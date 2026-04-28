@@ -1,0 +1,48 @@
+# Dependency artifacts
+node_modules/
+target/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build outputs
+dist/
+build/
+*.exe (except intentional)
+*.dll
+*.so
+*.dylib
+
+# Pulumi state (each project manages its own)
+*.pstate
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files (never commit secrets)
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Rust
+**/target/
+
+# Go
+*.test
+*.out
+vendor/
+
+# Docker
+.docker/
+
+# Logs
+*.log
+logs/
