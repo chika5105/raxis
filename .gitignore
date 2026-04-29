@@ -5,7 +5,8 @@ target/
 __pycache__/
 *.pyc
 *.pyo
-*.pth           # PyTorch model weights — large binary, use a model registry instead
+# PyTorch model weights — large binary, use a model registry instead
+*.pth
 
 # Build outputs
 dist/
