@@ -1,8 +1,24 @@
-# RAXIS — Control Plane Specification
+# RAXIS
 
-RAXIS is specified as a **standalone repository**: treat this directory as the RAXIS project root—whether it is cloned on its own or nested temporarily inside another monorepo. Kernel-owned runtime state lives under `$RAXIS_DATA_DIR` (default `~/.raxis/`), independent of where the Git checkout lives.
+**Runtime Attestation eXchange for Intelligent Systems**
 
-The shipped operator/plumbing binary is **`raxis-cli`** (see Part 4). Informal prose may abbreviate as `raxis …`; read that as `raxis-cli …`.
+RAXIS is a protocol paradigm for enforcing accountable autonomous action. It defines how an intelligent system — an LLM-backed agent, a planner, an autonomous executor — must interact with its environment: every action is preceded by an explicit, structured claim; that claim is verified against independent ground truth by a separate authority before any side effect is admitted; and every admission or rejection is recorded in a tamper-evident ledger that can be audited independently of the agent that produced it.
+
+The core principle: **intelligence and authority must be separated.** The component that decides what to do is never the same component that enforces what is allowed. This boundary is enforced by design — by process isolation, typed IPC, and cryptographic attestation — not by convention, prompt engineering, or model alignment alone.
+
+RAXIS answers the question: *how do you trust an AI agent's actions in a system where the cost of being wrong is real?* Not by training the model to be trustworthy. By verifying — independently, at runtime, before admission — that what the agent claims to have done is what actually happened, and that it was authorized to do it.
+
+> **This repository is the v1 + v2 reference implementation** — a proof of concept of the RAXIS paradigm applied to autonomous software engineering. See [`legacy/naming-rationale.md`](legacy/naming-rationale.md) for the full origin story, why the project was renamed, and an honest accounting of how far v1+v2 are from a complete RAXIS system.
+
+---
+
+## This Repository
+
+What you have checked out is the **RAXIS** codebase: a **Rust workspace** meant to be built and run with **this directory as the root** (`cargo build`, `cargo test`, paths in the specs). That stays true if you clone the repo by itself or park it inside a larger monorepo for a while.
+
+Do not confuse the workspace root with **where the kernel keeps live state**. Databases, sockets, audit log segments, witness blobs, and the policy cache live under **`$RAXIS_DATA_DIR`**, which defaults to **`~/.raxis/`**. That location is fixed by environment variable, not by where the Git tree sits on disk.
+
+For operator actions (genesis, plan approval, escalations, audit verify, and the rest), the spec names one binary: **`raxis-cli`**. Details are in Part 4 ([`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md)). If you see examples written as `raxis …` in passing, treat them as shorthand for `raxis-cli …`.
 
 ---
 
