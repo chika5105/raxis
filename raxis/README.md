@@ -8,7 +8,7 @@ The core principle: **intelligence and authority must be separated.** The compon
 
 RAXIS answers the question: *how do you trust an AI agent's actions in a system where the cost of being wrong is real?* Not by training the model to be trustworthy. By verifying — independently, at runtime, before admission — that what the agent claims to have done is what actually happened, and that it was authorized to do it.
 
-> **This repository is the v1 + v2 reference implementation** — a proof of concept of the RAXIS paradigm applied to autonomous software engineering. See [`legacy/naming-rationale.md`](legacy/naming-rationale.md) for the full origin story, why the project was renamed, and an honest accounting of how far v1+v2 are from a complete RAXIS system.
+> **This repository is the v1 + v2 reference implementation** — a proof of concept of the RAXIS paradigm applied to autonomous software engineering. See [`perspectives/naming-rationale.md`](perspectives/naming-rationale.md) for the full origin story, why the project was renamed, and how far v1+v2 are from a complete RAXIS system. For a deliberate steel-man **case against** that approach—and a structured **defense**—see [`perspectives/case-against-raxis.md`](perspectives/case-against-raxis.md) and [`perspectives/raxis-defense.md`](perspectives/raxis-defense.md) (indexed from [`perspectives/README.md`](perspectives/README.md)).
 
 ---
 
@@ -284,7 +284,12 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 
 | Document | Scope |
 |---|---|
-| [`need-for-cj-brain.md`](need-for-cj-brain.md) | Why RAXIS exists — the trust model motivation and kernel-as-authority philosophy |
+| [`perspectives/need-for-cj-brain.md`](perspectives/need-for-cj-brain.md) | Why RAXIS exists — trust-model motivation and kernel-as-authority philosophy |
+| [`perspectives/naming-rationale.md`](perspectives/naming-rationale.md) | Origin story, rename CJBrain → RAXIS, v1/v2 scope vs a full RAXIS vision |
+| [`perspectives/README.md`](perspectives/README.md) | Index of perspective essays (origin, motivation, limits, pro/con) |
+| [`perspectives/case-against-raxis.md`](perspectives/case-against-raxis.md) | Steel-man critique: why constraining models this way may be the wrong trade |
+| [`perspectives/raxis-defense.md`](perspectives/raxis-defense.md) | Response: constraints on action, determinism, scaling, complements with better models |
+| [`perspectives/raxis-concept.md`](perspectives/raxis-concept.md) | What “RAXIS” claims and where this repo stops short |
 | [`specs/design-decisions.md`](specs/design-decisions.md) | 20 design alternatives considered and rejected. Read before proposing a design change |
 
 ### Operator Guides
