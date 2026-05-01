@@ -1,0 +1,1698 @@
+# RAXIS — Part 2 (Core): Kernel Binary Specification
+
+> **Scope:** `raxis-kernel` — source tree layout (Part 2.1), startup sequence and IPC server (Part 2.2), internal subsystem specifications (Part 2.3), and the Initiative/Task FSMs (Part 2.4). Full function signatures for all subsystem boundaries.
+>
+> **Supersession:** §2.5.8 in [Part 2 Store](kernel-store.md) is normative over any conflicting prose here (particularly `vcs/diff.rs` diff command and `handlers/intent.rs` step ordering).
+>
+> **Navigation:** [README](../../README.md) | [Part 1](philosophy.md) | [Part 2 Store](kernel-store.md) | [Part 3](peripherals.md)
+
+---
+
+> The file inventories above cover foundational workspace scaffolding and shared library crates only.
+> Component-level file inventories (every source file in each binary, with rationale) are in Parts 2–4.
+> Part 2 covers the kernel binary in file-level detail.
+> Part 3 covers the planner, gateway, and verifier binaries.
+> Part 4 covers the CLI, test suites, genesis ceremony, and policy fixtures.
+
+---
+
+### Part 2 — The Kernel Binary (`raxis-kernel`)
+
+> Part 2 is written in five sub-parts.
+> Part 2.1 covers the kernel file tree and `Cargo.toml` only — the authoritative module layout. The startup sequence is in Part 2.2.
+> Part 2.2 covers the startup sequence, `main.rs`, `bootstrap.rs`, `recovery.rs`, `errors.rs`, and the full IPC server subsystem.
+> Part 2.3 covers authority, scheduler, gates, provider routing, prompt, policy manager, and break-glass — with full function signatures for all subsystem boundaries.
+> Part 2.4 covers the Initiative and Task FSMs (Gap 4), DAG execution mechanics, `initiatives/` handler specs, recovery, and trust invariants INV-INIT-01..06.
+> Part 2.5 (§2.5.1 complete; §2.5.2–§2.5.7 planned) covers the store DDL and isolation model, plan artifact signing contract, key inventory, operator CLI authentication, and [[gates]] normative schema — closing the remaining Part 2 gaps before Part 3.
+
+The kernel is the authority core. It is the only process that reads the signed policy store, holds provider credentials, writes to the kernel state database, and appends authority-class audit events. Everything else — planner, gateway, verifier — communicates through typed, authenticated IPC and has no direct access to any of those resources.
+
+**The kernel's hard constraint: stable, reproducible behavior given recorded inputs.** The kernel's outputs must be derivable from: the state store, the audit log, and the sequence of IPC inputs — all of which are recorded. Sources of non-determinism that are explicitly permitted and always logged: wall-clock timestamps (kernel-owned, logged in every audit event and proof record), OS-assigned PIDs (auxiliary metadata only, never used for cryptographic binding). Sources that are forbidden without logging: any external state read not reflected in the audit record, any ordering decision based on filesystem traversal order without a stable sort applied on top.
+
+---
+
+#### Part 2.1 — Kernel Source Tree and `Cargo.toml`
+
+Every subsystem is its own Rust module. This is not cosmetic — it enforces that each subsystem's internal state and functions are inaccessible to sibling subsystems unless explicitly re-exported. The `gates` module never imports `raxis-store` directly; each `gates/` submodule uses only the facades permitted by the boundary rule (see **`gates` subsystem boundary rule** below). This prevents accidental cross-subsystem coupling and keeps every submodule independently unit-testable.
+
+```
+kernel/
+├── Cargo.toml
+└── src/
+    ├── main.rs                        # entry point; startup sequencer
+    ├── bootstrap.rs                   # genesis state machine; fail-closed boot
+    ├── recovery.rs                    # post-crash reconciliation
+    ├── policy_manager.rs              # epoch advance; policy reload; delegation sweep
+    ├── breakglass.rs                  # one-time recovery credential; dual audit write
+    ├── errors.rs                      # BOOT_ERR_* exit codes + typed KernelError enum
+    ├── witness_index.rs               # sole module for store witness rows + blobs (read AND write); both gates/witness.rs (lookup) and ipc/handlers/witness.rs (ingest verifier writeback) go through this facade — no other module holds a store reference for witness operations
+    │
+    ├── vcs/
+    │   ├── mod.rs
+    │   └── diff.rs                    # resolve range (base_sha, head_sha) → sorted touched path list (INV-07 input); v1: git CLI subprocess (deterministic stdout, no libgit2 C binding risk)
+    │
+    ├── ipc/
+    │   ├── mod.rs                     # wires listener + auth + dispatcher
+    │   ├── listener.rs                # UDS accept loop; per-connection task spawn
+    │   ├── auth.rs                    # token + sequence + nonce validation (INV-01)
+    │   ├── dispatcher.rs              # typed IpcMessage routing to handlers; maps internal errors to coarse planner-facing codes (INV-08)
+    │   └── handlers/
+    │       ├── mod.rs
+    │       ├── intent.rs              # handles IntentRequest from planner
+    │       ├── fetch.rs               # handles FetchRequest; allowlist + audit (INV-02B)
+    │       ├── witness.rs             # handles WitnessSubmission from verifier
+    │       ├── escalation.rs          # handles EscalationRequest from planner; ApprovalToken verify; ApprovalProof issuance (Gap 3)
+    │       └── proposal_append.rs     # accepts ProposalEvent only; no authority-class append
+    │
+    ├── authority/
+    │   ├── mod.rs                     # re-exports: session, delegation (check_capability, record_capability_use, list_delegations, mark_stale_on_epoch_advance), verifier_token, keys, approval
+    │   ├── session.rs                 # session create/revoke; token issuance (INV-01)
+    │   ├── delegation.rs              # delegation issuance; TTL; two-phase staleness (StaleOnNextUse → RenewalRequired)
+    │   ├── verifier_token.rs          # single-use verifier run tokens; issue / validate / consume
+    │   ├── keys.rs                    # holds live key material; HMAC and Ed25519 sign/verify primitives only — policy artifact verification is orchestrated by bootstrap.rs and policy_manager.rs, not here
+    │   └── approval.rs                # approval token verify; proof record; consume (INV-06)
+    │
+    ├── scheduler/
+    │   ├── mod.rs                     # re-exports: admit, dag (next_ready_tasks, mark_task_complete, transition_to_admitted), lane, budget
+    │   ├── admit.rs                   # task row insert + DAG edge insert (approve_plan path only; no budget check, no initial_state arg — see Part 2.3 amendment)
+    │   ├── dag.rs                     # predecessor tracking; next_ready_tasks; transition_to_admitted
+    │   ├── lane.rs                    # lane admission; fairness accounting
+    │   └── budget.rs                  # pre-call admission; post-call reconciliation (INV-02A)
+    │
+    ├── gates/
+    │   ├── mod.rs                     # evaluate_claims; sole call site for record_capability_use (step 4 terminal Pass)
+    │   ├── claim.rs                   # per-claim delegation + submission + scope check; returns ClaimCheckResult (INV-07)
+    │   ├── witness.rs                 # witness index lookup via witness_index facade (INV-03); no direct store import
+    │   ├── verifier_runner.rs         # spawn verifier; issue run token; global concurrent cap + pending queue
+    │   └── policy_lookup.rs           # claim-requirement table query; required_claims → Vec<ClaimType>; StrictDefault handling
+    │
+    ├── provider/
+    │   ├── mod.rs                     # ProviderCtx { policy, store, gateway_channel, audit }; re-exports execute_fetch, check_rate_limit, check (allowlist)
+    │   ├── fetch.rs                   # execute_fetch method on ProviderCtx; allowlist → gateway → audit → rate record
+    │   ├── allowlist.rs               # domain allowlist enforcement for FetchRequest (INV-02B)
+    │   ├── gateway.rs                 # GatewayChannel; forward_fetch to gateway subprocess over dedicated UDS
+    │   ├── rate_limit.rs              # per-session fetch quota; check_rate_limit / record_fetch (reads session.fetch_quota from store)
+    │   └── audit_egress.rs            # write_fetch_audit; audit-before-release invariant (INV-02B)
+    │
+    ├── prompt/
+    │   ├── mod.rs
+    │   ├── assembler.rs               # assemble(session_id, ctx) → AssembledPrompt; epoch-bound; no cache
+    │   └── epoch_binding.rs           # session_prompt_valid; invalidate_session_prompts on epoch advance
+    │
+    └── initiatives/                   # Gap 4: Initiative + Task FSM; all initiative/task lifecycle operations
+        ├── mod.rs                     # re-exports lifecycle, task_transitions, recovery
+        ├── lifecycle.rs               # create_initiative, approve_plan, evaluate_terminal_criteria, abort_initiative
+        ├── task_transitions.rs        # transition_task, TransitionActor; single call-site for evaluate_terminal_criteria
+        └── recovery.rs                # reconcile_tasks (called by recovery::reconcile); resume_task
+```
+
+**Total: 49 source files + `Cargo.toml`** (root: 7, vcs: 2, ipc: 10, authority: 6, scheduler: 5, gates: 5, provider: 6, prompt: 3, initiatives: 4 — 7+2+10+6+5+5+6+3+4 = 48, plus `Cargo.toml` = 49). This tree is the authoritative file layout. Part 2.3 is the authoritative contract for the function signatures, invariants, and internal structure of all files up to and including `breakglass.rs`. Part 2.4 (§4.6) is the authoritative contract for `src/initiatives/`. Any discrepancy between this tree and Part 2.3/2.4 is a specification error in the tree — Parts 2.3 and 2.4 win.
+
+**INV-08 placement note:** `policy_lookup.rs` returns opaque result types (`ClaimCheckResult`, not string reason codes). `dispatcher.rs` is the only layer that maps internal typed errors to planner-facing response codes (`FAIL_MISSING_WITNESS`, `FAIL_POLICY_VIOLATION`, etc.) — no other module may construct a planner-facing error string directly. This is the rule that enforces INV-08: a single serialization point where expansion to coarse codes is deliberate and reviewable, not scattered across handlers. `ipc/auth.rs` owns INV-01 (token/sequence/nonce rejection before dispatch); `dispatcher.rs` owns INV-08 (coarse code mapping after handler execution).
+
+**`vcs/diff.rs` role in INV-07:** `gates/claim.rs` cannot derive required claims on its own — it needs the set of paths actually touched across the intent's commit range. `vcs/diff.rs` resolves `(base_sha, head_sha)` from the planner's intent (already validated as full SHAs) to a sorted, stable list of touched paths, which `claim.rs` passes to `policy_lookup.rs`. The planner-submitted path manifest is explicitly discarded at this stage — only VCS-derived paths feed the lookup.
+
+**`epoch_binding.rs` / `policy_manager.rs` coordination:** When `policy_manager.rs` advances the epoch, it (1) marks active delegations stale-on-next-use in the store, and (2) notifies `prompt::epoch_binding` to mark all existing assembled prompts as epoch-invalid. On the next planner inference request, the assembler detects the invalid epoch flag, reassembles under the new epoch, and logs the reassembly event. Planner sessions do not need to reconnect; only the static prompt scaffold portion is rebuilt.
+
+**`gates` subsystem boundary rule:** The `gates` module must not import `raxis-store` directly and must not reach into internal types of the `authority` module. Each `gates/` submodule may only reach the outside world through typed kernel-internal facades (never `raxis-store` directly). The permitted facades and the specific file that uses each are:
+
+- **`gates/claim.rs`** — composes three facades: `authority` (delegation check), `policy` (claim-requirement table), and `vcs` (touched-path diff). All three are kernel-local modules; none exposes raw store rows. (Illustrative signatures: `authority::delegation::check_capability(session_id, capability_class) -> DelegationStatus`; `policy::claim_table::required_claims(paths) -> Vec<ClaimType>`; `vcs::diff::touched_paths(base_sha, head_sha, worktree_root) -> Vec<PathBuf>` — exact paths locked in Part 2.3.)
+- **`gates/witness.rs`** — uses `witness_index` only (read-side lookup). Obtains `Option<WitnessRecord>` by `(evaluation_sha, task_id, gate_type, verifier_run_id)`. `evaluation_sha` is the `head_commit_sha` of the range intent the gate is being evaluated for — same field name as in `WitnessRecord` and `AuditEventKind::WitnessAccepted`. No authority, policy, or vcs import.
+- **`gates/verifier_runner.rs`** — uses `authority` (to issue a `verifier_run_token` for the spawned verifier process) and kernel IPC spawn helpers (to fork the verifier subprocess with resource caps and the token). Does not call `witness_index`, `policy`, `vcs`, or `store` directly; the witness writeback arrives separately through `ipc/handlers/witness.rs`. (Full spawn interface in Part 2.3.)
+- **`gates/policy_lookup.rs`** — uses `policy` only (claim-requirement table query). Returns `ClaimCheckResult` structured types; no string codes, no authority or store import.
+
+This design keeps every `gates/` file testable in isolation: tests substitute stub implementations of `authority`, `policy`, `vcs`, `witness_index`, and IPC spawn helpers without spinning up a real SQLite store or subprocess. Full function signatures for all facades are in Part 2.3.
+
+---
+
+##### `kernel/Cargo.toml` — [NEW]
+
+**Why it matters beyond build configuration:** The kernel's `Cargo.toml` is itself a trust surface. Any dependency added here potentially expands the kernel's attack surface or pulls in capability that violates the thin-kernel principle. Every dependency must be justified; unjustified additions are a code-review defect.
+
+Key decisions encoded in this file:
+
+- **`edition = "2021"`, `resolver = "2"`** — required for correct feature unification across the workspace. Without resolver v2, a feature enabled by one crate can silently activate it in another, potentially enabling HTTP client code in the kernel through a transitive feature flag.
+- **`tokio` with explicit feature list**: `features = ["rt", "net", "sync", "time", "macros"]`. This is a declaration of intent; the actual enforcement is the `cargo deny` allowlist below.
+- **HTTP stack denylist via `cargo deny`**: The workspace `deny.toml` bans HTTP client crates (`hyper`, `reqwest`, `ureq`, `h2`, and equivalents) scoped to `raxis-kernel` only — not a global workspace ban, since the gateway binary legitimately needs HTTP. The exact `deny.toml` syntax (whether `[[bans]]` entries, `wrappers`, `skip`, or `skip-tree`) should be confirmed against the cargo-deny version in use at implementation time; the intent is a kernel-scoped ban enforced by `cargo deny check bans` in CI, not by `cargo tree | grep`.
+- **`raxis-types`, `raxis-crypto`, `raxis-ipc`, `raxis-policy`, `raxis-audit-tools`, `raxis-store`** — the six workspace crates the kernel links. This list is the machine-readable statement of the kernel's authority surface. Adding a seventh entry here (e.g., `raxis-audit-tools-writer`) would be a mistake — the kernel uses `audit-tools`, which has the full chain-write capability.
+- **`rusqlite` with `bundled` feature** — SQLite bundled to avoid version skew with the host OS. WAL mode and `synchronous = FULL` are set at runtime in `store/src/db.rs`, not compile-time.
+- **`ed25519-dalek`** (or `ring`) — signing backend for token and policy artifact verification. Version is pinned; updates require explicit review because a signing library regression is a security event.
+- **`[profile.release]`**: `panic = "abort"`, `opt-level = 3`, `debug = false`. Abort on panic ensures no unwinding in production; unwinding in a kernel process can leave shared state partially mutated.
+
+> **End of Part 2.1.**
+> Part 2.1 is the kernel module layout only. It does not specify startup sequence (Part 2.2), subsystem function signatures (Part 2.3), or initiative handler internals (Part 2.4 §4.6).
+> Part 2.2 covers the startup sequence, `main.rs`, `bootstrap.rs`, `recovery.rs`, `errors.rs`, and the full IPC server subsystem (including `vcs/diff.rs`, `handlers/escalation.rs`, and the renamed `proposal_append.rs`).
+
+---
+
+#### Part 2.2 — Startup Sequence, Entry Point, IPC Server, and VCS Subsystem
+
+---
+
+##### Kernel Startup Sequence
+
+The startup sequence is a strict ordered pipeline. Each step must succeed before the next begins. There is no partial startup with degraded mode — the kernel either reaches the dispatch loop in a fully consistent state or exits with a typed error code.
+
+| Step | What happens | Failure exit code |
+|---|---|---|
+| 1 | Parse CLI flags and environment. Detect mode: `normal`, `bootstrap`, or explicit `--recovery-override`. | Non-zero with usage message |
+| 2 | If bootstrap mode: enter `bootstrap::run()` state machine. Does not proceed to step 3. Exits 0 on success, `BOOT_ERR_BOOTSTRAP_FAILED` on failure. | `BOOT_ERR_BOOTSTRAP_FAILED` |
+| 3 | Load and verify signed policy artifacts from `~/.raxis/policy/` using `raxis-policy::loader`. Verify signature against authority key. | `BOOT_ERR_POLICY_INVALID` |
+| 4 | Initialize key registry from loaded policy (`raxis-crypto::keyring`). Verify authority key, quality key, and verifier token key entries are all present and non-expired. | `BOOT_ERR_KEY_REGISTRY` |
+| 5 | Open kernel state store (`raxis-store::db`). Verify schema version matches binary. Apply any pending migrations. | `BOOT_ERR_STORE_SCHEMA` |
+| 6 | Run `recovery::reconcile(store, audit, witness_idx)` — single `main.rs` call that executes three ordered phases internally: **(6-chain)** verify audit chain (`verify_audit_chain`) — broken/missing chain is **fatal**; **(6-task)** reconcile in-flight tasks (`reconcile_tasks`) — recovery-pending found is **warn + continue**; **(6-witness)** check witness index for orphaned blobs (`witness_index::startup_check`) — discrepancies logged, non-fatal. `main.rs` calls `reconcile` once and checks the returned `ReconciliationResult` for fatal vs non-fatal outcomes. | `BOOT_ERR_AUDIT_CHAIN` (chain broken); warn + continue (tasks/witness orphans) |
+| 7 | Bind IPC listener sockets under `~/.raxis/run/`. Set directory permissions `0700`. The three socket file names, per-socket permissions, and listener binding order are specified in §2.5.5 (planner.sock, witness.sock, operator.sock). For v1, all three listeners are bound in this step before the IPC server loop begins. | `BOOT_ERR_SOCKET_BIND` |
+| 8 | Emit `KernelStarted` audit event (records binary version, policy epoch, recovery_pending task count). On failure: **dual-write to the emergency sink** (`~/.raxis/emergency.log`) then exit `BOOT_ERR_AUDIT_WRITE`. Rationale: if the chain cannot accept a start record, the kernel's audit integrity is already suspect and operating would worsen the problem. The emergency sink preserves the start event for operator inspection. | `BOOT_ERR_AUDIT_WRITE` |
+| 9 | Enter IPC dispatch loop (`ipc::start_ipc_server`). Process incoming connections until SIGTERM/SIGINT. | — |
+
+**Why fail-closed at every step:** A kernel that starts in a partially consistent state will make decisions against stale or unverified policy, against a corrupted state store, or without a trusted audit record. All of these are worse than not starting. The operator can inspect the exit code, read the structured error message, and take corrective action. Degraded-mode operation is not offered in v1.
+
+---
+
+##### Entry Point Subsystem
+
+---
+
+###### `src/main.rs` — [NEW]
+
+**Purpose:** Orchestrates the startup sequence and owns the process lifecycle. Contains no policy logic, no IPC logic, and no authority logic — only sequencing calls and signal handling.
+
+**Why it exists as its own file:** Keeping `main.rs` thin is critical for testability. Integration tests that want to start a kernel subprocess can inspect exactly what `main` does without wading through subsystem logic. Any logic that belongs in a subsystem must live there, not in `main`.
+
+**What it contains:**
+- `fn main()` — calls each startup step in order, converts `Err` results to `errors::exit_with_code(err)`. No inline logic.
+- Signal handler registration: `SIGTERM` and `SIGINT` both trigger graceful shutdown — drain the IPC handler queue, flush pending audit writes, close the UDS socket, emit `KernelStopped` audit event. **`KernelStopped` failure policy:** dual-write to emergency sink (`~/.raxis/emergency.log`) then exit 0 (best-effort, not `BOOT_ERR_AUDIT_WRITE`). Rationale: a clean shutdown that cannot write its final record is less dangerous than one that refuses to exit, leaving the socket open and the process running. The emergency sink preserves the stop event for operator inspection. This is explicitly different from the `KernelStarted` policy (which is fail-closed) because the risk profile differs: failing to record a start means the kernel might operate without a chain anchor; failing to record a stop means only an audit gap on clean shutdown.
+- No `#[tokio::main]` with `flavor = "multi_thread"` and unbounded workers — explicitly configure thread pool size to bound concurrency (v1: `worker_threads = 4` or configurable via env).
+
+---
+
+###### `src/bootstrap.rs` — [NEW]
+
+**Purpose:** Genesis state machine. Entered only when the kernel is started in bootstrap mode (first-time setup or deliberate re-genesis). Mutually exclusive with normal startup — it creates the authority key material and first policy epoch, then exits. It does not enter the IPC dispatch loop.
+
+**Why it is separate from `main.rs`:** The bootstrap path touches key generation, which must never run on a normally-started kernel. Keeping it isolated means the normal startup path cannot accidentally trigger key regeneration, and the bootstrap path cannot accidentally enter production operation.
+
+**What it contains:**
+- `pub fn run(config: &BootstrapConfig) -> Result<(), KernelError>` — the genesis state machine entry point.
+- `fn generate_authority_keypair() -> KeyPair` — generates the authority signing keypair. Writes to `~/.raxis/policy/authority.key` with `0400` permissions. Fails if the file already exists (never overwrites silently).
+- `fn write_genesis_policy(keypair: &KeyPair, epoch: PolicyEpoch) -> Result<()>` — signs and writes the first policy epoch artifact.
+- `fn write_genesis_audit_record(keypair: &KeyPair) -> Result<()>` — writes the chain-initiating audit record (a `GenesisEvent`) as the first record in segment-000 of the audit store. Fields: `{ prev_hash: null, genesis_nonce: <random 256-bit>, timestamp, authority_pubkey_fingerprint }`. This is the only `AuditEventKind` with `prev_hash: null`; every subsequent record chains from its hash. Write order: (1) write record bytes, (2) fsync segment file, (3) write segment index entry, (4) fsync index — matching the chain-write protocol in `raxis-audit-tools` so recovery can detect partial writes.
+- Exits the process after completion; does not return to `main`.
+
+---
+
+###### `src/recovery.rs` — [NEW]
+
+**Purpose:** Post-crash reconciliation. Runs at the end of startup (step 6). Verifies the audit chain is intact, identifies tasks that were in-flight at crash time, and marks them `blocked_recovery_pending` so the operator can inspect and manually resume or discard. Does not resume any execution automatically.
+
+**Why automatic resumption is not done here:** Resuming an in-flight task after a crash requires knowing whether the last action before the crash completed or not. Without a two-phase commit between the state store and the audit log, automatic resumption could double-execute a task step. In v1 the operator makes that determination. Automatic resumption is a v2 feature gated behind `cfg(feature = "v2-auto-recovery")`.
+
+**What it contains:**
+- `pub fn reconcile(store: &Store, audit: &AuditTools, witness_idx: &WitnessIndex) -> ReconciliationResult` — the single entry point called from `main.rs` step 6. Orchestrates all sub-steps internally in this order (the labeled phases in the startup table): (1) `verify_audit_chain` (fatal on failure, maps to `BOOT_ERR_AUDIT_CHAIN`), (2) `reconcile_tasks` (warn on recovery-pending), (3) `witness_index::startup_check` (log orphan discrepancies). `main.rs` calls `reconcile` once; it does not call the sub-functions directly.
+- `fn verify_audit_chain(audit: &AuditTools) -> Result<ChainCheckpoint, KernelError>` — calls `audit_tools::verifier::verify_chain(None)` for full chain verification; returns the last verified segment + hash as a `ChainCheckpoint` for anchoring future writes. **Fatal failure path**: returns `Err(KernelError::AuditChainBroken)` which `reconcile` propagates; `main.rs` maps to `BOOT_ERR_AUDIT_CHAIN`.
+- `fn reconcile_tasks(store: &Store) -> ReconciliationReport` — selects all tasks whose state is **not** terminal: **`NOT IN (Completed, Failed, Aborted, Cancelled)`**. **`Cancelled` is terminal** — including it in this predicate is mandatory so bulk-cancelled tasks are never swept into `BlockedRecoveryPending`. For every row returned, transitions the task to **`BlockedRecoveryPending`** with `recovery_transition_at` (including tasks already in `BlockedRecoveryPending` — update is idempotent). v1 does not exempt `Admitted` vs `GatesPending` vs `Running`; all non-terminal tasks need operator disposition after an unclean shutdown.
+- `fn mark_recovery_pending(store: &Store, task_ids: Vec<TaskId>) -> Result<()>` — performs the state transition batch for the matched task IDs (implementation detail of `reconcile_tasks`).
+
+---
+
+###### `src/errors.rs` — [NEW]
+
+**Purpose:** Shared vocabulary for all kernel failure modes. Every subsystem that can fail at startup or runtime uses types from this file. Prevents each subsystem from inventing its own error strings or exit codes.
+
+**Why it is a single file at the root:** Boot errors need to be visible across `main.rs`, `bootstrap.rs`, `recovery.rs`, and all subsystem init functions. Placing it at the crate root makes it accessible everywhere without re-export chains.
+
+**What it contains:**
+- `BOOT_ERR_POLICY_INVALID: i32 = 10`, `BOOT_ERR_KEY_REGISTRY: i32 = 11`, `BOOT_ERR_STORE_SCHEMA: i32 = 12`, `BOOT_ERR_AUDIT_CHAIN: i32 = 13`, `BOOT_ERR_SOCKET_BIND: i32 = 14`, `BOOT_ERR_BOOTSTRAP_FAILED: i32 = 15`, `BOOT_ERR_AUDIT_WRITE: i32 = 16`, `BOOT_ERR_VCS_ROOT: i32 = 17` — typed exit codes, documented in operator runbook. New codes added for step 8 (audit write failure) and vcs root validation failure at startup.
+- `enum KernelError` — runtime error enum with variants for each subsystem failure class. Implements `Display` with structured messages.
+- `fn exit_with_code(err: KernelError) -> !` — logs `err` as a structured JSON line to stderr, then calls `std::process::exit(err.exit_code())`. The `-> !` ensures the compiler knows this never returns.
+
+---
+
+##### IPC Server Subsystem
+
+The IPC server is the kernel's public surface — the only interface through which the planner, gateway, verifier, and CLI reach the kernel. Every inbound message passes through three layers in sequence: **listener** (accept connection) → **auth** (validate token, sequence, nonce) → **dispatcher** (route to handler). A message rejected at any layer never reaches the next.
+
+---
+
+###### `src/ipc/mod.rs` — [NEW]
+
+**Purpose:** Wires listener, auth, and dispatcher together and exposes `start_ipc_server` as the single entry point called from `main.rs`. Contains no logic of its own.
+
+**What it contains:**
+- `pub async fn start_ipc_server(socket_path: &Path, handlers: Handlers) -> Result<(), KernelError>` — creates the UDS listener, passes it to `listener::accept_loop`.
+
+---
+
+###### `src/ipc/listener.rs` — [NEW]
+
+**Purpose:** Accepts UDS connections and spawns a per-connection async task. Each task is independent — one slow or misbehaving connection cannot block others.
+
+**Why per-connection tasks, not a single shared loop:** A shared loop would serialize all message processing, making the kernel unresponsive if one handler blocks (e.g., waiting on a verifier subprocess). Per-connection `tokio::spawn` gives concurrent handling. **Connection concurrency is bounded**: the accept loop enforces a configurable `max_connections` limit (v1 default: 16 — the expected clients are planner, gateway, verifier, and CLI, so 16 is generous). When the limit is reached, new connections are accepted and immediately closed with an error frame; the attempt is logged. This prevents a DoS from unbounded task accumulation.
+
+**What it contains:**
+- `pub async fn accept_loop(listener: UnixListener, auth: Arc<AuthValidator>, dispatcher: Arc<Dispatcher>) -> Result<(), KernelError>` — loops on `listener.accept()`; for each connection calls `tokio::spawn(handle_connection(stream, auth.clone(), dispatcher.clone()))`.
+- `async fn handle_connection(stream: UnixStream, auth: Arc<AuthValidator>, dispatcher: Arc<Dispatcher>)` — reads length-prefixed frames using `raxis-ipc::frame`, deserializes `IpcMessage`, passes to `auth.validate`, passes to `dispatcher.dispatch` on success.
+- Connection-level timeout: if no message is received within a configurable idle window (v1 default: 30s), the connection is closed and an `IdleConnectionClosed` audit event is emitted.
+
+---
+
+###### `src/ipc/auth.rs` — [NEW] — Enforcement point for INV-01
+
+**Purpose:** The single choke point for all inbound message authentication. Every message from every process passes through `validate` before reaching any handler. A message that fails validation never reaches the dispatcher.
+
+**Why authentication is not in the dispatcher:** The dispatcher's job is routing. If auth were inlined in the dispatcher, it would be possible to add a new message variant and accidentally forget to add its auth check. Separating auth into a dedicated module ensures there is exactly one place where the auth invariant is enforced, regardless of how many message variants exist.
+
+**What it contains:**
+- `pub struct AuthValidator { session_store: Arc<Store>, verifier_token_store: Arc<VerifierTokenStore>, nonce_cache: Arc<NonceCache> }` — two separate stores: `session_store` holds planner and gateway session rows; `verifier_token_store` holds kernel-issued verifier run tokens (separate table, separate lookup path in `authority::verifier_token`). Verifier run tokens are not session rows and must not be validated against the session table. (Implementation detail deferred to Part 2.3.)
+- `pub fn validate(envelope: &IpcEnvelope) -> Result<ValidatedSession, AuthError>` — branches on message class before applying auth rules:
+  - **Planner / gateway session messages**: (1) token lookup in `session_store` via `session_id`; (2) constant-time token binding check against `sessions.session_token`; (3) **check (A) — strict sequence**: verify `sequence_num == sessions.sequence_number + 1` (read from the session row loaded in step 1); (4) **check (B) — envelope nonce**: `INSERT INTO nonce_cache (session_id, sequence_num, envelope_nonce, observed_at) VALUES (?, ?, ?, now())` — fails with `SQLITE_CONSTRAINT_UNIQUE` on duplicate `envelope_nonce` (duplicate delivery) or `SQLITE_CONSTRAINT_PRIMARYKEY` on duplicate `sequence_num` (schema backstop for check A); (5) `UPDATE sessions SET sequence_number = sequence_num` atomically with step 4 in one store transaction. All five checks must pass. See §2.5.1 Table 16 for the canonical INV-01 enforcement sequence.
+  - **Verifier run token messages** (e.g. `WitnessSubmission`): (1) token lookup in `verifier_token_store` by `verifier_run_id`; (2) constant-time comparison of the presented 256-bit random token bytes against the stored `token_hash` (SHA-256 of raw bytes). **Sequence and nonce rules do not apply** — verifier runs are one-shot submissions. INV-01 for verifier messages means: the token is valid (lookup succeeds, hash matches), non-expired, and not yet consumed.
+  - Any message that does not match a known class → `Err(AuthError::UnknownMessageClass)`, connection closed.
+- `struct NonceCache` — thin wrapper around the `nonce_cache` SQLite table (§2.5.1 Table 16). **Not an in-memory HashMap.** All reads and writes go through the store transaction in `validate()`; no in-process cache is maintained. The SQLite-backed design was chosen because the nonce check must survive a process restart (an in-memory cache would lose all nonces on crash, reopening a replay window until the TTL window expires). Background eviction of rows older than `NONCE_CACHE_TTL_SECONDS` runs in the dispatcher's background task, not inside `NonceCache` itself.
+- **Invariant INV-01**: this function is the structural enforcement point. If this function is bypassed, the entire authority model fails.
+
+---
+
+###### `src/ipc/dispatcher.rs` — [NEW] — Enforcement point for INV-08
+
+**Purpose:** Routes validated `IpcMessage` variants to the correct handler. Also the sole layer that maps internal typed errors to coarse planner-facing response codes — enforcing INV-08.
+
+**Why a dedicated dispatcher rather than a match in each handler:** If each handler wrote its own response serialization, the coarse-code rule (INV-08) would need to be enforced in every handler. A single dispatcher is the only place where that mapping happens; adding a new handler does not create a new INV-08 surface.
+
+**What it contains:**
+- `pub struct Dispatcher { handlers: Handlers }` where `Handlers` is a struct holding `Arc<IntentHandler>`, `Arc<FetchHandler>`, `Arc<WitnessHandler>`, `Arc<ProposalAppendHandler>`, `Arc<EscalationHandler>`.
+- `pub async fn dispatch(msg: IpcMessage, session: ValidatedSession) -> IpcResponse` — pattern-matches on `IpcMessage` variant; routes to the corresponding handler; catches `HandlerError` variants and maps them to `IpcResponse::Error(PlannerErrorCode)`. The catch-all arm maps any unrecognized variant to `IpcResponse::Error(PlannerErrorCode::InvalidRequest)`. Verifier sessions attempting to send `EscalationRequest` are rejected at this layer before reaching `EscalationHandler` (role check).
+- `fn map_error(err: HandlerError) -> PlannerErrorCode` — the INV-08 enforcement function. Maps `HandlerError::MissingWitness` → `FAIL_MISSING_WITNESS`, `HandlerError::PolicyViolation` → `FAIL_POLICY_VIOLATION`, `HandlerError::TaskNotSchedulable { .. }` → `FAIL_TASK_NOT_RUNNING`, etc. Internal error details (which rule, which policy line) are logged to the audit log but never included in the `PlannerErrorCode` sent to the planner. **`MissingWitness` aggregates** claim-manifest deficiencies at intent time and witness deficiencies where the handler collapses them to this variant — see §1.3 INV-08 coarse-code note.
+
+---
+
+###### `src/ipc/handlers/intent.rs` — [NEW]
+
+**Purpose:** Handles `IntentRequest` from the planner. The intent handler is the entry point for all planner-initiated work: it validates the session's claim set and SHA range, binds the existing plan task to the current session, evaluates gate claims, reserves lane budget, and transitions the task to `Running` or `GatesPending`.
+
+**What it contains:**
+- `pub async fn handle(req: IntentRequest, session: ValidatedSession, ctx: &HandlerContext) -> Result<IntentResponse, HandlerError>`
+- **Two-SHA validation** — `IntentRequest` carries `head_commit_sha` and `base_commit_sha`. Both must be 40-char hex SHAs. Branch refs (`main`, `HEAD`, `origin/main`) and short SHAs are rejected; accepting a ref would make the diff non-deterministic across re-evaluation.
+- **Ancestor check** — calls `ctx.vcs.is_ancestor(base_sha, head_sha, worktree_root)` before any diff. If base is not an ancestor of head, the kernel rejects with `HandlerError::InvalidShaRange`. The planner cannot shrink the diff by providing a false base. When **`base_sha == head_sha`**, this is the reflexive case (empty commit range per §2.5.8); `is_ancestor` must succeed so the handler can compute an empty `touched_paths` without special-casing ancestor logic beyond that.
+- **Single-commit parent verification (v1 hardening)** — applies only when `req.intent_kind == IntentKind::SingleCommit` **and** `base_sha != head_sha`. The kernel runs `ctx.vcs.rev_parse_parent(head_sha, worktree_root)` and requires the result to equal `base_sha`; otherwise rejects with `HandlerError::InvalidShaRange`. When **`base_sha == head_sha`**, this check is **skipped**: there is no single-commit “tip whose parent must equal base” — the range is intentionally empty (same rule as Part 3 field notes and §2.5.8 empty-diff rows). For non-empty `SingleCommit` ranges, the parent rule still prevents a planner-chosen `base_sha` from under-covering `touched_paths`.
+- **Range diff** — calls `ctx.vcs.touched_paths(base_sha, head_sha, worktree_root)` to get all paths changed across the full range. `worktree_root` is bound to this session at session creation time (the agent's git worktree, not process cwd). The `worktree_root`, `base_sha`, and `head_sha` used are all included in the `IntentReceived` audit event (INV-05).
+- Discards any planner-supplied path manifest in the request — VCS-derived range paths only.
+- **Admission cost computation** — calls `budget::compute_admission_cost(&touched_paths, req.intent_kind, &policy)`. `touched_paths` is the VCS-derived sorted list from the previous step — the same list used for INV-07 claim evaluation; no re-derivation. On `Err(BudgetError::UnknownIntentKindCost { intent_kind })` → returns `Ok(IntentResponse::Rejected { reason: PlannerErrorCode::FAIL_POLICY_VIOLATION })` immediately; no task row binding, no scheduler interaction, no witness or audit rows written beyond `IntentRejected`. On `Ok(cost)` → `estimated_cost = cost` is held in local scope for the budget reservation step that runs after gate evaluation. `IntentRequest` carries no cost field; even if a future version adds a hint field, it must not be passed to `compute_admission_cost` or `consume_budget` — see `IntentRequest` guardrail in `raxis-types`.
+
+  > **Guardrail — coordinated release:** when a new `IntentKind` variant is introduced in `raxis-types`, a corresponding entry in `policy.budget.base_cost_per_intent_kind` must be present in the loaded policy artifact before or simultaneously with the binary that adds the variant. A kernel binary whose cost table omits a live `IntentKind` will reject all intents of that kind with `FAIL_POLICY_VIOLATION`. This is intentional — it enforces explicit operator acknowledgement of new surface area. Operational story: ship the updated policy artifact first (or atomically with the binary); never ship a binary with a new `IntentKind` against a policy that does not price it.
+- **Task row binding** — tasks already exist in the `tasks` table from `approve_plan` with plan-defined `task_id` values (Part 2.4 INV-INIT-01). The intent handler does **not** insert a new task row and does **not** call `Uuid::new_v4()`. Instead:
+  1. **Load existing task row** by `req.task_id`. If no row → `HandlerError::InvalidTask`. If `task.initiative_id` does not belong to an initiative in `Executing` state → `HandlerError::InitiativeNotExecuting`.
+  2. **Session exclusivity** — if `task.session_id IS NOT NULL` and `task.session_id != session.session_id`, return `HandlerError::Unauthorized` (another session owns this task). If `task.session_id IS NOT NULL` and matches `session.session_id`, the same planner continues work on an already-bound task (**pickup** or **continuation**).
+  3. **Schedulability** — If `task.state == TaskState::Running` and `task.session_id == session.session_id`, proceed (**continuation intent** — matches `IntentRequest` semantics in `raxis-types`; `next_ready_tasks` is not consulted). If `task.state == TaskState::Admitted`, require `req.task_id ∈ scheduler::next_ready_tasks(initiative_id, store)`; membership is the single gate for pickup and for returning from `GatesPending → Admitted` (both are `Admitted` rows eligible per DAG + gate rules — see `scheduler::next_ready_tasks`). If the task is `Admitted` but **not** in that set (e.g. predecessors incomplete), → `HandlerError::TaskNotSchedulable`. Any other state (`GatesPending`, `BlockedRecoveryPending`, terminal, wrong session after step 2) → `HandlerError::TaskNotSchedulable { current_state }`.
+  4. **Bind or refresh SHA fields** — `UPDATE` the task row with `session_id` (= current session, if still NULL), `evaluation_sha` (= `req.head_commit_sha`), `base_sha` (= `req.base_commit_sha`), and `submitted_claims_json` (= `req.claims.as_json()`). On first pickup `session_id` is written; on continuation it is unchanged. This `UPDATE` is part of the enclosing handler transaction; if any subsequent step fails, it rolls back (for first pickup, restoring NULL session fields where applicable).
+- **Gate evaluation** — calls `ctx.gates.evaluate_claims(session_id, &req.head_commit_sha, &req.task_id, &touched_paths, &req.claims, ctx)`. **Gate evaluation runs before budget reservation** — on any `GateEvalResult::ClaimInsufficient` variant (`Insufficient`, `DelegationInsufficient`, or `ScopeInsufficient`), the handler returns rejection immediately and the enclosing transaction rolls back the binding `UPDATE`. No budget is touched on a gate rejection.
+- **Budget check and reservation** — runs only after gate evaluation returns `Pass`, `BreakglassPass`, or `PendingWitness`. **`lane_budget_reservations` uses `PRIMARY KEY (lane_id, task_id)`** — at most one reservation row per task per lane for the task's whole non-terminal life (including `Admitted → GatesPending → Admitted` witness cycles). Therefore:
+  - If **no** row exists yet for `(task.lane_id, req.task_id)`: call `ctx.budget.check_budget(task.lane_id, estimated_cost, store)` then `ctx.budget.consume_budget(task.lane_id, req.task_id, estimated_cost, store)`, and **`UPDATE tasks SET admission_reserved_units = estimated_cost`** for this `task_id` (persists the lane reservation amount for `BudgetOverrun` after `release_budget` deletes the reservation row — typically first intent from `Admitted` to `Running` or `GatesPending`).
+  - If a row **already** exists: **omit** `check_budget` and `consume_budget` — same task, additional intent turn (e.g. `Running` continuation, or re-scheduled `Admitted` after `GatesPending` without a terminal release). A second `INSERT` would violate the PK or double-charge the lane.
+  `actual_cost` on the task row is still updated by `budget::reconcile_actual_cost` on terminal transition.
+- **Transition task** — after budget handling, apply state transitions only when the stored state actually changes (signature matches `task_transitions.rs`):
+  - `GateEvalResult::Pass` or `GateEvalResult::BreakglassPass` → if current state is `Admitted`, call `transition_task(req.task_id, TaskState::Running, None, TransitionActor::Kernel, policy_epoch, &ctx.store, &ctx.audit)`. If already `Running` (continuation intent, state unchanged), **skip** `transition_task` — the state does not change and emitting a spurious `TaskTransitioned` event would be incorrect. The `IntentReceived` audit event (emitted at the start of the handler) records the continuation intent.
+  - `GateEvalResult::PendingWitness` → current state must be `Admitted` here (step 3 rejects `GatesPending` with `TaskNotSchedulable`). Call `transition_task(req.task_id, TaskState::GatesPending, None, TransitionActor::Kernel, policy_epoch, &ctx.store, &ctx.audit)`. Verifier(s) are spawned inside `evaluate_claims` for each missing gate (see `gates/verifier_runner.rs`).
+- Returns `IntentResponse::Accepted { task_id: req.task_id, warn_delegation_stale }` or `IntentResponse::Rejected { reason: PlannerErrorCode }`. `warn_delegation_stale` is set from `GateEvalResult::Pass { delegate_renewal_required }` (or `false` for BreakglassPass / non-stale Pass).
+
+> **Part 2.3 amendment — `scheduler/admit.rs`:** The `admit` function is **not called from the intent handler**. `admit` is called exclusively from `initiatives::lifecycle::approve_plan` at plan approval time. The function contract has also changed: it no longer accepts `NewTask` or `initial_state`, does not call `check_budget` or `consume_budget`, and does not `TaskAdmitted`-audit with `estimated_cost`. The new contract is `admit(task: PlanTask, initiative_id, policy_epoch, store, audit)` — task row + DAG edge insertion only. All Part 2.3 text that implies `admit` runs budget steps or is called from `handlers/intent.rs` is superseded by this amendment and by Part 2.4 §4.6.
+
+---
+
+###### `src/ipc/handlers/fetch.rs` — [NEW] — Enforcement point for INV-02B
+
+**Purpose:** Handles `FetchRequest` from the planner. All external data the planner needs must go through this handler. The handler enforces the domain allowlist, forwards to the gateway, logs the fetch before returning content to the planner.
+
+**What it contains:**
+- `pub async fn handle(req: FetchRequest, session: ValidatedSession, ctx: &HandlerContext) -> Result<FetchResponse, HandlerError>`
+- Calls `ctx.provider.allowlist.check(req.url)` — returns `HandlerError::FetchDenied` if URL is not on the allowlist; emits `AuditEventKind::FetchDenied { deny_reason: DomainNotAllowed }` before returning.
+- Calls `ctx.provider.execute_fetch(url, session_id)` to run the full fetch pipeline (rate limit → gateway forward → SHA-256 → audit before return). `ctx.provider` is `Arc<ProviderCtx>`; `ProviderCtx` holds the `GatewayChannel` internally (implemented in `provider/gateway.rs`). The handler does not call the gateway channel directly.
+  - `ProviderError::RateLimitExceeded` from `check_rate_limit` inside `execute_fetch` maps to `HandlerError::FetchDenied` — the same handler error as allowlist denial — so both deny paths produce identical planner-visible behavior (`PlannerErrorCode::FETCH_DENIED`). The `deny_reason` distinction lives in the audit record (`FetchDenyReason::RateLimitExceeded`), not in the planner-facing code.
+- Computes `response_sha256` over the response body before any other processing.
+- Emits `AuditEventKind::FetchExternalDataAudited { fetch_request_id, url, fetched_at, response_sha256, content_type, byte_len, allowed_by_domain_allowlist: true }` — written to audit log **before** the body is returned to the planner (INV-02B, INV-05).
+- Returns `FetchResponse { fetch_request_id, response_sha256, content_type, byte_len, body }`.
+
+---
+
+###### `src/ipc/handlers/witness.rs` — [NEW]
+
+**Purpose:** Handles `WitnessSubmission` from the verifier subprocess. Validates the `verifier_run_token`, hashes the body, writes to the witness index, then performs a gate-recheck for the associated task. If all outstanding gates are now satisfied, transitions the task from `GatesPending` to `Admitted`.
+
+**What it contains:**
+- `pub async fn handle(sub: WitnessSubmission, session: ValidatedSession, ctx: &HandlerContext) -> Result<WitnessAck, HandlerError>`
+- **Token validation**: validates `sub.verifier_run_token` via `authority::verifier_token::validate`. Returns `HandlerError::Unauthorized` if invalid, expired, or already consumed.
+- **Evaluation SHA binding (before any write):** loads the task row by `sub.task_id`. If no row → `HandlerError::InvalidTask`. Compares `sub.head_commit_sha` to `task.evaluation_sha` (the head_commit_sha stored on the task row when the intent handler bound the task to the planner session). If they differ, returns **`Ok(WitnessAck::Rejected { reason: EvaluationShaMismatch })`** — **no** witness write, **no** token consume, **no** `WitnessAccepted` audit. This catches verifier/kernel bugs or a mismatched submission without poisoning the witness index.
+- **Body hash**: computes `blob_sha256 = sha256(sub.body)` (must match the value embedded in `WitnessRecord`).
+- **Witness write**: builds `WitnessRecord { evaluation_sha: sub.head_commit_sha, task_id: sub.task_id, gate_type: sub.gate_type, verifier_run_id, blob_sha256, result_class, blob_path: blob_sha256_hex, recorded_at }` where `blob_sha256_hex` is the lowercase hex string of `blob_sha256`, and `result_class` is **`Pass` / `Fail` / `Inconclusive`** (carried on `WitnessSubmission` once the IPC schema wires it, or derived from the verifier subprocess exit status and normalized in this handler — fields must match §2.5.1 Table 13 `witness_records`). Calls `ctx.witness_index.write(record, sub.body.as_slice(), &ctx.witness_index_ctx)` — **blob bytes and `WitnessIndexCtx` are mandatory** (`HandlerContext` exposes `witness_index_ctx`; see `witness_index.rs`). Routes through `witness_index` facade only.
+- **Token consume**: calls `authority::verifier_token::consume_verifier_token(verifier_run_id, &ctx.store)` after the witness write succeeds. Ordering is write-then-consume: if the write fails, the token is not consumed and the verifier may resubmit.
+- **Audit**: emits `AuditEventKind::WitnessAccepted { verifier_run_id, task_id, evaluation_sha, gate_type, blob_sha256 }`.
+- **Gate-recheck**: after a successful write, loads the task row from store via `task_id` to retrieve `task.session_id` (the planner's session, stored when the intent handler bound the task), `task.evaluation_sha` (= head_commit_sha), and `task.base_sha` (= base_commit_sha). Re-derives `touched_paths` from VCS by calling `ctx.vcs.touched_paths(task.base_sha, task.evaluation_sha, worktree_root)` — the same derivation the intent handler performed, ensuring the recheck uses exactly the same VCS-derived path set as the original evaluation. Also loads `session.worktree_root` via `authority::get_session(&task.session_id)`. Calls `ctx.gates.evaluate_claims(task.session_id, &sub.head_commit_sha, &sub.task_id, &touched_paths, &task.submitted_claims_json.parse(), ctx)`. **`task.session_id` is used, not `sub.session_id`** — the verifier's `ValidatedSession` is verifier-scoped and carries no planner delegations.
+  - If result is `GateEvalResult::Pass`: calls `ctx.scheduler.transition_to_admitted(&sub.task_id)` to move the task from `GatesPending` to `Admitted`. Emits `AuditEventKind::TaskGatesCleared { task_id, final_witness_run_id: verifier_run_id }`.
+  - If result is `GateEvalResult::PendingWitness { missing_gates }`: the kernel **automatically spawns** a new verifier for each gate in `missing_gates` by calling `ctx.gates.verifier_runner::spawn_verifier(task_id, gate_type, evaluation_sha, session.worktree_root, &ctx.authority, &ctx.config.verifier)` for each. The planner does not poll; the kernel drives the full witness-collection loop. `WitnessAck` carries `remaining_gates` as an informational field for observability, not as an instruction to the planner.
+  - If result is any claim/delegation failure variant: the witness is accepted and in the index, but the gate failure is audited and the task remains `GatesPending`. The kernel does **not** auto-spawn further verifiers — a claim failure requires planner action (submit correct claim) before the next evaluation cycle.
+- **Successful witness pipeline:** returns `WitnessAck::Accepted { verifier_run_id, remaining_gates: Vec<GateType> }` (empty `remaining_gates` = all gates cleared; non-empty = verifiers already spawned by kernel, informational only).
+- **Rejected acknowledgment (SHA binding only):** returns `WitnessAck::Rejected { reason: EvaluationShaMismatch }` when `sub.head_commit_sha != task.evaluation_sha` — distinct from `Err(HandlerError::...)`, which signals transport/auth failures to the dispatcher; **`Rejected` is an Ok variant** so the verifier receives a typed refusal without consuming the run token.
+
+
+---
+
+###### `src/ipc/handlers/escalation.rs` — [NEW] — Escalation FSM entry point
+
+**Purpose:** Handles `EscalationRequest` from the planner. Records the escalation in the kernel state store, enforces the probe-rate-limiter, emits the audit event, and triggers the operator notification. Does not make any authority decision — it submits the request for human resolution.
+
+**What it contains:**
+
+- `pub async fn handle(req: EscalationRequest, session: ValidatedSession, ctx: &HandlerContext) -> Result<EscalationResponse, HandlerError>`
+
+  **Step 1 — Rate-limit check:**
+  - Reads the per-lineage escalation counter from the store for the current window (`ctx.policy.escalation_window()`).
+  - **Quarantine check first:** if the lineage's quarantine flag is set → returns `Ok(EscalationResponse::Rejected { reason: EscalationErrorCode::LineageQuarantined })` immediately, without incrementing the counter or running any further checks.
+  - If `count >= ctx.policy.escalation_max_per_window()` → increments the cumulative trigger count, emits `AuditEventKind::EscalationRateLimitExceeded { session_id, lineage_id, window_count }`, and returns `Ok(EscalationResponse::Rejected { reason: EscalationErrorCode::RateLimitExceeded })`.
+  - If the cumulative trigger count (after increment) now equals `ctx.policy.escalation_quarantine_threshold()` → additionally sets the quarantine flag and emits `AuditEventKind::LineageQuarantined { lineage_id, trigger_count }` in the same response. The Nth submission that tips the threshold receives `Rejected { reason: RateLimitExceeded }` (not yet quarantined at receipt, but quarantine is set before returning); subsequent submissions see the quarantine check fire first. Quarantine is lifted only by operator CLI (`raxis-cli quarantine lift <lineage_id>`).
+
+  **Step 2 — Task ownership check:**
+  - Loads the task row for `req.task_id`. If no row → `HandlerError::InvalidTask`.
+  - Verifies `task.session_id == session.session_id`. If not → `HandlerError::Unauthorized` (a planner cannot escalate on behalf of another session's task).
+
+  **Step 3 — Idempotency check:**
+  - Queries escalation rows for `(session_id, task_id, class, idempotency_key)`. If a matching row exists and its status is `Pending` or `Approved` → returns `Ok(EscalationResponse::AlreadyPending { escalation_id })` without creating a duplicate row.
+
+  **Step 4 — Write escalation row:**
+  - Inserts `{ escalation_id: Uuid::new_v4(), session_id, task_id, class, requested_scope, justification, idempotency_key, status: Pending, submitted_at: now(), timeout_at: now() + ctx.policy.escalation_timeout() }`.
+
+  **Step 5 — Audit and notify:**
+  - Emits `AuditEventKind::EscalationSubmitted { escalation_id, session_id, task_id, class, requested_scope_summary }`.
+  - Triggers `notification::send_escalation_alert(escalation_id, ...)` — operator notification (email or local alert). Non-fatal: if notification fails, the escalation is still recorded; notification failure emits its own warn-level audit entry.
+
+  **Step 6 — Return:**
+  - Returns `Ok(EscalationResponse::Submitted { escalation_id, timeout_at })`.
+
+**`EscalationResponse` variants:** `Submitted { escalation_id, timeout_at }` | `AlreadyPending { escalation_id }` | `Rejected { reason: EscalationErrorCode }`.
+
+**`EscalationErrorCode` variants:** `RateLimitExceeded` | `LineageQuarantined`. These are the only cases where a well-formed escalation request from an authenticated session is turned away as an `Ok(Rejected)` response. `InvalidTask` (step 2) and bad-class deserialization errors (step 1, serde) produce `Err(HandlerError::...)` — transport-level failures, not escalation-level rejections — and are not `EscalationErrorCode` variants.
+
+---
+
+#### Escalation FSM
+
+**States and transitions.** The escalation FSM owns the lifecycle of every escalation from planner submission to terminal resolution. All transitions are kernel-recorded or operator-recorded; the planner cannot drive any transition beyond the initial submission.
+
+**State inventory:**
+
+| State | Terminal? | Description |
+|---|---|---|
+| `Pending` | No | Submitted by planner; awaiting operator action. No authority change. |
+| `Approved` | No | Operator issued a signed `ApprovalToken` via CLI. Token not yet presented. |
+| `Denied` | Yes | Operator explicitly denied via `raxis-cli escalation deny <escalation_id>`. No authority change. |
+| `TimedOut` | Yes | `timeout_at` elapsed without operator action. Kernel timeout sweep fires. |
+| `TokenExpired` | Yes | Token issued (`Approved`) but `valid_until` elapsed before planner presented it. |
+| `Consumed` | Yes | Token presented, validated, and the escalated action executed successfully. |
+
+**Transitions:**
+
+| From | To | Trigger | Actor | Audit event |
+|---|---|---|---|---|
+| *(none)* | `Pending` | `EscalationRequest` received and written | Planner (IPC) | `EscalationSubmitted` |
+| `Pending` | `Approved` | `raxis-cli escalation approve <escalation_id> --scope <…> --max-uses <n> --valid-for <secs>` | Operator (CLI) | `EscalationApproved { escalation_id, approval_id }` |
+| `Pending` | `Denied` | `raxis-cli escalation deny <escalation_id> [--reason <…>]` | Operator (CLI) | `EscalationDenied { escalation_id, denied_by }` |
+| `Pending` | `TimedOut` | Kernel timeout sweep: `now() > timeout_at` | Kernel (sweep) | `EscalationTimedOut { escalation_id }` |
+| `Approved` | `Consumed` | `validate_approval_token` returns `Valid`; action executes; `ApprovalProof` written | Kernel (on use) | `ApprovalConsumed { approval_id, escalation_id, action_id }` |
+| `Approved` | `TokenExpired` | Kernel timeout sweep: `now() > token.valid_until` | Kernel (sweep) | `ApprovalTokenExpired { approval_id, escalation_id }` |
+
+**Invalid transitions (kernel must reject):**
+
+- Any transition from a terminal state (`Denied`, `TimedOut`, `TokenExpired`, `Consumed`) — escalation rows are immutable once terminal.
+- `Pending → Consumed` without passing through `Approved` — a token cannot be consumed without being issued.
+- `Approved → Approved` — re-issuing a token for the same escalation creates a new `ApprovalToken` but does not change the escalation state. If the operator re-signs (e.g. extending the expiry), the old token is revoked via `authority::revoke_approval` before the new token is issued.
+
+**Trust invariants (all must hold; violation is a critical trust failure):**
+
+- **INV-ESC-01:** No transition from `Pending` to `Approved` without an operator-signed `ApprovalToken`. The kernel cannot self-approve an escalation.
+- **INV-ESC-02:** `validate_approval_token` always checks `token.policy_epoch == ctx.policy.load().epoch()`. If they differ, returns `ApprovalStatus::EpochMismatch` and the escalation remains `Approved` (the token is invalid; the operator must re-issue). The action does not execute.
+- **INV-ESC-03:** `token.session_id` must equal the session presenting the token. A token issued for session A cannot be used by session B.
+- **INV-ESC-04:** The nonce in each `ApprovalToken` is single-use. `validate_approval_token` checks the nonce against a consumed-nonce table in the store before marking `Valid`. Once consumed, the nonce is written to the table and future presentations of the same token return `NonceConsumed`.
+- **INV-ESC-05:** The proposed action must fall within the bounds of `token.scope` — that is, `action ⊆ scope`. This is enforced by `check_scope(&token.scope, action) -> bool` (step 6 of `validate_approval_token`): `true` = action is within scope; `false` = action exceeds scope. `validate_approval_token` maps `false` to `Ok(ApprovalStatus::ScopeMismatch)`. A token scoped to `CapabilityUpgrade { WriteCode }` does not authorize `CapabilityUpgrade { WriteSecrets }`; `check_scope` returns `false` and the caller receives `ScopeMismatch`.
+- **INV-ESC-06:** The planner cannot query escalation status by `escalation_id` via IPC in v1 — no status-query endpoint exists in `handlers/mod.rs`. The planner receives `escalation_id` in `EscalationResponse::Submitted` and must re-attempt the intent with the approval token when one is obtained; notification is out-of-band (operator email / local alert). **Testable assertion:** `handlers/mod.rs` must contain no arm matching an escalation-status-query variant in v1; any such arm is a scope violation.
+
+**`validate_approval_token` — canonical contract** (this is the normative spec; the `authority/approval.rs` section below is the implementation home and references this check sequence):
+
+```
+pub fn validate_approval_token(
+    token: &ApprovalToken,
+    action: &ProposedAction,   // what the kernel is about to do
+    ctx: &KernelContext,
+) -> Result<ApprovalStatus, AuthorityError>
+```
+
+**Return type semantics:** `Err(AuthorityError)` means the token payload is not usable for policy decisions — the caller must stop without branching on payload fields. Two cases:
+- `Err(AuthorityError::SignatureInvalid)` — step 1 crypto failure; the payload may have been tampered with.
+- `Err(AuthorityError::ApprovalRevoked)` — pre-step: `approval_id` appears in the revocation set; the token has been administratively invalidated regardless of signature.
+
+`Ok(ApprovalStatus::*)` is returned for all other outcomes, including rejections; callers branch on the `Ok` value to decide whether to proceed.
+
+Check sequence (fail-closed; each step runs only if the previous returned `Ok`):
+0. Revocation check: query revocation set for `token.approval_id`. If present → `Err(AuthorityError::ApprovalRevoked)`. No further checks run.
+1. Ed25519 signature verification: `ed25519_verify(issuer_pubkey, token_payload_bytes, token.signature)`. `issuer_pubkey` looked up from `ctx.policy.operator_entry(token.issued_by).public_key`. On failure → `Err(AuthorityError::SignatureInvalid)`. No further checks run.
+2. Epoch check: `token.policy_epoch == ctx.policy.load().epoch()`. On mismatch → `Ok(ApprovalStatus::EpochMismatch)`.
+3. Expiry check: `token.scope.valid_until > now()`. On failure → `Ok(ApprovalStatus::Expired)`.
+4. Nonce check: store query for `token.nonce` in consumed-nonce table. If present → `Ok(ApprovalStatus::NonceConsumed)`.
+5. Session check: `token.session_id == action.session_id`. On mismatch → `Ok(ApprovalStatus::ScopeMismatch)`.
+6. Scope check: `check_scope(&token.scope, action)` — verifies `action ⊆ token.scope`. On failure → `Ok(ApprovalStatus::ScopeMismatch)`.
+7. All checks pass → `Ok(ApprovalStatus::Valid)`.
+
+After `Valid` is returned: the caller writes the `ApprovalProof`, marks the escalation `Consumed`, writes the nonce to the consumed-nonce table, and executes the action. These four writes must be atomic (wrapped in a store transaction); if the transaction fails, the action does not execute and the escalation reverts to `Approved`.
+
+**Probe-rate-limiter parameters** (in policy artifact — amendment to Gap 2 schema):
+
+```toml
+[escalation_policy]
+timeout_secs         = 3600   # u64; how long a Pending escalation waits before TimedOut
+window_secs          = 300    # u64; rolling window for per-lineage rate limiting
+max_per_window       = 5      # u32; max escalation submissions per lineage per window
+quarantine_threshold = 3      # u32; rate-limit trigger count before lineage quarantine
+```
+
+These four fields are added to `PolicyBundle` with accessors:
+- `pub fn escalation_timeout(&self) -> Duration`
+- `pub fn escalation_window(&self) -> Duration`
+- `pub fn escalation_max_per_window(&self) -> u32`
+- `pub fn escalation_quarantine_threshold(&self) -> u32`
+
+Unknown or missing `[escalation_policy]` block → `PolicyError::MalformedArtifact` (all four fields required; no safe default).
+
+**Task state during `Pending` escalation.** The task is NOT moved to a new state when its escalation is `Pending`. The task retains whatever state it was in when the planner submitted the escalation (typically `GatesPending` for a claim gap, or `Admitted` for a capability gap). The escalation is orthogonal to the task state — it is the planner's request for operator resolution. When the operator approves and the token is issued, the planner presents the token on the next intent attempt and the kernel proceeds with the escalated authority. No `BlockReason::EscalationPending` is written; the task does not transition to `BlockedRecoveryPending` solely due to an open escalation.
+
+---
+
+###### `src/ipc/handlers/proposal_append.rs` — [NEW]
+
+
+**Purpose:** Handles `ProposalEvent` append requests from the planner. The planner is permitted to append only `ProposalEvent` variants (`PlanProposed`, `IntentSubmitted`, `AmendmentProposed`) — no authority-class events. This handler enforces that restriction by type.
+
+**Why it is named `proposal_append`, not `audit_append`:** The name `audit_append` implied the planner could append general audit events. `proposal_append` names the function correctly: it appends only planner-proposal-class events. The kernel's own authority events are written directly by kernel subsystems through `raxis-audit-tools`, not through IPC.
+
+**What it contains:**
+- `pub async fn handle(event: ProposalEvent, session: ValidatedSession, ctx: &HandlerContext) -> Result<AppendAck, HandlerError>`
+- Validates that `event` is a `ProposalEvent` variant — enforced by the Rust type system (the handler only accepts `ProposalEvent`, not `AuditEvent`). No runtime check needed.
+- Validates that `session.role` is `Role::Planner` — if somehow a non-planner session submits to this endpoint, `HandlerError::Unauthorized` is returned.
+- Calls `raxis-audit-tools::writer::append(ProposalAuditEvent::from(event))`. The `From<ProposalEvent>` implementation is the **only** conversion path from `ProposalEvent` to an audit-writable type; it is implemented to produce only `AuditEventKind::Proposal*` variants and panics at compile time (via exhaustive match) if a new `ProposalEvent` variant is added without a corresponding `Proposal*` audit kind. This is the structural guarantee that a planner-submitted event cannot produce an authority-class audit record. The planner never holds a file handle; the kernel serializes the append.
+- Returns `AppendAck::Accepted { event_id }`.
+
+---
+
+##### VCS Subsystem
+
+---
+
+###### `src/vcs/mod.rs` — [NEW]
+
+Re-exports `diff::touched_paths` and `diff::is_ancestor`. No logic.
+
+---
+
+###### `src/vcs/diff.rs` — [NEW] — Provides INV-07 input for `gates/claim.rs`
+
+**Purpose:** Resolves a commit range `(base_sha, head_sha)` to a sorted, stable list of all file paths touched between those two commits. This is the authoritative input to `gates/claim.rs` — single-commit diffs and planner-supplied path manifests are both rejected.
+
+**Why range diff, not `git diff-tree`:** `diff-tree <sha>` answers "what changed in this one commit vs its parent" — under-inclusive for multi-commit branches and wrong for merge commits (returns only merge-resolution deltas, not the union of both sides). `git diff <base> <head> --name-status --no-renames` (the normative form; see §2.5.8) answers "all files changed between these two tree states" for any intent type. **§2.5.8 is the canonical authority for all `vcs::diff` invocations**; the description here is a context note, not a specification.
+
+**`..` vs `...` (two-dot vs three-dot):** v1 uses two-dot. With the ancestor check enforced in `intent.rs`, `base` is always a true ancestor of `head`, so two-dot gives exactly "what the agent added on this branch" — deterministic and auditable. Three-dot (symmetric difference from merge-base) diverges when both sides have advanced and is not used.
+
+**Why git CLI subprocess, not libgit2:** libgit2 is a C binding that expands the unsafe surface and requires independent security tracking. The git CLI stdout format is stable, documented, and deterministic; a subprocess failure is a normal `io::Error`.
+
+**What it contains:**
+- `pub fn touched_paths(base_sha: &CommitSha, head_sha: &CommitSha, worktree_root: &Path) -> Result<Vec<PathBuf>, VcsError>`
+  - **Normative command (see §2.5.8 for full spec):** `git -C <worktree_root> diff <base_sha> <head_sha> --name-status --no-renames`. Note: space-separated SHAs (not `..` range syntax); `--no-renames` is mandatory; `--name-status` is required for the status-code dispatch table. The timeout wrapper (v1 default: 30s; configurable via `vcs.diff_timeout_secs` with a hard cap, e.g. 120s) applies to this invocation.
+  - Reads stdout line by line; sorts result with `paths.sort()` before returning — stable ordering required for INV-05 reproducibility (identical `Vec<PathBuf>` for the same `(base_sha, head_sha)` pair).
+  - `worktree_root` is the agent's git worktree path, bound to the session at creation time and validated at startup via `git -C <worktree_root> rev-parse --git-dir`. Concurrent agents operate on distinct `worktree_root` paths. The root is logged in every intent audit event.
+  - On timeout or non-zero exit: `VcsError::DiffFailed` with stderr captured.
+  - On `worktree_root` validation failure at startup: `BOOT_ERR_VCS_ROOT` (exit code 17).
+  - Does NOT resolve branch refs — receives only validated `CommitSha` newtypes (40-char hex); branch refs rejected upstream in `handlers/intent.rs`.
+
+- `pub fn is_ancestor(base_sha: &CommitSha, head_sha: &CommitSha, worktree_root: &Path) -> Result<bool, VcsError>`
+  - Spawns `git -C <worktree_root> merge-base --is-ancestor <base_sha> <head_sha>`.
+  - Maps exit code 0 → `Ok(true)`, exit code 1 → `Ok(false)`, any other exit → `Err(VcsError::GitError)`.
+  - Called by `intent.rs` before `touched_paths`; `Ok(false)` results in `HandlerError::InvalidShaRange` — the intent is rejected.
+
+- `pub fn rev_parse_parent(head_sha: &CommitSha, worktree_root: &Path) -> Result<CommitSha, VcsError>`
+  - Spawns `git -C <worktree_root> rev-parse <head_sha>^` and parses the parent commit SHA.
+  - Called by `handlers/intent.rs` when `intent_kind == IntentKind::SingleCommit` **and** `base_sha != head_sha` to confirm `base_sha` equals the true parent of `head_sha`; mismatch → `HandlerError::InvalidShaRange`. Skipped when `base_sha == head_sha` (empty range — see Part 2.4 `handlers/intent.rs`).
+
+- `pub fn topology_check(base_sha: &CommitSha, head_sha: &CommitSha, worktree_root: &Path) -> Result<(), VcsDiffError>`
+  - **Added by §2.5.8.** Spawns `git -C <worktree_root> rev-list <base_sha>..<head_sha> --min-parents=2 --count`. If count > 0, returns `Err(VcsDiffError::MergeCommitInRange { merge_count })`. Not called for `IntentKind::IntegrationMerge` — see §2.5.8 §Integration merge carve-out.
+
+- `pub fn compute(base_sha: &CommitSha, head_sha: &CommitSha, worktree_root: &Path) -> Result<Vec<PathBuf>, VcsDiffError>`
+  - **Added by §2.5.8.** Wrapper around the normative `git diff <base> <head> --name-status --no-renames` invocation with status-code dispatch and post-processing as defined in §2.5.8 §`vcs::diff` normative specification. Returns sorted `Vec<PathBuf>`. Distinct from `touched_paths` (which predates §2.5.8 and used `--name-only`); `compute` is the canonical function for path scope enforcement. `touched_paths` is retained for INV-07 claim derivation pending alignment with `compute` in a future amendment.
+
+---
+
+> **End of Part 2.2.**
+> Part 2.3 covers the authority engine, scheduler/DAG, gate evaluation, provider/fetch routing, prompt assembly, `policy_manager.rs`, `witness_index.rs`, and `breakglass.rs` — with full function signatures for all facade boundaries.
+
+---
+
+##### Multi-Agent VCS Design Note
+
+This note captures the VCS semantics required for the intended concurrent-agent workflow and must be kept consistent with `vcs/diff.rs`, `handlers/intent.rs`, and the `IntentRequest` type in `raxis-types`.
+
+**Concurrent agent workflow**
+
+```
+main ─── A ─── B ─── C                    ← main
+               │
+               ├─── agent-1 ─── D ─── E   ← agent-1 worktree (base = C, head = E)
+               │
+               └─── agent-2 ─── F ─── G   ← agent-2 worktree (base = C, head = G)
+                                    │
+                                    └─── integration ─── H  ← merge commit
+```
+
+Git branches persist in `.git/refs` and are shared across all terminals, subprocesses, and reboots. They isolate **history**, not **filesystem state**. Two agents checking out different branches in the same working tree will overwrite each other's files. The required isolation mechanism is `git worktree`: each agent operates from a distinct directory path, all backed by the same `.git` object store.
+
+**Operator contract (v1):** The kernel does not create or manage worktrees. Before starting an agent session, the operator (or orchestration layer) must:
+1. Run `git worktree add <worktree_path> <agent_branch>` to create the agent's isolated working directory.
+2. Supply `worktree_path` as the `worktree_root` in the session config when creating the planner session with the kernel.
+3. Ensure `base_commit_sha` is set to the known-good main-branch tip at branch creation time (not the current main HEAD at intent submission time, which may have advanced).
+
+This contract is enforced by convention in v1; v2 may add kernel-managed worktree lifecycle.
+
+**`IntentRequest` fields (relevant VCS fields)**
+
+| Field | Type | Required | Semantics |
+|---|---|---|---|
+| `head_commit_sha` | `CommitSha` (40-char hex) | Yes | The commit the agent is asserting as its current work product |
+| `base_commit_sha` | `CommitSha` (40-char hex) | Yes | The commit the agent branched from (typically the main tip at branch creation) |
+
+Branch refs (e.g. `main`, `HEAD`, `origin/main`) are rejected by the handler. Both SHAs must be full hex strings; short SHAs are also rejected.
+
+**Claim evaluation for the four intent types**
+
+| Intent type | `base_sha` | `head_sha` | Range semantics |
+|---|---|---|---|
+| Single-commit work | Parent commit of head (`head^`) | Head commit | Files changed in exactly one commit. **v1 policy hardening**: when `base_sha` is supplied as `head^`, the kernel verifies this claim by running `git -C <worktree_root> rev-parse <head_sha>^` and confirming it equals `base_sha`. If they differ, the intent is rejected — the planner cannot claim single-commit semantics while providing a non-parent base. |
+| Multi-commit branch | Main tip at branch creation | Branch head | All files changed across the branch |
+| Integration merge | Main tip at session creation (policy-pinned) | Merge commit | Full union of all agent-branch changes |
+| PR gate evaluation | Main HEAD at PR creation (policy-pinned) | PR merge commit | All files that would enter main |
+
+**Integration merge commit rule (v1 canonical choice):** The kernel evaluates gate requirements against `git diff <main_head_at_session_creation> <merge_commit> --name-status --no-renames` (normative form per §2.5.8). This gives the true union of all changes from all contributing agent branches. The `main_head_at_session_creation` is locked in `sessions.base_sha` at `create_session` time and cannot be changed by the planner. Two distinct failure modes apply when the integration intent is submitted:
+
+- **Stale base** (`HandlerError::StaleIntegrationBase`): detected by checking `locked_base == current_main_HEAD`. If main has advanced since session creation, this equality fails. The `is_ancestor(locked_base, merge_commit)` check still passes (the locked base remains a valid ancestor of the merge commit), so these are different checks. Remediation: rebase the integration branch on the new main HEAD and resubmit.
+- **Ancestor check failed** (`HandlerError::InvalidShaRange`): detected by `is_ancestor(locked_base, merge_commit)` returning false. This means the merge commit does not descend from the locked base — likely a force-push or a corrupted intent. Remediation: verify the merge commit history.
+
+**Why not three-dot (`...`) range:** Three-dot computes the symmetric difference from the merge-base, which diverges when both main and the branch have advanced since branching. Two-dot (`..`) with a kernel-validated base-is-ancestor check gives deterministic, auditable results: the range is exactly "what the agent added," bounded by the operator-supplied base. If the ancestor check fails, the intent is rejected — the planner cannot silently shrink the diff by picking a bad base.
+
+---
+
+### Part 2.3 — Internal Kernel Subsystem Specifications
+
+This part specifies the internal logic layer of the kernel: the six subsystems that implement authority, scheduling, gate evaluation, provider routing, prompt assembly, and the shared store facades. Function signatures here are the locked contract between subsystems; they supersede the illustrative examples in Parts 2.1 and 2.2 wherever there is a conflict — Part 2.3 wins.
+
+**Scope:** `authority/`, `scheduler/`, `gates/`, `provider/`, `prompt/`, `witness_index.rs`, `policy_manager.rs`, `breakglass.rs`.
+
+---
+
+#### Authority Subsystem (`src/authority/`)
+
+**Role:** The authority subsystem is the kernel's trust engine. It owns session lifecycle, delegation checks, verifier run token issuance and consumption, signing key access, and human-issued approval token validation. No other subsystem may read session rows, delegation rows, or key material directly — all access is through this module's public functions.
+
+**Invariant:** Within the kernel binary, `authority` is the designated importer of `raxis-crypto` for all live key operations (HMAC, Ed25519 signing, signature verification). Any kernel module that needs a cryptographic result calls a function in `authority`; it does not link `raxis-crypto` directly. **Controlled exception:** `raxis-audit-tools` is a separate crate with its own direct `raxis-crypto` dependency for chain-hash and JSONL-append operations — it is not a violation of this rule because it is a library crate, not the kernel binary. The rule is: within `raxis` (the kernel crate itself), `authority` is the sole `raxis-crypto` importer. `cargo deny` is configured to enforce this at the per-crate level, not at the workspace level. Policy verification (`registry.authority_keypair.public`) uses the authority keypair, not a separate "quality key" — the quality keypair exists in `KeyRegistry` for quality-gate artifact signing (verifier output attestation) and is documented in the verifier crate spec (Part 3); it is not used in policy signature verification.
+
+---
+
+##### `src/authority/mod.rs` — [NEW]
+
+Re-exports the public API surface of the authority subsystem. Internal sub-modules (`delegation`, `session`, `verifier_token`, `keys`, `approval`) are private to the subsystem; only the functions listed here are callable by other kernel modules.
+
+**Public API re-exported:**
+```
+pub use delegation::{check_capability, record_capability_use, list_delegations, mark_stale_on_epoch_advance};
+pub use session::{create_session, get_session, revoke_session, update_sequence_number};
+pub use verifier_token::{issue_verifier_token, validate_verifier_token, consume_verifier_token};
+pub use keys::{verify_hmac, sign_audit_record, authority_pubkey_fingerprint};
+pub use approval::{validate_approval_token, revoke_approval};
+```
+
+---
+
+##### `src/authority/session.rs` — [NEW]
+
+**Purpose:** Session lifecycle management. A session represents a single authenticated connection from a planner, gateway, or verifier process to the kernel. Sessions are created by the kernel at spawn time, not by the connecting process.
+
+**What it contains:**
+
+- `pub fn create_session(role: Role, worktree_root: Option<PathBuf>, base_sha: Option<CommitSha>, base_tracking_ref: Option<String>, config: &SessionConfig, store: &Store) -> Result<SessionId, AuthorityError>`
+  - Generates `session_id` (UUID v4) and `session_token` (256-bit CSPRNG random bytes). The token is stored in the `sessions` table and returned to the caller (kernel spawn path). It is **not** derived from `session_id` via HMAC — random generation means session tokens are independently unguessable and can be revoked by deleting/flagging the row without key rotation.
+  - For `Role::Planner`: **`worktree_root` must be `Some`** — stores the absolute git worktree path in `sessions.worktree_root` (**NOT NULL**). Runs `git -C <worktree_root> rev-parse --git-dir`; validation failure returns **`AuthorityError::InvalidWorktree`** (kernel spawn maps this to **`BOOT_ERR_VCS_ROOT`** when session creation is part of bootstrap — exit code 17; same operator-facing story as §2.5.8). Records `base_sha` / `base_tracking_ref` per §2.5.1 Table 4. When the spawn path pins a main tip for integration semantics, `base_sha` is the resolved commit OID and **`base_tracking_ref` is the exact symbolic ref that was resolved** (normative default when the operator does not override: `refs/heads/main`). All locked for the session lifetime.
+  - For `Role::Gateway` and `Role::Verifier`: **`worktree_root` must be `None`** — stores **SQL NULL** in `sessions.worktree_root`. These roles do not run kernel VCS diff/ancestor/topology on their **own** session row (no range intents). **`base_sha` and `base_tracking_ref` are SQL NULL.** Verifier subprocesses still receive a **`worktree_root` path via the planner session** bound to `task.session_id` when spawned (`spawn_verifier`, witness recheck) — that path is **not** read from the verifier's kernel session row.
+  - **`create_session` rejects** `Planner` + `worktree_root: None` and **`Gateway`/`Verifier` + `worktree_root: Some`** at API boundary — no sentinel paths; implementers must not substitute empty strings or the kernel cwd.
+  - Writes session row to `sessions` table. Returns `SessionId`.
+  - Emits `AuditEventKind::SessionCreated { session_id, role, worktree_root }` — `worktree_root` is present in the payload **only when stored non-NULL** (planner); gateway/verifier omit it or use `Option`/JSON null consistently in the audit schema.
+
+- `pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, AuthorityError>`
+  - Returns the session row or `AuthorityError::SessionNotFound`. Called by `ipc/auth.rs` during token validation.
+
+- `pub fn revoke_session(session_id: &SessionId, store: &Store, audit: &AuditTools) -> Result<(), AuthorityError>`
+  - Sets `revoked_at = now()` in the session row. Subsequent `get_session` calls return `AuthorityError::SessionRevoked`.
+  - Emits `AuditEventKind::SessionRevoked { session_id, revoked_by }`.
+
+- `pub fn update_sequence_number(session_id: &SessionId, expected: u64, store: &Store) -> Result<(), AuthorityError>`
+  - Atomically increments the stored sequence to `expected + 1`. Returns `AuthorityError::SequenceMismatch` if the current stored value does not equal `expected` — prevents concurrent IPC messages from advancing the sequence out of order.
+  - > **Superseded in the IPC path by §2.5.1 INV-01 enforcement.** The IPC dispatcher (`ipc/auth.rs::validate`) does **not** call this function. Instead, it executes `UPDATE sessions SET sequence_number = ?` atomically with the `nonce_cache` INSERT inside the same store transaction (steps 4–5 of the §2.5.1 Table 16 dispatcher sequence). `update_sequence_number` is retained as a store-level utility for non-IPC contexts (test harnesses, crash-recovery reconciliation), but any caller outside those contexts should use the dispatcher auth transaction instead.
+
+---
+
+##### `src/authority/delegation.rs` — [NEW]
+
+**Purpose:** Capability delegation management. A delegation is a kernel-issued record that grants a session a specific `CapabilityClass` for a bounded scope and TTL. Delegations are issued by the operator (via the CLI approval path) and recorded in the kernel store; they are not self-issued by the planner.
+
+**What it contains:**
+
+- `pub fn check_capability(session_id: &SessionId, capability: CapabilityClass, store: &Store) -> Result<DelegationStatus, AuthorityError>`
+  - **Pure read. No writes.** Queries the `delegations` table for a record matching `(session_id, capability)` and returns its current status without modifying any row. Safe to call from CLI tooling, operator inspection, logging, dry runs, and metrics — calling it never advances the staleness state.
+  - Returns:
+    - `DelegationStatus::Active` — record found, TTL not expired, `status = Active`.
+    - `DelegationStatus::StaleOnNextUse` — record found, TTL not expired, `status = StaleOnNextUse` (set by `mark_stale_on_epoch_advance`). Returned as-is; the caller decides whether to advance state.
+    - `DelegationStatus::RenewalRequired` — delegation was used once in stale state via an enforcement path; not renewed. Acts as a block.
+    - `DelegationStatus::Expired` — TTL has passed regardless of epoch.
+    - `DelegationStatus::NotGranted` — no record exists for `(session_id, capability)`.
+  - Does **not** delete expired delegations; rows are retained for audit purposes.
+
+- `pub fn record_capability_use(session_id: &SessionId, capability: CapabilityClass, store: &Store) -> Result<(), AuthorityError>`
+  - **Enforcement hook. Writes.** Called exclusively by `gates/mod.rs::evaluate_claims` at step 4, immediately after all gate types are satisfied (terminal `GateEvalResult::Pass`). Not called on `PendingWitness` — the recheck path detects staleness fresh since the row remains `StaleOnNextUse` until a terminal pass. Atomically transitions the delegation row from `StaleOnNextUse` to `RenewalRequired` for each capability that was stale during this evaluation.
+  - Returns `AuthorityError::DelegationNotStale` if the row is not currently `StaleOnNextUse` (guards against double-call or race).
+  - **Must not** be called from any non-enforcement path. CLI tools that need to simulate enforcement should call a future `delegation::simulate_consume` (test/admin hook, not this function).
+
+- `pub fn list_delegations(session_id: &SessionId, store: &Store) -> Result<Vec<Delegation>, AuthorityError>`
+  - Returns all delegation rows for the session regardless of status. Used by the CLI `gate-verdict` command and by `gates/claim.rs` for delegation context assembly.
+
+- `pub fn mark_stale_on_epoch_advance(store: &Store) -> Result<usize, AuthorityError>`
+  - Called by `policy_manager.rs` when the policy epoch advances. Sets `status = StaleOnNextUse` on all `Active` delegation rows. On next `check_capability`, the caller receives `DelegationStatus::StaleOnNextUse` — the delegation still passes for one use but the planner must renew before the following action.
+  - Returns the count of rows updated (for audit logging by the caller).
+
+---
+
+##### `src/authority/verifier_token.rs` — [NEW]
+
+**Purpose:** Kernel-issued single-use credentials for verifier subprocess runs. A `verifier_run_token` is issued by `gates/verifier_runner.rs` before spawning the verifier, passed to the verifier via its spawn envelope, and consumed on first valid presentation at `ipc/handlers/witness.rs`. Verifier tokens are stored in a separate table from session tokens.
+
+**What it contains:**
+
+- `pub fn issue_verifier_token(task_id: &TaskId, gate_type: GateType, evaluation_sha: &CommitSha, ttl: Duration, store: &Store) -> Result<VerifierRunToken, AuthorityError>`
+  - Generates a 256-bit random token value. Hashes it with SHA-256 and stores `{ verifier_run_id, task_id, gate_type, evaluation_sha, token_hash, issued_at, expires_at, consumed: 0 }` in the `verifier_run_tokens` table. The raw token bytes are never stored; only the hash is persisted. The raw token is returned to the caller for inclusion in the verifier spawn envelope.
+  - Returns the `VerifierRunToken` (contains `verifier_run_id` + raw token bytes) to be passed in the verifier's spawn envelope.
+
+- `pub fn validate_verifier_token(verifier_run_id: &VerifierRunId, token_bytes: &[u8], store: &Store) -> Result<VerifierTokenRow, AuthorityError>`
+  - Looks up the token by `verifier_run_id`. Computes SHA-256 of `token_bytes` and compares constant-time to `verifier_run_tokens.token_hash`. Returns `AuthorityError::TokenNotFound`, `AuthorityError::TokenMismatch`, `AuthorityError::TokenExpired`, or `AuthorityError::TokenConsumed` as appropriate.
+  - Does **not** consume the token — consumption is a separate step called only after the witness body passes all checks in `handlers/witness.rs`.
+
+- `pub fn consume_verifier_token(verifier_run_id: &VerifierRunId, store: &Store) -> Result<(), AuthorityError>`
+  - Sets `consumed = 1` and `consumed_at = now()` atomically (`UPDATE verifier_run_tokens SET consumed = 1, consumed_at = now() WHERE verifier_run_id = ? AND consumed = 0`). Returns `AuthorityError::AlreadyConsumed` if `rows_affected() == 0` (double-submission guard).
+
+---
+
+##### `src/authority/keys.rs` — [NEW]
+
+**Purpose:** Cryptographic key access and operations. This is the only module in the kernel binary that holds live key material in memory. All other modules that need HMAC or signing call functions here; they never receive raw key bytes.
+
+**What it contains:**
+
+- `pub struct KeyRegistry { authority_keypair: KeyPair, quality_keypair: KeyPair, verifier_token_key: SymmetricKey }` — loaded once at startup (`step 4`), held in an `Arc<KeyRegistry>` passed through `HandlerContext`.
+
+- `pub fn verify_hmac(token_bytes: &[u8], session_id: &SessionId, registry: &KeyRegistry) -> Result<(), AuthorityError>`
+  - Computes `HMAC-SHA256(key=registry.authority_keypair.secret, msg=session_id_bytes)` and compares to `token_bytes` in constant time. Returns `AuthorityError::HmacMismatch` on failure.
+
+- `pub fn sign_audit_record(record_bytes: &[u8], registry: &KeyRegistry) -> Signature`
+  - Signs `record_bytes` with `registry.authority_keypair` using Ed25519. Used by `raxis-audit-tools::writer` when appending authority-class events.
+
+- `pub fn authority_pubkey_fingerprint(registry: &KeyRegistry) -> String`
+  - Returns the hex-encoded SHA-256 fingerprint of the authority public key. Included in genesis record and `KernelStarted` audit event.
+
+---
+
+##### `src/authority/approval.rs` — [NEW]
+
+**Purpose:** Human-issued signed approval tokens. Approval tokens are issued by the operator via the CLI (`raxis-cli escalation approve <escalation_id> --scope <scope> --max-uses <n> --valid-for <seconds>`), signed with the **operator's own private key** (the key from the operator's `[[operators.entries]]` entry in the policy artifact — not the kernel's `authority_keypair`). The kernel validates the token by looking up the operator's public key from `policy.operator_entry(token.issued_by)`. These are distinct from verifier run tokens (kernel-issued, machine-to-machine) and from session tokens (kernel-issued, process authentication).
+
+**What it contains:**
+
+- `pub fn validate_approval_token(token: &ApprovalToken, action: &ProposedAction, ctx: &KernelContext) -> Result<ApprovalStatus, AuthorityError>`
+  - Canonical implementation of the 8-step check sequence (step 0 = revocation pre-check, steps 1–7 = FSM section). `Err(AuthorityError)` for unusable token (revoked or bad sig); `Ok(ApprovalStatus::*)` for all other outcomes. See the FSM section for the normative check sequence and return-type semantics.
+  - `ProposedAction` and `KernelContext` are defined in `raxis-kernel` — not in `raxis-types`. They are kernel-internal types; the planner has no access to them.
+  - Operator public key is sourced from `ctx.policy.operator_entry(token.issued_by).public_key` — never from `registry.authority_keypair.public`.
+
+- `pub fn check_scope(scope: &ApprovalScope, action: &ProposedAction) -> bool`
+  - Returns `true` if `action ⊆ scope` — the proposed action falls within every dimension the scope predicate allows. Returns `false` if any dimension of the action exceeds what the token authorized.
+
+- `pub fn revoke_approval(approval_id: &ApprovalId, store: &Store, audit: &AuditTools) -> Result<(), AuthorityError>`
+  - Adds `approval_id` to the approval revocation set in the store. Subsequent `validate_approval_token` calls for any token with this `approval_id` return `Err(AuthorityError::ApprovalRevoked)` at step 0 (pre-signature check). This is intentionally an `Err` — same as `SignatureInvalid` — because a revoked token is definitively not usable for policy decisions; callers should not branch on payload fields of a revoked token.
+  - Emits `AuditEventKind::ApprovalRevoked { approval_id, revoked_by, revoked_at }`.
+
+---
+
+#### Scheduler Subsystem (`src/scheduler/`)
+
+**Role:** The scheduler is responsible for lane admission, DAG-based task ordering, and concurrency budget enforcement. It does not execute tasks — it decides whether a task may enter the execution pipeline (admission) and in what order ready tasks are surfaced to the planner. All admission decisions are recorded in the audit log.
+
+**Invariant:** The scheduler never calls `gates/`, `authority/`, or `vcs/`. It receives a task record after initial claim evaluation (claims must have passed; witnesses may still be outstanding for `GatesPending` tasks) and makes purely structural decisions: does the lane have budget, and does the DAG allow this task to proceed?
+
+---
+
+##### `src/scheduler/mod.rs` — [NEW]
+
+Re-exports the public admission API.
+
+```
+pub use admit::admit;
+pub use dag::{next_ready_tasks, mark_task_complete, transition_to_admitted};  // add_task/insert_edges are private to admit.rs
+pub use lane::{lane_config_for_row, get_lane_status};
+pub use budget::{check_budget, current_budget};
+```
+
+---
+
+##### `src/scheduler/admit.rs` — [NEW]
+
+**Purpose:** Plan-time task instantiation, called exclusively from `initiatives::lifecycle::approve_plan`. Inserts task rows and DAG edges for all tasks defined in a newly approved plan. **`admit` is not called from the intent handler** — budget checking, budget reservation, and gate evaluation all happen on the intent path (`handlers/intent.rs`) using VCS-derived `touched_paths` and `estimated_cost` that do not exist at plan instantiation time.
+
+**What it contains:**
+
+- `pub fn admit(task: PlanTask, initiative_id: &InitiativeId, policy_epoch: u64, store: &Store, audit: &AuditTools) -> Result<TaskId, SchedulerError>`
+  - `PlanTask` is a plan-derived struct: `{ task_id: TaskId, lane_id: LaneId, dependencies: Vec<TaskId>, admitted_at: Timestamp }`. It does **not** carry `estimated_cost`, `touched_paths`, or `submitted_claims` — those fields are populated on the task row by the intent handler at first intent time, not at plan instantiation time.
+  - Validates that `task.lane_id` is a configured lane in the currently loaded policy. Returns `SchedulerError::UnknownLane { lane_id }` if the lane name does not appear in the policy bundle passed to the caller (`approve_plan` provides the loaded `&PolicyBundle`).
+  - Runs inside a single store transaction. Any step failure rolls back entirely. **Execution order within the transaction:**
+    - Step 1: `dag::detect_cycle(task.task_id, &task.dependencies, store)` — pure read DFS; returns `SchedulerError::CyclicDependency` if the proposed edges would create a cycle. No state written.
+    - Step 2: Insert task row into `tasks` with `state = TaskState::Admitted`, `admitted_at = task.admitted_at`, `policy_epoch`. Intent-bound fields (`session_id`, `evaluation_sha`, `base_sha`, `submitted_claims_json`) are inserted as SQL NULL; `actual_cost = 0`. **Task row is inserted before edge rows** because `task_dag_edges` has a FK to `tasks`; the FK would reject an edge insert if the task row did not exist.
+    - Step 3: `dag::insert_edges(task.task_id, &task.dependencies, store)` — inserts rows into `task_dag_edges` now that the task row exists.
+    - Step 4: Emit `AuditEventKind::TaskAdmitted { task_id, lane_id, initiative_id, dependency_count: task.dependencies.len() }`.
+  - Returns `Ok(task_id)` on success.
+  - **No `check_budget` and no `consume_budget`.** These are called by the intent handler after gate evaluation, using the VCS-derived `estimated_cost`. `admit` does not perform budget operations because the plan does not encode cost per task — cost is computed at intent time from `touched_paths` and `intent_kind`.
+
+---
+
+##### `src/scheduler/dag.rs` — [NEW]
+
+**Purpose:** Directed acyclic graph over tasks within an initiative. A task is "ready" when all its predecessors are in `Completed` state. The DAG is persisted in the `task_dag_edges` table; the in-memory representation is rebuilt on demand from the store (no live DAG object held between requests — avoids state divergence after recovery).
+
+**What it contains:**
+
+- `pub fn add_task(task_id: TaskId, dependencies: Vec<TaskId>, store: &Store) -> Result<(), SchedulerError>`
+  - For each `dep_id` in `dependencies`, inserts one row into `task_dag_edges` with `(predecessor_task_id = dep_id, successor_task_id = task_id)` — **predecessor must complete before `task_id` is schedulable**. Runs cycle detection before insertion via `detect_cycle(task_id, &dependencies, store)`.
+
+- `pub fn detect_cycle(new_task: TaskId, proposed_deps: &[TaskId], store: &Store) -> Result<(), SchedulerError>`
+  - Loads the dependency subgraph for `proposed_deps` from the store. DFS from `new_task` following proposed edges; if `new_task` is reachable from itself, returns `SchedulerError::CyclicDependency`. Bounded to `MAX_DAG_DEPTH = 64` levels to prevent unbounded store traversal. **Pure read — writes nothing.** Called by `admit` before any row insertions (Step 1 in the admit transaction).
+
+- `pub fn insert_edges(task_id: TaskId, dependencies: &[TaskId], store: &Store) -> Result<(), SchedulerError>`
+  - Inserts `(predecessor_task_id, successor_task_id)` rows into `task_dag_edges`. Called by `admit` in Step 3, after the task row exists.
+
+- `pub fn next_ready_tasks(initiative_id: &InitiativeId, store: &Store) -> Result<Vec<TaskId>, SchedulerError>`
+  - Returns all tasks in `TaskState::Admitted` (not `GatesPending`) whose predecessor edges are all satisfied (`predecessor_satisfied = 1`). Computed by a single SQL query joining `tasks` and `task_dag_edges` (see the `next_ready_tasks` query pattern in §2.5.1 DDL Part 1). `GatesPending` tasks are excluded regardless of predecessor state — they are not executable until a gate-recheck transitions them to `Admitted`.
+
+- `pub fn transition_to_admitted(task_id: &TaskId, store: &Store) -> Result<(), SchedulerError>`
+  - Sets `TaskState::GatesPending → TaskState::Admitted`. Returns `SchedulerError::InvalidStateTransition` if current state is not `GatesPending`. Called by `ipc/handlers/witness.rs` after a gate-recheck returns `GateEvalResult::Pass` for all outstanding gates.
+
+- `pub fn mark_task_complete(task_id: &TaskId, store: &Store) -> Result<(), SchedulerError>`
+  - Sets `TaskState::Completed` and `completed_at = now()`. Subsequent `next_ready_tasks` calls will surface tasks that depended on this one.
+
+---
+
+##### `src/scheduler/lane.rs` — [NEW]
+
+**Purpose:** Lane configuration and status. A lane is a named execution channel with a concurrency cap and cost ceiling. Lane definitions are part of the signed policy artifact; the scheduler reads but does not write lane configuration.
+
+**What it contains:**
+
+- `pub struct LaneConfig { lane_id: LaneId, max_concurrent_tasks: u32, max_cost_per_epoch: u64, priority: u8 }`
+
+- `pub fn lane_config_for_row(lane_id: &LaneId, policy: &PolicyBundle) -> Result<LaneConfig, SchedulerError>`
+  - `policy.lane_config(lane_id).ok_or(SchedulerError::NoLaneAssigned)`. Used wherever the kernel needs lane ceilings for a task row loaded from the store. **`lane_id` on the task row comes from the signed plan artifact**, validated at `approve_plan` / `scheduler::admit` against policy — the intent handler does **not** accept a planner-supplied lane override on `IntentRequest` in v1 (lane is fixed per task at plan approval).
+
+- `pub fn get_lane_status(lane_id: &LaneId, store: &Store) -> Result<LaneStatus, SchedulerError>`
+  - Returns current `{ active_tasks: u32, reserved_cost: u64 }` for operator inspection (used by `raxis-cli status` CLI command).
+
+---
+
+##### `src/scheduler/budget.rs` — [NEW]
+
+**Purpose:** Per-lane concurrency and cost budget enforcement. Budget state is persisted in the `lane_budget_reservations` table so it survives kernel restarts. Reservation rows are created on **intent pickup** (`handlers/intent.rs`, after gate evaluation, when transitioning from `Admitted` into `Running` or `GatesPending`) — **not** at `approve_plan` / `scheduler::admit`. They are released on task completion, failure, or abort. Continuation intents on an already-`Running` task **do not** insert another reservation (PK `(lane_id, task_id)`).
+
+**What it contains:**
+
+- `pub fn check_budget(lane_id: &LaneId, estimated_cost: u64, store: &Store) -> Result<(), SchedulerError>`
+  - Reads current `{ active_tasks, reserved_cost }` for the lane.
+  - Returns `SchedulerError::BudgetExceeded { kind: ConcurrencyLimit }` if `active_tasks >= lane.max_concurrent_tasks`.
+  - Returns `SchedulerError::BudgetExceeded { kind: CostLimit }` if `reserved_cost + estimated_cost > lane.max_cost_per_epoch`.
+  - Pure read; writes nothing. Called from the intent handler after gate evaluation succeeds, before `consume_budget`.
+
+- `pub fn consume_budget(lane_id: &LaneId, task_id: &TaskId, cost: u64, store: &Store) -> Result<(), SchedulerError>`
+  - Inserts a `lane_budget_reservations { lane_id, task_id, reserved_cost: cost, reserved_at }` row. Called from the intent handler transaction, after gate evaluation returns `Pass`, `BreakglassPass`, or `PendingWitness`, and before `transition_task`. Not called from `admit`.
+
+- `pub fn current_budget(lane_id: &LaneId, store: &Store) -> Result<LaneBudgetSnapshot, SchedulerError>`
+  - Returns `LaneBudgetSnapshot { active_tasks: u32, reserved_cost: u64 }` for the lane. Alias for `get_lane_status` at the budget layer; re-exported from `scheduler/mod.rs` for callers that only care about budget state without lane configuration details.
+
+- `pub fn release_budget(lane_id: &LaneId, task_id: &TaskId, store: &Store) -> Result<(), SchedulerError>`
+  - Issues `DELETE FROM lane_budget_reservations WHERE lane_id = ? AND task_id = ?`. Checks `rows_affected()` from the SQLite result: `0` → reservation already released, return `Ok(())` (idempotent — safe on duplicate call from crash recovery or `reconcile_tasks`); `1` → released, lane credited; `> 1` → return `Err(SchedulerError::CorruptReservationState { task_id })` (schema invariant violation). This makes `release_budget` safe to call from `recovery::reconcile_tasks` and from any terminal-state handler without double-crediting the lane.
+
+- `pub fn compute_admission_cost(touched_paths: &[PathBuf], intent_kind: IntentKind, policy: &PolicyBundle) -> Result<u64, BudgetError>`
+  - Calls `policy.base_cost_for_intent_kind(intent_kind)`. If `None` (intent kind absent from cost table) → `Err(BudgetError::UnknownIntentKindCost { intent_kind })`. **No fallback cost is applied.** Unknown intent kinds are rejected at admission, not silently priced at a default. Parallel to `StrictDefault` in `policy_lookup::required_claims`: new surface area fails closed until policy acknowledges it.
+  - `base_cost: u64` = the returned value.
+  - `path_cost: u64 = touched_paths.len() as u64 * policy.cost_per_touched_path()`. Uses the same sorted, deduplicated `touched_paths` list already derived by `vcs::diff` — no second diff, no independent re-derivation.
+  - `raw: u64 = base_cost.saturating_add(path_cost)` — saturating arithmetic; overflow on abnormally large diffs saturates to `u64::MAX` before the cap, not a wrapped small value.
+  - Returns `Ok(min(raw, policy.max_cost_per_task()))`.
+  - **Pure function** — no store access, no side effects. Inputs are kernel-trusted: `touched_paths` from `vcs::diff`, `intent_kind` used only as a table lookup key (cannot steer the formula), `PolicyBundle` kernel-controlled. The planner cannot influence the result.
+  - **Semantics (mandatory for implementers):** the result is "admission units" — not a token count, API cost, or wall-clock estimate. `estimated_cost` is a historical field name; the formula is a deliberate coarse heuristic for lane saturation control. Code that treats this value as a token budget is a misuse.
+  - `BudgetError::UnknownIntentKindCost { intent_kind: IntentKind }` — the `intent.rs` handler receives this error and returns `Ok(IntentResponse::Rejected { reason: PlannerErrorCode::FAIL_POLICY_VIOLATION })` directly. This is a policy-shaped planner rejection, not an infrastructure error, so it does **not** flow through `dispatcher::map_error`. No task binding `UPDATE`, no reservation insert, no `transition_task`.
+
+- `pub fn reconcile_actual_cost(task_id: &TaskId, actual_units: u64, source: ActualCostSource, store: &Store, audit: &AuditTools) -> Result<(), BudgetError>`
+  - Writes `task.actual_cost = actual_units` to the task row.
+  - Let `reserved_units = task.admission_reserved_units.unwrap_or(0)` (set once at first `consume_budget` — see `handlers/intent.rs`; omitted tasks default to 0). If `actual_units > reserved_units` → emits `AuditEventKind::BudgetOverrun { task_id, lane_id, estimated_cost: reserved_units, actual_cost: actual_units, delta: actual_units - reserved_units, planner_reported: source.is_planner_reported() }`.
+  - Does **not** retroactively adjust the lane reservation (already released at terminal state before reconciliation runs). Budget overruns are audit signals for operator tuning, not enforcement triggers. **Ordering requirement:** every terminal-state handler must call `release_budget` before `reconcile_actual_cost`; recovery paths (`recovery::reconcile_tasks`) must follow the same ordering for tasks transitioned to `BlockedRecoveryPending`. Reordering these calls would violate the "reservation already released" invariant checked by `rows_affected()`.
+  - `ActualCostSource` enum (local to `budget.rs`): `InferenceResponse { inference_id: Uuid }` — authoritative, sourced from gateway-returned provider metadata on the kernel-controlled inference path; `PlannerReported { planner_reported_tokens: u64 }` — observational only, written to the audit record as a `planner_reported_tokens` field, never used to compute enforcement quantities. Consumers of audit `BudgetOverrun` events must filter on `planner_reported = false` to get enforcement-grade data.
+
+**Lane budget and session fetch quota are independent controls.** Lane admission cost (`estimated_cost` units, enforced at `consume_budget`) and session fetch quota (`session.fetch_quota`, enforced per `FetchRequest` at `rate_limit::check_rate_limit`) are independent enforcement axes. Neither implies the other: a task cheap to admit may issue many fetches; an expensive task may issue none. Operators must tune both independently. Exhausting fetch quota does not write a `BlockReason`, does not trigger a lane reservation release, and does not cause a task FSM transition — see Path A semantics in `rate_limit.rs` and `handlers/fetch.rs`.
+
+---
+
+> **End of Part 2.3 — Section A (authority + scheduler).**
+> Part 2.3 — Section B covers: `gates/`, `provider/`, `prompt/`, `witness_index.rs`, `policy_manager.rs`, and `breakglass.rs`.
+
+---
+
+#### Gates Subsystem (`src/gates/`)
+
+**Role:** The gates subsystem evaluates whether a task's claims are sufficient given its VCS-derived touched paths, and manages the lifecycle of verifier subprocess runs that produce witness artifacts. It is the enforcement point for INV-07 (claim sufficiency) and INV-03 (witness binding).
+
+**Invariant:** Gates never import `raxis-store` directly. All state access goes through the facades: `authority` (delegation + verifier token issuance), `policy` (claim-requirement lookup), `vcs` (range diff), `witness_index` (witness lookup). Each sub-file uses exactly its declared facade set — see boundary rule in Part 2.1.
+
+---
+
+##### `src/gates/mod.rs` — [NEW]
+
+**Purpose:** Single public entry point for gate evaluation. Called by `handlers/intent.rs` after VCS path derivation (and by any handler that re-evaluates claims, e.g. on witness arrival). Never called by the dispatcher directly.
+
+**What it contains:**
+
+- `pub async fn evaluate_claims(session_id: &SessionId, evaluation_sha: &CommitSha, task_id: &TaskId, touched_paths: &[PathBuf], submitted_claims: &[Claim], ctx: &HandlerContext) -> Result<GateEvalResult, GateError>`
+  - `evaluation_sha` = `head_commit_sha` from the intent (same value used in `WitnessRecord`); `task_id` = **`req.task_id`** — the plan-defined task row established at `approve_plan`, not allocated by the intent handler.
+  - Step 1: `breakglass::check_active(store)` — if `BreakglassStatus::Active`, log `BreakglassAction` for this evaluation, skip remaining steps (2 through 5), return `GateEvalResult::BreakglassPass { activation_id }`. Downstream intent handling still applies (`consume_budget` / `transition_task` per handler rules); only gate enforcement is bypassed. **`record_capability_use` is not called on the break-glass path** — stale delegations remain `StaleOnNextUse` after a break-glass event; the grace use is not consumed by an emergency bypass.
+  - Step 2: `policy_lookup::required_claims(touched_paths, &ctx.policy)?` → `Vec<ClaimType>`. The `?` propagates `Err(GateError::PolicyMisconfigured)` immediately. On `Ok(required)`: if `required` is empty and `default_action` is `Permit`, proceed with no claim requirements. **How `StrictDefault` appears in `required`:** it is a literal `ClaimType::StrictDefault` variant appended for any path that matches no rule; the vector is never empty under default-deny (see `policy_lookup.rs`).
+  - Step 3: `claim::evaluate(session_id, &required_claims, submitted_claims, touched_paths, &ctx.authority, &ctx.policy)?` → `ClaimCheckResult`. **Full variant mapping:**
+    - `Sufficient` → proceed to step 4. `delegate_renewal_required = false`.
+    - `SufficientStale { stale_capabilities }` → proceed to step 4 with `stale_capabilities` captured. `delegate_renewal_required = true`. `record_capability_use` is **not** called yet — see step 4.
+    - `Insufficient { failing_claims }` → return `GateEvalResult::ClaimInsufficient { reason: ClaimInsufficient, failing_claims }` without touching scheduler.
+    - `DelegationInsufficient { claim_type }` → return `GateEvalResult::ClaimInsufficient { reason: DelegationInsufficient, claim_type }` without touching scheduler.
+    - `ScopeInsufficient { claim_type, uncovered_paths }` → return `GateEvalResult::ClaimInsufficient { reason: ScopeInsufficient, claim_type, uncovered_paths }` without touching scheduler.
+  - Step 4: For each `GateType` implied by the required claim set: check `witness::lookup(evaluation_sha, task_id, gate_type, None, &ctx.witness_index)`. A `WitnessRecord` with `result_class == Pass` satisfies that gate.
+    - If all gate types satisfied **and** `delegate_renewal_required = true`: call `authority::record_capability_use(session_id, cap, &ctx.authority.store)` for each cap in `stale_capabilities`. **This is the sole call site for `record_capability_use` in the entire kernel.** Then return `GateEvalResult::Pass { delegate_renewal_required: true }`. Consuming the grace use here (terminal pass) ensures it is not consumed on failed evaluations or on the intermediate `PendingWitness` path.
+    - If all gate types satisfied and `delegate_renewal_required = false`: return `GateEvalResult::Pass { delegate_renewal_required: false }`.
+  - Step 5: For unsatisfied gate types: return `GateEvalResult::PendingWitness { missing_gates }`. **`record_capability_use` is not called here.** The recheck (triggered on witness arrival) calls `evaluate_claims` fresh; if delegation is still `StaleOnNextUse` (not yet renewed), the recheck will again reach step 4 with `SufficientStale` and call `record_capability_use` at that point. If the planner renewed the delegation before witnesses complete, the recheck sees `Active` and `delegate_renewal_required = false`.
+  - Gate evaluation is idempotent on the `Sufficient` path. On the `SufficientStale` path, idempotency depends on delegation state: if `record_capability_use` already advanced the row to `RenewalRequired`, a re-call would produce `DelegationInsufficient`; the planner must renew to re-establish idempotency.
+
+---
+
+##### `src/gates/claim.rs` — [NEW]
+
+**Purpose:** Evaluates whether a session's submitted claims are sufficient for the required set, given its delegation status. Composes `authority`, `policy`, and `vcs` facades.
+
+**What it contains:**
+
+- `pub fn evaluate(session_id: &SessionId, required: &[ClaimType], submitted: &[Claim], touched_paths: &[PathBuf], authority: &AuthorityCtx, policy: &PolicyBundle) -> Result<ClaimCheckResult, GateError>`
+  - `AuthorityCtx` exposes `pub store: Arc<Store>` (or an equivalent accessor). `claim::evaluate` uses `&authority.store` when calling delegation functions. `record_capability_use` is **not** called by this function — it is called exclusively by `gates/mod.rs` after all claims pass and all gate types are satisfied.
+  - For each `required` claim type:
+    - Step A: `authority::check_capability(session_id, capability_for(claim_type), &authority.store)` — **pure read**. Maps result:
+      - `NotGranted`, `Expired`, `RenewalRequired` → record `DelegationInsufficient` for this claim type. **First-failure-wins:** evaluation stops at the first delegation failure; remaining claim types in `required` are not evaluated. This is intentional — a missing delegation is a hard prerequisite failure, not a collectable error.
+      - `StaleOnNextUse` → append `capability_for(claim_type)` to local `stale_caps: Vec<CapabilityClass>`. **No write.** Mark `any_stale = true`.
+      - `Active` → proceed.
+    - Step B: Find a matching `Claim { claim_type, scope, justification_blob }` in `submitted`. If none found → record `Insufficient` for this claim type.
+    - Step C: `policy_lookup::check_claim_scope(&claim, touched_paths, policy)` — scope must be a superset of `touched_paths`. Mismatch → record `ScopeInsufficient { claim_type, uncovered_paths }`.
+  - After evaluating all required claim types (skipping remainder on first DelegationInsufficient — see step A):
+    - Any delegation failure detected → `ClaimCheckResult::DelegationInsufficient { claim_type }` (the first one encountered; evaluation did not continue past it).
+    - Any submission failures → `ClaimCheckResult::Insufficient { failing_claims }` (collected across all claim types — the full list is useful for planner diagnostics).
+    - Any scope failures → `ClaimCheckResult::ScopeInsufficient { claim_type, uncovered_paths }` (first encountered; scope failures are also hard stops).
+    - All pass, `any_stale = true` → `ClaimCheckResult::SufficientStale { stale_capabilities: stale_caps }`.
+    - All pass, `any_stale = false` → `ClaimCheckResult::Sufficient`.
+  - **Failure precedence:** `DelegationInsufficient` > `ScopeInsufficient` > `Insufficient`. If a delegation failure is present, it is returned regardless of B/C failures on the same or other claim types — the delegation check is the hardest prerequisite.
+
+---
+
+##### `src/gates/witness.rs` — [NEW]
+
+**Purpose:** Read-side witness existence check. Does not write witness records — writes go through `ipc/handlers/witness.rs` → `witness_index::write`. Uses `witness_index` facade only.
+
+**What it contains:**
+
+- `pub fn lookup(evaluation_sha: &CommitSha, task_id: &TaskId, gate_type: GateType, verifier_run_id: Option<&VerifierRunId>, witness_index: &WitnessIndex) -> Result<Option<WitnessRecord>, GateError>`
+  - Calls `witness_index::lookup(evaluation_sha, task_id, gate_type, verifier_run_id)`.
+  - Returns `None` if no matching record; `Some(WitnessRecord)` if found.
+  - Does not interpret `WitnessRecord::result_class`. **The sole interpreter of `result_class` is `gates/mod.rs` step 4**, which checks `result_class == Pass` to decide whether a gate is satisfied. `gates/witness.rs` is intentionally kept dumb: it returns the record as stored and never makes a pass/fail judgment. No other module in the kernel calls `witness_index::lookup` directly; all witness reads go through `gates/witness::lookup`, which means the interpretation contract is enforced at a single call site.
+
+---
+
+##### `src/gates/verifier_runner.rs` — [NEW]
+
+**Purpose:** Issues a verifier run token and forks the verifier subprocess with bounded resources. Does not wait for the subprocess result — witness results arrive asynchronously via `ipc/handlers/witness.rs`.
+
+**What it contains:**
+
+- `pub async fn spawn_verifier(task_id: &TaskId, gate_type: GateType, evaluation_sha: &CommitSha, worktree_root: &Path, authority: &AuthorityCtx, config: &VerifierConfig) -> Result<VerifierRunId, GateError>`
+  - `authority` carries an internal `Store` handle; token issuance goes through it so `spawn_verifier` does not need a raw `&Store` argument.
+  - Step 1: Check global concurrent verifier count against `config.max_concurrent_verifiers`. If at cap, push `(task_id, gate_type)` onto the **pending spawn queue** (in-memory, drained when a running verifier completes) and return `Err(GateError::VerifierCapExceeded)`. The caller (`ipc/handlers/witness.rs`) includes this gate in `remaining_gates` in the `WitnessAck` rather than treating it as an error. When the queue is drained after a verifier exits, the kernel calls `spawn_verifier` from the drain path; this is the only path where `VerifierCapExceeded` does not surface to a handler.
+  - Step 2: `authority::issue_verifier_token(task_id, gate_type, evaluation_sha, config.verifier_token_ttl)` → `VerifierRunToken`.
+  - Step 3: Build verifier spawn envelope: `{ verifier_run_token, task_id, gate_type, evaluation_sha, kernel_socket_path: config.kernel_socket_path, worktree_root }`. `worktree_root` is passed explicitly (bound to the session at creation; retrieved from the session row before this call).
+  - Step 4: Spawn verifier subprocess via `std::process::Command` with:
+    - `env` restricted to the spawn envelope fields only (no kernel env vars)
+    - `stdout`/`stderr` piped for logging
+    - resource limits: `RLIMIT_CPU = config.verifier_cpu_secs`, `RLIMIT_AS = config.verifier_memory_bytes` (set via `nix::sys::resource`)
+  - Step 5: Increment the global concurrent verifier counter. Register a completion callback (tokio task watching the child PID) that decrements the counter and drains the pending spawn queue on exit.
+  - Step 6: Emit `AuditEventKind::VerifierSpawned { verifier_run_id, task_id, gate_type, evaluation_sha }`.
+  - Returns `verifier_run_id` immediately. The kernel does not await subprocess completion; the verifier contacts the kernel via UDS when done.
+
+- `pub struct VerifierConfig { verifier_binary_path: PathBuf, verifier_token_ttl: Duration, verifier_cpu_secs: u64, verifier_memory_bytes: u64, max_concurrent_verifiers: usize }` — `max_concurrent_verifiers` is the global cap (v1 default: 16). Loaded from policy at startup; not operator-mutable at runtime without a policy epoch advance.
+
+**Concurrency note:** Multiple tasks may be `GatesPending` simultaneously, each with multiple outstanding gate types. The global cap prevents unbounded subprocess accumulation regardless of the number of concurrent `GatesPending` tasks. The scheduler's lane budget controls the rate at which new tasks enter `GatesPending` — lane admission acts as the upstream backpressure. A `GatesPending` task does not consume lane execution budget (it is not `Running`) but it does count against the task count ceiling in its lane.
+
+---
+
+##### `src/gates/policy_lookup.rs` — [NEW]
+
+**Purpose:** Maps a set of touched file paths to their required claim types, using the policy artifact's claim-requirement table. Returns structured result types — no string codes, no planner-facing mapping.
+
+**What it contains:**
+
+- `pub fn required_claims(paths: &[PathBuf], policy: &PolicyBundle) -> Result<Vec<ClaimType>, GateError>`
+  - Iterates `policy.claim_table.rules` in **declaration order** — the order rules appear in the policy artifact's `[[claim_requirements.rules]]` array. For each path, the first matching rule wins; no specificity sorting is applied at load time or evaluation time. **Operator responsibility:** rules must be listed from most specific to least specific, with the catch-all `**` last. The kernel does not reorder rules on your behalf; a misplaced `**` early in the list will swallow paths that should have matched a more specific rule below it. This is the same contract as `.gitignore` and nginx `location` blocks — declaration order is total; specificity is a documentation convention, not an enforcement mechanism.
+  - Returns the deduplicated union of required claim types across all paths. `StrictDefault` is a literal `ClaimType` variant; it appears in the returned `Vec` when a path matches no rule, so the vector is never empty under default-deny.
+  - **Error return:** returns `Err(GateError::PolicyMisconfigured)` if `default_action` is not `Permit` and the resulting claim set is empty after deduplication (indicates the policy table has rules with empty claim lists on all matched paths without an explicit `permit: []` marker — an operator configuration error, not a planner error). This is an `Err` result, not `Ok(vec![])`, so callers in `gates/mod.rs` that match on the result will not silently treat misconfiguration as "no claims required."
+
+- `pub fn check_claim_scope(claim: &Claim, paths: &[PathBuf], policy: &PolicyBundle) -> ClaimCheckResult`
+  - Verifies that the claim's declared `scope` (a path glob or explicit list) covers all paths in `paths`. Scope must be a superset — a claim scoped to `src/auth/**` does not satisfy a requirement over `src/scheduler/admit.rs`.
+
+---
+
+#### Provider Subsystem (`src/provider/`)
+
+**Role:** The provider subsystem handles all outbound data access on behalf of the planner — domain allowlist enforcement, forwarding to the gateway process, SHA-256 computation, rate limiting, and egress audit. It is the enforcement point for INV-02B (no unapproved egress).
+
+**Invariant:** The provider subsystem never opens a network connection directly. All network I/O is delegated to the gateway subprocess via the gateway IPC channel. The kernel process itself has no network capability in production (enforced by the gateway process design; the kernel binary does not link `hyper`, `reqwest`, or any HTTP stack).
+
+---
+
+##### `src/provider/mod.rs` — [NEW]
+
+Re-exports the provider public API.
+
+```
+pub use allowlist::check as allowlist_check;
+pub use fetch::execute_fetch;
+pub use rate_limit::check_rate_limit;
+```
+
+---
+
+##### `src/provider/allowlist.rs` — [NEW]
+
+**Purpose:** Domain allowlist enforcement. The allowlist is defined in the signed policy artifact; the provider reads it at startup and reloads on epoch advance. No network call is made if the allowlist check fails.
+
+**What it contains:**
+
+- `pub fn check(url: &Url, policy: &PolicyBundle) -> AllowlistResult`
+  - Extracts the host from `url`. Checks against `policy.egress_allowlist.domains` (exact match) and `policy.egress_allowlist.patterns` (glob match, anchored).
+  - Returns `AllowlistResult::Permitted` or `AllowlistResult::Denied { reason: DenialReason }`.
+  - Does not log — logging is the caller's responsibility (`handlers/fetch.rs` logs before returning to the planner, per INV-02B).
+
+- `pub fn reload(policy: &PolicyBundle, allowlist_cache: &mut AllowlistCache)`
+  - Called by `policy_manager.rs` on epoch advance. Replaces the in-memory allowlist cache atomically (swap behind `ArcSwap`).
+
+---
+
+##### `src/provider/fetch.rs` — [NEW]
+
+**Purpose:** Orchestrates the full fetch pipeline: allowlist check → gateway forward → SHA-256 → egress audit. Called by `ipc/handlers/fetch.rs`.
+
+**What it contains:**
+
+- `pub async fn execute_fetch(&self, url: Url, session_id: &SessionId) -> Result<FetchResult, ProviderError>`
+  - `self` is `&ProviderCtx`. All fields accessed as `self.*` (no `ctx` parameter).
+  - Step 1: `allowlist::check(&url, &self.policy)` — if not permitted: emits `AuditEventKind::FetchDenied { deny_reason: FetchDenyReason::DomainNotAllowed, fetch_request_id, url, session_id }`, returns `ProviderError::FetchDenied`. Content is never fetched.
+  - Step 2: `rate_limit::check_rate_limit(session_id, &self.store)` — deny if session has exceeded fetch quota. Returns `ProviderError::RateLimitExceeded`.
+  - Step 3: `self.gateway_channel.forward_fetch(url)` — gateway performs the HTTP request; returns `GatewayResponse { body, status, request_id }`.
+  - Step 4: Compute `blob_sha256 = sha256(response.body)`.
+  - Step 5: `audit_egress::write_fetch_audit(url, blob_sha256, session_id, received_at, &self.audit)`. **Audit is written before body is returned to the handler.** If the audit write fails, the fetch is aborted and `ProviderError::AuditWriteFailed` is returned — the planner never receives content that is not in the audit log (INV-02B).
+  - Step 6: `rate_limit::record_fetch(session_id, &self.store)`.
+  - Returns `FetchResult { body: Bytes, sha256: String, status: u16 }`.
+
+---
+
+##### `src/provider/gateway.rs` — [NEW]
+
+**Purpose:** IPC interface to the gateway subprocess. The gateway is a separate process that holds all network capability. The kernel communicates with it over a dedicated UDS channel, not the planner-facing UDS socket.
+
+**What it contains:**
+
+- `pub async fn forward_fetch(url: Url, channel: &GatewayChannel) -> Result<GatewayResponse, ProviderError>`
+  - Serializes `FetchRequest { url, request_id: Uuid::new_v4() }` and sends over the gateway channel.
+  - Awaits `GatewayResponse { body: Bytes, status: u16, request_id }`. Validates `request_id` matches (prevents response mixing under concurrent fetches).
+  - Times out after `config.gateway_fetch_timeout` (v1 default: 30s).
+
+- `pub struct GatewayChannel` — wraps a `tokio::net::UnixStream` to the gateway process. **Held in `ProviderCtx`, accessible via `HandlerContext::provider.gateway_channel`.** Not a top-level field of `HandlerContext`. Reconnects automatically on disconnection with exponential backoff up to `config.gateway_reconnect_max_attempts`.
+
+---
+
+##### `src/provider/rate_limit.rs` — [NEW]
+
+**Purpose:** Per-session fetch rate limiting. Prevents a misbehaving or compromised planner from using the kernel as an unconstrained proxy.
+
+**What it contains:**
+
+- `pub fn check_rate_limit(session_id: &SessionId, store: &Store) -> Result<(), ProviderError>`
+  - Reads the session's `fetch_quota` (max fetches per window, written into the session row at session creation from `policy.egress.max_fetches_per_window` at that moment) and the current `fetch_count` in the active window from the `fetch_rate` table.
+  - Returns `ProviderError::RateLimitExceeded` if `fetch_count >= session.fetch_quota`. No policy bundle parameter needed at call time — the quota was stamped into the session row at creation; runtime enforcement is a pure store read.
+  - **Path A quota exhaustion semantics:** when `check_rate_limit` returns `ProviderError::RateLimitExceeded` (internal), `fetch.rs` maps to `HandlerError::FetchDenied`, dispatcher maps to `PlannerErrorCode::FETCH_DENIED`. Emits `AuditEventKind::FetchDenied { deny_reason: FetchDenyReason::RateLimitExceeded, fetch_request_id, url, session_id }` — same audit variant as allowlist denial, distinguished by `deny_reason`. The task remains non-terminal (`GatesPending` or `Running`). No `BlockReason` is written; no FSM transition fires. The planner receives `FETCH_DENIED` per request and decides whether to abort, retry when the window resets, or continue with non-fetch work.
+  - **`FETCH_DENIED` naming:** `PlannerErrorCode::FETCH_DENIED` intentionally omits the `FAIL_` prefix used by gate and policy outcome codes (`FAIL_POLICY_VIOLATION`, `FAIL_MISSING_WITNESS`, etc.). `FAIL_*` codes signal intent-level failures requiring resubmission; `FETCH_DENIED` signals a per-request recoverable denial — the intent itself is not invalidated, and the planner may retry the fetch in the next window or continue without it. Both deny paths (allowlist and rate-limit) map to the same `FETCH_DENIED` code.
+  - **The kernel does not auto-terminate a task due to fetch quota exhaustion in v1.** If a future version adds auto-termination (Path B), it must specify the exact threshold, add a `BlockReason` variant (name to be reconciled with the `BlockReason` enum in Gap 4 — provisional: `FetchQuotaExhausted`), and handle the `InitiativeState` transition — that work is explicitly v2, gated as `cfg(feature = "v2-fetch-quota-termination")`.
+  - **Independence from lane budget:** `check_rate_limit` has no access to lane budget state and does not consult `estimated_cost`. Session fetch quota and lane admission cost are tuned independently by the operator. See independence statement in `scheduler/budget.rs`.
+
+- `pub fn record_fetch(session_id: &SessionId, store: &Store) -> Result<(), ProviderError>`
+  - Increments the fetch counter for the current window. Window boundary is wall-clock aligned (e.g. 1-minute windows) — calculated as `floor(now / window_size) * window_size`.
+
+---
+
+##### `src/provider/audit_egress.rs` — [NEW]
+
+**Purpose:** Writes the fetch audit record. Separated from `fetch.rs` so the audit write path is testable in isolation and so the "audit before release" invariant has a single implementation point.
+
+**What it contains:**
+
+- `pub fn write_fetch_audit(url: &Url, sha256: &str, session_id: &SessionId, received_at: DateTime, audit: &AuditTools) -> Result<(), ProviderError>`
+  - Appends `AuditEventKind::FetchExternalDataAudited { fetch_request_id, url, sha256: response_sha256, received_at, returned_at: now() }`. **Field name alignment:** the variant is `FetchExternalDataAudited` (matching Part 1 `raxis-types/audit.rs` and the INV-02B test assertion); the `EgressFetch` name used in an earlier draft is superseded. All audit grep tooling should use `FetchExternalDataAudited`.
+  - If append fails: returns `ProviderError::AuditWriteFailed`. Caller (`fetch.rs`) aborts the fetch response — content is not returned to the planner.
+
+---
+
+#### Prompt Subsystem (`src/prompt/`)
+
+**Role:** The prompt subsystem assembles the static scaffold of the planner's system prompt — the portion derived from kernel-known facts (policy epoch, session identity, delegation summary, initiative context). It does not generate natural language; it produces a structured context block the planner model receives as its system prompt prefix. The planner cannot modify this block; it is assembled by the kernel and signed by the epoch.
+
+**Invariant:** The prompt subsystem reads `authority` (session + delegation), `policy` (current epoch + constraints), and `raxis-store` (initiative context) — it is one of the two subsystems that may read store directly (the other is `witness_index`). It does not call `vcs`, `gates`, `scheduler`, or `provider`.
+
+---
+
+##### `src/prompt/mod.rs` — [NEW]
+
+Re-exports the public prompt API.
+
+```
+pub use assembler::assemble;
+pub use epoch_binding::{session_prompt_valid, invalidate_session_prompts, mark_all_prompts_invalid};
+```
+
+---
+
+##### `src/prompt/assembler.rs` — [NEW]
+
+**Purpose:** Builds the `AssembledPrompt` for a planner session. Called before each planner inference round.
+
+**What it contains:**
+
+- `pub fn assemble(session_id: &SessionId, ctx: &HandlerContext) -> Result<AssembledPrompt, PromptError>`
+  - Step 1: `epoch_binding::session_prompt_valid(session_id, &ctx.authority.store)` — checks the `prompt_epoch_valid` flag in the session row (written to `false` by `policy_manager.rs` on epoch advance). `ctx.authority.store` is the `Arc<Store>` held by `AuthorityCtx` (the session row is an authority concern). If `false`, triggers full reassembly and logs `AuditEventKind::PromptReassembled { reason: EpochAdvance, session_id }`.
+  - Step 2: Load `SessionRow` from `authority::get_session` — extracts `role`, `worktree_root` (`Option`; **non-NULL** for planner sessions, which are the only callers of `assemble`), `base_sha`.
+  - Step 3: Load `Vec<Delegation>` from `authority::list_delegations` — formats as a human-readable capability summary block.
+  - Step 4: Load initiative context from store (`initiative_id`, current FSM state, task list with states).
+  - Step 5: Load `PolicyBundle` from `ctx.policy.load()` — extracts current `epoch_id`, `constraint_summary`.
+  - Step 6: Assemble `AssembledPrompt { epoch_id, session_id, role_block, capability_block, initiative_block, constraint_block, assembled_at }`. No free-form text generation; fields are templated from typed values.
+  - **No prompt cache.** Assembly runs on every inference round. The session row flag in Step 1 is a consistency check ("was an epoch advance missed?"), not a cache; there is no in-memory or store-resident cached prompt object to invalidate.
+
+---
+
+##### `src/prompt/epoch_binding.rs` — [NEW]
+
+**Purpose:** Tracks the current policy epoch and signals when assembled prompts need rebuilding due to an epoch advance.
+
+**What it contains:**
+
+- `pub fn current_epoch(policy: &PolicyBundle) -> PolicyEpoch`
+  - Returns `policy.epoch_id`. Thin accessor; epoch is owned by `policy_manager.rs`.
+
+- `pub fn session_prompt_valid(session_id: &SessionId, store: &Store) -> Result<bool, PromptError>`
+  - Reads `prompt_epoch_valid` flag from the session row. Returns `true` if the prompt is still current, `false` if invalidated by an epoch advance. Called by `assembler::assemble` to determine whether to log a reassembly event.
+
+- `pub fn invalidate_session_prompts(session_id: &SessionId, store: &Store) -> Result<(), PromptError>`
+  - Sets `prompt_epoch_valid = false` for the session row. Called by `policy_manager.rs` on epoch advance for a specific session.
+
+- `pub fn mark_all_prompts_invalid(store: &Store) -> Result<usize, PromptError>`
+  - Bulk version — sets `prompt_epoch_valid = false` for all active sessions. Returns count of sessions invalidated. Called by `policy_manager::advance_epoch` step 2. **Callable via `prompt::epoch_binding::mark_all_prompts_invalid`** or via the re-export `prompt::mark_all_prompts_invalid` (both work; policy_manager uses the full path).
+
+---
+
+> **End of Part 2.3 — Section B (gates + provider + prompt).**
+> Part 2.3 — Section C covers: `witness_index.rs`, `policy_manager.rs`, and `breakglass.rs`.
+
+---
+
+#### `src/witness_index.rs` — [NEW]
+
+**Role:** The single facade that all kernel code uses to read and write witness records. It is the only module that manages both the witness filesystem blob store (`$RAXIS_DATA_DIR/witness/`) and the `witness_records` SQL table in `kernel.db`. Both `gates/witness.rs` (read path) and `ipc/handlers/witness.rs` (write path) go through this module — never around it.
+
+**Storage model:** Witness blobs live on the **filesystem** under `$RAXIS_DATA_DIR/witness/<blob_sha256>` — one file per unique blob, named by the hex SHA-256 of its contents (content-addressed). The `witness_records` SQL table stores only the index metadata: `(verifier_run_id, evaluation_sha, task_id, gate_type, result_class, blob_sha256, blob_path, recorded_at)`. This two-layer design is intentional: large binary blobs in SQLite WAL degrade write throughput and inflate checkpoint size. Storing blobs on the filesystem gives O(1) retrieval by content address, and keeping the index in SQLite gives transactional metadata updates and indexed lookups by `(evaluation_sha, task_id, gate_type)`.
+
+**Invariant:** `witness_index.rs` is the **sole** module that:
+1. Writes files to `$RAXIS_DATA_DIR/witness/`
+2. Reads or writes the `witness_records` SQL table
+
+No other kernel module may access either storage layer directly. There are no `witness_blobs` or `witness_rows` SQL tables — the SQL witness surface is exactly `witness_records`.
+
+**Crash-window characterisation:** The filesystem blob write and the `witness_records` SQL insert are **not** unified under a single SQLite transaction — the filesystem is a separate subsystem. Write order is always **filesystem first, then SQL index row.** This means:
+- If the SQL insert fails after the filesystem write: blob file exists but no index row → **orphaned blob**. The kernel cannot retrieve it via `lookup` (which requires an index row), so it is harmless to correctness. `startup_check` detects and reports it.
+- If the filesystem write fails before the SQL insert: neither step completes, the `write()` call returns `Err`, and the witness is not accepted. The verifier may resubmit (the token is not consumed on write failure).
+- The reverse (index row inserted, blob missing) cannot occur under correct write order but is detected defensively by `startup_check`.
+
+**What it contains:**
+
+- `pub fn write(record: WitnessRecord, blob: &[u8], ctx: &WitnessIndexCtx) -> Result<VerifierRunId, WitnessError>`
+  - `WitnessIndexCtx` carries `{ store: Arc<Store>, witness_dir: PathBuf }` — the store for SQL index writes and the filesystem directory path for blob writes.
+  - Write steps:
+    1. Compute `blob_sha256 = sha256(blob)`. Verify it matches `record.blob_sha256`; if not → `WitnessError::BlobHashMismatch`. No writes happen on mismatch.
+    2. Write blob bytes to `ctx.witness_dir/<blob_sha256>` (filesystem). If the file already exists (content-addressed idempotency — same SHA-256 = same content), skip the write.
+    3. Write index row to `witness_records` in `kernel.db` via `ctx.store` with: `verifier_run_id`, `evaluation_sha`, `task_id`, `gate_type`, `result_class`, `blob_sha256`, `blob_path` (= `<blob_sha256>` relative to `witness_dir`), `recorded_at`.
+  - Step 3 (SQL insert) runs after step 2 (filesystem write). If step 3 fails, the blob file exists but no index row — orphaned blob, safe, detected by `startup_check` on next startup.
+  - Returns `Ok(verifier_run_id)` on success.
+
+- `pub fn lookup(evaluation_sha: &CommitSha, task_id: &TaskId, gate_type: GateType, verifier_run_id: Option<&VerifierRunId>, store: &Store) -> Result<Option<WitnessRecord>, WitnessError>`
+  - Queries `witness_records` for a matching index row. If `verifier_run_id` is `Some`, looks up the specific run. If `None`, returns the most recent row for `(evaluation_sha, task_id, gate_type)` ordered by `recorded_at DESC`.
+  - Returns the index metadata only — does **not** return blob bytes. Callers that need the raw blob bytes call `get_blob` separately.
+
+- `pub fn get_blob(blob_sha256: &str, witness_dir: &Path) -> Result<Bytes, WitnessError>`
+  - Reads `witness_dir/<blob_sha256>` from the filesystem. Returns `WitnessError::BlobNotFound` if the file does not exist (orphaned index row or host filesystem inconsistency).
+  - Used by the CLI `audit inspect` command and any path that requires raw verifier output. Not called during normal gate evaluation — `gates/witness.rs` uses `lookup` only, which returns index metadata without blob bytes.
+
+- `pub fn startup_check(store: &Store, witness_dir: &Path) -> Result<WitnessStartupReport, WitnessError>`
+  - **Orphaned blobs** — reads all filenames from `witness_dir/`; for each, checks that a `witness_records` row with matching `blob_sha256` exists. Files with no matching row are orphaned blobs.
+  - **Orphaned index rows** — reads all `blob_sha256` values from `witness_records`; for each, checks that the corresponding file exists in `witness_dir/`. Rows with no matching file indicate an unexpected store inconsistency.
+  - Returns `WitnessStartupReport { orphaned_blobs: usize, orphaned_index_rows: usize }`. Does not delete or repair orphans automatically — logs counts for operator inspection. Orphan deletion is an explicit operator CLI action.
+
+---
+
+#### `src/policy_manager.rs` — [NEW]
+
+**Role:** Loads, verifies, and advances the signed policy artifact via `load_and_verify` (startup) and `advance_epoch` (in-process epoch flip). Owns the `PolicyBundle` shared reference used by all subsystems. Coordinates the epoch advance sequence — the only operation that touches multiple subsystems simultaneously (authority delegations, prompt epoch cache, allowlist cache). See §A.2 for why `advance_epoch` is not "hot reload" in the rejected sense: it is signed, kernel-mediated, and audit-recorded.
+
+**Invariant:** `policy_manager.rs` is the only module that writes to the `policy_epoch` store table. Subsystems that need the current epoch read it from the `PolicyBundle` reference they hold — they never query the store for epoch state directly.
+
+**What it contains:**
+
+- `pub fn load_and_verify(policy_path: &Path, registry: &KeyRegistry) -> Result<PolicyBundle, PolicyError>`
+  - Reads the signed policy artifact from `policy_path`.
+  - Verifies the Ed25519 signature against `registry.authority_keypair.public`.
+  - Verifies the artifact's `epoch_id` is greater than the last known epoch in the store (prevents replay of an old policy artifact).
+  - Returns `PolicyBundle` on success; `PolicyError::SignatureInvalid`, `PolicyError::EpochReplay`, or `PolicyError::MalformedArtifact` on failure.
+  - Called at startup (step 3) and by `advance_epoch`.
+
+- `pub fn advance_epoch(policy_path: &Path, sig_path: &Path, registry: &KeyRegistry, ctx: &mut KernelContext) -> Result<PolicyEpoch, PolicyError>`
+  - Takes explicit `policy_path` and `sig_path` arguments. The operator (via `raxis-cli policy advance --file <path> --sig <path>`) specifies which artifact files to load — no implicit staged location, no fixed path. Shell history and audit records both capture the exact artifact paths used.
+  - Loads and verifies the new policy artifact via `load_and_verify(policy_path, sig_path, registry)`.
+  - Epoch advance sequence (atomic with respect to observer visibility — all steps complete before any subsystem sees the new epoch):
+    1. `authority::mark_stale_on_epoch_advance(store)` — marks all active delegations `StaleOnNextUse`.
+    2. `prompt::mark_all_prompts_invalid(store)` — invalidates all session prompt caches.
+    3. `provider::allowlist::reload(new_policy, &mut ctx.allowlist_cache)` — swaps in the new allowlist atomically.
+    4. Write new `policy_epoch` record to store.
+    5. Swap `ctx.policy` `ArcSwap` to the new `PolicyBundle`.
+  - Emits `AuditEventKind::PolicyEpochAdvanced { old_epoch, new_epoch, advanced_by, advanced_at }`.
+  - Returns `new_epoch`.
+
+- `pub fn current_epoch(ctx: &KernelContext) -> PolicyEpoch`
+  - Returns `ctx.policy.load().epoch_id`. Thin accessor.
+
+---
+
+#### `src/breakglass.rs` — [NEW]
+
+**Role:** Emergency operator override mechanism. Break-glass activation suspends normal gate evaluation and allows the operator to perform actions that would ordinarily require claims, witnesses, and policy approval. It is an explicitly dangerous capability and is surrounded by ceremony, logging, and strict TTL enforcement.
+
+**Design principles:**
+- Break-glass requires **two-operator acknowledgement** in v1: two distinct operator keypair signatures on the activation record. This prevents a single compromised operator credential from enabling break-glass. **Key storage:** operator public keys are held in a sibling struct `OperatorRegistry { operator_keys: Vec<(OperatorId, PublicKey)> }` loaded from the signed policy artifact (operators are registered in policy, not in the genesis key file). `breakglass::activate` receives `operator_registry: &OperatorRegistry` not `KeyRegistry`. This keeps operator identity separate from kernel key material.
+- Every action taken during break-glass is logged with `AuditEventKind::BreakglassAction`. The audit record includes the activation record hash.
+- Break-glass has a hard TTL (v1: `config.breakglass_max_duration`, default 4 hours). Auto-expires; manual deactivation before TTL is also supported.
+
+**What it contains:**
+
+- `pub struct BreakglassActivation { activation_id: Uuid, justification: String, activated_by: Vec<OperatorId>, activated_at: DateTime, expires_at: DateTime, signature_1: Signature, signature_2: Signature }`
+
+- `pub fn activate(activation: BreakglassActivation, operator_registry: &OperatorRegistry, store: &Store, audit: &AuditTools) -> Result<(), BreakglassError>`
+  - Verifies `signature_1` and `signature_2` against keys in `operator_registry.operator_keys`, identifying each signer by `OperatorId`.
+  - Checks that `signature_1` and `signature_2` are from distinct operator identities (same-operator double-signing is rejected).
+  - Checks `expires_at <= activated_at + config.breakglass_max_duration` (prevents operator from self-issuing an unbounded TTL).
+  - Writes activation record to store.
+  - Emits `AuditEventKind::BreakglassActivated { activation_id, activated_by, expires_at, justification }`.
+
+- `pub fn check_active(store: &Store) -> Result<BreakglassStatus, BreakglassError>`
+  - Returns `BreakglassStatus::Active { activation_id, expires_at }` if an unexpired activation exists.
+  - Returns `BreakglassStatus::Inactive` otherwise.
+  - Called by gate evaluation (`gates/mod.rs`) at the start of each `evaluate_claims` call — if active, gate evaluation is bypassed but the bypass is logged with `AuditEventKind::BreakglassAction`.
+
+- `pub fn deactivate(operator_id: &OperatorId, operator_sig: &Signature, activation_id: &Uuid, operator_registry: &OperatorRegistry, store: &Store, audit: &AuditTools) -> Result<(), BreakglassError>`
+  - Verifies `operator_sig` (one operator signature is sufficient for deactivation). Marks the activation deactivated.
+  - Emits `AuditEventKind::BreakglassDeactivated { activation_id, deactivated_by: operator_id, deactivated_at }`.
+
+- `pub fn log_breakglass_action(activation_id: &Uuid, action_description: &str, session_id: &SessionId, audit: &AuditTools) -> Result<(), BreakglassError>`
+  - Appends `AuditEventKind::BreakglassAction { activation_id, session_id, action_description, action_at }`.
+  - Called by any handler that detects `BreakglassStatus::Active` before proceeding with a bypassed action.
+
+---
+
+#### `HandlerContext` — Subsystem Wiring Summary
+
+All handler functions receive a `&HandlerContext` which holds `Arc`-wrapped references to each initialized subsystem. This section documents the complete field set — it is the compile-time contract that `main.rs` must satisfy when assembling the context at startup.
+
+```rust
+pub struct HandlerContext {
+    // Authority engine
+    pub authority: Arc<AuthorityCtx>,  // wraps KeyRegistry + Store handle
+    // Scheduling
+    pub scheduler: Arc<SchedulerCtx>,  // wraps Store handle + PolicyBundle ref
+    // Gate evaluation
+    pub gates: Arc<GatesCtx>,          // wraps AuthorityCtx + PolicyBundle + WitnessIndex + VcsCtx
+    // Provider / egress
+    pub provider: Arc<ProviderCtx>,    // wraps AllowlistCache + GatewayChannel + Store + AuditTools
+    // Prompt assembly
+    pub prompt: Arc<PromptCtx>,        // wraps AuthorityCtx + PolicyBundle + Store
+    // VCS (global config; per-session worktree_root resolved from ValidatedSession at request time)
+    pub vcs: Arc<VcsCtx>,              // wraps KernelConfig.vcs (binary path, timeout); worktree_root not stored here — resolved per-request from session row via authority::get_session
+    // HandlerContext is a global (per-kernel) singleton; it is NOT cloned per connection.
+    // Per-session mutable state (worktree_root, base_sha, base_tracking_ref, sequence_number) lives in the session
+    // store row, not in HandlerContext. Handlers read session state via authority::get_session.
+    // Witness facade
+    pub witness_index: Arc<WitnessIndex>, // wraps Store
+    // Policy (shared across all subsystems)
+    pub policy: Arc<ArcSwap<PolicyBundle>>,
+    // Audit tools
+    pub audit: Arc<AuditTools>,
+    // Kernel config (static after startup)
+    pub config: Arc<KernelConfig>,
+}
+```
+
+**Construction order** (enforced in `main.rs` after step 5 store init):
+1. `KeyRegistry::load(policy, store)` — keys first; everything else depends on them.
+2. `AuditTools::open(config.audit_dir)` — needed by authority and all emitters.
+3. `WitnessIndex::new(store.clone())` — no dependencies.
+4. `AuthorityCtx::new(key_registry, store.clone())`.
+5. `VcsCtx::new(config.vcs)` — per-session worktree_root is set when session is created, not here.
+6. `PolicyBundle` loaded by `policy_manager::load_and_verify` — wrapped in `ArcSwap`.
+7. `GatewayChannel::connect(config.gateway_socket)` — gateway must be running.
+8. All `*Ctx` structs assembled; `HandlerContext` constructed and moved into `Arc`.
+
+---
+
+---
+
+> **End of Part 2.3.**
+> Part 2.3 completes the internal kernel specification. The next sections (Part 3+) cover the planner, gateway, verifier crate internals, CLI tooling, test suite design, and the genesis key ceremony.
+
+---
+
+## Part 2.4 — Gap 4: Initiative FSM
+
+**What this gap specifies.** The full lifecycle of an initiative and its constituent tasks: how an initiative moves from `Draft` to `Executing` to terminal; how individual tasks transition through the scheduler and gate pipeline; how the DAG controls task ordering; and what rules determine when an initiative is complete, blocked, failed, or aborted. This is the behavioral contract that `raxis-kernel/src/initiatives/` and `raxis-store/src/initiatives.rs` must implement.
+
+**Relationship to other gaps.**
+- Gap 2 (Policy Artifact) defines the signed plan artifact and the lane/claim configuration that feeds initiative creation.
+- Gap 3 (Escalation FSM) runs orthogonally — escalations are attached to tasks, not initiatives; initiative state does not change when an escalation is `Pending`.
+- `raxis-types/src/initiative.rs` (Part 2.1) defines the raw enum types; this gap defines the transitions, invariants, and evaluation logic that govern those types.
+
+---
+
+### 4.1 — The Initiative / Task Containment Model
+
+An **initiative** is the operator-scoped unit of work. It has a signed plan artifact, a DAG of tasks, terminal criteria, and a lifecycle state. The kernel creates an initiative when the operator or orchestrator submits a signed plan.
+
+A **task** is the planner-executable unit. Each task has a scope (intent kinds it may submit), a lane assignment, dependency edges in the initiative DAG, and its own FSM. The planner interacts with tasks, not directly with initiatives — it submits `IntentRequest` packets that are admitted under a specific task.
+
+**Containment rules:**
+- One initiative contains one or more tasks.
+- Each task belongs to exactly one initiative.
+- A task cannot be moved between initiatives.
+- The initiative FSM is driven by the aggregate of its task states — it is derived, not directly settable by the planner.
+- The planner cannot create tasks directly; tasks are defined in the signed plan artifact and instantiated by the kernel on initiative admission.
+
+---
+
+### 4.2 — Initiative FSM
+
+#### State inventory
+
+| State | Terminal? | Description |
+|---|---|---|
+| `Draft` | No | Plan artifact submitted but not yet operator-approved. Tasks not yet instantiated. |
+| `ApprovedPlan` | No | Operator has approved the plan artifact. Kernel has instantiated all task rows and DAG edges. Execution not yet started. |
+| `Executing` | No | At least one task is in a non-terminal state. The initiative is active. |
+| `Blocked` | No | `next_ready_tasks` returns nothing AND no task is `Running`. Every non-terminal task is `GatesPending`, `BlockedRecoveryPending`, or `Admitted` with predecessors not yet `Completed`. `GatesPending`-only deadlock auto-unblocks when witnesses arrive; `BlockedRecoveryPending` requires operator intervention. |
+| `Completed` | Yes | Terminal criteria met: all tasks in the completion set are `Completed`. |
+| `Failed` | Yes | Terminal criteria evaluated; initiative failed: at least one required task reached `Failed` and no recovery path remains. |
+| `Aborted` | Yes | Operator-requested termination, or kernel-detected unrecoverable infrastructure failure across all lanes. |
+
+**`Blocked` is not terminal.** The initiative returns to `Executing` when either `next_ready_tasks` returns a task or a task transitions to `Running` (e.g., operator resumes a `BlockedRecoveryPending` task). Escalation state is orthogonal: a `Running` task with an open escalation is in-flight and keeps the initiative in `Executing` — escalation alone does not produce `Blocked`. `Blocked` requires both `next_ready_tasks` to be empty *and* no `Running` tasks.
+
+#### Transition table
+
+| From | To | Trigger | Actor |
+|---|---|---|---|
+| *(none)* | `Draft` | Operator/orchestrator submits signed plan artifact | Operator (CLI) |
+| `Draft` | `ApprovedPlan` | Operator runs `raxis-cli plan approve <initiative_id>` | Operator (CLI) |
+| `Draft` | `Aborted` | Operator runs `raxis-cli plan reject <initiative_id>` | Operator (CLI) |
+| `ApprovedPlan` | `Executing` | Kernel admits first task intent from planner | Kernel (on first `IntentRequest`) |
+| `Executing` | `Completed` | Terminal criteria evaluation returns `Complete`, via `evaluate_terminal_criteria` after task state updates (typically on task terminal transition) | Kernel (`evaluate_terminal_criteria`) |
+| `Executing` | `Failed` | Terminal criteria evaluation returns `Failed`, via `evaluate_terminal_criteria` after task state updates (typically on task terminal transition) | Kernel (`evaluate_terminal_criteria`) |
+| `Executing` | `Blocked` | All non-terminal tasks are in non-runnable states (detected by `evaluate_terminal_criteria` called after each task state write) | Kernel (`evaluate_terminal_criteria`) |
+| `Blocked` | `Executing` | `next_ready_tasks` becomes non-empty or a task transitions to `Running` (detected by `evaluate_terminal_criteria` called after each task state write — e.g., `GatesPending → Admitted` makes `next_ready_tasks` non-empty) | Kernel (`evaluate_terminal_criteria`) |
+| `Blocked` | `Aborted` | Operator runs `raxis-cli initiative abort <initiative_id>` while blocked (`AbortInitiative`) | Operator (CLI) |
+| `Executing` | `Aborted` | Operator runs `raxis-cli initiative abort <initiative_id>` (`AbortInitiative`) | Operator (CLI) |
+
+**Invalid transitions (kernel must reject):**
+- Any transition from `Completed`, `Failed`, or `Aborted` — initiative rows are immutable once terminal.
+- `Draft → Executing` without passing through `ApprovedPlan` — the plan must be operator-approved before tasks can run.
+- `ApprovedPlan → Completed` / `Failed` / `Blocked` — cannot reach a terminal or blocked state without ever executing.
+
+#### Terminal criteria and initiative state evaluation
+
+After every `transition_task` call — terminal and non-terminal — the kernel runs `lifecycle::evaluate_terminal_criteria(initiative_id, store)`. This is the single hook that keeps initiative state (`Executing`, `Blocked`, `Completed`, `Failed`) consistent with task state. Running it after non-terminal writes (e.g., `Admitted → GatesPending`) is required to detect the `Executing → Blocked` transition in cases where no terminal task exists yet. This function:
+
+1. Loads the initiative's `terminal_criteria` from the signed plan artifact. Criteria are defined at plan time and cannot be changed after approval.
+2. Evaluates the criteria against the current task state snapshot.
+3. Returns one of: `StillExecuting` | `Complete` | `InitiativeFailed` | `AllTerminalNoSuccess`.
+
+**Built-in criteria shapes** (defined in the plan artifact schema):
+
+| Criterion | Rule |
+|---|---|
+| `AllTasksCompleted` | All tasks in the initiative are `Completed`. Default if no criterion specified. |
+| `RequiredSetCompleted(task_ids)` | All tasks in the named required set are `Completed`; other tasks may be in any state. |
+| `AnyCompleted` | At least one task is `Completed`. Used for parallel-attempt initiatives. |
+| `CustomScript(path)` | *(v2 only)* Kernel invokes the signed script, passes task state JSON; exit 0 = complete. Not available in v1. |
+
+**Failure detection:** If any task in the `required_set` reaches `Failed` or `Aborted` without a recovery path (i.e., all remaining non-terminal tasks cannot form a path to completing the required set), the kernel transitions the initiative to `Failed`. Failure detection only fires when all remaining options are exhausted — it is not speculative.
+
+**`AllTerminalNoSuccess`** is the pathological case where all tasks are terminal but the success criterion is not met (e.g., all tasks `Aborted` before any reached `Completed`). The kernel maps this to `InitiativeFailed`.
+
+---
+
+### 4.3 — Task FSM
+
+#### State inventory
+
+| State | Terminal? | Runnable? | Description |
+|---|---|---|---|
+| `Admitted` | No | Derived | Task instantiated; `next_ready_tasks` returns it only when all DAG predecessors are `Completed`. All tasks start `Admitted` at `approve_plan` time — there is no separate "holding" state for predecessor-blocked tasks. Schedulable = `next_ready_tasks` eligible, not a stored flag. |
+| `GatesPending` | No | No | Kernel received first gated `IntentRequest` for this task; verifiers spawned; witnesses not yet all received. Not returned by `next_ready_tasks`. |
+| `Running` | No | N/A — in-flight | Task picked up from `next_ready_tasks`; planner has taken at least one work turn. `Running` tasks are **not** returned by `next_ready_tasks` — the planner continues via its session-bound in-flight task context, not via a new scheduler pick-up. |
+| `Completed` | Yes | — | Planner reported task success; kernel accepted. |
+| `Failed` | Yes | — | Planner reported task failure (work attempted, did not meet criteria). |
+| `Aborted` | Yes | — | Kernel-recorded infrastructure failure. Always carries `BlockReason`. |
+| `Cancelled` | Yes | — | Bulk-cancelled task (initiative-level failure or `abort_initiative`); not used for per-task operator abort — that is **`Aborted` + `OperatorAbort`** via `task abort`. |
+| `BlockedRecoveryPending` | No | No | Task interrupted mid-execution; awaiting operator recovery decision. Not returned by `next_ready_tasks`. |
+
+**Schedulable** = returned by `scheduler::next_ready_tasks`. `next_ready_tasks` returns only `Admitted` tasks (not `GatesPending`, not `Running`). Schedulability for `Admitted` tasks is derived at query time — `next_ready_tasks` returns an `Admitted` task only if all its DAG predecessors are `Completed`. Schedulability is not a stored field on the task row.
+
+**`Admitted` at plan approval vs at predecessor completion:** All tasks are instantiated as `Admitted` at `approve_plan` time. Tasks with unmet predecessors are `Admitted` in the store but not returned by `next_ready_tasks` until their predecessors complete. `release_successors` does not change the task row state — it records the predecessor completion in the DAG edge table so that the next `next_ready_tasks` query includes the successor. There is no separate stored state for "waiting for predecessors."
+
+**`Admitted` vs `GatesPending`:** `Admitted` is the non-terminal stored state for tasks that are not `GatesPending`, `Running`, `BlockedRecoveryPending`, or terminal. Schedulability — whether the task is returned by `next_ready_tasks` — is a derived property computed at query time from the DAG edge table, not a flag stored on the task row. `GatesPending` means verifiers are outstanding and the task is not returned by `next_ready_tasks` regardless of predecessor state. When all gates clear, the task transitions `GatesPending → Admitted` and becomes eligible for `next_ready_tasks` (subject to its predecessors being `Completed`).
+
+**`Running` and the planner continue-work path:** A `Running` task is already in-flight. The planner continues submitting `IntentRequest` packets carrying the same `task_id` (the task binding field — see `src/intent.rs` in `raxis-types`) — it does not go through `next_ready_tasks` again. The kernel validates the `task_id` against the session's in-flight task context. A `Running` task with an open escalation is still in-flight; the escalation is orthogonal. As long as any task is `Running`, the initiative remains `Executing`.
+
+#### Transition table
+
+| From | To | Trigger | Actor |
+|---|---|---|---|
+| *(none)* | `Admitted` | Initiative moves to `ApprovedPlan`; kernel instantiates task; DAG predecessors already `Completed` (or task has no predecessors) | Kernel (plan approval) |
+| `Admitted` | `GatesPending` | Kernel evaluates intent; claim table requires gates; verifiers spawned | Kernel (on `IntentRequest`) |
+| `GatesPending` | `Admitted` | All required witnesses submitted and accepted; gate recheck passes | Kernel (on `WitnessSubmission`) |
+| `GatesPending` | `Aborted` | Verifier token TTL expired without witness; kernel timeout sweep | Kernel (sweep) |
+| `Admitted` | `Running` | Planner submits `IntentRequest`; no gates required or gates already cleared | Kernel (on `IntentRequest`) |
+| `Running` | `Completed` | Planner submits `IntentRequest { intent_kind: CompleteTask }`; kernel accepts | Kernel (on intent) |
+| `Running` | `Failed` | Planner submits `IntentRequest { intent_kind: ReportFailure, justification }` | Kernel (on intent) |
+| `Running` | `Aborted` | Infrastructure failure: witness timeout, delegation expired, provider timeout, or unrecoverable kernel error | Kernel |
+| `Running` | `BlockedRecoveryPending` | Kernel crashed and restarted; task was `Running` at crash time; `recovery::reconcile` marks it pending | Kernel (recovery sweep) |
+| `BlockedRecoveryPending` | `Running` | Operator runs `raxis-cli task resume <task_id>` after reviewing audit log | Operator (CLI) |
+| `BlockedRecoveryPending` | `Aborted` | Operator runs `raxis-cli task abort <task_id>` (declines recovery; `BlockReason::OperatorAbort`) | Operator (CLI) |
+| `Admitted` | `Aborted` | Operator runs `raxis-cli task abort <task_id>` before planner picks up the task (`OperatorAbort`) | Operator (CLI) |
+| `Running` | `Aborted` | Operator runs `raxis-cli task abort <task_id>` (`OperatorAbort`) | Operator (CLI) |
+
+**Successor schedulability rule:** When a task transitions to `Completed`, the kernel calls `store::dag::release_successors(task_id)`. This records the predecessor-satisfied marker on the DAG edge record and causes the next `next_ready_tasks` query to include successors whose full predecessor set is now `Completed`. The successor's stored task row state remains `Admitted` throughout — `release_successors` does not issue a state transition. The planner cannot force a successor to be returned by `next_ready_tasks` before its predecessors complete.
+
+**`Cancelled` vs `Aborted`:** **`Aborted`** with **`BlockReason::OperatorAbort`** covers operator-initiated **task abort** via CLI (`AbortTask` IPC). **`Cancelled`** is used for **bulk** termination when an initiative fails criteria or the operator aborts the whole initiative (`abort_initiative`), where tasks are mass-cancelled without per-task `transition_task` (see `lifecycle::abort_initiative`). Kernel-initiated infrastructure failures also produce **`Aborted`** with other `BlockReason` variants. The planner cannot directly abort — it uses `ReportFailure` → `Failed`, not operator abort.
+
+---
+
+### 4.4 — `BlockReason` Taxonomy
+
+Every `Aborted` task carries exactly one `BlockReason`. The `BlockReason` enum is exhaustive — no variant may be added without also updating `recovery::reconcile_tasks` and the `raxis-cli status` CLI display.
+
+**`BlockReason` variants used with `TaskState::Aborted`:**
+
+| `BlockReason` | Cause | Recovery path |
+|---|---|---|
+| `WitnessTimeout` | Verifier token TTL elapsed without `WitnessSubmission` | Investigate verifier environment; fix; submit new intent with new SHA |
+| `WitnessFailure` | Verifier submitted `WitnessResult::Fail` | Fix the underlying failure (build broken, tests failing); new commit; new intent |
+| `DelegationInsufficient` | Claim evaluation found no valid (non-stale) delegation | Renew delegation; re-submit intent |
+| `DelegationExpired` | Delegation TTL elapsed; grace period exhausted | Request delegation renewal from operator |
+| `ProviderTimeout` | Gateway response timeout on every retry within the task | Operator investigates provider; task may be resubmitted with new intent |
+| `BudgetExhausted` | Lane cost ceiling hit; no budget for new reservations. Set by the scheduler when `SchedulerError::BudgetExceeded` is returned at admission; `transition_task` is called by the scheduler with `actor: Kernel` and `reason: BudgetExhausted`. | Submit `BudgetException` escalation or reduce task scope |
+| `PolicyEpochMismatch` | Policy epoch advanced mid-task; session's epoch pin is now stale | Re-authenticate session under new epoch; re-submit intent |
+| `OperatorAbort` | Operator explicitly aborted the task via CLI | No recovery; issue is resolved manually |
+| `UnrecoverableKernelError` | Kernel recorded an internal error it cannot recover from | Operator reviews audit log; manual decision required |
+
+**`BlockReason` variant used with `TaskState::BlockedRecoveryPending` only — not with `Aborted`:**
+
+| `BlockReason` | Cause | Resolution |
+|---|---|---|
+| `RecoveryPendingOperatorAction` | Kernel restart interrupted a `Running` task; set by `initiatives::recovery::reconcile_tasks` (called as part of the top-level `recovery::reconcile` in Part 2.2) at startup. Never set during normal execution. | Operator runs `raxis-cli task resume` or `raxis-cli task abort`; the task is not terminal until the operator decides. |
+
+---
+
+### 4.5 — DAG Execution Mechanics
+
+#### Plan artifact DAG definition
+
+The signed plan artifact includes a task list and a dependency graph. The kernel instantiates this at `ApprovedPlan` time.
+
+```toml
+[[tasks]]
+task_id       = "task-auth-tests"
+lane_id       = "default"
+description   = "Fix and verify the auth token reuse regression"
+intent_kinds  = ["SingleCommit", "CompleteTask"]
+depends_on    = []           # no predecessors; eligible immediately
+
+[[tasks]]
+task_id       = "task-integration"
+lane_id       = "default"
+description   = "Run integration suite after auth fix"
+intent_kinds  = ["CompleteTask"]
+depends_on    = ["task-auth-tests"]   # blocked until task-auth-tests is Completed
+```
+
+**Validation at `ApprovedPlan` time:**
+1. All `depends_on` references must resolve to task IDs within the same initiative.
+2. The DAG must be acyclic — the kernel runs a topological sort and rejects the plan if a cycle exists.
+3. All `lane_id` values must be present in the signed policy artifact.
+4. All `intent_kinds` must be valid `IntentKind` variants.
+
+If validation fails, the plan is rejected and the initiative stays in `Draft`.
+
+#### Successor release on task completion
+
+```
+task "task-auth-tests" → Completed
+
+store::dag::release_successors("task-auth-tests"):
+  load successors: ["task-integration"]
+  for each successor:
+    load predecessor list from DAG edge table
+    all predecessors Completed? → yes
+    mark DAG edge record as predecessor-satisfied
+    emit AuditEventKind::SuccessorSchedulable { task_id: "task-integration", unblocked_by: "task-auth-tests" }
+    # task row state: still Admitted — no state transition
+
+next_ready_tasks() now returns "task-integration"  ← successor eligible at next query
+planner picks it up on next scheduling cycle
+```
+
+**No implicit parallelism.** Tasks with no shared dependencies can be picked up by the planner in any order, and multiple sessions can work on them concurrently (v1-compatible). The DAG only enforces ordering constraints — it does not schedule tasks onto specific sessions.
+
+#### DAG failure propagation
+
+When a task reaches `Failed` or `Aborted`, its successors are not automatically cancelled. The kernel evaluates terminal criteria after each terminal transition. If the criteria evaluation returns `InitiativeFailed` (e.g., a required task failed), the initiative moves to `Failed` and all non-terminal tasks transition to `Cancelled`. If the criteria evaluation returns `StillExecuting` (e.g., the failed task was optional), the initiative continues and successors of the failed task remain `Admitted` in the store but will never be returned by `next_ready_tasks` (their predecessor is not `Completed` and never will be — they are permanently non-schedulable unless the initiative is aborted and re-submitted).
+
+**Operator decision on partial failure:** If a required task fails and the operator wants to retry it, they must:
+1. Run `raxis-cli task retry <task_id>` (`RetryTask` IPC) if the operator wants the same plan task retried after `Failed`.
+2. Or amend the plan via `raxis-cli plan amend` (v2; creates a new plan artifact, requires operator re-approval and epoch advance).
+
+In v1, plan amendment is out of scope. A failed required task means the initiative must be aborted and re-submitted with a corrected plan.
+
+---
+
+### 4.6 — `src/initiatives/` Handler Specifications
+
+#### `src/initiatives/mod.rs` — [NEW]
+
+Re-exports the public initiative API: `create`, `approve_plan`, `reject_plan`, `abort`, `evaluate_terminal_criteria`.
+
+---
+
+#### `src/initiatives/lifecycle.rs` — [NEW]
+
+**What it contains:**
+
+- `pub fn create_initiative(plan: SignedPlanArtifact, store: &Store, audit: &AuditTools) -> Result<InitiativeId, InitiativeError>`
+  - Verifies the plan artifact's Ed25519 signature using the authority public key.
+  - Validates the DAG (acyclic, all references resolve, all lane IDs in policy).
+  - Inserts the initiative row with `status: Draft`.
+  - Emits `AuditEventKind::InitiativeCreated { initiative_id, plan_hash }`.
+  - Does not instantiate task rows — that happens at `approve_plan`.
+
+- `pub fn approve_plan(initiative_id: InitiativeId, approved_by: OperatorId, store: &Store, audit: &AuditTools) -> Result<(), InitiativeError>`
+  - Verifies initiative is in `Draft` state; else `InitiativeError::InvalidTransition`.
+  - Instantiates all task rows from the plan's `[[tasks]]` stanzas as `TaskState::Admitted`. DAG edges are written to `store::dag`. Tasks with predecessors are `Admitted` in the store but will not be returned by `next_ready_tasks` until their predecessors complete — there is no separate stored holding state.
+  - Transitions initiative to `ApprovedPlan`.
+  - Emits `AuditEventKind::PlanApproved { initiative_id, approved_by, task_count }`.
+
+- `pub fn reject_plan(initiative_id: InitiativeId, rejected_by: OperatorId, store: &Store, audit: &AuditTools) -> Result<(), InitiativeError>`
+  - Verifies initiative is in `Draft` state; else `InitiativeError::InvalidTransition`.
+  - Discards the draft (no task rows exist yet). Transitions initiative to `Aborted`.
+  - Emits `AuditEventKind::PlanRejected { initiative_id, rejected_by }` (or equivalent audit variant consistent with `raxis-types`).
+
+- `pub fn evaluate_terminal_criteria(initiative_id: InitiativeId, store: &Store, audit: &AuditTools) -> Result<InitiativeEval, InitiativeError>`
+  - **Called after every task state write** — both terminal and non-terminal. The function is cheap when nothing changes: it loads the task state snapshot, checks terminal criteria, then checks blocked/unblocked condition in a single pass.
+  - Loads task state snapshot and the initiative's `terminal_criteria`.
+  - Evaluates criteria; returns `StillExecuting | Complete | InitiativeFailed | AllTerminalNoSuccess`.
+  - If `Complete` → transitions initiative to `Completed`; emits `InitiativeCompleted`.
+  - If `InitiativeFailed` or `AllTerminalNoSuccess` → transitions initiative to `Failed`; cancels all non-terminal tasks; emits `InitiativeFailed { cause_task_id }`.
+  - If `StillExecuting` → checks whether `next_ready_tasks` is non-empty OR any task is `Running`:
+    - If **yes** and initiative is `Blocked` → transitions initiative to `Executing`; emits `AuditEventKind::InitiativeResumed { initiative_id, at }`.
+    - If **no** and initiative is `Executing` → transitions initiative to `Blocked`; emits `AuditEventKind::InitiativeBlocked { initiative_id, at }`.
+    - If neither condition changes — no initiative state write.
+  - **This is how the single-task gated case is handled:** `Admitted → GatesPending` is a non-terminal write; `evaluate_terminal_criteria` is called; `next_ready_tasks` returns nothing and no task is `Running` → initiative transitions `Executing → Blocked`. When the witness arrives and `GatesPending → Admitted`, `evaluate_terminal_criteria` is called again; `next_ready_tasks` now returns the task → initiative transitions `Blocked → Executing`.
+  - If all non-terminal tasks are `GatesPending`, the initiative enters `Blocked` but auto-unblocks when witnesses arrive — no operator action needed. Only `BlockedRecoveryPending` tasks require operator action to resume.
+  - All state writes and audit emits in a single store transaction.
+
+- `pub fn abort_initiative(initiative_id: InitiativeId, aborted_by: OperatorId, store: &Store, audit: &AuditTools) -> Result<(), InitiativeError>`
+  - Verifies initiative is not already terminal.
+  - Bulk-cancels all non-terminal tasks via direct store writes — **not** through `transition_task`. Each cancelled task row emits `AuditEventKind::TaskCancelled { task_id, initiative_id, reason: "initiative aborted", aborted_by }` individually. `transition_task` is intentionally bypassed here because the initiative is being force-terminated: there is no per-task criterion evaluation, and `evaluate_terminal_criteria` is not invoked. The initiative state is written directly to `Aborted` in the same store transaction.
+  - Transitions initiative to `Aborted`.
+  - Emits `AuditEventKind::InitiativeAborted { initiative_id, aborted_by }`.
+
+---
+
+#### `src/initiatives/task_transitions.rs` — [NEW]
+
+**What it contains:**
+
+- `pub fn transition_task(task_id: TaskId, new_state: TaskState, reason: Option<BlockReason>, actor: TransitionActor, policy_epoch: u64, store: &Store, audit: &AuditTools) -> Result<(), TaskError>`
+  - Loads current task state; validates transition is permitted (enforces the transition table in §4.3).
+  - Writes new state, `reason`, `actor`, `policy_epoch`, and `transitioned_at` to the task row.
+  - If `new_state` is terminal and `reason` is `None` but terminal state requires one (e.g., `Aborted`) → `TaskError::MissingBlockReason`.
+  - If `new_state` is `Completed` → calls `store::dag::release_successors(task_id)`.
+  - **Unconditionally** calls `lifecycle::evaluate_terminal_criteria(initiative_id, ...)` after every state write — both terminal and non-terminal. This is the single call-site that keeps initiative state consistent with task state.
+  - All writes in a single store transaction.
+  - Emits `AuditEventKind::TaskTransitioned { task_id, initiative_id, from_state, new_state, reason, actor, policy_epoch }`.
+
+- `pub enum TransitionActor { Kernel, Planner(SessionId), Operator(OperatorId), RecoverySweep }`
+
+  **Trust invariant:** `Planner(session_id)` may only trigger `Running → Completed` and `Running → Failed` transitions. All other transitions must have actor `Kernel`, `Operator`, or `RecoverySweep`. If a planner-sourced request triggers any other transition, `transition_task` returns `TaskError::Unauthorized`.
+
+  **Alignment with `handlers/intent.rs`:** `handlers/intent.rs` calls `transition_task` with `actor: TransitionActor::Kernel` for the `Admitted → Running` and `Admitted → GatesPending` edges — these are kernel-initiated transitions in response to a planner `IntentRequest`, not planner-initiated transitions. The planner submits an intent; the kernel decides the state change.
+
+---
+
+#### `src/initiatives/recovery.rs` — [NEW]
+
+**What it contains:**
+
+- `pub fn reconcile_tasks(store: &Store, audit: &AuditTools) -> Result<ReconcileReport, RecoveryError>`
+  - Called by `recovery::reconcile` (Part 2.2 top-level recovery orchestrator) as its task-specific step — not invoked independently. `recovery::reconcile` orchestrates audit chain verification, witness orphan reconciliation, and then delegates task recovery to this function. There is one normative recovery entry point (`recovery::reconcile` in `main.rs`); `reconcile_tasks` is not called from `main.rs` directly.
+  - Queries all tasks in `Running` state. These were interrupted by kernel crash.
+  - For each interrupted task: calls `transition_task(task_id, BlockedRecoveryPending, RecoveryPendingOperatorAction, RecoverySweep, ...)`. `transition_task` emits `AuditEventKind::TaskTransitioned` and calls `evaluate_terminal_criteria`, which detects the loss of `Running` tasks and transitions affected initiatives from `Executing` to `Blocked`.
+  - After each `transition_task` call, `reconcile_tasks` also emits `AuditEventKind::TaskNeedsRecovery { task_id, initiative_id, interrupted_at }` as a separate, operator-visible event. `TaskNeedsRecovery` is not part of `TaskTransitioned`; it is a dedicated recovery-surface event emitted by `reconcile_tasks` itself.
+  - Returns `ReconcileReport { recovered_task_count, affected_initiative_ids }`.
+  - Does NOT auto-resume any task. Operator must run `raxis-cli task resume` or `raxis-cli task abort`.
+
+- `pub fn resume_task(task_id: TaskId, operator_id: OperatorId, store: &Store, audit: &AuditTools) -> Result<(), RecoveryError>`
+  - Verifies task is in `BlockedRecoveryPending`.
+  - Calls `transition_task(task_id, Running, None, Operator(operator_id), ...)`. `transition_task` unconditionally calls `evaluate_terminal_criteria`, which detects the new `Running` task and transitions any `Blocked` initiative back to `Executing` (emitting `InitiativeResumed` if the initiative state changes).
+  - `resume_task` does not directly manipulate initiative state — all initiative state updates flow through `evaluate_terminal_criteria` inside `transition_task`. This is the single call-site guarantee.
+
+---
+
+### 4.7 — Integration Test Matrix (Gap 4)
+
+**Happy path — linear DAG:**
+- Plan with two tasks: A (no predecessors), B (depends on A).
+- Initiative created → `Draft`.
+- Operator approves → `ApprovedPlan`; both tasks instantiated as `Admitted`. Task B is `Admitted` but not yet schedulable (`next_ready_tasks` excludes it — predecessor A not yet `Completed`).
+- Planner picks up task A (returned by `next_ready_tasks`) → `Running`.
+- Planner completes task A → `Completed`; `release_successors` fires; B becomes schedulable — `next_ready_tasks` now returns B.
+- Planner picks up task B → `Running` → `Completed`.
+- `evaluate_terminal_criteria` returns `Complete` (all tasks completed).
+- Initiative → `Completed`. Verify: no non-terminal tasks remain; initiative row is `Completed`.
+
+**Happy path — parallel tasks, partial dependency:**
+- Plan: tasks A, B (independent), C (depends on A and B).
+- Both A and B schedulable immediately (`next_ready_tasks` returns both — no predecessors). Planner completes A; B still `Running`.
+- C is `Admitted` but not schedulable (`next_ready_tasks` excludes it — B not yet `Completed`).
+- B completes → `release_successors` for B; C's predecessors now all `Completed` → C becomes schedulable via `next_ready_tasks`.
+- C completes → initiative `Completed`.
+
+**Task failure in required set:**
+- Plan: tasks A (required), B (required). Criterion: `AllTasksCompleted`.
+- A completes. B fails (`WitnessFailure`).
+- `evaluate_terminal_criteria`: required task B is `Failed`; returns `InitiativeFailed { cause_task_id: B }`.
+- Initiative → `Failed`; task A remains `Completed`; no state change needed.
+- Verify: initiative is `Failed`; audit log contains `InitiativeFailed`.
+
+**Initiative blocked — progress deadlock (all tasks non-runnable):**
+- Scenario: all tasks are `GatesPending` and all witnesses time out → all tasks → `Aborted { WitnessTimeout }` → `evaluate_terminal_criteria` → `AllTerminalNoSuccess` → initiative → `Failed`. No `Blocked` state entered because all tasks became terminal.
+- Scenario: one task in `Running`; planner submits escalation (task stays `Running`, escalation is orthogonal); if the task genuinely cannot proceed without the escalated capability, the planner reports `ReportFailure` → task → `Failed` → `evaluate_terminal_criteria` → `InitiativeFailed`. The escalation `Pending` or `TimedOut` state does not directly drive the initiative to `Blocked` — only the task state does.
+- Scenario producing `Blocked`: all non-terminal tasks are `GatesPending` (witnesses not yet arrived) and no other runnable tasks exist. Initiative enters `Blocked` but will auto-unblock when witnesses arrive — no operator action needed for this case.
+
+**Recovery sweep at startup:**
+- Kernel crashes while task X is `Running`.
+- Kernel restarts; `reconcile_tasks` runs before IPC listener starts.
+- Task X transitions to `BlockedRecoveryPending`.
+- Initiative transitions to `Blocked` (no runnable tasks remain).
+- Operator runs `raxis-cli task resume X` → task → `Running`; initiative → `Executing`.
+- Verify: audit log contains `TaskNeedsRecovery`, then `TaskResumed`; initiative state transitions are consistent.
+
+**Operator abort mid-execution:**
+- Initiative in `Executing`; two tasks in `Running`, one `Admitted`.
+- Operator runs `raxis-cli initiative abort <id>`.
+- All non-terminal tasks → `Cancelled`.
+- Initiative → `Aborted`.
+- Verify: no task remains in a non-terminal state; budget reservations released; audit log contains `InitiativeAborted`.
+
+**DAG cycle rejection:**
+- Plan submitted with A depends on B and B depends on A.
+- `create_initiative` fails with `InitiativeError::CyclicDependency`.
+- Initiative never created; no task rows written.
+
+**`BlockedRecoveryPending` planner cannot resume:**
+- Task in `BlockedRecoveryPending`. Planner submits `IntentRequest` for this task.
+- Intent handler: state is not `Running` with matching session and not `Admitted` in `next_ready_tasks` → `HandlerError::TaskNotSchedulable` → dispatcher maps to **`FAIL_TASK_NOT_RUNNING`** (not `FAIL_POLICY_VIOLATION`).
+- Only `raxis-cli task resume` (operator) can move the task to `Running`. Verify: no planner-sourced transition to `Running` without operator command.
+
+---
+
+### 4.8 — Trust Invariants (Gap 4)
+
+- **INV-INIT-01:** The planner cannot create or amend tasks. Tasks are instantiated from the signed plan artifact at `approve_plan` time. No planner IPC message results in a new task row.
+- **INV-INIT-02:** The planner cannot transition a task to any state other than `Completed` or `Failed`. All other transitions are kernel- or operator-initiated. `transition_task` enforces this via the `TransitionActor` check.
+- **INV-INIT-03:** A successor task cannot become schedulable (returned by `next_ready_tasks`) until all its predecessors are `Completed`. `release_successors` is the only mechanism that marks a successor's predecessors as satisfied in the DAG edge table; no state transition occurs on the task row. The planner cannot force a successor to be returned by `next_ready_tasks` before its predecessors complete.
+- **INV-INIT-04:** `evaluate_terminal_criteria` is called after **every** `transition_task` write — terminal and non-terminal. It is never called proactively or on a timer. `transition_task` is the single authoritative call-site; `evaluate_terminal_criteria` is never invoked independently by callers. This ensures initiative state (`Executing`, `Blocked`, `Completed`, `Failed`) is always consistent with the task state snapshot after each state change.
+- **INV-INIT-05:** A `BlockedRecoveryPending` task can only be resumed (`raxis-cli task resume`) or terminated by operator **`task abort`** (`raxis-cli task abort`). The planner cannot self-resume an interrupted task. The kernel cannot auto-resume without operator approval.
+- **INV-INIT-06:** The signed plan artifact is immutable after `approve_plan`. The `terminal_criteria`, task list, and DAG edges cannot be modified in v1. Any change requires a new plan submission and a new `approve_plan` operation.
+
+---
+
+> **End of Part 2.4.**
+> Gap 4 completes the core kernel FSM specifications (Gaps 1–4). Part 2.5 closes the remaining Part 2 gaps — store DDL, plan artifact signing contract, key inventory, operator authentication protocol, and [[gates]] normative schema — before Part 3 begins.
+
+---
+

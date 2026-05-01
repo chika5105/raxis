@@ -1,0 +1,297 @@
+# RAXIS — Control Plane Specification
+
+RAXIS is specified as a **standalone repository**: treat this directory as the RAXIS project root—whether it is cloned on its own or nested temporarily inside another monorepo. Kernel-owned runtime state lives under `$RAXIS_DATA_DIR` (default `~/.raxis/`), independent of where the Git checkout lives.
+
+The shipped operator/plumbing binary is **`raxis-cli`** (see Part 4). Informal prose may abbreviate as `raxis …`; read that as `raxis-cli …`.
+
+---
+
+## The Problem
+
+Modern coding agents can produce substantial software output, but they are not trustworthy as control-plane actors.
+Current systems often let the same model process generate work, interpret policy, and validate outcomes, creating a shared-delusion loop where hallucinated facts can pass as verified truth.
+
+The core gap is not "better prompting"; it is missing infrastructure: a local control plane that treats agent/planner output as untrusted, enforces authority boundaries mechanically, and evaluates promotion quality through evidence bound to specific commits, tasks, and verifier runs.
+
+This requires separating non-negotiable authority controls (permissions, budgets, escalation, routing) from negotiable quality controls (design and code-health gates with explicit, signed exceptions), while preserving append-only auditability and deterministic recovery.
+
+RAXIS exists to provide that missing layer between human intent and autonomous execution: a system where policy is not inferred from prose, outcomes are not accepted without witnesses, and every decision is reconstructable from kernel-owned records.
+
+---
+
+## The Technical Plan
+
+### Overview
+
+RAXIS is structured as a small cluster of processes — not a single application — where each process has a clearly defined role and trust level.
+The central idea is that the component that makes authority decisions must be physically separate from the component that produces proposals. **In v1**, that separation is achieved by **running separate processes with typed IPC** so the kernel never executes planner code in-process; stronger host containment (separate OS identities, sandboxes, peer credential checks) is **not** fully delivered by v1 alone — see **Assumptions and Limits** and the **v2 Host isolation** row.
+
+### The Kernel
+
+The kernel is the authority core of the system.
+It is a long-lived local process that owns everything with real consequences: it assigns identity to sessions, controls what each agent is allowed to do, manages the queue of work, enforces cost budgets, decides whether an escalation reaches a human, and records every decision into an append-only audit log.
+
+Critically, the kernel never reads the text content of agent messages when making policy decisions.
+It evaluates only structured envelope fields — session ID, role, capability flags, quota state — that were set by the kernel itself at session creation and cannot be overwritten by a model.
+This means a sophisticated model output cannot argue its way into elevated authority: the kernel does not read arguments.
+
+### The Planner
+
+The planner is the agent loop.
+It is explicitly treated as untrusted, even though it runs on your machine and is your own code, because it is the component most exposed to LLM outputs — which can hallucinate, be manipulated, or simply be wrong.
+The planner reads task context, calls the AI model, and translates the model's response into structured "intent packets" — typed requests sent to the kernel over a local socket.
+The kernel reads those requests at the metadata level: what kind of action is being requested, on which resource, by which session.
+The prose content of the request is logged for audit purposes but does not drive the kernel's decision.
+
+The planner holds a working cache of context needed for the current session — prompt packs, candidate plans, task summaries — but this cache is disposable: it can be wiped safely without affecting the authoritative record of what happened.
+
+### The Provider Gateway
+
+Every call to an external AI model (Claude or others) goes through the provider gateway, a separate process that the kernel spawns and controls.
+The planner never has direct access to provider API keys.
+When the planner needs a model response, it sends an inference request to the kernel over the local socket.
+The kernel checks the budget, assembles the final prompt (injecting the static policy portion that the planner cannot modify), and hands the call to the gateway.
+The gateway handles the HTTP connection, streaming, rate-limit backoff, and any provider-specific error handling, then returns a structured result to the kernel.
+The kernel reconciles actual token usage against the approved budget before returning the result to the planner.
+
+This design means the kernel can enforce a cost ceiling that is structurally impossible for the planner to bypass — direct API calls cannot happen because the planner does not hold the keys.
+
+### The Verifier Runner
+
+When a task is ready for promotion, the kernel spawns an ephemeral verifier process to run the quality gates: compiling the code, running tests, checking architecture boundary rules, performing security scans.
+The verifier is a short-lived process with hard resource limits (wall-clock timeout, memory cap, process count cap).
+It writes its results back to the kernel — not to a file the planner can read — and the kernel stores them in a witness store keyed by commit hash, task ID, gate type, and a kernel-issued run ID.
+
+A test result is not accepted as evidence just because it exists.
+The completion gate checks that a witness record for the specific commit under evaluation was generated by a kernel-issued verifier run — not a cached result from a previous version of the code, and not a file the planner wrote itself.
+
+### The Storage Layer
+
+Five stores hold the system's state, each with a different trust level and access model:
+
+- **Kernel State Store** — the live runtime database. Sessions, delegations, task DAGs, lane queues, budget positions, escalation states. Only the kernel reads and writes this. Backed by a local SQLite database with WAL mode for crash safety.
+- **Policy Store** — the rules the kernel enforces. Claim-requirement tables, role capability ceilings, signing key registries, override rules. Policy artifacts are signed; the SQLite index is a derived cache. Signed files are the ground truth.
+- **Audit Log** — the unforgeable record. Every decision, denial, gate outcome, approval, and state transition lands here as an append-only JSONL entry, hash-chained across segments so tampering is detectable without a database.
+- **Witness Store** — the evidence vault. Test results, static analysis outputs, diff fingerprints, and gate verdicts are stored as content-addressed blobs. The index records `evaluation_sha` (the commit identifier of the range intent the gate was evaluated against), task, and verifier run for each blob; `head_commit_sha` is the IPC/env alias used in some messages. See Part 2.3 for the canonical field name `evaluation_sha`.
+- **Planner Working Cache** — the throwaway workspace. Context packs, candidate plans, and temporary summaries the planner needs to do its job. Aggressively TTL'd and can be wiped without consequence.
+
+The four **trusted** stores (kernel state, policy, audit log, witness) live outside the repository workspace (under `~/.raxis/`), which reduces accidental access by agents operating inside the repository — see Assumptions and Limits for the full host-isolation caveat. The fifth bucket — the Planner Working Cache — is not a trusted store: it is disposable, aggressively TTL'd, and may live under `~/.raxis/planner-cache/` or any operator-configured path; wiping it has no effect on system correctness.
+
+### Human Contact
+
+The human operator communicates with the system through two deliberately separate channels.
+
+**Email** is for notifications: progress updates on a configurable cadence, escalation alerts that need attention, completion summaries.
+Email is outbound-only in the authority model — reading a notification and replying to it does not constitute an approval.
+
+**A local signed command** is the only approval mechanism.
+When an escalation requires a human decision, the operator reads the notification, assesses the request offline, and issues a cryptographically signed approval token through a local CLI tool.
+The kernel validates the token by looking up the operator's public key from the loaded policy artifact (`policy.operator_entry(token.issued_by).public_key`), verifying the Ed25519 signature, checking the epoch matches the current policy epoch, and confirming the token's nonce has not been consumed. Authority cannot be granted by email reply, by prose in a chat window, or by any path that an agent can reach or forge.
+
+### How a Piece of Work Flows Through the System
+
+A typical initiative moves through the following stages:
+
+1. The human submits a goal — a document, a spec, a set of requirements.
+2. The planner produces a structured plan proposal: a task dependency graph, capability requirements per task, budget estimates, and machine-checkable success criteria.
+3. The human reviews the structured plan, edits the terminal success criteria directly, and signs the artifact. The kernel accepts this and transitions the initiative from `draft` to `approved_plan`.
+4. The kernel releases tasks to the admission queue in dependency order. The planner works on each task under the capabilities it has been granted.
+5. When a task is complete, the verifier runner collects evidence. The kernel evaluates gates against submitted claims and witness blobs; terminal success for a task still requires an admitted **`IntentKind::CompleteTask`** (path checks, gate closure). Initiative-wide terminal moves (**`Executing` → `Completed` / `Failed` / `Blocked`**) run through **`lifecycle::evaluate_terminal_criteria`** after each **`transition_task`** — Part 2.4 §4.2 (*Terminal criteria and initiative state evaluation*) and §4.6 (`src/initiatives/lifecycle.rs`). Witness sufficiency alone does not complete a task.
+6. When all tasks reach terminal success and the completion gate is satisfied, the initiative closes with a kernel-signed completion record.
+7. Throughout, every decision — grants, denials, gate outcomes, escalations, amendments — is appended to the audit log.
+
+> **This is a simplified flow.** The authoritative task lifecycle — including `GatesPending` (task admitted but witnesses still outstanding), sequential witness rechecks as each gate is satisfied, delegation staleness (`SufficientStale`, `warn_delegation_stale`), the distinction between `TaskState::Admitted` and schedulable-ready, and **`CompleteTask`** as the binding completion intent — is specified in Part 2.3 (`gates/mod.rs` `evaluate_claims`) and Part 2.4 (`handlers/intent.rs`). When in doubt, Part 2.3 + Part 2.4 amendment blocks are the contract; this narrative is orientation.
+
+### Block Diagram
+
+```mermaid
+graph TB
+    Human["Human Operator"]
+
+    subgraph KB ["Trusted Kernel Boundary"]
+        direction TB
+        K["Kernel\nAuthority · Scheduler · Budgets\nSession management · Prompt assembly"]
+        PG["Provider Gateway\nHTTP · Streaming · Cost reconciliation\nKernel-owned subprocess"]
+        VR["Verifier Runner\nTests · Static analysis · Security scans\nEphemeral · Resource-capped"]
+        K <-->|"local IPC + token"| PG
+        K <-->|"local IPC + token"| VR
+    end
+
+    subgraph UB ["Untrusted Planner"]
+        P["Planner\nLLM turn loop · Intent packets\nWorking cache"]
+    end
+
+    subgraph ST ["Storage — outside workspace write-bubble"]
+        direction LR
+        KS["Kernel State\nSQLite WAL\n~/.raxis/kernel.db"]
+        PS["Policy Store\nSigned artifacts\n~/.raxis/policy/"]
+        AL["Audit Log\nJSONL + hash chain\n~/.raxis/audit/"]
+        WS["Witness Store\nContent-addressed blobs\n~/.raxis/witness/"]
+    end
+
+    APIs["Model Provider APIs\nClaude · others"]
+
+    Human -->|"local signed command"| K
+    K -->|"email notification"| Human
+    K <-->|"UDS + session token"| P
+    PG <-->|"HTTPS"| APIs
+    K <-->|"read / write"| KS
+    K <-->|"read — updates via signed ceremony"| PS
+    K -->|"append-only"| AL
+    K -->|"kernel writes only"| WS
+```
+
+---
+
+## Assumptions and Limits
+
+RAXIS v1 is local-first and single-operator: it runs on one machine, owned and operated by one person, and makes no attempt to secure across a shared network boundary.
+The kernel and planner run under the same OS user, so the host isolation guarantee is process-level and protocol-level, not OS-enforced; a process that fully escapes the IPC contract could reach kernel-adjacent paths.
+Stronger host isolation — separate OS user, sandboxed execution environments — is explicitly planned for v2 and is a known, documented limitation of the v1 security model.
+
+### Tightening isolation beyond “honest IPC clients” (design note)
+
+The **authority story assumes each component behaves as specified**: the planner speaks only `raxis-ipc`, the gateway never impersonates the kernel, and agents operating inside the Git workspace do not compromise sibling processes. That holds when engineers preserve crate boundaries and configurations — but **it is not a kernel-enforced guarantee against a hostile or compromised agent running as the same POSIX user.**
+
+**What “escaping the IPC protocol” means here**
+
+Same-UID adversaries can, in principle: attach debuggers or inject code into the planner process; swap binaries or `LD_PRELOAD` shims; open **`$RAXIS_DATA_DIR`** files directly (SQLite, witness blobs, policy artifacts) instead of going through the kernel; bind competing listeners if paths were predictable and racing startup; or coerce a trusted helper process into acting outside its intended envelope. None of that is blocked by **typed messages alone** — it requires **OS-level containment**, operational discipline, or stronger deployment modes.
+
+**Ideas worth fleshing out (not v1 contracts)**
+
+Each item below needs threat modelling, platform choices, and usually a **dedicated gap spec** before implementation claims parity with the narrative:
+
+1. **Separate OS identities** — kernel service account vs planner/gateway/verifier agents; filesystem ACLs / POSIX DAC so only the kernel user can read/write `kernel.db`, witness index paths, and append-only audit segment files; operator CLI runs via `sudo`-style elevation or a setgid helper with narrow surface.
+2. **Sandboxed subprocesses** — per-role profiles (macOS Seatbelt, Linux `bubblewrap`/namespaces, minimal container images) with explicit allowlists for **only** the kernel socket path, temp dirs, and Git worktree; deny generic `$HOME` reads where feasible.
+3. **Syscall and filesystem tightening** — seccomp-BPF / Landlock (Linux), AppArmor/SELinux profiles labeling `raxis-kernel` vs `raxis-planner`, restricting `ptrace`, `CLONE_*`, and unexpected `connect`.
+4. **Socket hardening** — fixed paths under `0700` data dirs (already implied), optional abstract-namespace or Linux `SO_PEERCRED` / `getsockopt` peer UID checks so only the expected UID may connect to planner/gateway sockets.
+5. **Supply chain** — reproducible builds, code signing or measured boot tie-ins for operator binaries in high-assurance deployments (pairs naturally with **FIDO2 operator auth** in the v3 roadmap).
+6. **Verifier / tool isolation** — disposable VMs or per-task namespaces so malicious repo content cannot pivot into the kernel host even when gates execute attacker-controlled scripts.
+
+These directions overlap the **v2 Host isolation** row below; they do not relax any v1 invariant — they describe **how much stronger than v1** a serious deployment would need to become once agents are treated as actively malicious rather than merely buggy.
+
+---
+
+## V1 vs V2
+
+### v1 — Safe, Local, Minimal Viable Control Plane
+
+The goal of v1 is to prove that the trust boundaries and correctness guarantees work before adding scale, convenience, or flexibility.
+
+| Area | v1 Scope |
+|---|---|
+| **Process model** | Kernel, planner, provider gateway, verifier runner — four separate processes |
+| **Authority enforcement** | Kernel owns permissions, budgets, queue admission, escalation state |
+| **Planner trust** | Untrusted proposer only; planner prose never drives kernel decisions |
+| **Providers** | One provider fully integrated (Claude); others stubbed in registry |
+| **Roles / lanes** | One role, simple lane model; schema is fully defined for extension |
+| **Plans** | Signed structured plan artifact; kernel-owned DAG execution |
+| **Quality gates** | Witness-based gates bound to commit SHA + task ID + verifier run ID |
+| **Storage** | Append-only audit log, witness store, kernel state store — all outside workspace |
+| **Human approvals** | Local signed command only; email is notification-only |
+| **Bootstrap** | Fail-closed genesis ceremony; basic break-glass with enumerated trigger classes |
+| **Host isolation** | Same-user OS boundary — documented limitation (see **Assumptions and Limits** — tightening against IPC escape) |
+
+### v2 — Scale, Precision, and Ergonomics
+
+v2 extends the proven v1 foundation without weakening any of its guarantees.
+
+| Area | v2 Additions |
+|---|---|
+| **Providers** | Multi-provider routing intelligence; richer typed registry with live capability tracking. Policy routing schema (which IntentKind or lane maps to which provider) and the model-selection field on InferenceRequest require a dedicated gap spec before they are implementable contracts. |
+| **Scheduling** | Multi-lane fairness and priority sophistication beyond the v1 single-lane schema |
+| **Policy precision** | Per-capability delegation staleness checks (impact-based, not any-epoch) |
+| **Host isolation** | Stronger isolation by default — separate OS user and/or sandboxed execution per subprocess; optional peer credential checks on UDS; gap spec must define threat model vs same-UID agent (above — **Assumptions and Limits**, *Tightening isolation*) |
+| **Intake UX** | Richer plan amendment tooling and more ergonomic structured-plan review interface |
+| **Quality analytics** | Advanced drift detection, anti-gaming signals, longitudinal complexity tracking |
+| **Recovery** | More automated state recovery from audit replay; improved operator experience |
+| **Multi-agent coordination** | Multiple kernel sessions running concurrently is **v1-compatible already**. v2's contribution is scheduling sophistication and the following kernel-mediated coordination primitives: (1) **kernel-mediated agent channels** — inter-agent messaging where the kernel is the relay and records the envelope of every message, preserving auditability and authority enforcement; (2) **hierarchical delegation** — orchestrator-spawns-sub-planner patterns where the orchestrator session delegates a bounded capability subset to a sub-session, with the kernel enforcing `sub-session-scope ⊆ orchestrator-scope` on every intent; (3) **kernel-push notifications** — kernel-initiated messages to active planner sessions (e.g. gate completion, epoch advance, quarantine events) without requiring the planner to poll; (4) **`session_agent_type` field** — kernel-visible principal type (e.g. Orchestrator, Executor, Reviewer) enabling type-specific enforcement rules. All four require dedicated gap specs with message types, capability scoping rules, and audit event shapes before implementation. |
+| **Operator tool manifest** | Tool definitions live entirely in the signed policy artifact (`[[tools]]` blocks in `policy.toml`) — not in kernel code. The operator adds, updates, or removes tools by editing and re-signing the policy; no kernel release is required. Each `[[tools]]` entry carries a canonical `id`, description, input schema, per-provider name overrides (different providers may use different names for the same tool), and an `allowed_for` list of `session_agent_type` values. The kernel ships with an optional default tool library (data files, independently updatable, not compiled in) that operators may reference by `id` instead of writing schemas from scratch; custom tools not in the library can be defined inline. At `prompt/assemble` time, the kernel injects tool definitions for the session's agent type from the signed policy and nothing else — the agent has no mechanism to discover tools outside its assembled prompt. INV-TOOL-01: no tool definition reaches the agent that is not present in the operator-signed `[[tools]]` policy for that session's `session_agent_type`. Depends on `session_agent_type`. Requires a gap spec covering the `[[tools]]` policy schema, default tool library format, per-provider name resolution, and startup structural validation. |
+| **Non-inference tool providers** | Kombai-class APIs and other non-inference tool providers — new provider class, typed adapter IPC, and witness semantics for non-inference outputs. Requires a dedicated gap spec. |
+
+### v3 — Coordination, Flexibility, and Scale
+
+> **Status:** Design intent only. No item in this section is an implementable contract. Each area requires a dedicated gap spec — with typed message definitions, invariant statements, DDL amendments, and adversarial assertion coverage — before work may begin. v3 builds on top of proven v2 primitives (kernel-mediated agent channels, hierarchical delegation, push notifications) and must not be started until v2 is stable.
+
+> **Rule:** An item moves from this section to a versioned additions table only when its gap spec is complete and reviewed.
+
+| Area | v3 Additions |
+|---|---|
+| **Multi-planner coordination** | Cross-session path-conflict detection (`CrossSessionConflict` audit event), session-to-task pinning in signed plans (`task_session_assignment`), sub-initiative spawning with scoped plans and bounded capability sets, `cross_initiative_path_grants` table, `parent_initiative_id` on `initiatives`. Requires v2 `session_agent_type` and hierarchical delegation. |
+| **Plan flexibility** | Incremental plan amendments (`PlanAmendment` signed delta, `parent_artifact_sha` linkage; add-only, never remove); operator-approved task retry (`raxis-cli task retry <task_id>`, `retriable` flag, path accumulator reset-or-carry decision); cross-initiative dependencies (`initiative_dependencies` table, `next_ready_tasks` updated). |
+| **Gate and enforcement evolution** | Composite gates (M-of-N quorum, `verifier_run_group`); conditional gates (path-pattern activation, `activation_pattern` field, vacuous-pass semantics); gate dependency ordering (gate-level DAG within a task); witness caching (`cacheable` flag, epoch-advance invalidation); gate-scoped break-glass with multi-operator co-signing (`BreakGlassScope::GateScoped`). |
+| **Trust model expansion** | Planner-requested delegations (`DelegationRequest` IPC, `delegation_requests` table); delegation templates in policy artifact (`[[delegation_templates]]`, auto-approve on exact match); initiative-scoped delegations (`scope_type CHECK('Session','Initiative')`); multi-operator co-approval (`required_approvals`, `escalation_approval_votes`, `PartiallyApproved` FSM state). |
+| **Hardware-presence operator auth** | Augment the v1 Ed25519 challenge-response with a mandatory hardware-presence second factor (FIDO2 / hardware security key tap) to make operator authentication agent-proof. An agent with OS-level access and software key files cannot authenticate without physical possession of the hardware token. Pure software mechanisms (CAPTCHA, TOTP on the same machine) are insufficient in a single-OS-user model. Requires a gap spec: FIDO2 assertion flow, hardware key registration ceremony, fallback policy (TOTP from a physically separate device), and kernel-side FIDO2 library integration. |
+| **Observability and analytics** | Read-only audit query socket (`audit_index.db`); Prometheus `/metrics` endpoint with in-memory counters (`raxis-metrics` crate); planner-facing push event stream (uses v2 kernel-push, `Subscribe` IPC type); operator dashboard (`raxis-cli dashboard`, reads audit query API and metrics, no kernel mutations). |
+| **Distributed kernel** | Distributed state store (CockroachDB or etcd, behind `raxis-store` abstraction); shared nonce cache across instances (distributed UNIQUE on `(session_id, envelope_nonce)`); distributed budget enforcement (pessimistic lane lock or soft-limit reconciliation); audit log aggregation with cross-instance chain anchoring; session affinity with failover semantics. |
+| **Plan portability** | Cross-deployment plan import (trusted-key registry in policy artifact, re-signing ceremony, `original_signature` field); plan replay mode for audit reconstruction (read-only kernel replay from audit log + signed plan). |
+
+### Rule of Thumb
+
+> v1 proves trust boundaries and correctness.
+> v2 improves throughput, flexibility, and convenience without weakening v1 guarantees.
+> v3 introduces coordination patterns, plan flexibility, and operational maturity at scale — each area gated behind a dedicated gap spec and a proven v2 baseline.
+
+**On multi-agent execution:**
+
+- **Sessions (v1):** Multiple concurrent agent sessions against one initiative DAG is v1-compatible; no v2 feature is required. v2 adds scheduling fairness and lane sophistication that makes concurrent sessions perform predictably under load — it does not introduce multi-session support as a new capability.
+- **Model / provider selection (v2 target):** Routing inference calls to a specific model (e.g. Claude Sonnet for code edits) is directionally aligned with the v2 Providers row, but the policy routing schema and InferenceRequest model-hint field are not yet fully specified — treat as v2 intent requiring a gap spec, not a shipped contract. All model calls must remain planner → kernel → gateway under INV-02A regardless of which model is selected; the kernel selects from policy, the planner does not self-route.
+- **Specialized tool providers / Kombai-class APIs (v2, requires gap spec):** Compatible with the trust model if kernel-gated, logged, and allowlisted. Requires a dedicated gap spec: new provider class, typed adapter IPC, and witness semantics for non-inference outputs. Committed v2 item.
+- **Session-to-task assignment / environment labels like Cursor (v2 with `session_agent_type`):** The orchestrator or signed plan assigns tasks to sessions; the kernel validates that the assigned session holds the delegation for the task. `session_agent_type` is a committed v2 field that makes agent role (Orchestrator, Executor, Reviewer) kernel-visible, enabling type-specific enforcement rules. An orchestrator session cannot grant a sub-session capabilities beyond what the operator-signed policy allows.
+- **No hidden optimization:** The kernel is a constraint-enforcer, not a talent broker. "Suitability" = declared preferences in the signed policy or signed plan. There is no learned optimization that discovers which agent is best for which work; encoding "use Kombai for frontend" means writing that constraint into policy or the orchestrator plan, not configuring a kernel preference engine.
+
+---
+
+## V1 Invariants — Quick Reference
+
+Full invariant specifications (rationale, adversarial assertions, test cross-references) are in [`specs/v1/philosophy.md`](specs/v1/philosophy.md) §1.2.
+
+| ID | Invariant |
+|---|---|
+| INV-01 | Planner cannot perform any authorized action without a valid kernel-issued session token |
+| INV-02A | Planner has no provider credential access; all inference goes `InferenceRequest → kernel → gateway`; admission cost is kernel-computed, no planner-supplied field reaches `consume_budget` |
+| INV-02B | Planner has no direct network egress; all fetches go `FetchRequest → kernel → gateway`; kernel logs every fetch before content is returned |
+| INV-03 | A witness bound to commit SHA `A` cannot satisfy a gate check for commit SHA `B` |
+| INV-04 | Any modification to the audit log is detectable by hash chain verification |
+| INV-05 | Given the audit log and kernel state at crash time, kernel decisions are reproducible from stored records |
+| INV-06 | An action requiring approval does not execute without a valid, scoped, unexpired approval token whose `ApprovalProof` is written to the kernel state store |
+| INV-07 | A planner-submitted path manifest cannot influence which claim types are required; kernel derives required claims from VCS state independently |
+| INV-08 | Rejection reason codes exposed to the planner do not reveal which specific policy rule fired |
+| INV-TASK-PATH-01 | The kernel admits an intent if and only if every path in `touched_paths(intent)` is a member of `effective_allow(task_id)` at the time of admission; failing intents are rejected non-terminally |
+| INV-TASK-PATH-02 | The kernel does not transition a task to `Completed` unless every path in the union of all intent ranges plus the trailing segment from `tasks.evaluation_sha` to `CompleteTask.head_sha` is a member of `effective_allow(task_id)` recomputed at completion time |
+
+---
+
+## Documentation Index
+
+### Background
+
+| Document | Scope |
+|---|---|
+| [`need-for-cj-brain.md`](need-for-cj-brain.md) | Why RAXIS exists — the trust model motivation and kernel-as-authority philosophy |
+| [`specs/design-decisions.md`](specs/design-decisions.md) | 20 design alternatives considered and rejected. Read before proposing a design change |
+
+### Operator Guides
+
+| Document | Scope |
+|---|---|
+| [`configuring-witnesses.md`](configuring-witnesses.md) | `[[gates]]` TOML schema, `VerifierSpawnEnvelope` env vars, exit codes, resource caps |
+| [`kernel-feedback-flows.md`](kernel-feedback-flows.md) | Audit events, escalation notifications, gate outcomes, operator UDS socket protocol |
+
+### v1 Implementation Specifications
+
+> **Authority rule:** DDL in `kernel-store.md` wins over prose in `kernel-core.md` for representation details. FSM semantics in `kernel-core.md` win when `kernel-store.md` is silent. §2.5.8 in `kernel-store.md` supersedes any conflicting VCS prose in `kernel-core.md`.
+>
+> **Rule:** Section numbers in all `specs/v1/` files are stable after first publication — do not renumber.
+
+| Spec | Contents | Status |
+|---|---|---|
+| [`specs/v1/philosophy.md`](specs/v1/philosophy.md) | Implementation philosophy · full INV table · v1 test matrix · release gates · workspace layout · shared crates · policy artifact format | ✅ Complete |
+| [`specs/v1/kernel-core.md`](specs/v1/kernel-core.md) | Source tree · startup · IPC server · VCS subsystem · authority · scheduler/DAG · gates · provider routing · prompt · policy manager · break-glass · Initiative and Task FSMs | ✅ Complete |
+| [`specs/v1/kernel-store.md`](specs/v1/kernel-store.md) | Store DDL (18 tables) · VCS path enforcement §2.5.8 · audit log §2.5.2 · plan signing §2.5.3 · key inventory §2.5.4 · operator auth §2.5.5 · gates schema §2.5.6 · INV amendments §2.5.7 | ✅ Complete |
+| [`specs/v1/peripherals.md`](specs/v1/peripherals.md) | Planner IPC contract (§3.1) · gateway wire format (§3.2) · verifier subprocess contract (§3.3) | ✅ Complete |
+| [`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md) | `raxis-cli` subcommands (§4.1) · genesis ceremony (§4.2) · integration test fixtures (§4.3) | ✅ Complete |
+| [`specs/v1/planner-api.md`](specs/v1/planner-api.md) | Machine-readable planner API — all error codes, remediation text, retry semantics. Injected verbatim into planner system prompt | ✅ Complete |
+| [`fixtures/`](fixtures/) | Canonical integration test fixtures: `minimal_plan.toml`, `gated_plan.toml`, `dag_plan.toml`, `integration_plan.toml` | ✅ Complete |
+
+---

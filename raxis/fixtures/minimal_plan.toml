@@ -1,0 +1,19 @@
+# RAXIS canonical fixture: minimal_plan
+# Tests: INV-INIT-06, INV-TASK-PATH-01, INV-SCHED-01
+# See: specs/v1/cli-ceremony.md §4.3
+
+[plan]
+initiative_id  = "test-minimal-001"
+description    = "Minimal single-task plan with no gates and no dependencies"
+version        = "1"
+
+[[tasks]]
+task_id        = "task-alpha"
+description    = "Implement the feature"
+intent_kinds   = ["SingleCommit", "CompleteTask"]
+path_allowlist    = ["src/", "tests/"]
+predecessors   = []
+gates          = []
+
+# terminal_criteria
+terminal_criteria = "AllTasksSucceeded"

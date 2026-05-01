@@ -1,0 +1,36 @@
+# RAXIS canonical fixture: integration_plan
+# Tests: IntentKind::IntegrationMerge 5-predicate topology check,
+#        stale-base check, FAIL_STALE_BASE, FAIL_INVALID_COMMIT_TOPOLOGY
+# See: specs/v1/cli-ceremony.md §4.3
+
+[plan]
+initiative_id  = "test-integration-001"
+description    = "Two agent tasks plus one integration merge task"
+version        = "1"
+
+[[tasks]]
+task_id        = "task-agent-a"
+description    = "Agent A feature branch"
+intent_kinds   = ["SingleCommit", "CompleteTask"]
+path_allowlist    = ["src/feature-a/"]
+predecessors   = []
+gates          = []
+
+[[tasks]]
+task_id        = "task-agent-b"
+description    = "Agent B feature branch"
+intent_kinds   = ["SingleCommit", "CompleteTask"]
+path_allowlist    = ["src/feature-b/"]
+predecessors   = []
+gates          = []
+
+[[tasks]]
+task_id        = "task-integration"
+description    = "Merge agent branches onto main"
+intent_kinds   = ["IntegrationMerge", "CompleteTask"]
+path_allowlist    = ["src/feature-a/", "src/feature-b/"]
+predecessors   = ["task-agent-a", "task-agent-b"]
+gates          = []
+
+# terminal_criteria
+terminal_criteria = "AllTasksSucceeded"

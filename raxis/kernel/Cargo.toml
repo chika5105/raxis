@@ -1,0 +1,11 @@
+[package]
+name        = "raxis-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "raxis-kernel"
+path = "src/main.rs"
+
+[dependencies]

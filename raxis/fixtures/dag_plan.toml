@@ -1,0 +1,35 @@
+# RAXIS canonical fixture: dag_plan
+# Tests: DAG scheduling, predecessor-gate blocking, scheduler::next_ready_tasks
+# See: specs/v1/cli-ceremony.md §4.3
+
+[plan]
+initiative_id  = "test-dag-001"
+description    = "Three-task dependency chain"
+version        = "1"
+
+[[tasks]]
+task_id        = "task-1-foundation"
+description    = "Build the foundation layer"
+intent_kinds   = ["SingleCommit", "CompleteTask"]
+path_allowlist    = ["src/foundation/"]
+predecessors   = []
+gates          = []
+
+[[tasks]]
+task_id        = "task-2-feature"
+description    = "Build the feature on top"
+intent_kinds   = ["SingleCommit", "CompleteTask"]
+path_allowlist    = ["src/feature/"]
+predecessors   = ["task-1-foundation"]
+gates          = []
+
+[[tasks]]
+task_id        = "task-3-integration"
+description    = "Integration wiring"
+intent_kinds   = ["SingleCommit", "CompleteTask"]
+path_allowlist    = ["src/integration/", "tests/integration/"]
+predecessors   = ["task-1-foundation", "task-2-feature"]
+gates          = []
+
+# terminal_criteria
+terminal_criteria = "AllTasksSucceeded"

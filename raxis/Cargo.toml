@@ -1,0 +1,50 @@
+# RAXIS — standalone Rust workspace
+# This workspace is independent of the aegis-ai root workspace.
+# It has no dependency on any other aegis-ai crate.
+#
+# Workspace layout matches specs/v1/philosophy.md §1.5.
+# All implementation crates are stubs until spec review is complete.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/types",
+    "crates/ipc",
+    "crates/store",
+    "crates/policy",
+    "crates/crypto",
+    "crates/audit",
+    "kernel",
+    "cli",
+    "gateway",
+]
+
+[workspace.package]
+version     = "0.1.0"
+edition     = "2021"
+license     = "MIT OR Apache-2.0"
+authors     = ["RAXIS authors"]
+repository  = "https://github.com/chika5105/aegis-ai"
+
+[workspace.dependencies]
+# Will be pinned before first implementation sprint
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+tokio       = { version = "1", features = ["full"] }
+rusqlite    = { version = "0.31", features = ["bundled"] }
+ed25519-dalek = "2"
+sha2        = "0.10"
+hex         = "0.4"
+uuid        = { version = "1", features = ["v4"] }
+toml        = "0.8"
+glob        = "0.3"
+anyhow      = "1"
+thiserror   = "1"
+
+# Workspace-internal crates
+raxis-types  = { path = "crates/types" }
+raxis-ipc    = { path = "crates/ipc" }
+raxis-store  = { path = "crates/store" }
+raxis-policy = { path = "crates/policy" }
+raxis-crypto = { path = "crates/crypto" }
+raxis-audit-tools = { path = "crates/audit" }
