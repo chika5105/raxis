@@ -10,4 +10,5 @@ sha2            = { workspace = true }
 hex             = { workspace = true }
 serde           = { workspace = true }
 thiserror       = { workspace = true }
+getrandom       = { workspace = true }
 raxis-types     = { workspace = true }

@@ -11,6 +11,10 @@ license.workspace = true
 [dependencies]
 bincode     = { workspace = true }
 serde       = { workspace = true }
+# Used by `json_frame` for the operator socket. Kept distinct from the planner
+# socket's bincode codec because operators inspect operator frames by hand
+# during ceremonies. See peripherals.md §3 "Operator socket".
+serde_json  = { workspace = true }
 tokio       = { workspace = true }
 thiserror   = { workspace = true }
 uuid        = { workspace = true }
