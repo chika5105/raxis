@@ -25,27 +25,30 @@ use crate::authority::keys::AuthorityError;
 
 /// Issue a new verifier run token for `run_id`.
 ///
-/// Returns the raw token hex (64 chars). The caller (kernel task runner) must
-/// deliver this to the verifier subprocess via a secure channel (e.g. a pipe
-/// from the kernel's stdout before execve). The kernel stores only the SHA-256
-/// hash.
+/// Returns the raw token hex (64 chars). The kernel stores only the SHA-256
+/// hash. DDL Table 12 requires task_id, gate_type, evaluation_sha columns;
+/// the caller (verifier_runner.rs) supplies all three.
 pub fn issue_verifier_token(
-    run_id: &str,
-    ttl_secs: u64,
-    store: &Store,
+    run_id:         &str,
+    task_id:        &str,
+    gate_type:      &str,
+    evaluation_sha: &str,
+    ttl_secs:       u64,
+    store:          &Store,
 ) -> Result<String, AuthorityError> {
     let (raw_token, token_hash) = generate_verifier_token();
-
-    let token_id = uuid::Uuid::new_v4().to_string();
-    let now = now_unix_secs();
+    let now        = now_unix_secs();
     let expires_at = now + ttl_secs as i64;
 
+    // DDL Table 12 PKs on verifier_run_id; issue_verifier_token receives run_id
+    // from the caller (verifier_runner.rs) and uses it as the PK.
     let conn = store.lock_sync();
     conn.execute(
         "INSERT INTO verifier_run_tokens
-            (token_id, run_id, token_hash, issued_at, expires_at, consumed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, NULL)",
-        rusqlite::params![&token_id, run_id, &token_hash, now, expires_at],
+            (verifier_run_id, task_id, gate_type, evaluation_sha,
+             token_hash, issued_at, expires_at, consumed)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+        rusqlite::params![run_id, task_id, gate_type, evaluation_sha, &token_hash, now, expires_at],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     Ok(raw_token)
@@ -69,8 +72,8 @@ pub fn validate_verifier_token(
     let now = now_unix_secs();
 
     let conn = store.lock_sync();
-    let (run_id, expires_at, consumed_at): (String, i64, Option<i64>) = conn.query_row(
-        "SELECT run_id, expires_at, consumed_at
+    let (run_id, expires_at, consumed): (String, i64, i64) = conn.query_row(
+        "SELECT verifier_run_id, expires_at, consumed
          FROM verifier_run_tokens WHERE token_hash=?1",
         rusqlite::params![&token_hash],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
@@ -79,7 +82,7 @@ pub fn validate_verifier_token(
         other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
     })?;
 
-    if consumed_at.is_some() {
+    if consumed != 0 {
         return Err(AuthorityError::TokenConsumed);
     }
     if expires_at < now {
@@ -100,8 +103,8 @@ pub fn consume_verifier_token(raw_token: &str, store: &Store) -> Result<(), Auth
 
     let conn = store.lock_sync();
     let rows = conn.execute(
-        "UPDATE verifier_run_tokens SET consumed_at=?1
-         WHERE token_hash=?2 AND consumed_at IS NULL",
+        "UPDATE verifier_run_tokens SET consumed=1, consumed_at=?1
+         WHERE token_hash=?2 AND consumed=0",
         rusqlite::params![now, &token_hash],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 

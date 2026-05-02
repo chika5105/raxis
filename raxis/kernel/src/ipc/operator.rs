@@ -22,6 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use crate::authority;
+use crate::initiatives::lifecycle;
 use crate::ipc::auth::AuthenticatedOperator;
 use crate::ipc::context::HandlerContext;
 
@@ -55,14 +56,40 @@ pub enum OperatorRequest {
         max_uses: Option<i64>,
         signature_hex: String,
     },
-    // v1 stubs — domain subsystems pending:
-    CreateInitiative   { payload: serde_json::Value },
-    ApprovePlan        { payload: serde_json::Value },
-    RejectPlan         { payload: serde_json::Value },
-    RetryTask          { payload: serde_json::Value },
-    ResumeTask         { payload: serde_json::Value },
-    AbortTask          { payload: serde_json::Value },
-    AbortInitiative    { payload: serde_json::Value },
+    // Initiative lifecycle — fully wired in v1:
+    CreateInitiative {
+        plan_toml:     String,
+        plan_sig_hex:  String,
+        submitted_by:  String,
+    },
+    ApprovePlan {
+        initiative_id:        String,
+        approving_operator:   String,
+        /// Hex-encoded Ed25519 pubkey of the approving operator.
+        operator_pubkey_hex:  String,
+    },
+    RejectPlan {
+        initiative_id: String,
+        rejected_by:   String,
+        reason:        Option<String>,
+    },
+    RetryTask {
+        task_id: String,
+    },
+    ResumeTask {
+        /// Resume a BlockedRecoveryPending task → Admitted.
+        task_id:     String,
+        resumed_by:  String,
+    },
+    AbortTask {
+        task_id:    String,
+        aborted_by: String,
+    },
+    AbortInitiative {
+        initiative_id: String,
+        aborted_by:    String,
+    },
+    // Tier 2 stubs:
     ApproveEscalation  { payload: serde_json::Value },
     DenyEscalation     { payload: serde_json::Value },
     RotateEpoch        { payload: serde_json::Value },
@@ -85,6 +112,14 @@ pub enum OperatorResponse {
     },
     DelegationGranted {
         delegation_id: String,
+    },
+    InitiativeCreated {
+        initiative_id: String,
+        status: String,
+    },
+    PlanApproved {
+        initiative_id: String,
+        tasks_admitted: usize,
     },
     Ack { message: String },
     Error {
@@ -177,12 +212,34 @@ async fn handle_request(
                 ttl_secs, max_uses, signature_hex, operator, ctx,
             ).await
         }
-        // v1 stubs for unimplemented domain operations:
-        other => {
-            let name = op_name(&other);
-            OperatorResponse::Ack {
-                message: format!("{name} not yet implemented in v1"),
-            }
+        // Initiative lifecycle:
+        OperatorRequest::CreateInitiative { plan_toml, plan_sig_hex, submitted_by } => {
+            handle_create_initiative(plan_toml, plan_sig_hex, submitted_by, ctx).await
+        }
+        OperatorRequest::ApprovePlan { initiative_id, approving_operator, operator_pubkey_hex } => {
+            handle_approve_plan(initiative_id, approving_operator, operator_pubkey_hex, ctx).await
+        }
+        OperatorRequest::RejectPlan { initiative_id, rejected_by, reason } => {
+            handle_reject_plan(initiative_id, rejected_by, reason, ctx).await
+        }
+        OperatorRequest::RetryTask { task_id } => {
+            handle_retry_task(task_id, ctx).await
+        }
+        OperatorRequest::ResumeTask { task_id, resumed_by } => {
+            handle_resume_task(task_id, resumed_by, ctx).await
+        }
+        OperatorRequest::AbortTask { task_id, aborted_by } => {
+            handle_abort_task(task_id, aborted_by, ctx).await
+        }
+        OperatorRequest::AbortInitiative { initiative_id, aborted_by } => {
+            handle_abort_initiative(initiative_id, aborted_by, ctx).await
+        }
+        // Tier 2 stubs:
+        OperatorRequest::ApproveEscalation { .. } | OperatorRequest::DenyEscalation { .. } => {
+            OperatorResponse::Ack { message: "EscalationApproval not yet implemented (Tier 2)".to_owned() }
+        }
+        OperatorRequest::RotateEpoch { .. } => {
+            OperatorResponse::Ack { message: "RotateEpoch not yet implemented (Tier 2)".to_owned() }
         }
     }
 }
@@ -382,6 +439,147 @@ async fn handle_grant_delegation(
         }
         Err(e) => OperatorResponse::Error {
             code: "FAIL_GRANT_DELEGATION".to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Initiative lifecycle handlers
+// ---------------------------------------------------------------------------
+
+/// CreateInitiative — submit a plan TOML + Ed25519 sig → PlanSubmitted row.
+/// Spec: kernel-core.md §2.3 operator handlers; initiative_id returned to operator.
+async fn handle_create_initiative(
+    plan_toml:    String,
+    plan_sig_hex: String,
+    submitted_by: String,
+    ctx: &HandlerContext,
+) -> OperatorResponse {
+    match lifecycle::create_initiative(&plan_toml, &plan_sig_hex, &submitted_by, &ctx.store) {
+        Ok(result) => OperatorResponse::InitiativeCreated {
+            initiative_id: result.initiative_id,
+            status:        result.status,
+        },
+        Err(e) => OperatorResponse::Error {
+            code:   "FAIL_CREATE_INITIATIVE".to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// ApprovePlan — verify Ed25519 sig, parse tasks, admit all, → Executing.
+/// Spec: "verify sig, promote to Executing, admit all tasks."
+async fn handle_approve_plan(
+    initiative_id:       String,
+    approving_operator:  String,
+    operator_pubkey_hex: String,
+    ctx: &HandlerContext,
+) -> OperatorResponse {
+    let pubkey_bytes = match hex::decode(&operator_pubkey_hex) {
+        Ok(b) => b,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_APPROVE_PLAN".to_owned(),
+            detail: format!("operator_pubkey_hex decode failed: {e}"),
+        },
+    };
+    match lifecycle::approve_plan(&initiative_id, &approving_operator, &pubkey_bytes, &ctx.store) {
+        Ok(result) => OperatorResponse::PlanApproved {
+            initiative_id:  result.initiative_id,
+            tasks_admitted: result.tasks_admitted,
+        },
+        Err(e) => OperatorResponse::Error {
+            code:   "FAIL_APPROVE_PLAN".to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// RejectPlan — set status = Rejected; initiative must be in PlanSubmitted.
+async fn handle_reject_plan(
+    initiative_id: String,
+    rejected_by:   String,
+    reason:        Option<String>,
+    ctx: &HandlerContext,
+) -> OperatorResponse {
+    match lifecycle::reject_plan(&initiative_id, &rejected_by, reason.as_deref(), &ctx.store) {
+        Ok(()) => OperatorResponse::Ack {
+            message: format!("initiative {initiative_id} rejected"),
+        },
+        Err(e) => OperatorResponse::Error {
+            code:   "FAIL_REJECT_PLAN".to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// RetryTask — transition a Failed task back to Admitted.
+/// Spec: "retry_task — transition a Failed task back to Admitted."
+async fn handle_retry_task(task_id: String, ctx: &HandlerContext) -> OperatorResponse {
+    match lifecycle::retry_task(&task_id, &ctx.store) {
+        Ok(()) => OperatorResponse::Ack {
+            message: format!("task {task_id} retried (→ Admitted)"),
+        },
+        Err(e) => OperatorResponse::Error {
+            code:   "FAIL_RETRY_TASK".to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// ResumeTask — transition a BlockedRecoveryPending task → Admitted.
+/// Spec: "BlockedRecoveryPending → Admitted (operator resume)".
+/// Uses task_transitions directly: the FSM edge BlockedRecoveryPending→Admitted
+/// is legal per the FSM table in task_transitions.rs.
+async fn handle_resume_task(
+    task_id:    String,
+    _resumed_by: String,
+    ctx: &HandlerContext,
+) -> OperatorResponse {
+    use crate::initiatives::task_transitions::{transition_task, TransitionActor};
+    use raxis_types::TaskState;
+
+    let actor = TransitionActor::Operator { fingerprint: _resumed_by.clone() };
+    match transition_task(&task_id, TaskState::Admitted, None, actor, &ctx.store) {
+        Ok(()) => OperatorResponse::Ack {
+            message: format!("task {task_id} resumed (→ Admitted)"),
+        },
+        Err(e) => OperatorResponse::Error {
+            code:   "FAIL_RESUME_TASK".to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// AbortTask — cancel a single non-terminal task.
+async fn handle_abort_task(
+    task_id:    String,
+    aborted_by: String,
+    ctx: &HandlerContext,
+) -> OperatorResponse {
+    match lifecycle::abort_task(&task_id, &aborted_by, &ctx.store) {
+        Ok(()) => OperatorResponse::Ack {
+            message: format!("task {task_id} aborted"),
+        },
+        Err(e) => OperatorResponse::Error {
+            code:   "FAIL_ABORT_TASK".to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// AbortInitiative — set status = Aborted; cancel all non-terminal tasks.
+async fn handle_abort_initiative(
+    initiative_id: String,
+    aborted_by:    String,
+    ctx: &HandlerContext,
+) -> OperatorResponse {
+    match lifecycle::abort_initiative(&initiative_id, &aborted_by, &ctx.store) {
+        Ok(()) => OperatorResponse::Ack {
+            message: format!("initiative {initiative_id} aborted"),
+        },
+        Err(e) => OperatorResponse::Error {
+            code:   "FAIL_ABORT_INITIATIVE".to_owned(),
             detail: e.to_string(),
         },
     }

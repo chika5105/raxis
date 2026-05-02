@@ -220,10 +220,12 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
             }
         }
 
-        // Expire any live verifier tokens for this task.
+        // Expire any live verifier tokens issued for this task.
+        // DDL Table 12: task_id FK + consumed INTEGER (0=live, 1=consumed).
+        // consumed_at is a separate nullable column; consumed flag is the gate.
         match conn.execute(
-            "UPDATE verifier_run_tokens SET consumed_at=?1
-             WHERE run_id=?2 AND consumed_at IS NULL",
+            "UPDATE verifier_run_tokens SET consumed=1, consumed_at=?1
+             WHERE task_id=?2 AND consumed=0",
             rusqlite::params![now, task_id],
         ) {
             Ok(rows) => {
