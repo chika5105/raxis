@@ -13,4 +13,5 @@ bincode     = { workspace = true }
 serde       = { workspace = true }
 tokio       = { workspace = true }
 thiserror   = { workspace = true }
+uuid        = { workspace = true }
 raxis-types = { workspace = true }

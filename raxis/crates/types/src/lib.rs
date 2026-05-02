@@ -29,6 +29,6 @@ pub use id::{
     TaskId, VerifierRunId,
 };
 pub use intent::{BudgetSnapshot, IntentKind, IntentRequest, IntentResponse};
-pub use operator::{OperatorErrorDetail, OperatorResponse};
+pub use operator::{ApprovalScope, OperatorErrorDetail, OperatorRequest, OperatorResponse};
 pub use policy::Role;
 pub use witness::{WitnessResultClass, WitnessSubmission};

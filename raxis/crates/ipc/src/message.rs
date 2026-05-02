@@ -1,0 +1,170 @@
+// raxis-ipc::message — Top-level IpcMessage and GatewayMessage enums.
+//
+// Normative reference:
+//   - peripherals.md §3.1 (planner socket messages)
+//   - peripherals.md §3.2 (gateway socket messages)
+//   - peripherals.md §3.3 (verifier / witness intake)
+//   - kernel-core.md §`handlers/operator.rs` (operator socket)
+//
+// There are THREE distinct UDS sockets; each carries a separate top-level
+// message type. Mixing them is a protocol violation caught by auth.rs.
+//
+//   planner.sock  → IpcMessage (planner variants + witness intake)
+//   operator.sock → IpcMessage (operator variants)
+//   gateway.sock  → GatewayMessage
+//
+// In v1 the planner, witness, and operator messages share one enum to
+// keep the framing layer uniform. The socket-level `permitted_message_kinds`
+// check in ipc/auth.rs enforces that a planner session cannot send operator
+// messages and vice versa.
+
+use raxis_types::{
+    EscalationRequest, EscalationResponse, IntentRequest, IntentResponse,
+    OperatorRequest, OperatorResponse, WitnessSubmission,
+};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+// ---------------------------------------------------------------------------
+// IpcMessage — planner socket, operator socket, witness intake
+// ---------------------------------------------------------------------------
+
+/// The top-level discriminant enum for all messages on the planner and
+/// operator UDS sockets. Wire: positional bincode 2.0.1 standard() u32 tag.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum IpcMessage {
+    // -----------------------------------------------------------------------
+    // Planner socket — inbound (planner → kernel)
+    // peripherals.md §3.1
+    // -----------------------------------------------------------------------
+    /// A planner intent submission.
+    IntentRequest(IntentRequest),
+
+    /// A planner escalation submission.
+    /// Sent on the same socket as IntentRequest (same session context).
+    EscalationRequest(EscalationRequest),
+
+    // -----------------------------------------------------------------------
+    // Planner socket — outbound (kernel → planner)
+    // peripherals.md §3.1
+    // -----------------------------------------------------------------------
+    /// Kernel response to an IntentRequest.
+    KernelIntentResponse(IntentResponse),
+
+    /// Kernel response to an EscalationRequest.
+    KernelEscalationResponse(EscalationResponse),
+
+    // -----------------------------------------------------------------------
+    // Verifier / witness intake (verifier → kernel)
+    // peripherals.md §3.3
+    // -----------------------------------------------------------------------
+    /// A verifier subprocess submitting its gate evaluation result.
+    WitnessSubmission(WitnessSubmission),
+
+    /// Kernel acknowledgement of a witness submission.
+    WitnessAck {
+        /// The verifier_run_id from the submission; echoed for correlation.
+        verifier_run_id: Uuid,
+        /// true if the witness was accepted; false if rejected (see reason).
+        accepted: bool,
+        /// On rejection: a short reason string for the verifier's stderr.
+        /// INV-08 does not apply to verifier↔kernel messages.
+        reason: Option<String>,
+    },
+
+    // -----------------------------------------------------------------------
+    // Operator socket — inbound (operator CLI → kernel)
+    // cli-ceremony.md §4.1, peripherals.md §3
+    // -----------------------------------------------------------------------
+    /// An operator command.
+    OperatorRequest(OperatorRequest),
+
+    // -----------------------------------------------------------------------
+    // Operator socket — outbound (kernel → operator CLI)
+    // peripherals.md §3 "Operator socket"
+    // -----------------------------------------------------------------------
+    /// Kernel response to an OperatorRequest.
+    OperatorResponse(OperatorResponse),
+}
+
+// ---------------------------------------------------------------------------
+// GatewayMessage — gateway socket only
+// peripherals.md §3.2
+// ---------------------------------------------------------------------------
+
+/// Messages exchanged on the gateway UDS socket (kernel ↔ gateway subprocess).
+///
+/// The gateway socket uses its own message type (not IpcMessage) because the
+/// gateway has no planner context and the message set is entirely different.
+#[derive(Debug, Serialize, Deserialize)]
+pub enum GatewayMessage {
+    // -----------------------------------------------------------------------
+    // kernel → gateway
+    // peripherals.md §3.2 "FetchRequest wire shape"
+    // -----------------------------------------------------------------------
+    FetchRequest {
+        /// The gateway_process_token issued at spawn time. Validated by gateway.
+        gateway_token: String,
+        /// UUID v4 for correlating this request to its FetchResponse.
+        fetch_id: Uuid,
+        /// "Inference" or "DataFetch" — different timeout/size limits apply.
+        fetch_kind: FetchKind,
+        url: String,
+        method: String,
+        /// HTTP headers as key-value pairs.
+        headers: Vec<(String, String)>,
+        /// Raw request body bytes. The gateway injects credentials then forwards.
+        body_bytes: Vec<u8>,
+        /// Maximum milliseconds to wait for a response. Hard cap: 120_000 ms.
+        timeout_ms: u32,
+        /// Session context for audit logging (not used for auth by the gateway).
+        session_id: Option<Uuid>,
+        /// Task context for audit logging.
+        task_id: Option<String>,
+    },
+
+    /// Signal from the kernel that the policy epoch has advanced.
+    /// Gateway must re-read policy.toml before processing the next FetchRequest.
+    /// peripherals.md §3.2 "Domain allowlist re-validation".
+    EpochAdvanced {
+        new_epoch_id: Uuid,
+    },
+
+    // -----------------------------------------------------------------------
+    // gateway → kernel
+    // peripherals.md §3.2 "FetchResponse wire shape"
+    // -----------------------------------------------------------------------
+    FetchResponse {
+        /// Correlates to the FetchRequest.fetch_id.
+        fetch_id: Uuid,
+        /// HTTP status code, or None if the request failed before a response.
+        status_code: Option<u16>,
+        /// Response headers.
+        headers: Vec<(String, String)>,
+        /// Raw response body bytes. Max 16 MiB (configurable per provider).
+        /// None on error.
+        body_bytes: Option<Vec<u8>>,
+        /// Observed latency in milliseconds.
+        latency_ms: u32,
+        /// On error: a short reason string.
+        /// Possible values: "TimeoutExceeded", "DomainNotAllowed",
+        /// "ResponseTooLarge", "PolicyReloadFailed", "NetworkError".
+        error: Option<String>,
+    },
+
+    /// Gateway → kernel: gateway is ready to accept requests (sent once at startup
+    /// after the gateway has loaded credentials and policy).
+    GatewayReady {
+        gateway_token: String,
+    },
+}
+
+/// The kind of external fetch, determining timeout and size limits.
+/// peripherals.md §3.2: "Inference" vs "DataFetch".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FetchKind {
+    /// LLM API call. Higher timeout; response body validated by the provider adapter.
+    Inference,
+    /// URL data fetch for context. Lower timeout; 16 MiB body limit.
+    DataFetch,
+}
