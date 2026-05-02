@@ -6,20 +6,19 @@
 // This file is intentionally thin — no policy logic, no IPC logic, no
 // authority logic. Only: step sequencing + signal handling + error dispatch.
 // Each step calls a subsystem function; this file is the call list.
-//
-// v1 implementation note: steps 6–9 are scaffolded with placeholder
-// implementations that will be filled in as each subsystem module is
-// implemented. Steps 1–5 are fully wired.
 
 mod errors;
 mod bootstrap;
+mod authority;
+mod ipc;
+
+use std::sync::Arc;
 
 use errors::{exit_with_code, KernelError};
 use raxis_policy::load_policy;
 use raxis_store::Store;
 
-/// Kernel data directory. In production this is `~/.raxis`; in tests it is a
-/// temp dir. Sourced from the RAXIS_DATA_DIR env var, defaulting to `~/.raxis`.
+/// Kernel data directory. Sourced from RAXIS_DATA_DIR env var, defaulting to ~/.raxis.
 fn data_dir() -> std::path::PathBuf {
     if let Ok(val) = std::env::var("RAXIS_DATA_DIR") {
         std::path::PathBuf::from(val)
@@ -29,10 +28,9 @@ fn data_dir() -> std::path::PathBuf {
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     // Step 1: Parse CLI flags and environment.
-    // v1 uses env vars only; clap is deferred to v2 to keep the dependency
-    // surface minimal.
     let data_dir = data_dir();
     let bootstrap_mode = std::env::var("RAXIS_BOOTSTRAP").is_ok();
 
@@ -44,11 +42,9 @@ fn main() {
             force: std::env::var("RAXIS_FORCE").is_ok(),
         };
         // bootstrap::run calls std::process::exit(0) on success.
-        // On failure it returns Err which we convert to exit code 15.
         if let Err(e) = bootstrap::run(&config) {
             exit_with_code(e);
         }
-        // Unreachable: run() always calls process::exit.
         unreachable!("bootstrap::run must exit the process");
     }
 
@@ -59,34 +55,30 @@ fn main() {
             reason: e.to_string(),
         })
     });
-    let policy = std::sync::Arc::new(policy);
+    let policy = Arc::new(policy);
     eprintln!(
         "{{\"level\":\"info\",\"message\":\"policy loaded\",\"epoch\":{}}}",
         policy.epoch()
     );
 
     // Step 4: Initialize key registry.
-    // Keys are loaded from <data_dir>/keys/ by authority::keys::load_keyring.
-    // Not yet implemented — will be wired when authority/ module is in place.
-    //
-    // For now, verify that the key files exist (fail-closed sanity check).
-    let authority_key_path = data_dir.join("keys").join("authority_keypair.pem");
-    if !authority_key_path.exists() {
-        exit_with_code(KernelError::KeyRegistry {
-            reason: format!(
-                "authority_keypair.pem not found at {}",
-                authority_key_path.display()
-            ),
-        });
-    }
+    let registry = match authority::load_key_registry(&data_dir) {
+        Ok(r) => {
+            eprintln!(
+                "{{\"level\":\"info\",\"message\":\"key registry loaded\",\"authority_fp\":\"{}\"}}",
+                authority::authority_pubkey_fingerprint(&r)
+            );
+            Arc::new(r)
+        }
+        Err(e) => exit_with_code(e),
+    };
 
     // Step 5: Open kernel state store.
-    // Store::open runs the WAL pragma + migration atomically.
     let db_path = data_dir.join("kernel.db");
     let store = match Store::open(&db_path) {
         Ok(s) => {
             eprintln!("{{\"level\":\"info\",\"message\":\"store opened\"}}");
-            s
+            Arc::new(s)
         }
         Err(e) => {
             exit_with_code(KernelError::StoreSchema {
@@ -94,35 +86,23 @@ fn main() {
             })
         }
     };
-    let _store = std::sync::Arc::new(store);
 
-    // Step 6: Run recovery::reconcile.
-    // Not yet implemented — placeholder. In production this verifies the
-    // audit chain, sweeps in-flight tasks to BlockedRecoveryPending, and
-    // checks the witness index for orphaned blobs.
+    // Step 6: Run recovery::reconcile (stub).
     eprintln!("{{\"level\":\"info\",\"message\":\"recovery reconcile: stub, skipping\"}}");
 
-    // Step 7: Bind IPC listener sockets.
-    // Not yet implemented — ipc::listener will be implemented in the IPC
-    // subsystem module. Three sockets: planner.sock, gateway.sock, operator.sock.
-    let sockets_dir = data_dir.join("sockets");
-    if let Err(e) = std::fs::create_dir_all(&sockets_dir) {
-        exit_with_code(KernelError::SocketBind {
-            reason: format!("cannot create sockets dir {}: {e}", sockets_dir.display()),
-        });
-    }
-    eprintln!(
-        "{{\"level\":\"info\",\"message\":\"socket dir ready\",\"path\":\"{}\"}}",
-        sockets_dir.display()
-    );
+    // Step 7 + 9: Bind IPC sockets and enter dispatch loop.
+    let ctx = Arc::new(ipc::context::HandlerContext::new(
+        Arc::clone(&policy),
+        Arc::clone(&registry),
+        Arc::clone(&store),
+        data_dir.clone(),
+    ));
 
-    // Step 8: Emit KernelStarted audit event.
-    // Not yet implemented — AuditWriter will be initialised here and its
-    // chain opened from the segment store. For now, log to stderr as a sentinel.
+    // Step 8: Emit KernelStarted audit event (stub).
     eprintln!("{{\"level\":\"info\",\"message\":\"KernelStarted (audit stub)\"}}");
 
-    // Step 9: Enter IPC dispatch loop.
-    // Not yet implemented — ipc::start_ipc_server will be called here.
-    // For now, park the process waiting for SIGTERM/SIGINT.
-    eprintln!("{{\"level\":\"info\",\"message\":\"dispatch loop not yet implemented; exiting cleanly\"}}");
+    // Step 9: Enter IPC dispatch loop (runs forever or until fatal error).
+    if let Err(e) = ipc::server::start(&data_dir, ctx).await {
+        exit_with_code(e);
+    }
 }

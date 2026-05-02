@@ -25,6 +25,11 @@ pub enum StoreError {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
+    /// Direct rusqlite::Error — used when callers handle rusqlite errors before
+    /// wrapping them into StoreError (e.g. authority subsystem's `?` conversions).
+    #[error("SQLite error (raw): {0}")]
+    Rusqlite(rusqlite::Error),
+
     #[error("migration error: {0}")]
     Migration(String),
 
@@ -96,8 +101,23 @@ impl Store {
     /// violation. The borrow checker enforces this: `Transaction<'_>` borrows
     /// from `Connection`, which is behind the guard, so the guard cannot be
     /// dropped while `tx` is alive.
+    /// Acquire the store mutex asynchronously.
+    ///
+    /// Callers MUST hold the guard for the entire duration of any transaction.
     pub async fn lock(&self) -> tokio::sync::MutexGuard<'_, Connection> {
         self.conn.lock().await
+    }
+
+    /// Acquire the store mutex from a synchronous (non-async) context.
+    ///
+    /// Used by the authority subsystem which is sync (no tokio). This calls
+    /// `blocking_lock()` on the tokio Mutex — safe as long as the caller is NOT
+    /// running inside a tokio async task (it will deadlock if called from async
+    /// context while another task holds the lock). Authority subsystem code is
+    /// called from IPC handler tasks via `tokio::task::spawn_blocking`, so this
+    /// is safe for the v1 execution model.
+    pub fn lock_sync(&self) -> tokio::sync::MutexGuard<'_, Connection> {
+        self.conn.blocking_lock()
     }
 
     // -----------------------------------------------------------------------

@@ -589,6 +589,7 @@ dependencies = [
  "raxis-policy",
  "raxis-store",
  "raxis-types",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
