@@ -144,6 +144,14 @@ For each operation in this table, splitting writes across two transactions or tw
 
 ---
 
+#### SQL Type-Safety and Codebase Representation
+
+**Type-safety invariant (INV-STORE-03):** To prevent runtime SQL errors from typos or schema drift, **no Rust source file in `raxis/kernel/src` may contain a raw SQL table-name or state-value string literal**. 
+- **Table names** must be dynamically interpolated using the `raxis-store::Table` enum. A module interacting with the database must define a module-level constant (e.g., `const TASKS: &str = Table::Tasks.as_str();`) and use `format!()` to inject it into the query string.
+- **State values** (e.g., TaskState, InitiativeState) must use the relevant enum's `.as_sql_str()` method as bound parameters.
+
+---
+
 > **§2.5.1 — isolation model complete.**
 > DDL tables 1–6 follow immediately below.
 
