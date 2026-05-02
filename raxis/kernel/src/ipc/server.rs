@@ -23,6 +23,7 @@ use std::sync::Arc;
 use tokio::net::{UnixListener, UnixStream};
 
 use crate::errors::KernelError;
+use crate::handlers;
 use crate::ipc::context::HandlerContext;
 use crate::ipc::auth;
 use crate::ipc::operator;
@@ -194,17 +195,23 @@ async fn handle_operator_connection(
 }
 
 // ---------------------------------------------------------------------------
-// Planner accept loop (stub — auth will be wired when planner handlers are done)
+// Planner accept loop — bincode-framed IpcMessage dispatch
+// Normative reference: kernel-core.md §2.2 `src/ipc/` dispatch loop.
+// Wire format: raxis-ipc::frame (4-byte LE length prefix + bincode body).
 // ---------------------------------------------------------------------------
 
-async fn accept_planner_loop(listener: UnixListener, _ctx: Arc<HandlerContext>) {
+async fn accept_planner_loop(listener: UnixListener, ctx: Arc<HandlerContext>) {
     loop {
         match listener.accept().await {
-            Ok((_stream, _addr)) => {
-                // v1 stub: accept connection, log, drop.
-                eprintln!(
-                    "{{\"level\":\"debug\",\"message\":\"planner connection accepted (stub — planner IPC not yet wired)\"}}",
-                );
+            Ok((stream, _addr)) => {
+                let ctx = Arc::clone(&ctx);
+                tokio::spawn(async move {
+                    if let Err(e) = handle_planner_connection(stream, ctx).await {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"message\":\"planner connection error\",\"error\":\"{e}\"}}",
+                        );
+                    }
+                });
             }
             Err(e) => {
                 eprintln!("{{\"level\":\"error\",\"message\":\"planner accept error\",\"error\":\"{e}\"}}");
@@ -212,6 +219,75 @@ async fn accept_planner_loop(listener: UnixListener, _ctx: Arc<HandlerContext>) 
             }
         }
     }
+}
+
+/// Handle a single planner connection per spec (kernel-core.md §2.2).
+///
+/// Message routing:
+///   IntentRequest     → handlers::intent::handle → KernelIntentResponse
+///   WitnessSubmission → handlers::witness::handle → WitnessAckResponse
+///   (Other variants)  → warn + drop frame; connection stays open
+///
+/// Spec §2.2 startup step 7:
+///   "there is no separate witness.sock — verifier subprocesses connect to
+///   planner.sock and the dispatcher routes by message variant."
+async fn handle_planner_connection(
+    mut stream: tokio::net::UnixStream,
+    ctx: Arc<HandlerContext>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use raxis_ipc::{read_frame, write_frame, IpcMessage};
+
+    loop {
+        let msg: IpcMessage = match read_frame(&mut stream).await {
+            Ok(m) => m,
+            Err(raxis_ipc::FrameError::Eof) => break, // clean disconnect
+            Err(e) => {
+                eprintln!("{{\"level\":\"warn\",\"message\":\"planner frame read error\",\"error\":\"{e}\"}}");
+                break;
+            }
+        };
+
+        match msg {
+            // ── IntentRequest ────────────────────────────────────────────
+            IpcMessage::IntentRequest(req) => {
+                let resp = handlers::intent::handle(req, &ctx).await;
+                write_frame(&mut stream, &IpcMessage::KernelIntentResponse(resp)).await?;
+            }
+
+            // ── WitnessSubmission ─────────────────────────────────────────
+            // Spec §2.2: verifiers connect to planner.sock; dispatcher routes
+            // by variant. The WitnessAck response is a separate IpcMessage
+            // variant so the verifier subprocess gets a typed acknowledgment.
+            IpcMessage::WitnessSubmission(sub) => {
+                match handlers::witness::handle(sub, &ctx).await {
+                    Ok(ack) => {
+                        write_frame(&mut stream, &IpcMessage::WitnessAck(ack)).await?;
+                    }
+                    Err(e) => {
+                        // HandlerError is a transport/auth-level failure.
+                        // Log and close — the verifier's run token remains
+                        // unconsumed so it may resubmit if still valid.
+                        eprintln!(
+                            "{{\"level\":\"error\",\"message\":\"WitnessSubmission handler error\",\"error\":\"{e}\"}}"
+                        );
+                        break;
+                    }
+                }
+            }
+
+            // ── EscalationRequest (Tier 2 stub) ────────────────────────────
+            IpcMessage::EscalationRequest(_) => {
+                eprintln!("{{\"level\":\"debug\",\"message\":\"EscalationRequest received (Tier 2 stub)\"}}");
+                // Do not break — keep connection open; planner may continue.
+            }
+
+            _ => {
+                eprintln!("{{\"level\":\"warn\",\"message\":\"unexpected IpcMessage on planner socket\"}}");
+                // Unknown variant: log and drop frame but keep connection open.
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
