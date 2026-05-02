@@ -102,4 +102,67 @@ mod tests {
         assert_eq!(sha.len(), 64, "hex SHA-256 must be 64 chars");
         assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
     }
+
+    /// Empty plan body is still a well-defined signing input. Catches a
+    /// regression where the signing path silently no-op'd on empty bytes.
+    #[test]
+    fn plan_signing_input_handles_empty_body() {
+        let input = plan_signing_input(b"");
+        // Domain-prefixed hash of "" is exactly SHA-256("RAXIS-V1-PLAN\x00").
+        let expected = {
+            let mut h = Sha256::new();
+            h.update(b"RAXIS-V1-PLAN\x00");
+            h.finalize()
+        };
+        assert_eq!(&input[..], &expected[..]);
+    }
+
+    /// Domain prefix MUST disambiguate from raw-bytes signing — a signature
+    /// over `plan_bytes` directly must NOT verify against the canonical scheme.
+    /// This is the regression guard for the v1 review's "plan signing
+    /// semantic mismatch" finding.
+    #[test]
+    fn raw_bytes_signature_is_rejected_by_canonical_verifier() {
+        let (sk, pk_bytes) = test_keypair();
+        let plan_bytes: &[u8] = b"[initiative]\nname = \"x\"\n";
+
+        // Sign the raw plan bytes (the OLD broken scheme).
+        let bad_sig = sk.sign(plan_bytes);
+
+        // Canonical verifier MUST reject it.
+        assert!(
+            verify_plan_signature(&pk_bytes, plan_bytes, &bad_sig.to_bytes()).is_err(),
+            "raw-bytes signature must NOT verify under the canonical scheme"
+        );
+    }
+
+    /// Hex-string-of-digest signing (the OLDER broken CLI scheme) must also
+    /// be rejected. This is the regression guard for the v1 review's
+    /// CLI-side variant where `policy sign` signed `sha256_hex.as_bytes()`.
+    #[test]
+    fn hex_string_of_digest_signature_is_rejected() {
+        let (sk, pk_bytes) = test_keypair();
+        let plan_bytes: &[u8] = b"[initiative]\nname = \"x\"\n";
+
+        let hex_digest = plan_artifact_sha256(plan_bytes);
+        let bad_sig = sk.sign(hex_digest.as_bytes());
+
+        assert!(
+            verify_plan_signature(&pk_bytes, plan_bytes, &bad_sig.to_bytes()).is_err(),
+            "hex-string signature must NOT verify under the canonical scheme"
+        );
+    }
+
+    /// Signing input is determined ONLY by the bytes — same bytes produce the
+    /// same input regardless of signer. (Sanity; protects against accidental
+    /// keying of the prefix.)
+    #[test]
+    fn signing_input_is_a_pure_function_of_bytes() {
+        let a = plan_signing_input(b"plan-1");
+        let b = plan_signing_input(b"plan-1");
+        assert_eq!(a, b);
+
+        let c = plan_signing_input(b"plan-2");
+        assert_ne!(a, c, "different bodies must produce different inputs");
+    }
 }

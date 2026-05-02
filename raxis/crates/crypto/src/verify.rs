@@ -26,6 +26,12 @@ pub enum CryptoError {
 
     #[error("hex decode error: {0}")]
     HexDecode(#[from] hex::FromHexError),
+
+    /// The OS CSPRNG was unavailable when minting a token / seed / nonce.
+    /// Callers that hit this MUST refuse to proceed — silently filling with
+    /// zeros has produced real-world key compromise. See cli-ceremony.md §4.2.
+    #[error("OS CSPRNG unavailable: {0}")]
+    Rng(#[from] getrandom::Error),
 }
 
 // ---------------------------------------------------------------------------

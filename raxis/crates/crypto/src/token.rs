@@ -1,105 +1,126 @@
 // raxis-crypto::token — CSPRNG token generation for kernel-issued credentials.
 //
-// Normative reference: kernel-store.md §2.5.4 (key inventory) and the token
-// generation rules for sessions, verifier run tokens, and operator challenges.
+// Normative reference: kernel-store.md §2.5.4 (key inventory) and
+// cli-ceremony.md §4.2 (genesis ceremony — "fail closed if /dev/urandom is
+// unavailable; never write a key whose bytes were not delivered by the OS
+// CSPRNG").
 //
 // All kernel-issued tokens are 32 random bytes (256-bit) from the OS CSPRNG,
 // hex-encoded to 64 ASCII characters for at-rest storage and wire transport.
 //
 // Token types in v1:
-//   - session_token: 32 CSPRNG bytes (hex 64 chars) — stored in sessions.session_token
-//   - verifier_run_token: 32 CSPRNG bytes (hex 64 chars) — raw bytes sent to verifier,
-//     SHA-256(raw) stored in verifier_run_tokens.token_hash
-//   - approval_token_nonce: 16 CSPRNG bytes (hex 32 chars) — embedded in approval token
-//   - operator challenge: 32 CSPRNG bytes — sent to operator CLI for signing
+//   - session_token        : 32 bytes / 64 hex chars (sessions.session_token)
+//   - verifier_run_token   : 32 bytes / 64 hex chars; SHA-256(raw) stored in
+//                            verifier_run_tokens.token_hash
+//   - approval_token_nonce : 16 bytes / 32 hex chars (approval_tokens.nonce)
+//   - operator challenge   : 32 raw bytes (ChallengeEnvelope.challenge_bytes)
 //
-// None of these use kernel's Ed25519 signing key — they are opaque random values.
-// The Ed25519 key is used only for ApprovalProof signatures (kernel-signed receipts).
+// None of these use the kernel's Ed25519 signing key — they are opaque random
+// values. The Ed25519 key is used only for ApprovalProof signatures.
+//
+// Failure model: every helper that mints randomness returns
+// `Result<_, CryptoError>` and surfaces `CryptoError::Rng(getrandom::Error)`
+// when the OS CSPRNG is unavailable. There is no panicking variant and no
+// silently-zero variant. Callers MUST handle the failure and refuse to
+// proceed with a degraded token.
 
 use sha2::{Digest, Sha256};
 
+use crate::CryptoError;
+
 // ---------------------------------------------------------------------------
-// OS CSPRNG — portable random bytes via std (macOS: /dev/urandom).
-// We do NOT pull in the `rand` crate to avoid supply-chain surface.
-// std::io::Read on /dev/urandom is always available on Unix.
+// OS CSPRNG via the getrandom crate (Linux: getrandom(2); macOS: getentropy;
+// Windows: BCryptGenRandom). The crate handles platform differences; we
+// expose a single `try_random_bytes` shim and route every minting helper
+// through it so the failure path is uniform.
 // ---------------------------------------------------------------------------
 
-/// Generate `n` cryptographically random bytes using the OS CSPRNG.
-/// Panics if the OS CSPRNG is unavailable (system misconfiguration).
-pub fn random_bytes(n: usize) -> Vec<u8> {
-    use std::io::Read;
+/// Fill `dest` with bytes from the OS CSPRNG.
+///
+/// Returns `CryptoError::Rng` on any underlying failure. Does NOT retry —
+/// caller decides whether retrying makes sense for the call-site.
+pub fn try_random_bytes(dest: &mut [u8]) -> Result<(), CryptoError> {
+    getrandom::getrandom(dest)?;
+    Ok(())
+}
 
-    #[cfg(unix)]
-    {
-        let mut buf = vec![0u8; n];
-        std::fs::File::open("/dev/urandom")
-            .expect("failed to open /dev/urandom")
-            .read_exact(&mut buf)
-            .expect("failed to read from /dev/urandom");
-        buf
-    }
+/// Allocate and return `n` cryptographically random bytes.
+///
+/// Returns `CryptoError::Rng` on OS CSPRNG failure. Caller must propagate.
+pub fn try_random_vec(n: usize) -> Result<Vec<u8>, CryptoError> {
+    let mut buf = vec![0u8; n];
+    try_random_bytes(&mut buf)?;
+    Ok(buf)
+}
 
-    #[cfg(not(unix))]
-    {
-        // Windows / other platforms: use getrandom crate or compile-time error.
-        // v1 target is macOS/Linux; this branch is unreachable in production.
-        compile_error!("raxis-crypto::token::random_bytes: non-Unix platform not supported in v1");
-    }
+/// Allocate and return a fixed-size array of `N` cryptographically random bytes.
+///
+/// Convenience around `try_random_bytes` for the common 32-byte seed case.
+pub fn try_random_array<const N: usize>() -> Result<[u8; N], CryptoError> {
+    let mut buf = [0u8; N];
+    try_random_bytes(&mut buf)?;
+    Ok(buf)
 }
 
 // ---------------------------------------------------------------------------
-// Token generation helpers
+// Token generation helpers — all fallible
 // ---------------------------------------------------------------------------
 
 /// Generate a session token: 32 CSPRNG bytes, hex-encoded to 64 chars.
-/// Stored plaintext in `sessions.session_token`.
-pub fn generate_session_token() -> String {
-    hex::encode(random_bytes(32))
+///
+/// Stored plaintext in `sessions.session_token`. Comparison at validation time
+/// MUST be constant-time via `ct_eq`.
+pub fn generate_session_token() -> Result<String, CryptoError> {
+    let raw: [u8; 32] = try_random_array()?;
+    Ok(hex::encode(raw))
 }
 
 /// Generate a verifier run token: 32 CSPRNG bytes.
-/// Returns (raw_bytes, token_hash_hex):
-///   raw_bytes: sent to verifier as RAXIS_VERIFIER_TOKEN env var (hex-encoded)
-///   token_hash_hex: hex SHA-256 of raw_bytes; stored in verifier_run_tokens.token_hash
-pub fn generate_verifier_token() -> (String, String) {
-    let raw = random_bytes(32);
-    let raw_hex = hex::encode(&raw);
-
-    let mut hasher = Sha256::new();
-    hasher.update(&raw);
-    let hash_hex = hex::encode(hasher.finalize());
-
-    (raw_hex, hash_hex)
+///
+/// Returns `(raw_hex, token_hash_hex)`:
+///   - `raw_hex`        : sent to verifier as `RAXIS_VERIFIER_TOKEN` env var
+///   - `token_hash_hex` : hex SHA-256 of the raw bytes; stored in
+///                        `verifier_run_tokens.token_hash`
+pub fn generate_verifier_token() -> Result<(String, String), CryptoError> {
+    let raw: [u8; 32] = try_random_array()?;
+    let raw_hex = hex::encode(raw);
+    let hash_hex = sha256_hex(&raw);
+    Ok((raw_hex, hash_hex))
 }
 
 /// Generate an operator challenge: 32 CSPRNG raw bytes.
+///
 /// Sent to the operator CLI in `ChallengeEnvelope.challenge_bytes`.
-pub fn generate_operator_challenge() -> [u8; 32] {
-    random_bytes(32)
-        .try_into()
-        .expect("random_bytes(32) is exactly 32 bytes")
+pub fn generate_operator_challenge() -> Result<[u8; 32], CryptoError> {
+    try_random_array::<32>()
 }
 
 /// Generate an approval token nonce: 16 CSPRNG bytes, hex-encoded to 32 chars.
-/// Stored in `approval_tokens.nonce`; inserted into `approval_token_nonces` on consumption.
-pub fn generate_approval_nonce() -> String {
-    hex::encode(random_bytes(16))
+///
+/// Stored in `approval_tokens.nonce`; inserted into `approval_token_nonces`
+/// on consumption (single-use enforcement).
+pub fn generate_approval_nonce() -> Result<String, CryptoError> {
+    let raw: [u8; 16] = try_random_array()?;
+    Ok(hex::encode(raw))
 }
 
 /// Generate an envelope nonce: 16 CSPRNG bytes, hex-encoded to 32 chars.
-/// Used by the planner CLI for `IntentRequest.envelope_nonce` (INV-01 check B).
-pub fn generate_envelope_nonce() -> String {
-    hex::encode(random_bytes(16))
+///
+/// Used by the planner for `IntentRequest.envelope_nonce` (INV-01 check B).
+pub fn generate_envelope_nonce() -> Result<String, CryptoError> {
+    let raw: [u8; 16] = try_random_array()?;
+    Ok(hex::encode(raw))
 }
 
 // ---------------------------------------------------------------------------
 // Token hash helpers (used by kernel when validating presented tokens)
 // ---------------------------------------------------------------------------
 
-/// Compute hex SHA-256 of the raw token bytes.
-/// Used to reconstruct the hash for constant-time comparison against
-/// `sessions.session_token` (stored plaintext — comparison is direct)
-/// and `verifier_run_tokens.token_hash` (hash comparison).
+/// Hex SHA-256 of `bytes`.
+///
+/// Used to (a) reconstruct verifier-token hashes for lookup against
+/// `verifier_run_tokens.token_hash` and (b) compute operator pubkey
+/// fingerprints (truncated to 16 bytes / 32 hex chars by the caller).
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -110,13 +131,15 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 // Constant-time comparison
 // ---------------------------------------------------------------------------
 
-/// Compare two byte slices in constant time. Returns true iff equal.
-/// Used for session_token validation to prevent timing oracle attacks.
+/// Compare two byte slices in constant time. Returns `true` iff equal.
+///
+/// Used for session-token validation and any other place where a timing
+/// oracle on a secret comparison would leak information. Length mismatch is
+/// short-circuited (the length itself is not secret).
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    // XOR-accumulate: any differing bit sets at least one bit in `diff`.
     let diff: u8 = a.iter().zip(b.iter()).fold(0u8, |acc, (&x, &y)| acc | (x ^ y));
     diff == 0
 }
@@ -130,18 +153,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn try_random_bytes_fills_buffer() {
+        let mut buf = [0u8; 32];
+        try_random_bytes(&mut buf).expect("OS CSPRNG must succeed in test env");
+        // Probability of an all-zero 32-byte buffer from a healthy CSPRNG is 2^-256.
+        assert!(buf.iter().any(|&b| b != 0), "buffer should not be all zeros");
+    }
+
+    #[test]
+    fn try_random_array_fills_full_array() {
+        let buf: [u8; 16] = try_random_array().expect("OS CSPRNG must succeed");
+        assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn try_random_vec_has_requested_length() {
+        let v = try_random_vec(48).expect("OS CSPRNG must succeed");
+        assert_eq!(v.len(), 48);
+    }
+
+    #[test]
     fn session_token_is_64_lowercase_hex() {
-        let tok = generate_session_token();
+        let tok = generate_session_token().expect("rng");
         assert_eq!(tok.len(), 64);
         assert!(tok.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
     }
 
     #[test]
     fn verifier_token_hash_matches_sha256_of_raw() {
-        let (raw_hex, hash_hex) = generate_verifier_token();
+        let (raw_hex, hash_hex) = generate_verifier_token().expect("rng");
         let raw = hex::decode(&raw_hex).unwrap();
-        let expected_hash = sha256_hex(&raw);
-        assert_eq!(hash_hex, expected_hash);
+        assert_eq!(hash_hex, sha256_hex(&raw));
+    }
+
+    #[test]
+    fn approval_nonce_is_32_lowercase_hex() {
+        let n = generate_approval_nonce().expect("rng");
+        assert_eq!(n.len(), 32);
+        assert!(n.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')));
+    }
+
+    #[test]
+    fn envelope_nonce_is_32_lowercase_hex() {
+        let n = generate_envelope_nonce().expect("rng");
+        assert_eq!(n.len(), 32);
+    }
+
+    #[test]
+    fn operator_challenge_is_32_bytes() {
+        let c = generate_operator_challenge().expect("rng");
+        assert_eq!(c.len(), 32);
     }
 
     #[test]
@@ -149,12 +210,13 @@ mod tests {
         assert!(ct_eq(b"hello", b"hello"));
         assert!(!ct_eq(b"hello", b"world"));
         assert!(!ct_eq(b"short", b"longer"));
+        assert!(ct_eq(b"", b""));
     }
 
     #[test]
     fn tokens_are_unique() {
-        let a = generate_session_token();
-        let b = generate_session_token();
+        let a = generate_session_token().expect("rng");
+        let b = generate_session_token().expect("rng");
         assert_ne!(a, b, "two tokens should be different (collision probability ~2^-256)");
     }
 }
