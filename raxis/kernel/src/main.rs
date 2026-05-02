@@ -13,6 +13,7 @@ mod authority;
 mod ipc;
 mod recovery;
 mod initiatives;
+mod scheduler;
 
 use std::sync::Arc;
 

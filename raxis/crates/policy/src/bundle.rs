@@ -48,6 +48,9 @@ pub(crate) struct RawPolicy {
 
     #[serde(default)]
     pub(crate) roles: Vec<RoleEntry>,
+
+    #[serde(default)]
+    pub(crate) lanes: Vec<LaneEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +171,8 @@ pub(crate) struct DelegationsSection {
 ///
 /// ```toml
 /// [budget]
+/// cost_per_touched_path = 1
+/// max_cost_per_task     = 10000
 /// [budget.base_cost_per_intent_kind]
 /// SingleCommit       = 10
 /// MultiBranchCommit  = 25
@@ -177,7 +182,40 @@ pub(crate) struct DelegationsSection {
 #[derive(Debug, Deserialize)]
 pub(crate) struct BudgetSection {
     pub(crate) base_cost_per_intent_kind: HashMap<String, u64>,
+    /// Cost per touched file in the VCS diff range. Default 1.
+    #[serde(default = "default_cost_per_touched_path")]
+    pub(crate) cost_per_touched_path: u64,
+    /// Cap on per-task admission cost before lane enforcement. Default 10000.
+    #[serde(default = "default_max_cost_per_task")]
+    pub(crate) max_cost_per_task: u64,
 }
+
+fn default_cost_per_touched_path() -> u64 { 1 }
+fn default_max_cost_per_task() -> u64 { 10_000 }
+
+/// A `[[lanes]]` entry defining one execution lane.
+///
+/// ```toml
+/// [[lanes]]
+/// lane_id              = "default"
+/// max_concurrent_tasks = 4
+/// max_cost_per_epoch   = 10000
+/// priority             = 100
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct LaneEntry {
+    pub lane_id: String,
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent_tasks: u32,
+    #[serde(default = "default_max_cost")]
+    pub max_cost_per_epoch: u64,
+    #[serde(default = "default_priority")]
+    pub priority: u8,
+}
+
+fn default_max_concurrent() -> u32 { 4 }
+fn default_max_cost() -> u64 { 10_000 }
+fn default_priority() -> u8 { 100 }
 
 // ---------------------------------------------------------------------------
 // Operators block
@@ -271,6 +309,7 @@ pub struct PolicyBundle {
     operators: Vec<OperatorEntry>,
     gates: Vec<GateEntry>,
     roles: Vec<RoleEntry>,
+    lanes: Vec<LaneEntry>,
     /// Cached: role_id → ceiling set
     role_ceilings: HashMap<String, Vec<String>>,
     escalation_timeout: Duration,
@@ -282,6 +321,8 @@ pub struct PolicyBundle {
     allowed_worktree_roots: Vec<String>,
     max_delegation_ttl: Duration,
     base_cost_per_intent_kind: HashMap<String, u64>,
+    cost_per_touched_path: u64,
+    max_cost_per_task: u64,
     /// SHA-256 of the raw policy.toml bytes. Set by the loader after computing
     /// from actual file bytes (not from the meta field). Used for storage in
     /// policy_epoch_history. Initially empty; populated by loader via with_sha256().
@@ -331,6 +372,7 @@ impl PolicyBundle {
             operators: raw.operators_block.entries,
             gates: raw.gates,
             roles: raw.roles,
+            lanes: raw.lanes,
             role_ceilings,
             escalation_timeout: Duration::from_secs(raw.escalation_policy.timeout_secs),
             escalation_window: Duration::from_secs(raw.escalation_policy.window_secs),
@@ -341,14 +383,8 @@ impl PolicyBundle {
             allowed_worktree_roots: raw.sessions.allowed_worktree_roots,
             max_delegation_ttl: Duration::from_secs(raw.delegations.max_ttl_secs),
             base_cost_per_intent_kind: raw.budget.base_cost_per_intent_kind,
-            // policy_sha256 is always set by loader::load_policy via with_sha256()
-            // before the bundle is returned to the kernel. The value is the
-            // SHA-256 of the raw file bytes computed independently by the loader.
-            // meta.policy_sha256 from the TOML is intentionally ignored here:
-            // it is a self-referential field that cannot be verified (see
-            // loader.rs module comment) and the Ed25519 signature is the actual
-            // integrity check. Initialise to empty so any caller that forgets
-            // to call with_sha256() gets an obviously wrong value.
+            cost_per_touched_path: raw.budget.cost_per_touched_path,
+            max_cost_per_task: raw.budget.max_cost_per_task,
             policy_sha256: String::new(),
             signed_by: raw.meta.signed_by,
             signed_at: raw.meta.signed_at,
@@ -476,6 +512,26 @@ impl PolicyBundle {
     /// in the kernel's budget subsystem).
     pub fn base_cost_for_intent_kind(&self, intent_kind: &str) -> Option<u64> {
         self.base_cost_per_intent_kind.get(intent_kind).copied()
+    }
+
+    /// Cost to add per touched file in the VCS diff.
+    pub fn cost_per_touched_path(&self) -> u64 {
+        self.cost_per_touched_path
+    }
+
+    /// Per-task admission cost cap (before lane enforcement).
+    pub fn max_cost_per_task(&self) -> u64 {
+        self.max_cost_per_task
+    }
+
+    /// Lane configuration for a named lane. Returns `None` if not found.
+    pub fn lane_config(&self, lane_id: &str) -> Option<&LaneEntry> {
+        self.lanes.iter().find(|l| l.lane_id == lane_id)
+    }
+
+    /// All lane definitions.
+    pub fn lanes(&self) -> &[LaneEntry] {
+        &self.lanes
     }
 
     // ── Artifact metadata ───────────────────────────────────────────────────
