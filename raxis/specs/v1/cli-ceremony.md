@@ -1,21 +1,23 @@
 # RAXIS — Part 4: CLI, Genesis Ceremony, and Fixtures
 
-> **Scope:** `raxis-cli` subcommands and their normative behaviour (§4.1), the genesis key ceremony step-by-step (§4.2), and the canonical integration test fixtures with their v1 test matrix cross-references (§4.3).
+> **Scope:** `raxis` subcommands and their normative behaviour (§4.1), the genesis key ceremony step-by-step (§4.2), and the canonical integration test fixtures with their v1 test matrix cross-references (§4.3).
 >
 > **Navigation:** [README](../../README.md) | [Part 2 Store](kernel-store.md) | [Part 3](peripherals.md) | [Planner API](planner-api.md)
 >
 > **Authority:** Where this file and `kernel-store.md` conflict on key file names, formats, or paths, `kernel-store.md` §2.5.4 wins. Where this file describes CLI subcommand behaviour that drives the operator auth protocol, `kernel-store.md` §2.5.5 wins on the wire format.
+>
+> **Binary vs crate name.** The user-facing operator binary is **`raxis`**. The Cargo crate that produces it is `raxis-cli` (kept stable so workspace dependencies do not have to churn). Earlier drafts of this spec used `raxis-cli` everywhere; treat any remaining `raxis-cli <subcommand>` example below as equivalent to `raxis <subcommand>` — the binary on disk and on `$PATH` is `raxis`.
 
 ---
 
-## §4.1 — `raxis-cli` Subcommands
+## §4.1 — `raxis` Subcommands
 
-`raxis-cli` is the operator-facing binary. All operator interactions with the kernel go through this tool. It communicates exclusively over the operator UDS (`<data_dir>/sockets/operator.sock`), performing the challenge-response handshake on every invocation.
+`raxis` is the operator-facing binary. All operator interactions with the kernel go through this tool. It communicates exclusively over the operator UDS (`<data_dir>/sockets/operator.sock`), performing the challenge-response handshake on every invocation.
 
 ### Global flags
 
 ```
-raxis-cli [--data-dir <path>] [--socket <path>] <subcommand>
+raxis [--data-dir <path>] [--socket <path>] <subcommand>
 ```
 
 | Flag | Default | Description |

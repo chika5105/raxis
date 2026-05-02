@@ -1,6 +1,6 @@
 # RAXIS — Part 2 (Store): Closing Gaps — Schema, Signing, Keys, and Operator Auth
 
-> **Scope:** Part 2.5 — store DDL (all 18 `kernel.db` tables, §2.5.1), VCS path scope enforcement (§2.5.8, **normative**), audit log transaction boundary (§2.5.2), plan artifact signing contract (§2.5.3), key inventory (§2.5.4), operator authentication protocol (§2.5.5), `[[gates]]` normative schema (§2.5.6), INV amendments (§2.5.7).
+> **Scope:** Part 2.5 — store DDL (all 19 `kernel.db` tables: 16 core + Tables 17–18 VCS path scope + Table 19 policy_epoch_history, §2.5.1), VCS path scope enforcement (§2.5.8, **normative**), audit log transaction boundary (§2.5.2), plan artifact signing contract (§2.5.3), key inventory (§2.5.4), operator authentication protocol (§2.5.5), `[[gates]]` normative schema (§2.5.6), INV amendments (§2.5.7).
 >
 > **Authority:** When table name, column name, or column type in Part 2 Core prose conflicts with the canonical DDL here, this file wins for representation details. When this file is silent on FSM semantics, Part 2 Core wins.
 >
@@ -15,7 +15,7 @@ Part 2.5 provides the normative specifications that are referenced throughout Pa
 **Resolution rule:** When a table name, column name, or column type in Parts 2.3–2.4 prose conflicts with the canonical DDL in §2.5.1, the DDL wins for representation details. When the DDL is silent on FSM semantics (state transitions, actor rules, evaluation order), Parts 2.3–2.4 win.
 
 > Part 2.5 is structured as seven sections, written incrementally with review between each.
-> §2.5.1 — Store DDL and isolation model: database file layout, runtime pragmas, canonical schema for all 18 kernel tables (Tables 1–16 core + Tables 17–18 VCS path scope), indexes, and migration inventory.
+> §2.5.1 — Store DDL and isolation model: database file layout, runtime pragmas, canonical schema for all 19 kernel tables (Tables 1–16 core + Tables 17–18 VCS path scope + Table 19 policy_epoch_history), indexes, and migration inventory.
 > §2.5.2 — Audit log transaction boundary: write ordering between SQLite commits and `raxis-audit-tools` JSONL appends, crash-window characterisation, and what `recovery::reconcile` assumes as ground truth when the two diverge **(complete)**.
 > §2.5.3 — Plan artifact signing contract: byte-exact signing domain, canonical serialisation, `plan.sig` format, plan-signing key (operator), IPC path, and `create_initiative` call path **(complete)**.
 > §2.5.4 — Key inventory and custody model: all four key families, who holds what at runtime vs at ceremony time, blast-radius characterisation for each **(complete)**.
@@ -132,13 +132,24 @@ When a separate read-only connection pool is introduced in a future version (per
 | Operation | Tables written in one transaction | Source-of-truth contract |
 |---|---|---|
 | `lifecycle::transition_task` (+ `evaluate_terminal_criteria` it calls) | `tasks`, `initiatives`, `task_dag_edges` (via `release_successors`), audit-pointer | `kernel-core.md` §4.6, INV-INIT-04 |
-| `lifecycle::approve_plan` (+ `scheduler::admit` it calls per task) | `initiatives`, `tasks`, `task_dag_edges`, `signed_plan_artifacts`, audit-pointer | `kernel-core.md` §4.6 + Part 2.3 admit |
+| `lifecycle::approve_plan` (+ `scheduler::admit_in_tx` it calls per task) | `initiatives`, `tasks`, `task_dag_edges`, `signed_plan_artifacts`, audit-pointer | `kernel-core.md` §4.6 + Part 2.3 admit |
 | `policy_manager::advance_epoch` Phase 1 | `delegations` (sweep), `sessions` (prompt-cache invalidation), `policy_epoch_history` (Table 19 insert), audit-pointer | `kernel-core.md` §`policy_manager.rs`, INV-POLICY-01 below |
 | `handlers/intent` accepting an intent | `tasks` (intent fields + state), `task_intent_ranges`, `lane_budget_reservations`, audit-pointer | `kernel-core.md` Part 2.3 §`handlers/intent.rs` "Budget check and reservation" + `transition_task` call (which is itself bound by INV-INIT-04) |
 | `gates/witness_index::write` | `witness_records`, `verifier_run_tokens` (consumed), audit-pointer | Part 2.3 §witness_index.rs |
 | `recovery::reconcile_tasks` (+ `expire_orphan_verifier_tokens` it calls) | `tasks` (sweep to BlockedRecoveryPending), `verifier_run_tokens` (orphan expiry), audit-pointer | `kernel-core.md` §recovery.rs, INV-INIT-08 |
 
 For each operation in this table, splitting writes across two transactions or two mutex acquisitions is a spec violation: another tokio task could interleave between them and observe an inconsistent intermediate state (e.g. for `advance_epoch`, see new delegations marked stale but old `policy_epoch_history` MAX still in place, allowing a stale-policy escalation to slip through). Any future kernel operation that needs to compose multiple table writes atomically MUST be added to this table as part of its spec PR.
+
+**Deferred-FK pattern for intra-plan references.** `lifecycle::approve_plan` issues `PRAGMA defer_foreign_keys = 1;` immediately after `BEGIN`. This is required because plans frequently declare dependent tasks (`t2.predecessors = ["t1"]`) and the per-task admit pass inserts task rows + edge rows interleaved — at the moment the edge `(t1, t2)` is inserted while admitting `t2`, both `t1` and `t2` already exist as task rows but the FK on `task_dag_edges.predecessor_task_id → tasks(task_id)` would fail under default (immediate) FK mode if predecessors were inserted later in the same statement batch. Deferred-FK is per-transaction and reverts on COMMIT/ROLLBACK; cross-table integrity is still validated at COMMIT, so a plan that references a non-existent task ID still causes the entire `approve_plan` to roll back.
+
+**Implementation pointer.** The `approve_plan` flow is:
+1. Acquire the `Store` mutex (one acquisition for the entire operation).
+2. Pre-tx reads (initiative state, plan bytes, plan signature) — these may legitimately fail before any write happens.
+3. `BEGIN` → `PRAGMA defer_foreign_keys = 1` → conditional UPDATE on `initiatives` (re-checks Draft inside the tx to close the TOCTOU window).
+4. For each `PlanTask` parsed from the plan TOML: call `scheduler::admit_in_tx(&tx, task, policy_epoch)` which (a) runs `dag::detect_cycle_in` against the in-progress edge set, (b) inserts the task row, (c) inserts that task's edges via `dag::insert_edges_in`.
+5. `COMMIT` → drop the mutex → emit the `PlanApproved` audit record (per §2.5.2 audit-after-commit ordering).
+
+Audit emission **after** commit is mandatory: an audit record for an operation that did not commit would corrupt the chain. The kernel routes every audit emission through the `raxis-audit-tools::AuditSink` trait held on `HandlerContext` (production wiring is `FileAuditSink` over `<data_dir>/audit/segment-000.jsonl`; tests inject `FakeAuditSink`). Direct `eprintln!`-based audit emission is forbidden — the only acceptable use of `eprintln!` in handler code is fallback logging when an `AuditSink::emit` call itself fails (a §2.5.2 "SQLite committed, JSONL not appended" gap that recovery::reconcile repairs).
 
 **Policy epoch atomicity invariant (INV-POLICY-01).** `policy_manager::advance_epoch` Phase 1 (the SQL-write phase) writes to `delegations`, `sessions`, `policy_epoch_history`, and the audit-pointer table inside one transaction held under one INV-STORE-01 mutex acquisition. Phase 2 (in-memory `ArcSwap` swaps for `ctx.policy` and `ctx.allowlist_cache`) runs only after Phase 1 commits, and is infallible. Phase 3 (gateway `EpochAdvanced` signal) is best-effort and does not affect the success of the advance. The full phase contract — including failure modes for each phase, audit events for both rejection (`PolicyAdvanceRejected`) and post-`BEGIN` failure (`PolicyAdvanceFailed`), and crash semantics (which reduce to single-transaction commit/no-commit) — is normative in `kernel-core.md` §`policy_manager.rs`. A partially-applied epoch advance is structurally impossible: either all four SQL writes commit and the in-memory caches are then swapped, or the transaction rolls back and the kernel observably remains at the old epoch with no audit `PolicyEpochAdvanced` row.
 
@@ -149,6 +160,21 @@ For each operation in this table, splitting writes across two transactions or tw
 **Type-safety invariant (INV-STORE-03):** To prevent runtime SQL errors from typos or schema drift, **no Rust source file in `raxis/kernel/src` may contain a raw SQL table-name or state-value string literal**. 
 - **Table names** must be dynamically interpolated using the `raxis-store::Table` enum. A module interacting with the database must define a module-level constant (e.g., `const TASKS: &str = Table::Tasks.as_str();`) and use `format!()` to inject it into the query string.
 - **State values** (e.g., TaskState, InitiativeState) must use the relevant enum's `.as_sql_str()` method as bound parameters.
+
+---
+
+#### Hash table strategy (kernel-internal maps)
+
+The kernel uses two hash families for in-memory maps and sets, picked by the **trust origin of the key**:
+
+| Key origin | Default type | Rationale |
+|---|---|---|
+| Untrusted IPC frame, planner-supplied content, anything that can be chosen by an adversary to provoke worst-case collisions | `std::collections::HashMap` (SipHash-1-3) | HashDoS-resistant; the per-process random key prevents a remote attacker from constructing a colliding key set. |
+| Operator-controlled or kernel-internal: lane IDs, gate types, capability classes, `task_id` after admission, `session_id` after creation, file paths derived by the kernel from `vcs::diff` | `rustc_hash::FxHashMap` / `FxHashSet` | Faster (~2× lookup, ~3× insert on small string keys); the FxHash function is intentionally non-DoS-resistant, but every key in this category is a value the kernel either generated itself or read from an artifact the operator signed — none are user-attacker-influenced at runtime. |
+
+**Migration policy.** Modules adopting `FxHashMap` MUST justify the choice in a code comment that names the trust origin (e.g. "lane_id is read from the signed PolicyBundle; operator-controlled"). A code review that finds an `FxHashMap` keyed by a planner-supplied `String` is a P0 review block: the module must either revert to `HashMap` or prove (via a wrapped newtype with a length cap and character-set restriction) that the key cannot be adversarially shaped.
+
+**Wire serialization.** Both map types serialize identically over `serde`/`bincode` — the choice is a memory-representation decision and never appears on the wire.
 
 ---
 
@@ -1055,22 +1081,33 @@ CREATE INDEX IF NOT EXISTS idx_nonce_cache_observed_at
 5. **Atomically:** `UPDATE sessions SET sequence_number = sequence_num WHERE session_id = ?`. Both the INSERT and UPDATE commit together or both roll back. This preserves the invariant `sessions.sequence_number == MAX(nonce_cache.sequence_num)` for this session.
 6. Dispatch to handler. No handler logic executes before steps 2–5 complete.
 
+> **Implementation pointer:** Steps 2–5 are implemented by
+> `kernel::authority::session::accept_envelope_and_advance_sequence`,
+> which is the single entry point called from
+> `kernel::handlers::intent::handle_inner` before any business logic
+> runs. Its `EnvelopeReplayReason` enum (`DuplicateNonce`,
+> `SequenceAlreadyAccepted`, `SequenceGap`, `MalformedNonce`) is what
+> populates the `reason` field in the `ReplayRejected` audit event.
+> Direct callers of `update_sequence_number` are forbidden in the
+> message ingress path; that helper is retained only for
+> bootstrap/recovery flows that do not carry an envelope nonce.
+
 ---
 
-> **§2.5.1 — DDL Part 3 of 4 complete.**
+> **§2.5.1 — DDL Part 4 of 4 complete.**
 >
-> **All 18 canonical `kernel.db` tables are now specified** (tables 17–18 added by §2.5.8 VCS Path Scope Enforcement):
+> **All 19 canonical `kernel.db` tables are now specified** (tables 17–18 added by §2.5.8 VCS Path Scope Enforcement; Table 19 added by `policy_manager.rs::advance_epoch` Phase 1 in `kernel-core.md`):
 >
 > | Part | Tables |
 > |------|--------|
 > | Part 1 | `schema_version` (1), `initiatives` (2), `signed_plan_artifacts` (3), `sessions` (4), `tasks` (5), `task_dag_edges` (6) |
 > | Part 2 | `delegations` (7), `escalations` (8), `approval_tokens` (9), `approval_proofs` (10), `approval_token_nonces` (11), `verifier_run_tokens` (12) |
 > | Part 3 | `witness_records` (13), `lane_budget_reservations` (14), `lineage_rate_limits` (15), `nonce_cache` (16) |
-> | Part 4 | `task_intent_ranges` (17), `task_exported_path_snapshots` (18) |
+> | Part 4 | `task_intent_ranges` (17), `task_exported_path_snapshots` (18), `policy_epoch_history` (19) |
 >
-> The v1 baseline migration (migration 1) creates all 18 tables atomically. All table names in this DDL are canonical and supersede any conflicting names in Parts 2.1–2.4.
+> The v1 baseline migration (migration 1) creates all 19 tables atomically. All table names in this DDL are canonical and supersede any conflicting names in Parts 2.1–2.4. The Rust implementation enforces this via the `raxis_store::Table` enum and the `INV-STORE-03` rule "no raw SQL table-name literals in `raxis/kernel/src`; use `Table` enum + `.as_str()`".
 
-**DDL Part 4 of 4 — VCS Path Scope Enforcement tables (Tables 17–18)**
+**DDL Part 4 of 4 — VCS Path Scope Enforcement tables (Tables 17–18) and policy epoch ledger (Table 19)**
 
 ```sql
 -- ============================================================
@@ -1186,7 +1223,7 @@ CREATE INDEX IF NOT EXISTS idx_policy_epoch_history_advanced_at
 Every kernel state mutation follows a strict two-phase write order:
 
 1. **SQLite commit first.** The store transaction is committed and `fsync`-equivalent durability is guaranteed before any audit record is attempted.
-2. **JSONL append second.** `AuditTools::append` writes the serialised audit record to the JSONL file and flushes after the store commit returns `Ok`.
+2. **JSONL append second.** `AuditSink::emit` (production impl: `FileAuditSink` wrapping `AuditWriter::append`) writes the serialised audit record to the JSONL file and flushes after the store commit returns `Ok`. The kernel exposes the sink through `HandlerContext::audit: Arc<dyn AuditSink>`; tests inject `FakeAuditSink` for in-memory capture without touching disk.
 
 The JSONL audit log is the human-readable, tamper-evident ledger. SQLite is the ground truth for all FSM state. These roles never invert.
 
@@ -1251,12 +1288,24 @@ Both files are written by `raxis-cli plan sign`. The kernel reads both **once**,
 
 #### Byte-exact signing domain
 
-The signature covers the **exact bytes of `plan.toml` as read from disk** — no normalization, no canonicalization, no whitespace stripping, no BOM handling. The SHA-256 of those exact bytes is computed first; the Ed25519 signature is over that SHA-256 digest (not over the raw bytes directly, for auditability).
+The signature covers the **exact bytes of `plan.toml` as read from disk** — no normalization, no canonicalization, no whitespace stripping, no BOM handling. The signing input is a **domain-prefixed** SHA-256 digest, and the Ed25519 signature is over that digest (not over the raw bytes directly, for auditability and cross-protocol replay defence).
 
 ```
-plan_sha256   = SHA-256(file_bytes(plan.toml))
-signature_hex = Ed25519Sign(operator_private_key, plan_sha256)
+canonical_input = "RAXIS-V1-PLAN" || 0x00 || file_bytes(plan.toml)
+signing_input   = SHA-256(canonical_input)            -- 32 bytes
+signature_hex   = Ed25519Sign(operator_private_key, signing_input)
+
+plan_sha256     = SHA-256(file_bytes(plan.toml))      -- without the prefix;
+                                                      -- recorded separately
+                                                      -- in plan.sig and in
+                                                      -- initiatives.plan_artifact_sha256
 ```
+
+The `"RAXIS-V1-PLAN"` 13-byte ASCII prefix and the `0x00` terminator are mandatory. They are the same domain-separation pattern used by `"RAXIS-V1-DELEGATION-GRANT"` (§2.5.5 below) and `"RAXIS-V1-ESCALATION-APPROVE"`. Without the prefix, an Ed25519 signature minted for one purpose could be replayed as a valid signature for another — see §2.5.5 "Why a domain-separation prefix" for the worked example.
+
+`plan_sha256` (the **un**-prefixed SHA-256) is NOT what is signed. It is recorded as a separate field in `plan.sig` for human inspection and as `initiatives.plan_artifact_sha256` for join lookups. The kernel does not verify against `plan_sha256`; verification recomputes `signing_input` from `plan_bytes` on each call.
+
+Canonical implementation: `raxis-crypto::plan::plan_signing_input` (signer side, called by `raxis-cli plan sign` / `policy sign`) and `raxis-crypto::plan::verify_plan_signature` (verifier side, called by `kernel::initiatives::lifecycle::approve_plan`). Both routes MUST go through these two functions; signing or verifying directly via `Ed25519::sign`/`Ed25519::verify` over any other byte string is a spec violation. The `cli/tests/plan_sign_roundtrip.rs` integration test pins this contract: it signs via the canonical helper and verifies via the kernel's verifier, and it asserts that signatures over the raw plan bytes OR over the hex string of `plan_sha256` are rejected.
 
 Post-sign editing of `plan.toml` — including whitespace or comment changes — **invalidates the signature**. The ceremony tool is the canonical generator; operators review the TOML before signing, not after.
 
@@ -1282,10 +1331,16 @@ Operator → raxis-cli plan submit <initiative_id> <plan_dir>
     → kernel IPC: CreateInitiative { initiative_id, plan_toml_path, plan_sig_path }
     → kernel reads plan.toml bytes, plan.sig
     → verifies: SHA-256(plan.toml bytes) == plan.sig.plan_sha256
-    → verifies: Ed25519Verify(operator_pubkey, plan.sig.plan_sha256, plan.sig.signature) == Ok
+    → verifies: raxis_crypto::plan::verify_plan_signature(
+                    operator_pubkey,         -- looked up via plan.sig.signed_by
+                    plan_bytes,              -- raw file bytes
+                    plan.sig.signature,      -- 64 raw bytes (decoded from hex)
+                ) == Ok
     → if ok: INSERT INTO initiatives + INSERT INTO signed_plan_artifacts (Table 3)
     → returns: InitiativeCreated { initiative_id } or error
 ```
+
+The verifier function reconstructs `signing_input = SHA-256("RAXIS-V1-PLAN\0" || plan_bytes)` and calls `Ed25519::verify(pubkey, signing_input, signature)`. Calling `Ed25519::verify` with `plan.sig.plan_sha256` (the bare digest, no domain prefix) or with `plan_bytes` directly would NOT produce a valid verification under the canonical scheme and is a spec violation.
 
 `create_initiative` seals the plan into `signed_plan_artifacts` (§2.5.1 Table 3) by inserting a single row with exactly four columns:
 
@@ -1301,7 +1356,16 @@ The other fields of `plan.sig` — `signed_by` (operator pubkey fingerprint), `s
 
 #### `approve_plan` call path
 
-`approve_plan` does not re-verify the signature — it trusts the record in `signed_plan_artifacts` written at `create_initiative` time. It only checks that the `signed_plan_artifacts` row exists and `initiatives.status == Draft`. Signature verification happens exactly once, at `create_initiative`.
+`approve_plan` re-verifies the signature against the operator pubkey resolved from current policy (NOT against a key cached at `create_initiative` time). The cost is one Ed25519 verification per approval — negligible. The benefit: if an operator key is rotated or removed between submission and approval, the approval fails closed instead of executing under a key that policy no longer accepts. The kernel reads `plan_bytes` and `plan_sig` from `signed_plan_artifacts` (sealed at submission, never mutated thereafter — INV-INIT-06) and routes them through `raxis_crypto::plan::verify_plan_signature` exactly as `create_initiative` did. Only on success does it transition the initiative to `Executing` and admit tasks (see `kernel-core.md` §2.4 task FSM).
+
+The operator public key MUST be looked up via `policy.operator_entry(approving_operator).pubkey_hex` — it is **never** taken from the wire. The `OperatorRequest::ApprovePlan { operator_pubkey_hex }` field exists only for back-compat with already-deployed CLI builds; the kernel **ignores** its value (it is not even decoded). New clients SHOULD send an empty string.
+
+Two checks gate `approve_plan` before any signature verification:
+
+1. **Identity binding (no impersonation).** The connected operator's challenge-response handshake established `AuthenticatedOperator { fingerprint, .. }` at the start of the connection. The handler enforces `request.approving_operator == authenticated.fingerprint`; mismatch → `FAIL_OPERATOR_IDENTITY_MISMATCH`. Without this, operator A holding a valid socket connection could submit a request claiming to be operator B and forge a "B-approved" plan.
+2. **Trusted-operator lookup.** `approving_operator` MUST resolve to an entry in the loaded `policy.operators`. Absence → `FAIL_OPERATOR_UNKNOWN`. The pubkey used for Ed25519 verification is read from this entry's `pubkey_hex` and decoded inside the handler.
+
+Reference implementation: `raxis-kernel::ipc::operator::handle_approve_plan`.
 
 #### Immutability
 
@@ -1888,6 +1952,20 @@ Run `check_paths(touched_paths, task_id, store)`. On `PathPolicyViolation` → r
 
 **Step 7A — record accepted range (new):**
 On successful admission, inside the **same store transaction** as **step 4 — Task binding** (Part 2.4 `handlers/intent.rs`, bullet **Bind or refresh SHA fields**): the handler already issued `UPDATE tasks SET session_id = ..., evaluation_sha = req.head_commit_sha, base_sha = req.base_commit_sha, submitted_claims_json = ...` for this intent. **Step 7A does not issue a second `UPDATE` to `evaluation_sha`.** In that same transaction, append:
+
+> **Implementation status:** the durable substrate of step 7A — the
+> `INSERT OR IGNORE INTO task_intent_ranges` itself — is implemented in
+> `kernel::handlers::intent::insert_task_intent_range`, called as
+> "Step 12A" in the current handler pipeline. The compositional
+> requirement (steps 10–12 + 12A in a *single* SQLite transaction) is
+> deferred to PR-6b; the present implementation runs each helper as its
+> own auto-commit. This is a known INV-STORE-02 gap, tracked in the
+> review ledger; it does NOT regress safety because the writes are
+> append-only and the only durable cross-table relationship the gap
+> could violate is "task_intent_ranges row exists for an
+> evaluation_sha that the tasks row does not record" — which the
+> handler's strict ordering (UPDATE tasks then INSERT
+> task_intent_ranges) makes impossible in practice.
 ```sql
 INSERT INTO task_intent_ranges (task_id, base_sha, head_sha, accepted_at)
 VALUES (?, ?, ?, unixepoch())
