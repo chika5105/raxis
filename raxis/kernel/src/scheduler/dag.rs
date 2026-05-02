@@ -18,41 +18,65 @@ const TASKS: &str          = Table::Tasks.as_str();
 const DAG_EDGES: &str      = Table::TaskDagEdges.as_str();
 
 pub fn add_task(
-    task_id:      &str,
-    dependencies: &[String],
-    store:        &Store,
+    initiative_id: &str,
+    task_id:       &str,
+    dependencies:  &[String],
+    store:         &Store,
 ) -> Result<(), SchedulerError> {
-    detect_cycle(task_id, dependencies, store)?;
-    insert_edges(task_id, dependencies, store)
+    let conn = store.lock_sync();
+    detect_cycle_in(&conn, task_id, dependencies)?;
+    insert_edges_in(&conn, initiative_id, task_id, dependencies)
 }
 
-pub fn insert_edges(
-    task_id:      &str,
-    dependencies: &[String],
-    store:        &Store,
+/// Insert DAG edges for a single task using the supplied connection.
+///
+/// Takes `&Connection` so the caller can supply either a raw connection
+/// (auto-commit) or a `Transaction<'_>`. Per kernel-store.md §2.5.1 INV-STORE-02
+/// row "approve_plan", task rows and edge rows MUST be written in one
+/// transaction — so production callers always pass a `Transaction<'_>`.
+///
+/// `initiative_id` populates the `task_dag_edges.initiative_id` column,
+/// which is `NOT NULL REFERENCES initiatives(initiative_id)` per
+/// kernel-store.md §2.5.1 Table 6.
+pub fn insert_edges_in(
+    conn:          &rusqlite::Connection,
+    initiative_id: &str,
+    task_id:       &str,
+    dependencies:  &[String],
 ) -> Result<(), SchedulerError> {
     if dependencies.is_empty() {
         return Ok(());
     }
-    let conn = store.lock_sync();
     for dep_id in dependencies {
         conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO {DAG_EDGES}
-                    (predecessor_task_id, successor_task_id)
-                 VALUES (?1, ?2)"
+                    (initiative_id, predecessor_task_id, successor_task_id)
+                 VALUES (?1, ?2, ?3)"
             ),
-            rusqlite::params![dep_id, task_id],
+            rusqlite::params![initiative_id, dep_id, task_id],
         )?;
     }
     Ok(())
 }
 
-pub fn detect_cycle(
+/// Cycle detection over the proposed dependency edges.
+///
+/// Reads `task_dag_edges` only — it does not write — but it MUST run inside
+/// the same transaction that will insert the new edges, otherwise a
+/// concurrent `admit` could insert a counter-edge between the check and
+/// our insert and turn the resulting graph into a cycle.
+///
+/// The implementation is iterative DFS bounded by `MAX_DAG_DEPTH`.
+pub fn detect_cycle_in(
+    conn:          &rusqlite::Connection,
     new_task:      &str,
     proposed_deps: &[String],
-    store:         &Store,
 ) -> Result<(), SchedulerError> {
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT predecessor_task_id FROM {DAG_EDGES} WHERE successor_task_id=?1"
+    ))?;
+
     for dep in proposed_deps {
         let mut visited = std::collections::HashSet::new();
         let mut stack   = vec![(dep.to_owned(), 0usize)];
@@ -64,12 +88,15 @@ pub fn detect_cycle(
             if node == new_task {
                 return Err(SchedulerError::CyclicDependency);
             }
-            if visited.contains(&node) {
+            if !visited.insert(node.clone()) {
                 continue;
             }
-            visited.insert(node.clone());
 
-            for pred in get_predecessors(&node, store)? {
+            let preds: Vec<String> = stmt
+                .query_map(rusqlite::params![&node], |r| r.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            for pred in preds {
                 stack.push((pred, depth + 1));
             }
         }
@@ -159,18 +186,6 @@ pub fn mark_task_complete(task_id: &str, store: &Store) -> Result<(), SchedulerE
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
-
-fn get_predecessors(task_id: &str, store: &Store) -> Result<Vec<String>, SchedulerError> {
-    let conn = store.lock_sync();
-    let mut stmt = conn.prepare(&format!(
-        "SELECT predecessor_task_id FROM {DAG_EDGES} WHERE successor_task_id=?1"
-    ))?;
-    let ids: Vec<String> = stmt
-        .query_map(rusqlite::params![task_id], |r| r.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
-        .collect();
-    Ok(ids)
-}
 
 /// Builds the SQL `'State1', 'State2', ...` literal for NOT IN clauses.
 /// Derived entirely from the TaskState enum — no raw strings.

@@ -9,17 +9,21 @@
 //   - gates/ authority/ vcs/ (structural invariant per §2.3)
 //
 // Public API re-exports per scheduler/mod.rs spec:
-//   pub use admit::admit;
+//   pub use admit::{admit_in_tx, PlanTask};
 //   pub use dag::{next_ready_tasks, mark_task_complete, transition_to_admitted};
 //   pub use lane::{lane_config_for_row, get_lane_status};
 //   pub use budget::{check_budget, current_budget};
+//
+// Note: `admit_in_tx` (formerly `admit`) takes a borrowed `&Connection` so the
+// caller — exclusively `lifecycle::approve_plan` — can compose all task admits
+// for one initiative inside one transaction, as required by INV-STORE-02.
 
 pub mod admit;
 pub mod dag;
 pub mod lane;
 pub mod budget;
 
-pub use admit::admit;
+pub use admit::{admit_in_tx, PlanTask};
 pub use dag::{next_ready_tasks, mark_task_complete, transition_to_admitted};
 pub use lane::{lane_config_for_row, get_lane_status};
 pub use budget::{check_budget, current_budget};

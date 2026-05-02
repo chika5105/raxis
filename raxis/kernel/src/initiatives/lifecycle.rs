@@ -22,10 +22,12 @@
 //   signed_plan_artifacts — immutable plan bytes + sig (separate from initiatives)
 //   tasks         — task rows, FK to initiatives
 
+use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_store::{Store, Table};
 use raxis_types::{InitiativeState, TaskState};
 
 use crate::authority::keys::AuthorityError;
+use crate::scheduler::{self, SchedulerError};
 
 // Table name consts — one definition, used everywhere below.
 const INITIATIVES: &str            = Table::Initiatives.as_str();
@@ -61,6 +63,9 @@ pub enum LifecycleError {
 
     #[error("plan TOML invalid: {reason}")]
     PlanInvalid { reason: String },
+
+    #[error("scheduler error during admission: {0}")]
+    Scheduler(#[from] SchedulerError),
 
     #[error("store error: {0}")]
     Store(#[from] raxis_store::StoreError),
@@ -140,7 +145,22 @@ pub fn create_initiative(
         ],
     )?;
 
-    let sig_bytes = hex::decode(plan_sig_hex).unwrap_or_default();
+    // Reject malformed hex up-front rather than silently storing an empty
+    // `plan_sig` (which would later fail signature verification with a
+    // misleading "Ed25519 signature verification failed" error and obscure
+    // the real cause). Surfaces as `PlanInvalid` so the operator sees the
+    // actual problem.
+    let sig_bytes = hex::decode(plan_sig_hex).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("plan signature is not valid hex: {e}"),
+    })?;
+    if sig_bytes.len() != 64 {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "plan signature must be 64 bytes (Ed25519); got {} bytes",
+                sig_bytes.len()
+            ),
+        });
+    }
     conn.execute(
         &format!(
             "INSERT INTO {SIGNED_PLAN_ARTIFACTS}
@@ -171,19 +191,34 @@ pub fn create_initiative(
 // ---------------------------------------------------------------------------
 
 /// Approve a plan: verify the operator Ed25519 signature, parse task definitions
-/// from the plan TOML, admit all tasks (insert task rows in Admitted state),
-/// and transition the initiative from `Draft` to `Executing`.
+/// from the plan TOML, admit all tasks (insert task rows + DAG edges in
+/// Admitted state), and transition the initiative from `Draft` to `Executing`.
 ///
 /// Spec INV-INIT-01: task rows are derived from plan TOML at approval time.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1, table row "approve_plan").**
+/// All writes — the `initiatives` UPDATE, every `tasks` INSERT, and every
+/// `task_dag_edges` INSERT — happen inside ONE `BEGIN`/`COMMIT` held under
+/// ONE mutex acquisition. Failure on any task admit (cycle detected, FK
+/// violation, lane validation) rolls back the entire transaction; the
+/// initiative remains `Draft` and no partial task rows linger.
+///
+/// The audit event is intentionally emitted **after** `tx.commit()` per
+/// kernel-store.md §2.5.2 ("SQLite committed first, JSONL appended second").
+/// PR-8 will replace the `eprintln!` with `AuditWriter::append`.
 pub fn approve_plan(
-    initiative_id:      &str,
-    approving_operator: &str,
+    initiative_id:         &str,
+    approving_operator:    &str,
     operator_pubkey_bytes: &[u8],
+    policy_epoch:          u64,
     store: &Store,
+    audit: &dyn AuditSink,
 ) -> Result<PlanApproved, LifecycleError> {
-    let conn = store.lock_sync();
+    let mut conn = store.lock_sync();
 
-    // Load initiative row — must be in Draft state.
+    // ── Pre-tx reads (cheap, do not need to be in the tx) ────────────────
+    // We read state + plan bytes + sig before BEGIN so a malformed sig or
+    // a non-Draft initiative does not even start a transaction.
     let current_state: String = conn.query_row(
         &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
         rusqlite::params![initiative_id],
@@ -194,7 +229,6 @@ pub fn approve_plan(
         },
         other => LifecycleError::Sql(other),
     })?;
-
     if current_state != InitiativeState::Draft.as_sql_str() {
         return Err(LifecycleError::InitiativeTerminal { current_state });
     }
@@ -203,39 +237,93 @@ pub fn approve_plan(
         &format!("SELECT plan_bytes, plan_sig FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1"),
         rusqlite::params![initiative_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
-    ).map_err(|e| LifecycleError::Sql(e))?;
+    )?;
 
-    // Verify Ed25519 signature over raw plan bytes.
-    raxis_crypto::verify::verify_ed25519(operator_pubkey_bytes, &plan_bytes, &plan_sig)
+    // Canonical Ed25519 verification per kernel-store.md §2.5.3 (the same
+    // signing domain the CLI's `policy sign` constructs). Verifying raw
+    // plan bytes — as an earlier draft did — would reject every CLI sig.
+    raxis_crypto::plan::verify_plan_signature(operator_pubkey_bytes, &plan_bytes, &plan_sig)
         .map_err(|e| LifecycleError::PlanSignatureInvalid {
             reason: e.to_string(),
         })?;
 
-    let now  = now_unix_secs();
     let plan_toml_str = String::from_utf8_lossy(&plan_bytes);
-    let tasks = parse_plan_tasks(&plan_toml_str)?;
-    let task_count = tasks.len();
+    let plan_tasks    = parse_plan_tasks(&plan_toml_str)?;
+    let task_count    = plan_tasks.len();
+    let now           = now_unix_secs();
 
-    // Transition initiative: Draft → Executing.
-    conn.execute(
+    // ── INV-STORE-02 transaction ─────────────────────────────────────────
+    // Everything below MUST commit or roll back as one unit.
+    let tx = conn.transaction()?;
+
+    // Defer FK enforcement until COMMIT. The intra-plan FK pattern is:
+    //   task_dag_edges.predecessor_task_id → tasks(task_id)
+    // and within a single plan, tasks frequently reference each other
+    // (t2 depends on t1). We insert tasks one at a time, so the edge
+    // (t1, t2) inserted while admitting t2 would fail FK if t1 were not
+    // yet committed (it isn't — we're still inside the tx). Deferring
+    // FK to COMMIT lets the entire plan land before validation, while
+    // still rolling back on any unresolved reference at commit time.
+    tx.execute_batch("PRAGMA defer_foreign_keys = 1;")?;
+
+    // Re-check Draft inside the tx using a conditional UPDATE — this
+    // closes the TOCTOU window between the pre-tx read and BEGIN. If a
+    // concurrent caller already approved (or rejected) the initiative,
+    // `rows == 0` and we error out cleanly.
+    let rows = tx.execute(
         &format!(
             "UPDATE {INITIATIVES} SET state=?1, approved_at=?2
-             WHERE initiative_id=?3"
+             WHERE initiative_id=?3 AND state=?4"
         ),
-        rusqlite::params![InitiativeState::Executing.as_sql_str(), now, initiative_id],
+        rusqlite::params![
+            InitiativeState::Executing.as_sql_str(),
+            now,
+            initiative_id,
+            InitiativeState::Draft.as_sql_str(),
+        ],
     )?;
-
-    // Admit all tasks (insert task rows in Admitted state).
-    for task in &tasks {
-        admit_task(&conn, &task.task_id, initiative_id, &task.name, &task.lane_id)?;
+    if rows == 0 {
+        // Tx is dropped → automatic rollback. No state change.
+        return Err(LifecycleError::InitiativeTerminal {
+            current_state: "<changed concurrently>".to_owned(),
+        });
     }
 
-    eprintln!(
-        "{{\"level\":\"info\",\"event\":\"PlanApproved\",\
-         \"initiative_id\":\"{initiative_id}\",\
-         \"approving_operator\":\"{approving_operator}\",\
-         \"tasks_admitted\":{task_count}}}",
-    );
+    // Admit every task. `admit_in_tx` owns no lock and no transaction; it
+    // writes through the borrowed `&Connection` exposed by `tx`.
+    for pt in plan_tasks {
+        let task = scheduler::PlanTask {
+            task_id:       pt.task_id.clone(),
+            initiative_id: initiative_id.to_owned(),
+            lane_id:       pt.lane_id,
+            name:          pt.name,
+            dependencies:  pt.predecessors,
+        };
+        scheduler::admit_in_tx(&tx, task, policy_epoch)?;
+    }
+
+    tx.commit()?;
+    drop(conn); // release the store mutex before doing audit I/O.
+
+    // Audit-after-commit per kernel-store.md §2.5.2. A failure here
+    // produces a §2.5.2 "SQLite committed, JSONL not appended" gap that
+    // recovery::reconcile detects and repairs via ReconciliationGap;
+    // we therefore only log the failure here and return success — the
+    // store is consistent and the operator's intent has been honoured.
+    if let Err(e) = audit.emit(
+        AuditEventKind::PlanApproved {
+            initiative_id: initiative_id.to_owned(),
+            task_count,
+        },
+        None,
+        None,
+        Some(initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"PlanApproved\",\"audit_emit_failed\":\"{e}\",\
+             \"initiative_id\":\"{initiative_id}\",\"approving_operator\":\"{approving_operator}\"}}",
+        );
+    }
 
     Ok(PlanApproved {
         initiative_id: initiative_id.to_owned(),
@@ -429,15 +517,24 @@ pub fn retry_task(task_id: &str, store: &Store) -> Result<(), LifecycleError> {
 // Private helpers
 // ---------------------------------------------------------------------------
 
+/// One task entry parsed from a plan TOML `[[tasks]]` array.
+///
+/// Spec reference: cli-ceremony.md §4.3 fixture format. `predecessors` is read
+/// from the TOML; v1 implementation uses it to populate `task_dag_edges` rows
+/// per INV-INIT-03 (`kernel-core.md` §8 Task DAG semantics).
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanTask {
-    task_id: String,
-    name:    String,
-    lane_id: String,
+    task_id:      String,
+    name:         String,
+    lane_id:      String,
+    predecessors: Vec<String>,
 }
 
-/// Parse [[tasks]] array from plan TOML.
-/// Each entry requires: task_id (required), name (optional, defaults to task_id),
-/// lane_id (optional, defaults to "default").
+/// Parse `[[tasks]]` array from plan TOML.
+///
+/// Required: `task_id`.
+/// Optional: `name` (defaults to `task_id`), `lane_id` (defaults to `"default"`),
+///           `predecessors` (defaults to empty list).
 fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
     let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
         reason: format!("TOML parse error: {e}"),
@@ -461,35 +558,31 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .to_owned();
         let name    = entry.get("name").and_then(|v| v.as_str()).unwrap_or(&task_id).to_owned();
         let lane_id = entry.get("lane_id").and_then(|v| v.as_str()).unwrap_or("default").to_owned();
-        tasks.push(PlanTask { task_id, name, lane_id });
+
+        // predecessors: optional array of task_id strings (DAG edges).
+        let predecessors: Vec<String> = entry
+            .get("predecessors")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|p| p.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        tasks.push(PlanTask { task_id, name, lane_id, predecessors });
     }
 
     Ok(tasks)
 }
 
-/// Insert a task row in `Admitted` state.
-///
-/// DDL Table 5 requires: task_id, initiative_id, lane_id, state, actor,
-/// policy_epoch, admitted_at, transitioned_at.
-fn admit_task(
-    conn:         &rusqlite::Connection,
-    task_id:      &str,
-    initiative_id: &str,
-    _name:        &str,
-    lane_id:      &str,
-) -> Result<(), LifecycleError> {
-    let now = now_unix_secs();
-    conn.execute(
-        &format!(
-            "INSERT OR IGNORE INTO {TASKS}
-                (task_id, initiative_id, lane_id, state,
-                 actor, policy_epoch, admitted_at, transitioned_at)
-             VALUES (?1, ?2, ?3, ?4, 'kernel', 1, ?5, ?5)"
-        ),
-        rusqlite::params![task_id, initiative_id, lane_id, TaskState::Admitted.as_sql_str(), now],
-    )?;
-    Ok(())
-}
+// `admit_task` (private helper) was removed: task insertion is now done by
+// `scheduler::admit_in_tx`, which inserts both the task row AND its DAG
+// edges inside the surrounding transaction. The old helper inserted only
+// the task row, which silently dropped every `task_dag_edges` row a plan
+// declared — a violation of kernel-store.md §2.5.1 line 384 ("All edges
+// for an initiative are inserted by approve_plan alongside the task rows,
+// in the same transaction").
 
 fn now_unix_secs() -> i64 {
     std::time::SystemTime::now()
@@ -552,5 +645,286 @@ mod tests {
     fn lifecycle_error_task_not_failed_display() {
         let e = LifecycleError::TaskNotFailed { current_state: "Running".into() };
         assert!(e.to_string().contains("Running"));
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    //  approve_plan — INV-STORE-02 atomicity tests
+    //
+    // These tests verify the spec contract from kernel-store.md §2.5.1
+    // (table row "approve_plan"): every initiatives UPDATE, every tasks
+    // INSERT, and every task_dag_edges INSERT either all commit together
+    // or none do.
+    // ───────────────────────────────────────────────────────────────────
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use raxis_audit_tools::FakeAuditSink;
+    use raxis_store::Store;
+
+    /// Deterministic Ed25519 keypair for fixtures (no entropy needed).
+    fn fixture_keypair() -> (SigningKey, [u8; 32]) {
+        let sk = SigningKey::from_bytes(&[0x42u8; 32]);
+        let pk = sk.verifying_key().to_bytes();
+        (sk, pk)
+    }
+
+    /// Build a Draft initiative + signed_plan_artifacts row directly (no
+    /// IPC), returning everything the test needs to call `approve_plan`.
+    fn seed_draft_initiative(
+        store:      &Store,
+        plan_toml:  &str,
+        sk:         &SigningKey,
+    ) -> (String, Vec<u8>) {
+        let initiative_id = "init-test".to_owned();
+        let plan_bytes    = plan_toml.as_bytes().to_vec();
+        let signing_input = raxis_crypto::plan::plan_signing_input(&plan_bytes);
+        let sig_bytes     = sk.sign(&signing_input).to_bytes().to_vec();
+        let plan_sha      = raxis_crypto::plan::plan_artifact_sha256(&plan_bytes);
+        let pk_bytes      = sk.verifying_key().to_bytes();
+        let now           = now_unix_secs();
+
+        let conn = store.lock_sync();
+        // initiatives row in Draft. terminal_criteria_json is NOT NULL
+        // per kernel-store.md §2.5.1 Table 2; an empty JSON object is the
+        // canonical "no criteria yet" placeholder.
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)"
+            ),
+            rusqlite::params![
+                &initiative_id,
+                InitiativeState::Draft.as_sql_str(),
+                "{}",
+                &plan_sha,
+                now,
+            ],
+        ).unwrap();
+
+        // signed_plan_artifacts: column set per kernel-store.md §2.5.1 Table 3
+        // is exactly (initiative_id, plan_bytes, plan_sig, stored_at).
+        conn.execute(
+            &format!(
+                "INSERT INTO {SIGNED_PLAN_ARTIFACTS}
+                    (initiative_id, plan_bytes, plan_sig, stored_at)
+                 VALUES (?1, ?2, ?3, ?4)"
+            ),
+            rusqlite::params![&initiative_id, &plan_bytes, &sig_bytes, now],
+        ).unwrap();
+        drop(conn);
+
+        (initiative_id, pk_bytes.to_vec())
+    }
+
+    /// Count rows in a table where `initiative_id = ?` (for assertions).
+    fn count_initiative_rows(store: &Store, table: &str, init_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE initiative_id=?1"),
+            rusqlite::params![init_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    /// Count edges that mention any task in the given initiative.
+    fn count_edges_for_initiative(store: &Store, init_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM task_dag_edges e
+                   JOIN tasks t ON t.task_id = e.successor_task_id
+                  WHERE t.initiative_id = ?1"
+            ),
+            rusqlite::params![init_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    fn read_initiative_state(store: &Store, init_id: &str) -> String {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
+            rusqlite::params![init_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    // NOTE on test attribute choice: these tests use `#[test]`, not
+    // `#[tokio::test]`, because `approve_plan` is a sync function that
+    // acquires the store mutex via `Store::lock_sync()` → `blocking_lock`.
+    // tokio's `blocking_lock` panics if invoked from a thread already
+    // driving an async runtime. In production, the operator handler
+    // wraps the call in `tokio::task::spawn_blocking`; in tests we
+    // simply call from a non-async thread.
+    #[test]
+    fn approve_plan_happy_path_inserts_tasks_and_edges() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _pk) = fixture_keypair();
+
+        // Plan with two tasks — t2 depends on t1 (one DAG edge).
+        let plan = r#"
+            [meta]
+            version = 1
+
+            [[tasks]]
+            task_id  = "t1"
+            name     = "first"
+            lane_id  = "default"
+
+            [[tasks]]
+            task_id      = "t2"
+            name         = "second"
+            lane_id      = "default"
+            predecessors = ["t1"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+
+        let result = approve_plan(&init_id, "op-test", &pk_bytes, 1, &store, &audit).unwrap();
+        assert_eq!(result.tasks_admitted, 2);
+
+        assert_eq!(read_initiative_state(&store, &init_id), "Executing");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 2);
+        assert_eq!(
+            count_edges_for_initiative(&store, &init_id), 1,
+            "one DAG edge (t1 → t2) should be inserted alongside the task rows",
+        );
+
+        // Audit-after-commit per kernel-store.md §2.5.2: PlanApproved emits
+        // exactly once, with the initiative_id wired through.
+        let events = audit.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind.as_str(), "PlanApproved");
+        assert_eq!(events[0].initiative_id.as_deref(), Some(init_id.as_str()));
+    }
+
+    #[test]
+    fn approve_plan_rolls_back_on_cyclic_dependency() {
+        // Cycle: t1 depends on t2, t2 depends on t1. detect_cycle_in must
+        // reject this and the entire transaction must roll back: the
+        // initiative stays Draft and no tasks/edges are persisted.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+
+        let plan = r#"
+            [meta]
+            version = 1
+
+            [[tasks]]
+            task_id      = "t1"
+            predecessors = ["t2"]
+
+            [[tasks]]
+            task_id      = "t2"
+            predecessors = ["t1"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+
+        let err = approve_plan(&init_id, "op-test", &pk_bytes, 1, &store, &audit).unwrap_err();
+        assert!(
+            matches!(err, LifecycleError::Scheduler(SchedulerError::CyclicDependency)),
+            "expected CyclicDependency, got {err:?}",
+        );
+
+        // INV-STORE-02 atomicity: nothing partial.
+        assert_eq!(
+            read_initiative_state(&store, &init_id), "Draft",
+            "initiative must remain Draft on cycle rejection",
+        );
+        assert_eq!(
+            count_initiative_rows(&store, "tasks", &init_id), 0,
+            "no task rows may be persisted when the tx rolls back",
+        );
+        assert_eq!(
+            count_edges_for_initiative(&store, &init_id), 0,
+            "no edges may be persisted when the tx rolls back",
+        );
+
+        // Audit-after-commit invariant: a rolled-back operation MUST NOT
+        // produce a PlanApproved record.
+        assert!(audit.events().is_empty(),
+                "no audit events may be emitted when the tx rolls back");
+    }
+
+    #[test]
+    fn approve_plan_rejects_bad_signature_without_starting_tx() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id = "t1"
+        "#;
+        let (init_id, _correct_pk) = seed_draft_initiative(&store, plan, &sk);
+
+        // Hand `approve_plan` a different pubkey — sig will fail to verify.
+        let wrong_pk = SigningKey::from_bytes(&[0x99u8; 32]).verifying_key().to_bytes();
+        let audit   = FakeAuditSink::new();
+        let err = approve_plan(&init_id, "op-test", &wrong_pk, 1, &store, &audit).unwrap_err();
+        assert!(
+            matches!(err, LifecycleError::PlanSignatureInvalid { .. }),
+            "expected PlanSignatureInvalid, got {err:?}",
+        );
+
+        // No state change at all.
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
+        assert!(audit.events().is_empty(),
+                "audit must remain silent when the signature check fails");
+    }
+
+    #[test]
+    fn approve_plan_is_idempotent_under_double_call() {
+        // Calling approve_plan twice on the same Draft must succeed once
+        // (Draft → Executing) and fail the second time (already Executing).
+        // The second failure must NOT clobber the first call's state.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id = "only"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+
+        approve_plan(&init_id, "op-1", &pk_bytes, 1, &store, &audit).unwrap();
+        let second = approve_plan(&init_id, "op-2", &pk_bytes, 1, &store, &audit);
+        assert!(second.is_err(), "second approve must fail (not Draft)");
+
+        assert_eq!(read_initiative_state(&store, &init_id), "Executing");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 1);
+
+        // Exactly ONE PlanApproved emitted, despite two attempts. The
+        // second (failed) call must NOT add an audit row.
+        let approved: Vec<_> = audit.events()
+            .into_iter()
+            .filter(|e| e.kind.as_str() == "PlanApproved")
+            .collect();
+        assert_eq!(approved.len(), 1,
+                   "PlanApproved must emit exactly once across both attempts");
+    }
+
+    #[test]
+    fn approve_plan_records_correct_policy_epoch_on_tasks() {
+        // policy_epoch column on `tasks` must equal what the caller passed —
+        // not the hardcoded value that the OLD `admit_task` helper used.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_id = "t1"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+
+        approve_plan(&init_id, "op", &pk_bytes, 42, &store, &audit).unwrap();
+
+        let conn = store.lock_sync();
+        let epoch: i64 = conn.query_row(
+            "SELECT policy_epoch FROM tasks WHERE initiative_id=?1",
+            rusqlite::params![&init_id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(epoch, 42, "policy_epoch must be the value passed to approve_plan");
     }
 }
