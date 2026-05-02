@@ -4,4 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Wire codec: bincode 2.0.1 with `bincode::config::standard()` and the `serde`
+# feature, framed with a 4-byte little-endian length prefix per
+# specs/v1/peripherals.md §3. Workspace pin justification (including why not
+# 3.x) lives in raxis/Cargo.toml [workspace.dependencies].
 [dependencies]
+bincode     = { workspace = true }
+serde       = { workspace = true }
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+raxis-types = { workspace = true }

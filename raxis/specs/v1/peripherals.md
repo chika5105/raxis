@@ -7,7 +7,45 @@
 > **Authority:** Where this file and `kernel-core.md` conflict on IPC message shapes, this file wins — it is the client-facing contract. Where this file and `kernel-store.md` conflict on DDL-backed fields (e.g. session token format, sequence numbers), `kernel-store.md` wins.
 
 > **Normative wire format — single source of truth:**
-> All IPC between kernel, planner, gateway, and verifier uses **bincode-encoded Rust types preceded by a 4-byte little-endian length prefix** (excluding the prefix itself). This is implemented in `raxis-ipc::frame`. The codec is `bincode` (serde-compatible, no schema version field in v1). All JSON objects in this document are **human-readable projections** of the underlying `raxis-ipc` types for specification clarity — they are not the wire encoding. An implementation that sends bare JSON on the UDS is non-conformant. Where a JSON field name below differs from the Rust struct field name in `raxis-ipc`, the Rust name wins.
+> All IPC between kernel, planner, gateway, and verifier uses **bincode-encoded Rust types preceded by a 4-byte little-endian unsigned length prefix** (the prefix itself is excluded from the byte count it announces). The codec is **`bincode = "=2.0.1"` (exact pin) using `bincode::config::standard()`** — i.e. variable-length integer encoding (LEB128 / varint), little-endian byte order, no struct/field name metadata on the wire (variants and fields are positional). `bincode::serde::encode_to_vec` / `decode_from_slice` are the canonical entry points; the `serde` feature is enabled in `raxis-ipc/Cargo.toml` (workspace dep declared in `raxis/Cargo.toml`). This is implemented in `raxis-ipc::frame`.
+>
+> **Why `=2.0.1` exactly, and why not bincode 1.x or 3.x.**
+>
+> - **Not 1.x.** Bincode 1.x and 2.x produce wire-incompatible byte streams under their respective default configs (1.x defaults to fixed-width `u64` length encoding; 2.x defaults to varint via `Configuration::standard()`). v1 wants the smaller, named, varint format.
+> - **Not 3.x.** As of 2026, the `bincode = "3.0.0"` artifact on crates.io is published by a downstream fork (`Apich-Organization/bincode-next`) — the original `bincode-org/bincode` repository was **archived in August 2025** and the original maintainer ceased development. Critically, 3.x's `config::standard()` is **wire-incompatible** with 2.x's `config::standard()`; only 3.x's `config::legacy()` round-trips with 2.x. Pinning 3.x would (a) bind the v1 protocol to an unaudited downstream organisation's evolution, and (b) silently break wire format if a future maintainer changes 3.x defaults. v1 stays on the last release from the original org.
+> - **`=2.0.1` (exact pin, no caret).** The `=` operator in the workspace Cargo.toml prevents an accidental jump to a hypothetical `2.0.2` or `2.1.0` patch from a downstream republisher. The first implementation sprint MUST re-evaluate this pin against the state of the post-archival Rust ecosystem at that time; any codec change requires a §3 amendment AND a wire-compat regression test that round-trips every `IpcMessage` variant against a captured `2.0.1` baseline.
+>
+> Implementations MUST NOT use `bincode::config::legacy()` (the 1.x compatibility config) on the wire — that variant exists for migration from 1.x stores only and is not part of the v1 IPC contract. There is no schema version field in v1; the `IpcMessage` enum tag (positional `u32` discriminant per bincode 2 encoding) is the only versioning surface.
+>
+> **Frame format (normative pseudo-Rust):**
+>
+> ```rust
+> // raxis-ipc/src/frame.rs (normative)
+> pub const FRAME_MAX_BYTES: usize = 16 * 1024 * 1024; // 16 MiB hard cap; oversized frame → connection close
+> pub fn write_frame<W: AsyncWrite + Unpin, T: serde::Serialize>(w: &mut W, msg: &T) -> io::Result<()> {
+>     let body = bincode::serde::encode_to_vec(msg, bincode::config::standard())
+>         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+>     if body.len() > FRAME_MAX_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large")); }
+>     let len = u32::try_from(body.len())
+>         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "frame > u32::MAX"))?;
+>     w.write_all(&len.to_le_bytes()).await?;
+>     w.write_all(&body).await
+> }
+> pub async fn read_frame<R: AsyncRead + Unpin, T: serde::de::DeserializeOwned>(r: &mut R) -> io::Result<T> {
+>     let mut len_buf = [0u8; 4];
+>     r.read_exact(&mut len_buf).await?;
+>     let len = u32::from_le_bytes(len_buf) as usize;
+>     if len > FRAME_MAX_BYTES { return Err(io::Error::new(io::ErrorKind::InvalidData, "advertised length exceeds FRAME_MAX_BYTES")); }
+>     let mut body = vec![0u8; len];
+>     r.read_exact(&mut body).await?;
+>     let (msg, consumed) = bincode::serde::decode_from_slice(&body, bincode::config::standard())
+>         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+>     if consumed != len { return Err(io::Error::new(io::ErrorKind::InvalidData, "trailing bytes in frame")); }
+>     Ok(msg)
+> }
+> ```
+>
+> All JSON objects in this document are **human-readable projections** of the underlying `raxis-ipc` types for specification clarity — they are not the wire encoding. An implementation that sends bare JSON on the UDS is non-conformant. Where a JSON field name below differs from the Rust struct field name in `raxis-ipc`, the Rust name wins (bincode 2 with `standard()` config does not transmit field names anyway, so the JSON projection's field naming is purely a documentation convention; only the positional layout of the Rust struct is observable on the wire).
 
 ---
 
@@ -59,7 +97,7 @@ The planner must not assume it can reuse a session across initiatives. One sessi
 **Field rules:**
 - `sequence_number` — must be exactly `prev_accepted_sequence + 1`. Gaps or reuse → `UNAUTHORIZED`.
 - `envelope_nonce` — 16 random bytes, hex. Must be globally unique per `(session_id, nonce)` pair within the nonce cache TTL (§2.5.1 Table 16). Reuse → `UNAUTHORIZED`.
-- `base_sha` and `head_sha` — required for all intent kinds except `ReportFailure`. For `CompleteTask`, `base_sha` is accepted but ignored by the kernel (see `kernel-store.md` §2.5.8 `base_sha` disposition). For `SingleCommit`, `base_sha == head_sha` is a valid "no committed changes yet" intent (empty diff — path check passes vacuously per §2.5.8 edge-case table). For non-empty `SingleCommit` (`base_sha != head_sha`): the kernel enforces `parent(head_sha) == base_sha` via `vcs::rev_parse_parent` — i.e. exactly one new commit on top of `base_sha`. Submitting a `base_sha` that is an ancestor of `head_sha` but not its direct parent is rejected with `HandlerError::InvalidShaRange`. **This means `SingleCommit` is truly single-commit: one intent = one commit. Multi-commit ranges require a different `IntentKind` (not in v1).**
+- `base_sha` and `head_sha` — required for all intent kinds except `ReportFailure`. For `CompleteTask`, `base_sha` is accepted but ignored by the kernel (see `kernel-store.md` §2.5.8 `base_sha` disposition). For `SingleCommit`, `base_sha == head_sha` is a valid "no committed changes yet" intent (empty diff — path check passes vacuously per §2.5.8 edge-case table). For non-empty `SingleCommit` (`base_sha != head_sha`): the kernel enforces `parent(head_sha) == base_sha` via **`vcs::rev_parse_parent`** (`kernel-core.md` Part 2.2 §`src/vcs/diff.rs` — normative command `git -C <worktree_root> rev-parse --verify <head_sha>^1`; root-commit and missing-SHA edge cases mapped to `HandlerError::InvalidShaRange`) — i.e. exactly one new commit on top of `base_sha`. Submitting a `base_sha` that is an ancestor of `head_sha` but not its direct parent is rejected with `HandlerError::InvalidShaRange`. **This means `SingleCommit` is truly single-commit: one intent = one commit. Multi-commit ranges require a different `IntentKind` (not in v1).**
 - `submitted_claims` — may be empty `[]` if the task's gate set has no active claim requirements. Providing claims when none are required is accepted (they are ignored).
 - `justification` — required and non-empty for `IntentKind::ReportFailure`. Ignored for all other kinds.
 - `idempotency_key` — if provided, the kernel returns the same `IntentResponse` on a duplicate submission with the same key (within the session). Absent → no idempotency guarantee.
@@ -148,8 +186,58 @@ The planner **must stop** on `UNAUTHORIZED` — this indicates a session integri
 
 ```rust
 // raxis-types/src/operator.rs (normative)
+
+// Inbound from `raxis-cli` over the operator UDS. One frame per request; reply
+// is exactly one `OperatorResponse` frame on the same connection.
+// Variant order in this enum matches the §2.5.5 operator IPC discriminant table
+// in `kernel-store.md` — that table is the source of truth for preconditions,
+// state transitions, and `permitted_ops` strings.
+enum OperatorRequest {
+    // initiatives
+    CreateInitiative   { plan_toml_path: PathBuf, plan_sig_path: PathBuf },
+    ApprovePlan        { initiative_id: InitiativeId },
+    RejectPlan         { initiative_id: InitiativeId, reason: Option<String> },
+    AbortInitiative    { initiative_id: InitiativeId, reason: Option<String> },
+
+    // sessions and delegations
+    CreateSession      { role: Role, worktree_root: Option<PathBuf>, base_tracking_ref: Option<String>, task_id: Option<TaskId>, lineage_id: LineageId },
+    RevokeSession      { session_id: SessionId },
+    GrantDelegation    { session_id: SessionId, capability_class: CapabilityClass, delegating_role_id: RoleId, expires_at: UnixSeconds, scope_json: Option<String>, operator_sig: Ed25519Sig },
+
+    // tasks
+    RetryTask          { task_id: TaskId },
+    ResumeTask         { task_id: TaskId },
+    AbortTask          { task_id: TaskId, reason: Option<String> },
+
+    // escalations (full wire shapes for these are in `kernel-store.md` §2.5.5
+    // "Escalation approval on the operator socket"; reproduced here as enum tags only)
+    ApproveEscalation  { escalation_id: EscalationId, approval_scope: ApprovalScope, operator_sig: Ed25519Sig },
+    DenyEscalation     { escalation_id: EscalationId, reason: String },
+
+    // policy
+    RotateEpoch        { policy_path: PathBuf, sig_path: PathBuf },
+}
+
 enum OperatorResponse {
-    // ... per-command success variants, e.g. EpochAdvanced { … }, TaskRetried { … } ...
+    // initiatives
+    InitiativeCreated     { initiative_id: InitiativeId, plan_sha256: [u8; 32], created_at: UnixSeconds },
+    PlanApproved          { initiative_id: InitiativeId, transitioned_at: UnixSeconds, n_tasks: u32 },
+    PlanRejected          { initiative_id: InitiativeId, transitioned_at: UnixSeconds },
+    InitiativeAborted     { initiative_id: InitiativeId, transitioned_at: UnixSeconds, n_tasks_cancelled: u32 },
+    // sessions and delegations
+    SessionCreated        { session_id: SessionId, session_token: String /* 64-char lowercase hex */, role: Role, worktree_root: Option<PathBuf>, base_sha: Option<CommitSha>, base_tracking_ref: Option<String>, expires_at: UnixSeconds, bound_task_id: Option<TaskId>, lineage_id: LineageId },
+    SessionRevoked        { session_id: SessionId, revoked_at: UnixSeconds },
+    DelegationGranted     { delegation_id: DelegationId, granted_at: UnixSeconds, expires_at: UnixSeconds, capability_class: CapabilityClass },
+    // tasks
+    TaskRetried           { task_id: TaskId, initiative_id: InitiativeId, transitioned_at: UnixSeconds },
+    TaskResumed           { task_id: TaskId, prior_state: TaskState, transitioned_at: UnixSeconds },
+    TaskAborted           { task_id: TaskId, transitioned_at: UnixSeconds },
+    // escalations
+    EscalationApproved    { escalation_id: EscalationId, approval_token_id: ApprovalTokenId, transitioned_at: UnixSeconds },
+    EscalationDenied      { escalation_id: EscalationId, transitioned_at: UnixSeconds },
+    // policy
+    EpochAdvanced         { new_epoch_id: u64, n_delegations_marked_stale: u32, n_sessions_invalidated: u32, policy_sha256: [u8; 32] },
+    // catch-all error envelope
     Error {
         code: OperatorErrorCode,    // string-tagged enum (see table below) — wire form is the bare code string
         detail: OperatorErrorDetail,// serde-tagged enum, one variant per code, carrying the code's structured fields; never a free-form string
@@ -158,15 +246,36 @@ enum OperatorResponse {
 
 enum OperatorErrorDetail {
     // Tag matches the OperatorErrorCode value; field set is fixed per variant.
+
+    // task-state preconditions
     TaskNotResumable    { current_state: TaskState },
     TaskNotRetryable    { current_state: TaskState },
     InitiativeTerminal  { initiative_state: InitiativeState, terminal_criteria: TerminalCriteria },
+
     // policy-advance failure details (see `cli-ceremony.md` §`epoch advance`):
     PolicySignatureInvalid { artifact_path: PathBuf },
     PolicyEpochReplay      { presented_epoch: u64, current_epoch: u64 },
     PolicyMalformed        { parser_message: String },
     PathOutsideDataDir     { offending_path: PathBuf, data_dir: PathBuf },
     StoreWrite             { sql_error: String },
+
+    // session lifecycle failures (see `cli-ceremony.md` §`session create` / `session revoke`):
+    RoleNotOperatorCreatable    { requested_role: Role },
+    WorktreeOutsideAllowedRoots { worktree_root: PathBuf, allowed_roots: Vec<PathBuf> },
+    BaseRefUnresolved           { ref_string: String, worktree_root: PathBuf, git_stderr: String },
+    InvalidLineageId            { offending_value: String, parse_error: String },
+    SessionNotFound             { session_id: SessionId },
+    SessionAlreadyRevoked       { session_id: SessionId, revoked_at: UnixSeconds },
+    SessionInvalid              { session_id: SessionId, reason: SessionInvalidReason /* enum: Revoked | Expired | NotFound */ },
+    SessionTaskMismatch         { session_id: SessionId, bound_task: TaskId, attempted_task: TaskId },
+
+    // delegation grant failures (see `cli-ceremony.md` §`delegation grant`):
+    UnknownCapabilityClass      { offending_value: String },
+    CapabilityAboveCeiling      { role_id: RoleId, capability_class: CapabilityClass, ceiling: Vec<CapabilityClass> },
+    DelegationTtlOutOfRange     { requested_ttl_seconds: u64, max_ttl_seconds: u64 },
+    DelegationAlreadyActive     { existing_delegation_id: DelegationId, expires_at: UnixSeconds },
+    DelegationSignatureInvalid  { proposed_delegation_id: DelegationId, expected_signer: OperatorId },
+
     // operator authorisation failure (universal across all operator IPC ops):
     OperationNotPermitted  { operator_id: OperatorId, attempted_op: String },
     // ... one variant per code added in future iterations ...
@@ -187,6 +296,19 @@ The v1 operator-only error codes — each with its `OperatorErrorDetail` variant
 | `FAIL_POLICY_MALFORMED` | `PolicyMalformed { parser_message }` | `policy_manager::advance_epoch` Phase 0 step 1 (TOML parse / schema check) | New artifact failed TOML parse or required-block validation. |
 | `FAIL_PATH_OUTSIDE_DATA_DIR` | `PathOutsideDataDir { offending_path, data_dir }` | `policy_manager::advance_epoch` Phase 0 path canonicalisation | One of `--policy` / `--sig` resolved to a path outside `<data_dir>/policy/`. |
 | `FAIL_STORE_WRITE` | `StoreWrite { sql_error }` | `policy_manager::advance_epoch` Phase 1 commit failure | A SQL write inside the Phase 1 transaction failed; the transaction was rolled back. |
+| `FAIL_ROLE_NOT_OPERATOR_CREATABLE` | `RoleNotOperatorCreatable { requested_role }` | `handlers/operator::handle_create_session` step 1 | `session create` was invoked with `--role` other than `planner`. Gateway/verifier sessions are minted by kernel-internal spawn paths, not operator IPC. |
+| `FAIL_WORKTREE_OUTSIDE_ALLOWED_ROOTS` | `WorktreeOutsideAllowedRoots { worktree_root, allowed_roots }` | `handlers/operator::handle_create_session` step 2 | The `--worktree-root` resolves outside every entry in `policy.toml` `[sessions] allowed_worktree_roots`. |
+| `FAIL_BASE_REF_UNRESOLVED` | `BaseRefUnresolved { ref_string, worktree_root, git_stderr }` | `handlers/operator::handle_create_session` step 3 (`git rev-parse <ref>^{commit}`) | The optional `--base-tracking-ref` could not be peeled to a commit OID in the worktree. |
+| `FAIL_INVALID_LINEAGE_ID` | `InvalidLineageId { offending_value, parse_error }` | `handlers/operator::handle_create_session` step 2.5 (`Uuid::parse_str(req.lineage_id)`) | The operator supplied a `lineage_id` that does not parse as a UUID v4 hyphenated form (36 ASCII bytes). The CLI ought to have caught this client-side before sending; this code is the kernel's defensive check. |
+| `FAIL_SESSION_NOT_FOUND` | `SessionNotFound { session_id }` | `handlers/operator::handle_revoke_session`, `handle_grant_delegation` | The presented `session_id` does not exist in the `sessions` table. |
+| `FAIL_SESSION_ALREADY_REVOKED` | `SessionAlreadyRevoked { session_id, revoked_at }` | `authority::session::revoke_session` (`rows_affected == 0` on the conditional `UPDATE`) | Idempotency hit on `session revoke` — the row was already revoked. The desired end state is the same; the CLI nonetheless exits non-zero so orchestration scripts notice. |
+| `FAIL_SESSION_INVALID` | `SessionInvalid { session_id, reason }` | `authority::delegation::grant_delegation` step 1 | The session is revoked, expired, or not found. `reason` enumerates which. |
+| `FAIL_SESSION_TASK_MISMATCH` | `SessionTaskMismatch { session_id, bound_task, attempted_task }` | `handlers/intent.rs` first-intent admission for sessions created with `--task` | The session was bound to a single task at `session create` time and a subsequent intent's `task_id` does not match. |
+| `FAIL_UNKNOWN_CAPABILITY_CLASS` | `UnknownCapabilityClass { offending_value }` | `OperatorRequest::GrantDelegation` deserialiser | `--capability` value does not match any `CapabilityClass` enum variant in `raxis-types`. |
+| `FAIL_CAPABILITY_ABOVE_CEILING` | `CapabilityAboveCeiling { role_id, capability_class, ceiling }` | `authority::delegation::grant_delegation` step 2 | The requested `capability_class` is not in the `delegating_role_id`'s ceiling. `ceiling` is returned as a sorted list so the operator immediately sees what the role *can* grant. |
+| `FAIL_DELEGATION_TTL_OUT_OF_RANGE` | `DelegationTtlOutOfRange { requested_ttl_seconds, max_ttl_seconds }` | `authority::delegation::grant_delegation` step 3 | `--ttl` is `<= 0` or exceeds `policy.delegations.max_ttl_seconds`. |
+| `FAIL_DELEGATION_ALREADY_ACTIVE` | `DelegationAlreadyActive { existing_delegation_id, expires_at }` | `authority::delegation::grant_delegation` step 4 (UNIQUE constraint violation) | A delegation already exists for `(session_id, capability_class)` in `Active` or `StaleOnNextUse` status. v1 has no in-place re-grant — wait for natural expiry. |
+| `FAIL_DELEGATION_SIGNATURE_INVALID` | `DelegationSignatureInvalid { proposed_delegation_id, expected_signer }` | `authority::delegation::grant_delegation` step 2.5 (Ed25519 verification of `operator_sig` against the `RAXIS-V1-DELEGATION-GRANT` signing domain — see `kernel-store.md` §2.5.5 "Delegation grant signing domain on the operator socket") | The operator-supplied `operator_sig` did not verify against the operator's public key over the canonical signing-domain bytes. Most commonly indicates a CLI bug (canonical-bytes serialiser disagreement), a tampered request between CLI and kernel (which the operator UDS file-mode `0600` makes implausible but not impossible), or use of the wrong operator private key. The `expected_signer` is the operator fingerprint that authenticated the connection — the signature was checked against that pubkey. |
 | `UNAUTHORIZED` | `OperationNotPermitted { operator_id, attempted_op }` | Every operator IPC dispatcher (per-op `permitted_ops` gate, `kernel-store.md` §2.5.5 L1424) | The authenticated operator's `permitted_ops` list does not include the requested op. `attempted_op` is the operator IPC variant name (e.g. `"RetryTask"`, `"RotateEpoch"`) so the operator can confirm which entry to add to their policy entry. **Note:** the bare wire string `UNAUTHORIZED` is shared with the *planner* socket's `PlannerErrorCode::UNAUTHORIZED` variant (planner-facing table above), but the two enums live in different Rust types (`OperatorErrorCode` vs `PlannerErrorCode`) and carry different `detail` shapes — the socket the message arrived on disambiguates which decoder to use. |
 
 Adding a new operator error code requires adding both a new `OperatorErrorCode` enum value and a matching `OperatorErrorDetail` variant in the same PR — the spec disallows codes whose `detail` shape is undefined.
@@ -206,6 +328,88 @@ The planner must not attempt to game the budget by under-declaring scope in its 
 - The session token is a kernel-issued credential. The planner stores it in memory and presents it on every `IntentRequest`.
 - If the kernel returns `UNAUTHORIZED`, the token is invalid. The planner must **not** retry with the same token or attempt to obtain a new token through the planner IPC path (token issuance is a kernel-internal operation at session creation).
 - Token rotation in v1 is not supported. If a token expires or is revoked, the session ends.
+
+---
+
+### `EscalationRequest` wire shape (planner → kernel)
+
+The planner submits an `EscalationRequest` on the **planner UDS** (`<data_dir>/sockets/planner.sock`) — the same socket as `IntentRequest`. It is a top-level `IpcMessage::EscalationRequest(EscalationRequest)` variant; verifier sessions attempting to send it are rejected at the dispatcher (`kernel-core.md` Part 2.3 §`ipc/dispatch.rs`) before reaching the handler. The full handler contract is `kernel-core.md` Part 2.3 §`src/ipc/handlers/escalation.rs`; the wire shape and response envelope below are the planner-facing surface.
+
+> **Encoding reminder:** Illustrative JSON projection of `IpcMessage::EscalationRequest { .. }` in `raxis-ipc`. On-wire: length-prefixed bincode-2 frame per `raxis-ipc::frame`.
+
+```json
+{
+  "task_id":          "<uuid v4>",
+  "class":            "CapabilityUpgrade",
+  "requested_scope": {
+    "kind":           "CapabilityUpgrade",
+    "capability":     "WriteSecrets"
+  },
+  "justification":    "<free text, max 4096 chars; required and non-empty>",
+  "idempotency_key":  "<uuid v4>"
+}
+```
+
+**Fields (the corresponding Rust struct lives in `raxis-types/src/escalation.rs`; field names below match the Rust struct verbatim — JSON tags are the same):**
+
+- `task_id` (`TaskId`, required) — the task this escalation applies to. The kernel rejects with `HandlerError::InvalidTask` if the task does not exist; with `HandlerError::Unauthorized` if `task.session_id != session.session_id` (planners cannot escalate on behalf of another session's task).
+- `class` (`EscalationClass`, required) — one of `CapabilityUpgrade` | `DelegationRenewal` | `BudgetException` | `QualityGateException` (full enum in `raxis-types/src/escalation.rs`; canonical reference in `philosophy.md` §`src/escalation.rs`). Determines which `requested_scope` variant is valid; mismatches are rejected at the deserialiser (serde-tagged enum).
+- `requested_scope` (`RequestedEscalationScope`, required) — serde-tagged enum where `kind` matches `class`. The four variant shapes:
+  - `CapabilityUpgrade { capability: CapabilityClass }`
+  - `DelegationRenewal { delegation_id: DelegationId }`
+  - `BudgetException { additional_units: u64 }`
+  - `QualityGateException { gate_type: GateType, task_id: TaskId }` — the inner `task_id` MUST equal the outer `task_id`; mismatch is rejected at the handler (`HandlerError::InconsistentScope`).
+- `justification` (`String`, required, non-empty, max 4096 chars) — opaque to kernel policy; logged verbatim into the audit chain so the operator sees the planner's stated reason. Empty or oversized → `HandlerError::InvalidJustification`.
+- `idempotency_key` (`Uuid`, required) — planner-supplied UUID v4. The kernel uses it to deduplicate retried submissions: if a `Pending` or `Approved` escalation row already exists for `(session_id, task_id, class, idempotency_key)`, the kernel returns `EscalationResponse::AlreadyPending { escalation_id }` for that prior row instead of creating a duplicate. The planner SHOULD generate a fresh UUID for each new submission and reuse the same one across retries of that submission.
+
+The kernel-assigned fields (`escalation_id`, `lineage_id`, `initiative_id`, `submitted_at`, `timeout_at`, `status`) are **not** present in the request; they are populated by `handlers/escalation.rs` step 4 and surfaced in the response below.
+
+### `EscalationResponse` wire shape (kernel → planner)
+
+```json
+{
+  "kind": "Submitted",
+  "escalation_id": "<uuid v4>",
+  "timeout_at":    1714596523
+}
+```
+
+**Variants (`EscalationResponse` in `raxis-types/src/escalation.rs`):**
+
+| Variant | Fields | Meaning |
+|---|---|---|
+| `Submitted` | `escalation_id: EscalationId`, `timeout_at: UnixSeconds` | Escalation row was created (`status: Pending`). The planner MUST persist `escalation_id` (in its own state) — it is the handle the planner later presents on the next `IntentRequest`'s `approval_token` field once the operator has approved (the operator-issued `ApprovalToken.escalation_id` will match). `timeout_at` is the absolute Unix timestamp at which the escalation auto-transitions to `TimedOut` if the operator does not act. |
+| `AlreadyPending` | `escalation_id: EscalationId` | An escalation with the same `(session_id, task_id, class, idempotency_key)` is already `Pending` or `Approved`. Returned in lieu of creating a duplicate row. The `escalation_id` is the existing one — the planner can reuse it as if a fresh `Submitted` had been returned. No `timeout_at` because the original submission's `timeout_at` is what governs (and the planner can re-query via a future `escalation status` IPC, deferred to v2). |
+| `Rejected` | `reason: EscalationErrorCode` | The escalation is well-formed but the kernel refuses to record it. The two v1 reasons are `RateLimitExceeded` (the per-lineage submission counter exceeded `policy.escalation_max_per_window`) and `LineageQuarantined` (the lineage has been quarantined by exceeding `policy.escalation_quarantine_threshold` cumulative rate-limit hits — only an operator `raxis-cli quarantine lift` clears this). Distinct from transport-level errors (malformed payload, unauthorized session, invalid task), which surface as `IpcResponse::Error(PlannerErrorCode::*)` instead. |
+
+**`EscalationErrorCode` (wire enum):**
+
+| Variant | Wire string | Planner action |
+|---|---|---|
+| `RateLimitExceeded` | `"RateLimitExceeded"` | Wait until the current window expires (`policy.escalation_window` seconds; default 3600 = 1h) before resubmitting. Persistent rate-limiting will eventually trip quarantine. |
+| `LineageQuarantined` | `"LineageQuarantined"` | Stop submitting escalations on this lineage. The operator must lift the quarantine via `raxis-cli quarantine lift <lineage_id>`. The planner SHOULD `IntentKind::ReportFailure` on the affected task with a justification explaining the quarantine condition. |
+
+### Presenting the approval token on the next intent
+
+Once the operator runs `raxis-cli escalation approve`, the planner is notified out-of-band (the v1 mechanism is operator-supplied — typically a sidecar that polls the kernel via a future `escalation status` IPC; v1 itself does not push notifications to the planner). When the planner is ready to retry the gated action, it submits the next `IntentRequest` with the `approval_token` field populated:
+
+```json
+{
+  "task_id":         "<uuid>",
+  "intent_kind":     "SingleCommit",
+  "base_sha":        "...",
+  "head_sha":        "...",
+  "approval_token": {
+    "approval_id":   "<uuid from ApprovalToken>",
+    "escalation_id": "<uuid from EscalationResponse::Submitted>",
+    "operator_sig":  "<64-byte hex Ed25519>"
+  }
+}
+```
+
+The `escalation_id` in the presented token MUST match the `escalation_id` returned by the original `EscalationResponse::Submitted` (or `AlreadyPending`). Mismatch → `IntentResponse::Rejected { reason: FAIL_APPROVAL_TOKEN_INVALID }`. The full eight-step `validate_approval_token` flow runs at intent admission (`kernel-core.md` Part 2.3 §`authority/approval.rs`); the planner does not need to model the full validation locally — it just presents the token and reads the `IntentResponse`.
+
+**Audit visibility.** Every escalation submission produces `AuditEventKind::EscalationSubmitted { escalation_id, session_id, task_id, class, requested_scope_summary }` (see `kernel-core.md` Part 2.3 §`handlers/escalation.rs` step 5). Rate-limit and quarantine outcomes produce their own audit events (`EscalationRateLimitExceeded`, `LineageQuarantined`). The planner cannot read the audit chain — but the operator can, which is the intended forensic surface.
 
 ---
 
@@ -337,11 +541,13 @@ The verifier submits exactly one `WitnessSubmission` to `RAXIS_KERNEL_SOCKET` be
 
 **`result_class` — canonical enum (`WitnessResultClass` in `raxis-types/src/witness.rs`):**
 
+The wire-string values MUST match the SQLite `CHECK` constraint on `witness_records.result_class` (`kernel-store.md` §2.5.1 Table 13: `CHECK (result_class IN ('Pass', 'Fail', 'Inconclusive'))`). The DDL is the authority on the variant names per the supersession rule in `kernel-store.md` §2.5.1; the wire enum has been aligned to match.
+
 | Variant | Meaning |
 |---|---|
-| `Pass` | Gate evaluation ran and evidence meets the policy threshold |
-| `Fail` | Gate evaluation ran but evidence does not meet threshold (e.g. coverage below minimum). Gate outcome is `Fail`. |
-| `Error` | Verifier could not complete evaluation due to an environmental error (build failure, test runner crash). Not a gate outcome — kernel re-queues for retry (up to `max_verifier_retries`, default 2). |
+| `Pass` | Gate evaluation ran and evidence meets the policy threshold. |
+| `Fail` | Gate evaluation ran but evidence does not meet threshold (e.g. coverage below minimum, test failures, build broken). Gate outcome is `Fail` — recorded permanently in `witness_records` and surfaced to the planner as `FAIL_INSUFFICIENT_WITNESS` on subsequent intents. |
+| `Inconclusive` | Verifier could not complete evaluation due to an environmental error (build toolchain missing, test runner segfault, network outage during a test that legitimately requires network). Distinct from `Fail`: the verifier did not get a clean read on the evidence. The kernel re-queues for retry up to `max_verifier_retries` (default 2, configured in `policy.toml` `[verifier]` block); if every retry returns `Inconclusive`, the gate cannot clear and the task is marked `Aborted` with `BlockReason::WitnessTimeout` (re-using the existing taxonomy — operator investigates the verifier environment). **Note on naming**: older drafts called this variant `Error`; that name was non-canonical and conflicted with the DDL. The canonical wire string is `Inconclusive`. |
 
 These are the **only** valid `result_class` values in v1. Any other value → witness rejected, `verifier_run_token` consumed (treat as malformed submission).
 

@@ -223,6 +223,49 @@ Use `ReportFailure` rather than looping indefinitely on a rejected intent. If yo
 
 ---
 
+## Escalating for higher authority
+
+When a gate cannot be satisfied with your current capabilities, delegations, or budget, you may submit an `EscalationRequest` instead of (or before) `ReportFailure`. An escalation is a structured request for a human operator to grant a one-time, scoped exception. The operator can approve, deny, or let it time out; the kernel records every step in the audit chain.
+
+Submit `EscalationRequest` on the same socket as `IntentRequest`. Wire shape and full lifecycle are in `peripherals.md` §3.1 "EscalationRequest wire shape" — that section is the normative contract. Summary for planner reference:
+
+```json
+{
+  "task_id":         "<your task_id>",
+  "class":           "CapabilityUpgrade",
+  "requested_scope": { "kind": "CapabilityUpgrade", "capability": "WriteSecrets" },
+  "justification":   "<required, non-empty, max 4096 chars>",
+  "idempotency_key": "<fresh UUID v4 per submission; reuse on retry>"
+}
+```
+
+**The four classes.** Pick exactly one — the kernel rejects mismatched `class` / `requested_scope.kind`:
+
+| `class` | When to use | `requested_scope` shape |
+|---|---|---|
+| `CapabilityUpgrade` | A gate failed because your session lacks a capability (e.g. `WriteSecrets`, `NetworkEgress`). | `{ "kind": "CapabilityUpgrade", "capability": "<CapabilityClass>" }` |
+| `DelegationRenewal` | A delegation you depend on is `Expired` or in `RenewalRequired` state and a fresh grant is needed. | `{ "kind": "DelegationRenewal", "delegation_id": "<your delegation_id>" }` |
+| `BudgetException` | You hit `FAIL_BUDGET_EXCEEDED` but the task is genuinely incomplete and additional units are warranted. | `{ "kind": "BudgetException", "additional_units": <u64> }` |
+| `QualityGateException` | A specific quality gate cannot be satisfied (e.g. coverage threshold cannot be met for a justifiable reason) and an ad-hoc bypass is needed. Distinct from policy `override_rules` which are pre-authorised. | `{ "kind": "QualityGateException", "gate_type": "<GateType>", "task_id": "<same as outer task_id>" }` |
+
+**The response.** The kernel replies with `EscalationResponse`. The three variants:
+
+- `Submitted { escalation_id, timeout_at }` — the kernel recorded the escalation as `Pending`. **Persist `escalation_id` in your local state** — you will need it to present the operator-issued approval token on your next intent. `timeout_at` is the absolute Unix timestamp at which the escalation auto-transitions to `TimedOut` if the operator does not act.
+- `AlreadyPending { escalation_id }` — an escalation with this same `(task_id, class, idempotency_key)` already exists. Treat as if `Submitted` returned with the same `escalation_id`. This is the safe outcome of a retried submission.
+- `Rejected { reason }` — the kernel refused to record the escalation. The two reasons:
+  - `RateLimitExceeded` — your lineage's escalation rate exceeded `policy.escalation_max_per_window`. Wait until the window expires (typically 1 hour); resubmit. Persistent rate-limiting trips quarantine.
+  - `LineageQuarantined` — your lineage is quarantined; no further escalations will be accepted until the operator runs `raxis-cli quarantine lift`. Submit `ReportFailure` on the affected task with a justification citing quarantine.
+
+**After the operator approves.** When the operator approves the escalation (out-of-band; v1 does not push notifications to the planner), submit your next `IntentRequest` with an `approval_token` field carrying `{ approval_id, escalation_id, operator_sig }`. The `escalation_id` MUST match the one returned by your original `Submitted` (or `AlreadyPending`) response. If the kernel rejects with `FAIL_APPROVAL_TOKEN_INVALID`, the token is malformed, expired, scope-mismatched, or the escalation is no longer `Approved` — read `error_detail` and either re-escalate or `ReportFailure`.
+
+**When to use escalation vs `ReportFailure`.**
+
+- Use **escalation** when you have a concrete unmet predicate the operator can grant a scoped exception for (a missing capability, an exhausted budget, a one-off gate bypass).
+- Use **`ReportFailure`** when the task itself cannot be completed regardless of authority (the requirement is impossible, the requirements are contradictory, the work is fundamentally beyond your competence).
+- Do **not** repeatedly escalate the same `(task_id, class)` with different `idempotency_key` values to "try again" — every submission counts toward the rate-limit window. If your first escalation is denied or times out, submit `ReportFailure`.
+
+---
+
 ## What you must not do
 
 - Do not attempt to access provider APIs directly. All inference and fetch calls are mediated by the kernel.

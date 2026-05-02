@@ -44,7 +44,7 @@ All subcommands that require kernel connectivity will fail with `ERR_SOCKET_NOT_
 6. Writes initial `policy.toml` to `<data_dir>/policy/policy.toml` with:
    - `authority_pubkey` = public key extracted from `authority_keypair.pem`
    - `quality_pubkey` = public key extracted from `quality_keypair.pem`
-   - `[[operators.entries]]` = the registered operator entry with `permitted_ops = ["CreateInitiative", "ApprovePlan", "RejectPlan", "AbortInitiative", "AbortTask", "ResumeTask", "RetryTask", "GrantDelegation", "ApproveEscalation", "DenyEscalation", "RevokeSession", "RotateEpoch"]` (minimal **full-v1** starter set — omit keys only if you intentionally deny that capability)
+   - `[[operators.entries]]` = the registered operator entry with `permitted_ops = ["CreateInitiative", "ApprovePlan", "RejectPlan", "CreateSession", "RevokeSession", "GrantDelegation", "RetryTask", "ResumeTask", "AbortTask", "AbortInitiative", "ApproveEscalation", "DenyEscalation", "RotateEpoch"]` (the canonical 13-operation v1 set per `kernel-store.md` §2.5.5 IPC discriminant table — omit keys only if you intentionally deny that capability)
    - Empty `[[tasks]]`, `[[gates]]`, and `[[tools]]` sections
 7. Prompts the operator to sign `policy.toml` with their private key using `raxis-cli policy sign` and store `policy.sig` alongside it. The ceremony is not complete until `policy.sig` exists.
 8. Prints a summary of generated files and next steps.
@@ -262,6 +262,81 @@ INV-INIT-05: the planner cannot self-resume a `BlockedRecoveryPending` task. Onl
 | `task abort <id>` | `AbortTask { task_id }` | Any non-terminal | `→ Aborted` | `initiatives::lifecycle::abort_task` |
 
 These are three distinct IPC variants — no single `ResumeTask` variant overloads multiple preconditions.
+
+---
+
+### `session create`
+
+**Purpose:** Mint a planner session row in the kernel and return the session token to the operator. The operator is then responsible for spawning the planner subprocess with the token injected via the `RAXIS_SESSION_TOKEN` environment variable. v1 does **not** auto-spawn planners — planners are operator-supplied AI agents whose process lifecycle is owned by the operator's orchestration scripts; the kernel only owns the authentication credential.
+
+This is the v1 answer to "how does a planner get a session token before its first intent." Gateway and verifier sessions are separate code paths (`spawn_gateway` at kernel boot, `spawn_verifier` on demand for each gate); only **planner** sessions flow through this CLI.
+
+**Usage:** `raxis-cli session create --role planner --worktree-root <path> [--base-tracking-ref <ref>] [--task <task_id>] [--lineage-id <uuid>]`
+
+- `--role planner` — required, must be the literal string `planner`. v1 rejects any other role on this CLI (`FAIL_ROLE_NOT_OPERATOR_CREATABLE`); gateway/verifier sessions are created elsewhere and never via operator IPC.
+- `--worktree-root <path>` — required, absolute path to a git worktree the planner will operate in. Must exist; must contain `.git` (validated by `git -C <path> rev-parse --git-dir`); must be under one of the operator-allowed roots configured in `policy.toml` (`[sessions] allowed_worktree_roots = ["/home/operator/work", ...]`); a path outside any allowed root → `FAIL_WORKTREE_OUTSIDE_ALLOWED_ROOTS`.
+- `--base-tracking-ref <ref>` — optional, the symbolic ref the kernel resolves into `sessions.base_sha` for stale-base re-resolution on `IntegrationMerge` intents. Defaults to `refs/heads/main` (per `kernel-core.md` Part 2.3 §`session.rs`). Resolution failure → `FAIL_BASE_REF_UNRESOLVED`.
+- `--task <task_id>` — optional. When supplied, the kernel binds the new session to a single specific `Admitted` task; subsequent intents from this session whose `task_id` does not match are rejected with `FAIL_SESSION_TASK_MISMATCH`. When omitted, the session may submit intents for any `Admitted` task in any initiative the operator's policy entry can reach (the bind is established at first intent admission). The single-task mode is the standard v1 pattern; the unbound mode is reserved for test fixtures and future multi-task planner work.
+- `--lineage-id <uuid>` — optional. Operator-supplied UUID v4 (hyphenated form, 36 ASCII bytes) identifying the **agent instance** this session belongs to. **Reuse the same `lineage_id` across sessions of the same logical agent** (e.g. a session-revoke + re-create cycle for a crashed agent that you want to resume under the same identity); use a **fresh** `lineage_id` for genuinely independent agents. The `lineage_id` is what per-lineage rate-limiting (`policy.escalation_max_per_window`) and quarantine (`policy.escalation_quarantine_threshold`) key on — sharing a lineage across independent agents pools their escalation budgets, which is almost always a mistake. When omitted, the CLI generates a fresh `Uuid::new_v4()` and prints it in the success summary so the operator can capture it. **Note:** there is no `initiative_id` parameter — sessions are not bound to initiatives at the session-row level; binding flows through `--task` (which implies an initiative) or through the first accepted intent's `task_id` (for unbound sessions). See `kernel-store.md` §2.5.5 "Lineage ownership and supply" for the full rationale.
+
+**Behaviour:**
+1. CLI opens operator socket; performs challenge-response handshake.
+2. CLI sends `OperatorRequest::CreateSession { role: Role::Planner, worktree_root: PathBuf, base_tracking_ref: Option<String>, task_id: Option<TaskId>, lineage_id: LineageId }`. If `--lineage-id` was omitted, the CLI substitutes a freshly generated `Uuid::new_v4()` before sending.
+3. Kernel handler (`handlers/operator::handle_create_session`) checks `permitted_ops` ∋ `CreateSession`, validates the worktree root, validates the `lineage_id` parses as a UUID v4 (`FAIL_INVALID_LINEAGE_ID` on failure), resolves `base_tracking_ref` (if provided) into a `base_sha`, then calls `authority::session::create_session(Role::Planner, Some(worktree_root), base_sha, base_tracking_ref, lineage_id, &cfg, &store)` — the canonical helper signature is extended to take `lineage_id: LineageId` (the column is `NOT NULL` in Table 4, so the parameter is required, not `Option`).
+4. On success, kernel responds `OperatorResponse::SessionCreated { session_id, session_token, role, worktree_root, base_sha, base_tracking_ref, expires_at, lineage_id }`. The `session_token` is **256 bits of CSPRNG random as a 64-char lowercase hex string** (matching the storage shape in `sessions.session_token` per `kernel-store.md` §2.5.1 Table 4).
+5. CLI prints all fields except the token to stdout (human-readable confirmation, including the `lineage_id` so the operator can record it for future reuse), and prints the token by itself to stderr with the leading marker `RAXIS_SESSION_TOKEN=` so the operator can pipe it into a `.env` file or capture it via shell redirection without it appearing in shell history under default zsh/bash settings. Example invocation: `raxis-cli session create --role planner --worktree-root /work/agent-1 --lineage-id $(uuidgen) 2>session-1.env`.
+6. Audit: `AuditEventKind::SessionCreated { session_id, role, worktree_root, base_sha, base_tracking_ref, lineage_id, created_by_operator: <fingerprint>, bound_task_id }` (the `bound_task_id` field is `None` when `--task` was omitted).
+
+**Token delivery to the planner.** The operator MUST deliver the token to the planner subprocess via a private channel — env var (`RAXIS_SESSION_TOKEN`), Unix file descriptor inheritance, or argv (least preferred — visible in `ps`). v1 does not constrain the choice; the trust boundary is the operator's process orchestration. The kernel never logs the token value (only the SHA-256 hash of it goes to the audit chain — `created_by_operator` audit field).
+
+**Authorisation:** Requires `CreateSession ∈ permitted_ops`. Failure → `OperatorResponse::Error { code: UNAUTHORIZED, detail: OperationNotPermitted { operator_id, attempted_op: "CreateSession" } }` per the standard envelope.
+
+---
+
+### `session revoke`
+
+**Purpose:** Mark a planner session as revoked, after which any further IPC frames presenting that token are rejected with `UNAUTHORIZED { reason: SessionRevoked }`. This is the v1 mechanism for terminating a misbehaving planner without killing the kernel; combine with `task abort` if the underlying task should also be terminated.
+
+**Usage:** `raxis-cli session revoke <session_id>`
+
+**Behaviour:**
+1. CLI opens operator socket; performs challenge-response handshake.
+2. CLI sends `OperatorRequest::RevokeSession { session_id }`.
+3. Kernel handler (`handlers/operator::handle_revoke_session`) checks `permitted_ops`, then calls `authority::session::revoke_session(session_id, &store, &audit)` which executes `UPDATE sessions SET revoked_at = now() WHERE session_id = ? AND revoked_at IS NULL` inside one store transaction (INV-STORE-02) and appends `AuditEventKind::SessionRevoked { session_id, revoked_by_operator: <fingerprint>, revoked_at }` to the chain.
+4. On success: `OperatorResponse::SessionRevoked { session_id, revoked_at }`. CLI prints `Session <session_id> revoked at <timestamp>`.
+5. On precondition failure: if the session row does not exist → `OperatorResponse::Error { code: FAIL_SESSION_NOT_FOUND, detail: SessionNotFound { session_id } }`. If it was already revoked (idempotency hit — `rows_affected == 0`) → `OperatorResponse::Error { code: FAIL_SESSION_ALREADY_REVOKED, detail: SessionAlreadyRevoked { session_id, revoked_at } }`. Both are non-fatal from the operator's perspective (the desired end state is the same), but the CLI exits non-zero to make orchestration scripts notice the unexpected condition.
+6. **Effect on in-flight IPC.** A planner that has an open connection holding an active stream is **not** disconnected synchronously — the kernel does not currently reach into the per-connection task to close the socket on revocation. The next IPC frame that flows through `ipc/auth.rs::validate` reads the now-revoked session row and is rejected with `UNAUTHORIZED { reason: SessionRevoked }`, which closes the connection. Practically this means a long-running inference call may complete before the planner sees the revocation; operators relying on hard cut-off semantics MUST also `task abort` the relevant task (which prevents further state writes from any subsequent intent regardless of session validity).
+
+**Effect on `delegations`.** Active delegations on the revoked session remain rows in the `delegations` table for audit purposes; they cannot be exercised because every gated action goes through `validate` first. v1 does not eagerly mark delegations `Revoked`; this is by design (one source of truth — the session row).
+
+**Authorisation:** Requires `RevokeSession ∈ permitted_ops`. Failure → `OperatorResponse::Error { code: UNAUTHORIZED, detail: OperationNotPermitted { operator_id, attempted_op: "RevokeSession" } }`.
+
+---
+
+### `delegation grant`
+
+**Purpose:** Grant a planner session a specific `CapabilityClass` for a bounded TTL, scoped under a specific `delegating_role_id` whose ceiling in `policy.toml` constrains what may be granted. Until a delegation is granted, the planner cannot pass any gate that requires that capability class — its first attempt returns `FAIL_CAPABILITY_REQUIRED`. The standard operator workflow is `session create` → `delegation grant` × N → hand the token to the planner spawn.
+
+**Usage:** `raxis-cli delegation grant --session <session_id> --capability <capability_class> --role <role_id> --ttl <seconds> [--scope-json <inline-json>]`
+
+- `--session <session_id>` — required; the session that will receive the delegation. Must be active (not revoked, not expired).
+- `--capability <capability_class>` — required; one of the canonical `CapabilityClass` enum names (e.g. `WriteSecrets`, `NetworkEgress`, `BreakGlass`). The full enum is defined in `raxis-types/src/capability.rs`; the kernel rejects any value not in the enum at deserialise time (`FAIL_UNKNOWN_CAPABILITY_CLASS`).
+- `--role <role_id>` — required; the role under whose ceiling the grant is being made. Must be a key of `policy.role_ceilings`; the requested capability must be present in that role's ceiling bitmap. Roles are operator-defined; common v1 examples are `software-engineer`, `infra-operator`, `incident-responder`.
+- `--ttl <seconds>` — required; integer seconds into the future. Must satisfy `0 < ttl <= policy.delegations.max_ttl_seconds` (default 86400 = 24h). The kernel computes `expires_at = now() + ttl` and stores it.
+- `--scope-json <inline-json>` — optional; a free-form JSON document that scopes the capability beyond the class itself (e.g. `{"domains":["api.stripe.com"]}` for `NetworkEgress`). Schema is per-capability and lives in `raxis-types`. The kernel stores the raw JSON in `delegations.scope_json` and passes it to capability checks via `gates/claim.rs`.
+
+**Behaviour:**
+1. CLI opens operator socket; performs challenge-response handshake. The handshake establishes which operator is authenticated; the operator's **private** key (loaded from `--operator-key <path>` or the configured default keystore location — same key used by `raxis-cli policy sign` and `raxis-cli escalation approve`) must be available to the CLI process for the next step.
+2. CLI builds the canonical signing-domain bytes per `kernel-store.md` §2.5.5 "Delegation grant signing domain on the operator socket" — the byte-exact concatenation `"RAXIS-V1-DELEGATION-GRANT" || 0x00 || session_id (UUID hyphenated) || 0x00 || capability_class || 0x00 || role_id || 0x00 || expires_at_le_u64 || 0x00 || scope_json_present_byte || (length-prefixed scope_json bytes if Some)`. CLI computes `signing_input = SHA-256(canonical_bytes)` and `operator_sig = Ed25519Sign(operator_private_key, signing_input)`.
+3. CLI sends `OperatorRequest::GrantDelegation { session_id, capability_class, delegating_role_id, expires_at, scope_json, operator_sig }`. The `op_token` (operator session token from step 1's handshake) is carried in the IPC envelope header per the standard operator socket auth.
+4. Kernel handler (`handlers/operator::handle_grant_delegation`) checks `permitted_ops ∋ GrantDelegation`, then calls `authority::delegation::grant_delegation(req, &store, &policy, &audit)` (full contract in `kernel-core.md` Part 2.3 §`authority/delegation.rs`). The handler runs the now-six-step sequence: session validity → policy ceiling check → operator-signature verification (step 2.5) → TTL bounds check → uniqueness check → insert + audit (single transaction, INV-STORE-02).
+5. On success: `OperatorResponse::DelegationGranted { delegation_id, granted_at, expires_at, capability_class }`. CLI prints `Delegation <delegation_id> granted: session=<session_id> capability=<class> role=<role_id> expires=<timestamp>`.
+6. On precondition failure, the response is `OperatorResponse::Error { code, detail }` with one of the failure codes enumerated in `kernel-store.md` §2.5.5 operator-error envelope: `FAIL_SESSION_INVALID`, `FAIL_CAPABILITY_ABOVE_CEILING`, `FAIL_DELEGATION_SIGNATURE_INVALID`, `FAIL_DELEGATION_TTL_OUT_OF_RANGE`, `FAIL_DELEGATION_ALREADY_ACTIVE`, `FAIL_UNKNOWN_CAPABILITY_CLASS`. The CLI deserialises `detail` and renders a human-readable message. **`FAIL_DELEGATION_SIGNATURE_INVALID` almost always indicates a CLI/kernel disagreement on the canonical-bytes serialisation** — implementers MUST add a regression test that round-trips the canonical bytes between the CLI signer and the kernel verifier on every supported `(scope_json present/absent, capability class, role id)` cross-product before merging changes to either side.
+7. Audit: `AuditEventKind::DelegationGranted { delegation_id, session_id, capability_class, delegating_role_id, granted_by_operator: <fingerprint>, expires_at, operator_sig_sha256, scope_json_sha256 }` (both the signature and the scope JSON are stored as SHA-256 in the audit event, with the raw signature persisted in `delegations.operator_signature` and the raw scope JSON in `delegations.scope_json` — keeps the audit chain compact and avoids leaking large scope payloads into a frequently-rotated segment).
+
+**Re-granting after expiry or revocation.** v1 has no in-place "renew" path. To re-grant after expiry, the operator submits a fresh `delegation grant` for the same `(session, capability)` — the prior row's `status` will already be `Expired` (TTL passed), so the UNIQUE constraint (`status IN ('Active', 'StaleOnNextUse')`) does not block. After a `RotateEpoch`, all `Active` delegations transition to `StaleOnNextUse` per `mark_stale_on_epoch_advance`; the planner gets one final use with `warn_delegation_stale = true`, after which a new `delegation grant` is required. There is no `RevokeDelegation` operator IPC in v1; deferred to v2 alongside the broader `policy.delegations.lifecycle` features.
+
+**Authorisation:** Requires `GrantDelegation ∈ permitted_ops`. Failure → `OperatorResponse::Error { code: UNAUTHORIZED, detail: OperationNotPermitted { operator_id, attempted_op: "GrantDelegation" } }`.
 
 ---
 

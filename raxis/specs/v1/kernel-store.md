@@ -1364,21 +1364,27 @@ The kernel binds three Unix domain sockets at startup:
 |---|---|---|---|
 | Planner UDS | `<data_dir>/sockets/planner.sock` | Planner sessions (session token auth) | All `IntentKind` variants, `WitnessSubmission` |
 | Gateway UDS | `<data_dir>/sockets/gateway.sock` | Gateway process (gateway process token auth) | `FetchRequest`, `FetchResponse` |
-| Operator UDS | `<data_dir>/sockets/operator.sock` | Operator CLI (challenge-response + operator session token) | `CreateInitiative`, `ApprovePlan`, `RejectPlan`, `AbortInitiative`, `AbortTask`, `ResumeTask`, `RetryTask`, `GrantDelegation`, `ApproveEscalation`, `DenyEscalation`, `RevokeSession`, `RotateEpoch` |
+| Operator UDS | `<data_dir>/sockets/operator.sock` | Operator CLI (challenge-response + operator session token) | `CreateInitiative`, `ApprovePlan`, `RejectPlan`, `CreateSession`, `RevokeSession`, `GrantDelegation`, `RetryTask`, `ResumeTask`, `AbortTask`, `AbortInitiative`, `ApproveEscalation`, `DenyEscalation`, `RotateEpoch` |
 
 **Operator IPC discriminant reference:**
 
 | IPC message | Precondition | State transition | Handler | `permitted_ops` name |
 |---|---|---|---|---|
+| `CreateInitiative { plan_toml_path, plan_sig_path }` | None | Inserts row in `initiatives` (`state: Draft`) + row in `signed_plan_artifacts` after Ed25519 verification | `initiatives::lifecycle::create_initiative` | `CreateInitiative` |
+| `ApprovePlan { initiative_id }` | Initiative `Draft` | Initiative `→ ApprovedPlan`; instantiates task rows + DAG edges | `initiatives::lifecycle::approve_plan` | `ApprovePlan` |
 | `RejectPlan { initiative_id }` | Initiative `Draft` | Initiative `→ Aborted` (draft discarded) | `initiatives::lifecycle::reject_plan` | `RejectPlan` |
-| `ResumeTask { task_id }` | `BlockedRecoveryPending` | `→ Running` | `recovery::resume_task` | `ResumeTask` |
+| `CreateSession { role, worktree_root, base_tracking_ref, task_id?, lineage_id }` | `role == Planner` (gateway/verifier sessions are kernel-spawned, not operator-created in v1); `worktree_root` is an absolute path under operator-allowed roots; `lineage_id` is operator-supplied (see §2.5.5 "Lineage ownership and supply" below — operator-namespace UUID); `task_id` (optional) must be `Admitted` and unbound | Inserts row in `sessions` (`lineage_id` populates the NOT NULL Table 4 column); returns `(session_id, session_token)` | `authority::session::create_session` (called by `handlers/operator::create_session`) | `CreateSession` |
+| `RevokeSession { session_id }` | Session row exists and `revoked_at IS NULL` | `UPDATE sessions SET revoked_at = now() WHERE session_id = ?` | `authority::session::revoke_session` | `RevokeSession` |
+| `GrantDelegation { session_id, capability_class, delegating_role_id, expires_at, scope_json?, operator_sig }` | Session `Active` (not revoked, not expired); `capability_class ∈ policy.allowed_capabilities`; `delegating_role_id ∈ policy.role_ceilings` and the requested `capability_class` is within that role's ceiling; **at most one** active delegation per `(session_id, capability_class)` (UNIQUE in Table 7 — a duplicate grant returns `FAIL_DELEGATION_ALREADY_ACTIVE`; revoke first if you want to re-grant); `operator_sig` MUST verify against the operator's public key over the canonical signing domain defined in §2.5.5 "Delegation grant signing domain on the operator socket" below | Inserts row in `delegations` with `status = 'Active'`, `effective_from = now()`, `operator_signature` blob (Table 7 column), `epoch_stale_set_at = NULL` | `authority::delegation::grant_delegation` | `GrantDelegation` |
 | `RetryTask { task_id }` | `Failed` | `→ Admitted` | `initiatives::lifecycle::retry_task` | `RetryTask` |
-| `ApproveEscalation { op_token, escalation_id, approval_scope, operator_sig }` | Escalation `Pending` | Escalation `→ Approved`; writes `approval_tokens` + `approval_proofs` rows | `authority::approve_escalation` | `ApproveEscalation` |
-| `DenyEscalation { op_token, escalation_id, reason }` | Escalation `Pending` | Escalation `→ Denied`; no token issued; audit-only record | `authority::deny_escalation` | `DenyEscalation` |
+| `ResumeTask { task_id }` | `BlockedRecoveryPending` | `→ Running` | `recovery::resume_task` | `ResumeTask` |
 | `AbortTask { task_id }` | Task non-terminal | `→ Aborted` (`OperatorAbort`) | `initiatives::lifecycle::abort_task` | `AbortTask` |
 | `AbortInitiative { initiative_id }` | Initiative non-terminal | Initiative `→ Aborted`; bulk task cancellation per `lifecycle::abort_initiative` | `initiatives::lifecycle::abort_initiative` | `AbortInitiative` |
+| `ApproveEscalation { op_token, escalation_id, approval_scope, operator_sig }` | Escalation `Pending` | Escalation `→ Approved`; writes `approval_tokens` + `approval_proofs` rows | `authority::approve_escalation` | `ApproveEscalation` |
+| `DenyEscalation { op_token, escalation_id, reason }` | Escalation `Pending` | Escalation `→ Denied`; no token issued; audit-only record | `authority::deny_escalation` | `DenyEscalation` |
+| `RotateEpoch { policy_path, sig_path }` | Phase 0 verification of new artifact passes (signature, epoch monotonicity, TOML shape, path under `<data_dir>/policy/`) | Phase 1 SQL transaction: sweeps `delegations` to `StaleOnNextUse`, invalidates session prompts, inserts `policy_epoch_history` row, appends `PolicyEpochAdvanced` audit. Phase 2 swaps `ArcSwap<PolicyBundle>` and `ArcSwap<AllowlistCache>`. Phase 3 best-effort gateway signal. | `policy_manager::advance_epoch` (called by `handlers/operator::handle_rotate_epoch`) | `RotateEpoch` |
 
-`DenyEscalation` does not require `operator_sig` (no approval artifact is created; the audit event is the only record). `ApproveEscalation` requires `operator_sig` because the resulting `ApprovalProof` must be independently verifiable after a crash (INV-ESC-01). `AbortTask` and `AbortInitiative` are distinct variants — per-task abort (`OperatorAbort`) vs initiative-wide abort. `ResumeTask` and `RetryTask` are distinct message types dispatched on IPC discriminant, not on probed task state. **This table is the single source of truth for operator IPC names and `permitted_ops` strings; `cli-ceremony.md` references it.**
+`DenyEscalation` does not require `operator_sig` (no approval artifact is created; the audit event is the only record). `ApproveEscalation` requires `operator_sig` because the resulting `ApprovalProof` must be independently verifiable after a crash (INV-ESC-01). `AbortTask` and `AbortInitiative` are distinct variants — per-task abort (`OperatorAbort`) vs initiative-wide abort. `ResumeTask` and `RetryTask` are distinct message types dispatched on IPC discriminant, not on probed task state. `CreateSession` and `RevokeSession` are the v1 mechanism by which planner sessions are minted and torn down (gateway and verifier sessions are kernel-spawned via separate code paths and are not minted via this IPC — see `kernel-core.md` Part 2.3 §`session.rs` for the role-specific spawn paths). `GrantDelegation` is the operator's per-session capability-grant operation; the session must already exist (operator workflow is typically `CreateSession` → `GrantDelegation` × N capabilities → operator hands the session token to the planner spawn → planner submits its first intent). **This table is the single source of truth for operator IPC names and `permitted_ops` strings; `cli-ceremony.md` references it.**
 
 The operator socket is bound with `mode 0600` and owned by the kernel OS user — readable only by the same user. v1 is single-operator, single-machine; this is the only access control at the socket layer.
 
@@ -1407,21 +1413,42 @@ Operator → Kernel:  ChallengeResponse { signed_by: <fingerprint>, signature: <
 
 #### `permitted_ops` schema
 
-Each operator entry in `policy.toml` carries a `permitted_ops` list. The snippet below is a **minimal illustration only** — production entries must include **every** IPC operation that operator is allowed to invoke (see the operator socket table above: `CreateInitiative`, `ApprovePlan`, `RejectPlan`, `AbortInitiative`, `AbortTask`, `ResumeTask`, `RetryTask`, `GrantDelegation`, `ApproveEscalation`, `DenyEscalation`, `RevokeSession`, `RotateEpoch`, plus any future v1 extensions documented beside that table).
+Each operator entry in `policy.toml` carries a `permitted_ops` list. The snippet below is a **minimal illustration only** — production entries must include **every** IPC operation that operator is allowed to invoke (see the operator IPC discriminant table above for the canonical 13-operation v1 set: `CreateInitiative`, `ApprovePlan`, `RejectPlan`, `CreateSession`, `RevokeSession`, `GrantDelegation`, `RetryTask`, `ResumeTask`, `AbortTask`, `AbortInitiative`, `ApproveEscalation`, `DenyEscalation`, `RotateEpoch`).
 
 ```toml
 [[operators.entries]]
 pubkey_fingerprint = "abcd1234..."
 display_name       = "Alice"
 permitted_ops      = [
-  "CreateInitiative", "ApprovePlan", "RejectPlan", "AbortInitiative", "AbortTask",
-  "ResumeTask", "RetryTask", "GrantDelegation",
+  "CreateInitiative", "ApprovePlan", "RejectPlan",
+  "CreateSession", "RevokeSession", "GrantDelegation",
+  "RetryTask", "ResumeTask",
+  "AbortTask", "AbortInitiative",
   "ApproveEscalation", "DenyEscalation",
-  "RevokeSession", "RotateEpoch",
+  "RotateEpoch",
 ]
 ```
 
 The kernel enforces this at every operator IPC call: if the requested operation is not in `permitted_ops` for the authenticated operator → `UNAUTHORIZED { reason: OperationNotPermitted }`. This is evaluated after token validation, not before.
+
+#### Lineage ownership and supply
+
+`sessions.lineage_id` (Table 4 column, `NOT NULL`) is the **operator's namespace** for grouping related sessions. Every session has exactly one `lineage_id` and the value is **operator-supplied at `CreateSession` time** — the kernel does not synthesise it, does not derive it from any session field, and does not allow it to be `NULL`. The kernel's only constraints on the value are:
+
+1. Non-empty UTF-8.
+2. Parsable as a UUID v4 hyphenated form (36 ASCII bytes — same shape as `session_id`). The kernel validates with the standard `Uuid::parse_str` and rejects with `OperatorErrorCode::FAIL_INVALID_LINEAGE_ID` on parse failure.
+
+Beyond those two checks the kernel is namespace-blind: any UUID v4 the operator supplies is accepted. The semantics are operator-side:
+
+- **One agent instance, one lineage.** When an operator spawns a planner subprocess for a fresh agent (a fresh "instance" in their orchestration model — typically per-task, per-initiative, or per-developer-session), the operator generates a fresh `LineageId` (`Uuid::new_v4()` in the CLI). All sessions belonging to that agent instance share the lineage_id.
+- **Reuse across sessions of the same agent.** If the operator revokes a session and creates a new one for the *same* logical agent (e.g. the agent crashed and the operator is restarting it under the same task), the operator MUST reuse the same `lineage_id`. This is what makes per-lineage rate-limiting (`escalation_max_per_window`) and quarantine (`escalation_quarantine_threshold`) effective — a misbehaving agent that hammers escalations cannot evade rate-limiting by getting its session revoked and recreated under a fresh lineage.
+- **Distinct lineages per logical agent.** Two genuinely independent agents (different tasks, different initiatives, different developer sessions) MUST get different lineage_ids. Sharing a lineage across independent agents pools their rate-limit budgets, which is almost always a mistake.
+
+**Why the operator owns lineage assignment, not the kernel.** The kernel cannot infer agent identity — it only sees session connections. "These two sessions are the same agent" is an orchestration-layer fact (same process tree, same task assignment, same operator-managed agent record). Asking the kernel to derive a lineage from session metadata would either be a tautology (lineage = session_id, which defeats the rate-limiting purpose) or wrong (lineage = task_id, which fails when one agent works on multiple tasks). The clean answer is: operator generates and supplies the lineage; kernel honours it.
+
+**Why no `initiative_id` field on `CreateSession`.** Sessions in v1 are not bound to initiatives at the session-row level (`sessions` Table 4 has no `initiative_id` column). The session-to-initiative relationship is **derived through tasks**: a session that picks up `task_id = T` is operating on `T`'s containing initiative; a session bound to a single task at `CreateSession` time (`task_id: Some(T)`) is implicitly scoped to that initiative for its lifetime. Multi-initiative sessions (one session, intents on tasks across two initiatives) are accepted by the kernel but discouraged — operators SHOULD prefer one session per initiative for clarity, and v2 may add a normative `initiative_id` field to enforce it. v1 keeps the surface minimal.
+
+**CLI behaviour.** `raxis-cli session create` accepts `--lineage-id <uuid>` for explicit reuse and **defaults to `--lineage-id $(uuidgen --random)`** when omitted (a fresh random UUID v4 per invocation). The CLI prints the chosen `lineage_id` in its stdout summary so operator scripts can capture it for later reuse. Operators implementing custom orchestration (Python, Go, etc. spawning the CLI) are responsible for tracking lineage_ids per agent instance — the kernel will not help them.
 
 #### Escalation approval on the operator socket
 
@@ -1444,6 +1471,78 @@ The kernel:
 5. Returns `EscalationApproved { approval_token }` to the operator CLI, which passes the token to the planner out-of-band.
 
 The `operator_sig` is required even though the connection is already authenticated — it creates a durable `ApprovalProof` tied to the specific scope, independent of the session. This is what `recovery::reconcile` can verify after a crash.
+
+#### Delegation grant signing domain on the operator socket
+
+`GrantDelegation` requires `operator_sig` for the same reason `ApproveEscalation` does: a delegation is a long-lived authority artifact that may outlive the operator's session and is consumed across many gated actions until expiry. The kernel persists the operator's signature in `delegations.operator_signature` (Table 7 normative addition — see below) so that `recovery::reconcile` and any future audit-log replay can verify, post-crash, that the delegation row was authorised by the named operator and was not forged by a compromised kernel.
+
+**Wire format:**
+
+```
+Operator → Kernel: GrantDelegation {
+  op_token:            "<operator session token>",
+  session_id:          "<uuid>",
+  capability_class:    "<CapabilityClass enum variant name>",
+  delegating_role_id:  "<RoleId>",
+  expires_at:          <UnixSeconds u64>,
+  scope_json:          "<inline JSON or null>",
+  operator_sig:        "<64-byte hex Ed25519 sig over canonical signing domain — see below>"
+}
+```
+
+**Signing domain (normative, byte-exact):**
+
+The operator signs the SHA-256 digest of the canonical concatenation of all six functional fields, in the exact order below, with `0x00` as the field separator and length prefixes as noted. The `op_token` is **not** part of the signing domain (it authenticates the connection, not the artifact). This mirrors the §2.5.3 plan-signing pattern (Ed25519 over the SHA-256 digest, not the raw bytes — for auditability and constant-size signing input).
+
+```
+canonical_bytes = "RAXIS-V1-DELEGATION-GRANT" || 0x00
+               || session_id (UTF-8 bytes of UUID hyphenated form, 36 bytes) || 0x00
+               || capability_class (UTF-8 bytes of enum variant name, no quoting) || 0x00
+               || delegating_role_id (UTF-8 bytes of role id) || 0x00
+               || expires_at (8-byte little-endian u64 of absolute Unix seconds) || 0x00
+               || scope_json_present (1 byte: 0x01 if scope_json is Some, 0x00 if None)
+               || (if scope_json_present == 0x01:
+                       u32_le(scope_json_byte_length) || scope_json_utf8_bytes
+                   else: <empty>)
+
+signing_input  = SHA-256(canonical_bytes)             // 32 bytes
+operator_sig   = Ed25519Sign(operator_private_key, signing_input)   // 64 bytes
+```
+
+**Field-by-field rationale:**
+
+- `"RAXIS-V1-DELEGATION-GRANT"` domain-separation prefix prevents a signature produced for one purpose (e.g. plan signing, escalation approval) from being replayed as a valid delegation grant. This is the standard cross-protocol replay defence; mirror prefixes exist for `"RAXIS-V1-PLAN"` (§2.5.3) and `"RAXIS-V1-ESCALATION-APPROVE"` (§2.5.5 above — to be added in a parallel cleanup; the pattern is the same).
+- `session_id` in **UUID hyphenated form** (e.g. `550e8400-e29b-41d4-a716-446655440000`) — exactly 36 ASCII bytes. Not raw 16-byte UUID bytes, not the unhyphenated form. This matches the at-rest representation in `sessions.session_id TEXT`.
+- `capability_class` as the **enum variant name** UTF-8 bytes (e.g. `"WriteSecrets"`), no JSON quoting, no surrounding whitespace. Matches the at-rest representation in `delegations.capability_class TEXT`.
+- `delegating_role_id` as raw UTF-8 bytes of the operator-defined role id. No quoting. Matches `delegations.delegating_role_id TEXT`.
+- `expires_at` as an **8-byte little-endian unsigned integer** — fixed width, byte-exact. The kernel reconstructs the same byte sequence by encoding `delegations.expires_at` (`INTEGER NOT NULL`) the same way before recomputing the signing input during `recovery::reconcile`.
+- `scope_json_present` is a single discriminant byte that distinguishes "no scope" from "empty-string scope" — both must be unforgeable. When present, the JSON body's byte length is encoded as a 4-byte little-endian `u32` followed by the raw UTF-8 bytes of the JSON document **as the operator typed it** (no canonicalisation, no JSON re-serialisation). The operator CLI is the only canonical signer; the kernel signs nothing here. The kernel verifies what it received against what the operator's public key endorsed.
+
+**Kernel verification (in `authority::delegation::grant_delegation` step 2.5 — between policy ceiling check and TTL bounds check):**
+
+1. Reconstruct `canonical_bytes` from the request fields exactly as above.
+2. Compute `signing_input = SHA-256(canonical_bytes)`.
+3. Look up the operator's Ed25519 public key from `policy.operator_entry(authenticated_operator.fingerprint).public_key`.
+4. `Ed25519Verify(pubkey, signing_input, req.operator_sig)`. Failure → `AuthorityError::DelegationSignatureInvalid` → `OperatorErrorCode::FAIL_DELEGATION_SIGNATURE_INVALID` (new code; see operator-error envelope addition in `peripherals.md` §3 below).
+5. On success, the handler proceeds to step 3 (TTL bounds check), step 4 (uniqueness), and step 5 (insert + audit). The Phase-5 insert MUST persist `req.operator_sig` into the new `delegations.operator_signature` column added below.
+
+**`delegations` table addendum (Table 7) — `operator_signature` column:**
+
+The existing Table 7 DDL must add one column (or, equivalently, the next spec amendment that revises Table 7 must include it):
+
+```sql
+operator_signature  BLOB    NOT NULL,    -- 64-byte detached Ed25519 signature over
+                                         -- the canonical GrantDelegation signing domain
+                                         -- defined in §2.5.5 "Delegation grant signing
+                                         -- domain". Persisted so recovery::reconcile and
+                                         -- post-crash audit can re-verify the grant
+                                         -- was operator-authorised. Distinct from the
+                                         -- ApprovalProof signing path (§2.5.5
+                                         -- "Escalation approval"); this signature is
+                                         -- operator-produced, not kernel-produced.
+```
+
+**Post-crash verification (`recovery::reconcile`):** for every row in `delegations` whose `status IN ('Active', 'StaleOnNextUse')`, the recovery routine reconstructs `canonical_bytes` from the row's column values, recomputes the SHA-256, looks up the operator pubkey from the **current** policy bundle (a delegation whose granting operator was removed from `[[operators.entries]]` in a later epoch is treated as orphaned — see operator runbook), and runs `Ed25519Verify`. A row whose signature does not verify against any current operator pubkey is logged as `AuditEventKind::DelegationSignatureUnverifiable { delegation_id, expected_signer_unknown_in_current_policy: bool }` and the row's `status` is forced to `Revoked` (defensive — a kernel that cannot prove operator authorisation must not honour the delegation). This is the asymmetric mirror of how `ApprovalProof` records are verified.
 
 ---
 
@@ -1501,7 +1600,20 @@ A non-zero exit is **not** a gate failure. The gate outcome is determined only b
 
 #### Alignment with `configuring-witnesses.md`
 
-`configuring-witnesses.md` is the operator-facing guide. The env var names and exit code semantics defined here are normative; `configuring-witnesses.md` must reflect them exactly. Where they conflict, this section wins.
+`configuring-witnesses.md` is the operator-facing tutorial — it shows worked examples of how to wire `[[gates]]` entries, write verifier scripts in shell/Rust/etc., and stage cross-platform witnesses. It is **not** a normative spec source; this `kernel-store.md` §2.5.6 (env vars + exit codes) and `peripherals.md` §3.3 (witness wire shape) together are the normative contract for the verifier surface. Where the two disagree on any of the four surfaces below, the normative spec wins and `configuring-witnesses.md` must be patched to match.
+
+**The four surfaces `configuring-witnesses.md` covers, with their normative source:**
+
+| Surface | What `configuring-witnesses.md` shows | Normative source | Precedence on conflict |
+|---|---|---|---|
+| Env-var inventory injected by `spawn_verifier` | Tutorial table at "Step 3" reproducing the seven `RAXIS_*` env vars | This section's env-var table (above) | This section wins |
+| Verifier exit-code semantics | "Always `exit 0` after submission" pattern in every script example | This section's exit-code table (above) — `0` = submission attempted, non-zero = process failure (re-queued, not gate-fail) | This section wins |
+| `WitnessSubmission` wire shape and `result_class` enum values | "Submit a `WitnessSubmission`" prose; result-class strings appear in the failure-modes table | `peripherals.md` §3.3 "Output: WitnessSubmission" + "result_class — canonical enum" | `peripherals.md` wins |
+| IPC framing (length-prefixed bincode, not JSON) | One-line note "length-prefixed bincode framing per `peripherals.md` §3.3 — not JSON on the wire" | `peripherals.md` §3 opening normative note (bincode 2.x with `bincode::config::standard()`) | `peripherals.md` wins |
+
+**As of v1, no known conflicts exist.** The tutorial has been swept against both normative sources after every iteration that touched §2.5.6 or §3.3 (most recently the `Error` → `Inconclusive` rename for `result_class`, which the tutorial does not reference, and the bincode-version pin to 2.x with `config::standard()`, which the tutorial cites by reference rather than restating). Engineers implementing the spec do **not** need to read `configuring-witnesses.md` to build a conformant kernel or verifier-host runtime — every behavioural contract is in the spec corpus (`kernel-store.md`, `peripherals.md`, `kernel-core.md`, `philosophy.md`, `cli-ceremony.md`, `planner-api.md`). Read `configuring-witnesses.md` only to learn the *operator workflow* (how to design gates for a real project, where to put scripts in the repo, how to layer per-OS gates).
+
+**Authority on the precedence rule:** if a future patch introduces wording in `configuring-witnesses.md` that contradicts either normative source, the patch reviewer MUST treat the contradiction as a tutorial bug and fix `configuring-witnesses.md` — never the other way around.
 
 ---
 

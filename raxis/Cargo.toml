@@ -41,6 +41,25 @@ glob        = "0.3"
 anyhow      = "1"
 thiserror   = "1"
 
+# IPC wire codec. Pinned to 2.0.1 (the last release from upstream bincode-org
+# before that organisation archived in August 2025). Configured at every
+# call-site with `bincode::config::standard()` — see specs/v1/peripherals.md
+# §3 opening normative note for the byte-exact framing contract.
+#
+# Why 2.0.1 and not 3.x: the 3.x line on crates.io is from a downstream fork
+# (Apich-Organization/bincode-next) whose `config::standard()` defaults are
+# wire-INCOMPATIBLE with 2.x — only `config::legacy()` round-trips. v1 pins
+# 2.0.1 because (a) it is the last release from the original maintainer and
+# the de-facto stable artifact the wider Rust ecosystem currently consumes,
+# (b) `config::standard()` is the minimal, varint-encoded, named configuration
+# we want on the wire, and (c) staying on 2.x defers the codec-fork question
+# to v2 instead of binding the protocol to an unaudited downstream organisation.
+# The first implementation sprint MUST re-evaluate this pin against the state
+# of the post-archival ecosystem at that time; any change to the codec or its
+# config requires a peripherals.md §3 amendment AND a wire-compat test that
+# round-trips every IpcMessage variant against a 2.0.1 baseline.
+bincode     = { version = "=2.0.1", features = ["serde"] }
+
 # Workspace-internal crates
 raxis-types  = { path = "crates/types" }
 raxis-ipc    = { path = "crates/ipc" }
