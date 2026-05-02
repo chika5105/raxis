@@ -381,9 +381,11 @@ pub struct PolicyBundle {
     quality_pubkey_hex: String,
     operators: Vec<OperatorEntry>,
     gates: Vec<GateEntry>,
-    roles: Vec<RoleEntry>,
     lanes: Vec<LaneEntry>,
-    /// Cached: role_id → ceiling set
+    /// Validated `[[roles]]` flattened into a `role_id → ceiling` lookup.
+    /// Built from `RawPolicy::roles` at validate time. The raw `Vec<RoleEntry>`
+    /// is intentionally dropped after the lookup is built — every consumer in
+    /// the codebase (delegation, session minting) goes through `role_ceilings`.
     role_ceilings: HashMap<String, Vec<String>>,
     escalation_timeout: Duration,
     escalation_window: Duration,
@@ -449,7 +451,6 @@ impl PolicyBundle {
             quality_pubkey_hex: raw.authority.quality_pubkey,
             operators: raw.operators_block.entries,
             gates: raw.gates,
-            roles: raw.roles,
             lanes: raw.lanes,
             role_ceilings,
             escalation_timeout: Duration::from_secs(raw.escalation_policy.timeout_secs),
@@ -575,11 +576,31 @@ impl PolicyBundle {
         &self.allowed_worktree_roots
     }
 
-    /// Returns true if `path` is under at least one allowed worktree root.
+    /// Returns true if `path` is at — or under — at least one allowed
+    /// worktree root.
+    ///
+    /// **Component-aware comparison.** A naive `path.starts_with(root)` is
+    /// unsafe: if the operator allows `/srv/work`, a planner-supplied
+    /// `/srv/work_secret` would also pass because the literal byte prefix
+    /// matches. We require either exact equality OR a directory-separator
+    /// boundary right after the root, so `/srv/work_secret` is rejected
+    /// while `/srv/work` and `/srv/work/sub/dir` are accepted.
+    ///
+    /// We also tolerate operators writing the root with or without a
+    /// trailing slash (`/srv/work` vs `/srv/work/`) — the trailing slash
+    /// is stripped before comparison.
     pub fn worktree_root_allowed(&self, path: &str) -> bool {
-        self.allowed_worktree_roots
-            .iter()
-            .any(|root| path.starts_with(root.as_str()))
+        self.allowed_worktree_roots.iter().any(|raw_root| {
+            let root = raw_root.trim_end_matches('/');
+            if path == root {
+                return true;
+            }
+            // Require a path-separator boundary after the root prefix to
+            // prevent the `/srv/work` ⊃ `/srv/work_secret` false positive.
+            path.len() > root.len()
+                && path.starts_with(root)
+                && path.as_bytes()[root.len()] == b'/'
+        })
     }
 
     // ── Delegation policy ───────────────────────────────────────────────────
@@ -668,5 +689,116 @@ impl PolicyBundle {
     /// Max fetches per session per window.
     pub fn egress_max_fetches_per_window(&self) -> u32 {
         self.egress_max_fetches_per_window
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — worktree_root_allowed component-aware comparison.
+// ---------------------------------------------------------------------------
+//
+// These tests guard against the v1-review finding "bundle.worktree_root_allowed
+// uses raw `starts_with`, allowing path-prefix collisions like
+// `/srv/work_secret` to satisfy a `/srv/work` policy".
+//
+// We construct a `PolicyBundle` directly via its private fields so the
+// test does not need a full TOML round-trip — the only thing under test
+// here is the `worktree_root_allowed` predicate.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bundle_with_roots(roots: Vec<&str>) -> PolicyBundle {
+        // We bypass `PolicyBundle::validate` because the only thing under
+        // test here is the `worktree_root_allowed` predicate. All other
+        // fields are populated with empty/zero values that don't matter.
+        PolicyBundle {
+            epoch: 0,
+            authority_pubkey_hex: String::new(),
+            quality_pubkey_hex: String::new(),
+            operators: Vec::new(),
+            gates: Vec::new(),
+            lanes: Vec::new(),
+            role_ceilings: HashMap::new(),
+            escalation_timeout: Duration::from_secs(0),
+            escalation_window: Duration::from_secs(0),
+            escalation_max_per_window: 0,
+            escalation_quarantine_threshold: 0,
+            default_session_ttl: Duration::from_secs(0),
+            max_session_ttl: Duration::from_secs(0),
+            allowed_worktree_roots: roots.into_iter().map(str::to_owned).collect(),
+            max_delegation_ttl: Duration::from_secs(0),
+            base_cost_per_intent_kind: HashMap::new(),
+            cost_per_touched_path: 0,
+            max_cost_per_task: 0,
+            policy_sha256: String::new(),
+            signed_by: String::new(),
+            signed_at: 0,
+            claim_rules: Vec::new(),
+            claim_default_action: String::new(),
+            egress_domains: Vec::new(),
+            egress_patterns: Vec::new(),
+            egress_max_fetches_per_window: 0,
+        }
+    }
+
+    #[test]
+    fn exact_match_is_accepted() {
+        let b = bundle_with_roots(vec!["/srv/work"]);
+        assert!(b.worktree_root_allowed("/srv/work"));
+    }
+
+    #[test]
+    fn path_under_root_is_accepted() {
+        let b = bundle_with_roots(vec!["/srv/work"]);
+        assert!(b.worktree_root_allowed("/srv/work/repo"));
+        assert!(b.worktree_root_allowed("/srv/work/repo/subdir/file"));
+    }
+
+    /// Regression guard: literal byte prefix without a separator boundary
+    /// MUST NOT count as "under the root".
+    #[test]
+    fn sibling_with_byte_prefix_is_rejected() {
+        let b = bundle_with_roots(vec!["/srv/work"]);
+        assert!(!b.worktree_root_allowed("/srv/work_secret"),
+                "/srv/work_secret must NOT match /srv/work");
+        assert!(!b.worktree_root_allowed("/srv/work_secret/repo"),
+                "subdir of /srv/work_secret must NOT match /srv/work");
+        assert!(!b.worktree_root_allowed("/srv/working"),
+                "/srv/working must NOT match /srv/work");
+    }
+
+    /// Operator-supplied trailing slash is normalised away so both forms work.
+    #[test]
+    fn trailing_slash_in_root_is_tolerated() {
+        let b = bundle_with_roots(vec!["/srv/work/"]);
+        assert!(b.worktree_root_allowed("/srv/work"),       "exact root, no trailing /");
+        assert!(b.worktree_root_allowed("/srv/work/repo"),  "subdir under root with trailing /");
+        assert!(!b.worktree_root_allowed("/srv/work_secret"),
+                "trailing-slash root must STILL reject the byte-prefix sibling");
+    }
+
+    #[test]
+    fn empty_allowlist_rejects_everything() {
+        let b = bundle_with_roots(vec![]);
+        assert!(!b.worktree_root_allowed("/srv/work"));
+        assert!(!b.worktree_root_allowed(""));
+    }
+
+    #[test]
+    fn multiple_roots_any_match() {
+        let b = bundle_with_roots(vec!["/srv/a", "/srv/b"]);
+        assert!(b.worktree_root_allowed("/srv/a/x"));
+        assert!(b.worktree_root_allowed("/srv/b"));
+        assert!(!b.worktree_root_allowed("/srv/c/x"));
+        // Sibling collisions still rejected on every root in the list.
+        assert!(!b.worktree_root_allowed("/srv/a_other"));
+    }
+
+    #[test]
+    fn shorter_path_than_root_is_rejected() {
+        let b = bundle_with_roots(vec!["/srv/work"]);
+        assert!(!b.worktree_root_allowed("/srv"));
+        assert!(!b.worktree_root_allowed(""));
     }
 }
