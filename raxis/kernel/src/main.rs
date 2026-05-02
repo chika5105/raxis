@@ -11,6 +11,8 @@ mod errors;
 mod bootstrap;
 mod authority;
 mod ipc;
+mod recovery;
+mod initiatives;
 
 use std::sync::Arc;
 
@@ -87,8 +89,19 @@ async fn main() {
         }
     };
 
-    // Step 6: Run recovery::reconcile (stub).
-    eprintln!("{{\"level\":\"info\",\"message\":\"recovery reconcile: stub, skipping\"}}");
+    // Step 6: Run recovery::reconcile — verify audit chain, sweep in-flight tasks.
+    let audit_dir = data_dir.join("audit");
+    match recovery::reconcile(&store, &audit_dir) {
+        Ok(result) => {
+            if result.swept_tasks > 0 {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"message\":\"recovery swept tasks\",\"count\":{}}}",
+                    result.swept_tasks
+                );
+            }
+        }
+        Err(e) => exit_with_code(e),
+    }
 
     // Step 7 + 9: Bind IPC sockets and enter dispatch loop.
     let ctx = Arc::new(ipc::context::HandlerContext::new(

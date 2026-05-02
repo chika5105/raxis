@@ -595,6 +595,7 @@ dependencies = [
  "sha2",
  "thiserror",
  "tokio",
+ "toml",
  "uuid",
 ]
 
