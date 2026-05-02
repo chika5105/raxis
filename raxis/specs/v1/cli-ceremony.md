@@ -70,8 +70,8 @@ All subcommands that require kernel connectivity will fail with `ERR_SOCKET_NOT_
 - Stops cleanly if the kernel is detected as running (checks for active socket).
 - Generates new key material for the specified family.
 - For `operator`: prompts for new public key; removes old `.pub` file; writes new one; operator must re-sign all active plan artifacts with the new key.
-- For any key: prints "You must advance the policy epoch before restarting. Run: `raxis-cli epoch advance`."
-- Does **not** automatically advance the epoch — that is a separate explicit step.
+- For any key: prints "You must advance the policy epoch before resuming work. After restarting the kernel, stage the new signed policy artifact under `<data_dir>/policy/` and run: `raxis-cli epoch advance --policy <path> --sig <path>` (both arguments required; see the `epoch advance` section below)."
+- Does **not** automatically advance the epoch — that is a separate explicit step requiring the operator to stage the new signed artifact and pass its paths.
 
 ---
 
@@ -223,12 +223,14 @@ INV-INIT-05: the planner cannot self-resume a `BlockedRecoveryPending` task. Onl
 
 **Behaviour:**
 1. Opens operator socket; performs challenge-response handshake.
-2. Sends `ResumeTask { task_id }` (operator IPC variant).
-3. Kernel calls `recovery::resume_task(task_id, operator_id)` — validates `task.state == TaskState::BlockedRecoveryPending`. Any other state → `FAIL_TASK_NOT_RESUMABLE { current_state }`.
-4. Kernel transitions task `BlockedRecoveryPending → Running`; emits `AuditEventKind::TaskResumed`.
+2. Sends `OperatorRequest::ResumeTask { task_id }` (operator IPC variant).
+3. Kernel calls `recovery::resume_task(task_id, operator_id)` — validates `task.state == TaskState::BlockedRecoveryPending`. Any other state → `OperatorResponse::Error { code: FAIL_TASK_NOT_RESUMABLE, detail: TaskNotResumable { current_state } }` per the operator-error envelope normatively defined in `peripherals.md` §3 "Operator socket". The CLI deserialises `detail` and renders `"Cannot resume: task is in state <current_state> (must be BlockedRecoveryPending)"` to stderr; exit code is non-zero.
+4. On success, kernel transitions task `BlockedRecoveryPending → Running`; emits `AuditEventKind::TaskResumed`; returns `OperatorResponse::TaskResumed { task_id, prior_state, transitioned_at }` (`prior_state` echoed from the `TaskNeedsRecovery` audit event so the operator sees what was interrupted).
 5. Requires `ResumeTask ∈ permitted_ops`.
 
 **Note:** After `task resume`, the operator must attach a planner session to the task to continue work. The kernel does not automatically reconnect the prior session (it may have been terminated at crash time).
+
+**Gate-progress preservation across recovery (per INV-INIT-08, `kernel-core.md` §4.4):** `task resume` always lands the task in `Running` regardless of its `prior_state` (`Admitted` / `GatesPending` / `Running` at crash time — visible in the `TaskNeedsRecovery { prior_state, … }` audit event written during `recovery::reconcile_tasks`). Pre-crash gate progress is not lost: `witness_records` (Table 13) preserves every accepted witness across restarts, and the next `IntentRequest` from the attached planner session re-runs `evaluate_claims` against those records. Witnesses that arrived before the crash satisfy their gates without re-execution; gates whose verifier subprocesses died with the kernel re-spawn fresh verifiers; verifier tokens issued before the crash were invalidated by `expire_orphan_verifier_tokens` during the recovery sweep, so any stray pre-crash subprocess that somehow re-presents its token is rejected with `AuthorityError::TokenExpired`. **Practical implication:** for tasks whose `prior_state` was `GatesPending`, the operator does not need to issue any extra command beyond `task resume` — the planner's first post-resume intent restores gate evaluation to a consistent state. For tasks whose `prior_state` was `Running`, the operator should also confirm with the planner whether any partial work was in flight (the planner may need to inspect its working tree for uncommitted changes before submitting the next intent).
 
 ---
 
@@ -240,12 +242,14 @@ INV-INIT-05: the planner cannot self-resume a `BlockedRecoveryPending` task. Onl
 
 **Behaviour:**
 1. Opens operator socket; performs challenge-response handshake.
-2. Sends `RetryTask { task_id }` (separate IPC variant from `ResumeTask`).
-3. Kernel validates `task.state == TaskState::Failed`. Any other state → `FAIL_TASK_NOT_RETRYABLE { current_state }`.
-4. Kernel transitions task `Failed → Admitted`; emits `AuditEventKind::TaskRetried { operator_id }`.
-5. Requires `RetryTask ∈ permitted_ops`.
+2. Sends `OperatorRequest::RetryTask { task_id }` (separate IPC variant from `ResumeTask`).
+3. Kernel validates `task.state == TaskState::Failed` AND the containing initiative is non-terminal (`initiative.state ∈ {ApprovedPlan, Executing, Blocked}`). Failing preconditions return one of two envelope shapes per `peripherals.md` §3 "Operator socket":
+   - **Task-state failure** → `OperatorResponse::Error { code: FAIL_TASK_NOT_RETRYABLE, detail: TaskNotRetryable { current_state } }`. CLI prints `"Cannot retry: task is in state <current_state> (must be Failed; Aborted/Cancelled tasks are non-retryable in v1 — see specs/v1/kernel-core.md INV-INIT-07)"` and exits non-zero.
+   - **Initiative-state failure** → `OperatorResponse::Error { code: FAIL_INITIATIVE_TERMINAL, detail: InitiativeTerminal { initiative_state, terminal_criteria } }`. CLI prints `"Cannot retry: initiative is in terminal state <initiative_state> under criterion <terminal_criteria> — re-submit a new initiative via `raxis-cli plan submit`"` and exits non-zero. This case is most commonly hit under `AllTasksSucceeded` criteria where `evaluate_terminal_criteria` already moved the initiative to `Failed` synchronously with the task failure (see `kernel-core.md` §4.5 "Operator decision on partial failure" for the criterion-dependent applicability table); the `terminal_criteria` field in `detail` lets the operator immediately understand *why* the initiative is unrecoverable rather than having to look it up.
+4. On success, kernel resets `session_id`, `evaluation_sha`, `base_sha`, `submitted_claims_json`, `admission_reserved_units`, and `actual_cost` on the task row, then transitions it `Failed → Admitted` via `transition_task`. The post-write `evaluate_terminal_criteria` hook fires automatically; under `MinSuccessCount` or `AllTasksTerminal` this may transition the initiative `Blocked → Executing` if `next_ready_tasks` becomes non-empty as a result. Emits `AuditEventKind::TaskTransitioned { from: Failed, to: Admitted, actor: Operator(<operator_id>), … }` plus `AuditEventKind::TaskRetried { task_id, initiative_id, retried_by, prior_failure_reason, at }` (full payload defined in `kernel-core.md` §4.6 `lifecycle::retry_task`); both audit writes are in the same store transaction as the row update. Returns `OperatorResponse::TaskRetried { task_id, initiative_id, transitioned_at }`.
+5. Requires `RetryTask ∈ permitted_ops`. Authorisation failure returns `OperatorResponse::Error { code: UNAUTHORIZED, detail: OperationNotPermitted { operator_id, attempted_op: "RetryTask" } }` per the standard operator-permitted-ops gate (`kernel-store.md` §2.5.5 L1424 + `peripherals.md` §3 "Operator socket" auth flow). All other operator IPC commands return the same envelope on permitted-ops failure; this is documented once here for the `task retry` example.
 
-**Note:** `Aborted` tasks cannot be retried in v1 — abort is terminal. `BlockedRecoveryPending` tasks use `task resume`, not `task retry`.
+**Note:** `Aborted` and `Cancelled` tasks cannot be retried in v1 — `Aborted` is terminal by infrastructure or operator decision, `Cancelled` is bulk-terminated by initiative-level operations (and per-task retry is meaningless when the initiative itself is terminal). `BlockedRecoveryPending` tasks use `task resume`, not `task retry`. After a successful retry, the operator should attach a planner session to the task (or wait for an existing session's next pickup) — `retry_task` only rewinds the task state, it does not re-spawn or re-attach planners. Each retry charges the lane budget afresh; there is no built-in retry cap in v1 (a future `policy.tasks.max_retries` field is deferred to v2).
 
 ---
 
@@ -263,16 +267,21 @@ These are three distinct IPC variants — no single `ResumeTask` variant overloa
 
 ### `epoch advance`
 
-**Purpose:** Advance the policy epoch, invalidating all epoch-bound sessions and cached witnesses.
+**Purpose:** Advance the policy epoch by loading and verifying a new signed policy artifact, sweeping all active delegations to `StaleOnNextUse`, invalidating all session prompt caches, swapping the in-memory policy bundle and domain allowlist, and signalling the gateway to reload.
 
-**Usage:** `raxis-cli epoch advance`
+**Usage:** `raxis-cli epoch advance --policy <path> --sig <path>`
+
+Both arguments are **required**. There is no implicit staged location. The kernel canonicalises both paths and rejects any path that does not resolve under `<data_dir>/policy/` (`PolicyError::PathOutsideDataDir`); operators stage new artifacts inside `<data_dir>/policy/` (e.g. `policy.toml.next` + `policy.toml.next.sig`) before invoking the command. Capturing the exact paths in shell history and in the audit record is intentional — it ties an epoch-advance event to a specific on-disk artifact pair without an implicit "current staged" mutable pointer.
 
 **Behaviour:**
-1. Opens operator socket; performs challenge-response handshake.
-2. Sends `RotateEpoch {}`.
-3. Kernel increments `epoch_id`, marks all active sessions' `prompt_epoch_valid = false`, and logs `AuditEventKind::EpochAdvanced`.
-4. Prints the new epoch ID.
-5. Active planner sessions are not disconnected — their next inference request will trigger prompt reassembly under the new epoch.
+1. CLI opens the operator socket; performs the challenge-response handshake (`peripherals.md` operator socket auth). The handshake establishes the `OperatorId` of the invoker (looked up from `[[operators.entries]]` in the current policy artifact); this `OperatorId` is forwarded to the kernel as `triggered_by` in step 2.
+2. CLI sends `OperatorRequest::RotateEpoch { policy_path: PathBuf, sig_path: PathBuf }` carrying the resolved absolute paths from the `--policy` / `--sig` arguments. (Empty payload is **not** valid; the kernel rejects `RotateEpoch` IPC messages with empty paths at the deserialiser before reaching the handler.)
+3. Kernel handler (`handlers/operator::handle_rotate_epoch`) calls `policy_manager::advance_epoch(policy_path, sig_path, &triggered_by, &registry, &ctx)` (full contract in `kernel-core.md` §`policy_manager.rs`). The handler runs the four-phase sequence: (Phase 0) verify the artifact signature, epoch-monotonicity, and TOML shape; (Phase 1) one SQL transaction holding the `Store` mutex, doing the delegations sweep + session-prompt invalidation + `policy_epoch` row insert + `PolicyEpochAdvanced` audit append; (Phase 2) `ArcSwap` swaps for `ctx.policy` and `ctx.allowlist_cache`; (Phase 3) best-effort `GatewayMessage::EpochAdvanced` signal.
+4. On success, kernel responds `OperatorResponse::EpochAdvanced { new_epoch_id, n_delegations_marked_stale, n_sessions_invalidated, policy_sha256 }`. CLI prints all four values so the operator can confirm the artifact identity and the scope of the sweep.
+5. On failure, kernel responds `OperatorResponse::Error { code, detail }` where `code` is one of `FAIL_POLICY_SIGNATURE_INVALID`, `FAIL_POLICY_EPOCH_REPLAY`, `FAIL_POLICY_MALFORMED`, `FAIL_PATH_OUTSIDE_DATA_DIR`, or `FAIL_STORE_WRITE` (Phase 0 rejection codes vs Phase 1 commit failure; per the audit-on-rejection contract in `kernel-core.md`, the corresponding `PolicyAdvanceRejected` or `PolicyAdvanceFailed` audit event is appended before the kernel returns). CLI exits non-zero and prints the error.
+6. Active planner sessions are **not** disconnected — their next inference request triggers prompt reassembly under the new epoch (per `prompt::epoch_binding` flow in `kernel-core.md`). Active delegations are flagged `StaleOnNextUse`: the next gated action against each delegation passes once with `warn_delegation_stale = true` in the `IntentResponse` (see `peripherals.md` §3.1), then must be renewed before the following action.
+
+**Audit event name correction:** the canonical event kind is `AuditEventKind::PolicyEpochAdvanced` (with payload `{ old_epoch, new_epoch, policy_sha256, signed_by_authority, triggered_by, advanced_at, n_delegations_marked_stale, n_sessions_invalidated }`). Older draft text using `AuditEventKind::EpochAdvanced` is non-canonical and is being swept out of all spec sites in this revision.
 
 ---
 
@@ -374,7 +383,11 @@ Tasks are now scheduled. The planner session can begin.
 
 ```bash
 raxis-cli genesis --rotate <key-family>
-raxis-cli epoch advance    # after kernel restarts
+# After the kernel restarts, stage the re-signed policy artifact under
+# <data_dir>/policy/ (e.g. as policy.toml.next + policy.toml.next.sig) then:
+raxis-cli epoch advance \
+  --policy <data_dir>/policy/policy.toml.next \
+  --sig    <data_dir>/policy/policy.toml.next.sig
 ```
 
 ---

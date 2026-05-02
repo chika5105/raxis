@@ -240,3 +240,174 @@ Each entry follows the same structure — what was tempting about the alternativ
 
 ---
 
+### Planner Integration Strategy
+
+#### A.22 — Option A: RAXIS as a Proxy Layer Wrapping Existing Agents (Not Adopted)
+
+**Considered because:** existing agent tooling — Cursor, Claude Code (claw-code), Antigravity, Cline, Aider — already has sophisticated planner loops, context management, tool execution, and provider integrations. Rather than building a planner from scratch, RAXIS could sit between the existing agent and its provider, intercepting API calls and file writes to enforce policy. The agent runs on the host as normal; RAXIS is transparent middleware. This would immediately support every existing agent without modification, dramatically lowering the barrier to adoption.
+
+**Not adopted because of five structural weaknesses:**
+
+1. **No enforceable process boundary.** The agent runs on the host with the same privileges as the operator. RAXIS can intercept at the HTTP layer (provider calls) and possibly at the filesystem layer (file writes), but it cannot prevent the agent from making direct `connect(2)` calls to the provider, reading the proxy's credentials from memory, or writing to paths that RAXIS doesn't monitor. The isolation is advisory — the agent *cooperates* with the proxy rather than being *confined* by it. This directly contradicts the fail-closed thesis (A.1).
+
+2. **No authority over the prompt.** In Option A, the existing agent assembles its own system prompt, selects its own tools, and manages its own context window. RAXIS cannot inject policy context that the agent cannot read or modify (INV-02A). The agent's prompt is a black box; RAXIS can only observe the outbound API call after the prompt is already assembled. This means the kernel cannot enforce operator policy at the prompt level — it can only reject requests that violate policy after the fact, which is reactive rather than preventive.
+
+3. **Tool execution is unobservable.** Existing agents execute tools (file edits, bash commands, search) locally without routing through RAXIS. The proxy sees the provider response (which contains tool-use blocks) but not the tool execution itself. RAXIS would need to reconstruct what the agent did from VCS diffs after the fact, rather than mediating each action as it happens. This breaks the intent-before-action model: the agent acts first, RAXIS judges later.
+
+4. **Budget enforcement is bypassable.** If the agent holds or can observe the provider API key (which it does in Cursor, Claude Code, etc.), it can make direct calls that bypass the proxy's budget accounting. Even if the key is stripped and RAXIS holds it, the agent can cache responses, make speculative calls, or route through alternative endpoints. True budget enforcement requires the planner to have no network access — which is only possible if the planner is a confined process or VM, not a host-level application.
+
+5. **No agent-agnostic IPC contract.** Each existing agent has its own internal state model, tool definitions, and error handling. A proxy that works with Cursor would not work with Claude Code without separate integration code. The "universal proxy" becomes N separate integrations, each tracking upstream agent internals that change across releases. The maintenance burden scales with the number of supported agents rather than being fixed by a single IPC contract.
+
+**What Option A would have given:** immediate compatibility with the existing agent ecosystem. Operators could use their preferred editor-integrated agent (Cursor, Claude Code) with RAXIS providing guardrails. This is a significant adoption advantage that Option B sacrifices.
+
+**What Option A costs:** the entire enforcement model becomes advisory rather than structural. RAXIS becomes a monitoring/audit layer, not an authority layer. The guarantees degrade from "the planner cannot do X" to "the planner should not do X, and we will notice if it does." For a project whose thesis is that agents need structural boundaries, not advisory ones, this is a foundational compromise.
+
+**Guardrail:** Option A may be revisited as a "RAXIS-lite" product for teams that want observability without hard enforcement. It must never be presented as providing the same guarantees as Option B. If implemented, it must carry a clear caveat: "advisory mode — the agent cooperates with RAXIS but is not confined by it."
+
+---
+
+#### A.23 — Option B: RAXIS-Native Planner Loop (Adopted)
+
+**Adopted because:** a purpose-built planner binary that runs inside RAXIS's isolation boundary (process, namespace, or VM) is the only integration model that makes the enforcement guarantees structural rather than advisory. The planner speaks `raxis-ipc`, holds no API keys, has no network access, and submits structured intents that the kernel independently verifies. Every boundary — prompt assembly, budget enforcement, path policy, gate evaluation — is enforced by the kernel, not by agent cooperation.
+
+**Trade-off acknowledged:** this means operators cannot use Cursor, Claude Code, or other existing agents as the planner. They use the RAXIS-native planner, which must provide its own context management, tool execution, and model interaction. This is a higher barrier to adoption than Option A.
+
+**Structural constraints on the planner binary:**
+
+The `raxis-planner` binary is defined by what it *cannot* do, not by what it can:
+
+| Constraint | Mechanism | Invariant |
+|---|---|---|
+| No network access | No virtio-net device (VM tiers), no `connect(2)` permitted (sandbox tiers), advisory (direct tier) | INV-02B |
+| No API keys | Keys held exclusively by gateway; planner process env is cleared at spawn | INV-02A, A.13 |
+| No policy visibility | Planner cannot read `policy.toml`, claim-requirement table, or gate definitions; kernel injects policy context into assembled prompt | A.7, A.8, A.21 |
+| No witness store access | Planner has no file path to `$RAXIS_DATA_DIR/witness/`; witnesses are kernel-written | A.16 |
+| No audit store access | Planner has no file path to `$RAXIS_DATA_DIR/audit/`; audit is kernel-appended | A.15, A.21 |
+| No self-permission | Planner does not evaluate path or capability permissions; kernel evaluates on intent admission | A.22 §3 |
+| Single IPC channel | All planner ↔ kernel communication is over one authenticated socket (UDS or vsock); no side channels | A.3, A.4 |
+
+**Agent loop structure — the planner's entire runtime is this loop:**
+
+```
+1. CONNECT    → IPC handshake with kernel; receive session_token
+2. PICK UP    → kernel.send(NextReadyTasks) → receive task list
+3. BIND       → kernel.send(IntentRequest { PickUpTask, task_id }) → task bound to session
+4. INFER      → kernel.send(InferenceRequest { task_id, messages })
+                 kernel checks budget, assembles prompt (injecting policy context),
+                 forwards to gateway, returns InferenceResponse
+5. PARSE      → extract structured actions from model output
+                 (file edits, tool calls, "I'm done", "I can't do this")
+6. EXECUTE    → apply file changes to worktree (local fs ops within VirtioFS mount)
+                 git add + git commit → new head_sha
+7. DECLARE    → kernel.send(IntentRequest { SingleCommit, base_sha, head_sha })
+                 kernel independently diffs base..head, checks path policy,
+                 consumes budget, spawns verifiers for required gates
+8. VERDICT    → IntentResponse::Accepted → continue from step 4
+                 IntentResponse::Rejected → revert commit, adjust, retry from step 4
+9. COMPLETE   → kernel.send(IntentRequest { CompleteTask, head_sha })
+                 kernel checks path closure + gate closure → Accepted (task done)
+                 or Rejected (fix and retry from step 4)
+10. FAIL      → kernel.send(IntentRequest { ReportFailure, justification })
+                 → task transitions to Failed; planner returns to step 2
+```
+
+Steps 4–8 repeat until the task is complete, failed, or budget is exhausted. Steps 2–10 repeat for each task in the session. The planner never exits the loop except on session revocation or shutdown.
+
+**What the kernel does that the planner cannot influence:**
+
+| Responsibility | Kernel action | Planner visibility |
+|---|---|---|
+| **Prompt assembly** | Kernel receives planner's `messages` array, prepends the operator-signed system prompt (from policy), appends policy context (path allowlist, budget state, gate status), and forwards the assembled prompt to the gateway. The planner's `messages` are the conversation history; the kernel controls the framing. | Planner sees `InferenceResponse` (the model's output). It never sees the assembled prompt, the system prompt, or the policy context the kernel injected. |
+| **Model selection** | Kernel reads `[[providers]]` from the signed policy and selects the model + provider based on the intent kind, lane, and operator routing rules. | Planner does not specify a model, temperature, or provider in `InferenceRequest`. It sends the conversation and receives the output. |
+| **Budget enforcement** | Kernel computes admission cost from VCS-derived `touched_paths` + `intent_kind` + policy. Deducts from lane budget. Returns `remaining_budget` (opaque admission units) on `Accepted`. | Planner sees `remaining_budget.admission_units` and tracks deltas for self-throttling. Cannot influence the cost computation. |
+| **Path policy** | Kernel diffs `base_sha..head_sha`, extracts `touched_paths`, evaluates against `effective_allow(task_id)`. Rejects if any path is out of scope. | Planner sees `FAIL_PATH_POLICY_VIOLATION`. Does not see which path or which rule. |
+| **Gate evaluation** | Kernel evaluates `touched_paths` against `[[claim_requirements.rules]]`, determines required gates, spawns verifiers, collects witnesses. | Planner sees `task_state: GatesPending`. Does not see which gates, which verifiers, or which witnesses. |
+| **Approval tokens** | Kernel validates operator-signed approval tokens for escalations. Planner submits `EscalationRequest`; kernel parks it until operator approves or denies. | Planner sees `EscalationResponse::Approved` or `EscalationResponse::Denied`. Does not see the token, the operator's identity, or the approval rationale. |
+
+**Worktree interaction model:**
+
+The planner operates on a Git worktree that is the *only* writable filesystem it can access:
+
+- **VM tiers (Firecracker, Apple Virtualization.framework):** The worktree is a VirtioFS mount from the host. The planner sees `/worktree` (read-write). No other host filesystem path is mounted. `$RAXIS_DATA_DIR` is not accessible.
+- **Sandbox tiers (bubblewrap, Seatbelt):** The worktree is the planner's only writable directory. Sandboxing rules deny access to `$RAXIS_DATA_DIR`, `$HOME`, and other host paths.
+- **Direct tier (v1 default):** The worktree is a normal directory. Access to `$RAXIS_DATA_DIR` is prevented by protocol (the planner does not receive the path) but not by OS enforcement (same-UID limitation, documented in Assumptions and Limits).
+
+The planner reads files, writes files, runs git operations, and commits — all within the worktree. The kernel independently verifies what changed by diffing the commit range. The planner cannot "claim" to have changed fewer files than it actually did — the kernel's VCS diff is the source of truth.
+
+**Context management (planner-internal, does not cross IPC):**
+
+The planner maintains its own conversation context across inference turns. This includes:
+
+- **Message history:** The `messages` array sent with each `InferenceRequest`. The planner is responsible for trimming, summarizing, and managing the context window to stay within the model's token limit.
+- **Session JSONL:** Append-only local log of all messages for crash recovery and debugging. Adapted from the claw-code `session.rs` pattern (see A.24). Stored within the planner's writable area, not in `$RAXIS_DATA_DIR`.
+- **Tool-use parsing:** The planner must parse the model's tool-use blocks (Claude's `tool_use` content blocks or equivalent) into structured actions. The parsing logic is planner-internal; the kernel does not prescribe how the planner interprets model output.
+- **Retry heuristics:** On `Rejected` verdicts, the planner decides whether to revert, adjust, and retry. The kernel provides the rejection code and remaining budget; the planner decides the strategy. There is no kernel-prescribed retry algorithm.
+
+These are explicitly *not* kernel concerns. The kernel does not manage the planner's context window, does not parse model output, and does not prescribe retry strategy. The IPC boundary is clean: the planner sends structured intents, the kernel returns structured verdicts.
+
+**Reference implementation candidate — claw-code (see A.24):** the claw-code open-source agent provides a well-structured Rust turn loop, session management, and tool execution model that can be studied and selectively adapted for the RAXIS planner. It is not a direct dependency — it is an architectural reference.
+
+**Guardrail:** the RAXIS planner must never escalate to "just wrap an existing agent." If integration with existing agent tooling is desired, it must go through the formal IPC boundary as a separate product tier (see A.22 caveat), not by relaxing the planner's confinement.
+
+---
+
+#### A.24 — claw-code as Direct Planner Implementation (Not Adopted Directly)
+
+**Considered because:** [claw-code](https://github.com/ultraworkers/claw-code) (the open-source Rust implementation of Claude Code) provides a production-quality agent turn loop with bounded iteration, JSONL session persistence, typed provider error handling, tool execution, and context management — exactly the mechanics the RAXIS planner needs. Importing it as a crate or forking it wholesale would save significant implementation time.
+
+**Not adopted as a direct dependency because of five incompatible architectural assumptions:**
+
+1. **Direct provider API access.** claw-code's `api` crate (`api/src/lib.rs`) makes HTTP streaming calls directly to the Anthropic API. The RAXIS planner must not hold API keys or make provider calls (INV-02A, A.13). All inference goes through `InferenceRequest` → kernel → gateway. The entire `api` crate is unusable.
+
+2. **Workspace-resident policy.** claw-code's configuration system (`config.rs`) discovers and merges JSON config files from within the workspace (`.claw/settings.json`, `.claw.json`). This is explicitly rejected by A.14 — policy must live outside the repository write-bubble. The `config.rs`, `config_validate.rs`, and `trust_resolver.rs` modules are unusable.
+
+3. **Self-enforced permissions.** claw-code's permission system (`permissions.rs`, `permission_enforcer.rs`) evaluates tool permissions locally within the agent process. In RAXIS, the planner has no permission enforcement role — the kernel enforces all path and capability policies via intent admission. The entire permission layer is not only unusable but contradicts the RAXIS authority model.
+
+4. **MCP for tool transport.** claw-code uses MCP (`mcp_stdio.rs`, `mcp_tool_bridge.rs`) for external tool communication. MCP for authority decisions is rejected by A.3. The RAXIS planner communicates exclusively over `raxis-ipc` (bincode with 4-byte length prefix over UDS/vsock).
+
+5. **No IPC boundary.** claw-code is a monolithic agent — the turn loop, provider client, permission system, and tool executor share a process. RAXIS requires the planner to be a separate process (or VM) communicating with the kernel over IPC. There is no `IpcClient` abstraction in claw-code; the provider response is consumed in the same process that decides what to do with it.
+
+**What is adopted — study and selective adaptation:**
+
+The following mechanics from claw-code are studied and selectively reimplemented (not imported) in the RAXIS planner:
+
+| claw-code mechanic | Source | RAXIS adaptation |
+|---|---|---|
+| Bounded turn loop with `max_iterations` | `conversation.rs` | Core agent loop structure: iterate until task complete, failed, or budget exhausted. Replace tool execution with `IntentRequest` submission. |
+| JSONL session persistence with fork lineage | `session.rs` | Planner-internal context management across turns. Does not cross the IPC boundary. |
+| `ProjectContext` with git status/diff | `prompt.rs` | Planner-side context assembly before `InferenceRequest`. The kernel completes prompt assembly by injecting policy context. |
+| Typed provider error taxonomy | `error.rs` | Adapted for `IntentResponse::Rejected` handling — `retryable`, error classification, exhaustion tracking. |
+| Health probe after compaction | `conversation.rs` | Defensive sanity check after context trimming — verify the planner's internal state is consistent before submitting the next intent. |
+| Recovery-as-data pattern | `recovery_recipes.rs` | Structured failure scenarios mapped to retry recipes with escalation policies. |
+
+**Estimated reuse:** ~500 lines of loop mechanics and session management patterns are adaptable. ~3000 lines of permissions, config, MCP, and direct-API code are discarded. ~800 lines of new IPC integration, intent submission, and kernel-mediated inference are written fresh.
+
+**Guardrail:** claw-code is an architectural reference, not a runtime dependency. The RAXIS planner must not depend on any claw-code crate. If claw-code's turn loop is adapted, the adaptation must replace all IO boundaries (provider calls → `IpcClient`, permissions → removed, config → kernel policy) rather than wrapping them. A planner that imports claw-code and "just disables" the permission or API layers inherits their assumptions and their attack surface.
+
+---
+
+#### A.25 — opencode as Additional Architecture Reference (Study Candidate)
+
+**Context:** [opencode](https://github.com/sst/opencode) (`sst/opencode`) is an open-source, Go-based terminal coding agent with a client/server architecture. Unlike claw-code (which is a monolithic CLI), opencode runs as a **background server** that maintains persistent state across sessions, with a TUI client that connects to the running agent instance. It supports multiple providers (Anthropic, OpenAI, Gemini, Bedrock, Ollama), MCP for tool extensibility, LSP integration for code understanding, and a plugin architecture with pre/post tool-call hooks. It also distinguishes between a **Plan agent** (static analysis, suggestions) and a **Build agent** (file edits, environment interaction).
+
+**What is worth studying for RAXIS:**
+
+| opencode mechanic | RAXIS relevance |
+|---|---|
+| **Client/server split** | The background-server model is architecturally closer to RAXIS than claw-code's monolithic CLI. The opencode server maintains persistent state and accepts connections from multiple clients — similar to how the RAXIS kernel maintains persistent state and accepts connections from planner sessions. The session lifecycle management patterns may inform `raxis-kernel`'s IPC listener design. |
+| **Plan/Build agent separation** | opencode's split between a planning agent and an execution agent mirrors the RAXIS intent model: the planner proposes, the kernel verifies. The specific implementation of "plan then execute" is worth comparing against RAXIS's `IntentRequest` → `IntentResponse` cycle. |
+| **Plugin hooks (pre/post tool-call)** | opencode's plugin architecture for registering custom logic before and after tool calls is analogous to the kernel's pre-intent validation and post-intent audit emission. The hook registration API may inform the `[[tools]]` policy schema (v2 Operator tool manifest). |
+| **`AGENTS.md` / `opencode.md` behavioural anchor** | opencode generates a project-specific instruction file from codebase analysis. RAXIS's equivalent is the operator-signed policy artifact + the kernel-injected prompt context. The comparison highlights the tradeoff: opencode trusts the workspace-resident file (A.14 violation); RAXIS requires the behavioural anchor to be signed and stored outside the workspace. |
+
+**What is incompatible with RAXIS (same categories as claw-code A.24):**
+
+1. **Written in Go.** RAXIS is a Rust workspace. opencode cannot be imported as a crate. Any adoption is study-and-rewrite, not dependency.
+2. **Direct provider API access.** opencode holds API keys and makes direct HTTPS calls to providers. Same rejection as A.13/A.24 §1.
+3. **Workspace-resident config.** `opencode.md` / `AGENTS.md` is the behavioural anchor — lives in the repo. Same rejection as A.14/A.24 §2.
+4. **MCP for tool transport.** Same rejection as A.3/A.24 §4.
+5. **Self-enforced permissions.** The agent decides what tools to run and what files to edit. No external authority boundary. Same rejection as A.22 §3.
+
+**Disposition:** study the client/server session lifecycle, the plan/build agent split, and the plugin hook model. Do not adopt the Go codebase, the MCP integration, the workspace-resident config, or the direct-provider architecture. Add findings to `learnings/egm-agentic/` when reviewed.
+
+---
+

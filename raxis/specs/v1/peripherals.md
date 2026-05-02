@@ -75,38 +75,52 @@ The planner must not assume it can reuse a session across initiatives. One sessi
 
 ### `IntentResponse` wire shape
 
-> **Encoding reminder:** This JSON is an illustrative projection of `IpcMessage::IntentResponse { .. }` in `raxis-ipc`.
+> **Encoding reminder:** This JSON is the normative wire projection of `IpcMessage::KernelResponse(IntentResponse)` in `raxis-ipc`. The structural shape mirrors the Rust enum normatively defined in `philosophy.md` `crates/types/src/intent.rs` (two variants — `Accepted` and `Rejected`); the `outcome` JSON string is the discriminant. Wire fields are partitioned into:
+>
+> - **Envelope fields** (added by `raxis-ipc`'s frame serialiser, common to every IPC message — see `philosophy.md` `crates/types/src/envelope.rs`): `sequence_number`. The planner correlates a response to its prior request by matching `sequence_number`; the kernel does not echo `task_id` on the wire because correlation is already complete via the envelope.
+> - **Payload fields** (the variant body): every field shown below other than `sequence_number`.
+
+Accepted projection:
 
 ```json
 {
-  "sequence_number":   42,
-  "outcome":           "Accepted",
-  "remaining_budget":  { "tokens": 48200, "cost_usd_cents": 320 },
-  "error_code":        null,
-  "error_detail":      null,
-  "task_state":        "Running"
+  "sequence_number":       42,
+  "outcome":               "Accepted",
+  "task_state":            "Running",
+  "remaining_budget":      { "admission_units": 48200 },
+  "warn_delegation_stale": false,
+  "error_code":            null,
+  "error_detail":          null
 }
 ```
 
-Or on rejection:
+Rejected projection:
 
 ```json
 {
-  "sequence_number":   42,
-  "outcome":           "Rejected",
-  "remaining_budget":  null,
-  "error_code":        "FAIL_PATH_POLICY_VIOLATION",
-  "error_detail":      null,
-  "task_state":        "Running"
+  "sequence_number":       42,
+  "outcome":               "Rejected",
+  "task_state":            "Running",
+  "remaining_budget":      null,
+  "warn_delegation_stale": null,
+  "error_code":            "FAIL_PATH_POLICY_VIOLATION",
+  "error_detail":          null
 }
 ```
 
-**Field rules:**
-- `outcome` — `"Accepted"` or `"Rejected"`. Never a partial state.
-- `remaining_budget` — present only on `Accepted`. Contains the budget remaining after this intent's cost was consumed. Planner should use this to self-throttle.
-- `error_code` — present only on `Rejected`. Values defined in [`planner-api.md`](planner-api.md).
-- `error_detail` — **INV-08 rule (definitive for v1):** `error_detail` is `null` for all rejection codes **except** `FAIL_POLICY_VIOLATION`. For `FAIL_POLICY_VIOLATION` only, `error_detail` contains exactly one string from the approved generic-template set defined as `PlannerErrorTemplate` enum in `raxis-types/src/error.rs`. Templates are fixed, version-controlled strings — no runtime interpolation, no file paths, no policy rule names, no glob patterns. Max length: 256 characters. The planner must not parse `error_detail` for logic decisions — it is an operator debugging aid only. All other codes: `error_detail` is always `null`.
-- `task_state` — current `TaskState` of the task after this operation. Values: `Admitted`, `Running`, `GatesPending`, `Completed`, `Failed`, `Aborted`, `Cancelled`, `BlockedRecoveryPending`. Always present.
+**Field rules — exhaustive (every wire field is listed here so the projection cannot drift from the Rust type):**
+
+| Field | Origin | Variant | Type / values | Rule |
+|---|---|---|---|---|
+| `sequence_number` | envelope | both | u64 | Matches the `sequence_number` of the `IntentRequest` this is responding to. |
+| `outcome` | discriminant | both | `"Accepted"` \| `"Rejected"` | Never a partial state. Maps to the Rust enum variant. |
+| `task_state` | payload | both | `TaskState` enum string: `Admitted`, `Running`, `GatesPending`, `Completed`, `Failed`, `Aborted`, `Cancelled`, `BlockedRecoveryPending` | **Always present** on both variants. Reflects the task's state at response time — post-transition on `Accepted`, last-committed-state on `Rejected` (the binding `UPDATE` rolls back on early rejections). The planner uses this on `Rejected` to choose a retry strategy (e.g. `FAIL_TASK_NOT_RUNNING` with `task_state: GatesPending` ⇒ wait for witnesses; with `task_state: BlockedRecoveryPending` ⇒ wait for operator). |
+| `remaining_budget` | payload | `Accepted` only | `BudgetSnapshot` JSON object, or `null` on `Rejected` | The lane's budget snapshot after `consume_budget` ran for this intent (or after the existing-reservation branch decided not to charge again — see `kernel-core.md` `handlers/intent.rs` "Budget check and reservation"). The inner shape is the JSON serialisation of the `BudgetSnapshot` Rust struct (`philosophy.md` `crates/types/src/intent.rs`); units are admission units per `kernel-core.md` §3.5 / `kernel-store.md` §2.5.7. The planner uses this to self-throttle: estimate the cost of the next intent and avoid submitting if `remaining_budget < estimate`. **Always `null` on `Rejected`** — rejected intents do not consume budget, so there is no post-consume snapshot to report. |
+| `warn_delegation_stale` | payload | `Accepted` only | `bool`, or `null` on `Rejected` | `true` iff `evaluate_claims` took the `SufficientStale` grace use to admit this intent. The planner must renew the delegation before the next gated action. **Always `null` on `Rejected`** — no grace use was consumed. |
+| `error_code` | payload | `Rejected` only | `PlannerErrorCode` enum string, or `null` on `Accepted` | Coarse rejection reason. Full enum values + remediation in [`planner-api.md`](planner-api.md). Maps from the Rust `Rejected.reason` field. |
+| `error_detail` | payload | `Rejected` only | `string` (≤256 chars), or `null` | **INV-08 rule (definitive for v1):** `error_detail` is `null` for every rejection code **except** `FAIL_POLICY_VIOLATION`. For `FAIL_POLICY_VIOLATION` only, `error_detail` contains exactly one string from the approved generic-template set — the `PlannerErrorTemplate` enum in `raxis-types/src/error.rs`. Templates are fixed, version-controlled strings — no runtime interpolation, no file paths, no policy rule names, no glob patterns. The planner must not parse `error_detail` for logic decisions — it is an operator debugging aid only. Maps from the Rust `Rejected.error_detail: Option<PlannerErrorTemplate>`. |
+
+**Cross-variant exclusivity (validator rule):** `outcome == "Accepted"` ⇒ `error_code` and `error_detail` are `null`, and `remaining_budget` and `warn_delegation_stale` are non-`null`. `outcome == "Rejected"` ⇒ `remaining_budget` and `warn_delegation_stale` are `null`, and `error_code` is non-`null` (with `error_detail` populated only for `FAIL_POLICY_VIOLATION`). Receivers must reject responses that violate this exclusivity as malformed (treat as `INVALID_REQUEST` from a wire-integrity standpoint).
 
 ### Retry semantics
 
@@ -130,7 +144,54 @@ All rejections are **non-terminal** for the task unless the planner submits `Rep
 
 The planner **must stop** on `UNAUTHORIZED` — this indicates a session integrity failure, not a recoverable error.
 
-**Operator socket (not planner-facing):** responses on the operator UDS use separate errors for CLI ergonomics — for example `FAIL_TASK_NOT_RESUMABLE` / `FAIL_TASK_NOT_RETRYABLE` when `task resume` / `task retry` preconditions fail. Those strings are **not** returned on the planner socket; normative operator CLI behaviour is in `cli-ceremony.md`.
+**Operator socket (not planner-facing):** responses on the operator UDS use a separate error vocabulary tuned for CLI ergonomics — these strings are **not** returned on the planner socket and must not be referenced by `PlannerErrorCode`. All operator-side errors share **one** envelope:
+
+```rust
+// raxis-types/src/operator.rs (normative)
+enum OperatorResponse {
+    // ... per-command success variants, e.g. EpochAdvanced { … }, TaskRetried { … } ...
+    Error {
+        code: OperatorErrorCode,    // string-tagged enum (see table below) — wire form is the bare code string
+        detail: OperatorErrorDetail,// serde-tagged enum, one variant per code, carrying the code's structured fields; never a free-form string
+    },
+}
+
+enum OperatorErrorDetail {
+    // Tag matches the OperatorErrorCode value; field set is fixed per variant.
+    TaskNotResumable    { current_state: TaskState },
+    TaskNotRetryable    { current_state: TaskState },
+    InitiativeTerminal  { initiative_state: InitiativeState, terminal_criteria: TerminalCriteria },
+    // policy-advance failure details (see `cli-ceremony.md` §`epoch advance`):
+    PolicySignatureInvalid { artifact_path: PathBuf },
+    PolicyEpochReplay      { presented_epoch: u64, current_epoch: u64 },
+    PolicyMalformed        { parser_message: String },
+    PathOutsideDataDir     { offending_path: PathBuf, data_dir: PathBuf },
+    StoreWrite             { sql_error: String },
+    // operator authorisation failure (universal across all operator IPC ops):
+    OperationNotPermitted  { operator_id: OperatorId, attempted_op: String },
+    // ... one variant per code added in future iterations ...
+}
+```
+
+The `code` field is the machine-stable error identifier (used by automation, scripts, and CI). The `detail` field is a tagged structured value the CLI deserialises and renders to the operator (e.g. `task retry` failing on a `GatesPending` task prints `"Cannot retry: task is in state GatesPending (must be Failed)"`). **Wire-shape rule (normative):** every operator error MUST be returned as `OperatorResponse::Error { code, detail }` where the `detail` variant tag matches the `code`; an `Error` whose `detail` tag does not match its `code` is a kernel bug and the CLI rejects it with a hard-fail "kernel response shape violation" message rather than attempting to interpret it.
+
+The v1 operator-only error codes — each with its `OperatorErrorDetail` variant — are:
+
+| `OperatorErrorCode` (wire string) | `OperatorErrorDetail` variant | Emitted by | Meaning |
+|---|---|---|---|
+| `FAIL_TASK_NOT_RESUMABLE` | `TaskNotResumable { current_state }` | `recovery::resume_task` precondition check | `task resume` precondition failed — task is not in `BlockedRecoveryPending`. `current_state` carries the actual state. |
+| `FAIL_TASK_NOT_RETRYABLE` | `TaskNotRetryable { current_state }` | `lifecycle::retry_task` precondition 1 | `task retry` precondition failed — task is not in `Failed`. `current_state` carries the actual state. |
+| `FAIL_INITIATIVE_TERMINAL` | `InitiativeTerminal { initiative_state, terminal_criteria }` | `lifecycle::retry_task` precondition 4 | `task retry` precondition failed — the containing initiative is in a terminal state (`Completed`/`Failed`/`Aborted`). `initiative_state` is the actual terminal state; `terminal_criteria` is the criterion that drove the initiative there (so the operator immediately sees, e.g., that `AllTasksSucceeded` synchronously moved the initiative to `Failed` after the task failed). See `kernel-core.md` §4.6 `lifecycle::retry_task` precondition 4 and §4.5 "Operator decision on partial failure" for the criterion-dependent applicability table. |
+| `FAIL_POLICY_SIGNATURE_INVALID` | `PolicySignatureInvalid { artifact_path }` | `policy_manager::advance_epoch` Phase 0 step 1 | New policy artifact's Ed25519 signature did not verify against the authority pubkey. |
+| `FAIL_POLICY_EPOCH_REPLAY` | `PolicyEpochReplay { presented_epoch, current_epoch }` | `policy_manager::advance_epoch` Phase 0 step 1 (loader epoch monotonicity check) | New artifact's `meta.epoch` is not strictly greater than `policy_epoch_history` MAX. |
+| `FAIL_POLICY_MALFORMED` | `PolicyMalformed { parser_message }` | `policy_manager::advance_epoch` Phase 0 step 1 (TOML parse / schema check) | New artifact failed TOML parse or required-block validation. |
+| `FAIL_PATH_OUTSIDE_DATA_DIR` | `PathOutsideDataDir { offending_path, data_dir }` | `policy_manager::advance_epoch` Phase 0 path canonicalisation | One of `--policy` / `--sig` resolved to a path outside `<data_dir>/policy/`. |
+| `FAIL_STORE_WRITE` | `StoreWrite { sql_error }` | `policy_manager::advance_epoch` Phase 1 commit failure | A SQL write inside the Phase 1 transaction failed; the transaction was rolled back. |
+| `UNAUTHORIZED` | `OperationNotPermitted { operator_id, attempted_op }` | Every operator IPC dispatcher (per-op `permitted_ops` gate, `kernel-store.md` §2.5.5 L1424) | The authenticated operator's `permitted_ops` list does not include the requested op. `attempted_op` is the operator IPC variant name (e.g. `"RetryTask"`, `"RotateEpoch"`) so the operator can confirm which entry to add to their policy entry. **Note:** the bare wire string `UNAUTHORIZED` is shared with the *planner* socket's `PlannerErrorCode::UNAUTHORIZED` variant (planner-facing table above), but the two enums live in different Rust types (`OperatorErrorCode` vs `PlannerErrorCode`) and carry different `detail` shapes — the socket the message arrived on disambiguates which decoder to use. |
+
+Adding a new operator error code requires adding both a new `OperatorErrorCode` enum value and a matching `OperatorErrorDetail` variant in the same PR — the spec disallows codes whose `detail` shape is undefined.
+
+Normative operator CLI behaviour and the full per-command IPC discriminant table are in `cli-ceremony.md`.
 
 ### Budget awareness
 

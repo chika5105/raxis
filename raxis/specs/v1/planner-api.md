@@ -185,13 +185,19 @@ Wait. The kernel will notify you (or you will see the gate resolve on your next 
 After every accepted intent, the response includes `remaining_budget`:
 
 ```json
-{ "tokens": 48200, "cost_usd_cents": 320 }
+{ "admission_units": 48200 }
 ```
 
-Monitor this. Before submitting your next intent, estimate whether you have sufficient budget. If you are running low:
+`admission_units` is the kernel's internal cost unit for lane-saturation control. Treat it as **opaque**: it is **not** a token count, USD amount, or wall-clock estimate, and you cannot convert it to one. Each intent the kernel admits costs some number of admission units (computed by the kernel from the intent kind and the VCS-derived touched-path set; you cannot influence the cost). The number you see is the admission units remaining on this task's lane after this intent's cost was charged.
+
+Use this for self-throttling by tracking deltas across your prior intents on this task: the difference between successive `remaining_budget` values is what the most recent intent cost. If the next intent you intend to submit looks structurally similar (same `intent_kind`, similar number of touched paths) and the remaining budget is below your observed cost, expect a `FAIL_BUDGET_EXCEEDED` rejection.
+
+Monitor `remaining_budget` after every accepted intent. If you are running low:
 - Prioritise completing the current task over starting new work.
 - Submit `CompleteTask` if the task is done.
 - Submit `ReportFailure` if the task is not done and budget is exhausted.
+
+`remaining_budget` is **always `null`** on a `Rejected` response — rejected intents do not consume budget, so there is no post-consume snapshot. Do not interpret a missing `remaining_budget` as "budget exhausted"; check `outcome` first.
 
 ---
 

@@ -17,7 +17,7 @@ Part 2.5 provides the normative specifications that are referenced throughout Pa
 > Part 2.5 is structured as seven sections, written incrementally with review between each.
 > §2.5.1 — Store DDL and isolation model: database file layout, runtime pragmas, canonical schema for all 18 kernel tables (Tables 1–16 core + Tables 17–18 VCS path scope), indexes, and migration inventory.
 > §2.5.2 — Audit log transaction boundary: write ordering between SQLite commits and `raxis-audit-tools` JSONL appends, crash-window characterisation, and what `recovery::reconcile` assumes as ground truth when the two diverge **(complete)**.
-> §2.5.3 — Plan artifact signing contract: byte-exact signing domain, canonical serialisation, `plan.sig` format, authority key used, IPC path, and `create_initiative` call path **(complete)**.
+> §2.5.3 — Plan artifact signing contract: byte-exact signing domain, canonical serialisation, `plan.sig` format, plan-signing key (operator), IPC path, and `create_initiative` call path **(complete)**.
 > §2.5.4 — Key inventory and custody model: all four key families, who holds what at runtime vs at ceremony time, blast-radius characterisation for each **(complete)**.
 > §2.5.5 — Operator authentication protocol: three-socket model, operator challenge-response wire format, session establishment, nonce and clock-skew rules, `permitted_ops` schema **(complete)**.
 > §2.5.6 — `[[gates]]` normative schema and env-var alignment: gate-type → verifier-command mapping, `VerifierSpawnEnvelope` env var names unified with `configuring-witnesses.md` **(complete)**.
@@ -45,15 +45,23 @@ The kernel owns a single data directory: **`$RAXIS_DATA_DIR`**, which defaults t
 │   └── ...               # new segment per rotation threshold (size or time)
 ├── witness/              # filesystem witness blob store, managed by witness_index.rs
 │   └── <blob_sha256>     # one file per witness blob, named by hex SHA-256 of contents
-├── run/                  # runtime sockets (created at bind, removed on clean shutdown)
-│   ├── planner.sock      # planner session IPC endpoint (§2.5.5)
-│   ├── witness.sock      # verifier WitnessSubmission endpoint (§2.5.5)
-│   └── operator.sock     # operator CLI authentication and commands (§2.5.5)
+├── sockets/              # runtime UDS endpoints (created at bind, removed on clean shutdown);
+│                         # directory mode 0700, owned by the kernel OS user (§2.5.5)
+│   ├── planner.sock      # planner session IPC endpoint; also accepts WitnessSubmission from
+│   │                     # verifier subprocesses (the WitnessSubmission variant is dispatched
+│   │                     # on verifier_run_token auth, not session-token auth — see §2.5.5
+│   │                     # three-socket model and §2.5.6 verifier token contract). This is the
+│   │                     # path that RAXIS_KERNEL_SOCKET points to (see §2.5.6 env var table).
+│   ├── gateway.sock      # provider gateway process IPC endpoint (gateway_process_token auth);
+│   │                     # carries FetchRequest / FetchResponse and InferenceRequest /
+│   │                     # InferenceResponse (§2.5.5).
+│   └── operator.sock     # operator CLI: challenge-response handshake then operator session
+│                         # token; carries the operator IPC discriminant set listed in §2.5.5.
 └── emergency.log         # written only when audit chain cannot accept a KernelStarted
                           # or KernelStopped record; append-only; never part of the chain
 ```
 
-`kernel.db`, `audit/`, `witness/`, and `run/` are four logically separate subsystems. They are **not** unified under a single transaction boundary — the relationship between the SQLite store and the JSONL audit store is defined in §2.5.2; the relationship between the store and the witness filesystem store is defined in the `witness_index.rs` spec in Part 2.3.
+`kernel.db`, `audit/`, `witness/`, and `sockets/` are four logically separate subsystems. They are **not** unified under a single transaction boundary — the relationship between the SQLite store and the JSONL audit store is defined in §2.5.2; the relationship between the store and the witness filesystem store is defined in the `witness_index.rs` spec in Part 2.3.
 
 **Note on plan artifacts:** signed plan artifacts (`plan.toml` + `plan.sig`) are not stored under `policy/`. They are sealed into `kernel.db` (the `signed_plan_artifacts` table) at `create_initiative` time. `policy/` contains only the kernel policy artifact (system-wide configuration). This is intentional: a plan artifact is initiative-scoped, not system-scoped, and must survive epoch advances without being re-signed.
 
@@ -110,6 +118,29 @@ PRAGMA temp_store = MEMORY;
 Future versions may introduce a separate read-only connection pool if profiling shows mutex contention on high-load workloads. Any such addition must maintain the invariant that all writes go through the single write connection.
 
 **WAL checkpoint policy.** The kernel uses SQLite's default automatic checkpointing (triggered at 1000 WAL pages). No custom checkpoint logic is added in v1. The checkpoint runs in the background as part of SQLite's normal WAL maintenance; it does not block reads or writes. Operators should not manually run `PRAGMA wal_checkpoint` unless advised during incident response.
+
+**Mutex scope invariant (INV-STORE-01).** The `Mutex` wrapping the connection is **`tokio::sync::Mutex`** (FIFO, async-aware) — not `std::sync::Mutex` and not `parking_lot::Mutex`. The async-aware mutex is mandatory because handler tasks run inside a tokio runtime; using `std::sync::Mutex` would block the worker thread for the duration of the SQL transaction, starving the runtime. The FIFO property prevents writer starvation when many handlers contend for the connection.
+
+Every kernel operation that issues `BEGIN`/`COMMIT` on the connection MUST hold the mutex continuously from `BEGIN` through `COMMIT` (or `ROLLBACK`). Releasing the mutex mid-transaction is undefined behaviour at the SQLite level (the next acquirer would see the partially-completed transaction state and could corrupt commit ordering) and is forbidden by INV-STORE-01. The implementation rule is mechanical: handlers hold a `tokio::sync::MutexGuard<Connection>`, call `Connection::transaction()` to obtain a `rusqlite::Transaction<'_>` that borrows the connection, perform their work via the `Transaction` handle, and `commit()` or drop-for-rollback before letting the `MutexGuard` go out of scope.
+
+Functions that compose multiple writes — most importantly `lifecycle::transition_task` + the `lifecycle::evaluate_terminal_criteria` it calls (`kernel-core.md` §4.6) — MUST execute the entire composition under one mutex acquisition + one transaction. Calling `evaluate_terminal_criteria` from outside an open transition transaction is a spec violation; `transition_task` is the only authorised caller per INV-INIT-04, so this is enforced at the call-site. Any future kernel-side operation that needs to compose multiple table writes atomically MUST follow the same single-acquire / single-`BEGIN` / single-`COMMIT` pattern; never split a logical operation across two mutex acquisitions because another tokio task can interleave between them and observe inconsistent state.
+
+When a separate read-only connection pool is introduced in a future version (per the "Future versions" note above), it MUST NOT be allowed to bypass this invariant: read-only pool connections may serve queries that don't `BEGIN IMMEDIATE`, but **every write path continues to go through the single mutex-protected write connection**, and the read pool's snapshot isolation must be derived from SQLite's WAL semantics (each pool connection sees a snapshot at its `BEGIN` time, isolated from concurrent writes via WAL frames). The single-writer model is permanent.
+
+**Multi-table atomicity invariant (INV-STORE-02).** Operations that mutate **more than one table** to maintain a cross-table consistency relationship MUST execute every write in a single SQL transaction held under one INV-STORE-01 mutex acquisition. The exhaustive list of such operations in v1 is:
+
+| Operation | Tables written in one transaction | Source-of-truth contract |
+|---|---|---|
+| `lifecycle::transition_task` (+ `evaluate_terminal_criteria` it calls) | `tasks`, `initiatives`, `task_dag_edges` (via `release_successors`), audit-pointer | `kernel-core.md` §4.6, INV-INIT-04 |
+| `lifecycle::approve_plan` (+ `scheduler::admit` it calls per task) | `initiatives`, `tasks`, `task_dag_edges`, `signed_plan_artifacts`, audit-pointer | `kernel-core.md` §4.6 + Part 2.3 admit |
+| `policy_manager::advance_epoch` Phase 1 | `delegations` (sweep), `sessions` (prompt-cache invalidation), `policy_epoch_history` (Table 19 insert), audit-pointer | `kernel-core.md` §`policy_manager.rs`, INV-POLICY-01 below |
+| `handlers/intent` accepting an intent | `tasks` (intent fields + state), `task_intent_ranges`, `lane_budget_reservations`, audit-pointer | `kernel-core.md` Part 2.3 §`handlers/intent.rs` "Budget check and reservation" + `transition_task` call (which is itself bound by INV-INIT-04) |
+| `gates/witness_index::write` | `witness_records`, `verifier_run_tokens` (consumed), audit-pointer | Part 2.3 §witness_index.rs |
+| `recovery::reconcile_tasks` (+ `expire_orphan_verifier_tokens` it calls) | `tasks` (sweep to BlockedRecoveryPending), `verifier_run_tokens` (orphan expiry), audit-pointer | `kernel-core.md` §recovery.rs, INV-INIT-08 |
+
+For each operation in this table, splitting writes across two transactions or two mutex acquisitions is a spec violation: another tokio task could interleave between them and observe an inconsistent intermediate state (e.g. for `advance_epoch`, see new delegations marked stale but old `policy_epoch_history` MAX still in place, allowing a stale-policy escalation to slip through). Any future kernel operation that needs to compose multiple table writes atomically MUST be added to this table as part of its spec PR.
+
+**Policy epoch atomicity invariant (INV-POLICY-01).** `policy_manager::advance_epoch` Phase 1 (the SQL-write phase) writes to `delegations`, `sessions`, `policy_epoch_history`, and the audit-pointer table inside one transaction held under one INV-STORE-01 mutex acquisition. Phase 2 (in-memory `ArcSwap` swaps for `ctx.policy` and `ctx.allowlist_cache`) runs only after Phase 1 commits, and is infallible. Phase 3 (gateway `EpochAdvanced` signal) is best-effort and does not affect the success of the advance. The full phase contract — including failure modes for each phase, audit events for both rejection (`PolicyAdvanceRejected`) and post-`BEGIN` failure (`PolicyAdvanceFailed`), and crash semantics (which reduce to single-transaction commit/no-commit) — is normative in `kernel-core.md` §`policy_manager.rs`. A partially-applied epoch advance is structurally impossible: either all four SQL writes commit and the in-memory caches are then swapped, or the transaction rolls back and the kernel observably remains at the old epoch with no audit `PolicyEpochAdvanced` row.
 
 ---
 
@@ -174,7 +205,7 @@ CREATE TABLE IF NOT EXISTS initiatives (
 );
 ```
 
-**`terminal_criteria_json` format:** the `TerminalCriteria` type is a Rust enum with variants `AllTasksTerminal`, `AllTasksSucceeded`, and `MinSuccessCount(u32)`. The JSON representation is the serde-serialised form (`"AllTasksTerminal"`, `"AllTasksSucceeded"`, `{"MinSuccessCount":3}`). `evaluate_terminal_criteria` deserialises this field to apply the policy.
+**`terminal_criteria_json` format:** stores the JSON-serialised form of the `TerminalCriteria` Rust enum. The v1 enum has exactly three variants — `AllTasksSucceeded` (default, applied when the plan omits `terminal_criteria`), `AllTasksTerminal`, and `MinSuccessCount(u32)` — with serde representations `"AllTasksSucceeded"`, `"AllTasksTerminal"`, and `{"MinSuccessCount": <n>}` respectively. **Per-variant semantics, default-selection rules, and failure-detection logic are normatively defined in `kernel-core.md` §4.2 (Terminal criteria and initiative state evaluation); this column merely persists the operator's serialised choice so `evaluate_terminal_criteria` can deserialise and apply it on every call (no in-memory cache).** Variants explicitly *not* in the v1 enum (`RequiredSetSucceeded`, `AnyCompleted`, `AllTasksCompleted`, `CustomScript`) and the rationale for their exclusion are documented in `kernel-core.md` §4.2 — `create_initiative` rejects any plan whose `terminal_criteria_json` deserialises to one of those names with `InitiativeError::UnknownTerminalCriteriaVariant`.
 
 ---
 
@@ -182,10 +213,11 @@ CREATE TABLE IF NOT EXISTS initiatives (
 
 ```sql
 -- ── signed_plan_artifacts ───────────────────────────────────────────────────────
--- Stores the raw canonical plan bytes and the detached Ed25519 signature over
--- those bytes, sealed at create_initiative time. This row is immutable after
--- insertion (INV-INIT-06). approve_plan reads plan_bytes to instantiate tasks;
--- it never writes back to this table.
+-- Stores the raw canonical plan TOML bytes and the detached Ed25519 signature
+-- over their SHA-256 digest (see §2.5.3 "Byte-exact signing domain" for the
+-- two-step sign model), sealed at create_initiative time. This row is immutable
+-- after insertion (INV-INIT-06). approve_plan reads plan_bytes to instantiate
+-- tasks; it never writes back to this table.
 --
 -- Normalisation note: plan_artifact_sha256 in initiatives is derived from
 -- plan_bytes in this table. The kernel recomputes SHA-256(plan_bytes) at
@@ -195,8 +227,8 @@ CREATE TABLE IF NOT EXISTS initiatives (
 CREATE TABLE IF NOT EXISTS signed_plan_artifacts (
     initiative_id  TEXT    NOT NULL PRIMARY KEY
         REFERENCES initiatives(initiative_id),
-    plan_bytes     BLOB    NOT NULL,  -- raw canonical bytes signed by the authority key
-    plan_sig       BLOB    NOT NULL,  -- 64-byte detached Ed25519 signature over plan_bytes
+    plan_bytes     BLOB    NOT NULL,  -- raw canonical plan TOML bytes; signed by the operator key (see §2.5.3 "Plan-signing key (operator)")
+    plan_sig       BLOB    NOT NULL,  -- 64-byte detached Ed25519 signature over SHA-256(plan_bytes); see §2.5.3 "Byte-exact signing domain"
     stored_at      INTEGER NOT NULL   -- Unix seconds; for audit cross-referencing
 );
 ```
@@ -622,9 +654,13 @@ CREATE TABLE IF NOT EXISTS approval_tokens (
 --
 -- kernel_signature covers: escalation_id ‖ approval_token_id ‖ action_hash
 --   ‖ policy_epoch ‖ action_taken_at (all as UTF-8 bytes, pipe-separated).
--- Signed with the kernel's runtime Ed25519 signing key (distinct from the
--- authority key used for plan artifacts). This provides a kernel-signed receipt
--- that survives audit log rotation and can be verified without the JSONL chain.
+-- Signed with the kernel's authority_keypair (Ed25519) — see §2.5.4 four-key
+-- custody model. The authority_keypair is the kernel's own runtime signing key
+-- and is reserved for ApprovalProof receipts and policy artifact verification;
+-- it is distinct from the operator key (held by the human operator, never by
+-- the kernel) which signs plan artifacts per §2.5.3. This row provides a
+-- kernel-signed receipt that survives audit log rotation and can be verified
+-- without the JSONL chain by anyone holding the kernel authority_pubkey.
 --
 -- The audit log's AuditEventKind::EscalationConsumed carries the same fields
 -- and is the operational record; approval_proofs is the cryptographic receipt.
@@ -1081,9 +1117,57 @@ CREATE TABLE IF NOT EXISTS task_exported_path_snapshots (
 
 CREATE INDEX IF NOT EXISTS idx_task_exported_path_snapshots_task_id
     ON task_exported_path_snapshots (task_id);
+
+-- ============================================================
+-- Table 19: policy_epoch_history
+-- ============================================================
+-- Append-only ledger of every successful policy epoch advance, plus the
+-- genesis epoch installed at first boot. The MAX(epoch_id) row is the
+-- kernel's current policy epoch — `read_current_epoch()` is implemented as
+-- `SELECT COALESCE(MAX(epoch_id), 0) FROM policy_epoch_history` (returns 0
+-- on a fresh, never-genesised store, which any valid first artifact with
+-- epoch ≥ 1 satisfies — see philosophy.md §src/loader.rs step 6).
+--
+-- This table is the durable backing for `policy_manager::current_epoch` /
+-- `read_current_epoch` and the source of truth for replay protection in
+-- `load_and_verify` (an artifact whose epoch_id is not strictly greater than
+-- MAX(epoch_id) is rejected as PolicyError::EpochReplay).
+--
+-- Written by exactly two paths:
+--   1. genesis (`raxis-cli genesis` -> first `bootstrap::load_policy`):
+--      inserts the row for epoch 1 (or whatever epoch the operator's
+--      first signed artifact carries) under the same transaction that
+--      finalises the schema.
+--   2. `policy_manager::advance_epoch` Phase 1 step 6 (kernel-core.md
+--      §policy_manager.rs): inserts one new row per successful advance,
+--      under the same transaction as the delegations sweep, the session
+--      prompt invalidation, and the PolicyEpochAdvanced audit append.
+--
+-- Never updated. Never deleted (the row count is naturally small — one row
+-- per signed policy revision in the kernel's lifetime, typically tens to
+-- low hundreds). The full history is needed for forensic replay: an audit
+-- record that references policy_epoch = N must be interpretable against
+-- the policy artifact identity (policy_sha256) that was active at epoch N.
+--
+-- policy_sha256 is hex-encoded SHA-256 of the canonical policy.toml bytes
+-- (the same bytes verified by Ed25519Verify(authority_pubkey, ...) in
+-- load_and_verify). signed_by_authority is the 8-byte truncated SHA-256
+-- fingerprint of the authority public key (DER) that verified this
+-- artifact; recording the fingerprint (not the full key) keeps the row
+-- compact while still distinguishing across authority key rotations.
+CREATE TABLE IF NOT EXISTS policy_epoch_history (
+    epoch_id              INTEGER NOT NULL PRIMARY KEY,   -- monotonically increasing; matches PolicyBundle.epoch_id
+    policy_sha256         TEXT    NOT NULL UNIQUE,        -- hex SHA-256 of canonical policy.toml bytes; UNIQUE prevents accidental re-insert of the same artifact under a different epoch_id
+    signed_by_authority   TEXT    NOT NULL,               -- hex 8-byte truncated SHA-256 fingerprint of the authority pubkey that verified this artifact
+    triggered_by_operator TEXT    NOT NULL,               -- OperatorId of the operator who invoked `raxis-cli epoch advance` (genesis row uses the literal string "genesis")
+    advanced_at           INTEGER NOT NULL                -- Unix seconds (UTC); commit timestamp of this row
+);
+
+CREATE INDEX IF NOT EXISTS idx_policy_epoch_history_advanced_at
+    ON policy_epoch_history (advanced_at);
 ```
 
-> **§2.5.1 — DDL Part 4 of 4 complete. All 18 kernel.db tables specified.**
+> **§2.5.1 — DDL Part 4 of 4 complete. All 19 kernel.db tables specified.**
 
 ---
 
@@ -1155,7 +1239,7 @@ The kernel write path is append-only to JSONL. No kernel handler reads JSONL. Ch
     plan.sig         # the detached signature file
 ```
 
-Both files are written by `raxis-cli plan sign`. The kernel reads both at `create_initiative` time and at every subsequent `approve_plan` call.
+Both files are written by `raxis-cli plan sign`. The kernel reads both **once**, at `create_initiative` time, and seals their content into `signed_plan_artifacts` (Table 3). Every subsequent operation — `approve_plan`, crash recovery, audit reconstruction — reads `plan_bytes` and `plan_sig` from the sealed DB row, never from disk. The on-disk `plan.toml` and `plan.sig` files remain at `<data_dir>/plans/<initiative_id>/` for human inspection and external tooling, but they are **non-authoritative** once the seal succeeds: deleting, modifying, or replacing them does not affect kernel behaviour for that initiative, and the kernel does not re-open them at any point in the initiative lifecycle.
 
 #### Byte-exact signing domain
 
@@ -1179,9 +1263,9 @@ signed_at    = 1714500000                        # Unix timestamp (seconds)
 
 `signed_by` is a fingerprint, not the full key. The kernel resolves the full public key from `policy.operators` by matching `fingerprint(operator.pubkey) == plan.sig.signed_by`. If no operator entry matches, `create_initiative` returns `FAIL_UNKNOWN_SIGNER`.
 
-#### Authority key used
+#### Plan-signing key (operator)
 
-The **operator's Ed25519 private key** signs plan artifacts — not the kernel authority keypair. The kernel verifies using the operator's public key stored in the policy artifact. The kernel authority keypair is used only for `ApprovalProof` records (escalation responses).
+The **operator's Ed25519 private key** (registered in the policy artifact under `[[operators.entries]]`) signs plan artifacts — **not** the kernel's `authority_keypair`. The kernel verifies the signature using the operator's public key looked up via `policy.operator_entry(plan.sig.signed_by).public_key`. The kernel's `authority_keypair` is reserved for `ApprovalProof` records (escalation responses) and policy-artifact verification — it never signs or verifies plan artifacts. See §2.5.4 (four-key custody model) for the full key inventory and `philosophy.md` `src/signing.rs` for the three-way operator-vs-authority key-domain split. Older drafts of this section were titled "Authority key used"; that name is non-canonical and has been corrected to reflect the actual signing key.
 
 #### IPC path — `create_initiative`
 
@@ -1195,7 +1279,17 @@ Operator → raxis-cli plan submit <initiative_id> <plan_dir>
     → returns: InitiativeCreated { initiative_id } or error
 ```
 
-`create_initiative` stores `plan_sha256`, `sig_hex`, `signed_by`, and `signed_at` into the `signed_plan_artifacts` table (§2.5.1 Table 3). The plan TOML content is **not** stored in SQLite — only the hash and signature. The files remain on disk at the declared path.
+`create_initiative` seals the plan into `signed_plan_artifacts` (§2.5.1 Table 3) by inserting a single row with exactly four columns:
+
+- `initiative_id` — FK to `initiatives.initiative_id`.
+- `plan_bytes` — the **full byte-image** of `plan.toml` exactly as read from disk and verified against `plan.sig.plan_sha256` above. The plan TOML content **is** stored in SQLite — this is intentional (see Table 3 rationale "Why store the full `plan_bytes` and not just the hash?"): it makes the kernel self-contained for `approve_plan`, recovery replay, and audit reconstruction, with no dependency on the on-disk file after sealing.
+- `plan_sig` — the raw 64-byte Ed25519 signature decoded from `plan.sig.signature` (the hex-encoded form on disk is decoded to bytes for storage).
+- `stored_at` — Unix seconds at insertion, for audit cross-referencing.
+
+The other fields of `plan.sig` — `signed_by` (operator pubkey fingerprint), `signed_at`, and `plan_sha256` — are **verified** at this call but **not** duplicated as columns of `signed_plan_artifacts`:
+
+- `plan_sha256` is recomputable from `plan_bytes` on demand and is also indexed at `initiatives.plan_artifact_sha256` for join lookups (Table 2).
+- `signed_by` and `signed_at` are preserved in the audit log via `AuditEventKind::InitiativeCreated { initiative_id, plan_hash, signed_by, signed_at }` (see `kernel-core.md` `src/initiatives/lifecycle.rs::create_initiative`). The audit log is the durable signer-of-record; this avoids storing the same value redundantly in the row table while keeping forensic recoverability of "which operator authorised this initiative, and when did they sign it" intact even if the on-disk `plan.sig` file is later removed.
 
 #### `approve_plan` call path
 
@@ -1215,7 +1309,7 @@ Once `approve_plan` is called, the plan is locked (INV-INIT-06). The `signed_pla
 |---|---|---|---|---|
 | `authority_keypair` | Ed25519 | Kernel only (loaded into memory at boot; file remains on disk) | Operator generates at genesis | `<data_dir>/keys/authority_keypair.pem` |
 | `operator_key` | Ed25519 (per operator) | Operator workstation only — kernel never holds the private key | Operator (self-generated; public key registered at genesis) | Private key: operator's own keystore. Public key: `<data_dir>/keys/operator_<fingerprint>.pub` |
-| `quality_keypair` | Ed25519 | Kernel (for signing witness records); verifier subprocess receives the public key only | Operator generates at genesis | `<data_dir>/keys/quality_keypair.pem` |
+| `quality_keypair` | Ed25519 | **Reserved for v2 — not consumed by any v1 code path.** Loaded into `KeyRegistry` at startup and the public key is recorded in the policy artifact (`quality_pubkey`) so that v2 deployments can adopt witness-record signing without a new genesis ceremony or epoch advance. v1 writes `WitnessRecord` rows unsigned (see `kernel-core.md` `handlers/witness.rs` L349 and `gates/witness_index::write`); the integrity story for v1 witnesses rests on (a) FK enforcement that `witness_records.verifier_run_id` references a kernel-issued `verifier_run_tokens` row, (b) `evaluation_sha` binding so a witness submitted against the wrong commit is rejected at the handler, and (c) OS-level filesystem permissions on `kernel.db` (`0600`, kernel UID only). | Operator generates at genesis | `<data_dir>/keys/quality_keypair.pem` |
 | `verifier_token_key` | HMAC-SHA256 (256-bit random) | Kernel only | Operator generates at genesis | `<data_dir>/keys/verifier_token_key.bin` |
 
 #### Key loading at boot
@@ -1235,7 +1329,7 @@ All four must load successfully or the kernel exits before binding any socket.
 |---|---|---|
 | `authority_keypair` | Forge `ApprovalProof` records — bypass escalation approval | Stop kernel · run genesis to generate new keypair · re-sign policy with new authority pubkey · verify all historical `ApprovalProof` records against old key · epoch advance |
 | `operator_key` (private) | Sign fraudulent plan artifacts and approval tokens | Remove `operator_<fingerprint>.pub` from `keys/` · epoch advance · re-sign all active plans with a new operator key · audit all plans signed by the compromised key |
-| `quality_keypair` | Forge `WitnessRecord` blobs — pass gate checks with fabricated evidence | Epoch advance invalidates all cached witnesses · re-run all gates for active tasks · stop kernel · generate new keypair at next maintenance window |
+| `quality_keypair` | **In v1: no compromise impact.** The key is loaded but never used to sign or verify anything; an attacker who steals it gains no capability they did not already have. **In v2 (when witness signing is wired up):** forge `WitnessRecord` blobs — pass gate checks with fabricated evidence; mitigation will then be epoch advance + invalidate all cached witnesses + re-run all gates for active tasks + stop kernel + generate new keypair at next maintenance window. **Witness forgery threat in v1 is mitigated differently** — see the `quality_keypair` "Used by" cell above for the current integrity story (FK enforcement on `verifier_run_tokens` + `evaluation_sha` binding + OS filesystem permissions on `kernel.db`). |
 | `verifier_token_key` | Forge `verifier_run_token` values — submit witness blobs without being spawned by the kernel | Rotate key (stop kernel · generate new `verifier_token_key.bin` · restart) · all in-flight verifier tokens are immediately invalid · active verifier runs must be re-spawned |
 
 #### Key files format
@@ -1363,7 +1457,7 @@ gate_type        = "TestCoverage"          # matches GateType enum variant name 
 verifier_command = "/usr/local/bin/raxis-verify-coverage"
 max_wall_seconds = 120
 max_memory_bytes = 536870912              # 512 MiB
-network_allowed  = false                  # default false; kernel enforces via seccomp/rlimit in v2
+network_allowed  = false                  # advisory in v1 (recorded for forward compat with v2 seccomp/namespace enforcement); see field rules below for v1 mitigations and limits
 
 [[gates]]
 gate_type        = "LintClean"
@@ -1377,7 +1471,7 @@ network_allowed  = false
 - `verifier_command` — absolute path to the verifier executable. Must be readable and executable by the kernel OS user at startup; failure → `BOOT_ERR_VERIFIER_NOT_FOUND`.
 - `max_wall_seconds` — kernel SIGKILL after this wall-clock duration. Minimum 1, maximum 600 (v1).
 - `max_memory_bytes` — `setrlimit(RLIMIT_AS)` applied to the verifier subprocess. Minimum 64 MiB.
-- `network_allowed` — v1 kernel sets `RLIMIT_NOFILE` aggressively to impede networking but does not apply seccomp; full enforcement is v2. Default `false` is documented as advisory in v1.
+- `network_allowed` — **advisory only in v1**: the policy field is recorded in the `[[gates]]` stanza for forward compatibility and operator intent capture, but the v1 kernel does **not** enforce network isolation. The verifier subprocess runs under the same OS user as the kernel and can in principle issue `connect(2)` / `socket(2)` syscalls. v1 mitigations are limited to (a) `RLIMIT_NOFILE = 64` to cap the verifier's subsequent fd allocation (does **not** retroactively close inherited fds — for that see the FD-hygiene step in `kernel-core.md` `gates::verifier_runner::spawn_verifier` step 4), (b) `Command::env_clear()` so the verifier inherits no proxy / DNS / `HTTP_PROXY` / certificate-bundle env vars from the kernel, and (c) inability to inherit listening sockets via the FD_CLOEXEC + `closefrom` belt-and-suspenders. **None of this prevents an outbound connection** if the verifier issues raw socket syscalls and supplies its own DNS resolution. Full enforcement (Linux seccomp-bpf network filters, network namespace isolation, macOS sandbox profiles) is v2. Operators who need a hard guarantee in v1 should run the kernel under an OS-level network policy (firewall rules denying egress for the kernel's UID, or running on a host with no egress route) — there is no in-kernel substitute. **`network_allowed = true` is currently equivalent to `false` from an enforcement standpoint;** the field exists so v1 operator policies do not need to be rewritten when v2 enforcement lands.
 
 #### `VerifierSpawnEnvelope` — normative env var set
 
@@ -1705,7 +1799,7 @@ If `SQLITE_CONSTRAINT_PRIMARYKEY` (same `head_sha` already accepted for this tas
    - **Invariant:** `tasks.evaluation_sha` is set in **step 4 — Task binding** on every accepted range intent (Part 2.4); **step 7A** only adds the `task_intent_ranges` row in the **same transaction**, matching that `head_sha`. **`IntentKind::CompleteTask`** uses the separate branch below and does not substitute for the trailing segment unless an explicit future amendment records CompleteTask ranges in `task_intent_ranges`. The trailing segment covers extra commits landed **without** a new accepted intent that committed step 4+7A before `CompleteTask`.
 5. Recompute `effective_allow(task_id, store)` at completion time (same algorithm as intent admission; predecessor completion between last intent and CompleteTask may have widened the set).
 6. Run `check_paths(full_touched_paths, task_id, store)`.
-7. On `PathPolicyViolation` → return `IntentResponse::Rejected { reason: FAIL_PATH_POLICY_VIOLATION }`. Log `AuditEventKind::IntentRejected { task_id, reason: PathPolicyViolation }`. Task remains in `Running`. **Non-terminal:** planner reverts the out-of-scope commits, pushes a new `head_sha`, resubmits the `CompleteTask` intent with the corrected `head_sha`. If the planner never satisfies the path check, the task remains `Running` until **normal termination elsewhere**: e.g. operator **`task abort`** (`OperatorAbort`), planner submits **`IntentKind::ReportFailure`** → **`Running` → `Failed`** (Part 2.4 §4.3 task transition table), or a successful retry of **`CompleteTask`** → **`Completed`**. There is **no automatic task-level deadline** in v1 (`deadline_at` is not a field on `initiatives` or `tasks` in the current DDL).
+7. On `PathPolicyViolation` → return `IntentResponse::Rejected { reason: FAIL_PATH_POLICY_VIOLATION }`. Log `AuditEventKind::IntentRejected { task_id, reason: PathPolicyViolation }`. Task remains in `Running`. **Non-terminal:** planner reverts the out-of-scope commits, pushes a new `head_sha`, resubmits the `CompleteTask` intent with the corrected `head_sha`. If the planner never satisfies the path check, the task remains `Running` until **normal termination elsewhere**: e.g. operator **`task abort`** (`OperatorAbort`), planner submits **`IntentKind::ReportFailure`** → **`Running` → `Failed`** (Part 2.4 §4.3 task transition table), or a successful retry of **`CompleteTask`** → **`Completed`**. There is **no automatic task-level deadline** in v1 — this is the design (`kernel-core.md` Part 2.4 INV-INIT-09 + §4.5 "Task lifetime bounds (no v1 task-level deadline)"); `deadline_at` is not a field on `initiatives` or `tasks` in the current DDL by intent. Lane budget exhaustion (`max_cost_per_epoch` → `FAIL_BUDGET_EXCEEDED`) is the practical bound on how long a planner stuck in this loop can keep submitting; see the §4.5 "Task lifetime bounds" table for the full enumeration of v1 lifetime bounds.
 8. On success: proceed with normal `CompleteTask` branch flow (gate check, `Running → Completed` transition).
 
 **Export snapshot — computed inside the `Running → Completed` transaction:**
@@ -1808,7 +1902,7 @@ FAIL_INVALID_COMMIT_TOPOLOGY:
 | Predecessor `Aborted` (not `Completed`) | Grant never activates. `effective_allow` does not include aborted predecessor's exports. |
 | Concurrent successors with shared predecessor exports | Both successors see the same `task_exported_path_snapshots` rows. Both may touch those paths. No mutual exclusion — concurrent write conflicts are git conflicts the planner must resolve. Path scope enforcement does not imply write exclusion (see §v3.1 for future cross-session write exclusion). |
 | `path_scope_override = true` | `effective_allow` = universal set. Both INV-TASK-PATH-01 and INV-TASK-PATH-02 pass unconditionally. `PathScopeOverrideApplied` audit event written at `approve_plan`. Signing tool must require `--allow-path-override` acknowledgement; bare `**` without this flag must be rejected at signing time (Part 4 normative rule). |
-| `CompleteTask` path check fails | Task stays `Running`. Planner reverts out-of-scope commits, resubmits `CompleteTask` with corrected `head_sha`. Otherwise the task can still leave `Running` via operator **`task abort`**, planner **`IntentKind::ReportFailure`** (Part 2.4 §4.3 task transition table: `Running` → `Failed`), or successful **`CompleteTask`** after remediation; there is no `deadline_at` on tasks/initiatives in v1 DDL. |
+| `CompleteTask` path check fails | Task stays `Running`. Planner reverts out-of-scope commits, resubmits `CompleteTask` with corrected `head_sha`. Otherwise the task can still leave `Running` via operator **`task abort`**, planner **`IntentKind::ReportFailure`** (Part 2.4 §4.3 task transition table: `Running` → `Failed`), or successful **`CompleteTask`** after remediation; there is no `deadline_at` on tasks/initiatives in v1 DDL by design (`kernel-core.md` Part 2.4 **INV-INIT-09** + §4.5 "Task lifetime bounds"). The seven practical lifetime bounds — most notably lane budget exhaustion via `max_cost_per_epoch` — are enumerated in `kernel-core.md` §4.5; v2 will add `deadline_at` columns and the corresponding sweep. |
 | `path_export_to_successors = false` (default) | No rows written to `task_exported_path_snapshots` at completion. Successors' `effective_allow` is unaffected. Zero export blast radius. |
 | Unmerged paths (`U` status in diff) | `VcsDiffError::UnmergedPaths` → `FAIL_INVALID_DIFF`. Non-terminal. Planner must resolve conflicts and resubmit. |
 
