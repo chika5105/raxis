@@ -12,6 +12,7 @@
 // implemented. Steps 1–5 are fully wired.
 
 mod errors;
+mod bootstrap;
 
 use errors::{exit_with_code, KernelError};
 use raxis_policy::load_policy;
@@ -37,11 +38,18 @@ fn main() {
 
     // Step 2: If bootstrap mode — enter bootstrap::run(). Does not return.
     if bootstrap_mode {
-        // bootstrap::run is implemented in bootstrap.rs (stub for now).
-        // The genesis state machine creates keys and initial policy, then exits.
-        // It never enters the dispatch loop.
-        eprintln!("{{\"level\":\"info\",\"message\":\"bootstrap mode not yet implemented in v1\"}}");
-        std::process::exit(errors::BOOT_ERR_BOOTSTRAP_FAILED);
+        let config = bootstrap::BootstrapConfig {
+            data_dir: data_dir.clone(),
+            operator_pubkey_path: std::env::var("RAXIS_OPERATOR_PUBKEY").ok().map(Into::into),
+            force: std::env::var("RAXIS_FORCE").is_ok(),
+        };
+        // bootstrap::run calls std::process::exit(0) on success.
+        // On failure it returns Err which we convert to exit code 15.
+        if let Err(e) = bootstrap::run(&config) {
+            exit_with_code(e);
+        }
+        // Unreachable: run() always calls process::exit.
+        unreachable!("bootstrap::run must exit the process");
     }
 
     // Step 3: Load and verify signed policy artifact.
