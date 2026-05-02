@@ -49,17 +49,39 @@ const TASKS: &str = Table::Tasks.as_str();
 // Public outcome types
 // ---------------------------------------------------------------------------
 
-/// Application-level outcome of a WitnessSubmission.
+/// Application-level outcome of a `WitnessSubmission`.
 ///
-/// This is *not* a `Result` error — both variants are *successful* responses
-/// from the handler's perspective; `Rejected` simply means the submission
-/// was refused for a typed application reason, and the transport stays open.
+/// This is *not* a `Result` error — every variant is a *successful* response
+/// from the handler's perspective; `Rejected` simply means the submission was
+/// refused for a typed application reason, and the transport stays open.
+///
+/// **Pass vs non-Pass distinction (v1 review item #14).**
+/// Pre-fix, both `Pass` and `Fail` / `Inconclusive` witnesses returned the
+/// same `Accepted { remaining_gates: vec![] }` shape, which lied to the
+/// planner: an empty `remaining_gates` MUST mean "all gates cleared, you may
+/// advance the task" — but a `Fail` witness leaves the gate UNcleared. The
+/// planner had no way to tell the two situations apart without reparsing
+/// audit. We now use a separate variant for non-Pass acks so the planner
+/// can route correctly without speculative re-reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WitnessAck {
-    /// Submission accepted and written.
-    /// `run_id` echoes the verifier_run_id from the token lookup for correlation.
-    /// `remaining_gates` lists any gates still needing witnesses.
+    /// Submission accepted, witness written, token consumed, **and** the
+    /// task's gate set was re-evaluated. `remaining_gates` is the list of
+    /// gates STILL needing a `Pass` witness; an empty vec MEANS the task may
+    /// now advance out of `GatesPending`. Only `result_class == Pass`
+    /// submissions take this path.
     Accepted { run_id: String, remaining_gates: Vec<GateType> },
+
+    /// Submission accepted and witness written, but the result was NOT a
+    /// `Pass`, so the gate cannot be cleared by this submission. The task
+    /// remains in `GatesPending`. The planner SHOULD treat this as a
+    /// terminal-for-this-attempt outcome for the named gate (typically:
+    /// transition the task to `Failed` or queue an operator escalation).
+    AcceptedNonPass {
+        run_id: String,
+        gate_type: GateType,
+        result_class: ResultClass,
+    },
 
     /// Submission refused at the application level. Token is NOT consumed.
     Rejected { reason: WitnessRejectionReason },
@@ -197,7 +219,9 @@ pub async fn handle(
 
     // ── Step 6: Gate-recheck ──────────────────────────────────────────────
     // Only recheck if the witness was a Pass — Fail/Inconclusive can't clear
-    // the gate, so skip the evaluation round-trip for those cases.
+    // the gate, so skip the evaluation round-trip for those cases. We return
+    // a distinct ack variant so the planner does not mistake "non-Pass
+    // recorded" for "all gates cleared, you may advance".
     if result_class != ResultClass::Pass {
         eprintln!(
             "{{\"level\":\"info\",\"event\":\"WitnessNonPass\",\
@@ -205,8 +229,11 @@ pub async fn handle(
             sub.task_id.as_str(),
             result_class.as_str(),
         );
-        // Task stays GatesPending. No verifier spawn.
-        return Ok(WitnessAck::Accepted { run_id: run_id.clone(), remaining_gates: vec![] });
+        return Ok(WitnessAck::AcceptedNonPass {
+            run_id,
+            gate_type: sub.gate_type.clone(),
+            result_class,
+        });
     }
 
     let remaining_gates = gate_recheck(
@@ -490,6 +517,28 @@ mod tests {
             },
         };
         assert!(matches!(ack, WitnessAck::Rejected { .. }));
+    }
+
+    /// Regression guard for v1 review item #14: a non-Pass witness MUST
+    /// surface as `AcceptedNonPass` (NOT `Accepted { remaining_gates: [] }`),
+    /// because an empty `remaining_gates` is reserved for "all gates cleared
+    /// — the planner may now advance the task". Conflating the two would
+    /// silently advance tasks that just failed a gate.
+    #[test]
+    fn non_pass_uses_distinct_variant_from_all_clear() {
+        let all_clear = WitnessAck::Accepted {
+            run_id: "r-1".to_owned(),
+            remaining_gates: vec![],
+        };
+        let non_pass = WitnessAck::AcceptedNonPass {
+            run_id: "r-2".to_owned(),
+            gate_type: raxis_types::GateType::parse("TestCoverage").unwrap(),
+            result_class: ResultClass::Fail,
+        };
+        // The distinct variant is the whole point — they MUST NOT be `==`.
+        assert_ne!(all_clear, non_pass);
+        assert!(matches!(all_clear, WitnessAck::Accepted { .. }));
+        assert!(matches!(non_pass, WitnessAck::AcceptedNonPass { .. }));
     }
 
     // ── HandlerError display ──────────────────────────────────────────────

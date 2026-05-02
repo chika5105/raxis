@@ -22,6 +22,7 @@ mod handlers;
 use std::sync::Arc;
 
 use errors::{exit_with_code, KernelError};
+use raxis_audit_tools::{AuditEventKind, AuditSink, AuditWriter, FileAuditSink};
 use raxis_policy::load_policy;
 use raxis_store::Store;
 
@@ -108,16 +109,47 @@ async fn main() {
         Err(e) => exit_with_code(e),
     }
 
-    // Step 7 + 9: Bind IPC sockets and enter dispatch loop.
+    // Step 7a: Open the AuditWriter on segment-000.jsonl. Per
+    // kernel-store.md §2.5.2 this is the only writer to the JSONL chain;
+    // no other module opens the file.
+    //
+    // v1 simplification: starting_seq=0 / starting_prev_sha256=None on
+    // every kernel start. A future PR will scan the segment for the last
+    // line + recompute its prev_sha256 to resume the chain across
+    // restarts. The current behaviour is the same as the previous
+    // `eprintln!`-only path: every restart begins a fresh chain segment.
+    let audit_path = audit_dir.join("segment-000.jsonl");
+    let writer = AuditWriter::open(&audit_path, 0, None).unwrap_or_else(|e| {
+        exit_with_code(KernelError::AuditChainBroken {
+            reason: format!("cannot open audit segment {audit_path:?}: {e}"),
+        })
+    });
+    let audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(writer));
+
+    // Step 8: Emit the canonical KernelStarted record. This is the very
+    // first event in this kernel-process lifetime; with the v1 reset
+    // policy above it is also the genesis event of the segment.
+    if let Err(e) = audit.emit(
+        AuditEventKind::KernelStarted {
+            data_dir: data_dir.display().to_string(),
+            policy_epoch: policy.epoch(),
+            schema_version: 1,
+        },
+        None, None, None,
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"KernelStarted\",\"audit_emit_failed\":\"{e}\"}}"
+        );
+    }
+
+    // Step 7b: Build the HandlerContext now that the audit sink exists.
     let ctx = Arc::new(ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
         Arc::clone(&store),
+        Arc::clone(&audit),
         data_dir.clone(),
     ));
-
-    // Step 8: Emit KernelStarted audit event (stub).
-    eprintln!("{{\"level\":\"info\",\"message\":\"KernelStarted (audit stub)\"}}");
 
     // Step 9: Enter IPC dispatch loop (runs forever or until fatal error).
     if let Err(e) = ipc::server::start(&data_dir, ctx).await {

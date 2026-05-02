@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use raxis_audit_tools::AuditSink;
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
@@ -32,6 +33,15 @@ pub struct HandlerContext {
     pub registry: Arc<KeyRegistry>,
     /// SQLite state store (WAL mode, synchronous=FULL, foreign_keys=ON).
     pub store: Arc<Store>,
+    /// Append-only audit sink. Production wiring is `FileAuditSink` over
+    /// the JSONL segment under `<data_dir>/audit/`. Tests use
+    /// `FakeAuditSink`.
+    ///
+    /// Per kernel-store.md §2.5.2, every audit emission MUST follow a
+    /// successful SQLite commit; the trait does not enforce this — the
+    /// kernel review process does. See `lifecycle::approve_plan` for a
+    /// canonical use site (commit → drop store mutex → emit).
+    pub audit: Arc<dyn AuditSink>,
     /// Absolute path to the kernel data directory (e.g. `~/.raxis`).
     pub data_dir: PathBuf,
     /// Absolute path to the witness blob store (`<data_dir>/witness/`).
@@ -48,10 +58,11 @@ impl HandlerContext {
         policy: Arc<PolicyBundle>,
         registry: Arc<KeyRegistry>,
         store: Arc<Store>,
+        audit: Arc<dyn AuditSink>,
         data_dir: PathBuf,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
-        Self { policy, registry, store, data_dir, witness_dir }
+        Self { policy, registry, store, audit, data_dir, witness_dir }
     }
 
     /// Construct with an explicit witness_dir (useful in tests that use a

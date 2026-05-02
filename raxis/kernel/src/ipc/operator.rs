@@ -17,8 +17,8 @@
 
 use std::sync::Arc;
 
+use raxis_ipc::{read_json_frame_async, write_json_frame_async, JsonFrameError};
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 use crate::authority;
@@ -28,9 +28,24 @@ use crate::ipc::context::HandlerContext;
 
 // ---------------------------------------------------------------------------
 // Wire types (OperatorRequest / OperatorResponse)
-// These mirror the types in raxis-types but are defined here to avoid the
-// build-time dependency on the bincode wire codec for the auth handshake path.
-// The operator socket uses JSON framing for its messages in v1.
+//
+// These mirror the canonical definitions in `raxis_types::operator` but are
+// defined here for one tactical reason: the canonical types target the
+// **bincode** codec used by the planner socket (where field positions are
+// the wire), while the operator socket uses **JSON** with field names and a
+// looser schema (the CLI hand-builds JSON via `serde_json::Value`, which
+// tolerates extra/missing fields better than bincode).
+//
+// PR-2a follow-up (deferred): collapse into one type. The right design is
+//   - `raxis_types::operator::OperatorRequest` with serde tags compatible
+//     with both bincode and JSON, AND
+//   - rewrite `cli/src/commands/*` to construct typed requests instead of
+//     `serde_json::Value`.
+// That refactor is large enough to be its own PR and is out of scope here.
+// In the interim, every variant added below MUST have a matching variant in
+// `raxis_types::operator::OperatorRequest`, and the JSON tag (`"op"`) MUST
+// match. The contract is enforced by the v1 review's pending PR-2c
+// "reconcile every CLI command JSON request shape with kernel enum" task.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
@@ -137,35 +152,27 @@ pub async fn dispatch_loop(
     operator: AuthenticatedOperator,
     ctx: Arc<HandlerContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Framing routes through `raxis-ipc::json_frame` so the kernel and CLI
+    // share one source of truth (PR-2 — earlier the kernel and CLI used
+    // independent hand-rolled framings with different byte orders, making
+    // the operator socket non-functional end-to-end).
     loop {
-        // Read length-prefixed JSON frame.
-        let mut len_buf = [0u8; 4];
-        match stream.read_exact(&mut len_buf).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                // Client closed connection — clean exit.
-                return Ok(());
-            }
-            Err(e) => return Err(e.into()),
-        }
-        let msg_len = u32::from_le_bytes(len_buf) as usize;
-        if msg_len > 1024 * 1024 {
-            // Oversized frame — disconnect.
-            return Err("operator request frame too large".into());
-        }
-        let mut msg_buf = vec![0u8; msg_len];
-        stream.read_exact(&mut msg_buf).await?;
-
-        let request: OperatorRequest = match serde_json::from_slice(&msg_buf) {
+        let request: OperatorRequest = match read_json_frame_async(&mut stream).await {
             Ok(r) => r,
-            Err(e) => {
+            // Clean disconnect between frames — peer closed the socket.
+            Err(JsonFrameError::Eof) => return Ok(()),
+            // Malformed JSON: send an error frame and keep the connection
+            // open so the CLI can show a useful message.
+            Err(JsonFrameError::Decode(e)) => {
                 let resp = OperatorResponse::Error {
                     code: "INVALID_REQUEST".to_owned(),
                     detail: e.to_string(),
                 };
-                write_response(&mut stream, &resp).await?;
+                write_json_frame_async(&mut stream, &resp).await?;
                 continue;
             }
+            // Anything else (Io, TooLarge, Encode) is fatal for this connection.
+            Err(other) => return Err(Box::new(other)),
         };
 
         // permitted_ops gate.
@@ -178,13 +185,13 @@ pub async fn dispatch_loop(
                     operator.fingerprint
                 ),
             };
-            write_response(&mut stream, &resp).await?;
+            write_json_frame_async(&mut stream, &resp).await?;
             continue;
         }
 
         // Dispatch.
         let response = handle_request(request, &operator, &ctx).await;
-        write_response(&mut stream, &response).await?;
+        write_json_frame_async(&mut stream, &response).await?;
     }
 }
 
@@ -217,7 +224,7 @@ async fn handle_request(
             handle_create_initiative(plan_toml, plan_sig_hex, submitted_by, ctx).await
         }
         OperatorRequest::ApprovePlan { initiative_id, approving_operator, operator_pubkey_hex } => {
-            handle_approve_plan(initiative_id, approving_operator, operator_pubkey_hex, ctx).await
+            handle_approve_plan(initiative_id, approving_operator, operator_pubkey_hex, operator, ctx).await
         }
         OperatorRequest::RejectPlan { initiative_id, rejected_by, reason } => {
             handle_reject_plan(initiative_id, rejected_by, reason, ctx).await
@@ -469,21 +476,78 @@ async fn handle_create_initiative(
 }
 
 /// ApprovePlan — verify Ed25519 sig, parse tasks, admit all, → Executing.
-/// Spec: "verify sig, promote to Executing, admit all tasks."
+/// Spec: kernel-store.md §2.5.3 "approve_plan call path" + v1-review item #11.
+///
+/// Trust model — the operator pubkey comes from **policy, not the wire**.
+///
+///   The connected operator is authenticated by the challenge-response
+///   handshake at connection time (`AuthenticatedOperator { fingerprint, .. }`).
+///   The `ApprovePlan` request also carries `approving_operator` and a legacy
+///   `operator_pubkey_hex` field. Per `kernel-store.md` §2.5.3:
+///
+///     - `approving_operator` MUST equal the authenticated fingerprint
+///       (no impersonation between operators on the wire).
+///     - The pubkey used for signature verification MUST be looked up from
+///       `policy.operator_entry(approving_operator).pubkey_hex`. The wire
+///       field `operator_pubkey_hex` is **ignored** — accepting it would let
+///       a malicious caller substitute their own key. We keep the wire field
+///       in the request type only for back-compat with already-deployed
+///       CLI builds; new clients SHOULD send an empty string.
+///
+/// Only after the identity check passes do we resolve the policy pubkey,
+/// hex-decode it, and hand the bytes to `lifecycle::approve_plan`, which
+/// then performs canonical Ed25519 verification over the plan signing domain.
 async fn handle_approve_plan(
-    initiative_id:       String,
-    approving_operator:  String,
-    operator_pubkey_hex: String,
+    initiative_id:        String,
+    approving_operator:   String,
+    _operator_pubkey_hex: String,
+    authenticated:        &AuthenticatedOperator,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    let pubkey_bytes = match hex::decode(&operator_pubkey_hex) {
-        Ok(b) => b,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_APPROVE_PLAN".to_owned(),
-            detail: format!("operator_pubkey_hex decode failed: {e}"),
+    if approving_operator != authenticated.fingerprint {
+        return OperatorResponse::Error {
+            code:   "FAIL_OPERATOR_IDENTITY_MISMATCH".to_owned(),
+            detail: format!(
+                "request.approving_operator='{approving_operator}' does not match \
+                 authenticated operator '{}'",
+                authenticated.fingerprint,
+            ),
+        };
+    }
+
+    // Single source of truth for trusted operators and their pubkeys.
+    let entry = match ctx.policy.operator_entry(&approving_operator) {
+        Some(e) => e,
+        None => return OperatorResponse::Error {
+            code:   "FAIL_OPERATOR_UNKNOWN".to_owned(),
+            detail: format!(
+                "approving_operator '{approving_operator}' has no entry in policy.operators",
+            ),
         },
     };
-    match lifecycle::approve_plan(&initiative_id, &approving_operator, &pubkey_bytes, &ctx.store) {
+
+    let pubkey_bytes = match hex::decode(&entry.pubkey_hex) {
+        Ok(b) => b,
+        Err(e) => return OperatorResponse::Error {
+            // Policy validation should have caught this at load time; reaching
+            // this branch indicates either a corrupted policy file accepted by
+            // an older loader, or hand-editing of the in-memory bundle.
+            code:   "FAIL_POLICY_OPERATOR_PUBKEY_INVALID".to_owned(),
+            detail: format!(
+                "policy entry for '{approving_operator}' has malformed pubkey_hex: {e}",
+            ),
+        },
+    };
+
+    let policy_epoch = ctx.policy.epoch();
+    match lifecycle::approve_plan(
+        &initiative_id,
+        &approving_operator,
+        &pubkey_bytes,
+        policy_epoch,
+        &ctx.store,
+        &*ctx.audit,
+    ) {
         Ok(result) => OperatorResponse::PlanApproved {
             initiative_id:  result.initiative_id,
             tasks_admitted: result.tasks_admitted,
@@ -607,13 +671,7 @@ fn op_name(req: &OperatorRequest) -> &'static str {
     }
 }
 
-async fn write_response(
-    stream: &mut UnixStream,
-    resp: &OperatorResponse,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let bytes = serde_json::to_vec(resp)?;
-    let len = bytes.len() as u32;
-    stream.write_all(&len.to_le_bytes()).await?;
-    stream.write_all(&bytes).await?;
-    Ok(())
-}
+// `write_response` was inlined into `dispatch_loop` once framing moved to
+// `raxis_ipc::write_json_frame_async`. Kept this comment to explain the
+// rename in case anyone diffs against the pre-PR-2 history.
+

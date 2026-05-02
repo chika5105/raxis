@@ -40,7 +40,8 @@ use raxis_types::{
 };
 use raxis_store::{Store, Table};
 
-const TASKS: &str = Table::Tasks.as_str();
+const TASKS:              &str = Table::Tasks.as_str();
+const TASK_INTENT_RANGES: &str = Table::TaskIntentRanges.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
@@ -102,18 +103,47 @@ async fn handle_inner(req: IntentRequest, ctx: &HandlerContext) -> HandlerResult
         return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
     }
 
-    // ── Step 2: Sequence-number — validate THEN atomically advance ────────
-    // Spec INV-01: "sequence_number must be exactly prev_accepted_sequence + 1".
-    // We validate first, then call update_sequence_number which uses a
-    // conditional UPDATE (sequence_number = expected) to atomically advance it.
-    // If two concurrent frames arrive with the same sequence number, only one
-    // can win the CAS; the second gets SequenceMismatch → UNAUTHORIZED.
-    let expected_seq = (session.sequence_number as u64) + 1;
-    if seq != expected_seq {
+    // ── Step 2: INV-01 — accept envelope (sequence + nonce) atomically ────
+    // Spec: kernel-store.md §2.5.1 Table 16 INV-01 enforcement sequence,
+    // checks (A) sequence-number monotonic and (B) envelope_nonce dedup.
+    // Both happen in one SQLite transaction so we never advance the sequence
+    // without writing the nonce row, and never write the nonce without
+    // advancing the sequence. The handler does NOTHING else before this
+    // call succeeds — every later step is reachable only on a fresh,
+    // non-replayed envelope.
+    //
+    // Per INV-08, every replay reason maps to PlannerErrorCode::Unauthorized
+    // on the wire (we do not leak which check failed). The structured
+    // reason is recorded as `AuditEventKind::ReplayRejected` for forensic
+    // analysis — see kernel-store.md §2.5.1 Table 16 INV-01 enforcement
+    // sequence step 3 (audit emit on rejection).
+    let presented_seq_i64 = i64::try_from(seq).map_err(|_| {
+        // Only happens for seq > i64::MAX, i.e. a malicious caller —
+        // bin it as Unauthorized.
+        (PlannerErrorCode::Unauthorized, TaskState::Admitted)
+    })?;
+    if let Err(reason) = authority::session::accept_envelope_and_advance_sequence(
+        &session_id,
+        presented_seq_i64,
+        &req.envelope_nonce,
+        store,
+    ) {
+        // No SQLite write occurred (the helper rolled back its own tx
+        // on rejection), so emitting the audit record now does NOT
+        // violate the §2.5.2 "audit-after-commit" rule — there is
+        // nothing to commit, and the rejection itself is the event.
+        let _ = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::ReplayRejected {
+                session_id:   session_id.as_str().to_owned(),
+                sequence_num: seq,
+                reason:       format!("{reason:?}"),
+            },
+            Some(session_id.as_str()),
+            None,
+            None,
+        );
         return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
     }
-    authority::session::update_sequence_number(&session_id, session.sequence_number, store)
-        .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
 
     // ── Step 3: Load task row ─────────────────────────────────────────────
     let task = load_task(req.task_id.as_str(), store)
@@ -269,6 +299,36 @@ async fn handle_inner(req: IntentRequest, ctx: &HandlerContext) -> HandlerResult
         head_sha_raw.as_str(),
         base_sha_raw.as_str(),
         session_id.as_str(),
+        store,
+    ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+
+    // ── Step 12A: Record accepted intent range (INV-TASK-PATH-02 substrate)
+    //
+    // Spec: kernel-store.md §2.5.8 step 7A. Append one row per accepted
+    // intent to `task_intent_ranges`, which CompleteTask later reads to
+    // reconstruct the union of touched paths across all admitted ranges.
+    //
+    // PRIMARY KEY (task_id, head_sha) — duplicate `head_sha` for the same
+    // task collapses to an idempotent retry (per spec the kernel "treats
+    // this as an idempotent retry and returns the prior accepted response
+    // without re-processing"). The `INSERT OR IGNORE` here is the SQL
+    // implementation of that idempotency: the response shape returned at
+    // the end of the function is computed from the live state and is
+    // therefore identical for both the first call and the retry.
+    //
+    // INV-STORE-02 footnote: ideally this INSERT would share a single
+    // transaction with steps 10–12 (budget consume + FSM transition +
+    // intent-field UPDATE). The current implementation runs them as
+    // separate auto-commits because each helper opens its own connection
+    // lock; PR-6b will compose them into one tx by threading a shared
+    // `Transaction<'_>` through the helpers. This row write is still a
+    // strict net improvement: prior to this PR, `task_intent_ranges` was
+    // never populated, which made INV-TASK-PATH-02 (CompleteTask path
+    // check across all admitted ranges) impossible to enforce.
+    insert_task_intent_range(
+        req.task_id.as_str(),
+        base_sha_raw.as_str(),
+        head_sha_raw.as_str(),
         store,
     ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
@@ -458,6 +518,32 @@ fn update_task_intent_fields(
     Ok(())
 }
 
+/// Append one row to `task_intent_ranges` per kernel-store.md §2.5.8 step 7A.
+///
+/// Uses `INSERT OR IGNORE` so a duplicate `(task_id, head_sha)` — which
+/// SQLite reports as `SQLITE_CONSTRAINT_PRIMARYKEY` on plain INSERT —
+/// silently no-ops, matching the spec's idempotent-retry semantics:
+/// "Submitting the same head_sha twice returns SQLITE_CONSTRAINT_PRIMARYKEY;
+///  the kernel treats this as an idempotent retry and returns the prior
+///  accepted response without re-processing."
+fn insert_task_intent_range(
+    task_id:  &str,
+    base_sha: &str,
+    head_sha: &str,
+    store:    &Store,
+) -> Result<(), ()> {
+    let conn = store.lock_sync();
+    conn.execute(
+        &format!(
+            "INSERT OR IGNORE INTO {TASK_INTENT_RANGES}
+                (task_id, base_sha, head_sha, accepted_at)
+             VALUES (?1, ?2, ?3, ?4)"
+        ),
+        rusqlite::params![task_id, base_sha, head_sha, unix_now()],
+    ).map_err(|_| ())?;
+    Ok(())
+}
+
 fn parse_task_state(s: &str) -> TaskState {
     match s {
         "Admitted"               => TaskState::Admitted,
@@ -554,5 +640,112 @@ mod tests {
     fn justification_at_2049_chars_is_rejected() {
         let j = "x".repeat(2049);
         assert!(j.len() > 2048); // would trigger InvalidRequest
+    }
+
+    // ── insert_task_intent_range — INV-TASK-PATH-02 substrate ──────────────
+    //
+    // These tests verify that step 7A correctly populates `task_intent_ranges`
+    // and that the PRIMARY KEY (task_id, head_sha) idempotency rule from
+    // kernel-store.md §2.5.8 is honoured.
+
+    fn seed_task(store: &Store, task_id: &str) {
+        let conn = store.lock_sync();
+        let now = unix_now();
+        conn.execute(
+            "INSERT INTO initiatives
+                (initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at)
+             VALUES ('init-int', 'Executing', '{}', 'deadbeef', ?1)",
+            rusqlite::params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO tasks
+                (task_id, initiative_id, lane_id, state, actor,
+                 policy_epoch, admitted_at, transitioned_at, actual_cost)
+             VALUES (?1, 'init-int', 'default', 'Admitted', 'kernel',
+                     1, ?2, ?2, 0)",
+            rusqlite::params![task_id, now],
+        ).unwrap();
+    }
+
+    fn count_intent_ranges(store: &Store, task_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            "SELECT COUNT(*) FROM task_intent_ranges WHERE task_id=?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    #[test]
+    fn intent_range_insert_persists_pair() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t1");
+
+        insert_task_intent_range("t1", "aaaaaaaa", "bbbbbbbb", &store).unwrap();
+        assert_eq!(count_intent_ranges(&store, "t1"), 1);
+
+        let conn = store.lock_sync();
+        let (base, head): (String, String) = conn.query_row(
+            "SELECT base_sha, head_sha FROM task_intent_ranges WHERE task_id='t1'",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        assert_eq!(base, "aaaaaaaa");
+        assert_eq!(head, "bbbbbbbb");
+    }
+
+    #[test]
+    fn intent_range_insert_is_idempotent_on_same_head_sha() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t1");
+
+        // Same (task_id, head_sha) submitted twice — INSERT OR IGNORE
+        // must collapse to one row, matching the spec's "idempotent retry".
+        insert_task_intent_range("t1", "aa", "bb", &store).unwrap();
+        insert_task_intent_range("t1", "aa", "bb", &store).unwrap();
+        assert_eq!(count_intent_ranges(&store, "t1"), 1);
+
+        // A different base_sha but the SAME head_sha is also collapsed —
+        // PRIMARY KEY is (task_id, head_sha), not (task_id, base_sha, head_sha).
+        // The spec treats this as a retry of the prior accepted intent.
+        insert_task_intent_range("t1", "cc", "bb", &store).unwrap();
+        assert_eq!(count_intent_ranges(&store, "t1"), 1);
+    }
+
+    #[test]
+    fn intent_range_accumulates_across_successive_intents() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t1");
+
+        // Three distinct head_shas → three rows; CompleteTask later
+        // unions touched_paths across all of them.
+        insert_task_intent_range("t1", "aa", "bb", &store).unwrap();
+        insert_task_intent_range("t1", "bb", "cc", &store).unwrap();
+        insert_task_intent_range("t1", "cc", "dd", &store).unwrap();
+        assert_eq!(count_intent_ranges(&store, "t1"), 3);
+    }
+
+    #[test]
+    fn intent_ranges_are_scoped_per_task() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t1");
+
+        let conn = store.lock_sync();
+        conn.execute(
+            "INSERT INTO tasks
+                (task_id, initiative_id, lane_id, state, actor,
+                 policy_epoch, admitted_at, transitioned_at, actual_cost)
+             VALUES ('t2', 'init-int', 'default', 'Admitted', 'kernel',
+                     1, ?1, ?1, 0)",
+            rusqlite::params![unix_now()],
+        ).unwrap();
+        drop(conn);
+
+        // Same head_sha for two different tasks must coexist — the PK
+        // includes task_id.
+        insert_task_intent_range("t1", "aa", "bb", &store).unwrap();
+        insert_task_intent_range("t2", "aa", "bb", &store).unwrap();
+        assert_eq!(count_intent_ranges(&store, "t1"), 1);
+        assert_eq!(count_intent_ranges(&store, "t2"), 1);
     }
 }

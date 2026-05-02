@@ -141,25 +141,19 @@ async fn handle_operator_connection(
     mut stream: UnixStream,
     ctx: Arc<HandlerContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use raxis_ipc::{read_json_frame_async, write_json_frame_async};
 
-    // Step 1: Send challenge.
-    let challenge = auth::make_challenge();
-    let challenge_bytes = serde_json::to_vec(&challenge)?;
-    let len = challenge_bytes.len() as u32;
-    stream.write_all(&len.to_le_bytes()).await?;
-    stream.write_all(&challenge_bytes).await?;
+    // Step 1: Send challenge. RNG failure here closes the connection — we
+    // refuse to send a degraded challenge whose entropy we cannot vouch for.
+    // Framing routes through `raxis-ipc::json_frame` so the kernel and CLI
+    // share one source of truth (PR-2 — earlier the kernel used hand-rolled
+    // little-endian framing while the CLI used hand-rolled BIG-endian, making
+    // the operator socket unusable end-to-end).
+    let challenge = auth::make_challenge()?;
+    write_json_frame_async(&mut stream, &challenge).await?;
 
-    // Step 2: Read response.
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let msg_len = u32::from_le_bytes(len_buf) as usize;
-    if msg_len > 4 * 1024 {
-        return Err("response too large".into());
-    }
-    let mut msg_buf = vec![0u8; msg_len];
-    stream.read_exact(&mut msg_buf).await?;
-    let response: auth::ResponseEnvelope = serde_json::from_slice(&msg_buf)?;
+    // Step 2: Read response envelope.
+    let response: auth::ResponseEnvelope = read_json_frame_async(&mut stream).await?;
 
     // Step 3: Verify.
     let operator = match auth::verify_response(&challenge, &response, &ctx.policy) {
@@ -169,20 +163,16 @@ async fn handle_operator_connection(
                 "status": "Unauthorized",
                 "reason": reason,
             });
-            let bytes = serde_json::to_vec(&error_msg)?;
-            let len = bytes.len() as u32;
-            stream.write_all(&len.to_le_bytes()).await?;
-            stream.write_all(&bytes).await?;
+            write_json_frame_async(&mut stream, &error_msg).await?;
             return Ok(());
         }
     };
 
-    // Step 4: Send auth-ok.
-    let ok_msg = serde_json::json!({"status": "AuthOk"});
-    let ok_bytes = serde_json::to_vec(&ok_msg)?;
-    let ok_len = ok_bytes.len() as u32;
-    stream.write_all(&ok_len.to_le_bytes()).await?;
-    stream.write_all(&ok_bytes).await?;
+    // Step 4: Send auth-ok ACK. The CLI's `OperatorConn::connect` matches
+    // `status == "Ok"` (cli/src/conn.rs); we keep both keys for forward-
+    // compatibility with the older `"AuthOk"` value.
+    let ok_msg = serde_json::json!({"status": "Ok"});
+    write_json_frame_async(&mut stream, &ok_msg).await?;
 
     eprintln!(
         "{{\"level\":\"info\",\"message\":\"operator authenticated\",\"fingerprint\":\"{}\"}}",
@@ -262,12 +252,35 @@ async fn handle_planner_connection(
                 match handlers::witness::handle(sub, &ctx).await {
                     Ok(ack) => {
                         // Map domain WitnessAck → wire IpcMessage::WitnessAck.
-                        // verifier_run_id is embedded in the Accepted payload
-                        // (it's discovered after token validation inside the handler).
+                        //
+                        // The wire shape (`accepted: bool, reason: Option<String>`)
+                        // is intentionally narrower than the domain enum: the
+                        // verifier subprocess only needs to know whether the
+                        // submission landed and, if not, why. The handler-level
+                        // distinction between `Accepted` (cleared a gate) and
+                        // `AcceptedNonPass` (recorded a Fail/Inconclusive) is
+                        // routed elsewhere (planner via audit / future planner
+                        // facing wire types — see kernel-store.md §2.5.6).
+                        // For the verifier we collapse both Accepted variants
+                        // to `accepted = true` so it knows to release its
+                        // worktree lease and exit cleanly. The `reason` field
+                        // surfaces the result_class for AcceptedNonPass so the
+                        // verifier's own logs can echo it.
                         let (accepted, verifier_run_id, reason) = match ack {
                             handlers::witness::WitnessAck::Accepted { run_id, .. } => {
                                 (true, uuid::Uuid::parse_str(&run_id).unwrap_or_default(), None)
                             }
+                            handlers::witness::WitnessAck::AcceptedNonPass {
+                                run_id, gate_type, result_class,
+                            } => (
+                                true,
+                                uuid::Uuid::parse_str(&run_id).unwrap_or_default(),
+                                Some(format!(
+                                    "non-pass recorded: gate={} result={}",
+                                    gate_type.as_str(),
+                                    result_class.as_str(),
+                                )),
+                            ),
                             handlers::witness::WitnessAck::Rejected { reason } => {
                                 (false, uuid::Uuid::nil(), Some(format!("{reason:?}")))
                             }
