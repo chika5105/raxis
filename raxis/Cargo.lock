@@ -580,6 +580,21 @@ dependencies = [
 [[package]]
 name = "raxis-kernel"
 version = "0.1.0"
+dependencies = [
+ "hex",
+ "raxis-audit-tools",
+ "raxis-crypto",
+ "raxis-ipc",
+ "raxis-policy",
+ "raxis-store",
+ "raxis-types",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "tokio",
+ "uuid",
+]
 
 [[package]]
 name = "raxis-policy"

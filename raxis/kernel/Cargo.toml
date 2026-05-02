@@ -4,8 +4,30 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# Part 2.1: panic = "abort" in release — no unwinding in a trust-critical process.
+[profile.release]
+panic     = "abort"
+opt-level = 3
+debug     = false
+
 [[bin]]
 name = "raxis-kernel"
 path = "src/main.rs"
 
 [dependencies]
+# Workspace support crates (the six listed in Part 2.1)
+raxis-types       = { workspace = true }
+raxis-crypto      = { workspace = true }
+raxis-ipc         = { workspace = true }
+raxis-policy      = { workspace = true }
+raxis-audit-tools = { workspace = true }
+raxis-store       = { workspace = true }
+
+# Async runtime — tokio with explicit feature list per Part 2.1.
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+sha2        = { workspace = true }
+hex         = { workspace = true }
+uuid        = { workspace = true }
