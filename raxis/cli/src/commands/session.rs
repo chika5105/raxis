@@ -75,8 +75,11 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
     let worktree_root = worktree_root
         .ok_or_else(|| CliError::Usage("session create requires --worktree-root <path>".to_owned()))?;
 
-    // Generate lineage_id if not provided.
-    let lineage_id = lineage_id.unwrap_or_else(|| uuid_v4());
+    // Generate lineage_id if not provided. `uuid::Uuid::new_v4()` routes to
+    // `getrandom` and panics on RNG failure (acceptable here — the rest of the
+    // CLI is also synchronous and we have no recovery path; we do not want to
+    // emit a degraded lineage_id).
+    let lineage_id = lineage_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     let (mut conn, fingerprint) = open_conn(flags)?;
     let req = json!({
@@ -126,28 +129,4 @@ pub fn run_revoke(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
     })
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn uuid_v4() -> String {
-    // Generate a UUID v4 from /dev/urandom bytes.
-    let mut b = [0u8; 16];
-    crate::commands::genesis::fill_random_bytes(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40; // version 4
-    b[8] = (b[8] & 0x3f) | 0x80; // variant bits
-    format!(
-        "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
-        u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
-        u16::from_be_bytes([b[4], b[5]]),
-        u16::from_be_bytes([b[6], b[7]]),
-        u16::from_be_bytes([b[8], b[9]]),
-        {
-            let mut n = 0u64;
-            for &byte in &b[10..16] {
-                n = (n << 8) | byte as u64;
-            }
-            n
-        }
-    )
-}
+// (UUID minting moved to `uuid::Uuid::new_v4()` — see usage in `run_create`.)

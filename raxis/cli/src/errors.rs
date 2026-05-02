@@ -34,4 +34,9 @@ pub enum CliError {
 
     #[error("hex decode error: {0}")]
     Hex(#[from] hex::FromHexError),
+
+    /// OS CSPRNG unavailable / signature input malformed / etc. The CLI MUST
+    /// never silently degrade to zeroed bytes — see cli-ceremony.md §4.2 step 2.
+    #[error("crypto error: {0}")]
+    Crypto(#[from] raxis_crypto::CryptoError),
 }

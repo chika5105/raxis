@@ -101,7 +101,11 @@ fn run() -> Result<(), CliError> {
 
     // Subcommand dispatch.
     let subcmd = args.get(pos).map(|s| s.as_str()).unwrap_or("");
-    let rest = &args[pos.saturating_add(1)..];
+    // `rest` is everything after the subcommand token. When `pos` is at
+    // or past the end of `args`, slicing `args[pos+1..]` would panic; we
+    // guard with `min(args.len())` so the result is an empty slice.
+    let rest_start = pos.saturating_add(1).min(args.len());
+    let rest = &args[rest_start..];
 
     match subcmd {
         "genesis" => commands::genesis::run(&flags, rest),
@@ -198,10 +202,10 @@ fn require_arg<'a>(args: &'a [String], pos: usize, flag: &str) -> Result<&'a str
 
 fn print_help() {
     println!(
-        r#"raxis-cli — RAXIS kernel operator CLI
+        r#"raxis — RAXIS kernel operator CLI
 
 USAGE:
-    raxis-cli [--data-dir <path>] [--socket <path>] [--operator-key <path>] <subcommand>
+    raxis [--data-dir <path>] [--socket <path>] [--operator-key <path>] <subcommand>
 
 GLOBAL FLAGS:
     --data-dir <path>       Kernel data directory (default: ~/.raxis or $RAXIS_DATA_DIR)

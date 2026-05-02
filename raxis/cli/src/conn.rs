@@ -5,18 +5,24 @@
 // Every kernel-connected command:
 //   1. Opens the operator UDS.
 //   2. Reads the ChallengeEnvelope (JSON, length-prefixed).
-//   3. Computes Ed25519 signature over challenge_bytes.
+//   3. Computes Ed25519 signature over the decoded challenge bytes.
 //   4. Sends ResponseEnvelope (JSON, length-prefixed).
 //   5. Reads the ACK or error.
 //   6. Sends the OperatorRequest (JSON, length-prefixed).
 //   7. Reads the OperatorResponse.
 //
-// Length-prefixed framing: 4-byte big-endian length prefix followed by JSON payload.
+// Wire framing routes through `raxis_ipc::json_frame::{read_json_frame,
+// write_json_frame}` — the SAME helper the kernel uses on the other side
+// (kernel/src/ipc/operator.rs). Earlier the CLI used a hand-rolled
+// big-endian length prefix while the kernel used hand-rolled little-endian;
+// the two never connected end-to-end. PR-2 unifies on one helper to make
+// drift impossible — see cli/tests/operator_socket_smoke.rs and
+// crates/ipc/src/json_frame.rs::tests for the regression guards.
 
-use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use raxis_ipc::{read_json_frame_raw, write_json_frame, JsonFrameError};
 use serde_json::Value;
 
 use crate::errors::CliError;
@@ -46,27 +52,37 @@ impl OperatorConn {
         let mut stream = UnixStream::connect(socket_path)?;
 
         // Step 1: Read ChallengeEnvelope from kernel.
-        let challenge_json = read_frame(&mut stream)?;
-        let challenge: Value = serde_json::from_str(&challenge_json)?;
+        let challenge: Value = read_json(&mut stream)?;
         let challenge_hex = challenge["challenge_hex"]
             .as_str()
             .ok_or_else(|| CliError::AuthFailed("missing challenge_hex".to_owned()))?;
         let challenge_bytes = hex::decode(challenge_hex)?;
+        if challenge_bytes.len() != 32 {
+            return Err(CliError::AuthFailed(format!(
+                "challenge_hex must decode to 32 bytes, got {}",
+                challenge_bytes.len()
+            )));
+        }
 
-        // Step 2: Sign challenge with operator private key.
+        // Step 2: Sign the raw 32-byte challenge with the operator private key.
+        // The signature is over the DECODED bytes, not the hex string —
+        // kernel-side `auth::verify_response` decodes `challenge_hex` and
+        // verifies against those bytes.
         let signing_key = load_operator_key(key_path)?;
         let sig_hex = sign_bytes(&signing_key, &challenge_bytes);
 
-        // Step 3: Send ResponseEnvelope.
+        // Step 3: Send ResponseEnvelope. Field names MUST match
+        // `raxis_kernel::ipc::auth::ResponseEnvelope`: `fingerprint` and
+        // `signed_challenge_hex`. (Earlier drafts used `signed_challenge`,
+        // which the kernel rejects.)
         let response = serde_json::json!({
             "fingerprint": fingerprint,
             "signed_challenge_hex": sig_hex,
         });
-        write_frame(&mut stream, &response.to_string())?;
+        write_json_frame(&mut stream, &response).map_err(map_frame_err)?;
 
         // Step 4: Read auth ACK.
-        let ack_json = read_frame(&mut stream)?;
-        let ack: Value = serde_json::from_str(&ack_json)?;
+        let ack: Value = read_json(&mut stream)?;
         if ack["status"].as_str() != Some("Ok") {
             let reason = ack["reason"].as_str().unwrap_or("unknown");
             return Err(CliError::AuthFailed(format!("kernel rejected auth: {reason}")));
@@ -80,41 +96,29 @@ impl OperatorConn {
 
     /// Send an OperatorRequest and receive the OperatorResponse.
     pub fn send_request(&mut self, req: &Value) -> Result<Value, CliError> {
-        write_frame(&mut self.stream, &req.to_string())?;
-        let resp_json = read_frame(&mut self.stream)?;
-        let resp: Value = serde_json::from_str(&resp_json)?;
-        Ok(resp)
+        write_json_frame(&mut self.stream, req).map_err(map_frame_err)?;
+        read_json(&mut self.stream)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Frame codec: 4-byte big-endian length prefix + JSON payload
+// Helpers: blocking JSON frame round-trip on a UnixStream
 // ---------------------------------------------------------------------------
 
-pub fn read_frame(stream: &mut UnixStream) -> Result<String, CliError> {
-    let mut len_bytes = [0u8; 4];
-    stream.read_exact(&mut len_bytes)?;
-    let len = u32::from_be_bytes(len_bytes) as usize;
-
-    // Sanity cap: 64 MiB.
-    if len > 64 * 1024 * 1024 {
-        return Err(CliError::AuthFailed(format!("frame too large: {len} bytes")));
-    }
-
-    let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf)?;
-    String::from_utf8(buf).map_err(|e| {
-        CliError::AuthFailed(format!("non-UTF-8 frame: {e}"))
-    })
+/// Read one length-prefixed JSON frame and parse it as `serde_json::Value`.
+fn read_json(stream: &mut UnixStream) -> Result<Value, CliError> {
+    let body = read_json_frame_raw(stream).map_err(map_frame_err)?;
+    serde_json::from_str(&body).map_err(CliError::Json)
 }
 
-pub fn write_frame(stream: &mut UnixStream, payload: &str) -> Result<(), CliError> {
-    let bytes = payload.as_bytes();
-    let len = bytes.len() as u32;
-    stream.write_all(&len.to_be_bytes())?;
-    stream.write_all(bytes)?;
-    stream.flush()?;
-    Ok(())
+/// Translate `JsonFrameError` into the CLI's error type. We treat framing
+/// errors as auth-flow failures because they universally indicate either a
+/// kernel / CLI version mismatch or a corrupt UDS connection.
+fn map_frame_err(e: JsonFrameError) -> CliError {
+    match e {
+        JsonFrameError::Io(io) => CliError::Socket(io),
+        other => CliError::AuthFailed(other.to_string()),
+    }
 }
 
 /// Derive the SHA-256[:16] fingerprint from a raw Ed25519 public key (32 bytes).

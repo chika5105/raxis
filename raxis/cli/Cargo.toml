@@ -1,11 +1,18 @@
 [package]
+# Crate name remains `raxis-cli` because Cargo / crates.io / docs.rs all
+# index by package name and renaming would cascade into every workspace
+# Cargo.toml. The user-facing binary, however, is plain `raxis` (per the
+# v1 review's "operator types `raxis`, not `raxis-cli`" finding).
 name        = "raxis-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "raxis-cli"
+# `raxis` — the canonical operator binary name. Everything in
+# specs/v1/operator-cli.md, the bash completions, and the man pages
+# refers to this binary name.
+name = "raxis"
 path = "src/main.rs"
 
 [dependencies]
