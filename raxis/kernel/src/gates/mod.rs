@@ -184,22 +184,67 @@ pub async fn evaluate_claims(
     }
 
     // ── Step 5: Spawn verifiers for missing gates ─────────────────────────
+    //
+    // Per kernel-core.md §2.3 `verifier_runner.rs`, spawn errors are
+    // intentionally non-fatal at this point — the missing gate stays in
+    // `missing_gates` and the planner is told to wait. But "non-fatal"
+    // does NOT mean "silently swallowed": each error variant carries
+    // different operational meaning, and operators need to see them in
+    // structured logs so a permanently-broken verifier binary or an
+    // exhausted concurrent-verifier cap surfaces at telemetry time
+    // instead of being invisible.
+    //
+    //   - `Ok(_)`                    → verifier spawned, run_id reserved.
+    //   - `Err(VerifierCapExceeded)` → backpressure, expected under load.
+    //   - `Err(SpawnFailed)`         → the verifier binary is missing or
+    //                                  unexecutable — operator action.
+    //   - `Err(AuthorityError)`      → token issuance failed — likely a
+    //                                  store-level fault.
+    //   - `Err(_other)`              → defensive catch-all.
     for gate_type in &missing_gates {
         let vconfig = verifier_runner::VerifierConfig::from_policy(
             policy,
             gate_type,
             &ctx.data_dir,
         );
-        if let Some(vconfig) = vconfig {
-            // VerifierCapExceeded is non-fatal: gate stays in missing_gates.
-            let _ = verifier_runner::spawn_verifier(
-                task_id,
-                gate_type,
-                evaluation_sha,
-                worktree_root,
-                &vconfig,
-                store,
-            ).await;
+        let Some(vconfig) = vconfig else { continue };
+
+        match verifier_runner::spawn_verifier(
+            task_id,
+            gate_type,
+            evaluation_sha,
+            worktree_root,
+            &vconfig,
+            store,
+        ).await {
+            Ok(_) => {}
+            Err(GateError::VerifierCapExceeded { .. }) => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"VerifierCapExceeded\",\
+                     \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\"}}",
+                );
+            }
+            Err(GateError::SpawnFailed { gate_type, reason }) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"VerifierSpawnFailed\",\
+                     \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\
+                     \"reason\":\"{reason}\"}}",
+                );
+            }
+            Err(GateError::AuthorityError(reason)) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"VerifierTokenIssueFailed\",\
+                     \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\
+                     \"reason\":\"{reason}\"}}",
+                );
+            }
+            Err(other) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"VerifierSpawnUnexpectedError\",\
+                     \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\
+                     \"error\":\"{other}\"}}",
+                );
+            }
         }
     }
 
