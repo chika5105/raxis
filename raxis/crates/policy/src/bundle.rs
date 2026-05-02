@@ -1,0 +1,504 @@
+// raxis-policy::bundle — PolicyBundle: the in-memory representation of
+// a validated, loaded policy artifact.
+//
+// Normative references:
+//   - kernel-store.md §2.5.5 "[[operators.entries]]" and "permitted_ops"
+//   - kernel-core.md §2.3 policy_manager.rs escalation_policy fields
+//   - kernel-core.md §2.3 authority/delegation.rs (role_ceilings)
+//   - kernel-store.md §2.5.6 "[[gates]]" normative schema
+//   - kernel-core.md §2.3 scheduler (lane/budget config)
+//   - kernel-core.md §2.2 startup step 3 (authority_pubkey, quality_pubkey)
+//
+// Policy is loaded from `<data_dir>/policy/policy.toml` at boot and wrapped
+// in ArcSwap<PolicyBundle> by the kernel. This file owns only the TOML-mapped
+// types and their accessor methods. I/O and signature verification live in
+// loader.rs.
+//
+// All fields are `pub(crate)` — external callers use the accessor methods,
+// which apply business-rule validation and return well-typed values rather
+// than raw TOML scalars.
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::PolicyError;
+
+// ---------------------------------------------------------------------------
+// Top-level TOML-mapped structs (serde shapes)
+// ---------------------------------------------------------------------------
+
+/// The raw TOML-mapped policy artifact, before semantic validation.
+/// Parsed by `toml::from_str`; then converted to `PolicyBundle` by
+/// `PolicyBundle::validate`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawPolicy {
+    pub(crate) meta: PolicyMeta,
+    pub(crate) authority: AuthoritySection,
+    pub(crate) escalation_policy: EscalationPolicySection,
+    pub(crate) sessions: SessionsSection,
+    pub(crate) delegations: DelegationsSection,
+    pub(crate) budget: BudgetSection,
+
+    #[serde(rename = "operators")]
+    pub(crate) operators_block: OperatorsBlock,
+
+    #[serde(default)]
+    pub(crate) gates: Vec<GateEntry>,
+
+    #[serde(default)]
+    pub(crate) roles: Vec<RoleEntry>,
+}
+
+// ---------------------------------------------------------------------------
+// Policy meta
+// ---------------------------------------------------------------------------
+
+/// `[meta]` — policy artifact metadata.
+///
+/// ```toml
+/// [meta]
+/// epoch     = 1
+/// signed_by = "<fingerprint>"
+/// signed_at = 1714500000
+/// ```
+#[derive(Debug, Deserialize)]
+pub(crate) struct PolicyMeta {
+    pub(crate) epoch: u64,
+    /// Optional: SHA-256 of the policy.toml bytes embedded by the signing tool.
+    /// Accepted during TOML parse for forward-compatibility with policy files
+    /// that include it, but intentionally never read after parsing: verifying it
+    /// would require a self-referential fixed-point hash (unsolvable), and the
+    /// Ed25519 signature over the raw bytes is the actual integrity check.
+    /// The loader computes the SHA-256 independently from the raw bytes.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub(crate) policy_sha256: Option<String>,
+    /// SHA-256[:16] fingerprint of the signing operator's Ed25519 public key.
+    pub(crate) signed_by: String,
+    pub(crate) signed_at: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Authority section
+// ---------------------------------------------------------------------------
+
+/// `[authority]` — kernel key fingerprints.
+///
+/// ```toml
+/// [authority]
+/// authority_pubkey = "<64-char hex: raw 32-byte Ed25519 public key>"
+/// quality_pubkey   = "<64-char hex: raw 32-byte Ed25519 public key>"
+/// ```
+#[derive(Debug, Deserialize)]
+pub(crate) struct AuthoritySection {
+    /// Raw 32-byte Ed25519 authority public key, hex-encoded (64 chars).
+    /// Used to verify ApprovalProof signatures and policy artifact signatures.
+    pub(crate) authority_pubkey: String,
+    /// Raw 32-byte Ed25519 quality keypair public key, hex-encoded (64 chars).
+    /// Loaded but unused in v1 — reserved for v2 witness-record signing.
+    /// kernel-store.md §2.5.4: failure to load → BOOT_ERR_KEY_LOAD.
+    pub(crate) quality_pubkey: String,
+}
+
+// ---------------------------------------------------------------------------
+// Escalation policy
+// ---------------------------------------------------------------------------
+
+/// `[escalation_policy]` — per-lineage rate limiting parameters.
+///
+/// All four fields are required; any missing field → PolicyError::MalformedArtifact.
+///
+/// ```toml
+/// [escalation_policy]
+/// timeout_secs         = 3600
+/// window_secs          = 300
+/// max_per_window       = 5
+/// quarantine_threshold = 3
+/// ```
+#[derive(Debug, Deserialize)]
+pub(crate) struct EscalationPolicySection {
+    pub(crate) timeout_secs: u64,
+    pub(crate) window_secs: u64,
+    pub(crate) max_per_window: u32,
+    pub(crate) quarantine_threshold: u32,
+}
+
+// ---------------------------------------------------------------------------
+// Sessions section
+// ---------------------------------------------------------------------------
+
+/// `[sessions]` — session creation policy.
+///
+/// ```toml
+/// [sessions]
+/// default_ttl_secs       = 86400
+/// max_ttl_secs           = 604800
+/// allowed_worktree_roots = ["/home/operator/worktrees"]
+/// ```
+#[derive(Debug, Deserialize)]
+pub(crate) struct SessionsSection {
+    pub(crate) default_ttl_secs: u64,
+    pub(crate) max_ttl_secs: u64,
+    /// Operator-specified path prefixes under which planner worktree_root
+    /// values are allowed. At least one entry required.
+    pub(crate) allowed_worktree_roots: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Delegations section
+// ---------------------------------------------------------------------------
+
+/// `[delegations]` — delegation TTL policy.
+///
+/// ```toml
+/// [delegations]
+/// max_ttl_secs = 86400
+/// ```
+#[derive(Debug, Deserialize)]
+pub(crate) struct DelegationsSection {
+    pub(crate) max_ttl_secs: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Budget section
+// ---------------------------------------------------------------------------
+
+/// `[budget]` — lane budget and per-intent-kind base costs.
+///
+/// ```toml
+/// [budget]
+/// [budget.base_cost_per_intent_kind]
+/// SingleCommit       = 10
+/// MultiBranchCommit  = 25
+/// IntegrationMerge   = 50
+/// PrGateEvaluation   = 15
+/// ```
+#[derive(Debug, Deserialize)]
+pub(crate) struct BudgetSection {
+    pub(crate) base_cost_per_intent_kind: HashMap<String, u64>,
+}
+
+// ---------------------------------------------------------------------------
+// Operators block
+// ---------------------------------------------------------------------------
+
+/// `[operators]` containing `[[operators.entries]]`.
+///
+/// ```toml
+/// [operators]
+/// [[operators.entries]]
+/// pubkey_fingerprint = "abcd1234..."
+/// display_name       = "Alice"
+/// pubkey_hex         = "<64-char hex raw Ed25519 public key>"
+/// permitted_ops      = ["CreateInitiative", ...]
+/// ```
+#[derive(Debug, Deserialize)]
+pub(crate) struct OperatorsBlock {
+    pub(crate) entries: Vec<OperatorEntry>,
+}
+
+/// A single operator entry in `[[operators.entries]]`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct OperatorEntry {
+    /// SHA-256[:16] fingerprint of the operator's Ed25519 public key (32 hex chars).
+    pub pubkey_fingerprint: String,
+    pub display_name: String,
+    /// Raw 32-byte Ed25519 public key, hex-encoded (64 hex chars).
+    pub pubkey_hex: String,
+    /// The subset of operator IPC operations this operator is allowed to invoke.
+    /// Canonical v1 set: 13 operations listed in kernel-store.md §2.5.5.
+    pub permitted_ops: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Gate entries
+// ---------------------------------------------------------------------------
+
+/// A single `[[gates]]` entry.
+///
+/// ```toml
+/// [[gates]]
+/// gate_type        = "TestCoverage"
+/// verifier_command = "/usr/local/bin/raxis-verify-coverage"
+/// max_wall_seconds = 120
+/// max_memory_bytes = 536870912
+/// network_allowed  = false
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct GateEntry {
+    pub gate_type: String,
+    pub verifier_command: String,
+    pub max_wall_seconds: u32,
+    pub max_memory_bytes: u64,
+    /// Advisory only in v1 — not enforced at the OS level (kernel-store.md §2.5.6).
+    pub network_allowed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Role entries
+// ---------------------------------------------------------------------------
+
+/// A `[[roles]]` entry establishing the capability ceiling for a role.
+///
+/// ```toml
+/// [[roles]]
+/// role_id   = "planner-standard"
+/// ceiling   = ["WriteCode", "ReadSecrets"]
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoleEntry {
+    pub role_id: String,
+    /// The set of CapabilityClass variant names this role is permitted to
+    /// delegate. authority::delegation::grant_delegation enforces this.
+    pub ceiling: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// PolicyBundle — the validated in-memory policy
+// ---------------------------------------------------------------------------
+
+/// The validated, loaded policy artifact. Constructed by `loader::load_policy`
+/// and held behind `Arc<PolicyBundle>` (or `ArcSwap<PolicyBundle>` in the
+/// kernel binary) for concurrent read access.
+///
+/// All fields are private; callers use the typed accessor methods below.
+#[derive(Debug)]
+pub struct PolicyBundle {
+    epoch: u64,
+    authority_pubkey_hex: String,
+    quality_pubkey_hex: String,
+    operators: Vec<OperatorEntry>,
+    gates: Vec<GateEntry>,
+    roles: Vec<RoleEntry>,
+    /// Cached: role_id → ceiling set
+    role_ceilings: HashMap<String, Vec<String>>,
+    escalation_timeout: Duration,
+    escalation_window: Duration,
+    escalation_max_per_window: u32,
+    escalation_quarantine_threshold: u32,
+    default_session_ttl: Duration,
+    max_session_ttl: Duration,
+    allowed_worktree_roots: Vec<String>,
+    max_delegation_ttl: Duration,
+    base_cost_per_intent_kind: HashMap<String, u64>,
+    /// SHA-256 of the raw policy.toml bytes. Set by the loader after computing
+    /// from actual file bytes (not from the meta field). Used for storage in
+    /// policy_epoch_history. Initially empty; populated by loader via with_sha256().
+    policy_sha256: String,
+    signed_by: String,
+    signed_at: i64,
+}
+
+impl PolicyBundle {
+    /// Validate and build a `PolicyBundle` from a `RawPolicy` parsed from TOML.
+    ///
+    /// Returns `PolicyError::MalformedArtifact` if any required constraint fails.
+    pub(crate) fn validate(raw: RawPolicy) -> Result<Self, PolicyError> {
+        // Require at least one operator entry.
+        if raw.operators_block.entries.is_empty() {
+            return Err(PolicyError::MalformedArtifact(
+                "[[operators.entries]] is empty — at least one operator required".to_owned(),
+            ));
+        }
+
+        // Require at least one allowed worktree root.
+        if raw.sessions.allowed_worktree_roots.is_empty() {
+            return Err(PolicyError::MalformedArtifact(
+                "sessions.allowed_worktree_roots is empty".to_owned(),
+            ));
+        }
+
+        // Validate TTL ordering.
+        if raw.sessions.default_ttl_secs > raw.sessions.max_ttl_secs {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "sessions.default_ttl_secs ({}) > max_ttl_secs ({})",
+                raw.sessions.default_ttl_secs, raw.sessions.max_ttl_secs
+            )));
+        }
+
+        // Build role_ceilings lookup.
+        let role_ceilings: HashMap<String, Vec<String>> = raw
+            .roles
+            .iter()
+            .map(|r| (r.role_id.clone(), r.ceiling.clone()))
+            .collect();
+
+        Ok(Self {
+            epoch: raw.meta.epoch,
+            authority_pubkey_hex: raw.authority.authority_pubkey,
+            quality_pubkey_hex: raw.authority.quality_pubkey,
+            operators: raw.operators_block.entries,
+            gates: raw.gates,
+            roles: raw.roles,
+            role_ceilings,
+            escalation_timeout: Duration::from_secs(raw.escalation_policy.timeout_secs),
+            escalation_window: Duration::from_secs(raw.escalation_policy.window_secs),
+            escalation_max_per_window: raw.escalation_policy.max_per_window,
+            escalation_quarantine_threshold: raw.escalation_policy.quarantine_threshold,
+            default_session_ttl: Duration::from_secs(raw.sessions.default_ttl_secs),
+            max_session_ttl: Duration::from_secs(raw.sessions.max_ttl_secs),
+            allowed_worktree_roots: raw.sessions.allowed_worktree_roots,
+            max_delegation_ttl: Duration::from_secs(raw.delegations.max_ttl_secs),
+            base_cost_per_intent_kind: raw.budget.base_cost_per_intent_kind,
+            // policy_sha256 is always set by loader::load_policy via with_sha256()
+            // before the bundle is returned to the kernel. The value is the
+            // SHA-256 of the raw file bytes computed independently by the loader.
+            // meta.policy_sha256 from the TOML is intentionally ignored here:
+            // it is a self-referential field that cannot be verified (see
+            // loader.rs module comment) and the Ed25519 signature is the actual
+            // integrity check. Initialise to empty so any caller that forgets
+            // to call with_sha256() gets an obviously wrong value.
+            policy_sha256: String::new(),
+            signed_by: raw.meta.signed_by,
+            signed_at: raw.meta.signed_at,
+        })
+    }
+
+    // ── Epoch ──────────────────────────────────────────────────────────────
+
+    /// Current policy epoch number. Monotonically increasing across all
+    /// `policy_epoch_history` rows (kernel-store.md §2.5.1 Table 19).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    // ── Key accessors ───────────────────────────────────────────────────────
+
+    /// Authority Ed25519 public key bytes (32 bytes).
+    /// Returns `PolicyError::HexDecode` if the stored hex is malformed
+    /// (caught at load time by `loader`; this should not occur in practice).
+    pub fn authority_pubkey_bytes(&self) -> Result<Vec<u8>, PolicyError> {
+        Ok(hex::decode(&self.authority_pubkey_hex)?)
+    }
+
+    /// Quality Ed25519 public key bytes (32 bytes). Reserved for v2.
+    pub fn quality_pubkey_bytes(&self) -> Result<Vec<u8>, PolicyError> {
+        Ok(hex::decode(&self.quality_pubkey_hex)?)
+    }
+
+    // ── Operator entries ────────────────────────────────────────────────────
+
+    /// All registered operator entries.
+    pub fn operators(&self) -> &[OperatorEntry] {
+        &self.operators
+    }
+
+    /// Look up an operator by pubkey fingerprint (the `signed_by` field from
+    /// plan.sig / policy.sig). Returns `None` if no entry matches.
+    pub fn operator_entry(&self, fingerprint: &str) -> Option<&OperatorEntry> {
+        self.operators
+            .iter()
+            .find(|op| op.pubkey_fingerprint == fingerprint)
+    }
+
+    // ── Gate config ─────────────────────────────────────────────────────────
+
+    /// All gate definitions from `[[gates]]`.
+    pub fn gates(&self) -> &[GateEntry] {
+        &self.gates
+    }
+
+    /// Look up a gate definition by gate_type name.
+    pub fn gate_config(&self, gate_type: &str) -> Option<&GateEntry> {
+        self.gates.iter().find(|g| g.gate_type == gate_type)
+    }
+
+    // ── Role ceilings ───────────────────────────────────────────────────────
+
+    /// The capability ceiling for a role — the set of CapabilityClass names
+    /// the role is permitted to delegate. Returns `None` if the role is unknown.
+    pub fn role_ceiling(&self, role_id: &str) -> Option<&[String]> {
+        self.role_ceilings.get(role_id).map(|v| v.as_slice())
+    }
+
+    /// Returns true if `capability_class` is within the ceiling for `role_id`.
+    pub fn capability_within_ceiling(&self, role_id: &str, capability_class: &str) -> bool {
+        self.role_ceiling(role_id)
+            .map(|ceiling| ceiling.iter().any(|c| c == capability_class))
+            .unwrap_or(false)
+    }
+
+    // ── Escalation policy ───────────────────────────────────────────────────
+
+    /// How long a Pending escalation waits before TimedOut.
+    pub fn escalation_timeout(&self) -> Duration {
+        self.escalation_timeout
+    }
+
+    /// Rolling window for per-lineage rate limiting.
+    pub fn escalation_window(&self) -> Duration {
+        self.escalation_window
+    }
+
+    /// Max escalation submissions per lineage per window.
+    pub fn escalation_max_per_window(&self) -> u32 {
+        self.escalation_max_per_window
+    }
+
+    /// Rate-limit trigger count before lineage quarantine.
+    pub fn escalation_quarantine_threshold(&self) -> u32 {
+        self.escalation_quarantine_threshold
+    }
+
+    // ── Session policy ──────────────────────────────────────────────────────
+
+    pub fn default_session_ttl(&self) -> Duration {
+        self.default_session_ttl
+    }
+
+    pub fn max_session_ttl(&self) -> Duration {
+        self.max_session_ttl
+    }
+
+    /// Operator-specified absolute path prefixes for worktree_root validation.
+    pub fn allowed_worktree_roots(&self) -> &[String] {
+        &self.allowed_worktree_roots
+    }
+
+    /// Returns true if `path` is under at least one allowed worktree root.
+    pub fn worktree_root_allowed(&self, path: &str) -> bool {
+        self.allowed_worktree_roots
+            .iter()
+            .any(|root| path.starts_with(root.as_str()))
+    }
+
+    // ── Delegation policy ───────────────────────────────────────────────────
+
+    pub fn max_delegation_ttl(&self) -> Duration {
+        self.max_delegation_ttl
+    }
+
+    // ── Budget policy ───────────────────────────────────────────────────────
+
+    /// Base cost for an intent kind. Returns `None` if the intent kind is not
+    /// in the policy table (maps to `BudgetError::UnknownIntentKindCost`
+    /// in the kernel's budget subsystem).
+    pub fn base_cost_for_intent_kind(&self, intent_kind: &str) -> Option<u64> {
+        self.base_cost_per_intent_kind.get(intent_kind).copied()
+    }
+
+    // ── Artifact metadata ───────────────────────────────────────────────────
+
+    /// Set the SHA-256 of the raw policy.toml bytes. Called by the loader
+    /// after computing the hash from actual file bytes.
+    pub(crate) fn with_sha256(mut self, sha256: String) -> Self {
+        self.policy_sha256 = sha256;
+        self
+    }
+
+    /// SHA-256 of the raw policy.toml bytes.
+    /// Used to cross-reference against `policy_epoch_history.policy_sha256`.
+    pub fn policy_sha256(&self) -> &str {
+        &self.policy_sha256
+    }
+
+    /// Fingerprint of the operator who signed this policy artifact.
+    pub fn signed_by(&self) -> &str {
+        &self.signed_by
+    }
+
+    pub fn signed_at(&self) -> i64 {
+        self.signed_at
+    }
+}
