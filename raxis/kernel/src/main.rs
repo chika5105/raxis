@@ -14,6 +14,10 @@ mod ipc;
 mod recovery;
 mod initiatives;
 mod scheduler;
+mod vcs;
+mod witness_index;
+mod gates;
+mod handlers;
 
 use std::sync::Arc;
 

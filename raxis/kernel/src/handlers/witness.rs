@@ -52,10 +52,10 @@ use crate::witness_index::{self, ResultClass, WitnessRecord};
 /// was refused for a typed application reason, and the transport stays open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WitnessAck {
-    /// Submission accepted and written. `remaining_gates` lists any gates that
-    /// still need witnesses (kernel has already spawned fresh verifiers for
-    /// these). Empty vec = all gates cleared; task transitioned to Admitted.
-    Accepted { remaining_gates: Vec<GateType> },
+    /// Submission accepted and written.
+    /// `run_id` echoes the verifier_run_id from the token lookup for correlation.
+    /// `remaining_gates` lists any gates still needing witnesses.
+    Accepted { run_id: String, remaining_gates: Vec<GateType> },
 
     /// Submission refused at the application level. Token is NOT consumed.
     Rejected { reason: WitnessRejectionReason },
@@ -201,9 +201,8 @@ pub async fn handle(
             sub.task_id.as_str(),
             result_class.as_str(),
         );
-        // Task stays GatesPending. No verifier spawn — claim failure or fail
-        // result requires planner action.
-        return Ok(WitnessAck::Accepted { remaining_gates: vec![] });
+        // Task stays GatesPending. No verifier spawn.
+        return Ok(WitnessAck::Accepted { run_id: run_id.clone(), remaining_gates: vec![] });
     }
 
     let remaining_gates = gate_recheck(
@@ -213,7 +212,7 @@ pub async fn handle(
         ctx,
     ).await?;
 
-    Ok(WitnessAck::Accepted { remaining_gates })
+    Ok(WitnessAck::Accepted { run_id, remaining_gates })
 }
 
 // ---------------------------------------------------------------------------
@@ -473,9 +472,9 @@ mod tests {
 
     #[test]
     fn accepted_empty_remaining_gates_means_all_clear() {
-        let ack = WitnessAck::Accepted { remaining_gates: vec![] };
+        let ack = WitnessAck::Accepted { run_id: "r-1".to_owned(), remaining_gates: vec![] };
         match ack {
-            WitnessAck::Accepted { remaining_gates } => assert!(remaining_gates.is_empty()),
+            WitnessAck::Accepted { remaining_gates, .. } => assert!(remaining_gates.is_empty()),
             _ => panic!("wrong variant"),
         }
     }

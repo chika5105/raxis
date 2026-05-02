@@ -104,13 +104,14 @@ pub fn create_session(
     let now_secs = now_unix_secs();
     let expires_at = now_secs + config.default_ttl_secs as i64;
 
+    // DDL Table 4 column names: role_id (not role), revoked INTEGER DEFAULT 0.
     let store = store.lock_sync();
     store.execute(
         "INSERT INTO sessions (
-            session_id, role, session_token, sequence_number,
+            session_id, role_id, session_token, sequence_number,
             worktree_root, base_sha, base_tracking_ref,
-            lineage_id, fetch_quota, created_at, expires_at
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            lineage_id, fetch_quota, created_at, expires_at, revoked
+         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0)",
         rusqlite::params![
             session_id.as_str(),
             role.as_str(),
@@ -134,23 +135,23 @@ pub fn create_session(
 pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, AuthorityError> {
     let store = store.lock_sync();
     let row = store.query_row(
-        "SELECT session_id, role, session_token, sequence_number,
+        "SELECT session_id, role_id, session_token, sequence_number,
                 worktree_root, base_sha, base_tracking_ref,
                 lineage_id, revoked_at, expires_at
          FROM sessions WHERE session_id = ?1",
         rusqlite::params![session_id.as_str()],
         |row| {
             Ok(SessionRow {
-                session_id: row.get(0)?,
-                role: row.get(1)?,
-                session_token: row.get(2)?,
-                sequence_number: row.get(3)?,
-                worktree_root: row.get(4)?,
-                base_sha: row.get(5)?,
+                session_id:        row.get(0)?,
+                role:              row.get(1)?,  // mapped from role_id column
+                session_token:     row.get(2)?,
+                sequence_number:   row.get(3)?,
+                worktree_root:     row.get(4)?,
+                base_sha:          row.get(5)?,
                 base_tracking_ref: row.get(6)?,
-                lineage_id: row.get(7)?,
-                revoked_at: row.get(8)?,
-                expires_at: row.get(9)?,
+                lineage_id:        row.get(7)?,
+                revoked_at:        row.get(8)?,
+                expires_at:        row.get(9)?,
             })
         },
     ).map_err(|e| match e {
@@ -158,8 +159,10 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
         other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
     })?;
 
-    if let Some(revoked_at) = row.revoked_at {
-        return Err(AuthorityError::SessionRevoked { revoked_at });
+    // DDL Table 4: revoked INTEGER (0/1 flag) + revoked_at (nullable timestamp).
+    // Check both: revoked=1 is the gate; revoked_at carries the time.
+    if row.revoked_at.is_some() {
+        return Err(AuthorityError::SessionRevoked { revoked_at: row.revoked_at.unwrap_or(0) });
     }
     if row.expires_at < now_unix_secs() {
         return Err(AuthorityError::SessionExpired);
@@ -168,16 +171,49 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
     Ok(row)
 }
 
-/// Revoke a session by setting `revoked_at = now()`.
+/// Look up a session row by raw `session_token` hex string.
 ///
-/// Uses a conditional `UPDATE … WHERE revoked_at IS NULL` (INV-STORE-02) to
-/// prevent double-revocation races. If `rows_affected == 0`, the session is
-/// already revoked; the caller receives `SessionRevoked`.
+/// Called by the planner IPC dispatch loop to resolve the per-frame token
+/// to a session context before sequence/nonce validation.
+///
+/// Returns the raw row without applying revoked/expired guards — the caller
+/// performs those checks (they need the raw row for sequence number access).
+/// `SessionNotFound` if no row matches the token.
+pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<SessionRow, AuthorityError> {
+    let conn = store.lock_sync();
+    conn.query_row(
+        "SELECT session_id, role_id, session_token, sequence_number,
+                worktree_root, base_sha, base_tracking_ref,
+                lineage_id, revoked_at, expires_at
+         FROM sessions WHERE session_token = ?1",
+        rusqlite::params![session_token],
+        |row| Ok(SessionRow {
+            session_id:        row.get(0)?,
+            role:              row.get(1)?,  // mapped from role_id column
+            session_token:     row.get(2)?,
+            sequence_number:   row.get(3)?,
+            worktree_root:     row.get(4)?,
+            base_sha:          row.get(5)?,
+            base_tracking_ref: row.get(6)?,
+            lineage_id:        row.get(7)?,
+            revoked_at:        row.get(8)?,
+            expires_at:        row.get(9)?,
+        }),
+    ).map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => AuthorityError::SessionNotFound,
+        other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
+    })
+}
+
+/// Revoke a session by setting `revoked=1, revoked_at=now()`.
+///
+/// DDL Table 4: revoked INTEGER NOT NULL DEFAULT 0, revoked_at INTEGER (nullable).
+/// Uses conditional UPDATE WHERE revoked=0 (INV-STORE-02) to prevent double-revocation races.
 pub fn revoke_session(session_id: &SessionId, store: &Store) -> Result<(), AuthorityError> {
     let now = now_unix_secs();
     let store = store.lock_sync();
     let rows = store.execute(
-        "UPDATE sessions SET revoked_at = ?1 WHERE session_id = ?2 AND revoked_at IS NULL",
+        "UPDATE sessions SET revoked=1, revoked_at=?1 WHERE session_id=?2 AND revoked=0",
         rusqlite::params![now, session_id.as_str()],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 

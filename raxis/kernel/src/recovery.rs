@@ -201,7 +201,7 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     // Sweep each task to BlockedRecoveryPending.
     for task_id in &task_ids {
         match conn.execute(
-            "UPDATE tasks SET state='BlockedRecoveryPending', recovery_transition_at=?1
+            "UPDATE tasks SET state='BlockedRecoveryPending', transitioned_at=?1
              WHERE task_id=?2
                AND state NOT IN ('Completed', 'Failed', 'Aborted', 'Cancelled')",
             rusqlite::params![now, task_id],

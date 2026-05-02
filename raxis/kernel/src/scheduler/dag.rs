@@ -130,12 +130,14 @@ pub fn next_ready_tasks(
 ///
 /// Called by `handlers/witness.rs` after a gate-recheck returns Pass.
 /// Returns `SchedulerError::InvalidStateTransition` if current state is not `GatesPending`.
+/// Uses transitioned_at (DDL canonical) not a separate gates_cleared_at column.
 pub fn transition_to_admitted(task_id: &str, store: &Store) -> Result<(), SchedulerError> {
-    let conn = store.lock_sync();
-    let rows = conn.execute(
-        "UPDATE tasks SET state='Admitted', block_reason=NULL
-         WHERE task_id=?1 AND state='GatesPending'",
-        rusqlite::params![task_id],
+    let conn  = store.lock_sync();
+    let now   = now_unix_secs();
+    let rows  = conn.execute(
+        "UPDATE tasks SET state='Admitted', transitioned_at=?1, block_reason=NULL
+         WHERE task_id=?2 AND state='GatesPending'",
+        rusqlite::params![now, task_id],
     )?;
     if rows == 0 {
         return Err(SchedulerError::InvalidStateTransition {
@@ -150,11 +152,12 @@ pub fn transition_to_admitted(task_id: &str, store: &Store) -> Result<(), Schedu
 ///
 /// Called when the planner reports task completion. Subsequent `next_ready_tasks`
 /// calls will surface tasks that depended on this one.
+/// Uses transitioned_at (DDL canonical single-timestamp column).
 pub fn mark_task_complete(task_id: &str, store: &Store) -> Result<(), SchedulerError> {
     let conn = store.lock_sync();
-    let now = now_unix_secs();
+    let now  = now_unix_secs();
     let rows = conn.execute(
-        "UPDATE tasks SET state='Completed', completed_at=?1
+        "UPDATE tasks SET state='Completed', transitioned_at=?1
          WHERE task_id=?2 AND state NOT IN ('Completed', 'Aborted', 'Cancelled', 'Failed')",
         rusqlite::params![now, task_id],
     )?;

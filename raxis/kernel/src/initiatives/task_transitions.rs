@@ -78,54 +78,58 @@ pub fn transition_task(
         TransitionActor::Operator { fingerprint } => format!("operator:{fingerprint}"),
     };
 
-    // Apply the transition with the appropriate timestamp column.
+    // Apply the transition using DDL-canonical columns only.
+    // DDL Table 5 mutable columns: state, block_reason, actor, transitioned_at,
+    // session_id, evaluation_sha, base_sha, submitted_claims_json, actual_cost.
+    // There is NO started_at, gates_pending_at, failed_at, etc. — only transitioned_at.
     match &new_state {
         TaskState::Running => {
             conn.execute(
-                "UPDATE tasks SET state=?1, started_at=?2, block_reason=NULL WHERE task_id=?3",
-                rusqlite::params![new_state_str, now, task_id],
+                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=NULL, actor=?3
+                 WHERE task_id=?4",
+                rusqlite::params![new_state_str, now, &actor_desc, task_id],
             )?;
         }
         TaskState::GatesPending => {
             conn.execute(
-                "UPDATE tasks SET state=?1, gates_pending_at=?2, block_reason=?3 WHERE task_id=?4",
-                rusqlite::params![new_state_str, now, block_reason, task_id],
+                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=?3, actor=?4
+                 WHERE task_id=?5",
+                rusqlite::params![new_state_str, now, block_reason, &actor_desc, task_id],
             )?;
         }
         TaskState::Admitted => {
             conn.execute(
-                "UPDATE tasks SET state=?1, block_reason=NULL WHERE task_id=?2",
-                rusqlite::params![new_state_str, task_id],
+                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=NULL, actor=?3
+                 WHERE task_id=?4",
+                rusqlite::params![new_state_str, now, &actor_desc, task_id],
             )?;
         }
         TaskState::Completed => {
             conn.execute(
-                "UPDATE tasks SET state=?1, completed_at=?2 WHERE task_id=?3",
-                rusqlite::params![new_state_str, now, task_id],
+                "UPDATE tasks SET state=?1, transitioned_at=?2, actor=?3
+                 WHERE task_id=?4",
+                rusqlite::params![new_state_str, now, &actor_desc, task_id],
             )?;
         }
         TaskState::Failed => {
             conn.execute(
-                "UPDATE tasks SET state=?1, failed_at=?2, block_reason=?3 WHERE task_id=?4",
-                rusqlite::params![new_state_str, now, block_reason, task_id],
+                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=?3, actor=?4
+                 WHERE task_id=?5",
+                rusqlite::params![new_state_str, now, block_reason, &actor_desc, task_id],
             )?;
         }
-        TaskState::Aborted => {
+        TaskState::Aborted | TaskState::Cancelled => {
             conn.execute(
-                "UPDATE tasks SET state=?1, aborted_at=?2 WHERE task_id=?3",
-                rusqlite::params![new_state_str, now, task_id],
+                "UPDATE tasks SET state=?1, transitioned_at=?2, actor=?3
+                 WHERE task_id=?4",
+                rusqlite::params![new_state_str, now, &actor_desc, task_id],
             )?;
         }
         TaskState::BlockedRecoveryPending => {
             conn.execute(
-                "UPDATE tasks SET state=?1, recovery_transition_at=?2 WHERE task_id=?3",
-                rusqlite::params![new_state_str, now, task_id],
-            )?;
-        }
-        TaskState::Cancelled => {
-            conn.execute(
-                "UPDATE tasks SET state=?1, cancelled_at=?2 WHERE task_id=?3",
-                rusqlite::params![new_state_str, now, task_id],
+                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=?3, actor=?4
+                 WHERE task_id=?5",
+                rusqlite::params![new_state_str, now, block_reason, &actor_desc, task_id],
             )?;
         }
     }

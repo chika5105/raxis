@@ -17,7 +17,7 @@
 //                 before the row is written (raxis-crypto::delegation::verify_delegation).
 
 use raxis_store::Store;
-use raxis_types::SessionId;
+use raxis_types::{CapabilityClass, DelegationStatus, SessionId};
 
 use crate::authority::keys::AuthorityError;
 
@@ -119,62 +119,75 @@ pub fn grant_delegation(
     }
 }
 
-/// Check whether a session has an active, unexpired delegation for
-/// `capability_class`. Returns `DelegationNotGranted` if absent.
+/// Check delegation status for a (session, capability) pair.
 ///
-/// Called by `gates/claim.rs` before evaluating any claim that requires a
-/// delegated capability.
+/// **Pure read. No writes.** Returns the current `DelegationStatus`:
+///   - `Active`          — row exists, TTL not expired, status='Active'.
+///   - `StaleOnNextUse`  — row exists, TTL not expired, status='StaleOnNextUse'.
+///   - `RenewalRequired` — row exists, TTL not expired, status='RenewalRequired'.
+///   - `Expired`         — row exists but TTL has passed.
+///   - `NotGranted`      — no row for (session_id, capability) pair.
+///
+/// Normative reference: kernel-core.md §2.3 `authority/delegation.rs`.
 pub fn check_capability(
     session_id: &SessionId,
-    capability_class: &str,
+    capability: &CapabilityClass,
     store: &Store,
-) -> Result<DelegationRow, AuthorityError> {
+) -> Result<DelegationStatus, AuthorityError> {
     let conn = store.lock_sync();
     let now = now_unix_secs();
-    conn.query_row(
-        "SELECT delegation_id, session_id, capability_class, scope_json,
-                granted_by, granted_at, expires_at, use_count, max_uses, status
-         FROM delegations
+    // Query any row for (session_id, capability) — including expired.
+    let result = conn.query_row(
+        "SELECT status, expires_at FROM delegations
          WHERE session_id=?1 AND capability_class=?2
-           AND status='Active' AND expires_at > ?3",
-        rusqlite::params![session_id.as_str(), capability_class, now],
-        |r| Ok(DelegationRow {
-            delegation_id: r.get(0)?,
-            session_id: r.get(1)?,
-            capability_class: r.get(2)?,
-            scope_json: r.get(3)?,
-            granted_by: r.get(4)?,
-            granted_at: r.get(5)?,
-            expires_at: r.get(6)?,
-            use_count: r.get(7)?,
-            max_uses: r.get(8)?,
-            status: r.get(9)?,
-        }),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => AuthorityError::DelegationNotGranted,
-        other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
-    })
+         ORDER BY granted_at DESC
+         LIMIT 1",
+        rusqlite::params![session_id.as_str(), capability.as_str()],
+        |r| {
+            let status_str: String = r.get(0)?;
+            let expires_at: i64 = r.get(1)?;
+            Ok((status_str, expires_at))
+        },
+    );
+    match result {
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(DelegationStatus::NotGranted),
+        Err(e) => Err(AuthorityError::Store(raxis_store::StoreError::Rusqlite(e))),
+        Ok((status_str, expires_at)) => {
+            if expires_at <= now {
+                return Ok(DelegationStatus::Expired);
+            }
+            Ok(DelegationStatus::from_sql_str(&status_str)
+                .unwrap_or(DelegationStatus::Expired))
+        }
+    }
 }
 
-/// Record a capability use — increment `use_count`. If `max_uses` is set and
-/// `use_count` reaches `max_uses`, set `status = 'Exhausted'`.
+/// Record a capability use — transition StaleOnNextUse → RenewalRequired.
 ///
-/// Called after a gate or handler successfully consumes a delegated capability.
+/// **Enforcement hook. Writes.** Called exclusively by `gates/mod.rs::evaluate_claims`
+/// at step 4, immediately after all gate types are satisfied (terminal Pass).
+/// Must only be called when the delegation was `StaleOnNextUse` during this evaluation.
+///
+/// Returns `AuthorityError::DelegationNotStale` if the row is not currently `StaleOnNextUse`
+/// (guards against double-call or race).
+///
+/// Normative reference: kernel-core.md §2.3 `authority/delegation.rs`.
 pub fn record_capability_use(
-    delegation_id: &str,
+    session_id: &SessionId,
+    capability: &CapabilityClass,
     store: &Store,
 ) -> Result<(), AuthorityError> {
     let conn = store.lock_sync();
-    conn.execute(
+    let rows = conn.execute(
         "UPDATE delegations
-         SET use_count = use_count + 1,
-             status = CASE
-               WHEN max_uses IS NOT NULL AND use_count + 1 >= max_uses THEN 'Exhausted'
-               ELSE status
-             END
-         WHERE delegation_id = ?1",
-        rusqlite::params![delegation_id],
+         SET status = 'RenewalRequired'
+         WHERE session_id = ?1 AND capability_class = ?2
+           AND status = 'StaleOnNextUse'",
+        rusqlite::params![session_id.as_str(), capability.as_str()],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+    if rows == 0 {
+        return Err(AuthorityError::DelegationNotStale);
+    }
     Ok(())
 }
 
@@ -208,26 +221,24 @@ pub fn list_delegations(
 
     let mut result = Vec::new();
     for row in rows {
-        result.push(row.map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?);
+        result.push(row.map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?)
     }
     Ok(result)
 }
 
-/// Mark all active delegations for a session as `StaleOnNextUse` when the
-/// policy epoch advances.
+/// Mark ALL active delegations across all sessions as `StaleOnNextUse`.
 ///
-/// Stale delegations remain in the table for audit purposes but cannot be used
-/// for new gate evaluations. The next request that encounters a stale delegation
-/// row must call `revoke_stale_delegation` to retire it.
+/// Called by `policy_manager.rs` when the policy epoch advances.
+/// Returns the count of rows updated (for audit logging by the caller).
+///
+/// Normative reference: kernel-core.md §2.3 `authority/delegation.rs`.
 pub fn mark_stale_on_epoch_advance(
-    session_id: &SessionId,
     store: &Store,
 ) -> Result<usize, AuthorityError> {
     let conn = store.lock_sync();
     let rows = conn.execute(
-        "UPDATE delegations SET status='StaleOnNextUse'
-         WHERE session_id=?1 AND status='Active'",
-        rusqlite::params![session_id.as_str()],
+        "UPDATE delegations SET status='StaleOnNextUse' WHERE status='Active'",
+        [],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
     Ok(rows)
 }

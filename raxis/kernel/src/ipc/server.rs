@@ -261,12 +261,26 @@ async fn handle_planner_connection(
             IpcMessage::WitnessSubmission(sub) => {
                 match handlers::witness::handle(sub, &ctx).await {
                     Ok(ack) => {
-                        write_frame(&mut stream, &IpcMessage::WitnessAck(ack)).await?;
+                        // Map domain WitnessAck → wire IpcMessage::WitnessAck.
+                        // verifier_run_id is embedded in the Accepted payload
+                        // (it's discovered after token validation inside the handler).
+                        let (accepted, verifier_run_id, reason) = match ack {
+                            handlers::witness::WitnessAck::Accepted { run_id, .. } => {
+                                (true, uuid::Uuid::parse_str(&run_id).unwrap_or_default(), None)
+                            }
+                            handlers::witness::WitnessAck::Rejected { reason } => {
+                                (false, uuid::Uuid::nil(), Some(format!("{reason:?}")))
+                            }
+                        };
+                        write_frame(&mut stream, &IpcMessage::WitnessAck {
+                            verifier_run_id,
+                            accepted,
+                            reason,
+                        }).await?;
                     }
                     Err(e) => {
-                        // HandlerError is a transport/auth-level failure.
-                        // Log and close — the verifier's run token remains
-                        // unconsumed so it may resubmit if still valid.
+                        // HandlerError: transport/auth-level failure.
+                        // Log and close — verifier's token remains unconsumed.
                         eprintln!(
                             "{{\"level\":\"error\",\"message\":\"WitnessSubmission handler error\",\"error\":\"{e}\"}}"
                         );
