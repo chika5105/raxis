@@ -38,7 +38,9 @@ pub fn issue_verifier_token(
     ttl_secs:       u64,
     store:          &Store,
 ) -> Result<String, AuthorityError> {
-    let (raw_token, token_hash) = generate_verifier_token();
+    // RNG failure aborts issuance; we never persist a verifier-run-token row
+    // whose `token_hash` was derived from a degraded random source.
+    let (raw_token, token_hash) = generate_verifier_token()?;
     let now        = now_unix_secs();
     let expires_at = now + ttl_secs as i64;
 
@@ -71,7 +73,11 @@ pub fn validate_verifier_token(
     raw_token: &str,
     store: &Store,
 ) -> Result<String, AuthorityError> {
-    let raw_bytes = hex::decode(raw_token).unwrap_or_default();
+    // Reject malformed hex up-front rather than collapsing to an empty buffer
+    // (which would let a presented token of "" hash to the SHA-256 of empty
+    // and accidentally match a malformed row). On any decode error we return
+    // `TokenMismatch` — the verifier presented something that is not a token.
+    let raw_bytes = hex::decode(raw_token).map_err(|_| AuthorityError::TokenMismatch)?;
     let token_hash = sha256_hex(&raw_bytes);
     let now = now_unix_secs();
 
@@ -100,7 +106,9 @@ pub fn validate_verifier_token(
 /// Once consumed, `validate_verifier_token` returns `TokenConsumed` for any
 /// subsequent presentation. Tokens are single-use.
 pub fn consume_verifier_token(raw_token: &str, store: &Store) -> Result<(), AuthorityError> {
-    let raw_bytes = hex::decode(raw_token).unwrap_or_default();
+    // See `validate_verifier_token` for the rationale on rejecting malformed
+    // hex rather than silently degrading to SHA-256("").
+    let raw_bytes = hex::decode(raw_token).map_err(|_| AuthorityError::TokenMismatch)?;
     let token_hash = sha256_hex(&raw_bytes);
     let now = now_unix_secs();
 

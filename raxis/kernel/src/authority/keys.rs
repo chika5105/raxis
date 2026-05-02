@@ -238,4 +238,9 @@ pub enum AuthorityError {
     Store(#[from] raxis_store::StoreError),
     #[error("serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    /// Surfaces `CryptoError::Rng` and signature/key-format errors. The kernel
+    /// MUST refuse session/token issuance when the OS CSPRNG is unavailable —
+    /// silently filling buffers with zeros has caused real-world key compromise.
+    #[error("crypto error: {0}")]
+    Crypto(#[from] raxis_crypto::CryptoError),
 }

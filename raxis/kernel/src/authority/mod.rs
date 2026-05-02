@@ -35,7 +35,10 @@ pub use delegation::{
     check_capability, record_capability_use, list_delegations, mark_stale_on_epoch_advance,
     grant_delegation,
 };
-pub use session::{create_session, get_session, revoke_session, update_sequence_number};
+pub use session::{
+    accept_envelope_and_advance_sequence, create_session, get_session, revoke_session,
+    update_sequence_number, EnvelopeReplayReason,
+};
 pub use verifier_token::{issue_verifier_token, validate_verifier_token, consume_verifier_token};
 pub use keys::{verify_hmac, sign_audit_record, authority_pubkey_fingerprint, KeyRegistry, load_key_registry};
 pub use approval::{validate_approval_token, revoke_approval};

@@ -20,7 +20,7 @@ use crate::authority::keys::AuthorityError;
 use raxis_crypto::token::generate_session_token;
 
 const SESSIONS:    &str = Table::Sessions.as_str();
-const NONCE_CACHE: &str = Table::NonceCaché.as_str();
+const NONCE_CACHE: &str = Table::NonceCache.as_str();
 
 /// Role of a session — corresponds to the authenticated process type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,7 +102,9 @@ pub fn create_session(
     }
 
     let session_id = SessionId::new_v4();
-    let session_token = generate_session_token(); // 32 bytes → 64 hex chars
+    // 32 CSPRNG bytes → 64 hex chars. RNG failure surfaces as
+    // `AuthorityError::Crypto`; we never write a zeroed token.
+    let session_token = generate_session_token()?;
 
     let now_secs = now_unix_secs();
     let expires_at = now_secs + config.default_ttl_secs as i64;
@@ -235,9 +237,13 @@ pub fn revoke_session(session_id: &SessionId, store: &Store) -> Result<(), Autho
 
 /// Atomically advance the sequence number for a session.
 ///
-/// Spec note: in the IPC path, auth.rs does this inside the nonce_cache INSERT
-/// transaction. This function is retained as a store-level utility for test
-/// harnesses and crash-recovery reconciliation (kernel-core.md §2.3).
+/// Spec note: in the IPC path, callers should prefer
+/// [`accept_envelope_and_advance_sequence`] which combines the sequence-number
+/// CAS with the `nonce_cache` envelope-nonce dedup INSERT in a SINGLE
+/// SQLite transaction (INV-01 checks A and B together — see kernel-core.md
+/// §2.3 / kernel-store.md §2.5.1 Table 16). This standalone update is
+/// retained as a store-level utility for test harnesses and crash-recovery
+/// reconciliation; production handlers should not call it directly.
 pub fn update_sequence_number(
     session_id: &SessionId,
     expected_current: i64,
@@ -256,6 +262,309 @@ pub fn update_sequence_number(
         Err(AuthorityError::SequenceMismatch)
     } else {
         Ok(())
+    }
+}
+
+/// Why this exists separately from sequence-number advancement: replay
+/// protection has two distinct failure modes the planner sees as separate
+/// outcomes — a duplicate `envelope_nonce` (the same logical message
+/// re-delivered) versus a duplicate `sequence_num` (a request out of order
+/// or already accepted). Both surface as `UNAUTHORIZED` to the planner per
+/// INV-08, but distinguishing them in audit is required.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnvelopeReplayReason {
+    /// `(session_id, envelope_nonce)` already in `nonce_cache` for the TTL
+    /// window — duplicate delivery.
+    DuplicateNonce,
+    /// `(session_id, sequence_num)` already accepted (PK collision on
+    /// `nonce_cache`) — schema backstop for check (A).
+    SequenceAlreadyAccepted,
+    /// `sequence_num != sessions.sequence_number + 1` — out-of-order frame.
+    SequenceGap { expected: i64, presented: i64 },
+}
+
+/// INV-01 chokepoint. ALL planner-class IPC handlers must route through this
+/// function before doing any other work.
+///
+/// Combines, in one SQLite transaction:
+///   1. **Check (A)** — sequence number is exactly `sessions.sequence_number + 1`.
+///   2. **Check (B)** — `INSERT INTO nonce_cache (session_id, sequence_num,
+///                       envelope_nonce, observed_at)`. Fails on duplicate
+///                       `(session_id, envelope_nonce)` (UNIQUE) or duplicate
+///                       `(session_id, sequence_num)` (PK).
+///   3. **Atomic advance** — `UPDATE sessions SET sequence_number = sequence_num`.
+///
+/// Either all three succeed and commit, or none do (transaction rollback). The
+/// invariant `sessions.sequence_number == MAX(nonce_cache.sequence_num)` is
+/// preserved across crashes.
+///
+/// Returns `Err(EnvelopeReplayReason)` on any failure for caller-side audit
+/// emission. The handler maps each reason to `PlannerErrorCode::Unauthorized`
+/// per INV-08 to avoid leaking which check failed.
+pub fn accept_envelope_and_advance_sequence(
+    session_id:      &SessionId,
+    presented_seq:   i64,
+    envelope_nonce:  &str,
+    store:           &Store,
+) -> Result<(), EnvelopeReplayReason> {
+    // Sanity: nonce must be 32 hex chars (16 bytes). A malformed nonce is a
+    // protocol violation and we treat it as DuplicateNonce-equivalent —
+    // surfaces as UNAUTHORIZED, no observable difference to the planner.
+    if envelope_nonce.len() != 32
+        || !envelope_nonce.chars().all(|c| c.is_ascii_hexdigit())
+    {
+        return Err(EnvelopeReplayReason::DuplicateNonce);
+    }
+
+    let mut conn = store.lock_sync();
+    let tx = conn
+        .transaction()
+        .map_err(|_| EnvelopeReplayReason::DuplicateNonce)?;
+
+    // Check (A) inside the transaction so we read+write under one snapshot.
+    let current_seq: i64 = tx
+        .query_row(
+            &format!("SELECT sequence_number FROM {SESSIONS} WHERE session_id = ?1"),
+            rusqlite::params![session_id.as_str()],
+            |r| r.get(0),
+        )
+        .map_err(|_| EnvelopeReplayReason::DuplicateNonce)?;
+
+    let expected = current_seq + 1;
+    if presented_seq != expected {
+        // No INSERT, no UPDATE — caller sees `SequenceGap`.
+        return Err(EnvelopeReplayReason::SequenceGap {
+            expected,
+            presented: presented_seq,
+        });
+    }
+
+    // Check (B) — the UNIQUE/PK constraints on nonce_cache do the dedup work.
+    let now = now_unix_secs();
+    let insert_result = tx.execute(
+        &format!(
+            "INSERT INTO {NONCE_CACHE}
+                (session_id, sequence_num, envelope_nonce, observed_at)
+             VALUES (?1, ?2, ?3, ?4)"
+        ),
+        rusqlite::params![session_id.as_str(), presented_seq, envelope_nonce, now],
+    );
+
+    match insert_result {
+        Ok(_) => {}
+        Err(rusqlite::Error::SqliteFailure(err, msg)) => {
+            // Map SQLite constraint codes to INV-01 reason variants.
+            // `extended_code` distinguishes UNIQUE (2067) from PRIMARYKEY (1555).
+            const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
+            const SQLITE_CONSTRAINT_PRIMARYKEY: i32 = 1555;
+            return Err(match err.extended_code {
+                SQLITE_CONSTRAINT_UNIQUE => EnvelopeReplayReason::DuplicateNonce,
+                SQLITE_CONSTRAINT_PRIMARYKEY => EnvelopeReplayReason::SequenceAlreadyAccepted,
+                _ => {
+                    // Any other constraint failure: treat as duplicate-class
+                    // for INV-08; log via the message field on the way out.
+                    let _ = msg;
+                    EnvelopeReplayReason::DuplicateNonce
+                }
+            });
+        }
+        Err(_) => return Err(EnvelopeReplayReason::DuplicateNonce),
+    }
+
+    // Atomic CAS — if anything else slipped in between SELECT and UPDATE,
+    // the row count will be 0 and we treat it as `SequenceAlreadyAccepted`
+    // (the most likely cause: a concurrent handler advanced the sequence).
+    let updated = tx.execute(
+        &format!(
+            "UPDATE {SESSIONS}
+             SET sequence_number = ?1
+             WHERE session_id = ?2 AND sequence_number = ?3"
+        ),
+        rusqlite::params![presented_seq, session_id.as_str(), current_seq],
+    );
+
+    match updated {
+        Ok(0) => return Err(EnvelopeReplayReason::SequenceAlreadyAccepted),
+        Ok(_) => {}
+        Err(_) => return Err(EnvelopeReplayReason::DuplicateNonce),
+    }
+
+    tx.commit()
+        .map_err(|_| EnvelopeReplayReason::DuplicateNonce)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raxis_store::Store;
+
+    /// Set up an in-memory store with one session row at sequence 0.
+    fn store_with_session(session_id: &SessionId) -> Store {
+        let store = Store::open_in_memory().expect("open in-memory store");
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {SESSIONS} (session_id, role_id, session_token,
+                                          lineage_id, fetch_quota, sequence_number,
+                                          created_at, expires_at, revoked)
+                 VALUES (?1, 'Planner', 'tok', '00000000-0000-4000-8000-000000000000',
+                         100, 0, 0, ?2, 0)"
+            ),
+            rusqlite::params![session_id.as_str(), now_unix_secs() + 3600],
+        )
+        .unwrap();
+        drop(conn);
+        store
+    }
+
+    fn nonce(seed: u8) -> String {
+        // 32 hex chars derived from a one-byte seed for deterministic tests.
+        format!("{:02x}", seed).repeat(16)
+    }
+
+    #[test]
+    fn first_envelope_advances_sequence_to_one() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+
+        accept_envelope_and_advance_sequence(&sid, 1, &nonce(0xAB), &store)
+            .expect("first envelope should accept");
+
+        let conn = store.lock_sync();
+        let s: i64 = conn
+            .query_row(
+                &format!("SELECT sequence_number FROM {SESSIONS} WHERE session_id = ?1"),
+                rusqlite::params![sid.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(s, 1);
+
+        // And one row in nonce_cache.
+        let n: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {NONCE_CACHE} WHERE session_id = ?1"),
+                rusqlite::params![sid.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn duplicate_envelope_nonce_is_rejected_atomically() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+
+        accept_envelope_and_advance_sequence(&sid, 1, &nonce(0xCD), &store).unwrap();
+
+        // Same nonce, NEXT sequence number → still rejected (UNIQUE on nonce).
+        let err =
+            accept_envelope_and_advance_sequence(&sid, 2, &nonce(0xCD), &store).unwrap_err();
+        assert_eq!(err, EnvelopeReplayReason::DuplicateNonce);
+
+        // Sequence number must not have advanced.
+        let conn = store.lock_sync();
+        let s: i64 = conn
+            .query_row(
+                &format!("SELECT sequence_number FROM {SESSIONS} WHERE session_id = ?1"),
+                rusqlite::params![sid.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(s, 1, "sequence must not advance on rejected envelope");
+    }
+
+    #[test]
+    fn out_of_order_sequence_is_rejected_with_gap_variant() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+
+        // Skip seq 1, jump to seq 2 — must reject with SequenceGap.
+        let err =
+            accept_envelope_and_advance_sequence(&sid, 2, &nonce(0xEF), &store).unwrap_err();
+        assert_eq!(
+            err,
+            EnvelopeReplayReason::SequenceGap { expected: 1, presented: 2 }
+        );
+
+        // No nonce_cache row was written.
+        let conn = store.lock_sync();
+        let n: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {NONCE_CACHE} WHERE session_id = ?1"),
+                rusqlite::params![sid.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn replaying_same_sequence_with_different_nonce_is_rejected() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+
+        accept_envelope_and_advance_sequence(&sid, 1, &nonce(0x11), &store).unwrap();
+
+        // Try to re-accept seq=1 with a fresh nonce. The sequence check (A)
+        // catches this before we reach the nonce insert.
+        let err =
+            accept_envelope_and_advance_sequence(&sid, 1, &nonce(0x22), &store).unwrap_err();
+        assert!(matches!(err, EnvelopeReplayReason::SequenceGap { .. }));
+    }
+
+    #[test]
+    fn malformed_nonce_is_rejected() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+
+        // Wrong length.
+        let err =
+            accept_envelope_and_advance_sequence(&sid, 1, "abc", &store).unwrap_err();
+        assert_eq!(err, EnvelopeReplayReason::DuplicateNonce);
+
+        // Non-hex character.
+        let bad = "z".repeat(32);
+        let err = accept_envelope_and_advance_sequence(&sid, 1, &bad, &store).unwrap_err();
+        assert_eq!(err, EnvelopeReplayReason::DuplicateNonce);
+
+        // Sequence must NOT have advanced.
+        let conn = store.lock_sync();
+        let s: i64 = conn
+            .query_row(
+                &format!("SELECT sequence_number FROM {SESSIONS} WHERE session_id = ?1"),
+                rusqlite::params![sid.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(s, 0);
+    }
+
+    #[test]
+    fn many_envelopes_accepted_in_order() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+
+        for i in 1..=10 {
+            accept_envelope_and_advance_sequence(&sid, i, &nonce(i as u8), &store)
+                .expect("ordered envelope should accept");
+        }
+
+        let conn = store.lock_sync();
+        let s: i64 = conn
+            .query_row(
+                &format!("SELECT sequence_number FROM {SESSIONS} WHERE session_id = ?1"),
+                rusqlite::params![sid.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(s, 10);
     }
 }
 

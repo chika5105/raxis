@@ -28,7 +28,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::errors::KernelError;
-use raxis_crypto::token::generate_session_token;
+use raxis_crypto::token::try_random_array;
 
 /// Configuration supplied by main.rs to bootstrap::run.
 pub struct BootstrapConfig {
@@ -160,14 +160,10 @@ pub fn run(config: &BootstrapConfig) -> Result<(), KernelError> {
 fn generate_ed25519_keypair(keys_dir: &Path, filename: &str) -> Result<SigningKey, KernelError> {
     let path = keys_dir.join(filename);
 
-    // Generate key material from /dev/urandom via generate_session_token
-    // (which uses 32 CSPRNG bytes). Use those bytes as the Ed25519 seed.
-    let seed_hex = generate_session_token(); // 32 bytes → 64 hex chars
-    let seed_bytes = hex::decode(&seed_hex).map_err(|e| KernelError::BootstrapFailed {
-        reason: format!("CSPRNG hex decode failed: {e}"),
-    })?;
-    let seed: [u8; 32] = seed_bytes.try_into().map_err(|_| KernelError::BootstrapFailed {
-        reason: "CSPRNG returned wrong byte count".to_owned(),
+    // 32-byte Ed25519 seed straight from the OS CSPRNG. ANY rng failure
+    // aborts bootstrap — we never write a partially-random key file.
+    let seed: [u8; 32] = try_random_array().map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("OS CSPRNG unavailable: {e}"),
     })?;
 
     let signing_key = SigningKey::from_bytes(&seed);
@@ -184,11 +180,13 @@ fn generate_ed25519_keypair(keys_dir: &Path, filename: &str) -> Result<SigningKe
 }
 
 /// Generate 32 CSPRNG bytes for the verifier token HMAC key and write to disk.
+///
+/// Returns `BootstrapFailed` if the OS CSPRNG is unavailable; never writes
+/// a key file with non-CSPRNG bytes.
 fn generate_verifier_token_key(keys_dir: &Path) -> Result<(), KernelError> {
     let path = keys_dir.join("verifier_token_key.bin");
-    let token_hex = generate_session_token(); // 32 bytes → 64 hex chars
-    let key_bytes = hex::decode(&token_hex).map_err(|e| KernelError::BootstrapFailed {
-        reason: format!("CSPRNG hex decode failed: {e}"),
+    let key_bytes: [u8; 32] = try_random_array().map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("OS CSPRNG unavailable: {e}"),
     })?;
     write_file_0400(&path, &key_bytes)
 }
@@ -363,10 +361,13 @@ fn write_genesis_audit_record(
 
     let segment_path = audit_dir.join("segment-000.jsonl");
 
-    // 256-bit CSPRNG nonce (two 128-bit tokens concatenated).
-    let nonce_a = generate_session_token(); // 64 hex chars = 32 bytes
-    let nonce_b = generate_session_token();
-    let genesis_nonce = format!("{nonce_a}{nonce_b}");
+    // 512-bit (64-byte) CSPRNG nonce, hex-encoded → 128 hex chars. Spec
+    // (kernel-store.md §2.5.5 audit-genesis-nonce) requires "at least 256 bits
+    // of entropy"; we mint 512 bits to leave headroom.
+    let nonce_bytes: [u8; 64] = try_random_array().map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("OS CSPRNG unavailable for genesis nonce: {e}"),
+    })?;
+    let genesis_nonce = hex::encode(nonce_bytes);
 
     let fingerprint = {
         let mut h = Sha256::new();
