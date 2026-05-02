@@ -24,7 +24,7 @@ pub enum Table {
     // ── Session / auth ────────────────────────────────────────────────────
     Sessions,
     Delegations,
-    NonceCaché,
+    NonceCache,
     // ── Escalation pipeline ───────────────────────────────────────────────
     Escalations,
     ApprovalTokens,
@@ -47,27 +47,31 @@ impl Table {
     /// Returns the exact table name used in the migration DDL.
     ///
     /// Matches kernel-store.md §2.5.1 table names verbatim.
-    pub fn as_str(self) -> &'static str {
+    ///
+    /// `const fn` so callers can write `const TASKS: &str = Table::Tasks.as_str();`
+    /// at module top-level — see kernel-store.md §2.5.1 INV-STORE-03 ("no raw SQL
+    /// table-name literals in raxis/kernel/src; use Table enum + .as_str()").
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::SchemaVersion           => "schema_version",
-            Self::Initiatives             => "initiatives",
-            Self::SignedPlanArtifacts     => "signed_plan_artifacts",
-            Self::Tasks                   => "tasks",
-            Self::TaskDagEdges            => "task_dag_edges",
-            Self::Sessions                => "sessions",
-            Self::Delegations             => "delegations",
-            Self::NonceCaché              => "nonce_cache",
-            Self::Escalations             => "escalations",
-            Self::ApprovalTokens          => "approval_tokens",
-            Self::ApprovalProofs          => "approval_proofs",
-            Self::ApprovalTokenNonces     => "approval_token_nonces",
-            Self::VerifierRunTokens       => "verifier_run_tokens",
-            Self::WitnessRecords          => "witness_records",
-            Self::LaneBudgetReservations  => "lane_budget_reservations",
-            Self::LineageRateLimits       => "lineage_rate_limits",
-            Self::TaskIntentRanges        => "task_intent_ranges",
+            Self::SchemaVersion             => "schema_version",
+            Self::Initiatives               => "initiatives",
+            Self::SignedPlanArtifacts       => "signed_plan_artifacts",
+            Self::Tasks                     => "tasks",
+            Self::TaskDagEdges              => "task_dag_edges",
+            Self::Sessions                  => "sessions",
+            Self::Delegations               => "delegations",
+            Self::NonceCache                => "nonce_cache",
+            Self::Escalations               => "escalations",
+            Self::ApprovalTokens            => "approval_tokens",
+            Self::ApprovalProofs            => "approval_proofs",
+            Self::ApprovalTokenNonces       => "approval_token_nonces",
+            Self::VerifierRunTokens         => "verifier_run_tokens",
+            Self::WitnessRecords            => "witness_records",
+            Self::LaneBudgetReservations    => "lane_budget_reservations",
+            Self::LineageRateLimits         => "lineage_rate_limits",
+            Self::TaskIntentRanges          => "task_intent_ranges",
             Self::TaskExportedPathSnapshots => "task_exported_path_snapshots",
-            Self::PolicyEpochHistory      => "policy_epoch_history",
+            Self::PolicyEpochHistory        => "policy_epoch_history",
         }
     }
 }
@@ -87,7 +91,7 @@ mod tests {
         let all = [
             Table::SchemaVersion, Table::Initiatives, Table::SignedPlanArtifacts,
             Table::Tasks, Table::TaskDagEdges, Table::Sessions, Table::Delegations,
-            Table::NonceCaché, Table::Escalations, Table::ApprovalTokens,
+            Table::NonceCache, Table::Escalations, Table::ApprovalTokens,
             Table::ApprovalProofs, Table::ApprovalTokenNonces, Table::VerifierRunTokens,
             Table::WitnessRecords, Table::LaneBudgetReservations, Table::LineageRateLimits,
             Table::TaskIntentRanges, Table::TaskExportedPathSnapshots, Table::PolicyEpochHistory,

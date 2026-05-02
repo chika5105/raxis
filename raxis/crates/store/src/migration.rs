@@ -15,17 +15,18 @@ use crate::StoreError;
 use rusqlite::Connection;
 
 /// Apply all pending migrations to `conn`.
-/// Safe to call on every startup — skips already-applied migrations.
+///
+/// Safe to call on every startup — skips already-applied migrations. Returns
+/// `StoreError::Migration` if the schema is unreadable for any reason OTHER
+/// than the `schema_version` table not yet existing.
+///
+/// Why explicit error discrimination matters: an earlier implementation used
+/// `query_row(...).unwrap_or(0)` and treated *any* `rusqlite::Error` as a
+/// fresh DB. That swallowed `SQLITE_BUSY`, `SQLITE_IOERR`, file-permission
+/// failures, and on-disk corruption — silently re-running the entire
+/// migration on top of a partially-broken DB. The reviewer's PR-5 finding.
 pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
-    // Determine current schema version.
-    // On a fresh DB, schema_version does not yet exist, so we catch that case.
-    let current_version: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0); // table doesn't exist yet → version 0
+    let current_version = read_current_version(conn)?;
 
     if current_version < 1 {
         apply_migration_1(conn)?;
@@ -34,6 +35,37 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     // Future migrations: if current_version < 2 { apply_migration_2(conn)?; }
 
     Ok(())
+}
+
+/// Read `MAX(version)` from `schema_version`, treating "table does not exist"
+/// as version `0` (fresh DB) and surfacing every other failure as a
+/// `Migration` error. Centralises the failure-mode policy in one place.
+fn read_current_version(conn: &Connection) -> Result<i64, StoreError> {
+    match conn.query_row(
+        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("no such table") =>
+        {
+            // Fresh DB — schema_version not yet created. This is the ONLY
+            // condition under which "no version row" is acceptable.
+            Ok(0)
+        }
+        Err(rusqlite::Error::SqliteFailure(err, None))
+            if err.code == rusqlite::ErrorCode::Unknown =>
+        {
+            // Unknown SQLite error code with no extended message — propagate.
+            Err(StoreError::Migration(format!(
+                "schema_version probe failed (unknown sqlite error): {err:?}"
+            )))
+        }
+        Err(other) => Err(StoreError::Migration(format!(
+            "schema_version probe failed: {other}"
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -401,3 +433,130 @@ INSERT OR IGNORE INTO schema_version (version, applied_at)
 
 COMMIT;
 ";
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// Fresh (empty) DB → `schema_version` does not exist → `read_current_version`
+    /// reports `0`, `apply_pending` succeeds, and the schema is fully populated.
+    #[test]
+    fn fresh_db_applies_migration_1() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 0);
+
+        apply_pending(&conn).expect("migration 1 should apply on fresh db");
+
+        let v = read_current_version(&conn).unwrap();
+        assert_eq!(v, 1, "schema_version should be 1 after first apply");
+
+        // Spot-check: a representative table exists post-migration.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "tasks table should exist after migration 1");
+    }
+
+    /// Calling `apply_pending` twice in a row is a no-op; the schema_version
+    /// row remains `(version=1, applied_at=…)` and no error is raised.
+    #[test]
+    fn apply_pending_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 1);
+
+        // Exactly one row in schema_version (PK on `version` enforces this).
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// If the DB has `schema_version` but `MAX(version)` returns NULL (no rows),
+    /// `read_current_version` returns 0 via COALESCE — this is the "table
+    /// exists but is empty" path, distinct from "table does not exist".
+    #[test]
+    fn empty_schema_version_table_reads_as_zero() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at INTEGER NOT NULL);",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_current_version(&conn).unwrap(),
+            0,
+            "empty schema_version → version 0"
+        );
+    }
+
+    /// If `schema_version` is malformed (column missing), `read_current_version`
+    /// MUST surface the error — NOT silently return 0. The earlier
+    /// `unwrap_or(0)` codepath would have re-run the entire migration on top
+    /// of the broken table; this test guards against regression.
+    #[test]
+    fn malformed_schema_version_table_propagates_error() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Wrong column name: `version` is replaced by `vers`. The probe
+        // `SELECT MAX(version) FROM schema_version` will fail with
+        // "no such column: version", which is NOT "no such table" and
+        // therefore must propagate.
+        conn.execute_batch("CREATE TABLE schema_version (vers INTEGER, applied_at INTEGER);")
+            .unwrap();
+
+        let err = read_current_version(&conn).unwrap_err();
+        match err {
+            StoreError::Migration(msg) => {
+                assert!(
+                    msg.contains("schema_version probe failed"),
+                    "expected 'schema_version probe failed' in error, got: {msg}"
+                );
+            }
+            other => panic!("expected Migration error, got {other:?}"),
+        }
+    }
+
+    /// A second call to `apply_pending` after a successful first call must
+    /// detect "version >= 1" and skip migration 1 entirely (no DDL re-run).
+    /// We verify this by injecting a sentinel row into `tasks` between calls
+    /// and asserting it survives — if the DDL had re-run, the row would be
+    /// gone (DROP-then-CREATE would lose data; CREATE IF NOT EXISTS would
+    /// preserve it but the schema_version PK conflict on re-INSERT would
+    /// have raised).
+    #[test]
+    fn second_apply_does_not_drop_data() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        // Insert minimum-FK chain so we have a tasks row to look for.
+        conn.execute_batch(
+            "INSERT INTO initiatives (initiative_id, state, terminal_criteria_json,
+                                       plan_artifact_sha256, created_at)
+             VALUES ('init-1', 'Draft', '{}', 'deadbeef', 0);
+             INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor,
+                                policy_epoch, admitted_at, transitioned_at)
+             VALUES ('task-1', 'init-1', 'default', 'Admitted', 'planner',
+                     1, 0, 0);",
+        )
+        .unwrap();
+
+        apply_pending(&conn).unwrap();
+
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE task_id='task-1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(n, 1, "tasks row must survive a second apply_pending");
+    }
+}

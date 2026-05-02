@@ -78,7 +78,12 @@ impl Store {
 
     /// Open an in-memory database for tests. Applies the same pragmas and
     /// migrations as a real store so test code exercises the real schema.
-    #[cfg(test)]
+    ///
+    /// Not gated by `#[cfg(test)]` because downstream crates
+    /// (`raxis-kernel`, `raxis-policy`, etc.) need it from their own test
+    /// builds. The `raxis-test-support` crate (PR-11) will eventually wrap
+    /// this as `FakeStore::new()`; until then, callers are expected to use
+    /// it only from `#[cfg(test)]` modules.
     pub fn open_in_memory() -> Result<Self, StoreError> {
         let conn = Connection::open_in_memory()?;
         Self::apply_pragmas(&conn)?;
