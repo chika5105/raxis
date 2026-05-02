@@ -16,7 +16,9 @@
 //     recovery::reconcile appends a ReconciliationGap record.
 
 pub mod event;
+pub mod sink;
 pub mod writer;
 
 pub use event::{AuditEvent, AuditEventKind};
+pub use sink::{AuditSink, CapturedEvent, FakeAuditSink, FileAuditSink};
 pub use writer::{AuditWriter, AuditWriterError};
