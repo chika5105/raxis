@@ -548,6 +548,19 @@ dependencies = [
 [[package]]
 name = "raxis-cli"
 version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "raxis-crypto",
+ "raxis-ipc",
+ "raxis-policy",
+ "raxis-types",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "toml",
+ "uuid",
+]
 
 [[package]]
 name = "raxis-crypto"

@@ -9,3 +9,15 @@ name = "raxis-cli"
 path = "src/main.rs"
 
 [dependencies]
+raxis-types  = { path = "../crates/types" }
+raxis-crypto = { path = "../crates/crypto" }
+raxis-policy = { path = "../crates/policy" }
+raxis-ipc    = { path = "../crates/ipc" }
+
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+ed25519-dalek = { workspace = true }
+hex           = { workspace = true }
+uuid         = { workspace = true }
+toml         = { workspace = true }
+thiserror    = { workspace = true }
