@@ -23,7 +23,12 @@
 
 pub mod auth;
 pub mod frame;
+pub mod json_frame;
 pub mod message;
 
 pub use frame::{read_frame, write_frame, FrameError};
+pub use json_frame::{
+    read_json_frame, read_json_frame_async, read_json_frame_raw, write_json_frame,
+    write_json_frame_async, JsonFrameError,
+};
 pub use message::{GatewayMessage, IpcMessage};
