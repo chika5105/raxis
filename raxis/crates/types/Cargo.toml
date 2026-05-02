@@ -5,3 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+uuid        = { version = "1", features = ["v4", "serde"] }
+thiserror   = { workspace = true }
