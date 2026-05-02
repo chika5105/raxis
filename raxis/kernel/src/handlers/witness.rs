@@ -34,12 +34,16 @@
 use std::path::PathBuf;
 
 use raxis_types::{GateType, TaskId, WitnessSubmission};
+use raxis_store::Table;
+use raxis_types::TaskState;
 
 use crate::authority::verifier_token;
 use crate::gates::{self, GateEvalResult};
 use crate::ipc::context::HandlerContext;
 use crate::vcs;
 use crate::witness_index::{self, ResultClass, WitnessRecord};
+
+const TASKS: &str = Table::Tasks.as_str();
 
 // ---------------------------------------------------------------------------
 // Public outcome types
@@ -128,7 +132,7 @@ pub async fn handle(
     // Gate state check: only accept witness for tasks actually in GatesPending.
     // This prevents poisoning the witness index for tasks that have already been
     // swept to BlockedRecoveryPending by recovery.rs.
-    if task_row.state != "GatesPending" {
+    if task_row.state != TaskState::GatesPending.as_sql_str() {
         return Ok(WitnessAck::Rejected {
             reason: WitnessRejectionReason::TaskNotGatesPending {
                 current_state: task_row.state.clone(),
@@ -359,8 +363,7 @@ struct TaskRowData {
 fn load_task_row(task_id: &str, store: &raxis_store::Store) -> Result<TaskRowData, HandlerError> {
     let conn = store.lock_sync();
     conn.query_row(
-        "SELECT state, evaluation_sha, base_sha, session_id, lane_id
-         FROM tasks WHERE task_id = ?1",
+        &format!("SELECT state, evaluation_sha, base_sha, session_id, lane_id FROM {TASKS} WHERE task_id = ?1"),
         rusqlite::params![task_id],
         |row| Ok(TaskRowData {
             state:          row.get(0)?,

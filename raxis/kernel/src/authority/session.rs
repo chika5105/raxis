@@ -13,11 +13,14 @@
 // Planner sessions: worktree_root required; base_sha / base_tracking_ref recorded.
 // Gateway/Verifier sessions: worktree_root must be None (stored as SQL NULL).
 
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 use raxis_types::{SessionId, LineageId};
 
 use crate::authority::keys::AuthorityError;
 use raxis_crypto::token::generate_session_token;
+
+const SESSIONS:    &str = Table::Sessions.as_str();
+const NONCE_CACHE: &str = Table::NonceCaché.as_str();
 
 /// Role of a session — corresponds to the authenticated process type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,11 +110,13 @@ pub fn create_session(
     // DDL Table 4 column names: role_id (not role), revoked INTEGER DEFAULT 0.
     let store = store.lock_sync();
     store.execute(
-        "INSERT INTO sessions (
-            session_id, role_id, session_token, sequence_number,
-            worktree_root, base_sha, base_tracking_ref,
-            lineage_id, fetch_quota, created_at, expires_at, revoked
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0)",
+        &format!(
+            "INSERT INTO {SESSIONS} (
+                session_id, role_id, session_token, sequence_number,
+                worktree_root, base_sha, base_tracking_ref,
+                lineage_id, fetch_quota, created_at, expires_at, revoked
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0)"
+        ),
         rusqlite::params![
             session_id.as_str(),
             role.as_str(),
@@ -135,10 +140,12 @@ pub fn create_session(
 pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, AuthorityError> {
     let store = store.lock_sync();
     let row = store.query_row(
-        "SELECT session_id, role_id, session_token, sequence_number,
-                worktree_root, base_sha, base_tracking_ref,
-                lineage_id, revoked_at, expires_at
-         FROM sessions WHERE session_id = ?1",
+        &format!(
+            "SELECT session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, revoked_at, expires_at
+             FROM {SESSIONS} WHERE session_id = ?1"
+        ),
         rusqlite::params![session_id.as_str()],
         |row| {
             Ok(SessionRow {
@@ -182,10 +189,12 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
 pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<SessionRow, AuthorityError> {
     let conn = store.lock_sync();
     conn.query_row(
-        "SELECT session_id, role_id, session_token, sequence_number,
-                worktree_root, base_sha, base_tracking_ref,
-                lineage_id, revoked_at, expires_at
-         FROM sessions WHERE session_token = ?1",
+        &format!(
+            "SELECT session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, revoked_at, expires_at
+             FROM {SESSIONS} WHERE session_token = ?1"
+        ),
         rusqlite::params![session_token],
         |row| Ok(SessionRow {
             session_id:        row.get(0)?,
@@ -213,7 +222,7 @@ pub fn revoke_session(session_id: &SessionId, store: &Store) -> Result<(), Autho
     let now = now_unix_secs();
     let store = store.lock_sync();
     let rows = store.execute(
-        "UPDATE sessions SET revoked=1, revoked_at=?1 WHERE session_id=?2 AND revoked=0",
+        &format!("UPDATE {SESSIONS} SET revoked=1, revoked_at=?1 WHERE session_id=?2 AND revoked=0"),
         rusqlite::params![now, session_id.as_str()],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
@@ -236,8 +245,10 @@ pub fn update_sequence_number(
 ) -> Result<(), AuthorityError> {
     let store = store.lock_sync();
     let rows = store.execute(
-        "UPDATE sessions SET sequence_number = ?1
-         WHERE session_id = ?2 AND sequence_number = ?3",
+        &format!(
+            "UPDATE {SESSIONS} SET sequence_number = ?1
+             WHERE session_id = ?2 AND sequence_number = ?3"
+        ),
         rusqlite::params![expected_current + 1, session_id.as_str(), expected_current],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 

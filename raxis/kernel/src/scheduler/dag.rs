@@ -2,40 +2,34 @@
 //
 // Normative reference: kernel-core.md §2.3 `src/scheduler/dag.rs`.
 //
-// The DAG is persisted in `task_dag_edges` (predecessor_task_id, successor_task_id).
-// No live in-memory DAG is maintained between requests — rebuilt from store on demand.
-// This avoids state divergence after recovery.
-//
-// MAX_DAG_DEPTH = 64 — cycle detection DFS is bounded to this depth.
+// Type-safety rules:
+//   - Table names: use `Table::X.as_str()` — no raw "table_name" literals.
+//   - State strings: use `TaskState::X.as_sql_str()` — no raw "'Admitted'" etc.
 
-use raxis_store::Store;
+use raxis_store::{Store, Table};
+use raxis_types::TaskState;
 
 use crate::scheduler::SchedulerError;
 
 const MAX_DAG_DEPTH: usize = 64;
 
-/// Add a task to the DAG with its declared dependencies.
-///
-/// - Runs cycle detection (pure read DFS).
-/// - Inserts edges into `task_dag_edges`.
-/// Called by `admit.rs` Step 3 after the task row is inserted (Step 2).
+// Table name shorthands — defined once so each SQL string is readable.
+const TASKS: &str          = Table::Tasks.as_str();
+const DAG_EDGES: &str      = Table::TaskDagEdges.as_str();
+
 pub fn add_task(
-    task_id: &str,
+    task_id:      &str,
     dependencies: &[String],
-    store: &Store,
+    store:        &Store,
 ) -> Result<(), SchedulerError> {
     detect_cycle(task_id, dependencies, store)?;
     insert_edges(task_id, dependencies, store)
 }
 
-/// Insert `(predecessor_task_id, successor_task_id)` edges for `task_id`.
-///
-/// Called by `admit` in Step 3, after the task row exists. Does NOT run cycle
-/// detection — that is the caller's responsibility (admit Step 1).
 pub fn insert_edges(
-    task_id: &str,
+    task_id:      &str,
     dependencies: &[String],
-    store: &Store,
+    store:        &Store,
 ) -> Result<(), SchedulerError> {
     if dependencies.is_empty() {
         return Ok(());
@@ -43,31 +37,25 @@ pub fn insert_edges(
     let conn = store.lock_sync();
     for dep_id in dependencies {
         conn.execute(
-            "INSERT OR IGNORE INTO task_dag_edges
-                (predecessor_task_id, successor_task_id)
-             VALUES (?1, ?2)",
+            &format!(
+                "INSERT OR IGNORE INTO {DAG_EDGES}
+                    (predecessor_task_id, successor_task_id)
+                 VALUES (?1, ?2)"
+            ),
             rusqlite::params![dep_id, task_id],
         )?;
     }
     Ok(())
 }
 
-/// Detect whether adding `proposed_deps → new_task` edges would create a cycle.
-///
-/// Pure read DFS from `new_task` following proposed edges backward through the
-/// existing `task_dag_edges` table. Returns `SchedulerError::CyclicDependency`
-/// if `new_task` is already reachable from any proposed dep.
-/// Bounded to `MAX_DAG_DEPTH = 64` levels.
 pub fn detect_cycle(
-    new_task: &str,
+    new_task:      &str,
     proposed_deps: &[String],
-    store: &Store,
+    store:         &Store,
 ) -> Result<(), SchedulerError> {
-    // DFS: starting from each proposed dep, follow existing edges backward.
-    // If we ever reach `new_task`, a cycle would form.
     for dep in proposed_deps {
         let mut visited = std::collections::HashSet::new();
-        let mut stack = vec![(dep.to_owned(), 0usize)];
+        let mut stack   = vec![(dep.to_owned(), 0usize)];
 
         while let Some((node, depth)) = stack.pop() {
             if depth > MAX_DAG_DEPTH {
@@ -81,9 +69,7 @@ pub fn detect_cycle(
             }
             visited.insert(node.clone());
 
-            // Follow existing predecessors of this node.
-            let predecessors = get_predecessors(&node, store)?;
-            for pred in predecessors {
+            for pred in get_predecessors(&node, store)? {
                 stack.push((pred, depth + 1));
             }
         }
@@ -91,32 +77,28 @@ pub fn detect_cycle(
     Ok(())
 }
 
-/// Return all `TaskId`s that are ready for the planner to pick up in `initiative_id`.
+/// Return all task IDs ready for the planner in `initiative_id`.
 ///
-/// Ready = in `Admitted` state + all predecessor edges satisfied (predecessor Completed).
-///
-/// Note: `GatesPending` tasks are explicitly excluded — they are not schedulable
-/// until a witness clears their gates and transitions them to `Admitted`.
+/// Ready = state Admitted + all predecessors Completed.
 pub fn next_ready_tasks(
     initiative_id: &str,
-    store: &Store,
+    store:         &Store,
 ) -> Result<Vec<String>, SchedulerError> {
-    let conn = store.lock_sync();
+    let admitted  = TaskState::Admitted.as_sql_str();
+    let completed = TaskState::Completed.as_sql_str();
 
-    // Tasks in Admitted state where either:
-    //   (a) no predecessor edges exist, OR
-    //   (b) ALL predecessor tasks are in Completed state.
-    let mut stmt = conn.prepare(
-        "SELECT t.task_id FROM tasks t
+    let conn = store.lock_sync();
+    let mut stmt = conn.prepare(&format!(
+        "SELECT t.task_id FROM {TASKS} t
          WHERE t.initiative_id = ?1
-           AND t.state = 'Admitted'
+           AND t.state = '{admitted}'
            AND NOT EXISTS (
-               SELECT 1 FROM task_dag_edges e
-               JOIN tasks pred ON pred.task_id = e.predecessor_task_id
+               SELECT 1 FROM {DAG_EDGES} e
+               JOIN {TASKS} pred ON pred.task_id = e.predecessor_task_id
                WHERE e.successor_task_id = t.task_id
-                 AND pred.state != 'Completed'
-           )",
-    )?;
+                 AND pred.state != '{completed}'
+           )"
+    ))?;
 
     let ids: Vec<String> = stmt
         .query_map(rusqlite::params![initiative_id], |r| r.get::<_, String>(0))?
@@ -129,42 +111,46 @@ pub fn next_ready_tasks(
 /// Transition a task from `GatesPending` → `Admitted`.
 ///
 /// Called by `handlers/witness.rs` after a gate-recheck returns Pass.
-/// Returns `SchedulerError::InvalidStateTransition` if current state is not `GatesPending`.
-/// Uses transitioned_at (DDL canonical) not a separate gates_cleared_at column.
 pub fn transition_to_admitted(task_id: &str, store: &Store) -> Result<(), SchedulerError> {
-    let conn  = store.lock_sync();
-    let now   = now_unix_secs();
-    let rows  = conn.execute(
-        "UPDATE tasks SET state='Admitted', transitioned_at=?1, block_reason=NULL
-         WHERE task_id=?2 AND state='GatesPending'",
-        rusqlite::params![now, task_id],
+    let to_state   = TaskState::Admitted.as_sql_str();
+    let from_state = TaskState::GatesPending.as_sql_str();
+    let now        = now_unix_secs();
+
+    let conn = store.lock_sync();
+    let rows = conn.execute(
+        &format!(
+            "UPDATE {TASKS} SET state=?1, transitioned_at=?2, block_reason=NULL
+             WHERE task_id=?3 AND state='{from_state}'"
+        ),
+        rusqlite::params![to_state, now, task_id],
     )?;
     if rows == 0 {
         return Err(SchedulerError::InvalidStateTransition {
             task_id: task_id.to_owned(),
-            reason: "task is not in GatesPending state".to_owned(),
+            reason:  format!("task is not in {from_state} state"),
         });
     }
     Ok(())
 }
 
 /// Transition a task to `Completed` state.
-///
-/// Called when the planner reports task completion. Subsequent `next_ready_tasks`
-/// calls will surface tasks that depended on this one.
-/// Uses transitioned_at (DDL canonical single-timestamp column).
 pub fn mark_task_complete(task_id: &str, store: &Store) -> Result<(), SchedulerError> {
+    let completed      = TaskState::Completed.as_sql_str();
+    let terminal_not_in = terminal_states_not_in_sql();
+    let now            = now_unix_secs();
+
     let conn = store.lock_sync();
-    let now  = now_unix_secs();
     let rows = conn.execute(
-        "UPDATE tasks SET state='Completed', transitioned_at=?1
-         WHERE task_id=?2 AND state NOT IN ('Completed', 'Aborted', 'Cancelled', 'Failed')",
-        rusqlite::params![now, task_id],
+        &format!(
+            "UPDATE {TASKS} SET state=?1, transitioned_at=?2
+             WHERE task_id=?3 AND state NOT IN ({terminal_not_in})"
+        ),
+        rusqlite::params![completed, now, task_id],
     )?;
     if rows == 0 {
         return Err(SchedulerError::InvalidStateTransition {
             task_id: task_id.to_owned(),
-            reason: "task is already in a terminal state".to_owned(),
+            reason:  "task is already in a terminal state".to_owned(),
         });
     }
     Ok(())
@@ -176,14 +162,29 @@ pub fn mark_task_complete(task_id: &str, store: &Store) -> Result<(), SchedulerE
 
 fn get_predecessors(task_id: &str, store: &Store) -> Result<Vec<String>, SchedulerError> {
     let conn = store.lock_sync();
-    let mut stmt = conn.prepare(
-        "SELECT predecessor_task_id FROM task_dag_edges WHERE successor_task_id=?1",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT predecessor_task_id FROM {DAG_EDGES} WHERE successor_task_id=?1"
+    ))?;
     let ids: Vec<String> = stmt
         .query_map(rusqlite::params![task_id], |r| r.get::<_, String>(0))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(ids)
+}
+
+/// Builds the SQL `'State1', 'State2', ...` literal for NOT IN clauses.
+/// Derived entirely from the TaskState enum — no raw strings.
+fn terminal_states_not_in_sql() -> String {
+    [
+        TaskState::Completed,
+        TaskState::Aborted,
+        TaskState::Cancelled,
+        TaskState::Failed,
+    ]
+    .iter()
+    .map(|s| format!("'{}'", s.as_sql_str()))
+    .collect::<Vec<_>>()
+    .join(", ")
 }
 
 fn now_unix_secs() -> i64 {
@@ -192,8 +193,3 @@ fn now_unix_secs() -> i64 {
         .unwrap_or_default()
         .as_secs() as i64
 }
-
-// No unit tests in this file — all dag logic depends on a live Store connection.
-// Integration tests live in tests/ and use a real on-disk or provided Store instance.
-// The empty-dep fast-path is proven by code inspection: the for-loop body is
-// unreachable when proposed_deps is empty, so detect_cycle trivially returns Ok(()).

@@ -38,7 +38,9 @@ use raxis_types::{
     BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
     PlannerErrorCode, SessionId, SubmittedClaim, TaskState,
 };
-use raxis_store::Store;
+use raxis_store::{Store, Table};
+
+const TASKS: &str = Table::Tasks.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
@@ -429,7 +431,7 @@ struct TaskRow {
 fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
     let conn = store.lock_sync();
     conn.query_row(
-        "SELECT lane_id, state FROM tasks WHERE task_id = ?1",
+        &format!("SELECT lane_id, state FROM {TASKS} WHERE task_id = ?1"),
         rusqlite::params![task_id],
         |row| Ok(TaskRow { lane_id: row.get(0)?, state: row.get(1)? }),
     ).map_err(|_| ())

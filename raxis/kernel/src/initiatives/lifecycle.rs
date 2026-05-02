@@ -22,12 +22,15 @@
 //   signed_plan_artifacts — immutable plan bytes + sig (separate from initiatives)
 //   tasks         — task rows, FK to initiatives
 
-use std::path::PathBuf;
-
-use raxis_store::Store;
-use raxis_types::{InitiativeId, TaskId, TaskState};
+use raxis_store::{Store, Table};
+use raxis_types::{InitiativeState, TaskState};
 
 use crate::authority::keys::AuthorityError;
+
+// Table name consts — one definition, used everywhere below.
+const INITIATIVES: &str            = Table::Initiatives.as_str();
+const SIGNED_PLAN_ARTIFACTS: &str  = Table::SignedPlanArtifacts.as_str();
+const TASKS: &str                  = Table::Tasks.as_str();
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -121,26 +124,29 @@ pub fn create_initiative(
 
     let conn = store.lock_sync();
 
-    // Insert initiatives row — state = 'Draft' (DDL CHECK canonical).
     conn.execute(
-        "INSERT INTO initiatives
-            (initiative_id, state, terminal_criteria_json,
-             plan_artifact_sha256, created_at)
-         VALUES (?1, 'Draft', ?2, ?3, ?4)",
+        &format!(
+            "INSERT INTO {INITIATIVES}
+                (initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)"
+        ),
         rusqlite::params![
             &initiative_id,
+            InitiativeState::Draft.as_sql_str(),
             terminal_criteria,
             &plan_sha256,
             now,
         ],
     )?;
 
-    // Insert signed_plan_artifacts row — FK references initiatives.
     let sig_bytes = hex::decode(plan_sig_hex).unwrap_or_default();
     conn.execute(
-        "INSERT INTO signed_plan_artifacts
-            (initiative_id, plan_bytes, plan_sig, stored_at)
-         VALUES (?1, ?2, ?3, ?4)",
+        &format!(
+            "INSERT INTO {SIGNED_PLAN_ARTIFACTS}
+                (initiative_id, plan_bytes, plan_sig, stored_at)
+             VALUES (?1, ?2, ?3, ?4)"
+        ),
         rusqlite::params![
             &initiative_id,
             plan_toml.as_bytes(),
@@ -179,7 +185,7 @@ pub fn approve_plan(
 
     // Load initiative row — must be in Draft state.
     let current_state: String = conn.query_row(
-        "SELECT state FROM initiatives WHERE initiative_id=?1",
+        &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
         rusqlite::params![initiative_id],
         |r| r.get(0),
     ).map_err(|e| match e {
@@ -189,14 +195,12 @@ pub fn approve_plan(
         other => LifecycleError::Sql(other),
     })?;
 
-    // Only Draft may be approved. Other states are terminal or already executing.
-    if current_state != "Draft" {
+    if current_state != InitiativeState::Draft.as_sql_str() {
         return Err(LifecycleError::InitiativeTerminal { current_state });
     }
 
-    // Load plan bytes + signature from signed_plan_artifacts.
     let (plan_bytes, plan_sig): (Vec<u8>, Vec<u8>) = conn.query_row(
-        "SELECT plan_bytes, plan_sig FROM signed_plan_artifacts WHERE initiative_id=?1",
+        &format!("SELECT plan_bytes, plan_sig FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1"),
         rusqlite::params![initiative_id],
         |r| Ok((r.get(0)?, r.get(1)?)),
     ).map_err(|e| LifecycleError::Sql(e))?;
@@ -214,9 +218,11 @@ pub fn approve_plan(
 
     // Transition initiative: Draft → Executing.
     conn.execute(
-        "UPDATE initiatives SET state='Executing', approved_at=?1
-         WHERE initiative_id=?2",
-        rusqlite::params![now, initiative_id],
+        &format!(
+            "UPDATE {INITIATIVES} SET state=?1, approved_at=?2
+             WHERE initiative_id=?3"
+        ),
+        rusqlite::params![InitiativeState::Executing.as_sql_str(), now, initiative_id],
     )?;
 
     // Admit all tasks (insert task rows in Admitted state).
@@ -252,9 +258,15 @@ pub fn reject_plan(
 ) -> Result<(), LifecycleError> {
     let conn = store.lock_sync();
     let rows = conn.execute(
-        "UPDATE initiatives SET state='Aborted'
-         WHERE initiative_id=?1 AND state='Draft'",
-        rusqlite::params![initiative_id],
+        &format!(
+            "UPDATE {INITIATIVES} SET state=?1
+             WHERE initiative_id=?2 AND state=?3"
+        ),
+        rusqlite::params![
+            InitiativeState::Aborted.as_sql_str(),
+            initiative_id,
+            InitiativeState::Draft.as_sql_str(),
+        ],
     )?;
     if rows == 0 {
         // Could be: not found, or already past Draft state.
@@ -283,7 +295,7 @@ pub fn abort_initiative(
 
     // Verify initiative exists and is not already terminal.
     let current_state: String = conn.query_row(
-        "SELECT state FROM initiatives WHERE initiative_id=?1",
+        &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
         rusqlite::params![initiative_id],
         |r| r.get(0),
     ).map_err(|e| match e {
@@ -293,31 +305,39 @@ pub fn abort_initiative(
         other => LifecycleError::Sql(other),
     })?;
 
-    // Terminal states per DDL: Completed, Failed, Aborted.
-    match current_state.as_str() {
-        "Completed" | "Failed" | "Aborted" => {
-            return Err(LifecycleError::InitiativeTerminal {
-                current_state,
-            });
-        }
-        _ => {}
+    // Use InitiativeState::is_terminal() — no raw string matching.
+    let parsed = InitiativeState::from_sql_str(&current_state)
+        .ok_or_else(|| LifecycleError::InitiativeTerminal {
+            current_state: current_state.clone(),
+        })?;
+    if parsed.is_terminal() {
+        return Err(LifecycleError::InitiativeTerminal { current_state });
     }
 
     let now = now_unix_secs();
 
     // Cancel all non-terminal tasks atomically in the same connection lock.
+    let cancel_state   = TaskState::Cancelled.as_sql_str();
+    let terminal_not_in = [TaskState::Completed, TaskState::Failed, TaskState::Aborted, TaskState::Cancelled]
+        .iter()
+        .map(|s| format!("'{}'", s.as_sql_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
     conn.execute(
-        "UPDATE tasks SET state='Cancelled', transitioned_at=?1
-         WHERE initiative_id=?2
-           AND state NOT IN ('Completed', 'Failed', 'Aborted', 'Cancelled')",
+        &format!(
+            "UPDATE {TASKS} SET state='{cancel_state}', transitioned_at=?1
+             WHERE initiative_id=?2 AND state NOT IN ({terminal_not_in})"
+        ),
         rusqlite::params![now, initiative_id],
     )?;
 
-    // Transition initiative to Aborted.
     conn.execute(
-        "UPDATE initiatives SET state='Aborted', completed_at=?1
-         WHERE initiative_id=?2",
-        rusqlite::params![now, initiative_id],
+        &format!(
+            "UPDATE {INITIATIVES} SET state=?1, completed_at=?2
+             WHERE initiative_id=?3"
+        ),
+        rusqlite::params![InitiativeState::Aborted.as_sql_str(), now, initiative_id],
     )?;
 
     eprintln!(
@@ -340,7 +360,7 @@ pub fn abort_task(
     let now  = now_unix_secs();
 
     let state: String = conn.query_row(
-        "SELECT state FROM tasks WHERE task_id=?1",
+        &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
         rusqlite::params![task_id],
         |r| r.get(0),
     ).map_err(|e| match e {
@@ -350,17 +370,17 @@ pub fn abort_task(
         other => LifecycleError::Sql(other),
     })?;
 
-    match state.as_str() {
-        "Completed" | "Failed" | "Aborted" | "Cancelled" => {
-            return Err(LifecycleError::TaskNotAbortable { current_state: state });
-        }
-        _ => {}
+    let aborted_states = [TaskState::Completed, TaskState::Failed, TaskState::Aborted, TaskState::Cancelled]
+        .map(|s| s.as_sql_str());
+    if aborted_states.contains(&state.as_str()) {
+        return Err(LifecycleError::TaskNotAbortable { current_state: state });
     }
 
     conn.execute(
-        "UPDATE tasks SET state='Aborted', transitioned_at=?1
-         WHERE task_id=?2",
-        rusqlite::params![now, task_id],
+        &format!(
+            "UPDATE {TASKS} SET state=?1, transitioned_at=?2 WHERE task_id=?3"
+        ),
+        rusqlite::params![TaskState::Aborted.as_sql_str(), now, task_id],
     )?;
 
     eprintln!(
@@ -381,7 +401,7 @@ pub fn retry_task(task_id: &str, store: &Store) -> Result<(), LifecycleError> {
 
     let conn = store.lock_sync();
     let state: String = conn.query_row(
-        "SELECT state FROM tasks WHERE task_id=?1",
+        &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
         rusqlite::params![task_id],
         |r| r.get(0),
     ).map_err(|e| match e {
@@ -391,7 +411,7 @@ pub fn retry_task(task_id: &str, store: &Store) -> Result<(), LifecycleError> {
         other => LifecycleError::Sql(other),
     })?;
 
-    if state != "Failed" {
+    if state != TaskState::Failed.as_sql_str() {
         return Err(LifecycleError::TaskNotFailed { current_state: state });
     }
     drop(conn); // release lock before calling transition_task which re-acquires
@@ -460,11 +480,13 @@ fn admit_task(
 ) -> Result<(), LifecycleError> {
     let now = now_unix_secs();
     conn.execute(
-        "INSERT OR IGNORE INTO tasks
-            (task_id, initiative_id, lane_id, state,
-             actor, policy_epoch, admitted_at, transitioned_at)
-         VALUES (?1, ?2, ?3, 'Admitted', 'kernel', 1, ?4, ?4)",
-        rusqlite::params![task_id, initiative_id, lane_id, now],
+        &format!(
+            "INSERT OR IGNORE INTO {TASKS}
+                (task_id, initiative_id, lane_id, state,
+                 actor, policy_epoch, admitted_at, transitioned_at)
+             VALUES (?1, ?2, ?3, ?4, 'kernel', 1, ?5, ?5)"
+        ),
+        rusqlite::params![task_id, initiative_id, lane_id, TaskState::Admitted.as_sql_str(), now],
     )?;
     Ok(())
 }

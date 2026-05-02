@@ -18,10 +18,12 @@
 // token is returned once to the caller (the kernel spawn path) and never stored.
 // This is the "store-the-hash, not-the-secret" pattern.
 
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 use raxis_crypto::token::{generate_verifier_token, sha256_hex};
 
 use crate::authority::keys::AuthorityError;
+
+const VRT: &str = Table::VerifierRunTokens.as_str();
 
 /// Issue a new verifier run token for `run_id`.
 ///
@@ -44,10 +46,12 @@ pub fn issue_verifier_token(
     // from the caller (verifier_runner.rs) and uses it as the PK.
     let conn = store.lock_sync();
     conn.execute(
-        "INSERT INTO verifier_run_tokens
-            (verifier_run_id, task_id, gate_type, evaluation_sha,
-             token_hash, issued_at, expires_at, consumed)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)",
+        &format!(
+            "INSERT INTO {VRT}
+                (verifier_run_id, task_id, gate_type, evaluation_sha,
+                 token_hash, issued_at, expires_at, consumed)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)"
+        ),
         rusqlite::params![run_id, task_id, gate_type, evaluation_sha, &token_hash, now, expires_at],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
@@ -73,8 +77,7 @@ pub fn validate_verifier_token(
 
     let conn = store.lock_sync();
     let (run_id, expires_at, consumed): (String, i64, i64) = conn.query_row(
-        "SELECT verifier_run_id, expires_at, consumed
-         FROM verifier_run_tokens WHERE token_hash=?1",
+        &format!("SELECT verifier_run_id, expires_at, consumed FROM {VRT} WHERE token_hash=?1"),
         rusqlite::params![&token_hash],
         |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
     ).map_err(|e| match e {
@@ -103,8 +106,7 @@ pub fn consume_verifier_token(raw_token: &str, store: &Store) -> Result<(), Auth
 
     let conn = store.lock_sync();
     let rows = conn.execute(
-        "UPDATE verifier_run_tokens SET consumed=1, consumed_at=?1
-         WHERE token_hash=?2 AND consumed=0",
+        &format!("UPDATE {VRT} SET consumed=1, consumed_at=?1 WHERE token_hash=?2 AND consumed=0"),
         rusqlite::params![now, &token_hash],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 

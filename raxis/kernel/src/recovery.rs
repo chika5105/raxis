@@ -12,11 +12,13 @@
 // Fatal sub-step: verify_audit_chain — failure returns KernelError::AuditChainBroken
 // which main.rs maps to BOOT_ERR_AUDIT_CHAIN (exit code 13).
 
-use std::path::Path;
-
-use raxis_store::Store;
+use raxis_store::{Store, Table};
+use raxis_types::TaskState;
 
 use crate::errors::KernelError;
+
+const TASKS: &str                = Table::Tasks.as_str();
+const VERIFIER_RUN_TOKENS: &str  = Table::VerifierRunTokens.as_str();
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -167,10 +169,16 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
 
     // Find all non-terminal task IDs.
     let task_ids: Vec<String> = {
-        let mut stmt = match conn.prepare(
-            "SELECT task_id FROM tasks
-             WHERE state NOT IN ('Completed', 'Failed', 'Aborted', 'Cancelled')",
-        ) {
+        // Build NOT IN list from terminal TaskState variants — no raw strings.
+        let terminal = [TaskState::Completed, TaskState::Failed, TaskState::Aborted, TaskState::Cancelled]
+            .iter()
+            .map(|s| format!("'{}'", s.as_sql_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let mut stmt = match conn.prepare(&format!(
+            "SELECT task_id FROM {TASKS} WHERE state NOT IN ({terminal})"
+        )) {
             Ok(s) => s,
             Err(e) => {
                 eprintln!(
@@ -199,11 +207,19 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     let now = now_unix_secs();
 
     // Sweep each task to BlockedRecoveryPending.
+    let blocked  = TaskState::BlockedRecoveryPending.as_sql_str();
+    let terminal = [TaskState::Completed, TaskState::Failed, TaskState::Aborted, TaskState::Cancelled]
+        .iter()
+        .map(|s| format!("'{}'", s.as_sql_str()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
     for task_id in &task_ids {
         match conn.execute(
-            "UPDATE tasks SET state='BlockedRecoveryPending', transitioned_at=?1
-             WHERE task_id=?2
-               AND state NOT IN ('Completed', 'Failed', 'Aborted', 'Cancelled')",
+            &format!(
+                "UPDATE {TASKS} SET state='{blocked}', transitioned_at=?1
+                 WHERE task_id=?2 AND state NOT IN ({terminal})"
+            ),
             rusqlite::params![now, task_id],
         ) {
             Ok(rows) if rows > 0 => {
@@ -224,8 +240,10 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
         // DDL Table 12: task_id FK + consumed INTEGER (0=live, 1=consumed).
         // consumed_at is a separate nullable column; consumed flag is the gate.
         match conn.execute(
-            "UPDATE verifier_run_tokens SET consumed=1, consumed_at=?1
-             WHERE task_id=?2 AND consumed=0",
+            &format!(
+                "UPDATE {VERIFIER_RUN_TOKENS} SET consumed=1, consumed_at=?1
+                 WHERE task_id=?2 AND consumed=0"
+            ),
             rusqlite::params![now, task_id],
         ) {
             Ok(rows) => {

@@ -13,5 +13,7 @@
 
 pub mod db;
 pub mod migration;
+pub mod table;
 
 pub use db::{Store, StoreError};
+pub use table::Table;

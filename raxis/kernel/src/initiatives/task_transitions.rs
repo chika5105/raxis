@@ -8,23 +8,15 @@
 //   - lifecycle::abort_initiative (bulk cancel inside abort_initiative tx)
 //   - lifecycle::admit_task (initial Admitted insert at plan approval)
 //
-// Each `transition_task` call:
-//   1. Validates the transition is legal per the TaskState FSM.
-//   2. Writes the new state to the tasks table.
-//   3. Sets the appropriate timestamp column.
-//   4. Emits a structured JSON log line (full audit integration is v2).
-//
-// FSM (normative, from raxis-types::TaskState):
-//   Admitted → Running | GatesPending
-//   Running  → Admitted (gate cycle) | Completed | Failed
-//   GatesPending → Admitted (witness cleared all gates)
-//   BlockedRecoveryPending → Admitted (operator resume) | Aborted
-//   Completed, Failed, Aborted, Cancelled — terminal; no outbound transitions
+// Type-safety rule: all state strings in SQL use TaskState::as_sql_str().
+// No raw string literals for enum values — the compiler catches misspellings.
 
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 use raxis_types::TaskState;
 
 use crate::initiatives::LifecycleError;
+
+const TASKS: &str = Table::Tasks.as_str();
 
 /// Actor that triggered the transition (for audit).
 #[derive(Debug, Clone)]
@@ -36,24 +28,24 @@ pub enum TransitionActor {
 /// Perform an atomic task state transition.
 ///
 /// Returns `Err(LifecycleError::TaskNotFound)` if no row for `task_id`.
-/// Returns `Err(LifecycleError::TaskNotAbortable)` if the transition is
-/// not legal from the current state.
+/// Returns `Err(LifecycleError::TaskNotAbortable)` if the transition is not
+/// legal from the current state.
 ///
-/// The `block_reason` is stored in `tasks.block_reason` when transitioning
-/// to `GatesPending` or `BlockedRecoveryPending`.
+/// The `block_reason` string is stored in `tasks.block_reason` when
+/// transitioning to `GatesPending`, `Failed`, or `BlockedRecoveryPending`.
 pub fn transition_task(
-    task_id: &str,
-    new_state: TaskState,
+    task_id:      &str,
+    new_state:    TaskState,
     block_reason: Option<&str>,
-    actor: TransitionActor,
-    store: &Store,
+    actor:        TransitionActor,
+    store:        &Store,
 ) -> Result<(), LifecycleError> {
     let conn = store.lock_sync();
-    let now = now_unix_secs();
+    let now  = now_unix_secs();
 
-    // Load current state.
+    // Load current state string and parse it through the enum.
     let current_state_str: String = conn.query_row(
-        "SELECT state FROM tasks WHERE task_id=?1",
+        &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
         rusqlite::params![task_id],
         |r| r.get(0),
     ).map_err(|e| match e {
@@ -63,73 +55,55 @@ pub fn transition_task(
         other => LifecycleError::Sql(other),
     })?;
 
-    let current_state = parse_task_state(&current_state_str);
+    // Parse via the enum — rejects any unknown/corrupt DB value.
+    let current_state = TaskState::from_sql_str(&current_state_str)
+        .ok_or_else(|| LifecycleError::TaskNotAbortable {
+            current_state: current_state_str.clone(),
+        })?;
 
-    // Validate transition.
     if !is_legal_transition(&current_state, &new_state) {
         return Err(LifecycleError::TaskNotAbortable {
             current_state: current_state_str.clone(),
         });
     }
 
-    let new_state_str = task_state_str(&new_state);
+    // Type-safe new state string — never a raw literal.
+    let new_state_str = new_state.as_sql_str();
     let actor_desc = match &actor {
         TransitionActor::Kernel => "kernel".to_owned(),
         TransitionActor::Operator { fingerprint } => format!("operator:{fingerprint}"),
     };
 
-    // Apply the transition using DDL-canonical columns only.
-    // DDL Table 5 mutable columns: state, block_reason, actor, transitioned_at,
-    // session_id, evaluation_sha, base_sha, submitted_claims_json, actual_cost.
-    // There is NO started_at, gates_pending_at, failed_at, etc. — only transitioned_at.
+    // All transitions use the same DDL-canonical columns:
+    //   state, transitioned_at, actor — always written.
+    //   block_reason — written for GatesPending / Failed / BlockedRecoveryPending,
+    //                  cleared (NULL) for Running / Admitted / Completed / terminal.
     match &new_state {
-        TaskState::Running => {
+        TaskState::Running | TaskState::Admitted | TaskState::Completed => {
             conn.execute(
-                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=NULL, actor=?3
-                 WHERE task_id=?4",
+                &format!(
+                    "UPDATE {TASKS} SET state=?1, transitioned_at=?2, block_reason=NULL, actor=?3
+                     WHERE task_id=?4"
+                ),
                 rusqlite::params![new_state_str, now, &actor_desc, task_id],
             )?;
         }
-        TaskState::GatesPending => {
+        TaskState::GatesPending | TaskState::Failed | TaskState::BlockedRecoveryPending => {
             conn.execute(
-                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=?3, actor=?4
-                 WHERE task_id=?5",
-                rusqlite::params![new_state_str, now, block_reason, &actor_desc, task_id],
-            )?;
-        }
-        TaskState::Admitted => {
-            conn.execute(
-                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=NULL, actor=?3
-                 WHERE task_id=?4",
-                rusqlite::params![new_state_str, now, &actor_desc, task_id],
-            )?;
-        }
-        TaskState::Completed => {
-            conn.execute(
-                "UPDATE tasks SET state=?1, transitioned_at=?2, actor=?3
-                 WHERE task_id=?4",
-                rusqlite::params![new_state_str, now, &actor_desc, task_id],
-            )?;
-        }
-        TaskState::Failed => {
-            conn.execute(
-                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=?3, actor=?4
-                 WHERE task_id=?5",
+                &format!(
+                    "UPDATE {TASKS} SET state=?1, transitioned_at=?2, block_reason=?3, actor=?4
+                     WHERE task_id=?5"
+                ),
                 rusqlite::params![new_state_str, now, block_reason, &actor_desc, task_id],
             )?;
         }
         TaskState::Aborted | TaskState::Cancelled => {
             conn.execute(
-                "UPDATE tasks SET state=?1, transitioned_at=?2, actor=?3
-                 WHERE task_id=?4",
+                &format!(
+                    "UPDATE {TASKS} SET state=?1, transitioned_at=?2, actor=?3
+                     WHERE task_id=?4"
+                ),
                 rusqlite::params![new_state_str, now, &actor_desc, task_id],
-            )?;
-        }
-        TaskState::BlockedRecoveryPending => {
-            conn.execute(
-                "UPDATE tasks SET state=?1, transitioned_at=?2, block_reason=?3, actor=?4
-                 WHERE task_id=?5",
-                rusqlite::params![new_state_str, now, block_reason, &actor_desc, task_id],
             )?;
         }
     }
@@ -143,64 +117,34 @@ pub fn transition_task(
 }
 
 // ---------------------------------------------------------------------------
-// FSM transition table
+// FSM transition table — canonical allowed edges per kernel-core.md §2.4
 // ---------------------------------------------------------------------------
 
 fn is_legal_transition(from: &TaskState, to: &TaskState) -> bool {
     match (from, to) {
-        // Admitted: can start (Running) or go to gate eval (GatesPending)
-        (TaskState::Admitted, TaskState::Running) => true,
-        (TaskState::Admitted, TaskState::GatesPending) => true,
-        (TaskState::Admitted, TaskState::Aborted) => true,
-        (TaskState::Admitted, TaskState::Cancelled) => true,
-        // Running: can complete, fail, or re-enter gate cycle
-        (TaskState::Running, TaskState::Completed) => true,
-        (TaskState::Running, TaskState::Failed) => true,
-        (TaskState::Running, TaskState::GatesPending) => true,
-        (TaskState::Running, TaskState::Admitted) => true, // continuation / re-schedule
-        (TaskState::Running, TaskState::Aborted) => true,
-        // GatesPending: cleared → Admitted; or aborted
-        (TaskState::GatesPending, TaskState::Admitted) => true,
-        (TaskState::GatesPending, TaskState::Aborted) => true,
-        (TaskState::GatesPending, TaskState::Cancelled) => true,
+        // Admitted: start running, wait for gates, or operator cancel
+        (TaskState::Admitted, TaskState::Running)          => true,
+        (TaskState::Admitted, TaskState::GatesPending)     => true,
+        (TaskState::Admitted, TaskState::Aborted)          => true,
+        (TaskState::Admitted, TaskState::Cancelled)        => true,
+        // Running: complete, fail, enter gate cycle, re-admit (continuation), abort
+        (TaskState::Running,  TaskState::Completed)        => true,
+        (TaskState::Running,  TaskState::Failed)           => true,
+        (TaskState::Running,  TaskState::GatesPending)     => true,
+        (TaskState::Running,  TaskState::Admitted)         => true,
+        (TaskState::Running,  TaskState::Aborted)          => true,
+        (TaskState::Running,  TaskState::Cancelled)        => true,
+        // GatesPending: gates cleared → Admitted; or aborted / cancelled
+        (TaskState::GatesPending, TaskState::Admitted)     => true,
+        (TaskState::GatesPending, TaskState::Aborted)      => true,
+        (TaskState::GatesPending, TaskState::Cancelled)    => true,
         // BlockedRecoveryPending: operator resume → Admitted; or abort
         (TaskState::BlockedRecoveryPending, TaskState::Admitted) => true,
-        (TaskState::BlockedRecoveryPending, TaskState::Aborted) => true,
-        // Failed → Admitted is the retry path
-        (TaskState::Failed, TaskState::Admitted) => true,
-        // All other transitions are illegal
+        (TaskState::BlockedRecoveryPending, TaskState::Aborted)  => true,
+        // Failed → Admitted is the retry path (retry_task operator command)
+        (TaskState::Failed, TaskState::Admitted)           => true,
+        // All other transitions are illegal (terminal states have no outbound edges)
         _ => false,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn parse_task_state(s: &str) -> TaskState {
-    match s {
-        "Admitted" => TaskState::Admitted,
-        "Running" => TaskState::Running,
-        "GatesPending" => TaskState::GatesPending,
-        "Completed" => TaskState::Completed,
-        "Failed" => TaskState::Failed,
-        "Aborted" => TaskState::Aborted,
-        "Cancelled" => TaskState::Cancelled,
-        "BlockedRecoveryPending" => TaskState::BlockedRecoveryPending,
-        _ => TaskState::Failed, // defensive: unknown state → treat as non-transitionable
-    }
-}
-
-fn task_state_str(s: &TaskState) -> &'static str {
-    match s {
-        TaskState::Admitted => "Admitted",
-        TaskState::Running => "Running",
-        TaskState::GatesPending => "GatesPending",
-        TaskState::Completed => "Completed",
-        TaskState::Failed => "Failed",
-        TaskState::Aborted => "Aborted",
-        TaskState::Cancelled => "Cancelled",
-        TaskState::BlockedRecoveryPending => "BlockedRecoveryPending",
     }
 }
 
@@ -240,5 +184,44 @@ mod tests {
     #[test]
     fn gates_pending_to_admitted_is_legal() {
         assert!(is_legal_transition(&TaskState::GatesPending, &TaskState::Admitted));
+    }
+
+    #[test]
+    fn blocked_recovery_to_admitted_is_legal() {
+        assert!(is_legal_transition(&TaskState::BlockedRecoveryPending, &TaskState::Admitted));
+    }
+
+    #[test]
+    fn terminal_states_have_no_outbound_edges() {
+        for terminal in &[TaskState::Aborted, TaskState::Cancelled, TaskState::Completed] {
+            for any in &[
+                TaskState::Admitted, TaskState::Running, TaskState::GatesPending,
+                TaskState::Completed, TaskState::Failed, TaskState::Aborted,
+                TaskState::Cancelled, TaskState::BlockedRecoveryPending,
+            ] {
+                assert!(
+                    !is_legal_transition(terminal, any),
+                    "{:?} → {:?} should be illegal",
+                    terminal, any
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn as_sql_str_round_trips() {
+        for state in &[
+            TaskState::Admitted, TaskState::Running, TaskState::GatesPending,
+            TaskState::Completed, TaskState::Failed, TaskState::Aborted,
+            TaskState::Cancelled, TaskState::BlockedRecoveryPending,
+        ] {
+            let s = state.as_sql_str();
+            assert_eq!(
+                TaskState::from_sql_str(s),
+                Some(*state),
+                "round-trip failed for {:?}",
+                state
+            );
+        }
     }
 }

@@ -51,6 +51,12 @@ pub(crate) struct RawPolicy {
 
     #[serde(default)]
     pub(crate) lanes: Vec<LaneEntry>,
+
+    #[serde(default)]
+    pub(crate) claim_requirements: ClaimRequirementsSection,
+
+    #[serde(default)]
+    pub(crate) egress: EgressSection,
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +299,73 @@ pub struct RoleEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Claim requirements
+// ---------------------------------------------------------------------------
+
+/// `[claim_requirements]` — maps path globs to required claim types.
+///
+/// ```toml
+/// [claim_requirements]
+/// default_action = "deny"   # or "permit"
+/// [[claim_requirements.rules]]
+/// path_glob    = "src/**"
+/// claim_types  = ["WriteCode"]
+/// ```
+#[derive(Debug, Deserialize)]
+pub struct ClaimRequirementsSection {
+    /// "permit" → default allow (no claim needed for unmatched paths).
+    /// "deny"   → StrictDefault (any unmatched path requires explicit claim).
+    #[serde(default = "default_claim_action")]
+    pub default_action: String,
+    #[serde(default)]
+    pub rules: Vec<ClaimRule>,
+}
+
+impl Default for ClaimRequirementsSection {
+    fn default() -> Self {
+        Self {
+            default_action: default_claim_action(),
+            rules: Vec::new(),
+        }
+    }
+}
+
+fn default_claim_action() -> String { "permit".to_owned() }
+
+/// One rule in `[[claim_requirements.rules]]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClaimRule {
+    /// Glob pattern matched against relative file paths (e.g. `src/**`).
+    pub path_glob: String,
+    /// Claim type names that satisfy the requirement for matched paths.
+    pub claim_types: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Egress allowlist
+// ---------------------------------------------------------------------------
+
+/// `[egress]` — domain allowlist for outbound HTTP fetches.
+///
+/// ```toml
+/// [egress]
+/// max_fetches_per_window = 100
+/// domains  = ["api.openai.com"]
+/// patterns = ["*.github.com"]
+/// ```
+#[derive(Debug, Default, Deserialize)]
+pub struct EgressSection {
+    #[serde(default = "default_max_fetches")]
+    pub max_fetches_per_window: u32,
+    #[serde(default)]
+    pub domains: Vec<String>,
+    #[serde(default)]
+    pub patterns: Vec<String>,
+}
+
+fn default_max_fetches() -> u32 { 100 }
+
+// ---------------------------------------------------------------------------
 // PolicyBundle — the validated in-memory policy
 // ---------------------------------------------------------------------------
 
@@ -329,6 +402,11 @@ pub struct PolicyBundle {
     policy_sha256: String,
     signed_by: String,
     signed_at: i64,
+    claim_rules: Vec<ClaimRule>,
+    claim_default_action: String,
+    egress_domains: Vec<String>,
+    egress_patterns: Vec<String>,
+    egress_max_fetches_per_window: u32,
 }
 
 impl PolicyBundle {
@@ -388,6 +466,11 @@ impl PolicyBundle {
             policy_sha256: String::new(),
             signed_by: raw.meta.signed_by,
             signed_at: raw.meta.signed_at,
+            claim_rules: raw.claim_requirements.rules,
+            claim_default_action: raw.claim_requirements.default_action,
+            egress_domains: raw.egress.domains,
+            egress_patterns: raw.egress.patterns,
+            egress_max_fetches_per_window: raw.egress.max_fetches_per_window,
         })
     }
 
@@ -556,5 +639,34 @@ impl PolicyBundle {
 
     pub fn signed_at(&self) -> i64 {
         self.signed_at
+    }
+
+    // ── Claim requirements ──────────────────────────────────────────────────
+
+    /// Ordered claim rules (declaration order = match priority per spec).
+    pub fn claim_rules(&self) -> &[ClaimRule] {
+        &self.claim_rules
+    }
+
+    /// Default action for paths that match no rule: "permit" or "deny".
+    pub fn claim_default_action(&self) -> &str {
+        &self.claim_default_action
+    }
+
+    // ── Egress allowlist ─────────────────────────────────────────────────────
+
+    /// Exact-match domain list for egress allowlist.
+    pub fn egress_domains(&self) -> &[String] {
+        &self.egress_domains
+    }
+
+    /// Glob-match pattern list for egress allowlist.
+    pub fn egress_patterns(&self) -> &[String] {
+        &self.egress_patterns
+    }
+
+    /// Max fetches per session per window.
+    pub fn egress_max_fetches_per_window(&self) -> u32 {
+        self.egress_max_fetches_per_window
     }
 }

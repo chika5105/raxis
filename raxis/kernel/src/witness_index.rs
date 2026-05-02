@@ -16,9 +16,11 @@
 use std::path::{Path, PathBuf};
 
 use raxis_crypto::token::sha256_hex;
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 use rusqlite::OptionalExtension;
 use thiserror::Error;
+
+const WR: &str = Table::WitnessRecords.as_str();
 
 // ---------------------------------------------------------------------------
 // Error
@@ -133,10 +135,12 @@ pub fn write(
     let recorded_at = unix_now();
     let conn = store.lock_sync();
     conn.execute(
-        "INSERT OR IGNORE INTO witness_records
-            (verifier_run_id, evaluation_sha, task_id, gate_type,
-             result_class, blob_sha256, blob_path, recorded_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        &format!(
+            "INSERT OR IGNORE INTO {WR}
+                (verifier_run_id, evaluation_sha, task_id, gate_type,
+                 result_class, blob_sha256, blob_path, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+        ),
         rusqlite::params![
             record.verifier_run_id,
             record.evaluation_sha,
@@ -169,22 +173,25 @@ pub fn lookup(
     let conn = store.lock_sync();
     let row = if let Some(run_id) = verifier_run_id {
         conn.query_row(
-            "SELECT verifier_run_id, evaluation_sha, task_id, gate_type,
-                    result_class, blob_sha256, blob_path, recorded_at
-             FROM witness_records
-             WHERE verifier_run_id = ?1",
+            &format!(
+                "SELECT verifier_run_id, evaluation_sha, task_id, gate_type,
+                        result_class, blob_sha256, blob_path, recorded_at
+                 FROM {WR} WHERE verifier_run_id = ?1"
+            ),
             rusqlite::params![run_id],
             parse_row,
         )
         .optional()?
     } else {
         conn.query_row(
-            "SELECT verifier_run_id, evaluation_sha, task_id, gate_type,
-                    result_class, blob_sha256, blob_path, recorded_at
-             FROM witness_records
-             WHERE evaluation_sha = ?1 AND task_id = ?2 AND gate_type = ?3
-             ORDER BY recorded_at DESC
-             LIMIT 1",
+            &format!(
+                "SELECT verifier_run_id, evaluation_sha, task_id, gate_type,
+                        result_class, blob_sha256, blob_path, recorded_at
+                 FROM {WR}
+                 WHERE evaluation_sha = ?1 AND task_id = ?2 AND gate_type = ?3
+                 ORDER BY recorded_at DESC
+                 LIMIT 1"
+            ),
             rusqlite::params![evaluation_sha, task_id, gate_type],
             parse_row,
         )

@@ -12,10 +12,17 @@
 //   Step 4: Emit TaskAdmitted audit event (log line in v1)
 //
 // Does NOT check or consume budget — that happens at intent time.
+//
+// Type-safety rule: Table::X.as_str() for table names, TaskState::X.as_sql_str()
+// for state strings — no raw string literals.
 
-use raxis_store::Store;
+use raxis_store::{Store, Table};
+use raxis_types::TaskState;
 
 use crate::scheduler::{dag, SchedulerError};
+
+const TASKS:     &str = Table::Tasks.as_str();
+const DAG_EDGES: &str = Table::TaskDagEdges.as_str();
 
 /// A task as derived from the plan artifact at approve_plan time.
 ///
@@ -23,10 +30,10 @@ use crate::scheduler::{dag, SchedulerError};
 /// those are intent-time fields.
 #[derive(Debug, Clone)]
 pub struct PlanTask {
-    pub task_id: String,
+    pub task_id:      String,
     pub initiative_id: String,
-    pub lane_id: String,
-    pub name: String,
+    pub lane_id:      String,
+    pub name:         String,
     pub dependencies: Vec<String>,
 }
 
@@ -36,27 +43,32 @@ pub struct PlanTask {
 /// Called exclusively from `initiatives::lifecycle::approve_plan`.
 /// policy_epoch is the epoch from the currently loaded PolicyBundle.
 pub fn admit(
-    task: PlanTask,
+    task:         PlanTask,
     policy_epoch: u64,
-    store: &Store,
+    store:        &Store,
 ) -> Result<String, SchedulerError> {
     // Step 1: Cycle detection (pure read).
     dag::detect_cycle(&task.task_id, &task.dependencies, store)?;
 
-    let conn = store.lock_sync();
-    let now = now_unix_secs();
+    let conn  = store.lock_sync();
+    let now   = now_unix_secs();
+    let state = TaskState::Admitted.as_sql_str();
 
     // Step 2: Insert task row in Admitted state.
     // FK on task_dag_edges → tasks requires the task row to exist first.
     conn.execute(
-        "INSERT OR IGNORE INTO tasks
-            (task_id, initiative_id, lane_id, name, state, admitted_at, policy_epoch, actual_cost)
-         VALUES (?1, ?2, ?3, ?4, 'Admitted', ?5, ?6, 0)",
+        &format!(
+            "INSERT OR IGNORE INTO {TASKS}
+                (task_id, initiative_id, lane_id, name, state,
+                 admitted_at, policy_epoch, actual_cost)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)"
+        ),
         rusqlite::params![
             &task.task_id,
             &task.initiative_id,
             &task.lane_id,
             &task.name,
+            state,
             now,
             policy_epoch as i64,
         ],
@@ -65,9 +77,11 @@ pub fn admit(
     // Step 3: Insert DAG edges.
     for dep_id in &task.dependencies {
         conn.execute(
-            "INSERT OR IGNORE INTO task_dag_edges
-                (predecessor_task_id, successor_task_id)
-             VALUES (?1, ?2)",
+            &format!(
+                "INSERT OR IGNORE INTO {DAG_EDGES}
+                    (predecessor_task_id, successor_task_id)
+                 VALUES (?1, ?2)"
+            ),
             rusqlite::params![dep_id, &task.task_id],
         ).map_err(SchedulerError::Sql)?;
     }
