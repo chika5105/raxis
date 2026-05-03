@@ -22,6 +22,7 @@ mod handlers;
 mod notifications;
 mod path_scope;
 mod policy_manager;
+mod prompt;
 mod runtime;
 
 use std::sync::Arc;
