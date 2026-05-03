@@ -112,16 +112,56 @@ pub enum OperatorRequest {
         task_id: String,
     },
 
+    // ── escalation review ─────────────────────────────────────────────
+    //
+    // Operator approves or denies a planner-submitted escalation.
+    // Spec: kernel-store.md §2.5.5 "Escalation approval on the
+    // operator socket" + cli-ceremony.md §"Approve / deny escalation"
+    // + planner-api.md §"Escalating for higher authority".
+    //
+    // The signing input for ApproveEscalation is canonical:
+    //   "approval|<escalation_id>|<capability_class>|<max_uses>|<valid_for_seconds>"
+    // (see authority::escalation::approval_signing_input — the kernel
+    // and CLI MUST agree on this exact byte layout).
+    ApproveEscalation {
+        escalation_id:    String,
+        approval_scope:   ApprovalScopeWire,
+        operator_sig_hex: String,
+    },
+    DenyEscalation {
+        escalation_id: String,
+        /// Optional; max 512 chars. Recorded in the audit log only;
+        /// the operator may pass `None` when no public reason is
+        /// appropriate (e.g. confidential security concerns).
+        reason: Option<String>,
+    },
+
     // ── tier-2 stubs ──────────────────────────────────────────────────
     //
-    // These three keep `serde_json::Value` payloads because the
-    // ApproveEscalation / DenyEscalation / RotateEpoch handlers are not
-    // yet implemented. Once they land their payloads will become typed
-    // structs in this same enum (PR-2c follow-up); the wire tag is
-    // already pinned.
-    ApproveEscalation { payload: serde_json::Value },
-    DenyEscalation    { payload: serde_json::Value },
-    RotateEpoch       { payload: serde_json::Value },
+    // RotateEpoch keeps a `serde_json::Value` payload because the
+    // policy-rotation handler is not yet implemented. Once it lands
+    // the payload will become a typed struct in this same enum
+    // (PR-2c follow-up); the wire tag is already pinned.
+    RotateEpoch { payload: serde_json::Value },
+}
+
+/// Scope of an approval token issued for a `Pending` escalation.
+///
+/// Kernel-store.md §2.5.5 wire format:
+///   `approval_scope: { capability_class, max_uses, valid_for_seconds }`
+///
+/// `capability_class` is the string discriminant of `CapabilityClass`
+/// (e.g. `"WriteSecrets"`, `"WriteCode"`). The kernel parses it back
+/// into the typed enum at validation time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ApprovalScopeWire {
+    pub capability_class: String,
+    /// Maximum number of times the issued token may be presented.
+    /// `0` is rejected by the kernel — issue at least one use.
+    pub max_uses:         i64,
+    /// Lifetime of the issued token, in seconds from `issued_at`.
+    /// `0` is rejected by the kernel.
+    pub valid_for_seconds: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +200,29 @@ pub enum OperatorResponse {
     PlanApproved {
         initiative_id:  String,
         tasks_admitted: usize,
+    },
+    /// Issued by the kernel after a successful `ApproveEscalation`.
+    ///
+    /// `approval_token_raw` is the high-entropy secret the operator
+    /// must hand to the planner out-of-band; the kernel only stores
+    /// `sha256(approval_token_raw)` in the `approval_tokens` table
+    /// (kernel-store.md Table 9 — `token_hash` column). After the
+    /// planner presents the token on its next intent, the kernel
+    /// re-derives the hash and looks it up to authorise the action.
+    EscalationApproved {
+        escalation_id:      String,
+        approval_token_id:  String,
+        /// Hex-encoded high-entropy token (32 bytes → 64 hex chars).
+        /// Operators MUST treat this value as a secret.
+        approval_token_raw: String,
+        expires_at:         i64,
+    },
+    /// Issued by the kernel after a successful `DenyEscalation`.
+    /// No durable approval artifact is written — the audit event is
+    /// the only record (kernel-store.md §2.5.5 — `DenyEscalation`).
+    EscalationDenied {
+        escalation_id: String,
+        denied_at:     i64,
     },
     /// Generic acknowledgement for handlers that have no structured
     /// success payload (today: stubs, abort/retry/resume responses).
@@ -390,14 +453,103 @@ mod tests {
     }
 
     #[test]
-    fn approve_escalation_wire_shape_passthrough_payload() {
+    fn approve_escalation_wire_shape() {
         round_trip(
             &OperatorRequest::ApproveEscalation {
-                payload: json!({ "escalation_id": "e1", "approval_scope": {} }),
+                escalation_id:    "esc-1".into(),
+                approval_scope:   ApprovalScopeWire {
+                    capability_class:  "WriteSecrets".into(),
+                    max_uses:          1,
+                    valid_for_seconds: 3600,
+                },
+                operator_sig_hex: "deadbeef".into(),
             },
             json!({
                 "op": "ApproveEscalation",
-                "payload": { "payload": { "escalation_id": "e1", "approval_scope": {} } }
+                "payload": {
+                    "escalation_id": "esc-1",
+                    "approval_scope": {
+                        "capability_class": "WriteSecrets",
+                        "max_uses": 1,
+                        "valid_for_seconds": 3600
+                    },
+                    "operator_sig_hex": "deadbeef"
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn deny_escalation_with_reason_wire_shape() {
+        round_trip(
+            &OperatorRequest::DenyEscalation {
+                escalation_id: "esc-1".into(),
+                reason:        Some("scope too broad".into()),
+            },
+            json!({
+                "op": "DenyEscalation",
+                "payload": {
+                    "escalation_id": "esc-1",
+                    "reason": "scope too broad"
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn deny_escalation_without_reason_wire_shape() {
+        // Confirms `reason: None` serialises as explicit `null`, matching
+        // the optional-field convention pinned by
+        // `create_session_omits_optional_keys_as_null`.
+        round_trip(
+            &OperatorRequest::DenyEscalation {
+                escalation_id: "esc-1".into(),
+                reason:        None,
+            },
+            json!({
+                "op": "DenyEscalation",
+                "payload": {
+                    "escalation_id": "esc-1",
+                    "reason": null
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn escalation_approved_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::EscalationApproved {
+                escalation_id:      "esc-1".into(),
+                approval_token_id:  "atk-1".into(),
+                approval_token_raw: "ff".repeat(32),
+                expires_at:         1_700_000_000,
+            },
+            json!({
+                "status": "EscalationApproved",
+                "payload": {
+                    "escalation_id":      "esc-1",
+                    "approval_token_id":  "atk-1",
+                    "approval_token_raw": "ff".repeat(32),
+                    "expires_at":         1_700_000_000_i64
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn escalation_denied_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::EscalationDenied {
+                escalation_id: "esc-1".into(),
+                denied_at:     1_700_000_000,
+            },
+            json!({
+                "status": "EscalationDenied",
+                "payload": {
+                    "escalation_id": "esc-1",
+                    "denied_at":     1_700_000_000_i64
+                }
             }),
         );
     }
