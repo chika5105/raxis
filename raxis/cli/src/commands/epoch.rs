@@ -5,7 +5,6 @@
 use std::path::PathBuf;
 
 use raxis_types::operator_wire::OperatorRequest;
-use serde_json::json;
 
 use crate::commands::plan::{handle_response, open_conn, to_wire};
 use crate::errors::CliError;
@@ -45,25 +44,26 @@ pub fn run_advance(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
         .canonicalize()
         .map_err(|e| CliError::Io { path: "sig path".to_owned(), source: e })?;
 
-    let (mut conn, fingerprint) = open_conn(flags)?;
-    // RotateEpoch is a tier-2 stub in v1; the kernel-side enum carries
-    // an opaque `payload: serde_json::Value`. The CLI keeps the same
-    // field names it always used so the existing operator scripts
-    // continue to work; once the handler goes live the typed payload
-    // variant will replace this stub.
+    let (mut conn, _fingerprint) = open_conn(flags)?;
+    // RotateEpoch is now fully wired to `policy_manager::advance_epoch`
+    // (kernel-core.md §`policy_manager.rs`). The kernel takes the
+    // operator identity from the authenticated socket session
+    // (peripherals.md §3 operator socket challenge-response), so the
+    // CLI does NOT echo a `triggered_by` field — sending one would be
+    // ignored and could mislead operators into thinking they can act
+    // as another operator.
     let req = OperatorRequest::RotateEpoch {
-        payload: json!({
-            "policy_path":  policy_path.display().to_string(),
-            "sig_path":     sig_path.display().to_string(),
-            "triggered_by": fingerprint,
-        }),
+        policy_path: policy_path.display().to_string(),
+        sig_path:    sig_path.display().to_string(),
     };
     let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
         println!("Epoch advanced:");
-        println!("  new_epoch_id:             {}", ok["new_epoch_id"].as_u64().unwrap_or(0));
+        println!("  new_epoch_id:               {}", ok["new_epoch_id"].as_u64().unwrap_or(0));
+        println!("  policy_sha256:              {}", ok["policy_sha256"].as_str().unwrap_or("?"));
+        println!("  signed_by_authority:        {}", ok["signed_by_authority"].as_str().unwrap_or("?"));
         println!("  n_delegations_marked_stale: {}", ok["n_delegations_marked_stale"].as_u64().unwrap_or(0));
-        println!("  n_sessions_invalidated:    {}", ok["n_sessions_invalidated"].as_u64().unwrap_or(0));
-        println!("  policy_sha256:             {}", ok["policy_sha256"].as_str().unwrap_or("?"));
+        println!("  n_sessions_invalidated:     {}", ok["n_sessions_invalidated"].as_u64().unwrap_or(0));
+        println!("  advanced_at:                {}", ok["advanced_at"].as_i64().unwrap_or(0));
     })
 }

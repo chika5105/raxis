@@ -22,7 +22,7 @@
 //   RetryTask          — fully wired (initiatives::lifecycle::retry_task)
 //   ApproveEscalation  — fully wired (authority::escalation::approve_escalation)
 //   DenyEscalation     — fully wired (authority::escalation::deny_escalation)
-//   RotateEpoch        — stub (policy_manager::advance_epoch not yet implemented)
+//   RotateEpoch        — fully wired (policy_manager::advance_epoch)
 
 use std::sync::Arc;
 
@@ -158,9 +158,8 @@ async fn handle_request(
         OperatorRequest::DenyEscalation { escalation_id, reason } => {
             handle_deny_escalation(escalation_id, reason, operator, ctx).await
         }
-        // Tier 2 stub:
-        OperatorRequest::RotateEpoch { .. } => {
-            OperatorResponse::Ack { message: "RotateEpoch not yet implemented (Tier 2)".to_owned() }
+        OperatorRequest::RotateEpoch { policy_path, sig_path } => {
+            handle_rotate_epoch(policy_path, sig_path, operator, ctx).await
         }
     }
 }
@@ -882,6 +881,204 @@ async fn handle_deny_escalation(
             code:   e.error_code().to_owned(),
             detail: e.to_string(),
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RotateEpoch handler (kernel-core.md §`policy_manager.rs`)
+// ---------------------------------------------------------------------------
+
+/// `RotateEpoch` — operator-initiated in-process policy advance.
+///
+/// Pipeline (kernel-core.md §`policy_manager.rs`):
+///   1. Canonicalise both paths and confirm they resolve under
+///      `<data_dir>/policy/`. Out-of-tree paths are rejected with
+///      `FAIL_POLICY_PATH_OUTSIDE_DATA_DIR` BEFORE either file is opened.
+///   2. Run `policy_manager::advance_epoch` (Phase 0 verification +
+///      Phase 1 SQL transaction + Phase 2 ArcSwap). The function is
+///      synchronous and reaches `Store::lock_sync()`, so it MUST run
+///      inside `tokio::task::spawn_blocking` to avoid panicking the
+///      tokio runtime.
+///   3. On `PolicyError` from Phase 0, emit `PolicyAdvanceRejected`
+///      audit (the dispatcher's responsibility per the spec).
+///      On `PolicyError` from Phase 1, emit `PolicyAdvanceFailed`
+///      (the SQL transaction was rolled back; in-memory state
+///      unchanged, but operator forensics need a marker).
+///   4. On success, return `OperatorResponse::EpochAdvanced` with
+///      sweep counts and the artifact identity.
+///
+/// **Phase 3 (gateway signal) is NOT yet wired here** — it lands
+/// with B.3f when `GatewayClient::notify_epoch_advanced` arrives.
+/// The gateway has its own failure-closed contract per
+/// `peripherals.md` §3.2 (re-reads policy.toml on the next
+/// FetchRequest), so the absence of the explicit signal is
+/// safety-equivalent to the spec's "best-effort" Phase 3 behaviour.
+async fn handle_rotate_epoch(
+    policy_path:  String,
+    sig_path:     String,
+    operator:     &AuthenticatedOperator,
+    ctx:          &HandlerContext,
+) -> OperatorResponse {
+    use crate::policy_manager;
+
+    let policy_path_buf = std::path::PathBuf::from(&policy_path);
+    let sig_path_buf    = std::path::PathBuf::from(&sig_path);
+
+    // Step 1: path containment. Done before opening the files so a
+    // non-existent path under data_dir surfaces as a `read failed`
+    // (forensically distinct from a real path that escapes).
+    let policy_dir = ctx.data_dir.join("policy");
+    for (label, path) in [("policy_path", &policy_path_buf), ("sig_path", &sig_path_buf)] {
+        if let Err(e) = policy_manager::canonicalize_under_data_dir(path, &policy_dir) {
+            // Emit PolicyAdvanceRejected for forensic visibility, then
+            // surface the typed error code on the wire.
+            emit_policy_advance_rejected(
+                ctx, &operator.fingerprint, &policy_path, &sig_path, &e,
+            );
+            return OperatorResponse::Error {
+                code:   e.error_code().to_owned(),
+                detail: format!("{label}: {e}"),
+            };
+        }
+    }
+
+    // Step 2: spawn_blocking around the synchronous advance pipeline.
+    // We clone the Arcs we need into the closure; everything else
+    // (KeyRegistry, Store, AuditSink, ArcSwap<PolicyBundle>) is
+    // already an Arc on `ctx`.
+    let registry_for_blocking = Arc::clone(&ctx.registry);
+    let store_for_blocking    = Arc::clone(&ctx.store);
+    let audit_for_blocking    = Arc::clone(&ctx.audit);
+    let policy_for_blocking   = Arc::clone(&ctx.policy);
+    let triggered_by          = operator.fingerprint.clone();
+    let policy_path_blocking  = policy_path_buf.clone();
+    let sig_path_blocking     = sig_path_buf.clone();
+
+    let join_outcome = tokio::task::spawn_blocking(move || {
+        policy_manager::advance_epoch(
+            &policy_path_blocking,
+            &sig_path_blocking,
+            &triggered_by,
+            &registry_for_blocking,
+            &policy_for_blocking,
+            &store_for_blocking,
+            &audit_for_blocking,
+        )
+    })
+    .await;
+
+    let advance_result = match join_outcome {
+        Ok(r) => r,
+        Err(join_err) => {
+            return OperatorResponse::Error {
+                code: "FAIL_POLICY_STORE_WRITE".to_owned(),
+                detail: format!("advance_epoch spawn_blocking join failed: {join_err}"),
+            };
+        }
+    };
+
+    match advance_result {
+        Ok(outcome) => OperatorResponse::EpochAdvanced {
+            new_epoch_id:               outcome.new_epoch_id,
+            policy_sha256:              outcome.policy_sha256,
+            signed_by_authority:        outcome.signed_by_authority,
+            n_delegations_marked_stale: outcome.n_delegations_marked_stale,
+            n_sessions_invalidated:     outcome.n_sessions_invalidated,
+            advanced_at:                outcome.advanced_at_unix_secs,
+        },
+        Err(e) => {
+            // Phase-distinguished audit. Phase 0 failures
+            // (signature, replay, malformed, path outside) get
+            // `PolicyAdvanceRejected`; Phase 1 failures
+            // (transactional SQL trouble after BEGIN succeeded) get
+            // `PolicyAdvanceFailed`. The error variants line up
+            // 1:1 with the Phase contract in
+            // kernel-core.md §`policy_manager.rs`.
+            match e {
+                policy_manager::PolicyError::SignatureInvalid { .. }
+                | policy_manager::PolicyError::EpochReplay { .. }
+                | policy_manager::PolicyError::MalformedArtifact { .. }
+                | policy_manager::PolicyError::PathOutsideDataDir { .. }
+                | policy_manager::PolicyError::ArtifactReadFailed { .. } => {
+                    emit_policy_advance_rejected(
+                        ctx, &operator.fingerprint, &policy_path, &sig_path, &e,
+                    );
+                }
+                policy_manager::PolicyError::PolicyArtifactAlreadyInstalled { .. }
+                | policy_manager::PolicyError::StoreWriteFailed { .. } => {
+                    emit_policy_advance_failed(ctx, &e);
+                }
+            }
+            OperatorResponse::Error {
+                code:   e.error_code().to_owned(),
+                detail: e.to_string(),
+            }
+        }
+    }
+}
+
+/// Emit `AuditEventKind::PolicyAdvanceRejected`. Failures here are
+/// logged to stderr — the operator already received the typed wire
+/// error so the audit miss is forensic noise, not a correctness gap.
+fn emit_policy_advance_rejected(
+    ctx:           &HandlerContext,
+    triggered_by:  &str,
+    policy_path:   &str,
+    sig_path:      &str,
+    err:           &crate::policy_manager::PolicyError,
+) {
+    use crate::policy_manager::PolicyError;
+
+    // The audit event carries a structured `(reason, attempted_epoch,
+    // current_epoch)` triple. We extract the epoch hint where it
+    // is meaningful (EpochReplay knows both); for other variants we
+    // pass `None` and `0` respectively.
+    let (artifact_epoch, current_epoch) = match err {
+        PolicyError::EpochReplay { attempted, current } => (Some(*attempted), *current),
+        _ => (None, 0u64),
+    };
+    let reason = format!(
+        "{err}; triggered_by={triggered_by} policy_path={policy_path} sig_path={sig_path}",
+    );
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::PolicyAdvanceRejected {
+            reason,
+            artifact_epoch,
+            current_epoch,
+        },
+        None, None, None,
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"PolicyAdvanceRejected\",\
+             \"audit_emit_failed\":\"{e}\"}}",
+        );
+    }
+}
+
+/// Emit `AuditEventKind::PolicyAdvanceFailed`. Same logging
+/// guarantees as `emit_policy_advance_rejected`.
+fn emit_policy_advance_failed(
+    ctx: &HandlerContext,
+    err: &crate::policy_manager::PolicyError,
+) {
+    let reason = err.to_string();
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::PolicyAdvanceFailed {
+            reason,
+            // Phase 1 is post-verification, but we don't have the
+            // verified bundle in scope here. The audit event's
+            // `new_epoch_id` field is best-effort and would need a
+            // wider refactor to plumb through the verified epoch on
+            // the failure path; pinned at 0 for now (operators read
+            // the human reason for diagnostics).
+            new_epoch_id: 0,
+        },
+        None, None, None,
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"PolicyAdvanceFailed\",\
+             \"audit_emit_failed\":\"{e}\"}}",
+        );
     }
 }
 

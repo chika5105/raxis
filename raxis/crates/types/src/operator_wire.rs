@@ -136,13 +136,24 @@ pub enum OperatorRequest {
         reason: Option<String>,
     },
 
-    // ── tier-2 stubs ──────────────────────────────────────────────────
+    // ── policy epoch advance ──────────────────────────────────────────
     //
-    // RotateEpoch keeps a `serde_json::Value` payload because the
-    // policy-rotation handler is not yet implemented. Once it lands
-    // the payload will become a typed struct in this same enum
-    // (PR-2c follow-up); the wire tag is already pinned.
-    RotateEpoch { payload: serde_json::Value },
+    // Operator rotates the active policy artifact in-process. The
+    // kernel verifies the new artifact (signature, monotonic epoch,
+    // path containment under <data_dir>/policy/), runs the four-phase
+    // advance from `policy_manager::advance_epoch`, and replies with
+    // `EpochAdvanced`. Spec: kernel-core.md §`policy_manager.rs`,
+    // cli-ceremony.md §"epoch advance".
+    RotateEpoch {
+        /// Filesystem path to the new signed policy.toml. Resolved by
+        /// the CLI from the operator-supplied `--policy` argument.
+        /// MUST canonicalise to a location under `<data_dir>/policy/`
+        /// or the kernel rejects with `FAIL_POLICY_PATH_OUTSIDE_DATA_DIR`.
+        policy_path: String,
+        /// Filesystem path to the corresponding 64-byte raw Ed25519
+        /// signature file. Same containment rule as `policy_path`.
+        sig_path:    String,
+    },
 }
 
 /// Scope of an approval token issued for a `Pending` escalation.
@@ -223,6 +234,22 @@ pub enum OperatorResponse {
     EscalationDenied {
         escalation_id: String,
         denied_at:     i64,
+    },
+    /// Issued by the kernel after a successful `RotateEpoch`.
+    ///
+    /// Carries forensic-grade detail: the new epoch id, the SHA-256
+    /// of the artifact bytes (so the operator can confirm the kernel
+    /// loaded the file they intended), the authority fingerprint that
+    /// signed it, and the sweep counts from Phase 1. The CLI prints
+    /// every field so a deployment audit trail can be reconstructed
+    /// from operator shell history alone.
+    EpochAdvanced {
+        new_epoch_id:                u64,
+        policy_sha256:               String,
+        signed_by_authority:         String,
+        n_delegations_marked_stale:  u64,
+        n_sessions_invalidated:      u64,
+        advanced_at:                 i64,
     },
     /// Generic acknowledgement for handlers that have no structured
     /// success payload (today: stubs, abort/retry/resume responses).
@@ -532,6 +559,48 @@ mod tests {
                     "approval_token_id":  "atk-1",
                     "approval_token_raw": "ff".repeat(32),
                     "expires_at":         1_700_000_000_i64
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn rotate_epoch_request_wire_shape() {
+        round_trip(
+            &OperatorRequest::RotateEpoch {
+                policy_path: "/var/lib/raxis/policy/policy.epoch-2.toml".into(),
+                sig_path:    "/var/lib/raxis/policy/policy.epoch-2.sig".into(),
+            },
+            json!({
+                "op": "RotateEpoch",
+                "payload": {
+                    "policy_path": "/var/lib/raxis/policy/policy.epoch-2.toml",
+                    "sig_path":    "/var/lib/raxis/policy/policy.epoch-2.sig"
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn epoch_advanced_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::EpochAdvanced {
+                new_epoch_id:               2,
+                policy_sha256:              "ab".repeat(32),
+                signed_by_authority:        "ff".repeat(16),
+                n_delegations_marked_stale: 7,
+                n_sessions_invalidated:     3,
+                advanced_at:                1_700_000_000,
+            },
+            json!({
+                "status": "EpochAdvanced",
+                "payload": {
+                    "new_epoch_id":               2,
+                    "policy_sha256":              "ab".repeat(32),
+                    "signed_by_authority":        "ff".repeat(16),
+                    "n_delegations_marked_stale": 7,
+                    "n_sessions_invalidated":     3,
+                    "advanced_at":                1_700_000_000_i64
                 }
             }),
         );

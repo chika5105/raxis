@@ -180,6 +180,40 @@ fn every_response_status_variant_decodes() {
     let parsed: OperatorResponse = serde_json::from_value(denied)
         .expect("EscalationDenied must decode");
     assert!(matches!(parsed, OperatorResponse::EscalationDenied { .. }));
+
+    let advanced = json!({
+        "status": "EpochAdvanced",
+        "payload": {
+            "new_epoch_id":               2,
+            "policy_sha256":              "ab".repeat(32),
+            "signed_by_authority":        "ff".repeat(16),
+            "n_delegations_marked_stale": 7,
+            "n_sessions_invalidated":     0,
+            "advanced_at":                1_700_000_000_i64
+        }
+    });
+    let parsed: OperatorResponse = serde_json::from_value(advanced)
+        .expect("EpochAdvanced must decode");
+    assert!(matches!(parsed, OperatorResponse::EpochAdvanced { .. }));
+}
+
+// ── RotateEpoch: typed payload (post-B.3d). The CLI's
+//    `epoch advance` command constructs `{policy_path, sig_path}`,
+//    not the previous opaque `serde_json::Value` payload.
+#[test]
+fn rotate_epoch_uses_typed_paths_payload() {
+    let req = OperatorRequest::RotateEpoch {
+        policy_path: "/var/lib/raxis/policy/policy.epoch-2.toml".into(),
+        sig_path:    "/var/lib/raxis/policy/policy.epoch-2.sig".into(),
+    };
+    let v = round_trip(req);
+    assert_eq!(v["op"], "RotateEpoch");
+    assert!(v["payload"].get("policy_path").is_some());
+    assert!(v["payload"].get("sig_path").is_some());
+    assert!(v["payload"].get("payload").is_none(),
+        "wire MUST NOT carry the legacy opaque `payload` field");
+    assert!(v["payload"].get("triggered_by").is_none(),
+        "wire MUST NOT carry triggered_by — kernel takes operator from auth");
 }
 
 // ── Negative case: a flat (un-tagged) shape MUST NOT decode.
