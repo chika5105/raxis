@@ -559,9 +559,9 @@ Unknown or missing `[escalation_policy]` block → `PolicyError::MalformedArtifa
 
 - `async fn handle_abort_initiative(req, session, ctx) -> Result<OperatorResponse, HandlerError>` — wrapper over `initiatives::lifecycle::abort_initiative`. Returns `InitiativeAborted`.
 
-- `async fn handle_approve_escalation(req, session, ctx) -> Result<OperatorResponse, HandlerError>` — wrapper over `authority::approve_escalation`. Returns `EscalationApproved`.
+- `async fn handle_approve_escalation(req, session, ctx) -> Result<OperatorResponse, HandlerError>` — wrapper over `authority::escalation::approve_escalation`. Returns `EscalationApproved { escalation_id, approval_token_id, approval_token_raw, expires_at }`. The kernel mints `approval_token_raw` (32 CSPRNG bytes, hex-encoded) and stores ONLY `sha256(raw)` in `approval_tokens.token_hash`; the operator passes the raw token to the planner out-of-band, and the kernel re-derives the hash on subsequent intent presentations (kernel-store.md §2.5.5 Table 9 `token_hash` column). The signing input is the canonical UTF-8 byte sequence `"approval|<escalation_id>|<capability_class>|<max_uses>|<valid_for_seconds>"` — the kernel and CLI MUST agree on this exact byte layout (regression-pinned by `authority::escalation::tests::canonical_signing_input_byte_layout`).
 
-- `async fn handle_deny_escalation(req, session, ctx) -> Result<OperatorResponse, HandlerError>` — wrapper over `authority::deny_escalation`. Returns `EscalationDenied`.
+- `async fn handle_deny_escalation(req, session, ctx) -> Result<OperatorResponse, HandlerError>` — wrapper over `authority::escalation::deny_escalation`. Returns `EscalationDenied { escalation_id, denied_at }`. No `approval_tokens` row is written (denial creates no durable approval artifact — the audit event is the only record). The optional `reason` field is capped at 512 characters at the dispatcher level (cap pinned by `ipc::operator::escalation_dispatch_tests::deny_escalation_rejects_reason_over_512_chars_before_touching_store`).
 
 - `async fn handle_rotate_epoch(req, session, ctx) -> Result<OperatorResponse, HandlerError>` — wrapper over `policy_manager::advance_epoch`. Returns `EpochAdvanced`. The four-phase contract is fully specified in `policy_manager.rs`; this handler does no additional validation.
 

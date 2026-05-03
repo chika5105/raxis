@@ -13,7 +13,7 @@
 // re-introduces a hand-built JSON shape for an OperatorRequest variant,
 // the test that pins THAT variant's shape will fail.
 
-use raxis_types::operator_wire::{OperatorRequest, OperatorResponse};
+use raxis_types::operator_wire::{ApprovalScopeWire, OperatorRequest, OperatorResponse};
 use serde_json::{json, Value};
 
 /// Helper: serialise → JSON value → deserialise → equality.
@@ -78,18 +78,52 @@ fn grant_delegation_uses_ttl_secs_not_expires_at() {
     assert_eq!(v["payload"]["ttl_secs"], 3600);
 }
 
-// ── Tier-2 stubs: payload is an opaque object, but the variant tag is fixed.
+// ── ApproveEscalation: typed payload (escalation_id, approval_scope, sig).
+//    Phase A.6 promoted ApproveEscalation from a tier-2 `serde_json::Value`
+//    payload to a fully typed wire variant. This test pins the new shape so
+//    no future PR slips back to a hand-built JSON envelope.
 #[test]
-fn approve_escalation_wraps_payload_in_typed_envelope() {
+fn approve_escalation_uses_typed_payload() {
     let req = OperatorRequest::ApproveEscalation {
-        payload: json!({ "escalation_id": "e1" }),
+        escalation_id: "esc-1".into(),
+        approval_scope: ApprovalScopeWire {
+            capability_class:  "WriteSecrets".into(),
+            max_uses:          1,
+            valid_for_seconds: 3600,
+        },
+        operator_sig_hex: "deadbeef".into(),
     };
-    let v = serde_json::to_value(&req).unwrap();
+    let v = round_trip(req);
     assert_eq!(v["op"], "ApproveEscalation");
-    // The typed envelope nests payload twice: outer payload (per
-    // OperatorRequest's #[serde(content = "payload")]) wraps the inner
-    // tier-2 stub `payload` field.
-    assert_eq!(v["payload"]["payload"]["escalation_id"], "e1");
+    assert_eq!(v["payload"]["escalation_id"], "esc-1");
+    assert_eq!(v["payload"]["approval_scope"]["capability_class"], "WriteSecrets");
+    assert_eq!(v["payload"]["approval_scope"]["max_uses"], 1);
+    assert_eq!(v["payload"]["approval_scope"]["valid_for_seconds"], 3600);
+    assert_eq!(v["payload"]["operator_sig_hex"], "deadbeef");
+}
+
+// ── DenyEscalation: typed payload with optional reason.
+#[test]
+fn deny_escalation_uses_typed_payload_with_optional_reason() {
+    let req = OperatorRequest::DenyEscalation {
+        escalation_id: "esc-1".into(),
+        reason:        Some("scope too broad".into()),
+    };
+    let v = round_trip(req);
+    assert_eq!(v["op"], "DenyEscalation");
+    assert_eq!(v["payload"]["escalation_id"], "esc-1");
+    assert_eq!(v["payload"]["reason"], "scope too broad");
+}
+
+#[test]
+fn deny_escalation_emits_null_reason_when_unset() {
+    let req = OperatorRequest::DenyEscalation {
+        escalation_id: "esc-1".into(),
+        reason:        None,
+    };
+    let v = round_trip(req);
+    assert!(v["payload"]["reason"].is_null(),
+        "reason MUST serialise as explicit null when unset (matches the optional-field convention)");
 }
 
 // ── OperatorResponse parsing — every status variant decodes back to type.
@@ -125,6 +159,27 @@ fn every_response_status_variant_decodes() {
     let parsed: OperatorResponse = serde_json::from_value(err)
         .expect("Error must decode");
     assert!(matches!(parsed, OperatorResponse::Error { .. }));
+
+    let approved = json!({
+        "status": "EscalationApproved",
+        "payload": {
+            "escalation_id":      "esc-1",
+            "approval_token_id":  "atk-1",
+            "approval_token_raw": "ff".repeat(32),
+            "expires_at":         1_700_000_000_i64
+        }
+    });
+    let parsed: OperatorResponse = serde_json::from_value(approved)
+        .expect("EscalationApproved must decode");
+    assert!(matches!(parsed, OperatorResponse::EscalationApproved { .. }));
+
+    let denied = json!({
+        "status": "EscalationDenied",
+        "payload": { "escalation_id": "esc-1", "denied_at": 1_700_000_000_i64 }
+    });
+    let parsed: OperatorResponse = serde_json::from_value(denied)
+        .expect("EscalationDenied must decode");
+    assert!(matches!(parsed, OperatorResponse::EscalationDenied { .. }));
 }
 
 // ── Negative case: a flat (un-tagged) shape MUST NOT decode.

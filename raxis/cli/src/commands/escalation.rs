@@ -1,18 +1,19 @@
 // raxis-cli::commands::escalation — escalation approve / deny.
 //
-// Normative reference: cli-ceremony.md §4.1 `escalation approve`, `escalation deny`.
+// Normative reference:
+//   - cli-ceremony.md §4.1 `escalation approve`, `escalation deny`
+//   - kernel-store.md §2.5.5 "Escalation approval on the operator socket"
+//   - kernel-core.md §2.3 `handle_approve_escalation` / `handle_deny_escalation`
 //
-// **Tier-2 status:** the kernel's escalation handlers are stubs in v1
-// (peripherals.md §3 lists ApproveEscalation / DenyEscalation as
-// "stub responses" today). The CLI side wraps the operator-level
-// payload (escalation_id, scope, sig, …) inside the typed enum's
-// `payload: serde_json::Value` slot so the operator can already
-// exercise the round-trip; once the handlers go live the typed
-// payload variants will replace the JSON `Value` and the CLI will
-// be updated to construct them directly.
+// Both handlers are fully implemented kernel-side as of phase A.6:
+// `OperatorRequest::ApproveEscalation` / `DenyEscalation` are typed
+// variants of the wire enum (see `raxis-types::operator_wire`), and the
+// canonical signing input is constructed via
+// `raxis_crypto::escalation::approval_scope_signing_input`, which is
+// shared with the kernel — drift between the two halves is impossible
+// because both sides go through the same function.
 
-use raxis_types::operator_wire::OperatorRequest;
-use serde_json::json;
+use raxis_types::operator_wire::{ApprovalScopeWire, OperatorRequest};
 
 use crate::commands::plan::{handle_response, open_conn, to_wire};
 use crate::errors::CliError;
@@ -28,7 +29,7 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
         .clone();
 
     let mut scope: Option<String> = None;
-    let mut max_uses: Option<u32> = None;
+    let mut max_uses: Option<i64> = None;
     let mut valid_for_secs: Option<u64> = None;
     let mut i = 1;
 
@@ -55,43 +56,51 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
 
     let capability_class = scope.ok_or_else(|| CliError::Usage("escalation approve requires --scope <capability_class>".to_owned()))?;
     let max_uses = max_uses.ok_or_else(|| CliError::Usage("escalation approve requires --max-uses <n>".to_owned()))?;
-    let valid_for_secs = valid_for_secs.ok_or_else(|| CliError::Usage("escalation approve requires --valid-for <secs>".to_owned()))?;
+    let valid_for_seconds = valid_for_secs.ok_or_else(|| CliError::Usage("escalation approve requires --valid-for <secs>".to_owned()))?;
 
-    // Build approval scope canonical bytes and sign.
-    // Format: escalation_id (UUID) || 0x00 || capability_class || 0x00 || max_uses_le_u32 || 0x00 || valid_for_le_u64
+    let approval_scope = ApprovalScopeWire {
+        capability_class: capability_class.clone(),
+        max_uses,
+        valid_for_seconds,
+    };
+
+    // Sign with the operator's private key over the canonical bytes
+    // produced by the SHARED helper (raxis-crypto::escalation). The
+    // kernel reconstructs the same bytes inside
+    // authority::escalation::approve_escalation; if the two halves
+    // disagree on layout, the round-trip test in raxis-crypto fails at
+    // build time and the IPC handler returns FAIL_OPERATOR_SIGNATURE_INVALID.
     let key_path = flags.operator_key_path.as_deref()
         .ok_or_else(|| CliError::Usage("--operator-key is required for escalation approve".to_owned()))?;
     let signing_key = crate::signing::load_operator_key(key_path)?;
-
-    let mut signing_input = Vec::new();
-    signing_input.extend_from_slice(escalation_id.as_bytes());
-    signing_input.push(0x00);
-    signing_input.extend_from_slice(capability_class.as_bytes());
-    signing_input.push(0x00);
-    signing_input.extend_from_slice(&max_uses.to_le_bytes());
-    signing_input.push(0x00);
-    signing_input.extend_from_slice(&valid_for_secs.to_le_bytes());
+    let signing_input = raxis_crypto::escalation::approval_scope_signing_input(
+        &escalation_id,
+        &approval_scope.capability_class,
+        approval_scope.max_uses,
+        approval_scope.valid_for_seconds,
+    );
     let sig_hex = crate::signing::sign_bytes(&signing_key, &signing_input);
 
-    let (mut conn, fingerprint) = open_conn(flags)?;
+    let (mut conn, _fingerprint) = open_conn(flags)?;
     let req = OperatorRequest::ApproveEscalation {
-        payload: json!({
-            "escalation_id": escalation_id,
-            "approval_scope": {
-                "capability_class": capability_class,
-                "max_uses": max_uses,
-                "valid_for_seconds": valid_for_secs,
-            },
-            "operator_sig": sig_hex,
-            "approved_by": fingerprint,
-        }),
+        escalation_id:    escalation_id.clone(),
+        approval_scope,
+        operator_sig_hex: sig_hex,
     };
     let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
-        let token = ok["approval_token"].as_str().unwrap_or("?");
+        // Typed `EscalationApproved` payload exposes the raw token
+        // directly — the CLI prints it verbatim so the operator can
+        // hand it to the planner out-of-band. The token itself is the
+        // secret; the kernel only stored sha256(token).
+        let token = ok["approval_token_raw"].as_str().unwrap_or("?");
+        let token_id = ok["approval_token_id"].as_str().unwrap_or("?");
+        let expires_at = ok["expires_at"].as_i64().unwrap_or(0);
         println!("Escalation {escalation_id} approved.");
-        println!("approval_token: {token}");
-        println!("(Pass this token to the planner out-of-band.)");
+        println!("approval_token_id:  {token_id}");
+        println!("approval_token_raw: {token}");
+        println!("expires_at:         {expires_at}");
+        println!("(Pass approval_token_raw to the planner out-of-band — this is a secret.)");
     })
 }
 
@@ -117,16 +126,25 @@ pub fn run_deny(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         i += 1;
     }
 
-    let (mut conn, fingerprint) = open_conn(flags)?;
+    // The CLI mirrors the kernel-side 512-character cap so operators
+    // get a useful error before the round-trip even happens.
+    if let Some(r) = reason.as_ref() {
+        if r.chars().count() > 512 {
+            return Err(CliError::Usage(format!(
+                "--reason exceeds 512-character limit (was {} chars)",
+                r.chars().count(),
+            )));
+        }
+    }
+
+    let (mut conn, _fingerprint) = open_conn(flags)?;
     let req = OperatorRequest::DenyEscalation {
-        payload: json!({
-            "escalation_id": escalation_id,
-            "reason": reason,
-            "denied_by": fingerprint,
-        }),
+        escalation_id: escalation_id.clone(),
+        reason,
     };
     let resp = conn.send_request(&to_wire(&req)?)?;
-    handle_response(resp, |_| {
-        println!("Escalation {escalation_id} denied.");
+    handle_response(resp, |ok| {
+        let denied_at = ok["denied_at"].as_i64().unwrap_or(0);
+        println!("Escalation {escalation_id} denied (denied_at={denied_at}).");
     })
 }
