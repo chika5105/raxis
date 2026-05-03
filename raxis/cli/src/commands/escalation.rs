@@ -1,10 +1,20 @@
 // raxis-cli::commands::escalation — escalation approve / deny.
 //
 // Normative reference: cli-ceremony.md §4.1 `escalation approve`, `escalation deny`.
+//
+// **Tier-2 status:** the kernel's escalation handlers are stubs in v1
+// (peripherals.md §3 lists ApproveEscalation / DenyEscalation as
+// "stub responses" today). The CLI side wraps the operator-level
+// payload (escalation_id, scope, sig, …) inside the typed enum's
+// `payload: serde_json::Value` slot so the operator can already
+// exercise the round-trip; once the handlers go live the typed
+// payload variants will replace the JSON `Value` and the CLI will
+// be updated to construct them directly.
 
+use raxis_types::operator_wire::OperatorRequest;
 use serde_json::json;
 
-use crate::commands::plan::{handle_response, open_conn};
+use crate::commands::plan::{handle_response, open_conn, to_wire};
 use crate::errors::CliError;
 use crate::GlobalFlags;
 
@@ -64,18 +74,19 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
     let sig_hex = crate::signing::sign_bytes(&signing_key, &signing_input);
 
     let (mut conn, fingerprint) = open_conn(flags)?;
-    let req = json!({
-        "op": "ApproveEscalation",
-        "escalation_id": escalation_id,
-        "approval_scope": {
-            "capability_class": capability_class,
-            "max_uses": max_uses,
-            "valid_for_seconds": valid_for_secs,
-        },
-        "operator_sig": sig_hex,
-        "approved_by": fingerprint,
-    });
-    let resp = conn.send_request(&req)?;
+    let req = OperatorRequest::ApproveEscalation {
+        payload: json!({
+            "escalation_id": escalation_id,
+            "approval_scope": {
+                "capability_class": capability_class,
+                "max_uses": max_uses,
+                "valid_for_seconds": valid_for_secs,
+            },
+            "operator_sig": sig_hex,
+            "approved_by": fingerprint,
+        }),
+    };
+    let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
         let token = ok["approval_token"].as_str().unwrap_or("?");
         println!("Escalation {escalation_id} approved.");
@@ -107,13 +118,14 @@ pub fn run_deny(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     }
 
     let (mut conn, fingerprint) = open_conn(flags)?;
-    let req = json!({
-        "op": "DenyEscalation",
-        "escalation_id": escalation_id,
-        "reason": reason,
-        "denied_by": fingerprint,
-    });
-    let resp = conn.send_request(&req)?;
+    let req = OperatorRequest::DenyEscalation {
+        payload: json!({
+            "escalation_id": escalation_id,
+            "reason": reason,
+            "denied_by": fingerprint,
+        }),
+    };
+    let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |_| {
         println!("Escalation {escalation_id} denied.");
     })

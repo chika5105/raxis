@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use raxis_ipc::{read_json_frame_async, write_json_frame_async, JsonFrameError};
-use serde::{Deserialize, Serialize};
 use tokio::net::UnixStream;
 
 use crate::authority;
@@ -29,119 +28,22 @@ use crate::ipc::context::HandlerContext;
 // ---------------------------------------------------------------------------
 // Wire types (OperatorRequest / OperatorResponse)
 //
-// These mirror the canonical definitions in `raxis_types::operator` but are
-// defined here for one tactical reason: the canonical types target the
-// **bincode** codec used by the planner socket (where field positions are
-// the wire), while the operator socket uses **JSON** with field names and a
-// looser schema (the CLI hand-builds JSON via `serde_json::Value`, which
-// tolerates extra/missing fields better than bincode).
+// **Single source of truth: `raxis_types::operator_wire`.** Both this
+// dispatcher (deserialise) and every `cli/src/commands/*` JSON
+// construction site (serialise) MUST go through that module — the CLI
+// builds typed values and serialises with `serde_json::to_value`, the
+// kernel deserialises into the same types. Any new operator op MUST be
+// added in `operator_wire.rs` first; the wire-shape contract tests
+// there will catch field-name or tag drift between the two halves.
 //
-// PR-2a follow-up (deferred): collapse into one type. The right design is
-//   - `raxis_types::operator::OperatorRequest` with serde tags compatible
-//     with both bincode and JSON, AND
-//   - rewrite `cli/src/commands/*` to construct typed requests instead of
-//     `serde_json::Value`.
-// That refactor is large enough to be its own PR and is out of scope here.
-// In the interim, every variant added below MUST have a matching variant in
-// `raxis_types::operator::OperatorRequest`, and the JSON tag (`"op"`) MUST
-// match. The contract is enforced by the v1 review's pending PR-2c
-// "reconcile every CLI command JSON request shape with kernel enum" task.
+// Why a JSON-shape type set co-exists with `raxis_types::operator`
+// (the bincode-shape design): the planner socket uses bincode + typed
+// IDs; the operator socket uses JSON + plain strings. They are
+// genuinely two protocols. `operator.rs` is the v2 destination,
+// `operator_wire.rs` is the v1 contract.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
-#[serde(tag = "op", content = "payload")]
-pub enum OperatorRequest {
-    CreateSession {
-        role: String,
-        worktree_root: Option<String>,
-        base_sha: Option<String>,
-        base_tracking_ref: Option<String>,
-        lineage_id: String,
-        task_id: Option<String>,
-    },
-    RevokeSession {
-        session_id: String,
-    },
-    GrantDelegation {
-        session_id: String,
-        delegation_id: String,
-        capability_class: String,
-        scope_json: Option<String>,
-        ttl_secs: u64,
-        max_uses: Option<i64>,
-        signature_hex: String,
-    },
-    // Initiative lifecycle — fully wired in v1:
-    CreateInitiative {
-        plan_toml:     String,
-        plan_sig_hex:  String,
-        submitted_by:  String,
-    },
-    ApprovePlan {
-        initiative_id:        String,
-        approving_operator:   String,
-        /// Hex-encoded Ed25519 pubkey of the approving operator.
-        operator_pubkey_hex:  String,
-    },
-    RejectPlan {
-        initiative_id: String,
-        rejected_by:   String,
-        reason:        Option<String>,
-    },
-    RetryTask {
-        task_id: String,
-    },
-    ResumeTask {
-        /// Resume a BlockedRecoveryPending task → Admitted.
-        task_id:     String,
-        resumed_by:  String,
-    },
-    AbortTask {
-        task_id:    String,
-        aborted_by: String,
-    },
-    AbortInitiative {
-        initiative_id: String,
-        aborted_by:    String,
-    },
-    // Tier 2 stubs:
-    ApproveEscalation  { payload: serde_json::Value },
-    DenyEscalation     { payload: serde_json::Value },
-    RotateEpoch        { payload: serde_json::Value },
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "status", content = "payload")]
-pub enum OperatorResponse {
-    SessionCreated {
-        session_id: String,
-        session_token: String,
-        role: String,
-        worktree_root: Option<String>,
-        base_sha: Option<String>,
-        lineage_id: String,
-    },
-    SessionRevoked {
-        session_id: String,
-        revoked_at: i64,
-    },
-    DelegationGranted {
-        delegation_id: String,
-    },
-    InitiativeCreated {
-        initiative_id: String,
-        status: String,
-    },
-    PlanApproved {
-        initiative_id: String,
-        tasks_admitted: usize,
-    },
-    Ack { message: String },
-    Error {
-        code: String,
-        detail: String,
-    },
-}
+pub use raxis_types::operator_wire::{OperatorRequest, OperatorResponse};
 
 /// Dispatch loop for one authenticated operator connection.
 ///
@@ -349,10 +251,7 @@ async fn handle_revoke_session(session_id_str: String, ctx: &HandlerContext) -> 
 
     match authority::session::revoke_session(&session_id, &ctx.store) {
         Ok(()) => {
-            let revoked_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
+            let revoked_at = raxis_types::unix_now_secs();
             OperatorResponse::SessionRevoked {
                 session_id: session_id_str,
                 revoked_at,
@@ -547,6 +446,7 @@ async fn handle_approve_plan(
         policy_epoch,
         &ctx.store,
         &*ctx.audit,
+        &ctx.plan_registry,
     ) {
         Ok(result) => OperatorResponse::PlanApproved {
             initiative_id:  result.initiative_id,

@@ -4,9 +4,10 @@
 
 use std::path::PathBuf;
 
+use raxis_types::operator_wire::OperatorRequest;
 use serde_json::json;
 
-use crate::commands::plan::{handle_response, open_conn};
+use crate::commands::plan::{handle_response, open_conn, to_wire};
 use crate::errors::CliError;
 use crate::GlobalFlags;
 
@@ -45,13 +46,19 @@ pub fn run_advance(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
         .map_err(|e| CliError::Io { path: "sig path".to_owned(), source: e })?;
 
     let (mut conn, fingerprint) = open_conn(flags)?;
-    let req = json!({
-        "op": "RotateEpoch",
-        "policy_path": policy_path.display().to_string(),
-        "sig_path": sig_path.display().to_string(),
-        "triggered_by": fingerprint,
-    });
-    let resp = conn.send_request(&req)?;
+    // RotateEpoch is a tier-2 stub in v1; the kernel-side enum carries
+    // an opaque `payload: serde_json::Value`. The CLI keeps the same
+    // field names it always used so the existing operator scripts
+    // continue to work; once the handler goes live the typed payload
+    // variant will replace this stub.
+    let req = OperatorRequest::RotateEpoch {
+        payload: json!({
+            "policy_path":  policy_path.display().to_string(),
+            "sig_path":     sig_path.display().to_string(),
+            "triggered_by": fingerprint,
+        }),
+    };
+    let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
         println!("Epoch advanced:");
         println!("  new_epoch_id:             {}", ok["new_epoch_id"].as_u64().unwrap_or(0));

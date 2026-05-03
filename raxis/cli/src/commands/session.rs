@@ -1,10 +1,18 @@
 // raxis-cli::commands::session — session create / revoke.
 //
 // Normative reference: cli-ceremony.md §4.1 `session create`, `session revoke`.
+//
+// Wire shape: every operator op is constructed as a typed
+// `raxis_types::operator_wire::OperatorRequest` and serialised via
+// `serde_json::to_value`. This guarantees the CLI's outgoing JSON shape
+// is byte-equal to what the kernel's deserialiser expects (the wire
+// shape is locked by `operator_wire::tests`). Hand-built `serde_json::json!`
+// blocks for OperatorRequest are FORBIDDEN — they bypass the type
+// system and have caused protocol drift in the past.
 
 use std::path::PathBuf;
 
-use serde_json::json;
+use raxis_types::operator_wire::OperatorRequest;
 
 use crate::commands::plan::{handle_response, open_conn};
 use crate::errors::CliError;
@@ -81,18 +89,24 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
     // emit a degraded lineage_id).
     let lineage_id = lineage_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    let (mut conn, fingerprint) = open_conn(flags)?;
-    let req = json!({
-        "op": "CreateSession",
-        "role": role,
-        "worktree_root": worktree_root.display().to_string(),
-        "base_tracking_ref": base_tracking_ref,
-        "task_id": task_id,
-        "lineage_id": lineage_id,
-        "created_by_operator": fingerprint,
-    });
+    let (mut conn, _fingerprint) = open_conn(flags)?;
+    // The kernel infers the creating operator from the authenticated
+    // session, NOT from a wire-supplied field — so we don't echo
+    // `created_by_operator` here (the field doesn't exist in the
+    // kernel-side OperatorRequest enum).
+    let req = OperatorRequest::CreateSession {
+        role:              role.clone(),
+        worktree_root:     Some(worktree_root.display().to_string()),
+        base_sha:          None,
+        base_tracking_ref: base_tracking_ref.clone(),
+        lineage_id:        lineage_id.clone(),
+        task_id:           task_id.clone(),
+    };
+    let req_json = serde_json::to_value(&req).map_err(|e| {
+        CliError::Usage(format!("could not serialise CreateSession request: {e}"))
+    })?;
 
-    let resp = conn.send_request(&req)?;
+    let resp = conn.send_request(&req_json)?;
     handle_response(resp, |ok| {
         let session_id = ok["session_id"].as_str().unwrap_or("?");
         let token = ok["session_token"].as_str().unwrap_or("?");
@@ -121,8 +135,11 @@ pub fn run_revoke(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
         .ok_or_else(|| CliError::Usage("session revoke requires <session_id>".to_owned()))?;
 
     let (mut conn, _) = open_conn(flags)?;
-    let req = json!({ "op": "RevokeSession", "session_id": session_id });
-    let resp = conn.send_request(&req)?;
+    let req = OperatorRequest::RevokeSession { session_id: session_id.clone() };
+    let req_json = serde_json::to_value(&req).map_err(|e| {
+        CliError::Usage(format!("could not serialise RevokeSession request: {e}"))
+    })?;
+    let resp = conn.send_request(&req_json)?;
     handle_response(resp, |ok| {
         let revoked_at = ok["revoked_at"].as_i64().unwrap_or(0);
         println!("Session {session_id} revoked at {revoked_at}");

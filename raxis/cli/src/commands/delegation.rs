@@ -2,11 +2,9 @@
 //
 // Normative reference: cli-ceremony.md §4.1 `delegation grant`.
 
-use std::path::PathBuf;
+use raxis_types::operator_wire::OperatorRequest;
 
-use serde_json::json;
-
-use crate::commands::plan::{handle_response, open_conn};
+use crate::commands::plan::{handle_response, open_conn, to_wire};
 use crate::errors::CliError;
 use crate::GlobalFlags;
 
@@ -68,22 +66,41 @@ pub fn run_grant(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let signing_input = raxis_crypto::token::sha256_hex(&signing_domain);
     let sig_hex = crate::signing::sign_bytes(&signing_key, signing_input.as_bytes());
 
-    let (mut conn, fingerprint) = open_conn(flags)?;
-    let req = json!({
-        "op": "GrantDelegation",
-        "session_id": session_id,
-        "capability_class": capability,
-        "delegating_role_id": role_id,
-        "expires_at": expires_at,
-        "scope_json": scope_json,
-        "operator_sig": sig_hex,
-        "granted_by": fingerprint,
-    });
+    let (mut conn, _fingerprint) = open_conn(flags)?;
 
-    let resp = conn.send_request(&req)?;
+    // The CLI mints the delegation_id (UUIDv4) so the operator can
+    // correlate logs across CLI and kernel without waiting for the
+    // round-trip. The kernel stores whichever ID arrives — same model
+    // as `lineage_id` in `session create`. `expires_at` is computed
+    // from `ttl_secs` operator-side for the signing input but the
+    // kernel re-derives it from `ttl_secs` server-side, so we send
+    // `ttl_secs` on the wire (NOT `expires_at`) to keep the two
+    // halves of the protocol agreeing on a single source of truth
+    // (operator-supplied TTL).
+    //
+    // The kernel-side handler also takes `max_uses` (Option<i64>);
+    // omitted here since the CLI doesn't yet expose a flag for it.
+    // A future PR will add `--max-uses` and pipe it through.
+    let _ = role_id;     // role_id is part of the signing input only
+    let _ = expires_at;  // ditto — kernel derives from ttl_secs
+    let delegation_id = uuid::Uuid::new_v4().to_string();
+
+    let req = OperatorRequest::GrantDelegation {
+        session_id:       session_id.clone(),
+        delegation_id:    delegation_id.clone(),
+        capability_class: capability.clone(),
+        scope_json:       scope_json.clone(),
+        ttl_secs,
+        max_uses:         None,
+        signature_hex:    sig_hex,
+    };
+    let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
-        let delegation_id = ok["delegation_id"].as_str().unwrap_or("?");
-        println!("Delegation {delegation_id} granted: session={session_id} capability={capability} role={role_id} expires={expires_at}");
+        let returned_id = ok["delegation_id"].as_str().unwrap_or(delegation_id.as_str());
+        println!(
+            "Delegation {returned_id} granted: session={session_id} \
+             capability={capability} ttl={ttl_secs}s",
+        );
     })
 }
 
