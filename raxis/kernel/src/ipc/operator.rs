@@ -1171,8 +1171,9 @@ mod escalation_dispatch_tests {
     use ed25519_dalek::{Signer, SigningKey};
     use raxis_audit_tools::{AuditEventKind, FakeAuditSink};
     use raxis_policy::{OperatorEntry, PolicyBundle};
-    use raxis_store::Store;
+    use raxis_store::{Store, Table};
     use raxis_types::operator_wire::ApprovalScopeWire;
+    use raxis_types::{EscalationClass, EscalationStatus};
 
     use crate::authority::escalation::approval_scope_signing_input;
     use crate::authority::keys::KeyRegistry;
@@ -1181,7 +1182,11 @@ mod escalation_dispatch_tests {
 
     // ── shared fixtures ───────────────────────────────────────────────
 
-    const FP: &str = "op-prime";
+    const FP:           &str = "op-prime";
+    // INV-STORE-03: no raw SQL table-name literals in `kernel/src`.
+    // The dispatcher tests below use these constants (and the various
+    // `*State::as_sql_str()` methods) instead of inline string literals.
+    const ESCALATIONS:  &str = Table::Escalations.as_str();
 
     fn fixture_keypair() -> SigningKey { SigningKey::from_bytes(&[7u8; 32]) }
 
@@ -1228,17 +1233,26 @@ mod escalation_dispatch_tests {
         tokio::task::spawn_blocking(move || {
             let conn = store.lock_sync();
             conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+            // The literal session/task/initiative/lineage values stay
+            // inline here (no FK rows seeded — `PRAGMA foreign_keys = OFF`
+            // above lets the test bypass referential integrity for the
+            // dispatch path under test). Table name + escalation class
+            // + status string come from typed sources per INV-STORE-03.
+            let class  = EscalationClass::CapabilityUpgrade.as_sql_str();
+            let status = EscalationStatus::Pending.as_sql_str();
             conn.execute(
-                "INSERT INTO escalations (
-                    escalation_id, session_id, task_id, lineage_id, initiative_id,
-                    class, requested_scope_json, justification, idempotency_key,
-                    status, created_at, timeout_at
-                 ) VALUES (?1, 'sess-1', 'task-1', 'lin-1', 'init-1',
-                           'CapabilityUpgrade',
-                           '{\"kind\":\"CapabilityUpgrade\",\"capability\":\"WriteSecrets\"}',
-                           'unit-test', ?2, 'Pending', ?3, ?4)",
+                &format!(
+                    "INSERT INTO {ESCALATIONS} (
+                        escalation_id, session_id, task_id, lineage_id, initiative_id,
+                        class, requested_scope_json, justification, idempotency_key,
+                        status, created_at, timeout_at
+                     ) VALUES (?1, 'sess-1', 'task-1', 'lin-1', 'init-1',
+                               ?2,
+                               '{{\"kind\":\"CapabilityUpgrade\",\"capability\":\"WriteSecrets\"}}',
+                               'unit-test', ?3, ?4, ?5, ?6)"
+                ),
                 rusqlite::params![
-                    id, id,
+                    id, class, id, status,
                     raxis_types::unix_now_secs(),
                     raxis_types::unix_now_secs() + 3600,
                 ],
@@ -1254,7 +1268,7 @@ mod escalation_dispatch_tests {
         tokio::task::spawn_blocking(move || {
             let conn = store.lock_sync();
             conn.query_row(
-                "SELECT status FROM escalations WHERE escalation_id = ?1",
+                &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
                 rusqlite::params![id], |r| r.get(0),
             ).unwrap()
         }).await.unwrap()
@@ -1262,13 +1276,13 @@ mod escalation_dispatch_tests {
 
     /// Force the escalation row's status (used to set up the
     /// "already-Approved" fixture for the NotPending error path).
-    async fn force_status(store: Arc<Store>, escalation_id: &str, status: &str) {
-        let id     = escalation_id.to_owned();
-        let status = status.to_owned();
+    async fn force_status(store: Arc<Store>, escalation_id: &str, status: EscalationStatus) {
+        let id        = escalation_id.to_owned();
+        let status_s  = status.as_sql_str().to_owned();
         tokio::task::spawn_blocking(move || {
             store.lock_sync().execute(
-                "UPDATE escalations SET status = ?1 WHERE escalation_id = ?2",
-                rusqlite::params![status, id],
+                &format!("UPDATE {ESCALATIONS} SET status = ?1 WHERE escalation_id = ?2"),
+                rusqlite::params![status_s, id],
             ).unwrap();
         }).await.unwrap();
     }
@@ -1361,7 +1375,7 @@ mod escalation_dispatch_tests {
 
         insert_pending_escalation(store.clone(), "esc-1").await;
         // Force the row to Approved so the second approve attempt fails.
-        force_status(store.clone(), "esc-1", "Approved").await;
+        force_status(store.clone(), "esc-1", EscalationStatus::Approved).await;
 
         let sig = sk.sign(&approval_scope_signing_input("esc-1", &scope))
             .to_bytes().to_vec();
@@ -1520,6 +1534,184 @@ mod escalation_dispatch_tests {
             "esc-edge".into(), Some(exactly_max), &op, &ctx,
         ).await;
         assert!(matches!(resp, OperatorResponse::EscalationDenied { .. }));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // End-to-end notification fanout (Phase B.4d).
+    //
+    // The dispatcher tests above use a bare `FakeAuditSink`. Production
+    // wraps that sink with `NotifyingAuditSink` so every emit fans into
+    // `notifications::dispatch`. The test below builds the *production*
+    // sink shape, drives a real `handle_approve_escalation` end-to-end,
+    // and asserts that the resulting JSONL line lands in the implicit
+    // Shell channel inbox at `<data_dir>/notifications/inbox.jsonl`.
+    //
+    // Why this lives next to the dispatcher (and not in
+    // `notifications::sink::tests`):
+    //   - The unit test in `sink.rs` proves that `emit` fans out.
+    //   - This test proves that the `handle_approve_escalation` wiring
+    //     CALLS emit through the wrapping sink — i.e., that an operator
+    //     dispatcher arm authored after the wrap-in still participates
+    //     in the notification pipeline. Without this guard, a future
+    //     refactor that bypasses `ctx.audit` (for example, hand-rolling
+    //     a `FileAuditSink` inside the handler) would silently break
+    //     operator notifications.
+    // ─────────────────────────────────────────────────────────────────
+    use crate::notifications::NotifyingAuditSink;
+    use raxis_audit_tools::AuditSink;
+    use std::time::Duration;
+
+    /// Build a context whose `audit` field is the production
+    /// `NotifyingAuditSink` wrapping a `FakeAuditSink`. The wrapping
+    /// is what kicks the notification dispatcher; without it, no
+    /// inbox line would be written even though the FSM transition
+    /// committed cleanly.
+    fn build_ctx_with_notifying_sink(
+        store:    Arc<Store>,
+        data_dir: PathBuf,
+        sk:       &SigningKey,
+    ) -> (Arc<HandlerContext>, Arc<FakeAuditSink>) {
+        let policy_bundle = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
+            pubkey_fingerprint: FP.to_owned(),
+            display_name:       FP.to_owned(),
+            pubkey_hex:         hex::encode(sk.verifying_key().to_bytes()),
+            permitted_ops:      vec!["ApproveEscalation".into()],
+        }]);
+        let policy_swap = Arc::new(arc_swap::ArcSwap::from_pointee(policy_bundle));
+
+        let inner: Arc<FakeAuditSink> = Arc::new(FakeAuditSink::new());
+        let inner_dyn: Arc<dyn AuditSink> = Arc::clone(&inner) as Arc<dyn AuditSink>;
+        let audit: Arc<dyn AuditSink> = Arc::new(NotifyingAuditSink::new(
+            Arc::clone(&inner_dyn),
+            Arc::clone(&policy_swap),
+            data_dir.clone(),
+        ));
+
+        let ctx = Arc::new(HandlerContext::new(
+            policy_swap,
+            Arc::new(KeyRegistry::stub_for_tests()),
+            store,
+            audit,
+            data_dir,
+            Arc::new(PlanRegistry::new()),
+            Arc::new(crate::gateway::client::GatewayClient::new()),
+        ));
+        (ctx, inner)
+    }
+
+    /// Poll `<inbox>` until at least `min` records are present or the
+    /// deadline elapses. Returns the parsed JSONL records.
+    async fn await_inbox_with_min(
+        path:     &std::path::Path,
+        min:      usize,
+        deadline: Duration,
+    ) -> Vec<serde_json::Value> {
+        let start = std::time::Instant::now();
+        loop {
+            if let Ok(bytes) = tokio::fs::read(path).await {
+                let parsed: Vec<serde_json::Value> = std::str::from_utf8(&bytes)
+                    .unwrap_or("")
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect();
+                if parsed.len() >= min {
+                    return parsed;
+                }
+            }
+            if start.elapsed() > deadline {
+                return tokio::fs::read(path).await
+                    .ok()
+                    .and_then(|bytes| String::from_utf8(bytes).ok())
+                    .map(|s| {
+                        s.lines()
+                            .filter_map(|l| serde_json::from_str(l).ok())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn approve_escalation_lands_inbox_line_via_notifying_sink() {
+        let tmp   = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sk    = fixture_keypair();
+        let (ctx, _inner_sink) = build_ctx_with_notifying_sink(
+            Arc::clone(&store),
+            tmp.path().to_path_buf(),
+            &sk,
+        );
+        insert_pending_escalation(Arc::clone(&store), "esc-end-to-end").await;
+
+        let scope = fixture_scope();
+        let sig   = sk
+            .sign(&approval_scope_signing_input("esc-end-to-end", &scope))
+            .to_bytes()
+            .to_vec();
+
+        let resp = handle_approve_escalation(
+            "esc-end-to-end".into(),
+            scope,
+            hex::encode(&sig),
+            &fixture_authenticated(),
+            &ctx,
+        ).await;
+        assert!(matches!(resp, OperatorResponse::EscalationApproved { .. }),
+            "expected EscalationApproved, got {resp:?}");
+
+        let inbox   = PolicyBundle::shell_inbox_path_for(tmp.path());
+        let records = await_inbox_with_min(&inbox, 1, Duration::from_secs(2)).await;
+        assert_eq!(records.len(), 1,
+            "exactly one inbox record expected; got {records:?}");
+        let r = &records[0];
+        assert_eq!(r["event_kind"], "EscalationApproved");
+        assert_eq!(r["payload"]["escalation_id"], "esc-end-to-end");
+        assert_eq!(r["payload"]["approved_by"], FP);
+        let summary = r["human_summary"].as_str().unwrap();
+        assert!(summary.contains("APPROVED"),
+            "summary should mention approval; got {summary:?}");
+        assert!(summary.contains("esc-end-to-end"),
+            "summary should include escalation_id; got {summary:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn deny_escalation_lands_inbox_line_via_notifying_sink() {
+        let tmp   = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sk    = fixture_keypair();
+        let mut op = fixture_authenticated();
+        op.permitted_ops.push("DenyEscalation".into());
+        let (ctx, _inner_sink) = build_ctx_with_notifying_sink(
+            Arc::clone(&store),
+            tmp.path().to_path_buf(),
+            &sk,
+        );
+        insert_pending_escalation(Arc::clone(&store), "esc-deny").await;
+
+        let resp = handle_deny_escalation(
+            "esc-deny".into(),
+            Some("scope too broad".into()),
+            &op,
+            &ctx,
+        ).await;
+        assert!(matches!(resp, OperatorResponse::EscalationDenied { .. }),
+            "expected EscalationDenied, got {resp:?}");
+
+        let inbox   = PolicyBundle::shell_inbox_path_for(tmp.path());
+        let records = await_inbox_with_min(&inbox, 1, Duration::from_secs(2)).await;
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert_eq!(r["event_kind"], "EscalationDenied");
+        assert_eq!(r["payload"]["escalation_id"], "esc-deny");
+        assert_eq!(r["payload"]["reason"], "scope too broad");
+        let summary = r["human_summary"].as_str().unwrap();
+        assert!(summary.contains("DENIED"),
+            "summary should mention denial; got {summary:?}");
+        assert!(summary.contains("scope too broad"),
+            "summary should echo the operator-supplied reason; got {summary:?}");
     }
 }
 

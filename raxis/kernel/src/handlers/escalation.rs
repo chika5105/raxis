@@ -44,9 +44,10 @@
 use std::sync::Arc;
 
 use raxis_audit_tools::AuditEventKind;
+use raxis_store::Table;
 use raxis_types::{
     unix_now_secs, EscalationId, EscalationRejectionReason, EscalationRequest,
-    EscalationResponse,
+    EscalationResponse, EscalationStatus,
 };
 
 use crate::authority;
@@ -59,6 +60,17 @@ use crate::ipc::context::HandlerContext;
 /// Maximum justification length per peripherals.md §3.1
 /// "justification — required, non-empty, max 4096 chars".
 const JUSTIFICATION_MAX_BYTES: usize = 4096;
+
+// INV-STORE-03 (kernel-store.md §2.5.1): "no raw SQL table-name literals
+// in raxis/kernel/src; use Table enum + .as_str()". Same posture for
+// status strings — sourced from the typed enum's `.as_sql_str()` so
+// any future rename in `raxis-types` propagates by compile error rather
+// than silent SQL drift.
+const ESCALATIONS:          &str = Table::Escalations.as_str();
+const TASKS:                &str = Table::Tasks.as_str();
+const SESSIONS:             &str = Table::Sessions.as_str();
+const LINEAGE_RATE_LIMITS:  &str = Table::LineageRateLimits.as_str();
+const INITIATIVES:          &str = Table::Initiatives.as_str();
 
 /// Dispatch one EscalationRequest and return the EscalationResponse.
 ///
@@ -193,10 +205,12 @@ fn submit_escalation_blocking(
     // to reject cross-lineage escalations defence-in-depth.
     let task_row: Option<(String, Option<String>)> = tx
         .query_row(
-            "SELECT t.initiative_id, s.lineage_id
-               FROM tasks t
-          LEFT JOIN sessions s ON s.session_id = t.session_id
-              WHERE t.task_id = ?1",
+            &format!(
+                "SELECT t.initiative_id, s.lineage_id
+                   FROM {TASKS} t
+              LEFT JOIN {SESSIONS} s ON s.session_id = t.session_id
+                  WHERE t.task_id = ?1"
+            ),
             params![req.task_id.as_str()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -224,8 +238,10 @@ fn submit_escalation_blocking(
     let idem_key = req.idempotency_key.to_string();
     let existing_id: Option<String> = tx
         .query_row(
-            "SELECT escalation_id FROM escalations
-              WHERE session_id = ?1 AND idempotency_key = ?2",
+            &format!(
+                "SELECT escalation_id FROM {ESCALATIONS}
+                  WHERE session_id = ?1 AND idempotency_key = ?2"
+            ),
             params![session_id_str, idem_key],
             |r| r.get::<_, String>(0),
         )
@@ -255,8 +271,10 @@ fn submit_escalation_blocking(
     // Existing lineage_rate_limits row, if any.
     let existing: Option<(i64, i64, i64, i64)> = tx
         .query_row(
-            "SELECT window_start, escalation_count, quarantined, quarantine_trigger_count
-               FROM lineage_rate_limits WHERE lineage_id = ?1",
+            &format!(
+                "SELECT window_start, escalation_count, quarantined, quarantine_trigger_count
+                   FROM {LINEAGE_RATE_LIMITS} WHERE lineage_id = ?1"
+            ),
             params![lineage_id_str],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
@@ -350,11 +368,13 @@ fn submit_escalation_blocking(
         .expect("RequestedEscalationScope is always JSON-serialisable");
 
     tx.execute(
-        "INSERT INTO escalations (
-            escalation_id, session_id, task_id, lineage_id, initiative_id,
-            class, requested_scope_json, justification, idempotency_key,
-            status, created_at, timeout_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'Pending', ?10, ?11)",
+        &format!(
+            "INSERT INTO {ESCALATIONS} (
+                escalation_id, session_id, task_id, lineage_id, initiative_id,
+                class, requested_scope_json, justification, idempotency_key,
+                status, created_at, timeout_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+        ),
         params![
             escalation_id_str,
             session_id_str,
@@ -365,6 +385,7 @@ fn submit_escalation_blocking(
             scope_json,
             req.justification,
             idem_key,
+            EscalationStatus::Pending.as_sql_str(),
             now_secs,
             timeout_at,
         ],
@@ -423,19 +444,21 @@ fn upsert_lineage_rate_limits(
 ) -> Result<(), EscalationRejectionReason> {
     use rusqlite::params;
     tx.execute(
-        "INSERT INTO lineage_rate_limits (
-            lineage_id, window_start, escalation_count,
-            quarantined, quarantine_trigger_count, quarantined_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         ON CONFLICT(lineage_id) DO UPDATE SET
-            window_start             = excluded.window_start,
-            escalation_count         = excluded.escalation_count,
-            quarantined              = excluded.quarantined,
-            quarantine_trigger_count = excluded.quarantine_trigger_count,
-            quarantined_at           = COALESCE(
-                                          lineage_rate_limits.quarantined_at,
-                                          excluded.quarantined_at
-                                       )",
+        &format!(
+            "INSERT INTO {LINEAGE_RATE_LIMITS} (
+                lineage_id, window_start, escalation_count,
+                quarantined, quarantine_trigger_count, quarantined_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(lineage_id) DO UPDATE SET
+                window_start             = excluded.window_start,
+                escalation_count         = excluded.escalation_count,
+                quarantined              = excluded.quarantined,
+                quarantine_trigger_count = excluded.quarantine_trigger_count,
+                quarantined_at           = COALESCE(
+                                              {LINEAGE_RATE_LIMITS}.quarantined_at,
+                                              excluded.quarantined_at
+                                           )"
+        ),
         params![
             lineage_id,
             window_start,
@@ -482,8 +505,8 @@ mod tests {
     use raxis_policy::{EscalationPolicyForTests, OperatorEntry, PolicyBundle};
     use raxis_store::Store;
     use raxis_types::{
-        EscalationClass, EscalationRequest, EscalationResponse,
-        RequestedEscalationScope,
+        EscalationClass, EscalationRequest, EscalationResponse, InitiativeState,
+        RequestedEscalationScope, Role, TaskState,
     };
 
     use crate::authority::keys::KeyRegistry;
@@ -499,6 +522,8 @@ mod tests {
     const LINEAGE_ID:    &str = "lin-prime";
     const INITIATIVE_ID: &str = "00000000-0000-0000-0000-0000000000aa";
     const TASK_ID:       &str = "00000000-0000-0000-0000-0000000000bb";
+    // INV-STORE-03: tests share the production const aliases for table
+    // names (visible because `mod tests` is `use super::*`).
 
     /// Build a HandlerContext with a non-zero escalation policy so the
     /// rate-limit branch can fire deterministically. Returns the ctx
@@ -542,32 +567,52 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let conn = ctx.store.lock_sync();
             let now  = unix_now_secs();
+            // Role/actor strings ("planner", "kernel") are free-form
+            // value columns (not finite enums), so they remain inline.
+            // Initiative/task FSM state strings come from the typed
+            // enum's `.as_sql_str()` per INV-STORE-03.
             conn.execute(
-                "INSERT INTO sessions (
-                    session_id, role_id, session_token, lineage_id,
-                    worktree_root, base_sha, base_tracking_ref,
-                    fetch_quota, sequence_number,
-                    created_at, expires_at, revoked, revoked_at
-                 ) VALUES (?1, 'planner', ?2, ?3, NULL, NULL, NULL,
-                           0, 0,
-                           ?4, ?5, 0, NULL)",
-                rusqlite::params![SESSION_ID, SESSION_TOKEN, LINEAGE_ID, now, now + 3600],
+                &format!(
+                    "INSERT INTO {SESSIONS} (
+                        session_id, role_id, session_token, lineage_id,
+                        worktree_root, base_sha, base_tracking_ref,
+                        fetch_quota, sequence_number,
+                        created_at, expires_at, revoked, revoked_at
+                     ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL,
+                               0, 0,
+                               ?5, ?6, 0, NULL)"
+                ),
+                rusqlite::params![
+                    SESSION_ID,
+                    Role::Planner.as_sql_str(),
+                    SESSION_TOKEN, LINEAGE_ID, now, now + 3600,
+                ],
             ).unwrap();
             conn.execute(
-                "INSERT INTO initiatives
-                    (initiative_id, state, terminal_criteria_json,
-                     plan_artifact_sha256, created_at)
-                 VALUES (?1, 'Executing', '{}', 'deadbeef', ?2)",
-                rusqlite::params![INITIATIVE_ID, now],
+                &format!(
+                    "INSERT INTO {INITIATIVES}
+                        (initiative_id, state, terminal_criteria_json,
+                         plan_artifact_sha256, created_at)
+                     VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+                ),
+                rusqlite::params![
+                    INITIATIVE_ID, InitiativeState::Executing.as_sql_str(), now,
+                ],
             ).unwrap();
             conn.execute(
-                "INSERT INTO tasks
-                    (task_id, initiative_id, lane_id, state, actor,
-                     policy_epoch, admitted_at, transitioned_at, session_id,
-                     actual_cost)
-                 VALUES (?1, ?2, 'default', 'Running', 'kernel',
-                         1, ?3, ?3, ?4, 0)",
-                rusqlite::params![TASK_ID, INITIATIVE_ID, now, SESSION_ID],
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at, session_id,
+                         actual_cost)
+                     VALUES (?1, ?2, 'default', ?3, 'kernel',
+                             1, ?4, ?4, ?5, 0)"
+                ),
+                rusqlite::params![
+                    TASK_ID, INITIATIVE_ID,
+                    TaskState::Running.as_sql_str(),
+                    now, SESSION_ID,
+                ],
             ).unwrap();
         }).await.unwrap();
     }
@@ -719,7 +764,7 @@ mod tests {
         seed_session_and_task(Arc::clone(&ctx)).await;
         with_store_blocking(&ctx, |conn| {
             conn.execute(
-                "UPDATE sessions SET revoked_at = ?1 WHERE session_id = ?2",
+                &format!("UPDATE {SESSIONS} SET revoked_at = ?1 WHERE session_id = ?2"),
                 rusqlite::params![unix_now_secs(), SESSION_ID],
             ).unwrap();
         }).await;
@@ -736,7 +781,7 @@ mod tests {
         seed_session_and_task(Arc::clone(&ctx)).await;
         with_store_blocking(&ctx, |conn| {
             conn.execute(
-                "UPDATE sessions SET expires_at = ?1 WHERE session_id = ?2",
+                &format!("UPDATE {SESSIONS} SET expires_at = ?1 WHERE session_id = ?2"),
                 rusqlite::params![unix_now_secs() - 1, SESSION_ID],
             ).unwrap();
         }).await;
@@ -774,23 +819,34 @@ mod tests {
         with_store_blocking(&ctx, move |conn| {
             let now = unix_now_secs();
             conn.execute(
-                "INSERT INTO sessions (
-                    session_id, role_id, session_token, lineage_id,
-                    worktree_root, base_sha, base_tracking_ref,
-                    fetch_quota, sequence_number,
-                    created_at, expires_at, revoked, revoked_at
-                 ) VALUES (?1, 'planner', 'tok2', 'lin-other', NULL, NULL, NULL,
-                           0, 0, ?2, ?3, 0, NULL)",
-                rusqlite::params![other_session_id, now, now + 3600],
+                &format!(
+                    "INSERT INTO {SESSIONS} (
+                        session_id, role_id, session_token, lineage_id,
+                        worktree_root, base_sha, base_tracking_ref,
+                        fetch_quota, sequence_number,
+                        created_at, expires_at, revoked, revoked_at
+                     ) VALUES (?1, ?2, 'tok2', 'lin-other', NULL, NULL, NULL,
+                               0, 0, ?3, ?4, 0, NULL)"
+                ),
+                rusqlite::params![
+                    other_session_id, Role::Planner.as_sql_str(),
+                    now, now + 3600,
+                ],
             ).unwrap();
             conn.execute(
-                "INSERT INTO tasks
-                    (task_id, initiative_id, lane_id, state, actor,
-                     policy_epoch, admitted_at, transitioned_at, session_id,
-                     actual_cost)
-                 VALUES (?1, ?2, 'default', 'Running', 'kernel',
-                         1, ?3, ?3, ?4, 0)",
-                rusqlite::params![other_task_id, INITIATIVE_ID, now, other_session_id],
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at, session_id,
+                         actual_cost)
+                     VALUES (?1, ?2, 'default', ?3, 'kernel',
+                             1, ?4, ?4, ?5, 0)"
+                ),
+                rusqlite::params![
+                    other_task_id, INITIATIVE_ID,
+                    TaskState::Running.as_sql_str(),
+                    now, other_session_id,
+                ],
             ).unwrap();
         }).await;
 
@@ -829,7 +885,7 @@ mod tests {
         }
         let count: i64 = with_store_blocking(&ctx, |conn| {
             conn.query_row(
-                "SELECT escalation_count FROM lineage_rate_limits WHERE lineage_id = ?1",
+                &format!("SELECT escalation_count FROM {LINEAGE_RATE_LIMITS} WHERE lineage_id = ?1"),
                 rusqlite::params![LINEAGE_ID],
                 |r| r.get(0),
             ).unwrap()
@@ -862,7 +918,7 @@ mod tests {
 
         let count: i64 = with_store_blocking(&ctx, |conn| {
             conn.query_row(
-                "SELECT escalation_count FROM lineage_rate_limits WHERE lineage_id = ?1",
+                &format!("SELECT escalation_count FROM {LINEAGE_RATE_LIMITS} WHERE lineage_id = ?1"),
                 rusqlite::params![LINEAGE_ID],
                 |r| r.get(0),
             ).unwrap()
@@ -922,7 +978,7 @@ mod tests {
         // expired window and resets the counter.
         with_store_blocking(&ctx, |conn| {
             conn.execute(
-                "UPDATE lineage_rate_limits SET window_start = ?1 WHERE lineage_id = ?2",
+                &format!("UPDATE {LINEAGE_RATE_LIMITS} SET window_start = ?1 WHERE lineage_id = ?2"),
                 rusqlite::params![unix_now_secs() - 600, LINEAGE_ID],
             ).unwrap();
         }).await;

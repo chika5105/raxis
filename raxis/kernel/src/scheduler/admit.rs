@@ -111,16 +111,22 @@ mod tests {
     use super::*;
     use raxis_store::Store;
 
+    const INITIATIVES:    &str = Table::Initiatives.as_str();
+    const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
+
     fn fresh_store_with_initiative(init_id: &str) -> Store {
+        use raxis_types::InitiativeState;
         let store = Store::open_in_memory().unwrap();
         let now = unix_now_secs();
         let conn = store.lock_sync();
         conn.execute(
-            "INSERT INTO initiatives
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES (?1, 'Draft', '{}', 'deadbeef', ?2)",
-            rusqlite::params![init_id, now],
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![init_id, InitiativeState::Draft.as_sql_str(), now],
         ).unwrap();
         drop(conn);
         store
@@ -151,12 +157,14 @@ mod tests {
         let conn = store.lock_sync();
         let (state, actor, epoch, admitted_at, transitioned_at): (String, String, i64, i64, i64) =
             conn.query_row(
-                "SELECT state, actor, policy_epoch, admitted_at, transitioned_at
-                   FROM tasks WHERE task_id='t1'",
+                &format!(
+                    "SELECT state, actor, policy_epoch, admitted_at, transitioned_at
+                       FROM {TASKS} WHERE task_id='t1'"
+                ),
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             ).unwrap();
-        assert_eq!(state, "Admitted");
+        assert_eq!(state, TaskState::Admitted.as_sql_str());
         assert_eq!(actor, "kernel");
         assert_eq!(epoch, 7);
         assert!(admitted_at > 0);
@@ -197,8 +205,10 @@ mod tests {
 
         let conn = store.lock_sync();
         let (init_id, pred, succ): (String, String, String) = conn.query_row(
-            "SELECT initiative_id, predecessor_task_id, successor_task_id
-               FROM task_dag_edges",
+            &format!(
+                "SELECT initiative_id, predecessor_task_id, successor_task_id
+                   FROM {TASK_DAG_EDGES}"
+            ),
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         ).unwrap();

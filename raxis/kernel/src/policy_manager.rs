@@ -27,11 +27,20 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_policy::PolicyBundle;
-use raxis_store::Store;
-use raxis_types::unix_now_secs;
+use raxis_store::{Store, Table};
+use raxis_types::{unix_now_secs, DelegationStatus};
 use thiserror::Error;
 
 use crate::authority::keys::{authority_verifying_key, KeyRegistry};
+
+// INV-STORE-03 (kernel-store.md §2.5.1): "no raw SQL table-name literals
+// in raxis/kernel/src; use Table enum + .as_str()". Same posture for state
+// strings — `DelegationStatus::*.as_sql_str()` flows through these queries
+// so any rename in `raxis-types` is caught at compile time, not at runtime.
+const POLICY_EPOCH_HISTORY: &str = Table::PolicyEpochHistory.as_str();
+const DELEGATIONS:          &str = Table::Delegations.as_str();
+#[cfg(test)]
+const SESSIONS:             &str = Table::Sessions.as_str();
 
 // ---------------------------------------------------------------------------
 // PolicyError
@@ -124,7 +133,7 @@ pub fn read_current_epoch(store: &Store) -> Result<u64, PolicyError> {
     let conn = store.lock_sync();
     let epoch: i64 = conn
         .query_row(
-            "SELECT COALESCE(MAX(epoch_id), 0) FROM policy_epoch_history",
+            &format!("SELECT COALESCE(MAX(epoch_id), 0) FROM {POLICY_EPOCH_HISTORY}"),
             [],
             |r| r.get(0),
         )
@@ -174,14 +183,16 @@ pub fn install_genesis_policy_epoch(
     // UNIQUE(policy_sha256) constraint AT a different code path —
     // covered by the test below.
     conn.execute(
-        "INSERT OR IGNORE INTO policy_epoch_history (
-             epoch_id, policy_sha256, signed_by_authority,
-             triggered_by_operator, advanced_at
-         ) VALUES (1, ?1, ?2, 'genesis', ?3)",
+        &format!(
+            "INSERT OR IGNORE INTO {POLICY_EPOCH_HISTORY} (
+                 epoch_id, policy_sha256, signed_by_authority,
+                 triggered_by_operator, advanced_at
+             ) VALUES (1, ?1, ?2, 'genesis', ?3)"
+        ),
         rusqlite::params![policy_sha256, signed_by_authority, advanced_at_unix_secs],
     )
     .map_err(|e| PolicyError::StoreWriteFailed {
-        reason: format!("INSERT OR IGNORE policy_epoch_history failed: {e}"),
+        reason: format!("INSERT OR IGNORE {POLICY_EPOCH_HISTORY} failed: {e}"),
     })?;
     Ok(())
 }
@@ -379,15 +390,23 @@ pub fn advance_epoch(
                 reason: format!("BEGIN IMMEDIATE failed: {e}"),
             })?;
 
-        // Step 1: delegation sweep.
+        // Step 1: delegation sweep. State strings sourced via
+        // `DelegationStatus::*.as_sql_str()` per INV-STORE-03.
+        let stale_state  = DelegationStatus::StaleOnNextUse
+            .as_sql_str()
+            .expect("StaleOnNextUse is a stored variant");
+        let active_state = DelegationStatus::Active
+            .as_sql_str()
+            .expect("Active is a stored variant");
         let n_delegations = tx
             .execute(
-                "UPDATE delegations SET status = 'StaleOnNextUse' \
-                  WHERE status = 'Active'",
-                [],
+                &format!(
+                    "UPDATE {DELEGATIONS} SET status = ?1 WHERE status = ?2"
+                ),
+                rusqlite::params![stale_state, active_state],
             )
             .map_err(|e| PolicyError::StoreWriteFailed {
-                reason: format!("UPDATE delegations failed: {e}"),
+                reason: format!("UPDATE {DELEGATIONS} failed: {e}"),
             })? as u64;
 
         // Step 2: session prompt invalidation. Deferred until the
@@ -402,10 +421,12 @@ pub fn advance_epoch(
         // operator gets a precise wire code (vs a generic
         // StoreWriteFailed that would lose the diagnostic).
         let insert_result = tx.execute(
-            "INSERT INTO policy_epoch_history (
-                 epoch_id, policy_sha256, signed_by_authority,
-                 triggered_by_operator, advanced_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            &format!(
+                "INSERT INTO {POLICY_EPOCH_HISTORY} (
+                     epoch_id, policy_sha256, signed_by_authority,
+                     triggered_by_operator, advanced_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5)"
+            ),
             rusqlite::params![
                 new_epoch_id as i64,
                 sha256_hex,
@@ -432,7 +453,7 @@ pub fn advance_epoch(
                 });
             }
             return Err(PolicyError::StoreWriteFailed {
-                reason: format!("INSERT policy_epoch_history failed: {e}"),
+                reason: format!("INSERT {POLICY_EPOCH_HISTORY} failed: {e}"),
             });
         }
 
@@ -577,8 +598,10 @@ mod tests {
         let conn = store.lock_sync();
         let (sha, signed_by, triggered, ts): (String, String, String, i64) = conn
             .query_row(
-                "SELECT policy_sha256, signed_by_authority, triggered_by_operator, advanced_at
-                   FROM policy_epoch_history WHERE epoch_id = 1",
+                &format!(
+                    "SELECT policy_sha256, signed_by_authority, triggered_by_operator, advanced_at
+                       FROM {POLICY_EPOCH_HISTORY} WHERE epoch_id = 1"
+                ),
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
@@ -833,13 +856,20 @@ mod tests {
         // outcome's `n_delegations_marked_stale` counts only the
         // Active flip.
         let (registry, sk, store, swap, audit, _sink) = boot_state();
+        let active_state = DelegationStatus::Active.as_sql_str().unwrap();
+        let stale_state  = DelegationStatus::StaleOnNextUse.as_sql_str().unwrap();
         {
             let conn = store.lock_sync();
             // Seed a session row so the delegations FK resolves.
+            // Role identifier ("planner") is a free-form text column,
+            // so it stays inline; only state strings come from the
+            // typed enum per INV-STORE-03.
             conn.execute(
-                "INSERT INTO sessions (session_id, role_id, session_token, lineage_id,
-                                       fetch_quota, sequence_number, created_at, expires_at)
-                 VALUES ('s1', 'planner', 'tok1', 'lin1', 10, 0, 1, 9999999999)",
+                &format!(
+                    "INSERT INTO {SESSIONS} (session_id, role_id, session_token, lineage_id,
+                                             fetch_quota, sequence_number, created_at, expires_at)
+                     VALUES ('s1', 'planner', 'tok1', 'lin1', 10, 0, 1, 9999999999)"
+                ),
                 [],
             ).unwrap();
             // The delegations CHECK constraint allows
@@ -849,22 +879,26 @@ mod tests {
             // the sweep targets only 'Active' rows so 'StaleOnNextUse'
             // must remain unchanged.
             conn.execute(
-                "INSERT INTO delegations (
-                    delegation_id, session_id, capability_class,
-                    delegating_role_id, delegate_role_id,
-                    effective_from, expires_at, status, operator_signature
-                 ) VALUES ('d1', 's1', 'FsRead', 'planner', 'planner',
-                           1, 9999999, 'Active', X'00')",
-                [],
+                &format!(
+                    "INSERT INTO {DELEGATIONS} (
+                        delegation_id, session_id, capability_class,
+                        delegating_role_id, delegate_role_id,
+                        effective_from, expires_at, status, operator_signature
+                     ) VALUES ('d1', 's1', 'FsRead', 'planner', 'planner',
+                               1, 9999999, ?1, X'00')"
+                ),
+                rusqlite::params![active_state],
             ).unwrap();
             conn.execute(
-                "INSERT INTO delegations (
-                    delegation_id, session_id, capability_class,
-                    delegating_role_id, delegate_role_id,
-                    effective_from, expires_at, status, operator_signature
-                 ) VALUES ('d2', 's1', 'FsWrite', 'planner', 'planner',
-                           1, 9999999, 'StaleOnNextUse', X'00')",
-                [],
+                &format!(
+                    "INSERT INTO {DELEGATIONS} (
+                        delegation_id, session_id, capability_class,
+                        delegating_role_id, delegate_role_id,
+                        effective_from, expires_at, status, operator_signature
+                     ) VALUES ('d2', 's1', 'FsWrite', 'planner', 'planner',
+                               1, 9999999, ?1, X'00')"
+                ),
+                rusqlite::params![stale_state],
             ).unwrap();
         }
 
@@ -878,13 +912,19 @@ mod tests {
         // (the WHERE clause targets `status = 'Active'` only).
         let conn = store.lock_sync();
         let active_status: String = conn
-            .query_row("SELECT status FROM delegations WHERE delegation_id = 'd1'", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT status FROM {DELEGATIONS} WHERE delegation_id = 'd1'"),
+                [], |r| r.get(0),
+            )
             .unwrap();
         let stale_status: String = conn
-            .query_row("SELECT status FROM delegations WHERE delegation_id = 'd2'", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT status FROM {DELEGATIONS} WHERE delegation_id = 'd2'"),
+                [], |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(active_status, "StaleOnNextUse");
-        assert_eq!(stale_status, "StaleOnNextUse");
+        assert_eq!(active_status, stale_state);
+        assert_eq!(stale_status, stale_state);
     }
 
     // ── advance_epoch failure paths ───────────────────────────────────
@@ -952,7 +992,9 @@ mod tests {
             // the next INSERT trips on UNIQUE(policy_sha256), not
             // UNIQUE(epoch_id).
             conn.execute(
-                "UPDATE policy_epoch_history SET policy_sha256 = ?1 WHERE epoch_id = 1",
+                &format!(
+                    "UPDATE {POLICY_EPOCH_HISTORY} SET policy_sha256 = ?1 WHERE epoch_id = 1"
+                ),
                 [&sha],
             )
             .unwrap();

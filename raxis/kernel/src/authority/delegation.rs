@@ -16,10 +16,15 @@
 //   INV-DELEG-04: Ed25519 signature over the canonical signing input is verified
 //                 before the row is written (raxis-crypto::delegation::verify_delegation).
 
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 use raxis_types::{unix_now_secs, CapabilityClass, DelegationStatus, SessionId};
 
 use crate::authority::keys::AuthorityError;
+
+// INV-STORE-03 (kernel-store.md §2.5.1): table identifiers and FSM state
+// strings come from the typed sources; no raw SQL identifiers in this
+// file.
+const DELEGATIONS: &str = Table::Delegations.as_str();
 
 /// A delegation row returned by list_delegations or check_capability.
 #[derive(Debug, Clone)]
@@ -84,11 +89,15 @@ pub fn grant_delegation(
 
     let conn = store.lock_sync();
     // INV-DELEG-01: INSERT will fail if UNIQUE(session_id, capability_class) is violated.
+    let active_state = DelegationStatus::Active.as_sql_str()
+        .expect("Active is a stored variant");
     let result = conn.execute(
-        "INSERT INTO delegations (
-            delegation_id, session_id, capability_class, scope_json,
-            granted_by, granted_at, expires_at, use_count, max_uses, status
-         ) VALUES (?1,?2,?3,?4,?5,?6,?7,0,?8,'Active')",
+        &format!(
+            "INSERT INTO {DELEGATIONS} (
+                delegation_id, session_id, capability_class, scope_json,
+                granted_by, granted_at, expires_at, use_count, max_uses, status
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,0,?8,?9)"
+        ),
         rusqlite::params![
             delegation_id,
             session_id.as_str(),
@@ -98,6 +107,7 @@ pub fn grant_delegation(
             now,
             expires_at,
             max_uses,
+            active_state,
         ],
     );
 
@@ -108,9 +118,11 @@ pub fn grant_delegation(
         {
             // UNIQUE violation — find the existing delegation_id for the error.
             let existing_id: String = conn.query_row(
-                "SELECT delegation_id FROM delegations
-                 WHERE session_id=?1 AND capability_class=?2 AND status='Active'",
-                rusqlite::params![session_id.as_str(), capability_class],
+                &format!(
+                    "SELECT delegation_id FROM {DELEGATIONS}
+                     WHERE session_id=?1 AND capability_class=?2 AND status=?3"
+                ),
+                rusqlite::params![session_id.as_str(), capability_class, active_state],
                 |r| r.get(0),
             ).unwrap_or_else(|_| "unknown".to_owned());
             Err(AuthorityError::DelegationAlreadyActive { existing_delegation_id: existing_id })
@@ -138,10 +150,12 @@ pub fn check_capability(
     let now = unix_now_secs();
     // Query any row for (session_id, capability) — including expired.
     let result = conn.query_row(
-        "SELECT status, expires_at FROM delegations
-         WHERE session_id=?1 AND capability_class=?2
-         ORDER BY granted_at DESC
-         LIMIT 1",
+        &format!(
+            "SELECT status, expires_at FROM {DELEGATIONS}
+             WHERE session_id=?1 AND capability_class=?2
+             ORDER BY granted_at DESC
+             LIMIT 1"
+        ),
         rusqlite::params![session_id.as_str(), capability.as_str()],
         |r| {
             let status_str: String = r.get(0)?;
@@ -178,12 +192,23 @@ pub fn record_capability_use(
     store: &Store,
 ) -> Result<(), AuthorityError> {
     let conn = store.lock_sync();
+    let renewal_state = DelegationStatus::RenewalRequired.as_sql_str()
+        .expect("RenewalRequired is a stored variant");
+    let stale_state   = DelegationStatus::StaleOnNextUse.as_sql_str()
+        .expect("StaleOnNextUse is a stored variant");
     let rows = conn.execute(
-        "UPDATE delegations
-         SET status = 'RenewalRequired'
-         WHERE session_id = ?1 AND capability_class = ?2
-           AND status = 'StaleOnNextUse'",
-        rusqlite::params![session_id.as_str(), capability.as_str()],
+        &format!(
+            "UPDATE {DELEGATIONS}
+             SET status = ?1
+             WHERE session_id = ?2 AND capability_class = ?3
+               AND status = ?4"
+        ),
+        rusqlite::params![
+            renewal_state,
+            session_id.as_str(),
+            capability.as_str(),
+            stale_state,
+        ],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
     if rows == 0 {
         return Err(AuthorityError::DelegationNotStale);
@@ -197,11 +222,13 @@ pub fn list_delegations(
     store: &Store,
 ) -> Result<Vec<DelegationRow>, AuthorityError> {
     let conn = store.lock_sync();
-    let mut stmt = conn.prepare(
+    let list_sql = format!(
         "SELECT delegation_id, session_id, capability_class, scope_json,
                 granted_by, granted_at, expires_at, use_count, max_uses, status
-         FROM delegations WHERE session_id=?1 ORDER BY granted_at ASC",
-    ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+         FROM {DELEGATIONS} WHERE session_id=?1 ORDER BY granted_at ASC"
+    );
+    let mut stmt = conn.prepare(&list_sql)
+        .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     let rows = stmt.query_map(
         rusqlite::params![session_id.as_str()],
@@ -236,9 +263,13 @@ pub fn mark_stale_on_epoch_advance(
     store: &Store,
 ) -> Result<usize, AuthorityError> {
     let conn = store.lock_sync();
+    let stale_state  = DelegationStatus::StaleOnNextUse.as_sql_str()
+        .expect("StaleOnNextUse is a stored variant");
+    let active_state = DelegationStatus::Active.as_sql_str()
+        .expect("Active is a stored variant");
     let rows = conn.execute(
-        "UPDATE delegations SET status='StaleOnNextUse' WHERE status='Active'",
-        [],
+        &format!("UPDATE {DELEGATIONS} SET status=?1 WHERE status=?2"),
+        rusqlite::params![stale_state, active_state],
     ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
     Ok(rows)
 }

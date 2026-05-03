@@ -32,8 +32,13 @@ use rusqlite::params;
 use crate::authority::keys::AuthorityError;
 use raxis_crypto::{token, verify};
 use raxis_policy::PolicyBundle;
-use raxis_store::Store;
-use raxis_types::{operator_wire::ApprovalScopeWire, unix_now_secs};
+use raxis_store::{Store, Table};
+use raxis_types::{operator_wire::ApprovalScopeWire, unix_now_secs, EscalationStatus};
+
+// INV-STORE-03 (kernel-store.md §2.5.1): table names + state strings come
+// from the typed sources; no raw SQL identifiers anywhere in this file.
+const ESCALATIONS:     &str = Table::Escalations.as_str();
+const APPROVAL_TOKENS: &str = Table::ApprovalTokens.as_str();
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -194,8 +199,11 @@ pub fn approve_escalation(
     let mut conn = store.lock_sync();
     let tx = conn.transaction()?;
 
+    let pending_state  = EscalationStatus::Pending.as_sql_str();
+    let approved_state = EscalationStatus::Approved.as_sql_str();
+
     let current_status: String = tx.query_row(
-        "SELECT status FROM escalations WHERE escalation_id = ?1",
+        &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
         params![escalation_id],
         |r| r.get(0),
     ).map_err(|e| match e {
@@ -205,7 +213,7 @@ pub fn approve_escalation(
         other => EscalationError::Sql(other),
     })?;
 
-    if current_status != "Pending" {
+    if current_status.as_str() != pending_state {
         return Err(EscalationError::NotPending {
             escalation_id:  escalation_id.to_owned(),
             current_status,
@@ -213,11 +221,13 @@ pub fn approve_escalation(
     }
 
     tx.execute(
-        "INSERT INTO approval_tokens (
-            approval_token_id, escalation_id, scope_json,
-            issued_by_operator_id, policy_epoch, token_hash, nonce,
-            issued_at, expires_at, consumed
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)",
+        &format!(
+            "INSERT INTO {APPROVAL_TOKENS} (
+                approval_token_id, escalation_id, scope_json,
+                issued_by_operator_id, policy_epoch, token_hash, nonce,
+                issued_at, expires_at, consumed
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)"
+        ),
         params![
             approval_token_id,
             escalation_id,
@@ -232,10 +242,12 @@ pub fn approve_escalation(
     )?;
 
     let updated = tx.execute(
-        "UPDATE escalations
-            SET status = 'Approved', resolved_at = ?1
-          WHERE escalation_id = ?2 AND status = 'Pending'",
-        params![now_secs, escalation_id],
+        &format!(
+            "UPDATE {ESCALATIONS}
+                SET status = ?1, resolved_at = ?2
+              WHERE escalation_id = ?3 AND status = ?4"
+        ),
+        params![approved_state, now_secs, escalation_id, pending_state],
     )?;
     if updated != 1 {
         return Err(EscalationError::Sql(rusqlite::Error::QueryReturnedNoRows));
@@ -259,8 +271,11 @@ pub fn deny_escalation(
     let now = unix_now_secs();
     let conn = store.lock_sync();
 
+    let pending_state = EscalationStatus::Pending.as_sql_str();
+    let denied_state  = EscalationStatus::Denied.as_sql_str();
+
     let current_status: String = conn.query_row(
-        "SELECT status FROM escalations WHERE escalation_id = ?1",
+        &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
         params![escalation_id],
         |r| r.get(0),
     ).map_err(|e| match e {
@@ -270,7 +285,7 @@ pub fn deny_escalation(
         other => EscalationError::Sql(other),
     })?;
 
-    if current_status != "Pending" {
+    if current_status.as_str() != pending_state {
         return Err(EscalationError::NotPending {
             escalation_id:  escalation_id.to_owned(),
             current_status,
@@ -278,10 +293,12 @@ pub fn deny_escalation(
     }
 
     let updated = conn.execute(
-        "UPDATE escalations
-            SET status = 'Denied', resolved_at = ?1, resolution_notes = ?2
-          WHERE escalation_id = ?3 AND status = 'Pending'",
-        params![now, reason, escalation_id],
+        &format!(
+            "UPDATE {ESCALATIONS}
+                SET status = ?1, resolved_at = ?2, resolution_notes = ?3
+              WHERE escalation_id = ?4 AND status = ?5"
+        ),
+        params![denied_state, now, reason, escalation_id, pending_state],
     )?;
     if updated != 1 {
         // Race: another caller approved/denied between our SELECT and
@@ -289,7 +306,7 @@ pub fn deny_escalation(
         // it as NotPending so the operator gets a clear error message.
         return Err(EscalationError::NotPending {
             escalation_id:  escalation_id.to_owned(),
-            current_status: "Pending (race)".to_owned(),
+            current_status: format!("{pending_state} (race)"),
         });
     }
     Ok(DenyResult { denied_at: now })
@@ -387,20 +404,27 @@ mod tests {
         // and initiatives. We disable FK enforcement just for the
         // fixture insert, then re-enable, so the test exercises the
         // status transition logic in isolation.
+        //
+        // Class + status strings come from the typed enums per
+        // INV-STORE-03; the rest are free-form text columns.
         let conn = store.lock_sync();
         conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
         conn.execute(
-            "INSERT INTO escalations (
-                escalation_id, session_id, task_id, lineage_id, initiative_id,
-                class, requested_scope_json, justification, idempotency_key,
-                status, created_at, timeout_at
-             ) VALUES (?1, 'sess-1', 'task-1', 'lin-1', 'init-1',
-                       'CapabilityUpgrade',
-                       '{\"kind\":\"CapabilityUpgrade\",\"capability\":\"WriteSecrets\"}',
-                       'unit-test', ?2, 'Pending', ?3, ?4)",
+            &format!(
+                "INSERT INTO {ESCALATIONS} (
+                    escalation_id, session_id, task_id, lineage_id, initiative_id,
+                    class, requested_scope_json, justification, idempotency_key,
+                    status, created_at, timeout_at
+                 ) VALUES (?1, 'sess-1', 'task-1', 'lin-1', 'init-1',
+                           ?2,
+                           '{{\"kind\":\"CapabilityUpgrade\",\"capability\":\"WriteSecrets\"}}',
+                           'unit-test', ?3, ?4, ?5, ?6)"
+            ),
             params![
                 escalation_id,
+                raxis_types::EscalationClass::CapabilityUpgrade.as_sql_str(),
                 escalation_id, // unique idempotency_key per escalation
+                EscalationStatus::Pending.as_sql_str(),
                 unix_now_secs(),
                 unix_now_secs() + 3600,
             ],
@@ -408,18 +432,18 @@ mod tests {
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
     }
 
-    fn force_status(store: &Store, escalation_id: &str, status: &str) {
+    fn force_status(store: &Store, escalation_id: &str, status: EscalationStatus) {
         let conn = store.lock_sync();
         conn.execute(
-            "UPDATE escalations SET status = ?1 WHERE escalation_id = ?2",
-            params![status, escalation_id],
+            &format!("UPDATE {ESCALATIONS} SET status = ?1 WHERE escalation_id = ?2"),
+            params![status.as_sql_str(), escalation_id],
         ).unwrap();
     }
 
     fn read_status(store: &Store, escalation_id: &str) -> String {
         let conn = store.lock_sync();
         conn.query_row(
-            "SELECT status FROM escalations WHERE escalation_id = ?1",
+            &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
             params![escalation_id],
             |r| r.get(0),
         ).unwrap()
@@ -485,13 +509,15 @@ mod tests {
         assert!(result.expires_at > unix_now_secs(),
             "expires_at must be in the future");
 
-        assert_eq!(read_status(&store, "esc-1"), "Approved");
+        assert_eq!(read_status(&store, "esc-1"), EscalationStatus::Approved.as_sql_str());
 
         // approval_tokens row was inserted with token_hash = sha256(raw).
         let conn = store.lock_sync();
         let (stored_hash, stored_epoch): (String, i64) = conn.query_row(
-            "SELECT token_hash, policy_epoch FROM approval_tokens
-              WHERE escalation_id = ?1",
+            &format!(
+                "SELECT token_hash, policy_epoch FROM {APPROVAL_TOKENS}
+                  WHERE escalation_id = ?1"
+            ),
             params!["esc-1"],
             |r| Ok((r.get(0)?, r.get(1)?)),
         ).unwrap();
@@ -523,7 +549,13 @@ mod tests {
         // Escalation already moved to Denied — operator's approval
         // attempt MUST be rejected with NotPending so the operator
         // sees a clear error rather than a confusing race.
-        for terminal_status in ["Approved", "Denied", "TimedOut", "Consumed", "TokenExpired"] {
+        for terminal_status in [
+            EscalationStatus::Approved,
+            EscalationStatus::Denied,
+            EscalationStatus::TimedOut,
+            EscalationStatus::Consumed,
+            EscalationStatus::TokenExpired,
+        ] {
             let store = Store::open_in_memory().unwrap();
             let (sk, pk) = fixture_keypair();
             let policy = policy_with_operator("op-prime", hex::encode(pk));
@@ -539,7 +571,7 @@ mod tests {
 
             match err {
                 EscalationError::NotPending { current_status, .. } => {
-                    assert_eq!(current_status, terminal_status,
+                    assert_eq!(current_status, terminal_status.as_sql_str(),
                         "error must surface the actual current_status");
                 }
                 other => panic!("expected NotPending, got {other:?}"),
@@ -648,7 +680,7 @@ mod tests {
             "esc-1", &scope, &sig, "op-prime", 1, &policy, &store,
         ).unwrap_err();
         assert!(matches!(err, EscalationError::SignatureInvalid));
-        assert_eq!(read_status(&store, "esc-1"), "Pending");
+        assert_eq!(read_status(&store, "esc-1"), EscalationStatus::Pending.as_sql_str());
     }
 
     #[test]
@@ -662,7 +694,7 @@ mod tests {
         let policy = policy_with_operator("op-prime", hex::encode(pk));
         let scope = fixture_scope();
         insert_pending_escalation(&store, "esc-1");
-        force_status(&store, "esc-1", "Approved");
+        force_status(&store, "esc-1", EscalationStatus::Approved);
         let sig = sk.sign(&approval_scope_signing_input("esc-1", &scope))
             .to_bytes().to_vec();
 
@@ -674,7 +706,7 @@ mod tests {
         // Crucial invariant: NO approval_tokens row was written.
         let conn = store.lock_sync();
         let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM approval_tokens WHERE escalation_id = 'esc-1'",
+            &format!("SELECT COUNT(*) FROM {APPROVAL_TOKENS} WHERE escalation_id = 'esc-1'"),
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(n, 0,
@@ -693,11 +725,11 @@ mod tests {
         ).expect("happy-path denial must succeed");
 
         assert!(result.denied_at > 0);
-        assert_eq!(read_status(&store, "esc-1"), "Denied");
+        assert_eq!(read_status(&store, "esc-1"), EscalationStatus::Denied.as_sql_str());
 
         let conn = store.lock_sync();
         let notes: Option<String> = conn.query_row(
-            "SELECT resolution_notes FROM escalations WHERE escalation_id = 'esc-1'",
+            &format!("SELECT resolution_notes FROM {ESCALATIONS} WHERE escalation_id = 'esc-1'"),
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(notes.as_deref(), Some("scope too broad"));
@@ -710,10 +742,10 @@ mod tests {
 
         deny_escalation("esc-1", None, "op-prime", &store).unwrap();
 
-        assert_eq!(read_status(&store, "esc-1"), "Denied");
+        assert_eq!(read_status(&store, "esc-1"), EscalationStatus::Denied.as_sql_str());
         let conn = store.lock_sync();
         let notes: Option<String> = conn.query_row(
-            "SELECT resolution_notes FROM escalations WHERE escalation_id = 'esc-1'",
+            &format!("SELECT resolution_notes FROM {ESCALATIONS} WHERE escalation_id = 'esc-1'"),
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(notes, None);
@@ -729,7 +761,16 @@ mod tests {
 
     #[test]
     fn deny_escalation_rejects_when_not_pending() {
-        for terminal_status in ["Approved", "Denied", "TimedOut", "Consumed", "TokenExpired"] {
+        // Cover every non-Pending variant the schema CHECK constraint
+        // permits — keeps lock-step with the EscalationStatus enum so
+        // a future variant addition forces this test to be updated.
+        for terminal_status in [
+            EscalationStatus::Approved,
+            EscalationStatus::Denied,
+            EscalationStatus::TimedOut,
+            EscalationStatus::Consumed,
+            EscalationStatus::TokenExpired,
+        ] {
             let store = Store::open_in_memory().unwrap();
             insert_pending_escalation(&store, "esc-x");
             force_status(&store, "esc-x", terminal_status);
@@ -747,7 +788,7 @@ mod tests {
         deny_escalation("esc-1", Some("nope"), "op-prime", &store).unwrap();
         let conn = store.lock_sync();
         let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM approval_tokens WHERE escalation_id = 'esc-1'",
+            &format!("SELECT COUNT(*) FROM {APPROVAL_TOKENS} WHERE escalation_id = 'esc-1'"),
             [], |r| r.get(0),
         ).unwrap();
         assert_eq!(n, 0, "denial MUST NOT issue an approval token");

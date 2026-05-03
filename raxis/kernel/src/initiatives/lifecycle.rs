@@ -1015,11 +1015,12 @@ mod tests {
 
     /// Count edges that mention any task in the given initiative.
     fn count_edges_for_initiative(store: &Store, init_id: &str) -> i64 {
+        const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
         let conn = store.lock_sync();
         conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM task_dag_edges e
-                   JOIN tasks t ON t.task_id = e.successor_task_id
+                "SELECT COUNT(*) FROM {TASK_DAG_EDGES} e
+                   JOIN {TASKS} t ON t.task_id = e.successor_task_id
                   WHERE t.initiative_id = ?1"
             ),
             rusqlite::params![init_id],
@@ -1227,7 +1228,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let epoch: i64 = conn.query_row(
-            "SELECT policy_epoch FROM tasks WHERE initiative_id=?1",
+            &format!("SELECT policy_epoch FROM {TASKS} WHERE initiative_id=?1"),
             rusqlite::params![&init_id],
             |r| r.get(0),
         ).unwrap();

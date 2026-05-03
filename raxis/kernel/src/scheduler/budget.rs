@@ -12,11 +12,15 @@
 use std::path::PathBuf;
 
 use raxis_policy::PolicyBundle;
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 use raxis_types::{unix_now_secs, IntentKind};
 
 use crate::scheduler::{BudgetError, SchedulerError};
 use crate::scheduler::lane::get_lane_status;
+
+// INV-STORE-03 (kernel-store.md §2.5.1): all SQL identifiers in this
+// module flow through the typed `Table` enum.
+const LANE_BUDGET_RESERVATIONS: &str = Table::LaneBudgetReservations.as_str();
 
 /// Budget snapshot for a lane — alias for LaneStatus in budget-centric terms.
 pub type LaneBudgetSnapshot = crate::scheduler::lane::LaneStatus;
@@ -73,9 +77,11 @@ pub fn consume_budget(
     let conn = store.lock_sync();
     let now = unix_now_secs();
     conn.execute(
-        "INSERT OR IGNORE INTO lane_budget_reservations
-            (lane_id, task_id, reserved_cost, reserved_at)
-         VALUES (?1, ?2, ?3, ?4)",
+        &format!(
+            "INSERT OR IGNORE INTO {LANE_BUDGET_RESERVATIONS}
+                (lane_id, task_id, reserved_cost, reserved_at)
+             VALUES (?1, ?2, ?3, ?4)"
+        ),
         rusqlite::params![lane_id, task_id, cost as i64, now],
     )?;
     Ok(())
@@ -94,7 +100,9 @@ pub fn current_budget(lane_id: &str, store: &Store) -> Result<LaneBudgetSnapshot
 pub fn release_budget(lane_id: &str, task_id: &str, store: &Store) -> Result<(), SchedulerError> {
     let conn = store.lock_sync();
     let rows = conn.execute(
-        "DELETE FROM lane_budget_reservations WHERE lane_id=?1 AND task_id=?2",
+        &format!(
+            "DELETE FROM {LANE_BUDGET_RESERVATIONS} WHERE lane_id=?1 AND task_id=?2"
+        ),
         rusqlite::params![lane_id, task_id],
     )?;
     match rows {

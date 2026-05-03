@@ -45,9 +45,13 @@ use raxis_store::{Store, Table};
 
 use crate::initiatives::{PlanRegistry, TaskKey, TaskPlanFields};
 
+// INV-STORE-03 (kernel-store.md §2.5.1): no raw SQL table-name literals
+// in `kernel/src`; the constants below are interpolated into every query.
 const TASK_DAG_EDGES:               &str = Table::TaskDagEdges.as_str();
 const TASKS:                        &str = Table::Tasks.as_str();
 const TASK_EXPORTED_PATH_SNAPSHOTS: &str = Table::TaskExportedPathSnapshots.as_str();
+#[cfg(test)]
+const INITIATIVES:                  &str = Table::Initiatives.as_str();
 
 // ---------------------------------------------------------------------------
 // AllowSet — glob patterns ∪ exact paths, with override flag
@@ -410,32 +414,43 @@ mod tests {
     fn seed_initiative(store: &Store, init_id: &str) {
         let conn = store.lock_sync();
         conn.execute(
-            "INSERT INTO initiatives
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES (?1, 'Executing', '{}', 'deadbeef', 0)",
-            rusqlite::params![init_id],
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', 0)"
+            ),
+            rusqlite::params![
+                init_id,
+                raxis_types::InitiativeState::Executing.as_sql_str(),
+            ],
         ).unwrap();
     }
 
-    fn seed_task(store: &Store, init_id: &str, task_id: &str, state: &str) {
+    /// Take a typed `TaskState` rather than a free `&str` so a typo in
+    /// the test doesn't slip past the SQL CHECK constraint silently.
+    fn seed_task(store: &Store, init_id: &str, task_id: &str, state: raxis_types::TaskState) {
         let conn = store.lock_sync();
         conn.execute(
-            "INSERT INTO tasks
-                (task_id, initiative_id, lane_id, state, actor,
-                 policy_epoch, admitted_at, transitioned_at, actual_cost)
-             VALUES (?1, ?2, 'default', ?3, 'kernel', 1, 0, 0, 0)",
-            rusqlite::params![task_id, init_id, state],
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES (?1, ?2, 'default', ?3, 'kernel', 1, 0, 0, 0)"
+            ),
+            rusqlite::params![task_id, init_id, state.as_sql_str()],
         ).unwrap();
     }
 
     fn seed_edge(store: &Store, init_id: &str, pred: &str, succ: &str) {
         let conn = store.lock_sync();
         conn.execute(
-            "INSERT INTO task_dag_edges
-                (initiative_id, predecessor_task_id, successor_task_id,
-                 predecessor_satisfied)
-             VALUES (?1, ?2, ?3, 0)",
+            &format!(
+                "INSERT INTO {TASK_DAG_EDGES}
+                    (initiative_id, predecessor_task_id, successor_task_id,
+                     predecessor_satisfied)
+                 VALUES (?1, ?2, ?3, 0)"
+            ),
             rusqlite::params![init_id, pred, succ],
         ).unwrap();
     }
@@ -444,8 +459,10 @@ mod tests {
         let conn = store.lock_sync();
         for p in paths {
             conn.execute(
-                "INSERT INTO task_exported_path_snapshots (task_id, path)
-                 VALUES (?1, ?2)",
+                &format!(
+                    "INSERT INTO {TASK_EXPORTED_PATH_SNAPSHOTS} (task_id, path)
+                     VALUES (?1, ?2)"
+                ),
                 rusqlite::params![task_id, p],
             ).unwrap();
         }
@@ -488,7 +505,7 @@ mod tests {
     fn task_with_no_predecessors_uses_only_layer_one() {
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
-        seed_task(&store, "init-A", "t1", "Admitted");
+        seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
             "init-A", "t1",
             TaskPlanFields {
@@ -511,8 +528,8 @@ mod tests {
         // pred contributes exported_paths (exact); succ keeps its own globs.
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
-        seed_task(&store, "init-A", "pred", "Completed");
-        seed_task(&store, "init-A", "succ", "Admitted");
+        seed_task(&store, "init-A", "pred", raxis_types::TaskState::Completed);
+        seed_task(&store, "init-A", "succ", raxis_types::TaskState::Admitted);
         seed_edge(&store, "init-A", "pred", "succ");
         seed_exported(&store, "pred", &["src/predout/x.rs", "src/predout/y.rs"]);
 
@@ -539,8 +556,8 @@ mod tests {
     fn aborted_predecessor_grant_never_activates() {
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
-        seed_task(&store, "init-A", "pred", "Aborted");
-        seed_task(&store, "init-A", "succ", "Admitted");
+        seed_task(&store, "init-A", "pred", raxis_types::TaskState::Aborted);
+        seed_task(&store, "init-A", "succ", raxis_types::TaskState::Admitted);
         seed_edge(&store, "init-A", "pred", "succ");
         seed_exported(&store, "pred", &["src/predout/x.rs"]);
         let registry = registry_with(&[
@@ -564,8 +581,8 @@ mod tests {
     fn predecessor_without_export_optin_is_skipped() {
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
-        seed_task(&store, "init-A", "pred", "Completed");
-        seed_task(&store, "init-A", "succ", "Admitted");
+        seed_task(&store, "init-A", "pred", raxis_types::TaskState::Completed);
+        seed_task(&store, "init-A", "succ", raxis_types::TaskState::Admitted);
         seed_edge(&store, "init-A", "pred", "succ");
         seed_exported(&store, "pred", &["src/predout/x.rs"]);
         // Default `path_export_to_successors = false` — even though rows
@@ -588,7 +605,7 @@ mod tests {
     fn check_paths_passes_on_full_coverage() {
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
-        seed_task(&store, "init-A", "t1", "Admitted");
+        seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
             "init-A", "t1",
             TaskPlanFields {
@@ -606,7 +623,7 @@ mod tests {
     fn check_paths_collects_violations() {
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
-        seed_task(&store, "init-A", "t1", "Admitted");
+        seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
             "init-A", "t1",
             TaskPlanFields {
@@ -632,7 +649,7 @@ mod tests {
         // → touched_paths = {} → "Path check passes vacuously at admission."
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
-        seed_task(&store, "init-A", "t1", "Admitted");
+        seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
             "init-A", "t1",
             TaskPlanFields::default(),  // empty allowlist on purpose
@@ -647,7 +664,7 @@ mod tests {
     fn check_paths_with_override_passes_everything() {
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
-        seed_task(&store, "init-A", "t1", "Admitted");
+        seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
             "init-A", "t1",
             TaskPlanFields { path_scope_override: true, ..Default::default() },

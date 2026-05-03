@@ -258,7 +258,9 @@ pub fn startup_check(
 
     // Collect all blob_sha256 values from the SQL index.
     let conn = store.lock_sync();
-    let mut stmt = conn.prepare("SELECT DISTINCT blob_sha256 FROM witness_records")?;
+    let select_blobs_sql =
+        format!("SELECT DISTINCT blob_sha256 FROM {WR}");
+    let mut stmt = conn.prepare(&select_blobs_sql)?;
     let index_shas: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
         .filter_map(|r| r.ok())

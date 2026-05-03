@@ -15,12 +15,16 @@
 use std::path::Path;
 
 use raxis_store::{Store, Table};
-use raxis_types::{unix_now_secs, TaskState};
+use raxis_types::{unix_now_secs, InitiativeState, TaskState};
 
 use crate::errors::KernelError;
 
-const TASKS: &str                = Table::Tasks.as_str();
-const VERIFIER_RUN_TOKENS: &str  = Table::VerifierRunTokens.as_str();
+// INV-STORE-03 (kernel-store.md §2.5.1): table identifiers and FSM state
+// strings flow through typed constants/enums; no raw SQL identifiers in
+// this file (production OR tests).
+const TASKS:                &str = Table::Tasks.as_str();
+const VERIFIER_RUN_TOKENS:  &str = Table::VerifierRunTokens.as_str();
+const INITIATIVES:          &str = Table::Initiatives.as_str();
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -321,19 +325,23 @@ mod tests {
         let now = unix_now_secs();
 
         conn.execute(
-            "INSERT INTO initiatives
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES ('init-recon', 'Executing', '{}', 'deadbeef', ?1)",
-            rusqlite::params![now],
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-recon', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
         ).unwrap();
 
         for (task_id, state) in task_states {
             conn.execute(
-                "INSERT INTO tasks
-                    (task_id, initiative_id, lane_id, state, actor,
-                     policy_epoch, admitted_at, transitioned_at, actual_cost)
-                 VALUES (?1, 'init-recon', 'default', ?2, 'kernel', 1, ?3, ?3, 0)",
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at, actual_cost)
+                     VALUES (?1, 'init-recon', 'default', ?2, 'kernel', 1, ?3, ?3, 0)"
+                ),
                 rusqlite::params![task_id, state.as_sql_str(), now],
             ).unwrap();
         }
@@ -345,10 +353,12 @@ mod tests {
         let conn = store.lock_sync();
         let now = unix_now_secs();
         conn.execute(
-            "INSERT INTO verifier_run_tokens
-                (verifier_run_id, task_id, gate_type, evaluation_sha,
-                 token_hash, issued_at, expires_at, consumed)
-             VALUES (?1, ?2, 'tests_pass', 'evalsha', 'tokhash', ?3, ?4, 0)",
+            &format!(
+                "INSERT INTO {VERIFIER_RUN_TOKENS}
+                    (verifier_run_id, task_id, gate_type, evaluation_sha,
+                     token_hash, issued_at, expires_at, consumed)
+                 VALUES (?1, ?2, 'tests_pass', 'evalsha', 'tokhash', ?3, ?4, 0)"
+            ),
             rusqlite::params![run_id, task_id, now, now + 3600],
         ).unwrap();
     }
@@ -356,7 +366,7 @@ mod tests {
     fn task_state(store: &Store, task_id: &str) -> String {
         let conn = store.lock_sync();
         conn.query_row(
-            "SELECT state FROM tasks WHERE task_id=?1",
+            &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
         ).unwrap()
@@ -365,7 +375,7 @@ mod tests {
     fn token_consumed(store: &Store, run_id: &str) -> i64 {
         let conn = store.lock_sync();
         conn.query_row(
-            "SELECT consumed FROM verifier_run_tokens WHERE verifier_run_id=?1",
+            &format!("SELECT consumed FROM {VERIFIER_RUN_TOKENS} WHERE verifier_run_id=?1"),
             rusqlite::params![run_id],
             |r| r.get(0),
         ).unwrap()
@@ -893,19 +903,23 @@ mod disk_store_integration {
         let now  = unix_now_secs();
 
         conn.execute(
-            "INSERT INTO initiatives
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES ('init-disk-recon', 'Executing', '{}', 'deadbeef', ?1)",
-            rusqlite::params![now],
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-disk-recon', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
         ).unwrap();
 
         for (task_id, state) in task_states {
             conn.execute(
-                "INSERT INTO tasks
-                    (task_id, initiative_id, lane_id, state, actor,
-                     policy_epoch, admitted_at, transitioned_at, actual_cost)
-                 VALUES (?1, 'init-disk-recon', 'default', ?2, 'kernel', 1, ?3, ?3, 0)",
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at, actual_cost)
+                     VALUES (?1, 'init-disk-recon', 'default', ?2, 'kernel', 1, ?3, ?3, 0)"
+                ),
                 rusqlite::params![task_id, state.as_sql_str(), now],
             ).unwrap();
         }
@@ -914,7 +928,7 @@ mod disk_store_integration {
     fn task_state_disk(disk: &DiskStore, task_id: &str) -> String {
         let conn = disk.store().lock_sync();
         conn.query_row(
-            "SELECT state FROM tasks WHERE task_id=?1",
+            &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
         ).unwrap()
@@ -931,11 +945,13 @@ mod disk_store_integration {
         {
             let conn = disk.store().lock_sync();
             conn.execute(
-                "INSERT INTO initiatives
-                    (initiative_id, state, terminal_criteria_json,
-                     plan_artifact_sha256, created_at)
-                 VALUES ('wal-probe', 'Executing', '{}', 'deadbeef', 0)",
-                [],
+                &format!(
+                    "INSERT INTO {INITIATIVES}
+                        (initiative_id, state, terminal_criteria_json,
+                         plan_artifact_sha256, created_at)
+                     VALUES ('wal-probe', ?1, '{{}}', 'deadbeef', 0)"
+                ),
+                rusqlite::params![InitiativeState::Executing.as_sql_str()],
             ).unwrap();
         }
 
