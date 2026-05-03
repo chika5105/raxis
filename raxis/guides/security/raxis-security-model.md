@@ -879,6 +879,8 @@ A failed admission is audited with the failure code.
 | `IntegrationMergeAdmitted { commit_sha, initiative_id }` | Merge admitted |
 | `EscalationRequested { class, session_id }` | Agent submits escalation |
 | `EscalationConsumed { resolved_by, escalation_id }` | Operator resolves escalation |
+| `MergeApprovalRequired { escalation_id, protected_paths, commit_sha }` | Kernel auto-creates ProtectedPathMerge escalation |
+| `EscalationRejected { class, resolved_by, escalation_id }` | Operator rejects a ProtectedPathMerge approval |
 | `PolicyEpochAdvanced { from, to, affected_classes }` | Epoch advance committed |
 | `BudgetExhausted { lane_id, initiative_id }` | Lane ceiling reached |
 
@@ -1558,9 +1560,112 @@ delegation tracking. The audit log deliberately does not use SQLite.
 
 ---
 
+## Part 17 — Protected Path Operator Approval Gate
+
+### The Problem
+
+The path allowlist and LLM Reviewer together ensure agents write only to authorized paths
+and produce correct code within those paths. But neither provides a **human sign-off** for
+high-stakes paths. A Reviewer is an LLM — it can be compromised, jailbroken, or simply
+miss subtle security implications in a payments or auth module change.
+
+For paths where the consequence of a wrong merge is severe (payment processing logic,
+authentication, database migrations, infrastructure), operators may require that no
+`IntegrationMerge` touching those paths is admitted without an explicit human approval of
+the exact diff.
+
+### The Threat Scenario
+
+**Without protected path approval:** A jailbroken Implementer writes a subtly malicious
+payment handler in `src/payments/charge.rs` — a logic bomb that rounds down to zero
+for certain account IDs. The LLM Reviewer inspects the code, is itself jailbroken or
+simply doesn't catch the subtle condition, and approves. The `IntegrationMerge` is
+admitted. The malicious code reaches master.
+
+**With protected path approval:** The `IntegrationMerge` touching `src/payments/` fires
+the `[[protected_paths]]` gate. The Kernel auto-creates a `ProtectedPathMerge` escalation.
+The operator runs `raxis merge diff <escalation_id>` and inspects the exact diff. They
+spot the suspicious rounding logic, run `raxis merge reject <escalation_id>`. The merge
+is blocked. The audit chain records the rejection with `resolved_by: operator_alice`.
+
+### Policy Bundle Configuration
+
+```toml
+# policy.toml — deployment-level, not per-initiative
+
+[[protected_paths]]
+path_prefix          = "src/payments/"
+require_approval_for = ["IntegrationMerge"]
+
+[[protected_paths]]
+path_prefix          = "src/auth/"
+require_approval_for = ["IntegrationMerge"]
+
+[[protected_paths]]
+path_prefix          = "migrations/"
+require_approval_for = ["IntegrationMerge"]
+```
+
+**Why policy bundle, not plan:** A plan-level configuration allows an operator to write a
+plan that omits `src/payments/` from protection, defeating the compliance guarantee.
+Policy bundle changes require `raxis policy push` with the operator's Ed25519 key and
+result in a `PolicyEpochAdvanced` audit event — they cannot be made silently.
+
+### The Approval Flow
+
+```
+Orchestrator submits IntegrationMerge { commit_sha: "abc", operator_approval_id: None }
+  ↓
+Kernel Check 5b: diff touches src/payments/ → protected hit
+  → Auto-creates escalation { id: esc-99, class: ProtectedPathMerge, commit_sha: "abc" }
+  → Emits MergeApprovalRequired audit event
+  → Returns FAIL_PROTECTED_PATH_APPROVAL_REQUIRED { escalation_id: esc-99 }
+  → KernelPush::MergeApprovalRequired to Orchestrator
+
+Operator: raxis merge diff esc-99    ← full diff of commit "abc"
+Operator: raxis merge approve esc-99 ← or reject
+  → Emits EscalationConsumed { class: ProtectedPathMerge, resolved_by: operator_alice }
+  → KernelPush::EscalationResolved to Orchestrator
+
+Orchestrator re-submits IntegrationMerge { commit_sha: "abc", operator_approval_id: Some(esc-99) }
+  ↓
+Kernel Check 6a: verifies esc-99 is Consumed, class matches, SHA matches → admitted
+  → master fast-forwards to "abc"
+  → Emits IntegrationMergeCompleted { operator_approval_id: Some(esc-99), ... }
+```
+
+### Why Approval Is SHA-Specific (Critical Security Property)
+
+The operator approves `commit_sha: "abc"` specifically. The escalation record stores this
+SHA. A re-submitted `IntegrationMerge { commit_sha: "def", operator_approval_id: Some(esc-99) }`
+fails Check 6a: `escalations.commit_sha = "abc" ≠ "def"` → `FAIL_APPROVAL_SHA_MISMATCH`.
+
+**Why this matters:** Without SHA specificity, an attacker could:
+1. Get operator approval for an innocuous diff (commit `abc`)
+2. Discard `abc`, produce a malicious commit `def`
+3. Reuse the approval for `def`
+
+SHA binding means the operator is approving the exact bytes entering master — not the
+concept of the merge. If the Orchestrator retries after conflict resolution (new SHA), a
+new approval is required. This is intentional.
+
+### Kernel-Initiated Escalations
+
+Standard escalations (`MergeConflict`) are submitted by the Orchestrator when blocked.
+`ProtectedPathMerge` escalations are created by the Kernel in response to an
+`IntegrationMerge` attempt. This is a new pattern in the escalation FSM.
+
+**Audit distinction:** Kernel-initiated escalations carry `initiator: "Kernel"` in the
+`EscalationCreated` event. Orchestrator-initiated carry `initiator: <session_id>`. The
+distinction is preserved in the audit chain and visible to auditors.
+
+**Full spec:** [`specs/v2/integration-merge.md §12`](../../specs/v2/integration-merge.md)
+
+---
+
 ## Summary: Defense in Depth
 
-RAXIS's security is not a single mechanism. It is 16 overlapping layers, each assuming
+RAXIS's security is not a single mechanism. It is 17 overlapping layers, each assuming
 the others can fail:
 
 | Layer | Primary threat stopped |
@@ -1586,6 +1691,7 @@ the others can fail:
 | Store Isolation | Audit/policy tampering by agents |
 | Ed25519 Plan Signing | Unsigned plan execution |
 | Provider Allowlist | Data exfiltration via rogue provider |
+| **Protected Path Approval Gate** | **Compromised LLM Reviewer approving malicious merge to high-stakes paths** |
 
 No single layer is sufficient. Every layer that fails has another layer behind it.
 The audit chain ensures that even a breach is fully reconstructable.

@@ -1493,10 +1493,12 @@ and final decisions. Provider-agnostic throughout. All V1 invariants preserved.*
 
 ## Related Specifications
 
-The following V2 deliverables are specified in standalone documents, as they are independent
-of the multi-agent orchestration architecture above and interact solely with the policy engine:
+The following V2 deliverables are specified in standalone documents. The policy epoch
+diffing spec is orthogonal to orchestration; the integration-merge spec is a deep-dive
+into a core orchestration subsystem that warrants its own detailed mechanical specification.
 
 | Topic | File | Status |
 |---|---|---|
 | Per-capability policy epoch staleness diffing (A.18 promotion) | [`policy-epoch-diffing.md`](policy-epoch-diffing.md) | V2 Specified |
+| `IntegrationMerge` — complete intent spec, 8-check admission pipeline, multi-task sequencing, operator-approval gate for sensitive paths | [`integration-merge.md`](integration-merge.md) | V2 Specified |
 
