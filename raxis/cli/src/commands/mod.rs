@@ -27,6 +27,7 @@ pub mod inspect;
 pub mod log;
 pub mod plan;
 pub mod policy;
+pub mod policy_diff;
 pub mod policy_show;
 pub mod queue;
 pub mod session;

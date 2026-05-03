@@ -114,6 +114,7 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "sign" => commands::policy::run_sign(&flags, &rest[1..]),
                 "show" => commands::policy_show::run(&flags, &rest[1..]),
+                "diff" => commands::policy_diff::run(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(format!("unknown policy sub-command: {sub2:?}"))),
             }
         }
@@ -339,6 +340,11 @@ READ-ONLY OBSERVATION:
         Decision-tree explanation for one task: state classification,
         unsatisfied predecessors, per-gate witness summary, plus the
         last 5 audit events tagged with the task. Exit 4 if missing.
+
+    policy diff <left.toml> <right.toml> [--json]
+        Semantic diff between two validated policy bundles. Reports
+        per-section deltas (lanes, operators, gates, egress,
+        gateway, providers, notifications) — not a textual diff.
 "#
     );
 }
