@@ -69,6 +69,7 @@ pub mod kernel_meta;
 pub mod policy_history;
 pub mod sessions;
 pub mod tasks;
+pub mod witnesses;
 
 // Re-export the most common return shapes so CLI binders don't have to
 // chase three sub-paths for one table.
@@ -77,4 +78,7 @@ pub use initiatives::{InitiativeRow, InitiativeStateCounts};
 pub use kernel_meta::{KernelMeta, KernelMetaError};
 pub use policy_history::PolicyEpochRow;
 pub use sessions::{SessionRow, SessionStateCounts};
-pub use tasks::{ReadyTaskRow, TaskRow, TaskStateCounts};
+pub use tasks::{
+    BlockingEdgeRow, DagEdgeRow, EdgeDirection, ReadyTaskRow, TaskRow, TaskStateCounts,
+};
+pub use witnesses::WitnessRow;

@@ -189,6 +189,8 @@ fn run() -> Result<(), CliError> {
         "status" => commands::status::run(&flags, rest),
         "log" => commands::log::run(&flags, rest),
         "verify-chain" => commands::verify_chain::run(&flags, rest),
+        "queue" => commands::queue::run(&flags, rest),
+        "inspect" => commands::inspect::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -279,6 +281,15 @@ READ-ONLY OBSERVATION:
     verify-chain [--quick] [--audit-dir <path>]
         Walk every audit segment, verify prev_sha256 + seq monotonicity.
         Exit 0 intact, 3 broken. --quick mirrors `raxis status`'s check.
+
+    queue [--lane <id>] [--blocked-only] [--limit <N>]
+        DAG scheduler state — READY (Admitted | GatesPending) and
+        BLOCKED (BlockedRecoveryPending) tables, plus the
+        approximate pending-verifier-spawns count from heartbeat.
+
+    inspect <task_id> [--json] [--gates-only] [--with-deps]
+        Forensic deep-dive into a single task: state, dependencies,
+        witnesses. --reveal-paths is reserved for v1.x.
 "#
     );
 }
