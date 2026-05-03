@@ -199,6 +199,7 @@ fn run() -> Result<(), CliError> {
         "verifiers" => commands::verifiers::run(&flags, rest),
         "witnesses" => commands::witnesses::run(&flags, rest),
         "budget" => commands::budget::run(&flags, rest),
+        "explain" => commands::explain::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -333,6 +334,11 @@ READ-ONLY OBSERVATION:
     budget [<lane_id>] [--limit N] [--json]
         Per-lane budget pressure (reserved / max_cost_per_epoch).
         Drill into one lane's reservations by passing <lane_id>.
+
+    explain <task_id> [--json]
+        Decision-tree explanation for one task: state classification,
+        unsatisfied predecessors, per-gate witness summary, plus the
+        last 5 audit events tagged with the task. Exit 4 if missing.
 "#
     );
 }

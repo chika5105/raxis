@@ -19,6 +19,7 @@ pub mod doctor;
 pub mod epoch;
 pub mod escalation;
 pub mod escalations;
+pub mod explain;
 pub mod genesis;
 pub mod inbox;
 pub mod initiative;
