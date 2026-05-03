@@ -204,7 +204,7 @@ async fn handle_create_session(
                 }
             };
             let canonical_str = canonical.to_string_lossy();
-            if !ctx.policy.worktree_root_allowed(&canonical_str) {
+            if !ctx.policy.load().worktree_root_allowed(&canonical_str) {
                 return OperatorResponse::Error {
                     code: "FAIL_WORKTREE_OUTSIDE_ALLOWED_ROOTS".to_owned(),
                     detail: format!("worktree_root '{wt}' not in allowed_worktree_roots"),
@@ -350,8 +350,11 @@ async fn handle_grant_delegation(
         }
     };
 
-    // Get operator pubkey from policy.
-    let op_entry = match ctx.policy.operator_entry(&operator.fingerprint) {
+    // Get operator pubkey from policy. We pin one snapshot of the
+    // bundle for the duration of this handler so the pubkey lookup and
+    // the `max_delegation_ttl` read see the same epoch.
+    let policy_snapshot = ctx.policy.load_full();
+    let op_entry = match policy_snapshot.operator_entry(&operator.fingerprint) {
         Some(e) => e,
         None => {
             return OperatorResponse::Error {
@@ -376,7 +379,7 @@ async fn handle_grant_delegation(
     let capability_for_blocking    = capability_class.clone();
     let scope_for_blocking         = scope_json.clone();
     let fp_for_blocking            = operator.fingerprint.clone();
-    let max_ttl                    = ctx.policy.max_delegation_ttl().as_secs();
+    let max_ttl                    = policy_snapshot.max_delegation_ttl().as_secs();
     let join_result = tokio::task::spawn_blocking(move || {
         authority::delegation::grant_delegation(
             &session_for_blocking,
@@ -491,7 +494,10 @@ async fn handle_approve_plan(
     }
 
     // Single source of truth for trusted operators and their pubkeys.
-    let entry = match ctx.policy.operator_entry(&approving_operator) {
+    // Pin one snapshot so the pubkey lookup and the epoch read see the
+    // same bundle.
+    let policy_snapshot = ctx.policy.load_full();
+    let entry = match policy_snapshot.operator_entry(&approving_operator) {
         Some(e) => e,
         None => return OperatorResponse::Error {
             code:   "FAIL_OPERATOR_UNKNOWN".to_owned(),
@@ -514,7 +520,7 @@ async fn handle_approve_plan(
         },
     };
 
-    let policy_epoch = ctx.policy.epoch();
+    let policy_epoch = policy_snapshot.epoch();
     let store_for_blocking          = Arc::clone(&ctx.store);
     let audit_for_blocking          = Arc::clone(&ctx.audit);
     let plan_registry_for_blocking  = Arc::clone(&ctx.plan_registry);
@@ -746,12 +752,14 @@ async fn handle_approve_escalation(
         },
     };
 
-    let policy_for_blocking   = Arc::clone(&ctx.policy);
+    // Pin one snapshot of the bundle: the FSM call below must run
+    // against the same epoch we recorded in the audit metadata.
+    let policy_snapshot       = ctx.policy.load_full();
     let store_for_blocking    = Arc::clone(&ctx.store);
     let fp_for_blocking       = operator.fingerprint.clone();
     let escalation_id_blocking = escalation_id.clone();
     let scope_for_blocking    = approval_scope.clone();
-    let policy_epoch          = ctx.policy.epoch();
+    let policy_epoch          = policy_snapshot.epoch();
 
     let join_result = tokio::task::spawn_blocking(move || {
         crate::authority::escalation::approve_escalation(
@@ -760,7 +768,7 @@ async fn handle_approve_escalation(
             &signature,
             &fp_for_blocking,
             policy_epoch,
-            &policy_for_blocking,
+            &policy_snapshot,
             &store_for_blocking,
         )
     }).await;
@@ -956,7 +964,7 @@ mod escalation_dispatch_tests {
             permitted_ops:      vec![],
         }]);
         Arc::new(HandlerContext::new(
-            Arc::new(policy),
+            Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
             store,
             sink,

@@ -821,7 +821,7 @@ mod stub_round_trip {
         let plan_registry = Arc::new(PlanRegistry::new());
 
         Arc::new(HandlerContext::new(
-            Arc::new(policy),
+            Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             registry,
             store,
             audit,

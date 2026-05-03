@@ -82,7 +82,11 @@ type HandlerResult = Result<IntentResponse, (PlannerErrorCode, TaskState)>;
 
 async fn handle_inner(req: IntentRequest, ctx: &HandlerContext) -> HandlerResult {
     let store  = ctx.store.as_ref();
-    let policy = ctx.policy.as_ref();
+    // Pin one snapshot of the policy bundle for the entire intent
+    // pipeline. INV-POLICY-01: an in-process epoch advance must not
+    // tear an in-flight enforcement decision (kernel-store.md §INV-POLICY-01).
+    let policy_snapshot = ctx.policy.load_full();
+    let policy: &raxis_policy::PolicyBundle = &policy_snapshot;
     let seq    = req.sequence_number;
 
     // ── Step 1: Session validation ────────────────────────────────────────

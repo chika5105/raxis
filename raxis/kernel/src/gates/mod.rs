@@ -99,7 +99,13 @@ pub async fn evaluate_claims(
     worktree_root:    &Path,
     ctx:              &HandlerContext,
 ) -> Result<GateEvalResult, GateError> {
-    let policy = ctx.policy.as_ref();
+    // Pin one snapshot of the policy bundle for the duration of this
+    // gate evaluation. INV-POLICY-01: an in-process epoch advance must
+    // not tear an in-flight enforcement decision (kernel-store.md
+    // §INV-POLICY-01); binding to a single `Arc<PolicyBundle>` keeps
+    // every claim/witness/proof check on the same epoch.
+    let policy_snapshot = ctx.policy.load_full();
+    let policy: &raxis_policy::PolicyBundle = &policy_snapshot;
     let store  = ctx.store.as_ref();
 
     // ── Step 1: Break-glass ────────────────────────────────────────────────

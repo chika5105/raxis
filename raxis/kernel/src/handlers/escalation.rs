@@ -243,10 +243,14 @@ fn submit_escalation_blocking(
     }
 
     // ── Step 5: lineage rate-limit + quarantine ───────────────────────
+    // Pin one snapshot of the policy bundle for the rest of the
+    // pipeline so the rate-limit, quarantine, and timeout reads all
+    // see the same epoch (INV-POLICY-01).
+    let policy_snapshot = ctx.policy.load_full();
     let now_secs = unix_now_secs() as i64;
-    let max_per_window = ctx.policy.escalation_max_per_window() as i64;
-    let window_secs    = ctx.policy.escalation_window().as_secs() as i64;
-    let quarantine_threshold = ctx.policy.escalation_quarantine_threshold() as i64;
+    let max_per_window = policy_snapshot.escalation_max_per_window() as i64;
+    let window_secs    = policy_snapshot.escalation_window().as_secs() as i64;
+    let quarantine_threshold = policy_snapshot.escalation_quarantine_threshold() as i64;
 
     // Existing lineage_rate_limits row, if any.
     let existing: Option<(i64, i64, i64, i64)> = tx
@@ -340,7 +344,7 @@ fn submit_escalation_blocking(
     // ── Step 6: INSERT escalations row + UPDATE counter ────────────────
     let escalation_id_str = uuid::Uuid::new_v4().to_string();
     let timeout_at = now_secs.saturating_add(
-        ctx.policy.escalation_timeout().as_secs() as i64,
+        policy_snapshot.escalation_timeout().as_secs() as i64,
     );
     let scope_json = serde_json::to_string(&req.requested_scope)
         .expect("RequestedEscalationScope is always JSON-serialisable");
@@ -516,7 +520,7 @@ mod tests {
         );
         let sink = Arc::new(FakeAuditSink::new());
         let ctx  = Arc::new(HandlerContext::new(
-            Arc::new(policy),
+            Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
             Arc::new(store),
             sink.clone(),

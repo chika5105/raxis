@@ -14,6 +14,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use raxis_audit_tools::AuditSink;
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
@@ -27,10 +28,18 @@ use crate::initiatives::PlanRegistry;
 /// All fields are `Arc`-wrapped so each connection task gets a cheap clone.
 /// The `store` is behind `Store` which itself contains a `tokio::sync::Mutex`.
 pub struct HandlerContext {
-    /// Validated policy bundle. Replaced atomically (via `ArcSwap` in v2;
-    /// in v1 we use `Arc<PolicyBundle>` since epoch advance is rare and
-    /// requires kernel restart in v1).
-    pub policy: Arc<PolicyBundle>,
+    /// Validated policy bundle, behind an `ArcSwap` so the kernel can flip
+    /// the visible epoch in-process from `policy_manager::advance_epoch`
+    /// without a kernel restart (kernel-core.md §`policy_manager.rs`).
+    ///
+    /// **Read pattern:** all callers use `ctx.policy.load()` which returns
+    /// a cheap `arc_swap::Guard<Arc<PolicyBundle>>` that can be deref'd to
+    /// `&PolicyBundle`. Long-lived borrows should `policy.load_full()` to
+    /// hold an owned `Arc<PolicyBundle>`. Because reads are wait-free,
+    /// holding a guard across an `await` boundary is safe — the underlying
+    /// `Arc` is detached from the `ArcSwap`'s read counter the moment a
+    /// new bundle is `store()`'d, so the swap will not block on us.
+    pub policy: Arc<ArcSwap<PolicyBundle>>,
     /// Kernel key registry — authority + quality keypairs + verifier token key.
     pub registry: Arc<KeyRegistry>,
     /// SQLite state store (WAL mode, synchronous=FULL, foreign_keys=ON).
@@ -77,7 +86,7 @@ pub struct HandlerContext {
 
 impl HandlerContext {
     pub fn new(
-        policy: Arc<PolicyBundle>,
+        policy: Arc<ArcSwap<PolicyBundle>>,
         registry: Arc<KeyRegistry>,
         store: Arc<Store>,
         audit: Arc<dyn AuditSink>,

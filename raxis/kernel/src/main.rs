@@ -67,10 +67,15 @@ async fn main() {
             reason: e.to_string(),
         })
     });
-    let policy = Arc::new(policy);
+    // Wrap the policy bundle in an `Arc<ArcSwap<_>>` so the kernel can
+    // flip the visible epoch in-process via `policy_manager::advance_epoch`
+    // (kernel-core.md §`policy_manager.rs`). Every reader goes through
+    // `policy.load()` which is wait-free.
+    let policy_epoch_at_boot = policy.epoch();
+    let policy: Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>> =
+        Arc::new(arc_swap::ArcSwap::from_pointee(policy));
     eprintln!(
-        "{{\"level\":\"info\",\"message\":\"policy loaded\",\"epoch\":{}}}",
-        policy.epoch()
+        "{{\"level\":\"info\",\"message\":\"policy loaded\",\"epoch\":{policy_epoch_at_boot}}}"
     );
 
     // Step 4: Initialize key registry.
@@ -184,7 +189,7 @@ async fn main() {
     if let Err(e) = audit.emit(
         AuditEventKind::KernelStarted {
             data_dir: data_dir.display().to_string(),
-            policy_epoch: policy.epoch(),
+            policy_epoch: policy.load().epoch(),
             schema_version: 1,
         },
         None, None, None,
@@ -278,7 +283,7 @@ async fn main() {
     // shutdown the spec mandates.
     let (gateway_shutdown_tx, gateway_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let supervisor_handle = {
-        let gateway_section = policy.gateway().cloned();
+        let gateway_section = policy.load().gateway().cloned();
         let socket_path = data_dir.join("sockets/gateway.sock");
         let data_dir_for_sup = data_dir.clone();
         let audit_for_sup = Arc::clone(&audit);

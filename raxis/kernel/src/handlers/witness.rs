@@ -384,7 +384,7 @@ async fn gate_recheck(
             // Re-spawn verifiers for remaining missing gates.
             for gate_type_str in &missing_gates {
                 if let Some(vconfig) = crate::gates::verifier_runner::VerifierConfig::from_policy(
-                    ctx.policy.as_ref(),
+                    &ctx.policy.load(),
                     gate_type_str,
                     &ctx.data_dir,
                 ) {

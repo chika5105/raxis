@@ -62,6 +62,13 @@ thiserror   = "1"
 # supplied content, where SipHash's HashDoS resistance matters.
 rustc-hash  = "1.1"
 
+# Lock-free Arc swap for atomic in-place visibility flips of large
+# read-mostly structures (the loaded policy bundle and provider allowlist
+# cache, both swapped on `policy_manager::advance_epoch`). Pinned to the
+# `1.x` line — the API has been stable since 2019 and we use only
+# `ArcSwap::new`, `load`, `load_full`, and `store`.
+arc-swap    = "1"
+
 # IPC wire codec. Pinned to 2.0.1 (the last release from upstream bincode-org
 # before that organisation archived in August 2025). Configured at every
 # call-site with `bincode::config::standard()` — see specs/v1/peripherals.md

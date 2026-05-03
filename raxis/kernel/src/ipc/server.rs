@@ -325,8 +325,12 @@ async fn handle_operator_connection(
     // Step 2: Read response envelope.
     let response: auth::ResponseEnvelope = read_json_frame_async(&mut stream).await?;
 
-    // Step 3: Verify.
-    let operator = match auth::verify_response(&challenge, &response, &ctx.policy) {
+    // Step 3: Verify. We pin one snapshot of the bundle for the
+    // duration of the handshake — an in-process epoch advance during
+    // a handshake simply means the next handshake re-reads under the
+    // new bundle.
+    let policy_snapshot = ctx.policy.load_full();
+    let operator = match auth::verify_response(&challenge, &response, policy_snapshot.as_ref()) {
         auth::ChallengeResult::Ok(op) => op,
         auth::ChallengeResult::Unauthorized { reason } => {
             let error_msg = serde_json::json!({
