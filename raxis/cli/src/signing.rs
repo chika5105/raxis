@@ -229,4 +229,64 @@ MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\n\
             "stored policy form is 64-char hex"
         );
     }
+
+    #[test]
+    fn parse_operator_public_hex_accepts_uppercase() {
+        let bytes = parse_operator_public_key_material(SAMPLE_PEM).expect("pem");
+        let mixed = hex::encode(bytes).to_uppercase();
+        let got = parse_operator_public_key_material(&mixed).expect("uppercase hex");
+        assert_eq!(got, bytes);
+    }
+
+    #[test]
+    fn parse_operator_public_hex_trims_surrounding_whitespace() {
+        let bytes = parse_operator_public_key_material(SAMPLE_PEM).expect("pem");
+        let h = hex::encode(bytes);
+        let padded = format!("\n\t  {h}  \r\n");
+        let got = parse_operator_public_key_material(&padded).expect("trimmed hex");
+        assert_eq!(got, bytes);
+    }
+
+    #[test]
+    fn parse_operator_public_pem_accepts_crlf_and_blank_lines() {
+        let pem = "-----BEGIN PUBLIC KEY-----\r\n\r\nMCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\r\n\r\n-----END PUBLIC KEY-----\r\n";
+        let a = parse_operator_public_key_material(SAMPLE_PEM).expect("lf pem");
+        let b = parse_operator_public_key_material(pem).expect("crlf pem");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn parse_operator_public_rejects_non_64_hex_without_pem_header() {
+        let err = parse_operator_public_key_material(&"a".repeat(63)).expect_err("63 chars");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("expected 64-char hex") || msg.contains("operator public key"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn parse_operator_public_pem_rejects_wrong_der_length() {
+        // Valid base64 that decodes to 8 bytes — not 32 raw nor 44-byte SPKI.
+        let pem = "-----BEGIN PUBLIC KEY-----\n\
+wjukMjM=\n\
+-----END PUBLIC KEY-----\n";
+        let err = parse_operator_public_key_material(pem).expect_err("short der");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("unsupported Ed25519 public key encoding") || msg.contains("DER"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn parse_operator_public_pem_rejects_invalid_base64_payload() {
+        let pem = "-----BEGIN PUBLIC KEY-----\n!!!!\n-----END PUBLIC KEY-----\n";
+        let err = parse_operator_public_key_material(pem).expect_err("bad b64");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("base64") || msg.contains("PEM") || msg.contains("invalid"),
+            "{msg}"
+        );
+    }
 }
