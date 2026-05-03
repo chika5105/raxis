@@ -1689,6 +1689,67 @@ A non-zero exit is **not** a gate failure. The gate outcome is determined only b
 
 ---
 
+### §2.5.6a — `[notifications]` Normative Schema
+
+> **Normative reference:** the full notification model — channel kinds,
+> routing, fail-open semantics, the Shell channel handler, and the v2
+> Email/Webhook forward-compat — lives in `cli-readonly.md` §5.6. This
+> section is the authoritative TOML schema and `PolicyBundle::validate`
+> contract that section refers to.
+
+#### `[notifications]` in `policy.toml`
+
+```toml
+[notifications]
+default_channels = ["shell"]
+
+[[notifications.channels]]
+id     = "shell"                 # implicit; explicit entry overrides target
+kind   = "Shell"                 # Shell | File | Email | Webhook
+target = "<data_dir>/notifications/inbox.jsonl"
+
+[[notifications.channels]]
+id     = "audit-mirror"
+kind   = "File"
+target = "/var/log/raxis-notifications.jsonl"
+
+[[notifications.routes]]
+event_kind = "EscalationSubmitted"
+channels   = ["shell", "audit-mirror"]
+```
+
+**`PolicyBundle::validate` enforcement (normative):**
+
+1. `default_channels` MUST reference only declared channel ids (the
+   implicit `"shell"` channel always counts, even without an explicit
+   `[[notifications.channels]]` entry — it defaults to
+   `target = "<data_dir>/notifications/inbox.jsonl"`).
+2. Every `[[notifications.routes]].channels` entry MUST reference only
+   declared channel ids. An empty list is the canonical "silenced"
+   form for that event kind.
+3. Every `[[notifications.routes]].event_kind` MUST be a real
+   `AuditEventKind` discriminant string (validated by reflecting on
+   the enum at validate time — same string the `event_kind` column in
+   `audit_records` carries).
+4. `Email` and `Webhook` channels are accepted by the validator but
+   trigger a boot-time **warning** in the kernel log
+   (`level = "warn"`, message: `notification channel '<id>' of kind
+   '<Email|Webhook>' is declared but its handler is not implemented in
+   v1; events routed to this channel will be silently dropped`). This
+   is a warning, not an error — operators may stage v2 channel config
+   in v1 without blocking the boot.
+
+#### `[notifications]` is policy state, not store state
+
+`policy.toml` is read at boot and on epoch advance; the
+`[notifications]` block is part of `PolicyBundle` and is hot-reloadable
+via the existing `epoch advance` flow. There is no `notifications`
+table in `kernel.db`. Per-event delivery records (the
+`NotificationDeliveryFailed` and (for File/Shell handlers) the
+`NotificationDelivered` audit events) carry the per-event audit trail.
+
+---
+
 ### §2.5.7 — INV Amendments and Adversarial Assertion Matrix
 
 #### INV-INIT-06 amendment

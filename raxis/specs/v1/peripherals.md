@@ -403,7 +403,7 @@ The kernel-assigned fields (`escalation_id`, `lineage_id`, `initiative_id`, `sub
 
 ### Presenting the approval token on the next intent
 
-Once the operator runs `raxis-cli escalation approve`, the planner is notified out-of-band (the v1 mechanism is operator-supplied — typically a sidecar that polls the kernel via a future `escalation status` IPC; v1 itself does not push notifications to the planner). When the planner is ready to retry the gated action, it submits the next `IntentRequest` with the `approval_token` field populated:
+Once the operator runs `raxis-cli escalation approve`, the planner is notified out-of-band. v1's default routing (per `cli-readonly.md` §5.6) writes an `EscalationApproved` notification to the Shell channel (`<data_dir>/notifications/inbox.jsonl`); operator tooling that watches that file (e.g. a `raxis inbox -f` sidecar, or a custom scriptlet that tails the JSONL) is responsible for prodding the planner. The kernel itself does not push to the planner over IPC in v1. When the planner is ready to retry the gated action, it submits the next `IntentRequest` with the `approval_token` field populated:
 
 ```json
 {
