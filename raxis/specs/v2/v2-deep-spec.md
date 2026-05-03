@@ -1778,10 +1778,37 @@ manipulating the filesystem layout.
 | Mount the policy directory | ❌ Not in spec | No code path exists |
 | Mount the audit directory | ❌ Not in spec | No code path exists |
 | Mount credentials directory | ❌ Not in spec | No code path exists |
+| Mount `plan.toml` | ❌ Not mounted | See below |
 | Override the `/raxis/` config path | ❌ Not in spec | Hardcoded in `session_virtio_fs_mounts()` |
 
 The ❌ rows are enforced not by validation of operator input but by the absence of any
 code that reads mount configuration from operator input. The enforcement is structural.
+
+**Why `plan.toml` is not mounted:**
+`plan.toml` is the Kernel's document, not the agent's. The Kernel reads the signed plan
+to drive admission, activation, and enforcement. The agent is the *subject* of the plan's
+rules — it doesn't enforce those rules against itself. Three specific reasons:
+
+1. **Least privilege.** An Executor has no legitimate need to know other Executors'
+   `path_allowlist` entries, the full dependency graph, or the Orchestrator's
+   configuration. The plan carries the full initiative topology; each session only needs
+   its own slice.
+
+2. **Cross-task information leakage.** If the plan describes task B's work, Executor A
+   learns about task B's scope unnecessarily. A compromised agent could use this to
+   reason about the overall initiative or tailor its actions to the known topology.
+
+3. **Signature material proximity.** `plan.toml` is paired with `plan.toml.sig` (the
+   operator's Ed25519 signature over the plan bytes). Mounting the raw plan bytes into
+   the VM hands the agent the exact signed content. This doesn't expose the private key,
+   but gives the agent material it has no legitimate use for and could exfiltrate via
+   `EgressRequest` if egress is permitted.
+
+**How the agent gets what it actually needs from the plan:**
+The Kernel Prompt Assembler reads the full plan internally and writes only the relevant
+portion into `/raxis/system_prompt.txt` before VM boot. The Orchestrator's prompt
+includes its sub-task IDs and descriptions. An Executor's prompt includes only its own
+task description and allowlist context. The raw plan never crosses the host→VM boundary.
 
 ---
 
