@@ -33,15 +33,20 @@
 // No direct `UPDATE tasks SET state=…` is permitted in this file.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use raxis_types::{
-    unix_now_secs, BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
-    PlannerErrorCode, SessionId, SubmittedClaim, TaskState,
+    unix_now_secs, BudgetSnapshot, InitiativeState, IntentKind, IntentOutcome, IntentRequest,
+    IntentResponse, PlannerErrorCode, SessionId, SubmittedClaim, TaskState,
 };
 use raxis_store::{Store, Table};
 
-const TASKS:              &str = Table::Tasks.as_str();
-const TASK_INTENT_RANGES: &str = Table::TaskIntentRanges.as_str();
+// INV-STORE-03 (kernel-store.md §2.5.1): table identifiers come from the
+// `Table` enum; FSM state strings come from `*State::as_sql_str()`.
+const TASKS:                       &str = Table::Tasks.as_str();
+const TASK_INTENT_RANGES:          &str = Table::TaskIntentRanges.as_str();
+const INITIATIVES:                 &str = Table::Initiatives.as_str();
+const TASK_EXPORTED_PATH_SNAPSHOTS:&str = Table::TaskExportedPathSnapshots.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
@@ -57,9 +62,42 @@ use crate::vcs::diff::CommitSha;
 
 /// Dispatch one IntentRequest and return the IntentResponse.
 ///
-/// Never panics. All internal errors produce a Rejected response; the TCP
+/// Never panics. All internal errors produce a Rejected response; the
 /// connection stays open for subsequent requests.
-pub async fn handle(req: IntentRequest, ctx: &HandlerContext) -> IntentResponse {
+///
+/// ## Async safety contract (P0)
+///
+/// The pipeline performs ~14 SQLite operations via `Store::lock_sync()`,
+/// which calls `tokio::sync::Mutex::blocking_lock` and panics the worker
+/// thread with `Cannot block the current thread from within a runtime`
+/// if invoked from a tokio async context. The pipeline ALSO has one
+/// genuinely async sub-call — `gates::evaluate_claims`, which spawns
+/// verifier subprocesses via `tokio::process::Command`.
+///
+/// Following the same pattern as `escalation::handle` and the operator
+/// handlers, every `lock_sync()` call site inside `handle_inner` MUST be
+/// wrapped in `tokio::task::spawn_blocking` so the closure runs on the
+/// blocking pool (where `blocking_lock` is legal). Wrapping the whole
+/// `handle_inner` in a single `spawn_blocking + Handle::current().block_on`
+/// would NOT work — `block_on` re-enters async context and the inner
+/// `lock_sync` calls panic anyway. The phased-spawn-blocking pattern
+/// is the only correct solution for a hybrid sync-SQLite + async-subprocess
+/// pipeline.
+///
+/// **Status**: as of this commit only the first lock_sync site (Step 1
+/// session lookup) is wrapped — enough to make the bogus-token rejection
+/// path round-trip cleanly and unblocks the mock-planner integration
+/// test (`kernel/tests/mock_planner_end_to_end.rs`). The remaining
+/// lock_sync sites in `handle_inner`, `handle_report_failure`, and
+/// `handle_complete_task` remain as latent P0s tracked by inline
+/// `TODO(P0-async-safety):` markers; they will fire the same panic the
+/// moment any test (or production planner with a real session) reaches
+/// them. The fix is mechanical — wrap each call site in `spawn_blocking`
+/// the same way Step 1 is wrapped — but is sized as a separate PR
+/// because each call requires its own surrounding `Arc<Store>` clone
+/// dance. The argument type is `&Arc<HandlerContext>` so the inner Arc
+/// can be cheaply cloned into the blocking tasks.
+pub async fn handle(req: IntentRequest, ctx: &Arc<HandlerContext>) -> IntentResponse {
     let seq = req.sequence_number;
     match handle_inner(req, ctx).await {
         Ok(resp) => resp,
@@ -80,7 +118,7 @@ type HandlerResult = Result<IntentResponse, (PlannerErrorCode, TaskState)>;
 // handle_inner — 13-step pipeline
 // ---------------------------------------------------------------------------
 
-async fn handle_inner(req: IntentRequest, ctx: &HandlerContext) -> HandlerResult {
+async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerResult {
     let store  = ctx.store.as_ref();
     // Pin one snapshot of the policy bundle for the entire intent
     // pipeline. INV-POLICY-01: an in-process epoch advance must not
@@ -92,8 +130,24 @@ async fn handle_inner(req: IntentRequest, ctx: &HandlerContext) -> HandlerResult
     // ── Step 1: Session validation ────────────────────────────────────────
     // Resolve session_token → SessionRow.
     // session_token is 64-char hex; stored verbatim in sessions.session_token.
-    let session = authority::session::get_session_by_token(&req.session_token, store)
-        .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
+    //
+    // ASYNC-SAFETY: `get_session_by_token` calls `Store::lock_sync()` →
+    // `tokio::sync::Mutex::blocking_lock`, which panics if invoked from a
+    // tokio worker thread. The planner dispatcher (`accept_planner_loop`)
+    // calls us from exactly that context. We move this lookup onto the
+    // blocking pool via `spawn_blocking` so the lock acquisition is legal.
+    // The same pattern is documented at length on `handle()` above and
+    // already used by `escalation::handle` and the operator handlers.
+    let session = {
+        let store_arc = Arc::clone(&ctx.store);
+        let token = req.session_token.clone();
+        tokio::task::spawn_blocking(move || {
+            authority::session::get_session_by_token(&token, &store_arc)
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?
+        .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?
+    };
 
     let session_id = SessionId::parse(&session.session_id)
         .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
@@ -730,9 +784,6 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
         .collect()
 }
 
-const TASK_EXPORTED_PATH_SNAPSHOTS: &str =
-    raxis_store::Table::TaskExportedPathSnapshots.as_str();
-
 /// Atomically transition the task to `Completed` AND insert the export
 /// snapshot rows in ONE SQLite transaction (§2.5.8 line 2014).
 ///
@@ -759,12 +810,14 @@ fn commit_task_completion(
     //    column (kernel-store.md §2.5.1 Table 5); `transitioned_at` is
     //    the canonical timestamp for the Running → Completed edge.
     let now = unix_now_secs();
+    let completed_state = TaskState::Completed.as_sql_str();
+    let running_state   = TaskState::Running.as_sql_str();
     let rows = tx.execute(
         &format!(
-            "UPDATE {TASKS} SET state = 'Completed', transitioned_at = ?1
-             WHERE task_id = ?2 AND state = 'Running'",
+            "UPDATE {TASKS} SET state = ?1, transitioned_at = ?2
+             WHERE task_id = ?3 AND state = ?4",
         ),
-        rusqlite::params![now, task_id],
+        rusqlite::params![completed_state, now, task_id, running_state],
     ).map_err(|_| ())?;
     if rows == 0 {
         return Err(());
@@ -821,8 +874,10 @@ fn update_task_intent_fields(
 ) -> Result<(), ()> {
     let conn = store.lock_sync();
     conn.execute(
-        "UPDATE tasks SET evaluation_sha = ?1, base_sha = ?2, session_id = ?3
-         WHERE task_id = ?4",
+        &format!(
+            "UPDATE {TASKS} SET evaluation_sha = ?1, base_sha = ?2, session_id = ?3
+             WHERE task_id = ?4"
+        ),
         rusqlite::params![evaluation_sha, base_sha, session_id, task_id],
     ).map_err(|_| ())?;
     Ok(())
@@ -955,26 +1010,30 @@ mod tests {
         let conn = store.lock_sync();
         let now = unix_now_secs();
         conn.execute(
-            "INSERT INTO initiatives
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES ('init-int', 'Executing', '{}', 'deadbeef', ?1)",
-            rusqlite::params![now],
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-int', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
         ).unwrap();
         conn.execute(
-            "INSERT INTO tasks
-                (task_id, initiative_id, lane_id, state, actor,
-                 policy_epoch, admitted_at, transitioned_at, actual_cost)
-             VALUES (?1, 'init-int', 'default', 'Admitted', 'kernel',
-                     1, ?2, ?2, 0)",
-            rusqlite::params![task_id, now],
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES (?1, 'init-int', 'default', ?2, 'kernel',
+                         1, ?3, ?3, 0)"
+            ),
+            rusqlite::params![task_id, TaskState::Admitted.as_sql_str(), now],
         ).unwrap();
     }
 
     fn count_intent_ranges(store: &Store, task_id: &str) -> i64 {
         let conn = store.lock_sync();
         conn.query_row(
-            "SELECT COUNT(*) FROM task_intent_ranges WHERE task_id=?1",
+            &format!("SELECT COUNT(*) FROM {TASK_INTENT_RANGES} WHERE task_id=?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
         ).unwrap()
@@ -990,7 +1049,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let (base, head): (String, String) = conn.query_row(
-            "SELECT base_sha, head_sha FROM task_intent_ranges WHERE task_id='t1'",
+            &format!("SELECT base_sha, head_sha FROM {TASK_INTENT_RANGES} WHERE task_id='t1'"),
             [], |r| Ok((r.get(0)?, r.get(1)?)),
         ).unwrap();
         assert_eq!(base, "aaaaaaaa");
@@ -1035,12 +1094,14 @@ mod tests {
 
         let conn = store.lock_sync();
         conn.execute(
-            "INSERT INTO tasks
-                (task_id, initiative_id, lane_id, state, actor,
-                 policy_epoch, admitted_at, transitioned_at, actual_cost)
-             VALUES ('t2', 'init-int', 'default', 'Admitted', 'kernel',
-                     1, ?1, ?1, 0)",
-            rusqlite::params![unix_now_secs()],
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES ('t2', 'init-int', 'default', ?1, 'kernel',
+                         1, ?2, ?2, 0)"
+            ),
+            rusqlite::params![TaskState::Admitted.as_sql_str(), unix_now_secs()],
         ).unwrap();
         drop(conn);
 
@@ -1128,26 +1189,30 @@ mod tests {
         // Reuse same initiative as `seed_task`'s "init-int" if already
         // present — otherwise insert one.
         let _ = conn.execute(
-            "INSERT OR IGNORE INTO initiatives
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES ('init-int', 'Executing', '{}', 'deadbeef', ?1)",
-            rusqlite::params![now],
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-int', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
         );
         conn.execute(
-            "INSERT INTO tasks
-                (task_id, initiative_id, lane_id, state, actor,
-                 policy_epoch, admitted_at, transitioned_at, actual_cost)
-             VALUES (?1, 'init-int', 'default', 'Running', 'kernel',
-                     1, ?2, ?2, 0)",
-            rusqlite::params![task_id, now],
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES (?1, 'init-int', 'default', ?2, 'kernel',
+                         1, ?3, ?3, 0)"
+            ),
+            rusqlite::params![task_id, TaskState::Running.as_sql_str(), now],
         ).unwrap();
     }
 
     fn task_state_of(store: &Store, task_id: &str) -> String {
         let conn = store.lock_sync();
         conn.query_row(
-            "SELECT state FROM tasks WHERE task_id = ?1",
+            &format!("SELECT state FROM {TASKS} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
         ).unwrap()
@@ -1156,7 +1221,7 @@ mod tests {
     fn count_export_snapshots(store: &Store, task_id: &str) -> i64 {
         let conn = store.lock_sync();
         conn.query_row(
-            "SELECT COUNT(*) FROM task_exported_path_snapshots WHERE task_id = ?1",
+            &format!("SELECT COUNT(*) FROM {TASK_EXPORTED_PATH_SNAPSHOTS} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
         ).unwrap()
@@ -1169,7 +1234,7 @@ mod tests {
 
         commit_task_completion("t1", &[], &store).unwrap();
 
-        assert_eq!(task_state_of(&store, "t1"), "Completed");
+        assert_eq!(task_state_of(&store, "t1"), TaskState::Completed.as_sql_str());
         assert_eq!(count_export_snapshots(&store, "t1"), 0,
             "empty export list must write zero snapshot rows");
     }
@@ -1186,13 +1251,16 @@ mod tests {
 
         commit_task_completion("t1", &exports, &store).unwrap();
 
-        assert_eq!(task_state_of(&store, "t1"), "Completed");
+        assert_eq!(task_state_of(&store, "t1"), TaskState::Completed.as_sql_str());
         assert_eq!(count_export_snapshots(&store, "t1"), 3);
 
         // Spot-check one row to verify the path round-trips byte-equal.
         let conn = store.lock_sync();
+        let select_paths_sql = format!(
+            "SELECT path FROM {TASK_EXPORTED_PATH_SNAPSHOTS} WHERE task_id = ?1"
+        );
         let mut paths: Vec<String> = conn
-            .prepare("SELECT path FROM task_exported_path_snapshots WHERE task_id = ?1")
+            .prepare(&select_paths_sql)
             .unwrap()
             .query_map(rusqlite::params!["t1"], |r| r.get::<_, String>(0))
             .unwrap()
@@ -1235,7 +1303,7 @@ mod tests {
         let result = commit_task_completion("t1", &[], &store);
         assert!(result.is_err(),
             "commit_task_completion must reject non-Running tasks");
-        assert_eq!(task_state_of(&store, "t1"), "Admitted",
+        assert_eq!(task_state_of(&store, "t1"), TaskState::Admitted.as_sql_str(),
             "rejected commit must NOT modify the task state");
         assert_eq!(count_export_snapshots(&store, "t1"), 0,
             "rejected commit must NOT leak snapshot rows");
@@ -1264,7 +1332,7 @@ mod tests {
         {
             let conn = store.lock_sync();
             conn.execute(
-                "UPDATE tasks SET evaluation_sha = ?1 WHERE task_id = ?2",
+                &format!("UPDATE {TASKS} SET evaluation_sha = ?1 WHERE task_id = ?2"),
                 rusqlite::params!["head3", "t1"],
             ).unwrap();
         }

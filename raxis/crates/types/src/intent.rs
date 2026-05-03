@@ -208,8 +208,26 @@ pub struct IntentResponse {
 }
 
 /// The exclusive payload variants for IntentResponse.
+///
+/// **Wire format note (INV-IPC-BINCODE):** this enum is serialised through
+/// `raxis-ipc::frame` with `bincode::config::standard()`, which encodes
+/// enums positionally with a single varint discriminator. Earlier
+/// revisions had `#[serde(tag = "outcome", rename_all = "PascalCase")]`
+/// here to mirror the JSON projection in `peripherals.md` §3.1; that
+/// internal-tag representation requires `serde::deserialize_any` which
+/// `bincode::config::standard()` does NOT support, and produces
+/// `Decode(Serde(AnyNotSupported))` at the first wire round-trip. The
+/// attribute had survived only because no test exercised the actual
+/// bincode round-trip — `kernel/tests/mock_planner_end_to_end.rs` is
+/// the regression guard.
+///
+/// The default external-tag representation works with bincode and stays
+/// compatible with JSON consumers that read the discriminant from the
+/// outer key (`{"Accepted": {...}}` / `{"Rejected": {...}}`). The flat
+/// JSON projection sketched in the spec is documentation-only in v1; if
+/// a JSON wire shape is added later it should be a separate type, not a
+/// serde mode that breaks the bincode wire path.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "PascalCase")]
 pub enum IntentOutcome {
     Accepted {
         /// Lane budget snapshot after budget consumption for this intent.

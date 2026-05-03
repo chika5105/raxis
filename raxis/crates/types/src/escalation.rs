@@ -64,8 +64,13 @@ impl EscalationClass {
 // ---------------------------------------------------------------------------
 
 /// The scope detail for an escalation request. Tag must match EscalationClass.
+///
+/// **Wire format note (INV-IPC-BINCODE):** see the long comment on
+/// `IntentOutcome` in `intent.rs`. The previous `#[serde(tag = "kind")]`
+/// internal-tag representation breaks `bincode::config::standard()`
+/// (returns `AnyNotSupported`); the default external tagging works for
+/// bincode and is what the wire actually carries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "PascalCase")]
 pub enum RequestedEscalationScope {
     CapabilityUpgrade {
         capability: crate::CapabilityClass,
@@ -144,8 +149,14 @@ pub struct EscalationRequest {
 // ---------------------------------------------------------------------------
 
 /// The kernel's reply to an EscalationRequest. Three variants.
+///
+/// **Wire format note (INV-IPC-BINCODE):** see the long comment on
+/// `IntentOutcome` in `intent.rs`. The previous
+/// `#[serde(tag = "outcome")]` internal-tag representation breaks
+/// `bincode::config::standard()` (returns `AnyNotSupported`); the
+/// default external tagging works for bincode and is what the wire
+/// actually carries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "PascalCase")]
 pub enum EscalationResponse {
     /// The escalation was recorded as Pending.
     /// The planner must persist `escalation_id` to present it later.
@@ -183,7 +194,11 @@ pub enum EscalationRejectionReason {
 // CHECK (status IN ('Pending','Approved','Denied','TimedOut','Consumed'))
 // ---------------------------------------------------------------------------
 
-/// The lifecycle state of an escalation record.
+/// The lifecycle state of an escalation record. Variants are the exact
+/// strings allowed by the `escalations.status` CHECK constraint
+/// (kernel-store.md §2.5.1 Table 9). Keep these two in lock-step —
+/// `from_sql_str` returning `None` for a value the schema permits is a
+/// spec drift bug.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum EscalationStatus {
@@ -191,6 +206,10 @@ pub enum EscalationStatus {
     Approved,
     Denied,
     TimedOut,
+    /// The approval token expired before the planner consumed it.
+    /// Distinct from `TimedOut` (which fires before approval) so the
+    /// audit trail can tell the two failure modes apart.
+    TokenExpired,
     /// The approval token was consumed (planner presented it on an intent).
     Consumed,
 }
@@ -202,6 +221,7 @@ impl EscalationStatus {
             Self::Approved => "Approved",
             Self::Denied => "Denied",
             Self::TimedOut => "TimedOut",
+            Self::TokenExpired => "TokenExpired",
             Self::Consumed => "Consumed",
         }
     }
@@ -212,6 +232,7 @@ impl EscalationStatus {
             "Approved" => Some(Self::Approved),
             "Denied" => Some(Self::Denied),
             "TimedOut" => Some(Self::TimedOut),
+            "TokenExpired" => Some(Self::TokenExpired),
             "Consumed" => Some(Self::Consumed),
             _ => None,
         }
