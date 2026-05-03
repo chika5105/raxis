@@ -21,4 +21,4 @@ pub mod writer;
 
 pub use event::{AuditEvent, AuditEventKind};
 pub use sink::{AuditSink, CapturedEvent, FakeAuditSink, FileAuditSink};
-pub use writer::{AuditWriter, AuditWriterError};
+pub use writer::{last_chain_state, AuditWriter, AuditWriterError, ChainResumeInfo};

@@ -23,7 +23,9 @@ mod path_scope;
 use std::sync::Arc;
 
 use errors::{exit_with_code, KernelError};
-use raxis_audit_tools::{AuditEventKind, AuditSink, AuditWriter, FileAuditSink};
+use raxis_audit_tools::{
+    last_chain_state, AuditEventKind, AuditSink, AuditWriter, FileAuditSink,
+};
 use raxis_policy::load_policy;
 use raxis_store::Store;
 
@@ -114,13 +116,41 @@ async fn main() {
     // kernel-store.md §2.5.2 this is the only writer to the JSONL chain;
     // no other module opens the file.
     //
-    // v1 simplification: starting_seq=0 / starting_prev_sha256=None on
-    // every kernel start. A future PR will scan the segment for the last
-    // line + recompute its prev_sha256 to resume the chain across
-    // restarts. The current behaviour is the same as the previous
-    // `eprintln!`-only path: every restart begins a fresh chain segment.
+    // Chain-resume: scan the existing segment to recover the last seq +
+    // prev_sha256 so a kernel restart does NOT reset the chain. Without
+    // this, every restart would emit a `KernelStarted` with seq=0 and
+    // genesis prev_sha256, which `recovery::verify_audit_chain` would
+    // immediately fail-close on at the next boot. `last_chain_state`
+    // returns Ok(None) for missing/empty files (genesis case) and
+    // Err(...) for any chain corruption (gap, prev_sha256 break,
+    // malformed JSON). We treat any error as a fatal AuditChainBroken
+    // — fail-closed parity with `recovery::verify_audit_chain`.
     let audit_path = audit_dir.join("segment-000.jsonl");
-    let writer = AuditWriter::open(&audit_path, 0, None).unwrap_or_else(|e| {
+    let resume_info = match last_chain_state(&audit_path) {
+        Ok(maybe) => maybe,
+        Err(e) => exit_with_code(KernelError::AuditChainBroken {
+            reason: format!("cannot resume audit segment {audit_path:?}: {e}"),
+        }),
+    };
+    let (starting_seq, starting_prev) = match resume_info {
+        Some(info) => {
+            eprintln!(
+                "{{\"level\":\"info\",\"message\":\"audit chain resumed\",\
+                 \"next_seq\":{},\"prev_sha256\":\"{}\"}}",
+                info.next_seq, info.prev_sha256
+            );
+            (info.next_seq, Some(info.prev_sha256))
+        }
+        None => {
+            eprintln!(
+                "{{\"level\":\"info\",\"message\":\"audit chain genesis\",\
+                 \"path\":\"{}\"}}",
+                audit_path.display()
+            );
+            (0, None)
+        }
+    };
+    let writer = AuditWriter::open(&audit_path, starting_seq, starting_prev).unwrap_or_else(|e| {
         exit_with_code(KernelError::AuditChainBroken {
             reason: format!("cannot open audit segment {audit_path:?}: {e}"),
         })
