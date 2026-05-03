@@ -31,4 +31,6 @@ pub mod session;
 pub mod sessions;
 pub mod status;
 pub mod task;
+pub mod verifiers;
 pub mod verify_chain;
+pub mod witnesses;

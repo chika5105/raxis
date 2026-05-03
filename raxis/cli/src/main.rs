@@ -196,6 +196,8 @@ fn run() -> Result<(), CliError> {
         "escalations" => commands::escalations::run(&flags, rest),
         "inbox" => commands::inbox::run(&flags, rest),
         "doctor" => commands::doctor::run(&flags, rest),
+        "verifiers" => commands::verifiers::run(&flags, rest),
+        "witnesses" => commands::witnesses::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -316,6 +318,16 @@ READ-ONLY OBSERVATION:
         bits, policy.toml loadability, kernel.db schema pin,
         heartbeat freshness, audit chain quick-check, bundle/kernel
         epoch alignment.
+
+    verifiers [--recent] [--limit N] [--json]
+        Outstanding verifier subprocess tokens (default), or the
+        last N issued tokens regardless of state with --recent.
+        Heartbeat snapshot of active/max-concurrent runners.
+
+    witnesses <task_id> [--gate G] [--result Pass|Fail|Inconclusive]
+                        [--limit N] [--json]
+        Witness records for one task, newest-first. Exit code 4
+        when the task has no witnesses recorded yet.
 "#
     );
 }

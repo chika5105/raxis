@@ -69,6 +69,7 @@ pub mod kernel_meta;
 pub mod policy_history;
 pub mod sessions;
 pub mod tasks;
+pub mod verifier_tokens;
 pub mod witnesses;
 
 // Re-export the most common return shapes so CLI binders don't have to
@@ -81,4 +82,5 @@ pub use sessions::{SessionRow, SessionStateCounts};
 pub use tasks::{
     BlockingEdgeRow, DagEdgeRow, EdgeDirection, ReadyTaskRow, TaskRow, TaskStateCounts,
 };
+pub use verifier_tokens::VerifierTokenRow;
 pub use witnesses::WitnessRow;
