@@ -1,0 +1,19 @@
+# RAXIS sample plan for manual E2E demo (same shape as fixtures/minimal_plan.toml).
+#
+# After setup.sh: sign with `raxis policy sign …/plan/plan.toml --key <operator.pem>`
+# then `plan submit test-minimal-001 <plan_dir>`.
+
+[plan]
+initiative_id   = "test-minimal-001"
+description     = "Demo minimal single-task plan (no gates)"
+version         = "1"
+
+[[tasks]]
+task_id          = "task-alpha"
+description      = "Demo task"
+intent_kinds     = ["SingleCommit", "CompleteTask"]
+path_allowlist   = ["src/", "tests/"]
+predecessors     = []
+gates            = []
+
+terminal_criteria = "AllTasksSucceeded"
