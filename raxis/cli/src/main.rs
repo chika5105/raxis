@@ -191,6 +191,8 @@ fn run() -> Result<(), CliError> {
         "verify-chain" => commands::verify_chain::run(&flags, rest),
         "queue" => commands::queue::run(&flags, rest),
         "inspect" => commands::inspect::run(&flags, rest),
+        "sessions" => commands::sessions::run(&flags, rest),
+        "escalations" => commands::escalations::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -290,6 +292,13 @@ READ-ONLY OBSERVATION:
     inspect <task_id> [--json] [--gates-only] [--with-deps]
         Forensic deep-dive into a single task: state, dependencies,
         witnesses. --reveal-paths is reserved for v1.x.
+
+    sessions [--limit N] [--json]
+        List currently-active planner / gateway / verifier sessions
+        and the global active/expired/revoked counts.
+
+    escalations [--status pending|approved|denied|all] [--limit N] [--json]
+        List escalations filtered by status (default: pending).
 "#
     );
 }
