@@ -1,0 +1,47 @@
+[package]
+name        = "raxis-genesis-tools"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# Single source of truth for the on-disk artifacts produced by the genesis
+# ceremony — `policy.toml` (epoch 1) and the chain-anchor `audit/segment-000.jsonl`
+# `GenesisRecord`. Both `raxis-cli`'s `genesis` command and the kernel's
+# `RAXIS_BOOTSTRAP=1` mode use this crate so they cannot drift again.
+#
+# Production graph: pure-function library. No I/O, no logging, no time-of-day
+# (callers inject `signed_at`/`emitted_at`). Pulled in by `raxis-cli` and
+# `raxis-kernel` as a normal `[dependencies]` entry, NOT a dev-dep — the
+# emitter is operator-facing production code.
+publish     = false
+description = "Single source of truth for the genesis policy.toml and chain-anchor audit record."
+
+[dependencies]
+# `sha2` + `hex` for the SHA-256[:16] fingerprint helper. Both already
+# transit the workspace, so adding them here is a no-cost re-pin.
+sha2       = { workspace = true }
+hex        = { workspace = true }
+# `serde_json` for the genesis audit record serialiser. The record is an
+# adjacent-tagged JSON line (matches the `AuditWriter` chain-write protocol
+# in `raxis-audit-tools`).
+serde_json = { workspace = true }
+# `getrandom` for the genesis-nonce CSPRNG. Goes through the workspace
+# `try_random_array` helper in `raxis-crypto`.
+raxis-crypto = { workspace = true }
+# `uuid` for the `event_id` field of the genesis audit record. Same UUID
+# version (`v4`) used by every other `event_id` mint site in the kernel.
+uuid       = { workspace = true }
+
+[dev-dependencies]
+# `raxis-policy` round-trip: every `render_genesis_policy_toml` test parses
+# its own output through the production loader to guarantee the artifact is
+# bootable. Kept as a dev-dep so the genesis-tools crate itself does not pull
+# in the loader (which depends on `toml`, `glob`, etc.) at production build
+# time. The runtime contract — "load_policy must accept what render_genesis_policy_toml
+# wrote" — is enforced by these tests.
+raxis-policy = { workspace = true }
+# `tempfile` for the round-trip test: write the rendered TOML to disk so the
+# loader can read it back through its actual `&Path` API.
+tempfile     = "3"

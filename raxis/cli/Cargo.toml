@@ -16,10 +16,14 @@ name = "raxis"
 path = "src/main.rs"
 
 [dependencies]
-raxis-types  = { path = "../crates/types" }
-raxis-crypto = { path = "../crates/crypto" }
-raxis-policy = { path = "../crates/policy" }
-raxis-ipc    = { path = "../crates/ipc" }
+raxis-types          = { path = "../crates/types" }
+raxis-crypto         = { path = "../crates/crypto" }
+raxis-policy         = { path = "../crates/policy" }
+raxis-ipc            = { path = "../crates/ipc" }
+# Single source of truth for the genesis policy.toml emitted by `raxis genesis`.
+# See `crates/genesis-tools/src/lib.rs` for the drift history that motivated
+# the extraction. Used only by `commands/genesis.rs`.
+raxis-genesis-tools  = { workspace = true }
 
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -28,3 +32,9 @@ hex           = { workspace = true }
 uuid         = { workspace = true }
 toml         = { workspace = true }
 thiserror    = { workspace = true }
+
+[dev-dependencies]
+# `tempfile` for the genesis-emitter round-trip test
+# (`tests/genesis_emitter_round_trip.rs`), which writes the emitted policy
+# to a tempdir and reads it back through the production loader.
+tempfile     = "3"

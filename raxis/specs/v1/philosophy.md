@@ -189,7 +189,9 @@ raxis/                          # repository root (standalone clone or nested su
 │   ├── audit/
 │   │   ├── writer/               # raxis-audit-tools-writer  (planner-safe: types only)
 │   │   └── tools/                # raxis-audit-tools   (kernel/cli: crypto + chain ops)
-│   └── store/                    # raxis-store
+│   ├── store/                    # raxis-store
+│   ├── genesis-tools/            # raxis-genesis-tools (kernel + cli: shared genesis emitters)
+│   └── test-support/             # raxis-test-support  (DEV-DEPS ONLY; FakeClock + helpers)
 │
 ├── kernel/                       # raxis-kernel binary
 ├── planner/                      # raxis-planner binary
@@ -263,6 +265,7 @@ raxis/                          # repository root (standalone clone or nested su
   `warn_delegation_stale` is `true` when `evaluate_claims` detected stale delegation (`SufficientStale` path) and consumed the grace use; the planner must renew the delegation before the next gated action. `task_state` is **always present** on both variants (a planner needs it on `Rejected` to pick a retry strategy — e.g. `FAIL_TASK_NOT_RUNNING` with `task_state: GatesPending` means "wait for witnesses," with `task_state: BlockedRecoveryPending` means "wait for operator").
 
   Intent packets carry no authority-bearing fields (no capabilities or signing keys). Requests carry VCS pins (`base_commit_sha`, `head_commit_sha`), `intent_kind`, planner-supplied claim manifests, `request_type`, `target_resource`, `justification_blob` (opaque to kernel policy), and `idempotency_key`. **Task binding:** `IntentRequest` carries `task_id: TaskId` — the kernel uses this to bind the intent to the correct task row. For the initial pick-up of a task (`Admitted → Running`), the planner supplies the `task_id` returned by `next_ready_tasks`. For subsequent intents on the same in-flight task (`Running`), the planner repeats the same `task_id`; the kernel validates it against the session's in-flight task context without re-running `next_ready_tasks`. **Cost guardrail:** `IntentRequest` must not contain any field named `estimated_cost`, `cost`, `budget_units`, `cost_hint`, or any semantic equivalent, including serde-renamed fields (`#[serde(rename = "...")]`) that deserialize to a cost-adjacent value. If a future version adds a planner-supplied cost hint for observability, it must be named `planner_cost_hint: Option<u64>` and must be explicitly excluded from any code path reaching `compute_admission_cost` or `consume_budget` — it may appear only in audit records. Structural test: grep for any `IntentRequest` field (including serde aliases) appearing as an argument or binding in `compute_admission_cost` or `consume_budget`; any match is a critical trust violation.
+- `src/clock.rs` — Wall-clock abstraction: the `Clock` trait (`fn now_unix_secs(&self) -> i64`), the production `RealClock` impl, and the convenience free function `unix_now_secs()`. Every kernel call site that needs Unix-second wall time goes through one of these three; private `fn now_unix_secs()` / `fn unix_now()` helpers were forbidden from the kernel after `raxis-types` v0.1 to eliminate (a) the nine-way duplication of the same `SystemTime::now() - UNIX_EPOCH` chain and (b) inconsistent error handling on host-clock failure. Tests inject `FakeClock` from `raxis-test-support` (see §1.6 below) anywhere a `dyn Clock` is expected.
 - `src/witness.rs` — Witness record types: `WitnessRef`, `WitnessBundle`, `GateVerdict`. `WitnessRef` binds `evaluation_sha` (the `head_commit_sha` of the range intent the gate was evaluated against — renamed from `commit_sha` to match `WitnessRecord`, `WitnessSubmission`, and `AuditEventKind::WitnessAccepted`; no aliases, one canonical name), `task_id`, `gate_type`, `verifier_run_id`, `generated_at`, `result_class`. `GateVerdict` is the coarse verdict the planner receives: `Pass`, `FailMissingWitness`, `FailInsufficientWitness`, `FailPolicyViolation`.
 - `src/initiative.rs` — Initiative and task FSM state types: `InitiativeState` enum (`Draft`, `ApprovedPlan`, `Executing`, `Blocked`, `Completed`, `Failed`, `Aborted`), `TaskState` enum (`Admitted`, `GatesPending`, `Running`, `Completed`, `Failed`, `Aborted`, `Cancelled`, `BlockedRecoveryPending`), `BlockReason` enum.
   - **`Admitted`**: the non-terminal stored state for tasks that are not `GatesPending`, `Running`, `BlockedRecoveryPending`, or terminal. Whether a specific `Admitted` task is returned by `next_ready_tasks` (and therefore schedulable) is determined at query time from the DAG edge table — no separate `Ready` state is needed because readiness is a derived query, not a stored flag.
@@ -638,6 +641,73 @@ The audit crate is split to prevent transitive coupling: if a single audit crate
 
 ---
 
+##### `crates/genesis-tools/` — `raxis-genesis-tools`
+
+**Purpose:** Single source of truth for the on-disk artifacts the genesis ceremony emits — the epoch-1 `policy.toml` and the chain-anchor `audit/segment-000.jsonl` `GenesisRecord`. Both `raxis-cli`'s `genesis` command and the kernel's `RAXIS_BOOTSTRAP=1` self-bootstrap path call this crate so they cannot drift again.
+
+**Why a dedicated crate:** Until this crate landed, the same `policy.toml` had two separate hand-rolled emitters (`cli/src/commands/genesis.rs::render_initial_policy_toml` and `kernel/src/bootstrap.rs::write_genesis_policy`). They had drifted in five distinct ways, two of which were latent P0s:
+
+1. The kernel-side wrote `[sessions] allowed_worktree_roots = []`, which `raxis_policy::PolicyBundle::validate` rejects → the kernel could not load its own genesis output.
+2. The kernel-side wrote `[budget.base_cost_per_intent_kind]` keys for `MultiBranchCommit` and `PrGateEvaluation` (not real `IntentKind` variants) and omitted the two real variants the budget code looks up at admission (`CompleteTask`, `ReportFailure`) → any task of those kinds would fail admission with `BudgetError::UnknownIntentKindCost`.
+3. The kernel-side omitted `[[lanes]]` entirely → admission would fail with `SchedulerError::UnknownLane` for the default lane every plan ships with.
+4. The two emitters disagreed on `display_name` (`"operator-1"` vs `"Initial Operator"`).
+5. Whitespace differed → distinct `policy_sha256` for the same operator key.
+
+The whole class of bug — "two binaries hand-roll the same artifact and silently diverge over time" — is structurally eliminated by this crate.
+
+**What it contains:**
+- `src/lib.rs` — `pubkey_fingerprint(bytes) -> String` (SHA-256[:16] of the pubkey, hex-encoded; matches `raxis_policy::loader::operator_pubkey_fingerprint`). The single fingerprint helper used by every emit site.
+- `src/policy_toml.rs` — `render_genesis_policy_toml(GenesisPolicyInputs) -> String`. Pure function — no I/O, no `SystemTime::now()`, no random bytes. The caller injects the timestamp; the emitter never panics on a non-empty input vector.
+- `src/audit_record.rs` — `render_genesis_audit_record(GenesisAuditInputs) -> String`. Pure function — caller injects the 64 CSPRNG bytes (sourced from `raxis_crypto::token::try_random_array`), the `event_id` UUID, and the wall-clock timestamp. The emitter validates the nonce length is exactly 64 bytes (= 512 bits, with 256-bit headroom over the spec floor in `kernel-store.md` §2.5.5 `audit-genesis-nonce`).
+
+**Test contract:** Every emitter has a round-trip test that parses its own output through the production loader (`raxis_policy::load_policy` for the policy emitter; `serde_json::from_str` + the field-set assertion suite for the audit-record emitter). A drift in the loader's accepted shape OR the emitter's produced shape surfaces immediately. There is also a negative pin against the two dead intent-kind names (`MultiBranchCommit`, `PrGateEvaluation`) so they cannot reappear via a copy-paste mistake.
+
+**Who depends on it (production graph):** `raxis-kernel` (uses it from `bootstrap::run_inner`) and `raxis-cli` (uses it from `commands::genesis::run_genesis`). Both list it under `[dependencies]`, NOT `[dev-dependencies]` — the emitter is operator-facing production code.
+
+**Who must NOT depend on it:** `raxis-planner`, `raxis-gateway`, `raxis-verifier`. The genesis ceremony is operator-only; sub-processes have no business minting their own policy artifacts.
+
+**Why no `raxis-policy` dep at production build time:** The loader is a dev-dep of `raxis-genesis-tools` only — it is used to assert round-trip correctness in tests, but the production graph stays minimal. This avoids any pressure that would push the loader to call back into `raxis-genesis-tools` for "default" values, which would create a circular pressure on the policy validation path.
+
+---
+
+##### `crates/test-support/` — `raxis-test-support`
+
+**Purpose:** Workspace-wide test scaffolding. Holds the cross-cutting fakes and one-line helpers that every test crate would otherwise re-roll.
+
+**Why it exists as a separate crate:**
+
+1. `FakeClock` is genuinely cross-cutting — the kernel, gateway, and (eventually) provider crates all need to inject deterministic wall time into TTL / expiry / cooldown logic. It cannot live in `raxis-types` because that crate forbids state (it is "pure data + serde derives" per its own module header). Putting `FakeClock` in any one consumer crate would force every other test consumer to add that crate as a dev-dep just to reach the fake.
+2. Re-exporting `FakeAuditSink` (canonical home: `raxis-audit-tools::sink`) and exposing `mem_store()` (thin wrapper over `Store::open_in_memory()`) from one place lets a test crate write `use raxis_test_support::{FakeClock, FakeAuditSink, mem_store};` instead of pulling three separate dev-deps.
+
+**What it contains:**
+
+- `src/clock.rs` — `FakeClock`: a settable, thread-safe `raxis_types::Clock` impl (`Arc<Mutex<i64>>` inside; cheap to clone). Methods: `at(unix_secs)`, `epoch()`, `now()`, `set_now(t)`, `advance_secs(u64)`, `advance_signed_secs(i64)`, `advance(Duration)`. Concurrency contract: `clone()` shares state via `Arc`, so a test driver can hold one handle and the kernel-under-test can hold an `Arc<dyn Clock>` containing the same fake — both observe `set_now` immediately.
+- `src/git_repo.rs` — `GitRepo`: a `tempfile::TempDir`-backed real git repository with ergonomic helpers (`init`, `commit_file`, `commit_files`, `delete_file_commit`, `create_branch`, `checkout`, `merge_no_ff`, `head_sha`). Used by `kernel/src/vcs/diff.rs::git_integration` to exercise `vcs::{touched_paths, compute, is_ancestor, rev_parse_parent, topology_check}` against actual `git` subprocess output instead of mocked byte strings. Initialisation pins the initial branch to `main` via `symbolic-ref` (portable across git ≥ 1.5) and disables GPG signing / autocrlf so commits are deterministic in any environment. Auto-cleaned on drop. Tests that depend on `GitRepo` MUST guard their bodies with `if !raxis_test_support::git_available() { return; }` so hosts without `git` on `PATH` (minimal CI containers) skip cleanly rather than panic.
+  - **Contract pinning rationale:** the live-git tests catch a class of bug that mocked-input parser tests cannot. The first `git_integration` run revealed that the `parse_name_status_z` parser had been written against the wrong `-z` framing (`<status>\t<path>\0` instead of the actual `<status>\0<path>\0`), which meant every real diff was rejected as `InvalidDiffOutput`. The unit tests had been complicit because they pinned the same wrong shape. This is the canonical justification for keeping a real-git fixture in the workspace test scaffolding rather than relying on mocked subprocess output.
+- `src/audit_dir.rs` — `AuditDir`: a `tempfile::TempDir`-backed audit directory shaped exactly like a production audit dir (`segment-000.jsonl`). Helpers: `new`, `path`, `segment_path`, `open_writer`, `open_writer_resuming_after`, `open_sink`, `write_genesis_record` (matches `kernel::bootstrap::write_genesis_audit_record` byte shape), `read_records`, `raw_lines`, `segment_size_bytes`, `truncate_segment_to`, `corrupt_byte_at`. Used by `kernel/src/recovery.rs::audit_chain_integration` to exercise the full `FileAuditSink` → JSONL → `verify_audit_chain` round trip on the SAME on-disk artifact, instead of pinning the writer contract and the verifier contract independently in unit tests against synthetic byte strings. Auto-cleaned on drop.
+  - **Contract pinning rationale (same bug class as `GitRepo`):** the writer (`raxis-audit-tools::AuditWriter`) and the verifier (`kernel::recovery::verify_audit_chain`) are two halves of the same canonical-bytes contract — every record's `prev_sha256` field MUST equal SHA-256 of the previous line's raw bytes (kernel-store.md §2.5.2). Each half has its own thorough unit tests against tempfiles, but until `AuditDir` arrived, no test put both halves in front of the same artifact. A drift in (e.g.) JSON key order, trailing whitespace, or which integer width `seq` serialises with would slip past both unit-test suites and quietly corrupt every kernel deployment's audit chain. The fixture's `write_genesis_record` helper is held to byte-shape parity with `bootstrap.rs`'s real genesis emitter; if the bootstrap format ever changes, the integration tests in `recovery::audit_chain_integration` break and force the fixture to follow.
+- `src/disk_store.rs` — `DiskStore`: a `tempfile::TempDir`-backed file-backed `Store` with explicit `close()` / `reopen()` lifecycle. Helpers: `new`, `store`, `db_path`, `data_dir`, `close` (drops the inner `Store`, simulating graceful kernel shutdown so the SQLite WAL is checkpointed), `reopen` (re-opens the SAME file with all migrations re-applied, matching `kernel::main::main` step 5 on every restart), `is_open`. Used by `kernel/src/recovery.rs::disk_store_integration` to exercise WAL fsync semantics, schema-migration-on-already-populated-DB, and the close-then-reopen-then-`reconcile_tasks` flow that `:memory:` `Store` cannot simulate (different SQLite mode; no fsync; no file lock).
+  - **Contract pinning rationale (same bug class as `GitRepo` and `AuditDir`):** every existing `Store` test uses `Store::open_in_memory()`, which means the production close-and-reopen-the-same-file path the kernel runs at every boot is currently uncovered. A bug in the migration layer (e.g. a future "schema version" table that double-writes on reopen) would not be caught. Likewise, a bug where `reconcile_tasks` reads a stale `tasks.state` because WAL was never checkpointed before the read connection opened. `DiskStore` provides the only honest "kernel restart" simulation in the workspace.
+- `src/lib.rs` — `mem_store()` factory + re-exports of `FakeAuditSink` and `CapturedEvent` from `raxis-audit-tools`.
+
+**Who depends on it:** **dev-deps only.** Every consumer (kernel, gateway, future provider crates) lists `raxis-test-support = { path = "../crates/test-support" }` under `[dev-dependencies]`, never `[dependencies]`. Shipping `FakeClock` in a release binary would be a P0 trust violation.
+
+**Who must NOT depend on it (at all):** `raxis-types`, `raxis-crypto`, `raxis-ipc`, `raxis-store`, `raxis-policy`, `raxis-audit-tools`. These crates are below `raxis-test-support` in the dependency graph (see §1.7) — their tests use the fakes that live in their own crates (e.g. `raxis-store` tests use `Store::open_in_memory()` directly, `raxis-audit-tools` tests use `FakeAuditSink` from its own `sink::` module). A circular dev-dep through `raxis-test-support` would be rejected by `cargo test --workspace`.
+
+**Workspace-graph rule:** `raxis-test-support` is deliberately NOT listed in `[workspace.dependencies]`. Each consumer spells out the path dependency explicitly so the dev-only nature is visible in every consumer's own `Cargo.toml`.
+
+**Enforcement (defense in depth):** the "dev-dep-only" rule is enforced by three independent layers, so a single mistake in one is caught by the others:
+
+1. **Compile-time (Layer 1)** — every public item in `raxis-test-support` (`FakeClock`, `GitRepo`, `AuditDir`, `DiskStore`, `mem_store`, the `FakeAuditSink` re-export, etc.) is gated on `#[cfg(any(debug_assertions, test))]`. In a release build, the gate is FALSE and the items vanish from the public API. A consumer that mistakenly adds the crate under `[dependencies]` and runs `cargo build --release` fails to compile with E0433 — `rustc` even points at the exact `cfg` line that hid the item. Verified by ad-hoc proof: a synthetic consumer with `pub fn use_fake_clock_in_release_path() { let _ = raxis_test_support::FakeClock::epoch(); }` builds clean in debug and breaks loudly under `--release`.
+
+2. **PR-time (Layer 2)** — `raxis-test-support/src/workspace_guard.rs` ships a `#[test] fn protected_crate_appears_only_under_dev_dependencies` that walks the workspace root's `[workspace.dependencies]` plus every member's `[dependencies]`, `[build-dependencies]`, and `[target.'cfg(...)'.{,build-}dependencies]` tables, and asserts `raxis-test-support` appears in NONE of them. The check runs whenever `cargo test --workspace` runs (i.e. on every CI run and on every reviewer's local), so a misuse is flagged regardless of whether the offending consumer is built in debug or release. The guard's own TOML-parsing helpers (`collect_dep_names`, `collect_target_deps`, `workspace_root`) have unit tests against synthetic fixtures, so the guard's correctness is independently testable.
+
+3. **Release-build noise (Layer 3)** — the crate root carries `#![cfg_attr(not(debug_assertions), deprecated = "...")]`. Even if both Layers 1 and 2 are somehow bypassed (e.g. a consumer uses only `pub use raxis_test_support;` without naming any item), every reference to the crate emits a clearly worded `#[deprecated]` warning explaining the rule and pointing at this section.
+
+`cargo test --release` is the one combination where Layer 1 makes the consumer fail to compile (debug_assertions are off). That is intentional: `cargo test --release` is for benchmarks, which belong in `criterion` benches outside `tests/` and should never depend on `raxis-test-support`.
+
+---
+
 #### 1.7 — Dependency Graph (Trust Enforcement Summary)
 
 The following diagram shows which crates may depend on which.
@@ -653,7 +723,12 @@ raxis-audit-tools-writer ←─── planner only               [NO CRYPTO DEP 
 raxis-audit-tools  ←─── kernel, cli                [HAS CRYPTO — kernel/operator only]
 raxis-store        ←─── kernel only                [NO OTHER PROCESS TOUCHES STATE DB]
 
+raxis-test-support ←─── DEV-DEPS ONLY of: kernel, gateway (and any future test crate)
+                                                   [NEVER appears under [dependencies]; never reachable
+                                                    from a release binary's dependency closure]
+
 raxis-kernel    depends on: types, crypto, ipc, policy, audit-tools, store
+                            (dev-deps add: test-support, tempfile)
 raxis-planner   depends on: types, ipc, audit-writer   ← no crypto, no policy, no store
 raxis-gateway   depends on: types, ipc                 ← no raxis-crypto (no authority-key ops); TLS for HTTPS handled by the HTTP client crate, not raxis-crypto
 raxis-verifier  depends on: types, ipc                 ← no raxis-crypto (no authority-key ops); SHA-256 over witness blobs uses stdlib or bundled crates, not raxis-crypto
