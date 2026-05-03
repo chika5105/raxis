@@ -111,6 +111,30 @@ pub enum DelegationStatus {
 }
 
 impl DelegationStatus {
+    /// The subset of variants that are stored at-rest in the
+    /// `delegations.status` column — i.e. the canonical set referenced
+    /// by the SQL CHECK constraint (kernel-store.md §2.5.1 Table 7).
+    ///
+    /// `Expired` is computed from `now() >= expires_at` at read time;
+    /// `NotGranted` is synthetic for "no row exists". Neither is ever
+    /// written, so neither appears in the DDL CHECK.
+    ///
+    /// Order matches the v1 DDL CHECK list so the rendered Migration 1
+    /// SQL is byte-stable across builds (the
+    /// `migration::tests::migration_1_ddl_fingerprint_is_pinned` hash
+    /// guard relies on this ordering).
+    ///
+    /// **Spec drift contract.** Adding a new STORED variant requires
+    /// both a length bump here AND a new migration that ALTERs the
+    /// CHECK constraint on already-installed databases. Adding a
+    /// runtime-derived variant (like `Expired`) does NOT touch this
+    /// array.
+    pub const STORED: [Self; 3] = [
+        Self::Active,
+        Self::StaleOnNextUse,
+        Self::RenewalRequired,
+    ];
+
     pub fn as_sql_str(self) -> Option<&'static str> {
         match self {
             Self::Active => Some("Active"),

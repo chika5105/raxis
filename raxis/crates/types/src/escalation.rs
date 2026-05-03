@@ -215,6 +215,26 @@ pub enum EscalationStatus {
 }
 
 impl EscalationStatus {
+    /// All variants in v1 — the canonical set referenced by the
+    /// `escalations.status` SQL CHECK constraint
+    /// (kernel-store.md §2.5.1 Table 9). Order matches the v1 DDL
+    /// CHECK list so the rendered Migration 1 SQL is byte-stable
+    /// across builds (the
+    /// `migration::tests::migration_1_ddl_fingerprint_is_pinned`
+    /// hash guard relies on this ordering).
+    ///
+    /// **Spec drift contract.** Adding a new variant requires both a
+    /// length bump here AND a new migration that ALTERs the CHECK
+    /// constraint on already-installed databases.
+    pub const ALL: [Self; 6] = [
+        Self::Pending,
+        Self::Approved,
+        Self::Denied,
+        Self::TimedOut,
+        Self::TokenExpired,
+        Self::Consumed,
+    ];
+
     pub fn as_sql_str(self) -> &'static str {
         match self {
             Self::Pending => "Pending",

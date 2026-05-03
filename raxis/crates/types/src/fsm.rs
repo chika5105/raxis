@@ -41,6 +41,27 @@ pub enum InitiativeState {
 }
 
 impl InitiativeState {
+    /// All variants in v1 — the canonical set referenced by the
+    /// `initiatives.state` SQL CHECK constraint
+    /// (kernel-store.md §2.5.1 Table 2).
+    ///
+    /// **Spec drift contract.** The array length is part of the v1
+    /// schema contract; bumping it (i.e. adding a new variant) MUST be
+    /// accompanied by a schema migration that ALTERs the CHECK
+    /// constraint on already-installed databases. The
+    /// `migration::tests::migration_1_ddl_fingerprint_is_pinned` hash
+    /// guard catches any silent drift between this array and the
+    /// rendered Migration 1 DDL.
+    pub const ALL: [Self; 7] = [
+        Self::Draft,
+        Self::ApprovedPlan,
+        Self::Executing,
+        Self::Blocked,
+        Self::Completed,
+        Self::Failed,
+        Self::Aborted,
+    ];
+
     /// Returns true for terminal states (no further transitions possible).
     /// kernel-core.md: "terminal state" = Completed | Failed | Aborted.
     pub fn is_terminal(self) -> bool {
@@ -115,6 +136,29 @@ pub enum TaskState {
 }
 
 impl TaskState {
+    /// All variants in v1 — the canonical set referenced by the
+    /// `tasks.state` SQL CHECK constraint
+    /// (kernel-store.md §2.5.1 Table 5).
+    ///
+    /// Order matches `tasks.state` CHECK in v1 DDL so the rendered
+    /// Migration 1 SQL is byte-stable across builds (the
+    /// `migration::tests::migration_1_ddl_fingerprint_is_pinned` hash
+    /// guard relies on this ordering).
+    ///
+    /// **Spec drift contract.** Adding a new variant requires both a
+    /// length bump here AND a new migration that ALTERs the CHECK
+    /// constraint on already-installed databases.
+    pub const ALL: [Self; 8] = [
+        Self::Admitted,
+        Self::GatesPending,
+        Self::Running,
+        Self::Completed,
+        Self::Failed,
+        Self::Aborted,
+        Self::Cancelled,
+        Self::BlockedRecoveryPending,
+    ];
+
     /// Terminal task states from which no transition is possible (except
     /// Failed → Admitted via retry_task).
     pub fn is_terminal(self) -> bool {

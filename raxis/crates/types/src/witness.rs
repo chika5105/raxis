@@ -37,6 +37,23 @@ pub enum WitnessResultClass {
 }
 
 impl WitnessResultClass {
+    /// All variants in v1 — the canonical set referenced by the
+    /// `witness_records.result_class` SQL CHECK constraint
+    /// (kernel-store.md §2.5.1 Table 13). Order matches the v1 DDL
+    /// CHECK list so the rendered Migration 1 SQL is byte-stable
+    /// across builds (the
+    /// `migration::tests::migration_1_ddl_fingerprint_is_pinned`
+    /// hash guard relies on this ordering).
+    ///
+    /// **Spec drift contract.** Adding a new variant requires both a
+    /// length bump here AND a new migration that ALTERs the CHECK
+    /// constraint on already-installed databases.
+    pub const ALL: [Self; 3] = [
+        Self::Pass,
+        Self::Fail,
+        Self::Inconclusive,
+    ];
+
     pub fn as_sql_str(self) -> &'static str {
         match self {
             Self::Pass => "Pass",
