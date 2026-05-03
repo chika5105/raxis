@@ -24,6 +24,16 @@ raxis-ipc            = { path = "../crates/ipc" }
 # See `crates/genesis-tools/src/lib.rs` for the drift history that motivated
 # the extraction. Used only by `commands/genesis.rs`.
 raxis-genesis-tools  = { workspace = true }
+# Read-only DB handle (`raxis_store::open_ro`) + typed query catalog
+# (`raxis_store::views`) for every read-only command. The CLI may
+# never write to `kernel.db`, so this dep is intentionally the
+# `RoConn`-flavoured surface only — see crates/store/src/views/mod.rs
+# §"Hard rules".
+raxis-store          = { workspace = true }
+# Heartbeat wire shape + atomic reader for `<data_dir>/runtime/
+# heartbeat.json`. Lives in its own crate so writer (kernel binary)
+# and reader (this CLI) cannot drift on field names.
+raxis-runtime        = { workspace = true }
 
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -32,6 +42,11 @@ hex           = { workspace = true }
 uuid         = { workspace = true }
 toml         = { workspace = true }
 thiserror    = { workspace = true }
+# Used by `commands::status::is_pid_alive` for `kill(pid, 0)` —
+# POSIX existence check that doesn't deliver a signal. Already a
+# dev-dep on the workspace; promoted to prod here because the
+# liveness check is an end-user-visible feature.
+libc         = "0.2"
 
 [dev-dependencies]
 # `tempfile` for the genesis-emitter round-trip test

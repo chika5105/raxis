@@ -566,10 +566,13 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "libc",
  "raxis-crypto",
  "raxis-genesis-tools",
  "raxis-ipc",
  "raxis-policy",
+ "raxis-runtime",
+ "raxis-store",
  "raxis-types",
  "serde",
  "serde_json",

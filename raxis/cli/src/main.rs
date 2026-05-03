@@ -186,6 +186,7 @@ fn run() -> Result<(), CliError> {
                 _ => Err(CliError::Usage(format!("unknown audit sub-command: {sub2:?}"))),
             }
         }
+        "status" => commands::status::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -260,6 +261,13 @@ SUBCOMMANDS:
 
     audit verify [--log-path <path>]
         Verify the integrity of the JSONL audit log chain.
+
+READ-ONLY OBSERVATION:
+
+    status [--json]
+        One-screen kernel health snapshot. Reads heartbeat.json + a
+        read-only kernel.db handle. Exit codes: 0 live, 1 stopped,
+        2 ambiguous (heartbeat fresh but PID gone), 3 chain break.
 "#
     );
 }
