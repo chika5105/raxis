@@ -429,3 +429,71 @@ The following mechanics from claw-code are studied and selectively reimplemented
 
 ---
 
+
+---
+
+#### A.27 — Unmediated Direct Operator-to-Agent Communication
+
+**Considered because:** operators naturally want to steer a running agent — "actually, also handle the edge case in `auth.rs`", "stop what you're doing and focus on the test suite." Chat-based instruction is the default interaction model for every existing agentic system. Adding a side-channel from the operator terminal directly into the agent's context window (via SSH into the VM, via a CLI `raxis message` command that bypasses kernel mediation, or via any mechanism that writes into the agent's context without going through the Kernel's IPC pipeline) feels like a usability improvement.
+
+**Rejected because the system breaks along four independent axes:**
+
+**Axis 1 — Audit chain integrity (INV-05).** The Kernel maintains a cryptographically chained JSONL audit log. Every action an agent takes — every intent submitted, every state transition — produces a signed audit event. An operator message delivered outside the IPC pipeline never appears in the audit log. The agent acts on it; the audit log has no record that the instruction existed. An auditor examining the log sees an agent that spontaneously changed behavior for no recorded reason. The audit chain is broken at the exact point where the behavior changed, making the record useless for compliance and forensics.
+
+**Axis 2 — Path enforcement becomes reactive rather than preventive.** The Kernel's admission gate evaluates every intent *before* any action is taken. If the operator says "also fix `src/legacy/`" and the agent tries to comply, the Kernel's path-allowlist check on the resulting `SingleCommit` intent catches it and rejects it — but only *after* the file has been modified in the worktree and a commit has been staged. The damage is already done at the filesystem level. The gate fires post-action, not pre-action. For the path gate to work as designed, the scope of what the agent is attempting must be visible to the Kernel *before* the agent attempts it.
+
+**Axis 3 — The signed plan is no longer the authoritative specification.** The operator's Ed25519 key (see `operator_public.pem`) is used for exactly one purpose: signing `plan.toml` at `create_initiative` time. That signature cryptographically commits the operator's intent — what agents may touch, what tasks exist, what the budget is. A direct runtime message is not signed with that key. It cannot be verified as originating from the plan-signing operator. It carries no authority — it is text from someone at a terminal. If the agent acts on it, the plan has been effectively amended at runtime without a signature. The entire ceremony of signing the plan becomes advisory.
+
+**Axis 4 — Non-repudiation gap.** If the operator sends "go ahead and write to `src/payments/`" and the agent complies, and a security incident follows, the operator can deny having sent that instruction. The only record is in the agent's ephemeral context window, which is not independently attested. By contrast, every operator action that goes through the Kernel's escalation mechanism produces `EscalationConsumed { resolved_by: operator_alice }` — permanently, cryptographically, in the audit chain. The operator cannot repudiate it.
+
+**Edge case — the operator is malicious:** A direct operator message is structurally identical to a prompt injection attack from the Kernel's perspective. An adversary who gains terminal access (and does not have the operator's Ed25519 private key) can inject messages indistinguishable from a legitimate operator. The only protection against this is that the operator's authority channel (the signed plan) requires the private key. A side-channel that doesn't require the private key destroys this protection.
+
+**Guardrail:** The CLI must never implement a command that writes into an agent's context window from the operator terminal without going through the Kernel's structured IPC pipeline. The Kernel must never expose an endpoint that accepts operator prose and pushes it to a session outside of the formal escalation FSM. This constraint applies even if the message is "just a hint" or "read-only guidance" — the attack surface doesn't care about the operator's intent.
+
+---
+
+#### A.28 — Kernel-Mediated Ad-Hoc Operator Messages (Not Originating from an Escalation)
+
+**Considered because:** if the concern with A.27 is the absence of kernel mediation, the obvious fix is to route the message through the Kernel. The operator runs `raxis message <session_id> "<text>"`. The Kernel logs `OperatorMessage { text, session_id, timestamp }` in the audit record, wraps the text in `KernelPush::OperatorMessage { text }`, and delivers it to the agent over VSock. The Kernel is now the intermediary. The message is auditable. Why is this still insufficient?
+
+**Rejected because kernel mediation solves the audit problem but not the authority problem:**
+
+**Problem 1 — Auditability ≠ authority.** The audit log now records that the message was sent. But recording that someone typed `raxis message <id> "fix auth.rs"` is not the same as authorizing the agent to touch `auth.rs`. The Kernel can log the message; it cannot validate whether the message's content is within the scope of the signed plan, whether it conflicts with the DAG, whether the requested action is within the agent's `path_allowlist`, or whether the request makes any semantic sense in the context of the current task. The Kernel is a policy enforcer, not a semantic reasoner. Logging an instruction the Kernel cannot validate is surveillance without enforcement.
+
+**Problem 2 — Content validation is unsolvable at the message layer.** When `approve_plan` runs, the 7 shift-left checks validate the entire plan against a typed schema before any VM boots. An ad-hoc operator message arrives as a natural-language string after VMs are running. The Kernel cannot:
+- Parse intent from natural language
+- Check whether the requested action is within the agent's `path_allowlist`  
+- Verify it doesn't introduce an implicit sub-task the DAG didn't authorize
+- Determine if it conflicts with a Reviewer's criteria for the current task
+- Know whether it amends, overrides, or merely clarifies the signed plan
+
+The only safe assumption is that the message's content is unvalidated operator prose — and unvalidated prose should never drive an agent's actions in a system where validated plans drive everything else.
+
+**Problem 3 — The LLM cannot distinguish a legitimate `KernelPush` from an injected one.** Even if the Kernel wraps the message as `KernelPush::OperatorMessage { text: "..." }`, the agent processes it as text in its context window. A prompt injection embedded in a file the agent is reading (a documentation file, a README, a code comment) could produce identically-structured output and impersonate the `KernelPush` format. The LLM has no cryptographic verification capability. If the Kernel creates a `KernelPush::OperatorMessage` channel, it creates an attack surface where any actor who can control text the agent reads can impersonate the operator via the Kernel's own delivery mechanism.
+
+The escalation mechanism avoids this because `KernelPush::EscalationResolved` can only be delivered after the Kernel has verified a matching `EscalationRequested` event in `Consumed` state and a valid operator token. The `KernelPush` is produced by the Kernel's own FSM transition, not by forwarding operator prose. The Kernel is not an operator-message relay; it is a state machine.
+
+**Problem 4 — The agent cannot act on it without violating another invariant.** If the operator message says "also handle `src/legacy/`" and the agent tries to comply, the next `SingleCommit` intent touching `src/legacy/` will be rejected by the path-allowlist gate — because `src/legacy/` is not in the agent's signed allowlist. The message caused the agent to waste inference turns attempting something structurally impossible. To make the message *actionable*, the Kernel would need to expand the agent's path allowlist in response to the message — which means unsigned runtime plan amendment (the rejected case in A.27).
+
+**Problem 5 — It breaks the "blocked" signal semantics.** The escalation FSM encodes a specific semantic: `EscalationRequested` means the agent is genuinely blocked and cannot proceed autonomously. This is a verifiable state — the Kernel knows the agent's FSM paused at the escalation submission. A general `KernelPush::OperatorMessage` mechanism has no such semantic. The operator can send messages to agents that are not blocked, are mid-task, or have just submitted `CompleteTask`. The message can arrive at any point and steer the agent off its planned trajectory without the Kernel knowing whether the agent was blocked or making normal progress.
+
+**The one legitimate version of this mechanism:** There *is* a correct, kernel-mediated, operator-to-agent message channel — the system prompt written to `.raxis/system_prompt.txt` before VM boot. This is:
+- Operator-sourced content via the signed plan's `[orchestrator.context]` / `[subtask.context]` fields
+- Validated at `approve_plan` time (part of the 7 shift-left checks)
+- Sealed into `signed_plan_artifacts` with `SHA-256(plan_bytes)`
+- Written once by the Kernel Prompt Assembler before the VM starts
+- Immutable for the session's lifetime
+
+The pre-boot system prompt is the correct "operator tells agent what to do" channel because it was committed at plan-signing time, under the operator's Ed25519 key, and is immutable during execution. An ad-hoc runtime message has none of these properties.
+
+**Invariant summary:**
+
+| Channel | Signed | Content validated | Immutable after delivery | Kernel state-machine-gated |
+|---|---|---|---|---|
+| `plan.toml` + pre-boot system prompt | ✅ Ed25519 | ✅ 7 approve_plan checks | ✅ | N/A (pre-execution) |
+| Escalation hint via `EscalationResolved` | ✅ operator token | ✅ FSM-gated (EscalationRequested must exist) | ✅ | ✅ |
+| Direct operator message (A.27) | ❌ | ❌ | ❌ | ❌ |
+| Kernel-mediated ad-hoc message (A.28) | ❌ | ❌ | ❌ | ❌ |
+
+**Guardrail:** The Kernel must never expose an IPC endpoint or CLI handler that accepts operator prose at runtime and pushes it to an active session's context window outside of the escalation FSM. The `KernelPush` enum must not include a variant that carries free-text operator input without an associated `EscalationId` that the Kernel has verified is in `Consumed` state. Any proposal to add `KernelPush::OperatorMessage` or equivalent must be evaluated as equivalent to A.27 and rejected on the same grounds.
+
