@@ -296,6 +296,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "glob"
+version = "0.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
+
+[[package]]
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -552,11 +558,13 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "raxis-crypto",
+ "raxis-genesis-tools",
  "raxis-ipc",
  "raxis-policy",
  "raxis-types",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "toml",
  "uuid",
@@ -580,6 +588,19 @@ name = "raxis-gateway"
 version = "0.1.0"
 
 [[package]]
+name = "raxis-genesis-tools"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "raxis-crypto",
+ "raxis-policy",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "raxis-ipc"
 version = "0.1.0"
 dependencies = [
@@ -597,14 +618,18 @@ name = "raxis-kernel"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "glob",
  "hex",
  "raxis-audit-tools",
  "raxis-crypto",
+ "raxis-genesis-tools",
  "raxis-ipc",
  "raxis-policy",
  "raxis-store",
+ "raxis-test-support",
  "raxis-types",
  "rusqlite",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",
@@ -643,13 +668,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-test-support"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "raxis-audit-tools",
+ "raxis-store",
+ "raxis-types",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml",
+]
+
+[[package]]
 name = "raxis-types"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "serde",
  "serde_json",
  "thiserror",
  "uuid",
+]
+
+[[package]]
+name = "raxis-verifier-stub"
+version = "0.1.0"
+dependencies = [
+ "raxis-ipc",
+ "raxis-types",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -674,6 +726,12 @@ dependencies = [
  "libsqlite3-sys",
  "smallvec",
 ]
+
+[[package]]
+name = "rustc-hash"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08d43f7aa6b08d49f382cde6a7982047c3426db949b1424bc4b7ec9ae12c6ce2"
 
 [[package]]
 name = "rustc_version"

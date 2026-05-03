@@ -22,6 +22,12 @@ raxis-ipc         = { workspace = true }
 raxis-policy      = { workspace = true }
 raxis-audit-tools = { workspace = true }
 raxis-store       = { workspace = true }
+# Single source of truth for the genesis policy.toml + chain-anchor audit
+# record. See `crates/genesis-tools/src/lib.rs` for the drift-history
+# rationale. The kernel calls `render_genesis_policy_toml` and
+# `render_genesis_audit_record` from `bootstrap::run_inner`; no other call
+# sites in the kernel.
+raxis-genesis-tools = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }
@@ -34,6 +40,12 @@ uuid        = { workspace = true }
 ed25519-dalek = { workspace = true }
 rusqlite    = { workspace = true }
 toml        = { workspace = true }
+glob        = { workspace = true }
+rustc-hash  = { workspace = true }
 
 [dev-dependencies]
 tempfile    = "3"
+# Dev-only — provides `FakeClock`, `FakeAuditSink`, `mem_store()`. MUST
+# stay in `[dev-dependencies]`, never `[dependencies]` (per
+# `raxis-test-support` crate-level docs).
+raxis-test-support = { path = "../crates/test-support" }

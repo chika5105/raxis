@@ -266,76 +266,103 @@ pub fn compute(
 
 /// Parse `git diff --name-status --no-renames -z` output.
 ///
-/// `-z` framing: each row is `<status>\t<path>\0` (or for copy rows
-/// `C<score>\0<src>\0<dst>` per the git man page — but with `--no-renames`
-/// copies are also collapsed, so we treat any `C` row as a parse error to
-/// avoid relying on undocumented behaviour). NUL terminators preserve paths
-/// containing `\t`, `\n`, or quotes.
+/// `-z` framing (verified empirically against git 2.39+; matches the
+/// `git-diff(1)` man page entry for `-z` under `--raw`/`--name-status`):
+///
+///   - A/M/D/T row : `<status>\0<path>\0`            — TWO fields
+///   - C<score>    : `<status>\0<src>\0<dst>\0`      — THREE fields
+///   - R<score>    : `<status>\0<src>\0<dst>\0`      — THREE (rejected: --no-renames)
+///   - U           : `<status>\0<path>\0`            — TWO fields (rejected: unmerged)
+///
+/// **Important:** `-z` does NOT keep the `<status>\t<path>` shape that
+/// the no-`-z` form uses. Every field — status, path, src, dst — is its
+/// own NUL-separated record. An earlier version of this parser assumed
+/// the `\t` separator was preserved under `-z`, which made `compute()`
+/// reject every real git diff with `InvalidDiffOutput`. The integration
+/// tests in `git_integration` below caught the bug.
+///
+/// NUL terminators preserve paths containing `\t`, `\n`, or quotes —
+/// hence why `-z` is used in the first place.
 fn parse_name_status_z(stdout: &str) -> Result<Vec<String>, VcsError> {
     let mut out = Vec::new();
+    // `-z` always terminates fields with `\0`, including the LAST one,
+    // so `split('\0')` yields a trailing empty string we must ignore.
     let mut iter = stdout.split('\0').peekable();
-    while let Some(field) = iter.next() {
-        if field.is_empty() {
-            // Trailing NUL after the last record produces an empty trailing
-            // field on most git versions. Skip cleanly.
+
+    while let Some(status) = iter.next() {
+        if status.is_empty() {
+            // Trailing empty field after the last record's terminator,
+            // OR a back-to-back `\0\0` pair (which some git versions emit
+            // at end-of-stream). Either way: skip until we either find a
+            // non-empty status or exhaust the iterator.
             if iter.peek().is_none() {
                 break;
             }
             continue;
         }
 
-        // Each non-copy row is "<status>\t<path>"; for copy/rename rows
-        // (which we do not expect with --no-renames) git emits
-        // "<status>\0<src>\0<dst>" with the status alone in this field.
-        let (status, path_in_same_field) = match field.split_once('\t') {
-            Some((s, p)) => (s.to_owned(), Some(p.to_owned())),
-            None => (field.to_owned(), None),
-        };
-
-        match classify_status(&status) {
+        match classify_status(status) {
             DiffStatus::SinglePath => {
-                let path = path_in_same_field.ok_or_else(|| VcsError::InvalidDiffOutput {
-                    line: field.to_owned(),
+                let path = next_nonempty_field(&mut iter).ok_or_else(|| {
+                    VcsError::InvalidDiffOutput {
+                        line: format!("{status} (missing path field)"),
+                    }
                 })?;
-                if path.is_empty() {
-                    return Err(VcsError::InvalidDiffOutput { line: field.to_owned() });
-                }
                 out.push(path);
             }
             DiffStatus::CopyRow => {
                 // C<score> rows: source in next field, destination in the one
                 // after. We must include BOTH (§2.5.8 conservative rule).
-                let src = iter.next().ok_or_else(|| VcsError::InvalidDiffOutput {
-                    line: format!("{status} (missing source path)"),
+                let src = next_nonempty_field(&mut iter).ok_or_else(|| {
+                    VcsError::InvalidDiffOutput {
+                        line: format!("{status} (missing source path)"),
+                    }
                 })?;
-                let dst = iter.next().ok_or_else(|| VcsError::InvalidDiffOutput {
-                    line: format!("{status} (missing destination path)"),
+                let dst = next_nonempty_field(&mut iter).ok_or_else(|| {
+                    VcsError::InvalidDiffOutput {
+                        line: format!("{status} (missing destination path)"),
+                    }
                 })?;
-                if src.is_empty() || dst.is_empty() {
-                    return Err(VcsError::InvalidDiffOutput {
-                        line: format!("{status} src={src:?} dst={dst:?}"),
-                    });
-                }
-                out.push(src.to_owned());
-                out.push(dst.to_owned());
+                out.push(src);
+                out.push(dst);
             }
             DiffStatus::Unmerged => {
-                let p = path_in_same_field.unwrap_or_default();
-                return Err(VcsError::UnmergedPaths { path: p });
+                // The unmerged row's path field still follows on the wire
+                // (per the `-z` framing); pull it so the error message is
+                // useful, but do not let a missing field hide the violation.
+                let path = next_nonempty_field(&mut iter).unwrap_or_default();
+                return Err(VcsError::UnmergedPaths { path });
             }
             DiffStatus::Rename => {
+                // Rename rows emit src + dst like copy rows. Drain both so
+                // the error report can name them — easier debugging than
+                // a bare "rename" message.
+                let src = next_nonempty_field(&mut iter).unwrap_or_default();
+                let dst = next_nonempty_field(&mut iter).unwrap_or_default();
                 return Err(VcsError::UnexpectedRenameRow {
-                    line: format!("{status}\t{path_in_same_field:?}"),
+                    line: format!("{status}\t{src:?} -> {dst:?}"),
                 });
             }
             DiffStatus::Invalid => {
                 return Err(VcsError::InvalidDiffOutput {
-                    line: format!("{status}\t{path_in_same_field:?}"),
+                    line: status.to_owned(),
                 });
             }
         }
     }
     Ok(out)
+}
+
+/// Pull the next field from the iterator, skipping over leading empty
+/// fields (which can happen if the stream contains stray `\0\0`).
+/// Returns `None` only if the iterator is fully exhausted.
+fn next_nonempty_field<'a, I: Iterator<Item = &'a str>>(iter: &mut I) -> Option<String> {
+    for f in iter {
+        if !f.is_empty() {
+            return Some(f.to_owned());
+        }
+    }
+    None
 }
 
 /// Apply the post-processing rules: strip leading `./`, reject `..`
@@ -588,13 +615,22 @@ mod tests {
 
     // ── parse_name_status_z ──────────────────────────────────────────────
 
-    /// Simulate `git diff --name-status -z` for the canonical happy path:
-    /// added, modified, deleted, type-change. All four are included, with
-    /// deletions kept (per the spec table — `D` is included for path-scope
-    /// enforcement; the earlier `compute` dropped them, which was a bug).
+    // ── parse_name_status_z fixtures ─────────────────────────────────────
+    //
+    // The byte shapes below were captured from real `git diff -z` output
+    // (verified against git 2.39+ and cross-checked with the integration
+    // tests in `git_integration` below). Every fixture uses the
+    // `<status>\0<path>\0` framing that real git emits — NEVER the
+    // `<status>\t<path>\0` shape that an earlier version of this parser
+    // (and these tests!) incorrectly assumed. See the parser doc comment
+    // for the full framing rules.
+
+    /// Canonical happy path: A / M / D / T rows. Deletions are KEPT
+    /// (per §2.5.8 — D is in scope for path enforcement; an earlier
+    /// `compute` dropped them, which was a bug).
     #[test]
     fn parse_z_canonical_single_path_rows() {
-        let stdout = "A\tsrc/added.rs\0M\tsrc/modified.rs\0D\tsrc/deleted.rs\0T\tsrc/type_change.rs\0";
+        let stdout = "A\0src/added.rs\0M\0src/modified.rs\0D\0src/deleted.rs\0T\0src/type_change.rs\0";
         let paths = parse_name_status_z(stdout).unwrap();
         assert_eq!(
             paths,
@@ -613,7 +649,7 @@ mod tests {
     /// pattern that did not handle suffix-bearing codes.
     #[test]
     fn parse_z_handles_score_suffix_on_modified() {
-        let stdout = "M100\tsrc/foo.rs\0";
+        let stdout = "M100\0src/foo.rs\0";
         let paths = parse_name_status_z(stdout).unwrap();
         assert_eq!(paths, vec!["src/foo.rs"]);
     }
@@ -630,7 +666,7 @@ mod tests {
     /// Unmerged paths are a hard reject — UnmergedPaths variant.
     #[test]
     fn parse_z_unmerged_is_rejected() {
-        let stdout = "U\tsrc/conflict.rs\0";
+        let stdout = "U\0src/conflict.rs\0";
         let err = parse_name_status_z(stdout).unwrap_err();
         match err {
             VcsError::UnmergedPaths { path } => assert_eq!(path, "src/conflict.rs"),
@@ -640,9 +676,10 @@ mod tests {
 
     /// Rename rows must never appear because we always pass `--no-renames`;
     /// if they do it's a kernel bug. Surfaces as `UnexpectedRenameRow`.
+    /// Real `-z` rename rows have THREE fields (status, src, dst).
     #[test]
     fn parse_z_rename_row_is_rejected_as_kernel_bug() {
-        let stdout = "R85\tsrc/old.rs\0";
+        let stdout = "R85\0src/old.rs\0src/new.rs\0";
         let err = parse_name_status_z(stdout).unwrap_err();
         assert!(matches!(err, VcsError::UnexpectedRenameRow { .. }));
     }
@@ -651,7 +688,7 @@ mod tests {
     /// `InvalidDiffOutput` — we never silently include or drop them.
     #[test]
     fn parse_z_unknown_status_is_invalid() {
-        for bad in ["X\tfoo.rs\0", "B\tfoo.rs\0", "?\tfoo.rs\0"] {
+        for bad in ["X\0foo.rs\0", "B\0foo.rs\0", "?\0foo.rs\0"] {
             let err = parse_name_status_z(bad).unwrap_err();
             assert!(
                 matches!(err, VcsError::InvalidDiffOutput { .. }),
@@ -660,15 +697,23 @@ mod tests {
         }
     }
 
-    /// Mixed-format output containing a path with `\t` in the body parses
-    /// correctly thanks to `-z`. Names with embedded tabs are rare but legal
-    /// in git; this is the regression guard.
+    /// Filenames containing `\t` parse correctly — the whole point of
+    /// using `-z` is that NUL is the only field separator, so embedded
+    /// tabs / newlines / quotes pass through untouched.
     #[test]
     fn parse_z_tolerates_tab_in_filename() {
-        // `weird\tname.rs` after the status's tab.
-        let stdout = "M\tweird\tname.rs\0";
+        let stdout = "M\0weird\tname.rs\0";
         let paths = parse_name_status_z(stdout).unwrap();
         assert_eq!(paths, vec!["weird\tname.rs"]);
+    }
+
+    /// Filenames containing `\n` (newline) — also legal in unix, also
+    /// preserved by `-z`.
+    #[test]
+    fn parse_z_tolerates_newline_in_filename() {
+        let stdout = "M\0weird\nname.rs\0";
+        let paths = parse_name_status_z(stdout).unwrap();
+        assert_eq!(paths, vec!["weird\nname.rs"]);
     }
 
     /// Empty input (no diff rows) is the valid "no changes" case.
@@ -677,12 +722,368 @@ mod tests {
         assert!(parse_name_status_z("").unwrap().is_empty());
     }
 
-    /// Trailing NUL after the last record — emitted by some git versions —
-    /// must NOT cause a parse failure or an empty-string entry.
+    /// Trailing NUL after the last record — always present, since `-z`
+    /// terminates every field — must NOT cause a parse failure or
+    /// produce an empty-string entry.
     #[test]
     fn parse_z_trailing_nul_is_tolerated() {
-        let stdout = "M\tsrc/foo.rs\0\0";
+        let stdout = "M\0src/foo.rs\0";
         let paths = parse_name_status_z(stdout).unwrap();
         assert_eq!(paths, vec!["src/foo.rs"]);
+    }
+
+    /// Defensive: missing path field after a SinglePath status surfaces
+    /// `InvalidDiffOutput` rather than silently dropping the row.
+    #[test]
+    fn parse_z_missing_path_after_status_is_invalid() {
+        // "A\0" with no following field: the iterator yields ["A", ""].
+        // The trailing "" is ignored as a terminator-only field, so the
+        // path lookup fails.
+        let stdout = "A\0";
+        let err = parse_name_status_z(stdout).unwrap_err();
+        assert!(
+            matches!(err, VcsError::InvalidDiffOutput { .. }),
+            "missing path after status MUST surface InvalidDiffOutput, got {err:?}"
+        );
+    }
+
+    /// Defensive: copy row with missing destination surfaces
+    /// `InvalidDiffOutput` (rather than silently producing only the src).
+    #[test]
+    fn parse_z_copy_row_missing_destination_is_invalid() {
+        let stdout = "C75\0src/orig.rs\0";
+        let err = parse_name_status_z(stdout).unwrap_err();
+        assert!(
+            matches!(err, VcsError::InvalidDiffOutput { .. }),
+            "copy row missing destination MUST surface InvalidDiffOutput, got {err:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests — exercise every public function against a REAL git repo
+// generated in a `tempfile::TempDir` and discarded on test completion.
+//
+// Why not in `kernel/tests/vcs_integration.rs`?
+//   `raxis-kernel` is a binary crate (no `[lib]` target), so external
+//   integration tests cannot import `raxis_kernel::vcs::diff`. Living in
+//   `#[cfg(test)] mod ...` here gives the integration tests the same
+//   `super::*` access the parser tests use, while still exercising the
+//   real `git` subprocess path the parser tests deliberately skip.
+//
+// Skip behaviour:
+//   Every test calls `skip_if_no_git()` first so hosts without `git` on
+//   PATH simply log "SKIP" and pass. We never panic on a host-property
+//   issue.
+//
+// Determinism:
+//   `GitRepo` fixes `user.email`/`user.name`/`commit.gpgsign=false`/
+//   `core.autocrlf=false` and pins the initial branch to `main` via
+//   `symbolic-ref`. Commit timestamps still vary (git uses wall time),
+//   so we never assert on SHAs themselves — only on diff output, ancestry
+//   relationships, and merge-commit counts.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod git_integration {
+    use super::*;
+    use raxis_test_support::{git_available, GitRepo};
+
+    /// Skip helper — every test starts with this. Returning early on a
+    /// missing git binary keeps the test green on minimal CI images.
+    fn skip_if_no_git() -> bool {
+        if !git_available() {
+            eprintln!("SKIP: git binary not available on PATH");
+            return true;
+        }
+        false
+    }
+
+    /// Promote a `GitRepo`-returned hex string into the typed `CommitSha`.
+    /// The fixture already validates 40-char lowercase hex, so this is
+    /// just a wrapping convenience.
+    fn sha(s: &str) -> CommitSha {
+        CommitSha::new(s).expect("GitRepo handed back an invalid SHA — fixture bug")
+    }
+
+    // ── touched_paths ────────────────────────────────────────────────────
+
+    #[test]
+    fn touched_paths_returns_added_modified_and_deleted() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let base_hex = repo.commit_files(
+            &[("a.txt", "1"), ("b.txt", "2"), ("doomed.txt", "3")],
+            "base: a, b, doomed",
+        );
+        let _ = repo.delete_file_commit("doomed.txt", "delete doomed");
+        let _ = repo.commit_file("a.txt", "MODIFIED", "modify a");
+        let head_hex = repo.commit_file("c.txt", "C", "add c");
+
+        let paths = touched_paths(&sha(&base_hex), &sha(&head_hex), repo.path())
+            .expect("touched_paths must succeed on a valid range");
+
+        // Sorted; includes A (c.txt), M (a.txt), D (doomed.txt). b.txt is
+        // unchanged and must NOT appear.
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("a.txt"),
+                PathBuf::from("c.txt"),
+                PathBuf::from("doomed.txt"),
+            ],
+            "touched_paths must include A+M+D and exclude unchanged paths"
+        );
+    }
+
+    #[test]
+    fn touched_paths_empty_for_identical_shas() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let only = repo.commit_file("x.txt", "x", "init");
+        let paths = touched_paths(&sha(&only), &sha(&only), repo.path()).unwrap();
+        assert!(paths.is_empty(), "diff of a SHA against itself must be empty");
+    }
+
+    #[test]
+    fn touched_paths_rejects_unknown_sha() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let real = repo.commit_file("a.txt", "x", "init");
+        let bogus = sha(&"f".repeat(40));
+        let err = touched_paths(&sha(&real), &bogus, repo.path()).unwrap_err();
+        assert!(
+            matches!(err, VcsError::DiffFailed { .. }),
+            "diff against unknown SHA must surface DiffFailed, got {err:?}"
+        );
+    }
+
+    // ── compute (the canonical -z parser path) ────────────────────────────
+
+    #[test]
+    fn compute_returns_post_processed_sorted_unique_paths() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let base = repo.commit_files(
+            &[("z.txt", "z"), ("dir/y.txt", "y")],
+            "base",
+        );
+        // Mix: add new file, modify existing in subdir, delete top-level.
+        std::fs::write(repo.path().join("dir/y.txt"), "modified")
+            .expect("write modify");
+        std::fs::create_dir_all(repo.path().join("dir/sub")).unwrap();
+        std::fs::write(repo.path().join("dir/sub/new.txt"), "n").unwrap();
+        let _ = repo.commit_files(
+            &[("dir/y.txt", "modified"), ("dir/sub/new.txt", "n")],
+            "modify y, add sub/new",
+        );
+        let head = repo.delete_file_commit("z.txt", "delete z");
+
+        let paths = compute(&sha(&base), &sha(&head), repo.path())
+            .expect("compute must succeed");
+
+        // Sorted lexicographically, unique. dir/sub/new (A), dir/y (M),
+        // z (D). Subdirectory paths must NOT have leading `./` after
+        // post-processing.
+        assert_eq!(
+            paths,
+            vec![
+                PathBuf::from("dir/sub/new.txt"),
+                PathBuf::from("dir/y.txt"),
+                PathBuf::from("z.txt"),
+            ],
+        );
+    }
+
+    #[test]
+    fn compute_empty_diff_returns_empty_vec() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let only = repo.commit_file("a.txt", "x", "init");
+        let paths = compute(&sha(&only), &sha(&only), repo.path()).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn compute_includes_deletion_rows() {
+        // Regression guard: an earlier `compute` implementation dropped D
+        // rows entirely, which would silently widen `effective_allow`
+        // checks (a deleted file outside the allowlist would not flag).
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let base = repo.commit_files(&[("keep.txt", "k"), ("gone.txt", "g")], "base");
+        let head = repo.delete_file_commit("gone.txt", "delete gone");
+
+        let paths = compute(&sha(&base), &sha(&head), repo.path()).unwrap();
+        assert_eq!(paths, vec![PathBuf::from("gone.txt")],
+            "D rows MUST be included — deletions are subject to path scope");
+    }
+
+    // ── is_ancestor ──────────────────────────────────────────────────────
+
+    #[test]
+    fn is_ancestor_true_for_strict_ancestor() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let a = repo.commit_file("1.txt", "1", "first");
+        let b = repo.commit_file("2.txt", "2", "second");
+        assert!(is_ancestor(&sha(&a), &sha(&b), repo.path()).unwrap());
+    }
+
+    #[test]
+    fn is_ancestor_true_for_same_commit() {
+        // git treats a commit as an ancestor of itself (exit 0).
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let a = repo.commit_file("1.txt", "1", "first");
+        assert!(is_ancestor(&sha(&a), &sha(&a), repo.path()).unwrap(),
+            "a commit MUST be its own ancestor (git contract)");
+    }
+
+    #[test]
+    fn is_ancestor_false_for_unrelated_branch_tips() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let _ = repo.commit_file("base.txt", "0", "base");
+        repo.create_branch("feature");
+        let feature_tip = repo.commit_file("feat.txt", "F", "feature work");
+        repo.checkout("main");
+        let main_tip = repo.commit_file("main.txt", "M", "main work");
+
+        // feature_tip is not an ancestor of main_tip (diverged).
+        assert!(!is_ancestor(&sha(&feature_tip), &sha(&main_tip), repo.path()).unwrap());
+        assert!(!is_ancestor(&sha(&main_tip),    &sha(&feature_tip), repo.path()).unwrap());
+    }
+
+    // ── rev_parse_parent ─────────────────────────────────────────────────
+
+    #[test]
+    fn rev_parse_parent_returns_first_parent() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let parent_hex = repo.commit_file("a.txt", "1", "first");
+        let child_hex  = repo.commit_file("b.txt", "2", "second");
+        let parent_resolved = rev_parse_parent(&sha(&child_hex), repo.path()).unwrap();
+        assert_eq!(parent_resolved.as_str(), parent_hex);
+    }
+
+    #[test]
+    fn rev_parse_parent_on_root_commit_returns_head_is_root_commit() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let root = repo.commit_file("a.txt", "1", "root");
+        let err = rev_parse_parent(&sha(&root), repo.path()).unwrap_err();
+        assert!(
+            matches!(err, VcsError::HeadIsRootCommit | VcsError::ShaNotFound { .. }),
+            "root commit MUST surface as HeadIsRootCommit (preferred) or ShaNotFound \
+             depending on git version, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rev_parse_parent_unknown_sha_surfaces_typed_error() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let _ = repo.commit_file("a.txt", "x", "init");
+        let bogus = sha(&"e".repeat(40));
+        let err = rev_parse_parent(&bogus, repo.path()).unwrap_err();
+        assert!(
+            matches!(err, VcsError::ShaNotFound { .. } | VcsError::HeadIsRootCommit | VcsError::GitError { .. }),
+            "unknown SHA MUST surface a typed error, got {err:?}"
+        );
+    }
+
+    // ── topology_check ───────────────────────────────────────────────────
+
+    #[test]
+    fn topology_check_passes_on_linear_history() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let base = repo.commit_file("a.txt", "1", "first");
+        let head = repo.commit_file("b.txt", "2", "second");
+        topology_check(&sha(&base), &sha(&head), repo.path())
+            .expect("linear history must pass topology_check");
+    }
+
+    #[test]
+    fn topology_check_passes_on_empty_range() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let only = repo.commit_file("a.txt", "1", "init");
+        topology_check(&sha(&only), &sha(&only), repo.path())
+            .expect("empty range MUST pass topology_check (zero merges = clean)");
+    }
+
+    #[test]
+    fn topology_check_rejects_merge_commit_in_range() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let base = repo.commit_file("base.txt", "0", "base");
+        repo.create_branch("feature");
+        repo.commit_file("feat.txt", "F", "on feature");
+        repo.checkout("main");
+        repo.commit_file("main.txt", "M", "on main");
+        let merge = repo.merge_no_ff("feature", "merge feature");
+
+        let err = topology_check(&sha(&base), &sha(&merge), repo.path()).unwrap_err();
+        match err {
+            VcsError::MergeCommitInRange { merge_count } => {
+                assert_eq!(merge_count, 1,
+                    "exactly one merge commit (--no-ff) was created");
+            }
+            other => panic!("expected MergeCommitInRange, got {other:?}"),
+        }
+    }
+
+    // ── End-to-end: real diff → check_paths (path-scope smoke) ───────────
+    //
+    // Demonstrates the fixture's value beyond `vcs::diff` itself: any
+    // path-scope test that wants real diff input rather than a synthetic
+    // `Vec<PathBuf>` builds on the same `GitRepo` fixture.
+
+    #[test]
+    fn end_to_end_compute_then_check_paths_against_glob_allowlist() {
+        if skip_if_no_git() { return; }
+        let repo = GitRepo::init();
+        let base = repo.commit_file("src/lib.rs", "fn main(){}", "init src/lib.rs");
+
+        // Make a change strictly inside src/ — should be allowed by a
+        // `src/**` allowlist.
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        std::fs::write(repo.path().join("src/util.rs"), "// util").unwrap();
+        let head_in_scope = repo.commit_files(
+            &[("src/util.rs", "// util")],
+            "add src/util.rs (in scope)",
+        );
+
+        let in_scope_paths = compute(&sha(&base), &sha(&head_in_scope), repo.path())
+            .expect("compute on in-scope diff must succeed");
+        assert_eq!(in_scope_paths, vec![PathBuf::from("src/util.rs")]);
+
+        // Verify the path matches the glob pattern `src/**`. We use the
+        // raw `glob` crate the same way `path_scope::AllowSet` does, so
+        // this test pins the same matching semantics path-scope enforces.
+        let pat = glob::Pattern::new("src/**").expect("glob compile");
+        for p in &in_scope_paths {
+            assert!(pat.matches_path(p),
+                "in-scope path {p:?} MUST match the glob {pat:?}");
+        }
+
+        // Now make a change OUTSIDE src/ — should NOT match the allowlist.
+        std::fs::write(repo.path().join("README.md"), "outside scope").unwrap();
+        let head_out_of_scope = repo.commit_files(
+            &[("README.md", "outside scope")],
+            "add README.md (out of scope)",
+        );
+
+        let out_of_scope_paths = compute(&sha(&base), &sha(&head_out_of_scope), repo.path())
+            .expect("compute on out-of-scope diff must succeed");
+        // Range covers BOTH commits (in_scope + out_of_scope), so both paths
+        // appear; that's intentional — we want to assert that path-scope
+        // enforcement, when fed real diff output, sees the violator.
+        assert!(out_of_scope_paths.contains(&PathBuf::from("README.md")));
+        let any_violation = out_of_scope_paths.iter().any(|p| !pat.matches_path(p));
+        assert!(any_violation,
+            "real-diff path-scope smoke MUST find at least one path outside `src/**`");
     }
 }

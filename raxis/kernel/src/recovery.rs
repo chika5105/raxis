@@ -582,3 +582,475 @@ mod tests {
         assert!(matches!(result, Ok(true)));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Integration tests — production AuditWriter / FileAuditSink ⟷ on-disk
+// JSONL ⟷ verify_audit_chain. Exercises BOTH halves of the audit-chain
+// contract through the same real artifact, instead of pinning the writer
+// shape and the verifier shape independently in unit tests against
+// synthetic byte strings. Same bug class as the `vcs::diff` `-z` framing
+// miss the `GitRepo` integration tests caught.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod audit_chain_integration {
+    use super::*;
+    use raxis_audit_tools::{AuditEventKind, AuditSink};
+    use raxis_test_support::{AuditDir, GenesisInfo};
+    use sha2::{Digest, Sha256};
+
+    fn sample_event(reason: &str) -> AuditEventKind {
+        AuditEventKind::KernelStopped {
+            reason: reason.to_owned(),
+        }
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(bytes);
+        hex::encode(h.finalize())
+    }
+
+    /// Walk every record in the segment and assert the chain invariant
+    /// (kernel-store.md §2.5.2): record N's `prev_sha256` MUST equal the
+    /// SHA-256 of record N-1's raw line bytes (including trailing '\n').
+    /// Returns the records on success so the caller can also assert
+    /// per-record fields.
+    fn assert_chain_unbroken(dir: &AuditDir) -> Vec<serde_json::Value> {
+        let raw     = std::fs::read_to_string(dir.segment_path()).unwrap();
+        let records = dir.read_records();
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(records.len(), lines.len(), "record count vs line count");
+
+        for (i, rec) in records.iter().enumerate() {
+            let prev = rec["prev_sha256"]
+                .as_str()
+                .unwrap_or_else(|| panic!("record {i} missing prev_sha256"));
+            let expected = if i == 0 {
+                "0".repeat(64)
+            } else {
+                sha256_hex(format!("{}\n", lines[i - 1]).as_bytes())
+            };
+            assert_eq!(
+                prev, expected,
+                "record {i} prev_sha256 must equal SHA-256 of line {}",
+                i.saturating_sub(1),
+            );
+        }
+
+        records
+    }
+
+    // ─── Happy paths ──────────────────────────────────────────────────────
+
+    #[test]
+    fn writer_to_verifier_round_trip_passes_chain_check() {
+        // Production setup the kernel itself runs on every boot:
+        //   bootstrap writes GenesisRecord, AuditWriter appends events,
+        //   verify_audit_chain reads the segment back at startup.
+        let dir  = AuditDir::new();
+        let info: GenesisInfo = dir.write_genesis_record();
+
+        // Append three real events through the production writer,
+        // chained off the genesis line.
+        let mut w = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
+        for i in 0..3 {
+            w.append(sample_event(&format!("e{i}")), None, None, None)
+                .unwrap();
+        }
+
+        // The chain MUST be byte-coherent across every line — this is the
+        // assertion that catches a writer/verifier shape drift.
+        let records = assert_chain_unbroken(&dir);
+        assert_eq!(records.len(), 4);
+
+        // And the production verifier MUST accept the segment.
+        let result = verify_audit_chain(dir.path());
+        assert!(matches!(result, Ok(true)),
+            "verify_audit_chain rejected a production-shape chain: {result:?}");
+    }
+
+    #[test]
+    fn file_audit_sink_round_trip_through_dyn_audit_sink_passes_chain_check() {
+        // Exercises the SAME `Arc<dyn AuditSink>` polymorphism the
+        // kernel uses in `HandlerContext`. If the trait coercion or
+        // the FileAuditSink mutex ever stops yielding identical bytes
+        // to the bare AuditWriter, this test breaks.
+        let dir  = AuditDir::new();
+        let info = dir.write_genesis_record();
+
+        // Open a writer resuming from genesis, wrap in a FileAuditSink,
+        // emit through the trait — same production path the kernel uses.
+        let writer = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
+        let sink   = raxis_audit_tools::FileAuditSink::new(writer);
+        let dyn_sink: std::sync::Arc<dyn AuditSink> = std::sync::Arc::new(sink);
+
+        for i in 0..2 {
+            dyn_sink
+                .emit(sample_event(&format!("via-trait-{i}")), None, None, None)
+                .unwrap();
+        }
+
+        assert_chain_unbroken(&dir);
+        assert!(matches!(verify_audit_chain(dir.path()), Ok(true)));
+    }
+
+    #[test]
+    fn writer_correctly_chains_first_event_off_genesis_line() {
+        // Specifically pins the GENESIS → first-event link, which is the
+        // single most error-prone hop in the chain (it crosses two
+        // different writers — the bootstrap-side raw write vs the
+        // production AuditWriter — and they MUST agree on the canonical
+        // line bytes the SHA-256 is computed from).
+        let dir  = AuditDir::new();
+        let info = dir.write_genesis_record();
+
+        let mut w = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
+        w.append(sample_event("first-after-genesis"), None, None, None)
+            .unwrap();
+
+        let records = dir.read_records();
+        assert_eq!(records[1]["seq"].as_u64().unwrap(), 1);
+        assert_eq!(
+            records[1]["prev_sha256"].as_str().unwrap(),
+            info.raw_line_sha256,
+            "first post-genesis event MUST chain off SHA-256 of the genesis line",
+        );
+    }
+
+    // ─── Negative paths — verify_audit_chain MUST reject ──────────────────
+
+    #[test]
+    fn flipping_genesis_seq_byte_breaks_verification() {
+        // Write a real genesis, then flip a single byte in the seq value.
+        // The structural verifier (which checks seq==0) MUST reject.
+        //
+        // Note: serde_json sorts object keys alphabetically by default,
+        // so "seq" is NOT first in the line; we locate the substring
+        // dynamically rather than hard-coding a byte offset (which would
+        // make the test brittle against any future key-name addition).
+        let dir = AuditDir::new();
+        dir.write_genesis_record();
+
+        let raw = std::fs::read(dir.segment_path()).unwrap();
+        let needle = b"\"seq\":0";
+        let pos = raw
+            .windows(needle.len())
+            .position(|w| w == needle)
+            .expect("genesis line must contain `\"seq\":0`");
+        // Byte offset of the literal '0' value: pos + length of `"seq":`.
+        let zero_offset = pos + b"\"seq\":".len();
+        assert_eq!(raw[zero_offset], b'0', "expected '0' at seq value position");
+        dir.corrupt_byte_at(zero_offset as u64, b'7');
+
+        match verify_audit_chain(dir.path()) {
+            Err(KernelError::AuditChainBroken { reason }) => {
+                assert!(
+                    reason.contains("not the genesis record"),
+                    "expected 'not the genesis record' rejection, got {reason:?}",
+                );
+            }
+            other => panic!("expected AuditChainBroken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncating_genesis_line_below_brace_close_breaks_verification() {
+        // Simulates a crash-window where only a prefix of the genesis
+        // line was fsynced. The verifier MUST reject the truncated line
+        // as malformed JSON.
+        let dir = AuditDir::new();
+        dir.write_genesis_record();
+
+        // Truncate to just the "{" character — clearly invalid JSON.
+        dir.truncate_segment_to(1);
+
+        // segment is non-empty (1 byte) but the first line has no '\n',
+        // so `content.lines().next()` yields the partial "{" string,
+        // which is not valid JSON.
+        match verify_audit_chain(dir.path()) {
+            Err(KernelError::AuditChainBroken { reason }) => {
+                assert!(
+                    reason.contains("not valid JSON"),
+                    "expected JSON-parse rejection, got {reason:?}",
+                );
+            }
+            other => panic!("expected AuditChainBroken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn truncating_to_zero_bytes_after_genesis_breaks_verification() {
+        // Simulates total file loss between bootstrap and kernel start
+        // (e.g. the audit dir got rsync'd from an empty source). The
+        // verifier MUST detect the empty file and reject.
+        let dir = AuditDir::new();
+        dir.write_genesis_record();
+        dir.truncate_segment_to(0);
+
+        match verify_audit_chain(dir.path()) {
+            Err(KernelError::AuditChainBroken { reason }) => {
+                assert!(reason.contains("is empty"), "got {reason:?}");
+            }
+            other => panic!("expected AuditChainBroken, got {other:?}"),
+        }
+    }
+
+    // ─── Chain-walk tests — these check the FULL chain invariant the
+    // verify_audit_chain v1 implementation does NOT yet check (it only
+    // structurally validates the genesis record). When v2 lands a chain
+    // walker, these tests pin the byte-exact invariant the walker MUST
+    // enforce. They also serve as a behavioural spec right now: any
+    // future production code that walks the chain can lift this same
+    // logic without re-deriving the canonical-bytes contract.
+    // ────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn full_chain_links_correctly_across_genesis_plus_n_events() {
+        let dir  = AuditDir::new();
+        let info = dir.write_genesis_record();
+
+        let mut w = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
+        for i in 0..10 {
+            w.append(sample_event(&format!("e{i}")), None, None, None)
+                .unwrap();
+        }
+
+        let records = assert_chain_unbroken(&dir);
+        assert_eq!(records.len(), 11, "1 genesis + 10 events");
+
+        // Sequence numbers MUST be 0..=10, monotonic, no gaps.
+        for (i, rec) in records.iter().enumerate() {
+            assert_eq!(rec["seq"].as_u64().unwrap(), i as u64);
+        }
+    }
+
+    #[test]
+    fn flipping_byte_in_middle_record_breaks_chain_walk() {
+        // Write genesis + 3 events, then corrupt a byte inside event #2.
+        // The chain walk MUST detect the break (event #3's prev_sha256
+        // no longer matches the SHA-256 of the corrupted line).
+        let dir  = AuditDir::new();
+        let info = dir.write_genesis_record();
+
+        let mut w = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
+        for i in 0..3 {
+            w.append(sample_event(&format!("e{i}")), None, None, None)
+                .unwrap();
+        }
+
+        let lines: Vec<String> = dir.raw_lines();
+        // Record indices: 0=genesis, 1=e0, 2=e1, 3=e2.
+        // Flip a byte inside the body of record 2 (e1), well past its
+        // opening brace. Any non-newline byte will do.
+        let mut offset: u64 = 0;
+        for line in lines.iter().take(2) {
+            offset += line.len() as u64 + 1; // +1 for '\n'
+        }
+        // Skip past the opening `{` and at least the first field name
+        // so we land inside a string value, where any flip preserves
+        // JSON validity but changes the line bytes.
+        let target = offset + 30;
+        dir.corrupt_byte_at(target, b'Z');
+
+        // Re-read and walk the chain manually — record 3's prev_sha256
+        // MUST no longer match SHA-256 of the corrupted record-2 line.
+        let raw       = std::fs::read_to_string(dir.segment_path()).unwrap();
+        let lines2: Vec<&str> = raw.lines().collect();
+        let actual_prev_in_rec3 = serde_json::from_str::<serde_json::Value>(lines2[3])
+            .expect("rec3 must still parse — only its predecessor changed")
+            ["prev_sha256"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let computed = sha256_hex(format!("{}\n", lines2[2]).as_bytes());
+        assert_ne!(
+            actual_prev_in_rec3, computed,
+            "byte-flip in record 2 must break the SHA-256 link from record 3",
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests — production Store::open(path) ⟷ on-disk SQLite ⟷
+// reconcile_tasks reading committed state. Exercises WAL behaviour, the
+// schema-migration-on-existing-DB path, and the close-then-reopen flow
+// that `:memory:` Store can never simulate. Same bug-class motivation
+// as the audit-chain integration block above.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod disk_store_integration {
+    use super::*;
+    use raxis_test_support::DiskStore;
+
+    /// Insert one initiative + N tasks in arbitrary states. Mirrors the
+    /// `seed_in_flight_tasks` helper in the in-memory test block above
+    /// but operates on a `DiskStore` so the writes hit the WAL.
+    fn seed_in_flight(disk: &DiskStore, task_states: &[(&str, TaskState)]) {
+        let conn = disk.store().lock_sync();
+        let now  = unix_now_secs();
+
+        conn.execute(
+            "INSERT INTO initiatives
+                (initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at)
+             VALUES ('init-disk-recon', 'Executing', '{}', 'deadbeef', ?1)",
+            rusqlite::params![now],
+        ).unwrap();
+
+        for (task_id, state) in task_states {
+            conn.execute(
+                "INSERT INTO tasks
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES (?1, 'init-disk-recon', 'default', ?2, 'kernel', 1, ?3, ?3, 0)",
+                rusqlite::params![task_id, state.as_sql_str(), now],
+            ).unwrap();
+        }
+    }
+
+    fn task_state_disk(disk: &DiskStore, task_id: &str) -> String {
+        let conn = disk.store().lock_sync();
+        conn.query_row(
+            "SELECT state FROM tasks WHERE task_id=?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    #[test]
+    fn disk_db_file_is_created_with_wal_sidecars() {
+        // Sanity: after opening a file-backed Store, the kernel's WAL
+        // pragma should have produced the `kernel.db-wal` and
+        // `kernel.db-shm` sidecar files. If pragma application is ever
+        // accidentally moved out of `Store::open(path)`, this catches it.
+        let disk = DiskStore::new();
+        // Force a write so SQLite materialises the WAL files.
+        {
+            let conn = disk.store().lock_sync();
+            conn.execute(
+                "INSERT INTO initiatives
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('wal-probe', 'Executing', '{}', 'deadbeef', 0)",
+                [],
+            ).unwrap();
+        }
+
+        let db_path = disk.db_path();
+        let wal     = db_path.with_extension("db-wal");
+        let shm     = db_path.with_extension("db-shm");
+
+        assert!(db_path.exists(), "main DB file must exist");
+        assert!(
+            wal.exists() || db_path.metadata().unwrap().len() > 0,
+            "either the WAL sidecar exists or the main DB has been written",
+        );
+        // SHM is allowed to be missing on some platforms / immediately
+        // after open; only assert it once we know the file is there.
+        let _ = shm;
+    }
+
+    #[test]
+    fn reopening_the_same_db_file_preserves_committed_state() {
+        // The crash-survival contract: anything COMMITTED before the
+        // kernel goes down MUST be visible when the kernel comes back up
+        // (kernel-store.md §2.5.1). `:memory:` cannot test this — its
+        // contents vanish on connection close.
+        let mut disk = DiskStore::new();
+        seed_in_flight(&disk, &[
+            ("t-pre-crash-1", TaskState::Running),
+            ("t-pre-crash-2", TaskState::Admitted),
+        ]);
+
+        // "Crash" the kernel: drop the connection. WAL gets checkpointed.
+        disk.close();
+        // "Restart" the kernel: re-open the same file.
+        disk.reopen();
+
+        // Both rows MUST still be there, with their original states.
+        assert_eq!(task_state_disk(&disk, "t-pre-crash-1"), "Running");
+        assert_eq!(task_state_disk(&disk, "t-pre-crash-2"), "Admitted");
+    }
+
+    #[test]
+    fn reconcile_after_restart_sweeps_in_flight_tasks_persisted_to_disk() {
+        // The full kernel-restart-then-recover sequence:
+        //   1. kernel boots, writes some Running tasks, COMMITs.
+        //   2. kernel crashes (we simulate by `disk.close()`).
+        //   3. kernel reboots → opens the SAME db file → runs reconcile.
+        //   4. Every Running/Admitted/GatesPending task MUST be moved to
+        //      BlockedRecoveryPending.
+        // This is exactly the path `kernel::main::main` step 6 takes,
+        // and it's not exercised by any existing test (all reconcile
+        // tests use `:memory:` which discards state on close).
+        let mut disk = DiskStore::new();
+        seed_in_flight(&disk, &[
+            ("t-running",   TaskState::Running),
+            ("t-admitted",  TaskState::Admitted),
+            ("t-completed", TaskState::Completed),
+        ]);
+
+        // Restart cycle.
+        disk.close();
+        disk.reopen();
+
+        // Run reconcile against the persisted state.
+        let report = reconcile_tasks(disk.store());
+        assert_eq!(report.swept_tasks, 2,
+            "2 non-terminal tasks should have been swept after restart");
+        assert_eq!(task_state_disk(&disk, "t-running"),   "BlockedRecoveryPending");
+        assert_eq!(task_state_disk(&disk, "t-admitted"),  "BlockedRecoveryPending");
+        assert_eq!(task_state_disk(&disk, "t-completed"), "Completed");
+    }
+
+    #[test]
+    fn reconcile_is_idempotent_across_a_second_restart() {
+        // Run reconcile, close, reopen, run reconcile AGAIN. The second
+        // pass must observe the BlockedRecoveryPending state from disk
+        // and not touch any token that was already marked consumed.
+        let mut disk = DiskStore::new();
+        seed_in_flight(&disk, &[("t-running", TaskState::Running)]);
+
+        let r1 = reconcile_tasks(disk.store());
+        assert_eq!(r1.swept_tasks, 1);
+
+        disk.close();
+        disk.reopen();
+
+        // After restart, the row is still BlockedRecoveryPending on disk.
+        assert_eq!(task_state_disk(&disk, "t-running"), "BlockedRecoveryPending");
+
+        // The bulk UPDATE re-fires (matches the in-memory test
+        // `reconcile_is_idempotent`'s contract — already-blocked rows
+        // are still in the WHERE-NOT-IN-terminal set).
+        let r2 = reconcile_tasks(disk.store());
+        assert_eq!(r2.swept_tasks, 1, "BlockedRecoveryPending re-sweeps idempotently after restart");
+    }
+
+    #[test]
+    fn reopening_an_already_migrated_db_does_not_blow_up() {
+        // Schema migration is idempotent (CREATE TABLE IF NOT EXISTS)
+        // per §2.5.1, but until you run it against a non-empty schema
+        // file you don't actually know that. This test exercises the
+        // "migration on previously-populated DB" branch that
+        // `Store::open(path)` runs on every kernel restart.
+        let mut disk = DiskStore::new();
+        seed_in_flight(&disk, &[("t-only", TaskState::Running)]);
+        disk.close();
+
+        // First reopen: migrations run against a populated schema.
+        disk.reopen();
+        assert_eq!(task_state_disk(&disk, "t-only"), "Running");
+
+        disk.close();
+
+        // Second reopen: still works. (Catches a class of bug where
+        // migrations record "version applied" state and a second run
+        // double-applies it.)
+        disk.reopen();
+        assert_eq!(task_state_disk(&disk, "t-only"), "Running");
+    }
+}

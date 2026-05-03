@@ -14,6 +14,9 @@ members = [
     "crates/policy",
     "crates/crypto",
     "crates/audit",
+    "crates/genesis-tools",
+    "crates/test-support",
+    "crates/verifier-stub",
     "kernel",
     "cli",
     "gateway",
@@ -85,3 +88,5 @@ raxis-store  = { path = "crates/store" }
 raxis-policy = { path = "crates/policy" }
 raxis-crypto = { path = "crates/crypto" }
 raxis-audit-tools = { path = "crates/audit" }
+raxis-genesis-tools = { path = "crates/genesis-tools" }
+raxis-verifier-stub = { path = "crates/verifier-stub" }

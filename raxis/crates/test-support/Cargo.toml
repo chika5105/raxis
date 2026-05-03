@@ -1,0 +1,38 @@
+[package]
+name        = "raxis-test-support"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# Test-only crate. Other crates depend on it ONLY via [dev-dependencies].
+# Production-graph dependency would mean shipping FakeClock etc. in a
+# release binary, which is a bug.
+publish     = false
+description = "RAXIS workspace-wide test helpers (FakeClock, in-memory store, audit sink re-exports)."
+
+[dependencies]
+raxis-types       = { workspace = true }
+raxis-store       = { workspace = true }
+raxis-audit-tools = { workspace = true }
+
+# Temp-dir lifecycle for the GitRepo / AuditDir / DiskStore fixtures.
+# `tempfile` is already a dev-dep of `raxis-kernel`; we re-pin the same
+# version family here so the fixtures can hand out auto-cleaning
+# `TempDir`-backed artifacts.
+tempfile          = "3"
+
+# AuditDir builds production-shape genesis records (matching what
+# `kernel::bootstrap::write_genesis_audit_record` emits) and exposes
+# the SHA-256 of the resulting line so the next post-genesis record
+# can chain off it. Both crates are tiny and already in the workspace.
+sha2              = { workspace = true }
+hex               = { workspace = true }
+serde_json        = { workspace = true }
+
+[dev-dependencies]
+# Used by the Layer 2 workspace-guard test (`src/workspace_guard.rs`)
+# to parse every member's Cargo.toml and assert raxis-test-support
+# only appears under [dev-dependencies].
+toml              = { workspace = true }
