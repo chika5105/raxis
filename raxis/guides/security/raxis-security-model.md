@@ -284,6 +284,77 @@ touching the Kernel binary.
 database, cannot emit audit events, and cannot modify session state. It is a pure
 computation function: request in, response out.
 
+### INV-GATEWAY-01: Gateway-Kernel Exclusive Channel
+
+**Statement:** The `raxis-gateway` process MUST only accept connections from `raxis-kernel`.
+No other process — no planner, no agent VM, no operator tool, no external process — may
+connect to the gateway directly.
+
+**Why this is a hard invariant, not a policy rule:**
+The gateway holds provider credentials and makes API calls with no further authorization
+checks of its own. It trusts the framing of the request it receives. If any process other
+than the Kernel can connect to the gateway, that process can:
+- Make arbitrary provider API calls that bypass the Kernel's budget enforcement
+- Bypass the Kernel's session token validation and dispatch matrix
+- Exfiltrate conversation content to providers without audit logging
+- Consume provider quota without any RAXIS admission record
+
+The Kernel's admission pipeline is what makes the gateway safe to use — without it, the
+gateway is an unauthenticated credential-exercising endpoint.
+
+**Enforcement — two independent layers:**
+
+**Layer 1 — UDS socket file permissions:**
+The gateway's listening socket is created at `$RAXIS_DATA_DIR/gateway.sock`:
+```
+owner: raxis-kernel   mode: 0600
+```
+The OS enforces this at `connect()` time. A process not running as `raxis-kernel` user
+receives `EACCES` and cannot open a connection. No code inside the gateway runs.
+
+**Layer 2 — Peer credential verification on every accepted connection:**
+After `accept()`, the gateway calls `getpeereid()` (macOS) or `SO_PEERCRED` (Linux) to
+read the connecting process's UID and GID:
+
+```rust
+// gateway/src/server.rs — accept loop
+let stream = listener.accept().await?;
+let peer = stream.peer_cred()?;       // getpeereid() on macOS
+if peer.uid() != RAXIS_KERNEL_UID {
+    tracing::warn!(peer_uid = peer.uid(), "connection from unexpected peer — closing");
+    emit_system_security_event(SecurityEventKind::GatewayUnauthorizedConnect { peer_uid: peer.uid() });
+    drop(stream);  // close immediately, no response
+    continue;
+}
+```
+
+This verifies the connecting process is running as `raxis-kernel` OS user. Any other UID
+— including `root`, `raxis-agent`, `raxis-gateway` itself — causes the connection to be
+closed immediately with no response. A `SecurityViolation` system event is emitted.
+
+**Why two layers:** File permissions alone are necessary but not sufficient. A process
+that has escalated to the `raxis-kernel` user (through a privilege escalation exploit)
+would pass the file permission check. Peer credential verification provides a second
+deterministic check at the socket level that is enforced by the OS kernel (not by any
+RAXIS process), making the combined defense significantly harder to bypass.
+
+**Scenario prevented:** A compromised agent VM finds a privilege escalation path to
+`raxis-kernel` user on the host (a severe host-level compromise). It attempts to connect
+directly to `$RAXIS_DATA_DIR/gateway.sock` and submit `InferenceRequest` frames to make
+API calls without going through the Kernel's admission pipeline. The file permission
+check would pass (it's now running as `raxis-kernel`). The peer credential check also
+passes (same user). **This is the limit of RAXIS's gateway boundary.** Host-level privilege
+escalation is a host security problem, not a RAXIS problem. RAXIS assumes the host OS
+user boundary is intact. What RAXIS prevents is all sub-host-compromise attacks: any
+process running as a different user, any process inside the VM, any network attacker.
+
+**The gateway never connects outward to the Kernel — it only listens:**
+The Kernel initiates the UDS connection to the gateway at startup. The gateway is a
+passive listener. There is no scenario in which the gateway connects to any other process.
+The gateway's only two communication channels are:
+1. The UDS socket (inbound from Kernel only, enforced by INV-GATEWAY-01)
+2. HTTPS connections to provider APIs (outbound only, no inbound)
+
 ---
 
 *Part 2 complete. Next: Part 3 — VM Isolation and Network Air-Gap.*
@@ -1692,6 +1763,7 @@ the others can fail:
 | Ed25519 Plan Signing | Unsigned plan execution |
 | Provider Allowlist | Data exfiltration via rogue provider |
 | **Protected Path Approval Gate** | **Compromised LLM Reviewer approving malicious merge to high-stakes paths** |
+| **INV-GATEWAY-01 Gateway-Kernel Exclusive Channel** | **Any process bypassing Kernel admission to make direct provider API calls** |
 
 No single layer is sufficient. Every layer that fails has another layer behind it.
 The audit chain ensures that even a breach is fully reconstructable.

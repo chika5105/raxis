@@ -142,6 +142,11 @@ VirtioFS-mounted worktree, the VSock device. Inference calls are made by submitt
 `InferenceRequest` bincode frames to the Kernel over VSock; the Kernel forwards them to the
 gateway process, which holds the credentials. The planner never sees a provider API key.
 
+The gateway accepts connections exclusively from the Kernel (INV-GATEWAY-01). No VM, no
+planner process, and no operator tool may connect to the gateway directly. This is enforced
+at the OS level via UDS socket permissions (`gateway.sock` mode `0600`, owner `raxis-kernel`)
+and peer credential verification (`getpeereid()`) on every accepted connection.
+
 **Distribution:** The `raxis-planner` binary and the kernel must support notarized AVF
 execution, distributed via `brew` (`aegis-ai/tap/raxis`). The `raxis-kernel` formula depends
 on `raxis-planner` so that a single `brew install raxis-kernel` brings the complete stack.
@@ -1351,6 +1356,13 @@ binary is completely provider-agnostic.
   not in the planner binary.
 - The gateway returns `InferenceResponse` to the Kernel, which forwards it over VSock to the
   waiting planner.
+- **INV-GATEWAY-01:** The gateway's UDS socket (`$RAXIS_DATA_DIR/gateway.sock`) is owned
+  by `raxis-kernel` with mode `0600`. The gateway verifies the peer UID on every accepted
+  connection via `getpeereid()`. Any connection not from `raxis-kernel` is closed immediately
+  and emits a `GatewayUnauthorizedConnect` security event. The Kernel is the sole permitted
+  caller of the gateway — no agent, no planner, and no operator tooling may bypass the
+  Kernel's admission pipeline by connecting to the gateway directly.
+  Full spec: `guides/security/raxis-security-model.md §INV-GATEWAY-01`.
 
 ---
 
