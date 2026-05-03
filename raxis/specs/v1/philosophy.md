@@ -191,6 +191,7 @@ raxis/                          # repository root (standalone clone or nested su
 │   │   └── tools/                # raxis-audit-tools   (kernel/cli: crypto + chain ops)
 │   ├── store/                    # raxis-store
 │   ├── genesis-tools/            # raxis-genesis-tools (kernel + cli: shared genesis emitters)
+│   ├── verifier-stub/            # raxis-verifier-stub  (DEV-DEPS ONLY; speaks UDS protocol; round-trip tests)
 │   └── test-support/             # raxis-test-support  (DEV-DEPS ONLY; FakeClock + helpers)
 │
 ├── kernel/                       # raxis-kernel binary
@@ -667,6 +668,30 @@ The whole class of bug — "two binaries hand-roll the same artifact and silentl
 **Who must NOT depend on it:** `raxis-planner`, `raxis-gateway`, `raxis-verifier`. The genesis ceremony is operator-only; sub-processes have no business minting their own policy artifacts.
 
 **Why no `raxis-policy` dep at production build time:** The loader is a dev-dep of `raxis-genesis-tools` only — it is used to assert round-trip correctness in tests, but the production graph stays minimal. This avoids any pressure that would push the loader to call back into `raxis-genesis-tools` for "default" values, which would create a circular pressure on the policy validation path.
+
+---
+
+##### `crates/verifier-stub/` — `raxis-verifier-stub` (DEV-DEPS ONLY)
+
+**Purpose:** A test-only verifier subprocess that speaks the production UDS / bincode protocol on behalf of integration tests. The kernel's `gates::verifier_runner::spawn_verifier` execve()s an operator-supplied verifier binary and expects it to connect back to `RAXIS_KERNEL_SOCKET`, send one `IpcMessage::WitnessSubmission`, and read one `IpcMessage::WitnessAck` (peripherals.md §3.3 + kernel-core.md §2.3). Until this crate landed, the cheaper OS-binary suite in `kernel/src/gates/verifier_runner.rs::integration` covered the cap, counter, env scrub, current-dir, wall-clock kill, and token-row paths, but no test exercised the wire layer end-to-end because `/usr/bin/true` does not speak the kernel's protocol. This crate fills that gap.
+
+**Why a separate crate (not a `#[cfg(test)]` mod inside the kernel):** The stub is a *binary* the kernel exec()s. A test that lives inside `raxis-kernel` would have to hand-build that binary every run; carving it into its own crate lets `cargo build -p raxis-verifier-stub` produce a stable artifact at the canonical `target/<profile>/raxis-verifier-stub` path that any integration test can locate and exec directly.
+
+**What it contains:**
+- `src/lib.rs` — pure functions: env parsing (`parse_stub_env_from_process`), result-class parsing (`parse_result_class`), submission building (`build_submission`), and the stable `ExitCode` table. All unit-testable without a subprocess.
+- `src/main.rs` — `#[tokio::main(flavor = "current_thread")]` shim: parse env → build submission → connect → write_frame → read_frame → exit with the lib-supplied code.
+- `tests/cli_smoke.rs` — process-level smoke tests that spawn the binary via `env!("CARGO_BIN_EXE_raxis-verifier-stub")` and assert exit codes for missing-env, no-such-socket, and invalid-result-class paths.
+
+**Test knobs (NOT part of the production verifier contract):** `RAXIS_STUB_RESULT_CLASS`, `RAXIS_STUB_BODY_JSON`, `RAXIS_STUB_SLEEP_MS`, `RAXIS_STUB_SKIP_SEND`. These let an integration test dial the stub into Pass / Fail / Inconclusive, send a custom JSON body, sleep before connecting (wall-clock kill tests), or connect-then-drop (kernel-side EOF tests).
+
+**Who depends on it (test graph only):** `raxis-kernel` (dev-dep), via `gates::verifier_runner::stub_round_trip::*`, which seeds a real `verifier_run_tokens` row, exec()s the stub with a custom envelope, and asserts the witness handler wrote the expected `witness_records` row and consumed the token. **MUST NOT** appear under `[dependencies]` of any production crate; the test-only nature of the binary is enforced by the same dev-dep guardrail as `raxis-test-support` (see `kernel/Cargo.toml` `[dev-dependencies]`).
+
+**Bug class this crate exposed:** Building the stub immediately surfaced two latent P0s in the production wire / async surface that no prior test had triggered:
+
+1. `WitnessSubmission.body: serde_json::Value` did not round-trip through `bincode::config::standard()` — `Value::deserialize` dispatches via `deserialize_any`, which bincode (non-self-describing) refuses with `Decode(Serde(AnyNotSupported))`. **Fix:** added a `json_value_as_string` serde helper in `raxis-types::witness` that encodes the body as a JSON STRING on the wire. Pinned by `raxis_types::witness::tests::witness_submission_round_trips_through_bincode`.
+2. `kernel::handlers::witness::handle` called `validate_verifier_token`, `load_task_row`, `witness_index::write`, and `consume_verifier_token` directly from its async frame, all of which call `Store::lock_sync` → `tokio::sync::Mutex::blocking_lock`, which panics on a tokio worker thread. **Fix:** wrapped each sync call in `tokio::task::spawn_blocking` (matching the pattern already documented for `verifier_runner::spawn_verifier` in kernel-core.md §2.3). Pinned by `gates::verifier_runner::stub_round_trip::inconclusive_witness_round_trips_through_stub_to_handler`.
+
+The crate's continued existence is the regression net for both of these — any future change to the wire codec or the witness handler's runtime model that breaks the round trip will fail these tests loudly.
 
 ---
 

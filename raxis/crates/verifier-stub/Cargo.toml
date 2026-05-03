@@ -1,0 +1,71 @@
+[package]
+name        = "raxis-verifier-stub"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# Test-only verifier subprocess that speaks the production kernel↔verifier
+# UDS protocol (peripherals.md §3.3 + kernel-core.md §2.3 verifier_runner.rs).
+#
+# Used by:
+#   - kernel/tests/witness_round_trip_via_stub.rs — full IPC-loopback
+#     round-trip test for `gates::verifier_runner::spawn_verifier` →
+#     `handlers::witness::handle`.
+#   - Future tests that need a deterministic verifier subprocess (e.g.
+#     wall-clock kill verification with a real witness submission, gate
+#     re-evaluation after Pass, retry-after-Inconclusive).
+#
+# This crate is INTENTIONALLY excluded from production: production
+# verifiers are out-of-process binaries supplied by the operator (see
+# peripherals.md §3.3); the stub exists ONLY to give the kernel test
+# suite a verifier it can drive deterministically.
+publish     = false
+description = "Test-only verifier subprocess that submits one WitnessSubmission and exits."
+
+[lib]
+# Library half — the env parser, exit-code mapper, and submission builder.
+# Unit-tested in `src/lib.rs`. Production code outside this crate has no
+# legitimate reason to depend on this lib (only the bin's tests do).
+path = "src/lib.rs"
+
+[[bin]]
+# Binary half — the `main()` entry point that the kernel's
+# `gates::verifier_runner::spawn_verifier` execve()s. The bin is a
+# minimal shim over the lib; everything substantive lives in `lib.rs` so
+# unit tests do not have to spawn subprocesses.
+name = "raxis-verifier-stub"
+path = "src/main.rs"
+
+[dependencies]
+# Wire types — `WitnessSubmission`, `WitnessResultClass`, `TaskId`,
+# `GateType`, `CommitSha`. Same crate every production verifier would
+# depend on, so the stub's wire path matches production exactly.
+raxis-types = { workspace = true }
+
+# Frame codec — `read_frame` / `write_frame` (4-byte LE length prefix +
+# bincode 2.0.1 standard()) and `IpcMessage` discriminant enum. Same
+# crate the kernel's planner accept loop uses, so the stub's bytes are
+# byte-for-byte what production kernels expect.
+raxis-ipc   = { workspace = true }
+
+# Async runtime — the stub uses `tokio::net::UnixStream` so it can share
+# the framing helpers with the kernel (which are async-only).
+tokio       = { workspace = true }
+
+# Body construction — the `WitnessSubmission.body` field is
+# `serde_json::Value`; the stub builds the default body from
+# `RAXIS_STUB_BODY_JSON` if set, else `serde_json::json!({})`.
+serde_json  = { workspace = true }
+
+# Typed error variants (`StubEnvError`, `BuildError`) so test-side
+# assertions can `matches!(e, StubEnvError::Missing("RAXIS_TASK_ID"))`
+# instead of grepping into stringified errors.
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+# Optional hook for future end-to-end smoke tests that exec the bin and
+# inspect its stdout. Not used by the unit tests in `lib.rs`, which
+# call into pure functions and avoid spawning.
+tempfile    = "3"

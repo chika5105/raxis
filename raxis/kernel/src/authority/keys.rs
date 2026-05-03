@@ -51,6 +51,30 @@ impl std::fmt::Debug for KeyRegistry {
     }
 }
 
+impl KeyRegistry {
+    /// Build a `KeyRegistry` from in-memory zero-seeded keys for unit /
+    /// integration tests that need a `HandlerContext` but do not
+    /// exercise the signing or verifier-token-HMAC code paths.
+    ///
+    /// PRODUCTION CALLERS MUST USE [`load_key_registry`]: the
+    /// zero-seeded authority key is publicly derivable, so any test
+    /// path that emits an audit signature using this registry is
+    /// signing with a known key. Caller responsibility to ensure the
+    /// test does not exercise that path.
+    #[cfg(test)]
+    pub(crate) fn stub_for_tests() -> Self {
+        // SigningKey::from_bytes(&[0u8; 32]) is the smallest valid
+        // Ed25519 key — `from_bytes` does not validate strength, only
+        // length, so all-zeros is accepted. The verifier_token_key is
+        // also all-zeros; verifier_token::issue_verifier_token does not
+        // care about its randomness for our test surface (it only HMACs
+        // a deterministic input + caller-supplied bytes).
+        let authority = SigningKey::from_bytes(&[0u8; 32]);
+        let quality   = SigningKey::from_bytes(&[1u8; 32]);
+        Self { authority, quality, verifier_token_key: [0u8; 32] }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Loader
 // ---------------------------------------------------------------------------
