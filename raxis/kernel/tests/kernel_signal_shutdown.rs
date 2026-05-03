@@ -48,33 +48,26 @@ fn acquire_test_lock() -> std::sync::MutexGuard<'static, ()> {
     TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Build (or locate) the `raxis-kernel` binary and return its absolute
-/// path. Mirrors the helper in `gates::verifier_runner::stub_round_trip`
-/// — same `cargo build` + path-derivation strategy.
+/// Locate the `raxis-kernel` binary built by Cargo for this test.
+///
+/// We rely on `CARGO_BIN_EXE_raxis-kernel`, which Cargo defines for
+/// integration tests inside the same crate as the binary
+/// (https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-crates).
+///
+/// We deliberately do NOT shell out to `cargo build -p raxis-kernel`
+/// from inside the test, because that recursive cargo invocation
+/// contends with the parent `cargo test --workspace` build lock and
+/// can wedge the entire workspace test run for tens of minutes
+/// (observed in practice for `gateway_roundtrip.rs` and
+/// `kernel_harness.rs` before P1-A landed). Cargo always builds every
+/// binary that integration tests depend on before launching the test
+/// binary, so the env-var lookup is sufficient and race-free.
+///
+/// The function name is preserved for backward compatibility with
+/// existing call sites; the "build" portion is now performed by Cargo
+/// itself before this function is reached.
 fn build_and_locate_kernel() -> PathBuf {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    let status = Command::new(&cargo)
-        .args(["build", "-p", "raxis-kernel", "--bin", "raxis-kernel"])
-        .status()
-        .expect("spawn `cargo build -p raxis-kernel`");
-    assert!(
-        status.success(),
-        "cargo build of raxis-kernel failed; cannot run signal test",
-    );
-
-    let exe = std::env::current_exe().expect("current_exe");
-    let target_profile_dir = exe
-        .parent()
-        .expect("test binary has parent")
-        .parent()
-        .expect("deps/ has parent");
-    let bin = target_profile_dir.join("raxis-kernel");
-    assert!(
-        bin.exists(),
-        "kernel binary not found at expected path: {}",
-        bin.display(),
-    );
-    bin
+    PathBuf::from(env!("CARGO_BIN_EXE_raxis-kernel"))
 }
 
 /// Write an Ed25519 public key (hex) to `<dir>/operator_pubkey.hex`,

@@ -104,26 +104,40 @@ async fn fire_one_intent(socket_path: &std::path::Path, seq: u64) {
         .expect("read intent reply");
 }
 
-/// Locate the `raxis` CLI binary built by cargo. Mirrors the kernel
-/// harness pattern: shell out `cargo build -p raxis-cli` (cheap on a
-/// warm build cache) and then derive the path from the test binary's
-/// own `current_exe()`.
+/// Locate the `raxis` CLI binary built by Cargo for this test.
+///
+/// We deliberately do NOT shell out to `cargo build -p raxis-cli` from
+/// inside the test, because that recursive cargo invocation contends
+/// with the parent `cargo test --workspace` build lock and can wedge
+/// the entire workspace test run for tens of minutes (observed in
+/// practice for `gateway/tests/gateway_roundtrip.rs` and
+/// `kernel/tests/common/kernel_harness.rs` before P1-A landed).
+///
+/// Cargo's `CARGO_BIN_EXE_<name>` env var is only set for binaries in
+/// the *same* crate as the integration test, so we cannot use it to
+/// reach the `raxis` binary from inside the kernel crate's tests.
+/// Instead we derive the path from `current_exe()`: integration test
+/// binaries always live under `<target>/<profile>/deps/<test-name>`,
+/// so `<target>/<profile>/raxis` is the sibling we need.
+///
+/// `cargo test --workspace` builds every workspace binary before
+/// launching test binaries, so the path lookup is race-free in CI.
+/// For local single-package iteration (`cargo test -p raxis-kernel`),
+/// the panic below carries an actionable hint.
 fn build_and_locate_cli() -> PathBuf {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    let status = std::process::Command::new(&cargo)
-        .args(["build", "-p", "raxis-cli", "--bin", "raxis"])
-        .status()
-        .expect("spawn `cargo build -p raxis-cli`");
-    assert!(status.success(), "cargo build of raxis-cli failed");
-
-    let exe = std::env::current_exe().expect("current_exe");
+    let exe = std::env::current_exe().expect("test binary current_exe");
     let target_profile_dir = exe
         .parent()
-        .expect("test binary parent")
-        .parent()
-        .expect("deps/ parent");
+        .and_then(|p| p.parent())
+        .expect("test binary is at <target>/<profile>/deps/<name>");
     let bin = target_profile_dir.join("raxis");
-    assert!(bin.exists(), "raxis CLI not at {}", bin.display());
+    assert!(
+        bin.exists(),
+        "raxis CLI binary not found at {} — run `cargo build -p raxis-cli` first \
+         (or use `cargo test --workspace`, which builds every binary before \
+         launching test binaries)",
+        bin.display(),
+    );
     bin
 }
 
