@@ -113,6 +113,7 @@ fn run() -> Result<(), CliError> {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
                 "sign" => commands::policy::run_sign(&flags, &rest[1..]),
+                "show" => commands::policy_show::run(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(format!("unknown policy sub-command: {sub2:?}"))),
             }
         }
@@ -193,6 +194,7 @@ fn run() -> Result<(), CliError> {
         "inspect" => commands::inspect::run(&flags, rest),
         "sessions" => commands::sessions::run(&flags, rest),
         "escalations" => commands::escalations::run(&flags, rest),
+        "inbox" => commands::inbox::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -299,6 +301,14 @@ READ-ONLY OBSERVATION:
 
     escalations [--status pending|approved|denied|all] [--limit N] [--json]
         List escalations filtered by status (default: pending).
+
+    policy show [--json] [--history]
+        Print the active policy bundle and (optionally) the
+        policy_epoch_history table.
+
+    inbox [--kind K] [--since DURATION] [--limit N] [--json]
+        Read <data_dir>/notifications/inbox.jsonl. Exit code 2 when
+        the inbox file does not exist yet.
 "#
     );
 }
