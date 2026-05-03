@@ -93,12 +93,31 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
     let keys_dir = config.data_dir.join("keys");
     let policy_dir = config.data_dir.join("policy");
     let audit_dir = config.data_dir.join("audit");
+    // `providers/` holds per-provider credential files (e.g. Anthropic API
+    // keys). Created at genesis time even though no provider is configured
+    // in the genesis policy.toml — operators dropping a credentials file
+    // post-bootstrap should not have to mkdir first. Mode 0700 (kernel uid
+    // only); the credential files themselves are 0600 once written.
+    // peripherals.md §3.2 "Provider credential storage".
+    let providers_dir = config.data_dir.join("providers");
 
     // Create directory tree.
-    for dir in &[&keys_dir, &policy_dir, &audit_dir] {
+    for dir in &[&keys_dir, &policy_dir, &audit_dir, &providers_dir] {
         std::fs::create_dir_all(dir).map_err(|e| KernelError::BootstrapFailed {
             reason: format!("cannot create directory {}: {e}", dir.display()),
         })?;
+    }
+    // Tighten permissions on the new providers/ dir to match the spec
+    // ("readable only by the kernel OS user"). `create_dir_all` honours
+    // the process umask which on most systems leaves group-readable; we
+    // chmod explicitly so the spec contract is byte-for-byte enforced.
+    if let Err(e) = std::fs::set_permissions(
+        &providers_dir,
+        std::fs::Permissions::from_mode(0o700),
+    ) {
+        return Err(KernelError::BootstrapFailed {
+            reason: format!("cannot chmod 0700 {}: {e}", providers_dir.display()),
+        });
     }
 
     // Guard: prevent accidental re-genesis.
@@ -999,6 +1018,48 @@ mod edge_cases {
             }
             other => panic!("expected BootstrapFailed, got {other:?}"),
         }
+    }
+
+    // ── providers/ directory (Phase A.3 / T0.3) ─────────────────────────────
+
+    #[test]
+    fn bootstrap_creates_providers_directory_with_0700_permissions() {
+        // Per peripherals.md §3.2 "Provider credential storage": credential
+        // files live under <data_dir>/providers/ and are readable only by
+        // the kernel uid. The bootstrap MUST create the directory (so an
+        // operator dropping a credentials file does not have to mkdir
+        // first) AND chmod 0700 (so a careless umask does not leak the
+        // directory listing to other users on the host).
+        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        run_inner(&config).expect("bootstrap");
+
+        let providers_dir = tmp.path().join("providers");
+        let meta = std::fs::metadata(&providers_dir)
+            .expect("providers/ must exist after bootstrap");
+        assert!(meta.is_dir(), "providers/ must be a directory");
+
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700,
+            "providers/ must be chmod 0700; got 0{mode:o}");
+    }
+
+    #[test]
+    fn bootstrapped_policy_loads_with_no_gateway_section() {
+        // The genesis policy template emits `[gateway]` and `[[providers]]`
+        // as commented blocks. A freshly-bootstrapped kernel must therefore
+        // load policy.toml with `gateway() == None` and `providers() == &[]`
+        // — the no-LLM degraded mode mentioned in the spec.
+        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        run_inner(&config).expect("bootstrap");
+
+        let (bundle, _, _) = raxis_policy::load_policy(
+            &tmp.path().join("policy/policy.toml"),
+        ).expect("genesis policy must load");
+        assert!(bundle.gateway().is_none(),
+            "genesis template must NOT activate [gateway]; operator must opt in");
+        assert!(bundle.providers().is_empty(),
+            "genesis template must NOT activate [[providers]]; operator must opt in");
     }
 
     #[test]

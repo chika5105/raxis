@@ -508,6 +508,38 @@ Before forwarding any request, the gateway resolves the `url`'s hostname and che
 
 Provider credentials (API keys) are stored in `<data_dir>/providers/<provider_name>.toml`, readable only by the kernel OS user. The gateway loads them at startup. The kernel never reads provider credentials directly — it sends the request body to the gateway, which injects the credential header before forwarding.
 
+### `[gateway]` and `[[providers]]` policy schema (NORMATIVE)
+
+Both sections are **OPTIONAL**: a kernel started against a policy artifact with neither boots cleanly and serves operator IPC, but no `FetchRequest` can be dispatched (audit-only / no-LLM deployment). Operators who run a model workflow add both sections at epoch 1 (genesis policy template ships them as commented blocks in `crates/genesis-tools/src/policy_toml.rs`).
+
+```toml
+[gateway]
+binary_path              = "/usr/local/bin/raxis-gateway"   # MUST be absolute
+spawn_timeout_secs       = 5     # default; max 60
+respawn_backoff_ms       = 1000  # initial; doubles each consecutive crash, cap 60_000
+max_consecutive_respawns = 5     # circuit-breaker; quarantines after this many crashes
+
+[[providers]]
+provider_id           = "anthropic-prod"  # unique within the array
+kind                  = "Anthropic"       # known: "Anthropic", "OpenAI"; unknown accepted (forward-compat) but rejected at dispatch
+credentials_file      = "anthropic-prod.toml"   # bare filename, resolved under <data_dir>/providers/
+inference_timeout_ms  = 30000   # default; max 120000 (peripherals.md §3.2)
+data_fetch_timeout_ms = 10000   # default; max 60000
+max_response_bytes    = 16777216 # default 16 MiB; max 64 MiB
+```
+
+`PolicyBundle::validate` (in `crates/policy/src/bundle.rs`) enforces the following — fail-closed at policy load time, before the kernel binds any sockets:
+
+- `[gateway].binary_path` MUST be absolute. Relative paths are rejected to prevent PATH-based hijacks. The file's existence is checked at *spawn* time (not validate time) since policy.toml may travel separately from the binary.
+- `[gateway].spawn_timeout_secs`, `respawn_backoff_ms`, and `max_consecutive_respawns` MUST all be `> 0`. Zero `max_consecutive_respawns` is rejected with a hint that `1` (not `0`) disables auto-respawn.
+- Every `[[providers]] provider_id` is non-empty and unique within the array.
+- Every `credentials_file` is a bare filename — no `/`, no `\`, no `.`, no `..`. The validator rejects path-traversal payloads at policy load time, *before* the gateway opens the file.
+- Each timeout / size knob is `> 0` and `<=` the spec ceiling (`MAX_INFERENCE_TIMEOUT_MS = 120_000`, `MAX_DATA_FETCH_TIMEOUT_MS = 60_000`, `MAX_RESPONSE_BYTES_CEILING = 64 MiB`).
+
+The bootstrap ceremony (`kernel/src/bootstrap.rs::run_inner`) creates `<data_dir>/providers/` with mode `0700` so the operator can drop a credentials file in immediately after first boot.
+
+These rules are pinned by the `gateway_providers_tests` test module in `crates/policy/src/bundle.rs` (15 tests covering happy path, defaults, and every fail-closed branch) plus `bootstrap::edge_cases::bootstrap_creates_providers_directory_with_0700_permissions`.
+
 ---
 
 ## §3.3 — Verifier Subprocess Contract

@@ -247,12 +247,47 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
         lane_id              = \"{lane_id}\"\n\
         max_concurrent_tasks = {max_conc}\n\
         max_cost_per_epoch   = {max_cost}\n\
-        priority             = {priority}\n",
+        priority             = {priority}\n\n",
         lane_id   = DEFAULT_LANE_NAME,
         max_conc  = DEFAULT_LANE_MAX_CONCURRENT_TASKS,
         max_cost  = DEFAULT_LANE_MAX_COST_PER_EPOCH,
         priority  = DEFAULT_LANE_PRIORITY,
     ).expect("String write_fmt is infallible");
+
+    // [gateway] + [[providers]] — OPTIONAL. We emit them as commented
+    // template blocks so operators get a working starting point without
+    // forcing them to know the schema upfront. A kernel started against a
+    // genesis policy with no `[gateway]` boots cleanly; it just cannot
+    // dispatch FetchRequests until the operator advances the policy with
+    // a real `[gateway]` and at least one `[[providers]]`.
+    //
+    // **Why commented vs. omitted entirely?** A commented template is
+    // self-documenting: an operator running `cat policy.toml` sees the
+    // full schema in front of them. Omitting the section would force them
+    // to pull the schema from peripherals.md §3.2 and bundle.rs at the
+    // same time, which is exactly the kind of friction that produces
+    // hand-edited policy.toml files with subtle errors.
+    out.push_str(
+        "# ── External provider integration (OPTIONAL) ──────────────────────────\n\
+         # Uncomment the [gateway] block and at least one [[providers]] entry to\n\
+         # enable inference / data-fetch. Provider credentials live separately\n\
+         # under <data_dir>/providers/<credentials_file> (mode 0600); the kernel\n\
+         # NEVER reads provider credentials directly. See peripherals.md §3.2.\n\
+         #\n\
+         # [gateway]\n\
+         # binary_path              = \"/usr/local/bin/raxis-gateway\"\n\
+         # spawn_timeout_secs       = 5\n\
+         # respawn_backoff_ms       = 1000\n\
+         # max_consecutive_respawns = 5\n\
+         #\n\
+         # [[providers]]\n\
+         # provider_id           = \"anthropic-prod\"\n\
+         # kind                  = \"Anthropic\"\n\
+         # credentials_file      = \"anthropic-prod.toml\"\n\
+         # inference_timeout_ms  = 30000\n\
+         # data_fetch_timeout_ms = 10000\n\
+         # max_response_bytes    = 16777216\n",
+    );
 
     out
 }

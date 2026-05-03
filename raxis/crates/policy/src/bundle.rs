@@ -57,6 +57,24 @@ pub(crate) struct RawPolicy {
 
     #[serde(default)]
     pub(crate) egress: EgressSection,
+
+    /// `[gateway]` — supervisor config for the kernel-spawned `raxis-gateway`
+    /// subprocess. **Optional** in v1: a kernel without a `[gateway]` section
+    /// boots and serves operator IPC, but no `FetchRequest` can be dispatched
+    /// (any planner asking for an inference call will receive a deferred
+    /// failure). Operators who run RAXIS without an LLM workflow (audit-only,
+    /// or with a planner that talks to providers via some out-of-band path)
+    /// can omit this section entirely.
+    #[serde(default)]
+    pub(crate) gateway: Option<GatewaySection>,
+
+    /// `[[providers]]` — declarative catalogue of model / data providers the
+    /// gateway is permitted to forward requests to. Provider credentials
+    /// (API keys) are stored separately under `<data_dir>/providers/<name>.toml`
+    /// — never in this policy artifact, so policy.toml can be checked into
+    /// version control without leaking secrets.
+    #[serde(default)]
+    pub(crate) providers: Vec<ProviderEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -366,6 +384,135 @@ pub struct EgressSection {
 fn default_max_fetches() -> u32 { 100 }
 
 // ---------------------------------------------------------------------------
+// Gateway supervisor config — `[gateway]`
+//
+// Spec ref: peripherals.md §3.2 "Spawn model" — the kernel spawns one
+// `raxis-gateway` subprocess at boot and supervises it (respawns on crash;
+// new gateway_process_token issued on each spawn). The single-gateway
+// model is justified by tokio's async multiplexing: one process can fan
+// out to thousands of concurrent HTTP requests over the gateway UDS. No
+// pool needed.
+// ---------------------------------------------------------------------------
+
+/// `[gateway]` — gateway subprocess supervisor parameters.
+///
+/// ```toml
+/// [gateway]
+/// binary_path             = "/usr/local/bin/raxis-gateway"
+/// spawn_timeout_secs      = 5     # how long the kernel waits for GatewayReady
+/// respawn_backoff_ms      = 1000  # initial back-off between respawns; doubles
+/// max_consecutive_respawns = 5    # circuit-breaker: too many crashes → quarantine
+/// ```
+///
+/// All fields except `binary_path` have defaults so most operators only
+/// need `binary_path = "..."`. The kernel re-validates `binary_path` at
+/// spawn time (not at policy validate time), since the binary file may
+/// be added or replaced after the policy artifact is signed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewaySection {
+    /// Absolute path to the `raxis-gateway` binary. The kernel
+    /// `Command::new(binary_path)` at boot. MUST be absolute (validated at
+    /// PolicyBundle::validate time) so PATH-based hijacks are impossible.
+    pub binary_path: String,
+
+    /// Maximum seconds to wait for `GatewayMessage::GatewayReady` after
+    /// spawning. If the gateway does not handshake in time, the kernel
+    /// terminates the child and treats it as a crash for the respawn loop.
+    /// Default: 5 seconds.
+    #[serde(default = "default_gateway_spawn_timeout_secs")]
+    pub spawn_timeout_secs: u64,
+
+    /// Initial back-off (in milliseconds) between respawn attempts after a
+    /// crash. Doubles each consecutive crash up to a hard cap of 60 s.
+    /// Default: 1000 ms.
+    #[serde(default = "default_gateway_respawn_backoff_ms")]
+    pub respawn_backoff_ms: u64,
+
+    /// After this many consecutive respawns within the back-off window the
+    /// kernel quarantines the gateway slot — no further respawns until the
+    /// operator either restarts the kernel OR triggers a manual respawn via
+    /// `raxis-cli gateway restart` (planned for v2). FetchRequests issued
+    /// while quarantined return `error: "GatewayUnavailable"`.
+    /// Default: 5 respawns.
+    #[serde(default = "default_gateway_max_consecutive_respawns")]
+    pub max_consecutive_respawns: u32,
+}
+
+fn default_gateway_spawn_timeout_secs() -> u64 { 5 }
+fn default_gateway_respawn_backoff_ms() -> u64 { 1000 }
+fn default_gateway_max_consecutive_respawns() -> u32 { 5 }
+
+// ---------------------------------------------------------------------------
+// Provider entries — `[[providers]]`
+// ---------------------------------------------------------------------------
+
+/// One `[[providers]]` table entry.
+///
+/// ```toml
+/// [[providers]]
+/// provider_id           = "anthropic-prod"
+/// kind                  = "Anthropic"
+/// credentials_file      = "anthropic-prod.toml"
+/// inference_timeout_ms  = 30000
+/// data_fetch_timeout_ms = 10000
+/// max_response_bytes    = 16777216   # 16 MiB
+/// ```
+///
+/// `credentials_file` is resolved relative to `<data_dir>/providers/`. The
+/// resolved path MUST exist with mode 0600 (kernel uid only) at gateway
+/// startup; the gateway loads it and injects the API key into outbound
+/// requests. The kernel never reads provider credentials directly
+/// (peripherals.md §3.2 "Provider credential storage").
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderEntry {
+    /// Short opaque identifier referenced by the kernel's
+    /// `provider/` adapter (e.g. "anthropic-prod"). Must be unique across
+    /// the whole `[[providers]]` array; PolicyBundle::validate enforces.
+    pub provider_id: String,
+
+    /// String discriminator for the provider's wire format. v1 known
+    /// values: `"Anthropic"`, `"OpenAI"`. Unknown values are accepted at
+    /// policy-validate time (forward-compat) but the gateway will reject
+    /// any FetchRequest routed to an unknown kind at dispatch time with
+    /// `error: "UnknownProviderKind"`.
+    pub kind: String,
+
+    /// Filename (no path components) under `<data_dir>/providers/`.
+    /// Validated by PolicyBundle::validate to contain no `/` or `..` so
+    /// it cannot escape the providers dir.
+    pub credentials_file: String,
+
+    /// Per-FetchRequest hard timeout for `fetch_kind: "Inference"`.
+    /// Capped at 120000 ms (peripherals.md §3.2). Default: 30000 ms.
+    #[serde(default = "default_inference_timeout_ms")]
+    pub inference_timeout_ms: u32,
+
+    /// Per-FetchRequest hard timeout for `fetch_kind: "DataFetch"`.
+    /// Capped at 60000 ms. Default: 10000 ms.
+    #[serde(default = "default_data_fetch_timeout_ms")]
+    pub data_fetch_timeout_ms: u32,
+
+    /// Maximum response body size before the gateway returns
+    /// `error: "ResponseTooLarge"`. Capped at 64 MiB. Default: 16 MiB.
+    #[serde(default = "default_max_response_bytes")]
+    pub max_response_bytes: u64,
+}
+
+fn default_inference_timeout_ms() -> u32 { 30_000 }
+fn default_data_fetch_timeout_ms() -> u32 { 10_000 }
+fn default_max_response_bytes() -> u64 { 16 * 1024 * 1024 }
+
+/// Hard cap on inference timeout, normative per peripherals.md §3.2.
+pub const MAX_INFERENCE_TIMEOUT_MS: u32 = 120_000;
+/// Hard cap on data-fetch timeout, normative per peripherals.md §3.2.
+pub const MAX_DATA_FETCH_TIMEOUT_MS: u32 = 60_000;
+/// Hard cap on response body size, normative per peripherals.md §3.2
+/// ("v1 constraint: 16 MiB ... configurable in `[[providers]]`"). The
+/// configurable knob has its own ceiling so a malicious or misconfigured
+/// policy cannot turn the gateway into a DoS amplifier.
+pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
+
+// ---------------------------------------------------------------------------
 // PolicyBundle — the validated in-memory policy
 // ---------------------------------------------------------------------------
 
@@ -409,6 +556,14 @@ pub struct PolicyBundle {
     egress_domains: Vec<String>,
     egress_patterns: Vec<String>,
     egress_max_fetches_per_window: u32,
+
+    /// Optional `[gateway]` config. `None` = kernel runs without a
+    /// gateway subprocess (no inference / fetch capability).
+    gateway: Option<GatewaySection>,
+
+    /// `[[providers]]` entries, validated for unique IDs and per-field
+    /// caps. Empty `Vec` is permitted (matches `gateway = None`).
+    providers: Vec<ProviderEntry>,
 }
 
 impl PolicyBundle {
@@ -445,6 +600,108 @@ impl PolicyBundle {
             .map(|r| (r.role_id.clone(), r.ceiling.clone()))
             .collect();
 
+        // Validate `[gateway]` if present.
+        if let Some(g) = &raw.gateway {
+            if !std::path::Path::new(&g.binary_path).is_absolute() {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[gateway] binary_path must be absolute (got {:?}); \
+                     relative paths are rejected to prevent PATH-based hijacks",
+                    g.binary_path
+                )));
+            }
+            if g.spawn_timeout_secs == 0 {
+                return Err(PolicyError::MalformedArtifact(
+                    "[gateway] spawn_timeout_secs must be > 0".to_owned(),
+                ));
+            }
+            if g.respawn_backoff_ms == 0 {
+                return Err(PolicyError::MalformedArtifact(
+                    "[gateway] respawn_backoff_ms must be > 0".to_owned(),
+                ));
+            }
+            if g.max_consecutive_respawns == 0 {
+                return Err(PolicyError::MalformedArtifact(
+                    "[gateway] max_consecutive_respawns must be > 0 — set to 1 \
+                     to disable auto-respawn rather than 0"
+                        .to_owned(),
+                ));
+            }
+        }
+
+        // Validate `[[providers]]` entries.
+        let mut seen_provider_ids: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        for p in &raw.providers {
+            if p.provider_id.trim().is_empty() {
+                return Err(PolicyError::MalformedArtifact(
+                    "[[providers]] provider_id must be a non-empty string".to_owned(),
+                ));
+            }
+            if !seen_provider_ids.insert(&p.provider_id) {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] provider_id={:?} is duplicated; IDs must be unique",
+                    p.provider_id
+                )));
+            }
+            // credentials_file MUST be a bare filename (no path components).
+            // This prevents `../../etc/shadow` and absolute-path tricks at
+            // policy-validate time. The actual filesystem existence check
+            // happens at gateway-spawn time, since policy.toml may travel
+            // separately from the credentials directory.
+            let cf = &p.credentials_file;
+            if cf.is_empty() {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] {:?} credentials_file is empty",
+                    p.provider_id
+                )));
+            }
+            if cf.contains('/') || cf.contains('\\') || cf == "." || cf == ".." {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] {:?} credentials_file={:?} must be a bare filename \
+                     (no path separators or `.`/`..`); resolved against \
+                     <data_dir>/providers/",
+                    p.provider_id, cf
+                )));
+            }
+            if p.inference_timeout_ms == 0 {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] {:?} inference_timeout_ms must be > 0",
+                    p.provider_id
+                )));
+            }
+            if p.inference_timeout_ms > MAX_INFERENCE_TIMEOUT_MS {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] {:?} inference_timeout_ms ({}) exceeds normative cap {} \
+                     (peripherals.md §3.2)",
+                    p.provider_id, p.inference_timeout_ms, MAX_INFERENCE_TIMEOUT_MS
+                )));
+            }
+            if p.data_fetch_timeout_ms == 0 {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] {:?} data_fetch_timeout_ms must be > 0",
+                    p.provider_id
+                )));
+            }
+            if p.data_fetch_timeout_ms > MAX_DATA_FETCH_TIMEOUT_MS {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] {:?} data_fetch_timeout_ms ({}) exceeds normative cap {}",
+                    p.provider_id, p.data_fetch_timeout_ms, MAX_DATA_FETCH_TIMEOUT_MS
+                )));
+            }
+            if p.max_response_bytes == 0 {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] {:?} max_response_bytes must be > 0",
+                    p.provider_id
+                )));
+            }
+            if p.max_response_bytes > MAX_RESPONSE_BYTES_CEILING {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[providers]] {:?} max_response_bytes ({}) exceeds ceiling {}",
+                    p.provider_id, p.max_response_bytes, MAX_RESPONSE_BYTES_CEILING
+                )));
+            }
+        }
+
         Ok(Self {
             epoch: raw.meta.epoch,
             authority_pubkey_hex: raw.authority.authority_pubkey,
@@ -472,6 +729,8 @@ impl PolicyBundle {
             egress_domains: raw.egress.domains,
             egress_patterns: raw.egress.patterns,
             egress_max_fetches_per_window: raw.egress.max_fetches_per_window,
+            gateway: raw.gateway,
+            providers: raw.providers,
         })
     }
 
@@ -690,6 +949,30 @@ impl PolicyBundle {
     pub fn egress_max_fetches_per_window(&self) -> u32 {
         self.egress_max_fetches_per_window
     }
+
+    // ── Gateway supervisor config ───────────────────────────────────────────
+
+    /// Optional `[gateway]` config. `None` if the policy omits the section
+    /// (kernel runs without a gateway subprocess; no inference dispatch).
+    pub fn gateway(&self) -> Option<&GatewaySection> {
+        self.gateway.as_ref()
+    }
+
+    // ── Provider catalogue ──────────────────────────────────────────────────
+
+    /// All `[[providers]]` entries in declaration order. Empty `&[]` if the
+    /// policy declares no providers (paired with `gateway() == None` in the
+    /// degraded "no-LLM" deployment).
+    pub fn providers(&self) -> &[ProviderEntry] {
+        &self.providers
+    }
+
+    /// Look up a provider by `provider_id`. Returns `None` if no entry
+    /// matches. Used by the kernel's `provider/` adapter when constructing
+    /// a `FetchRequest` and by the gateway to resolve the credentials path.
+    pub fn provider(&self, provider_id: &str) -> Option<&ProviderEntry> {
+        self.providers.iter().find(|p| p.provider_id == provider_id)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -728,6 +1011,8 @@ mod tests {
             max_session_ttl: Duration::from_secs(0),
             allowed_worktree_roots: roots.into_iter().map(str::to_owned).collect(),
             max_delegation_ttl: Duration::from_secs(0),
+            gateway: None,
+            providers: Vec::new(),
             base_cost_per_intent_kind: HashMap::new(),
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
@@ -802,3 +1087,318 @@ mod tests {
         assert!(!b.worktree_root_allowed(""));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests — `[gateway]` and `[[providers]]` validation (Phase A.3 / T0.3).
+// ---------------------------------------------------------------------------
+//
+// These cover every fail-closed branch in the gateway / providers
+// validation block of `PolicyBundle::validate`. Each test constructs a
+// minimal-but-loadable TOML document, mutates the gateway/providers
+// section, and asserts the expected outcome via the public `load_policy`
+// (since we want the *whole* parse + validate path under test, not just
+// individual field checks).
+
+#[cfg(test)]
+mod gateway_providers_tests {
+    use crate::load_policy;
+
+    /// Minimal valid policy.toml — exactly the sections REQUIRED by
+    /// `PolicyBundle::validate`, plus an empty `[budget]` and the default
+    /// lane. Inlined (rather than calling `raxis_genesis_tools`) to avoid
+    /// a dev-dep cycle and to keep these tests focused: any drift between
+    /// this fixture and the real emitter is a separate problem caught by
+    /// `genesis-tools::tests::output_round_trips_through_load_policy`.
+    fn minimal_policy_toml() -> String {
+        r#"[meta]
+epoch     = 1
+signed_by = "deadbeefdeadbeefdeadbeefdeadbeef"
+signed_at = 1700000000
+
+[authority]
+authority_pubkey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+quality_pubkey   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[escalation_policy]
+timeout_secs         = 3600
+window_secs          = 300
+max_per_window       = 5
+quarantine_threshold = 3
+
+[sessions]
+default_ttl_secs       = 86400
+max_ttl_secs           = 604800
+allowed_worktree_roots = ["/tmp/raxis-policy-test"]
+
+[delegations]
+max_ttl_secs = 86400
+
+[budget]
+cost_per_touched_path = 1
+max_cost_per_task     = 10000
+
+[budget.base_cost_per_intent_kind]
+SingleCommit     = 10
+IntegrationMerge = 50
+CompleteTask     = 5
+ReportFailure    = 1
+
+[[operators.entries]]
+pubkey_fingerprint = "deadbeefdeadbeefdeadbeefdeadbeef"
+display_name       = "operator-1"
+pubkey_hex         = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+permitted_ops      = ["CreateInitiative"]
+
+[[lanes]]
+lane_id              = "default"
+max_concurrent_tasks = 4
+max_cost_per_epoch   = 10000
+priority             = 100
+"#.to_owned()
+    }
+
+    fn write_and_load(
+        toml_str: &str,
+    ) -> Result<crate::PolicyBundle, crate::PolicyError> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_str).unwrap();
+        load_policy(tmp.path()).map(|(b, _, _)| b)
+    }
+
+    // ── No-section happy path ─────────────────────────────────────────────
+
+    #[test]
+    fn policy_without_gateway_or_providers_loads_cleanly() {
+        // Genesis policy template has both sections COMMENTED OUT. The
+        // kernel must boot fine without them — operators who don't need
+        // an LLM workflow ship like this.
+        let bundle = write_and_load(&minimal_policy_toml())
+            .expect("genesis-template policy must load even without [gateway]");
+        assert!(bundle.gateway().is_none(), "no [gateway] section → None");
+        assert!(bundle.providers().is_empty(), "no [[providers]] → empty slice");
+    }
+
+    // ── [gateway] happy path + accessor ───────────────────────────────────
+
+    #[test]
+    fn gateway_section_with_defaults_round_trips_through_loader() {
+        let mut t = minimal_policy_toml();
+        t.push_str("\n[gateway]\nbinary_path = \"/usr/local/bin/raxis-gateway\"\n");
+        let bundle = write_and_load(&t).expect("valid [gateway] must load");
+        let g = bundle.gateway().expect("gateway() returns Some after [gateway]");
+        assert_eq!(g.binary_path, "/usr/local/bin/raxis-gateway");
+        // Defaults applied:
+        assert_eq!(g.spawn_timeout_secs, 5);
+        assert_eq!(g.respawn_backoff_ms, 1000);
+        assert_eq!(g.max_consecutive_respawns, 5);
+    }
+
+    // ── [gateway] negative cases ──────────────────────────────────────────
+
+    #[test]
+    fn relative_gateway_binary_path_is_rejected() {
+        // Defence-in-depth: a relative path would let `Command::new` resolve
+        // via $PATH, opening a hijack window. The validator MUST reject.
+        let mut t = minimal_policy_toml();
+        t.push_str("\n[gateway]\nbinary_path = \"raxis-gateway\"\n");
+        let err = write_and_load(&t).expect_err("relative path must fail");
+        assert!(format!("{err}").contains("must be absolute"),
+            "error must explain WHY rejected; got: {err}");
+    }
+
+    #[test]
+    fn zero_spawn_timeout_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[gateway]\n\
+             binary_path        = \"/usr/local/bin/raxis-gateway\"\n\
+             spawn_timeout_secs = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero spawn_timeout must fail");
+        assert!(format!("{err}").contains("spawn_timeout_secs"));
+    }
+
+    #[test]
+    fn zero_max_consecutive_respawns_is_rejected_with_explicit_one_hint() {
+        // We require ≥ 1 because a "0" would silently disable supervision —
+        // operators who want that should set 1, not 0. The error spells
+        // this out so the operator gets the right answer in one read.
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[gateway]\n\
+             binary_path              = \"/usr/local/bin/raxis-gateway\"\n\
+             max_consecutive_respawns = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero respawn cap must fail");
+        let s = format!("{err}");
+        assert!(s.contains("max_consecutive_respawns"));
+        assert!(s.contains("set to 1"),
+            "error should hint operator to use 1, not 0; got: {s}");
+    }
+
+    // ── [[providers]] happy path + accessor + defaults ───────────────────
+
+    #[test]
+    fn provider_entry_with_only_required_fields_uses_defaults() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"anthropic-prod\"\n\
+             kind             = \"Anthropic\"\n\
+             credentials_file = \"anthropic-prod.toml\"\n",
+        );
+        let bundle = write_and_load(&t).expect("minimal provider entry must load");
+        assert_eq!(bundle.providers().len(), 1);
+        let p = bundle.provider("anthropic-prod").expect("lookup by id works");
+        assert_eq!(p.kind, "Anthropic");
+        assert_eq!(p.credentials_file, "anthropic-prod.toml");
+        // Defaults from `default_*_ms` and `default_max_response_bytes`:
+        assert_eq!(p.inference_timeout_ms, 30_000);
+        assert_eq!(p.data_fetch_timeout_ms, 10_000);
+        assert_eq!(p.max_response_bytes, 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn provider_lookup_returns_none_for_unknown_id() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"anthropic-prod\"\n\
+             kind             = \"Anthropic\"\n\
+             credentials_file = \"anthropic-prod.toml\"\n",
+        );
+        let bundle = write_and_load(&t).unwrap();
+        assert!(bundle.provider("openai-prod").is_none());
+    }
+
+    // ── [[providers]] negative cases ─────────────────────────────────────
+
+    #[test]
+    fn duplicate_provider_id_is_rejected() {
+        let mut t = minimal_policy_toml();
+        for _ in 0..2 {
+            t.push_str(
+                "\n[[providers]]\n\
+                 provider_id      = \"dup\"\n\
+                 kind             = \"Anthropic\"\n\
+                 credentials_file = \"x.toml\"\n",
+            );
+        }
+        let err = write_and_load(&t).expect_err("dup ids must fail");
+        assert!(format!("{err}").contains("duplicated"));
+    }
+
+    #[test]
+    fn empty_provider_id_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"\"\n\
+             kind             = \"Anthropic\"\n\
+             credentials_file = \"x.toml\"\n",
+        );
+        let err = write_and_load(&t).expect_err("empty id must fail");
+        assert!(format!("{err}").contains("non-empty"));
+    }
+
+    #[test]
+    fn credentials_file_with_path_separator_is_rejected() {
+        // `../etc/shadow`-style payloads must be rejected at validate time,
+        // before the gateway opens the file.
+        for evil in &["../etc/shadow", "subdir/file.toml", "/etc/shadow", "..", "."] {
+            let mut t = minimal_policy_toml();
+            t.push_str(&format!(
+                "\n[[providers]]\n\
+                 provider_id      = \"p1\"\n\
+                 kind             = \"Anthropic\"\n\
+                 credentials_file = \"{evil}\"\n",
+            ));
+            let err = write_and_load(&t).err().unwrap_or_else(|| {
+                panic!("expected Err for credentials_file={evil:?}, got Ok");
+            });
+            let s = format!("{err}");
+            assert!(s.contains("bare filename"),
+                "credentials_file={evil:?} should be rejected as path-traversal; \
+                 got error: {s}");
+        }
+    }
+
+    #[test]
+    fn inference_timeout_above_normative_cap_is_rejected() {
+        let cap = crate::MAX_INFERENCE_TIMEOUT_MS;
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id          = \"p1\"\n\
+             kind                 = \"Anthropic\"\n\
+             credentials_file     = \"p1.toml\"\n\
+             inference_timeout_ms = {}\n",
+            cap + 1,
+        ));
+        let err = write_and_load(&t).expect_err("timeout > cap must fail");
+        assert!(format!("{err}").contains("inference_timeout_ms"));
+    }
+
+    #[test]
+    fn data_fetch_timeout_above_normative_cap_is_rejected() {
+        let cap = crate::MAX_DATA_FETCH_TIMEOUT_MS;
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id           = \"p1\"\n\
+             kind                  = \"Anthropic\"\n\
+             credentials_file      = \"p1.toml\"\n\
+             data_fetch_timeout_ms = {}\n",
+            cap + 1,
+        ));
+        let err = write_and_load(&t).expect_err("timeout > cap must fail");
+        assert!(format!("{err}").contains("data_fetch_timeout_ms"));
+    }
+
+    #[test]
+    fn response_bytes_above_ceiling_is_rejected() {
+        let ceil = crate::MAX_RESPONSE_BYTES_CEILING;
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id        = \"p1\"\n\
+             kind               = \"Anthropic\"\n\
+             credentials_file   = \"p1.toml\"\n\
+             max_response_bytes = {}\n",
+            ceil + 1,
+        ));
+        let err = write_and_load(&t).expect_err("body > ceiling must fail");
+        assert!(format!("{err}").contains("max_response_bytes"));
+    }
+
+    #[test]
+    fn zero_inference_timeout_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id          = \"p1\"\n\
+             kind                 = \"Anthropic\"\n\
+             credentials_file     = \"p1.toml\"\n\
+             inference_timeout_ms = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero timeout must fail");
+        assert!(format!("{err}").contains("must be > 0"));
+    }
+
+    #[test]
+    fn forward_compat_unknown_provider_kind_loads_at_validate_time() {
+        // peripherals.md §3.2: unknown kinds are accepted at policy-validate
+        // time (forward-compat); they will be rejected by the gateway at
+        // dispatch time. This test pins the validate-time accept side.
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"future-vendor\"\n\
+             kind             = \"NotAValidKindYet\"\n\
+             credentials_file = \"future.toml\"\n",
+        );
+        let bundle = write_and_load(&t).expect("unknown kind must load");
+        assert_eq!(bundle.providers()[0].kind, "NotAValidKindYet");
+    }
+}
+
