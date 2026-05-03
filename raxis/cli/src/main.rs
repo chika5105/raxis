@@ -195,6 +195,7 @@ fn run() -> Result<(), CliError> {
         "sessions" => commands::sessions::run(&flags, rest),
         "escalations" => commands::escalations::run(&flags, rest),
         "inbox" => commands::inbox::run(&flags, rest),
+        "doctor" => commands::doctor::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -309,6 +310,12 @@ READ-ONLY OBSERVATION:
     inbox [--kind K] [--since DURATION] [--limit N] [--json]
         Read <data_dir>/notifications/inbox.jsonl. Exit code 2 when
         the inbox file does not exist yet.
+
+    doctor [--json]
+        Preflight checks against <data_dir>: subdir presence + mode
+        bits, policy.toml loadability, kernel.db schema pin,
+        heartbeat freshness, audit chain quick-check, bundle/kernel
+        epoch alignment.
 "#
     );
 }

@@ -14,6 +14,7 @@
 
 pub mod audit;
 pub mod delegation;
+pub mod doctor;
 pub mod epoch;
 pub mod escalation;
 pub mod escalations;
