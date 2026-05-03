@@ -146,6 +146,24 @@ Each entry follows the same structure — what was tempting about the alternativ
 
 ---
 
+#### A.26 — Direct Chat Channels (Operator-to-Planner and Planner-to-Planner)
+
+**Considered because:** conversational chat is the standard interaction model for almost all existing agentic systems. Operators are used to telling agents "actually, do X instead" in a chat window, and multi-agent systems often rely on free-text message passing between agents.
+
+**Rejected because:** policy cannot be inferred from prose. 
+- **For Operator-to-Planner:** If an operator can bypass the structured task DAG by typing new instructions into a chat window, the cryptographically signed `plan.toml` is no longer the source of truth. This breaks the audit trail and enables implicit task creation that the kernel cannot properly gate or budget. 
+- **For Planner-to-Planner:** Direct free-text chat between agents creates invisible trust boundaries and un-auditable coordination that the kernel cannot enforce capabilities against (see also A.4).
+
+**How to adjust behavior without chat:**
+If a planner is doing the wrong thing or needs coordination, course-correction must flow through structured state transitions:
+1. **Change the Code/Spec:** Edit the target files or specs in the Git worktree. The planner will see the new context on its next iteration.
+2. **Change the Plan:** Abort the current task (`raxis-cli task abort`), update the structured `plan.toml`, sign it, and submit a new plan.
+3. **Escalation Response:** If the planner is blocked on a missing capability, it files an `EscalationRequest`. The operator responds with a structured `raxis-cli escalation approve` or `deny` (which allows a brief text reason that is stored strictly in the audit log, not passed as a conversational instruction to the planner).
+
+**Guardrail:** the CLI must never implement a `chat` command. The kernel must never expose an IPC endpoint that allows arbitrary prose instructions to be pushed into a planner's context window from either the operator or another planner.
+
+---
+
 ### Credential and Storage Model
 
 #### A.13 — Planner-Held Provider API Keys
