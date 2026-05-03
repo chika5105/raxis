@@ -56,8 +56,9 @@ const DEFAULT_MAX_CONCURRENT_VERIFIERS: usize = 16;
 /// Reads have no observable production side effect; we keep the visibility
 /// to `pub(crate)` so external crates cannot take a dependency on the
 /// internal counter. The intra-crate consumers are:
-///   - `runtime::heartbeat::Snapshot::collect` (cli-readonly.md §5.2.2,
-///     `active_verifiers` field).
+///   - `runtime::heartbeat::collect` (cli-readonly.md §5.2.2,
+///     `active_verifiers` field). Returns the wire-shape
+///     `raxis_runtime::Snapshot` for the kernel's heartbeat loop.
 ///   - This file's own integration tests at the bottom of the module.
 pub(crate) fn active_verifier_count() -> usize {
     ACTIVE_VERIFIERS.load(Ordering::Relaxed)

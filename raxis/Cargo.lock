@@ -650,6 +650,7 @@ dependencies = [
  "raxis-genesis-tools",
  "raxis-ipc",
  "raxis-policy",
+ "raxis-runtime",
  "raxis-store",
  "raxis-test-support",
  "raxis-types",
@@ -678,6 +679,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "raxis-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

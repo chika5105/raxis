@@ -226,7 +226,7 @@ async fn main() {
     //     observe boot (the kernel's own stderr says it).
     // Sending through the wrapper would still work — it just produces
     // an inbox line nobody reads.
-    let started_at = runtime::heartbeat::unix_now_secs();
+    let started_at = raxis_runtime::unix_now_secs();
     if let Err(e) = inner_audit.emit(
         AuditEventKind::KernelStarted {
             data_dir: data_dir.display().to_string(),
@@ -256,7 +256,7 @@ async fn main() {
     // genesis time (Phase A1 contract), but operators upgrading from
     // a pre-A1 kernel may not have it on disk. The cost of a no-op
     // mkdir at boot is one syscall.
-    let _ = std::fs::create_dir_all(data_dir.join(runtime::heartbeat::RUNTIME_DIR));
+    let _ = std::fs::create_dir_all(data_dir.join(raxis_runtime::RUNTIME_DIR));
     let (heartbeat_shutdown_tx, heartbeat_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let heartbeat_handle = {
         let data_dir_for_hb = data_dir.clone();

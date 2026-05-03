@@ -28,6 +28,10 @@ raxis-store       = { workspace = true }
 # `render_genesis_audit_record` from `bootstrap::run_inner`; no other call
 # sites in the kernel.
 raxis-genesis-tools = { workspace = true }
+# Wire shape + atomic write/read for `<data_dir>/runtime/heartbeat.json`.
+# Lives in its own crate so the CLI binary can deserialize what the
+# kernel writes without depending on the kernel binary.
+raxis-runtime       = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }

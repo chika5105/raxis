@@ -1,0 +1,28 @@
+[package]
+name        = "raxis-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Why a dedicated tiny crate (rather than a module on `raxis-store` or
+# the kernel binary):
+#
+# The heartbeat surface is shared between the kernel writer and the
+# CLI reader. The kernel `bin` crate cannot be depended-on by the CLI
+# `bin` crate, and the heartbeat data structure has no business in
+# `raxis-store` (it is NOT durable kernel state). The smallest correct
+# scoping is its own workspace member that both binaries depend on.
+#
+# Today this crate exposes only the heartbeat shape + read/write
+# helpers. Future hint files in `<data_dir>/runtime/` (e.g. a
+# `gateway.json` exposing the active gateway PID once the gateway
+# supervisor's metadata graduates from stderr) will land here, NOT
+# in `raxis-store` and NOT in the kernel binary.
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+tempfile    = "3"
