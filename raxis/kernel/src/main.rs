@@ -17,6 +17,7 @@ mod scheduler;
 mod vcs;
 mod witness_index;
 mod gates;
+mod gateway;
 mod handlers;
 mod path_scope;
 
@@ -253,13 +254,67 @@ async fn main() {
         Arc::clone(&plan_registry),
     ));
 
+    // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a
+    // long-lived tokio task: it spawns one `raxis-gateway` subprocess,
+    // waits for it to exit, applies back-off, respawns. After
+    // `[gateway].max_consecutive_respawns` it emits `GatewayQuarantined`
+    // and stops. If `policy.gateway()` is None, the supervisor logs
+    // and returns `NoGatewayConfigured` immediately (degraded mode).
+    //
+    // We hold a `oneshot::Sender<()>` so the post-IPC-dispatch shutdown
+    // path (step 11 below) can ask the supervisor to kill the child
+    // and exit cleanly. Without this signal a SIGTERM-shutdown of the
+    // kernel would leave an orphaned `raxis-gateway` running until
+    // its UDS read returned EOF — eventually fine, but not the clean
+    // shutdown the spec mandates.
+    let (gateway_shutdown_tx, gateway_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let supervisor_handle = {
+        let gateway_section = policy.gateway().cloned();
+        let socket_path = data_dir.join("sockets/gateway.sock");
+        let data_dir_for_sup = data_dir.clone();
+        let audit_for_sup = Arc::clone(&audit);
+        tokio::spawn(async move {
+            gateway::spawn_and_supervise(
+                gateway_section,
+                data_dir_for_sup,
+                socket_path,
+                audit_for_sup,
+                gateway_shutdown_rx,
+            )
+            .await
+        })
+    };
+
     // Step 9: Enter IPC dispatch loop. Returns when SIGTERM or SIGINT is
     // received OR when one of the three accept loops dies. Either way we
     // emit `KernelStopped` for audit completeness; exit code differs.
     let shutdown = match ipc::server::start(&data_dir, ctx).await {
         Ok(reason) => reason,
-        Err(e) => exit_with_code(e),
+        Err(e) => {
+            // Try to tell the supervisor to clean up before bailing
+            // out. If the channel is closed (supervisor already gone)
+            // the send returns Err which we discard.
+            let _ = gateway_shutdown_tx.send(());
+            exit_with_code(e);
+        }
     };
+
+    // Step 9.5: Tell the gateway supervisor to wind down. This sends
+    // SIGKILL to the child (Tokio Command::start_kill) and waits for
+    // reap. Errors are logged inside the supervisor; we just need to
+    // know it's done before emitting KernelStopped.
+    let _ = gateway_shutdown_tx.send(());
+    match supervisor_handle.await {
+        Ok(reason) => eprintln!(
+            "{{\"level\":\"info\",\"event\":\"gateway_supervisor_done\",\
+             \"reason\":\"{:?}\"}}",
+            reason
+        ),
+        Err(join_err) => eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"gateway_supervisor_join_failed\",\
+             \"reason\":\"{join_err}\"}}"
+        ),
+    }
 
     // Step 10: Emit `KernelStopped` audit event. This MUST be the last
     // record in the segment for this kernel-process lifetime; without it,

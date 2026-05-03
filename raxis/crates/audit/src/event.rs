@@ -267,6 +267,37 @@ pub enum AuditEventKind {
         delegation_id: String,
         expected_signer_unknown_in_current_policy: bool,
     },
+
+    // --- Gateway supervisor (peripherals.md §3.2 "Spawn model") ---
+    /// Emitted by `gateway::supervisor::spawn_and_supervise` each time
+    /// it spawns a fresh `raxis-gateway` subprocess. `attempt` is
+    /// 1-indexed across the kernel-process lifetime; an `attempt` > 1
+    /// means a previous gateway crashed and the supervisor respawned.
+    /// `token_prefix` is the first 8 hex chars of the new
+    /// `gateway_process_token` — the full token never appears in
+    /// audit records (it is an in-process secret).
+    GatewaySpawned {
+        token_prefix: String,
+        binary_path: String,
+        attempt: u32,
+    },
+    /// The supervised gateway subprocess exited (clean or otherwise).
+    /// `exit_code = None` when the child was killed by a signal or
+    /// could not be reaped. Followed by either another `GatewaySpawned`
+    /// (back-off + respawn) or `GatewayQuarantined` (max crashes hit).
+    GatewayCrashed {
+        token_prefix: String,
+        exit_code: Option<i32>,
+        attempt: u32,
+    },
+    /// The supervisor exceeded `[gateway].max_consecutive_respawns`
+    /// and stopped respawning. Subsequent `FetchRequest`s short-circuit
+    /// to `error: "GatewayUnavailable"` until the operator restarts
+    /// the kernel.
+    GatewayQuarantined {
+        reason: String,
+        total_attempts: u32,
+    },
 }
 
 impl AuditEventKind {
@@ -305,6 +336,9 @@ impl AuditEventKind {
             Self::ReconciliationGap { .. } => "ReconciliationGap",
             Self::TaskBlockedForRecovery { .. } => "TaskBlockedForRecovery",
             Self::DelegationSignatureUnverifiable { .. } => "DelegationSignatureUnverifiable",
+            Self::GatewaySpawned { .. } => "GatewaySpawned",
+            Self::GatewayCrashed { .. } => "GatewayCrashed",
+            Self::GatewayQuarantined { .. } => "GatewayQuarantined",
         }
     }
 }
