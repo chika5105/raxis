@@ -10,23 +10,26 @@
 //  - Every other crate depends on this one; it depends on nothing in the workspace.
 
 pub mod capability;
+pub mod clock;
 pub mod error;
 pub mod escalation;
 pub mod fsm;
 pub mod id;
 pub mod intent;
 pub mod operator;
+pub mod operator_wire;
 pub mod policy;
 pub mod witness;
 
 // Convenient flat re-exports for the most-used types.
 pub use capability::{CapabilityClass, DelegationStatus};
+pub use clock::{unix_now_secs, Clock, RealClock};
 pub use error::{OperatorErrorCode, PlannerErrorCode};
 pub use escalation::{EscalationClass, EscalationRequest, EscalationResponse, RequestedEscalationScope};
 pub use fsm::{InitiativeState, TaskState, BlockReason, TerminalCriteria};
 pub use id::{
-    CommitSha, DelegationId, EscalationId, GateType, InitiativeId, LineageId, SessionId,
-    TaskId, VerifierRunId,
+    CommitSha, CommitShaError, DelegationId, EscalationId, GateType, GateTypeError,
+    InitiativeId, LineageId, SessionId, TaskId, TaskIdError, VerifierRunId,
 };
 pub use intent::{
     BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
