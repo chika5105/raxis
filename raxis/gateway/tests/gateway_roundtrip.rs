@@ -35,21 +35,21 @@ const GATEWAY_TOKEN: &str =
 // Build helpers
 // ---------------------------------------------------------------------------
 
-fn build_and_locate_gateway() -> PathBuf {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    let status = Command::new(&cargo)
-        .args(["build", "-p", "raxis-gateway", "--bin", "raxis-gateway"])
-        .status()
-        .expect("spawn `cargo build -p raxis-gateway`");
-    assert!(status.success(), "cargo build of raxis-gateway failed");
-
-    let exe = std::env::current_exe().expect("current_exe");
-    let target_profile_dir = exe
-        .parent().expect("test binary has parent")
-        .parent().expect("deps/ has parent");
-    let bin = target_profile_dir.join("raxis-gateway");
-    assert!(bin.exists(), "gateway binary not at expected path: {}", bin.display());
-    bin
+/// Path to the pre-built `raxis-gateway` binary.
+///
+/// We rely on `CARGO_BIN_EXE_raxis-gateway`, which Cargo defines for
+/// integration tests inside the same crate as the binary
+/// (https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-crates).
+///
+/// We deliberately do NOT shell out to `cargo build -p raxis-gateway` from
+/// inside the test, because that recursive cargo invocation contends with
+/// the parent `cargo test --workspace` build lock and can wedge the entire
+/// workspace test run for tens of minutes (observed in practice). Cargo
+/// already builds every binary that integration tests depend on before the
+/// test binary is launched, so the env-var lookup is sufficient and
+/// race-free.
+fn locate_gateway() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_raxis-gateway"))
 }
 
 /// Build a minimal `<data_dir>` with policy.toml + providers/anthropic.toml.
@@ -257,7 +257,7 @@ async fn drain_handshake(stream: &mut UnixStream) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_handshakes_then_returns_mock_response_for_allowed_url() {
-    let bin = build_and_locate_gateway();
+    let bin = locate_gateway();
     let data_dir = build_data_dir();
     let kernel = FakeKernel::bind();
 
@@ -298,7 +298,7 @@ async fn gateway_handshakes_then_returns_mock_response_for_allowed_url() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_returns_domain_not_allowed_for_url_outside_egress_allowlist() {
-    let bin = build_and_locate_gateway();
+    let bin = locate_gateway();
     let data_dir = build_data_dir();
     let kernel = FakeKernel::bind();
 
@@ -330,7 +330,7 @@ async fn gateway_returns_domain_not_allowed_for_url_outside_egress_allowlist() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_returns_invalid_token_when_token_does_not_match_env() {
-    let bin = build_and_locate_gateway();
+    let bin = locate_gateway();
     let data_dir = build_data_dir();
     let kernel = FakeKernel::bind();
 
@@ -365,7 +365,7 @@ async fn gateway_returns_invalid_token_when_token_does_not_match_env() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_exits_with_code_64_when_required_env_var_missing() {
     // Hand-rolled spawn: skip the helper because it always sets the env.
-    let bin = build_and_locate_gateway();
+    let bin = locate_gateway();
     let kernel = FakeKernel::bind();
 
     let output = Command::new(&bin)

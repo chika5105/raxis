@@ -66,36 +66,25 @@ pub fn acquire_test_lock() -> MutexGuard<'static, ()> {
 // Build + bootstrap helpers
 // ---------------------------------------------------------------------------
 
-/// Build (or locate) the `raxis-kernel` binary and return its absolute path.
+/// Locate the `raxis-kernel` binary built by Cargo for this test.
 ///
-/// Cargo gives us no first-class way to ask "where will the binary land?",
-/// so we shell out `cargo build -p raxis-kernel` first (cheap on a warm
-/// build cache) and then derive the path from `current_exe()`:
-/// `<target>/<profile>/deps/<this_test>` → `<target>/<profile>/raxis-kernel`.
+/// We rely on `CARGO_BIN_EXE_raxis-kernel`, which Cargo defines for
+/// integration tests inside the same crate as the binary
+/// (https://doc.rust-lang.org/cargo/reference/environment-variables.html#environment-variables-cargo-sets-for-crates).
+///
+/// We deliberately do NOT shell out to `cargo build -p raxis-kernel` from
+/// inside the test, because that recursive cargo invocation contends with
+/// the parent `cargo test --workspace` build lock and can wedge the entire
+/// workspace test run for tens of minutes (observed in practice). Cargo
+/// always builds every binary that integration tests depend on before
+/// launching the test binary, so the env-var lookup is sufficient and
+/// race-free.
+///
+/// The function is named `build_and_locate_kernel` for backward
+/// compatibility with existing call sites; the "build" portion is now
+/// performed by Cargo itself before this function is reached.
 pub fn build_and_locate_kernel() -> PathBuf {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    let status = Command::new(&cargo)
-        .args(["build", "-p", "raxis-kernel", "--bin", "raxis-kernel"])
-        .status()
-        .expect("spawn `cargo build -p raxis-kernel`");
-    assert!(
-        status.success(),
-        "cargo build of raxis-kernel failed; cannot run integration test",
-    );
-
-    let exe = std::env::current_exe().expect("current_exe");
-    let target_profile_dir = exe
-        .parent()
-        .expect("test binary has parent")
-        .parent()
-        .expect("deps/ has parent");
-    let bin = target_profile_dir.join("raxis-kernel");
-    assert!(
-        bin.exists(),
-        "kernel binary not found at expected path: {}",
-        bin.display(),
-    );
-    bin
+    PathBuf::from(env!("CARGO_BIN_EXE_raxis-kernel"))
 }
 
 /// Write a deterministic Ed25519 public key (hex) to `<dir>/operator_pubkey.hex`.
