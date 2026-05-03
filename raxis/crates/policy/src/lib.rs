@@ -21,5 +21,8 @@ pub use bundle::{
     GatewaySection, OperatorEntry, PolicyBundle, ProviderEntry,
     MAX_DATA_FETCH_TIMEOUT_MS, MAX_INFERENCE_TIMEOUT_MS, MAX_RESPONSE_BYTES_CEILING,
 };
+
+#[cfg(any(debug_assertions, test))]
+pub use bundle::EscalationPolicyForTests;
 pub use error::PolicyError;
 pub use loader::load_policy;

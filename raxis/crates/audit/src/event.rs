@@ -227,6 +227,21 @@ pub enum AuditEventKind {
         lineage_id: String,
         trigger_count: u64,
     },
+    /// Emitted when a planner submission would push a lineage past
+    /// `policy.escalation_max_per_window`. The submission is rejected
+    /// (`EscalationResponse::Rejected { RateLimitExceeded }`) and the
+    /// lineage's `quarantine_trigger_count` advances by one.
+    /// philosophy.md §"Escalation — rate-limiter fires" calls this out
+    /// as a required audit kind.
+    EscalationRateLimitExceeded {
+        lineage_id: String,
+        /// The window-local count *after* the rejected attempt is logged
+        /// — i.e. it is exactly `escalation_max_per_window + 1` for the
+        /// first overflow and stays at the cap for the rest of the
+        /// window. Useful for forensic reconstruction.
+        attempted_count: u64,
+        window_start: i64,
+    },
 
     // --- Policy epoch ---
     PolicyEpochAdvanced {
@@ -329,6 +344,7 @@ impl AuditEventKind {
             Self::EscalationTimedOut { .. } => "EscalationTimedOut",
             Self::EscalationConsumed { .. } => "EscalationConsumed",
             Self::LineageQuarantined { .. } => "LineageQuarantined",
+            Self::EscalationRateLimitExceeded { .. } => "EscalationRateLimitExceeded",
             Self::PolicyEpochAdvanced { .. } => "PolicyEpochAdvanced",
             Self::PolicyAdvanceRejected { .. } => "PolicyAdvanceRejected",
             Self::PolicyAdvanceFailed { .. } => "PolicyAdvanceFailed",

@@ -566,6 +566,34 @@ pub struct PolicyBundle {
     providers: Vec<ProviderEntry>,
 }
 
+/// Test-only escalation rate-limit / quarantine / timeout overrides for
+/// [`PolicyBundle::for_tests_with_operators_and_escalation_policy`].
+///
+/// Mirrors the four `[escalation_policy]` TOML fields that the kernel's
+/// planner-side EscalationRequest handler reads. Defaults to all-zero
+/// so callers that build via [`PolicyBundle::for_tests_with_operators`]
+/// keep their previous semantics.
+#[cfg(any(debug_assertions, test))]
+#[derive(Debug, Clone, Copy)]
+pub struct EscalationPolicyForTests {
+    pub timeout:               Duration,
+    pub window:                Duration,
+    pub max_per_window:        u32,
+    pub quarantine_threshold:  u32,
+}
+
+#[cfg(any(debug_assertions, test))]
+impl Default for EscalationPolicyForTests {
+    fn default() -> Self {
+        Self {
+            timeout:              Duration::from_secs(0),
+            window:               Duration::from_secs(0),
+            max_per_window:       0,
+            quarantine_threshold: 0,
+        }
+    }
+}
+
 impl PolicyBundle {
     /// Validate and build a `PolicyBundle` from a `RawPolicy` parsed from TOML.
     ///
@@ -776,6 +804,8 @@ impl PolicyBundle {
     /// zero/empty default. Use this when a unit test only needs
     /// `operator_entry()` lookups (e.g. signature verification on
     /// the operator IPC handlers) and not budgets, lanes, gates, etc.
+    /// For tests that also need escalation rate-limit configuration
+    /// see [`for_tests_with_operators_and_escalation_policy`].
     ///
     /// Gated on `debug_assertions || cfg(test)` — disappears in
     /// release builds, mirroring the convention used by
@@ -783,6 +813,23 @@ impl PolicyBundle {
     /// public surface.
     #[cfg(any(debug_assertions, test))]
     pub fn for_tests_with_operators(operators: Vec<OperatorEntry>) -> Self {
+        Self::for_tests_with_operators_and_escalation_policy(
+            operators,
+            EscalationPolicyForTests::default(),
+        )
+    }
+
+    /// Like `for_tests_with_operators` but also lets a test override
+    /// the escalation rate-limit / quarantine / timeout fields. Useful
+    /// for the planner-side EscalationRequest handler tests in
+    /// `kernel/src/handlers/escalation.rs` which need to drive the
+    /// rate-limit and quarantine paths deterministically without
+    /// relying on real wall-clock budgets.
+    #[cfg(any(debug_assertions, test))]
+    pub fn for_tests_with_operators_and_escalation_policy(
+        operators:         Vec<OperatorEntry>,
+        escalation_policy: EscalationPolicyForTests,
+    ) -> Self {
         Self {
             epoch: 0,
             authority_pubkey_hex: String::new(),
@@ -791,10 +838,10 @@ impl PolicyBundle {
             gates: Vec::new(),
             lanes: Vec::new(),
             role_ceilings: HashMap::new(),
-            escalation_timeout: Duration::from_secs(0),
-            escalation_window: Duration::from_secs(0),
-            escalation_max_per_window: 0,
-            escalation_quarantine_threshold: 0,
+            escalation_timeout: escalation_policy.timeout,
+            escalation_window: escalation_policy.window,
+            escalation_max_per_window: escalation_policy.max_per_window,
+            escalation_quarantine_threshold: escalation_policy.quarantine_threshold,
             default_session_ttl: Duration::from_secs(0),
             max_session_ttl: Duration::from_secs(0),
             allowed_worktree_roots: Vec::new(),

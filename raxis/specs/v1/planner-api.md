@@ -231,6 +231,7 @@ Submit `EscalationRequest` on the same socket as `IntentRequest`. Wire shape and
 
 ```json
 {
+  "session_token":   "<your session_token, identical to IntentRequest>",
   "task_id":         "<your task_id>",
   "class":           "CapabilityUpgrade",
   "requested_scope": { "kind": "CapabilityUpgrade", "capability": "WriteSecrets" },

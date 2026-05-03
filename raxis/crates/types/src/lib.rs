@@ -25,7 +25,10 @@ pub mod witness;
 pub use capability::{CapabilityClass, DelegationStatus};
 pub use clock::{unix_now_secs, Clock, RealClock};
 pub use error::{OperatorErrorCode, PlannerErrorCode};
-pub use escalation::{EscalationClass, EscalationRequest, EscalationResponse, RequestedEscalationScope};
+pub use escalation::{
+    EscalationClass, EscalationRejectionReason, EscalationRequest, EscalationResponse,
+    EscalationStatus, RequestedEscalationScope,
+};
 pub use fsm::{InitiativeState, TaskState, BlockReason, TerminalCriteria};
 pub use id::{
     CommitSha, CommitShaError, DelegationId, EscalationId, GateType, GateTypeError,

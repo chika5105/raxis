@@ -467,10 +467,15 @@ async fn handle_planner_connection(
                 }
             }
 
-            // ── EscalationRequest (Tier 2 stub) ────────────────────────────
-            IpcMessage::EscalationRequest(_) => {
-                eprintln!("{{\"level\":\"debug\",\"message\":\"EscalationRequest received (Tier 2 stub)\"}}");
-                // Do not break — keep connection open; planner may continue.
+            // ── EscalationRequest ─────────────────────────────────────────
+            // Spec §2.3 dispatcher: EscalationRequest lands on planner.sock
+            // (same socket as IntentRequest, different IpcMessage variant).
+            // The handler returns an EscalationResponse for every input —
+            // including malformed ones — so the connection stays open and
+            // the planner gets a typed reply it can match on.
+            IpcMessage::EscalationRequest(req) => {
+                let resp = handlers::escalation::handle(req, &ctx).await;
+                write_frame(&mut stream, &IpcMessage::KernelEscalationResponse(resp)).await?;
             }
 
             _ => {
