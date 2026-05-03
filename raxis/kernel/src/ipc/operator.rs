@@ -10,10 +10,19 @@
 //   4. Write OperatorResponse frame.
 //
 // v1 handler implementation status:
-//   CreateSession     — fully wired (authority::session::create_session)
-//   RevokeSession     — fully wired (authority::session::revoke_session)
-//   GrantDelegation   — fully wired (authority::delegation::grant_delegation)
-//   Other 10 ops      — stub responses (domain subsystems not yet implemented)
+//   CreateSession      — fully wired (authority::session::create_session)
+//   RevokeSession      — fully wired (authority::session::revoke_session)
+//   GrantDelegation    — fully wired (authority::delegation::grant_delegation)
+//   CreateInitiative   — fully wired (initiatives::lifecycle::create_initiative)
+//   ApprovePlan        — fully wired (initiatives::lifecycle::approve_plan)
+//   RejectPlan         — fully wired (initiatives::lifecycle::reject_plan)
+//   AbortInitiative    — fully wired (initiatives::lifecycle::abort_initiative)
+//   AbortTask          — fully wired (initiatives::lifecycle::abort_task)
+//   ResumeTask         — fully wired (task_transitions::transition_task)
+//   RetryTask          — fully wired (initiatives::lifecycle::retry_task)
+//   ApproveEscalation  — fully wired (authority::escalation::approve_escalation)
+//   DenyEscalation     — fully wired (authority::escalation::deny_escalation)
+//   RotateEpoch        — stub (policy_manager::advance_epoch not yet implemented)
 
 use std::sync::Arc;
 
@@ -143,10 +152,13 @@ async fn handle_request(
         OperatorRequest::AbortInitiative { initiative_id, aborted_by } => {
             handle_abort_initiative(initiative_id, aborted_by, ctx).await
         }
-        // Tier 2 stubs:
-        OperatorRequest::ApproveEscalation { .. } | OperatorRequest::DenyEscalation { .. } => {
-            OperatorResponse::Ack { message: "EscalationApproval not yet implemented (Tier 2)".to_owned() }
+        OperatorRequest::ApproveEscalation { escalation_id, approval_scope, operator_sig_hex } => {
+            handle_approve_escalation(escalation_id, approval_scope, operator_sig_hex, operator, ctx).await
         }
+        OperatorRequest::DenyEscalation { escalation_id, reason } => {
+            handle_deny_escalation(escalation_id, reason, operator, ctx).await
+        }
+        // Tier 2 stub:
         OperatorRequest::RotateEpoch { .. } => {
             OperatorResponse::Ack { message: "RotateEpoch not yet implemented (Tier 2)".to_owned() }
         }
@@ -550,6 +562,169 @@ async fn handle_abort_initiative(
 }
 
 // ---------------------------------------------------------------------------
+// Escalation review handlers (kernel-store.md §2.5.5)
+// ---------------------------------------------------------------------------
+
+/// `ApproveEscalation` — flips a `Pending` escalation to `Approved`,
+/// inserts an `approval_tokens` row, and returns the high-entropy raw
+/// token to the operator. The operator passes the token to the planner
+/// out-of-band; subsequent intent submissions present the token and the
+/// kernel re-derives `sha256(raw)` to look it up (kernel-core.md
+/// §2.3 `validate_approval_token`).
+///
+/// The actual FSM call goes through `tokio::task::spawn_blocking`
+/// because `authority::escalation::approve_escalation` reaches into
+/// `Store::lock_sync()` (sync `tokio::sync::Mutex::blocking_lock`),
+/// which panics if called directly from an async task. Same pattern
+/// `main.rs` uses for `recovery::reconcile` and the verifier-token
+/// issuance path in `gates::verifier_runner`.
+async fn handle_approve_escalation(
+    escalation_id:    String,
+    approval_scope:   raxis_types::operator_wire::ApprovalScopeWire,
+    operator_sig_hex: String,
+    operator:         &AuthenticatedOperator,
+    ctx:              &HandlerContext,
+) -> OperatorResponse {
+    let signature = match hex::decode(&operator_sig_hex) {
+        Ok(b) => b,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_APPROVE_ESCALATION".to_owned(),
+            detail: format!("operator_sig_hex is not valid hex: {e}"),
+        },
+    };
+
+    let policy_for_blocking   = Arc::clone(&ctx.policy);
+    let store_for_blocking    = Arc::clone(&ctx.store);
+    let fp_for_blocking       = operator.fingerprint.clone();
+    let escalation_id_blocking = escalation_id.clone();
+    let scope_for_blocking    = approval_scope.clone();
+    let policy_epoch          = ctx.policy.epoch();
+
+    let join_result = tokio::task::spawn_blocking(move || {
+        crate::authority::escalation::approve_escalation(
+            &escalation_id_blocking,
+            &scope_for_blocking,
+            &signature,
+            &fp_for_blocking,
+            policy_epoch,
+            &policy_for_blocking,
+            &store_for_blocking,
+        )
+    }).await;
+
+    let approve_outcome = match join_result {
+        Ok(r) => r,
+        Err(join_err) => return OperatorResponse::Error {
+            code:   "FAIL_APPROVE_ESCALATION".to_owned(),
+            detail: format!("approve_escalation spawn_blocking join failed: {join_err}"),
+        },
+    };
+
+    match approve_outcome {
+        Ok(result) => {
+            // Audit emission MUST follow a successful SQLite commit
+            // (kernel-store.md §2.5.2). `approve_escalation` already
+            // returned Ok so the row is in place; failures here are
+            // logged but do not propagate so the operator's intent is
+            // still honoured (`recovery::reconcile` will detect any
+            // §2.5.2 commit-vs-audit gap on next boot).
+            if let Err(e) = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::EscalationApproved {
+                    escalation_id: escalation_id.clone(),
+                    approved_by:   operator.fingerprint.clone(),
+                },
+                None,
+                None,
+                None,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"EscalationApproved\",\
+                     \"audit_emit_failed\":\"{e}\",\"escalation_id\":\"{escalation_id}\"}}",
+                );
+            }
+            OperatorResponse::EscalationApproved {
+                escalation_id,
+                approval_token_id:  result.approval_token_id,
+                approval_token_raw: result.approval_token_raw,
+                expires_at:         result.expires_at,
+            }
+        }
+        Err(e) => OperatorResponse::Error {
+            code:   e.error_code().to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// `DenyEscalation` — flips a `Pending` escalation to `Denied`. No
+/// approval artifact is created (no `approval_tokens` row); the audit
+/// event is the only durable record per kernel-store.md §2.5.5.
+async fn handle_deny_escalation(
+    escalation_id: String,
+    reason:        Option<String>,
+    operator:      &AuthenticatedOperator,
+    ctx:           &HandlerContext,
+) -> OperatorResponse {
+    if let Some(r) = reason.as_ref() {
+        if r.chars().count() > 512 {
+            return OperatorResponse::Error {
+                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                detail: format!(
+                    "reason exceeds 512-character limit (was {} chars)",
+                    r.chars().count()
+                ),
+            };
+        }
+    }
+    let store_for_blocking     = Arc::clone(&ctx.store);
+    let fp_for_blocking        = operator.fingerprint.clone();
+    let escalation_id_blocking = escalation_id.clone();
+    let reason_for_blocking    = reason.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        crate::authority::escalation::deny_escalation(
+            &escalation_id_blocking,
+            reason_for_blocking.as_deref(),
+            &fp_for_blocking,
+            &store_for_blocking,
+        )
+    }).await;
+    let deny_outcome = match join_result {
+        Ok(r) => r,
+        Err(join_err) => return OperatorResponse::Error {
+            code:   "FAIL_DENY_ESCALATION".to_owned(),
+            detail: format!("deny_escalation spawn_blocking join failed: {join_err}"),
+        },
+    };
+    match deny_outcome {
+        Ok(result) => {
+            if let Err(e) = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::EscalationDenied {
+                    escalation_id: escalation_id.clone(),
+                    denied_by:     operator.fingerprint.clone(),
+                    reason:        reason.clone(),
+                },
+                None,
+                None,
+                None,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"EscalationDenied\",\
+                     \"audit_emit_failed\":\"{e}\",\"escalation_id\":\"{escalation_id}\"}}",
+                );
+            }
+            OperatorResponse::EscalationDenied {
+                escalation_id,
+                denied_at: result.denied_at,
+            }
+        }
+        Err(e) => OperatorResponse::Error {
+            code:   e.error_code().to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper
 // ---------------------------------------------------------------------------
 
@@ -574,4 +749,317 @@ fn op_name(req: &OperatorRequest) -> &'static str {
 // `write_response` was inlined into `dispatch_loop` once framing moved to
 // `raxis_ipc::write_json_frame_async`. Kept this comment to explain the
 // rename in case anyone diffs against the pre-PR-2 history.
+
+// ---------------------------------------------------------------------------
+// Tests — focused tests for the escalation dispatcher arms.
+//
+// The bulk of the FSM logic is unit-tested in
+// `authority::escalation::tests`; what we cover here is the dispatcher-
+// only behaviour:
+//   * sig hex decoding,
+//   * 512-char `reason` cap on DenyEscalation,
+//   * `EscalationApproved` / `EscalationDenied` audit events fire after
+//     a successful FSM transition, and
+//   * `EscalationError` variants are mapped to the right operator
+//     wire `code` strings.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod escalation_dispatch_tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use raxis_audit_tools::{AuditEventKind, FakeAuditSink};
+    use raxis_policy::{OperatorEntry, PolicyBundle};
+    use raxis_store::Store;
+    use raxis_types::operator_wire::ApprovalScopeWire;
+
+    use crate::authority::escalation::approval_scope_signing_input;
+    use crate::authority::keys::KeyRegistry;
+    use crate::initiatives::PlanRegistry;
+    use crate::ipc::auth::AuthenticatedOperator;
+
+    // ── shared fixtures ───────────────────────────────────────────────
+
+    const FP: &str = "op-prime";
+
+    fn fixture_keypair() -> SigningKey { SigningKey::from_bytes(&[7u8; 32]) }
+
+    fn fixture_scope() -> ApprovalScopeWire {
+        ApprovalScopeWire {
+            capability_class:  "WriteSecrets".into(),
+            max_uses:          2,
+            valid_for_seconds: 600,
+        }
+    }
+
+    fn build_ctx(store: Arc<Store>, sink: Arc<FakeAuditSink>, sk: &SigningKey) -> Arc<HandlerContext> {
+        let policy = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
+            pubkey_fingerprint: FP.to_owned(),
+            display_name:       FP.to_owned(),
+            pubkey_hex:         hex::encode(sk.verifying_key().to_bytes()),
+            permitted_ops:      vec![],
+        }]);
+        Arc::new(HandlerContext::new(
+            Arc::new(policy),
+            Arc::new(KeyRegistry::stub_for_tests()),
+            store,
+            sink,
+            PathBuf::from("/tmp/raxis-test"),
+            Arc::new(PlanRegistry::new()),
+        ))
+    }
+
+    fn fixture_authenticated() -> AuthenticatedOperator {
+        AuthenticatedOperator {
+            fingerprint:   FP.to_owned(),
+            permitted_ops: vec!["ApproveEscalation".into(), "DenyEscalation".into()],
+        }
+    }
+
+    /// Insert a Pending escalation row. We MUST use `tokio::task::spawn_blocking`
+    /// because the dispatcher tests run under `#[tokio::test]`, where any
+    /// synchronous `Store::lock_sync()` call from the runtime thread
+    /// panics with "Cannot block the current thread from within a
+    /// runtime" (kernel-store.md §2.5.1 sync-store contract).
+    async fn insert_pending_escalation(store: Arc<Store>, escalation_id: &str) {
+        let id = escalation_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+            conn.execute(
+                "INSERT INTO escalations (
+                    escalation_id, session_id, task_id, lineage_id, initiative_id,
+                    class, requested_scope_json, justification, idempotency_key,
+                    status, created_at, timeout_at
+                 ) VALUES (?1, 'sess-1', 'task-1', 'lin-1', 'init-1',
+                           'CapabilityUpgrade',
+                           '{\"kind\":\"CapabilityUpgrade\",\"capability\":\"WriteSecrets\"}',
+                           'unit-test', ?2, 'Pending', ?3, ?4)",
+                rusqlite::params![
+                    id, id,
+                    raxis_types::unix_now_secs(),
+                    raxis_types::unix_now_secs() + 3600,
+                ],
+            ).unwrap();
+            conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        }).await.unwrap();
+    }
+
+    /// Read a column from the escalations row from inside an async test.
+    /// Same `spawn_blocking` requirement as `insert_pending_escalation`.
+    async fn read_status(store: Arc<Store>, escalation_id: &str) -> String {
+        let id = escalation_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            conn.query_row(
+                "SELECT status FROM escalations WHERE escalation_id = ?1",
+                rusqlite::params![id], |r| r.get(0),
+            ).unwrap()
+        }).await.unwrap()
+    }
+
+    /// Force the escalation row's status (used to set up the
+    /// "already-Approved" fixture for the NotPending error path).
+    async fn force_status(store: Arc<Store>, escalation_id: &str, status: &str) {
+        let id     = escalation_id.to_owned();
+        let status = status.to_owned();
+        tokio::task::spawn_blocking(move || {
+            store.lock_sync().execute(
+                "UPDATE escalations SET status = ?1 WHERE escalation_id = ?2",
+                rusqlite::params![status, id],
+            ).unwrap();
+        }).await.unwrap();
+    }
+
+    // ── ApproveEscalation ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn approve_escalation_happy_path_returns_typed_response_and_emits_audit() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sink  = Arc::new(FakeAuditSink::new());
+        let sk    = fixture_keypair();
+        let ctx   = build_ctx(store.clone(), sink.clone(), &sk);
+        let op    = fixture_authenticated();
+        let scope = fixture_scope();
+
+        insert_pending_escalation(store.clone(), "esc-A").await;
+
+        let sig = sk.sign(&approval_scope_signing_input("esc-A", &scope))
+            .to_bytes().to_vec();
+
+        let resp = handle_approve_escalation(
+            "esc-A".into(), scope, hex::encode(&sig), &op, &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::EscalationApproved {
+                escalation_id, approval_token_id, approval_token_raw, expires_at
+            } => {
+                assert_eq!(escalation_id, "esc-A");
+                assert!(uuid::Uuid::parse_str(&approval_token_id).is_ok());
+                assert_eq!(approval_token_raw.len(), 64);
+                assert!(expires_at > raxis_types::unix_now_secs());
+            }
+            other => panic!("expected EscalationApproved, got {other:?}"),
+        }
+
+        // Exactly one EscalationApproved audit event emitted.
+        let kinds = sink.event_kinds();
+        let approved_count = kinds.iter().filter(|k| **k == "EscalationApproved").count();
+        assert_eq!(approved_count, 1,
+            "exactly one EscalationApproved audit event must fire; got: {kinds:?}");
+        // Audit payload carries the right (escalation_id, approved_by) pair.
+        let evt = sink.events().into_iter()
+            .find(|e| matches!(e.kind, AuditEventKind::EscalationApproved { .. }))
+            .expect("EscalationApproved event present");
+        match evt.kind {
+            AuditEventKind::EscalationApproved { escalation_id, approved_by } => {
+                assert_eq!(escalation_id, "esc-A");
+                assert_eq!(approved_by, FP);
+            }
+            other => panic!("wrong event kind: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn approve_escalation_with_malformed_signature_hex_is_rejected() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sink  = Arc::new(FakeAuditSink::new());
+        let ctx   = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
+        let op    = fixture_authenticated();
+        insert_pending_escalation(store.clone(), "esc-1").await;
+
+        let resp = handle_approve_escalation(
+            "esc-1".into(),
+            fixture_scope(),
+            "ZZZ_not_hex".into(),
+            &op, &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::Error { code, detail } => {
+                assert_eq!(code, "FAIL_APPROVE_ESCALATION");
+                assert!(detail.contains("not valid hex"),
+                    "detail must explain hex decode failure; got: {detail}");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        // No audit event fires when hex decode fails before the FSM call.
+        assert!(!sink.event_kinds().contains(&"EscalationApproved"));
+    }
+
+    #[tokio::test]
+    async fn approve_escalation_maps_not_pending_to_stable_error_code() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sink  = Arc::new(FakeAuditSink::new());
+        let sk    = fixture_keypair();
+        let ctx   = build_ctx(store.clone(), sink.clone(), &sk);
+        let op    = fixture_authenticated();
+        let scope = fixture_scope();
+
+        insert_pending_escalation(store.clone(), "esc-1").await;
+        // Force the row to Approved so the second approve attempt fails.
+        force_status(store.clone(), "esc-1", "Approved").await;
+
+        let sig = sk.sign(&approval_scope_signing_input("esc-1", &scope))
+            .to_bytes().to_vec();
+
+        let resp = handle_approve_escalation(
+            "esc-1".into(), scope, hex::encode(&sig), &op, &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::Error { code, .. } => {
+                assert_eq!(code, "FAIL_ESCALATION_NOT_PENDING");
+            }
+            other => panic!("expected NotPending Error, got {other:?}"),
+        }
+        // No audit event fires for failed approvals (the row never moved).
+        assert!(!sink.event_kinds().contains(&"EscalationApproved"));
+    }
+
+    // ── DenyEscalation ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn deny_escalation_happy_path_returns_typed_response_and_emits_audit() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sink  = Arc::new(FakeAuditSink::new());
+        let ctx   = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
+        let op    = fixture_authenticated();
+        insert_pending_escalation(store.clone(), "esc-D").await;
+
+        let resp = handle_deny_escalation(
+            "esc-D".into(),
+            Some("scope too broad".into()),
+            &op, &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::EscalationDenied { escalation_id, denied_at } => {
+                assert_eq!(escalation_id, "esc-D");
+                assert!(denied_at > 0);
+            }
+            other => panic!("expected EscalationDenied, got {other:?}"),
+        }
+
+        let evt = sink.events().into_iter()
+            .find(|e| matches!(e.kind, AuditEventKind::EscalationDenied { .. }))
+            .expect("EscalationDenied event present");
+        match evt.kind {
+            AuditEventKind::EscalationDenied { escalation_id, denied_by, reason } => {
+                assert_eq!(escalation_id, "esc-D");
+                assert_eq!(denied_by, FP);
+                assert_eq!(reason.as_deref(), Some("scope too broad"));
+            }
+            other => panic!("wrong event kind: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_escalation_rejects_reason_over_512_chars_before_touching_store() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sink  = Arc::new(FakeAuditSink::new());
+        let ctx   = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
+        let op    = fixture_authenticated();
+        insert_pending_escalation(store.clone(), "esc-1").await;
+
+        let too_long: String = "x".repeat(513);
+        let resp = handle_deny_escalation(
+            "esc-1".into(), Some(too_long), &op, &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::Error { code, detail } => {
+                assert_eq!(code, "FAIL_DENY_ESCALATION");
+                assert!(detail.contains("512-character limit"),
+                    "detail must call out the 512 cap; got: {detail}");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        // The escalation row MUST still be Pending — the cap fires
+        // before any store write.
+        assert_eq!(read_status(store.clone(), "esc-1").await, "Pending");
+        // No audit event for a rejected denial.
+        assert!(!sink.event_kinds().contains(&"EscalationDenied"));
+    }
+
+    #[tokio::test]
+    async fn deny_escalation_at_exactly_512_chars_is_accepted() {
+        // Boundary: 512 is allowed, 513 is not (covered above).
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sink  = Arc::new(FakeAuditSink::new());
+        let ctx   = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
+        let op    = fixture_authenticated();
+        insert_pending_escalation(store.clone(), "esc-edge").await;
+
+        let exactly_max: String = "x".repeat(512);
+        let resp = handle_deny_escalation(
+            "esc-edge".into(), Some(exactly_max), &op, &ctx,
+        ).await;
+        assert!(matches!(resp, OperatorResponse::EscalationDenied { .. }));
+    }
+}
 

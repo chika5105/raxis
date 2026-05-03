@@ -29,6 +29,7 @@ pub mod session;
 pub mod delegation;
 pub mod verifier_token;
 pub mod approval;
+pub mod escalation;
 
 // Re-export the public API surface per kernel-core.md §2.3 authority/mod.rs.
 pub use delegation::{
