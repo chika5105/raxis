@@ -23,10 +23,22 @@ use tokio::process::Command;
 use tokio::sync::Mutex;
 
 use raxis_policy::PolicyBundle;
-use raxis_store::Store;
+use raxis_store::{Store, Table};
 
 use crate::authority::verifier_token;
 use super::GateError;
+
+// INV-STORE-03 (kernel-store.md §2.5.1): table identifiers come from the
+// `Table` enum; FSM state strings (production paths via the typed enums,
+// test fixtures via the same constants below).
+#[cfg(test)]
+const INITIATIVES:        &str = Table::Initiatives.as_str();
+#[cfg(test)]
+const TASKS:              &str = Table::Tasks.as_str();
+#[cfg(test)]
+const VERIFIER_RUN_TOKENS:&str = Table::VerifierRunTokens.as_str();
+#[cfg(test)]
+const WITNESS_RECORDS:    &str = Table::WitnessRecords.as_str();
 
 // ---------------------------------------------------------------------------
 // Global verifier cap counter
@@ -39,18 +51,28 @@ static ACTIVE_VERIFIERS: AtomicUsize = AtomicUsize::new(0);
 /// Max concurrent verifiers (v1 default — operator may set via policy).
 const DEFAULT_MAX_CONCURRENT_VERIFIERS: usize = 16;
 
-/// Test-only read accessor for the global verifier counter.
+/// Read accessor for the global verifier counter.
 ///
-/// Production code MUST NOT consume this — it is for the integration tests
-/// at the bottom of this file (and equivalent in-crate test code) that
-/// assert about counter add/sub semantics. The counter is intentionally
-/// not part of the public surface; exposing the read is fine because reads
-/// have no observable production side effect, but we keep the visibility
-/// to `pub(crate)` so external crates cannot accidentally take a dependency
-/// on it.
-#[cfg(test)]
+/// Reads have no observable production side effect; we keep the visibility
+/// to `pub(crate)` so external crates cannot take a dependency on the
+/// internal counter. The intra-crate consumers are:
+///   - `runtime::heartbeat::Snapshot::collect` (cli-readonly.md §5.2.2,
+///     `active_verifiers` field).
+///   - This file's own integration tests at the bottom of the module.
 pub(crate) fn active_verifier_count() -> usize {
     ACTIVE_VERIFIERS.load(Ordering::Relaxed)
+}
+
+/// Read accessor for the v1 default verifier-cap constant.
+///
+/// Mirrors the spec's "in-memory counters that `kernel.db` cannot expose"
+/// (cli-readonly.md §5.1.4). The cap is currently a compile-time
+/// constant; once policy-driven (`max_concurrent_verifiers` in
+/// `[gateway]`-style sections), this accessor will read from the active
+/// `PolicyBundle` instead — kept as a function so callers don't need to
+/// change.
+pub(crate) fn max_concurrent_verifiers() -> usize {
+    DEFAULT_MAX_CONCURRENT_VERIFIERS
 }
 
 // ---------------------------------------------------------------------------
@@ -346,21 +368,26 @@ mod integration {
     /// panic from within async context (same root cause as the P0 in
     /// production `spawn_verifier`).
     async fn seed_task_for(store: &Store, task_id: &str) {
+        use raxis_types::{InitiativeState, TaskState};
         let initiative_id = format!("init-{}", uuid::Uuid::new_v4().simple());
         let conn = store.lock().await;
         conn.execute(
-            "INSERT INTO initiatives
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES (?1, 'ApprovedPlan', '{}', 'sha-stub', 0)",
-            rusqlite::params![&initiative_id],
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'sha-stub', 0)"
+            ),
+            rusqlite::params![&initiative_id, InitiativeState::ApprovedPlan.as_sql_str()],
         ).expect("seed initiative");
         conn.execute(
-            "INSERT INTO tasks
-                (task_id, initiative_id, lane_id, state, actor,
-                 policy_epoch, admitted_at, transitioned_at)
-             VALUES (?1, ?2, 'default', 'Running', 'planner', 1, 0, 0)",
-            rusqlite::params![task_id, &initiative_id],
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at)
+                 VALUES (?1, ?2, 'default', ?3, 'planner', 1, 0, 0)"
+            ),
+            rusqlite::params![task_id, &initiative_id, TaskState::Running.as_sql_str()],
         ).expect("seed task");
     }
 
@@ -467,7 +494,7 @@ mod integration {
         // table would fill with orphan rows that never get consumed.
         let conn = store.lock().await;
         let row_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM verifier_run_tokens WHERE task_id = ?1",
+            &format!("SELECT COUNT(*) FROM {VERIFIER_RUN_TOKENS} WHERE task_id = ?1"),
             rusqlite::params![&task_id],
             |r| r.get(0),
         ).unwrap();
@@ -495,9 +522,11 @@ mod integration {
         let conn = store.lock().await;
         let (db_task_id, db_gate, db_eval, consumed): (String, String, String, i64) =
             conn.query_row(
-                "SELECT task_id, gate_type, evaluation_sha, consumed
-                   FROM verifier_run_tokens
-                  WHERE verifier_run_id = ?1",
+                &format!(
+                    "SELECT task_id, gate_type, evaluation_sha, consumed
+                       FROM {VERIFIER_RUN_TOKENS}
+                      WHERE verifier_run_id = ?1"
+                ),
                 rusqlite::params![&run_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             ).expect("verifier_run_tokens row must exist for successful spawn");
@@ -844,22 +873,31 @@ mod stub_round_trip {
         task_id: &str,
         evaluation_sha: &str,
     ) {
+        use raxis_types::{InitiativeState, TaskState};
         let initiative_id = format!("init-{}", uuid::Uuid::new_v4().simple());
         let conn = store.lock().await;
         conn.execute(
-            "INSERT INTO initiatives
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES (?1, 'ApprovedPlan', '{}', 'sha-stub', 0)",
-            rusqlite::params![&initiative_id],
+            &format!(
+                "INSERT INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'sha-stub', 0)"
+            ),
+            rusqlite::params![&initiative_id, InitiativeState::ApprovedPlan.as_sql_str()],
         ).expect("seed initiative");
         conn.execute(
-            "INSERT INTO tasks
-                (task_id, initiative_id, lane_id, state, actor,
-                 policy_epoch, admitted_at, transitioned_at,
-                 evaluation_sha, base_sha)
-             VALUES (?1, ?2, 'default', 'GatesPending', 'planner', 1, 0, 0, ?3, ?3)",
-            rusqlite::params![task_id, &initiative_id, evaluation_sha],
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     evaluation_sha, base_sha)
+                 VALUES (?1, ?2, 'default', ?3, 'planner', 1, 0, 0, ?4, ?4)"
+            ),
+            rusqlite::params![
+                task_id, &initiative_id,
+                TaskState::GatesPending.as_sql_str(),
+                evaluation_sha,
+            ],
         ).expect("seed task in GatesPending");
     }
 
@@ -1090,7 +1128,7 @@ mod stub_round_trip {
         let count: i64 = {
             let conn = store.lock().await;
             conn.query_row(
-                "SELECT COUNT(*) FROM witness_records WHERE task_id = ?1",
+                &format!("SELECT COUNT(*) FROM {WITNESS_RECORDS} WHERE task_id = ?1"),
                 rusqlite::params![&task_id],
                 |row| row.get(0),
             ).expect("count witness_records")
@@ -1106,8 +1144,10 @@ mod stub_round_trip {
         let consumed: i64 = {
             let conn = store.lock().await;
             conn.query_row(
-                "SELECT COUNT(*) FROM verifier_run_tokens
-                 WHERE task_id = ?1 AND consumed = 1 AND consumed_at IS NOT NULL",
+                &format!(
+                    "SELECT COUNT(*) FROM {VERIFIER_RUN_TOKENS}
+                     WHERE task_id = ?1 AND consumed = 1 AND consumed_at IS NOT NULL"
+                ),
                 rusqlite::params![&task_id],
                 |row| row.get(0),
             ).expect("count consumed tokens")
@@ -1252,7 +1292,7 @@ mod stub_round_trip {
         let count: i64 = {
             let conn = store.lock().await;
             conn.query_row(
-                "SELECT COUNT(*) FROM witness_records WHERE task_id = ?1",
+                &format!("SELECT COUNT(*) FROM {WITNESS_RECORDS} WHERE task_id = ?1"),
                 rusqlite::params![&task_id],
                 |row| row.get(0),
             ).expect("count witness_records")
@@ -1267,8 +1307,10 @@ mod stub_round_trip {
         let unconsumed: i64 = {
             let conn = store.lock().await;
             conn.query_row(
-                "SELECT COUNT(*) FROM verifier_run_tokens
-                 WHERE task_id = ?1 AND consumed = 0 AND consumed_at IS NULL",
+                &format!(
+                    "SELECT COUNT(*) FROM {VERIFIER_RUN_TOKENS}
+                     WHERE task_id = ?1 AND consumed = 0 AND consumed_at IS NULL"
+                ),
                 rusqlite::params![&task_id],
                 |row| row.get(0),
             ).expect("count unconsumed tokens")

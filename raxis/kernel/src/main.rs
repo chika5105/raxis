@@ -22,6 +22,7 @@ mod handlers;
 mod notifications;
 mod path_scope;
 mod policy_manager;
+mod runtime;
 
 use std::sync::Arc;
 
@@ -225,6 +226,7 @@ async fn main() {
     //     observe boot (the kernel's own stderr says it).
     // Sending through the wrapper would still work — it just produces
     // an inbox line nobody reads.
+    let started_at = runtime::heartbeat::unix_now_secs();
     if let Err(e) = inner_audit.emit(
         AuditEventKind::KernelStarted {
             data_dir: data_dir.display().to_string(),
@@ -237,6 +239,40 @@ async fn main() {
             "{{\"level\":\"error\",\"event\":\"KernelStarted\",\"audit_emit_failed\":\"{e}\"}}"
         );
     }
+
+    // Step 8a: Spawn the heartbeat loop. cli-readonly.md §5.2.1 contract:
+    //   - one initial write IMMEDIATELY (handled inside `run_loop`),
+    //   - periodic writes every 5s thereafter,
+    //   - one final `state = "Stopping"` write at shutdown.
+    //
+    // The loop owns no kernel state; it borrows `policy` (for the
+    // current epoch number) and reaches into
+    // `gates::verifier_runner::active_verifier_count()` for the
+    // in-memory counter. Termination is driven by a oneshot we wire
+    // into the post-IPC-shutdown step (10a) below — the same pattern
+    // used by `gateway_shutdown_tx` for the gateway supervisor.
+    //
+    // Defensive `create_dir_all`: bootstrap creates `runtime/` at
+    // genesis time (Phase A1 contract), but operators upgrading from
+    // a pre-A1 kernel may not have it on disk. The cost of a no-op
+    // mkdir at boot is one syscall.
+    let _ = std::fs::create_dir_all(data_dir.join(runtime::heartbeat::RUNTIME_DIR));
+    let (heartbeat_shutdown_tx, heartbeat_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let heartbeat_handle = {
+        let data_dir_for_hb = data_dir.clone();
+        let policy_for_hb = Arc::clone(&policy);
+        let pid = std::process::id();
+        tokio::spawn(async move {
+            runtime::heartbeat_loop(
+                data_dir_for_hb,
+                pid,
+                started_at,
+                policy_for_hb,
+                heartbeat_shutdown_rx,
+            )
+            .await
+        })
+    };
 
     // Step 7b: Construct the in-memory PlanRegistry and repopulate it from
     // every non-terminal initiative's signed plan artifact. Per
@@ -346,19 +382,24 @@ async fn main() {
     let shutdown = match ipc::server::start(&data_dir, ctx).await {
         Ok(reason) => reason,
         Err(e) => {
-            // Try to tell the supervisor to clean up before bailing
-            // out. If the channel is closed (supervisor already gone)
-            // the send returns Err which we discard.
+            // Try to tell the supervisor + heartbeat to clean up
+            // before bailing out. Both channels are best-effort — if
+            // either receiver was already dropped the send returns
+            // Err, which we discard.
             let _ = gateway_shutdown_tx.send(());
+            let _ = heartbeat_shutdown_tx.send(());
             exit_with_code(e);
         }
     };
 
-    // Step 9.5: Tell the gateway supervisor to wind down. This sends
-    // SIGKILL to the child (Tokio Command::start_kill) and waits for
-    // reap. Errors are logged inside the supervisor; we just need to
-    // know it's done before emitting KernelStopped.
+    // Step 9.5: Tell the gateway supervisor + heartbeat loop to wind
+    // down. The supervisor sends SIGKILL to the child (Tokio
+    // `Command::start_kill`) and waits for reap; the heartbeat loop
+    // writes one final `state = "Stopping"` snapshot before
+    // returning. Errors inside both are logged from inside; we just
+    // need to know they're done before emitting `KernelStopped`.
     let _ = gateway_shutdown_tx.send(());
+    let _ = heartbeat_shutdown_tx.send(());
     match supervisor_handle.await {
         Ok(reason) => eprintln!(
             "{{\"level\":\"info\",\"event\":\"gateway_supervisor_done\",\
@@ -367,6 +408,19 @@ async fn main() {
         ),
         Err(join_err) => eprintln!(
             "{{\"level\":\"warn\",\"event\":\"gateway_supervisor_join_failed\",\
+             \"reason\":\"{join_err}\"}}"
+        ),
+    }
+    match heartbeat_handle.await {
+        Ok(Ok(())) => eprintln!(
+            "{{\"level\":\"info\",\"event\":\"heartbeat_loop_done\"}}"
+        ),
+        Ok(Err(e)) => eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"heartbeat_loop_failed\",\
+             \"reason\":\"{e}\"}}"
+        ),
+        Err(join_err) => eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"heartbeat_loop_join_failed\",\
              \"reason\":\"{join_err}\"}}"
         ),
     }

@@ -31,6 +31,12 @@ use crate::errors::KernelError;
 use raxis_crypto::token::try_random_array;
 use raxis_types::unix_now_secs;
 
+// INV-STORE-03 (kernel-store.md §2.5.1): no raw SQL table-name literals
+// in `kernel/src`. The only table this module reads is
+// `policy_epoch_history`, surfaced via the typed `Table` enum.
+#[cfg(test)]
+const POLICY_EPOCH_HISTORY: &str = raxis_store::Table::PolicyEpochHistory.as_str();
+
 /// Configuration supplied by main.rs to bootstrap::run.
 pub struct BootstrapConfig {
     /// Root data directory (e.g. `~/.raxis`).
@@ -100,9 +106,17 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
     // only); the credential files themselves are 0600 once written.
     // peripherals.md §3.2 "Provider credential storage".
     let providers_dir = config.data_dir.join("providers");
+    // `runtime/` holds the kernel's heartbeat file (`heartbeat.json`)
+    // — the CLI-visible liveness hint defined in cli-readonly.md §5.2.
+    // Created at genesis so the very first kernel boot can write into
+    // an existing directory without racing `create_dir_all` against
+    // `tempfile + rename`. Mode is the default 0755 (the heartbeat
+    // itself is 0644 — readable by any local operator process); the
+    // file contains no secrets, only public liveness counters.
+    let runtime_dir = config.data_dir.join("runtime");
 
     // Create directory tree.
-    for dir in &[&keys_dir, &policy_dir, &audit_dir, &providers_dir] {
+    for dir in &[&keys_dir, &policy_dir, &audit_dir, &providers_dir, &runtime_dir] {
         std::fs::create_dir_all(dir).map_err(|e| KernelError::BootstrapFailed {
             reason: format!("cannot create directory {}: {e}", dir.display()),
         })?;
@@ -849,9 +863,11 @@ mod integration {
         let conn = store.lock_sync();
         let (epoch_id, sha, triggered): (i64, String, String) = conn
             .query_row(
-                "SELECT epoch_id, policy_sha256, triggered_by_operator
-                   FROM policy_epoch_history
-                  ORDER BY epoch_id DESC LIMIT 1",
+                &format!(
+                    "SELECT epoch_id, policy_sha256, triggered_by_operator
+                       FROM {POLICY_EPOCH_HISTORY}
+                      ORDER BY epoch_id DESC LIMIT 1"
+                ),
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -879,7 +895,10 @@ mod integration {
             .expect("re-open kernel.db");
         let conn = store.lock_sync();
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM policy_epoch_history", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {POLICY_EPOCH_HISTORY}"),
+                [], |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1, "genesis row must remain unique after re-run");
     }
@@ -1166,6 +1185,28 @@ mod edge_cases {
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700,
             "providers/ must be chmod 0700; got 0{mode:o}");
+    }
+
+    // ── runtime/ directory (Phase A1 / T2.1) ────────────────────────────────
+
+    #[test]
+    fn bootstrap_creates_runtime_directory() {
+        // Per cli-readonly.md §5.2.1, the kernel writes
+        // `<data_dir>/runtime/heartbeat.json` once at startup and every
+        // 5s thereafter. The directory MUST already exist when the
+        // first heartbeat write happens — the writer uses
+        // `tempfile + atomic rename` and would crash on a missing
+        // parent. Genesis is the natural place to mkdir it.
+        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        run_inner(&config).expect("bootstrap");
+
+        let runtime_dir = tmp.path().join("runtime");
+        let meta = std::fs::metadata(&runtime_dir)
+            .expect("runtime/ must exist after bootstrap");
+        assert!(meta.is_dir(), "runtime/ must be a directory");
+        // No chmod 0700 contract here: heartbeat.json carries no
+        // secrets and is intended to be readable by the operator's
+        // CLI process running under the same uid.
     }
 
     #[test]
