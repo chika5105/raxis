@@ -33,7 +33,7 @@
 
 use std::path::PathBuf;
 
-use raxis_types::{GateType, TaskId, WitnessSubmission};
+use raxis_types::{unix_now_secs, GateType, TaskId, WitnessSubmission};
 use raxis_store::Table;
 use raxis_types::TaskState;
 
@@ -131,25 +131,51 @@ pub enum HandlerError {
 ///
 /// Returns `Ok(WitnessAck)` for both accepted and typed-rejected submissions.
 /// Returns `Err(HandlerError)` only for transport/auth-level failures.
+///
+/// **Async safety:** every helper this function calls that touches
+/// `Store::lock_sync()` (verifier_token::validate / consume_verifier_token,
+/// load_task_row, witness_index::write) is wrapped in
+/// `tokio::task::spawn_blocking`. Calling them directly from this `async`
+/// frame would panic with "Cannot block the current thread from within a
+/// runtime" because `Store::lock_sync` ultimately invokes
+/// `tokio::sync::Mutex::blocking_lock`, which refuses to run on a tokio
+/// worker thread (kernel-store.md §2.5.1 documents this contract; the
+/// same rationale applies in `gates::verifier_runner::spawn_verifier`
+/// and `lifecycle::approve_plan`). This was a latent P0 — pre-fix,
+/// the very first witness submission against a multi-thread runtime
+/// would crash the planner socket task. Pinned by
+/// `gates::verifier_runner::stub_round_trip::*`.
 pub async fn handle(
     sub: WitnessSubmission,
     ctx: &HandlerContext,
 ) -> Result<WitnessAck, HandlerError> {
-    let store = ctx.store.as_ref();
-
     // ── Step 1: Token validation ──────────────────────────────────────────
     // Validates raw token hex against `verifier_run_tokens` table.
     // Returns the `run_id` (UUID) that identifies this verifier run on success.
     // Spec: "returns HandlerError::Unauthorized if invalid, expired, or consumed".
-    let run_id = verifier_token::validate_verifier_token(sub.verifier_token.as_str(), store)
-        .map_err(|e| HandlerError::Unauthorized { reason: e.to_string() })?;
+    let run_id = {
+        let token = sub.verifier_token.clone();
+        let store = ctx.store.clone();
+        tokio::task::spawn_blocking(move || {
+            verifier_token::validate_verifier_token(&token, store.as_ref())
+        })
+        .await
+        .map_err(|e| HandlerError::Store(format!("validate_verifier_token join: {e}")))?
+        .map_err(|e| HandlerError::Unauthorized { reason: e.to_string() })?
+    };
 
     // ── Step 2: Load task row and evaluation-SHA binding check ────────────
     // Spec: "loads the task row by sub.task_id. If no row → HandlerError::InvalidTask."
     // "Compares sub.evaluation_sha to task.evaluation_sha ... If they differ,
     //  returns Ok(WitnessAck::Rejected { reason: EvaluationShaMismatch }) —
     //  no witness write, no token consume, no WitnessAccepted audit."
-    let task_row = load_task_row(sub.task_id.as_str(), store)?;
+    let task_row = {
+        let task_id = sub.task_id.as_str().to_owned();
+        let store = ctx.store.clone();
+        tokio::task::spawn_blocking(move || load_task_row(&task_id, store.as_ref()))
+            .await
+            .map_err(|e| HandlerError::Store(format!("load_task_row join: {e}")))??
+    };
 
     // Gate state check: only accept witness for tasks actually in GatesPending.
     // This prevents poisoning the witness index for tasks that have already been
@@ -195,17 +221,40 @@ pub async fn handle(
         result_class:    result_class.clone(),
         blob_sha256:     blob_sha256.clone(),
         blob_path:       blob_sha256.clone(), // content-addressed; path == sha256 per witness_index
-        recorded_at:     unix_now(),
+        recorded_at:     unix_now_secs(),
     };
 
-    witness_index::write(&record, &body_bytes, &ctx.witness_dir, store)
+    {
+        // Same async-safety rationale as Step 1 — `witness_index::write`
+        // takes the store mutex via `lock_sync` and would panic on a
+        // tokio worker without `spawn_blocking`. We move only the
+        // owned bytes / record / dir clones into the closure to keep
+        // the lifetime clean.
+        let record_owned    = record.clone();
+        let body_bytes_owned = body_bytes.clone();
+        let witness_dir     = ctx.witness_dir.clone();
+        let store           = ctx.store.clone();
+        tokio::task::spawn_blocking(move || {
+            witness_index::write(&record_owned, &body_bytes_owned, &witness_dir, store.as_ref())
+        })
+        .await
+        .map_err(|e| HandlerError::WitnessWrite(format!("witness_index::write join: {e}")))?
         .map_err(|e| HandlerError::WitnessWrite(e.to_string()))?;
+    }
 
     // ── Step 5: Token consume ─────────────────────────────────────────────
     // Spec ordering: "write-then-consume: if the write fails, the token is not
     // consumed and the verifier may resubmit." We consume only after success.
-    verifier_token::consume_verifier_token(sub.verifier_token.as_str(), store)
+    {
+        let token = sub.verifier_token.clone();
+        let store = ctx.store.clone();
+        tokio::task::spawn_blocking(move || {
+            verifier_token::consume_verifier_token(&token, store.as_ref())
+        })
+        .await
+        .map_err(|e| HandlerError::Unauthorized { reason: format!("consume_verifier_token join: {e}") })?
         .map_err(|e| HandlerError::Unauthorized { reason: format!("consume failed: {e}") })?;
+    }
 
     // Structured audit log (full audit integration is v2; structured stderr for now).
     eprintln!(
@@ -430,13 +479,6 @@ fn map_result_class(rc: raxis_types::WitnessResultClass) -> ResultClass {
         raxis_types::WitnessResultClass::Fail        => ResultClass::Fail,
         raxis_types::WitnessResultClass::Inconclusive => ResultClass::Inconclusive,
     }
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 // ---------------------------------------------------------------------------
