@@ -14,6 +14,23 @@
 use crate::StoreError;
 use rusqlite::Connection;
 
+/// The current canonical schema version this build of `raxis-store`
+/// produces. Bumped together with every new `apply_migration_N`
+/// function below.
+///
+/// Normative reference: cli-readonly.md §5.3. The CLI compares this
+/// constant against `MAX(version) FROM schema_version` on every
+/// read-only connection open and exits with `ERR_SCHEMA_MISMATCH`
+/// (exit code 7) on mismatch — preventing the silent
+/// wrong-shape-row class of bug after a migration adds a column the
+/// CLI does not know about.
+///
+/// `pub` so kernel + CLI + every workspace crate that opens
+/// `kernel.db` resolves to the same value through Cargo workspace
+/// dep resolution; a CLI compiled against an older `raxis-store`
+/// version is a hard build error rather than a silent drift.
+pub const SCHEMA_VERSION: u32 = 1;
+
 /// Apply all pending migrations to `conn`.
 ///
 /// Safe to call on every startup — skips already-applied migrations. Returns

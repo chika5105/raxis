@@ -3,8 +3,18 @@
 // Normative reference: specs/v1/kernel-store.md §2.5.1
 //
 // This crate owns the single `kernel.db` SQLite connection and all
-// schema migrations. It exposes a `Store` handle (Arc<Mutex<Connection>>)
-// that all kernel subsystems use for reads and writes.
+// schema migrations. It exposes:
+//
+//   - `Store`           — the kernel's read+write handle
+//                          (Arc<Mutex<Connection>>); see `db.rs`.
+//   - `ro::open`         — the CLI's read-only handle; see `ro.rs`,
+//                          backed by `OpenFlags::SQLITE_OPEN_READ_ONLY`.
+//   - `Table`            — typed table-name enum (INV-STORE-03).
+//   - `SCHEMA_VERSION`   — current kernel.db schema version; bumped
+//                          alongside every new migration. Compared by
+//                          `ro::assert_compatible_schema` so the CLI
+//                          fails-closed against a kernel.db it does
+//                          not understand (cli-readonly.md §5.3).
 //
 // Crate rules (philosophy.md §1.5):
 //   - No async I/O: rusqlite is synchronous; callers use tokio::sync::Mutex.
@@ -13,7 +23,10 @@
 
 pub mod db;
 pub mod migration;
+pub mod ro;
 pub mod table;
 
 pub use db::{Store, StoreError};
+pub use migration::SCHEMA_VERSION;
+pub use ro::{assert_compatible_schema, open as open_ro, RoConn, RoError, KERNEL_DB_FILE};
 pub use table::Table;

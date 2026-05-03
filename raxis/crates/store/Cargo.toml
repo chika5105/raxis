@@ -12,3 +12,8 @@ thiserror   = { workspace = true }
 uuid        = { workspace = true }
 tokio       = { workspace = true }
 raxis-types = { workspace = true }
+
+[dev-dependencies]
+# Used by `ro::tests` to construct a temporary `data_dir` and the
+# kernel.db file inside it. Production code never touches `tempfile`.
+tempfile    = "3"
