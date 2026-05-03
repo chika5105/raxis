@@ -9,3 +9,10 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 uuid        = { version = "1", features = ["v4", "serde"] }
 thiserror   = { workspace = true }
+
+[dev-dependencies]
+# Required for the regression test in `witness::tests` that pins the
+# `WitnessSubmission` ↔ bincode round-trip via the canonical kernel
+# wire codec (`bincode::config::standard()`). Same pin as the workspace
+# wire codec in `raxis-ipc::frame` to keep the test honest.
+bincode     = { workspace = true }

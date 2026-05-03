@@ -184,6 +184,18 @@ The planner **must stop** on `UNAUTHORIZED` — this indicates a session integri
 
 **Operator socket (not planner-facing):** responses on the operator UDS use a separate error vocabulary tuned for CLI ergonomics — these strings are **not** returned on the planner socket and must not be referenced by `PlannerErrorCode`. All operator-side errors share **one** envelope:
 
+> **v1 implementation note:** the canonical (bincode + typed-IDs) shapes
+> shown below in `raxis-types/src/operator.rs` describe the **v2
+> destination** for the operator IPC. The actual v1 wire is the
+> JSON-shape companion in `raxis-types/src/operator_wire.rs`
+> (`{"op":"<Variant>","payload":{...}}`), which uses plain strings and
+> sends inline plan/sig blobs instead of `PathBuf`s. Both halves of the
+> protocol — the kernel-side dispatcher in `kernel/src/ipc/operator.rs`
+> AND every CLI command in `cli/src/commands/*` — go through the same
+> `operator_wire::OperatorRequest` enum so wire-shape drift cannot
+> creep back in. Wire-shape contract tests live in
+> `raxis-types::operator_wire::tests` and `cli/tests/operator_wire_shape.rs`.
+
 ```rust
 // raxis-types/src/operator.rs (normative)
 
@@ -552,6 +564,7 @@ The wire-string values MUST match the SQLite `CHECK` constraint on `witness_reco
 These are the **only** valid `result_class` values in v1. Any other value → witness rejected, `verifier_run_token` consumed (treat as malformed submission).
 
 - `body` — gate-type-specific structured evidence. Schema is defined per `GateType` in `raxis-types/src/witness.rs`. The kernel validates the body schema; malformed bodies → witness rejected, verifier token consumed.
+  - **Wire encoding contract:** the in-memory shape is `serde_json::Value`, but on the bincode wire the field is encoded as a **JSON string** (length-prefixed UTF-8) via the `json_value_as_string` serde helper in `raxis-types::witness`. This is required because `serde_json::Value::deserialize` dispatches via `serde::Deserializer::deserialize_any`, which the bincode (non-self-describing) codec refuses with `Decode(Serde(AnyNotSupported))`. Without the helper, ANY non-trivial witness body would fail to round-trip; the helper makes the body opaque-to-bincode but transparent-to-callers (the public field type stays `serde_json::Value`). Pinned by `raxis_types::witness::tests::witness_submission_round_trips_through_bincode` and the full IPC loopback test in `kernel/src/gates/verifier_runner.rs::stub_round_trip::*`.
 - `evaluation_sha` — must match `RAXIS_EVALUATION_SHA`. Mismatch → `EvaluationShaMismatch`; token not consumed; verifier effectively failed without submitting.
 
 ### Idempotency and dedup key
