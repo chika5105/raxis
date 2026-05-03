@@ -201,6 +201,7 @@ fn run() -> Result<(), CliError> {
         "witnesses" => commands::witnesses::run(&flags, rest),
         "budget" => commands::budget::run(&flags, rest),
         "explain" => commands::explain::run(&flags, rest),
+        "top" => commands::top::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -345,6 +346,11 @@ READ-ONLY OBSERVATION:
         Semantic diff between two validated policy bundles. Reports
         per-section deltas (lanes, operators, gates, egress,
         gateway, providers, notifications) — not a textual diff.
+
+    top [--interval N] [--once] [--no-clear]
+        Auto-refreshing kernel snapshot (heartbeat + workload counts).
+        Default interval: 2s. Use --once for one-shot; --no-clear
+        disables ANSI clear-screen for log-friendly output.
 "#
     );
 }
