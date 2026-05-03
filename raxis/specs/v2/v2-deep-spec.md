@@ -1444,6 +1444,347 @@ provider-specific code reaches the Kernel or any planner binary.
 
 ---
 
+### In-VM Capability Model and `SingleCommit` as the Audit Boundary
+
+#### INV-VM-CAP-01: In-VM Capabilities Are Not Kernel-Mediated Per Operation
+
+File editing, file reading, glob/grep search, and bash execution all run directly inside
+the microVM process. They are **not routed through the Kernel**. No admission check fires
+per `write_file` call. No audit event is emitted per `edit_file`. This is an explicit
+design decision, not an oversight.
+
+**The in-VM capability set:**
+
+| Capability | Mechanism | Kernel involved? |
+|---|---|---|
+| Read file | `file_ops::read_file` — direct VirtioFS read | No |
+| Write / create file | `file_ops::write_file` — direct VirtioFS write | No |
+| Edit file (patch) | `file_ops::edit_file` — read → patch → write | No |
+| Search files | `file_ops::glob_search`, `grep_search` | No |
+| Execute shell commands | `bash::run` → `sh -lc` via tokio | No |
+| Git add / git commit | `bash::run` → `git` CLI within worktree | No (until `SingleCommit`) |
+| Commit to RAXIS record | `IntentKind::SingleCommit { commit_sha }` | **Yes — full admission pipeline** |
+| Inference | `IntentKind::InferenceRequest` | **Yes** |
+| Web egress | `IntentKind::EgressRequest` | **Yes** |
+
+#### Why the Kernel Does Not Review Every File Change
+
+Three alternatives were considered and rejected:
+
+**Alternative A — Kernel intercepts every `write_file` call via a VirtioFS hook.**
+Rejected. VirtioFS does not expose a per-write hook at the hypervisor level on macOS AVF.
+Implementing one would require a custom FUSE layer on the guest side — replacing the
+VirtioFS guest driver with a RAXIS-specific intercepting driver. This is: (1) complex and
+failure-prone, (2) a new attack surface (FUSE inside the VM is a privileged process),
+(3) adds ~1ms of IPC round-trip latency per file write — an agent editing 200 files over
+a task produces 200 Kernel round-trips purely for observation, generating no additional
+security value because the Kernel cannot interpret the semantic intent of a partial file.
+
+**Alternative B — Kernel receives a `WriteFile` intent for every file operation.**
+Rejected. The `WriteFile` intent would need to carry the full file content, which the
+Kernel cannot meaningfully validate. The Kernel enforces path policy (is this path within
+the allowlist?) but it cannot enforce code correctness, semantic correctness, or
+consistency — that is the Reviewer's role. Validating path policy per-write produces
+the same result as validating it at commit time, with 200x the IPC overhead. A
+`SingleCommit` covers all writes in the commit atomically; per-write path checks on
+incomplete work-in-progress files are both more expensive and less informative.
+
+**Alternative C — Stream file diffs to the Kernel continuously.**
+Rejected. A streaming diff protocol requires the Kernel to maintain per-session diff state
+between every write — tracking the evolving working tree state to detect when paths drift
+outside the allowlist. This is a stateful, complex protocol that the Kernel must implement
+correctly under concurrent sessions. The git commit object already encodes the complete
+diff from base to HEAD in a format the Kernel can validate with a single `git diff`
+call. There is no benefit to rebuilding this machinery inside the Kernel.
+
+**Decision (INV-VM-CAP-01):** In-VM file operations and bash execution are unmediated.
+The VirtioFS mount boundary is the structural enforcement at the filesystem level. The
+Kernel's oversight point for all in-VM work is `SingleCommit`.
+
+#### `SingleCommit` as the Named Audit Boundary (INV-VM-CAP-02)
+
+`SingleCommit` is not just a "commit intent" — it is the **audit boundary** for all
+in-VM work that preceded it. When the Kernel admits a `SingleCommit`, it is attesting:
+
+> "The following set of file changes (deterministically computed from the commit SHA's
+> diff against the session's base) was produced by session `S`, under plan `P`, at
+> policy epoch `E`, and every changed path is within this session's declared allowlist."
+
+Everything between the session's activation and `SingleCommit` — every `write_file`,
+every `edit_file`, every `bash` execution — is inside the VM and outside the audit chain.
+`SingleCommit` is the moment that work enters the chain. This has two implications:
+
+**1. Pre-commit work is unaudited by design.** An agent can write to a file, delete it,
+rewrite it, and write it again — none of these intermediate states are recorded. Only the
+final committed state enters the audit chain. This is equivalent to how a human developer
+works: the git log records commits, not every keystroke. The commit is the unit of
+intentional, attributable work.
+**2. Path enforcement is commit-scoped, not write-scoped.** If an agent writes to
+`src/payments/evil.rs` (outside its `path_allowlist`), no violation occurs at write time.
+The violation occurs at `SingleCommit` admission — the Kernel's VCS diff detects the
+out-of-scope path and rejects the commit. The agent's intermediate write is discarded
+with the rejection. The write never reached the RAXIS record.
+
+**Why commit-scoped enforcement is sufficient:**
+The threat model asks: "can an agent persist unauthorized work?" Not: "can an agent write
+unauthorized files temporarily?" Temporary writes that are never committed have no
+persistent effect and no audit relevance. Only committed work can flow through
+`IntegrationMerge` to the master branch. Path allowlist enforcement at commit time is
+therefore enforcement at the only moment that matters — when the work becomes durable.
+
+#### The VirtioFS Boundary as the Structural Guarantee
+
+The VirtioFS mount root for a session is `$RAXIS_DATA_DIR/worktrees/<session_uuid>/`.
+This is the only path accessible to the VM's `/workspace/`. The VirtioFS guest driver
+resolves all paths relative to this root. Path traversal attacks (`../../../etc/passwd`)
+are handled at the host-side VirtioFS server — the host OS rejects accesses outside the
+share root before they reach the filesystem.
+
+**What the agent can access:**
+- Any path within `/workspace/` (the worktree)
+- Read-only paths within `/raxis/` (system prompt, session env, bundles) — separate
+  VirtioFS share, read-only mount
+
+**What the agent cannot access:**
+- Host filesystem outside the worktree (no path traversal)
+- Other sessions' worktrees (different VirtioFS shares, different VMs)
+- `$RAXIS_DATA_DIR/audit/`, `$RAXIS_DATA_DIR/policy/`, `$RAXIS_DATA_DIR/credentials/`
+  (not mounted into any VM)
+- The host network (no NIC — INV-02B)
+
+The combination of VirtioFS structural isolation + `SingleCommit` audit enforcement
+means: agents can do arbitrary file work within their worktree without per-operation
+Kernel involvement, and the Kernel's enforcement point (path allowlist at commit
+admission) is both necessary and sufficient to enforce the security boundary.
+
+---
+
+
+#### VM Environment Configuration — Toolchains and Dependencies (INV-VM-CAP-03)
+
+**The problem:** `raxis-planner` is PID 1 in every microVM, but agent work requires
+toolchains that vary by project: `cargo`/`rustc` for Rust, `npm`/`node` for JavaScript,
+`python`/`pip` for Python, `go` for Go. These binaries must be present in the VM image
+before the agent can do useful work.
+
+**What the VM image provides vs. what the worktree provides:**
+
+| Layer | Contents | Source |
+|---|---|---|
+| VM base image | OS, `raxis-planner` binary, toolchain binaries (`cargo`, `npm`, etc.) | Operator-built OCI image, pinned by digest |
+| VirtioFS worktree | Project source (`Cargo.toml`, `package.json`, `go.mod`, etc.) | Git clone from `base_sha` |
+| VirtioFS `/raxis/` (ro) | System prompt, session env, bundles | Kernel-written at session activation |
+
+The VM image provides tools. The worktree provides the project. They are independent.
+
+**Plan configuration — `vm_image` per task:**
+
+```toml
+# plan.toml
+
+[plan]
+vm_image = "raxis/rust-node:1.87-20"   # default for all tasks
+
+[[tasks]]
+task_id            = "auth_implementer"
+session_agent_type = "Executor"
+# inherits plan.vm_image
+
+[[tasks]]
+task_id            = "frontend_implementer"
+session_agent_type = "Executor"
+vm_image           = "raxis/node:20"   # per-task override
+
+[[tasks]]
+task_id            = "orchestrator"
+session_agent_type = "Orchestrator"
+vm_image           = "raxis/base"      # Orchestrator only needs git, not a full toolchain
+```
+
+**Policy bundle — permitted images with OCI digest pinning:**
+
+```toml
+# policy.toml
+
+[[vm_images]]
+name        = "raxis/base"
+oci_digest  = "sha256:f3a4b5c6..."
+description = "Alpine base + bash + git + jq. No language toolchain."
+
+[[vm_images]]
+name        = "raxis/rust:1.87"
+oci_digest  = "sha256:a1b2c3d4..."
+description = "Rust 1.87 + cargo + clippy + rustfmt"
+
+[[vm_images]]
+name        = "raxis/node:20"
+oci_digest  = "sha256:e5f6a7b8..."
+description = "Node.js 20 LTS + npm 10"
+
+[[vm_images]]
+name        = "raxis/rust-node:1.87-20"
+oci_digest  = "sha256:c9d0e1f2..."
+description = "Rust 1.87 + Node.js 20 for full-stack projects"
+```
+
+**Why OCI digest pinning (not just tags):**
+Image tags are mutable — `raxis/rust:1.87` can be silently repointed to a different
+image. The OCI digest is the SHA-256 of the image manifest — immutable and content-
+addressed. The policy bundle stores digests; the Kernel verifies the pulled image matches
+the pinned digest before booting the VM. Tags are for human readability; digests are for
+integrity. Both are stored so the Kernel can pull by digest while audit logs show the
+human-readable name.
+
+**`approve_plan` shift-left — Check 8 (new): VM Image Validation:**
+For each task, resolve `task.vm_image` (or `plan.vm_image` as default) against
+`policy.vm_images`. Record the `oci_digest` alongside the task in the initiative record.
+Failure: `FAIL_VM_IMAGE_NOT_PERMITTED { image_name }`. Runs before any VM boots — a plan
+referencing an unpermitted image is rejected at approval time, not at runtime.
+
+**Kernel provisioning flow at session activation:**
+
+```
+1. Read task.vm_image → resolve oci_digest (recorded at approve_plan time)
+2. Check local OCI cache: image with this digest already present?
+   Yes → use cached layers    No → pull from registry, verify digest, cache
+3. Boot AVF microVM with the OCI image as root filesystem
+4. Mount VirtioFS (rw): /workspace → $RAXIS_DATA_DIR/worktrees/<session_uuid>/
+5. Mount VirtioFS (ro): /raxis    → session config directory
+6. raxis-planner starts as PID 1; reads /raxis/session.env + /raxis/system_prompt.txt
+```
+
+**Why operator-built images rather than runtime package installation:**
+Declaring `packages = ["cargo", "npm"]` and installing at session activation is rejected:
+(1) network-dependent — pulls from package registries at runtime, can fail or take
+minutes; (2) non-deterministic — same declaration produces different environments on
+different dates; (3) no digest to verify. Operator-built images are pull-once, digest-
+verified, and deterministic. The operator controls what's in the image; the policy bundle
+controls which images are permitted.
+
+**Standard image naming convention:**
+
+| Image | Toolchain | Typical use |
+|---|---|---|
+| `raxis/base` | bash, git, jq only | Orchestrator sessions (merge only) |
+| `raxis/rust:<ver>` | rustc, cargo, clippy, rustfmt | Rust projects |
+| `raxis/node:<ver>` | node, npm, yarn | JS/TS projects |
+| `raxis/python:<ver>` | python, pip, venv | Python projects |
+| `raxis/go:<ver>` | go toolchain | Go projects |
+| `raxis/rust-node:<r>-<n>` | Rust + Node.js | Full-stack / WASM projects |
+
+---
+
+#### VirtioFS Mount Configuration — Kernel-Controlled, Not Operator-Configurable (INV-VM-CAP-04)
+
+**The invariant:** VirtioFS mounts are hardcoded in the Kernel. There is no
+`[[mounts]]` section in `plan.toml`. There is no `[[mounts]]` section in
+`policy.toml`. No operator command accepts a list of host paths to mount into a VM.
+The mount table is a compile-time constant in the Kernel's session activation code.
+
+**Why this is structural enforcement, not a blocklist:**
+A blocklist approach would define sensitive paths (`$RAXIS_DATA_DIR/audit/`,
+`$RAXIS_DATA_DIR/policy/`, `$RAXIS_DATA_DIR/credentials/`) and check that the
+operator hasn't configured them as mounts. This is weaker than the current approach
+because: (1) it requires correctly enumerating every sensitive path — missing one is
+a security hole, (2) it trusts operator configuration as the source of mount truth,
+(3) it requires validation logic that can have bugs.
+
+The structural approach is stronger: the code never reads mount specifications from
+operator input at all. If there is no code path from `plan.toml` to a VirtioFS mount
+call, operators cannot misconfigure mounts regardless of intent.
+
+**The static mount table (compile-time constant):**
+
+```rust
+// kernel/src/vm/mounts.rs
+//
+// This is the complete, exhaustive set of VirtioFS shares mounted into every session VM.
+// There is no runtime configuration for this table.
+
+pub fn session_virtio_fs_mounts(session: &SessionRecord) -> Vec<VirtioFsMount> {
+    vec![
+        VirtioFsMount {
+            host_path:  data_dir().join("worktrees").join(&session.uuid.to_string()),
+            guest_path: "/workspace",
+            mode:       MountMode::ReadWrite,
+            tag:        "workspace",
+        },
+        VirtioFsMount {
+            host_path:  data_dir().join("sessions").join(&session.uuid.to_string()).join("config"),
+            guest_path: "/raxis",
+            mode:       MountMode::ReadOnly,
+            tag:        "raxis-config",
+        },
+    ]
+}
+```
+
+Two mounts. Always. Exactly these. The function takes no configuration parameter beyond
+the session record (which provides the session UUID for path construction). It cannot
+be extended without a code change and a new binary deployment.
+
+**What the Kernel writes to `/raxis/` (the read-only config share) before VM boot:**
+
+| File | Contents | Written by |
+|---|---|---|
+| `session.env` | `RAXIS_SESSION_TOKEN`, `RAXIS_TASK_ID`, `RAXIS_INITIATIVE_ID` | Kernel token issuance |
+| `system_prompt.txt` | Role-specific non-negotiable prefix + operator context | Kernel Prompt Assembler |
+| `bundles/<task_id>.bundle` | Executor git bundles (Orchestrator sessions only) | Kernel on `KernelPush::SubTaskCompleted` |
+
+After VM boot, `/raxis/` is mounted read-only. The planner binary cannot modify these
+files. The Kernel can push new bundle files (for Orchestrator sessions receiving
+completed sub-task work) by writing to the host-side config directory — the VirtioFS
+share reflects host-side writes immediately without requiring a remount.
+
+**Worktree path containment — symlink attack prevention:**
+
+When the Kernel creates the worktree directory at session activation, it verifies the
+resolved path is within the permitted prefix before mounting:
+
+```rust
+// kernel/src/vm/worktree.rs
+pub fn create_worktree(session_uuid: Uuid) -> Result<PathBuf> {
+    let raw = data_dir().join("worktrees").join(session_uuid.to_string());
+    fs::create_dir_all(&raw)?;
+
+    // Resolve all symlinks before mounting.
+    // If $RAXIS_DATA_DIR/worktrees/<uuid> is a symlink pointing outside
+    // the permitted prefix (e.g., to /raxis/audit/), this check catches it.
+    let resolved = raw.canonicalize()?;
+    let permitted = data_dir().join("worktrees").canonicalize()?;
+    if !resolved.starts_with(&permitted) {
+        return Err(KernelError::WorktreePathEscape { path: resolved });
+    }
+
+    Ok(resolved)
+}
+```
+
+`canonicalize()` calls `realpath()` — it follows all symlinks and resolves `..`
+components before the prefix check. An attacker who can create a symlink at
+`$RAXIS_DATA_DIR/worktrees/<uuid>` pointing to `$RAXIS_DATA_DIR/audit/` would have
+`canonicalize()` return the audit directory path, which fails the `starts_with` check.
+This prevents a compromised host process from mounting sensitive directories by
+manipulating the filesystem layout.
+
+**What the operator CAN configure via `plan.toml` (and what they cannot):**
+
+| Config | In `plan.toml`? | Enforced how |
+|---|---|---|
+| Which VM image to use | ✅ `vm_image` field | Kernel resolves against policy bundle digest |
+| Path allowlist (within worktree) | ✅ `path_allowlist` per task | Kernel VCS diff at `SingleCommit` admission |
+| Allowed egress URLs | ✅ `allowed_egress` per task | Kernel Check E3 at `EgressRequest` admission |
+| Additional VirtioFS mounts | ❌ Not in spec | No code path exists |
+| Mount the policy directory | ❌ Not in spec | No code path exists |
+| Mount the audit directory | ❌ Not in spec | No code path exists |
+| Mount credentials directory | ❌ Not in spec | No code path exists |
+| Override the `/raxis/` config path | ❌ Not in spec | Hardcoded in `session_virtio_fs_mounts()` |
+
+The ❌ rows are enforced not by validation of operator input but by the absence of any
+code that reads mount configuration from operator input. The enforcement is structural.
+
+---
+
 ## Part 8 — Schema Addendum & INV-STORE-02 Amendment
 
 ### DDL Migration 2 — Complete Listing
