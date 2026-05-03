@@ -245,6 +245,14 @@ async fn main() {
 
     // Step 7c: Build the HandlerContext now that the audit sink AND the
     // plan registry exist.
+    //
+    // The `gateway_client` is created here too — it is shared between
+    // the supervisor (which calls `set_expected_token` before each
+    // spawn), the gateway accept loop (which calls `install_connection`
+    // after a valid handshake), and any IPC handler that needs to
+    // forward a fetch via `ctx.gateway.fetch(...)`. A single Arc is
+    // cloned three ways below; cheap.
+    let gateway_client = Arc::new(gateway::client::GatewayClient::new());
     let ctx = Arc::new(ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -252,6 +260,7 @@ async fn main() {
         Arc::clone(&audit),
         data_dir.clone(),
         Arc::clone(&plan_registry),
+        Arc::clone(&gateway_client),
     ));
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a
@@ -273,12 +282,14 @@ async fn main() {
         let socket_path = data_dir.join("sockets/gateway.sock");
         let data_dir_for_sup = data_dir.clone();
         let audit_for_sup = Arc::clone(&audit);
+        let client_for_sup = Arc::clone(&gateway_client);
         tokio::spawn(async move {
             gateway::spawn_and_supervise(
                 gateway_section,
                 data_dir_for_sup,
                 socket_path,
                 audit_for_sup,
+                client_for_sup,
                 gateway_shutdown_rx,
             )
             .await

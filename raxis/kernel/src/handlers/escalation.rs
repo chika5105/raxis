@@ -522,6 +522,7 @@ mod tests {
             sink.clone(),
             PathBuf::from("/tmp/raxis-escalation-test"),
             Arc::new(PlanRegistry::new()),
+            Arc::new(crate::gateway::client::GatewayClient::new()),
         ));
         (ctx, sink)
     }
@@ -641,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_oversize_justification() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             max_per_window: 1, window: Duration::from_secs(60), ..Default::default()
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
@@ -655,7 +656,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_justification_at_exactly_max_bytes() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             timeout: Duration::from_secs(60), window: Duration::from_secs(60),
             max_per_window: 1, quarantine_threshold: 100,
         });
@@ -669,7 +670,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_class_mismatched_with_scope() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             max_per_window: 1, window: Duration::from_secs(60), ..Default::default()
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
@@ -684,7 +685,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_nil_idempotency_key() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             max_per_window: 1, window: Duration::from_secs(60), ..Default::default()
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
@@ -697,7 +698,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_unknown_session_token() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests::default());
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests::default());
         seed_session_and_task(Arc::clone(&ctx)).await;
         let mut req = make_request(uuid::Uuid::new_v4());
         req.session_token = "deadbeef".repeat(8); // 64 chars but not the seeded one
@@ -707,7 +708,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_revoked_session() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             timeout: Duration::from_secs(60), window: Duration::from_secs(60),
             max_per_window: 1, quarantine_threshold: 100,
         });
@@ -724,7 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_expired_session() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             timeout: Duration::from_secs(60), window: Duration::from_secs(60),
             max_per_window: 1, quarantine_threshold: 100,
         });
@@ -743,7 +744,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_unknown_task() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             timeout: Duration::from_secs(60), window: Duration::from_secs(60),
             max_per_window: 1, quarantine_threshold: 100,
         });
@@ -758,7 +759,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_cross_lineage_task() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             timeout: Duration::from_secs(60), window: Duration::from_secs(60),
             max_per_window: 1, quarantine_threshold: 100,
         });
@@ -803,7 +804,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_idempotency_key_returns_already_pending_without_consuming_slot() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             timeout: Duration::from_secs(60), window: Duration::from_secs(60),
             max_per_window: 1, quarantine_threshold: 100,
         });
@@ -904,7 +905,7 @@ mod tests {
 
     #[tokio::test]
     async fn window_rolls_over_after_window_secs_elapses() {
-        let (ctx, sink) = build_ctx(EscalationPolicyForTests {
+        let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
             timeout: Duration::from_secs(60), window: Duration::from_secs(60),
             max_per_window: 1, quarantine_threshold: 100,
         });

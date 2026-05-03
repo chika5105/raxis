@@ -34,6 +34,10 @@
 //! at the kernel-side `gateway::*` adapter (planned for Phase B); for
 //! now this only affects the kernel boot log.
 
+pub mod accept;
+pub mod client;
 pub mod supervisor;
 
+pub use accept::accept_gateway_loop;
+pub use client::{FetchResult, GatewayCallError, GatewayClient};
 pub use supervisor::{spawn_and_supervise, SupervisorShutdown};

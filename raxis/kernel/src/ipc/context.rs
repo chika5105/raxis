@@ -19,6 +19,7 @@ use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
 use crate::authority::keys::KeyRegistry;
+use crate::gateway::client::GatewayClient;
 use crate::initiatives::PlanRegistry;
 
 /// Shared, read-only context for all IPC handlers.
@@ -62,6 +63,16 @@ pub struct HandlerContext {
     /// every intent admission and at CompleteTask. Refilled at boot by
     /// `initiatives::lifecycle::repopulate_plan_registry`.
     pub plan_registry: Arc<PlanRegistry>,
+
+    /// Active gateway client. Cheap to clone; shared with the
+    /// `gateway::supervisor` (which writes `set_expected_token` before
+    /// each spawn) and with `gateway::accept` (which calls
+    /// `install_connection` on a successful handshake). Handlers that
+    /// need to forward provider calls (data fetch, inference) call
+    /// `ctx.gateway.fetch(...)`. When no gateway is connected the
+    /// fetch returns `GatewayCallError::Unavailable`; handlers MUST
+    /// surface this as a planner-facing rejection rather than block.
+    pub gateway: Arc<GatewayClient>,
 }
 
 impl HandlerContext {
@@ -72,9 +83,10 @@ impl HandlerContext {
         audit: Arc<dyn AuditSink>,
         data_dir: PathBuf,
         plan_registry: Arc<PlanRegistry>,
+        gateway: Arc<GatewayClient>,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
-        Self { policy, registry, store, audit, data_dir, witness_dir, plan_registry }
+        Self { policy, registry, store, audit, data_dir, witness_dir, plan_registry, gateway }
     }
 
     /// Construct with an explicit witness_dir (useful in tests that use a

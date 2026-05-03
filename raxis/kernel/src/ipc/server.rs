@@ -129,11 +129,16 @@ pub async fn start(
     // Spawn the three accept loops.
     let operator_ctx = Arc::clone(&ctx);
     let planner_ctx = Arc::clone(&ctx);
-    let _gateway_ctx = Arc::clone(&ctx);
+    let gateway_client = Arc::clone(&ctx.gateway);
+    let gateway_audit  = Arc::clone(&ctx.audit);
 
     let op_task = tokio::spawn(accept_operator_loop(operator_listener, operator_ctx));
     let pl_task = tokio::spawn(accept_planner_loop(planner_listener, planner_ctx));
-    let gw_task = tokio::spawn(accept_gateway_loop(gateway_listener));
+    let gw_task = tokio::spawn(crate::gateway::accept::accept_gateway_loop(
+        gateway_listener,
+        gateway_client,
+        gateway_audit,
+    ));
 
     // Wait for either a shutdown signal OR an accept loop to exit.
     // SIGTERM and SIGINT both trigger graceful shutdown (kernel-core.md §2.2
@@ -488,24 +493,8 @@ async fn handle_planner_connection(
 }
 
 // ---------------------------------------------------------------------------
-// Gateway accept loop (stub)
+// Gateway accept loop has moved to `crate::gateway::accept`
 // ---------------------------------------------------------------------------
-
-async fn accept_gateway_loop(listener: UnixListener) {
-    loop {
-        match listener.accept().await {
-            Ok((_stream, _addr)) => {
-                eprintln!(
-                    "{{\"level\":\"debug\",\"message\":\"gateway connection accepted (stub — gateway IPC not yet wired)\"}}",
-                );
-            }
-            Err(e) => {
-                eprintln!("{{\"level\":\"error\",\"message\":\"gateway accept error\",\"error\":\"{e}\"}}");
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Socket permissions helper

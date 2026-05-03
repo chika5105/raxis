@@ -74,11 +74,19 @@ pub enum SupervisorError {
 ///
 /// The `audit` sink is used for `GatewaySpawned` / `GatewayCrashed` /
 /// `GatewayQuarantined` records.
+///
+/// The `client` is updated with each freshly-minted token immediately
+/// before `spawn_child` so the kernel-side accept loop (`gateway::accept`)
+/// can validate the gateway's `GatewayReady` handshake against it. On
+/// shutdown we additionally call `client.disconnect()` so any in-flight
+/// `fetch()` callers see `GatewayCallError::Unavailable` instead of
+/// hanging on the soon-to-be-torn-down stream.
 pub async fn spawn_and_supervise(
     gateway_section: Option<GatewaySection>,
     data_dir: PathBuf,
     socket_path: PathBuf,
     audit: Arc<dyn AuditSink>,
+    client: Arc<crate::gateway::client::GatewayClient>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> SupervisorShutdown {
     let cfg = match gateway_section {
@@ -104,7 +112,16 @@ pub async fn spawn_and_supervise(
     loop {
         attempt += 1;
         let token = match mint_token() {
-            Ok(t) => t,
+            Ok(t) => {
+                // Publish the expected token BEFORE we spawn the child,
+                // so a fast-starting gateway that already has the token
+                // in its env can `connect()` and the kernel-side accept
+                // loop will recognise it. The order matters: if we
+                // spawned first and published second, a sub-millisecond
+                // handshake could race the publish and be rejected.
+                client.set_expected_token(t.clone()).await;
+                t
+            }
             Err(e) => {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"gateway_token_mint_failed\",\
@@ -195,6 +212,10 @@ pub async fn spawn_and_supervise(
             _ = &mut shutdown_rx => {
                 eprintln!("{{\"level\":\"info\",\"event\":\"gateway_supervisor_shutdown_signal\"}}");
                 kill_child_best_effort(&mut child).await;
+                // Drop the kernel-side pump so any in-flight callers
+                // unblock with Unavailable instead of waiting on a
+                // socket that's about to disappear.
+                client.disconnect().await;
                 return SupervisorShutdown::Stopped;
             }
         };
@@ -209,6 +230,13 @@ pub async fn spawn_and_supervise(
                 .map(|c| c.to_string())
                 .unwrap_or_else(|| "null".to_owned()),
         );
+        // The pump task usually notices the EOF first and exits on
+        // its own, but `client.disconnect()` is idempotent and
+        // guarantees the kernel-side slot is empty before the next
+        // spawn so a slow EOF detection cannot leave the previous
+        // (now dead) stream installed when the fresh gateway sends
+        // its `GatewayReady`.
+        client.disconnect().await;
         let _ = audit.emit(
             AuditEventKind::GatewayCrashed {
                 token_prefix,
@@ -497,6 +525,7 @@ mod tests {
             PathBuf::from("/tmp"),
             socket,
             audit.clone() as Arc<dyn AuditSink>,
+            Arc::new(crate::gateway::client::GatewayClient::new()),
             rx,
         )
         .await;
@@ -523,6 +552,7 @@ mod tests {
                 PathBuf::from("/tmp"),
                 socket,
                 audit_for_task,
+                Arc::new(crate::gateway::client::GatewayClient::new()),
                 rx,
             )
             .await
@@ -568,6 +598,7 @@ mod tests {
                 PathBuf::from("/tmp"),
                 socket,
                 audit_for_task,
+                Arc::new(crate::gateway::client::GatewayClient::new()),
                 rx,
             ),
         )
@@ -615,6 +646,7 @@ mod tests {
                 PathBuf::from("/tmp"),
                 socket,
                 audit_for_task,
+                Arc::new(crate::gateway::client::GatewayClient::new()),
                 rx,
             ),
         )
@@ -655,6 +687,7 @@ mod tests {
                 PathBuf::from("/tmp"),
                 socket,
                 audit_for_task,
+                Arc::new(crate::gateway::client::GatewayClient::new()),
                 rx,
             )
             .await

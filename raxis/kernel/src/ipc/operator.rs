@@ -962,6 +962,7 @@ mod escalation_dispatch_tests {
             sink,
             PathBuf::from("/tmp/raxis-test"),
             Arc::new(PlanRegistry::new()),
+            Arc::new(crate::gateway::client::GatewayClient::new()),
         ))
     }
 
