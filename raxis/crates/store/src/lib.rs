@@ -25,6 +25,7 @@ pub mod db;
 pub mod migration;
 pub mod ro;
 pub mod table;
+pub mod views;
 
 pub use db::{Store, StoreError};
 pub use migration::SCHEMA_VERSION;
