@@ -310,6 +310,19 @@ mod integration {
     /// that touches the counter would require revisiting it.
     static GLOBAL_LOCK: StdMutex<()> = StdMutex::new(());
 
+    /// Acquire `GLOBAL_LOCK`, recovering automatically from poisoning.
+    ///
+    /// Any test that panics while holding the lock would otherwise
+    /// poison every subsequent acquisition with `PoisonError`,
+    /// cascading one real failure into N spurious failures of
+    /// otherwise-healthy tests in the same suite. We don't share any
+    /// invariant-bearing state through this lock — it's strictly a
+    /// serialisation token for `ACTIVE_VERIFIERS` and process-wide
+    /// env mutations — so recovering the inner `()` is safe.
+    fn acquire_global_lock() -> std::sync::MutexGuard<'static, ()> {
+        GLOBAL_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     fn skip_if_missing(path: &str) -> bool {
         if !std::path::Path::new(path).exists() {
             eprintln!("integration test skipped: {path} not found on this host");
@@ -401,7 +414,7 @@ mod integration {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawn_succeeds_against_bin_true_and_decrements_counter_on_exit() {
-        let _guard = GLOBAL_LOCK.lock().unwrap();
+        let _guard = acquire_global_lock();
         if skip_if_missing("/usr/bin/true") {
             return;
         }
@@ -433,7 +446,7 @@ mod integration {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawn_failed_against_nonexistent_binary_does_not_leak_counter() {
-        let _guard = GLOBAL_LOCK.lock().unwrap();
+        let _guard = acquire_global_lock();
         // ACTIVE_VERIFIERS is incremented AFTER cmd.spawn() succeeds;
         // a spawn-time failure must not advance the counter, or the cap
         // would slowly drift down to zero usable slots over time.
@@ -465,7 +478,7 @@ mod integration {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cap_exceeded_returns_err_without_spawning_or_issuing_token() {
-        let _guard = GLOBAL_LOCK.lock().unwrap();
+        let _guard = acquire_global_lock();
         // max_concurrent_verifiers = 0 forces `current >= 0` to be true
         // on the very first check, so cap_exceeded fires deterministically
         // regardless of what other tests are doing to the counter.
@@ -505,7 +518,7 @@ mod integration {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn successful_spawn_persists_verifier_run_tokens_row_with_correct_fields() {
-        let _guard = GLOBAL_LOCK.lock().unwrap();
+        let _guard = acquire_global_lock();
         if skip_if_missing("/usr/bin/true") {
             return;
         }
@@ -542,7 +555,7 @@ mod integration {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn wall_clock_kill_terminates_bin_sleep_within_timeout_plus_grace() {
-        let _guard = GLOBAL_LOCK.lock().unwrap();
+        let _guard = acquire_global_lock();
         if skip_if_missing("/bin/sleep") {
             return;
         }
@@ -595,7 +608,7 @@ mod integration {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn env_clear_scrubs_parent_env_and_current_dir_is_set_to_worktree_root() {
-        let _guard = GLOBAL_LOCK.lock().unwrap();
+        let _guard = acquire_global_lock();
         if skip_if_missing("/bin/sh") {
             return;
         }
@@ -607,12 +620,27 @@ mod integration {
 
         // The captured-output path is hardcoded into the script body so
         // the child can write to it without any env var passthrough.
+        //
+        // RACE NOTE — flake fix: `pwd > dst` and `env >> dst` were two
+        // separate writes, so once `pwd` finished the file was non-empty
+        // and the test's `await_until(|| len > 0)` predicate could
+        // observe it BEFORE `env` had appended its output. The child
+        // would then exit with `env_keys = {}` and the "missing required
+        // var" assertion fired (observed under load on macOS in
+        // ~1-in-10 workspace test runs).
+        //
+        // We now write the entire payload to `<dst>.tmp` in a single
+        // brace group (one `open(O_TRUNC|O_CREAT)` from the shell's
+        // perspective), then atomically rename to `<dst>`. POSIX
+        // guarantees `rename(2)` is atomic on the same filesystem, so
+        // the test's existence-check observes the COMPLETED file or no
+        // file at all — never a partially-written one.
         let captured = tmp.path().join("captured.txt");
         let script = tmp.path().join("probe.sh");
         let script_body = format!(
             "#!/bin/sh\n\
-             pwd > {dst}\n\
-             env >> {dst}\n",
+             {{ pwd; env; }} > {dst}.tmp\n\
+             mv {dst}.tmp {dst}\n",
             dst = captured.display(),
         );
         std::fs::write(&script, script_body.as_bytes()).unwrap();
@@ -633,13 +661,14 @@ mod integration {
             &worktree, &cfg, &store,
         ).await.expect("spawn");
 
-        // Wait up to 2s for the child to run, write, and exit.
+        // Wait up to 2s for the child to atomically rename `.tmp` to
+        // `captured.txt`. Existence of `captured.txt` is the
+        // synchronisation token — see the RACE NOTE on the script body.
         let written = await_until(
-            || captured.exists() && std::fs::metadata(&captured)
-                .map(|m| m.len() > 0).unwrap_or(false),
+            || captured.exists(),
             Duration::from_secs(2),
         ).await;
-        assert!(written, "child did not write the capture file within 2s");
+        assert!(written, "child did not produce the capture file within 2s");
 
         // Cleanup the env var promptly.
         unsafe { std::env::remove_var(&bleed_var); }
@@ -768,6 +797,15 @@ mod stub_round_trip {
     // state would have to acquire both, and a single shared lock would
     // hide that.
     static GLOBAL_LOCK: StdMutex<()> = StdMutex::new(());
+
+    /// Acquire `GLOBAL_LOCK`, recovering automatically from poisoning.
+    /// Mirrors `integration::acquire_global_lock` — see that helper
+    /// for the rationale (a single panicking test must not cascade
+    /// into N spurious `PoisonError` failures across the rest of the
+    /// suite).
+    fn acquire_global_lock() -> std::sync::MutexGuard<'static, ()> {
+        GLOBAL_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
 
     // ── Stub binary discovery ────────────────────────────────────────────────
 
@@ -972,7 +1010,7 @@ mod stub_round_trip {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn inconclusive_witness_round_trips_through_stub_to_handler() {
-        let _guard = GLOBAL_LOCK.lock().unwrap();
+        let _guard = acquire_global_lock();
 
         // Step 1: build & locate the stub binary up front (will no-op if
         // already built, fail loudly if it can't compile).
@@ -1188,7 +1226,7 @@ mod stub_round_trip {
     // ------------------------------------------------------------------
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn evaluation_sha_mismatch_returns_rejected_without_consuming_token() {
-        let _guard = GLOBAL_LOCK.lock().unwrap();
+        let _guard = acquire_global_lock();
 
         let stub_bin = build_and_locate_stub();
         let store: Arc<raxis_store::Store> = Arc::new(mem_store());
