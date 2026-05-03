@@ -24,9 +24,10 @@
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_store::{Store, Table};
-use raxis_types::{InitiativeState, TaskState};
+use raxis_types::{unix_now_secs, InitiativeState, TaskState};
 
 use crate::authority::keys::AuthorityError;
+use crate::initiatives::plan_registry::{PlanRegistry, TaskKey, TaskPlanFields};
 use crate::scheduler::{self, SchedulerError};
 
 // Table name consts — one definition, used everywhere below.
@@ -121,7 +122,7 @@ pub fn create_initiative(
 ) -> Result<InitiativeCreated, LifecycleError> {
     let initiative_id  = uuid::Uuid::new_v4().to_string();
     let plan_sha256    = raxis_crypto::token::sha256_hex(plan_toml.as_bytes());
-    let now            = now_unix_secs();
+    let now            = unix_now_secs();
 
     // terminal_criteria_json: empty JSON object in v1 (operator-driven terminal
     // criteria not yet configured at submission time).
@@ -211,8 +212,9 @@ pub fn approve_plan(
     approving_operator:    &str,
     operator_pubkey_bytes: &[u8],
     policy_epoch:          u64,
-    store: &Store,
-    audit: &dyn AuditSink,
+    store:                 &Store,
+    audit:                 &dyn AuditSink,
+    plan_registry:         &PlanRegistry,
 ) -> Result<PlanApproved, LifecycleError> {
     let mut conn = store.lock_sync();
 
@@ -250,7 +252,7 @@ pub fn approve_plan(
     let plan_toml_str = String::from_utf8_lossy(&plan_bytes);
     let plan_tasks    = parse_plan_tasks(&plan_toml_str)?;
     let task_count    = plan_tasks.len();
-    let now           = now_unix_secs();
+    let now           = unix_now_secs();
 
     // ── INV-STORE-02 transaction ─────────────────────────────────────────
     // Everything below MUST commit or roll back as one unit.
@@ -291,7 +293,29 @@ pub fn approve_plan(
 
     // Admit every task. `admit_in_tx` owns no lock and no transaction; it
     // writes through the borrowed `&Connection` exposed by `tx`.
+    //
+    // We clone the §2.5.8 path-scope fields out of `plan_tasks` BEFORE
+    // moving each `pt` into the scheduler::PlanTask struct, because
+    // those fields are not part of the scheduler-side type (they live
+    // in the in-memory PlanRegistry, not in `tasks` columns). The clone
+    // is small (mostly Vec<String> of plan-time globs) and only happens
+    // once per task at approve time.
+    let mut path_scope_snapshots: Vec<(String, TaskPlanFields, bool)>
+        = Vec::with_capacity(plan_tasks.len());
+
     for pt in plan_tasks {
+        let path_fields = TaskPlanFields {
+            path_allowlist:            pt.path_allowlist.clone(),
+            path_export_to_successors: pt.path_export_to_successors,
+            path_export_globs:         pt.path_export_globs.clone(),
+            path_scope_override:       pt.path_scope_override,
+        };
+        path_scope_snapshots.push((
+            pt.task_id.clone(),
+            path_fields,
+            pt.path_scope_override,
+        ));
+
         let task = scheduler::PlanTask {
             task_id:       pt.task_id.clone(),
             initiative_id: initiative_id.to_owned(),
@@ -304,6 +328,28 @@ pub fn approve_plan(
 
     tx.commit()?;
     drop(conn); // release the store mutex before doing audit I/O.
+
+    // ── Post-commit: populate in-memory PlanRegistry ─────────────────────
+    //
+    // Per kernel-store.md §2.5.8 line 1911 — the four path-scope fields
+    // are loaded from the signed plan artifact at `approve_plan` time
+    // and held in the kernel's in-memory plan representation, NOT in
+    // the `tasks` table. The intent handler reads them back via
+    // `path_scope::effective_allow`, which is the only consumer.
+    //
+    // We deliberately populate AFTER `tx.commit()` rather than before:
+    // if the SQLite commit fails for any reason (FK violation, disk
+    // pressure), the registry must NOT contain entries for tasks that
+    // were never persisted. The reverse failure mode (commit succeeds,
+    // registry insert "fails") cannot happen: `PlanRegistry::insert`
+    // is infallible — it's a `RwLock<HashMap>` write — so once we get
+    // past `tx.commit()?` every `insert` below is guaranteed to land.
+    for (task_id, fields, _) in &path_scope_snapshots {
+        plan_registry.insert(
+            TaskKey::new(initiative_id, task_id),
+            fields.clone(),
+        );
+    }
 
     // Audit-after-commit per kernel-store.md §2.5.2. A failure here
     // produces a §2.5.2 "SQLite committed, JSONL not appended" gap that
@@ -325,10 +371,134 @@ pub fn approve_plan(
         );
     }
 
+    // §2.5.8 path_scope_override semantics: emit one
+    // `PathScopeOverrideApplied` event per task with the override on,
+    // recording (initiative, task, approving_operator). Same audit-
+    // after-commit treatment as `PlanApproved`: failures are logged,
+    // never propagated, since the store is already consistent and the
+    // override has *de facto* taken effect.
+    for (task_id, _, override_on) in &path_scope_snapshots {
+        if !*override_on { continue; }
+        if let Err(e) = audit.emit(
+            AuditEventKind::PathScopeOverrideApplied {
+                initiative_id:      initiative_id.to_owned(),
+                task_id:            task_id.clone(),
+                approving_operator: approving_operator.to_owned(),
+            },
+            None,
+            Some(task_id),
+            Some(initiative_id),
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"PathScopeOverrideApplied\",\
+                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id}\",\
+                 \"task_id\":\"{task_id}\"}}",
+            );
+        }
+    }
+
     Ok(PlanApproved {
         initiative_id: initiative_id.to_owned(),
         tasks_admitted: task_count,
     })
+}
+
+// ---------------------------------------------------------------------------
+// repopulate_plan_registry — kernel-restart hook
+// ---------------------------------------------------------------------------
+
+/// Re-parse every non-terminal initiative's signed plan artifact and refill
+/// the in-memory `PlanRegistry`. Called once during kernel boot, after
+/// the store opens and `recovery::reconcile` returns.
+///
+/// **Why this is necessary:** the four §2.5.8 path-scope fields live only
+/// in the in-memory registry, not in the `tasks` DDL. A kernel restart
+/// would otherwise leave the registry empty for every previously-approved
+/// initiative, causing `path_scope::effective_allow` to return
+/// `NoPlanEntry` (fail-closed → `FAIL_PATH_POLICY_VIOLATION`) on the
+/// first intent submitted after restart. Repopulating from the immutable
+/// `signed_plan_artifacts.plan_bytes` row gives identical semantics as
+/// the in-process `approve_plan` path.
+///
+/// **Scope:** initiatives in `Executing` or `Blocked` state. `Draft` is
+/// skipped because no tasks have been admitted yet (so no intents can
+/// arrive). Terminal states (`Completed`/`Failed`/`Aborted`) are skipped
+/// because tasks there are not accepting intents.
+///
+/// **Failure mode:** a per-initiative failure (corrupt TOML, missing
+/// artifact row) is logged and skipped. The kernel does NOT abort boot
+/// because path-scope enforcement still works for any initiative whose
+/// plan parsed correctly — and any initiative that fails to load will
+/// fail-closed at intent time anyway, which is the desired degraded
+/// behaviour.
+///
+/// Returns the number of (initiative, task) pairs successfully inserted.
+pub fn repopulate_plan_registry(
+    store:    &Store,
+    registry: &PlanRegistry,
+) -> Result<usize, LifecycleError> {
+    let conn = store.lock_sync();
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT initiative_id FROM {INITIATIVES}
+         WHERE state IN (?1, ?2)",
+    ))?;
+    let initiative_ids: Vec<String> = stmt
+        .query_map(rusqlite::params![
+            InitiativeState::Executing.as_sql_str(),
+            InitiativeState::Blocked.as_sql_str(),
+        ], |r| r.get::<_, String>(0))?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    let mut inserted = 0usize;
+
+    for init_id in initiative_ids {
+        // Load the immutable plan blob for this initiative.
+        let plan_bytes: Vec<u8> = match conn.query_row(
+            &format!(
+                "SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1",
+            ),
+            rusqlite::params![&init_id],
+            |r| r.get::<_, Vec<u8>>(0),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
+                     \"initiative_id\":\"{init_id}\",\"reason\":\"missing_artifact: {e}\"}}",
+                );
+                continue;
+            }
+        };
+
+        let plan_str = String::from_utf8_lossy(&plan_bytes);
+        let parsed   = match parse_plan_tasks(&plan_str) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
+                     \"initiative_id\":\"{init_id}\",\"reason\":\"parse_failed: {e}\"}}",
+                );
+                continue;
+            }
+        };
+
+        for pt in parsed {
+            registry.insert(
+                TaskKey::new(&init_id, &pt.task_id),
+                TaskPlanFields {
+                    path_allowlist:            pt.path_allowlist,
+                    path_export_to_successors: pt.path_export_to_successors,
+                    path_export_globs:         pt.path_export_globs,
+                    path_scope_override:       pt.path_scope_override,
+                },
+            );
+            inserted += 1;
+        }
+    }
+
+    Ok(inserted)
 }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +572,7 @@ pub fn abort_initiative(
         return Err(LifecycleError::InitiativeTerminal { current_state });
     }
 
-    let now = now_unix_secs();
+    let now = unix_now_secs();
 
     // Cancel all non-terminal tasks atomically in the same connection lock.
     let cancel_state   = TaskState::Cancelled.as_sql_str();
@@ -445,7 +615,7 @@ pub fn abort_task(
     store: &Store,
 ) -> Result<(), LifecycleError> {
     let conn = store.lock_sync();
-    let now  = now_unix_secs();
+    let now  = unix_now_secs();
 
     let state: String = conn.query_row(
         &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
@@ -519,15 +689,33 @@ pub fn retry_task(task_id: &str, store: &Store) -> Result<(), LifecycleError> {
 
 /// One task entry parsed from a plan TOML `[[tasks]]` array.
 ///
-/// Spec reference: cli-ceremony.md §4.3 fixture format. `predecessors` is read
-/// from the TOML; v1 implementation uses it to populate `task_dag_edges` rows
-/// per INV-INIT-03 (`kernel-core.md` §8 Task DAG semantics).
+/// Spec reference: cli-ceremony.md §4.3 fixture format + kernel-store.md
+/// §2.5.8 "Plan artifact fields (per `[[tasks]]` stanza)".
+///
+/// `predecessors` populates `task_dag_edges` per INV-INIT-03.
+///
+/// The four §2.5.8 fields (`path_allowlist`, `path_export_to_successors`,
+/// `path_export_globs`, `path_scope_override`) are NOT persisted to
+/// `tasks` — they live in the in-memory `PlanRegistry`. The `tasks` DDL
+/// has no columns for them by intent (kernel-store.md §2.5.8 line 1911).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanTask {
     task_id:      String,
     name:         String,
     lane_id:      String,
     predecessors: Vec<String>,
+
+    // ── §2.5.8 path-scope fields (in-memory only) ──────────────────────
+    /// Glob patterns this task may touch. **Default `[]` (deny everything)**.
+    path_allowlist:            Vec<String>,
+    /// Whether to export `touched_paths` to direct DAG successors. Default `false`.
+    path_export_to_successors: bool,
+    /// Optional filter on what gets exported. Default `[]` (export the
+    /// full touched set if `path_export_to_successors = true`).
+    path_export_globs:         Vec<String>,
+    /// Bypass flag. Default `false`. When `true`, kernel emits
+    /// `PathScopeOverrideApplied` at `approve_plan`.
+    path_scope_override:       bool,
 }
 
 /// Parse `[[tasks]]` array from plan TOML.
@@ -535,6 +723,13 @@ struct PlanTask {
 /// Required: `task_id`.
 /// Optional: `name` (defaults to `task_id`), `lane_id` (defaults to `"default"`),
 ///           `predecessors` (defaults to empty list).
+///
+/// §2.5.8 path-scope fields: all optional; defaults are deny-everything,
+/// no-export, no-override (matching the spec's locked-down defaults).
+/// Non-array values for the array-typed fields silently fall back to the
+/// default — same conservative behaviour as `predecessors`. The signing
+/// tool is the gate that catches operator typos; the kernel does not
+/// re-validate plan shape beyond what's necessary for safety.
 fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
     let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
         reason: format!("TOML parse error: {e}"),
@@ -559,21 +754,47 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         let name    = entry.get("name").and_then(|v| v.as_str()).unwrap_or(&task_id).to_owned();
         let lane_id = entry.get("lane_id").and_then(|v| v.as_str()).unwrap_or("default").to_owned();
 
-        // predecessors: optional array of task_id strings (DAG edges).
-        let predecessors: Vec<String> = entry
-            .get("predecessors")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|p| p.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let predecessors        = string_array(entry, "predecessors");
+        let path_allowlist      = string_array(entry, "path_allowlist");
+        let path_export_globs   = string_array(entry, "path_export_globs");
 
-        tasks.push(PlanTask { task_id, name, lane_id, predecessors });
+        let path_export_to_successors = entry
+            .get("path_export_to_successors")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let path_scope_override = entry
+            .get("path_scope_override")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        tasks.push(PlanTask {
+            task_id,
+            name,
+            lane_id,
+            predecessors,
+            path_allowlist,
+            path_export_to_successors,
+            path_export_globs,
+            path_scope_override,
+        });
     }
 
     Ok(tasks)
+}
+
+/// Read an optional TOML field as a `Vec<String>`. Missing field, wrong
+/// type, or non-string array entries all fall back to the empty vec —
+/// matching the original `predecessors` parsing semantics.
+fn string_array(entry: &toml::Value, field: &str) -> Vec<String> {
+    entry
+        .get(field)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|p| p.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // `admit_task` (private helper) was removed: task insertion is now done by
@@ -583,13 +804,6 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
 // declared — a violation of kernel-store.md §2.5.1 line 384 ("All edges
 // for an initiative are inserted by approve_plan alongside the task rows,
 // in the same transaction").
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -633,6 +847,78 @@ mod tests {
     fn parse_plan_tasks_missing_tasks_array_is_error() {
         let toml = "[meta]\nversion = 1\n";
         assert!(parse_plan_tasks(toml).is_err());
+    }
+
+    // ── §2.5.8 path-scope field defaults — locked-down ────────────────────
+
+    #[test]
+    fn parse_plan_tasks_path_scope_defaults_are_lockdown() {
+        // A task that omits ALL four §2.5.8 fields must default to:
+        //   path_allowlist            = []     (deny everything)
+        //   path_export_to_successors = false  (zero export blast radius)
+        //   path_export_globs         = []
+        //   path_scope_override       = false  (no bypass)
+        // This pins the safe defaults — any regression that flips one of
+        // these would silently weaken path enforcement for every plan
+        // that omits the field.
+        let toml = r#"[[tasks]]
+        task_id = "t-default"
+        "#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert!(tasks[0].path_allowlist.is_empty(),
+                "default allowlist must deny everything");
+        assert!(!tasks[0].path_export_to_successors,
+                "default export must be off (zero blast radius)");
+        assert!(tasks[0].path_export_globs.is_empty());
+        assert!(!tasks[0].path_scope_override,
+                "default override must be off (no bypass)");
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_path_allowlist_in_order() {
+        let toml = r#"[[tasks]]
+        task_id        = "t-globs"
+        path_allowlist = ["src/**", "tests/**", "README.md"]
+        "#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].path_allowlist,
+                   vec!["src/**", "tests/**", "README.md"]);
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_path_export_optin_and_globs() {
+        let toml = r#"[[tasks]]
+        task_id                   = "t-export"
+        path_export_to_successors = true
+        path_export_globs         = ["src/ipc/**"]
+        "#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert!(tasks[0].path_export_to_successors);
+        assert_eq!(tasks[0].path_export_globs, vec!["src/ipc/**"]);
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_path_scope_override() {
+        let toml = r#"[[tasks]]
+        task_id             = "t-override"
+        path_scope_override = true
+        "#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert!(tasks[0].path_scope_override);
+    }
+
+    #[test]
+    fn parse_plan_tasks_silently_ignores_non_string_array_entries() {
+        // Defense in depth: the signing tool catches malformed arrays;
+        // the kernel's parser conservatively falls back to skipping
+        // non-string entries rather than panicking. (Matches the existing
+        // `predecessors` behaviour.)
+        let toml = r#"[[tasks]]
+        task_id        = "t"
+        path_allowlist = ["src/**", 123, "ok.rs"]
+        "#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].path_allowlist, vec!["src/**", "ok.rs"]);
     }
 
     #[test]
@@ -680,7 +966,7 @@ mod tests {
         let sig_bytes     = sk.sign(&signing_input).to_bytes().to_vec();
         let plan_sha      = raxis_crypto::plan::plan_artifact_sha256(&plan_bytes);
         let pk_bytes      = sk.verifying_key().to_bytes();
-        let now           = now_unix_secs();
+        let now           = unix_now_secs();
 
         let conn = store.lock_sync();
         // initiatives row in Draft. terminal_criteria_json is NOT NULL
@@ -781,8 +1067,15 @@ mod tests {
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
 
-        let result = approve_plan(&init_id, "op-test", &pk_bytes, 1, &store, &audit).unwrap();
+        let registry = PlanRegistry::new();
+        let result = approve_plan(
+            &init_id, "op-test", &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap();
         assert_eq!(result.tasks_admitted, 2);
+        assert_eq!(
+            registry.len(), 2,
+            "approve_plan must populate the in-memory plan registry for every task",
+        );
 
         assert_eq!(read_initiative_state(&store, &init_id), "Executing");
         assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 2);
@@ -822,11 +1115,19 @@ mod tests {
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
 
-        let err = approve_plan(&init_id, "op-test", &pk_bytes, 1, &store, &audit).unwrap_err();
+        let registry = PlanRegistry::new();
+        let err = approve_plan(
+            &init_id, "op-test", &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
         assert!(
             matches!(err, LifecycleError::Scheduler(SchedulerError::CyclicDependency)),
             "expected CyclicDependency, got {err:?}",
         );
+        // Registry must remain empty too — partial population on a
+        // rolled-back tx would let stale glob entries leak into later
+        // intent checks. We populate AFTER tx.commit(), so this MUST hold.
+        assert!(registry.is_empty(),
+                "registry must not be populated when the tx rolls back");
 
         // INV-STORE-02 atomicity: nothing partial.
         assert_eq!(
@@ -860,8 +1161,11 @@ mod tests {
 
         // Hand `approve_plan` a different pubkey — sig will fail to verify.
         let wrong_pk = SigningKey::from_bytes(&[0x99u8; 32]).verifying_key().to_bytes();
-        let audit   = FakeAuditSink::new();
-        let err = approve_plan(&init_id, "op-test", &wrong_pk, 1, &store, &audit).unwrap_err();
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+        let err = approve_plan(
+            &init_id, "op-test", &wrong_pk, 1, &store, &audit, &registry,
+        ).unwrap_err();
         assert!(
             matches!(err, LifecycleError::PlanSignatureInvalid { .. }),
             "expected PlanSignatureInvalid, got {err:?}",
@@ -888,8 +1192,9 @@ mod tests {
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
 
-        approve_plan(&init_id, "op-1", &pk_bytes, 1, &store, &audit).unwrap();
-        let second = approve_plan(&init_id, "op-2", &pk_bytes, 1, &store, &audit);
+        let registry = PlanRegistry::new();
+        approve_plan(&init_id, "op-1", &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        let second = approve_plan(&init_id, "op-2", &pk_bytes, 1, &store, &audit, &registry);
         assert!(second.is_err(), "second approve must fail (not Draft)");
 
         assert_eq!(read_initiative_state(&store, &init_id), "Executing");
@@ -917,7 +1222,8 @@ mod tests {
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit = FakeAuditSink::new();
 
-        approve_plan(&init_id, "op", &pk_bytes, 42, &store, &audit).unwrap();
+        let registry = PlanRegistry::new();
+        approve_plan(&init_id, "op", &pk_bytes, 42, &store, &audit, &registry).unwrap();
 
         let conn = store.lock_sync();
         let epoch: i64 = conn.query_row(
@@ -926,5 +1232,225 @@ mod tests {
             |r| r.get(0),
         ).unwrap();
         assert_eq!(epoch, 42, "policy_epoch must be the value passed to approve_plan");
+    }
+
+    // ── §2.5.8 path-scope wiring through approve_plan ──────────────────────
+
+    #[test]
+    fn approve_plan_populates_registry_with_path_scope_fields() {
+        // Each task's four §2.5.8 fields land in the in-memory registry
+        // exactly as parsed from the signed plan — values, not just keys.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id                   = "t1"
+            path_allowlist            = ["src/**", "README.md"]
+            path_export_to_successors = true
+            path_export_globs         = ["src/ipc/**"]
+
+            [[tasks]]
+            task_id        = "t2"
+            path_allowlist = ["docs/**"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(&init_id, "op", &pk_bytes, 1, &store, &audit, &registry).unwrap();
+
+        let f1 = registry.get(&TaskKey::new(&init_id, "t1"))
+            .expect("registry must contain t1");
+        assert_eq!(f1.path_allowlist, vec!["src/**", "README.md"]);
+        assert!(f1.path_export_to_successors);
+        assert_eq!(f1.path_export_globs, vec!["src/ipc/**"]);
+        assert!(!f1.path_scope_override);
+
+        let f2 = registry.get(&TaskKey::new(&init_id, "t2"))
+            .expect("registry must contain t2");
+        assert_eq!(f2.path_allowlist, vec!["docs/**"]);
+        assert!(!f2.path_export_to_successors,
+                "t2 omits the field — must default to false");
+    }
+
+    #[test]
+    fn approve_plan_emits_path_scope_override_audit_event_per_overriding_task() {
+        // Per kernel-store.md §2.5.8 `path_scope_override`:
+        //   "the kernel emits PathScopeOverrideApplied { initiative_id,
+        //    task_id, operator_id } for every task with
+        //    path_scope_override = true, inside the approve_plan
+        //    transaction."
+        // Two of three tasks set the override; PlanApproved + 2 events
+        // = 3 audit emissions total, in deterministic order
+        // (PlanApproved first, then one PathScopeOverrideApplied per
+        // overriding task in plan order).
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id             = "t-normal"
+            path_allowlist      = ["src/**"]
+
+            [[tasks]]
+            task_id             = "t-override-1"
+            path_scope_override = true
+
+            [[tasks]]
+            task_id             = "t-override-2"
+            path_scope_override = true
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(&init_id, "op-prime", &pk_bytes, 1, &store, &audit, &registry).unwrap();
+
+        let evs = audit.events();
+        let kinds: Vec<_> = evs.iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec!["PlanApproved", "PathScopeOverrideApplied", "PathScopeOverrideApplied"],
+            "expected exactly one PlanApproved + 2 PathScopeOverrideApplied (in that order)",
+        );
+
+        // The override events MUST carry initiative + task + operator.
+        let overriding_task_ids: Vec<_> = evs.iter()
+            .filter(|e| e.kind.as_str() == "PathScopeOverrideApplied")
+            .map(|e| e.task_id.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(overriding_task_ids, vec!["t-override-1", "t-override-2"]);
+
+        for ev in evs.iter().filter(|e| e.kind.as_str() == "PathScopeOverrideApplied") {
+            assert_eq!(ev.initiative_id.as_deref(), Some(init_id.as_str()));
+            // The approving operator goes into the AuditEventKind variant
+            // payload — covered by the variant's `Debug` repr below.
+            let dbg = format!("{:?}", ev.kind);
+            assert!(dbg.contains("op-prime"),
+                    "PathScopeOverrideApplied payload must record approving_operator: {dbg}");
+        }
+    }
+
+    #[test]
+    fn approve_plan_emits_no_override_event_when_no_task_overrides() {
+        // Conservative path: the override event MUST NOT be emitted for
+        // plans where every task uses the normal allowlist mechanism.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id        = "t1"
+            path_allowlist = ["src/**"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(&init_id, "op", &pk_bytes, 1, &store, &audit, &registry).unwrap();
+
+        let kinds: Vec<_> = audit.events().iter().map(|e| e.kind.as_str()).collect();
+        assert_eq!(kinds, vec!["PlanApproved"],
+                   "PathScopeOverrideApplied must NOT emit when no task sets the override");
+    }
+
+    // ── repopulate_plan_registry — kernel-restart hook ────────────────────
+
+    #[test]
+    fn repopulate_plan_registry_refills_executing_initiatives() {
+        // Simulate kernel restart: approve a plan, then drop the registry
+        // and rebuild it from the immutable signed_plan_artifacts row.
+        // The repopulated registry must be byte-equal for the values
+        // that matter to path-scope enforcement.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id                   = "t1"
+            path_allowlist            = ["src/**"]
+            path_export_to_successors = true
+            path_export_globs         = ["src/ipc/**"]
+
+            [[tasks]]
+            task_id             = "t2"
+            path_scope_override = true
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit         = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+
+        approve_plan(
+            &init_id, "op", &pk_bytes, 1, &store, &audit, &live_registry,
+        ).unwrap();
+
+        // Simulate a kernel restart — fresh registry, populated only
+        // by the boot-time hook.
+        let restarted_registry = PlanRegistry::new();
+        let n = repopulate_plan_registry(&store, &restarted_registry).unwrap();
+        assert_eq!(n, 2, "two tasks must be re-inserted from the plan");
+
+        let f1 = restarted_registry.get(&TaskKey::new(&init_id, "t1")).unwrap();
+        assert_eq!(f1.path_allowlist, vec!["src/**"]);
+        assert!(f1.path_export_to_successors);
+        assert_eq!(f1.path_export_globs, vec!["src/ipc/**"]);
+        assert!(!f1.path_scope_override);
+
+        let f2 = restarted_registry.get(&TaskKey::new(&init_id, "t2")).unwrap();
+        assert!(f2.path_scope_override);
+    }
+
+    #[test]
+    fn repopulate_plan_registry_skips_terminal_initiatives() {
+        // After an initiative is Aborted, its tasks never accept intents
+        // again — there is no reason to repopulate registry entries for
+        // it. Conserves memory and prevents accidentally honouring an
+        // override on an aborted plan.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_id = "t1"
+        path_allowlist = ["src/**"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit         = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+
+        approve_plan(
+            &init_id, "op", &pk_bytes, 1, &store, &audit, &live_registry,
+        ).unwrap();
+        abort_initiative(&init_id, "op", &store).unwrap();
+
+        let restarted = PlanRegistry::new();
+        let n = repopulate_plan_registry(&store, &restarted).unwrap();
+        assert_eq!(n, 0, "aborted initiatives must NOT be repopulated");
+        assert!(restarted.is_empty());
+    }
+
+    #[test]
+    fn repopulate_plan_registry_skips_draft_initiatives() {
+        // Draft initiatives have plan_bytes but no `tasks` rows yet —
+        // skipping them keeps the registry from holding stale entries
+        // that would later contradict whatever the operator finally
+        // approves.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_id = "t1"
+        path_allowlist = ["src/**"]
+        "#;
+        let (_init_id, _pk) = seed_draft_initiative(&store, plan, &sk);
+
+        let registry = PlanRegistry::new();
+        let n = repopulate_plan_registry(&store, &registry).unwrap();
+        assert_eq!(n, 0,
+            "Draft initiatives have no admitted tasks — repopulate must skip");
+    }
+
+    #[test]
+    fn repopulate_plan_registry_handles_empty_store() {
+        // No initiatives → nothing to repopulate, MUST NOT error.
+        let store    = Store::open_in_memory().unwrap();
+        let registry = PlanRegistry::new();
+        let n        = repopulate_plan_registry(&store, &registry).unwrap();
+        assert_eq!(n, 0);
+        assert!(registry.is_empty());
     }
 }

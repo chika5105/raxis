@@ -13,6 +13,8 @@
 // their corresponding audit record in a single SQLite transaction.
 
 pub mod lifecycle;
+pub mod plan_registry;
 pub mod task_transitions;
 
 pub use lifecycle::LifecycleError;
+pub use plan_registry::{PlanRegistry, TaskKey, TaskPlanFields};

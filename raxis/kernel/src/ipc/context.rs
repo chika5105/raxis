@@ -19,6 +19,7 @@ use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
 use crate::authority::keys::KeyRegistry;
+use crate::initiatives::PlanRegistry;
 
 /// Shared, read-only context for all IPC handlers.
 ///
@@ -51,6 +52,16 @@ pub struct HandlerContext {
     /// The directory is created at bootstrap time and always exists by
     /// the time the IPC server starts (startup step 5, store open).
     pub witness_dir: PathBuf,
+    /// In-memory per-task plan-fields registry.
+    ///
+    /// Per kernel-store.md §2.5.8 line 1911, the four path-scope fields
+    /// (`path_allowlist`, `path_export_to_successors`, `path_export_globs`,
+    /// `path_scope_override`) are NOT persisted to the `tasks` table —
+    /// they are parsed from the signed plan artifact at `approve_plan`
+    /// time and held here. Read by `path_scope::effective_allow` on
+    /// every intent admission and at CompleteTask. Refilled at boot by
+    /// `initiatives::lifecycle::repopulate_plan_registry`.
+    pub plan_registry: Arc<PlanRegistry>,
 }
 
 impl HandlerContext {
@@ -60,9 +71,10 @@ impl HandlerContext {
         store: Arc<Store>,
         audit: Arc<dyn AuditSink>,
         data_dir: PathBuf,
+        plan_registry: Arc<PlanRegistry>,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
-        Self { policy, registry, store, audit, data_dir, witness_dir }
+        Self { policy, registry, store, audit, data_dir, witness_dir, plan_registry }
     }
 
     /// Construct with an explicit witness_dir (useful in tests that use a

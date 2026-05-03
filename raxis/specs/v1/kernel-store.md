@@ -1910,6 +1910,21 @@ fn matches_allow(path, E: AllowSet) -> bool:
 
 **Plan fields are loaded from the signed plan artifact, not from the `tasks` table.** The `tasks` DDL does not have `path_allowlist`, `path_export_to_successors`, `path_export_globs`, or `path_scope_override` columns. These fields are parsed from the approved plan artifact at `approve_plan` time and held in the kernel's in-memory plan representation (keyed by `initiative_id + task_id`). `effective_allow` reads from this in-memory structure, not from arbitrary task row mutation.
 
+> **Implementation:** the in-memory plan representation is
+> `kernel::initiatives::PlanRegistry` — an `RwLock<FxHashMap<TaskKey,
+> TaskPlanFields>>` owned by `HandlerContext::plan_registry` (single
+> instance per kernel process, `Arc`-shared into every connection task).
+> `lifecycle::approve_plan` populates one entry per `[[tasks]]` stanza
+> after `tx.commit()`. **Kernel restart hook:**
+> `lifecycle::repopulate_plan_registry(store, registry)` is called once
+> at boot (between `recovery::reconcile` and `HandlerContext::new`); it
+> re-reads `signed_plan_artifacts.plan_bytes` for every initiative whose
+> state is `Executing` or `Blocked`, re-parses the TOML, and refills
+> the registry — keeping `effective_allow` semantically identical
+> across kernel restarts. Failure modes: a registry miss in
+> `effective_allow` is `PathScopeError::NoPlanEntry`, mapped to
+> `FAIL_PATH_POLICY_VIOLATION` on the wire (fail-closed).
+
 **Path coverage enforcement:**
 ```
 fn check_paths(touched_paths, task_id, store) -> Result<(), PathPolicyViolation>:
@@ -1958,14 +1973,23 @@ On successful admission, inside the **same store transaction** as **step 4 — T
 > `kernel::handlers::intent::insert_task_intent_range`, called as
 > "Step 12A" in the current handler pipeline. The compositional
 > requirement (steps 10–12 + 12A in a *single* SQLite transaction) is
-> deferred to PR-6b; the present implementation runs each helper as its
-> own auto-commit. This is a known INV-STORE-02 gap, tracked in the
-> review ledger; it does NOT regress safety because the writes are
-> append-only and the only durable cross-table relationship the gap
-> could violate is "task_intent_ranges row exists for an
+> still deferred to a future PR; the present implementation runs each
+> helper as its own auto-commit. This is a known INV-STORE-02 gap,
+> tracked in the review ledger; it does NOT regress safety because the
+> writes are append-only and the only durable cross-table relationship
+> the gap could violate is "task_intent_ranges row exists for an
 > evaluation_sha that the tasks row does not record" — which the
 > handler's strict ordering (UPDATE tasks then INSERT
 > task_intent_ranges) makes impossible in practice.
+>
+> **Step 3A (path scope check) is now wired** in
+> `kernel::handlers::intent::handle_inner` between the VCS diff (step 7)
+> and the cost computation (step 8). It calls
+> `path_scope::check_paths(&touched_paths, initiative_id, task_id,
+> registry, store)`, which composes `effective_allow` per the
+> normative algorithm above. Path lists never cross the IPC boundary
+> (INV-08); only the opaque `FAIL_PATH_POLICY_VIOLATION` code is
+> returned.
 ```sql
 INSERT INTO task_intent_ranges (task_id, base_sha, head_sha, accepted_at)
 VALUES (?, ?, ?, unixepoch())
@@ -2012,6 +2036,21 @@ if task.path_export_to_successors:
 ```
 
 The snapshot insert is part of the same store transaction as the `tasks.status = Completed` update. Both commit together or both roll back. A crash between the status update and the snapshot insert is impossible under SQLite's single-writer atomic transaction model.
+
+> **Implementation:** the CompleteTask path-closure pipeline above is
+> implemented in `kernel::handlers::intent::handle_complete_task`,
+> which composes `read_completion_inputs` (steps 1–2),
+> `vcs::compute` per range (step 3), an unconditional
+> `vcs::topology_check` + `vcs::compute` for the trailing segment
+> (steps 4a–4b), `path_scope::check_paths` (steps 5–6), then
+> `compute_export_set(touched, path_export_globs)` and
+> `commit_task_completion(task_id, exports, store)` for step 7. The
+> latter wraps the `Running → Completed` UPDATE and every
+> `INSERT OR IGNORE INTO task_exported_path_snapshots` row in a
+> single SQLite transaction (INV-STORE-02). The export glob matcher
+> uses the same `require_literal_separator = true` glob semantics as
+> `path_scope::AllowSet::matches` so `*` does not cross `/` —
+> matching the §2.5.8 normative glob rule.
 
 ---
 

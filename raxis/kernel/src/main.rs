@@ -18,6 +18,7 @@ mod vcs;
 mod witness_index;
 mod gates;
 mod handlers;
+mod path_scope;
 
 use std::sync::Arc;
 
@@ -142,13 +143,41 @@ async fn main() {
         );
     }
 
-    // Step 7b: Build the HandlerContext now that the audit sink exists.
+    // Step 7b: Construct the in-memory PlanRegistry and repopulate it from
+    // every non-terminal initiative's signed plan artifact. Per
+    // kernel-store.md §2.5.8 the four path-scope plan fields live only
+    // in memory; without this hook every intent submitted after a
+    // restart would fail-closed with `FAIL_PATH_POLICY_VIOLATION`.
+    let plan_registry = Arc::new(initiatives::PlanRegistry::new());
+    match initiatives::lifecycle::repopulate_plan_registry(&store, &plan_registry) {
+        Ok(n) => {
+            eprintln!(
+                "{{\"level\":\"info\",\"message\":\"plan registry repopulated\",\
+                 \"task_entries\":{n}}}"
+            );
+        }
+        Err(e) => {
+            // Repopulate is best-effort: the per-initiative loop already
+            // logs and skips on parse/missing-artifact failures, so an
+            // overall error here would have to be a SQL/lock failure.
+            // Surface it loudly but do not abort boot — fail-closed at
+            // intent time is still safe.
+            eprintln!(
+                "{{\"level\":\"error\",\"message\":\"plan_registry_repopulate failed\",\
+                 \"reason\":\"{e}\"}}",
+            );
+        }
+    }
+
+    // Step 7c: Build the HandlerContext now that the audit sink AND the
+    // plan registry exist.
     let ctx = Arc::new(ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
         Arc::clone(&store),
         Arc::clone(&audit),
         data_dir.clone(),
+        Arc::clone(&plan_registry),
     ));
 
     // Step 9: Enter IPC dispatch loop (runs forever or until fatal error).

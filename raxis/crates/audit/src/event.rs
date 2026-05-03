@@ -95,6 +95,21 @@ pub enum AuditEventKind {
     PlanRejected {
         initiative_id: String,
     },
+    /// kernel-store.md §2.5.8 `path_scope_override` semantics:
+    /// emitted by `approve_plan` for **every** task in the plan that has
+    /// `path_scope_override = true`. Records the override at the moment
+    /// the kernel honors it, so an auditor can reconstruct exactly which
+    /// task IDs ran with `effective_allow == UNIVERSAL` and under whose
+    /// operator approval. The signing tool's `--allow-path-override`
+    /// acknowledgement is a separate gate (Part 4 normative) but does
+    /// NOT replace this kernel-side audit emit — offline-signing
+    /// workflows still produce this event when the kernel processes
+    /// the plan.
+    PathScopeOverrideApplied {
+        initiative_id: String,
+        task_id: String,
+        approving_operator: String,
+    },
     InitiativeStateChanged {
         initiative_id: String,
         from_state: String,
@@ -263,6 +278,7 @@ impl AuditEventKind {
             Self::InitiativeCreated { .. } => "InitiativeCreated",
             Self::PlanApproved { .. } => "PlanApproved",
             Self::PlanRejected { .. } => "PlanRejected",
+            Self::PathScopeOverrideApplied { .. } => "PathScopeOverrideApplied",
             Self::InitiativeStateChanged { .. } => "InitiativeStateChanged",
             Self::InitiativeAborted { .. } => "InitiativeAborted",
             Self::TaskAdmitted { .. } => "TaskAdmitted",

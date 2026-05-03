@@ -35,7 +35,7 @@
 use std::path::PathBuf;
 
 use raxis_types::{
-    BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
+    unix_now_secs, BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
     PlannerErrorCode, SessionId, SubmittedClaim, TaskState,
 };
 use raxis_store::{Store, Table};
@@ -95,7 +95,7 @@ async fn handle_inner(req: IntentRequest, ctx: &HandlerContext) -> HandlerResult
         .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
 
     // Revocation and expiry checks (spec §2.3 step 1).
-    let now = unix_now();
+    let now = unix_now_secs();
     if session.revoked_at.is_some() {
         return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
     }
@@ -212,6 +212,53 @@ async fn handle_inner(req: IntentRequest, ctx: &HandlerContext) -> HandlerResult
     // ── Step 7: VCS diff → touched_paths ──────────────────────────────────
     let touched_paths = vcs::compute(&base_sha, &head_sha, &worktree_path)
         .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+
+    // ── Step 7A: Path-scope coverage check (§2.5.8 step 3A) ───────────────
+    //
+    // INV-TASK-PATH-01: every path in `touched_paths` must be a member of
+    // `effective_allow(task_id)` recomputed at admission time. A miss is
+    // non-terminal — task stays in its current state, planner reverts and
+    // resubmits. Path lists are NEVER returned on the wire (INV-08); the
+    // opaque `FAIL_PATH_POLICY_VIOLATION` is the only signal.
+    //
+    // Fail-closed posture: a missing PlanRegistry entry (corrupted state,
+    // boot-time repopulate failure, plan never approved) collapses to the
+    // same path-policy rejection. Combined with `effective_allow`'s
+    // default of `path_allowlist = []` it means the kernel will never
+    // silently widen `touched_paths` because the in-memory plan was
+    // unavailable.
+    match crate::path_scope::check_paths(
+        &touched_paths,
+        &task.initiative_id,
+        req.task_id.as_str(),
+        &ctx.plan_registry,
+        store,
+    ) {
+        Ok(Ok(())) => {}
+        Ok(Err(violation)) => {
+            // Internal log only — INV-08 keeps the wire response opaque.
+            // The planner's remediation guidance comes from the §2.5.8
+            // "Planner feedback model" system prompt, not from the kernel.
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"PathPolicyViolation\",\
+                 \"task_id\":\"{}\",\"violation_count\":{}}}",
+                req.task_id.as_str(),
+                violation.paths.len(),
+            );
+            return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
+        }
+        Err(e) => {
+            // Registry miss or invalid glob in the signed plan — still
+            // a path-policy rejection (don't expose the structural
+            // failure mode on the wire).
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"PathScopeError\",\
+                 \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
+                req.task_id.as_str(),
+            );
+            return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
+        }
+    }
 
     // ── Step 8: Compute estimated_cost ────────────────────────────────────
     // Spec: cost is computed from touched_paths + intent_kind against policy.
@@ -429,44 +476,175 @@ fn handle_report_failure(
 // ---------------------------------------------------------------------------
 // handle_complete_task — IntentKind::CompleteTask
 //
-// Spec §2.3 handlers/intent.rs:
-//   "Assert the task is complete. Triggers path closure + gate closure check."
+// Normative reference: kernel-store.md §2.5.8 "CompleteTask path check"
+// (full algorithm, lines 1989-2014).
 //
-// v1 simplification: gate closure check is the evaluate_claims fast-path
-// (if all gates have a Pass witness for the stored evaluation_sha, the task
-// may complete; if not, return FailMissingWitness so the planner knows
-// witnesses are still required before completion).
+// Path closure pipeline (deviates from a regular intent — no Step 7 diff
+// because there is no `(base_sha, head_sha)` pair on the request: only
+// `head_sha` matters, and `base_sha` from the wire is intentionally
+// IGNORED per §2.5.8 line 1985):
 //
-// FSM: Running → Completed (via scheduler::mark_task_complete which internally
-// evaluates the initiative terminal criteria per INV-INIT-04).
+//   1. Load `H_bind = tasks.evaluation_sha` (may be NULL).
+//   2. Load all `(base_sha, head_sha)` rows from `task_intent_ranges`
+//      for this task.
+//   3. Union touched_paths from `vcs::diff::compute(base, head, root)`
+//      across every range.
+//   4. If `req.head_sha != H_bind` (and H_bind is not NULL):
+//      4a. topology_check on the trailing segment (NO IntegrationMerge
+//          carve-out — the trailing gap is never an integration intent).
+//      4b. union touched_paths from the trailing diff.
+//   5. Recompute `effective_allow` and run `check_paths`.
+//   6. On violation → reject non-terminally; task stays Running.
+//   7. On success → write `task_exported_path_snapshots` (if opt-in)
+//      AND transition Running → Completed in the same SQLite tx.
 // ---------------------------------------------------------------------------
 
 fn handle_complete_task(
-    req: IntentRequest,
+    req:        IntentRequest,
     task_state: TaskState,
     _session_id: &SessionId,
-    seq: u64,
-    store: &Store,
-    policy: &raxis_policy::PolicyBundle,
-    _ctx: &HandlerContext,
+    seq:        u64,
+    store:      &Store,
+    policy:     &raxis_policy::PolicyBundle,
+    ctx:        &HandlerContext,
 ) -> HandlerResult {
-    // Must be Running to complete (spec §8.1 Task FSM).
     if task_state != TaskState::Running {
         return Err((PlannerErrorCode::FailTaskNotRunning, task_state));
     }
 
-    // Transition Running → Completed via the scheduler facade.
-    // scheduler::mark_task_complete enforces the state guard and sets completed_at.
-    crate::scheduler::mark_task_complete(req.task_id.as_str(), store)
+    let task = load_task(req.task_id.as_str(), store)
+        .map_err(|_| (PlannerErrorCode::FailUnknownTask, task_state))?;
+
+    // ── 1. Worktree root + req.head_sha ───────────────────────────────────
+    //
+    // We need the worktree to drive `vcs::diff::compute` and
+    // `vcs::topology_check`. Pull it from the session row exactly the
+    // way regular intents do (§2.5.8 line 1842 — "the intent handler
+    // reads `session.worktree_root` from the session row via
+    // `authority::get_session(session_id)`"). On `CompleteTask`, the
+    // request must still carry a session token; the planner never
+    // submits a witness-less completion without one.
+    let session = crate::authority::session::get_session_by_token(&req.session_token, store)
+        .map_err(|_| (PlannerErrorCode::Unauthorized, task_state))?;
+    let worktree_root = session.worktree_root.as_deref().unwrap_or("");
+    let worktree_path = std::path::PathBuf::from(worktree_root);
+
+    let req_head_str = req.head_sha.as_ref().map(|s| s.as_str()).unwrap_or("");
+    let req_head     = if req_head_str.is_empty() {
+        // §2.5.8 edge-case: empty head_sha + no recorded ranges + NULL
+        // H_bind = trivial vacuous pass. We model this as `None` and
+        // skip the trailing-segment branch entirely.
+        None
+    } else {
+        Some(CommitSha::new(req_head_str)
+            .map_err(|_| (PlannerErrorCode::InvalidRequest, task_state))?)
+    };
+
+    // ── 2. Read H_bind + accepted intent ranges from the store ───────────
+    //
+    // H_bind = tasks.evaluation_sha (may be NULL on first-intent vacuous
+    // paths). Ranges are SELECTed from `task_intent_ranges` populated by
+    // step 12A of regular intent acceptance.
+    let (h_bind, ranges) = read_completion_inputs(req.task_id.as_str(), store)
+        .map_err(|_| (PlannerErrorCode::FailUnknownTask, task_state))?;
+
+    // ── 3. Union touched_paths across all stored ranges ──────────────────
+    //
+    // §2.5.8 line 1987 explicitly says we DO NOT re-run topology_check
+    // on stored ranges — they were already checked at step 2A on
+    // admission (the IntegrationMerge carve-out applied per range).
+    let mut full_touched_paths: std::collections::BTreeSet<PathBuf> =
+        std::collections::BTreeSet::new();
+    for (base_str, head_str) in &ranges {
+        let b = CommitSha::new(base_str)
+            .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+        let h = CommitSha::new(head_str)
+            .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+        let paths = vcs::compute(&b, &h, &worktree_path)
+            .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+        for p in paths { full_touched_paths.insert(p); }
+    }
+
+    // ── 4. Trailing segment: H_bind → req.head_sha (when they differ) ────
+    //
+    // §2.5.8 step 4 with topology check (4a) and diff (4b). The trailing
+    // segment NEVER skips topology_check — there is no IntegrationMerge
+    // carve-out on the gap between the last admitted range and the
+    // CompleteTask head_sha.
+    if let (Some(ref h_bind_str), Some(ref h_req)) = (h_bind.as_ref(), req_head.as_ref()) {
+        if h_bind_str.as_str() != h_req.as_str() {
+            let h_bind_sha = CommitSha::new(h_bind_str)
+                .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+            // 4a — topology check on the trailing range (no carve-out).
+            vcs::topology_check(&h_bind_sha, h_req, &worktree_path)
+                .map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
+            // 4b — diff the trailing range.
+            let trailing = vcs::compute(&h_bind_sha, h_req, &worktree_path)
+                .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+            for p in trailing { full_touched_paths.insert(p); }
+        }
+    }
+
+    let touched_vec: Vec<PathBuf> = full_touched_paths.iter().cloned().collect();
+
+    // ── 5. Recompute effective_allow + run check_paths ──────────────────
+    //
+    // Recomputed at completion time per §2.5.8 line 1860 ("Predecessor
+    // completion between intents can widen the set"). Same fail-closed
+    // semantics as the intent admission branch.
+    match crate::path_scope::check_paths(
+        &touched_vec,
+        &task.initiative_id,
+        req.task_id.as_str(),
+        &ctx.plan_registry,
+        store,
+    ) {
+        Ok(Ok(())) => {}
+        Ok(Err(violation)) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"CompleteTaskPathViolation\",\
+                 \"task_id\":\"{}\",\"violation_count\":{}}}",
+                req.task_id.as_str(),
+                violation.paths.len(),
+            );
+            return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"CompleteTaskPathScopeError\",\
+                 \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
+                req.task_id.as_str(),
+            );
+            return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
+        }
+    }
+
+    // ── 6. Compute exported set (post-pass, pre-commit) ─────────────────
+    //
+    // Per §2.5.8 line 2003: the export snapshot is `full_touched_paths`
+    // intersected with `path_export_globs` if defined. The persistence
+    // happens inside the same SQLite tx as the Running → Completed
+    // status update — see `commit_task_completion` below.
+    let plan_fields = ctx.plan_registry.get(
+        &crate::initiatives::TaskKey::new(&task.initiative_id, req.task_id.as_str()),
+    );
+    let export_paths: Vec<String> = plan_fields
+        .as_ref()
+        .filter(|f| f.path_export_to_successors)
+        .map(|f| compute_export_set(&touched_vec, &f.path_export_globs))
+        .unwrap_or_default();
+
+    // ── 7. Atomic commit — Running → Completed + snapshot inserts ───────
+    commit_task_completion(req.task_id.as_str(), &export_paths, store)
         .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
 
     eprintln!(
-        "{{\"level\":\"info\",\"event\":\"TaskCompleted\",\"task_id\":\"{}\"}}",
-        req.task_id.as_str()
+        "{{\"level\":\"info\",\"event\":\"TaskCompleted\",\"task_id\":\"{}\",\
+         \"exported_paths\":{}}}",
+        req.task_id.as_str(),
+        export_paths.len(),
     );
 
-    let task = load_task(req.task_id.as_str(), store)
-        .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Completed))?;
     let remaining = lane_budget_snapshot(&task.lane_id, policy, store);
 
     Ok(IntentResponse {
@@ -479,21 +657,149 @@ fn handle_complete_task(
     })
 }
 
+/// Read `(tasks.evaluation_sha, list-of-(base, head))` for one task.
+///
+/// `evaluation_sha` may be SQL `NULL` — returned as `None` to signal
+/// "no kernel-bound tip yet", in which case the trailing-segment branch
+/// of CompleteTask is skipped (§2.5.8 step 4 vacuous case).
+fn read_completion_inputs(
+    task_id: &str,
+    store:   &Store,
+) -> Result<(Option<String>, Vec<(String, String)>), ()> {
+    let conn = store.lock_sync();
+
+    let h_bind: Option<String> = conn.query_row(
+        &format!("SELECT evaluation_sha FROM {TASKS} WHERE task_id = ?1"),
+        rusqlite::params![task_id],
+        |r| r.get::<_, Option<String>>(0),
+    ).map_err(|_| ())?;
+
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT base_sha, head_sha FROM {TASK_INTENT_RANGES} WHERE task_id = ?1",
+    )).map_err(|_| ())?;
+    let ranges: Vec<(String, String)> = stmt
+        .query_map(rusqlite::params![task_id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|_| ())?
+        .collect::<Result<_, _>>()
+        .map_err(|_| ())?;
+
+    Ok((h_bind, ranges))
+}
+
+/// Apply `path_export_globs` to the union of touched paths and return the
+/// concrete literal paths to persist.
+///
+/// §2.5.8 line 2003-2010: if `path_export_globs` is empty, export the
+/// full touched set (coarse — operator's responsibility). If non-empty,
+/// emit only the subset matching at least one glob.
+///
+/// Globs use the same `require_literal_separator = true` semantics as
+/// `path_scope::AllowSet::matches` so `*` doesn't cross `/`. Patterns
+/// that fail to compile are SKIPPED (not fatal) — same defense-in-depth
+/// posture as `path_scope::compile_globs`'s caller, since the signing
+/// tool is the gate.
+fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<String> {
+    if export_globs.is_empty() {
+        return touched.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    }
+
+    let opts = glob::MatchOptions {
+        case_sensitive:              true,
+        require_literal_separator:   true,
+        require_literal_leading_dot: false,
+    };
+
+    let compiled: Vec<glob::Pattern> = export_globs
+        .iter()
+        .filter_map(|g| glob::Pattern::new(g).ok())
+        .collect();
+    if compiled.is_empty() { return Vec::new(); }
+
+    touched.iter()
+        .filter_map(|p| {
+            if compiled.iter().any(|g| g.matches_path_with(p, opts)) {
+                Some(p.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+const TASK_EXPORTED_PATH_SNAPSHOTS: &str =
+    raxis_store::Table::TaskExportedPathSnapshots.as_str();
+
+/// Atomically transition the task to `Completed` AND insert the export
+/// snapshot rows in ONE SQLite transaction (§2.5.8 line 2014).
+///
+/// Per kernel-store.md §2.5.8: "The snapshot insert is part of the same
+/// store transaction as the `tasks.status = Completed` update. Both
+/// commit together or both roll back. A crash between the status update
+/// and the snapshot insert is impossible under SQLite's single-writer
+/// atomic transaction model."
+///
+/// `INSERT OR IGNORE` on the snapshot rows handles the idempotent-retry
+/// case (`PRIMARY KEY (task_id, path)` — same path inserted twice is a
+/// no-op, matching the spec's "ignore" rule).
+fn commit_task_completion(
+    task_id:      &str,
+    export_paths: &[String],
+    store:        &Store,
+) -> Result<(), ()> {
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction().map_err(|_| ())?;
+
+    // 1. Status update — guarded by `state = 'Running'` so a concurrent
+    //    abort or duplicate completion silently no-ops (rows == 0 →
+    //    transition rejected). The `tasks` DDL has no `completed_at`
+    //    column (kernel-store.md §2.5.1 Table 5); `transitioned_at` is
+    //    the canonical timestamp for the Running → Completed edge.
+    let now = unix_now_secs();
+    let rows = tx.execute(
+        &format!(
+            "UPDATE {TASKS} SET state = 'Completed', transitioned_at = ?1
+             WHERE task_id = ?2 AND state = 'Running'",
+        ),
+        rusqlite::params![now, task_id],
+    ).map_err(|_| ())?;
+    if rows == 0 {
+        return Err(());
+    }
+
+    // 2. Insert export snapshot rows (idempotent on PK).
+    if !export_paths.is_empty() {
+        let mut stmt = tx.prepare_cached(&format!(
+            "INSERT OR IGNORE INTO {TASK_EXPORTED_PATH_SNAPSHOTS} (task_id, path)
+             VALUES (?1, ?2)",
+        )).map_err(|_| ())?;
+        for p in export_paths {
+            stmt.execute(rusqlite::params![task_id, p]).map_err(|_| ())?;
+        }
+    }
+
+    tx.commit().map_err(|_| ())
+}
+
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
 
 struct TaskRow {
-    lane_id: String,
-    state:   String,
+    lane_id:       String,
+    state:         String,
+    initiative_id: String,
 }
 
 fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
     let conn = store.lock_sync();
     conn.query_row(
-        &format!("SELECT lane_id, state FROM {TASKS} WHERE task_id = ?1"),
+        &format!("SELECT lane_id, state, initiative_id FROM {TASKS} WHERE task_id = ?1"),
         rusqlite::params![task_id],
-        |row| Ok(TaskRow { lane_id: row.get(0)?, state: row.get(1)? }),
+        |row| Ok(TaskRow {
+            lane_id:       row.get(0)?,
+            state:         row.get(1)?,
+            initiative_id: row.get(2)?,
+        }),
     ).map_err(|_| ())
 }
 
@@ -539,7 +845,7 @@ fn insert_task_intent_range(
                 (task_id, base_sha, head_sha, accepted_at)
              VALUES (?1, ?2, ?3, ?4)"
         ),
-        rusqlite::params![task_id, base_sha, head_sha, unix_now()],
+        rusqlite::params![task_id, base_sha, head_sha, unix_now_secs()],
     ).map_err(|_| ())?;
     Ok(())
 }
@@ -571,13 +877,6 @@ fn lane_budget_snapshot(
         },
         _ => BudgetSnapshot { admission_units: 0 },
     }
-}
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 // ---------------------------------------------------------------------------
@@ -650,7 +949,7 @@ mod tests {
 
     fn seed_task(store: &Store, task_id: &str) {
         let conn = store.lock_sync();
-        let now = unix_now();
+        let now = unix_now_secs();
         conn.execute(
             "INSERT INTO initiatives
                 (initiative_id, state, terminal_criteria_json,
@@ -737,7 +1036,7 @@ mod tests {
                  policy_epoch, admitted_at, transitioned_at, actual_cost)
              VALUES ('t2', 'init-int', 'default', 'Admitted', 'kernel',
                      1, ?1, ?1, 0)",
-            rusqlite::params![unix_now()],
+            rusqlite::params![unix_now_secs()],
         ).unwrap();
         drop(conn);
 
@@ -747,5 +1046,235 @@ mod tests {
         insert_task_intent_range("t2", "aa", "bb", &store).unwrap();
         assert_eq!(count_intent_ranges(&store, "t1"), 1);
         assert_eq!(count_intent_ranges(&store, "t2"), 1);
+    }
+
+    // ── compute_export_set — §2.5.8 line 2003 ─────────────────────────────
+
+    #[test]
+    fn export_set_with_no_globs_returns_full_touched() {
+        // Per §2.5.8 blast-radius table: `path_export_to_successors=true`
+        // + no `path_export_globs` → export the full touched set
+        // (coarse; operator's responsibility).
+        let touched = vec![
+            PathBuf::from("src/a.rs"),
+            PathBuf::from("docs/b.md"),
+        ];
+        let exported = compute_export_set(&touched, &[]);
+        assert_eq!(exported, vec!["src/a.rs", "docs/b.md"]);
+    }
+
+    #[test]
+    fn export_set_filters_to_glob_matches() {
+        let touched = vec![
+            PathBuf::from("src/ipc/handlers/new.rs"),
+            PathBuf::from("src/scheduler/dag.rs"),
+            PathBuf::from("README.md"),
+        ];
+        let exported = compute_export_set(
+            &touched,
+            &["src/ipc/**".to_owned()],
+        );
+        assert_eq!(exported, vec!["src/ipc/handlers/new.rs"]);
+    }
+
+    #[test]
+    fn export_set_uses_directory_aware_globs() {
+        // §2.5.8 normative glob rule: `*` does NOT cross `/`.
+        let touched = vec![
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("src/sub/lib.rs"),
+        ];
+        let exported = compute_export_set(&touched, &["src/*".to_owned()]);
+        assert_eq!(exported, vec!["src/lib.rs"],
+            "single-* must not cross /, only top-level files match");
+    }
+
+    #[test]
+    fn export_set_skips_unparseable_globs() {
+        // Defense in depth: if the signing tool somehow let a malformed
+        // glob through, we drop it silently rather than panicking — the
+        // result is "fewer paths exported", which is conservative
+        // (errors-on-the-side-of-tighter-scope).
+        let touched = vec![PathBuf::from("src/a.rs")];
+        let exported = compute_export_set(
+            &touched,
+            &["src/[unclosed".to_owned(), "src/**".to_owned()],
+        );
+        assert_eq!(exported, vec!["src/a.rs"],
+            "unparseable glob is dropped; second valid glob still applies");
+    }
+
+    #[test]
+    fn export_set_with_only_unparseable_globs_returns_empty() {
+        // Edge: every glob malformed → conservative empty export.
+        let touched = vec![PathBuf::from("src/a.rs")];
+        let exported = compute_export_set(
+            &touched,
+            &["[broken".to_owned()],
+        );
+        assert!(exported.is_empty(),
+            "no valid globs → no export; conservative posture");
+    }
+
+    // ── commit_task_completion — §2.5.8 line 2014 single-tx contract ──────
+
+    fn seed_running_task(store: &Store, task_id: &str) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        // Reuse same initiative as `seed_task`'s "init-int" if already
+        // present — otherwise insert one.
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO initiatives
+                (initiative_id, state, terminal_criteria_json,
+                 plan_artifact_sha256, created_at)
+             VALUES ('init-int', 'Executing', '{}', 'deadbeef', ?1)",
+            rusqlite::params![now],
+        );
+        conn.execute(
+            "INSERT INTO tasks
+                (task_id, initiative_id, lane_id, state, actor,
+                 policy_epoch, admitted_at, transitioned_at, actual_cost)
+             VALUES (?1, 'init-int', 'default', 'Running', 'kernel',
+                     1, ?2, ?2, 0)",
+            rusqlite::params![task_id, now],
+        ).unwrap();
+    }
+
+    fn task_state_of(store: &Store, task_id: &str) -> String {
+        let conn = store.lock_sync();
+        conn.query_row(
+            "SELECT state FROM tasks WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    fn count_export_snapshots(store: &Store, task_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            "SELECT COUNT(*) FROM task_exported_path_snapshots WHERE task_id = ?1",
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    #[test]
+    fn commit_task_completion_transitions_running_to_completed() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t1");
+
+        commit_task_completion("t1", &[], &store).unwrap();
+
+        assert_eq!(task_state_of(&store, "t1"), "Completed");
+        assert_eq!(count_export_snapshots(&store, "t1"), 0,
+            "empty export list must write zero snapshot rows");
+    }
+
+    #[test]
+    fn commit_task_completion_persists_export_snapshots_atomically() {
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t1");
+        let exports = vec![
+            "src/a.rs".to_owned(),
+            "src/b.rs".to_owned(),
+            "src/sub/c.rs".to_owned(),
+        ];
+
+        commit_task_completion("t1", &exports, &store).unwrap();
+
+        assert_eq!(task_state_of(&store, "t1"), "Completed");
+        assert_eq!(count_export_snapshots(&store, "t1"), 3);
+
+        // Spot-check one row to verify the path round-trips byte-equal.
+        let conn = store.lock_sync();
+        let mut paths: Vec<String> = conn
+            .prepare("SELECT path FROM task_exported_path_snapshots WHERE task_id = ?1")
+            .unwrap()
+            .query_map(rusqlite::params!["t1"], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        paths.sort();
+        assert_eq!(paths, vec!["src/a.rs", "src/b.rs", "src/sub/c.rs"]);
+    }
+
+    #[test]
+    fn commit_task_completion_is_idempotent_on_repeat_paths() {
+        // §2.5.8 line 2011: PK constraint on (task_id, path) → second
+        // attempt with identical paths is INSERT OR IGNORE no-op. The
+        // task is still in `Completed` from the first call so the
+        // second `commit_task_completion` will return Err(()) at the
+        // status guard (rows == 0); however calling it directly is
+        // operator error, not a correctness concern. Here we test the
+        // PK behaviour by inserting the *same* path twice in one call.
+        let store = Store::open_in_memory().unwrap();
+        seed_running_task(&store, "t1");
+        let exports = vec![
+            "src/a.rs".to_owned(),
+            "src/a.rs".to_owned(),  // duplicate inside the call
+        ];
+
+        commit_task_completion("t1", &exports, &store).unwrap();
+        assert_eq!(count_export_snapshots(&store, "t1"), 1,
+            "PK (task_id, path) collapses duplicates to one row");
+    }
+
+    #[test]
+    fn commit_task_completion_rejects_non_running_task() {
+        // Guard `state = 'Running'` in the UPDATE prevents
+        // double-completion races. A task that's already Completed
+        // (or Aborted) returns Err(()) — caller surfaces this as
+        // FailTaskNotRunning on the wire.
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t1");  // seeds in `Admitted` state
+
+        let result = commit_task_completion("t1", &[], &store);
+        assert!(result.is_err(),
+            "commit_task_completion must reject non-Running tasks");
+        assert_eq!(task_state_of(&store, "t1"), "Admitted",
+            "rejected commit must NOT modify the task state");
+        assert_eq!(count_export_snapshots(&store, "t1"), 0,
+            "rejected commit must NOT leak snapshot rows");
+    }
+
+    // ── read_completion_inputs — §2.5.8 step 1+2 ──────────────────────────
+
+    #[test]
+    fn read_completion_inputs_returns_null_h_bind_when_unbound() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t1");
+        let (h_bind, ranges) = read_completion_inputs("t1", &store).unwrap();
+        assert!(h_bind.is_none(),
+            "first-intent-not-yet-arrived → evaluation_sha is NULL");
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn read_completion_inputs_returns_all_recorded_ranges() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task(&store, "t1");
+        // Bind evaluation_sha directly (raw SQL — bypassing
+        // `update_task_intent_fields` so we don't have to seed a session
+        // row to satisfy the session_id FK; the helper-under-test
+        // doesn't care about session_id).
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                "UPDATE tasks SET evaluation_sha = ?1 WHERE task_id = ?2",
+                rusqlite::params!["head3", "t1"],
+            ).unwrap();
+        }
+        insert_task_intent_range("t1", "base1", "head1", &store).unwrap();
+        insert_task_intent_range("t1", "base2", "head2", &store).unwrap();
+        insert_task_intent_range("t1", "base3", "head3", &store).unwrap();
+
+        let (h_bind, mut ranges) = read_completion_inputs("t1", &store).unwrap();
+        ranges.sort();
+        assert_eq!(h_bind.as_deref(), Some("head3"));
+        assert_eq!(ranges, vec![
+            ("base1".to_owned(), "head1".to_owned()),
+            ("base2".to_owned(), "head2".to_owned()),
+            ("base3".to_owned(), "head3".to_owned()),
+        ]);
     }
 }
