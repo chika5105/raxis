@@ -12,7 +12,26 @@
 
 ## §4.1 — `raxis` Subcommands
 
-`raxis` is the operator-facing binary. All operator interactions with the kernel go through this tool. It communicates exclusively over the operator UDS (`<data_dir>/sockets/operator.sock`), performing the challenge-response handshake on every invocation.
+`raxis` is the operator-facing binary. It has two distinct surfaces:
+
+1. **Mutating subcommands** (this document, §4.1) — every command that
+   changes kernel state (`genesis`, `policy sign`, `plan submit`,
+   `plan approve`, `escalation approve`, `task abort`, `session create`,
+   `delegation grant`, `epoch advance`, `audit verify`, `audit gaps`).
+   These communicate exclusively over the operator UDS
+   (`<data_dir>/sockets/operator.sock`), performing the challenge-response
+   handshake on every invocation.
+2. **Read-only subcommands** (`cli-readonly.md` Part 5 — `status`, `top`,
+   `queue`, `log`, `inspect`, `escalations`, `sessions`, `verifiers`,
+   `witnesses`, `budget`, `policy show`, `policy diff`, `verify-chain`,
+   `explain`, `doctor`, `inbox`). These NEVER connect to the kernel
+   socket — they open `kernel.db` directly with
+   `OpenFlags::SQLITE_OPEN_READ_ONLY` and parse the audit JSONL
+   directly. The contract, schema-version-pinning rules, and the
+   `Redactable<T>` confidentiality layer are spec'd in
+   `cli-readonly.md` §5.1–5.4. Both surfaces share the `--data-dir`
+   global flag below; `--socket` is meaningful only for §4.1
+   subcommands.
 
 ### Global flags
 
@@ -22,10 +41,10 @@ raxis [--data-dir <path>] [--socket <path>] <subcommand>
 
 | Flag | Default | Description |
 |---|---|---|
-| `--data-dir` | `~/.raxis` | Kernel data directory. All relative paths are resolved from here. |
-| `--socket` | `<data_dir>/sockets/operator.sock` | Override operator socket path. |
+| `--data-dir` | `~/.raxis` | Kernel data directory. All relative paths are resolved from here. Honoured by both §4.1 and `cli-readonly.md` Part 5 subcommands. |
+| `--socket` | `<data_dir>/sockets/operator.sock` | Override operator socket path. **§4.1 subcommands only**; ignored by read-only subcommands. |
 
-All subcommands that require kernel connectivity will fail with `ERR_SOCKET_NOT_FOUND` if the operator socket does not exist (kernel not running).
+All §4.1 subcommands that require kernel connectivity will fail with `ERR_SOCKET_NOT_FOUND` if the operator socket does not exist (kernel not running). Read-only subcommands (`cli-readonly.md` Part 5) work whether the kernel is running or stopped — they read state directly from disk.
 
 ---
 

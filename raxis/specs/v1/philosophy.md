@@ -804,8 +804,8 @@ Sequence numbers enforce ordering and provide the primary replay barrier. Nonces
 
 The CLI (`raxis-cli`) has broad local power — it depends on `policy`, `crypto`, and `audit-tools`. To prevent normal operation from accidentally exercising privileged paths, CLI commands are separated into modes.
 
-**Normal mode (default):** Commands available without elevated authentication (exact subcommand set evolves — **Part 4 / `cli-ceremony.md`** is normative).
-- `raxis-cli …` — examples: status queries, `audit verify` on segment files (read-only)
+**Read-only mode (default; no kernel connectivity required):** Commands that derive every byte of their output from on-disk state (`kernel.db` opened with `SQLITE_OPEN_READ_ONLY`, `audit/segment-NNN.jsonl` parsed in-process, `runtime/heartbeat.json` read for liveness/in-memory counters). Spec'd in `cli-readonly.md` (Part 5). The full v1 catalog is `status`, `top`, `queue`, `log` (with `-f`), `inspect`, `escalations`, `sessions`, `verifiers`, `witnesses`, `budget`, `policy show`, `policy diff`, `verify-chain`, `explain`, `doctor`, `inbox`. These commands work whether the kernel is running or stopped — they NEVER connect to the kernel IPC socket.
+- `raxis status`, `raxis log -f`, `raxis explain <task_id>`, … — see `cli-readonly.md` §5.5
 
 **Operator mode** (requires operator challenge-response / operator session):
 - `raxis-cli escalation approve …` / `raxis-cli escalation deny …` — escalation lifecycle
@@ -815,6 +815,10 @@ The CLI (`raxis-cli`) has broad local power — it depends on `policy`, `crypto`
 - `raxis-cli genesis …`, epoch advance, break-glass flows as specified in `cli-ceremony.md`
 
 All bootstrap/break-glass commands are rate-limited by the kernel — the kernel's break-glass state machine enforces the cooldown and rejects repeat invocations regardless of what the CLI sends. The CLI may enforce the same limits locally as a UX convenience to avoid a round-trip, but the kernel is the sole authority; CLI-side enforcement is advisory only and must not be relied upon for security.
+
+##### Why read-only mode bypasses IPC (architectural primitive)
+
+RAXIS is local-first. The CLI binary runs on the same host as the kernel and has Unix-level access to `<data_dir>/`. Routing read queries through the kernel's IPC socket would couple every operator dashboard to a new kernel handler + IPC schema bump + audit emit — exactly the brittle, ever-growing kernel surface v1 is designed to avoid. The read-only CLI therefore opens `kernel.db` directly with `SQLITE_OPEN_READ_ONLY` (the kernel's mandatory `PRAGMA journal_mode = WAL` setup, see `kernel-store.md` §2.5.1, guarantees readers and writers never block each other) and parses the audit JSONL directly. Schema coupling is mitigated by routing every read through `raxis-store::views::*` — a typed query catalog shared with the kernel — and pinned via a compile-time `EXPECTED_SCHEMA_VERSION` check. INV-08 (path-list confidentiality) is preserved at the file-system boundary by a `Redactable<T>` redaction layer that requires explicit `--reveal-paths` AND emits an auditable `PathReadAccessed` event before returning sensitive fields. See `cli-readonly.md` §5.1 for the full architectural rationale and §5.7 for the security model.
 
 ---
 
