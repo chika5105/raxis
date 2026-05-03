@@ -12,6 +12,7 @@
 //   - Raw private key bytes are never stored in types exported from this crate.
 
 pub mod delegation;
+pub mod escalation;
 pub mod plan;
 pub mod token;
 pub mod verify;
