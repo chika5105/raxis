@@ -438,14 +438,27 @@ The gateway communicates with the kernel exclusively over the gateway UDS (`<dat
 ### Spawn model
 
 ```
-kernel bootstrap::run →
-    spawn_gateway(gateway_binary_path, gateway_process_token, gateway_socket_path)
-        → env: RAXIS_GATEWAY_TOKEN=<hex>, RAXIS_GATEWAY_SOCKET=<path>
-        → gateway connects to gateway.sock, authenticates with token
-        → kernel records gateway as ready
+kernel main.rs step 9 →
+    spawn_gateway(gateway_binary_path, gateway_process_token, gateway_socket_path, data_dir)
+        → env: RAXIS_GATEWAY_TOKEN=<64-char hex>, RAXIS_GATEWAY_SOCKET=<absolute path>,
+                RAXIS_DATA_DIR=<absolute path>, RAXIS_GATEWAY_BACKEND={mock|http}
+        → gateway loads <data_dir>/policy/policy.toml + per-provider credentials
+        → gateway connects to gateway.sock, sends GatewayMessage::GatewayReady { gateway_token }
+        → kernel records gateway as ready (Phase A.5 supervisor)
 ```
 
-The gateway token is a 32-byte CSPRNG value generated at each boot. It is not stored in SQLite — it is in-memory only. If the gateway subprocess dies and is restarted, a new token is issued.
+**Single-subprocess model.** The kernel spawns exactly **one** `raxis-gateway` subprocess. There is no pool. Tokio gives the gateway all the concurrency it needs — one task per in-flight `FetchRequest`. Even with 50+ concurrent planners issuing inference calls, the kernel multiplexes them all over the single `gateway.sock` and the gateway fans them out to the upstream APIs as concurrent async futures. There is zero architectural benefit to a pool on a single host.
+
+**Crash-and-respawn.** If the gateway panics, segfaults, or is killed by the OS (OOM), the kernel detects the closed `gateway.sock` connection and respawns it with a brand-new `gateway_process_token` (random 32 bytes). The token is in-memory only — never persisted. In-flight `FetchRequest` UUIDs whose response was lost in the crash window are returned to their planner callers as `error: "GatewayUnavailable"` (the kernel-side `gateway::*` adapter handles the bookkeeping, Phase A.5).
+
+**v1 backend constraint.** The `RAXIS_GATEWAY_BACKEND` env var selects the outbound HTTP impl. v1 ships with `mock` (canned responses, used by tests + offline development). `http` (real `reqwest`-based outbound calls) is reserved and lands in a follow-up PR; until then a gateway started with `RAXIS_GATEWAY_BACKEND=http` falls back to `mock` with a one-line warning so operators get visible feedback.
+
+**Provider-for-host derivation (v1).** The current `FetchRequest` wire shape carries no `provider_id`; the gateway derives the provider by URL hostname:
+- `kind = "Anthropic"` matches any host ending in `anthropic.com`.
+- `kind = "OpenAI"`    matches any host ending in `openai.com`.
+- All other kinds: no auto-match → `error: "UnknownProviderForHost"`.
+
+v2 will add an explicit `url_match` field per `[[providers]]` entry to make the binding declarative; until then operators wanting third-party providers MUST use one of the two known kinds OR run a fork. This rule is implemented in `gateway/src/dispatch.rs::provider_for_host` and pinned by the `dispatch::tests` module.
 
 ### `FetchRequest` wire shape (kernel → gateway)
 

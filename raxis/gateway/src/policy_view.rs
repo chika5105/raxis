@@ -1,0 +1,423 @@
+//! `PolicyView` — the gateway's read-only projection of policy.toml +
+//! provider credentials.
+//!
+//! Normative reference: `peripherals.md` §3.2 — the gateway loads
+//! policy.toml directly (not over IPC) so it can re-validate the domain
+//! allowlist and resolve provider credentials. On `EpochAdvanced` the
+//! gateway calls `load_policy_view` again and atomically swaps the new
+//! view in.
+//!
+//! Why a separate "view" instead of using `PolicyBundle` directly: the
+//! gateway only needs three slices of policy state (allowlist, providers,
+//! and per-provider credentials). A purpose-built struct keeps the API
+//! surface small AND lets the credentials live in the view (the
+//! `PolicyBundle` cannot — credentials are NOT in policy.toml; they live
+//! under `<data_dir>/providers/`).
+//!
+//! Failure model: `load_policy_view` is fail-closed. If policy.toml is
+//! missing, malformed, or any declared `[[providers]]` is missing its
+//! credentials file, this function returns an `Err`. The runtime loop
+//! then either refuses to start (boot path) or marks the view as
+//! "stale" and returns `error: "PolicyReloadFailed"` on every subsequent
+//! `FetchRequest` until the next successful reload (epoch-advance path).
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+use thiserror::Error;
+
+/// All policy state the gateway needs to validate one `FetchRequest`.
+/// Held behind an `Arc<RwLock<PolicyView>>` in the runtime loop so an
+/// `EpochAdvanced` reload can swap it without blocking in-flight tasks.
+#[derive(Debug, Clone)]
+pub struct PolicyView {
+    /// Current policy epoch — recorded for log diagnostics; the gateway
+    /// does not gate on this value but the `FetchResponse` includes it
+    /// so the kernel can detect skew between its view and ours.
+    pub epoch: u64,
+
+    /// Domain allowlist (exact-match hostnames). Populated from
+    /// `[egress] domains` in policy.toml.
+    pub egress_domains: Vec<String>,
+
+    /// Domain allowlist (glob-match patterns). Populated from
+    /// `[egress] patterns` in policy.toml.
+    pub egress_patterns: Vec<String>,
+
+    /// Provider catalogue keyed by `provider_id`. The gateway looks up
+    /// the kind + credentials when dispatching a `FetchRequest`.
+    pub providers: HashMap<String, ProviderEntryView>,
+}
+
+/// One provider's gateway-relevant config + credentials. Mirrors
+/// `raxis_policy::ProviderEntry` plus the loaded credentials file.
+#[derive(Debug, Clone)]
+pub struct ProviderEntryView {
+    pub provider_id: String,
+    pub kind: String,
+    pub inference_timeout_ms: u32,
+    pub data_fetch_timeout_ms: u32,
+    pub max_response_bytes: u64,
+    pub credentials: ProviderCredentials,
+}
+
+/// Parsed `<data_dir>/providers/<credentials_file>`. Format is
+/// intentionally minimal in v1: a single `api_key` plus optional auth
+/// header overrides. v2 will likely add per-credential rotation
+/// timestamps and a key-id to allow zero-downtime rolls.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderCredentials {
+    /// The bearer token / API key. The gateway injects this into the
+    /// outbound request via `auth_header` (default `"Authorization"`)
+    /// with `auth_prefix` (default `"Bearer "`). Never logged.
+    pub api_key: String,
+
+    /// Header name to inject the credential under. Default
+    /// `"Authorization"` — overridable for providers that use a custom
+    /// header name (e.g. Anthropic uses `x-api-key`).
+    #[serde(default = "default_auth_header")]
+    pub auth_header: String,
+
+    /// Prefix to prepend before the api_key in the header value. Default
+    /// `"Bearer "`. Set to `""` for providers that pass the key bare.
+    #[serde(default = "default_auth_prefix")]
+    pub auth_prefix: String,
+}
+
+fn default_auth_header() -> String { "Authorization".to_owned() }
+fn default_auth_prefix() -> String { "Bearer ".to_owned() }
+
+/// Fail-closed reasons `load_policy_view` can return.
+#[derive(Debug, Error)]
+pub enum PolicyViewError {
+    #[error("policy.toml load failed at {path}: {source}")]
+    PolicyLoad {
+        path: PathBuf,
+        source: raxis_policy::PolicyError,
+    },
+    #[error("provider {provider_id:?}: credentials file {path} not readable: {source}")]
+    CredentialsRead {
+        provider_id: String,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("provider {provider_id:?}: credentials file {path} malformed: {source}")]
+    CredentialsParse {
+        provider_id: String,
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("provider {provider_id:?}: credentials file {path} api_key is empty")]
+    CredentialsEmpty {
+        provider_id: String,
+        path: PathBuf,
+    },
+}
+
+/// Read the full policy view from disk. Wraps `raxis_policy::load_policy`
+/// + per-provider credentials load.
+pub fn load_policy_view(data_dir: &Path) -> Result<PolicyView, PolicyViewError> {
+    let policy_path = data_dir.join("policy/policy.toml");
+    let (bundle, _bytes, _sha) = raxis_policy::load_policy(&policy_path)
+        .map_err(|e| PolicyViewError::PolicyLoad {
+            path: policy_path.clone(),
+            source: e,
+        })?;
+
+    let providers_dir = data_dir.join("providers");
+    let mut providers = HashMap::with_capacity(bundle.providers().len());
+    for entry in bundle.providers() {
+        let path = providers_dir.join(&entry.credentials_file);
+        let creds = load_provider_credentials_inner(&path).map_err(|e| match e {
+            CredentialsLoadError::Read(io) => PolicyViewError::CredentialsRead {
+                provider_id: entry.provider_id.clone(),
+                path: path.clone(),
+                source: io,
+            },
+            CredentialsLoadError::Parse(parse) => PolicyViewError::CredentialsParse {
+                provider_id: entry.provider_id.clone(),
+                path: path.clone(),
+                source: parse,
+            },
+            CredentialsLoadError::Empty => PolicyViewError::CredentialsEmpty {
+                provider_id: entry.provider_id.clone(),
+                path: path.clone(),
+            },
+        })?;
+        providers.insert(
+            entry.provider_id.clone(),
+            ProviderEntryView {
+                provider_id: entry.provider_id.clone(),
+                kind: entry.kind.clone(),
+                inference_timeout_ms: entry.inference_timeout_ms,
+                data_fetch_timeout_ms: entry.data_fetch_timeout_ms,
+                max_response_bytes: entry.max_response_bytes,
+                credentials: creds,
+            },
+        );
+    }
+
+    Ok(PolicyView {
+        epoch: bundle.epoch(),
+        egress_domains: bundle.egress_domains().to_vec(),
+        egress_patterns: bundle.egress_patterns().to_vec(),
+        providers,
+    })
+}
+
+/// Internal credentials-load error. Public callers see the richer
+/// `PolicyViewError` variants instead, which carry the provider_id and
+/// resolved path so operator log messages are actionable.
+#[derive(Debug, Error)]
+enum CredentialsLoadError {
+    #[error(transparent)]
+    Read(std::io::Error),
+    #[error(transparent)]
+    Parse(toml::de::Error),
+    #[error("api_key is empty")]
+    Empty,
+}
+
+/// Inner credentials loader. Returns the structured error so callers
+/// can route Read / Parse / Empty separately.
+fn load_provider_credentials_inner(
+    path: &Path,
+) -> Result<ProviderCredentials, CredentialsLoadError> {
+    let bytes = std::fs::read(path).map_err(CredentialsLoadError::Read)?;
+    let s = std::str::from_utf8(&bytes).map_err(|e| {
+        // UTF-8 violation surfaces as a Read-class problem with a
+        // descriptive io::Error so the operator gets one error string.
+        CredentialsLoadError::Read(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("credentials file is not valid UTF-8: {e}"),
+        ))
+    })?;
+    let creds: ProviderCredentials =
+        toml::from_str(s).map_err(CredentialsLoadError::Parse)?;
+    if creds.api_key.is_empty() {
+        return Err(CredentialsLoadError::Empty);
+    }
+    Ok(creds)
+}
+
+/// Public, friendly wrapper used by tests + future callers that just
+/// want a single `io::Error` flavour rather than the structured enum.
+pub fn load_provider_credentials(
+    providers_dir: &Path,
+    filename: &str,
+) -> Result<ProviderCredentials, std::io::Error> {
+    let path = providers_dir.join(filename);
+    load_provider_credentials_inner(&path).map_err(|e| match e {
+        CredentialsLoadError::Read(io) => io,
+        CredentialsLoadError::Parse(parse) => std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("toml parse: {parse}"),
+        ),
+        CredentialsLoadError::Empty => std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "api_key is empty",
+        ),
+    })
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// URL allowlist check
+// ─────────────────────────────────────────────────────────────────────────
+
+impl PolicyView {
+    /// True iff the URL's hostname is allowed by either the exact-match
+    /// `egress_domains` list or any glob in `egress_patterns`.
+    ///
+    /// Returns `false` for any URL that does not parse, has no host
+    /// component, or whose host matches no entry. Fail-closed by design
+    /// (peripherals.md §3.2 "Domain allowlist re-validation").
+    pub fn is_url_allowed(&self, url: &str) -> bool {
+        let host = match extract_host(url) {
+            Some(h) => h,
+            None => return false,
+        };
+
+        if self.egress_domains.iter().any(|d| d == &host) {
+            return true;
+        }
+
+        for pat in &self.egress_patterns {
+            if glob_match(pat, &host) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+/// Extract the hostname from a URL string. We do NOT pull `url`-crate
+/// here because the surface area we need is tiny and v1 only deals with
+/// `http://` / `https://` URLs from the planner.
+fn extract_host(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://")?.1;
+    let host_with_path = after_scheme.split('/').next()?;
+    // Strip optional `:port`.
+    let host = host_with_path.split(':').next()?;
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_owned())
+    }
+}
+
+/// Single-`*`-glob matcher. `*` matches any sequence of characters
+/// (including empty). Exact matches and `*.example.com` style suffix
+/// patterns are the only forms operators use in practice.
+fn glob_match(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return value == suffix || value.ends_with(&format!(".{suffix}"));
+    }
+    if let Some(prefix) = pattern.strip_suffix(".*") {
+        return value == prefix || value.starts_with(&format!("{prefix}."));
+    }
+    pattern == value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_creds(dir: &Path, name: &str, body: &str) {
+        std::fs::write(dir.join(name), body).unwrap();
+    }
+
+    #[test]
+    fn load_credentials_with_only_api_key_uses_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_creds(tmp.path(), "p1.toml", "api_key = \"sk-test\"\n");
+        let creds = load_provider_credentials(tmp.path(), "p1.toml").unwrap();
+        assert_eq!(creds.api_key, "sk-test");
+        assert_eq!(creds.auth_header, "Authorization");
+        assert_eq!(creds.auth_prefix, "Bearer ");
+    }
+
+    #[test]
+    fn load_credentials_with_anthropic_style_overrides() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_creds(
+            tmp.path(),
+            "anthropic.toml",
+            r#"api_key = "sk-ant-..."
+auth_header = "x-api-key"
+auth_prefix = ""
+"#,
+        );
+        let creds = load_provider_credentials(tmp.path(), "anthropic.toml").unwrap();
+        assert_eq!(creds.auth_header, "x-api-key");
+        assert_eq!(creds.auth_prefix, "");
+    }
+
+    #[test]
+    fn load_credentials_rejects_empty_api_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_creds(tmp.path(), "p1.toml", "api_key = \"\"\n");
+        let err = load_provider_credentials(tmp.path(), "p1.toml").unwrap_err();
+        assert!(format!("{err}").contains("empty"));
+    }
+
+    #[test]
+    fn load_credentials_rejects_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = load_provider_credentials(tmp.path(), "missing.toml").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn load_credentials_rejects_malformed_toml() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_creds(tmp.path(), "p1.toml", "this is not toml = = =");
+        let err = load_provider_credentials(tmp.path(), "p1.toml").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    // ── extract_host ────────────────────────────────────────────────────
+
+    #[test]
+    fn extract_host_basic_https() {
+        assert_eq!(extract_host("https://api.anthropic.com/v1/messages"), Some("api.anthropic.com".to_owned()));
+    }
+    #[test]
+    fn extract_host_with_port() {
+        assert_eq!(extract_host("http://localhost:8080/foo"), Some("localhost".to_owned()));
+    }
+    #[test]
+    fn extract_host_no_path() {
+        assert_eq!(extract_host("https://api.example.com"), Some("api.example.com".to_owned()));
+    }
+    #[test]
+    fn extract_host_rejects_no_scheme() {
+        assert_eq!(extract_host("api.example.com"), None);
+    }
+    #[test]
+    fn extract_host_rejects_empty_host() {
+        assert_eq!(extract_host("https:///foo"), None);
+    }
+
+    // ── glob_match ───────────────────────────────────────────────────────
+
+    #[test]
+    fn glob_match_star_matches_everything() {
+        assert!(glob_match("*", "anything.example.com"));
+    }
+    #[test]
+    fn glob_match_star_dot_suffix() {
+        assert!(glob_match("*.example.com", "api.example.com"));
+        assert!(glob_match("*.example.com", "deep.api.example.com"));
+        assert!(glob_match("*.example.com", "example.com"),
+            "*.example.com must also match the bare suffix per common convention");
+        assert!(!glob_match("*.example.com", "evil-example.com"),
+            "byte-prefix must not match");
+    }
+    #[test]
+    fn glob_match_exact_pattern() {
+        assert!(glob_match("api.example.com", "api.example.com"));
+        assert!(!glob_match("api.example.com", "other.example.com"));
+    }
+
+    // ── PolicyView::is_url_allowed ──────────────────────────────────────
+
+    fn view_with(domains: &[&str], patterns: &[&str]) -> PolicyView {
+        PolicyView {
+            epoch: 1,
+            egress_domains: domains.iter().map(|s| s.to_string()).collect(),
+            egress_patterns: patterns.iter().map(|s| s.to_string()).collect(),
+            providers: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn allowlist_exact_match_allows() {
+        let v = view_with(&["api.openai.com"], &[]);
+        assert!(v.is_url_allowed("https://api.openai.com/v1/chat"));
+    }
+
+    #[test]
+    fn allowlist_pattern_match_allows() {
+        let v = view_with(&[], &["*.anthropic.com"]);
+        assert!(v.is_url_allowed("https://api.anthropic.com/v1/messages"));
+    }
+
+    #[test]
+    fn allowlist_no_match_rejects() {
+        let v = view_with(&["api.openai.com"], &["*.anthropic.com"]);
+        assert!(!v.is_url_allowed("https://evil.example.com/exfiltrate"));
+    }
+
+    #[test]
+    fn allowlist_rejects_unparseable_url() {
+        let v = view_with(&["api.openai.com"], &["*"]);
+        // Even with `*` allow-all, an URL we can't extract a host from
+        // is rejected — fail-closed.
+        assert!(!v.is_url_allowed("not a url"));
+        assert!(!v.is_url_allowed("https:///empty-host"));
+    }
+}

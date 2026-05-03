@@ -586,6 +586,20 @@ dependencies = [
 [[package]]
 name = "raxis-gateway"
 version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "raxis-ipc",
+ "raxis-policy",
+ "raxis-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "uuid",
+]
 
 [[package]]
 name = "raxis-genesis-tools"
