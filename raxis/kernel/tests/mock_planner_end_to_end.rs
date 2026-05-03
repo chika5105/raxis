@@ -54,7 +54,7 @@ use raxis_ipc::{read_frame, write_frame, FrameError, IpcMessage};
 use raxis_types::{
     CapabilityClass, EscalationClass, EscalationRejectionReason, EscalationRequest,
     EscalationResponse, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
-    PlannerErrorCode, RequestedEscalationScope, TaskId, TaskState,
+    PlannerErrorCode, RequestedEscalationScope, SessionId, TaskId, TaskState,
 };
 use tokio::net::UnixStream;
 use uuid::Uuid;
@@ -531,4 +531,129 @@ async fn planner_socket_survives_peer_dropping_connection_without_sending() {
 
     let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
     assert!(status.success());
+}
+
+// ---------------------------------------------------------------------------
+// Test 6 — async-safety regression guard for `handlers/intent.rs`
+//
+// **Why this test exists.** Tests 1-5 above all use `FAKE_TOKEN`, a
+// well-formed but never-issued session token. The kernel rejects them at
+// Step 1 of the 13-step pipeline (session lookup miss), which is the
+// single `lock_sync()` site that was already wrapped in
+// `tokio::task::spawn_blocking`. So those tests never exercised Steps 2+.
+//
+// Before the `intent.rs` 3-phase async/sync refactor, every other
+// `lock_sync()` site in the handler ran on a tokio worker thread and
+// would panic the runtime with
+//   "Cannot block the current thread from within a runtime"
+// the moment a real planner with a valid session token reached Step 2.
+// The connection would close, the test would observe a `FrameError::Eof`,
+// and the kernel would log a panic on stderr.
+//
+// This test pins the fix: it inserts a real session row directly into
+// `kernel.db`, then submits an `IntentRequest` carrying the matching
+// session token. The kernel must:
+//
+//   - clear Step 1 (session lookup hit),
+//   - clear Step 2 (`accept_envelope_and_advance_sequence` — the first
+//     site that panicked pre-fix),
+//   - clear Step 3 (task lookup), and
+//   - reject with a STRUCTURED `FAIL_UNKNOWN_TASK` response (because no
+//     task exists for the synthesized `task_id`).
+//
+// If the response is a structured rejection, the entire `lock_sync`
+// chain ran on a blocking-pool thread as it should. If the kernel
+// panics or the connection drops, the async-safety fix has regressed.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn intent_with_real_session_token_clears_step2_envelope_acceptance() {
+    let mut kernel = KernelInstance::bootstrap_and_spawn();
+    kernel.wait_until_ready_or_panic(READY_DEADLINE);
+
+    // Insert a real session row directly. We use rusqlite against
+    // kernel.db because the WAL mode the kernel runs in tolerates a
+    // second writer briefly, and going through the operator socket
+    // would require the full operator-signing handshake — overkill
+    // for an async-safety regression guard whose only purpose is to
+    // give Step 2 a session to find.
+    let real_token = format!(
+        "{:032x}{:032x}",
+        Uuid::new_v4().as_u128(),
+        Uuid::new_v4().as_u128(),
+    );
+    let real_session_id = SessionId::new_v4().as_str().to_owned();
+
+    let kernel_db_path = kernel.data_dir().join("kernel.db");
+    {
+        let conn = rusqlite::Connection::open(&kernel_db_path)
+            .unwrap_or_else(|e| panic!("open kernel.db at {kernel_db_path:?}: {e}"));
+        let now      = raxis_types::unix_now_secs() as i64;
+        let far_exp  = now + 86_400;
+        conn.execute(
+            "INSERT INTO sessions (
+                 session_id, role_id, session_token, lineage_id, worktree_root,
+                 fetch_quota, sequence_number, created_at, expires_at
+             ) VALUES (?1, 'planner', ?2, 'test-lineage', '/tmp/raxis-async-safety-test',
+                       10, 0, ?3, ?4)",
+            rusqlite::params![real_session_id, real_token, now, far_exp],
+        )
+        .unwrap_or_else(|e| panic!("insert session row: {e}"));
+    }
+
+    let mut planner = MockPlanner::connect(&kernel.planner_socket())
+        .await
+        .expect("connect to planner.sock");
+    let req = planner.build_intent(&real_token, IntentKind::SingleCommit);
+    let req_seq = req.sequence_number;
+
+    let reply = planner
+        .round_trip(&IpcMessage::IntentRequest(req))
+        .await
+        .unwrap_or_else(|e| {
+            panic!(
+                "kernel did not return a frame after a valid-session intent — \
+                 likely a regression of the intent-handler async-safety fix. \
+                 FrameError={e}; kernel stderr so far:\n{}",
+                kernel.captured_stderr(),
+            );
+        });
+
+    let resp = expect_intent_response(reply);
+    assert_eq!(
+        resp.sequence_number, req_seq,
+        "sequence_number must echo even on rejection",
+    );
+
+    match resp.outcome {
+        IntentOutcome::Rejected { error_code, .. } => {
+            assert_eq!(
+                error_code,
+                PlannerErrorCode::FailUnknownTask,
+                "expected FAIL_UNKNOWN_TASK (Step 3 miss), got {error_code:?}; \
+                 kernel stderr:\n{}",
+                kernel.captured_stderr(),
+            );
+        }
+        IntentOutcome::Accepted { .. } => {
+            panic!(
+                "intent was Accepted without a seeded task — unexpected, \
+                 but proves the lock_sync chain ran without panic"
+            );
+        }
+    }
+
+    // Crash-detection check: the kernel must NOT have panicked. If
+    // the async-safety fix had regressed, the spawn_blocking-less
+    // Step 2 would have panicked the worker; tokio swallows the panic
+    // but the per-connection task logs it. Look for the canonical
+    // panic message on stderr.
+    let stderr = kernel.captured_stderr();
+    assert!(
+        !stderr.contains("Cannot block the current thread from within a runtime"),
+        "kernel stderr contains the async-safety panic:\n{stderr}",
+    );
+
+    let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
+    assert!(status.success(), "kernel must exit cleanly after SIGTERM");
 }
