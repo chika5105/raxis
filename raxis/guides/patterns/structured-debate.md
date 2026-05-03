@@ -511,3 +511,25 @@ a_r1 → b_r1 → c_r1 → a_r2 → b_r2 → c_r2 → synthesizer
 
 Each agent waits for all prior agents in that round before it starts (or just for the
 immediately prior agent, for a rolling sequential structure). Both are valid DAG topologies.
+
+---
+
+## Security: What Happens If a Debate Agent Is Compromised
+
+See the dedicated guide: [`security/compromised-agent-threat-model.md`](../security/compromised-agent-threat-model.md)
+
+The short version for the debate pattern specifically:
+
+- A compromised Proposer can write adversarial content in its proposal file — but file
+  content has no execution vector. Downstream agents' actions are still gated individually
+  by the Kernel's path allowlist at intent admission. The debate can "agree" on anything;
+  the Implementer can only act within its signed path scope.
+- A compromised Proposer cannot submit Orchestrator-class intents (`ActivateSubTask`,
+  `IntegrationMerge`) — the dispatch matrix enforces this at admission.
+- A compromised Proposer VM cannot reach other VMs' filesystems, the audit store, or the
+  Kernel's policy store — VirtioFS boundaries and the absence of a virtual NIC enforce this.
+- A compromised Orchestrator cannot skip the Reviewer gate or activate tasks outside the
+  signed plan — `DEPENDENCY_NOT_MET` and `FAIL_NOT_FOUND` are Kernel-enforced state checks.
+- The genuine residual risk is simultaneous compromise of Implementer and Reviewer. Mitigations:
+  path allowlist bounds the blast radius, the audit chain is complete, and adding a panel of
+  independent Reviewers makes simultaneous compromise significantly harder.

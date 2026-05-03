@@ -27,6 +27,15 @@ when to use it and when not to.
 
 ---
 
+## Security Guides
+
+| Guide | Summary |
+|---|---|
+| **Compromised Agent Threat Model** | What happens when one agent in an initiative is compromised. Covers LLM jailbreak, prompt injection, VM process compromise, and colluding agents. | [`security/compromised-agent-threat-model.md`](security/compromised-agent-threat-model.md) |
+| **RAXIS Security Model** | Complete reference for every security mechanism in RAXIS — isolation, authentication, enforcement, audit, and credential protection with reasons and scenarios. | [`security/raxis-security-model.md`](security/raxis-security-model.md) |
+
+---
+
 ## Reading Order for New Developers
 
 1. Read [`single-executor-reviewer.md`](patterns/single-executor-reviewer.md) first — it
