@@ -270,7 +270,7 @@ mod tests {
             listener, Arc::clone(&client), fake_audit(),
         ));
         let mut stream = UnixStream::connect(&path).await.unwrap();
-        let bogus = GatewayMessage::EpochAdvanced { new_epoch_id: uuid::Uuid::new_v4() };
+        let bogus = GatewayMessage::EpochAdvanced { new_epoch_id: 42 };
         write_frame(&mut stream, &bogus).await.unwrap();
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!client.is_connected().await);

@@ -243,6 +243,10 @@ pub enum OperatorResponse {
     /// signed it, and the sweep counts from Phase 1. The CLI prints
     /// every field so a deployment audit trail can be reconstructed
     /// from operator shell history alone.
+    ///
+    /// Note: `new_epoch_id` is explicitly typed as a monotonic `u64` rather than
+    /// a UUID to strictly enforce linear time (preventing replay attacks with old
+    /// policies) and to provide human-readable sequence numbers for operators.
     EpochAdvanced {
         new_epoch_id:                u64,
         policy_sha256:               String,

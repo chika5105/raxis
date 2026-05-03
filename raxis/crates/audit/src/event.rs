@@ -313,6 +313,22 @@ pub enum AuditEventKind {
         reason: String,
         total_attempts: u32,
     },
+    /// Best-effort kernel→gateway signal (e.g. `EpochAdvanced`) failed
+    /// to deliver. Per kernel-core.md §`policy_manager.rs` Phase 3 this
+    /// MUST NOT roll back the epoch advance — the gateway's own
+    /// failure-closed contract (`peripherals.md` §3.2 "Domain allowlist
+    /// re-validation") is the second line of defence (gateway returns
+    /// `PolicyReloadFailed` until its on-disk reload succeeds).
+    ///
+    /// `signal` is the `GatewayMessage` variant short-name (e.g.
+    /// `"EpochAdvanced"`). `reason` is a stable short string from
+    /// `GatewayCallError::category()`: `"unavailable"`, `"dropped"`,
+    /// `"gateway_error"`, `"unexpected_reply"`.
+    GatewaySignalFailed {
+        signal: String,
+        new_epoch_id: Option<u64>,
+        reason: String,
+    },
 }
 
 impl AuditEventKind {
@@ -355,6 +371,7 @@ impl AuditEventKind {
             Self::GatewaySpawned { .. } => "GatewaySpawned",
             Self::GatewayCrashed { .. } => "GatewayCrashed",
             Self::GatewayQuarantined { .. } => "GatewayQuarantined",
+            Self::GatewaySignalFailed { .. } => "GatewaySignalFailed",
         }
     }
 }

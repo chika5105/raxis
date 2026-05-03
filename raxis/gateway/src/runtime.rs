@@ -156,7 +156,7 @@ pub async fn run_gateway(env: GatewayEnv) -> Result<(), GatewayRunError> {
             GatewayMessage::EpochAdvanced { new_epoch_id } => {
                 eprintln!(
                     "{{\"level\":\"info\",\"event\":\"epoch_advanced_signal\",\
-                     \"new_epoch_id\":\"{new_epoch_id}\"}}"
+                     \"new_epoch_id\":{new_epoch_id}}}"
                 );
                 match load_policy_view(&env.data_dir) {
                     Ok(new_view) => {

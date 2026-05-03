@@ -907,12 +907,17 @@ async fn handle_deny_escalation(
 ///   4. On success, return `OperatorResponse::EpochAdvanced` with
 ///      sweep counts and the artifact identity.
 ///
-/// **Phase 3 (gateway signal) is NOT yet wired here** — it lands
-/// with B.3f when `GatewayClient::notify_epoch_advanced` arrives.
-/// The gateway has its own failure-closed contract per
-/// `peripherals.md` §3.2 (re-reads policy.toml on the next
-/// FetchRequest), so the absence of the explicit signal is
-/// safety-equivalent to the spec's "best-effort" Phase 3 behaviour.
+/// **Phase 3 (gateway signal).** After a successful `advance_epoch`,
+/// fire `ctx.gateway.notify_epoch_advanced(new_epoch_id)` to nudge the
+/// gateway into reloading `policy.toml`. Per kernel-core.md
+/// §`policy_manager.rs`, this is **best-effort** — if the gateway is
+/// down, in respawn back-off, or the write fails mid-flight, we
+/// emit `AuditEventKind::GatewaySignalFailed` and return success
+/// anyway. The gateway's own failure-closed contract (returns
+/// `PolicyReloadFailed` on its next request when its on-disk
+/// allowlist is stale, peripherals.md §3.2) is the second line of
+/// defence; the operator-visible epoch advance is committed and
+/// readers already see the new bundle through the `ArcSwap`.
 async fn handle_rotate_epoch(
     policy_path:  String,
     sig_path:     String,
@@ -978,13 +983,21 @@ async fn handle_rotate_epoch(
     };
 
     match advance_result {
-        Ok(outcome) => OperatorResponse::EpochAdvanced {
-            new_epoch_id:               outcome.new_epoch_id,
-            policy_sha256:              outcome.policy_sha256,
-            signed_by_authority:        outcome.signed_by_authority,
-            n_delegations_marked_stale: outcome.n_delegations_marked_stale,
-            n_sessions_invalidated:     outcome.n_sessions_invalidated,
-            advanced_at:                outcome.advanced_at_unix_secs,
+        Ok(outcome) => {
+            // Phase 3: best-effort gateway signal. Per spec, must NOT
+            // affect the response or roll back the advance — log the
+            // outcome via `GatewaySignalFailed` and move on.
+            if let Err(e) = ctx.gateway.notify_epoch_advanced(outcome.new_epoch_id).await {
+                emit_gateway_signal_failed(ctx, "EpochAdvanced", Some(outcome.new_epoch_id), &e);
+            }
+            OperatorResponse::EpochAdvanced {
+                new_epoch_id:               outcome.new_epoch_id,
+                policy_sha256:              outcome.policy_sha256,
+                signed_by_authority:        outcome.signed_by_authority,
+                n_delegations_marked_stale: outcome.n_delegations_marked_stale,
+                n_sessions_invalidated:     outcome.n_sessions_invalidated,
+                advanced_at:                outcome.advanced_at_unix_secs,
+            }
         },
         Err(e) => {
             // Phase-distinguished audit. Phase 0 failures
@@ -1051,6 +1064,33 @@ fn emit_policy_advance_rejected(
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"PolicyAdvanceRejected\",\
              \"audit_emit_failed\":\"{e}\"}}",
+        );
+    }
+}
+
+/// Emit `AuditEventKind::GatewaySignalFailed` for a Phase 3 failure
+/// in `handle_rotate_epoch`. The reason string is stable
+/// (`GatewayCallError::category()`) so forensic tooling can group by
+/// failure mode without parsing free-form text.
+fn emit_gateway_signal_failed(
+    ctx:           &HandlerContext,
+    signal_kind:   &str,
+    new_epoch_id:  Option<u64>,
+    err:           &crate::gateway::GatewayCallError,
+) {
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::GatewaySignalFailed {
+            signal:       signal_kind.to_owned(),
+            new_epoch_id,
+            reason:       err.category().to_owned(),
+        },
+        None, None, None,
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"GatewaySignalFailed\",\
+             \"audit_emit_failed\":\"{e}\",\"signal\":\"{signal_kind}\",\
+             \"reason\":\"{}\"}}",
+            err.category(),
         );
     }
 }
@@ -1480,6 +1520,350 @@ mod escalation_dispatch_tests {
             "esc-edge".into(), Some(exactly_max), &op, &ctx,
         ).await;
         assert!(matches!(resp, OperatorResponse::EscalationDenied { .. }));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — RotateEpoch dispatcher (Phase 3 gateway-signal path).
+//
+// The bulk of the policy-advance state machine is covered by
+// `policy_manager::tests` (Phases 0-2). What we cover here is the
+// dispatcher's *Phase 3* responsibility introduced by B.3e:
+//
+//   * On successful advance, fire `GatewayClient::notify_epoch_advanced`.
+//   * If that signal fails (typical: no gateway is connected at the
+//     moment of advance), emit `AuditEventKind::GatewaySignalFailed`
+//     **and still return `OperatorResponse::EpochAdvanced`**.
+//   * If a gateway IS connected, the EpochAdvanced frame reaches the
+//     gateway side and no GatewaySignalFailed audit is emitted.
+//
+// These tests share the signed-artifact builder pattern used by
+// `policy_manager::tests` and the `KeyRegistry::for_tests_with_authority`
+// helper so the kernel-side authority pubkey matches the signing key.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod rotate_epoch_dispatch_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use ed25519_dalek::{Signer, SigningKey};
+    use raxis_audit_tools::FakeAuditSink;
+    use raxis_ipc::message::GatewayMessage;
+    use raxis_ipc::{read_frame, write_frame};
+    use raxis_policy::PolicyBundle;
+    use raxis_store::Store;
+    use tokio::net::UnixStream;
+
+    use crate::authority::keys::KeyRegistry;
+    use crate::gateway::client::GatewayClient;
+    use crate::initiatives::PlanRegistry;
+    use crate::ipc::auth::AuthenticatedOperator;
+    use crate::policy_manager;
+
+    /// Fixed authority seed → reproducible KeyRegistry across tests.
+    /// Distinct from `escalation_dispatch_tests::fixture_keypair`'s seed
+    /// to make grep-based test debugging unambiguous.
+    const AUTHORITY_SEED: [u8; 32] = [0x42u8; 32];
+
+    fn authority_keys() -> (Arc<KeyRegistry>, SigningKey) {
+        let sk = SigningKey::from_bytes(&AUTHORITY_SEED);
+        (Arc::new(KeyRegistry::for_tests_with_authority(sk.clone())), sk)
+    }
+
+    /// Build a signed `policy.toml` artifact at the requested epoch and
+    /// write it under `<data_dir>/policy/`. Returns `(policy_path, sig_path)`.
+    /// Mirrors `policy_manager::tests::write_signed_policy_artifact`.
+    fn write_signed_policy_artifact(
+        data_dir: &Path,
+        epoch:    u64,
+        sk:       &SigningKey,
+    ) -> (PathBuf, PathBuf) {
+        let policy_dir = data_dir.join("policy");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        let policy_path = policy_dir.join(format!("policy.epoch-{epoch}.toml"));
+        let sig_path    = policy_dir.join(format!("policy.epoch-{epoch}.sig"));
+
+        let auth_hex  = hex::encode(sk.verifying_key().to_bytes());
+        let qual_hex  = "b".repeat(64);
+        let op_pk_hex = "c".repeat(64);
+        let op_fp     = raxis_policy::loader::operator_pubkey_fingerprint(&op_pk_hex).unwrap();
+
+        let toml = format!(
+            "[meta]\n\
+             epoch     = {epoch}\n\
+             signed_by = \"{op_fp}\"\n\
+             signed_at = 1700000000\n\
+             \n\
+             [authority]\n\
+             authority_pubkey = \"{auth_hex}\"\n\
+             quality_pubkey   = \"{qual_hex}\"\n\
+             \n\
+             [escalation_policy]\n\
+             timeout_secs         = 3600\n\
+             window_secs          = 300\n\
+             max_per_window       = 5\n\
+             quarantine_threshold = 3\n\
+             \n\
+             [sessions]\n\
+             default_ttl_secs       = 86400\n\
+             max_ttl_secs           = 604800\n\
+             allowed_worktree_roots = [\"/tmp/raxis-rotate-epoch-tests\"]\n\
+             \n\
+             [delegations]\n\
+             max_ttl_secs = 86400\n\
+             \n\
+             [budget]\n\
+             [budget.base_cost_per_intent_kind]\n\
+             SingleCommit = 10\n\
+             \n\
+             [operators]\n\
+             [[operators.entries]]\n\
+             pubkey_fingerprint = \"{op_fp}\"\n\
+             display_name       = \"Alice\"\n\
+             pubkey_hex         = \"{op_pk_hex}\"\n\
+             permitted_ops      = [\"RotateEpoch\"]\n",
+        );
+        std::fs::write(&policy_path, toml.as_bytes()).unwrap();
+        let sig = sk.sign(toml.as_bytes());
+        std::fs::write(&sig_path, sig.to_bytes()).unwrap();
+        (policy_path, sig_path)
+    }
+
+    /// Build a `HandlerContext` rooted at `data_dir` with the supplied
+    /// `gateway`. Pre-installs the genesis policy_epoch_history row so
+    /// `advance_epoch` can move us to epoch 2.
+    ///
+    /// `async` because the genesis-row install calls `store.lock_sync()`
+    /// — synchronous DB work that would panic the tokio runtime if
+    /// called directly from an `#[tokio::test]` body.
+    async fn build_ctx(
+        data_dir: &Path,
+        sink:     Arc<FakeAuditSink>,
+        registry: Arc<KeyRegistry>,
+        gateway:  Arc<GatewayClient>,
+    ) -> Arc<HandlerContext> {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let store_for_blocking = Arc::clone(&store);
+        tokio::task::spawn_blocking(move || {
+            policy_manager::install_genesis_policy_epoch(
+                &store_for_blocking, "genesis-sha", "genesis-fp", 1,
+            ).unwrap();
+        }).await.unwrap();
+
+        let bundle = PolicyBundle::for_tests_with_operators(vec![]);
+        let policy = Arc::new(arc_swap::ArcSwap::from_pointee(bundle));
+
+        Arc::new(HandlerContext::new(
+            policy,
+            registry,
+            store,
+            sink,
+            data_dir.to_path_buf(),
+            Arc::new(PlanRegistry::new()),
+            gateway,
+        ))
+    }
+
+    fn fixture_operator() -> AuthenticatedOperator {
+        AuthenticatedOperator {
+            fingerprint:   "op-prime".to_owned(),
+            permitted_ops: vec!["RotateEpoch".into()],
+        }
+    }
+
+    // ── Phase 3 happy path: gateway IS connected ──────────────────────
+
+    #[tokio::test]
+    async fn rotate_epoch_dispatches_signal_to_connected_gateway() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (registry, sk) = authority_keys();
+        let sink  = Arc::new(FakeAuditSink::new());
+
+        // Install a fake gateway that reads the EpochAdvanced frame.
+        let (kernel_side, mut gateway_side) = UnixStream::pair().unwrap();
+        let gateway = Arc::new(GatewayClient::new());
+        gateway.install_connection(kernel_side).await;
+        let observer = tokio::spawn(async move {
+            let msg: GatewayMessage = read_frame(&mut gateway_side).await.unwrap();
+            match msg {
+                GatewayMessage::EpochAdvanced { new_epoch_id } => new_epoch_id,
+                other => panic!("expected EpochAdvanced, got {other:?}"),
+            }
+        });
+
+        let ctx = build_ctx(tmp.path(), sink.clone(), registry, gateway).await;
+        let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &sk);
+        let resp = handle_rotate_epoch(
+            pp.to_string_lossy().into_owned(),
+            sp.to_string_lossy().into_owned(),
+            &fixture_operator(),
+            &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::EpochAdvanced { new_epoch_id, .. } => {
+                assert_eq!(new_epoch_id, 2);
+            }
+            other => panic!("expected EpochAdvanced, got {other:?}"),
+        }
+        assert_eq!(observer.await.unwrap(), 2,
+            "gateway must have observed EpochAdvanced frame for the new epoch");
+
+        // PolicyEpochAdvanced fires on success; GatewaySignalFailed
+        // MUST NOT fire when the signal succeeded.
+        let kinds = sink.event_kinds();
+        assert!(kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
+            "PolicyEpochAdvanced absent: {kinds:?}");
+        assert!(!kinds.iter().any(|k| *k == "GatewaySignalFailed"),
+            "GatewaySignalFailed must NOT fire when signal delivered: {kinds:?}");
+    }
+
+    // ── Phase 3 best-effort: gateway is NOT connected ─────────────────
+
+    #[tokio::test]
+    async fn rotate_epoch_emits_gateway_signal_failed_when_no_gateway_connected() {
+        // Empty GatewayClient — `notify_epoch_advanced` returns
+        // `Unavailable`. The advance MUST still succeed; the audit
+        // event MUST be emitted.
+        let tmp = tempfile::tempdir().unwrap();
+        let (registry, sk) = authority_keys();
+        let sink    = Arc::new(FakeAuditSink::new());
+        let gateway = Arc::new(GatewayClient::new()); // never connected
+        let ctx     = build_ctx(tmp.path(), sink.clone(), registry, gateway).await;
+
+        let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &sk);
+        let resp = handle_rotate_epoch(
+            pp.to_string_lossy().into_owned(),
+            sp.to_string_lossy().into_owned(),
+            &fixture_operator(),
+            &ctx,
+        ).await;
+
+        assert!(matches!(resp, OperatorResponse::EpochAdvanced { new_epoch_id: 2, .. }),
+            "advance MUST NOT roll back when gateway is unreachable; got {resp:?}");
+
+        let events = sink.events();
+        let signal_evt = events.iter()
+            .find(|e| matches!(e.kind, raxis_audit_tools::AuditEventKind::GatewaySignalFailed { .. }))
+            .expect("GatewaySignalFailed audit event must be emitted on Phase 3 failure");
+        match &signal_evt.kind {
+            raxis_audit_tools::AuditEventKind::GatewaySignalFailed {
+                signal, new_epoch_id, reason,
+            } => {
+                assert_eq!(signal, "EpochAdvanced");
+                assert_eq!(*new_epoch_id, Some(2));
+                assert_eq!(reason, "unavailable",
+                    "category() must produce the stable wire string");
+            }
+            other => panic!("wrong audit kind: {other:?}"),
+        }
+    }
+
+    // ── Phase 0 failure: signal MUST NOT fire ─────────────────────────
+
+    #[tokio::test]
+    async fn rotate_epoch_signature_failure_does_not_signal_gateway() {
+        // If Phase 0 rejects the artifact (here: signed by an
+        // unrecognised key), neither PolicyEpochAdvanced nor any
+        // gateway signal must fire — only PolicyAdvanceRejected.
+        let tmp = tempfile::tempdir().unwrap();
+        let (registry, _good_sk) = authority_keys();
+        let other_sk = SigningKey::from_bytes(&[0x99u8; 32]);
+
+        let (kernel_side, mut gateway_side) = UnixStream::pair().unwrap();
+        let gateway = Arc::new(GatewayClient::new());
+        gateway.install_connection(kernel_side).await;
+        // Fail loudly if anything reaches the gateway side.
+        let observer = tokio::spawn(async move {
+            let _: Result<GatewayMessage, _> = read_frame(&mut gateway_side).await;
+        });
+
+        let sink = Arc::new(FakeAuditSink::new());
+        let ctx  = build_ctx(tmp.path(), sink.clone(), registry, gateway).await;
+
+        let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &other_sk);
+        let resp = handle_rotate_epoch(
+            pp.to_string_lossy().into_owned(),
+            sp.to_string_lossy().into_owned(),
+            &fixture_operator(),
+            &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::Error { code, .. } => {
+                assert_eq!(code, "FAIL_POLICY_SIGNATURE_INVALID");
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+        let kinds = sink.event_kinds();
+        assert!(kinds.iter().any(|k| *k == "PolicyAdvanceRejected"));
+        assert!(!kinds.iter().any(|k| *k == "PolicyEpochAdvanced"));
+        assert!(!kinds.iter().any(|k| *k == "GatewaySignalFailed"),
+            "no Phase 3 attempt → no GatewaySignalFailed; got: {kinds:?}");
+
+        // Best-effort: if the observer task is still pending, abort it.
+        // We deliberately do NOT block on it — if a frame *had* been
+        // sent, the assert above on `kinds` would already have failed.
+        observer.abort();
+    }
+
+    // ── connection swap mid-advance ───────────────────────────────────
+
+    #[tokio::test]
+    async fn rotate_epoch_signal_failure_reason_is_dropped_when_gateway_disconnects_mid_advance() {
+        // Connect a gateway, then drop the gateway-side socket BEFORE
+        // running advance. The pump notices EOF; by the time
+        // `notify_epoch_advanced` runs, `submit` may still be Some
+        // (briefly) — surfacing as `Dropped` — or already None
+        // (`Unavailable`). Both reasons are stable strings the audit
+        // event records verbatim. We assert one of them appears.
+        let tmp = tempfile::tempdir().unwrap();
+        let (registry, sk) = authority_keys();
+        let sink = Arc::new(FakeAuditSink::new());
+
+        let (kernel_side, gateway_side) = UnixStream::pair().unwrap();
+        let gateway = Arc::new(GatewayClient::new());
+        gateway.install_connection(kernel_side).await;
+        drop(gateway_side); // close gateway side immediately
+
+        let ctx = build_ctx(tmp.path(), sink.clone(), registry, gateway).await;
+        let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &sk);
+        let resp = handle_rotate_epoch(
+            pp.to_string_lossy().into_owned(),
+            sp.to_string_lossy().into_owned(),
+            &fixture_operator(),
+            &ctx,
+        ).await;
+
+        assert!(matches!(resp, OperatorResponse::EpochAdvanced { new_epoch_id: 2, .. }));
+
+        let events = sink.events();
+        let evt = events.iter()
+            .find(|e| matches!(e.kind, raxis_audit_tools::AuditEventKind::GatewaySignalFailed { .. }))
+            .expect("GatewaySignalFailed must fire when gateway dropped");
+        match &evt.kind {
+            raxis_audit_tools::AuditEventKind::GatewaySignalFailed { reason, .. } => {
+                assert!(reason == "dropped" || reason == "unavailable",
+                    "reason must be one of the stable failure categories; got {reason:?}");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Smoke check that the helpers we imported actually round-trip
+    /// frames — guards against the gateway-side observer test silently
+    /// reading nothing.
+    #[tokio::test]
+    async fn unix_stream_pair_can_round_trip_a_gateway_message() {
+        let (mut a, mut b) = UnixStream::pair().unwrap();
+        let h = tokio::spawn(async move {
+            write_frame(&mut a, &GatewayMessage::EpochAdvanced { new_epoch_id: 99 }).await
+        });
+        let msg: GatewayMessage = read_frame(&mut b).await.unwrap();
+        h.await.unwrap().unwrap();
+        assert!(matches!(msg, GatewayMessage::EpochAdvanced { new_epoch_id: 99 }));
     }
 }
 

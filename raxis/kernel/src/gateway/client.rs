@@ -55,7 +55,8 @@ use uuid::Uuid;
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Errors callers can see when invoking `GatewayClient::fetch`.
+/// Errors callers can see when invoking `GatewayClient::fetch` or
+/// `GatewayClient::notify_epoch_advanced`.
 #[derive(Debug, Error)]
 pub enum GatewayCallError {
     /// No gateway is currently connected (between supervisor spawn and
@@ -85,11 +86,41 @@ pub enum GatewayCallError {
     UnexpectedReply,
 }
 
+impl GatewayCallError {
+    /// Stable short-string used by `AuditEventKind::GatewaySignalFailed.reason`
+    /// and forensic tooling. Pinned by tests so the wire never drifts.
+    pub fn category(&self) -> &'static str {
+        match self {
+            GatewayCallError::Unavailable     => "unavailable",
+            GatewayCallError::Dropped         => "dropped",
+            GatewayCallError::GatewayError(_) => "gateway_error",
+            GatewayCallError::UnexpectedReply => "unexpected_reply",
+        }
+    }
+}
+
 /// One outstanding fetch waiting on the pump task.
 struct Pending {
     fetch_id: Uuid,
     payload:  GatewayMessage, // ALWAYS GatewayMessage::FetchRequest
     reply_tx: oneshot::Sender<Result<FetchResult, GatewayCallError>>,
+}
+
+/// A one-way frame the kernel pushes to the gateway with no response
+/// expected (e.g. `EpochAdvanced`). The pump writes the frame and
+/// signals the caller via `ack_tx` once the bytes are on the wire OR
+/// the write failed. We do NOT wait for any reply from the gateway —
+/// signal semantics are best-effort fire-and-forget.
+struct OneShot {
+    payload: GatewayMessage,
+    ack_tx:  oneshot::Sender<Result<(), GatewayCallError>>,
+}
+
+/// What the pump task accepts. Either an in-flight `Pending` (correlated
+/// by `fetch_id`) or a fire-and-forget `OneShot` (no `fetch_id`).
+enum PumpJob {
+    Fetch(Pending),
+    Signal(OneShot),
 }
 
 /// What we hand back to the caller on a successful `fetch_id` round trip.
@@ -123,7 +154,7 @@ struct Inner {
     expected_token: Mutex<Option<String>>,
     /// Sender into the active pump task. `None` when no gateway is
     /// connected. Dropped to terminate the pump.
-    submit:         Mutex<Option<mpsc::UnboundedSender<Pending>>>,
+    submit:         Mutex<Option<mpsc::UnboundedSender<PumpJob>>>,
 }
 
 impl GatewayClient {
@@ -158,7 +189,7 @@ impl GatewayClient {
     /// around `stream`; tears down any pre-existing pump (whose mpsc
     /// will be dropped).
     pub async fn install_connection(&self, stream: UnixStream) {
-        let (tx, rx) = mpsc::unbounded_channel::<Pending>();
+        let (tx, rx) = mpsc::unbounded_channel::<PumpJob>();
         let mut slot = self.inner.submit.lock().await;
         // Drop the prior sender if any → old pump exits → blocked
         // callers see Unavailable via `RecvError`.
@@ -220,11 +251,59 @@ impl GatewayClient {
             let Some(tx) = slot.as_ref() else {
                 return Err(GatewayCallError::Unavailable);
             };
-            tx.send(Pending { fetch_id, payload, reply_tx })
+            tx.send(PumpJob::Fetch(Pending { fetch_id, payload, reply_tx }))
                 .map_err(|_| GatewayCallError::Unavailable)?;
         }
 
         match reply_rx.await {
+            Ok(res) => res,
+            Err(_) => Err(GatewayCallError::Dropped),
+        }
+    }
+
+    /// Best-effort `EpochAdvanced` signal to the gateway.
+    ///
+    /// Lifecycle (kernel-core.md §`policy_manager.rs` Phase 3):
+    ///
+    ///   1. Caller is `handlers/operator::handle_rotate_epoch`, AFTER
+    ///      `policy_manager::advance_epoch` succeeded (Phases 0-2 are
+    ///      already committed and visible to readers).
+    ///   2. We push a `GatewayMessage::EpochAdvanced { new_epoch_id }`
+    ///      frame onto the pump. No `fetch_id`, no response expected
+    ///      — the pump signals `Ok(())` once the bytes are on the wire.
+    ///   3. Failure modes (all surface as `Err`):
+    ///      - `Unavailable` — no gateway is currently connected. The
+    ///        gateway will re-read `policy.toml` on its next handshake
+    ///        anyway (it loads at boot + on every signal), so the
+    ///        signal is naturally idempotent across respawns.
+    ///      - `Dropped` — gateway socket closed mid-write. The
+    ///        supervisor will respawn; same idempotency argument.
+    ///      - `GatewayError(_)` — the pump never produces this for a
+    ///        fire-and-forget signal (no FetchResponse to surface);
+    ///        listed for API uniformity only.
+    ///
+    /// Spec note: per kernel-core.md §`policy_manager.rs`, the caller
+    /// MUST NOT roll back the epoch advance on failure here. The
+    /// gateway's own failure-closed contract (returns
+    /// `PolicyReloadFailed` on its next request when its on-disk
+    /// allowlist is stale) is the second line of defence.
+    pub async fn notify_epoch_advanced(
+        &self,
+        new_epoch_id: u64,
+    ) -> Result<(), GatewayCallError> {
+        let payload = GatewayMessage::EpochAdvanced { new_epoch_id };
+        let (ack_tx, ack_rx) = oneshot::channel();
+
+        {
+            let slot = self.inner.submit.lock().await;
+            let Some(tx) = slot.as_ref() else {
+                return Err(GatewayCallError::Unavailable);
+            };
+            tx.send(PumpJob::Signal(OneShot { payload, ack_tx }))
+                .map_err(|_| GatewayCallError::Unavailable)?;
+        }
+
+        match ack_rx.await {
             Ok(res) => res,
             Err(_) => Err(GatewayCallError::Dropped),
         }
@@ -241,32 +320,60 @@ impl GatewayClient {
 ///
 /// Either exit reason drops `inflight`, signalling Unavailable to every
 /// pending caller via the broken oneshot.
-async fn pump(mut stream: UnixStream, mut rx: mpsc::UnboundedReceiver<Pending>) {
+async fn pump(mut stream: UnixStream, mut rx: mpsc::UnboundedReceiver<PumpJob>) {
     let mut inflight: HashMap<Uuid, oneshot::Sender<Result<FetchResult, GatewayCallError>>> =
         HashMap::new();
 
     loop {
         tokio::select! {
-            // ── outbound: a kernel caller wants to send a FetchRequest ──
-            maybe_pending = rx.recv() => {
-                let Some(pending) = maybe_pending else {
+            // ── outbound: a kernel caller wants to send a frame ─────────
+            maybe_job = rx.recv() => {
+                let Some(job) = maybe_job else {
                     // mpsc closed — a fresh connection replaced us, OR
                     // the GatewayClient was disconnected. Drain inflight
                     // and exit.
                     break;
                 };
-                inflight.insert(pending.fetch_id, pending.reply_tx);
-                if let Err(e) = write_frame(&mut stream, &pending.payload).await {
-                    eprintln!(
-                        "{{\"level\":\"warn\",\"event\":\"gateway_write_failed\",\
-                         \"reason\":\"{e}\"}}"
-                    );
-                    // Notify just this caller and exit; subsequent
-                    // sends would also fail.
-                    if let Some(reply) = inflight.remove(&pending.fetch_id) {
-                        let _ = reply.send(Err(GatewayCallError::Dropped));
+                match job {
+                    PumpJob::Fetch(pending) => {
+                        // Track the in-flight fetch BEFORE writing — if
+                        // the write succeeds and the gateway races us
+                        // with a response, we MUST already be in the map.
+                        inflight.insert(pending.fetch_id, pending.reply_tx);
+                        if let Err(e) = write_frame(&mut stream, &pending.payload).await {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\"event\":\"gateway_write_failed\",\
+                                 \"kind\":\"FetchRequest\",\"reason\":\"{e}\"}}"
+                            );
+                            // Notify just this caller and exit; subsequent
+                            // sends would also fail.
+                            if let Some(reply) = inflight.remove(&pending.fetch_id) {
+                                let _ = reply.send(Err(GatewayCallError::Dropped));
+                            }
+                            break;
+                        }
                     }
-                    break;
+                    PumpJob::Signal(one_shot) => {
+                        // Fire-and-forget: write the frame, then ack the
+                        // caller. There is no response correlation slot
+                        // — the gateway is expected to act on the signal
+                        // (e.g. reload policy_view) without writing back.
+                        match write_frame(&mut stream, &one_shot.payload).await {
+                            Ok(()) => {
+                                let _ = one_shot.ack_tx.send(Ok(()));
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "{{\"level\":\"warn\",\"event\":\"gateway_write_failed\",\
+                                     \"kind\":\"Signal\",\"reason\":\"{e}\"}}"
+                                );
+                                let _ = one_shot.ack_tx.send(Err(GatewayCallError::Dropped));
+                                // Same exit policy as a failed FetchRequest
+                                // write — the stream is now suspect.
+                                break;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -586,6 +693,114 @@ mod tests {
             "tok".into(), FetchKind::DataFetch, "https://x".into(), "GET".into(),
             vec![], vec![], 1_000, None, None,
         ).await;
+        assert!(matches!(result, Err(GatewayCallError::Unavailable)));
+    }
+
+    // ── error category strings (pinned for audit wire stability) ────────
+
+    #[test]
+    fn error_category_strings_are_stable() {
+        // GatewaySignalFailed.reason consumers (audit JSONL, raxis log
+        // forensics) key off these short strings. Pin every variant.
+        assert_eq!(GatewayCallError::Unavailable.category(), "unavailable");
+        assert_eq!(GatewayCallError::Dropped.category(),     "dropped");
+        assert_eq!(GatewayCallError::GatewayError("x".into()).category(), "gateway_error");
+        assert_eq!(GatewayCallError::UnexpectedReply.category(), "unexpected_reply");
+    }
+
+    // ── notify_epoch_advanced (Phase 3 of policy_manager::advance_epoch) ─
+
+    #[tokio::test]
+    async fn notify_epoch_advanced_returns_unavailable_when_no_gateway() {
+        let client = GatewayClient::new();
+        let result = client.notify_epoch_advanced(7).await;
+        assert!(matches!(result, Err(GatewayCallError::Unavailable)),
+            "no gateway connected ⇒ Unavailable, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn notify_epoch_advanced_writes_frame_and_returns_ok() {
+        // Spin up a fake gateway that just reads ONE frame and asserts
+        // it's the EpochAdvanced variant carrying the right epoch.
+        let (kernel_side, mut gateway_side) = UnixStream::pair().unwrap();
+        let server = tokio::spawn(async move {
+            let msg: GatewayMessage = read_frame(&mut gateway_side).await.unwrap();
+            match msg {
+                GatewayMessage::EpochAdvanced { new_epoch_id } => new_epoch_id,
+                other => panic!("expected EpochAdvanced, got {other:?}"),
+            }
+        });
+
+        let client = GatewayClient::new();
+        client.install_connection(kernel_side).await;
+
+        client.notify_epoch_advanced(42).await.expect("signal must succeed");
+        let observed = server.await.unwrap();
+        assert_eq!(observed, 42);
+    }
+
+    #[tokio::test]
+    async fn notify_epoch_advanced_does_not_block_on_concurrent_fetch_response() {
+        // Regression: the pump handles signals on the SAME mpsc as
+        // fetches, but a signal must NOT wait for any FetchResponse.
+        // We push a fetch (gateway never responds), then a signal
+        // (gateway is expected to read it). The signal must complete
+        // even though the fetch is still in flight.
+        let (kernel_side, mut gateway_side) = UnixStream::pair().unwrap();
+        let observed_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+        let observer = observed_signal.clone();
+        let server = tokio::spawn(async move {
+            // Read TWO frames: the FetchRequest then the EpochAdvanced.
+            // Neither response is sent. The fetch caller hangs (test
+            // does not await it); the signal caller MUST complete.
+            let _f1: GatewayMessage = read_frame(&mut gateway_side).await.unwrap();
+            let f2: GatewayMessage  = read_frame(&mut gateway_side).await.unwrap();
+            assert!(matches!(f2, GatewayMessage::EpochAdvanced { new_epoch_id: 9 }));
+            observer.notify_one();
+            std::future::pending::<()>().await;
+        });
+
+        let client = GatewayClient::new();
+        client.install_connection(kernel_side).await;
+
+        // Hanging fetch — we never await its handle.
+        let _hanging = dummy_fetch(client.clone(), "tok".into(), 1);
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        client.notify_epoch_advanced(9).await.expect("signal must succeed");
+        observed_signal.notified().await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn notify_epoch_advanced_returns_dropped_when_gateway_closes_mid_send() {
+        // Fake gateway that closes the socket *before* we try to write.
+        // The pump's write_frame fails → ack_tx receives Dropped.
+        let (kernel_side, gateway_side) = UnixStream::pair().unwrap();
+        drop(gateway_side); // close immediately
+
+        let client = GatewayClient::new();
+        client.install_connection(kernel_side).await;
+        // Give the pump a moment to notice EOF and exit, OR race it
+        // and let the write fail. Either path resolves to a non-Ok
+        // result.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let result = client.notify_epoch_advanced(5).await;
+        assert!(
+            matches!(result, Err(GatewayCallError::Dropped))
+            || matches!(result, Err(GatewayCallError::Unavailable)),
+            "expected Dropped or Unavailable after gateway close, got {result:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn notify_epoch_advanced_after_disconnect_is_unavailable() {
+        let (kernel_side, _gateway_side) = UnixStream::pair().unwrap();
+        let client = GatewayClient::new();
+        client.install_connection(kernel_side).await;
+        client.disconnect().await;
+        let result = client.notify_epoch_advanced(1).await;
         assert!(matches!(result, Err(GatewayCallError::Unavailable)));
     }
 }

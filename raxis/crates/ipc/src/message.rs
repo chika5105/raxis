@@ -124,10 +124,17 @@ pub enum GatewayMessage {
     },
 
     /// Signal from the kernel that the policy epoch has advanced.
-    /// Gateway must re-read policy.toml before processing the next FetchRequest.
-    /// peripherals.md §3.2 "Domain allowlist re-validation".
+    /// Gateway must re-read `policy.toml` before processing the next
+    /// `FetchRequest`. peripherals.md §3.2 "Domain allowlist re-validation"
+    /// and kernel-core.md §`policy_manager.rs` Phase 3 ("Gateway signal").
+    ///
+    /// `new_epoch_id` is the monotonic `u64` epoch counter (matches
+    /// `policy_epoch_history.epoch_id` and `meta.epoch` in `policy.toml`).
+    /// Typed as `u64` (rather than UUID) to explicitly enforce monotonicity
+    /// (preventing replay attacks of older policies) and to provide human-readable
+    /// sequence numbers for operator ergonomics (e.g. `policy_epoch: 4`).
     EpochAdvanced {
-        new_epoch_id: Uuid,
+        new_epoch_id: u64,
     },
 
     // -----------------------------------------------------------------------
