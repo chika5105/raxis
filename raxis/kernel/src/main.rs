@@ -20,6 +20,7 @@ mod gates;
 mod gateway;
 mod handlers;
 mod path_scope;
+mod policy_manager;
 
 use std::sync::Arc;
 
@@ -47,17 +48,31 @@ async fn main() {
     let bootstrap_mode = std::env::var("RAXIS_BOOTSTRAP").is_ok();
 
     // Step 2: If bootstrap mode — enter bootstrap::run(). Does not return.
+    //
+    // Bootstrap is a synchronous, ceremony-driven path that opens the
+    // kernel.db (Step 6.5: install the genesis `policy_epoch_history`
+    // row) and therefore reaches `Store::lock_sync()`. Calling
+    // `blocking_lock` from the `#[tokio::main]` thread panics with
+    // "Cannot block the current thread from within a runtime", so we
+    // delegate the entire bootstrap into `spawn_blocking`. On success
+    // bootstrap calls `std::process::exit(0)` from inside the blocking
+    // pool worker, which exits the whole process — control never
+    // returns here.
     if bootstrap_mode {
         let config = bootstrap::BootstrapConfig {
             data_dir: data_dir.clone(),
             operator_pubkey_path: std::env::var("RAXIS_OPERATOR_PUBKEY").ok().map(Into::into),
             force: std::env::var("RAXIS_FORCE").is_ok(),
         };
-        // bootstrap::run calls std::process::exit(0) on success.
-        if let Err(e) = bootstrap::run(&config) {
-            exit_with_code(e);
+        let join_outcome =
+            tokio::task::spawn_blocking(move || bootstrap::run(&config)).await;
+        match join_outcome {
+            Ok(Ok(())) => unreachable!("bootstrap::run must exit the process"),
+            Ok(Err(e)) => exit_with_code(e),
+            Err(join_err) => exit_with_code(KernelError::BootstrapFailed {
+                reason: format!("bootstrap spawn_blocking join failed: {join_err}"),
+            }),
         }
-        unreachable!("bootstrap::run must exit the process");
     }
 
     // Step 3: Load and verify signed policy artifact.

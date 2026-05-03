@@ -190,6 +190,23 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
         "{{\"level\":\"info\",\"step\":\"bootstrap\",\"action\":\"wrote policy.toml\",\"epoch\":1}}",
     );
 
+    // Step 6.5: Install the canonical `epoch_id = 1` row into
+    // `policy_epoch_history`. Per kernel-core.md §`policy_manager.rs`
+    // the genesis bootstrap is one of the two writers to this table;
+    // without this row the kernel would boot with `current_epoch = 0`,
+    // and the first `RotateEpoch` would record `epoch_id = 1` instead
+    // of `epoch_id = 2`, leaving the genesis artifact unrecorded in
+    // the policy history audit trail. The store is opened (which
+    // applies the schema migration), the row inserted via
+    // `policy_manager::install_genesis_policy_epoch` (idempotent
+    // INSERT OR IGNORE), and the connection dropped immediately so
+    // the kernel's main `Store::open` at startup gets exclusive WAL
+    // access.
+    install_genesis_policy_epoch_row(&config.data_dir, &policy_dir, &authority_pubkey)?;
+    eprintln!(
+        "{{\"level\":\"info\",\"step\":\"bootstrap\",\"action\":\"installed genesis policy_epoch_history row\",\"epoch\":1}}",
+    );
+
     // Step 7: Write genesis audit record (chain anchor).
     write_genesis_audit_record(&audit_dir, &authority_pubkey)?;
     eprintln!(
@@ -383,6 +400,56 @@ fn write_genesis_policy(
     );
 
     write_file_0644(&policy_path, policy_content.as_bytes())?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Genesis policy_epoch_history row
+// ---------------------------------------------------------------------------
+
+/// Open the kernel.db, run schema migrations, and INSERT the canonical
+/// `epoch_id = 1, triggered_by_operator = "genesis"` row into
+/// `policy_epoch_history`. Idempotent: a re-bootstrap that crashed
+/// after this row was written is treated as a no-op via INSERT OR IGNORE.
+///
+/// We re-load the just-written `policy.toml` here (instead of plumbing
+/// the bytes from `write_genesis_policy`) so the SHA-256 we record is
+/// guaranteed to match what the kernel will read at next boot — there
+/// is no in-memory short-circuit that could drift from the on-disk
+/// artifact.
+///
+/// The store handle is dropped at the end of this function so the
+/// kernel's main `Store::open` at startup gets exclusive access to
+/// the WAL file.
+fn install_genesis_policy_epoch_row(
+    data_dir: &Path,
+    policy_dir: &Path,
+    authority_vk: &VerifyingKey,
+) -> Result<(), KernelError> {
+    let policy_path = policy_dir.join("policy.toml");
+    let (_bundle, _raw_bytes, sha256_hex) =
+        raxis_policy::load_policy(&policy_path).map_err(|e| KernelError::BootstrapFailed {
+            reason: format!(
+                "cannot re-load just-written policy artifact {}: {e}",
+                policy_path.display(),
+            ),
+        })?;
+    let signed_by_authority = raxis_genesis_tools::pubkey_fingerprint(authority_vk.as_bytes());
+
+    let db_path = data_dir.join("kernel.db");
+    let store = raxis_store::Store::open(&db_path).map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("cannot open kernel.db at {}: {e}", db_path.display()),
+    })?;
+
+    crate::policy_manager::install_genesis_policy_epoch(
+        &store,
+        &sha256_hex,
+        &signed_by_authority,
+        unix_now_secs() as i64,
+    )
+    .map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("install_genesis_policy_epoch failed: {e}"),
+    })?;
     Ok(())
 }
 
@@ -758,6 +825,63 @@ mod integration {
         let ops = bundle.operators();
         assert_eq!(ops.len(), 1, "bootstrap registers exactly one operator");
         assert_eq!(ops[0].pubkey_hex, op_pk_hex);
+    }
+
+    #[test]
+    fn genesis_writes_epoch_one_into_policy_epoch_history() {
+        // Pins the bootstrap ↔ policy_manager::install_genesis_policy_epoch
+        // contract: after a successful run, the on-disk kernel.db carries
+        // exactly one row in `policy_epoch_history` with epoch_id = 1,
+        // triggered_by_operator = "genesis", and policy_sha256 equal to
+        // the hash of the genesis policy.toml on disk. Without this row
+        // the first RotateEpoch would record epoch_id = 1 instead of 2,
+        // leaving the genesis artifact unrecorded in the policy history
+        // (kernel-core.md §`policy_manager.rs` "two writers" contract).
+        let (_tmp, config, _) = fresh_bootstrap_env();
+        run_inner(&config).expect("run_inner");
+
+        let policy_path = config.data_dir.join("policy").join("policy.toml");
+        let (_b, _bytes, expected_sha) =
+            raxis_policy::load_policy(&policy_path).expect("load policy");
+
+        let store = raxis_store::Store::open(&config.data_dir.join("kernel.db"))
+            .expect("re-open kernel.db");
+        let conn = store.lock_sync();
+        let (epoch_id, sha, triggered): (i64, String, String) = conn
+            .query_row(
+                "SELECT epoch_id, policy_sha256, triggered_by_operator
+                   FROM policy_epoch_history
+                  ORDER BY epoch_id DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("policy_epoch_history must contain the genesis row");
+        assert_eq!(epoch_id, 1);
+        assert_eq!(sha, expected_sha);
+        assert_eq!(triggered, "genesis");
+    }
+
+    #[test]
+    fn genesis_install_is_idempotent_under_force_re_run() {
+        // A `--force` re-bootstrap rewrites every key + policy artifact
+        // and must NOT trip the UNIQUE(policy_sha256) constraint on the
+        // genesis row written by the previous run. The deterministic
+        // fixture key + clock means the second policy.toml hashes to the
+        // same value as the first; INSERT OR IGNORE keeps the run
+        // idempotent.
+        let (tmp, mut config, _) = fresh_bootstrap_env();
+        run_inner(&config).expect("first run");
+
+        config.force = true;
+        run_inner(&config).expect("force re-run must succeed");
+
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db"))
+            .expect("re-open kernel.db");
+        let conn = store.lock_sync();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM policy_epoch_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "genesis row must remain unique after re-run");
     }
 
     #[test]
