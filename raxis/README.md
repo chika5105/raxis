@@ -63,6 +63,36 @@ Setting up RAXIS requires you to create your secure operator identity. Because o
    ```
    *(Note: You do not need to run `raxis-gateway` manually. The kernel will automatically spawn and supervise the gateway subprocess for you.)*
 
+### 4. Planner worktree and session bootstrap
+
+In v1 the kernel **does not** create Git worktrees. The operator or an orchestrator script creates an isolated checkout, then binds that path when minting the planner session (see [`specs/v1/kernel-core.md`](specs/v1/kernel-core.md) — operator contract and [`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md) §`session create`).
+
+That separation is deliberate: branching layout, naming (`agents/…`), and cleanup stay in **your** automation; RAXIS stays agnostic beyond **`worktree_root` must resolve to a real Git worktree** and **`git -C "$wt" …` succeeds** whenever the kernel runs VCS helpers. Ensure the worktree directory’s canonical path is covered by **`[sessions] allowed_worktree_roots`** in the signed policy (see [`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md) and Session create in Part 4).
+
+For most setups this is trivial to script. A short wrapper covers the common case: pick a lineage id (UUID), add a dedicated worktree and branch under your main repo path, open a planner session with a pinned tracking ref for integration semantics:
+
+```bash
+# Example inputs: REPO="$HOME/src/myproject" lineage_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+# RAXIS_WORK=a directory Policy allows under allowed_worktree_roots (see policy.toml).
+
+wt="$RAXIS_WORK/$lineage_id"
+git -C "$REPO" worktree add "$wt" -b "agents/$lineage_id"
+raxis session create --role planner --worktree-root "$wt" \
+  --base-tracking-ref refs/heads/main --lineage-id "$lineage_id"
+```
+
+Adjust `refs/heads/main` if your pinned integration base differs. After editing policy, plans, or this repo’s code, commit and push according to your org’s workflow; the snippet above does not substitute for normal version control hygiene.
+
+### Prompt assembly — “prompt engineering” in v1 (spec level)
+
+Structural enforcement beats ad-hoc model steering. That said, **v1 does define prompt-related contracts**:
+
+- **`specs/v1/peripherals.md`** §3.1: the kernel’s **`prompt::assemble`** path builds a **system-prompt scaffold** from **kernel-owned** facts—policy epoch, session identity (including bounded **`worktree_root`**), delegation summary, initiative context—not from free‑form prose the planner chooses. Inference traffic still flows **planner → kernel → gateway** under **`INV-02A`**.
+
+- **`specs/v1/planner-api.md`**: operators (or tooling) **inject this file verbatim** into the planner system prompt as the machine-readable IPC contract—intent shapes, **`PlannerErrorCode`** remediation, escalation summary, budgets, and “must not” rules—so retries and failures stay aligned with **opaque kernel rejections** (see **`INV-08`** and the planner-feedback model in [`specs/v1/kernel-store.md`](specs/v1/kernel-store.md)).
+
+So “prompt engineering” in RAXIS v1 means **curated scaffold + verbatim API spec**, not unstructured instructions that substitute for verifier-backed gates.
+
 ---
 
 ## The Problem
