@@ -771,6 +771,50 @@ impl PolicyBundle {
             .find(|op| op.pubkey_fingerprint == fingerprint)
     }
 
+    /// Test-only constructor that builds a minimal bundle whose only
+    /// populated field is `operators`. Every other field gets a
+    /// zero/empty default. Use this when a unit test only needs
+    /// `operator_entry()` lookups (e.g. signature verification on
+    /// the operator IPC handlers) and not budgets, lanes, gates, etc.
+    ///
+    /// Gated on `debug_assertions || cfg(test)` — disappears in
+    /// release builds, mirroring the convention used by
+    /// `KeyRegistry::stub_for_tests` and the `raxis-test-support`
+    /// public surface.
+    #[cfg(any(debug_assertions, test))]
+    pub fn for_tests_with_operators(operators: Vec<OperatorEntry>) -> Self {
+        Self {
+            epoch: 0,
+            authority_pubkey_hex: String::new(),
+            quality_pubkey_hex: String::new(),
+            operators,
+            gates: Vec::new(),
+            lanes: Vec::new(),
+            role_ceilings: HashMap::new(),
+            escalation_timeout: Duration::from_secs(0),
+            escalation_window: Duration::from_secs(0),
+            escalation_max_per_window: 0,
+            escalation_quarantine_threshold: 0,
+            default_session_ttl: Duration::from_secs(0),
+            max_session_ttl: Duration::from_secs(0),
+            allowed_worktree_roots: Vec::new(),
+            max_delegation_ttl: Duration::from_secs(0),
+            gateway: None,
+            providers: Vec::new(),
+            base_cost_per_intent_kind: HashMap::new(),
+            cost_per_touched_path: 0,
+            max_cost_per_task: 0,
+            policy_sha256: String::new(),
+            signed_by: String::new(),
+            signed_at: 0,
+            claim_rules: Vec::new(),
+            claim_default_action: String::new(),
+            egress_domains: Vec::new(),
+            egress_patterns: Vec::new(),
+            egress_max_fetches_per_window: 0,
+        }
+    }
+
     // ── Gate config ─────────────────────────────────────────────────────────
 
     /// All gate definitions from `[[gates]]`.

@@ -18,8 +18,8 @@ pub mod error;
 pub mod loader;
 
 pub use bundle::{
-    GatewaySection, PolicyBundle, ProviderEntry, MAX_DATA_FETCH_TIMEOUT_MS,
-    MAX_INFERENCE_TIMEOUT_MS, MAX_RESPONSE_BYTES_CEILING,
+    GatewaySection, OperatorEntry, PolicyBundle, ProviderEntry,
+    MAX_DATA_FETCH_TIMEOUT_MS, MAX_INFERENCE_TIMEOUT_MS, MAX_RESPONSE_BYTES_CEILING,
 };
 pub use error::PolicyError;
 pub use loader::load_policy;
