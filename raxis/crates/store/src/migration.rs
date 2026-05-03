@@ -10,8 +10,32 @@
 //     the `schema_version` table.
 //   - `apply_pending` is idempotent: calling it on a fully-migrated DB
 //     is a no-op (MAX(version) check).
+//
+// ## Type-safe DDL composition (INV-STORE-03)
+//
+// Per kernel-store.md §2.5.1 INV-STORE-03 "no raw SQL table-name
+// literals", every table reference in this file's DDL is rendered
+// from `crate::Table` and every CHECK-constraint enum list is rendered
+// from the corresponding `raxis_types` enum's `ALL` (or `STORED`) array.
+// `render_migration_1_ddl` is the single point of substitution; the DDL
+// is rebuilt once per `apply_migration_1` call (negligible cost — the
+// kernel applies it at most once per boot on a fresh DB).
+//
+// **Drift safety.** Migration 1 is the historical v1 schema; its
+// rendered text MUST stay byte-identical across builds for a given
+// set of enum variants. The
+// `tests::migration_1_ddl_fingerprint_is_pinned` SHA-256 guard
+// surfaces any unintended drift in code review (e.g. an enum variant
+// silently appended without a corresponding new migration). The
+// per-enum `ALL` arrays carry "spec drift contract" doc-comments
+// pointing back at this guard so anyone touching them sees the
+// downstream impact before sending the diff for review.
 
+use crate::table::Table;
 use crate::StoreError;
+use raxis_types::{
+    DelegationStatus, EscalationStatus, InitiativeState, TaskState, WitnessResultClass,
+};
 use rusqlite::Connection;
 
 /// The current canonical schema version this build of `raxis-store`
@@ -59,7 +83,10 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
 /// `Migration` error. Centralises the failure-mode policy in one place.
 fn read_current_version(conn: &Connection) -> Result<i64, StoreError> {
     match conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        &format!(
+            "SELECT COALESCE(MAX(version), 0) FROM {schema_version}",
+            schema_version = Table::SchemaVersion.as_str(),
+        ),
         [],
         |row| row.get::<_, i64>(0),
     ) {
@@ -98,21 +125,102 @@ fn read_current_version(conn: &Connection) -> Result<i64, StoreError> {
 // ---------------------------------------------------------------------------
 
 fn apply_migration_1(conn: &Connection) -> Result<(), StoreError> {
-    conn.execute_batch(MIGRATION_1_DDL).map_err(|e| {
+    let ddl = render_migration_1_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
         StoreError::Migration(format!("migration 1 failed: {e}"))
     })
 }
 
-/// The complete v1 baseline DDL — all 19 kernel.db tables plus their indexes.
-/// Extracted verbatim from kernel-store.md §2.5.1 Parts 1–4, wrapped in a
-/// single transaction so the entire schema appears atomically.
-const MIGRATION_1_DDL: &str = "
+/// Render an `IN ('A','B','C')` value list from a slice of `as_sql_str()`
+/// outputs. The output is **just** the parenthesised value list (caller
+/// provides the surrounding `CHECK (column IN ...)` framing) so the
+/// helper composes naturally inside `format!` substitutions.
+fn check_in_list(values: &[&'static str]) -> String {
+    let mut out = String::with_capacity(values.len() * 16 + 4);
+    out.push('(');
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push('\'');
+        out.push_str(v);
+        out.push('\'');
+    }
+    out.push(')');
+    out
+}
+
+/// Convenience: render a CHECK list directly from an enum's canonical
+/// `ALL`/`STORED` constant by mapping each variant through
+/// `as_sql_str()`. Generic over a small adapter closure so callers can
+/// handle both the plain `as_sql_str()` (returns `&'static str`) and
+/// the `DelegationStatus` shape (returns `Option<&'static str>`).
+fn check_in_clause<E: Copy>(variants: &[E], to_sql: impl Fn(E) -> &'static str) -> String {
+    let mapped: Vec<&'static str> = variants.iter().copied().map(to_sql).collect();
+    check_in_list(&mapped)
+}
+
+/// The complete v1 baseline DDL — all 19 kernel.db tables plus their
+/// indexes. Extracted verbatim from kernel-store.md §2.5.1 Parts 1–4,
+/// wrapped in a single transaction so the entire schema appears
+/// atomically. Table names come from `Table::X.as_str()`; CHECK-constraint
+/// value lists come from each enum's `ALL` (or `STORED`) array — there
+/// are NO raw SQL identifier or enum-value literals in this function
+/// (kernel-store.md §2.5.1 INV-STORE-03).
+fn render_migration_1_ddl() -> String {
+    // ── Table-name substitutions (Table::X is the authoritative registry) ──
+    let schema_version              = Table::SchemaVersion.as_str();
+    let initiatives                 = Table::Initiatives.as_str();
+    let signed_plan_artifacts       = Table::SignedPlanArtifacts.as_str();
+    let sessions                    = Table::Sessions.as_str();
+    let tasks                       = Table::Tasks.as_str();
+    let task_dag_edges              = Table::TaskDagEdges.as_str();
+    let delegations                 = Table::Delegations.as_str();
+    let escalations                 = Table::Escalations.as_str();
+    let approval_tokens             = Table::ApprovalTokens.as_str();
+    let approval_proofs             = Table::ApprovalProofs.as_str();
+    let approval_token_nonces       = Table::ApprovalTokenNonces.as_str();
+    let verifier_run_tokens         = Table::VerifierRunTokens.as_str();
+    let witness_records             = Table::WitnessRecords.as_str();
+    let lane_budget_reservations    = Table::LaneBudgetReservations.as_str();
+    let lineage_rate_limits         = Table::LineageRateLimits.as_str();
+    let nonce_cache                 = Table::NonceCache.as_str();
+    let task_intent_ranges          = Table::TaskIntentRanges.as_str();
+    let task_exported_path_snapshots = Table::TaskExportedPathSnapshots.as_str();
+    let policy_epoch_history        = Table::PolicyEpochHistory.as_str();
+
+    // ── CHECK-constraint enum substitutions (raxis_types is authoritative) ─
+    let initiative_state_check = check_in_clause(&InitiativeState::ALL, InitiativeState::as_sql_str);
+    let task_state_check       = check_in_clause(&TaskState::ALL,       TaskState::as_sql_str);
+    let escalation_status_check = check_in_clause(&EscalationStatus::ALL, EscalationStatus::as_sql_str);
+    let witness_result_class_check = check_in_clause(&WitnessResultClass::ALL, WitnessResultClass::as_sql_str);
+    // `DelegationStatus::STORED` carries the subset that actually appears
+    // at-rest (kernel-store.md §2.5.1 Table 7); the runtime-derived
+    // `Expired` and synthetic `NotGranted` do NOT belong in the CHECK.
+    let delegation_status_check = check_in_clause(
+        &DelegationStatus::STORED,
+        |s| DelegationStatus::as_sql_str(s).expect("STORED variants must serialise"),
+    );
+
+    // ── DEFAULT-clause enum substitutions (newly-inserted-row state) ──────
+    // The DDL `DEFAULT '...'` clauses on `delegations.status` and
+    // `escalations.status` MUST match the canonical "newly created"
+    // variant of each FSM enum. Pulling them from the enum (rather
+    // than hard-coding 'Active' / 'Pending') closes the same drift
+    // window as the CHECK lists above.
+    let delegation_default_status = DelegationStatus::Active
+        .as_sql_str()
+        .expect("Active is a stored variant");
+    let escalation_default_status = EscalationStatus::Pending.as_sql_str();
+
+    format!(
+        "
 BEGIN EXCLUSIVE;
 
 -- ── Table 1: schema_version ──────────────────────────────────────────────────
 -- Tracks applied migrations. MAX(version) = current schema level.
 -- PRIMARY KEY prevents duplicate application.
-CREATE TABLE IF NOT EXISTS schema_version (
+CREATE TABLE IF NOT EXISTS {schema_version} (
     version     INTEGER NOT NULL PRIMARY KEY,
     applied_at  INTEGER NOT NULL
 );
@@ -120,18 +228,10 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- ── Table 2: initiatives ─────────────────────────────────────────────────────
 -- One row per initiative. State machine: Draft → ApprovedPlan → Executing →
 -- Completed | Failed | Aborted. terminal_criteria_json serialises TerminalCriteria.
-CREATE TABLE IF NOT EXISTS initiatives (
+CREATE TABLE IF NOT EXISTS {initiatives} (
     initiative_id          TEXT    NOT NULL PRIMARY KEY,
     state                  TEXT    NOT NULL
-        CHECK (state IN (
-            'Draft',
-            'ApprovedPlan',
-            'Executing',
-            'Blocked',
-            'Completed',
-            'Failed',
-            'Aborted'
-        )),
+        CHECK (state IN {initiative_state_check}),
     terminal_criteria_json TEXT    NOT NULL,
     plan_artifact_sha256   TEXT    NOT NULL,
     created_at             INTEGER NOT NULL,
@@ -141,9 +241,9 @@ CREATE TABLE IF NOT EXISTS initiatives (
 
 -- ── Table 3: signed_plan_artifacts ───────────────────────────────────────────
 -- Immutable sealed plan bytes + Ed25519 signature. One row per initiative.
-CREATE TABLE IF NOT EXISTS signed_plan_artifacts (
+CREATE TABLE IF NOT EXISTS {signed_plan_artifacts} (
     initiative_id  TEXT    NOT NULL PRIMARY KEY
-        REFERENCES initiatives(initiative_id),
+        REFERENCES {initiatives}(initiative_id),
     plan_bytes     BLOB    NOT NULL,
     plan_sig       BLOB    NOT NULL,
     stored_at      INTEGER NOT NULL
@@ -152,7 +252,7 @@ CREATE TABLE IF NOT EXISTS signed_plan_artifacts (
 -- ── Table 4: sessions ────────────────────────────────────────────────────────
 -- One row per planner/gateway/verifier session. Soft-delete only (revoked flag).
 -- sequence_number enforces INV-01 monotonic ordering.
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE IF NOT EXISTS {sessions} (
     session_id            TEXT    NOT NULL PRIMARY KEY,
     role_id               TEXT    NOT NULL,
     session_token         TEXT    NOT NULL UNIQUE,
@@ -177,29 +277,20 @@ CREATE TABLE IF NOT EXISTS sessions (
 -- ── Table 5: tasks ───────────────────────────────────────────────────────────
 -- One row per task. Inserted by approve_plan; never by the intent handler.
 -- State machine defined in kernel-core.md §2.4 task FSM.
-CREATE TABLE IF NOT EXISTS tasks (
+CREATE TABLE IF NOT EXISTS {tasks} (
     task_id                TEXT    NOT NULL PRIMARY KEY,
     initiative_id          TEXT    NOT NULL
-        REFERENCES initiatives(initiative_id),
+        REFERENCES {initiatives}(initiative_id),
     lane_id                TEXT    NOT NULL,
     state                  TEXT    NOT NULL
-        CHECK (state IN (
-            'Admitted',
-            'GatesPending',
-            'Running',
-            'Completed',
-            'Failed',
-            'Aborted',
-            'Cancelled',
-            'BlockedRecoveryPending'
-        )),
+        CHECK (state IN {task_state_check}),
     block_reason           TEXT,
     actor                  TEXT    NOT NULL,
     policy_epoch           INTEGER NOT NULL,
     admitted_at            INTEGER NOT NULL,
     transitioned_at        INTEGER NOT NULL,
     session_id             TEXT
-        REFERENCES sessions(session_id),
+        REFERENCES {sessions}(session_id),
     evaluation_sha         TEXT,
     base_sha               TEXT,
     submitted_claims_json  TEXT,
@@ -210,70 +301,63 @@ CREATE TABLE IF NOT EXISTS tasks (
 -- ── Table 6: task_dag_edges ──────────────────────────────────────────────────
 -- Directed dependency edges. predecessor_satisfied is monotonically set by
 -- store::dag::release_successors on predecessor Completed transition.
-CREATE TABLE IF NOT EXISTS task_dag_edges (
+CREATE TABLE IF NOT EXISTS {task_dag_edges} (
     initiative_id           TEXT    NOT NULL
-        REFERENCES initiatives(initiative_id),
+        REFERENCES {initiatives}(initiative_id),
     predecessor_task_id     TEXT    NOT NULL
-        REFERENCES tasks(task_id),
+        REFERENCES {tasks}(task_id),
     successor_task_id       TEXT    NOT NULL
-        REFERENCES tasks(task_id),
+        REFERENCES {tasks}(task_id),
     predecessor_satisfied   INTEGER NOT NULL DEFAULT 0
         CHECK (predecessor_satisfied IN (0, 1)),
     PRIMARY KEY (predecessor_task_id, successor_task_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_dag_edges_successor
-    ON task_dag_edges (successor_task_id);
+    ON {task_dag_edges} (successor_task_id);
 
 -- ── Table 7: delegations ─────────────────────────────────────────────────────
 -- Per-(session, capability_class) delegations. One row per pair.
 -- status: Active → StaleOnNextUse (epoch advance) → RenewalRequired (grace used).
 -- revoked_at IS NOT NULL overrides status. now() >= expires_at → Expired.
-CREATE TABLE IF NOT EXISTS delegations (
+CREATE TABLE IF NOT EXISTS {delegations} (
     delegation_id         TEXT    NOT NULL PRIMARY KEY,
     session_id            TEXT    NOT NULL
-        REFERENCES sessions(session_id),
+        REFERENCES {sessions}(session_id),
     capability_class      TEXT    NOT NULL,
     delegating_role_id    TEXT    NOT NULL,
     delegate_role_id      TEXT    NOT NULL,
     effective_from        INTEGER NOT NULL,
     expires_at            INTEGER NOT NULL,
     revoked_at            INTEGER,
-    status                TEXT    NOT NULL DEFAULT 'Active'
-        CHECK (status IN ('Active', 'StaleOnNextUse', 'RenewalRequired')),
+    status                TEXT    NOT NULL DEFAULT '{delegation_default_status}'
+        CHECK (status IN {delegation_status_check}),
     epoch_stale_set_at    INTEGER,
     operator_signature    BLOB    NOT NULL,
     UNIQUE (session_id, capability_class)
 );
 
 CREATE INDEX IF NOT EXISTS idx_delegations_session_capability
-    ON delegations (session_id, capability_class);
+    ON {delegations} (session_id, capability_class);
 
 -- ── Table 8: escalations ─────────────────────────────────────────────────────
 -- One row per planner EscalationRequest. FSM: Pending → Approved | Denied |
 -- TimedOut; Approved → TokenExpired | Consumed.
-CREATE TABLE IF NOT EXISTS escalations (
+CREATE TABLE IF NOT EXISTS {escalations} (
     escalation_id         TEXT    NOT NULL PRIMARY KEY,
     session_id            TEXT    NOT NULL
-        REFERENCES sessions(session_id),
+        REFERENCES {sessions}(session_id),
     task_id               TEXT    NOT NULL
-        REFERENCES tasks(task_id),
+        REFERENCES {tasks}(task_id),
     lineage_id            TEXT    NOT NULL,
     initiative_id         TEXT    NOT NULL
-        REFERENCES initiatives(initiative_id),
+        REFERENCES {initiatives}(initiative_id),
     class                 TEXT    NOT NULL,
     requested_scope_json  TEXT    NOT NULL,
     justification         TEXT    NOT NULL,
     idempotency_key       TEXT    NOT NULL,
-    status                TEXT    NOT NULL DEFAULT 'Pending'
-        CHECK (status IN (
-            'Pending',
-            'Approved',
-            'Denied',
-            'TimedOut',
-            'TokenExpired',
-            'Consumed'
-        )),
+    status                TEXT    NOT NULL DEFAULT '{escalation_default_status}'
+        CHECK (status IN {escalation_status_check}),
     created_at            INTEGER NOT NULL,
     timeout_at            INTEGER NOT NULL,
     resolved_at           INTEGER,
@@ -284,10 +368,10 @@ CREATE TABLE IF NOT EXISTS escalations (
 -- ── Table 9: approval_tokens ─────────────────────────────────────────────────
 -- Operator-issued single-use tokens. One per escalation.
 -- token_hash = hex SHA-256(raw_bytes); raw bytes never stored.
-CREATE TABLE IF NOT EXISTS approval_tokens (
+CREATE TABLE IF NOT EXISTS {approval_tokens} (
     approval_token_id     TEXT    NOT NULL PRIMARY KEY,
     escalation_id         TEXT    NOT NULL UNIQUE
-        REFERENCES escalations(escalation_id),
+        REFERENCES {escalations}(escalation_id),
     scope_json            TEXT    NOT NULL,
     issued_by_operator_id TEXT    NOT NULL,
     policy_epoch          INTEGER NOT NULL,
@@ -301,12 +385,12 @@ CREATE TABLE IF NOT EXISTS approval_tokens (
 
 -- ── Table 10: approval_proofs ────────────────────────────────────────────────
 -- Kernel-signed receipt written atomically when an escalated action executes.
-CREATE TABLE IF NOT EXISTS approval_proofs (
+CREATE TABLE IF NOT EXISTS {approval_proofs} (
     proof_id              TEXT    NOT NULL PRIMARY KEY,
     escalation_id         TEXT    NOT NULL UNIQUE
-        REFERENCES escalations(escalation_id),
+        REFERENCES {escalations}(escalation_id),
     approval_token_id     TEXT    NOT NULL UNIQUE
-        REFERENCES approval_tokens(approval_token_id),
+        REFERENCES {approval_tokens}(approval_token_id),
     action_hash           TEXT    NOT NULL,
     action_description_json TEXT  NOT NULL,
     action_taken_at       INTEGER NOT NULL,
@@ -316,19 +400,19 @@ CREATE TABLE IF NOT EXISTS approval_proofs (
 
 -- ── Table 11: approval_token_nonces ──────────────────────────────────────────
 -- Consumed approval token nonces. INSERT fails on PK constraint → replay rejected.
-CREATE TABLE IF NOT EXISTS approval_token_nonces (
+CREATE TABLE IF NOT EXISTS {approval_token_nonces} (
     nonce                 TEXT    NOT NULL PRIMARY KEY,
     approval_token_id     TEXT    NOT NULL
-        REFERENCES approval_tokens(approval_token_id),
+        REFERENCES {approval_tokens}(approval_token_id),
     consumed_at           INTEGER NOT NULL
 );
 
 -- ── Table 12: verifier_run_tokens ────────────────────────────────────────────
 -- Single-use verifier subprocess credentials. token_hash = hex SHA-256.
-CREATE TABLE IF NOT EXISTS verifier_run_tokens (
+CREATE TABLE IF NOT EXISTS {verifier_run_tokens} (
     verifier_run_id       TEXT    NOT NULL PRIMARY KEY,
     task_id               TEXT    NOT NULL
-        REFERENCES tasks(task_id),
+        REFERENCES {tasks}(task_id),
     gate_type             TEXT    NOT NULL,
     evaluation_sha        TEXT    NOT NULL,
     token_hash            TEXT    NOT NULL,
@@ -342,33 +426,33 @@ CREATE TABLE IF NOT EXISTS verifier_run_tokens (
 -- ── Table 13: witness_records ────────────────────────────────────────────────
 -- SQL index for the content-addressed witness blob store.
 -- result_class: DDL canonical names are Pass | Fail | Inconclusive.
-CREATE TABLE IF NOT EXISTS witness_records (
+CREATE TABLE IF NOT EXISTS {witness_records} (
     verifier_run_id       TEXT    NOT NULL PRIMARY KEY
-        REFERENCES verifier_run_tokens(verifier_run_id),
+        REFERENCES {verifier_run_tokens}(verifier_run_id),
     evaluation_sha        TEXT    NOT NULL,
     task_id               TEXT    NOT NULL
-        REFERENCES tasks(task_id),
+        REFERENCES {tasks}(task_id),
     gate_type             TEXT    NOT NULL,
     result_class          TEXT    NOT NULL
-        CHECK (result_class IN ('Pass', 'Fail', 'Inconclusive')),
+        CHECK (result_class IN {witness_result_class_check}),
     blob_sha256           TEXT    NOT NULL,
     blob_path             TEXT    NOT NULL,
     recorded_at           INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_witness_records_lookup
-    ON witness_records (evaluation_sha, task_id, gate_type, recorded_at DESC);
+    ON {witness_records} (evaluation_sha, task_id, gate_type, recorded_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_witness_records_blob_sha256
-    ON witness_records (blob_sha256);
+    ON {witness_records} (blob_sha256);
 
 -- ── Table 14: lane_budget_reservations ───────────────────────────────────────
 -- Active per-lane task budget reservations. PK = (lane_id, task_id).
 -- release_budget = DELETE WHERE lane_id = ? AND task_id = ?.
-CREATE TABLE IF NOT EXISTS lane_budget_reservations (
+CREATE TABLE IF NOT EXISTS {lane_budget_reservations} (
     lane_id               TEXT    NOT NULL,
     task_id               TEXT    NOT NULL
-        REFERENCES tasks(task_id),
+        REFERENCES {tasks}(task_id),
     reserved_cost         INTEGER NOT NULL,
     reserved_at           INTEGER NOT NULL,
     PRIMARY KEY (lane_id, task_id)
@@ -377,7 +461,7 @@ CREATE TABLE IF NOT EXISTS lane_budget_reservations (
 -- ── Table 15: lineage_rate_limits ────────────────────────────────────────────
 -- Per-lineage escalation rate-limit state.
 -- quarantined=1 → lineage cannot submit new escalations.
-CREATE TABLE IF NOT EXISTS lineage_rate_limits (
+CREATE TABLE IF NOT EXISTS {lineage_rate_limits} (
     lineage_id              TEXT    NOT NULL PRIMARY KEY,
     window_start            INTEGER NOT NULL,
     escalation_count        INTEGER NOT NULL DEFAULT 0,
@@ -390,9 +474,9 @@ CREATE TABLE IF NOT EXISTS lineage_rate_limits (
 -- ── Table 16: nonce_cache ────────────────────────────────────────────────────
 -- Per-session IPC envelope nonce dedup. Enforces INV-01 check (B).
 -- UNIQUE(session_id, envelope_nonce) → duplicate delivery rejected.
-CREATE TABLE IF NOT EXISTS nonce_cache (
+CREATE TABLE IF NOT EXISTS {nonce_cache} (
     session_id            TEXT    NOT NULL
-        REFERENCES sessions(session_id),
+        REFERENCES {sessions}(session_id),
     sequence_num          INTEGER NOT NULL,
     envelope_nonce        TEXT    NOT NULL,
     observed_at           INTEGER NOT NULL,
@@ -401,13 +485,13 @@ CREATE TABLE IF NOT EXISTS nonce_cache (
 );
 
 CREATE INDEX IF NOT EXISTS idx_nonce_cache_observed_at
-    ON nonce_cache (observed_at);
+    ON {nonce_cache} (observed_at);
 
 -- ── Table 17: task_intent_ranges ─────────────────────────────────────────────
 -- Per-intent VCS diff range log for a task. Input for CompleteTask path check.
 -- PK(task_id, head_sha) makes same-SHA retries idempotent.
-CREATE TABLE IF NOT EXISTS task_intent_ranges (
-    task_id     TEXT    NOT NULL REFERENCES tasks(task_id),
+CREATE TABLE IF NOT EXISTS {task_intent_ranges} (
+    task_id     TEXT    NOT NULL REFERENCES {tasks}(task_id),
     base_sha    TEXT    NOT NULL,
     head_sha    TEXT    NOT NULL,
     accepted_at INTEGER NOT NULL,
@@ -415,25 +499,25 @@ CREATE TABLE IF NOT EXISTS task_intent_ranges (
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_intent_ranges_task_id
-    ON task_intent_ranges (task_id);
+    ON {task_intent_ranges} (task_id);
 
 -- ── Table 18: task_exported_path_snapshots ───────────────────────────────────
 -- Pre-computed path export for successor effective_allow computation.
 -- Populated only for tasks with path_export_to_successors = true.
-CREATE TABLE IF NOT EXISTS task_exported_path_snapshots (
-    task_id TEXT NOT NULL REFERENCES tasks(task_id),
+CREATE TABLE IF NOT EXISTS {task_exported_path_snapshots} (
+    task_id TEXT NOT NULL REFERENCES {tasks}(task_id),
     path    TEXT NOT NULL,
     PRIMARY KEY (task_id, path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_task_exported_path_snapshots_task_id
-    ON task_exported_path_snapshots (task_id);
+    ON {task_exported_path_snapshots} (task_id);
 
 -- ── Table 19: policy_epoch_history ───────────────────────────────────────────
 -- Append-only ledger of policy epoch advances plus genesis epoch.
 -- MAX(epoch_id) = current policy epoch.
 -- policy_sha256 UNIQUE prevents re-inserting the same artifact.
-CREATE TABLE IF NOT EXISTS policy_epoch_history (
+CREATE TABLE IF NOT EXISTS {policy_epoch_history} (
     epoch_id              INTEGER NOT NULL PRIMARY KEY,
     policy_sha256         TEXT    NOT NULL UNIQUE,
     signed_by_authority   TEXT    NOT NULL,
@@ -442,14 +526,16 @@ CREATE TABLE IF NOT EXISTS policy_epoch_history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_policy_epoch_history_advanced_at
-    ON policy_epoch_history (advanced_at);
+    ON {policy_epoch_history} (advanced_at);
 
 -- ── Record this migration ─────────────────────────────────────────────────────
-INSERT OR IGNORE INTO schema_version (version, applied_at)
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (1, strftime('%s', 'now'));
 
 COMMIT;
-";
+"
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -473,10 +559,14 @@ mod tests {
         assert_eq!(v, 1, "schema_version should be 1 after first apply");
 
         // Spot-check: a representative table exists post-migration.
+        // We use `Table::Tasks.as_str()` here too — keeping the test
+        // consistent with the production INV-STORE-03 contract.
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tasks'",
-                [],
+                &format!(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                ),
+                [Table::Tasks.as_str()],
                 |r| r.get(0),
             )
             .unwrap();
@@ -494,7 +584,11 @@ mod tests {
 
         // Exactly one row in schema_version (PK on `version` enforces this).
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 1);
     }
@@ -505,9 +599,10 @@ mod tests {
     #[test]
     fn empty_schema_version_table_reads_as_zero() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE schema_version (version INTEGER NOT NULL PRIMARY KEY, applied_at INTEGER NOT NULL);",
-        )
+        conn.execute_batch(&format!(
+            "CREATE TABLE {} (version INTEGER NOT NULL PRIMARY KEY, applied_at INTEGER NOT NULL);",
+            Table::SchemaVersion.as_str(),
+        ))
         .unwrap();
 
         assert_eq!(
@@ -528,8 +623,11 @@ mod tests {
         // `SELECT MAX(version) FROM schema_version` will fail with
         // "no such column: version", which is NOT "no such table" and
         // therefore must propagate.
-        conn.execute_batch("CREATE TABLE schema_version (vers INTEGER, applied_at INTEGER);")
-            .unwrap();
+        conn.execute_batch(&format!(
+            "CREATE TABLE {} (vers INTEGER, applied_at INTEGER);",
+            Table::SchemaVersion.as_str(),
+        ))
+        .unwrap();
 
         let err = read_current_version(&conn).unwrap_err();
         match err {
@@ -556,24 +654,227 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         // Insert minimum-FK chain so we have a tasks row to look for.
-        conn.execute_batch(
-            "INSERT INTO initiatives (initiative_id, state, terminal_criteria_json,
+        // Use `Table` enum + `as_sql_str` to keep test SQL aligned with
+        // production INV-STORE-03 contract.
+        let initiatives_t = Table::Initiatives.as_str();
+        let tasks_t       = Table::Tasks.as_str();
+        let draft         = InitiativeState::Draft.as_sql_str();
+        let admitted      = TaskState::Admitted.as_sql_str();
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives_t} (initiative_id, state, terminal_criteria_json,
                                        plan_artifact_sha256, created_at)
-             VALUES ('init-1', 'Draft', '{}', 'deadbeef', 0);
-             INSERT INTO tasks (task_id, initiative_id, lane_id, state, actor,
+             VALUES ('init-1', '{draft}', '{{}}', 'deadbeef', 0);
+             INSERT INTO {tasks_t} (task_id, initiative_id, lane_id, state, actor,
                                 policy_epoch, admitted_at, transitioned_at)
-             VALUES ('task-1', 'init-1', 'default', 'Admitted', 'planner',
+             VALUES ('task-1', 'init-1', 'default', '{admitted}', 'planner',
                      1, 0, 0);",
-        )
+        ))
         .unwrap();
 
         apply_pending(&conn).unwrap();
 
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM tasks WHERE task_id='task-1'", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {tasks_t} WHERE task_id='task-1'"),
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 1, "tasks row must survive a second apply_pending");
+    }
+
+    // ── Type-safe DDL composition guards (INV-STORE-03) ──────────────────────
+
+    /// `check_in_list` produces the exact `'A', 'B', 'C'` shape the
+    /// CHECK constraint syntax expects. Pin the format so a future
+    /// "let's prettify" refactor doesn't accidentally produce
+    /// `('A','B')` or `[A,B,C]` — both of which compile but mean
+    /// nothing useful inside `CHECK (col IN ...)`.
+    #[test]
+    fn check_in_list_uses_single_quoted_comma_space_format() {
+        let got = check_in_list(&["Pass", "Fail", "Inconclusive"]);
+        assert_eq!(got, "('Pass', 'Fail', 'Inconclusive')");
+    }
+
+    /// `check_in_list` of a single value still emits a valid
+    /// parenthesised list (no trailing comma, no missing parens).
+    #[test]
+    fn check_in_list_handles_single_value() {
+        assert_eq!(check_in_list(&["Only"]), "('Only')");
+    }
+
+    /// All five enum-driven CHECK clauses emit the exact strings the
+    /// kernel-store.md §2.5.1 DDL requires. Locks the rendered shape
+    /// in code review so a downstream refactor that reorders an enum
+    /// or renames a variant fails this test BEFORE the migration
+    /// hash test below — giving a precise diff in the failure message.
+    #[test]
+    fn enum_driven_check_clauses_match_v1_spec() {
+        // initiatives.state — kernel-store.md §2.5.1 Table 2.
+        assert_eq!(
+            check_in_clause(&InitiativeState::ALL, InitiativeState::as_sql_str),
+            "('Draft', 'ApprovedPlan', 'Executing', 'Blocked', \
+              'Completed', 'Failed', 'Aborted')"
+                .replace("              ", ""),
+        );
+        // tasks.state — kernel-store.md §2.5.1 Table 5.
+        assert_eq!(
+            check_in_clause(&TaskState::ALL, TaskState::as_sql_str),
+            "('Admitted', 'GatesPending', 'Running', 'Completed', \
+              'Failed', 'Aborted', 'Cancelled', 'BlockedRecoveryPending')"
+                .replace("              ", ""),
+        );
+        // delegations.status — only STORED variants. kernel-store.md Table 7.
+        assert_eq!(
+            check_in_clause(
+                &DelegationStatus::STORED,
+                |s| DelegationStatus::as_sql_str(s).expect("STORED variants must serialise"),
+            ),
+            "('Active', 'StaleOnNextUse', 'RenewalRequired')",
+        );
+        // escalations.status — kernel-store.md §2.5.1 Table 9.
+        assert_eq!(
+            check_in_clause(&EscalationStatus::ALL, EscalationStatus::as_sql_str),
+            "('Pending', 'Approved', 'Denied', 'TimedOut', \
+              'TokenExpired', 'Consumed')"
+                .replace("              ", ""),
+        );
+        // witness_records.result_class — kernel-store.md §2.5.1 Table 13.
+        assert_eq!(
+            check_in_clause(&WitnessResultClass::ALL, WitnessResultClass::as_sql_str),
+            "('Pass', 'Fail', 'Inconclusive')",
+        );
+    }
+
+    /// All 19 v1 tables created by Migration 1 are reachable through
+    /// the `Table` enum — i.e. there are no DDL-only tables that would
+    /// be invisible to the kernel's INV-STORE-03 type-safe accessors.
+    #[test]
+    fn all_v1_tables_are_in_table_enum() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master \
+                 WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+            )
+            .unwrap();
+        let observed: std::collections::BTreeSet<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let expected: std::collections::BTreeSet<String> = [
+            Table::SchemaVersion,
+            Table::Initiatives,
+            Table::SignedPlanArtifacts,
+            Table::Sessions,
+            Table::Tasks,
+            Table::TaskDagEdges,
+            Table::Delegations,
+            Table::Escalations,
+            Table::ApprovalTokens,
+            Table::ApprovalProofs,
+            Table::ApprovalTokenNonces,
+            Table::VerifierRunTokens,
+            Table::WitnessRecords,
+            Table::LaneBudgetReservations,
+            Table::LineageRateLimits,
+            Table::NonceCache,
+            Table::TaskIntentRanges,
+            Table::TaskExportedPathSnapshots,
+            Table::PolicyEpochHistory,
+        ]
+        .iter()
+        .map(|t| t.as_str().to_owned())
+        .collect();
+
+        assert_eq!(
+            observed, expected,
+            "set of tables created by Migration 1 must equal `Table` enum (INV-STORE-03)",
+        );
+    }
+
+    /// Hash-pin the rendered Migration 1 DDL.
+    ///
+    /// **Why this test exists.** Migration 1 is the historical v1
+    /// schema; once a database has been migrated to v1 it never
+    /// re-runs Migration 1, so changing this DDL silently is a real
+    /// risk: fresh installs would get a different schema than already-
+    /// installed databases. By pinning the SHA-256 here we force any
+    /// change — whether intentional (you bumped a `Self::ALL` array,
+    /// renamed a table, fixed a comment) or accidental (a
+    /// reformatter touched the heredoc) — to surface in code review.
+    ///
+    /// **What to do when this test fails.**
+    ///
+    ///   1. Inspect the diff against the previous Migration 1 DDL.
+    ///   2. If the change is *cosmetic only* (whitespace, comment),
+    ///      update the pinned hash in this test.
+    ///   3. If the change is *structural* (new column, new CHECK
+    ///      value, table renamed), DO NOT just update the hash —
+    ///      add a NEW migration (`apply_migration_2`) that ALTERs
+    ///      already-installed databases to match. Migration 1 is a
+    ///      historical record; its rendered output should change
+    ///      only when intentional.
+    #[test]
+    fn migration_1_ddl_fingerprint_is_pinned() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let ddl = render_migration_1_ddl();
+        let mut hasher = DefaultHasher::new();
+        ddl.hash(&mut hasher);
+        let observed = hasher.finish();
+
+        // Pinned fingerprint of the v1 baseline DDL after the
+        // INV-STORE-03 type-safe-rendering refactor. If you intend to
+        // change Migration 1, see the "What to do when this test
+        // fails" guidance in this test's doc comment.
+        const PINNED: u64 = MIGRATION_1_DDL_PINNED_HASH;
+
+        assert_eq!(
+            observed, PINNED,
+            "Migration 1 DDL drifted from the pinned hash. \
+             If this is intentional and cosmetic-only, update PINNED \
+             to {observed:#x}. If this is a structural schema change, \
+             add a new migration_2 instead — see test doc comment.",
+        );
+    }
+
+    /// Pinned hash of the v1 baseline DDL produced by
+    /// `render_migration_1_ddl()`. Captured on a 64-bit Unix host
+    /// after the INV-STORE-03 type-safe-rendering refactor landed.
+    ///
+    /// **Stability contract.** `DefaultHasher` is a `SipHash` with a
+    /// fixed initial state; the digest is deterministic across
+    /// builds and platforms FOR A GIVEN STD LIBRARY VERSION. If a
+    /// future Rust release bumps the hasher's seed (rare but
+    /// possible), this constant will need a one-time refresh.
+    /// That refresh is itself a "cosmetic-only" change and does NOT
+    /// require a new migration.
+    const MIGRATION_1_DDL_PINNED_HASH: u64 = 0xe3ec_727b_574e_cb66;
+
+    /// Variant counts of every enum the DDL renders are pinned. A
+    /// future PR that adds a new `TaskState` variant (etc.) MUST
+    /// touch both this test AND a new migration that ALTERs the
+    /// already-installed CHECK constraint — the count assertion
+    /// makes the first half visible at the test level so a reviewer
+    /// notices the schema-touching change before the hash assertion
+    /// above does.
+    #[test]
+    fn enum_variant_counts_are_pinned_to_v1() {
+        assert_eq!(InitiativeState::ALL.len(), 7,
+            "InitiativeState v1 has 7 variants; bumping this requires migration_2");
+        assert_eq!(TaskState::ALL.len(), 8,
+            "TaskState v1 has 8 variants; bumping this requires migration_2");
+        assert_eq!(EscalationStatus::ALL.len(), 6,
+            "EscalationStatus v1 has 6 variants; bumping this requires migration_2");
+        assert_eq!(WitnessResultClass::ALL.len(), 3,
+            "WitnessResultClass v1 has 3 variants; bumping this requires migration_2");
+        assert_eq!(DelegationStatus::STORED.len(), 3,
+            "DelegationStatus v1 STORED has 3 variants; bumping this requires migration_2");
     }
 }
