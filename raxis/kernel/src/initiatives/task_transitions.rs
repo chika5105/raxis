@@ -12,7 +12,7 @@
 // No raw string literals for enum values — the compiler catches misspellings.
 
 use raxis_store::{Store, Table};
-use raxis_types::TaskState;
+use raxis_types::{unix_now_secs, TaskState};
 
 use crate::initiatives::LifecycleError;
 
@@ -41,7 +41,7 @@ pub fn transition_task(
     store:        &Store,
 ) -> Result<(), LifecycleError> {
     let conn = store.lock_sync();
-    let now  = now_unix_secs();
+    let now  = unix_now_secs();
 
     // Load current state string and parse it through the enum.
     let current_state_str: String = conn.query_row(
@@ -146,13 +146,6 @@ fn is_legal_transition(from: &TaskState, to: &TaskState) -> bool {
         // All other transitions are illegal (terminal states have no outbound edges)
         _ => false,
     }
-}
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 // ---------------------------------------------------------------------------

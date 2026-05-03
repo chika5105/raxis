@@ -7,7 +7,7 @@
 //   - State strings: use `TaskState::X.as_sql_str()` — no raw "'Admitted'" etc.
 
 use raxis_store::{Store, Table};
-use raxis_types::TaskState;
+use raxis_types::{unix_now_secs, TaskState};
 
 use crate::scheduler::SchedulerError;
 
@@ -141,7 +141,7 @@ pub fn next_ready_tasks(
 pub fn transition_to_admitted(task_id: &str, store: &Store) -> Result<(), SchedulerError> {
     let to_state   = TaskState::Admitted.as_sql_str();
     let from_state = TaskState::GatesPending.as_sql_str();
-    let now        = now_unix_secs();
+    let now        = unix_now_secs();
 
     let conn = store.lock_sync();
     let rows = conn.execute(
@@ -164,7 +164,7 @@ pub fn transition_to_admitted(task_id: &str, store: &Store) -> Result<(), Schedu
 pub fn mark_task_complete(task_id: &str, store: &Store) -> Result<(), SchedulerError> {
     let completed      = TaskState::Completed.as_sql_str();
     let terminal_not_in = terminal_states_not_in_sql();
-    let now            = now_unix_secs();
+    let now            = unix_now_secs();
 
     let conn = store.lock_sync();
     let rows = conn.execute(
@@ -200,11 +200,4 @@ fn terminal_states_not_in_sql() -> String {
     .map(|s| format!("'{}'", s.as_sql_str()))
     .collect::<Vec<_>>()
     .join(", ")
-}
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }

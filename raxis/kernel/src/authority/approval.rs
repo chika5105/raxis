@@ -18,6 +18,7 @@
 
 use crate::authority::keys::AuthorityError;
 use raxis_store::Store;
+use raxis_types::unix_now_secs;
 
 /// A signed approval token received from the operator.
 /// All fields are validated before any policy decision.
@@ -117,7 +118,7 @@ pub fn validate_approval_token(
     ).map_err(|_| AuthorityError::SignatureInvalid)?;
 
     // Step 2: Expiry.
-    let now = now_unix_secs();
+    let now = unix_now_secs();
     let expires_at = token.issued_at + token.valid_for_secs as i64;
     if now > expires_at {
         return Ok(ApprovalStatus::Expired);
@@ -169,7 +170,7 @@ pub fn revoke_approval(
     revoked_by: &str,
     store: &Store,
 ) -> Result<(), AuthorityError> {
-    let now = now_unix_secs();
+    let now = unix_now_secs();
     let conn = store.lock_sync();
     conn.execute(
         "INSERT OR IGNORE INTO approval_revocations
@@ -225,11 +226,4 @@ fn approval_signing_input(token: &ApprovalToken) -> Vec<u8> {
         scope_json,
     )
     .into_bytes()
-}
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }

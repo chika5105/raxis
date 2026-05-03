@@ -17,7 +17,7 @@
 //                 before the row is written (raxis-crypto::delegation::verify_delegation).
 
 use raxis_store::Store;
-use raxis_types::{CapabilityClass, DelegationStatus, SessionId};
+use raxis_types::{unix_now_secs, CapabilityClass, DelegationStatus, SessionId};
 
 use crate::authority::keys::AuthorityError;
 
@@ -67,7 +67,7 @@ pub fn grant_delegation(
         });
     }
 
-    let now = now_unix_secs();
+    let now = unix_now_secs();
     let expires_at = now + ttl_secs as i64;
 
     // INV-DELEG-04: Verify Ed25519 signature on canonical signing input.
@@ -135,7 +135,7 @@ pub fn check_capability(
     store: &Store,
 ) -> Result<DelegationStatus, AuthorityError> {
     let conn = store.lock_sync();
-    let now = now_unix_secs();
+    let now = unix_now_secs();
     // Query any row for (session_id, capability) — including expired.
     let result = conn.query_row(
         "SELECT status, expires_at FROM delegations
@@ -243,13 +243,3 @@ pub fn mark_stale_on_epoch_advance(
     Ok(rows)
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}

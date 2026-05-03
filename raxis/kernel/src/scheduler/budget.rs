@@ -13,7 +13,7 @@ use std::path::PathBuf;
 
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
-use raxis_types::IntentKind;
+use raxis_types::{unix_now_secs, IntentKind};
 
 use crate::scheduler::{BudgetError, SchedulerError};
 use crate::scheduler::lane::get_lane_status;
@@ -71,7 +71,7 @@ pub fn consume_budget(
     store: &Store,
 ) -> Result<(), SchedulerError> {
     let conn = store.lock_sync();
-    let now = now_unix_secs();
+    let now = unix_now_secs();
     conn.execute(
         "INSERT OR IGNORE INTO lane_budget_reservations
             (lane_id, task_id, reserved_cost, reserved_at)
@@ -144,13 +144,6 @@ fn intent_kind_to_str(kind: &IntentKind) -> &'static str {
         IntentKind::CompleteTask => "CompleteTask",
         IntentKind::ReportFailure => "ReportFailure",
     }
-}
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 // ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@
 use std::path::Path;
 
 use raxis_store::{Store, Table};
-use raxis_types::TaskState;
+use raxis_types::{unix_now_secs, TaskState};
 
 use crate::errors::KernelError;
 
@@ -210,7 +210,7 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     let mut report = ReconciliationReport::default();
 
     let mut conn = store.lock_sync();
-    let now      = now_unix_secs();
+    let now      = unix_now_secs();
 
     let blocked  = TaskState::BlockedRecoveryPending.as_sql_str();
     let terminal = terminal_task_states_sql();
@@ -301,13 +301,6 @@ fn terminal_task_states_sql() -> String {
     .join(", ")
 }
 
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
 // ---------------------------------------------------------------------------
 // Tests — reconcile_tasks atomicity (INV-STORE-02)
 // ---------------------------------------------------------------------------
@@ -325,7 +318,7 @@ mod tests {
     /// has something to sweep. Returns nothing; the caller queries the store.
     fn seed_in_flight_tasks(store: &Store, task_states: &[(&str, TaskState)]) {
         let conn = store.lock_sync();
-        let now = now_unix_secs();
+        let now = unix_now_secs();
 
         conn.execute(
             "INSERT INTO initiatives
@@ -350,7 +343,7 @@ mod tests {
     /// Column set per kernel-store.md §2.5.1 Table 12.
     fn seed_live_token(store: &Store, run_id: &str, task_id: &str) {
         let conn = store.lock_sync();
-        let now = now_unix_secs();
+        let now = unix_now_secs();
         conn.execute(
             "INSERT INTO verifier_run_tokens
                 (verifier_run_id, task_id, gate_type, evaluation_sha,

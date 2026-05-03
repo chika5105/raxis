@@ -20,6 +20,7 @@
 
 use raxis_store::{Store, Table};
 use raxis_crypto::token::{generate_verifier_token, sha256_hex};
+use raxis_types::unix_now_secs;
 
 use crate::authority::keys::AuthorityError;
 
@@ -41,7 +42,7 @@ pub fn issue_verifier_token(
     // RNG failure aborts issuance; we never persist a verifier-run-token row
     // whose `token_hash` was derived from a degraded random source.
     let (raw_token, token_hash) = generate_verifier_token()?;
-    let now        = now_unix_secs();
+    let now        = unix_now_secs();
     let expires_at = now + ttl_secs as i64;
 
     // DDL Table 12 PKs on verifier_run_id; issue_verifier_token receives run_id
@@ -79,7 +80,7 @@ pub fn validate_verifier_token(
     // `TokenMismatch` — the verifier presented something that is not a token.
     let raw_bytes = hex::decode(raw_token).map_err(|_| AuthorityError::TokenMismatch)?;
     let token_hash = sha256_hex(&raw_bytes);
-    let now = now_unix_secs();
+    let now = unix_now_secs();
 
     let conn = store.lock_sync();
     let (run_id, expires_at, consumed): (String, i64, i64) = conn.query_row(
@@ -110,7 +111,7 @@ pub fn consume_verifier_token(raw_token: &str, store: &Store) -> Result<(), Auth
     // hex rather than silently degrading to SHA-256("").
     let raw_bytes = hex::decode(raw_token).map_err(|_| AuthorityError::TokenMismatch)?;
     let token_hash = sha256_hex(&raw_bytes);
-    let now = now_unix_secs();
+    let now = unix_now_secs();
 
     let conn = store.lock_sync();
     let rows = conn.execute(
@@ -123,11 +124,4 @@ pub fn consume_verifier_token(raw_token: &str, store: &Store) -> Result<(), Auth
     } else {
         Ok(())
     }
-}
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }

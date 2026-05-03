@@ -25,7 +25,7 @@
 // for state strings — no raw string literals.
 
 use raxis_store::Table;
-use raxis_types::TaskState;
+use raxis_types::{unix_now_secs, TaskState};
 
 use crate::scheduler::{dag, SchedulerError};
 
@@ -65,7 +65,7 @@ pub fn admit_in_tx(
 ) -> Result<String, SchedulerError> {
     dag::detect_cycle_in(conn, &task.task_id, &task.dependencies)?;
 
-    let now   = now_unix_secs();
+    let now   = unix_now_secs();
     let state = TaskState::Admitted.as_sql_str();
 
     // Insert the task row first; the FK on task_dag_edges requires the
@@ -102,13 +102,6 @@ pub fn admit_in_tx(
     Ok(task.task_id)
 }
 
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}
-
 // ---------------------------------------------------------------------------
 // Tests — admit_in_tx schema conformance + transactional behavior
 // ---------------------------------------------------------------------------
@@ -120,7 +113,7 @@ mod tests {
 
     fn fresh_store_with_initiative(init_id: &str) -> Store {
         let store = Store::open_in_memory().unwrap();
-        let now = now_unix_secs();
+        let now = unix_now_secs();
         let conn = store.lock_sync();
         conn.execute(
             "INSERT INTO initiatives

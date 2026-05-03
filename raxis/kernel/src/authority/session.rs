@@ -14,7 +14,7 @@
 // Gateway/Verifier sessions: worktree_root must be None (stored as SQL NULL).
 
 use raxis_store::{Store, Table};
-use raxis_types::{SessionId, LineageId};
+use raxis_types::{unix_now_secs, LineageId, SessionId};
 
 use crate::authority::keys::AuthorityError;
 use raxis_crypto::token::generate_session_token;
@@ -106,7 +106,7 @@ pub fn create_session(
     // `AuthorityError::Crypto`; we never write a zeroed token.
     let session_token = generate_session_token()?;
 
-    let now_secs = now_unix_secs();
+    let now_secs = unix_now_secs();
     let expires_at = now_secs + config.default_ttl_secs as i64;
 
     // DDL Table 4 column names: role_id (not role), revoked INTEGER DEFAULT 0.
@@ -173,7 +173,7 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
     if row.revoked_at.is_some() {
         return Err(AuthorityError::SessionRevoked { revoked_at: row.revoked_at.unwrap_or(0) });
     }
-    if row.expires_at < now_unix_secs() {
+    if row.expires_at < unix_now_secs() {
         return Err(AuthorityError::SessionExpired);
     }
 
@@ -221,7 +221,7 @@ pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<Sessio
 /// DDL Table 4: revoked INTEGER NOT NULL DEFAULT 0, revoked_at INTEGER (nullable).
 /// Uses conditional UPDATE WHERE revoked=0 (INV-STORE-02) to prevent double-revocation races.
 pub fn revoke_session(session_id: &SessionId, store: &Store) -> Result<(), AuthorityError> {
-    let now = now_unix_secs();
+    let now = unix_now_secs();
     let store = store.lock_sync();
     let rows = store.execute(
         &format!("UPDATE {SESSIONS} SET revoked=1, revoked_at=?1 WHERE session_id=?2 AND revoked=0"),
@@ -340,7 +340,7 @@ pub fn accept_envelope_and_advance_sequence(
     }
 
     // Check (B) — the UNIQUE/PK constraints on nonce_cache do the dedup work.
-    let now = now_unix_secs();
+    let now = unix_now_secs();
     let insert_result = tx.execute(
         &format!(
             "INSERT INTO {NONCE_CACHE}
@@ -415,7 +415,7 @@ mod tests {
                  VALUES (?1, 'Planner', 'tok', '00000000-0000-4000-8000-000000000000',
                          100, 0, 0, ?2, 0)"
             ),
-            rusqlite::params![session_id.as_str(), now_unix_secs() + 3600],
+            rusqlite::params![session_id.as_str(), unix_now_secs() + 3600],
         )
         .unwrap();
         drop(conn);
@@ -568,13 +568,3 @@ mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-fn now_unix_secs() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
-}

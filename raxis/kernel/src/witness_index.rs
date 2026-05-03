@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use raxis_crypto::token::sha256_hex;
 use raxis_store::{Store, Table};
+use raxis_types::unix_now_secs;
 use rusqlite::OptionalExtension;
 use thiserror::Error;
 
@@ -132,7 +133,7 @@ pub fn write(
     }
 
     // Step 3: Insert SQL index row.
-    let recorded_at = unix_now();
+    let recorded_at = unix_now_secs();
     let conn = store.lock_sync();
     conn.execute(
         &format!(
@@ -277,17 +278,6 @@ pub fn startup_check(
         orphaned_blobs,
         orphaned_index_rows,
     })
-}
-
-// ---------------------------------------------------------------------------
-// Helper
-// ---------------------------------------------------------------------------
-
-fn unix_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 // ---------------------------------------------------------------------------
