@@ -44,6 +44,8 @@ The central idea is that the component that makes authority decisions must be ph
 
 ### The Kernel
 
+> **Note on Terminology:** The "RAXIS Kernel" is an architectural metaphor. It is a standard user-space Rust daemon. It does not run in kernel-space (ring 0), nor does it require root privileges, eBPF, or custom OS kernel modules to operate.
+
 The kernel is the authority core of the system.
 It is a long-lived local process that owns everything with real consequences: it assigns identity to sessions, controls what each agent is allowed to do, manages the queue of work, enforces cost budgets, decides whether an escalation reaches a human, and records every decision into an append-only audit log.
 
