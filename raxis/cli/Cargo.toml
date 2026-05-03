@@ -34,6 +34,11 @@ raxis-store          = { workspace = true }
 # heartbeat.json`. Lives in its own crate so writer (kernel binary)
 # and reader (this CLI) cannot drift on field names.
 raxis-runtime        = { workspace = true }
+# Shared chain reader (`audit_tools::reader`) — lets `raxis log`,
+# `raxis verify-chain`, and the existing `raxis audit verify`
+# share one byte-exact JSONL parser instead of three independent
+# parsers drifting on `prev_sha256` canonicalisation.
+raxis-audit-tools    = { workspace = true }
 
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -53,3 +58,7 @@ libc         = "0.2"
 # (`tests/genesis_emitter_round_trip.rs`), which writes the emitted policy
 # to a tempdir and reads it back through the production loader.
 tempfile     = "3"
+# Used by `commands::log::tests` to hand-build a byte-correct
+# audit segment that exercises the audit-tools chain reader's
+# prev_sha256 link verification end-to-end.
+sha2         = { workspace = true }

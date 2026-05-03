@@ -187,6 +187,8 @@ fn run() -> Result<(), CliError> {
             }
         }
         "status" => commands::status::run(&flags, rest),
+        "log" => commands::log::run(&flags, rest),
+        "verify-chain" => commands::verify_chain::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -268,6 +270,15 @@ READ-ONLY OBSERVATION:
         One-screen kernel health snapshot. Reads heartbeat.json + a
         read-only kernel.db handle. Exit codes: 0 live, 1 stopped,
         2 ambiguous (heartbeat fresh but PID gone), 3 chain break.
+
+    log [<initiative_id>] [--task <id>] [--session <id>] [--kind <substr>]
+        [--since <duration>] [--limit <N>] [--json] [-f|--follow]
+        Stream or page through the audit chain with filter combinators.
+        --follow polls every 100ms; Ctrl-C exits cleanly.
+
+    verify-chain [--quick] [--audit-dir <path>]
+        Walk every audit segment, verify prev_sha256 + seq monotonicity.
+        Exit 0 intact, 3 broken. --quick mirrors `raxis status`'s check.
 "#
     );
 }
