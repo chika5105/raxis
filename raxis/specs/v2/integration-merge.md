@@ -662,10 +662,14 @@ Rejected. This would apply to every initiative and every merge, including low-ri
 documentation changes. It removes the efficiency benefit of autonomous agents for
 non-sensitive work. The protected-path granularity is the correct scope.
 
-**Alt B — Declare protected paths in the plan (per-initiative).**
-Rejected. Per-initiative configuration allows an operator to write a plan that excludes
-`src/payments/` from protection, defeating the compliance guarantee. Protection must be
-at the policy level to be enforceable across all initiatives.
+**Alt B — Declare protected paths in the plan as a replacement for policy-level protection.**
+Rejected. Per-initiative configuration that *replaces* policy-level protection allows an
+operator to write a plan that excludes `src/payments/` from the protection list, defeating
+the compliance guarantee. Protection must be at the policy level to be enforceable across
+all initiatives.
+
+*Note: Plan-level gates that are **additive** — additional paths required approval beyond
+what the policy bundle already requires — are permitted. See §12.b.*
 
 **Alt C — Use the existing Reviewer mechanism — add a human Reviewer session.**
 Rejected. Human Reviewers do not exist in the RAXIS session model. Reviewers are LLM
@@ -702,3 +706,210 @@ re-attempt with approval) is the correct flow.
 - [ ] Tests: protected path fires + approved, protected path fires + rejected,
       SHA mismatch rejection, policy bundle with no protected paths (no-op),
       simultaneous MergeConflict + ProtectedPathMerge escalations
+### §12.b — Plan-Level Integration Merge Gates (Additive-Only)
+
+Operators may declare additional protected path gates in `plan.toml` that are specific to
+a single initiative. These are **additive only** — they can add paths that require approval
+beyond what the policy bundle declares. They cannot remove or weaken policy-level gates.
+
+```toml
+# plan.toml
+
+[[integration_merge_gates]]
+path_prefix = "src/experimental-billing/"   # not in policy.toml, but sensitive for this initiative
+# default: require_approval = false
+require_approval = true
+
+[[integration_merge_gates]]
+path_prefix = "src/new-auth-provider/"
+require_approval = true
+```
+
+**Default:** `require_approval = false`. An `[[integration_merge_gates]]` entry with
+`require_approval = false` is a no-op and may be omitted.
+
+**How the Kernel computes the effective protected set (Check 5b):**
+
+```rust
+// Effective protected paths = policy bundle UNION plan-level gates
+let effective_protected: Vec<&str> = policy
+    .protected_paths                          // deployment-level (cannot be removed by plan)
+    .iter()
+    .filter(|p| p.require_approval_for.contains(&IntentClass::IntegrationMerge))
+    .chain(
+        plan.integration_merge_gates          // initiative-level additive gates
+            .iter()
+            .filter(|g| g.require_approval)
+    )
+    .filter(|p| touched_paths.iter().any(|t| t.starts_with(&p.path_prefix)))
+    .collect();
+```
+
+The Kernel takes the UNION of both sources. The plan can only contribute entries to the
+union — it cannot remove entries contributed by the policy bundle.
+
+**Why additive plan-level gates are safe:**
+The plan is operator-signed (Ed25519). Adding a gate requires the operator to sign a plan
+that includes the `[[integration_merge_gates]]` entry. This is equivalent to the operator
+declaring "I want human sign-off on this path for this initiative." The security model is
+not weakened — it is strengthened at the initiative level. The policy bundle floor is
+always enforced regardless of what the plan declares.
+
+**Audit record:** The `IntegrationMergeCompleted` audit event includes `protected_paths_approved`
+which lists all paths from both sources that triggered an approval for this merge.
+
+---
+
+## 13. Git Push Approval Gate
+
+### The Problem
+
+`IntegrationMerge` updates the local master branch in the RAXIS host's git repository.
+The local master is the record of everything the agent produced. But it has not yet left
+the machine — `git push` to the remote (GitHub, GitLab, etc.) is a separate step.
+
+For some deployments, operators want a final human gate between "the DAG completed and
+master is updated locally" and "the code is pushed to the remote and visible to the rest
+of the team / CI pipeline." This is especially relevant for:
+- Production deployment pipelines where a `git push` triggers CI that deploys to prod
+- Regulated environments where code changes require a human review before becoming visible
+- High-stakes initiatives where the operator wants final eyes on the complete diff
+
+### Configuration in `plan.toml`
+
+```toml
+# plan.toml
+
+[plan]
+require_push_approval = false    # default — git push happens automatically on InitiativeCompleted
+```
+
+```toml
+# plan.toml — with push gate enabled
+
+[plan]
+require_push_approval = true
+```
+
+**Default is `false`** for ergonomics — most initiatives can push automatically. The gate
+is opt-in per initiative by the operator at plan-signing time.
+
+### The Gate Flow
+
+```
+1. Final IntegrationMerge admitted
+   → master updated to final_sha
+   → Kernel emits InitiativeCompleted
+
+2. If plan.require_push_approval = false:
+   → Kernel executes git push immediately
+   → Emits PushCompleted { initiative_id, commit_sha, remote, ref_spec }
+   → Initiative transitions to Pushed state
+
+3. If plan.require_push_approval = true:
+   → Kernel creates PushApproval escalation { id: esc-200, state: Pending,
+                                               commit_sha: final_sha }
+   → Emits PushApprovalRequired { escalation_id: esc-200, commit_sha: final_sha }
+   → KernelPush::PushApprovalRequired { escalation_id: esc-200 } to Orchestrator
+   → Initiative transitions to PushPending state (new state)
+   → git push is NOT executed
+
+4. Operator reviews the final diff:
+   raxis push diff esc-200        # shows full diff from initiative initial_sha to final_sha
+   raxis push approve esc-200     # or: raxis push reject esc-200
+
+5a. On approve:
+    → Kernel: UPDATE escalations SET state = 'Consumed', resolved_by = 'operator_alice'
+    → Emits EscalationConsumed { class: PushApproval, resolved_by: operator_alice }
+    → Kernel executes git push origin master
+    → Emits PushCompleted { initiative_id, commit_sha: final_sha, resolved_by: operator_alice }
+    → Initiative transitions to Pushed state
+
+5b. On reject:
+    → Kernel: UPDATE escalations SET state = 'Rejected', resolved_by = 'operator_alice'
+    → Emits PushRejected { initiative_id, commit_sha: final_sha, resolved_by: operator_alice }
+    → Initiative transitions to PushRejected state
+    → master remains updated locally; remote is NOT updated
+    → Operator must decide: revert local master, re-plan, or investigate
+```
+
+### Audit Events
+
+```rust
+AuditEventKind::PushApprovalRequired {
+    initiative_id:   Uuid,
+    escalation_id:   Uuid,
+    commit_sha:      String,   // the final_sha that would be pushed
+    remote:          String,   // e.g., "origin"
+    ref_spec:        String,   // e.g., "refs/heads/master:refs/heads/master"
+}
+
+AuditEventKind::PushCompleted {
+    initiative_id:   Uuid,
+    commit_sha:      String,
+    remote:          String,
+    ref_spec:        String,
+    resolved_by:     Option<String>,   // Some("operator_alice") if push-gated, None if automatic
+}
+
+AuditEventKind::PushRejected {
+    initiative_id:   Uuid,
+    commit_sha:      String,
+    resolved_by:     String,
+    reason:          Option<String>,
+}
+```
+
+**Why `resolved_by` is present even on automatic pushes (as `None`):**
+Auditors querying `SELECT * FROM audit_events WHERE kind = 'PushCompleted'` see both
+automatic and operator-approved pushes in one query. The `None` vs `Some` distinction
+makes it immediately clear which required human approval.
+
+### SHA Specificity (Same as Protected Path Approval)
+
+The `PushApproval` escalation records `commit_sha = final_sha`. A push can only be
+approved for the exact SHA that will be pushed. If the operator approves `esc-200` for
+`sha_a`, but the initiative's `current_sha` has somehow changed to `sha_b` (e.g., another
+IntegrationMerge was admitted in the interim), the push gate re-fires for `sha_b`.
+
+This prevents: approve the push for a safe final diff, then slip in one more
+IntegrationMerge before the push executes, bypassing the gate for the new content.
+
+### New Initiative State: `PushPending`
+
+Adds a new state to the Initiative FSM:
+
+```
+InProgress
+    ↓ (all sub-tasks complete, IntegrationMerge admitted)
+Completed
+    ↓ require_push_approval = false: automatic
+    ↓ require_push_approval = true: PushApproval escalation created
+PushPending ──── operator approve ──→ Pushed
+            └─── operator reject ──→ PushRejected
+```
+
+The existing `Completed` state now means "DAG done, master updated, push not yet executed
+or gated." `Pushed` is the new terminal success state for initiatives with push configured.
+For initiatives without a remote (`remote = ""` in plan), `Completed = Pushed` — there is
+nothing to push.
+
+### Implementation Checklist
+
+- [ ] Add `require_push_approval = false` field to `PlanManifest` struct
+- [ ] Add `PushApproval` variant to `EscalationClass` enum
+- [ ] Add `PushPending` and `PushRejected` states to `initiatives.state` enum (DDL migration)
+- [ ] Add `Pushed` state to `initiatives.state` enum
+- [ ] Implement post-`InitiativeCompleted` push gate check in `handle_integration_merge`:
+      if `require_push_approval = false` → execute push immediately;
+      if `true` → create `PushApproval` escalation, set state to `PushPending`
+- [ ] Add `PushApprovalRequired { escalation_id, commit_sha }` to `KernelPush`
+- [ ] Implement `raxis push diff <escalation_id>` CLI: shows `git diff initial_sha..final_sha`
+- [ ] Implement `raxis push approve <escalation_id>` CLI
+- [ ] Implement `raxis push reject <escalation_id>` CLI
+- [ ] Add `FAIL_PUSH_SHA_MISMATCH` error variant (if SHA changed between approval and push)
+- [ ] Add `PushApprovalRequired`, `PushCompleted`, `PushRejected` audit event variants
+- [ ] Add `resolved_by: Option<String>` to `PushCompleted` audit event
+- [ ] Tests: auto-push (no gate), push gate approve flow, push gate reject flow,
+      SHA mismatch on push, PushPending → Pushed state transition,
+      PushPending → PushRejected state transition
