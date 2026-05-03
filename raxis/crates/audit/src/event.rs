@@ -329,6 +329,23 @@ pub enum AuditEventKind {
         new_epoch_id: Option<u64>,
         reason: String,
     },
+
+    // --- Notifications (cli-readonly.md §5.6.3) ---
+    /// A per-channel notification handler returned an error. The
+    /// originating mutation is unaffected — handler failure NEVER
+    /// aborts the parent transaction (cli-readonly.md §5.6.3).
+    ///
+    /// `channel_id` matches `[[notifications.channels]].id` from the
+    /// active policy. `event_kind` is the `AuditEventKind` discriminant
+    /// of the event we tried to deliver. `reason` is a short, stable
+    /// classification string (`"io"`, `"target_invalid"`,
+    /// `"unimplemented_v1"`); the verbose error text goes to the
+    /// kernel stderr log.
+    NotificationDeliveryFailed {
+        channel_id: String,
+        event_kind: String,
+        reason:     String,
+    },
 }
 
 impl AuditEventKind {
@@ -372,6 +389,7 @@ impl AuditEventKind {
             Self::GatewayCrashed { .. } => "GatewayCrashed",
             Self::GatewayQuarantined { .. } => "GatewayQuarantined",
             Self::GatewaySignalFailed { .. } => "GatewaySignalFailed",
+            Self::NotificationDeliveryFailed { .. } => "NotificationDeliveryFailed",
         }
     }
 }

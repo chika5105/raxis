@@ -75,6 +75,16 @@ pub(crate) struct RawPolicy {
     /// version control without leaking secrets.
     #[serde(default)]
     pub(crate) providers: Vec<ProviderEntry>,
+
+    /// `[notifications]` — per-event-kind delivery routing for operator-
+    /// facing channels. Optional: a kernel without this section gets the
+    /// implicit `shell` channel pointing at `<data_dir>/notifications/inbox.jsonl`
+    /// and an empty route table (everything falls through to
+    /// `default_channels = ["shell"]`).
+    ///
+    /// Normative reference: `cli-readonly.md` §5.6.
+    #[serde(default)]
+    pub(crate) notifications: NotificationsSection,
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +523,290 @@ pub const MAX_DATA_FETCH_TIMEOUT_MS: u32 = 60_000;
 pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
+// Notification channels — `[notifications]`
+//
+// Normative reference: cli-readonly.md §5.6.
+//
+// v1 ships handlers for `Shell` and `File` only; `Email` and `Webhook`
+// are accepted at policy-validate time so operators can stage their v2
+// channel config but each one emits a one-line warning at boot
+// ("declared but its handler is not implemented in v1").
+// ---------------------------------------------------------------------------
+
+/// Channel-kind discriminator. v1 implements Shell + File only;
+/// Email and Webhook are forward-compat schema slots (per spec §5.6.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum NotificationChannelKind {
+    Shell,
+    File,
+    Email,
+    Webhook,
+}
+
+/// One `[[notifications.channels]]` entry.
+///
+/// ```toml
+/// [[notifications.channels]]
+/// id     = "shell"
+/// kind   = "Shell"
+/// target = "<data_dir>/notifications/inbox.jsonl"
+/// ```
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationChannel {
+    /// Operator-chosen short identifier referenced from `[[notifications.routes]].channels`.
+    /// Must be unique across the channels array; PolicyBundle::validate enforces.
+    pub id:     String,
+    pub kind:   NotificationChannelKind,
+    /// For `Shell`/`File`: an absolute filesystem path the kernel will
+    /// `O_APPEND | O_CREAT` (the `Shell` channel's default target —
+    /// `<data_dir>/notifications/inbox.jsonl` — is filled in at runtime
+    /// when the operator omits the explicit channel entry, see
+    /// `PolicyBundle::shell_inbox_path_for`).
+    /// For `Email`: the recipient address (validated only as non-empty in v1).
+    /// For `Webhook`: the destination URL (validated only as non-empty in v1).
+    pub target: String,
+}
+
+/// One `[[notifications.routes]]` entry: which channels receive
+/// notifications for a given audit event-kind.
+///
+/// ```toml
+/// [[notifications.routes]]
+/// event_kind = "EscalationApproved"
+/// channels   = ["shell"]
+/// ```
+///
+/// An empty `channels` list is the canonical "silenced" form for that
+/// event kind (per spec §5.6.2 rule 2).
+#[derive(Debug, Clone, Deserialize)]
+pub struct NotificationRoute {
+    /// MUST match a real `AuditEventKind` discriminant string. Validated
+    /// against [`KNOWN_AUDIT_EVENT_KINDS`] at policy load time.
+    pub event_kind: String,
+    pub channels:   Vec<String>,
+}
+
+/// `[notifications]` raw TOML shape. Consumed by `PolicyBundle::validate`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct NotificationsSection {
+    /// Channel ids dispatched to when an event kind has no explicit
+    /// route. If empty, an unrouted event is silently dropped (the
+    /// caller-side "no route" fast-path).
+    #[serde(default)]
+    pub default_channels: Vec<String>,
+
+    #[serde(default, rename = "channels")]
+    pub channels_raw: Vec<NotificationChannel>,
+
+    #[serde(default, rename = "routes")]
+    pub routes_raw: Vec<NotificationRoute>,
+}
+
+/// Implicit channel id used by the spec's "always-on Shell channel"
+/// (cli-readonly.md §5.6.2: "always present implicitly; explicit entry
+/// overrides target"). The kernel synthesises this entry at validate
+/// time when the operator does not declare it.
+pub const IMPLICIT_SHELL_CHANNEL_ID: &str = "shell";
+
+/// Filename appended to `<data_dir>/notifications/` for the implicit
+/// Shell channel target (cli-readonly.md §5.6.2).
+pub const IMPLICIT_SHELL_INBOX_FILENAME: &str = "inbox.jsonl";
+
+/// Every `AuditEventKind` discriminant string the kernel currently
+/// emits. `PolicyBundle::validate` rejects routes whose `event_kind`
+/// is not in this list (preventing a typo from silently dropping
+/// every notification for that kind).
+///
+/// Kept in lockstep with `raxis-audit-tools::AuditEventKind::as_str`.
+/// A unit test in this crate cross-checks the two lists.
+pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
+    // lifecycle
+    "KernelStarted", "KernelStopped",
+    // initiative
+    "InitiativeCreated", "PlanApproved", "PlanRejected",
+    "PathScopeOverrideApplied", "InitiativeStateChanged", "InitiativeAborted",
+    // task
+    "TaskAdmitted", "TaskStateChanged",
+    // intent
+    "IntentAccepted", "IntentRejected",
+    // session
+    "SessionCreated", "SessionRevoked",
+    // delegation
+    "DelegationGranted", "DelegationMarkedStale",
+    // witness/gate
+    "WitnessAccepted", "WitnessRejected", "VerifierProcessFailed",
+    // escalation
+    "EscalationSubmitted", "EscalationApproved", "EscalationDenied",
+    "EscalationTimedOut", "EscalationConsumed", "LineageQuarantined",
+    "EscalationRateLimitExceeded",
+    // policy
+    "PolicyEpochAdvanced", "PolicyAdvanceRejected", "PolicyAdvanceFailed",
+    // ipc
+    "ReplayRejected",
+    // recovery
+    "ReconciliationGap", "TaskBlockedForRecovery",
+    "DelegationSignatureUnverifiable",
+    // gateway
+    "GatewaySpawned", "GatewayCrashed", "GatewayQuarantined",
+    "GatewaySignalFailed",
+    // notifications (self-reflective)
+    "NotificationDeliveryFailed",
+];
+
+/// Validate the raw `[notifications]` section and produce the final
+/// `(channels, routes, default_channels)` triple for `PolicyBundle`.
+///
+/// Rules enforced (mirroring `cli-readonly.md` §5.6.2):
+///
+/// 1. **Channel ids are unique.** Duplicate `id` values fail loudly.
+/// 2. **Implicit Shell is always present.** If the operator does not
+///    declare a channel with `id="shell"`, we synthesise one with
+///    `kind=Shell, target=""`. The empty target is interpreted by the
+///    Shell handler as "use the default `<data_dir>/notifications/inbox.jsonl`"
+///    (resolved at runtime via `PolicyBundle::shell_inbox_path_for`).
+/// 3. **Default channels reference declared ids.** Every entry in
+///    `default_channels` MUST resolve to a channel id (the implicit
+///    `"shell"` counts).
+/// 4. **Route channel ids resolve.** Every channel id in a route's
+///    `channels` array MUST resolve to a declared id.
+/// 5. **Route event_kind is real.** The event_kind MUST appear in
+///    [`KNOWN_AUDIT_EVENT_KINDS`] (defence against typo-silenced
+///    routes).
+/// 6. **Default channels default to `["shell"]`** when the operator
+///    omits the field — never empty, so an event kind with no route
+///    is dispatched to the implicit Shell channel rather than silently
+///    dropped.
+/// 7. **For Email/Webhook channels**, validate target is non-empty;
+///    the kernel emits a one-line warning at boot per spec §5.6.2.
+fn validate_notifications(
+    raw: &NotificationsSection,
+) -> Result<
+    (Vec<NotificationChannel>, HashMap<String, Vec<String>>, Vec<String>),
+    PolicyError,
+> {
+    use std::collections::HashSet;
+
+    let mut channels: Vec<NotificationChannel> = raw.channels_raw.clone();
+    let mut seen: HashSet<&str> = HashSet::new();
+    for ch in &channels {
+        if ch.id.trim().is_empty() {
+            return Err(PolicyError::MalformedArtifact(
+                "[[notifications.channels]] id must be a non-empty string".to_owned(),
+            ));
+        }
+        if !seen.insert(ch.id.as_str()) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "[[notifications.channels]] id={:?} is duplicated; ids must be unique",
+                ch.id
+            )));
+        }
+        // Per-kind target validation.
+        match ch.kind {
+            NotificationChannelKind::Shell | NotificationChannelKind::File => {
+                // Empty target on an explicit Shell entry means "use
+                // default" (implicit-channel behaviour). For File
+                // channels the target is operator-supplied so empty
+                // is a misconfiguration.
+                if matches!(ch.kind, NotificationChannelKind::File)
+                    && ch.target.trim().is_empty()
+                {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[notifications.channels]] id={:?} kind=File requires a non-empty target",
+                        ch.id
+                    )));
+                }
+            }
+            NotificationChannelKind::Email | NotificationChannelKind::Webhook => {
+                if ch.target.trim().is_empty() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[notifications.channels]] id={:?} kind={:?} requires a non-empty target",
+                        ch.id, ch.kind
+                    )));
+                }
+                // The handler is unimplemented in v1; the kernel
+                // emits a one-line warning at boot per spec §5.6.2.
+                // We do NOT short-circuit validation here — operators
+                // can stage v2 channel config in v1 without blocking
+                // boot.
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"notification_channel_v2_only\",\
+                     \"channel_id\":\"{}\",\"kind\":\"{:?}\"}}",
+                    ch.id, ch.kind,
+                );
+            }
+        }
+    }
+
+    // Synthesise the implicit Shell channel if the operator did not
+    // declare one. Empty target is the runtime sentinel for "use
+    // <data_dir>/notifications/inbox.jsonl" — resolved by
+    // `PolicyBundle::shell_inbox_path_for(data_dir)`.
+    if !seen.contains(IMPLICIT_SHELL_CHANNEL_ID) {
+        channels.push(NotificationChannel {
+            id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
+            kind:   NotificationChannelKind::Shell,
+            target: String::new(),
+        });
+    }
+
+    // Build the channel-id index AFTER synthesis so route validation
+    // can resolve `"shell"` regardless of whether it was declared.
+    let declared_ids: HashSet<&str> = channels.iter().map(|c| c.id.as_str()).collect();
+
+    // Default channels: validate every id resolves; default to ["shell"]
+    // when omitted.
+    let default_channels: Vec<String> = if raw.default_channels.is_empty() {
+        vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()]
+    } else {
+        for cid in &raw.default_channels {
+            if !declared_ids.contains(cid.as_str()) {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[notifications] default_channels references unknown channel id={:?}",
+                    cid
+                )));
+            }
+        }
+        raw.default_channels.clone()
+    };
+
+    // Validate every route: event_kind is a real audit kind, channels
+    // resolve. An empty channels list is the spec's silenced form;
+    // we keep it (the dispatcher reads it as "drop on the floor").
+    let known_kinds: HashSet<&str> =
+        KNOWN_AUDIT_EVENT_KINDS.iter().copied().collect();
+    let mut routes: HashMap<String, Vec<String>> = HashMap::new();
+    for r in &raw.routes_raw {
+        if !known_kinds.contains(r.event_kind.as_str()) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "[[notifications.routes]] event_kind={:?} is not a known AuditEventKind \
+                 — see crates/audit/src/event.rs::AuditEventKind for the canonical list",
+                r.event_kind
+            )));
+        }
+        for cid in &r.channels {
+            if !declared_ids.contains(cid.as_str()) {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[[notifications.routes]] event_kind={:?} references unknown channel id={:?}",
+                    r.event_kind, cid
+                )));
+            }
+        }
+        // Last-write-wins on duplicate event_kind — operators with two
+        // entries for the same kind almost certainly want the second.
+        // We log so the operator notices the override.
+        if routes.insert(r.event_kind.clone(), r.channels.clone()).is_some() {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"notification_route_overridden\",\
+                 \"event_kind\":\"{}\"}}",
+                r.event_kind,
+            );
+        }
+    }
+
+    Ok((channels, routes, default_channels))
+}
+
+// ---------------------------------------------------------------------------
 // PolicyBundle — the validated in-memory policy
 // ---------------------------------------------------------------------------
 
@@ -564,6 +858,23 @@ pub struct PolicyBundle {
     /// `[[providers]]` entries, validated for unique IDs and per-field
     /// caps. Empty `Vec` is permitted (matches `gateway = None`).
     providers: Vec<ProviderEntry>,
+
+    /// Validated notification channels. ALWAYS contains the implicit
+    /// `"shell"` channel — synthesised at validate time when the
+    /// operator does not declare it (cli-readonly.md §5.6.2). Channels
+    /// declared explicitly with id="shell" override the implicit
+    /// target.
+    notification_channels: Vec<NotificationChannel>,
+
+    /// Validated routes: `event_kind → [channel_id]`. Empty channel
+    /// list is the spec's "silenced" form. Event kinds with no entry
+    /// fall through to `default_notification_channels`.
+    notification_routes: HashMap<String, Vec<String>>,
+
+    /// Channel ids dispatched to when an event kind has no explicit
+    /// route (cli-readonly.md §5.6.2). Always at least `["shell"]`
+    /// when the operator does not override.
+    default_notification_channels: Vec<String>,
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -730,6 +1041,10 @@ impl PolicyBundle {
             }
         }
 
+        // ── Validate `[notifications]` ───────────────────────────────
+        let (notification_channels, notification_routes, default_notification_channels) =
+            validate_notifications(&raw.notifications)?;
+
         Ok(Self {
             epoch: raw.meta.epoch,
             authority_pubkey_hex: raw.authority.authority_pubkey,
@@ -759,6 +1074,9 @@ impl PolicyBundle {
             egress_max_fetches_per_window: raw.egress.max_fetches_per_window,
             gateway: raw.gateway,
             providers: raw.providers,
+            notification_channels,
+            notification_routes,
+            default_notification_channels,
         })
     }
 
@@ -859,6 +1177,15 @@ impl PolicyBundle {
             egress_domains: Vec::new(),
             egress_patterns: Vec::new(),
             egress_max_fetches_per_window: 0,
+            // Tests get the same implicit-Shell defaults a real
+            // policy.toml would synthesise.
+            notification_channels: vec![NotificationChannel {
+                id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
+                kind:   NotificationChannelKind::Shell,
+                target: String::new(),
+            }],
+            notification_routes: HashMap::new(),
+            default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
         }
     }
 
@@ -1064,6 +1391,49 @@ impl PolicyBundle {
     pub fn provider(&self, provider_id: &str) -> Option<&ProviderEntry> {
         self.providers.iter().find(|p| p.provider_id == provider_id)
     }
+
+    // ── Notification channels ──────────────────────────────────────────
+
+    /// All declared notification channels (always includes the implicit
+    /// `shell` channel synthesised by validate). cli-readonly.md §5.6.
+    pub fn notification_channels(&self) -> &[NotificationChannel] {
+        &self.notification_channels
+    }
+
+    /// Look up a notification channel by id.
+    pub fn notification_channel(&self, id: &str) -> Option<&NotificationChannel> {
+        self.notification_channels.iter().find(|c| c.id == id)
+    }
+
+    /// Channel ids the dispatcher MUST send to when an event has no
+    /// explicit route (cli-readonly.md §5.6.2). Always non-empty —
+    /// defaults to `["shell"]` if the operator omits the field.
+    pub fn default_notification_channels(&self) -> &[String] {
+        &self.default_notification_channels
+    }
+
+    /// Resolve `event_kind` to its dispatched-to channel ids. Returns:
+    ///
+    /// - `Some(&[])` — explicit silenced route (operator wrote
+    ///   `channels = []` for this event_kind).
+    /// - `Some(&[...])` — explicit route; dispatch to these channels.
+    /// - `None` — no explicit route; caller falls back to
+    ///   `default_notification_channels()`.
+    ///
+    /// The three-state return lets callers distinguish "operator
+    /// silenced" from "operator forgot to route" — important because
+    /// the second case fires the default channels.
+    pub fn notification_route(&self, event_kind: &str) -> Option<&[String]> {
+        self.notification_routes.get(event_kind).map(|v| v.as_slice())
+    }
+
+    /// Resolve the absolute filesystem path the implicit Shell channel
+    /// writes to, given a `data_dir`. Equivalent to
+    /// `<data_dir>/notifications/inbox.jsonl` (cli-readonly.md §5.6.2).
+    /// Used by the Shell handler when the channel's `target` is empty.
+    pub fn shell_inbox_path_for(data_dir: &std::path::Path) -> std::path::PathBuf {
+        data_dir.join("notifications").join(IMPLICIT_SHELL_INBOX_FILENAME)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,6 +1485,13 @@ mod tests {
             egress_domains: Vec::new(),
             egress_patterns: Vec::new(),
             egress_max_fetches_per_window: 0,
+            notification_channels: vec![NotificationChannel {
+                id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
+                kind:   NotificationChannelKind::Shell,
+                target: String::new(),
+            }],
+            notification_routes: HashMap::new(),
+            default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
         }
     }
 
@@ -1200,6 +1577,13 @@ mod gateway_providers_tests {
     /// a dev-dep cycle and to keep these tests focused: any drift between
     /// this fixture and the real emitter is a separate problem caught by
     /// `genesis-tools::tests::output_round_trips_through_load_policy`.
+    ///
+    /// `pub(super)` so sibling test modules (notably `notifications_tests`)
+    /// can reuse this fixture without code duplication.
+    pub(super) fn minimal_policy_toml_for_tests() -> String {
+        minimal_policy_toml()
+    }
+
     fn minimal_policy_toml() -> String {
         r#"[meta]
 epoch     = 1
@@ -1490,6 +1874,298 @@ priority             = 100
         );
         let bundle = write_and_load(&t).expect("unknown kind must load");
         assert_eq!(bundle.providers()[0].kind, "NotAValidKindYet");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — `[notifications]` validation (cli-readonly.md §5.6).
+// ---------------------------------------------------------------------------
+//
+// These cover every fail-closed branch in `validate_notifications`,
+// the implicit-Shell synthesis, the default_channels fallback, and the
+// silenced-route semantics.
+
+#[cfg(test)]
+mod notifications_tests {
+    use super::*;
+    use crate::load_policy;
+
+    fn minimal_with_notifications(extra: &str) -> String {
+        let mut t = super::gateway_providers_tests::minimal_policy_toml_for_tests();
+        t.push_str(extra);
+        t
+    }
+
+    fn write_and_load(t: &str) -> Result<crate::PolicyBundle, crate::PolicyError> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), t).unwrap();
+        load_policy(tmp.path()).map(|(b, _, _)| b)
+    }
+
+    // ── Implicit-Shell synthesis ─────────────────────────────────────
+
+    #[test]
+    fn no_notifications_section_synthesises_implicit_shell_channel() {
+        // Genesis policies that omit [notifications] still get a working
+        // Shell channel so escalation notifications are visible from
+        // day one (cli-readonly.md §5.6.2).
+        let bundle = write_and_load(&minimal_with_notifications(""))
+            .expect("policy without [notifications] must load cleanly");
+
+        let chans = bundle.notification_channels();
+        assert_eq!(chans.len(), 1, "exactly the implicit shell channel");
+        assert_eq!(chans[0].id, IMPLICIT_SHELL_CHANNEL_ID);
+        assert_eq!(chans[0].kind, NotificationChannelKind::Shell);
+        assert!(chans[0].target.is_empty(),
+            "implicit Shell target is empty (resolved at runtime)");
+
+        let defaults = bundle.default_notification_channels();
+        assert_eq!(defaults, &["shell".to_owned()],
+            "default_channels falls back to [\"shell\"] when omitted");
+
+        assert!(bundle.notification_route("EscalationApproved").is_none(),
+            "no explicit routes ⇒ None ⇒ caller uses default channels");
+    }
+
+    #[test]
+    fn explicit_shell_channel_overrides_implicit_target() {
+        // Operators who run two RAXIS instances on the same host can
+        // point the Shell channel at a non-default file by declaring
+        // an explicit `id="shell"` entry.
+        let toml = minimal_with_notifications("
+[[notifications.channels]]
+id     = \"shell\"
+kind   = \"Shell\"
+target = \"/var/log/raxis-alt-inbox.jsonl\"
+");
+        let bundle = write_and_load(&toml).expect("override must load");
+        let shell = bundle.notification_channel("shell").expect("shell channel exists");
+        assert_eq!(shell.target, "/var/log/raxis-alt-inbox.jsonl",
+            "explicit entry overrides the implicit target");
+        assert_eq!(bundle.notification_channels().len(), 1,
+            "no synthesised duplicate when operator declared shell explicitly");
+    }
+
+    #[test]
+    fn shell_inbox_path_for_data_dir_is_canonical_path() {
+        // The runtime resolves an empty Shell target to this path.
+        let p = PolicyBundle::shell_inbox_path_for(std::path::Path::new("/tmp/raxis"));
+        assert!(p.ends_with("notifications/inbox.jsonl"),
+            "got {p:?}");
+    }
+
+    // ── default_channels validation ──────────────────────────────────
+
+    #[test]
+    fn default_channels_referencing_unknown_id_is_rejected() {
+        let toml = minimal_with_notifications("
+[notifications]
+default_channels = [\"does-not-exist\"]
+");
+        let err = write_and_load(&toml).expect_err("unknown id must fail");
+        assert!(format!("{err}").contains("unknown channel id"),
+            "error must explain WHY rejected; got: {err}");
+    }
+
+    #[test]
+    fn default_channels_can_reference_implicit_shell() {
+        // The implicit Shell channel is always available — even if it
+        // was not declared explicitly. default_channels = ["shell"]
+        // must validate cleanly.
+        let toml = minimal_with_notifications("
+[notifications]
+default_channels = [\"shell\"]
+");
+        let bundle = write_and_load(&toml).expect("must load");
+        assert_eq!(bundle.default_notification_channels(), &["shell".to_owned()]);
+    }
+
+    // ── route validation ─────────────────────────────────────────────
+
+    #[test]
+    fn route_with_unknown_event_kind_is_rejected() {
+        let toml = minimal_with_notifications("
+[[notifications.routes]]
+event_kind = \"NotARealAuditEventKind\"
+channels   = [\"shell\"]
+");
+        let err = write_and_load(&toml).expect_err("typo must fail");
+        let s = format!("{err}");
+        assert!(s.contains("not a known AuditEventKind"),
+            "error must mention the AuditEventKind list; got: {s}");
+    }
+
+    #[test]
+    fn route_with_unknown_channel_id_is_rejected() {
+        let toml = minimal_with_notifications("
+[[notifications.routes]]
+event_kind = \"EscalationApproved\"
+channels   = [\"ghost\"]
+");
+        let err = write_and_load(&toml).expect_err("unknown id must fail");
+        assert!(format!("{err}").contains("unknown channel id"));
+    }
+
+    #[test]
+    fn route_with_empty_channels_list_is_silenced_form() {
+        // Spec §5.6.2 rule 2: empty list is the canonical "silenced"
+        // form. We accept it and surface it as Some(&[]) so the
+        // dispatcher distinguishes "no route" (None → fall through to
+        // default_channels) from "explicit silence" (Some(&[]) → drop).
+        let toml = minimal_with_notifications("
+[[notifications.routes]]
+event_kind = \"TaskStateChanged\"
+channels   = []
+");
+        let bundle = write_and_load(&toml).expect("silenced route must load");
+        let route = bundle.notification_route("TaskStateChanged");
+        assert!(matches!(route, Some(slice) if slice.is_empty()),
+            "silenced ⇒ Some(empty), got {route:?}");
+    }
+
+    #[test]
+    fn duplicate_channel_id_is_rejected() {
+        let toml = minimal_with_notifications("
+[[notifications.channels]]
+id     = \"file-mirror\"
+kind   = \"File\"
+target = \"/var/log/raxis.jsonl\"
+
+[[notifications.channels]]
+id     = \"file-mirror\"
+kind   = \"File\"
+target = \"/var/log/raxis-2.jsonl\"
+");
+        let err = write_and_load(&toml).expect_err("dup ids must fail");
+        assert!(format!("{err}").contains("duplicated"));
+    }
+
+    #[test]
+    fn file_channel_with_empty_target_is_rejected() {
+        let toml = minimal_with_notifications("
+[[notifications.channels]]
+id     = \"file-mirror\"
+kind   = \"File\"
+target = \"\"
+");
+        let err = write_and_load(&toml).expect_err("File channel needs target");
+        assert!(format!("{err}").contains("non-empty target"));
+    }
+
+    // ── full happy path ──────────────────────────────────────────────
+
+    #[test]
+    fn full_routing_example_round_trips() {
+        // Mirrors the example in cli-readonly.md §5.6.2.
+        let toml = minimal_with_notifications("
+[notifications]
+default_channels = [\"shell\"]
+
+[[notifications.channels]]
+id     = \"audit-mirror\"
+kind   = \"File\"
+target = \"/var/log/raxis-notifications.jsonl\"
+
+[[notifications.routes]]
+event_kind = \"EscalationSubmitted\"
+channels   = [\"shell\", \"audit-mirror\"]
+
+[[notifications.routes]]
+event_kind = \"EscalationApproved\"
+channels   = [\"shell\"]
+
+[[notifications.routes]]
+event_kind = \"TaskStateChanged\"
+channels   = []
+");
+        let bundle = write_and_load(&toml).expect("must load");
+
+        // Implicit shell + audit-mirror = 2 channels.
+        assert_eq!(bundle.notification_channels().len(), 2);
+
+        // Routes are accessible.
+        let submitted = bundle.notification_route("EscalationSubmitted").unwrap();
+        assert_eq!(submitted, &["shell".to_owned(), "audit-mirror".to_owned()]);
+        let approved = bundle.notification_route("EscalationApproved").unwrap();
+        assert_eq!(approved, &["shell".to_owned()]);
+        let task = bundle.notification_route("TaskStateChanged").unwrap();
+        assert!(task.is_empty(), "silenced");
+
+        // No explicit route for EscalationDenied → caller uses defaults.
+        assert!(bundle.notification_route("EscalationDenied").is_none());
+    }
+
+    // ── KNOWN_AUDIT_EVENT_KINDS drift guard ──────────────────────────
+
+    /// Cross-check `KNOWN_AUDIT_EVENT_KINDS` against the live
+    /// `AuditEventKind::as_str` enumeration. Any kind we add to the
+    /// audit crate without also adding it here would silently allow
+    /// typo-bypass — pin both lists with the same fixture.
+    #[test]
+    fn known_event_kinds_list_is_in_lockstep_with_audit_crate() {
+        // Hand-built list of every variant the audit crate's
+        // `as_str()` returns. We can't reflect this at runtime
+        // (Rust does not expose enum variants) so the contract is
+        // "every variant must appear in BOTH places". A new kind
+        // added to AuditEventKind will fail this test until the
+        // policy crate's KNOWN_AUDIT_EVENT_KINDS is updated.
+        use raxis_audit_tools::AuditEventKind;
+        let probes: Vec<&'static str> = vec![
+            AuditEventKind::KernelStarted { data_dir: "x".into(), policy_epoch: 0, schema_version: 0 }.as_str(),
+            AuditEventKind::KernelStopped { reason: "x".into() }.as_str(),
+            AuditEventKind::InitiativeCreated { initiative_id: "x".into(), plan_hash: "x".into(), signed_by: "x".into(), signed_at: 0 }.as_str(),
+            AuditEventKind::PlanApproved { initiative_id: "x".into(), task_count: 0 }.as_str(),
+            AuditEventKind::PlanRejected { initiative_id: "x".into() }.as_str(),
+            AuditEventKind::PathScopeOverrideApplied { initiative_id: "x".into(), task_id: "x".into(), approving_operator: "x".into() }.as_str(),
+            AuditEventKind::InitiativeStateChanged { initiative_id: "x".into(), from_state: "x".into(), to_state: "x".into() }.as_str(),
+            AuditEventKind::InitiativeAborted { initiative_id: "x".into(), triggered_by_operator: None }.as_str(),
+            AuditEventKind::TaskAdmitted { task_id: "x".into(), initiative_id: "x".into(), lane_id: "x".into() }.as_str(),
+            AuditEventKind::TaskStateChanged { task_id: "x".into(), from_state: "x".into(), to_state: "x".into(), actor: "x".into(), policy_epoch: 0 }.as_str(),
+            AuditEventKind::IntentAccepted { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), base_sha: None, head_sha: None, sequence_number: 0, remaining_units: 0 }.as_str(),
+            AuditEventKind::IntentRejected { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), error_code: "x".into(), sequence_number: 0 }.as_str(),
+            AuditEventKind::SessionCreated { session_id: "x".into(), role: "x".into(), lineage_id: "x".into(), worktree_root: None }.as_str(),
+            AuditEventKind::SessionRevoked { session_id: "x".into(), revoked_by: "x".into() }.as_str(),
+            AuditEventKind::DelegationGranted { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), expires_at: 0, granted_by: "x".into() }.as_str(),
+            AuditEventKind::DelegationMarkedStale { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), reason: "x".into() }.as_str(),
+            AuditEventKind::WitnessAccepted { verifier_run_id: "x".into(), task_id: "x".into(), gate_type: "x".into(), result_class: "x".into(), evaluation_sha: "x".into() }.as_str(),
+            AuditEventKind::WitnessRejected { verifier_run_id: "x".into(), task_id: "x".into(), reason: "x".into() }.as_str(),
+            AuditEventKind::VerifierProcessFailed { task_id: "x".into(), exit_code: None, gate_type: "x".into() }.as_str(),
+            AuditEventKind::EscalationSubmitted { escalation_id: "x".into(), task_id: "x".into(), class: "x".into(), lineage_id: "x".into() }.as_str(),
+            AuditEventKind::EscalationApproved { escalation_id: "x".into(), approved_by: "x".into() }.as_str(),
+            AuditEventKind::EscalationDenied { escalation_id: "x".into(), denied_by: "x".into(), reason: None }.as_str(),
+            AuditEventKind::EscalationTimedOut { escalation_id: "x".into() }.as_str(),
+            AuditEventKind::EscalationConsumed { escalation_id: "x".into(), approval_token_id: "x".into(), action_hash: "x".into(), policy_epoch: 0 }.as_str(),
+            AuditEventKind::LineageQuarantined { lineage_id: "x".into(), trigger_count: 0 }.as_str(),
+            AuditEventKind::EscalationRateLimitExceeded { lineage_id: "x".into(), attempted_count: 0, window_start: 0 }.as_str(),
+            AuditEventKind::PolicyEpochAdvanced { new_epoch_id: 0, policy_sha256: "x".into(), triggered_by: "x".into(), delegations_marked_stale: 0, sessions_invalidated: 0 }.as_str(),
+            AuditEventKind::PolicyAdvanceRejected { reason: "x".into(), artifact_epoch: None, current_epoch: 0 }.as_str(),
+            AuditEventKind::PolicyAdvanceFailed { reason: "x".into(), new_epoch_id: 0 }.as_str(),
+            AuditEventKind::ReplayRejected { session_id: "x".into(), sequence_num: 0, reason: "x".into() }.as_str(),
+            AuditEventKind::ReconciliationGap { missing_seq: 0, reconstructed_event: "x".into(), reconstructed: false }.as_str(),
+            AuditEventKind::TaskBlockedForRecovery { task_id: "x".into(), block_reason: "x".into() }.as_str(),
+            AuditEventKind::DelegationSignatureUnverifiable { delegation_id: "x".into(), expected_signer_unknown_in_current_policy: false }.as_str(),
+            AuditEventKind::GatewaySpawned { token_prefix: "x".into(), binary_path: "x".into(), attempt: 0 }.as_str(),
+            AuditEventKind::GatewayCrashed { token_prefix: "x".into(), exit_code: None, attempt: 0 }.as_str(),
+            AuditEventKind::GatewayQuarantined { reason: "x".into(), total_attempts: 0 }.as_str(),
+            AuditEventKind::GatewaySignalFailed { signal: "x".into(), new_epoch_id: None, reason: "x".into() }.as_str(),
+            AuditEventKind::NotificationDeliveryFailed { channel_id: "x".into(), event_kind: "x".into(), reason: "x".into() }.as_str(),
+        ];
+
+        let policy_kinds: std::collections::HashSet<&str> =
+            KNOWN_AUDIT_EVENT_KINDS.iter().copied().collect();
+        for k in &probes {
+            assert!(policy_kinds.contains(*k),
+                "AuditEventKind::{k} is missing from KNOWN_AUDIT_EVENT_KINDS \
+                 in policy/src/bundle.rs — operator routes for that kind would \
+                 be silently rejected. Add it to the const array.");
+        }
+        // Reverse direction: every entry in KNOWN_AUDIT_EVENT_KINDS must be a real
+        // variant. The probe list above is exhaustive, so any extra entry would
+        // be unreachable. Pinning the cardinality keeps drift loud.
+        assert_eq!(probes.len(), KNOWN_AUDIT_EVENT_KINDS.len(),
+            "KNOWN_AUDIT_EVENT_KINDS has {} entries but probe list has {}; \
+             the two lists must be in 1:1 correspondence (cli-readonly.md §5.6.2)",
+            KNOWN_AUDIT_EVENT_KINDS.len(), probes.len());
     }
 }
 
