@@ -552,6 +552,7 @@ mod tests {
             PathBuf::from("/tmp/raxis-escalation-test"),
             Arc::new(PlanRegistry::new()),
             Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
         ));
         (ctx, sink)
     }

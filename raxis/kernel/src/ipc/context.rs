@@ -22,6 +22,7 @@ use raxis_store::Store;
 use crate::authority::keys::KeyRegistry;
 use crate::gateway::client::GatewayClient;
 use crate::initiatives::PlanRegistry;
+use crate::prompt::EpochBinding;
 
 /// Shared, read-only context for all IPC handlers.
 ///
@@ -82,9 +83,18 @@ pub struct HandlerContext {
     /// fetch returns `GatewayCallError::Unavailable`; handlers MUST
     /// surface this as a planner-facing rejection rather than block.
     pub gateway: Arc<GatewayClient>,
+
+    /// In-memory tracker for session-prompt epoch validity (kernel-core.md
+    /// §2.3 `prompt::epoch_binding`). Read by `prompt::assemble` to log
+    /// `PromptReassembled { reason: EpochAdvance }` when an epoch advance
+    /// happens between assembly rounds. Written by
+    /// `policy_manager::advance_epoch` which calls `mark_all_invalid`
+    /// over the current set of active session IDs.
+    pub epoch_binding: Arc<EpochBinding>,
 }
 
 impl HandlerContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         policy: Arc<ArcSwap<PolicyBundle>>,
         registry: Arc<KeyRegistry>,
@@ -93,9 +103,20 @@ impl HandlerContext {
         data_dir: PathBuf,
         plan_registry: Arc<PlanRegistry>,
         gateway: Arc<GatewayClient>,
+        epoch_binding: Arc<EpochBinding>,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
-        Self { policy, registry, store, audit, data_dir, witness_dir, plan_registry, gateway }
+        Self {
+            policy,
+            registry,
+            store,
+            audit,
+            data_dir,
+            witness_dir,
+            plan_registry,
+            gateway,
+            epoch_binding,
+        }
     }
 
     /// Construct with an explicit witness_dir (useful in tests that use a

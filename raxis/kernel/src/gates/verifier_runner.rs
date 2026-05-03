@@ -858,6 +858,7 @@ mod stub_round_trip {
             witness_dir.parent().unwrap_or(Path::new("/tmp")).to_path_buf(),
             plan_registry,
             Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
         ).with_witness_dir(witness_dir))
     }
 

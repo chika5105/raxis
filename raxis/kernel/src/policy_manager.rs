@@ -32,6 +32,7 @@ use raxis_types::{unix_now_secs, DelegationStatus};
 use thiserror::Error;
 
 use crate::authority::keys::{authority_verifying_key, KeyRegistry};
+use crate::prompt::EpochBinding;
 
 // INV-STORE-03 (kernel-store.md §2.5.1): "no raw SQL table-name literals
 // in raxis/kernel/src; use Table enum + .as_str()". Same posture for state
@@ -39,7 +40,6 @@ use crate::authority::keys::{authority_verifying_key, KeyRegistry};
 // so any rename in `raxis-types` is caught at compile time, not at runtime.
 const POLICY_EPOCH_HISTORY: &str = Table::PolicyEpochHistory.as_str();
 const DELEGATIONS:          &str = Table::Delegations.as_str();
-#[cfg(test)]
 const SESSIONS:             &str = Table::Sessions.as_str();
 
 // ---------------------------------------------------------------------------
@@ -333,11 +333,16 @@ pub struct AdvanceOutcome {
 /// `BEGIN IMMEDIATE`).** Inside one transaction:
 ///   1. `UPDATE delegations SET status='StaleOnNextUse' WHERE status='Active'`
 ///      → `n_delegations_marked_stale`.
-///   2. (v1 stub) `n_sessions_invalidated = 0` — the prompt subsystem
-///      is not yet wired (kernel-core.md §`prompt::epoch_binding` is
-///      in the deferred prompt-assembler work). When the
-///      `sessions.prompt_epoch_valid` column is added, this step will
-///      run a parallel `UPDATE sessions ... WHERE prompt_epoch_valid = 1`.
+///   2. `SELECT session_id FROM sessions WHERE revoked_at IS NULL AND
+///      expires_at > now()` → list of currently-active session IDs.
+///      The list flows out of the SQL transaction unchanged and is
+///      handed to `prompt::epoch_binding::mark_all_invalid` after
+///      commit (Phase 1.5b). The in-memory `EpochBinding` is the
+///      v1 substitute for the spec's `sessions.prompt_epoch_valid`
+///      column (kernel-core.md §`prompt::epoch_binding`); the column
+///      lands in v1.1 alongside the migration that persists this flag.
+///      The count `n_sessions_invalidated` reports the actual count
+///      of active sessions whose prompt-epoch flag flipped.
 ///   3. `INSERT INTO policy_epoch_history (...)` — replay protection
 ///      via `epoch_id PRIMARY KEY` AND `policy_sha256 UNIQUE`.
 ///   4. The audit emit happens AFTER commit (Phase 1.5) per the
@@ -358,6 +363,7 @@ pub struct AdvanceOutcome {
 ///
 /// Returns `Ok(AdvanceOutcome)` after Phases 0-2 succeed (Phase 3
 /// success/failure does not affect the return value).
+#[allow(clippy::too_many_arguments)]
 pub fn advance_epoch(
     policy_path:    &Path,
     sig_path:       &Path,
@@ -366,6 +372,7 @@ pub fn advance_epoch(
     policy_swap:    &Arc<ArcSwap<PolicyBundle>>,
     store:          &Store,
     audit:          &Arc<dyn AuditSink>,
+    epoch_binding:  &EpochBinding,
 ) -> Result<AdvanceOutcome, PolicyError> {
     // ── Phase 0: verification (cold, read-only) ──────────────────────
     let VerifiedPolicyArtifact { bundle: new_bundle, raw_bytes: _, sha256_hex } =
@@ -382,7 +389,7 @@ pub fn advance_epoch(
     // inside the closure rolls the transaction back and surfaces as
     // `PolicyError::StoreWriteFailed` (or `PolicyArtifactAlreadyInstalled`
     // for the UNIQUE(policy_sha256) trip).
-    let (n_delegations_marked_stale, n_sessions_invalidated) = {
+    let (n_delegations_marked_stale, active_session_ids) = {
         let mut conn = store.lock_sync();
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -409,11 +416,34 @@ pub fn advance_epoch(
                 reason: format!("UPDATE {DELEGATIONS} failed: {e}"),
             })? as u64;
 
-        // Step 2: session prompt invalidation. Deferred until the
-        // prompt-assembly subsystem lands (kernel-core.md §`prompt::epoch_binding`).
-        // Counted as 0 today; the audit record carries the same field
-        // either way so the v1 schema stays forward-compatible.
-        let n_sessions: u64 = 0;
+        // Step 2: snapshot the active sessions whose prompts now need
+        // re-assembly. The actual flag flip happens in Phase 1.5b
+        // (in-memory only — see the doc comment) so we leave the SQL
+        // transaction footprint to the delegation sweep + the epoch
+        // history insert. Live filter: not revoked AND not expired.
+        let now_secs = advanced_at_unix_secs;
+        let mut session_id_strs: Vec<String> = Vec::new();
+        {
+            let mut stmt = tx
+                .prepare_cached(&format!(
+                    "SELECT session_id FROM {SESSIONS} \
+                     WHERE revoked_at IS NULL AND expires_at > ?1"
+                ))
+                .map_err(|e| PolicyError::StoreWriteFailed {
+                    reason: format!("prepare active-sessions select failed: {e}"),
+                })?;
+            let rows = stmt
+                .query_map(rusqlite::params![now_secs], |row| row.get::<_, String>(0))
+                .map_err(|e| PolicyError::StoreWriteFailed {
+                    reason: format!("execute active-sessions select failed: {e}"),
+                })?;
+            for row in rows {
+                let s = row.map_err(|e| PolicyError::StoreWriteFailed {
+                    reason: format!("read active-sessions row failed: {e}"),
+                })?;
+                session_id_strs.push(s);
+            }
+        }
 
         // Step 3: persist the new epoch row. Catch the
         // UNIQUE(policy_sha256) constraint and surface it as the
@@ -461,8 +491,25 @@ pub fn advance_epoch(
             reason: format!("COMMIT failed: {e}"),
         })?;
 
-        (n_delegations, n_sessions)
+        (n_delegations, session_id_strs)
     };
+
+    // ── Phase 1.5b: in-memory prompt-epoch sweep ─────────────────────
+    // The in-memory `EpochBinding` is the v1 substitute for the
+    // spec's `sessions.prompt_epoch_valid` column. Sessions present in
+    // `active_session_ids` (snapshot taken inside the SQL transaction
+    // above) get their prompt flagged invalid; the next assembly call
+    // for any of them will log
+    // `AuditEventKind::PromptReassembled { reason: EpochAdvance }`
+    // before rebuilding. Sessions admitted AFTER this point start
+    // with a fresh epoch implicitly (the binding's default is
+    // "valid"), which is correct because they were assembled against
+    // the new epoch.
+    let active_session_ids: Vec<raxis_types::SessionId> = active_session_ids
+        .into_iter()
+        .filter_map(|s| raxis_types::SessionId::parse(&s).ok())
+        .collect();
+    let n_sessions_invalidated = epoch_binding.mark_all_invalid(&active_session_ids) as u64;
 
     // ── Phase 1.5: post-commit audit emit ────────────────────────────
     // Per kernel-store.md §2.5.2 audit emission MUST follow a
@@ -826,9 +873,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (policy_path, sig_path) = write_signed_policy_artifact(tmp.path(), 2, &sk);
 
+        let binding = EpochBinding::new();
         let outcome = advance_epoch(
             &policy_path, &sig_path, "op-prime",
-            &registry, &swap, &store, &audit,
+            &registry, &swap, &store, &audit, &binding,
         ).unwrap();
 
         assert_eq!(outcome.new_epoch_id, 2);
@@ -904,7 +952,10 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &sk);
-        let outcome = advance_epoch(&pp, &sp, "op-prime", &registry, &swap, &store, &audit).unwrap();
+        let binding = EpochBinding::new();
+        let outcome = advance_epoch(
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+        ).unwrap();
         assert_eq!(outcome.n_delegations_marked_stale, 1);
 
         // Verify the actual rows. The Active row flipped to
@@ -927,6 +978,64 @@ mod tests {
         assert_eq!(stale_status, stale_state);
     }
 
+    #[test]
+    fn advance_epoch_marks_active_session_prompts_invalid_in_epoch_binding() {
+        // Seed the store with three sessions: two active (must be
+        // marked invalid in the binding) and one revoked (must NOT
+        // appear in the binding's invalidated set). The outcome's
+        // `n_sessions_invalidated` must reflect only the two active
+        // sessions; the binding's `session_prompt_valid()` must report
+        // `false` for them and `true` for the revoked one.
+        use raxis_types::SessionId;
+        let (registry, sk, store, swap, audit, _sink) = boot_state();
+        let s_alpha = SessionId::new_v4();
+        let s_beta  = SessionId::new_v4();
+        let s_gone  = SessionId::new_v4();
+        {
+            let conn = store.lock_sync();
+            // Two active sessions (revoked_at IS NULL, expires_at far
+            // in the future).
+            for sid in [&s_alpha, &s_beta] {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {SESSIONS} (session_id, role_id, session_token, lineage_id,
+                                                 fetch_quota, sequence_number, created_at, expires_at)
+                         VALUES (?1, 'planner', ?2, 'lin', 10, 0, 1, 9999999999)"
+                    ),
+                    rusqlite::params![sid.as_str(), format!("tok-{}", sid.as_str())],
+                ).unwrap();
+            }
+            // One revoked session (revoked_at is set; the active-sessions
+            // filter must exclude it).
+            conn.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} (session_id, role_id, session_token, lineage_id,
+                                             fetch_quota, sequence_number, created_at, expires_at,
+                                             revoked_at)
+                     VALUES (?1, 'planner', ?2, 'lin', 10, 0, 1, 9999999999, 100)"
+                ),
+                rusqlite::params![s_gone.as_str(), format!("tok-{}", s_gone.as_str())],
+            ).unwrap();
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &sk);
+        let binding = EpochBinding::new();
+        let outcome = advance_epoch(
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+        ).unwrap();
+
+        assert_eq!(outcome.n_sessions_invalidated, 2,
+            "expected exactly 2 active sessions to be invalidated; got {}",
+            outcome.n_sessions_invalidated);
+        assert!(!binding.session_prompt_valid(&s_alpha),
+            "alpha must be invalidated after epoch advance");
+        assert!(!binding.session_prompt_valid(&s_beta),
+            "beta must be invalidated after epoch advance");
+        assert!(binding.session_prompt_valid(&s_gone),
+            "the revoked session must NOT appear in the invalidated set");
+    }
+
     // ── advance_epoch failure paths ───────────────────────────────────
 
     #[test]
@@ -934,7 +1043,10 @@ mod tests {
         let (registry, sk, store, swap, audit, sink) = boot_state();
         let tmp = tempfile::tempdir().unwrap();
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 1, &sk);
-        let result = advance_epoch(&pp, &sp, "op-prime", &registry, &swap, &store, &audit);
+        let binding = EpochBinding::new();
+        let result = advance_epoch(
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+        );
         assert!(matches!(result, Err(PolicyError::EpochReplay { .. })));
         // No store mutation, no in-memory swap.
         assert_eq!(read_current_epoch(&store).unwrap(), 1);
@@ -950,7 +1062,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let other_sk = SigningKey::from_bytes(&[0x77u8; 32]);
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &other_sk);
-        let result = advance_epoch(&pp, &sp, "op-prime", &registry, &swap, &store, &audit);
+        let binding = EpochBinding::new();
+        let result = advance_epoch(
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+        );
         assert!(matches!(result, Err(PolicyError::SignatureInvalid { .. })));
         assert_eq!(read_current_epoch(&store).unwrap(), 1, "no store mutation");
     }
@@ -999,7 +1114,10 @@ mod tests {
             )
             .unwrap();
         }
-        let result = advance_epoch(&pp, &sp, "op-prime", &registry, &swap, &store, &audit);
+        let binding = EpochBinding::new();
+        let result = advance_epoch(
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+        );
         assert!(matches!(result, Err(PolicyError::PolicyArtifactAlreadyInstalled { .. })),
             "expected PolicyArtifactAlreadyInstalled, got {result:?}");
     }

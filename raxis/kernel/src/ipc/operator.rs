@@ -955,6 +955,7 @@ async fn handle_rotate_epoch(
     let store_for_blocking    = Arc::clone(&ctx.store);
     let audit_for_blocking    = Arc::clone(&ctx.audit);
     let policy_for_blocking   = Arc::clone(&ctx.policy);
+    let binding_for_blocking  = Arc::clone(&ctx.epoch_binding);
     let triggered_by          = operator.fingerprint.clone();
     let policy_path_blocking  = policy_path_buf.clone();
     let sig_path_blocking     = sig_path_buf.clone();
@@ -968,6 +969,7 @@ async fn handle_rotate_epoch(
             &policy_for_blocking,
             &store_for_blocking,
             &audit_for_blocking,
+            &binding_for_blocking,
         )
     })
     .await;
@@ -1213,6 +1215,7 @@ mod escalation_dispatch_tests {
             PathBuf::from("/tmp/raxis-test"),
             Arc::new(PlanRegistry::new()),
             Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
         ))
     }
 
@@ -1595,6 +1598,7 @@ mod escalation_dispatch_tests {
             data_dir,
             Arc::new(PlanRegistry::new()),
             Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
         ));
         (ctx, inner)
     }
@@ -1855,6 +1859,7 @@ mod rotate_epoch_dispatch_tests {
             data_dir.to_path_buf(),
             Arc::new(PlanRegistry::new()),
             gateway,
+            Arc::new(crate::prompt::EpochBinding::new()),
         ))
     }
 

@@ -334,6 +334,11 @@ async fn main() {
     // forward a fetch via `ctx.gateway.fetch(...)`. A single Arc is
     // cloned three ways below; cheap.
     let gateway_client = Arc::new(gateway::client::GatewayClient::new());
+    // The EpochBinding is the in-memory v1 substitute for the spec's
+    // `sessions.prompt_epoch_valid` column. Read by `prompt::assemble`,
+    // written by `policy_manager::advance_epoch` after every epoch
+    // rotation. A single Arc is shared across handlers via `ctx`.
+    let epoch_binding = Arc::new(prompt::EpochBinding::new());
     let ctx = Arc::new(ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -342,6 +347,7 @@ async fn main() {
         data_dir.clone(),
         Arc::clone(&plan_registry),
         Arc::clone(&gateway_client),
+        Arc::clone(&epoch_binding),
     ));
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a
