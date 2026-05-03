@@ -224,16 +224,38 @@ async fn handle_create_session(
         }
     };
 
-    let config = SessionConfig::default();
-    match authority::session::create_session(
-        role.clone(),
-        worktree_root.clone(),
-        base_sha.clone(),
-        base_tracking_ref.clone(),
-        lineage_id.clone(),
-        &config,
-        &ctx.store,
-    ) {
+    // FSM call goes through spawn_blocking — `authority::session::create_session`
+    // takes the store mutex via `Store::lock_sync()`, which panics if
+    // called directly from an async task ("Cannot block the current
+    // thread from within a runtime"). Same pattern as `main.rs` Step
+    // 6/7b and the escalation handlers below.
+    let config           = SessionConfig::default();
+    let role_for_blocking         = role.clone();
+    let worktree_for_blocking     = worktree_root.clone();
+    let base_sha_for_blocking     = base_sha.clone();
+    let base_track_for_blocking   = base_tracking_ref.clone();
+    let lineage_for_blocking      = lineage_id.clone();
+    let store_for_blocking        = Arc::clone(&ctx.store);
+    let join_result = tokio::task::spawn_blocking(move || {
+        authority::session::create_session(
+            role_for_blocking,
+            worktree_for_blocking,
+            base_sha_for_blocking,
+            base_track_for_blocking,
+            lineage_for_blocking,
+            &config,
+            &store_for_blocking,
+        )
+    }).await;
+    let create_outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_CREATE_SESSION".to_owned(),
+            detail: format!("create_session spawn_blocking join failed: {e}"),
+        },
+    };
+
+    match create_outcome {
         Ok((session_id, session_token)) => OperatorResponse::SessionCreated {
             session_id: session_id.as_str().to_owned(),
             session_token,
@@ -261,7 +283,20 @@ async fn handle_revoke_session(session_id_str: String, ctx: &HandlerContext) -> 
         }
     };
 
-    match authority::session::revoke_session(&session_id, &ctx.store) {
+    let store_for_blocking      = Arc::clone(&ctx.store);
+    let session_id_for_blocking = session_id.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        authority::session::revoke_session(&session_id_for_blocking, &store_for_blocking)
+    }).await;
+    let revoke_outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_REVOKE_SESSION".to_owned(),
+            detail: format!("revoke_session spawn_blocking join failed: {e}"),
+        },
+    };
+
+    match revoke_outcome {
         Ok(()) => {
             let revoked_at = raxis_types::unix_now_secs();
             OperatorResponse::SessionRevoked {
@@ -335,19 +370,37 @@ async fn handle_grant_delegation(
         }
     };
 
-    match authority::delegation::grant_delegation(
-        &session_id,
-        &delegation_id,
-        &capability_class,
-        scope_json.as_deref(),
-        &operator.fingerprint,
-        ttl_secs,
-        max_uses,
-        &signature_bytes,
-        &pubkey_bytes,
-        ctx.policy.max_delegation_ttl().as_secs(),
-        &ctx.store,
-    ) {
+    let store_for_blocking         = Arc::clone(&ctx.store);
+    let session_for_blocking       = session_id.clone();
+    let delegation_for_blocking    = delegation_id.clone();
+    let capability_for_blocking    = capability_class.clone();
+    let scope_for_blocking         = scope_json.clone();
+    let fp_for_blocking            = operator.fingerprint.clone();
+    let max_ttl                    = ctx.policy.max_delegation_ttl().as_secs();
+    let join_result = tokio::task::spawn_blocking(move || {
+        authority::delegation::grant_delegation(
+            &session_for_blocking,
+            &delegation_for_blocking,
+            &capability_for_blocking,
+            scope_for_blocking.as_deref(),
+            &fp_for_blocking,
+            ttl_secs,
+            max_uses,
+            &signature_bytes,
+            &pubkey_bytes,
+            max_ttl,
+            &store_for_blocking,
+        )
+    }).await;
+    let grant_outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_GRANT_DELEGATION".to_owned(),
+            detail: format!("grant_delegation spawn_blocking join failed: {e}"),
+        },
+    };
+
+    match grant_outcome {
         Ok(()) => OperatorResponse::DelegationGranted { delegation_id },
         Err(authority::keys::AuthorityError::DelegationAlreadyActive { existing_delegation_id }) => {
             OperatorResponse::Error {
@@ -374,7 +427,18 @@ async fn handle_create_initiative(
     submitted_by: String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    match lifecycle::create_initiative(&plan_toml, &plan_sig_hex, &submitted_by, &ctx.store) {
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let join_result = tokio::task::spawn_blocking(move || {
+        lifecycle::create_initiative(&plan_toml, &plan_sig_hex, &submitted_by, &store_for_blocking)
+    }).await;
+    let outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_CREATE_INITIATIVE".to_owned(),
+            detail: format!("create_initiative spawn_blocking join failed: {e}"),
+        },
+    };
+    match outcome {
         Ok(result) => OperatorResponse::InitiativeCreated {
             initiative_id: result.initiative_id,
             status:        result.status,
@@ -451,15 +515,30 @@ async fn handle_approve_plan(
     };
 
     let policy_epoch = ctx.policy.epoch();
-    match lifecycle::approve_plan(
-        &initiative_id,
-        &approving_operator,
-        &pubkey_bytes,
-        policy_epoch,
-        &ctx.store,
-        &*ctx.audit,
-        &ctx.plan_registry,
-    ) {
+    let store_for_blocking          = Arc::clone(&ctx.store);
+    let audit_for_blocking          = Arc::clone(&ctx.audit);
+    let plan_registry_for_blocking  = Arc::clone(&ctx.plan_registry);
+    let initiative_id_for_blocking  = initiative_id.clone();
+    let approving_op_for_blocking   = approving_operator.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        lifecycle::approve_plan(
+            &initiative_id_for_blocking,
+            &approving_op_for_blocking,
+            &pubkey_bytes,
+            policy_epoch,
+            &store_for_blocking,
+            &*audit_for_blocking,
+            &plan_registry_for_blocking,
+        )
+    }).await;
+    let outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_APPROVE_PLAN".to_owned(),
+            detail: format!("approve_plan spawn_blocking join failed: {e}"),
+        },
+    };
+    match outcome {
         Ok(result) => OperatorResponse::PlanApproved {
             initiative_id:  result.initiative_id,
             tasks_admitted: result.tasks_admitted,
@@ -478,7 +557,26 @@ async fn handle_reject_plan(
     reason:        Option<String>,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    match lifecycle::reject_plan(&initiative_id, &rejected_by, reason.as_deref(), &ctx.store) {
+    let store_for_blocking         = Arc::clone(&ctx.store);
+    let initiative_id_for_blocking = initiative_id.clone();
+    let rejected_by_for_blocking   = rejected_by.clone();
+    let reason_for_blocking        = reason.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        lifecycle::reject_plan(
+            &initiative_id_for_blocking,
+            &rejected_by_for_blocking,
+            reason_for_blocking.as_deref(),
+            &store_for_blocking,
+        )
+    }).await;
+    let outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_REJECT_PLAN".to_owned(),
+            detail: format!("reject_plan spawn_blocking join failed: {e}"),
+        },
+    };
+    match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("initiative {initiative_id} rejected"),
         },
@@ -492,7 +590,19 @@ async fn handle_reject_plan(
 /// RetryTask — transition a Failed task back to Admitted.
 /// Spec: "retry_task — transition a Failed task back to Admitted."
 async fn handle_retry_task(task_id: String, ctx: &HandlerContext) -> OperatorResponse {
-    match lifecycle::retry_task(&task_id, &ctx.store) {
+    let store_for_blocking   = Arc::clone(&ctx.store);
+    let task_id_for_blocking = task_id.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        lifecycle::retry_task(&task_id_for_blocking, &store_for_blocking)
+    }).await;
+    let outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_RETRY_TASK".to_owned(),
+            detail: format!("retry_task spawn_blocking join failed: {e}"),
+        },
+    };
+    match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("task {task_id} retried (→ Admitted)"),
         },
@@ -509,14 +619,27 @@ async fn handle_retry_task(task_id: String, ctx: &HandlerContext) -> OperatorRes
 /// is legal per the FSM table in task_transitions.rs.
 async fn handle_resume_task(
     task_id:    String,
-    _resumed_by: String,
+    resumed_by: String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
     use crate::initiatives::task_transitions::{transition_task, TransitionActor};
     use raxis_types::TaskState;
 
-    let actor = TransitionActor::Operator { fingerprint: _resumed_by.clone() };
-    match transition_task(&task_id, TaskState::Admitted, None, actor, &ctx.store) {
+    let store_for_blocking   = Arc::clone(&ctx.store);
+    let task_id_for_blocking = task_id.clone();
+    let resumed_by_for_blocking = resumed_by.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        let actor = TransitionActor::Operator { fingerprint: resumed_by_for_blocking };
+        transition_task(&task_id_for_blocking, TaskState::Admitted, None, actor, &store_for_blocking)
+    }).await;
+    let outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_RESUME_TASK".to_owned(),
+            detail: format!("resume_task spawn_blocking join failed: {e}"),
+        },
+    };
+    match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("task {task_id} resumed (→ Admitted)"),
         },
@@ -533,7 +656,20 @@ async fn handle_abort_task(
     aborted_by: String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    match lifecycle::abort_task(&task_id, &aborted_by, &ctx.store) {
+    let store_for_blocking      = Arc::clone(&ctx.store);
+    let task_id_for_blocking    = task_id.clone();
+    let aborted_by_for_blocking = aborted_by.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        lifecycle::abort_task(&task_id_for_blocking, &aborted_by_for_blocking, &store_for_blocking)
+    }).await;
+    let outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_ABORT_TASK".to_owned(),
+            detail: format!("abort_task spawn_blocking join failed: {e}"),
+        },
+    };
+    match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("task {task_id} aborted"),
         },
@@ -550,7 +686,24 @@ async fn handle_abort_initiative(
     aborted_by:    String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    match lifecycle::abort_initiative(&initiative_id, &aborted_by, &ctx.store) {
+    let store_for_blocking          = Arc::clone(&ctx.store);
+    let initiative_id_for_blocking  = initiative_id.clone();
+    let aborted_by_for_blocking     = aborted_by.clone();
+    let join_result = tokio::task::spawn_blocking(move || {
+        lifecycle::abort_initiative(
+            &initiative_id_for_blocking,
+            &aborted_by_for_blocking,
+            &store_for_blocking,
+        )
+    }).await;
+    let outcome = match join_result {
+        Ok(r) => r,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_ABORT_INITIATIVE".to_owned(),
+            detail: format!("abort_initiative spawn_blocking join failed: {e}"),
+        },
+    };
+    match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("initiative {initiative_id} aborted"),
         },
@@ -1044,6 +1197,67 @@ mod escalation_dispatch_tests {
         assert_eq!(read_status(store.clone(), "esc-1").await, "Pending");
         // No audit event for a rejected denial.
         assert!(!sink.event_kinds().contains(&"EscalationDenied"));
+    }
+
+    // ── Regression: pre-existing handlers run under spawn_blocking (B.1) ─
+    //
+    // The 10 pre-existing operator handlers (CreateSession, RevokeSession,
+    // GrantDelegation, CreateInitiative, ApprovePlan, RejectPlan,
+    // RetryTask, ResumeTask, AbortTask, AbortInitiative) were calling
+    // synchronous FSM functions directly inside `async fn` bodies. Those
+    // FSMs use `Store::lock_sync()`, which calls
+    // `tokio::sync::Mutex::blocking_lock()` and PANICS when invoked from
+    // an async task ("Cannot block the current thread from within a
+    // runtime"). Phase B.1 wrapped each handler's FSM call in
+    // `tokio::task::spawn_blocking`. The tests below run a representative
+    // handler (`handle_revoke_session`) end-to-end under `#[tokio::test]`
+    // and assert it returns a structured response — which is impossible
+    // unless the spawn_blocking wrapping is in place.
+    //
+    // We pick `handle_revoke_session` because it has the smallest input
+    // surface: just a session_id. Hitting the not-found path forces the
+    // FSM down to `lock_sync` even on the error side, so "no panic" is
+    // the discriminator.
+
+    #[tokio::test]
+    async fn revoke_session_runs_under_tokio_without_panic() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sink  = Arc::new(FakeAuditSink::new());
+        let ctx   = build_ctx(store, sink, &fixture_keypair());
+
+        let resp = handle_revoke_session(
+            "00000000-0000-4000-8000-000000000000".into(),
+            &ctx,
+        ).await;
+
+        // Whatever the outcome, the test passing means the runtime did
+        // not panic. The exact code is FAIL_REVOKE_SESSION because the
+        // session row doesn't exist.
+        match resp {
+            OperatorResponse::Error { .. } | OperatorResponse::SessionRevoked { .. } => {},
+            other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_initiative_runs_under_tokio_without_panic() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let sink  = Arc::new(FakeAuditSink::new());
+        let ctx   = build_ctx(store, sink, &fixture_keypair());
+
+        // Empty plan TOML is rejected by the FSM, but the FSM still
+        // takes the store mutex on the way to that error — same
+        // spawn_blocking gate as the happy path.
+        let resp = handle_create_initiative(
+            "[meta]\nplan_id = \"\"\n".into(),
+            "deadbeef".into(),
+            "op-prime".into(),
+            &ctx,
+        ).await;
+        match resp {
+            OperatorResponse::Error { .. } | OperatorResponse::InitiativeCreated { .. } => {},
+            other => panic!("unexpected variant: {other:?}"),
+        }
     }
 
     #[tokio::test]
