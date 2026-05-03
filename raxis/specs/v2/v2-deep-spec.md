@@ -1488,3 +1488,149 @@ CREATE TABLE IF NOT EXISTS subtask_activations (
 
 *Specification complete — Steps 1–31 fully documented with alternatives, rejection analysis,
 and final decisions. Provider-agnostic throughout. All V1 invariants preserved.*
+
+---
+
+## Part 9 — Per-Capability Epoch Staleness Diffing (A.18 Promotion to V2)
+
+### Context: What V1 Deferred and Why
+
+V1's policy epoch model is deliberately blunt. When the operator advances the policy epoch
+(via `policy_manager::advance_epoch`), **all active delegations are immediately marked stale**.
+The next time any active session submits an intent, the Kernel discovers the epoch mismatch
+and requires a renewal decision. The session does not know which specific capabilities changed
+— it only knows the epoch has moved and the kernel must re-evaluate.
+
+The V1 rationale (documented in `design-decisions.md §A.18`) was principled:
+> *"Per-capability staleness diffing requires the kernel to diff two policy epochs and
+> determine per-capability impact, which is a complex and failure-prone piece of infrastructure
+> to build before the basic system is proven."*
+
+The V1 blunt-invalidation rule has two correct incentive effects:
+1. Epoch changes are operationally disruptive (all active sessions stall for renewal) — this
+   creates pressure to keep policy changes rare, which is the correct incentive.
+2. The kernel never makes a "this change doesn't affect you" judgment that could be wrong —
+   any epoch change is treated conservatively as potentially affecting everyone.
+
+V1 also recorded `policy_epoch` in the 4-field `SessionCreated` audit attribution chain
+(Part 2, Step 7), establishing the epoch as a first-class audit field.
+
+**The V2 Problem:** In V2, initiatives run multiple concurrent sessions (Orchestrator +
+multiple Executors + Reviewers). An epoch advance while an initiative is mid-flight stalls
+ALL sessions simultaneously. For a long-running initiative with 8 active Executor VMs, an
+operator rotating a signing key (a routine operational task) causes 8 concurrent renewal
+stalls. Operationally, this makes mid-flight policy changes impractical for V2 scale —
+the disruption cost scales with initiative parallelism.
+
+---
+
+### Step 32: Per-Capability Epoch Staleness Diffing
+
+**Decision:** V2 promotes A.18 from "deferred optimization" to a specified deliverable.
+The kernel gains the ability to diff two policy epochs and determine, per capability class,
+whether the delta affects a given session's active delegation. Sessions whose capabilities
+are unaffected by the epoch change are not marked stale.
+
+#### The Capability Class Model
+
+Every delegation in the V1 `delegations` table already carries a `capability_class` field
+derived from the policy bundle. V2 extends this model by classifying epoch changes against
+capability classes:
+
+```rust
+pub enum CapabilityClass {
+    PathPolicy,          // changes to path_allowlist rules or path tier assignments
+    BudgetPolicy,        // changes to lane ceilings, admission unit weights
+    ProviderPolicy,      // changes to model routing, provider allowlist
+    EscalationPolicy,    // changes to escalation class definitions or approval thresholds
+    AuthPolicy,          // changes to session token expiry, signing keys
+    WitnessPolicy,       // changes to gate definitions or required witness types
+}
+```
+
+When `advance_epoch` is called, the Kernel diffs the old and new policy bundles and produces
+a `PolicyDelta`:
+
+```rust
+pub struct PolicyDelta {
+    pub from_epoch: u64,
+    pub to_epoch:   u64,
+    pub affected_classes: Vec<CapabilityClass>,
+}
+```
+
+**Alternative A — Diff at the field level (fine-grained).**
+Rejected. Field-level diffing is NP-complex for a signed policy bundle with nested
+structures. A field that appears unchanged may have had its semantic meaning altered by a
+change to an enum variant it references. Field-level diff has a high probability of
+"false negative" staleness — concluding a delegation is unaffected when it actually is.
+
+**Alternative B — Diff at the capability class level (coarse-grained).**
+Adopted. Capability classes are high-level, well-defined categories. The policy bundle
+schema defines which top-level keys belong to which class. A `PathPolicy` change only
+occurs when `[[claim_requirements.rules]]` or `path_tier` fields are modified. An
+`AuthPolicy` change only occurs when `auth.session_token_expiry` or `auth.signing_key`
+fields are modified. The diff is: "which top-level sections of the bundle changed?" —
+a set comparison on section names. This is fast, unambiguous, and conservative: if a
+section changed, all capabilities in that class are marked affected.
+
+#### Staleness Evaluation
+
+When the epoch advances and `PolicyDelta.affected_classes` is computed, the Kernel runs:
+
+```sql
+-- Mark only delegations whose capability_class is in the affected set
+UPDATE delegations
+   SET epoch_stale = 1
+ WHERE epoch_at_creation < ?              -- bind: new_epoch
+   AND status = 'Active'
+   AND capability_class IN (?, ?, ...)    -- bind: affected_classes
+```
+
+Delegations in unaffected classes are not marked stale. A session with a `PathPolicy`
+delegation is unaffected by a `ProviderPolicy` change (e.g., the operator adding a new
+provider to the allowlist). Its active work continues uninterrupted.
+
+**Conservative guarantee:** If the `PolicyDelta` computation itself fails (the new bundle is
+malformed, the diff throws an error), the Kernel falls back to V1 blunt invalidation —
+all delegations marked stale. Failure of the diff engine is never a permission grant.
+
+#### Audit Event: `PolicyEpochAdvanced` Extended
+
+The existing `AuditEventKind::PolicyEpochAdvanced` is extended:
+
+```rust
+PolicyEpochAdvanced {
+    from_epoch:       u64,
+    to_epoch:         u64,
+    affected_classes: Vec<CapabilityClass>,  // V2 addition
+    stale_count:      u32,                   // how many delegations were marked stale
+    unaffected_count: u32,                   // how many were preserved
+}
+```
+
+An auditor can now see precisely which capability classes changed during an epoch advance and
+how many sessions were disrupted versus preserved.
+
+#### What Does Not Change
+
+- The signing ceremony for `advance_epoch` is unchanged — the new bundle must pass the
+  operator Ed25519 signature check.
+- The `policy_epoch` field in `SessionCreated` audit events is unchanged — sessions still
+  record the epoch at creation time.
+- V1 blunt invalidation remains as the fallback. It is not removed.
+- The kernel's enforcement logic for stale delegations is unchanged — a stale delegation
+  still triggers a renewal decision on the next intent from that session.
+
+#### V2 Constraint: Epoch Advances During Genesis Are Still Blunt
+
+If an epoch advances while `approve_plan` is being processed (between the 7 validation
+checks and the final `admit_in_tx` write), the entire `approve_plan` transaction is aborted
+and the operator must resubmit. The per-capability staleness model applies only to
+**already-active** sessions. Sessions that have not completed admission are not subject to
+partial staleness evaluation.
+
+---
+
+*Part 9 complete. Per-capability epoch staleness diffing is now a V2 specified deliverable,
+promoted from A.18 deferred optimization.*
