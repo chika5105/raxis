@@ -73,6 +73,19 @@ impl KeyRegistry {
         let quality   = SigningKey::from_bytes(&[1u8; 32]);
         Self { authority, quality, verifier_token_key: [0u8; 32] }
     }
+
+    /// Build a `KeyRegistry` from a caller-supplied authority signing
+    /// key. Test-only — used by `policy_manager` tests that need to
+    /// produce signed policy artifacts whose signature the kernel can
+    /// then verify against this same key. Quality and verifier-token
+    /// keys are populated with deterministic stubs (any non-zero bytes
+    /// would do; we keep them distinct from the main test authority
+    /// key to surface accidental swaps).
+    #[cfg(test)]
+    pub(crate) fn for_tests_with_authority(authority: SigningKey) -> Self {
+        let quality = SigningKey::from_bytes(&[0xA1u8; 32]);
+        Self { authority, quality, verifier_token_key: [0xCCu8; 32] }
+    }
 }
 
 // ---------------------------------------------------------------------------
