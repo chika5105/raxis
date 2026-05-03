@@ -220,11 +220,34 @@ If a planner is doing the wrong thing or needs coordination, course-correction m
 
 #### A.18 — Per-Capability Epoch Staleness Checking
 
-**Considered because:** a fine-grained staleness model — where a delegation becomes stale only if the specific capability classes it covers changed in the new epoch — is more precise and operationally less disruptive than invalidating all delegations on any epoch change.
+**Considered because:** a fine-grained staleness model — where a delegation becomes stale
+only if the specific capability classes it covers changed in the new epoch — is more precise
+and operationally less disruptive than invalidating all delegations on any epoch change.
 
-**Rejected for v1 because:** implementing this correctly requires the kernel to diff two policy epochs and determine per-capability impact, which is a complex and failure-prone piece of infrastructure to build before the basic system is proven. The v1 rule is deterministic and auditable: any epoch advance marks active delegations stale-on-next-use, triggering a renewal decision at first use. This is operationally disruptive if epochs change frequently — which is itself a pressure to keep policy changes rare, which is the correct incentive. Per-capability staleness diffing is a v2 optimization.
+**Rejected for V1 because:** implementing this correctly requires the kernel to diff two
+policy epochs and determine per-capability impact, which is a complex and failure-prone piece
+of infrastructure to build before the basic system is proven. The V1 rule is deterministic
+and auditable: any epoch advance marks active delegations stale-on-next-use, triggering a
+renewal decision at first use. This is operationally disruptive if epochs change frequently
+— which is itself a pressure to keep policy changes rare, which is the correct incentive.
 
-**Guardrail:** do not implement per-capability epoch diffing in v1 code. Stale = any epoch mismatch. Renewal = new kernel decision required.
+**V1 guardrail:** do not implement per-capability epoch diffing in V1 code. Stale = any
+epoch mismatch. Renewal = new kernel decision required.
+
+**Status: Promoted to V2 specified deliverable.**
+V2's multi-session initiatives (Orchestrator + multiple Executor + Reviewer VMs) make the
+blunt-invalidation operational cost higher in aggregate — though V2 sessions are short-lived
+and the incentive to schedule epoch advances between initiatives remains correct. The
+per-capability diffing is a targeted quality-of-life improvement for cases where epoch
+advances cannot be scheduled (emergency key rotation, security incident response). It is
+not a V2 correctness requirement; it is an operational improvement with a clear safety
+contract: diff failure always falls back to blunt invalidation.
+
+**Full specification:** [`specs/v2/policy-epoch-diffing.md`](v2/policy-epoch-diffing.md)
+Key design points: `CapabilityClass` enum (6 classes), coarse section-level diff (not
+field-level, which has false-negative risk), targeted SQL UPDATE, silent auto-renewal for
+unaffected sessions, blunt fallback on diff error, genesis-phase abort constraint.
+
 
 ---
 
