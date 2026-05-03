@@ -218,6 +218,33 @@ impl KernelInstance {
         }
     }
 
+    /// Construct a `KernelInstance` directly from a spawned child + its
+    /// stderr-capture sink + the data dir it's running against. Used by
+    /// integration tests that need to spawn a SECOND kernel against an
+    /// already-bootstrapped data dir (e.g. cross-restart audit-chain
+    /// tests). The data_dir is owned by the original instance and is
+    /// NOT recreated here — this constructor takes a borrow-free
+    /// `PathBuf` and does NOT take ownership of any TempDir, so the
+    /// caller is responsible for keeping the original instance alive
+    /// long enough for the directory to outlive both kernels.
+    ///
+    /// `#[allow(dead_code)]` because not every integration-test binary
+    /// uses this entry point, but the harness is shared across all of
+    /// them and unused-fn lints are per-binary.
+    #[allow(dead_code)]
+    pub fn from_parts(
+        child: std::process::Child,
+        stderr_lines: Arc<Mutex<Vec<String>>>,
+        data_dir: PathBuf,
+    ) -> Self {
+        Self {
+            child,
+            stderr_lines,
+            data_dir,
+            _data_dir: None,
+        }
+    }
+
     /// Subprocess PID (cast to `i32` for `libc::kill`).
     pub fn pid(&self) -> i32 {
         self.child.id() as i32
