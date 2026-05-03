@@ -13,6 +13,7 @@
 //     report. cli-readonly.md §5.5 catalogues them.
 
 pub mod audit;
+pub mod budget;
 pub mod delegation;
 pub mod doctor;
 pub mod epoch;

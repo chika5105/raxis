@@ -63,6 +63,7 @@
 //! redaction depends on Phase B2 (the `inspect` command), not on this
 //! foundation crate. Tracked as TODO in `tasks::full_inspection`.
 
+pub mod budget;
 pub mod escalations;
 pub mod initiatives;
 pub mod kernel_meta;
@@ -74,6 +75,7 @@ pub mod witnesses;
 
 // Re-export the most common return shapes so CLI binders don't have to
 // chase three sub-paths for one table.
+pub use budget::{LaneBudgetRow, ReservationRow};
 pub use escalations::{EscalationRow, EscalationStatusFilter};
 pub use initiatives::{InitiativeRow, InitiativeStateCounts};
 pub use kernel_meta::{KernelMeta, KernelMetaError};

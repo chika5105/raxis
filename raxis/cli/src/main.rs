@@ -198,6 +198,7 @@ fn run() -> Result<(), CliError> {
         "doctor" => commands::doctor::run(&flags, rest),
         "verifiers" => commands::verifiers::run(&flags, rest),
         "witnesses" => commands::witnesses::run(&flags, rest),
+        "budget" => commands::budget::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
@@ -328,6 +329,10 @@ READ-ONLY OBSERVATION:
                         [--limit N] [--json]
         Witness records for one task, newest-first. Exit code 4
         when the task has no witnesses recorded yet.
+
+    budget [<lane_id>] [--limit N] [--json]
+        Per-lane budget pressure (reserved / max_cost_per_epoch).
+        Drill into one lane's reservations by passing <lane_id>.
 "#
     );
 }
