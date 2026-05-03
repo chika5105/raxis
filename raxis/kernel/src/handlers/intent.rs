@@ -75,28 +75,32 @@ use crate::vcs::diff::CommitSha;
 /// verifier subprocesses via `tokio::process::Command`.
 ///
 /// Following the same pattern as `escalation::handle` and the operator
-/// handlers, every `lock_sync()` call site inside `handle_inner` MUST be
-/// wrapped in `tokio::task::spawn_blocking` so the closure runs on the
-/// blocking pool (where `blocking_lock` is legal). Wrapping the whole
+/// handlers, every `lock_sync()` call site MUST be wrapped in
+/// `tokio::task::spawn_blocking` so the closure runs on the blocking
+/// pool (where `blocking_lock` is legal). Wrapping the whole
 /// `handle_inner` in a single `spawn_blocking + Handle::current().block_on`
 /// would NOT work — `block_on` re-enters async context and the inner
 /// `lock_sync` calls panic anyway. The phased-spawn-blocking pattern
 /// is the only correct solution for a hybrid sync-SQLite + async-subprocess
 /// pipeline.
 ///
-/// **Status**: as of this commit only the first lock_sync site (Step 1
-/// session lookup) is wrapped — enough to make the bogus-token rejection
-/// path round-trip cleanly and unblocks the mock-planner integration
-/// test (`kernel/tests/mock_planner_end_to_end.rs`). The remaining
-/// lock_sync sites in `handle_inner`, `handle_report_failure`, and
-/// `handle_complete_task` remain as latent P0s tracked by inline
-/// `TODO(P0-async-safety):` markers; they will fire the same panic the
-/// moment any test (or production planner with a real session) reaches
-/// them. The fix is mechanical — wrap each call site in `spawn_blocking`
-/// the same way Step 1 is wrapped — but is sized as a separate PR
-/// because each call requires its own surrounding `Arc<Store>` clone
-/// dance. The argument type is `&Arc<HandlerContext>` so the inner Arc
-/// can be cheaply cloned into the blocking tasks.
+/// **Topology**: `handle_inner` runs the body of the 13-step pipeline as
+/// three discrete phases bracketing the one async sub-call:
+///
+///   - `Phase A` (`spawn_blocking`) — Step 1 session lookup +
+///     Step 2 envelope acceptance + Step 3 task load + dispatch +
+///     (for SingleCommit/IntegrationMerge) Steps 4-8 sync work.
+///     Returns `PreGateOutcome::Proceed(PreGateState)`,
+///     `EarlyResponse(IntentResponse)` for ReportFailure/CompleteTask,
+///     or `Reject(code, state)`.
+///   - `Phase B` (async) — Step 9 `gates::evaluate_claims`, which spawns
+///     verifier subprocesses via `tokio::process::Command`.
+///   - `Phase C` (`spawn_blocking`) — Steps 10-13 + final response.
+///
+/// Each `spawn_blocking` clone of `ctx: Arc<HandlerContext>` is cheap
+/// (one `Arc::clone`); the closure owns its own `Arc<Store>` and
+/// `Arc<PolicyBundle>` snapshots so it never re-acquires the policy
+/// mutex mid-pipeline (INV-POLICY-01).
 pub async fn handle(req: IntentRequest, ctx: &Arc<HandlerContext>) -> IntentResponse {
     let seq = req.sequence_number;
     match handle_inner(req, ctx).await {
@@ -115,17 +119,40 @@ pub async fn handle(req: IntentRequest, ctx: &Arc<HandlerContext>) -> IntentResp
 type HandlerResult = Result<IntentResponse, (PlannerErrorCode, TaskState)>;
 
 // ---------------------------------------------------------------------------
-// handle_inner — 13-step pipeline
+// Three-phase async/sync split — see `handle()` doc comment.
+// ---------------------------------------------------------------------------
+
+/// State produced by Phase A and consumed by Phases B (gate eval) and C
+/// (post-gate finalize). Field names match the original step-by-step locals.
+struct PreGateState {
+    task: TaskRow,
+    task_state: TaskState,
+    worktree_path: PathBuf,
+    head_sha_raw: String,
+    base_sha_raw: String,
+    touched_paths: Vec<PathBuf>,
+    estimated_cost: u64,
+}
+
+/// Outcome of Phase A. Either we have a final response (early dispatch
+/// branches: `ReportFailure`, `CompleteTask`), an early rejection, or
+/// we proceed into the gate-evaluation pipeline carrying `PreGateState`.
+enum PreGateOutcome {
+    Reject(PlannerErrorCode, TaskState),
+    EarlyResponse(IntentResponse),
+    Proceed(PreGateState),
+}
+
+// ---------------------------------------------------------------------------
+// handle_inner — 13-step pipeline (3-phase async/sync layout)
 // ---------------------------------------------------------------------------
 
 async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerResult {
-    let store  = ctx.store.as_ref();
     // Pin one snapshot of the policy bundle for the entire intent
     // pipeline. INV-POLICY-01: an in-process epoch advance must not
     // tear an in-flight enforcement decision (kernel-store.md §INV-POLICY-01).
     let policy_snapshot = ctx.policy.load_full();
-    let policy: &raxis_policy::PolicyBundle = &policy_snapshot;
-    let seq    = req.sequence_number;
+    let seq = req.sequence_number;
 
     // ── Step 1: Session validation ────────────────────────────────────────
     // Resolve session_token → SessionRow.
@@ -152,7 +179,9 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     let session_id = SessionId::parse(&session.session_id)
         .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
 
-    // Revocation and expiry checks (spec §2.3 step 1).
+    // Revocation and expiry checks (spec §2.3 step 1). These are pure
+    // in-memory checks against the SessionRow we just loaded — no
+    // additional `lock_sync` site, so they stay on the async path.
     let now = unix_now_secs();
     if session.revoked_at.is_some() {
         return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
@@ -160,6 +189,110 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     if session.expires_at < now {
         return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
     }
+
+    // ── Phase A (spawn_blocking) — Steps 2-8 + dispatch ───────────────────
+    //
+    // Everything from here through Step 8 (estimated_cost) is sync and
+    // hits `lock_sync` repeatedly. We move it onto the blocking pool in
+    // ONE spawn_blocking so each call site is legal AND so we incur a
+    // single hop into the blocking pool rather than 10+.
+    let pre_gate = {
+        let ctx_arc      = Arc::clone(ctx);
+        let policy_arc   = Arc::clone(&policy_snapshot);
+        let session_clone = session.clone();
+        let session_id_clone = session_id.clone();
+        let req_clone    = req.clone();
+        tokio::task::spawn_blocking(move || {
+            run_phase_a(req_clone, session_clone, session_id_clone, seq, policy_arc, ctx_arc)
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
+    };
+
+    let pre_state = match pre_gate {
+        PreGateOutcome::Reject(code, state)  => return Err((code, state)),
+        PreGateOutcome::EarlyResponse(resp)  => return Ok(resp),
+        PreGateOutcome::Proceed(s)           => s,
+    };
+
+    // ── Phase B (async) — Step 9: Gate evaluation ─────────────────────────
+    //
+    // `gates::evaluate_claims` is genuinely async — it spawns verifier
+    // subprocesses via `tokio::process::Command`. It MUST run on the
+    // tokio runtime, not on a blocking-pool thread.
+    let submitted: Vec<SubmittedClaim> = req.submitted_claims.clone();
+    let gate_result = gates::evaluate_claims(
+        &session_id,
+        pre_state.head_sha_raw.as_str(),
+        req.task_id.as_str(),
+        &pre_state.touched_paths,
+        &submitted,
+        &pre_state.worktree_path,
+        ctx,
+    )
+    .await
+    .map_err(|_| (PlannerErrorCode::FailMissingWitness, pre_state.task_state))?;
+
+    // Phase B post-processing — pure sync, no `lock_sync`, kept on the
+    // async path so we don't hop pools just to inspect an enum.
+    let pending_gates: Vec<String>;
+    let warn_stale: bool;
+    match &gate_result {
+        GateEvalResult::ClaimInsufficient { .. } => {
+            return Err((PlannerErrorCode::FailMissingWitness, pre_state.task_state));
+        }
+        GateEvalResult::PendingWitness { missing_gates } => {
+            pending_gates = missing_gates.clone();
+            warn_stale    = false;
+        }
+        GateEvalResult::Pass { delegate_renewal_required } => {
+            pending_gates = vec![];
+            warn_stale    = *delegate_renewal_required;
+        }
+        GateEvalResult::BreakglassPass { .. } => {
+            pending_gates = vec![];
+            warn_stale    = false;
+        }
+    }
+
+    // ── Phase C (spawn_blocking) — Steps 10-13 + final response ───────────
+    let task_id_owned = req.task_id.as_str().to_owned();
+    let intent_kind   = req.intent_kind;
+    let session_id_str = session_id.as_str().to_owned();
+    let ctx_arc    = Arc::clone(ctx);
+    let policy_arc = Arc::clone(&policy_snapshot);
+    tokio::task::spawn_blocking(move || {
+        run_phase_c(
+            pre_state,
+            pending_gates,
+            warn_stale,
+            seq,
+            task_id_owned,
+            intent_kind,
+            session_id_str,
+            policy_arc,
+            ctx_arc,
+        )
+    })
+    .await
+    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
+}
+
+// ---------------------------------------------------------------------------
+// Phase A — sync body for spawn_blocking. Handles Steps 2-8 + the
+// ReportFailure / CompleteTask early-dispatch branches.
+// ---------------------------------------------------------------------------
+
+fn run_phase_a(
+    req: IntentRequest,
+    session: authority::session::SessionRow,
+    session_id: SessionId,
+    seq: u64,
+    policy_snapshot: Arc<raxis_policy::PolicyBundle>,
+    ctx: Arc<HandlerContext>,
+) -> PreGateOutcome {
+    let store  = ctx.store.as_ref();
+    let policy = policy_snapshot.as_ref();
 
     // ── Step 2: INV-01 — accept envelope (sequence + nonce) atomically ────
     // Spec: kernel-store.md §2.5.1 Table 16 INV-01 enforcement sequence,
@@ -175,11 +308,14 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     // reason is recorded as `AuditEventKind::ReplayRejected` for forensic
     // analysis — see kernel-store.md §2.5.1 Table 16 INV-01 enforcement
     // sequence step 3 (audit emit on rejection).
-    let presented_seq_i64 = i64::try_from(seq).map_err(|_| {
-        // Only happens for seq > i64::MAX, i.e. a malicious caller —
-        // bin it as Unauthorized.
-        (PlannerErrorCode::Unauthorized, TaskState::Admitted)
-    })?;
+    let presented_seq_i64 = match i64::try_from(seq) {
+        Ok(v) => v,
+        Err(_) => {
+            // Only happens for seq > i64::MAX, i.e. a malicious caller —
+            // bin it as Unauthorized.
+            return PreGateOutcome::Reject(PlannerErrorCode::Unauthorized, TaskState::Admitted);
+        }
+    };
     if let Err(reason) = authority::session::accept_envelope_and_advance_sequence(
         &session_id,
         presented_seq_i64,
@@ -200,12 +336,15 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
             None,
             None,
         );
-        return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
+        return PreGateOutcome::Reject(PlannerErrorCode::Unauthorized, TaskState::Admitted);
     }
 
     // ── Step 3: Load task row ─────────────────────────────────────────────
-    let task = load_task(req.task_id.as_str(), store)
-        .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Admitted))?;
+    let task = match load_task(req.task_id.as_str(), store) {
+        Ok(t) => t,
+        Err(_) => return PreGateOutcome::Reject(
+            PlannerErrorCode::FailUnknownTask, TaskState::Admitted),
+    };
 
     let task_state = parse_task_state(&task.state);
 
@@ -214,62 +353,81 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     // all reject with FailTaskNotRunning.
     match task_state {
         TaskState::Admitted | TaskState::Running => {}
-        s => return Err((PlannerErrorCode::FailTaskNotRunning, s)),
+        s => return PreGateOutcome::Reject(PlannerErrorCode::FailTaskNotRunning, s),
     }
 
     // ── Dispatch by intent kind ───────────────────────────────────────────
-
+    //
+    // ReportFailure and CompleteTask are entirely sync: they do not need
+    // gate evaluation. Run them inline inside Phase A and surface the
+    // result through `EarlyResponse`. SingleCommit / IntegrationMerge
+    // fall through to Steps 4-8 below and continue into Phase B.
     match req.intent_kind {
-        // ReportFailure and CompleteTask do not require a SHA range.
-        // They are handled separately and return early.
         IntentKind::ReportFailure => {
-            return handle_report_failure(req, task_state, &session_id, seq, store, policy);
+            return match handle_report_failure(req, task_state, &session_id, seq, store, policy) {
+                Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
+                Err((code, st))  => PreGateOutcome::Reject(code, st),
+            };
         }
         IntentKind::CompleteTask => {
-            return handle_complete_task(req, task_state, &session_id, seq, store, policy, ctx);
+            return match handle_complete_task(req, task_state, &session_id, seq, store, policy, ctx.as_ref()) {
+                Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
+                Err((code, st))  => PreGateOutcome::Reject(code, st),
+            };
         }
-        // SHA-requiring intents fall through to the main pipeline below.
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
     }
 
     // ── Step 4: Validate worktree_root against policy ─────────────────────
     let worktree_root = session.worktree_root.as_deref().unwrap_or("");
     if !policy.worktree_root_allowed(worktree_root) {
-        return Err((PlannerErrorCode::FailPolicyViolation, task_state));
+        return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state);
     }
     let worktree_path = PathBuf::from(worktree_root);
 
     // ── Step 5: SHA range + ancestry ─────────────────────────────────────
-    let head_sha_raw = req.head_sha.as_ref()
-        .map(|s| s.as_str().to_owned())
-        .ok_or((PlannerErrorCode::InvalidRequest, task_state))?;
-    let base_sha_raw = req.base_sha.as_ref()
-        .map(|s| s.as_str().to_owned())
-        .ok_or((PlannerErrorCode::InvalidRequest, task_state))?;
+    let head_sha_raw = match req.head_sha.as_ref().map(|s| s.as_str().to_owned()) {
+        Some(s) => s,
+        None    => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
+    };
+    let base_sha_raw = match req.base_sha.as_ref().map(|s| s.as_str().to_owned()) {
+        Some(s) => s,
+        None    => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
+    };
 
-    let head_sha = CommitSha::new(&head_sha_raw)
-        .map_err(|_| (PlannerErrorCode::InvalidRequest, task_state))?;
-    let base_sha = CommitSha::new(&base_sha_raw)
-        .map_err(|_| (PlannerErrorCode::InvalidRequest, task_state))?;
+    let head_sha = match CommitSha::new(&head_sha_raw) {
+        Ok(s)   => s,
+        Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
+    };
+    let base_sha = match CommitSha::new(&base_sha_raw) {
+        Ok(s)   => s,
+        Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
+    };
 
     // base must be an ancestor of head (spec §2.5.8 ancestry invariant).
-    let is_anc = vcs::is_ancestor(&base_sha, &head_sha, &worktree_path)
-        .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+    let is_anc = match vcs::is_ancestor(&base_sha, &head_sha, &worktree_path) {
+        Ok(v)   => v,
+        Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state),
+    };
     if !is_anc {
-        return Err((PlannerErrorCode::FailInvalidDiff, task_state));
+        return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
     }
 
     // ── Step 6: Topology check ────────────────────────────────────────────
     // SingleCommit: enforce parent(head) == base (no merge commits in range).
     // IntegrationMerge: topology check is skipped per spec §2.5.8.
     if matches!(req.intent_kind, IntentKind::SingleCommit) {
-        vcs::topology_check(&base_sha, &head_sha, &worktree_path)
-            .map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
+        if let Err(_) = vcs::topology_check(&base_sha, &head_sha, &worktree_path) {
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailInvalidCommitTopology, task_state);
+        }
     }
 
     // ── Step 7: VCS diff → touched_paths ──────────────────────────────────
-    let touched_paths = vcs::compute(&base_sha, &head_sha, &worktree_path)
-        .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+    let touched_paths = match vcs::compute(&base_sha, &head_sha, &worktree_path) {
+        Ok(p)   => p,
+        Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state),
+    };
 
     // ── Step 7A: Path-scope coverage check (§2.5.8 step 3A) ───────────────
     //
@@ -303,7 +461,8 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                 req.task_id.as_str(),
                 violation.paths.len(),
             );
-            return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailPathPolicyViolation, task_state);
         }
         Err(e) => {
             // Registry miss or invalid glob in the signed plan — still
@@ -314,69 +473,80 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                  \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
                 req.task_id.as_str(),
             );
-            return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailPathPolicyViolation, task_state);
         }
     }
 
     // ── Step 8: Compute estimated_cost ────────────────────────────────────
     // Spec: cost is computed from touched_paths + intent_kind against policy.
-    let estimated_cost = budget::compute_admission_cost(&touched_paths, req.intent_kind, policy)
-        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+    let estimated_cost =
+        match budget::compute_admission_cost(&touched_paths, req.intent_kind, policy) {
+            Ok(c)   => c,
+            Err(_)  => return PreGateOutcome::Reject(
+                PlannerErrorCode::FailPolicyViolation, task_state),
+        };
 
-    // ── Step 9: Gate evaluation ───────────────────────────────────────────
-    let submitted: Vec<SubmittedClaim> = req.submitted_claims.clone();
-    let gate_result = gates::evaluate_claims(
-        &session_id,
-        head_sha_raw.as_str(),
-        req.task_id.as_str(),
-        &touched_paths,
-        &submitted,
-        &worktree_path,
-        ctx,
-    ).await.map_err(|_| (PlannerErrorCode::FailMissingWitness, task_state))?;
+    PreGateOutcome::Proceed(PreGateState {
+        task,
+        task_state,
+        worktree_path,
+        head_sha_raw,
+        base_sha_raw,
+        touched_paths,
+        estimated_cost,
+    })
+}
 
-    let pending_gates: Vec<String>;
-    let warn_stale: bool;
+// ---------------------------------------------------------------------------
+// Phase C — sync body for spawn_blocking. Handles Steps 10-13 +
+// builds the final IntentResponse.
+// ---------------------------------------------------------------------------
 
-    match &gate_result {
-        GateEvalResult::ClaimInsufficient { .. } => {
-            // Claim or delegation insufficient — gates not satisfied.
-            return Err((PlannerErrorCode::FailMissingWitness, task_state));
-        }
-        GateEvalResult::PendingWitness { missing_gates } => {
-            // Gates spawned but witnesses not yet available.
-            // Transition Admitted → GatesPending (if not already there).
-            if task_state == TaskState::Admitted {
-                fsm_transition(
-                    req.task_id.as_str(),
-                    TaskState::GatesPending,
-                    Some("gates pending: witnesses required"),
-                    TransitionActor::Kernel,
-                    store,
-                ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, TaskState::GatesPending))?;
-            }
-            pending_gates = missing_gates.clone();
-            warn_stale    = false;
-        }
-        GateEvalResult::Pass { delegate_renewal_required } => {
-            pending_gates = vec![];
-            warn_stale    = *delegate_renewal_required;
-        }
-        GateEvalResult::BreakglassPass { .. } => {
-            pending_gates = vec![];
-            warn_stale    = false;
-        }
+#[allow(clippy::too_many_arguments)]
+fn run_phase_c(
+    pre_state: PreGateState,
+    pending_gates: Vec<String>,
+    warn_stale: bool,
+    seq: u64,
+    task_id_owned: String,
+    intent_kind: IntentKind,
+    session_id_str: String,
+    policy_snapshot: Arc<raxis_policy::PolicyBundle>,
+    ctx: Arc<HandlerContext>,
+) -> HandlerResult {
+    let store  = ctx.store.as_ref();
+    let policy = policy_snapshot.as_ref();
+    let task_state = pre_state.task_state;
+
+    // ── PendingWitness branch: transition Admitted → GatesPending ────────
+    //
+    // Done before the budget consume so a task that is GatesPending due
+    // to outstanding witnesses does not get charged a second time when
+    // the witness eventually arrives and the same intent is re-submitted.
+    if !pending_gates.is_empty() && task_state == TaskState::Admitted {
+        fsm_transition(
+            task_id_owned.as_str(),
+            TaskState::GatesPending,
+            Some("gates pending: witnesses required"),
+            TransitionActor::Kernel,
+            store,
+        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, TaskState::GatesPending))?;
     }
 
     // ── Step 10: Budget check + consume (first intent, Admitted path only) ─
     // Spec: "consume_budget must occur within the intent-handling transaction
     // to prevent double-spending or over-scheduling."
     // We only charge on the first time a task goes from Admitted → Running.
-    if task_state == TaskState::Admitted {
-        budget::check_budget(&task.lane_id, estimated_cost, policy, store)
+    if task_state == TaskState::Admitted && pending_gates.is_empty() {
+        budget::check_budget(&pre_state.task.lane_id, pre_state.estimated_cost, policy, store)
             .map_err(|_| (PlannerErrorCode::FailBudgetExceeded, task_state))?;
-        budget::consume_budget(&task.lane_id, req.task_id.as_str(), estimated_cost, store)
-            .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+        budget::consume_budget(
+            &pre_state.task.lane_id,
+            task_id_owned.as_str(),
+            pre_state.estimated_cost,
+            store,
+        ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
     }
 
     // ── Step 11: FSM transition via task_transitions (INV-INIT-04) ───────
@@ -385,7 +555,7 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     if task_state == TaskState::Admitted && pending_gates.is_empty() {
         // Admitted + all gates pass → Running.
         fsm_transition(
-            req.task_id.as_str(),
+            task_id_owned.as_str(),
             TaskState::Running,
             None,
             TransitionActor::Kernel,
@@ -393,17 +563,17 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
         ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Running))?;
     }
     // Running + gate pass: no transition needed; task stays Running.
-    // Running + gates pending: task stays Running (already evaluated above; the
-    // GatesPending transition is for Admitted → GatesPending only in this handler).
+    // Running + gates pending: task stays Running (the GatesPending
+    // transition is for Admitted → GatesPending only in this handler).
 
     // ── Step 12: Update task intent fields ───────────────────────────────
     // Persist evaluation_sha, base_sha, session_id on the task row so the
     // witness handler can recover the original VCS context.
     update_task_intent_fields(
-        req.task_id.as_str(),
-        head_sha_raw.as_str(),
-        base_sha_raw.as_str(),
-        session_id.as_str(),
+        task_id_owned.as_str(),
+        pre_state.head_sha_raw.as_str(),
+        pre_state.base_sha_raw.as_str(),
+        session_id_str.as_str(),
         store,
     ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
@@ -420,20 +590,10 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     // implementation of that idempotency: the response shape returned at
     // the end of the function is computed from the live state and is
     // therefore identical for both the first call and the retry.
-    //
-    // INV-STORE-02 footnote: ideally this INSERT would share a single
-    // transaction with steps 10–12 (budget consume + FSM transition +
-    // intent-field UPDATE). The current implementation runs them as
-    // separate auto-commits because each helper opens its own connection
-    // lock; PR-6b will compose them into one tx by threading a shared
-    // `Transaction<'_>` through the helpers. This row write is still a
-    // strict net improvement: prior to this PR, `task_intent_ranges` was
-    // never populated, which made INV-TASK-PATH-02 (CompleteTask path
-    // check across all admitted ranges) impossible to enforce.
     insert_task_intent_range(
-        req.task_id.as_str(),
-        base_sha_raw.as_str(),
-        head_sha_raw.as_str(),
+        task_id_owned.as_str(),
+        pre_state.base_sha_raw.as_str(),
+        pre_state.head_sha_raw.as_str(),
         store,
     ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
@@ -441,13 +601,13 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"IntentAccepted\",\
          \"task_id\":\"{}\",\"kind\":\"{}\",\"evaluation_sha\":\"{}\",\"pending_gates\":{}}}",
-        req.task_id.as_str(),
-        req.intent_kind.as_str(),
-        head_sha_raw,
+        task_id_owned,
+        intent_kind.as_str(),
+        pre_state.head_sha_raw,
         pending_gates.len()
     );
 
-    let remaining = lane_budget_snapshot(&task.lane_id, policy, store);
+    let remaining = lane_budget_snapshot(&pre_state.task.lane_id, policy, store);
     let final_task_state = if !pending_gates.is_empty() {
         TaskState::GatesPending
     } else if task_state == TaskState::Admitted {
