@@ -8,7 +8,64 @@
 
 use std::path::Path;
 
+use ed25519_dalek::VerifyingKey;
+
 use crate::errors::CliError;
+
+/// Parse an operator **public** Ed25519 key from file contents:
+/// either **64-char lowercase/uppercase hex** (raw 32 bytes) or **`openssl`**-style
+/// **PEM** (`-----BEGIN PUBLIC KEY-----` wrapping RFC 8410 SPKI DER).
+///
+/// Genesis and interactive pubkey paste paths use this so `--operator-pubkey
+/// operator_public.pem` matches what operators generate locally.
+pub fn parse_operator_public_key_material(content: &str) -> Result<[u8; 32], CliError> {
+    let trimmed = content.trim();
+
+    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        let vec = hex::decode(trimmed).map_err(|e| CliError::Key(format!("hex decode error: {e}")))?;
+        let arr: [u8; 32] = vec
+            .try_into()
+            .map_err(|_| CliError::Key("operator pubkey must be 32 bytes (64 hex chars)".to_owned()))?;
+        VerifyingKey::from_bytes(&arr).map_err(|e| CliError::Key(format!("invalid Ed25519 pubkey: {e}")))?;
+        return Ok(arr);
+    }
+
+    if trimmed.starts_with("-----BEGIN") {
+        let b64: String = trimmed
+            .lines()
+            .filter(|l| !l.starts_with("-----"))
+            .collect::<Vec<_>>()
+            .join("");
+        let der =
+            base64_decode(&b64).map_err(|e| CliError::Key(format!("PEM base64 decode failed: {e}")))?;
+        let pubkey: [u8; 32] = ed25519_pubkey_bytes_from_spki_der(&der)?;
+        VerifyingKey::from_bytes(&pubkey)
+            .map_err(|e| CliError::Key(format!("invalid Ed25519 pubkey in PEM: {e}")))?;
+        return Ok(pubkey);
+    }
+
+    Err(CliError::Key(
+        "operator public key: expected 64-char hex or PEM (-----BEGIN PUBLIC KEY-----); \
+         for PEM files use: raxis genesis --operator-pubkey /path/to/operator_public.pem"
+            .to_owned(),
+    ))
+}
+
+/// OpenSSL / RFC 8410 SubjectPublicKeyInfo for Ed25519 is **44 bytes**; the raw
+/// 32-byte public key starts at offset **12** (after algorithm OID + BIT STRING wrapper).
+fn ed25519_pubkey_bytes_from_spki_der(der: &[u8]) -> Result<[u8; 32], CliError> {
+    match der.len() {
+        44 => der[12..44]
+            .try_into()
+            .map_err(|_| CliError::Key("internal: Ed25519 SPKI slice".to_owned())),
+        32 => der
+            .try_into()
+            .map_err(|_| CliError::Key("internal: raw 32-byte pubkey".to_owned())),
+        n => Err(CliError::Key(format!(
+            "unsupported Ed25519 public key encoding: DER is {n} bytes (expected 44-byte SPKI or 32 raw)"
+        ))),
+    }
+}
 
 /// Load an Ed25519 keypair from a PEM file.
 ///
@@ -38,7 +95,6 @@ pub fn load_operator_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliEr
         .collect::<Vec<_>>()
         .join("");
 
-    use std::io::Read;
     let der = base64_decode(&b64)
         .map_err(|e| CliError::Key(format!("PEM base64 decode failed: {e}")))?;
 
@@ -108,7 +164,7 @@ pub fn delegation_grant_signing_domain(
 // Minimal base64 decoder (avoids adding a dep for a 30-line function)
 // ---------------------------------------------------------------------------
 
-fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     let table: [u8; 256] = {
         let mut t = [255u8; 256];
         for (i, &c) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -144,4 +200,33 @@ fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sample `openssl pkey -pubout` PEM (Ed25519 SPKI DER length 44).
+    const SAMPLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
+MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\n\
+-----END PUBLIC KEY-----\n";
+
+    #[test]
+    fn parse_operator_public_hex_round_trip() {
+        let bytes = parse_operator_public_key_material(SAMPLE_PEM).expect("pem");
+        let h = hex::encode(bytes);
+        let again = parse_operator_public_key_material(&h).expect("hex round-trip");
+        assert_eq!(again, bytes);
+    }
+
+    #[test]
+    fn parse_operator_public_pem_openssl_subject_public_key_info() {
+        let bytes = parse_operator_public_key_material(SAMPLE_PEM).expect("pem");
+        let _vk = VerifyingKey::from_bytes(&bytes).expect("dalek verifies");
+        assert_eq!(
+            hex::encode(bytes).len(),
+            64,
+            "stored policy form is 64-char hex"
+        );
+    }
 }

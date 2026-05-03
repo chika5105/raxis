@@ -67,11 +67,12 @@ RAXIS expects **Ed25519 PEM** keys compatible with **OpenSSL 3**’s `genpkey` /
 |---------|--------|-----|
 | **`Algorithm ed25519 not found`** (or similar) on `genpkey` | Default `openssl` is **LibreSSL** (common on macOS) | Install **`openssl@3`** via Homebrew and use that binary (see step 1 above). |
 | **`unable to load key`** / **No such file** on `pkey` | First command failed, so `operator_private.pem` was never created | Fix `genpkey` with OpenSSL 3, then re-run both commands in order. |
+| **`hex decode error: Invalid character '-' at position 0`** on **`genesis --operator-pubkey operator_public.pem`** | PEM files start with **`-----`**, while some older **`raxis`** versions treated **`--operator-pubkey`** as raw **hex only**. | Rebuild **`raxis`** so **`genesis` accepts PEM** (current main). Older CLI: decode to DER and export 32-byte hex manually, or use interactive paste (**64-character hex**, one line) instead of PEM. |
 | Unsure which binary runs | — | Run `openssl version`. You want **OpenSSL 3.x**, not LibreSSL, for generating these keys. |
 
 ### 3. Bootstrap and Run
 
-1. **Run the Genesis Ceremony** to bootstrap the kernel database and initial policy:
+1. **Run the Genesis Ceremony** with the **`operator_public.pem`** file produced above (PEM from **`openssl pkey -pubout`** is accepted; genesis stores **64-character hex** in policy internally):
    ```bash
    raxis genesis --operator-pubkey operator_public.pem
    ```

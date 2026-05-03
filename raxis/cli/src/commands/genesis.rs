@@ -275,29 +275,22 @@ fn load_operator_pubkey(path: &std::path::Path) -> Result<(String, String), CliE
         path: path.display().to_string(),
         source: e,
     })?;
-    let pubkey_hex = content.trim().to_owned();
-    let pubkey_bytes = hex::decode(&pubkey_hex)?;
-    if pubkey_bytes.len() != 32 {
-        return Err(CliError::Key(
-            "operator pubkey must be 32 bytes (64 hex chars)".to_owned(),
-        ));
-    }
+    let pubkey_bytes = crate::signing::parse_operator_public_key_material(&content)?;
+    let pubkey_hex = hex::encode(pubkey_bytes);
     let fingerprint = crate::conn::pubkey_fingerprint(&pubkey_bytes);
     Ok((pubkey_hex, fingerprint))
 }
 
 fn prompt_operator_pubkey() -> Result<(String, String), CliError> {
     use std::io::BufRead;
-    eprintln!("Paste operator Ed25519 public key (64-char hex or PEM): ");
+    eprintln!("Paste operator Ed25519 public key as a single line — 64-character hex (preferred).");
+    eprintln!("For `operator_public.pem`, use: raxis genesis --operator-pubkey /path/to/file.pem");
     let stdin = std::io::stdin();
     let line = stdin.lock().lines().next()
         .ok_or_else(|| CliError::Key("no input".to_owned()))?
         .map_err(|e| CliError::Io { path: "stdin".to_owned(), source: e })?;
-    let pubkey_hex = line.trim().to_owned();
-    let pubkey_bytes = hex::decode(&pubkey_hex)?;
-    if pubkey_bytes.len() != 32 {
-        return Err(CliError::Key("pubkey must be 32 bytes".to_owned()));
-    }
+    let pubkey_bytes = crate::signing::parse_operator_public_key_material(&line)?;
+    let pubkey_hex = hex::encode(pubkey_bytes);
     let fingerprint = crate::conn::pubkey_fingerprint(&pubkey_bytes);
     Ok((pubkey_hex, fingerprint))
 }

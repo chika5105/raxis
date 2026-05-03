@@ -37,6 +37,10 @@ Thumbs.db
 # Rust
 **/target/
 
+# RAXIS — default local operator Ed25519 key filenames (demo / genesis workflows)
+/raxis/operator_private.pem
+/raxis/operator_public.pem
+
 # Go
 *.test
 *.out

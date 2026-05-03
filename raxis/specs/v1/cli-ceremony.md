@@ -60,8 +60,8 @@ All §4.1 subcommands that require kernel connectivity will fail with `ERR_SOCKE
 3. Generates `quality_keypair` (Ed25519) → writes `<data_dir>/keys/quality_keypair.pem`.
 4. Generates `verifier_token_key` (32 CSPRNG bytes) → writes `<data_dir>/keys/verifier_token_key.bin`.
 5. Operator public key handling:
-   - If `--operator-pubkey <path>` is provided: reads the Ed25519 public key from that path, computes fingerprint, writes `<data_dir>/keys/operator_<fingerprint>.pub`.
-   - If not provided: prompts the operator to paste their Ed25519 public key (hex or PEM). The kernel never sees the operator's private key.
+   - If `--operator-pubkey <path>` is provided: read the Ed25519 **public** key from that path. The path may contain **PEM** (`-----BEGIN PUBLIC KEY-----`, as produced by **`openssl pkey -in operator_private.pem -pubout`**) or **64-character hex** (raw 32-byte public key, one line). Computes the fingerprint, then writes `<data_dir>/keys/operator_<fingerprint>.pub` (ASCII hex bytes). The kernel never sees the operator's private key.
+   - If not provided: prompts the operator to paste their Ed25519 public key as a **single line of 64 hex characters** (PEM is multi-line — use **`--operator-pubkey file.pem`** instead).
 6. Writes initial `policy.toml` to `<data_dir>/policy/policy.toml` via the SHARED canonical emitter `raxis_genesis_tools::render_genesis_policy_toml` (the same function the kernel's `RAXIS_BOOTSTRAP=1` self-bootstrap path calls — see `philosophy.md` §1.6 `crates/genesis-tools/` for the convergence rationale and drift history). The CLI is responsible only for plumbing the inputs to the emitter; the spec invariants are all enforced inside the shared crate. The emitted artifact contains:
    - `authority_pubkey` = public key extracted from `authority_keypair.pem`
    - `quality_pubkey` = public key extracted from `quality_keypair.pem`
