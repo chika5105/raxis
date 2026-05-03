@@ -693,3 +693,324 @@ attack surface for jailbreak-based dispatch violations.
 
 *Part 6 complete. Next: Part 7 — Path Allowlist Enforcement.*
 
+
+---
+
+## Part 7 — Path Allowlist Enforcement
+
+### What Path Allowlists Are
+
+Every agent session has a `path_allowlist`: a list of file paths or directory prefixes that
+the session is permitted to write. This list is declared in `plan.toml`, included in the
+`plan_bytes` that the operator signs, and sealed into the `signed_plan_artifacts` record
+at `approve_plan` time. It cannot be changed at runtime.
+
+```toml
+[[tasks]]
+task_id        = "auth_implementer"
+path_allowlist = ["src/auth/"]       # may write anything under src/auth/
+```
+
+**Exact file vs. directory prefix:**
+- `"src/auth/rate_limit.rs"` — the session may only write this exact file
+- `"src/auth/"` — the session may write any file whose path begins with `src/auth/`
+  (including new files, nested subdirectories)
+
+Globs (`*`, `**`) are explicitly rejected at `approve_plan` validation — they make the
+effective scope unauditable. A glob like `"src/**"` could match the entire codebase.
+
+### Enforcement Mechanism: VCS Diff at Admission
+
+Path allowlist enforcement happens at `SingleCommit` admission (step 12 of the pipeline).
+The Kernel computes:
+
+```rust
+let touched_paths = vcs::diff_paths(base_sha, head_sha, &worktree_path)?;
+for path in &touched_paths {
+    if !session.path_allowlist.iter().any(|allowed| path.starts_with(allowed)) {
+        return Err(KernelError::PathPolicyViolation { path: path.clone() });
+    }
+}
+```
+
+This is a **post-commit, pre-integration** check. The agent's VM has already made the git
+commit in its local worktree — the check evaluates the diff of that commit against the
+allowlist before the commit is allowed to propagate anywhere. If any touched path is outside
+the allowlist, the entire `SingleCommit` intent is rejected. The commit exists in the VM's
+local git history but never leaves the VM.
+
+**Why post-commit rather than pre-commit (file interception):**
+Pre-commit interception (intercepting file writes at the VirtioFS layer before git commit)
+would require the Kernel to hook every filesystem write in the VM — a massive, fragile,
+and performance-destroying surface. Post-commit diff evaluation is clean: one check, on a
+bounded, well-defined artifact (a git commit), at a single enforcement point.
+
+### The Subset Invariant
+
+The Orchestrator's `path_allowlist` must be a superset of the union of all its sub-tasks'
+allowlists. Validated at `approve_plan` time (shift-left check #4):
+
+```
+orchestrator.path_allowlist ⊇ UNION(task.path_allowlist for task in all_tasks)
+```
+
+**Why:** The Orchestrator performs `IntegrationMerge` — it merges sub-task commits into
+the master branch. If the Orchestrator's allowlist is narrower than a sub-task's, the
+Orchestrator's `IntegrationMerge` intent would include paths outside its own allowlist,
+causing the merge to be rejected at admission. The subset invariant is validated before
+the initiative starts to prevent this class of planning error.
+
+**Scenario: sneaky path expansion.** An operator writes a plan where `executor_a` has
+`path_allowlist = ["src/auth/", "src/admin/"]` but the Orchestrator has
+`path_allowlist = ["src/auth/"]`. At `approve_plan` time, shift-left check #4 computes
+the union (`{"src/auth/", "src/admin/"}`) and finds it is not a subset of the
+Orchestrator's allowlist. The plan is rejected before any VM boots.
+
+### Path Allowlists Are Write-Only Restrictions
+
+Path allowlists restrict **writing** (git commits). They do not restrict reading. An agent
+using `blobless` or `full` clone strategy has the entire repository available for reading.
+This is intentional — agents need read access to understand the codebase they are working
+in.
+
+**Implication for the debate pattern:** Proposer agents can read any file in the repository
+to build context for their proposals. They can only write to their declared proposal file.
+The debate knowledge is unrestricted; the debate authority is narrowly scoped.
+
+**The security boundary:** Reading has no direct security consequence — it cannot modify
+state. Writing does, and that is what the allowlist controls.
+
+### Scenario: Path Traversal via Git
+
+An adversarial commit could theoretically use git's submodule or symlink mechanisms to
+write outside the declared worktree. RAXIS's defenses:
+
+1. **`SingleCommit` intent validation (step 9)** rejects commits that modify `.gitmodules`
+   or add new submodule entries — submodules are out of scope for agent sessions entirely.
+2. **VCS diff computation** follows resolved paths, not raw tree entries — a symlink in the
+   commit pointing outside the worktree does not affect the diff of actual file paths.
+3. **VirtioFS boundary** — even if the agent's git commit claims to write outside the
+   worktree directory, the VirtioFS host-side driver resolves paths relative to the mount
+   root and rejects host-path traversal attempts.
+
+---
+
+*Part 7 complete. Next: Part 8 — Cryptographic Audit Chain.*
+
+
+---
+
+## Part 8 — Cryptographic Audit Chain
+
+### Why the Audit Chain Exists
+
+Every security system eventually relies on the question: "what actually happened?" The
+audit chain is RAXIS's answer. It is the ground truth record of every action taken in
+the system — who submitted it, under what plan, at what policy epoch, and with what result.
+
+An audit chain that can be tampered with is not an audit chain. A chain that can be
+selectively deleted is not a chain. RAXIS enforces three properties:
+
+1. **Append-only:** Only the Kernel's append endpoint writes to the audit store. No process
+   has a delete or update path to existing records.
+2. **Cryptographically linked:** Each event includes the hash of the previous event. Gaps
+   or modifications break the chain hash and are detectable.
+3. **Out-of-bubble isolation:** The audit store lives at `$RAXIS_DATA_DIR/audit/`, outside
+   the workspace and outside every VM's VirtioFS mount. Agents have no write path to it.
+
+### Audit Event Structure
+
+Every Kernel state change produces an `AuditEvent`:
+
+```rust
+pub struct AuditEvent {
+    pub event_id:       Uuid,
+    pub previous_hash:  [u8; 32],        // SHA-256 of previous event bytes
+    pub session_id:     Option<Uuid>,    // None for system-level events
+    pub initiative_id:  Option<Uuid>,
+    pub kind:           AuditEventKind,
+    pub timestamp:      i64,             // Unix epoch microseconds
+    pub payload_hash:   [u8; 32],        // SHA-256 of the full intent payload
+}
+```
+
+The chain integrity check: `SHA-256(serialize(event_n)) == event_{n+1}.previous_hash`.
+A verifier replays the chain from genesis and checks every link. Any insertion, deletion,
+or modification of event bytes causes a hash mismatch at the next event.
+
+### The 4-Field Attribution Chain (INV-05)
+
+Every session-scoped audit event carries four fields that together uniquely identify the
+human-authorized context for every action:
+
+```
+session_id       → which session submitted the intent
+initiative_id    → which initiative it belongs to
+plan_sha256      → SHA-256 of the exact plan.toml bytes the operator signed
+policy_epoch     → the policy epoch active when the session was created
+```
+
+**What this enables for forensics:**
+- Given any audit event, find `initiative_id`, look up `initiatives.plan_artifact_sha256`,
+  retrieve the plan bytes, verify the Ed25519 signature → confirm who authorized this work
+- Given `policy_epoch`, retrieve the policy bundle active at that time → confirm what rules
+  applied
+- Given `session_id`, replay all events for that session in order → reconstruct the exact
+  sequence of intents and Kernel responses
+
+No event can be "accidentally undocumented." If the Kernel processes an intent, an audit
+event exists. If no audit event exists for an expected action, the chain is broken — which
+is itself detectable.
+
+### Events That Are Always Recorded
+
+Every event below is emitted regardless of whether the admission succeeded or failed.
+A failed admission is audited with the failure code.
+
+| Event | Trigger |
+|---|---|
+| `InitiativeCreated` | `approve_plan` succeeds |
+| `SessionCreated` | `ActivateSubTask` succeeds |
+| `IntentAdmitted { kind, session_id }` | Any intent passes all 13 pipeline steps |
+| `IntentRejected { kind, session_id, error_code }` | Any intent fails any pipeline step |
+| `SecurityViolation { kind, cid, session_id }` | Adversarial probe detected |
+| `SessionRevoked { session_id, reason }` | Token revoked for any reason |
+| `ReviewSubmitted { approved, session_id, evaluation_sha }` | Reviewer submits |
+| `IntegrationMergeAdmitted { commit_sha, initiative_id }` | Merge admitted |
+| `EscalationRequested { class, session_id }` | Agent submits escalation |
+| `EscalationConsumed { resolved_by, escalation_id }` | Operator resolves escalation |
+| `PolicyEpochAdvanced { from, to, affected_classes }` | Epoch advance committed |
+| `BudgetExhausted { lane_id, initiative_id }` | Lane ceiling reached |
+
+### Audit Store Physical Isolation
+
+The audit store is not a table in the Kernel's SQLite database. It is a separate append-only
+JSONL file at `$RAXIS_DATA_DIR/audit/<date>.jsonl`, rotated daily.
+
+**Why separate from the database:** The Kernel's SQLite database contains mutable state
+(session status, delegation staleness, budget reservations). A bug in the database layer
+(transaction rollback, WAL corruption recovery) might roll back or lose audit records if
+they shared the same file. A separate append-only file cannot be rolled back — `append()`
+is atomic at the filesystem level for records smaller than the filesystem block size.
+
+**Why JSONL rather than binary:** JSONL is human-readable and independently parseable
+without RAXIS tooling. A security auditor can `grep`, `jq`, and verify the chain without
+access to the RAXIS binary. The format is self-documenting.
+
+**Access control:** `$RAXIS_DATA_DIR/audit/` is owned by the `raxis-kernel` user with
+mode `700`. The gateway process, the planner processes, and all VMs run as a separate
+`raxis-agent` user with no access to this directory.
+
+---
+
+*Part 8 complete. Next: Part 9 — Policy Signing and the Plan Ceremony.*
+
+
+---
+
+## Part 9 — Policy Signing and the Plan Ceremony
+
+### Two Things That Must Be Signed
+
+RAXIS has two independently signed artifacts. Both require the operator's Ed25519 private
+key. Neither can be substituted, forged, or amended at runtime.
+
+**1. The Policy Bundle (`policy.toml`)**
+Defines the rules of the system: path tiers, claim requirements, lane budgets, provider
+allowlist, escalation classes, auth parameters. Signed once when the operator configures
+a deployment. Stored at `$RAXIS_DATA_DIR/policy/policy.toml` with its detached signature.
+
+**2. The Initiative Plan (`plan.toml`)**
+Defines the work for a specific initiative: task topology, per-task path allowlists,
+agent types, budgets, context. Signed per initiative. Submitted to `approve_plan` with
+the signature bytes and the operator's public key certificate.
+
+These two signing ceremonies are intentionally separate. A policy update does not require
+re-signing every plan. A new initiative does not require re-signing the policy. Each
+artifact's scope is exactly its own content.
+
+### The Ed25519 Key
+
+**Why Ed25519 specifically:**
+- Deterministic signing (no per-signature randomness, no side-channel from weak RNG)
+- Small key and signature sizes (32-byte public key, 64-byte signature)
+- Fast verification (Kernel verifies every `approve_plan` call)
+- Widely audited (libsodium, `ed25519-dalek`)
+
+**Key storage:** `operator_private.pem` is never stored on the RAXIS host. The operator
+holds it locally (hardware security key recommended). `operator_public.pem` is installed
+at `$RAXIS_DATA_DIR/operator_public.pem` and is the only authority source the Kernel
+trusts.
+
+**Compromise scenario:** If `operator_private.pem` is compromised, an attacker can sign
+plans with arbitrary task topologies and allowlists. This is the highest-severity credential
+compromise in RAXIS. Mitigation: use a hardware key (YubiKey) for the Ed25519 key — the
+private key never leaves the hardware device. The RAXIS signing ceremony calls the hardware
+key's signing API, not a file-resident key.
+
+### The `approve_plan` Ceremony — 7 Shift-Left Checks
+
+`approve_plan` is the gate between a signed plan and an active initiative. It runs before
+any VM boots. All 7 checks must pass; failure at any check aborts the entire plan.
+
+**Check 1 — Ed25519 signature verification:**
+`ed25519_dalek::PublicKey::verify(plan_bytes, signature, operator_public_key)`.
+If this fails, the plan is forged or corrupted. Reject immediately.
+
+**Check 2 — Schema validity:**
+Deserialize `plan_bytes` as `PlanManifest`. Reject unknown fields, missing required fields,
+invalid enum variants. A plan that doesn't parse is either from a different protocol
+version or malformed.
+
+**Check 3 — DAG acyclicity:**
+Topological sort of `task_dag_edges`. If a cycle exists, reject. A cyclic plan would
+deadlock: no task can activate because its predecessor depends on it.
+
+**Check 4 — Path subset invariant:**
+For each task, verify `task.path_allowlist ⊆ orchestrator.path_allowlist`. Reject if
+any task's allowlist contains paths not covered by the Orchestrator. (See Part 7.)
+
+**Check 5 — Single Orchestrator:**
+Exactly one task must have `session_agent_type = Orchestrator`. Zero Orchestrators means
+nothing can activate sub-tasks. Two Orchestrators creates ambiguity about which one
+performs `IntegrationMerge`.
+
+**Check 6 — Budget feasibility:**
+`SUM(task.estimated_cost for all tasks) ≤ lane.max_cost_per_epoch`. If the plan's total
+estimated cost exceeds the lane ceiling, the initiative would be guaranteed to exhaust its
+budget before completing. Reject before any compute is spent.
+
+**Check 7 — Policy compliance:**
+Each task's capabilities are checked against the current policy bundle. A task requesting
+a model not in the provider allowlist, or a path tier that doesn't exist, or an escalation
+class not defined in the policy — all cause rejection here. This check ensures the plan
+is executable under current policy at submission time.
+
+**Why shift-left:** All 7 checks run before any VM boots and before any budget is reserved.
+A plan that fails check 4 never consumes any compute. A plan that fails check 7 is caught
+before an Executor wastes inference turns on a task that will always fail policy. Every
+minute of shift-left validation saves N minutes of runtime failure.
+
+### Plan SHA in the Audit Chain
+
+At `approve_plan` success, the Kernel records:
+```
+initiatives.plan_artifact_sha256 = SHA-256(plan_bytes)
+```
+
+This SHA is included in every `SessionCreated` audit event for every session in the
+initiative. It cryptographically links every agent action to the exact plan bytes the
+operator signed. An auditor can:
+
+1. Extract `plan_artifact_sha256` from any audit event
+2. Retrieve the plan bytes from cold storage
+3. Verify `SHA-256(plan_bytes) == plan_artifact_sha256`
+4. Verify `ed25519_verify(plan_bytes, signature, operator_public_key)`
+
+This four-step chain proves: "this agent action was authorized by plan bytes that the
+operator cryptographically committed to."
+
+---
+
+*Part 9 complete. Next: Part 10 — Credential Isolation.*
+
