@@ -98,18 +98,38 @@ async fn main() {
         }
     };
 
-    // Step 6: Run recovery::reconcile — verify audit chain, sweep in-flight tasks.
+    // Step 6: Run recovery::reconcile — verify audit chain, sweep in-flight
+    // tasks. recovery::reconcile internally calls Store::lock_sync() (it is
+    // a synchronous API by design — see kernel-core.md §4.6); calling it
+    // directly from `#[tokio::main]` would invoke `Mutex::blocking_lock()`
+    // on the runtime thread and panic with "Cannot block the current
+    // thread from within a runtime". Wrap in `spawn_blocking` to move the
+    // sync work onto a dedicated blocking-pool thread. Same pattern as
+    // `handlers/witness::handle` (kernel-core.md async-safety contract).
     let audit_dir = data_dir.join("audit");
-    match recovery::reconcile(&store, &audit_dir) {
-        Ok(result) => {
-            if result.swept_tasks > 0 {
-                eprintln!(
-                    "{{\"level\":\"warn\",\"message\":\"recovery swept tasks\",\"count\":{}}}",
-                    result.swept_tasks
-                );
+    {
+        let store_for_recovery = Arc::clone(&store);
+        let audit_dir_for_recovery = audit_dir.clone();
+        let recovery_outcome = tokio::task::spawn_blocking(move || {
+            recovery::reconcile(&store_for_recovery, &audit_dir_for_recovery)
+        })
+        .await
+        .unwrap_or_else(|join_err| {
+            exit_with_code(KernelError::AuditChainBroken {
+                reason: format!("recovery::reconcile spawn_blocking join failed: {join_err}"),
+            })
+        });
+        match recovery_outcome {
+            Ok(result) => {
+                if result.swept_tasks > 0 {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"message\":\"recovery swept tasks\",\"count\":{}}}",
+                        result.swept_tasks
+                    );
+                }
             }
+            Err(e) => exit_with_code(e),
         }
-        Err(e) => exit_with_code(e),
     }
 
     // Step 7a: Open the AuditWriter on segment-000.jsonl. Per
@@ -178,24 +198,47 @@ async fn main() {
     // kernel-store.md §2.5.8 the four path-scope plan fields live only
     // in memory; without this hook every intent submitted after a
     // restart would fail-closed with `FAIL_PATH_POLICY_VIOLATION`.
+    //
+    // Like `recovery::reconcile`, `repopulate_plan_registry` calls
+    // `Store::lock_sync()` and MUST run via `spawn_blocking` to avoid
+    // panicking the tokio runtime (`Cannot block the current thread from
+    // within a runtime`). Pinned by
+    // `kernel/tests/kernel_signal_shutdown.rs::sigterm_triggers_*`.
     let plan_registry = Arc::new(initiatives::PlanRegistry::new());
-    match initiatives::lifecycle::repopulate_plan_registry(&store, &plan_registry) {
-        Ok(n) => {
-            eprintln!(
-                "{{\"level\":\"info\",\"message\":\"plan registry repopulated\",\
-                 \"task_entries\":{n}}}"
-            );
-        }
-        Err(e) => {
-            // Repopulate is best-effort: the per-initiative loop already
-            // logs and skips on parse/missing-artifact failures, so an
-            // overall error here would have to be a SQL/lock failure.
-            // Surface it loudly but do not abort boot — fail-closed at
-            // intent time is still safe.
-            eprintln!(
-                "{{\"level\":\"error\",\"message\":\"plan_registry_repopulate failed\",\
-                 \"reason\":\"{e}\"}}",
-            );
+    {
+        let store_for_repopulate = Arc::clone(&store);
+        let registry_for_repopulate = Arc::clone(&plan_registry);
+        let repopulate_outcome = tokio::task::spawn_blocking(move || {
+            initiatives::lifecycle::repopulate_plan_registry(
+                &store_for_repopulate,
+                &registry_for_repopulate,
+            )
+        })
+        .await;
+        match repopulate_outcome {
+            Ok(Ok(n)) => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"message\":\"plan registry repopulated\",\
+                     \"task_entries\":{n}}}"
+                );
+            }
+            Ok(Err(e)) => {
+                // Repopulate is best-effort: the per-initiative loop already
+                // logs and skips on parse/missing-artifact failures, so an
+                // overall error here would have to be a SQL/lock failure.
+                // Surface it loudly but do not abort boot — fail-closed at
+                // intent time is still safe.
+                eprintln!(
+                    "{{\"level\":\"error\",\"message\":\"plan_registry_repopulate failed\",\
+                     \"reason\":\"{e}\"}}",
+                );
+            }
+            Err(join_err) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"message\":\"plan_registry_repopulate join failed\",\
+                     \"reason\":\"{join_err}\"}}",
+                );
+            }
         }
     }
 
@@ -210,8 +253,49 @@ async fn main() {
         Arc::clone(&plan_registry),
     ));
 
-    // Step 9: Enter IPC dispatch loop (runs forever or until fatal error).
-    if let Err(e) = ipc::server::start(&data_dir, ctx).await {
-        exit_with_code(e);
+    // Step 9: Enter IPC dispatch loop. Returns when SIGTERM or SIGINT is
+    // received OR when one of the three accept loops dies. Either way we
+    // emit `KernelStopped` for audit completeness; exit code differs.
+    let shutdown = match ipc::server::start(&data_dir, ctx).await {
+        Ok(reason) => reason,
+        Err(e) => exit_with_code(e),
+    };
+
+    // Step 10: Emit `KernelStopped` audit event. This MUST be the last
+    // record in the segment for this kernel-process lifetime; without it,
+    // `recovery::verify_audit_chain` on the next boot still passes (the
+    // chain is intact), but the operator cannot tell whether the previous
+    // exit was clean. Per `kernel-core.md` startup-sequence step 9
+    // sub-bullet "Signal handler registration".
+    if let Err(e) = audit.emit(
+        AuditEventKind::KernelStopped {
+            reason: shutdown.audit_reason(),
+        },
+        None, None, None,
+    ) {
+        // Same dual-write fallback rationale as KernelStarted: if the chain
+        // refuses our final record, log loudly so the operator can spot the
+        // gap by inspecting both stderr and the segment.
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"KernelStopped\",\
+             \"audit_emit_failed\":\"{e}\",\"reason\":\"{}\"}}",
+            shutdown.audit_reason()
+        );
+    } else {
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"KernelStopped\",\"reason\":\"{}\"}}",
+            shutdown.audit_reason()
+        );
+    }
+
+    // Step 11: Exit code reflects WHY we stopped:
+    //   - SIGTERM / SIGINT  → operator-initiated; exit 0
+    //   - AcceptLoopExited  → degraded; exit non-zero so init systems restart
+    if shutdown.is_clean() {
+        std::process::exit(0);
+    } else {
+        std::process::exit(KernelError::SocketBind {
+            reason: format!("dispatch loop exited unexpectedly: {}", shutdown.audit_reason()),
+        }.exit_code());
     }
 }

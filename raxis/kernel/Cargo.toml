@@ -49,3 +49,7 @@ tempfile    = "3"
 # stay in `[dev-dependencies]`, never `[dependencies]` (per
 # `raxis-test-support` crate-level docs).
 raxis-test-support = { path = "../crates/test-support" }
+# Dev-only — used by `kernel/tests/kernel_signal_shutdown.rs` to deliver
+# SIGTERM via `libc::kill`. Not used by production kernel code (Tokio
+# `signal::unix::signal` wraps libc internally already).
+libc        = "0.2"

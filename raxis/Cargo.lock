@@ -620,6 +620,7 @@ dependencies = [
  "ed25519-dalek",
  "glob",
  "hex",
+ "libc",
  "raxis-audit-tools",
  "raxis-crypto",
  "raxis-genesis-tools",
