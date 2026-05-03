@@ -10,7 +10,7 @@
 //     attestation). Calling quality_keypair.sign() from any v1 module is a
 //     spec violation.
 //
-// Key file format (written by bootstrap.rs):
+// Key file format (written by `kernel/bootstrap.rs` and `raxis` CLI `genesis` — must stay in lockstep):
 //   -----BEGIN ED25519 PRIVATE KEY-----
 //   <64-char hex: 32-byte seed>
 //   -----END ED25519 PRIVATE KEY-----

@@ -296,10 +296,17 @@ fn prompt_operator_pubkey() -> Result<(String, String), CliError> {
 }
 
 fn write_key_pem(path: &std::path::Path, key: &SigningKey) -> Result<(), CliError> {
-    // Write raw 32-byte seed as hex (simple format for v1).
+    // Must match `kernel/bootstrap::generate_ed25519_keypair` and
+    // `authority::keys::load_signing_key` — hex seed + pubkey in labelled blocks.
     let seed_hex = hex::encode(key.to_bytes());
+    let pubkey_hex = hex::encode(key.verifying_key().to_bytes());
     let pem = format!(
-        "-----BEGIN PRIVATE KEY-----\n{seed_hex}\n-----END PRIVATE KEY-----\n"
+        "-----BEGIN ED25519 PRIVATE KEY-----\n\
+{seed_hex}\n\
+-----END ED25519 PRIVATE KEY-----\n\
+-----BEGIN ED25519 PUBLIC KEY-----\n\
+{pubkey_hex}\n\
+-----END ED25519 PUBLIC KEY-----\n",
     );
     fs::write(path, pem.as_bytes()).map_err(|e| CliError::Io {
         path: path.display().to_string(),
@@ -329,3 +336,45 @@ fn set_permissions_600(path: &std::path::Path) {
 
 #[cfg(not(unix))]
 fn set_permissions_600(_path: &std::path::Path) {}
+
+#[cfg(test)]
+mod write_key_pem_tests {
+    use super::write_key_pem;
+    use ed25519_dalek::SigningKey;
+
+    /// `raxis-kernel` `authority::keys::load_signing_key` only recognises this layout
+    /// (`kernel/bootstrap::generate_ed25519_keypair`). Genesis must stay compatible.
+    #[test]
+    fn written_authority_pem_matches_kernel_parser_expectations() {
+        let key = SigningKey::from_bytes(&[0x42u8; 32]);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("authority_keypair.pem");
+        write_key_pem(&path, &key).expect("write pem");
+
+        let pem = std::fs::read_to_string(&path).expect("read pem");
+        assert!(
+            pem.contains("BEGIN ED25519 PRIVATE KEY"),
+            "kernel rejects GENERIC PRIVATE KEY label:\n{pem}"
+        );
+        assert!(
+            pem.contains("BEGIN ED25519 PUBLIC KEY"),
+            "bootstrap PEM bundles pubkey hex:\n{pem}"
+        );
+
+        let seed_line = pem
+            .lines()
+            .skip_while(|l| !l.contains("BEGIN ED25519 PRIVATE KEY"))
+            .nth(1)
+            .expect("line after BEGIN ED25519 PRIVATE KEY")
+            .trim();
+        assert_eq!(seed_line, hex::encode(key.to_bytes()));
+
+        let pub_line = pem
+            .lines()
+            .skip_while(|l| !l.contains("BEGIN ED25519 PUBLIC KEY"))
+            .nth(1)
+            .expect("line after BEGIN ED25519 PUBLIC KEY")
+            .trim();
+        assert_eq!(pub_line, hex::encode(key.verifying_key().to_bytes()));
+    }
+}
