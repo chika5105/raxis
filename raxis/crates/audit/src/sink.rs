@@ -30,9 +30,10 @@
 // `audit.emit(..)` call inside an open transaction as a P0 spec
 // violation.
 
-use crate::event::AuditEventKind;
+use crate::event::{AuditEvent, AuditEventKind};
 use crate::writer::{AuditWriter, AuditWriterError};
 use std::sync::Mutex;
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // AuditSink — the trait kernel handlers depend on.
@@ -43,20 +44,27 @@ use std::sync::Mutex;
 ///
 /// Implementations: [`FileAuditSink`] (production), [`FakeAuditSink`] (tests).
 pub trait AuditSink: Send + Sync {
-    /// Append one audit event.
+    /// Append one audit event and return the materialised record.
     ///
     /// MUST be called only AFTER the matching SQLite transaction has
     /// committed (kernel-store.md §2.5.2). Implementations are free to
     /// fail with [`AuditWriterError::Io`] on disk pressure; the kernel
     /// treats audit-write failure as fatal (§2.5.2 "audit-pointer is
     /// part of the consistency unit") — see `kernel/src/main.rs`.
+    ///
+    /// The returned [`AuditEvent`] carries the freshly-assigned `seq`
+    /// and `event_id`. Downstream fanouts (notification dispatch,
+    /// telemetry mirror) reuse those fields so the operator-facing
+    /// inbox JSONL records can be cross-referenced against the audit
+    /// chain. Callers that don't need the record can simply discard it
+    /// (`let _ = audit.emit(...)?;`).
     fn emit(
         &self,
         kind: AuditEventKind,
         session_id: Option<&str>,
         task_id: Option<&str>,
         initiative_id: Option<&str>,
-    ) -> Result<(), AuditWriterError>;
+    ) -> Result<AuditEvent, AuditWriterError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,7 +101,7 @@ impl AuditSink for FileAuditSink {
         session_id: Option<&str>,
         task_id: Option<&str>,
         initiative_id: Option<&str>,
-    ) -> Result<(), AuditWriterError> {
+    ) -> Result<AuditEvent, AuditWriterError> {
         // Mutex poisoning here means a previous emit panicked mid-write,
         // which is itself a fatal corruption signal — the kernel cannot
         // continue with a half-flushed line. Panic with a clear message
@@ -164,17 +172,46 @@ impl AuditSink for FakeAuditSink {
         session_id: Option<&str>,
         task_id: Option<&str>,
         initiative_id: Option<&str>,
-    ) -> Result<(), AuditWriterError> {
-        self.events
+    ) -> Result<AuditEvent, AuditWriterError> {
+        // Synthesise a deterministic AuditEvent that mirrors what the
+        // production writer would have produced. Tests get the same
+        // shape (seq, event_id, payload) without writing to disk; the
+        // `seq` is sourced from the captured-events vector length so it
+        // is monotonically increasing across emits on the same sink.
+        let mut events = self
+            .events
             .lock()
-            .expect("fake audit mutex poisoned")
-            .push(CapturedEvent {
-                kind,
-                session_id: session_id.map(str::to_owned),
-                task_id: task_id.map(str::to_owned),
-                initiative_id: initiative_id.map(str::to_owned),
-            });
-        Ok(())
+            .expect("fake audit mutex poisoned");
+        let seq = events.len() as u64;
+        let payload = serde_json::to_value(&kind).map_err(AuditWriterError::Json)?;
+        let event_kind_str = kind.as_str().to_owned();
+        events.push(CapturedEvent {
+            kind,
+            session_id: session_id.map(str::to_owned),
+            task_id: task_id.map(str::to_owned),
+            initiative_id: initiative_id.map(str::to_owned),
+        });
+        Ok(AuditEvent {
+            seq,
+            event_id: Uuid::new_v4(),
+            event_kind: event_kind_str,
+            session_id: session_id.map(str::to_owned),
+            task_id: task_id.map(str::to_owned),
+            initiative_id: initiative_id.map(str::to_owned),
+            payload,
+            // `unix_now()` is private to the writer module; reaching
+            // for `std::time::SystemTime::now()` here is fine because
+            // the FakeAuditSink does not need to share the writer's
+            // monotonic clock — tests assert on `seq`/`event_kind`,
+            // not `emitted_at`.
+            emitted_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
+            prev_sha256: String::from(
+                "0000000000000000000000000000000000000000000000000000000000000000",
+            ),
+        })
     }
 }
 
@@ -194,9 +231,9 @@ mod tests {
     #[test]
     fn fake_sink_captures_events_in_order() {
         let sink = FakeAuditSink::new();
-        sink.emit(sample_kind("a"), None, None, None).unwrap();
-        sink.emit(sample_kind("b"), Some("sess-1"), None, None).unwrap();
-        sink.emit(sample_kind("c"), None, Some("task-1"), Some("init-1")).unwrap();
+        let _ = sink.emit(sample_kind("a"), None, None, None).unwrap();
+        let _ = sink.emit(sample_kind("b"), Some("sess-1"), None, None).unwrap();
+        let _ = sink.emit(sample_kind("c"), None, Some("task-1"), Some("init-1")).unwrap();
 
         let events = sink.events();
         assert_eq!(events.len(), 3);
@@ -221,7 +258,7 @@ mod tests {
             .map(|i| {
                 let s = Arc::clone(&sink);
                 std::thread::spawn(move || {
-                    s.emit(sample_kind(&format!("t{i}")), None, None, None).unwrap();
+                    let _ = s.emit(sample_kind(&format!("t{i}")), None, None, None).unwrap();
                 })
             })
             .collect();

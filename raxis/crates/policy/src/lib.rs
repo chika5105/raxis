@@ -18,7 +18,9 @@ pub mod error;
 pub mod loader;
 
 pub use bundle::{
-    GatewaySection, OperatorEntry, PolicyBundle, ProviderEntry,
+    GatewaySection, NotificationChannel, NotificationChannelKind, NotificationRoute,
+    OperatorEntry, PolicyBundle, ProviderEntry,
+    IMPLICIT_SHELL_CHANNEL_ID, IMPLICIT_SHELL_INBOX_FILENAME, KNOWN_AUDIT_EVENT_KINDS,
     MAX_DATA_FETCH_TIMEOUT_MS, MAX_INFERENCE_TIMEOUT_MS, MAX_RESPONSE_BYTES_CEILING,
 };
 

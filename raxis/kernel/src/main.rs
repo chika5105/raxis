@@ -19,6 +19,7 @@ mod witness_index;
 mod gates;
 mod gateway;
 mod handlers;
+mod notifications;
 mod path_scope;
 mod policy_manager;
 
@@ -196,12 +197,35 @@ async fn main() {
             reason: format!("cannot open audit segment {audit_path:?}: {e}"),
         })
     });
-    let audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(writer));
+    // Two layers:
+    //   inner  — `FileAuditSink`: the single owner of the JSONL writer.
+    //            Used directly for the `KernelStarted` genesis emit
+    //            below (no notifications — no operator could have
+    //            subscribed to a kernel that hasn't started yet).
+    //   audit  — `NotifyingAuditSink` decorator that fans every emit
+    //            into the notification dispatcher (cli-readonly.md §5.6).
+    //            Stored on `HandlerContext` so every IPC handler emits
+    //            through the wrapped sink without remembering to call
+    //            `notifications::dispatch` themselves.
+    let inner_audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(writer));
+    let audit: Arc<dyn AuditSink> = Arc::new(notifications::NotifyingAuditSink::new(
+        Arc::clone(&inner_audit),
+        Arc::clone(&policy),
+        data_dir.clone(),
+    ));
 
     // Step 8: Emit the canonical KernelStarted record. This is the very
     // first event in this kernel-process lifetime; with the v1 reset
     // policy above it is also the genesis event of the segment.
-    if let Err(e) = audit.emit(
+    //
+    // We deliberately bypass the notifying wrapper here:
+    //   - the inbox JSONL lives at `<data_dir>/notifications/inbox.jsonl`
+    //     which the notifications dispatcher creates on first use;
+    //   - operators don't need a `KernelStarted` line in the inbox to
+    //     observe boot (the kernel's own stderr says it).
+    // Sending through the wrapper would still work — it just produces
+    // an inbox line nobody reads.
+    if let Err(e) = inner_audit.emit(
         AuditEventKind::KernelStarted {
             data_dir: data_dir.display().to_string(),
             policy_epoch: policy.load().epoch(),

@@ -119,10 +119,16 @@ impl AuditWriter {
         })
     }
 
-    /// Append one audit event to the segment.
+    /// Append one audit event to the segment and return the materialised
+    /// record.
     ///
-    /// Constructs the full `AuditEvent` record, serialises to JSON, appends
-    /// the line (with trailing '\n'), flushes, and updates chain state.
+    /// Constructs the full `AuditEvent` record (assigning `seq`,
+    /// `event_id`, `prev_sha256`, `emitted_at`), serialises to JSON,
+    /// appends the line (with trailing '\n'), flushes, and updates chain
+    /// state. The same record is returned to the caller so downstream
+    /// fanouts (notification dispatch, telemetry mirror) can reference
+    /// the canonical `seq`/`event_id` without parsing the JSONL file
+    /// back. Cost: one `clone()` of an already-allocated record.
     ///
     /// This method is synchronous. The tokio runtime should call it on a
     /// `spawn_blocking` task or hold the audit mutex to avoid blocking the
@@ -133,7 +139,7 @@ impl AuditWriter {
         session_id: Option<&str>,
         task_id: Option<&str>,
         initiative_id: Option<&str>,
-    ) -> Result<(), AuditWriterError> {
+    ) -> Result<AuditEvent, AuditWriterError> {
         let event_kind = kind.as_str().to_owned();
         let payload = serde_json::to_value(&kind)?;
 
@@ -164,7 +170,7 @@ impl AuditWriter {
         self.seq += 1;
         self.prev_sha256 = next_prev;
 
-        Ok(())
+        Ok(event)
     }
 
     /// The current sequence number (next event will use this value).
