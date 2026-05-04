@@ -341,6 +341,217 @@ The recommended posture is `keys = "infinity"` always.
 
 ---
 
+## 5b. Garbage Collection — Review and Deletion of Expiring Artifacts
+
+### Overview
+
+When a retention window is set to `Days(N)`, artifacts older than N days become
+eligible for deletion. The Kernel does not delete eligible artifacts automatically —
+deletion is operator-initiated. This is intentional: the retention window is a policy
+decision, but the act of reclaiming storage is an operational one. The operator reviews
+what will be deleted before any file is touched.
+
+### GC Flow
+
+```
+1. Operator: raxis gc --dry-run
+   → Kernel computes expiry candidates (no files touched)
+   → Kernel runs safety checks on the full candidate set
+   → Prints report: what would be deleted, what is blocked, why
+   → No audit event emitted (dry-run is read-only)
+
+2. Operator reviews the report
+
+3. Operator: raxis gc
+   → Kernel re-computes expiry candidates (list may differ if time passed)
+   → Kernel re-runs safety checks
+   → Emits ArtifactGCStarted { candidates, blocked, dry_run: false }
+   → For each candidate that passes safety checks:
+       - Unlinks the file (atomic at OS level)
+       - Emits ArtifactExpired { artifact_type, sha256, created_at, deleted_at }
+   → Emits ArtifactGCCompleted { deleted_count, blocked_count, failed_count }
+```
+
+### Expiry Candidate Computation
+
+An artifact is an expiry candidate when:
+
+```
+now() - artifact.written_at > retention_window.days()
+```
+
+The `written_at` timestamp is recorded in the Kernel's artifact index (a table in
+`audit.db`) at the moment the artifact is written with `O_CREAT | O_EXCL`. The index
+is not the artifact file itself — it is a separate record that survives even after
+the artifact file is deleted.
+
+```sql
+-- artifact index (in audit.db, separate from audit_events)
+CREATE TABLE artifact_index (
+    sha256        TEXT    NOT NULL PRIMARY KEY,
+    artifact_type TEXT    NOT NULL CHECK (artifact_type IN ('policy', 'plan', 'key')),
+    written_at    INTEGER NOT NULL,   -- Unix timestamp (seconds)
+    deleted_at    INTEGER,            -- NULL if not yet deleted
+    UNIQUE (sha256, artifact_type)
+);
+```
+
+Expiry candidates:
+```sql
+SELECT sha256, artifact_type, written_at
+FROM artifact_index
+WHERE deleted_at IS NULL
+  AND artifact_type IN (
+      -- only include types whose retention window is Days(N), not Forever
+      -- resolved from current policy bundle at GC time
+  )
+  AND (unixepoch('now') - written_at) > (retention_days * 86400);
+```
+
+### Safety Checks Before Any Deletion
+
+The Kernel runs these checks on the **full candidate set** before unlinking any file.
+A single blocked artifact does not prevent others from being deleted — blocked artifacts
+are reported separately and skipped.
+
+**Check S1 — Key-plan referential integrity:**
+For each key artifact in the candidate set:
+- Query `audit_events` for all `InitiativeCreated` events with
+  `operator_key_fingerprint = <this_key_fingerprint>`
+- For each such initiative, find its `plan_sha256`
+- Check if that plan artifact is still present (`deleted_at IS NULL`) and NOT in the
+  candidate set
+- If yes: the key cannot be deleted (plan would outlive its signing key)
+- Result: `BLOCKED_KEY_REFERENCED_BY_LIVE_PLAN { key_fingerprint, referencing_plan_sha256 }`
+
+**Check S2 — Key-policy referential integrity:**
+Same as S1 but for `PolicyEpochAdvanced` events:
+- If a policy artifact is live and was signed by this key, the key cannot be deleted
+- Result: `BLOCKED_KEY_REFERENCED_BY_LIVE_POLICY { key_fingerprint, referencing_policy_sha256 }`
+
+**Check S3 — Policy-plan referential integrity:**
+For each policy artifact in the candidate set:
+- Query `audit_events` for `InitiativeCreated` events with `policy_sha256 = <this_sha256>`
+- If the corresponding plan artifact is still live and NOT in the candidate set:
+  the policy artifact can be deleted (policy and plan have independent retention)
+  — note: losing the policy means you cannot reconstruct the exact policy the plan
+  was approved against. This is acceptable if the operator has chosen a shorter
+  retention for policy bundles than for plans. The audit event `InitiativeCreated`
+  still records the `policy_sha256` — you know what the policy was, you just can't
+  retrieve its full content.
+  → No block. But a warning is printed:
+  `WARN_GC_POLICY_ARTIFACT_UNRETRIEVABLE_AFTER_DELETION { policy_sha256, referencing_plan_sha256 }`
+
+### Audit Events for GC
+
+```rust
+AuditEventKind::ArtifactGCStarted {
+    candidates:    Vec<ArtifactRef>,   // full list considered for deletion
+    blocked:       Vec<BlockedArtifact>, // blocked by safety checks with reason
+    dry_run:       bool,
+}
+
+AuditEventKind::ArtifactExpired {
+    artifact_type:  String,   // "policy" | "plan" | "key"
+    sha256:         String,
+    written_at:     u64,      // Unix timestamp when artifact was first written
+    deleted_at:     u64,      // Unix timestamp of this deletion
+    retention_days: u64,      // the Days(N) value that triggered eligibility
+}
+
+AuditEventKind::ArtifactGCCompleted {
+    deleted_count:  u32,
+    blocked_count:  u32,
+    failed_count:   u32,   // OS-level unlink failures (permissions, IO errors)
+    duration_ms:    u64,
+}
+```
+
+**Why GC events are in the append-only audit log:**
+Even after an artifact's bytes are gone, the audit chain permanently records:
+- That the artifact existed (from the original write event)
+- Its SHA-256 (so cross-references in `InitiativeCreated` remain meaningful)
+- When it was deleted and why (retention policy)
+
+An auditor can always answer: "did policy artifact `abc123` exist and when was it
+deleted?" — even after the file is gone.
+
+### What the `--dry-run` Report Looks Like
+
+```
+raxis gc --dry-run
+
+Retention policy (epoch 12):
+  policy_bundles : 3650 days
+  plans          : 3650 days
+  keys           : infinity
+
+Expiry candidates (as of 2026-05-03 16:05 UTC):
+  policy  sha256=a1b2c3...  written=2015-12-01  age=3805d  → ELIGIBLE
+  policy  sha256=d4e5f6...  written=2016-03-15  age=3701d  → ELIGIBLE
+  plan    sha256=g7h8i9...  written=2016-01-10  age=3765d  → ELIGIBLE
+  key     sha256=j0k1l2...  written=2014-08-20  age=4273d  → BLOCKED
+
+Safety check results:
+  BLOCKED  key j0k1l2... → referenced by live plan g7h8i9... (would outlive key)
+           Fix: delete plan g7h8i9... first, or set keys = "infinity"
+
+Warnings:
+  WARN  policy a1b2c3... is referenced by plan m3n4o5... (plan within retention).
+        After deletion, policy a1b2c3... bytes will be unrecoverable.
+        Audit event InitiativeCreated for initiative 9f8e7d will still record
+        policy_sha256 = a1b2c3... for traceability.
+
+Would delete: 3 artifacts (2 policy, 1 plan)
+Blocked:      1 artifact (1 key)
+Run 'raxis gc' to execute.
+```
+
+### Optional Scheduled GC
+
+For deployments that want automatic GC, the policy can configure a schedule:
+
+```toml
+[artifact_retention]
+policy_bundles = 3650
+plans          = 3650
+keys           = "infinity"
+
+[artifact_retention.gc_schedule]
+enabled        = false        # default — GC is manual
+cron           = "0 2 * * 0" # if enabled: run at 02:00 UTC every Sunday
+dry_run_only   = false        # if true: scheduled runs are always dry-run (report only)
+```
+
+**`dry_run_only = true`** is recommended for scheduled GC: the Kernel runs the dry-run
+report automatically and records it as `ArtifactGCStarted { dry_run: true }` in the
+audit chain. The operator reviews the weekly report and runs `raxis gc` manually when
+ready. This gives the time-awareness of scheduled GC without automatic deletion.
+
+### Updated Implementation Checklist Additions
+
+- [ ] Create `artifact_index` table in DDL (migration 3):
+      `sha256`, `artifact_type`, `written_at`, `deleted_at`
+- [ ] Populate `artifact_index` on every artifact write (`O_CREAT | O_EXCL` success)
+- [ ] Implement `kernel/src/gc/expiry.rs`: expiry candidate query
+- [ ] Implement `kernel/src/gc/safety.rs`: checks S1, S2, S3
+- [ ] Implement `raxis gc --dry-run` CLI command
+- [ ] Implement `raxis gc` CLI command (with confirmation prompt if terminal is interactive)
+- [ ] Emit `ArtifactGCStarted`, `ArtifactExpired`, `ArtifactGCCompleted` audit events
+- [ ] Update `artifact_index.deleted_at` on successful unlink
+- [ ] Implement `[artifact_retention.gc_schedule]` section in `PolicyBundle`
+- [ ] Implement scheduled GC via Kernel-internal timer (tokio interval)
+- [ ] Tests:
+      - Artifact past retention window appears in dry-run as ELIGIBLE
+      - Key blocked by live plan → BLOCKED with reason
+      - Policy deletion with live plan reference → warning (not block)
+      - Scheduled dry-run emits ArtifactGCStarted { dry_run: true } in audit
+      - artifact_index.deleted_at set after successful gc
+      - artifact_index row survives artifact file deletion (index outlives artifact)
+
+
+---
+
 ## 6. Audit Queries Enabled by Immutable Artifacts
 
 With content-addressed immutable storage, the following queries become fully answerable:
