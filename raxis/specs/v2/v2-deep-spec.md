@@ -1883,4 +1883,5 @@ into a core orchestration subsystem that warrants its own detailed mechanical sp
 | `IntegrationMerge` — complete intent spec, 8-check admission pipeline, multi-task sequencing, operator-approval gate for sensitive paths | [`integration-merge.md`](integration-merge.md) | V2 Specified |
 | Kernel-mediated egress — per-task web egress via `raxis-egress` proxy, two-level allowlist, `EgressRequest` intent, SSRF prevention, INV-EGRESS-01 | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | V2 Specified |
 | Policy-plan authority hierarchy — INV-POLICY-01, `approve_plan` warning system, `--strict` mode, warning catalog (4 warning types), `[push_policy]` and `[approve_policy]` policy bundle sections | [`policy-plan-authority.md`](policy-plan-authority.md) | V2 Specified |
+| Immutable artifact store — content-addressed storage for policy bundles, plans, and operator keys; `PolicyEpochAdvanced` extended with SHA-256 fields; full audit query model | [`immutable-artifact-store.md`](immutable-artifact-store.md) | V2 Specified |
 
