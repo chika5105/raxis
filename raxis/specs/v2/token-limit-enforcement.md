@@ -306,14 +306,14 @@ the recorded SHA-256, the content is authentic and unmodified.
 
 ---
 
-## 11. Budget Lanes vs. Token Limits — Relationship and Tensions
+## 10. Budget Lanes vs. Token Limits — Relationship and Tensions
 
 This section documents the full design analysis of the relationship between budget lanes
 and token limits. The conclusion is in §11.7. The step-by-step reasoning is preserved
 here because the tradeoffs are non-obvious and future contributors need to understand
 why the two systems exist as separate rather than unified.
 
-### 11.1 — The Two Systems Defined
+### 10.1 — The Two Systems Defined
 
 RAXIS has two resource governance systems that both constrain inference.
 
@@ -345,7 +345,7 @@ the tension analyzed below.
 
 ---
 
-### 11.2 — Step-by-Step: Arguments for Keeping Them Separate
+### 10.2 — Step-by-Step: Arguments for Keeping Them Separate
 
 **Argument S1: Different measurement units, different scope.**
 
@@ -411,7 +411,7 @@ Unified error codes would obscure which problem occurred.
 
 ---
 
-### 11.3 — Step-by-Step: Arguments for Unifying Them
+### 10.3 — Step-by-Step: Arguments for Unifying Them
 
 **Argument U1: Both govern the same underlying resource.**
 
@@ -447,7 +447,7 @@ with a `reason` field (token limit vs. financial limit) is more composable.
 
 ---
 
-### 11.4 — The Decisive Question
+### 10.4 — The Decisive Question
 
 The tension resolves entirely once this is answered:
 
@@ -487,7 +487,7 @@ These are orthogonal. Not redundant.
 
 ---
 
-### 11.5 — The Interaction Model
+### 10.5 — The Interaction Model
 
 With token-proportional budget lanes, the `admit_inference` path checks in order:
 
@@ -520,7 +520,7 @@ With token-proportional budget lanes, the `admit_inference` path checks in order
 
 ---
 
-### 11.6 — Enhancement to Budget Lanes for Inference
+### 10.6 — Enhancement to Budget Lanes for Inference
 
 Replace the fixed weight for `InferenceRequest` in the policy bundle with a
 `TokenProportionalWeight`:
@@ -550,7 +550,7 @@ pricing scaled to their admission_unit denomination. For example:
 
 ---
 
-### 11.7 — Conclusion
+### 10.7 — Conclusion
 
 **Keep budget lanes and token limits as separate systems.** They are orthogonal
 dimensions — financial (policy-level) vs. technical (plan-level). Unifying them is
@@ -710,7 +710,7 @@ a new fine-grained addition at the plan level. They serve different governance n
 
 ---
 
-## 12. CLI Commands for Token Limit Management
+## 11. CLI Commands for Token Limit Management
 
 ```bash
 # --- Observation ---
@@ -759,7 +759,7 @@ raxis token effective-limits <session-id>
 
 ---
 
-## 13. Prompt Engineering — Token Limit Awareness
+## 12. Prompt Engineering — Token Limit Awareness
 
 ### 13.1 — Why the Model Must Know About Token Limits
 
@@ -917,7 +917,7 @@ for each escalation class the agent is permitted to submit.
 
 ---
 
-## 10. Implementation Checklist
+## 13. Implementation Checklist
 
 - [ ] Make `prompt_sha256` and `response_sha256` non-optional in `InferenceCompleted`
 - [ ] Add `tokens_cache_creation`, `tokens_cache_read`, `actual_units` to `InferenceCompleted`
