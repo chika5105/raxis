@@ -310,10 +310,26 @@ When you have completed a logical unit of work, submit SingleCommit:
   - You may submit multiple SingleCommit intents; each builds on the previous
 
 [KERNEL: EGRESS PROTOCOL]
-You may make HTTP requests to allowed hosts only:
-  <allowed_egress entries from plan, one per line>
-  Methods permitted per host are listed above.
-  Any other host or method: FAIL_EGRESS_NOT_PERMITTED — do not retry.
+
+Two categories of network access exist in your VM. They behave differently.
+
+Category 1 — Intra-VM loopback (UNRESTRICTED):
+  Connections to localhost / 127.0.0.1 stay within the VM network namespace.
+  No EgressRequest intent is needed. No allowlist check. Use freely.
+  This includes: your own dev servers, test servers, mock servers, in-VM databases,
+  and the RAXIS credential proxy ports listed in [KERNEL: CREDENTIAL PROXIES] below.
+
+Category 2 — External egress (ALLOWLIST-GATED):
+  Connections to any host outside the VM must go through the RAXIS egress proxy.
+  You must NOT call external hosts directly. Use the standard HTTP client — the
+  Kernel intercepts external calls automatically.
+
+Your permitted external hosts and methods for this task:
+  <allowed_egress entries from plan, one per line — host, url_prefix, methods>
+
+  Any host or method not listed: FAIL_EGRESS_NOT_PERMITTED
+  Do NOT retry with the same host. Do NOT escalate unless the host should be permitted
+  (in which case: escalate PlanViolation explaining which host is needed and why).
 
 [KERNEL: ESCALATION PROTOCOL]
 Submit EscalationRequest only when genuinely blocked. Include a structured explanation:
@@ -322,6 +338,16 @@ Submit EscalationRequest only when genuinely blocked. Include a structured expla
   - What you need from the operator
   Your explanation must be ≥ 50 characters. Vague explanations are rejected.
   Available escalation classes for Executor: MergeConflict, PlanViolation
+
+[KERNEL: CREDENTIAL PROXIES]
+The following localhost ports are occupied by RAXIS credential proxies.
+Connecting to these ports is how you access external services — no auth needed from you.
+Do NOT bind your dev servers to these ports. Do NOT call these ports via EgressRequest.
+
+  <active proxy entries: "name: localhost:port (proxy_type)" one per line,
+   drawn from KSB proxies field — only active credentials listed here>
+
+If no credentials are declared for this task, this section will show: (none)
 
 [KERNEL: TOKEN LIMIT PROTOCOL]
 (see §4.2 — full token limit error code reference injected here)
@@ -580,18 +606,28 @@ specific agent session. It does NOT give the agent access to the full plan.
 | Task description | `plan.tasks[task_id].description` |
 | Path allowlist | `plan.tasks[task_id].path_allowlist` |
 | Cross-cutting artifacts | `plan.orchestrator.cross_cutting_artifacts` |
-| Allowed egress | `plan.tasks[task_id].allowed_egress` |
+| Allowed egress (external hosts + methods) | `plan.tasks[task_id].allowed_egress` |
+| Credential proxies (localhost ports + types) | `plan.tasks[task_id].credentials` → resolved to proxy addresses at boot |
 | Acceptance criteria | `plan.tasks[task_id].acceptance_criteria` |
 | Review attempt count | Kernel DB: `subtask_activations.review_attempt` |
 | Max review rejections | `plan.tasks[task_id].max_review_rejections` |
 | Initiative DAG structure | `plan.tasks[*].{task_id, description, depends_on}` (all tasks) |
 
+**What the agent sees about egress:** Only its own task's `allowed_egress` entries —
+not the full policy `[[egress_hosts]]` ceiling. The agent cannot infer what other
+hosts might be available; it works only with what is explicitly listed in its NNSP.
+
+**What the agent sees about credentials:** The `[KERNEL: CREDENTIAL PROXIES]` block
+lists active proxy ports (e.g., `postgres-staging: localhost:5432 (postgres)`) — not
+the real target host or any credential value. The real backend host lives only in the
+Kernel's proxy configuration.
+
 The assembler does NOT include:
 - Other tasks' path allowlists (cross-task information leakage)
 - Other tasks' acceptance criteria
 - Operator signature material (`plan.toml.sig`)
-- Policy bundle contents
-- Credentials or secrets from `$RAXIS_DATA_DIR/credentials/`
+- Policy bundle contents (`[[egress_hosts]]`, `[[environment_gates]]`, `[[permitted_credentials]]`)
+- Credential values, real target hosts, or any content from `$RAXIS_DATA_DIR/credentials/`
 
 ---
 
