@@ -22,6 +22,152 @@ Content scanning on `InferenceRequest` payloads is **not** the primary defense a
 
 ---
 
+## 1b. HTTP Proxy vs. TCP Proxy — Why Database Proxying is Hard
+
+Understanding why database proxying is significantly harder than HTTP proxying is
+essential for implementing the credential proxy correctly.
+
+### HTTP Proxy (k8s, AWS, GCP, Azure API calls) — Simple
+
+HTTP is stateless and request-response. Each request is a self-contained message:
+
+```
+Agent → proxy: "GET /api/v1/namespaces/staging/pods HTTP/1.1\r\n
+                Host: localhost:8001\r\n
+                \r\n"
+
+Proxy does:
+  1. Parse HTTP request (read until \r\n\r\n)
+  2. Swap Host header: localhost:8001 → k8s-api.staging.company.com
+  3. Add: "Authorization: Bearer eyJhbGciO..."
+  4. Forward the modified request
+  5. Return the response verbatim
+
+State required: NONE between requests
+Protocol knowledge: HTTP header format (text, newline-delimited)
+Authentication: add one header — no handshake, no round-trips
+```
+
+The proxy is a message modifier. It reads a complete request, modifies it, forwards it.
+No state between requests. No binary framing. No bidirectional handshake.
+
+### TCP Proxy (PostgreSQL, MySQL, MSSQL, MongoDB, Redis) — Hard
+
+Database connections are stateful, binary-framed, bidirectional TCP streams. The proxy
+must fully implement both sides of the wire protocol simultaneously.
+
+**The PostgreSQL authentication handshake alone requires 5 round-trips:**
+
+```
+Phase 1 — Connection establishment:
+  Agent  → Proxy: TCP SYN
+  Proxy  → Agent: TCP SYN-ACK
+  Proxy  → RealDB: TCP SYN (separate connection to real server)
+  RealDB → Proxy: TCP SYN-ACK
+
+Phase 2 — Protocol startup:
+  Agent  → Proxy: StartupMessage { user="raxis_agent", database="mydb" }
+  Proxy  → RealDB: StartupMessage { user="real_svc_acct", database="mydb" }
+  # Proxy must modify the username being sent to the real DB
+
+Phase 3 — Auth challenge (server-driven):
+  RealDB → Proxy: AuthenticationMD5Password { salt=[0xAB, 0xCD, 0xEF, 0x12] }
+  # Proxy receives the salt — MUST compute response without showing it to agent
+  Proxy  → RealDB: PasswordMessage { md5="md5" + MD5(MD5(pass+user) + salt) }
+  # Proxy presents real credential. Agent never sees salt OR password.
+
+Phase 4 — Auth success forwarded:
+  RealDB → Proxy: AuthenticationOK
+  Proxy  → Agent: AuthenticationOK  (passes through)
+  RealDB → Proxy: BackendKeyData { pid, secret_key }
+  Proxy  → Agent: BackendKeyData (passes through — needed for cancel requests)
+
+Phase 5 — Ready to query:
+  RealDB → Proxy: ReadyForQuery { transaction_status='I' }
+  Proxy  → Agent: ReadyForQuery (passes through)
+
+# Agent believes it is connected and authenticated. It never saw the password.
+# Proxy now bridges two persistent connections bidirectionally.
+```
+
+**Why this is hard:**
+
+1. **Bidirectional binary framing.** PostgreSQL messages are binary frames: 1 byte tag +
+   4-byte length + payload. The proxy must parse these correctly on BOTH connections
+   simultaneously. A misread of one byte corrupts the entire protocol state.
+
+2. **Auth handshake is server-driven.** The server chooses the auth method
+   (md5, scram-sha-256, gss, cert, trust). The proxy cannot predict which method will
+   be used until the server sends it. The proxy must implement ALL methods the real
+   server might choose, compute the correct response using the stored credential, and
+   present it to the real server — all without ever sending the credential to the agent.
+
+3. **SCRAM-SHA-256 (modern PostgreSQL) is even harder.** It's a 4-step mutual
+   authentication exchange:
+   ```
+   Client → Server: SASLInitialResponse (client-first-message)
+   Server → Client: AuthenticationSASLContinue (server-first-message + nonce + salt + iterations)
+   Client → Server: SASLResponse (client-final-message with HMAC proof)
+   Server → Client: AuthenticationSASLFinal (server-signature for mutual auth)
+   ```
+   The proxy computes all four messages using the stored password. One wrong byte in
+   the HMAC fails the entire handshake.
+
+4. **Stateful protocol machine.** After auth, the connection is in one of several states:
+   - Idle (I): ready to accept a query
+   - In transaction (T): inside an explicit transaction block
+   - Error (E): error occurred in current transaction
+   - Copy-in / Copy-out mode: for COPY protocol
+   - Extended query pipeline: Parse → Bind → Describe → Execute sequence
+   
+   The proxy must track state transitions to handle each message correctly. A message
+   valid in Idle state may be illegal in Error state.
+
+5. **Extended query protocol.** ORMs (SQLAlchemy, Prisma, Diesel) almost exclusively
+   use the extended query protocol for parameterized queries:
+   ```
+   Agent → Proxy: Parse { name="s1", query="SELECT * FROM users WHERE id = $1" }
+   Agent → Proxy: Bind  { portal="p1", statement="s1", params=[42] }
+   Agent → Proxy: Describe { type='P', name="p1" }
+   Agent → Proxy: Execute { portal="p1", max_rows=0 }
+   Agent → Proxy: Sync
+   ```
+   The proxy must track named prepared statements and portals, enforce restrictions at
+   Parse time, and handle Sync/Flush correctly to maintain protocol coherence.
+
+6. **Connection multiplexing.** A SQLAlchemy pool with `pool_size=5` opens 5 separate
+   TCP connections. Each must be independently proxied with its own state machine,
+   its own auth handshake with the real DB, and its own transaction state.
+
+7. **Error propagation.** If the real DB connection drops mid-query, the proxy must
+   synthesize a valid PostgreSQL `ErrorResponse` message (SQLSTATE code, severity,
+   message text) and send it to the agent — not raw TCP RST, which would corrupt the
+   agent's connection state.
+
+### Comparison Table
+
+| Property | HTTP proxy (k8s, cloud APIs) | TCP proxy (databases) |
+|---|---|---|
+| Protocol | HTTP/1.1 + HTTP/2 | Wire protocol (PG, MySQL, TDS, etc.) |
+| Statefulness | Stateless per request | Stateful per connection |
+| Authentication | Add header | Participate in bidirectional handshake |
+| Binary parsing | Headers are text | Binary frames with type+length+payload |
+| Auth mechanism | Fixed (Bearer token) | Server-chosen (md5/scram/gss/cert/trust) |
+| Crypto required | None (TLS to real server) | SCRAM-SHA-256 PBKDF2 + HMAC |
+| State machine | None | 6+ states, complex transitions |
+| Connection pooling | HTTP/2 multiplexing | 1:1 agent-to-real per connection |
+| Error propagation | HTTP status codes (text) | Protocol-specific binary error frames |
+| Implementation complexity | Low (days) | High (weeks per protocol) |
+| Existing libraries | `hyper`, `reqwest` | `tokio-postgres`, custom TDS parser |
+
+This is why the database proxies are the most complex components in the credential proxy
+subsystem and why each protocol (PostgreSQL, MySQL, MSSQL, MongoDB, Redis) requires
+a separate, fully-tested implementation.
+
+---
+
+---
+
 ## 2. How the Proxy Architecture Works
 
 The Kernel starts a per-session **credential proxy** for each credential declared in the plan. The proxy runs on the Kernel host (outside the VM) and is reachable from inside the VM via a VirtioFS-mounted Unix socket or a loopback-mapped port.
@@ -501,7 +647,7 @@ The agent can see which proxies are active on this call. If a proxy it expects t
 
 ---
 
-## 8. Rejected Design — Environment Variable Credential Injection
+## 8. Rejected Design — Environment Variable Credential Injection (Kept for Reference)
 
 This section documents the credential injection approach that was considered and
 explicitly rejected. It is preserved here so future contributors understand *why*
@@ -658,7 +804,296 @@ themselves contain no credentials.
 
 ---
 
-## 7. Implementation Checklist
+## 9. Usage Examples — How Agents Use the Proxy
+
+These examples show the exact code an agent writes inside the VM. The agent code is
+identical to what it would write against a real database or cloud service — the proxy
+is fully transparent. The key difference is that env vars point to proxy addresses.
+
+### 9.1 — PostgreSQL (Python)
+
+```python
+import os
+import psycopg2
+from sqlalchemy import create_engine, text
+
+# DATABASE_URL is set by RAXIS Kernel: "postgresql://raxis@localhost:5432/mydb"
+# No password in the URL — proxy handles auth transparently
+database_url = os.environ["DATABASE_URL"]
+
+# Direct psycopg2
+with psycopg2.connect(database_url) as conn:
+    with conn.cursor() as cur:
+        cur.execute("SELECT id, name, price FROM products WHERE active = true")
+        products = cur.fetchall()
+
+# SQLAlchemy ORM (uses connection pool — proxy handles multiplexing)
+engine = create_engine(database_url, pool_size=5, max_overflow=2)
+with engine.connect() as conn:
+    result = conn.execute(text("SELECT count(*) FROM orders WHERE status = 'pending'"))
+    count = result.scalar()
+
+# Do NOT: engine = create_engine("postgresql://real_user:real_password@prod-db:5432/mydb")
+# Do NOT: psycopg2.connect(host="prod-db.company.com", password=os.environ.get("DB_PASS"))
+```
+
+**Database migration with Alembic:**
+```python
+# alembic/env.py — no changes needed from normal Alembic usage
+from alembic import context
+import os
+
+# RAXIS sets DATABASE_URL — Alembic reads it and connects to local proxy
+config.set_main_option("sqlalchemy.url", os.environ["DATABASE_URL"])
+# Alembic runs all migrations through the proxy — each statement is audited
+```
+
+---
+
+### 9.2 — PostgreSQL (Rust with sqlx)
+
+```rust
+use sqlx::PgPool;
+use std::env;
+
+#[tokio::main]
+async fn main() -> Result<(), sqlx::Error> {
+    // DATABASE_URL from env: "postgresql://raxis@localhost:5432/mydb"
+    let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+
+    // sqlx uses connection pool — proxy multiplexes transparently
+    let pool = PgPool::connect(&database_url).await?;
+
+    let products = sqlx::query!("SELECT id, name FROM products WHERE active = true")
+        .fetch_all(&pool)
+        .await?;
+
+    // do NOT: PgPool::connect("postgresql://real_user:pass@prod-db:5432/mydb").await
+    Ok(())
+}
+```
+
+---
+
+### 9.3 — MySQL (Python)
+
+```python
+import os
+import mysql.connector
+
+# DATABASE_URL=mysql://raxis@localhost:3306/mydb
+# Parse the URL or use individual components
+conn = mysql.connector.connect(
+    host="localhost",
+    port=3306,
+    user="raxis",
+    database="mydb",
+    # No password= field — proxy accepts connection without password
+)
+cursor = conn.cursor()
+cursor.execute("SELECT id, name FROM users WHERE created_at > %s", ("2024-01-01",))
+users = cursor.fetchall()
+
+# Do NOT: mysql.connector.connect(host="prod-mysql.company.com", password="real_pass")
+```
+
+---
+
+### 9.4 — Kubernetes (kubectl)
+
+```bash
+# KUBECONFIG=/raxis/generated/k8s-staging.yaml (set by Kernel)
+# The kubeconfig points to localhost:8001 with no token — proxy adds auth
+
+# These commands work exactly as normal:
+kubectl get pods -n staging
+kubectl apply -f manifests/deployment.yaml -n staging
+kubectl rollout status deployment/my-app -n staging
+kubectl logs -f deployment/my-app -n staging --tail=50
+
+# Do NOT: kubectl config set-credentials raxis-agent --token=$(cat /etc/secret)
+# Do NOT: kubectl --server=https://k8s-api.staging.company.com --token=eyJ...
+# Do NOT: export KUBECONFIG=~/.kube/config (the system kubeconfig may not exist)
+```
+
+**Python kubernetes client:**
+```python
+from kubernetes import client, config
+import os
+
+# config.load_kube_config() reads KUBECONFIG env var automatically
+# Points to blank kubeconfig → localhost:8001 → proxy → real cluster
+config.load_kube_config()
+
+v1 = client.CoreV1Api()
+pods = v1.list_namespaced_pod(namespace="staging")
+for pod in pods.items:
+    print(f"{pod.metadata.name}: {pod.status.phase}")
+```
+
+---
+
+### 9.5 — AWS (Python boto3)
+
+```python
+import boto3
+import os
+
+# RAXIS Kernel sets:
+#   AWS_CONTAINER_CREDENTIALS_FULL_URI=http://localhost:9001/creds
+#   AWS_DEFAULT_REGION=us-east-1
+# boto3 reads AWS_CONTAINER_CREDENTIALS_FULL_URI automatically as a credential provider
+# No aws_access_key_id or aws_secret_access_key needed
+
+s3 = boto3.client("s3")
+s3.upload_file("build/output.tar.gz", "my-staging-bucket", "releases/v1.2.3.tar.gz")
+
+# SQS
+sqs = boto3.client("sqs")
+sqs.send_message(
+    QueueUrl="https://sqs.us-east-1.amazonaws.com/123456789/staging-tasks",
+    MessageBody='{"task": "process_batch", "batch_id": "42"}'
+)
+
+# Do NOT: boto3.client("s3", aws_access_key_id="AKIA...", aws_secret_access_key="...")
+# Do NOT: boto3.Session(profile_name="staging").client("s3")
+```
+
+**Terraform with AWS (proxy is transparent to Terraform):**
+```hcl
+# main.tf — provider reads AWS_CONTAINER_CREDENTIALS_FULL_URI automatically
+provider "aws" {
+  region = "us-east-1"
+  # No access_key or secret_key — Terraform AWS provider uses env var credential chain
+}
+
+resource "aws_s3_bucket" "staging_artifacts" {
+  bucket = "my-staging-artifacts"
+}
+```
+
+---
+
+### 9.6 — Azure (Python)
+
+```python
+from azure.identity import ManagedIdentityCredential
+from azure.storage.blob import BlobServiceClient
+from azure.keyvault.secrets import SecretClient
+
+# RAXIS sets AZURE_CLIENT_ID (the client ID for the managed identity proxy)
+# ManagedIdentityCredential queries the local RAXIS Azure proxy
+# (which exposes an IMDS-compatible endpoint at the RAXIS proxy address)
+credential = ManagedIdentityCredential()
+
+# Azure Blob Storage
+blob_client = BlobServiceClient(
+    account_url="https://mystagingnstorageaccount.blob.core.windows.net",
+    credential=credential
+)
+container = blob_client.get_container_client("artifacts")
+container.upload_blob("release.tar.gz", open("release.tar.gz", "rb"))
+
+# Azure Key Vault (if permitted in allowed_resources)
+kv_client = SecretClient(
+    vault_url="https://my-staging-kv.vault.azure.net",
+    credential=credential
+)
+secret = kv_client.get_secret("db-connection-string")
+
+# Do NOT: ClientSecretCredential(tenant_id=..., client_id=..., client_secret=...)
+# Do NOT: DefaultAzureCredential() — may attempt to read real Azure env vars
+```
+
+**Azure SQL (via PostgreSQL proxy + Entra ID):**
+```python
+import psycopg2
+import os
+
+# Azure Database for PostgreSQL Flexible Server uses pg wire protocol
+# DATABASE_URL points to the RAXIS db proxy which handles Entra ID token auth
+database_url = os.environ["DATABASE_URL"]
+# Same as any PostgreSQL connection — Entra ID auth is transparent
+conn = psycopg2.connect(database_url)
+```
+
+---
+
+### 9.7 — MongoDB (Python)
+
+```python
+from pymongo import MongoClient
+import os
+
+# MONGODB_URI=mongodb://localhost:27017/mydb
+uri = os.environ["MONGODB_URI"]
+client = MongoClient(uri)
+db = client["mydb"]
+
+# Read operations
+products = list(db.products.find({"active": True, "price": {"$lt": 100}}))
+
+# Write operations (only if restrictions permit)
+db.audit_log.insert_one({"event": "deploy", "timestamp": datetime.utcnow()})
+
+# Do NOT: MongoClient("mongodb://real_user:real_pass@mongo.staging.company.com:27017")
+```
+
+---
+
+### 9.8 — Redis (Python)
+
+```python
+import redis
+import os
+
+# REDIS_URL=redis://localhost:6379
+r = redis.from_url(os.environ["REDIS_URL"])
+
+# Standard Redis operations
+r.set("deploy:latest", "v1.2.3", ex=3600)
+value = r.get("feature:flag:dark-mode")
+r.lpush("work:queue", "task-42")
+
+# Do NOT: redis.Redis(host="redis.staging.company.com", port=6379, password="real_pass")
+```
+
+---
+
+### 9.9 — What to Do When a Proxy Connection Fails
+
+If the agent's connection to a proxy fails:
+
+```python
+try:
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+except psycopg2.OperationalError as e:
+    # CORRECT: capture the exact error and escalate
+    # Submit EscalationRequest with:
+    #   class: PlanViolation
+    #   explanation: f"Database proxy connection failed: {e}. DATABASE_URL={os.environ['DATABASE_URL']}"
+    # Do NOT: try alternative connection strings
+    # Do NOT: try to read credentials from other sources
+    raise
+```
+
+If a query is blocked by a proxy restriction:
+```python
+try:
+    cur.execute("DELETE FROM temp_staging WHERE session_id = %s", (session_id,))
+except psycopg2.errors.InsufficientPrivilege as e:
+    # CORRECT: the restriction is intentional — do not try workarounds
+    # Submit EscalationRequest with:
+    #   class: PlanViolation
+    #   explanation: f"Query blocked by RAXIS proxy restriction: {e}. Task requires DELETE permission on temp_staging."
+    raise
+```
+
+---
+
+---
+
+## 10. Implementation Checklist
 
 - [ ] Design credential proxy trait: `trait CredentialProxy { fn start(&self, ...) -> ProxyHandle; }`
 - [ ] Implement `KubernetesProxy` (HTTPS, Authorization header injection)
