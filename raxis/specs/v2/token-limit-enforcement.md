@@ -41,8 +41,13 @@ AuditEventKind::InferenceCompleted {
     latency_ms:         u64,
 
     // Content integrity — always recorded, never optional
-    prompt_sha256:      String,    // SHA-256 of the exact bytes sent to provider
-    response_sha256:    String,    // SHA-256 of the exact bytes received from provider
+    prompt_sha256:      String,    // SHA-256 of exact bytes sent to provider (KSB+NNSP+messages)
+    response_sha256:    String,    // SHA-256 of exact bytes received from provider
+
+    // KSB integrity — always recorded; deterministically verifiable from DB state
+    ksb_sha256:         String,    // SHA-256 of the KSB string assembled for this specific call
+                                   // Auditor can reconstruct KSB from DB snapshot at call
+                                   // timestamp and verify hash matches without external storage
 }
 ```
 

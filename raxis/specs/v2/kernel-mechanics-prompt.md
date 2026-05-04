@@ -170,6 +170,98 @@ The model uses this to:
 
 ---
 
+---
+
+## 2b. KSB Auditability
+
+### 2b.1 — The Audit Record
+
+The KSB follows the same auditability model as prompt and response content: the SHA-256
+is always recorded in the `InferenceCompleted` audit event, and the raw bytes are
+optionally stored in the immutable artifact store.
+
+```rust
+AuditEventKind::InferenceCompleted {
+    // ... existing fields ...
+
+    // KSB integrity — always recorded
+    ksb_sha256: String,  // SHA-256 of the KSB string for this specific call
+}
+```
+
+`ksb_sha256` is computed by the Kernel immediately after `build_ksb()` returns,
+before the KSB string is prepended to the system prompt:
+
+```rust
+let ksb_string = build_ksb(&session, &effective_limits, &pending_escalations)?;
+let ksb_sha256 = sha256(ksb_string.as_bytes());
+// Prepend to system prompt
+let full_system = format!("{ksb_string}
+{nnsp}");
+// ... forward to gateway ...
+// Record in audit event:
+audit.ksb_sha256 = ksb_sha256;
+```
+
+### 2b.2 — The Key Property: Deterministic Reconstruction
+
+Unlike prompt content and response content (which include model-generated message
+history that cannot be reproduced without the original bytes), the KSB is
+**deterministically reconstructible from the Kernel's database state** at the
+moment of the call.
+
+The KSB is assembled from:
+- `sessions.tokens_input_total`, `tokens_output_total`, `tokens_total` at call time
+- `token_limit_grants` rows for this session (effective limits)
+- `sessions.state` (Active / Paused / AwaitingEscalation)
+- `escalations` rows for this session where `state IN ('Pending', 'Consumed')`
+- Git HEAD SHA from the worktree (reproducible from the worktree snapshot)
+
+An auditor can reconstruct the exact KSB for any past call by:
+1. Finding the `InferenceCompleted` event with its timestamp
+2. Reading the DB state at that timestamp (using the audit log's sequential ordering
+   as a consistent snapshot — all events before this one have been applied)
+3. Running `build_ksb()` with that state
+4. Verifying the output SHA-256 matches `ksb_sha256` in the audit event
+
+If the hashes match: the Kernel reported the correct state to the model at that call.
+If they don't match: the KSB was altered between assembly and delivery — a Kernel bug
+or tampering event.
+
+This verification path does not require external storage (unlike prompt/response bytes).
+The DB state IS the reconstruction source.
+
+### 2b.3 — Optional Content Storage
+
+For deployments that want to store the raw KSB bytes externally (consistent with
+`log_content = true` in `[inference_audit]`):
+
+```
+$RAXIS_DATA_DIR/artifacts/ksb/
+  <sha256>.txt    ← raw KSB string for this call (≤ ~1KB per file)
+```
+
+KSB artifacts are tiny (~500-800 bytes each). Unlike prompt/response content (which can
+be hundreds of KB), KSBs can be stored in the artifact store with negligible overhead
+even for high-frequency sessions (100 calls × 800 bytes = ~80KB per session).
+
+KSB retention follows the same `[artifact_retention]` policy as other artifacts,
+defaulting to `"forever"`. Since KSBs are reconstructible from DB state, their
+storage is redundant (convenience, not necessity) — operators can delete them more
+aggressively than prompt/response content without losing audit capability.
+
+### 2b.4 — What KSB Auditability Enables
+
+| Audit question | How to answer |
+|---|---|
+| What state did the Kernel report to the model before inference call X? | Reconstruct KSB from DB state at timestamp of call X; verify against `ksb_sha256` |
+| Was the model approaching its token limit at inference call X? | Check `ksb_sha256` for that call; reconstruct KSB; read `t_status` field |
+| Was there a pending escalation when the model made inference call X? | Reconstruct KSB; read `escl` field |
+| Did the Kernel correctly report the model's budget state? | Reconstruct KSB; compare `budget` field to lane DB state at that timestamp |
+| Was the KSB tampered with between assembly and delivery? | Reconstruct from DB; verify SHA-256 matches `InferenceCompleted.ksb_sha256` |
+
+---
+
 ## 3. Non-Negotiable System Prompt Structure (Per Role)
 
 The NNSP is assembled by the Kernel Prompt Assembler once at session boot and written
