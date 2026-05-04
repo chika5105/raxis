@@ -1093,6 +1093,398 @@ except psycopg2.errors.InsufficientPrivilege as e:
 
 ---
 
+## 11. Operator Configuration Guide — `policy.toml` and `plan.toml`
+
+This section shows complete, real-world configuration examples. Each example pairs
+the `policy.toml` declarations (deployment-level, operator-controlled floor) with the
+`plan.toml` declarations (initiative-level, must be a subset of policy).
+
+### 11.1 — Schema Reference
+
+**`policy.toml` additions:**
+
+```toml
+# Declares which credentials exist on this deployment and what proxy types they support.
+# Plans may ONLY reference credentials declared here.
+[[permitted_credentials]]
+name           = "<name>"           # referenced in plan [[tasks.credentials]]
+environment    = "<label>"          # must match an [[environment_gates]] label
+description    = "<human text>"
+proxy_types    = ["k8s"]            # which proxy_type values are allowed for this credential
+real_target    = "<host:port>"      # real backend the proxy connects to (DB or k8s API)
+                                    # Kernel uses this at proxy startup; agent never sees it
+
+# For database credentials, the real target is host:port
+# For k8s credentials, real_target is the k8s API server URL
+# For AWS/GCP/Azure, real_target is the cloud API base URL
+```
+
+**`plan.toml` additions:**
+
+```toml
+[[tasks.credentials]]
+name         = "<name>"         # must be in policy [[permitted_credentials]]
+proxy_type   = "<type>"         # must be in permitted_credentials.proxy_types
+mount_as     = "<ENV_VAR>"      # env var set in VM pointing to proxy address
+                                # value is a proxy address, not a real credential
+
+# Database-specific options:
+target_db    = "<dbname>"       # which database on the real server to connect to
+
+[tasks.credentials.restrictions]  # optional — further restrict proxy behavior
+allow_only_select     = false   # block DML/DDL at proxy
+forbidden_tables      = []      # reject queries touching these tables
+max_result_rows       = 0       # 0 = uncapped; N = proxy enforces LIMIT N
+statement_timeout_ms  = 30000   # proxy cancels queries exceeding this ms
+
+# Azure-specific options:
+allowed_resources = [           # Azure AD token scoping — proxy refuses tokens for
+  "https://ossrdbms-aad.database.windows.net"  # resources not in this list
+]
+azure_credential = "<name>"     # which Azure credential to use for token acquisition
+
+# AWS-specific options:
+role_arn  = "arn:aws:iam::..."  # IAM role to assume via STS
+region    = "us-east-1"
+```
+
+---
+
+### 11.2 — Example A: Deploy to Staging k8s + Read/Write Staging PostgreSQL
+
+**Scenario:** An Executor task deploys a Docker image to a staging k8s namespace
+and runs a database migration against the staging PostgreSQL instance.
+
+**Step 1 — Operator pre-populates `$RAXIS_DATA_DIR/credentials/`:**
+
+```bash
+# k8s credential: a kubeconfig file with the staging service account token
+# The service account has deploy permissions in the 'staging' namespace only
+cp ~/staging-sa-kubeconfig.yaml $RAXIS_DATA_DIR/credentials/k8s-staging.yaml
+
+# PostgreSQL credential: a .env file with the real connection parameters
+cat > $RAXIS_DATA_DIR/credentials/postgres-staging.env << 'EOF'
+PGHOST=postgres-staging.company.internal
+PGPORT=5432
+PGUSER=raxis_staging_svc
+PGPASSWORD=real-secret-password-here
+EOF
+```
+
+**Step 2 — `policy.toml` (operator declares what's permitted):**
+
+```toml
+# --- Environment gates ---
+[[environment_gates]]
+label                  = "staging"
+url_prefixes           = ["https://k8s-api.staging.company.com/"]
+block_all              = false
+write_requires_approval = false   # staging writes don't need escalation
+
+[[environment_gates]]
+label                  = "production"
+url_prefixes           = ["https://k8s-api.prod.company.com/",
+                           "https://postgres-prod.company.internal:5432/"]
+block_all              = false
+write_requires_approval = true    # prod writes always require operator approval
+
+# --- Permitted credentials ---
+[[permitted_credentials]]
+name        = "k8s-staging"
+environment = "staging"
+description = "Staging k8s cluster service account — deploy permissions in 'staging' namespace"
+proxy_types = ["k8s"]
+real_target = "https://k8s-api.staging.company.com"
+
+[[permitted_credentials]]
+name        = "postgres-staging"
+environment = "staging"
+description = "Staging PostgreSQL rw service account"
+proxy_types = ["postgres"]
+real_target = "postgres-staging.company.internal:5432"
+
+# --- Egress hosts (what the k8s proxy can forward to) ---
+[[egress_hosts]]
+hostname = "k8s-api.staging.company.com"
+ports    = [443]
+```
+
+**Step 3 — `plan.toml` (initiative operator configures the task):**
+
+```toml
+[[tasks]]
+task_id     = "deploy-staging"
+description = "Build Docker image, push to staging registry, apply k8s manifests, run migrations"
+vm_image    = "raxis/python:3.12-kubectl"
+session_agent_type = "Executor"
+
+path_allowlist = [
+  "k8s/manifests/staging/",
+  "alembic/versions/",
+  "alembic/env.py",
+]
+
+# Credential 1: k8s access for kubectl apply
+[[tasks.credentials]]
+name       = "k8s-staging"
+proxy_type = "k8s"
+mount_as   = "KUBECONFIG"
+# Kernel generates /raxis/generated/k8s-staging.yaml (blank, server: https://localhost:8001)
+# Sets KUBECONFIG=/raxis/generated/k8s-staging.yaml in VM
+
+# Credential 2: PostgreSQL for Alembic migrations
+[[tasks.credentials]]
+name       = "postgres-staging"
+proxy_type = "postgres"
+mount_as   = "DATABASE_URL"
+target_db  = "myapp_staging"
+# Kernel sets DATABASE_URL=postgresql://raxis@localhost:5432/myapp_staging in VM
+# (no password — proxy handles auth to postgres-staging.company.internal:5432)
+
+[tasks.credentials.restrictions]
+allow_only_select     = false   # migrations need DML + DDL
+statement_timeout_ms  = 60000  # migrations can take up to 60 seconds
+
+# Token limits
+[tasks.token_policy]
+max_tokens_total = 500_000
+
+[tasks.token_policy.limit_behavior]
+on_session_limit_exceeded = "escalate"
+on_session_limit_denied   = "fail_session"
+```
+
+**What the agent sees in the VM:**
+```bash
+$ echo $KUBECONFIG
+/raxis/generated/k8s-staging.yaml
+
+$ cat $KUBECONFIG
+apiVersion: v1
+clusters:
+- cluster:
+    server: https://localhost:8001   # proxy address — no real URL, no token
+  name: raxis-proxy
+...
+
+$ echo $DATABASE_URL
+postgresql://raxis@localhost:5432/myapp_staging   # no password
+
+$ kubectl get pods -n staging         # works — proxy adds Bearer token
+$ python -m alembic upgrade head      # works — proxy handles PostgreSQL auth
+```
+
+---
+
+### 11.3 — Example B: Read-Only Production Data Analysis
+
+**Scenario:** An Executor task queries production PostgreSQL to generate a report.
+Writes are forbidden by proxy restriction. Production is subject to an environment gate.
+
+**`policy.toml`:**
+```toml
+[[environment_gates]]
+label                   = "production"
+url_prefixes            = ["https://postgres-prod.company.internal:5432/"]
+block_all               = false
+write_requires_approval = true
+
+[[permitted_credentials]]
+name        = "postgres-prod-readonly"
+environment = "production"
+description = "Production PostgreSQL read-only service account (SELECT only role in DB)"
+proxy_types = ["postgres"]
+real_target = "postgres-prod.company.internal:5432"
+```
+
+**`plan.toml`:**
+```toml
+[[tasks]]
+task_id     = "generate-revenue-report"
+description = "Query production orders table and generate monthly revenue report"
+vm_image    = "raxis/python:3.12"
+
+[[tasks.credentials]]
+name       = "postgres-prod-readonly"
+proxy_type = "postgres"
+mount_as   = "DATABASE_URL"
+target_db  = "production"
+
+[tasks.credentials.restrictions]
+allow_only_select    = true      # proxy blocks INSERT/UPDATE/DELETE/DDL
+max_result_rows      = 100000    # proxy enforces LIMIT 100000 on all queries
+statement_timeout_ms = 120000   # long-running analytical queries allowed
+forbidden_tables     = ["users_pii", "payment_cards"]  # sensitive tables blocked
+```
+
+**What happens if the agent tries to INSERT:**
+```python
+# Agent code:
+conn.execute("INSERT INTO audit_log VALUES (...)")
+# PostgreSQL response from proxy:
+# ERROR: DML not permitted in this RAXIS session (allow_only_select = true)
+# SQLSTATE: 42501 (insufficient_privilege)
+```
+
+**`approve_plan` output for this plan:**
+```
+Checking plan against policy...
+
+WARNING: tasks.generate-revenue-report declares credential postgres-prod-readonly
+         (environment: production). Production credentials require extra scrutiny.
+         The proxy will enforce allow_only_select = true and forbidden_tables.
+
+No violations. Run with --no-strict to approve (or add explicit "uncapped" token limits
+to suppress WARN_UNCAPPED_TOKEN_LIMIT).
+
+Warnings: 1
+```
+
+---
+
+### 11.4 — Example C: AWS Task (S3 + SQS)
+
+**`$RAXIS_DATA_DIR/credentials/aws-staging.env`:**
+```bash
+AWS_ACCESS_KEY_ID=AKIASTAGINGEXAMPLE12
+AWS_SECRET_ACCESS_KEY=real-secret-key-here
+AWS_DEFAULT_REGION=us-east-1
+```
+
+**`policy.toml`:**
+```toml
+[[permitted_credentials]]
+name        = "aws-staging"
+environment = "staging"
+description = "AWS staging IAM user with S3+SQS permissions"
+proxy_types = ["aws"]
+real_target = "https://sts.amazonaws.com"   # STS endpoint for token vending
+
+[[egress_hosts]]
+hostname = "s3.us-east-1.amazonaws.com"
+ports    = [443]
+
+[[egress_hosts]]
+hostname = "sqs.us-east-1.amazonaws.com"
+ports    = [443]
+```
+
+**`plan.toml`:**
+```toml
+[[tasks.credentials]]
+name       = "aws-staging"
+proxy_type = "aws"
+mount_as   = "AWS_CREDENTIALS"    # signals Kernel to set AWS_CONTAINER_CREDENTIALS_FULL_URI
+region     = "us-east-1"
+role_arn   = "arn:aws:iam::123456789012:role/raxis-staging-deploy"
+# Kernel sets:
+#   AWS_CONTAINER_CREDENTIALS_FULL_URI=http://localhost:9001/creds
+#   AWS_DEFAULT_REGION=us-east-1
+# boto3 AWS SDK automatically reads AWS_CONTAINER_CREDENTIALS_FULL_URI
+
+[[tasks.allowed_egress]]
+url_prefix = "https://s3.us-east-1.amazonaws.com/"
+methods    = ["GET", "PUT", "DELETE"]
+
+[[tasks.allowed_egress]]
+url_prefix = "https://sqs.us-east-1.amazonaws.com/"
+methods    = ["GET", "POST"]
+```
+
+---
+
+### 11.5 — Example D: Azure Task (Azure SQL + Blob Storage)
+
+**`$RAXIS_DATA_DIR/credentials/azure-staging.json`:**
+```json
+{
+  "tenantId": "aaaa-bbbb-cccc-dddd",
+  "clientId": "eeee-ffff-0000-1111",
+  "clientSecret": "real-azure-client-secret-here",
+  "subscriptionId": "2222-3333-4444-5555"
+}
+```
+
+**`policy.toml`:**
+```toml
+[[permitted_credentials]]
+name        = "azure-staging"
+environment = "staging"
+description = "Azure staging service principal"
+proxy_types = ["azure", "mssql"]
+real_target = "https://login.microsoftonline.com"
+
+[[permitted_credentials]]
+name        = "azure-sql-staging"
+environment = "staging"
+description = "Azure SQL staging database (uses azure-staging for Entra ID auth)"
+proxy_types = ["mssql"]
+real_target = "staging-sql.database.windows.net:1433"
+```
+
+**`plan.toml`:**
+```toml
+# Azure credential proxy — for Blob Storage and Azure SDK calls
+[[tasks.credentials]]
+name       = "azure-staging"
+proxy_type = "azure"
+mount_as   = "AZURE_IDENTITY"    # signals Kernel to configure ManagedIdentityCredential endpoint
+allowed_resources = [
+  "https://storage.azure.com",
+  "https://vault.azure.net",
+]
+# Kernel sets AZURE_CLIENT_ID and configures IMDS-compatible endpoint at localhost
+
+# Azure SQL proxy — for MSSQL connections (TDS protocol)
+[[tasks.credentials]]
+name             = "azure-sql-staging"
+proxy_type       = "mssql"
+mount_as         = "DATABASE_URL"
+target_db        = "myapp_staging"
+azure_credential = "azure-staging"   # uses the above Azure proxy to get Entra ID token
+# Kernel sets DATABASE_URL=mssql://raxis@localhost:1433/myapp_staging (no password)
+
+[tasks.credentials.restrictions]
+allow_only_select    = false
+statement_timeout_ms = 30000
+
+[[tasks.allowed_egress]]
+url_prefix = "https://mystaginngstorageaccount.blob.core.windows.net/"
+methods    = ["GET", "PUT", "DELETE"]
+```
+
+---
+
+### 11.6 — Credential Files in `$RAXIS_DATA_DIR/credentials/`
+
+The operator is responsible for pre-populating credentials on the Kernel host.
+The Kernel reads these files at proxy startup — they are never sent into the VM.
+
+| Credential name | File path | Format |
+|---|---|---|
+| `k8s-*` | `credentials/<name>.yaml` | kubeconfig YAML |
+| `postgres-*` | `credentials/<name>.env` | `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD` as env file |
+| `mysql-*` | `credentials/<name>.env` | `MYSQL_HOST`, `MYSQL_PORT`, `MYSQL_USER`, `MYSQL_PASSWORD` |
+| `mssql-*` | `credentials/<name>.env` | `MSSQL_HOST`, `MSSQL_PORT`, `MSSQL_USER`, `MSSQL_PASSWORD` |
+| `aws-*` | `credentials/<name>.env` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+| `gcp-*` | `credentials/<name>.json` | Google service account key JSON |
+| `azure-*` | `credentials/<name>.json` | Azure service principal JSON |
+| `mongodb-*` | `credentials/<name>.env` | `MONGO_URI_WITH_CREDENTIALS` |
+| `redis-*` | `credentials/<name>.env` | `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` |
+
+**Permissions:**
+```bash
+chmod 600 $RAXIS_DATA_DIR/credentials/*   # readable only by raxis-kernel process
+chown raxis-kernel:raxis-kernel $RAXIS_DATA_DIR/credentials/
+```
+
+The `credentials/` directory is never mounted into VMs (INV-VM-CAP-04). The Kernel
+process reads it directly; the VM filesystem cannot access it.
+
+---
+
+---
+
 ## 10. Implementation Checklist
 
 - [ ] Design credential proxy trait: `trait CredentialProxy { fn start(&self, ...) -> ProxyHandle; }`
