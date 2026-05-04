@@ -917,6 +917,160 @@ for each escalation class the agent is permitted to submit.
 
 ---
 
+## 14. Kernel State Block — Per-Request System Prompt Injection
+
+### 14.1 — Rationale
+
+The non-negotiable system prompt (injected once at session boot) teaches the model
+the token limit protocol — error codes, recoverability classes, and escalation
+requirements. But the model also needs **current state** on every inference call:
+how many tokens it has used, how many remain, and whether it is approaching a limit.
+
+Without per-request state injection, the model must:
+- Guess how close it is to limits (it cannot)
+- React to errors after they occur (wasteful — tokens spent on a rejected call)
+- Escalate reactively rather than self-regulating proactively
+
+The **Kernel State Block (KSB)** is a lightweight structured section the Kernel
+prepends to the system prompt on every `InferenceRequest` before forwarding to the
+gateway. It is Kernel-generated, tamper-proof from the agent's perspective, and kept
+deliberately small (target: ≤ 200 tokens).
+
+### 14.2 — KSB Format (Injected on Every Request)
+
+The KSB is prepended as the first section of the system prompt. The model is
+instructed in the non-negotiable prompt to read but never modify this section.
+
+**Normal state (no limit approaching):**
+```
+[RAXIS:KERNEL_STATE v=1]
+session  = <session_uuid_short>     # first 8 chars of UUID
+tokens   = in:12450 out:8230 tot:20680
+limits   = in:uncapped out:uncapped tot:200000
+remaining= tot:179320 (89.6%)
+status   = OK
+[/RAXIS:KERNEL_STATE]
+```
+
+**Approaching state (≥ 80% of any limit consumed):**
+```
+[RAXIS:KERNEL_STATE v=1]
+session  = <session_uuid_short>
+tokens   = in:162000 out:18200 tot:180200
+limits   = in:uncapped out:uncapped tot:200000
+remaining= tot:19800 (9.9%)
+status   = APPROACHING_LIMIT
+warn     = total_tokens at 90.1% — begin wrapping up; commit completed work before exhaustion
+[/RAXIS:KERNEL_STATE]
+```
+
+**Limit exhausted (session paused, escalation pending):**
+```
+[RAXIS:KERNEL_STATE v=1]
+session  = <session_uuid_short>
+tokens   = in:198000 out:19500 tot:217500  # over limit — final state
+limits   = in:uncapped out:uncapped tot:200000
+status   = LIMIT_REACHED:total_tokens
+action   = ESCALATION_PENDING:esc-42 — await operator approval before sending further requests
+[/RAXIS:KERNEL_STATE]
+```
+
+### 14.3 — Why This Format
+
+**Structured, not prose:** The format is machine-readable. Key=value pairs can be
+parsed by the model reliably without ambiguity about where state ends and task content
+begins.
+
+**Versioned (`v=1`):** Adding `v=` allows the format to evolve. Models instructed for
+v=1 will still parse v=1 blocks correctly even after a v=2 is introduced for new
+deployments.
+
+**Delimited (`[RAXIS:KERNEL_STATE]` ... `[/RAXIS:KERNEL_STATE]`):** The block has
+unambiguous start and end markers. The non-negotiable prompt instructs the model to
+locate and read this block first, before processing any task content.
+
+**Abbreviated values:** `in:`, `out:`, `tot:` are short field prefixes. The full
+words (`tokens_input`, `tokens_output`, `tokens_total`) are in the non-negotiable
+prompt's legend — the per-request block uses abbreviations to minimize token cost.
+
+**Target size:** ≤ 200 tokens (typically 100-150). This is the per-request overhead
+of the KSB. Over a session with 100 inference calls, this adds ~15,000 tokens to the
+input total — visible in the cumulative token count, so operators can account for it
+when setting limits.
+
+### 14.4 — What the Non-Negotiable Prompt Says About the KSB
+
+Added to the non-negotiable system prompt for all agent roles:
+
+```
+## Kernel State Block
+
+At the start of every system prompt you will find a [RAXIS:KERNEL_STATE] block.
+Read it first. It tells you your current resource status.
+
+Fields:
+  tokens = in:<input_used> out:<output_used> tot:<total_used>
+  limits = in:<input_limit> out:<output_limit> tot:<total_limit>
+           ("uncapped" = no limit set for that dimension)
+  remaining = <dimension>:<amount> (<pct>% remaining)
+  status = OK | APPROACHING_LIMIT | LIMIT_REACHED:<dimension>
+  warn   = human-readable warning (present only when status = APPROACHING_LIMIT)
+  action = required action (present only when status = LIMIT_REACHED)
+
+Required behavior by status:
+
+  OK:
+    Continue working normally. No action required.
+
+  APPROACHING_LIMIT:
+    Read the warn field. Begin winding down your current work unit.
+    Commit what is complete. Do not start new large tasks.
+    Prefer shorter, focused responses until the work is committed.
+
+  LIMIT_REACHED:<dimension>:
+    Read the action field immediately.
+    Do NOT send additional inference requests.
+    Do NOT attempt to work around the limit by splitting prompts.
+    Follow the action field exactly (escalation pending or session terminating).
+```
+
+### 14.5 — Kernel Assembly of the KSB
+
+The KSB is assembled by the Kernel Prompt Assembler immediately before the
+`InferenceRequest` is forwarded to `raxis-gateway`. The assembler:
+
+1. Reads `sessions.tokens_input_total`, `tokens_output_total`, `tokens_total`
+   from the database (the current running totals, updated after each completed call)
+2. Reads the effective limits from `token_limit_grants` (plan_limit + granted extensions)
+3. Computes `remaining` and `pct_used` per dimension
+4. Determines `status`:
+   - `OK` if all dimensions < 80% used
+   - `APPROACHING_LIMIT` if any dimension ≥ 80%
+   - `LIMIT_REACHED:<dim>` if the session is paused pending escalation
+5. Serializes the KSB string
+6. Prepends it to the system prompt string before the operator's task content
+
+The KSB is assembled in the Kernel, not in the gateway or agent VM. The agent
+receives it as part of the system prompt payload — it cannot modify the running
+totals it reads from or the KSB it receives.
+
+### 14.6 — Implementation Additions
+
+- [ ] Implement `kernel/src/prompts/kernel_state_block.rs`:
+      `fn build_ksb(session: &Session, effective_limits: &EffectiveLimits) -> String`
+- [ ] Call `build_ksb` in `kernel/src/handlers/inference_request.rs` before forwarding
+      to gateway — prepend KSB to `system_prompt` field
+- [ ] Add KSB abbreviation legend to all non-negotiable system prompt templates
+- [ ] Add `status = APPROACHING_LIMIT` logic at 80%, 90%, 95% thresholds
+- [ ] Add `status = LIMIT_REACHED` logic when session is in token-paused state
+- [ ] Test: KSB injected on every InferenceRequest (verified in gateway-received payload)
+- [ ] Test: KSB reflects current token totals (not stale — reads from DB after each call)
+- [ ] Test: KSB token overhead ≤ 200 tokens (tokenize the KSB string in test suite)
+
+---
+
+---
+
 ## 13. Implementation Checklist
 
 - [ ] Make `prompt_sha256` and `response_sha256` non-optional in `InferenceCompleted`
