@@ -1485,6 +1485,413 @@ process reads it directly; the VM filesystem cannot access it.
 
 ---
 
+## 12. Credential Management CLI
+
+Operators manage credentials exclusively through the `raxis credential` CLI.
+Manual file creation in `$RAXIS_DATA_DIR/credentials/` is disallowed — the CLI enforces
+correct permissions, format validation, policy cross-checking, and audit event emission.
+
+### 12.1 — Security Invariants for the CLI
+
+**INV-CRED-CLI-01:** Credential values MUST NOT appear in:
+- Command-line arguments (`ps aux` would expose them)
+- stdout or stderr (piped to logs)
+- The audit log (audit events record only credential name and metadata)
+- Shell history (piped/file input avoids this)
+
+**Input methods (all permitted):**
+```
+--stdin          Read credential value from stdin (pipe)
+--file <path>    Read credential value from a file on disk
+--interactive    Prompt for value with hidden terminal input (like sudo password)
+```
+
+**Prohibited input method:** `--value <secret>` — rejected by the CLI with an error.
+Passing secrets as arguments exposes them in `ps aux`, shell history, and system logs.
+
+---
+
+### 12.2 — Command Reference
+
+#### `raxis credential add`
+
+Register a new credential on this Kernel host. Fails if the credential name already
+exists (use `raxis credential rotate` to update).
+
+```
+raxis credential add <name>
+    --type      <proxy_type>     # postgres | mysql | mssql | mongodb | redis | k8s | aws | gcp | azure
+    --env       <env_label>      # must match an [[environment_gates]] label in policy.toml
+    --desc      <description>
+    [input: --stdin | --file <path> | --interactive]
+    [--from-kubeconfig <path>]   # k8s only: copy and store a kubeconfig file
+    [--host <host>]              # postgres/mysql/mssql/mongodb/redis: real target host
+    [--port <port>]              # real target port
+    [--user <username>]          # DB username
+    [--database <dbname>]        # DB name (optional — can be specified per-task in plan)
+    [--region <region>]          # AWS only
+    [--role-arn <arn>]           # AWS only: STS role to assume
+    [--tenant-id <id>]           # Azure only
+    [--client-id <id>]           # Azure only
+    [--subscription-id <id>]     # Azure only
+    [--project <project>]        # GCP only
+    [--dry-run]                  # validate without writing
+```
+
+**What it does:**
+1. Validates `--type` is a known proxy type
+2. Validates `--env` exists in `policy.toml [[environment_gates]]` labels
+3. Reads the credential value via the specified input method
+4. Validates the format (kubeconfig YAML check, JSON check, env file parse check)
+5. Writes to `$RAXIS_DATA_DIR/credentials/<name>.<ext>` with mode `0600`
+6. Sets ownership to the `raxis-kernel` process user
+7. Emits `CredentialRegistered` audit event (name + metadata only, never value)
+8. Prints confirmation to stdout (no credential content)
+
+---
+
+#### `raxis credential list`
+
+List all registered credentials (names and metadata — never values).
+
+```
+raxis credential list [--env <label>] [--type <proxy_type>] [--json]
+```
+
+**Output:**
+```
+NAME                      TYPE        ENV          ADDED                     LAST ROTATED
+postgres-staging          postgres    staging      2025-01-15T10:23:00Z      —
+postgres-prod-readonly    postgres    production   2025-01-15T10:25:00Z      2025-03-01T09:00:00Z
+k8s-staging               k8s         staging      2025-01-15T10:24:00Z      —
+aws-staging               aws         staging      2025-01-15T10:26:00Z      2025-02-14T14:00:00Z
+azure-staging             azure       staging      2025-02-01T08:00:00Z      —
+```
+
+---
+
+#### `raxis credential show`
+
+Show metadata for a specific credential. Never shows the credential value.
+
+```
+raxis credential show <name>
+```
+
+**Output:**
+```
+Name:          postgres-staging
+Type:          postgres
+Environment:   staging
+Description:   Staging PostgreSQL rw service account
+Real target:   postgres-staging.company.internal:5432
+File path:     /var/raxis/credentials/postgres-staging.env
+File size:     142 bytes
+Permissions:   -rw------- (0600)
+Owner:         raxis-kernel
+Added:         2025-01-15T10:23:00Z
+Last rotated:  —
+Times used:    47 sessions
+Last used:     2025-04-30T16:42:00Z (session 3f7a9c2e)
+Policy match:  ✓ found in [[permitted_credentials]] in active policy bundle
+```
+
+---
+
+#### `raxis credential remove`
+
+Remove a credential. Emits an audit event. Warns if any active sessions are using it.
+
+```
+raxis credential remove <name> [--force]
+```
+
+Without `--force`: fails if any active sessions are currently using this credential.
+With `--force`: removes immediately; active sessions lose their proxy connection.
+
+**Output:**
+```
+WARNING: Removing postgres-staging will affect 0 active sessions.
+         2 sessions used this credential in the last 7 days.
+         This action is audited.
+
+Removed: postgres-staging
+Audit event: CredentialRemoved (id: evt-4421)
+```
+
+---
+
+#### `raxis credential rotate`
+
+Replace the value of an existing credential. Existing active sessions continue using
+the old value until they complete (per-session proxy isolation). New sessions after
+rotation use the new value.
+
+```
+raxis credential rotate <name>
+    [input: --stdin | --file <path> | --interactive]
+    [--from-kubeconfig <path>]   # k8s only
+    [--atomic]                   # write to temp file, rename atomically (default: true)
+```
+
+**What it does:**
+1. Reads new credential value via input method
+2. Validates format (same checks as `add`)
+3. Writes to `<name>.<ext>.new` atomically, then renames to `<name>.<ext>`
+4. Emits `CredentialRotated` audit event
+5. Existing session proxies (loaded the old value at session start) are unaffected
+6. New sessions after rotation pick up the new value at proxy startup
+
+**Output:**
+```
+Rotated: postgres-staging
+Active sessions using old value: 3 (they will complete with old credential)
+New sessions will use new value immediately.
+Audit event: CredentialRotated (id: evt-4422)
+```
+
+---
+
+#### `raxis credential verify`
+
+Start a temporary proxy and make a test connection to confirm the credential works.
+Displays success/failure and latency. Never displays the credential value.
+
+```
+raxis credential verify <name> [--timeout <ms>]
+```
+
+**Test connection per type:**
+```
+postgres / mysql / mssql:  SELECT 1  (confirms auth + basic connectivity)
+mongodb:                   { ping: 1 }  (admin command)
+redis:                     PING
+k8s:                       GET /api/v1/namespaces (first page only)
+aws:                       sts:GetCallerIdentity
+gcp:                       resourcemanager.projects.get (for configured project)
+azure:                     GET /subscriptions?api-version=2020-01-01
+```
+
+**Output (success):**
+```
+Verifying postgres-staging...
+  Target:    postgres-staging.company.internal:5432
+  Test:      SELECT 1
+  Status:    ✓ Connected (142ms)
+  Auth:      ✓ Authenticated as raxis_staging_svc
+  DB:        ✓ Database 'myapp_staging' accessible
+```
+
+**Output (failure):**
+```
+Verifying postgres-staging...
+  Target:    postgres-staging.company.internal:5432
+  Test:      SELECT 1
+  Status:    ✗ Connection refused (timeout after 5000ms)
+  Error:     connect: connection refused (postgres-staging.company.internal:5432)
+  Hint:      Check that the host is reachable and the port is open.
+             Check that PGHOST/PGPORT in the credential file are correct.
+```
+
+---
+
+#### `raxis credential audit`
+
+Show the audit history for a credential.
+
+```
+raxis credential audit <name> [--since <duration>] [--limit <n>]
+```
+
+**Output:**
+```
+Credential: postgres-staging
+Events (last 30 days):
+
+2025-04-30T16:42:00Z  CredentialProxyStarted  session=3f7a9c2e  task=deploy-staging
+2025-04-30T16:43:10Z  CredentialProxyStopped  session=3f7a9c2e  queries=14 blocked=0
+2025-04-29T11:20:00Z  CredentialProxyStarted  session=a1b2c3d4  task=run-migrations
+2025-04-29T11:20:45Z  CredentialProxyStopped  session=a1b2c3d4  queries=8 blocked=0
+2025-03-01T09:00:00Z  CredentialRotated       operator=alice
+2025-01-15T10:23:00Z  CredentialRegistered    operator=alice
+```
+
+---
+
+### 12.3 — Audit Events for Credential CLI Operations
+
+```rust
+AuditEventKind::CredentialRegistered {
+    credential_name:  String,
+    proxy_type:       String,
+    environment:      String,
+    operator:         String,      // who ran the command
+    registered_at:    u64,
+    // NO credential value — never
+}
+
+AuditEventKind::CredentialRotated {
+    credential_name:  String,
+    operator:         String,
+    rotated_at:       u64,
+    active_sessions:  u32,         // sessions using old value at rotation time
+}
+
+AuditEventKind::CredentialRemoved {
+    credential_name:  String,
+    operator:         String,
+    removed_at:       u64,
+    forced:           bool,
+}
+
+AuditEventKind::CredentialVerified {
+    credential_name:  String,
+    proxy_type:       String,
+    success:          bool,
+    latency_ms:       Option<u64>,
+    error:            Option<String>,  // error message (not credential value)
+    verified_at:      u64,
+}
+```
+
+---
+
+### 12.4 — Updated Example Workflow: Example A (§11.2)
+
+The manual file creation steps from §11.2 are replaced with CLI commands:
+
+**OLD (manual — disallowed):**
+```bash
+cp ~/staging-sa-kubeconfig.yaml $RAXIS_DATA_DIR/credentials/k8s-staging.yaml
+cat > $RAXIS_DATA_DIR/credentials/postgres-staging.env << 'EOF'
+PGHOST=postgres-staging.company.internal
+PGPASSWORD=real-secret-password-here
+EOF
+```
+
+**NEW (CLI — required):**
+```bash
+# Register k8s credential from existing kubeconfig file
+raxis credential add k8s-staging \
+  --type k8s \
+  --env staging \
+  --desc "Staging k8s cluster service account — deploy in staging namespace" \
+  --from-kubeconfig ~/staging-sa-kubeconfig.yaml
+
+# Register PostgreSQL credential interactively (password prompted, never echoed)
+raxis credential add postgres-staging \
+  --type postgres \
+  --env staging \
+  --desc "Staging PostgreSQL rw service account" \
+  --host postgres-staging.company.internal \
+  --port 5432 \
+  --user raxis_staging_svc \
+  --database myapp_staging \
+  --interactive
+# Prompt: Enter password for postgres-staging (input hidden):
+
+# Verify both credentials work before writing the plan
+raxis credential verify k8s-staging
+raxis credential verify postgres-staging
+
+# List to confirm
+raxis credential list --env staging
+```
+
+---
+
+### 12.5 — Updated Example Workflow: Example B (§11.3)
+
+```bash
+# Register prod read-only PostgreSQL credential
+# Secret piped from a secrets manager CLI (no value in shell history)
+vault read -field=password secret/raxis/postgres-prod-readonly | \
+  raxis credential add postgres-prod-readonly \
+    --type postgres \
+    --env production \
+    --desc "Production PostgreSQL read-only service account (SELECT role)" \
+    --host postgres-prod.company.internal \
+    --port 5432 \
+    --user raxis_prod_readonly \
+    --stdin
+
+# Verify the read-only account can connect
+raxis credential verify postgres-prod-readonly
+```
+
+---
+
+### 12.6 — Updated Example Workflow: Example C (§11.4)
+
+```bash
+# Register AWS credential — secret access key via stdin from secrets manager
+# AWS_ACCESS_KEY_ID is not a secret — safe as a flag
+# AWS_SECRET_ACCESS_KEY IS a secret — piped via --stdin
+echo "AWS_ACCESS_KEY_ID=AKIASTAGINGEXAMPLE12
+AWS_SECRET_ACCESS_KEY=$(vault read -field=secret_key secret/raxis/aws-staging)" | \
+  raxis credential add aws-staging \
+    --type aws \
+    --env staging \
+    --desc "AWS staging IAM user with S3+SQS permissions" \
+    --region us-east-1 \
+    --role-arn arn:aws:iam::123456789012:role/raxis-staging-deploy \
+    --stdin
+
+# Verify (calls sts:GetCallerIdentity to confirm the role can be assumed)
+raxis credential verify aws-staging
+```
+
+---
+
+### 12.7 — Updated Example Workflow: Example D (§11.5)
+
+```bash
+# Register Azure service principal from JSON key file downloaded from Azure portal
+raxis credential add azure-staging \
+  --type azure \
+  --env staging \
+  --desc "Azure staging service principal" \
+  --tenant-id aaaa-bbbb-cccc-dddd \
+  --client-id eeee-ffff-0000-1111 \
+  --subscription-id 2222-3333-4444-5555 \
+  --file ~/downloads/azure-staging-sp.json
+
+# Register Azure SQL credential (uses azure-staging proxy internally for Entra ID)
+# No secret value needed — the mssql proxy gets the token from the azure proxy
+raxis credential add azure-sql-staging \
+  --type mssql \
+  --env staging \
+  --desc "Azure SQL staging database via Entra ID auth" \
+  --host staging-sql.database.windows.net \
+  --port 1433 \
+  --database myapp_staging
+
+# Verify Azure connectivity
+raxis credential verify azure-staging
+raxis credential verify azure-sql-staging
+
+# Rotate after a key rotation in Azure portal
+raxis credential rotate azure-staging --file ~/downloads/azure-staging-sp-new.json
+```
+
+---
+
+### 12.8 — Credential Rotation Operational Note
+
+Credential rotation is operationally safe because RAXIS proxies are **per-session**:
+- A session that started at 09:00 and is still running at 10:00 has a proxy that
+  loaded the credential value at 09:00. That proxy continues using the old value.
+- A `raxis credential rotate` at 10:00 writes the new value atomically.
+- Sessions starting at 10:01 get proxies that load the new value.
+- No session experiences a mid-run credential change.
+- The audit trail shows: which sessions used the old credential (before rotation
+  timestamp), and which used the new credential (after rotation timestamp).
+
+This is equivalent to the Kubernetes rolling update pattern: new instances get new
+config; existing instances are not disrupted until they naturally terminate.
+
+---
+
 ## 10. Implementation Checklist
 
 - [ ] Design credential proxy trait: `trait CredentialProxy { fn start(&self, ...) -> ProxyHandle; }`
@@ -1525,3 +1932,18 @@ process reads it directly; the VM filesystem cannot access it.
       - Azure SQL: Entra ID token obtained via Azure proxy and used in TDS auth
       - Prepared statement rejection persists across Execute after Parse rejection
       - Transaction with mixed SELECT+INSERT: INSERT blocked, ROLLBACK sent to real DB
+- [ ] Implement `raxis credential add` CLI:
+      - Validate proxy_type and environment label against active policy bundle
+      - Accept --stdin / --file / --interactive / --from-kubeconfig input methods
+      - Reject --value flag with explicit error: "use --stdin, --file, or --interactive"
+      - Validate credential format (kubeconfig YAML, env file parse, JSON check)
+      - Write to credentials/<name>.<ext> with mode 0600, raxis-kernel ownership
+      - Emit CredentialRegistered audit event (name + metadata only, never value)
+- [ ] Implement `raxis credential list` CLI (--env, --type, --json filters)
+- [ ] Implement `raxis credential show` CLI (metadata, policy match, last-used session)
+- [ ] Implement `raxis credential remove` CLI (--force flag; warn on active sessions)
+- [ ] Implement `raxis credential rotate` CLI (atomic temp-file+rename; per-session isolation)
+- [ ] Implement `raxis credential verify` CLI (temp proxy + type-specific test connection)
+- [ ] Implement `raxis credential audit` CLI (--since, --limit; all CredentialProxy* events)
+- [ ] Emit CredentialRotated, CredentialRemoved, CredentialVerified audit events
+- [ ] Enforce CLI-only credential management: credentials/ dir not writable by other processes
