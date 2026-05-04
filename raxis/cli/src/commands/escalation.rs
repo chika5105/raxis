@@ -31,6 +31,13 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
     let mut scope: Option<String> = None;
     let mut max_uses: Option<i64> = None;
     let mut valid_for_secs: Option<u64> = None;
+    // Sensitive-output gate: the raw `approval_token_raw` is a bearer
+    // credential the planner must present to consume the escalation.
+    // Default-redact per the same v1.x credential-handling convention
+    // as `session create --reveal-token` (cli-readonly.md §5.4.2
+    // precedent for `--reveal-paths`); the operator must opt in
+    // explicitly to print the raw token to stdout.
+    let mut reveal_token = false;
     let mut i = 1;
 
     while i < args.len() {
@@ -48,6 +55,9 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
                 i += 1;
                 let s = args.get(i).ok_or_else(|| CliError::Usage("--valid-for requires a number".to_owned()))?;
                 valid_for_secs = Some(s.parse().map_err(|_| CliError::Usage(format!("--valid-for must be an integer, got {s:?}")))?);
+            }
+            "--reveal-token" => {
+                reveal_token = true;
             }
             other => return Err(CliError::Usage(format!("unknown escalation approve flag: {other:?}"))),
         }
@@ -90,18 +100,61 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
     let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
         // Typed `EscalationApproved` payload exposes the raw token
-        // directly — the CLI prints it verbatim so the operator can
-        // hand it to the planner out-of-band. The token itself is the
-        // secret; the kernel only stored sha256(token).
+        // directly — but the CLI only prints it when the operator
+        // has explicitly passed `--reveal-token`. Without the flag
+        // we print only the SHA-256 fingerprint so the operator can
+        // see a successful approval landed without leaking the
+        // bearer credential into shell history / screencasts.
         let token = ok["approval_token_raw"].as_str().unwrap_or("?");
         let token_id = ok["approval_token_id"].as_str().unwrap_or("?");
         let expires_at = ok["expires_at"].as_i64().unwrap_or(0);
         println!("Escalation {escalation_id} approved.");
         println!("approval_token_id:  {token_id}");
-        println!("approval_token_raw: {token}");
+        emit_approval_token(token, reveal_token);
         println!("expires_at:         {expires_at}");
-        println!("(Pass approval_token_raw to the planner out-of-band — this is a secret.)");
     })
+}
+
+/// Emit the approval token (or a redacted placeholder) per the
+/// `--reveal-token` gate. Stdout is the canonical channel here so the
+/// existing operator UX (`raxis escalation approve ... | grep
+/// approval_token_raw`) keeps working when the operator opts in.
+/// Without the flag we print the fingerprint so the operator can
+/// correlate against kernel-side audit logs without disclosing the
+/// raw bearer token.
+fn emit_approval_token(token: &str, reveal: bool) {
+    for line in build_approval_token_lines(token, reveal) {
+        println!("{line}");
+    }
+}
+
+/// Build the lines that `emit_approval_token` will print. Pure — no
+/// I/O. The unit tests at the bottom of this file exercise both
+/// branches without needing to capture stdout.
+pub(crate) fn build_approval_token_lines(token: &str, reveal: bool) -> Vec<String> {
+    if reveal {
+        return vec![
+            format!("approval_token_raw: {token}"),
+            "(Pass approval_token_raw to the planner out-of-band — this is a secret.)"
+                .to_owned(),
+        ];
+    }
+    let fingerprint = credential_fingerprint(token);
+    vec![format!(
+        "approval_token_raw: <redacted; sha256_fp={fingerprint}> \
+        (re-run with --reveal-token to print the raw token to stdout)"
+    )]
+}
+
+/// Same helper as `commands::session::credential_fingerprint`: short
+/// 8-char SHA-256 prefix in lowercase hex. Kept inlined per command
+/// rather than promoted to a shared helper because it's two lines and
+/// the CLI command modules are otherwise dependency-free of each
+/// other; introducing a shared `crate::secrets` module is a separate
+/// refactor.
+fn credential_fingerprint(credential: &str) -> String {
+    let full = raxis_crypto::token::sha256_hex(credential.as_bytes());
+    full[..8].to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -147,4 +200,73 @@ pub fn run_deny(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         let denied_at = ok["denied_at"].as_i64().unwrap_or(0);
         println!("Escalation {escalation_id} denied (denied_at={denied_at}).");
     })
+}
+
+// ---------------------------------------------------------------------------
+// Tests — `--reveal-token` redaction contract for `escalation approve`.
+//
+// Mirror of `commands::session::reveal_token_tests`. Pre-flag default
+// MUST emit only the SHA-256 fingerprint plus a hint; the operator
+// must opt in explicitly via `--reveal-token` to print
+// `approval_token_raw` to stdout.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod reveal_token_tests {
+    use super::build_approval_token_lines;
+
+    /// Distinctive token so any leak is unmissable in test output.
+    const SECRET_TOKEN: &str =
+        "SECRET_APPROVAL_TOKEN_dddddddddddddddddddddddddddddddddddddddd";
+
+    #[test]
+    fn default_redacted_lines_do_not_contain_raw_token() {
+        let lines = build_approval_token_lines(SECRET_TOKEN, false);
+        for line in &lines {
+            assert!(
+                !line.contains(SECRET_TOKEN),
+                "redacted line MUST NOT contain raw approval_token_raw; got: {line}",
+            );
+            assert!(
+                !line.contains("SECRET_"),
+                "no prefix of the secret token may appear; got: {line}",
+            );
+        }
+    }
+
+    #[test]
+    fn default_redacted_output_carries_fingerprint_and_reveal_hint() {
+        let lines = build_approval_token_lines(SECRET_TOKEN, false);
+        let joined = lines.join("\n");
+        assert!(joined.contains("sha256_fp="),
+            "redacted output must explain WHY the token is hidden via the fingerprint marker; got: {joined}");
+        assert!(joined.contains("--reveal-token"),
+            "redacted output must point operators to the explicit opt-in flag; got: {joined}");
+    }
+
+    #[test]
+    fn reveal_flag_emits_raw_token_and_secret_warning() {
+        let lines = build_approval_token_lines(SECRET_TOKEN, true);
+        let joined = lines.join("\n");
+        assert!(joined.contains(&format!("approval_token_raw: {SECRET_TOKEN}")),
+            "explicit --reveal-token must produce the canonical raw-token line; got: {joined}");
+        assert!(joined.contains("this is a secret"),
+            "explicit reveal must keep the operator-facing secret-handling reminder; got: {joined}");
+    }
+
+    /// Cross-check against the kernel-side fingerprint helper. See
+    /// the matching test in `commands::session::reveal_token_tests`.
+    #[test]
+    fn redacted_fingerprint_matches_kernel_side_helper() {
+        let lines = build_approval_token_lines(SECRET_TOKEN, false);
+        let line = lines.first().expect("redacted output must have at least one line");
+        let cli_fp = line
+            .split("sha256_fp=").nth(1).expect("redacted line must contain sha256_fp= marker")
+            .split('>').next().expect("marker must be terminated by '>'")
+            .to_owned();
+        let kernel_fp =
+            raxis_crypto::token::sha256_hex(SECRET_TOKEN.as_bytes())[..8].to_owned();
+        assert_eq!(cli_fp, kernel_fp,
+            "CLI redacted fingerprint must equal the kernel-side log fingerprint");
+    }
 }

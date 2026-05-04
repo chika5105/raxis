@@ -17,6 +17,7 @@
 mod commands;
 mod conn;
 mod errors;
+mod reveal;
 mod signing;
 
 use std::path::PathBuf;
@@ -257,7 +258,11 @@ SUBCOMMANDS:
         Retry a Failed task (transitions Failed → Admitted).
 
     session create --role planner --worktree-root <path> [--lineage-id <uuid>]
-        Create a planner session and print the session token to stderr.
+                   [--base-tracking-ref <ref>] [--task <task_id>] [--reveal-token]
+        Create a planner session. By default prints only a redacted
+        session_token fingerprint to stderr; pass --reveal-token to
+        print the raw RAXIS_SESSION_TOKEN value (typically captured
+        with `2>session.env`).
 
     session revoke <session_id>
         Revoke an active session; subsequent IPC frames from that session are rejected.
@@ -266,7 +271,10 @@ SUBCOMMANDS:
         Grant a capability delegation to a session for a bounded TTL.
 
     escalation approve <escalation_id> --scope <capability_class> --max-uses <n> --valid-for <secs>
-        Approve a pending escalation and issue an approval token.
+                       [--reveal-token]
+        Approve a pending escalation and issue an approval token. By
+        default prints only the token id and fingerprint; pass
+        --reveal-token to print approval_token_raw to stdout.
 
     escalation deny <escalation_id> [--reason <text>]
         Deny a pending escalation.
@@ -289,18 +297,21 @@ READ-ONLY OBSERVATION:
         Stream or page through the audit chain with filter combinators.
         --follow polls every 100ms; Ctrl-C exits cleanly.
 
-    verify-chain [--quick] [--audit-dir <path>]
+    verify-chain [--quick] [--from <seq>] [--audit-dir <path>]
         Walk every audit segment, verify prev_sha256 + seq monotonicity.
         Exit 0 intact, 3 broken. --quick mirrors `raxis status`'s check.
+        --from <seq> narrows the reported stats to records with seq ≥ <seq>;
+        the whole chain is still walked end-to-end for linkage.
 
     queue [--lane <id>] [--blocked-only] [--limit <N>]
         DAG scheduler state — READY (Admitted | GatesPending) and
         BLOCKED (BlockedRecoveryPending) tables, plus the
         approximate pending-verifier-spawns count from heartbeat.
 
-    inspect <task_id> [--json] [--gates-only] [--with-deps]
+    inspect <task_id> [--json] [--gates-only] [--with-deps] [--reveal-paths]
         Forensic deep-dive into a single task: state, dependencies,
-        witnesses. --reveal-paths is reserved for v1.x.
+        witnesses. --reveal-paths shows path_allowlist + path_export_globs
+        AND appends a PathReadAccessed audit event (cli-readonly.md §5.4.2).
 
     sessions [--limit N] [--json]
         List currently-active planner / gateway / verifier sessions

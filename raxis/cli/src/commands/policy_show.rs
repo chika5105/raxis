@@ -27,9 +27,13 @@
 //!      validated form is what the operator actually needs to audit
 //!      ("what did the kernel commit?").
 //!
-//! `--raw` is reserved for v1.x and intentionally rejected so we don't
-//! introduce a TOML-byte-passthrough surface that could drift from the
-//! kernel's parser.
+//! `--raw` dumps the on-disk `policy.toml` bytes verbatim — useful when
+//! an operator wants to feed the active policy into `diff(1)` or pipe
+//! it into another signing tool. The validated render is still the
+//! default (it's what the kernel actually committed); `--raw` is the
+//! opt-in for byte-fidelity workflows. Mutually exclusive with
+//! `--json` and `--history`, both of which are about the *parsed*
+//! projection of the bundle.
 //!
 //! # Exit code
 //!
@@ -57,17 +61,39 @@ const POLICY_FILE_NAME: &str = "policy.toml";
 pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let opts = parse_args(args)?;
 
+    let policy_path = flags.data_dir().join("policy").join(POLICY_FILE_NAME);
+
     if opts.raw {
-        return Err(CliError::Usage(
-            "--raw is reserved per cli-readonly.md §5.5.11 but not yet \
-             implemented in v1 (the validated render is the auditable \
-             surface; dumping raw TOML risks operator confusion when \
-             the kernel's parser would have rejected it)"
-                .to_owned(),
-        ));
+        // `--raw` is the byte-fidelity escape hatch — read the file
+        // and pipe it to stdout untouched. We do NOT attempt to
+        // parse or re-render: that's exactly what `--raw` is asking
+        // us to skip. Combining it with `--json` or `--history`
+        // would be nonsensical (both flags concern the parsed
+        // projection); reject early with a clear Usage error.
+        if opts.json || opts.with_history {
+            return Err(CliError::Usage(
+                "--raw is mutually exclusive with --json and --history \
+                 (it dumps the on-disk policy.toml bytes verbatim, with \
+                 no parsing or re-rendering)".to_owned(),
+            ));
+        }
+        let bytes = std::fs::read(&policy_path).map_err(|e| CliError::Io {
+            path:   policy_path.display().to_string(),
+            source: e,
+        })?;
+        let stdout = std::io::stdout();
+        let mut out = stdout.lock();
+        out.write_all(&bytes).map_err(|e| CliError::Io {
+            path:   "<stdout>".to_owned(),
+            source: e,
+        })?;
+        out.flush().map_err(|e| CliError::Io {
+            path:   "<stdout>".to_owned(),
+            source: e,
+        })?;
+        return Ok(());
     }
 
-    let policy_path = flags.data_dir().join("policy").join(POLICY_FILE_NAME);
     let (bundle, _raw_bytes, on_disk_sha256) = load_policy(&policy_path).map_err(|e| {
         CliError::Policy(format!(
             "failed to load active policy from {:?}: {e}",
@@ -140,12 +166,14 @@ fn print_help() {
         "raxis policy show — print the active policy bundle\n\
          \n\
          USAGE:\n\
-         \traxis policy show [--json] [--history]\n\
+         \traxis policy show [--json|--history|--raw]\n\
          \n\
          FLAGS:\n\
          \t--json      Emit one JSON object instead of human text.\n\
          \t--history   Append the policy_epoch_history table.\n\
-         \t--raw       (Reserved for v1.x; will dump policy.toml verbatim.)\n\
+         \t--raw       Dump <data_dir>/policy/policy.toml bytes verbatim\n\
+         \t            (no parsing or re-rendering); mutually exclusive\n\
+         \t            with --json and --history.\n\
          "
     );
 }
@@ -551,19 +579,90 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_raw_until_implemented() {
-        // We construct GlobalFlags with a non-existent data dir; the
-        // --raw rejection MUST fire before any IO so this stays
-        // deterministic.
+    fn run_raw_dumps_policy_file_bytes_verbatim() {
+        // Seed a data_dir with a tiny bespoke policy.toml whose
+        // bytes the run() loop must echo back unchanged. We verify
+        // every-byte fidelity by including a comment + a trailing
+        // newline that the validating loader would normalise away.
+        let tmp        = tempfile::TempDir::new().unwrap();
+        let policy_dir = tmp.path().join("policy");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        let raw_bytes  = b"# raxis policy show --raw fixture\n[meta]\nepoch = 7\n\n# trailing comment\n";
+        std::fs::write(policy_dir.join("policy.toml"), raw_bytes).unwrap();
+
+        // Spawn the CLI as a subprocess so we can inspect stdout
+        // byte-for-byte. cargo's test binary doesn't currently
+        // expose a stdout-capture handle for the command's own
+        // Stdout lock, and the production code intentionally uses
+        // std::io::stdout() so a unit-test that swaps it would be
+        // exercising a different code path.
+        //
+        // Resolve the binary cargo just built. Walk up two levels
+        // from the test executable to reach `target/debug/raxis`.
+        let test_exe = std::env::current_exe().expect("test exe");
+        let bin_dir  = test_exe
+            .parent().expect("deps dir")
+            .parent().expect("debug dir");
+        let raxis    = bin_dir.join("raxis");
+        assert!(raxis.exists(), "expected raxis binary at {}", raxis.display());
+
+        let out = std::process::Command::new(&raxis)
+            .args([
+                "--data-dir",
+                tmp.path().to_str().unwrap(),
+                "policy", "show", "--raw",
+            ])
+            .output()
+            .expect("spawn raxis policy show --raw");
+        assert!(out.status.success(),
+                "raxis policy show --raw exited non-zero: {:?}\nstderr: {}",
+                out.status, String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            out.stdout, raw_bytes,
+            "stdout must be byte-for-byte identical to policy.toml"
+        );
+    }
+
+    #[test]
+    fn run_raw_rejects_combined_with_json_or_history() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let policy_dir = tmp.path().join("policy");
+        std::fs::create_dir_all(&policy_dir).unwrap();
+        std::fs::write(policy_dir.join("policy.toml"), b"[meta]\nepoch = 1\n").unwrap();
         let flags = GlobalFlags {
-            data_dir:          PathBuf::from("/nonexistent/raxis"),
+            data_dir:          tmp.path().to_path_buf(),
+            socket_path:       None,
+            operator_key_path: None,
+        };
+        for combo in [
+            vec!["--raw".to_owned(), "--json".to_owned()],
+            vec!["--raw".to_owned(), "--history".to_owned()],
+        ] {
+            let err = run(&flags, &combo).unwrap_err();
+            match err {
+                CliError::Usage(msg) => {
+                    assert!(msg.contains("mutually exclusive"), "got: {msg}");
+                }
+                other => panic!("expected Usage(mutually exclusive); got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn run_raw_returns_io_error_when_policy_file_missing() {
+        // No policy.toml on disk → must surface a clean Io error
+        // rather than panicking or fabricating bytes.
+        let flags = GlobalFlags {
+            data_dir:          PathBuf::from("/nonexistent/raxis-policy-show-raw"),
             socket_path:       None,
             operator_key_path: None,
         };
         let err = run(&flags, &["--raw".to_owned()]).unwrap_err();
         match err {
-            CliError::Usage(msg) => assert!(msg.contains("--raw is reserved"), "got: {msg}"),
-            other => panic!("expected Usage, got {other:?}"),
+            CliError::Io { path, .. } => {
+                assert!(path.contains("policy.toml"), "got path: {path}");
+            }
+            other => panic!("expected Io; got {other:?}"),
         }
     }
 

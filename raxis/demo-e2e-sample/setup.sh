@@ -87,11 +87,32 @@ RAXIS demo sample created:
   HEAD (40 hex)     ${HEAD}
   HEAD^ (40 hex)    ${PARENT}
 
-Next:
-  1. Add REPO_ROOT (or dirname of future worktrees) to policy allowed_worktree_roots; sign policy.
-  2. Sign plan: raxis policy sign ${PLAN}/plan.toml --key <operator_private.pem>
-  3. Submit:   raxis plan submit test-minimal-001 ${PLAN}
-  Approve:     raxis plan approve test-minimal-001
+Next steps:
+
+  1. Add REPO_ROOT (or the parent of future worktrees) to your policy's
+     [sessions].allowed_worktree_roots, then re-sign and load the policy.
+
+  2. Sign the plan:
+       raxis policy sign ${PLAN}/plan.toml --key <operator_private.pem>
+
+  3. Submit the plan. The kernel ALWAYS mints a fresh UUID v4 as the
+     canonical initiative_id; the first argument to "plan submit" is a
+     free-form label shown only in CLI output, NOT the kernel-side id.
+     The kernel echoes the assigned UUID on its success line:
+         "Initiative <uuid> created. Status: Draft"
+     Capture it for the next step:
+
+       SUBMIT_OUT="\$(raxis plan submit demo ${PLAN})"
+       echo "\$SUBMIT_OUT"
+       INIT_ID="\$(printf '%s\\n' "\$SUBMIT_OUT" \\
+                  | awk '/^Initiative/ {print \$2; exit}')"
+
+  4. Approve using the kernel-assigned UUID — NOT the label from step 3:
+
+       raxis plan approve "\$INIT_ID"
+
+  (Same rule applies to "plan reject", "initiative abort", "task retry",
+   etc. They all key off the UUID echoed by "plan submit".)
 
 Planner smoke (SingleCommit vacuous diff): base_sha=head_sha=${HEAD}
 

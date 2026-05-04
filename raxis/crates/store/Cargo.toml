@@ -11,6 +11,11 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 uuid        = { workspace = true }
 tokio       = { workspace = true }
+# Used by `views::plan_fields` to parse the `[[tasks]]` array out of
+# `signed_plan_artifacts.plan_bytes` (TOML) for the read-only CLI's
+# `inspect --reveal-paths` surface (cli-readonly.md §5.4.2 / §5.5.6).
+# Pinned at workspace level alongside the kernel's plan TOML parser.
+toml        = { workspace = true }
 raxis-types = { workspace = true }
 
 [dev-dependencies]

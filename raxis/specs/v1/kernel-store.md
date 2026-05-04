@@ -1460,6 +1460,27 @@ The kernel binds three Unix domain sockets at startup:
 
 The operator socket is bound with `mode 0600` and owned by the kernel OS user — readable only by the same user. v1 is single-operator, single-machine; this is the only access control at the socket layer.
 
+> **INV-PLANNER-SPAWN (normative — cross-referenced from `peripherals.md` §3.1):** The kernel never autonomously decides to start a planner or create a planner session. `approve_plan` admits tasks and waits; no planner spawn logic fires. The canonical v1 operator workflow for starting an agent is:
+>
+> ```
+> Step 1 — Plan approval:   raxis-cli plan approve <initiative_id>
+>                           (kernel admits tasks, nothing else happens)
+>
+> Step 2 — Session creation: raxis-cli session create \
+>                               --worktree <absolute_path> \
+>                               --lineage <lineage_id>
+>                            (kernel returns session_token)
+>
+> Step 3 — Planner start:   <operator starts planner subprocess or API call>
+>                           passes session_token via env / config / API param
+>                           planner connects to planner.sock, submits IntentRequests
+> ```
+>
+> Steps 2 and 3 are explicitly the operator's responsibility. The kernel has no knowledge of how the planner process is started, what model it uses, or where it runs. This separation is intentional: it keeps orchestration logic (model selection, API keys, retry-on-crash) outside the kernel's audit surface. The kernel's role is to validate every intent frame, enforce policy, and record the audit trail — not to manage agent lifecycle.
+>
+> **Consequence for implementors:** Any kernel code path that calls `create_session(Role::Planner, ...)` without a corresponding `CreateSession` operator IPC message as the trigger is a spec violation. Session creation for planners MUST originate from an operator action, never from a timer, task state transition, or internal scheduler event.
+
+
 #### Operator challenge-response handshake
 
 On every new connection to the operator socket:

@@ -28,6 +28,15 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
     let mut base_tracking_ref: Option<String> = None;
     let mut task_id: Option<String> = None;
     let mut lineage_id: Option<String> = None;
+    // Sensitive-output gate: the raw `session_token` is a bearer
+    // credential. v1.x adopts the `--reveal-paths` precedent
+    // (cli-readonly.md §5.4.2) for credentials too: the operator must
+    // opt in explicitly. Default prints only the SHA-256 fingerprint
+    // of the token plus a hint instructing how to re-run with
+    // `--reveal-token` to capture the raw value (typically via
+    // `2>session.env`). This makes a copy-paste of `raxis session
+    // create` into a recorded shell session safe by default.
+    let mut reveal_token = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -69,6 +78,9 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
                         .ok_or_else(|| CliError::Usage("--lineage-id requires a uuid".to_owned()))?
                         .clone(),
                 );
+            }
+            "--reveal-token" => {
+                reveal_token = true;
             }
             other => return Err(CliError::Usage(format!("unknown session create flag: {other:?}"))),
         }
@@ -113,16 +125,50 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
         let expires_at = ok["expires_at"].as_i64().unwrap_or(0);
         let lineage = ok["lineage_id"].as_str().unwrap_or(&lineage_id);
 
-        // Token → stderr for secure capture.
-        // All other fields → stdout.
+        // All non-secret fields → stdout.
         println!("Session created:");
         println!("  session_id:   {session_id}");
         println!("  role:         planner");
         println!("  worktree:     {}", worktree_root.display());
         println!("  expires_at:   {expires_at}");
         println!("  lineage_id:   {lineage}");
-        eprintln!("RAXIS_SESSION_TOKEN={token}");
+        emit_session_token(token, reveal_token);
     })
+}
+
+/// Emit the session token (or a redacted placeholder) on stderr per
+/// the `--reveal-token` gate. Stderr is the canonical channel here so
+/// `raxis session create ... 2>session.env` continues to work
+/// unchanged when `--reveal-token` is set; without the flag the
+/// operator only sees a fingerprint plus a hint.
+fn emit_session_token(token: &str, reveal: bool) {
+    eprintln!("{}", build_session_token_line(token, reveal));
+}
+
+/// Build the session-token stderr line. Pure — no I/O. The unit
+/// tests at the bottom of this file exercise both the redacted and
+/// revealed branches without needing to capture stderr.
+pub(crate) fn build_session_token_line(token: &str, reveal: bool) -> String {
+    if reveal {
+        return format!("RAXIS_SESSION_TOKEN={token}");
+    }
+    let fingerprint = credential_fingerprint(token);
+    format!(
+        "session_token: <redacted; sha256_fp={fingerprint}> \
+        (re-run with --reveal-token to print RAXIS_SESSION_TOKEN to stderr; \
+        capture with `2>session.env` to keep it out of shell history)"
+    )
+}
+
+/// Short, non-reversible 8-char SHA-256 prefix of `credential` for
+/// display correlation (e.g. matching the redacted CLI line against
+/// a kernel-side `session_token_fp` log entry on `ipc.planner`).
+/// Mirrors the kernel-side `crate::ipc::log::credential_fingerprint`
+/// helper byte-for-byte: both compute `sha256(token.as_bytes())[..8]`
+/// in lowercase hex.
+fn credential_fingerprint(credential: &str) -> String {
+    let full = raxis_crypto::token::sha256_hex(credential.as_bytes());
+    full[..8].to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -147,3 +193,71 @@ pub fn run_revoke(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
 }
 
 // (UUID minting moved to `uuid::Uuid::new_v4()` — see usage in `run_create`.)
+
+// ---------------------------------------------------------------------------
+// Tests — `--reveal-token` redaction contract.
+//
+// The session_token is a bearer credential; v1.x mandates explicit
+// `--reveal-token` opt-in to print it to stderr. Pre-flag default
+// MUST emit only the SHA-256 fingerprint plus a hint. These tests
+// pin both halves so an accidental flag flip in `run_create` (e.g.
+// inverting a boolean) is caught at unit-test time.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod reveal_token_tests {
+    use super::build_session_token_line;
+
+    /// Distinctive token so any leak is unmissable in test output.
+    const SECRET_TOKEN: &str =
+        "SECRET_SESSION_TOKEN_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn default_redacted_line_does_not_contain_raw_token() {
+        let line = build_session_token_line(SECRET_TOKEN, false);
+        assert!(
+            !line.contains(SECRET_TOKEN),
+            "redacted line MUST NOT contain raw session_token; got: {line}",
+        );
+        assert!(
+            !line.contains("SECRET_"),
+            "no prefix of the secret token may appear; got: {line}",
+        );
+    }
+
+    #[test]
+    fn default_redacted_line_carries_fingerprint_and_reveal_hint() {
+        let line = build_session_token_line(SECRET_TOKEN, false);
+        assert!(line.contains("sha256_fp="),
+            "redacted line must explain WHY the token is hidden via the fingerprint marker; got: {line}");
+        assert!(line.contains("--reveal-token"),
+            "redacted line must point operators to the explicit opt-in flag; got: {line}");
+    }
+
+    #[test]
+    fn reveal_flag_emits_raw_token_in_env_var_format() {
+        let line = build_session_token_line(SECRET_TOKEN, true);
+        assert_eq!(line, format!("RAXIS_SESSION_TOKEN={SECRET_TOKEN}"),
+            "explicit --reveal-token must produce the canonical env-var line so \
+             `2>session.env` capture continues to work");
+    }
+
+    /// Cross-check: the redacted fingerprint must match what the
+    /// kernel-side `ipc::log::credential_fingerprint` would emit for
+    /// the same token, so a redacted CLI line and a kernel
+    /// `session_token_fp` log entry can be eyeballed against one
+    /// another by an operator triaging a session.
+    #[test]
+    fn redacted_fingerprint_matches_kernel_side_helper() {
+        let line = build_session_token_line(SECRET_TOKEN, false);
+        let cli_fp = line
+            .split("sha256_fp=").nth(1).expect("redacted line must contain sha256_fp= marker")
+            .split('>').next().expect("marker must be terminated by '>'")
+            .to_owned();
+        let kernel_fp =
+            raxis_crypto::token::sha256_hex(SECRET_TOKEN.as_bytes())[..8].to_owned();
+        assert_eq!(cli_fp, kernel_fp,
+            "CLI redacted fingerprint must equal the kernel-side log fingerprint \
+             so an operator can correlate the two without guesswork");
+    }
+}

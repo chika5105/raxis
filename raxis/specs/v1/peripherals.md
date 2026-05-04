@@ -73,6 +73,8 @@ The planner system prompt is assembled by the kernel (`prompt/assembler.rs`) and
 
 The planner must not assume it can reuse a session across initiatives. One session = one initiative scope.
 
+> **INV-PLANNER-SPAWN (normative):** The kernel **never autonomously decides to start a planner**. After `ApprovePlan` the kernel admits tasks and waits. An agent only begins executing when an operator (a) calls `CreateSession` to mint a session token and (b) independently starts a planner process that connects to `planner.sock` with that token. The two decisions — *"is this plan valid?"* and *"should an agent start now?"* — are intentionally separate and both require explicit operator action. This is a hard architectural invariant, not an implementation choice: autonomous kernel-initiated planner spawning would bypass the human-in-the-loop checkpoint between plan approval and agent execution, violating the failure-closed model. Implementations MUST NOT add logic that automatically spawns a planner subprocess upon plan approval or task state transitions.
+
 ### `IntentRequest` wire shape
 
 > **Encoding reminder:** This JSON is an illustrative projection of `IpcMessage::IntentRequest { .. }` in `raxis-ipc`. On-wire: length-prefixed frame per `raxis-ipc::frame`.

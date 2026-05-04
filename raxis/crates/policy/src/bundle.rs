@@ -651,6 +651,8 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "GatewaySignalFailed",
     // notifications (self-reflective)
     "NotificationDeliveryFailed",
+    // read-only CLI redaction reveal (cli-readonly.md §5.4.2 / §5.7.2)
+    "PathReadAccessed",
 ];
 
 /// Validate the raw `[notifications]` section and produce the final
@@ -2149,6 +2151,7 @@ channels   = []
             AuditEventKind::GatewayQuarantined { reason: "x".into(), total_attempts: 0 }.as_str(),
             AuditEventKind::GatewaySignalFailed { signal: "x".into(), new_epoch_id: None, reason: "x".into() }.as_str(),
             AuditEventKind::NotificationDeliveryFailed { channel_id: "x".into(), event_kind: "x".into(), reason: "x".into() }.as_str(),
+            AuditEventKind::PathReadAccessed { actor: "x".into(), table: "x".into(), column: "x".into(), task_id: "x".into(), command: "x".into() }.as_str(),
         ];
 
         let policy_kinds: std::collections::HashSet<&str> =

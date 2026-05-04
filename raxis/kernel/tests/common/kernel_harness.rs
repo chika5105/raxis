@@ -268,6 +268,12 @@ impl KernelInstance {
     /// `deadline` elapses. The kernel logs this line at the end of step 7,
     /// the moment all three UDS sockets are bound and accept loops are
     /// running — the earliest moment a test can `connect()`.
+    ///
+    /// **Wire-shape note:** the kernel's structured-logging refactor
+    /// emits `{"event":"sockets_bound", "module":"ipc.server", ...}`
+    /// rather than the pre-refactor `{"message":"sockets bound"}`
+    /// shape. This matcher accepts the current shape; it is the
+    /// canonical "kernel ready" signal per `kernel/src/ipc/server.rs::server_log::sockets_bound`.
     pub fn wait_for_ready(&self, deadline: Duration) -> bool {
         let start = Instant::now();
         while start.elapsed() < deadline {
@@ -276,7 +282,7 @@ impl KernelInstance {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|l| l.contains("\"message\":\"sockets bound\""))
+                .any(|l| l.contains("\"event\":\"sockets_bound\""))
             {
                 return true;
             }
@@ -285,14 +291,15 @@ impl KernelInstance {
         false
     }
 
-    /// Block until "sockets bound" appears or panic with the captured stderr.
-    /// Most tests want this (they cannot proceed without a bound socket); the
-    /// generic `wait_for_ready` is exposed for the rare test that wants to
-    /// assert the *negative* (e.g. degraded boot path).
+    /// Block until the `sockets_bound` event appears or panic with the
+    /// captured stderr. Most tests want this (they cannot proceed
+    /// without a bound socket); the generic `wait_for_ready` is
+    /// exposed for the rare test that wants to assert the *negative*
+    /// (e.g. degraded boot path).
     pub fn wait_until_ready_or_panic(&self, deadline: Duration) {
         if !self.wait_for_ready(deadline) {
             panic!(
-                "kernel never reported 'sockets bound' within {deadline:?}; stderr:\n{}",
+                "kernel never reported 'sockets_bound' within {deadline:?}; stderr:\n{}",
                 self.captured_stderr()
             );
         }

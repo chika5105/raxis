@@ -58,6 +58,25 @@ pub use raxis_types::operator_wire::{OperatorRequest, OperatorResponse};
 ///
 /// Reads requests in a loop, dispatches each one, writes one response.
 /// Returns when the connection is closed or a fatal framing error occurs.
+///
+/// Observability — every chokepoint here emits a structured stderr log line
+/// via the `dispatch_log` helpers below. Before this was wired, an operator
+/// hitting e.g. `FAIL_APPROVE_PLAN — initiative not found: …` got the error
+/// at the CLI but the kernel's stderr was silent, leaving the operator
+/// running the kernel with no record that the request happened. The four
+/// chokepoints we cover are:
+///
+///   * request frame received  → `op_request`  (info)
+///   * malformed JSON received → `frame_decode_failed` (warn)
+///   * permitted_ops rejection → `unauthorized` (warn)
+///   * response sent           → `op_response` (info on Ok variants;
+///                               warn on `OperatorResponse::Error`)
+///
+/// Each line carries the originating operator fingerprint and the per-op
+/// context fields ([`request_context_fields`]: initiative_id, session_id,
+/// task_id, escalation_id, delegation_id) so an operator grepping
+/// `raxis-kernel`'s stderr for a specific id can find every interaction
+/// with that entity.
 pub async fn dispatch_loop(
     mut stream: UnixStream,
     operator: AuthenticatedOperator,
@@ -75,6 +94,7 @@ pub async fn dispatch_loop(
             // Malformed JSON: send an error frame and keep the connection
             // open so the CLI can show a useful message.
             Err(JsonFrameError::Decode(e)) => {
+                dispatch_log::frame_decode_failed(&operator.fingerprint, &e.to_string());
                 let resp = OperatorResponse::Error {
                     code: "INVALID_REQUEST".to_owned(),
                     detail: e.to_string(),
@@ -89,6 +109,7 @@ pub async fn dispatch_loop(
         // permitted_ops gate.
         let op_name = op_name(&request);
         if !crate::ipc::auth::is_permitted(&operator, op_name) {
+            dispatch_log::unauthorized(op_name, &operator.fingerprint);
             let resp = OperatorResponse::Error {
                 code: "UNAUTHORIZED".to_owned(),
                 detail: format!(
@@ -100,9 +121,312 @@ pub async fn dispatch_loop(
             continue;
         }
 
-        // Dispatch.
+        // Dispatch — instrument with request/response logging. We capture
+        // the request's context fields BEFORE the handler runs so the log
+        // works even on handlers that consume the request by value.
+        let context_fields = request_context_fields(&request);
+        dispatch_log::op_request(op_name, &operator.fingerprint, &context_fields);
+        let started = std::time::Instant::now();
         let response = handle_request(request, &operator, &ctx).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        dispatch_log::op_response(
+            op_name,
+            &operator.fingerprint,
+            &response,
+            &context_fields,
+            latency_ms,
+        );
         write_json_frame_async(&mut stream, &response).await?;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-op context-field extraction
+//
+// Pulls the "what is this request operating on" identifiers out of each
+// `OperatorRequest` variant so they can be threaded through the request
+// log line, the response log line, and (later) any audit cross-reference.
+//
+// We use a small fixed key/value list (Vec<(&'static str, String)>) rather
+// than `serde_json::to_value(&request)` because:
+//   1. The full request can be huge (e.g. `CreateInitiative.plan_toml`
+//      and `CreateInitiative.plan_sig_hex`) — emitting it to stderr
+//      every call would bloat operator logs.
+//   2. The full request can carry sensitive data (e.g. `signature_hex`
+//      payloads) that we don't want in plain log lines.
+//   3. The CLI / operator workflow is identifier-driven — operators
+//      grep stderr for `"initiative_id":"<uuid>"`, not for plan bytes.
+//
+// New `OperatorRequest` variants MUST extend this match arm with their
+// identifier fields; the wire-shape contract tests in
+// `raxis-types::operator_wire::tests` will surface a missing arm at
+// compile time as soon as the new variant is added to the dispatcher.
+// ---------------------------------------------------------------------------
+
+fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> {
+    match req {
+        OperatorRequest::CreateSession { lineage_id, .. } => {
+            vec![("lineage_id", lineage_id.clone())]
+        }
+        OperatorRequest::RevokeSession { session_id } => {
+            vec![("session_id", session_id.clone())]
+        }
+        OperatorRequest::GrantDelegation {
+            session_id,
+            delegation_id,
+            capability_class,
+            ..
+        } => vec![
+            ("session_id", session_id.clone()),
+            ("delegation_id", delegation_id.clone()),
+            ("capability_class", capability_class.clone()),
+        ],
+        OperatorRequest::CreateInitiative { submitted_by, .. } => {
+            // No initiative_id field — the kernel mints one in
+            // `lifecycle::create_initiative`. The minted id appears in
+            // the response log line via `response_summary_fields`.
+            vec![("submitted_by", submitted_by.clone())]
+        }
+        OperatorRequest::ApprovePlan {
+            initiative_id,
+            approving_operator,
+            ..
+        } => vec![
+            ("initiative_id", initiative_id.clone()),
+            ("approving_operator", approving_operator.clone()),
+        ],
+        OperatorRequest::RejectPlan {
+            initiative_id,
+            rejected_by,
+            ..
+        } => vec![
+            ("initiative_id", initiative_id.clone()),
+            ("rejected_by", rejected_by.clone()),
+        ],
+        OperatorRequest::RetryTask { task_id } => {
+            vec![("task_id", task_id.clone())]
+        }
+        OperatorRequest::ResumeTask { task_id, resumed_by } => vec![
+            ("task_id", task_id.clone()),
+            ("resumed_by", resumed_by.clone()),
+        ],
+        OperatorRequest::AbortTask { task_id, aborted_by } => vec![
+            ("task_id", task_id.clone()),
+            ("aborted_by", aborted_by.clone()),
+        ],
+        OperatorRequest::AbortInitiative {
+            initiative_id,
+            aborted_by,
+        } => vec![
+            ("initiative_id", initiative_id.clone()),
+            ("aborted_by", aborted_by.clone()),
+        ],
+        OperatorRequest::ApproveEscalation { escalation_id, .. } => {
+            vec![("escalation_id", escalation_id.clone())]
+        }
+        OperatorRequest::DenyEscalation { escalation_id, .. } => {
+            vec![("escalation_id", escalation_id.clone())]
+        }
+        OperatorRequest::RotateEpoch {
+            policy_path,
+            sig_path,
+        } => vec![
+            ("policy_path", policy_path.clone()),
+            ("sig_path", sig_path.clone()),
+        ],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Structured stderr logging for the operator dispatcher.
+//
+// Why this lives inline rather than in a shared kernel `log` crate: the
+// rest of the kernel (main.rs, bootstrap.rs) emits one-off stderr lines
+// via raw `eprintln!` with format-string JSON. Building a full kernel
+// logging facade is a separate, larger refactor — see kernel-core.md
+// §future-work. Until that lands, this module provides an escape-safe
+// JSON emitter for the one surface where structured logging matters most
+// (every operator-facing error flows through here).
+//
+// Why we go through `serde_json::to_string`: the existing 5
+// `eprintln!(\"{{...{e}}}\")` call sites in this file do raw `format!`
+// interpolation — if `e.to_string()` ever contained a `\"` (e.g. an
+// SQL error wrapping a quoted column name), the resulting line is
+// non-parseable JSON. Routing everything through `serde_json::json!`
+// guarantees correctly escaped output.
+// ---------------------------------------------------------------------------
+
+pub(crate) mod dispatch_log {
+    use super::OperatorResponse;
+    use crate::ipc::log::{body_from_fields, finalize_line, level};
+    use serde_json::json;
+
+    pub(super) const MODULE: &str = "ipc.operator";
+
+    // ── Pure formatters (`build_*_line`) → owned `String`. ──
+    //
+    // Each emit-helper (`op_request`, `op_response`, `frame_decode_failed`,
+    // `unauthorized`) is a thin wrapper that calls its `build_*_line`
+    // counterpart and pipes the result to `eprintln!`. Tests assert
+    // against the formatter output directly — no stderr capture
+    // dependency required.
+
+    /// Build the JSON line that `op_request` will print. Pure — does no
+    /// I/O. The test suite at the bottom of this file calls this
+    /// directly and asserts the parsed `serde_json::Value` shape.
+    pub(crate) fn build_op_request_line(
+        op: &'static str,
+        operator_fp: &str,
+        context_fields: &[(&'static str, String)],
+        ts_unix: i64,
+    ) -> String {
+        let mut body = body_from_fields(context_fields);
+        body.insert("op".into(), json!(op));
+        body.insert("operator_fp".into(), json!(operator_fp));
+        finalize_line(level::INFO, MODULE, "op_request", body, ts_unix)
+    }
+
+    /// Build the JSON line that `op_response` will print. The `Error`
+    /// variant of [`OperatorResponse`] is rendered at level=warn with
+    /// `code` + `detail`; every success variant is rendered at level=info
+    /// with a `variant` tag (and the freshly-minted `initiative_id` for
+    /// `InitiativeCreated`, which is the one variant that surfaces an id
+    /// the request side did not have).
+    ///
+    /// We deliberately do NOT include the success payload's secrets
+    /// (e.g. `session_token`, `approval_token_raw`) — those values are
+    /// in-band-only between kernel and CLI, and operator-visible stderr
+    /// must never log them. Variant tag + latency + context is enough
+    /// to correlate with the matching `op_request` line.
+    pub(crate) fn build_op_response_line(
+        op: &'static str,
+        operator_fp: &str,
+        response: &OperatorResponse,
+        context_fields: &[(&'static str, String)],
+        latency_ms: u64,
+        ts_unix: i64,
+    ) -> String {
+        let mut body = body_from_fields(context_fields);
+        body.insert("op".into(), json!(op));
+        body.insert("operator_fp".into(), json!(operator_fp));
+        body.insert("latency_ms".into(), json!(latency_ms));
+
+        let log_level = match response {
+            OperatorResponse::Error { code, detail } => {
+                body.insert("status".into(), json!("error"));
+                body.insert("code".into(), json!(code));
+                body.insert("detail".into(), json!(detail));
+                level::WARN
+            }
+            other => {
+                body.insert("status".into(), json!("ok"));
+                body.insert("variant".into(), json!(response_variant_name(other)));
+                if let OperatorResponse::InitiativeCreated { initiative_id, .. } = other {
+                    body.insert("initiative_id".into(), json!(initiative_id));
+                }
+                level::INFO
+            }
+        };
+        finalize_line(log_level, MODULE, "op_response", body, ts_unix)
+    }
+
+    /// Build the JSON line for a malformed inbound frame. We don't have
+    /// an op name yet (that's exactly what failed to decode), so the
+    /// line carries only the operator fingerprint and the decode error.
+    pub(crate) fn build_frame_decode_failed_line(
+        operator_fp: &str,
+        detail: &str,
+        ts_unix: i64,
+    ) -> String {
+        let mut body = serde_json::Map::with_capacity(4);
+        body.insert("operator_fp".into(), json!(operator_fp));
+        body.insert("detail".into(), json!(detail));
+        finalize_line(level::WARN, MODULE, "frame_decode_failed", body, ts_unix)
+    }
+
+    /// Build the JSON line for a `permitted_ops` rejection. The wire
+    /// response is `UNAUTHORIZED`; this stderr line gives the operator
+    /// running the kernel an audit trail of capability misses.
+    pub(crate) fn build_unauthorized_line(
+        op: &'static str,
+        operator_fp: &str,
+        ts_unix: i64,
+    ) -> String {
+        let mut body = serde_json::Map::with_capacity(4);
+        body.insert("op".into(), json!(op));
+        body.insert("operator_fp".into(), json!(operator_fp));
+        finalize_line(level::WARN, MODULE, "unauthorized", body, ts_unix)
+    }
+
+    // ── Emit-side wrappers — used from `dispatch_loop`. ──
+
+    pub(super) fn op_request(
+        op: &'static str,
+        operator_fp: &str,
+        context_fields: &[(&'static str, String)],
+    ) {
+        eprintln!(
+            "{}",
+            build_op_request_line(op, operator_fp, context_fields, raxis_types::unix_now_secs()),
+        );
+    }
+
+    pub(super) fn op_response(
+        op: &'static str,
+        operator_fp: &str,
+        response: &OperatorResponse,
+        context_fields: &[(&'static str, String)],
+        latency_ms: u64,
+    ) {
+        eprintln!(
+            "{}",
+            build_op_response_line(
+                op,
+                operator_fp,
+                response,
+                context_fields,
+                latency_ms,
+                raxis_types::unix_now_secs(),
+            ),
+        );
+    }
+
+    pub(super) fn frame_decode_failed(operator_fp: &str, detail: &str) {
+        eprintln!(
+            "{}",
+            build_frame_decode_failed_line(operator_fp, detail, raxis_types::unix_now_secs()),
+        );
+    }
+
+    pub(super) fn unauthorized(op: &'static str, operator_fp: &str) {
+        eprintln!(
+            "{}",
+            build_unauthorized_line(op, operator_fp, raxis_types::unix_now_secs()),
+        );
+    }
+
+    // ── Operator-specific helpers ──
+    //
+    // The cross-dispatcher primitives `body_from_fields`,
+    // `finalize_line`, and `level::*` live in `crate::ipc::log` so the
+    // planner and gateway dispatchers share one escape-safe code path.
+
+    /// Tag for an `OperatorResponse` variant, used in the success log
+    /// line. Keep in sync with the variants in
+    /// `raxis_types::operator_wire::OperatorResponse`.
+    fn response_variant_name(r: &OperatorResponse) -> &'static str {
+        match r {
+            OperatorResponse::SessionCreated { .. }     => "SessionCreated",
+            OperatorResponse::SessionRevoked { .. }     => "SessionRevoked",
+            OperatorResponse::DelegationGranted { .. }  => "DelegationGranted",
+            OperatorResponse::InitiativeCreated { .. }  => "InitiativeCreated",
+            OperatorResponse::PlanApproved { .. }       => "PlanApproved",
+            OperatorResponse::EscalationApproved { .. } => "EscalationApproved",
+            OperatorResponse::EscalationDenied { .. }   => "EscalationDenied",
+            OperatorResponse::EpochAdvanced { .. }      => "EpochAdvanced",
+            OperatorResponse::Ack { .. }                => "Ack",
+            OperatorResponse::Error { .. }              => "Error",
+        }
     }
 }
 
@@ -168,6 +492,57 @@ async fn handle_request(
 // Per-variant handlers
 // ---------------------------------------------------------------------------
 
+/// Map the wire `role` string to the kernel's `authority::session::Role`,
+/// enforcing the operator-creatable role gate
+/// (kernel-core.md §`handle_create_session` step 1, cli-ceremony.md §4.2).
+///
+/// Wire contract per cli-ceremony.md §4.2 line 300: the canonical
+/// operator-creatable role string is the literal lowercase `"planner"`.
+/// Gateway and verifier sessions are minted by kernel-internal spawn
+/// paths (`spawn_gateway` / `spawn_verifier`) and MUST NOT be reachable
+/// through operator IPC. Any other role string (wrong casing,
+/// `"gateway"`, `"verifier"`, or unknown values) is rejected with
+/// `FAIL_ROLE_NOT_OPERATOR_CREATABLE`.
+fn parse_operator_creatable_role(role_str: &str) -> Result<authority::session::Role, OperatorResponse> {
+    match role_str {
+        // Canonical wire shape per cli-ceremony.md §4.2 line 300: the
+        // literal lowercase string "planner". Locked by the wire
+        // round-trip tests in raxis_types::operator_wire and
+        // raxis_cli::tests::operator_wire_shape.
+        "planner" => Ok(authority::session::Role::Planner),
+        // Everything else is rejected:
+        //   * "Planner" / wrong casing → off-spec, drift caught here.
+        //   * "gateway" / "verifier" → minted by spawn_gateway /
+        //     spawn_verifier respectively, never via operator IPC.
+        //   * unknown strings → defensive.
+        other => Err(OperatorResponse::Error {
+            code:   "FAIL_ROLE_NOT_OPERATOR_CREATABLE".to_owned(),
+            detail: format!(
+                "role '{other}' is not operator-creatable; only 'planner' is operator-creatable in v1"
+            ),
+        }),
+    }
+}
+
+/// Convert a `Role` to its canonical wire string for outbound responses.
+///
+/// This is deliberately distinct from `Role::as_str()`, which returns
+/// the PascalCase **SQL-storage** form (`"Planner"`/`"Gateway"`/`"Verifier"`)
+/// stored in `sessions.role`. The IPC wire contract is lowercase
+/// (cli-ceremony.md §4.2), and the round-trip fixtures in
+/// `raxis_types::operator_wire::tests::create_session_response_wire_shape`
+/// pin lowercase. Keeping inbound (`parse_operator_creatable_role`)
+/// and outbound (`wire_role_str`) co-located makes the wire-shape
+/// contract auditable in one place.
+fn wire_role_str(role: &authority::session::Role) -> &'static str {
+    use authority::session::Role;
+    match role {
+        Role::Planner  => "planner",
+        Role::Gateway  => "gateway",
+        Role::Verifier => "verifier",
+    }
+}
+
 async fn handle_create_session(
     role_str: String,
     worktree_root: Option<String>,
@@ -178,16 +553,9 @@ async fn handle_create_session(
 ) -> OperatorResponse {
     use authority::session::{Role, SessionConfig};
 
-    let role = match role_str.as_str() {
-        "Planner" => Role::Planner,
-        "Gateway" => Role::Gateway,
-        "Verifier" => Role::Verifier,
-        other => {
-            return OperatorResponse::Error {
-                code: "FAIL_ROLE_NOT_OPERATOR_CREATABLE".to_owned(),
-                detail: format!("role '{other}' is not operator-creatable"),
-            }
-        }
+    let role = match parse_operator_creatable_role(role_str.as_str()) {
+        Ok(r) => r,
+        Err(resp) => return resp,
     };
 
     // Worktree containment check for Planner sessions.
@@ -258,7 +626,11 @@ async fn handle_create_session(
         Ok((session_id, session_token)) => OperatorResponse::SessionCreated {
             session_id: session_id.as_str().to_owned(),
             session_token,
-            role: role.as_str().to_owned(),
+            // Wire-canonical lowercase per cli-ceremony.md §4.2 — see
+            // `wire_role_str` above. Do NOT use `role.as_str()` here:
+            // that returns the PascalCase SQL form and would break the
+            // wire round-trip pinned in raxis_types::operator_wire.
+            role: wire_role_str(&role).to_owned(),
             worktree_root,
             base_sha,
             lineage_id: lineage_id.as_str().to_owned(),
@@ -2064,3 +2436,553 @@ mod rotate_epoch_dispatch_tests {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dispatcher logging tests.
+//
+// These pin the JSON shape of every line `dispatch_loop` emits to stderr,
+// because that shape is the operator-runbook contract — operators grep
+// stderr for `"event":"op_response","status":"error"` to find failed
+// requests, and any drift in the field names breaks every downstream log
+// pipeline. The tests assert against the **pure formatters**
+// (`build_*_line`) so we never need to capture stderr.
+//
+// The four scenarios we cover map 1:1 to the four chokepoints in
+// `dispatch_loop`:
+//
+//   1. Successful request log — `op_request` carries the op name,
+//      operator fingerprint, and per-op context fields.
+//   2. Error response log — `op_response { status:"error", code, detail }`
+//      at WARN. THIS is the line the user's "FAIL_APPROVE_PLAN —
+//      initiative not found: test-minimal-001" report was missing.
+//   3. Success response log — `op_response { status:"ok", variant }`
+//      at INFO, deliberately omitting the success payload's secrets
+//      (we pin SessionCreated specifically because it carries
+//      `session_token`, the most sensitive one).
+//   4. Pre-handler error logs — `frame_decode_failed` and `unauthorized`
+//      both at WARN.
+//
+// Plus two corner cases:
+//
+//   * Per-op `request_context_fields` extracts the right identifiers
+//     for every variant — the user's failing flow needed `initiative_id`
+//     in the `ApprovePlan` log line, and a future variant added without
+//     a context-extractor arm is what would have masked it.
+//   * `serde_json::to_string` escape-safety — a `detail` containing a
+//     literal `"` (which the existing `eprintln!` format-string sites
+//     would mangle) round-trips through `serde_json::from_str`.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod dispatch_logging_tests {
+    use super::*;
+    use serde_json::Value;
+
+    /// Parse a built log line and assert it is a JSON object whose
+    /// constant fields are present with the spec-mandated values.
+    fn parse_and_check_constants(line: &str, expected_event: &str, expected_level: &str) -> Value {
+        let v: Value = serde_json::from_str(line).unwrap_or_else(|e| {
+            panic!("dispatch_log line is not valid JSON: {e}\nline: {line}")
+        });
+        assert_eq!(
+            v.get("module").and_then(Value::as_str),
+            Some("ipc.operator"),
+            "every dispatch_log line MUST carry module=ipc.operator (operators grep on it); line: {line}",
+        );
+        assert_eq!(
+            v.get("event").and_then(Value::as_str),
+            Some(expected_event),
+            "event field drifted; line: {line}",
+        );
+        assert_eq!(
+            v.get("level").and_then(Value::as_str),
+            Some(expected_level),
+            "level field drifted; line: {line}",
+        );
+        assert!(
+            v.get("ts_unix").and_then(Value::as_i64).is_some(),
+            "every dispatch_log line MUST carry a numeric ts_unix; line: {line}",
+        );
+        v
+    }
+
+    #[test]
+    fn op_request_line_carries_op_operator_fp_and_context_fields() {
+        // The user-reported failure was `ApprovePlan` with an unknown
+        // initiative_id. Pin that the request log contains the op name,
+        // operator fingerprint, AND the initiative_id from the request —
+        // grepping `"event":"op_request","initiative_id":"<id>"` is the
+        // operator workflow this line exists to support.
+        let fields = vec![
+            ("initiative_id", "test-minimal-001".to_owned()),
+            ("approving_operator", "abcd1234abcd1234abcd1234abcd1234".to_owned()),
+        ];
+        let line = dispatch_log::build_op_request_line(
+            "ApprovePlan",
+            "abcd1234abcd1234abcd1234abcd1234",
+            &fields,
+            1_700_000_000,
+        );
+        let v = parse_and_check_constants(&line, "op_request", "info");
+        assert_eq!(v.get("op").and_then(Value::as_str), Some("ApprovePlan"));
+        assert_eq!(
+            v.get("operator_fp").and_then(Value::as_str),
+            Some("abcd1234abcd1234abcd1234abcd1234"),
+        );
+        assert_eq!(
+            v.get("initiative_id").and_then(Value::as_str),
+            Some("test-minimal-001"),
+        );
+        assert_eq!(
+            v.get("approving_operator").and_then(Value::as_str),
+            Some("abcd1234abcd1234abcd1234abcd1234"),
+        );
+        assert_eq!(v.get("ts_unix").and_then(Value::as_i64), Some(1_700_000_000));
+    }
+
+    #[test]
+    fn op_response_error_line_carries_code_and_detail_at_warn() {
+        // The exact line that was missing from the user's report. After
+        // this test passes, an operator running `raxis-kernel` and
+        // greppping stderr for `FAIL_APPROVE_PLAN` will find this line
+        // every time.
+        let fields = vec![("initiative_id", "test-minimal-001".to_owned())];
+        let response = OperatorResponse::Error {
+            code: "FAIL_APPROVE_PLAN".to_owned(),
+            detail: "initiative not found: test-minimal-001".to_owned(),
+        };
+        let line = dispatch_log::build_op_response_line(
+            "ApprovePlan",
+            "abcd1234abcd1234abcd1234abcd1234",
+            &response,
+            &fields,
+            42,
+            1_700_000_001,
+        );
+        let v = parse_and_check_constants(&line, "op_response", "warn");
+        assert_eq!(v.get("status").and_then(Value::as_str), Some("error"));
+        assert_eq!(v.get("op").and_then(Value::as_str), Some("ApprovePlan"));
+        assert_eq!(
+            v.get("code").and_then(Value::as_str),
+            Some("FAIL_APPROVE_PLAN"),
+        );
+        assert_eq!(
+            v.get("detail").and_then(Value::as_str),
+            Some("initiative not found: test-minimal-001"),
+        );
+        assert_eq!(v.get("latency_ms").and_then(Value::as_u64), Some(42));
+        assert_eq!(
+            v.get("initiative_id").and_then(Value::as_str),
+            Some("test-minimal-001"),
+            "context field MUST be re-emitted on the response line so a single grep finds the failure",
+        );
+    }
+
+    #[test]
+    fn op_response_ok_line_omits_secret_payload() {
+        // `SessionCreated` carries the most sensitive success payload:
+        // `session_token` is the bearer token the planner uses to
+        // authenticate every subsequent IPC. It MUST NOT appear in
+        // operator-visible stderr — pin that.
+        let response = OperatorResponse::SessionCreated {
+            session_id:    "00000000-0000-4000-8000-000000000001".to_owned(),
+            session_token: "SUPER_SECRET_BEARER_TOKEN_DO_NOT_LOG".to_owned(),
+            // Lowercase per cli-ceremony.md §4.2 — matches what the
+            // dispatcher actually emits via wire_role_str().
+            role:          "planner".to_owned(),
+            worktree_root: Some("/tmp/wt".to_owned()),
+            base_sha:      Some("a".repeat(40)),
+            lineage_id:    "00000000-0000-4000-8000-00000000000a".to_owned(),
+        };
+        let line = dispatch_log::build_op_response_line(
+            "CreateSession",
+            "abcd1234abcd1234abcd1234abcd1234",
+            &response,
+            &[("lineage_id", "00000000-0000-4000-8000-00000000000a".to_owned())],
+            7,
+            1_700_000_002,
+        );
+        let v = parse_and_check_constants(&line, "op_response", "info");
+        assert_eq!(v.get("status").and_then(Value::as_str), Some("ok"));
+        assert_eq!(
+            v.get("variant").and_then(Value::as_str),
+            Some("SessionCreated"),
+        );
+        assert_eq!(v.get("op").and_then(Value::as_str), Some("CreateSession"));
+        assert!(
+            !line.contains("SUPER_SECRET_BEARER_TOKEN_DO_NOT_LOG"),
+            "session_token MUST NOT appear in operator-visible stderr; line: {line}",
+        );
+        assert!(
+            !line.contains("session_token"),
+            "session_token field MUST NOT be emitted at all (not even as an empty string); line: {line}",
+        );
+    }
+
+    #[test]
+    fn op_response_initiative_created_includes_minted_id_for_correlation() {
+        // The kernel mints a fresh UUID inside `lifecycle::create_initiative`
+        // and the request side has no `initiative_id` field — without
+        // this special case the operator can't correlate "the request I
+        // just sent" with "the initiative now in Draft". Pin that the
+        // response log surfaces the minted id so a single grep on
+        // `"event":"op_response","initiative_id":"<uuid>"` finds the
+        // exact creation moment.
+        let response = OperatorResponse::InitiativeCreated {
+            initiative_id: "5c5a6cd4-95cd-47d1-a4cc-8b0ef46da235".to_owned(),
+            status:        "Draft".to_owned(),
+        };
+        let line = dispatch_log::build_op_response_line(
+            "CreateInitiative",
+            "abcd1234abcd1234abcd1234abcd1234",
+            &response,
+            &[("submitted_by", "abcd1234abcd1234abcd1234abcd1234".to_owned())],
+            5,
+            1_700_000_003,
+        );
+        let v = parse_and_check_constants(&line, "op_response", "info");
+        assert_eq!(
+            v.get("variant").and_then(Value::as_str),
+            Some("InitiativeCreated"),
+        );
+        assert_eq!(
+            v.get("initiative_id").and_then(Value::as_str),
+            Some("5c5a6cd4-95cd-47d1-a4cc-8b0ef46da235"),
+            "the freshly-minted initiative_id MUST appear on the response line",
+        );
+    }
+
+    #[test]
+    fn frame_decode_failed_line_carries_operator_fp_and_detail_at_warn() {
+        let line = dispatch_log::build_frame_decode_failed_line(
+            "abcd1234abcd1234abcd1234abcd1234",
+            "expected `,` or `}` at line 1 column 42",
+            1_700_000_004,
+        );
+        let v = parse_and_check_constants(&line, "frame_decode_failed", "warn");
+        assert_eq!(
+            v.get("operator_fp").and_then(Value::as_str),
+            Some("abcd1234abcd1234abcd1234abcd1234"),
+        );
+        assert!(
+            v.get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("expected"),
+            "detail MUST be preserved verbatim so operators can debug malformed frames",
+        );
+    }
+
+    #[test]
+    fn unauthorized_line_carries_op_and_operator_fp_at_warn() {
+        let line = dispatch_log::build_unauthorized_line(
+            "RotateEpoch",
+            "abcd1234abcd1234abcd1234abcd1234",
+            1_700_000_005,
+        );
+        let v = parse_and_check_constants(&line, "unauthorized", "warn");
+        assert_eq!(v.get("op").and_then(Value::as_str), Some("RotateEpoch"));
+        assert_eq!(
+            v.get("operator_fp").and_then(Value::as_str),
+            Some("abcd1234abcd1234abcd1234abcd1234"),
+        );
+    }
+
+    #[test]
+    fn detail_strings_with_embedded_quotes_round_trip_through_json() {
+        // The five existing `eprintln!(\"{{...{e}}}\")` call sites in
+        // this file would corrupt the line if `e.to_string()` contained
+        // a literal `\"`. Going through `serde_json::to_string` makes
+        // the new helpers escape-safe — pin that with a detail that
+        // contains every metacharacter we'd plausibly see in a SQL
+        // error or a path string.
+        let nasty = r#"sql error: 'col "x"' contains \\backslash and ' apostrophe and "quote""#;
+        let response = OperatorResponse::Error {
+            code:   "FAIL_X".to_owned(),
+            detail: nasty.to_owned(),
+        };
+        let line = dispatch_log::build_op_response_line(
+            "ApprovePlan",
+            "abcd1234abcd1234abcd1234abcd1234",
+            &response,
+            &[],
+            0,
+            1_700_000_006,
+        );
+        // The line MUST be parseable as JSON…
+        let v: Value = serde_json::from_str(&line)
+            .expect("escape safety: log line must be valid JSON even with quotes/backslashes in detail");
+        // …AND the round-tripped detail MUST be byte-identical.
+        assert_eq!(
+            v.get("detail").and_then(Value::as_str),
+            Some(nasty),
+            "detail MUST round-trip; mangled detail is the silent-corruption mode \
+             this rewrite eliminates from the existing format-string sites",
+        );
+    }
+
+    #[test]
+    fn request_context_fields_extracts_initiative_id_for_approve_plan() {
+        // The user-reported flow. Pin that the per-op extractor produces
+        // the (initiative_id, approving_operator) pair so the dispatcher
+        // log can route on initiative_id without re-pattern-matching the
+        // whole request enum at every chokepoint.
+        let req = OperatorRequest::ApprovePlan {
+            initiative_id:        "test-minimal-001".to_owned(),
+            approving_operator:   "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+            operator_pubkey_hex:  String::new(), // legacy/ignored field
+        };
+        let fields = request_context_fields(&req);
+        assert_eq!(
+            fields,
+            vec![
+                ("initiative_id", "test-minimal-001".to_owned()),
+                ("approving_operator", "abcd1234abcd1234abcd1234abcd1234".to_owned()),
+            ],
+        );
+    }
+
+    #[test]
+    fn request_context_fields_covers_every_operator_request_variant() {
+        // Compile-time guard: every variant in
+        // `raxis_types::operator_wire::OperatorRequest` MUST have an arm
+        // in `request_context_fields`. We exercise each variant with
+        // dummy data and assert the result is non-empty (or, for
+        // CreateInitiative which has no request-side identifier other
+        // than `submitted_by`, that it produces at least the
+        // submitted_by field).
+        //
+        // If a future variant is added without an extractor arm, the
+        // exhaustive match in `request_context_fields` fails to compile;
+        // this test is the runtime backstop that also pins each
+        // variant's contribution.
+        let cases: Vec<(OperatorRequest, &str)> = vec![
+            (OperatorRequest::CreateSession {
+                // Lowercase per cli-ceremony.md §4.2 — the canonical
+                // wire shape the CLI actually puts on the wire.
+                role:               "planner".to_owned(),
+                worktree_root:      None,
+                base_sha:           None,
+                base_tracking_ref:  None,
+                lineage_id:         "00000000-0000-4000-8000-000000000001".to_owned(),
+                task_id:            None,
+            }, "lineage_id"),
+            (OperatorRequest::RevokeSession {
+                session_id: "00000000-0000-4000-8000-000000000002".to_owned(),
+            }, "session_id"),
+            (OperatorRequest::GrantDelegation {
+                session_id:        "00000000-0000-4000-8000-000000000003".to_owned(),
+                delegation_id:     "00000000-0000-4000-8000-000000000004".to_owned(),
+                capability_class:  "ReadWorktree".to_owned(),
+                scope_json:        None,
+                ttl_secs:          60,
+                max_uses:          None,
+                signature_hex:     "00".repeat(64),
+            }, "delegation_id"),
+            (OperatorRequest::CreateInitiative {
+                plan_toml:    String::new(),
+                plan_sig_hex: String::new(),
+                submitted_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+            }, "submitted_by"),
+            (OperatorRequest::ApprovePlan {
+                initiative_id:       "i1".to_owned(),
+                approving_operator:  "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+                operator_pubkey_hex: String::new(),
+            }, "initiative_id"),
+            (OperatorRequest::RejectPlan {
+                initiative_id: "i1".to_owned(),
+                rejected_by:   "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+                reason:        None,
+            }, "initiative_id"),
+            (OperatorRequest::RetryTask {
+                task_id: "t1".to_owned(),
+            }, "task_id"),
+            (OperatorRequest::ResumeTask {
+                task_id:    "t1".to_owned(),
+                resumed_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+            }, "task_id"),
+            (OperatorRequest::AbortTask {
+                task_id:    "t1".to_owned(),
+                aborted_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+            }, "task_id"),
+            (OperatorRequest::AbortInitiative {
+                initiative_id: "i1".to_owned(),
+                aborted_by:    "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+            }, "initiative_id"),
+            (OperatorRequest::ApproveEscalation {
+                escalation_id:    "e1".to_owned(),
+                approval_scope:   raxis_types::operator_wire::ApprovalScopeWire {
+                    capability_class:  "WriteSecrets".to_owned(),
+                    max_uses:          1,
+                    valid_for_seconds: 60,
+                },
+                operator_sig_hex: String::new(),
+            }, "escalation_id"),
+            (OperatorRequest::DenyEscalation {
+                escalation_id: "e1".to_owned(),
+                reason:        None,
+            }, "escalation_id"),
+            (OperatorRequest::RotateEpoch {
+                policy_path: "/tmp/p".to_owned(),
+                sig_path:    "/tmp/s".to_owned(),
+            }, "policy_path"),
+        ];
+        for (req, must_have_key) in cases {
+            let op = op_name(&req);
+            let fields = request_context_fields(&req);
+            assert!(
+                fields.iter().any(|(k, _)| *k == must_have_key),
+                "op {op}: extractor must produce key {must_have_key:?}; got {fields:?}",
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — parse_operator_creatable_role
+//
+// These tests pin the wire contract for the `role` field on
+// `OperatorRequest::CreateSession`. The contract is normatively fixed
+// in cli-ceremony.md §4.2 line 300 ("must be the literal string
+// `planner`") and locked in the wire round-trip tests
+// (`raxis_types::operator_wire::tests::create_session_wire_shape` and
+// `raxis_cli::tests::operator_wire_shape::create_session_emits_null_for_unset_optionals`),
+// both of which use lowercase `"planner"`.
+//
+// Pre-fix history: the dispatcher used to match PascalCase
+// `"Planner"`/`"Gateway"`/`"Verifier"` here, which silently rejected
+// every CLI-issued `session create` request with
+// `FAIL_ROLE_NOT_OPERATOR_CREATABLE` because the CLI sends lowercase
+// per the canonical wire shape. This module is the regression net.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod role_parser_tests {
+    use super::*;
+    use crate::authority::session::Role;
+
+    /// **Regression**: the CLI sends `"role": "planner"` (lowercase) —
+    /// the canonical wire shape. The dispatcher MUST accept it and
+    /// resolve it to `Role::Planner`. Pre-fix, this test failed because
+    /// the match arms were PascalCase.
+    #[test]
+    fn accepts_lowercase_planner_per_wire_contract() {
+        let parsed = parse_operator_creatable_role("planner")
+            .expect("lowercase 'planner' is the canonical wire shape per cli-ceremony.md §4.2");
+        assert_eq!(parsed, Role::Planner);
+    }
+
+    /// PascalCase `"Planner"` is NOT the canonical wire shape and must
+    /// be rejected. Accepting it would silently mask casing drift in
+    /// future callers.
+    #[test]
+    fn rejects_pascal_case_planner() {
+        let resp = parse_operator_creatable_role("Planner")
+            .expect_err("PascalCase 'Planner' is not the wire shape; must be rejected");
+        match resp {
+            OperatorResponse::Error { code, detail } => {
+                assert_eq!(code, "FAIL_ROLE_NOT_OPERATOR_CREATABLE");
+                assert!(
+                    detail.contains("'Planner'"),
+                    "detail must echo the offending role string for debuggability; got {detail:?}",
+                );
+            }
+            other => panic!("expected OperatorResponse::Error, got {other:?}"),
+        }
+    }
+
+    /// Per spec (kernel-core.md §`handle_create_session` step 1):
+    /// gateway and verifier sessions are minted by kernel-internal
+    /// spawn paths (`spawn_gateway` / `spawn_verifier`) and MUST NOT be
+    /// reachable through operator IPC, regardless of casing.
+    #[test]
+    fn rejects_gateway_role_even_in_lowercase() {
+        let resp = parse_operator_creatable_role("gateway")
+            .expect_err("'gateway' is kernel-spawned, never operator-creatable");
+        match resp {
+            OperatorResponse::Error { code, .. } => {
+                assert_eq!(code, "FAIL_ROLE_NOT_OPERATOR_CREATABLE")
+            }
+            other => panic!("expected OperatorResponse::Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_verifier_role_even_in_lowercase() {
+        let resp = parse_operator_creatable_role("verifier")
+            .expect_err("'verifier' is kernel-spawned, never operator-creatable");
+        match resp {
+            OperatorResponse::Error { code, .. } => {
+                assert_eq!(code, "FAIL_ROLE_NOT_OPERATOR_CREATABLE")
+            }
+            other => panic!("expected OperatorResponse::Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_role_string() {
+        let resp = parse_operator_creatable_role("garbage")
+            .expect_err("unknown role strings must be rejected");
+        match resp {
+            OperatorResponse::Error { code, detail } => {
+                assert_eq!(code, "FAIL_ROLE_NOT_OPERATOR_CREATABLE");
+                assert!(
+                    detail.contains("'garbage'"),
+                    "detail must echo the offending role string; got {detail:?}",
+                );
+            }
+            other => panic!("expected OperatorResponse::Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_empty_role_string() {
+        let resp = parse_operator_creatable_role("")
+            .expect_err("empty role string must be rejected");
+        match resp {
+            OperatorResponse::Error { code, .. } => {
+                assert_eq!(code, "FAIL_ROLE_NOT_OPERATOR_CREATABLE")
+            }
+            other => panic!("expected OperatorResponse::Error, got {other:?}"),
+        }
+    }
+
+    /// Pin the outbound wire shape for `OperatorResponse::SessionCreated`.
+    /// The CLI doesn't currently read this field (it hardcodes `"planner"`
+    /// in display), but the wire round-trip fixture in
+    /// `raxis_types::operator_wire` uses lowercase, and any future
+    /// consumer (including the SDK) that round-trips a captured response
+    /// MUST see the canonical lowercase string.
+    #[test]
+    fn wire_role_str_emits_canonical_lowercase_for_planner() {
+        assert_eq!(wire_role_str(&Role::Planner), "planner");
+    }
+
+    /// Defensive: gateway/verifier should never appear in a
+    /// `SessionCreated` response (they aren't operator-creatable),
+    /// but the helper must still emit the wire-canonical lowercase
+    /// form if it ever gets called. This avoids any path where
+    /// internal code accidentally reuses `Role::as_str()` (PascalCase
+    /// SQL form) for a wire-shaped output.
+    #[test]
+    fn wire_role_str_emits_canonical_lowercase_for_gateway_and_verifier() {
+        assert_eq!(wire_role_str(&Role::Gateway),  "gateway");
+        assert_eq!(wire_role_str(&Role::Verifier), "verifier");
+    }
+
+    /// Cross-shape invariant: whatever the inbound parser accepts,
+    /// the outbound formatter must emit byte-for-byte. This pins
+    /// "planner-in / planner-out" symmetry so a hypothetical future
+    /// alias (e.g. accepting "Planner" for back-compat) cannot
+    /// accidentally produce a different outbound string.
+    #[test]
+    fn wire_role_string_round_trips_through_parse_and_format() {
+        let inbound = "planner";
+        let parsed = parse_operator_creatable_role(inbound)
+            .expect("'planner' must parse");
+        assert_eq!(
+            wire_role_str(&parsed),
+            inbound,
+            "outbound wire string must equal the inbound canonical form",
+        );
+    }
+}

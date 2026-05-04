@@ -346,6 +346,43 @@ pub enum AuditEventKind {
         event_kind: String,
         reason:     String,
     },
+
+    // --- Read-only CLI: redaction reveal (cli-readonly.md §5.4.2 / §5.7.2) ---
+    /// Emitted by the read-only CLI when an operator runs a command
+    /// with `--reveal-paths` (or any future redaction-bypass flag).
+    /// This is the **only** audit event the read-only CLI is allowed
+    /// to write into the chain — see cli-readonly.md §5.7.3.
+    ///
+    /// Recording the read makes path-list disclosure observable
+    /// without forbidding it: operators can still debug, but they
+    /// leave a trace in the same hash-chained log as every kernel
+    /// state mutation.
+    ///
+    /// Field semantics:
+    ///   * `actor`   — who triggered the reveal. The CLI uses the
+    ///     operator's pubkey fingerprint (32 hex chars, matches the
+    ///     `[meta].signed_by` form in `policy.toml`) when an
+    ///     `--operator-key` is supplied; otherwise falls back to
+    ///     `cli:<unix-user>`.
+    ///   * `table`   — logical table the data came from
+    ///     (e.g. `"task_plan_fields"`).
+    ///   * `column`  — which redacted column was revealed
+    ///     (e.g. `"path_allowlist"`, `"path_export_globs"`, or the
+    ///     synthetic `"all"` for a whole-row reveal).
+    ///   * `command` — the CLI invocation that triggered the reveal,
+    ///     stored as a short, stable string (e.g. `"inspect"`).
+    ///
+    /// The companion `task_id` foreign-key column on `AuditEvent`
+    /// carries the task whose paths were revealed; this payload
+    /// duplicates it so log readers don't have to project two fields
+    /// to surface the read target in JSON output.
+    PathReadAccessed {
+        actor:    String,
+        table:    String,
+        column:   String,
+        task_id:  String,
+        command:  String,
+    },
 }
 
 impl AuditEventKind {
@@ -390,6 +427,65 @@ impl AuditEventKind {
             Self::GatewayQuarantined { .. } => "GatewayQuarantined",
             Self::GatewaySignalFailed { .. } => "GatewaySignalFailed",
             Self::NotificationDeliveryFailed { .. } => "NotificationDeliveryFailed",
+            Self::PathReadAccessed { .. } => "PathReadAccessed",
+        }
+    }
+}
+
+#[cfg(test)]
+mod path_read_accessed_tests {
+    use super::*;
+
+    #[test]
+    fn path_read_accessed_kind_string_matches_variant_name() {
+        let kind = AuditEventKind::PathReadAccessed {
+            actor:   "fp-7d2c00".to_owned(),
+            table:   "task_plan_fields".to_owned(),
+            column:  "path_allowlist".to_owned(),
+            task_id: "task-001".to_owned(),
+            command: "inspect".to_owned(),
+        };
+        assert_eq!(kind.as_str(), "PathReadAccessed");
+    }
+
+    #[test]
+    fn path_read_accessed_serialises_with_kind_tag_and_all_fields() {
+        let kind = AuditEventKind::PathReadAccessed {
+            actor:   "fp-7d2c00".to_owned(),
+            table:   "task_plan_fields".to_owned(),
+            column:  "path_allowlist".to_owned(),
+            task_id: "task-001".to_owned(),
+            command: "inspect".to_owned(),
+        };
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("PathReadAccessed"));
+        assert_eq!(v["actor"], serde_json::json!("fp-7d2c00"));
+        assert_eq!(v["table"], serde_json::json!("task_plan_fields"));
+        assert_eq!(v["column"], serde_json::json!("path_allowlist"));
+        assert_eq!(v["task_id"], serde_json::json!("task-001"));
+        assert_eq!(v["command"], serde_json::json!("inspect"));
+    }
+
+    #[test]
+    fn path_read_accessed_round_trips_through_json() {
+        let kind = AuditEventKind::PathReadAccessed {
+            actor:   "cli:alice".to_owned(),
+            table:   "task_plan_fields".to_owned(),
+            column:  "path_export_globs".to_owned(),
+            task_id: "t-42".to_owned(),
+            command: "inspect".to_owned(),
+        };
+        let s    = serde_json::to_string(&kind).unwrap();
+        let back: AuditEventKind = serde_json::from_str(&s).unwrap();
+        match back {
+            AuditEventKind::PathReadAccessed { actor, table, column, task_id, command } => {
+                assert_eq!(actor,   "cli:alice");
+                assert_eq!(table,   "task_plan_fields");
+                assert_eq!(column,  "path_export_globs");
+                assert_eq!(task_id, "t-42");
+                assert_eq!(command, "inspect");
+            }
+            other => panic!("expected PathReadAccessed; got {other:?}"),
         }
     }
 }

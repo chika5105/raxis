@@ -67,6 +67,7 @@ pub mod budget;
 pub mod escalations;
 pub mod initiatives;
 pub mod kernel_meta;
+pub mod plan_fields;
 pub mod policy_history;
 pub mod sessions;
 pub mod tasks;
@@ -79,6 +80,7 @@ pub use budget::{LaneBudgetRow, ReservationRow};
 pub use escalations::{EscalationRow, EscalationStatusFilter};
 pub use initiatives::{InitiativeRow, InitiativeStateCounts};
 pub use kernel_meta::{KernelMeta, KernelMetaError};
+pub use plan_fields::{reveal_for_task as reveal_plan_fields_for_task, PlanFieldsError, PlanPathFields};
 pub use policy_history::PolicyEpochRow;
 pub use sessions::{SessionRow, SessionStateCounts};
 pub use tasks::{

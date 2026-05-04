@@ -539,19 +539,56 @@ pub struct ChainStats {
 /// [`ChainReadError`] encountered. Stops on first error — the
 /// invariant is "intact OR not", not "many independent errors".
 pub fn verify_chain_full(audit_dir: &Path) -> Result<ChainStats, ChainReadError> {
+    verify_chain_from(audit_dir, 0)
+}
+
+/// Like [`verify_chain_full`] but report stats for the slice
+/// `seq >= from_seq`. The full chain is **still walked end-to-end**
+/// — `prev_sha256` linkage and seq monotonicity are global
+/// invariants, so any pre-`from_seq` break still fails the verdict.
+/// What `from_seq` controls is the SCOPE OF THE STATS RETURNED:
+///
+///   * `total_records` — number of records with `seq >= from_seq`.
+///   * `last_seq`      — the highest `seq` observed (always ≥
+///     `from_seq` when the chain has any records past that point;
+///     equals `from_seq.saturating_sub(1)` when the chain ends
+///     before `from_seq`).
+///   * `segment_count` — number of segment files contributing
+///     records with `seq >= from_seq` (NOT the total segment count
+///     in the directory).
+///
+/// `from_seq = 0` is byte-identical to [`verify_chain_full`] —
+/// that's how `verify_chain_full` is now defined.
+///
+/// Spec reference: cli-readonly.md §5.5.13 ("--from <seq> — start
+/// from the given seq (default 0)"). The spec leaves the
+/// interpretation of "start" to the implementor; this implementation
+/// is **pre-anchored**: chain integrity is verified from segment
+/// zero so the operator cannot miss a corruption that occurred
+/// before their slice window. The output reports only the slice the
+/// operator asked about, but the verdict reflects the whole chain.
+pub fn verify_chain_from(audit_dir: &Path, from_seq: u64) -> Result<ChainStats, ChainReadError> {
     let reader = ChainReader::open(audit_dir)?;
-    let segment_count = reader.segment_count();
     let mut total = 0u64;
-    let mut last_seq = 0u64;
+    let mut last_seq: Option<u64> = None;
+    let mut segments_in_slice: std::collections::BTreeSet<PathBuf> =
+        std::collections::BTreeSet::new();
     for rec in reader.records() {
         let r = rec?;
-        last_seq = r.seq;
-        total = total.saturating_add(1);
+        if r.seq >= from_seq {
+            last_seq = Some(r.seq);
+            total = total.saturating_add(1);
+            segments_in_slice.insert(r.segment_path.clone());
+        }
     }
     Ok(ChainStats {
         total_records: total,
-        last_seq,
-        segment_count,
+        // When the slice is empty, `last_seq` defaults to
+        // `from_seq.saturating_sub(1)` so a stats consumer can
+        // always read it as "highest seq ≤ this is the requested
+        // window's lower-bound predecessor".
+        last_seq:      last_seq.unwrap_or_else(|| from_seq.saturating_sub(1)),
+        segment_count: segments_in_slice.len(),
     })
 }
 
@@ -797,5 +834,112 @@ mod tests {
             ChainReader::open(tmp.path()).unwrap().records().collect::<Result<_, _>>().unwrap();
         // The KernelStarted record carries payload.data_dir.
         assert_eq!(recs[1].payload_str("data_dir"), Some("/tmp/raxis"));
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // verify_chain_from — slice-stats variant
+    // ────────────────────────────────────────────────────────────
+
+    /// Helper: build a four-record chain (seq 0..=3) that
+    /// `verify_chain_from` can slice. The chain is computed by
+    /// hand-hashing each line so we exercise the same byte
+    /// canonicalisation the production walker uses.
+    fn write_four_record_chain(audit_dir: &Path) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let mut prev_sha = GENESIS_PREV_SHA256_LITERAL.to_owned();
+        for seq in 0..4u64 {
+            let line = serde_json::json!({
+                "seq": seq,
+                "event_kind": if seq == 0 { "GenesisRecord" } else { "KernelStarted" },
+                "prev_sha256": prev_sha,
+                "emitted_at": 1_700_000_000_i64 + seq as i64,
+            }).to_string();
+            let with_nl = format!("{line}\n");
+            let mut h = Sha256::new();
+            h.update(with_nl.as_bytes());
+            prev_sha = hex::encode(h.finalize());
+            lines.push(line);
+        }
+        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        write_segment(audit_dir, 0, &body);
+        lines
+    }
+
+    #[test]
+    fn verify_chain_from_zero_matches_verify_chain_full_byte_for_byte() {
+        let tmp = TempDir::new().unwrap();
+        write_four_record_chain(tmp.path());
+        let full = verify_chain_full(tmp.path()).expect("full");
+        let from_zero = verify_chain_from(tmp.path(), 0).expect("from-zero");
+        assert_eq!(full, from_zero,
+            "verify_chain_from(0) MUST be identical to verify_chain_full");
+    }
+
+    #[test]
+    fn verify_chain_from_returns_only_records_at_or_above_seq() {
+        let tmp = TempDir::new().unwrap();
+        write_four_record_chain(tmp.path());
+
+        // from=2 → records {seq=2, seq=3} → total=2, last_seq=3.
+        let stats = verify_chain_from(tmp.path(), 2).expect("from=2");
+        assert_eq!(stats.total_records, 2);
+        assert_eq!(stats.last_seq, 3);
+        assert_eq!(stats.segment_count, 1);
+    }
+
+    #[test]
+    fn verify_chain_from_past_the_end_returns_empty_slice_with_pre_seq_marker() {
+        let tmp = TempDir::new().unwrap();
+        write_four_record_chain(tmp.path());
+
+        // from=99 → no records in slice. Total=0, last_seq=98 (the
+        // "highest seq ≤ this is the requested window's lower-bound
+        // predecessor" contract from the helper docs). segment_count=0
+        // because no segments contributed records to the slice.
+        let stats = verify_chain_from(tmp.path(), 99).expect("from=99");
+        assert_eq!(stats.total_records, 0);
+        assert_eq!(stats.last_seq, 98);
+        assert_eq!(stats.segment_count, 0);
+    }
+
+    #[test]
+    fn verify_chain_from_zero_with_empty_chain_uses_saturating_sub_one() {
+        // No records at all → from=0 → last_seq must be 0
+        // (saturating_sub on 0 is 0). Pinning this guards against
+        // an underflow regression.
+        let tmp = TempDir::new().unwrap();
+        // Need at least one segment file for `ChainReader::open`
+        // not to error with `NoSegments`. An empty segment is fine.
+        write_segment(tmp.path(), 0, "");
+        let stats = verify_chain_from(tmp.path(), 0).expect("empty chain");
+        assert_eq!(stats.total_records, 0);
+        assert_eq!(stats.last_seq, 0);
+        assert_eq!(stats.segment_count, 0);
+    }
+
+    #[test]
+    fn verify_chain_from_still_walks_chain_to_anchor_linkage_before_slice() {
+        // The slice starts at seq=3, but the chain BEFORE that has
+        // a corruption. The verdict MUST still be the chain-break
+        // error, NOT a clean stats response — chain integrity is a
+        // global invariant.
+        let tmp = TempDir::new().unwrap();
+        // Genesis with intact link.
+        let line0 = serde_json::json!({
+            "seq": 0,
+            "event_kind": "GenesisRecord",
+            "prev_sha256": GENESIS_PREV_SHA256_LITERAL,
+        }).to_string();
+        // Second record with a deliberately wrong prev_sha256
+        // (chain break at seq=1).
+        let line1 = serde_json::json!({
+            "seq": 1,
+            "event_kind": "K",
+            "prev_sha256": "deadbeef".repeat(8),
+        }).to_string();
+        write_segment(tmp.path(), 0, &format!("{line0}\n{line1}\n"));
+
+        let err = verify_chain_from(tmp.path(), 3).expect_err("must fail-close");
+        assert!(matches!(err, ChainReadError::ChainBreak { .. }), "got: {err:?}");
     }
 }

@@ -576,6 +576,7 @@ dependencies = [
  "raxis-runtime",
  "raxis-store",
  "raxis-types",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -708,6 +709,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "uuid",
 ]
 

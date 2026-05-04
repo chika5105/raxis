@@ -62,3 +62,7 @@ tempfile     = "3"
 # audit segment that exercises the audit-tools chain reader's
 # prev_sha256 link verification end-to-end.
 sha2         = { workspace = true }
+# Used by `reveal::tests` to seed a `kernel.db` with a fixture
+# initiative + signed_plan_artifacts row so the audit-on-reveal
+# path can be exercised end-to-end without standing up the kernel.
+rusqlite     = { workspace = true }

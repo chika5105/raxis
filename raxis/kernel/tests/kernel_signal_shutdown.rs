@@ -162,8 +162,13 @@ impl KernelHandle {
         self.child.id() as i32
     }
 
-    /// Block until the kernel logs "sockets bound" or `deadline` elapses.
-    /// Returns true on observation, false on timeout.
+    /// Block until the kernel logs the `sockets_bound` event or
+    /// `deadline` elapses. Returns true on observation, false on
+    /// timeout.
+    ///
+    /// **Wire-shape note:** matches the post-refactor structured log
+    /// shape `{"event":"sockets_bound", "module":"ipc.server", ...}`
+    /// emitted by `ipc::server::server_log::sockets_bound`.
     fn wait_for_ready(&self, deadline: Duration) -> bool {
         let start = Instant::now();
         while start.elapsed() < deadline {
@@ -172,7 +177,7 @@ impl KernelHandle {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|l| l.contains("\"message\":\"sockets bound\""))
+                .any(|l| l.contains("\"event\":\"sockets_bound\""))
             {
                 return true;
             }
@@ -246,7 +251,7 @@ fn sigterm_triggers_graceful_shutdown_and_kernel_stopped_audit() {
     // Wait for the kernel to bind sockets — it is now in the dispatch loop.
     assert!(
         kernel.wait_for_ready(Duration::from_secs(10)),
-        "kernel never reported 'sockets bound' within 10s; stderr:\n{}",
+        "kernel never reported 'sockets_bound' within 10s; stderr:\n{}",
         kernel.captured_stderr(),
     );
 
@@ -300,7 +305,7 @@ fn sigint_also_triggers_graceful_shutdown_with_distinct_audit_reason() {
 
     assert!(
         kernel.wait_for_ready(Duration::from_secs(10)),
-        "kernel never reported 'sockets bound' within 10s; stderr:\n{}",
+        "kernel never reported 'sockets_bound' within 10s; stderr:\n{}",
         kernel.captured_stderr(),
     );
 

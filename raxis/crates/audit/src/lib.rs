@@ -24,9 +24,9 @@ pub mod writer;
 pub use event::{AuditEvent, AuditEventKind};
 pub use genesis::{write_genesis_segment, GenesisWriteError};
 pub use reader::{
-    quick_chain_check, verify_chain_full, ChainQuickCheck, ChainReadError, ChainReader,
-    ChainRecord, ChainStats, AUDIT_DIR_NAME, GENESIS_PREV_SHA256_LITERAL, SEGMENT_PREFIX,
-    SEGMENT_SUFFIX,
+    quick_chain_check, verify_chain_from, verify_chain_full, ChainQuickCheck, ChainReadError,
+    ChainReader, ChainRecord, ChainStats, AUDIT_DIR_NAME, GENESIS_PREV_SHA256_LITERAL,
+    SEGMENT_PREFIX, SEGMENT_SUFFIX,
 };
 pub use sink::{AuditSink, CapturedEvent, FakeAuditSink, FileAuditSink};
 pub use writer::{last_chain_state, AuditWriter, AuditWriterError, ChainResumeInfo};
