@@ -222,25 +222,122 @@ The CLI commands read through the Kernel's query API.
 
 ## 5. Retention Policy
 
-By default, artifacts are retained indefinitely — the immutability guarantee is
-strongest when nothing is ever deleted. For deployments with storage constraints,
-a retention window may be configured:
+By default, artifacts are retained indefinitely. The default value for every retention
+field is `"infinity"` — an explicit, unambiguous declaration that the artifact lives
+forever.
 
 ```toml
 # policy.toml
 
 [artifact_retention]
-policy_bundles_days = 0    # 0 = retain forever (default)
-plans_days          = 0    # 0 = retain forever (default)
-keys_days           = 0    # 0 = retain forever (recommended — needed for signature verification)
+policy_bundles = "infinity"   # default — retain all policy bundles forever
+plans          = "infinity"   # default — retain all approved plans forever
+keys           = "infinity"   # default — retain all operator keys forever (strongly recommended)
 ```
 
-`0` means indefinite retention. Non-zero values enable garbage collection of artifacts
-older than the specified window. **Key artifacts should never be deleted** — a key
-deleted before all signatures made under it have been verified breaks the audit chain.
-The Kernel enforces: `keys_days` cannot be set to a non-zero value if any plan or policy
-artifact references a key fingerprint and the artifact itself would be retained beyond
-the key's deletion window.
+For deployments with storage constraints, a specific retention window may be configured
+using a positive integer (number of days):
+
+```toml
+[artifact_retention]
+policy_bundles = 3650    # retain for 10 years
+plans          = 3650    # retain for 10 years
+keys           = "infinity"   # keys should never be deleted — see safety constraint below
+```
+
+### Rust Type — `RetentionDays`
+
+The TOML value is parsed into a Rust enum that makes invalid states unrepresentable.
+The value `0` is not a valid `RetentionDays` — it is rejected at the serde deserialization
+layer before it reaches any Kernel logic. An operator who types `plans = 0` gets a parse
+error at `raxis policy push` time, not a silent "retain zero days" behavior.
+
+```rust
+/// Retention window for a class of artifacts.
+///
+/// Serialization:
+///   "infinity"         → RetentionDays::Forever
+///   <positive integer> → RetentionDays::Days(NonZeroU64)
+///   0                  → parse error (serde rejects before reaching kernel logic)
+///   negative integer   → parse error
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RetentionDays {
+    /// Retain indefinitely. No garbage collection runs for this artifact class.
+    Forever,
+    /// Retain for exactly N days. N must be ≥ 1.
+    Days(NonZeroU64),
+}
+
+impl<'de> Deserialize<'de> for RetentionDays {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Str(String),
+            Int(i64),
+        }
+
+        match Raw::deserialize(d)? {
+            Raw::Str(s) if s == "infinity" => Ok(RetentionDays::Forever),
+            Raw::Str(s) => Err(D::Error::custom(format!(
+                "invalid retention value {:?}: expected "infinity" or a positive integer",
+                s
+            ))),
+            Raw::Int(n) if n <= 0 => Err(D::Error::custom(format!(
+                "invalid retention value {}: must be a positive integer (≥ 1) or "infinity".                  Use "infinity" to retain forever.",
+                n
+            ))),
+            Raw::Int(n) => Ok(RetentionDays::Days(
+                NonZeroU64::new(n as u64).expect("checked above"),
+            )),
+        }
+    }
+}
+
+impl Default for RetentionDays {
+    fn default() -> Self {
+        RetentionDays::Forever   // "infinity" is the default for all retention fields
+    }
+}
+```
+
+```rust
+// crates/policy/src/bundle.rs
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ArtifactRetention {
+    #[serde(default)]
+    pub policy_bundles: RetentionDays,   // default: Forever
+
+    #[serde(default)]
+    pub plans: RetentionDays,            // default: Forever
+
+    #[serde(default)]
+    pub keys: RetentionDays,             // default: Forever
+}
+```
+
+### Safety Constraint on Key Retention
+
+**Key artifacts should never be deleted.** An operator key that is deleted before all
+plan and policy artifacts signed by it are also deleted breaks the audit chain — historical
+signatures become unverifiable.
+
+The Kernel enforces this at `raxis policy push` time: if `keys` is set to `Days(N)`,
+the Kernel checks that `policy_bundles` and `plans` are also set to `Days(M)` where
+`M ≤ N`. If any plan or policy artifact would outlive the key used to sign it, the push
+is rejected:
+
+```
+ERROR: artifact_retention.keys = 365 (days) is shorter than artifact_retention.plans = "infinity".
+Plans retained longer than the key used to sign them cannot be re-verified.
+Set keys = "infinity" or reduce plans retention to ≤ 365 days.
+```
+
+The recommended posture is `keys = "infinity"` always.
 
 ---
 
