@@ -144,6 +144,7 @@ mod tests {
     /// is created with explicit timestamps so the test does not race
     /// the wall clock.
     fn fresh_store_with_seed_sessions() -> TempDir {
+        const SESSIONS: &str = Table::Sessions.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
@@ -152,17 +153,19 @@ mod tests {
         // inside numeric literals (`9_999_999_999` parses as a token,
         // not an integer); spell out big numbers instead.
         guard.execute(
-            "INSERT INTO sessions \
-             (session_id, role_id, session_token, lineage_id, fetch_quota, \
-              created_at, expires_at, revoked) \
-             VALUES \
-             ('s-active',  'planner', 'tok-a', 'lin', 0, 100, 9999999999, 0), \
-             ('s-expired', 'planner', 'tok-e', 'lin', 0, 100, 200,        0), \
-             ('s-revoked', 'planner', 'tok-r', 'lin', 0, 100, 9999999999, 1)",
+            &format!(
+                "INSERT INTO {SESSIONS} \
+                 (session_id, role_id, session_token, lineage_id, fetch_quota, \
+                  created_at, expires_at, revoked) \
+                 VALUES \
+                 ('s-active',  'planner', 'tok-a', 'lin', 0, 100, 9999999999, 0), \
+                 ('s-expired', 'planner', 'tok-e', 'lin', 0, 100, 200,        0), \
+                 ('s-revoked', 'planner', 'tok-r', 'lin', 0, 100, 9999999999, 1)"
+            ),
             [],
         ).unwrap();
         guard.execute(
-            "UPDATE sessions SET revoked_at = 150 WHERE session_id = 's-revoked'",
+            &format!("UPDATE {SESSIONS} SET revoked_at = 150 WHERE session_id = 's-revoked'"),
             [],
         ).unwrap();
         tmp

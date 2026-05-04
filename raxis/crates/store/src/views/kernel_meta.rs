@@ -109,13 +109,16 @@ mod tests {
         // Simulate the kernel's genesis insert (without the full
         // bootstrap ceremony — we just need the row to be there).
         {
+            const POLICY_EPOCH_HISTORY: &str = Table::PolicyEpochHistory.as_str();
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
             guard.execute(
-                "INSERT INTO policy_epoch_history \
-                 (epoch_id, policy_sha256, signed_by_authority, \
-                  triggered_by_operator, advanced_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                &format!(
+                    "INSERT INTO {POLICY_EPOCH_HISTORY} \
+                     (epoch_id, policy_sha256, signed_by_authority, \
+                      triggered_by_operator, advanced_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)"
+                ),
                 rusqlite::params![1_i64, "deadbeef", "fp", "op", 1_700_000_000_i64],
             ).unwrap();
         }

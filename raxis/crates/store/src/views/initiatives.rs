@@ -151,6 +151,7 @@ mod tests {
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
+        const INITIATIVES: &str = Table::Initiatives.as_str();
         for (id, state, created) in [
             ("init-old",   "Completed",    100_i64),
             ("init-mid",   "Executing",    200),
@@ -159,9 +160,11 @@ mod tests {
             ("init-other", "Executing",    250),
         ] {
             guard.execute(
-                "INSERT INTO initiatives \
-                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-                 VALUES (?1, ?2, '{}', 'sha-' || ?1, ?3)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES (?1, ?2, '{{}}', 'sha-' || ?1, ?3)"
+                ),
                 rusqlite::params![id, state, created],
             ).unwrap();
         }

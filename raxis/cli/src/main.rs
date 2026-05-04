@@ -14,6 +14,7 @@
 // Usage:
 //   raxis-cli [--data-dir <path>] [--socket <path>] [--operator-key <path>] <subcommand>
 
+mod closeness;
 mod commands;
 mod conn;
 mod errors;
@@ -22,7 +23,44 @@ mod signing;
 
 use std::path::PathBuf;
 
+use closeness::unknown_with_suggestion;
 use errors::CliError;
+
+// ---------------------------------------------------------------------------
+// Canonical subcommand catalog
+//
+// Single source of truth for the closeness-suggestion ("did you mean")
+// machinery. Every `match` arm in `run` MUST appear in this catalog
+// (and vice versa) so an unknown-subcommand error can produce
+// useful guidance instead of a bare "unknown subcommand: ..." line.
+//
+// The two consistency tests at the bottom of this file
+// (`top_level_catalog_matches_run_dispatch` and the per-subcommand
+// `*_catalog_matches_run_dispatch` tests) hard-fail when the catalog
+// drifts from the dispatcher.
+// ---------------------------------------------------------------------------
+
+const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
+    "genesis", "policy", "plan", "initiative", "operator", "task", "session",
+    "delegation", "escalation", "epoch", "audit", "cert",
+    "status", "log", "verify-chain", "queue", "inspect", "sessions",
+    "escalations", "inbox", "doctor", "verifiers", "witnesses", "budget",
+    "explain", "top",
+];
+
+const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
+const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject"];
+const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "quarantine"];
+const OPERATOR_SUBCOMMANDS:    &[&str] = &["quarantine-plans-by"];
+const TASK_SUBCOMMANDS:        &[&str] = &["abort", "resume", "retry"];
+const SESSION_SUBCOMMANDS:     &[&str] = &["create", "revoke"];
+const DELEGATION_SUBCOMMANDS:  &[&str] = &["grant"];
+const ESCALATION_SUBCOMMANDS:  &[&str] = &["approve", "deny"];
+const EPOCH_SUBCOMMANDS:       &[&str] = &["advance"];
+const AUDIT_SUBCOMMANDS:       &[&str] = &["verify"];
+const CERT_SUBCOMMANDS:        &[&str] = &[
+    "mint", "mint-emergency", "show", "verify", "list", "install",
+];
 
 // ---------------------------------------------------------------------------
 // Global CLI flags
@@ -116,7 +154,9 @@ fn run() -> Result<(), CliError> {
                 "sign" => commands::policy::run_sign(&flags, &rest[1..]),
                 "show" => commands::policy_show::run(&flags, &rest[1..]),
                 "diff" => commands::policy_diff::run(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!("unknown policy sub-command: {sub2:?}"))),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "policy sub-command", sub2, POLICY_SUBCOMMANDS,
+                ))),
             }
         }
         "plan" => {
@@ -125,7 +165,9 @@ fn run() -> Result<(), CliError> {
                 "submit" => commands::plan::run_submit(&flags, &rest[1..]),
                 "approve" => commands::plan::run_approve(&flags, &rest[1..]),
                 "reject" => commands::plan::run_reject(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!("unknown plan sub-command: {sub2:?}"))),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "plan sub-command", sub2, PLAN_SUBCOMMANDS,
+                ))),
             }
         }
         "initiative" => {
@@ -133,8 +175,8 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "abort"      => commands::initiative::run_abort(&flags, &rest[1..]),
                 "quarantine" => commands::initiative::run_quarantine(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!(
-                    "unknown initiative sub-command: {sub2:?}"
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "initiative sub-command", sub2, INITIATIVE_SUBCOMMANDS,
                 ))),
             }
         }
@@ -144,8 +186,8 @@ fn run() -> Result<(), CliError> {
                 "quarantine-plans-by" => {
                     commands::operator::run_quarantine_plans_by(&flags, &rest[1..])
                 }
-                _ => Err(CliError::Usage(format!(
-                    "unknown operator sub-command: {sub2:?}"
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "operator sub-command", sub2, OPERATOR_SUBCOMMANDS,
                 ))),
             }
         }
@@ -155,7 +197,9 @@ fn run() -> Result<(), CliError> {
                 "abort" => commands::task::run_abort(&flags, &rest[1..]),
                 "resume" => commands::task::run_resume(&flags, &rest[1..]),
                 "retry" => commands::task::run_retry(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!("unknown task sub-command: {sub2:?}"))),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "task sub-command", sub2, TASK_SUBCOMMANDS,
+                ))),
             }
         }
         "session" => {
@@ -163,8 +207,8 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "create" => commands::session::run_create(&flags, &rest[1..]),
                 "revoke" => commands::session::run_revoke(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!(
-                    "unknown session sub-command: {sub2:?}"
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "session sub-command", sub2, SESSION_SUBCOMMANDS,
                 ))),
             }
         }
@@ -172,8 +216,8 @@ fn run() -> Result<(), CliError> {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
                 "grant" => commands::delegation::run_grant(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!(
-                    "unknown delegation sub-command: {sub2:?}"
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "delegation sub-command", sub2, DELEGATION_SUBCOMMANDS,
                 ))),
             }
         }
@@ -182,8 +226,8 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "approve" => commands::escalation::run_approve(&flags, &rest[1..]),
                 "deny" => commands::escalation::run_deny(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!(
-                    "unknown escalation sub-command: {sub2:?}"
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "escalation sub-command", sub2, ESCALATION_SUBCOMMANDS,
                 ))),
             }
         }
@@ -191,14 +235,18 @@ fn run() -> Result<(), CliError> {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
                 "advance" => commands::epoch::run_advance(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!("unknown epoch sub-command: {sub2:?}"))),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "epoch sub-command", sub2, EPOCH_SUBCOMMANDS,
+                ))),
             }
         }
         "audit" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
                 "verify" => commands::audit::run_verify(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!("unknown audit sub-command: {sub2:?}"))),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "audit sub-command", sub2, AUDIT_SUBCOMMANDS,
+                ))),
             }
         }
         "cert" => {
@@ -210,7 +258,9 @@ fn run() -> Result<(), CliError> {
                 "verify"         => commands::cert::run_verify(&flags, &rest[1..]),
                 "list"           => commands::cert::run_list(&flags, &rest[1..]),
                 "install"        => commands::cert::run_install(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(format!("unknown cert sub-command: {sub2:?}"))),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "cert sub-command", sub2, CERT_SUBCOMMANDS,
+                ))),
             }
         }
         "status" => commands::status::run(&flags, rest),
@@ -231,7 +281,9 @@ fn run() -> Result<(), CliError> {
             print_help();
             Ok(())
         }
-        other => Err(CliError::Usage(format!("unknown subcommand: {other:?}"))),
+        other => Err(CliError::Usage(unknown_with_suggestion(
+            "subcommand", other, TOP_LEVEL_SUBCOMMANDS,
+        ))),
     }
 }
 
@@ -403,4 +455,254 @@ READ-ONLY OBSERVATION:
         disables ANSI clear-screen for log-friendly output.
 "#
     );
+}
+
+// ---------------------------------------------------------------------------
+// Catalog ↔ dispatcher consistency tests
+//
+// These tests exist purely to catch drift between the
+// `*_SUBCOMMANDS` constants used for "did you mean" closeness
+// suggestions and the `match` arms in `run`. If a new arm is added
+// without updating the constant (or vice-versa), the CLI would print
+// misleading suggestions ("did you mean `mint`?" when the dispatcher
+// has actually been renamed to `issue`) — which is worse than no
+// suggestion at all.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod catalog_consistency_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    /// Resolve `cli/src/main.rs` from `CARGO_MANIFEST_DIR` so the
+    /// tests work regardless of the workspace test runner's CWD.
+    fn main_rs_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("main.rs")
+    }
+
+    /// Source of truth: scrape the literal arm-strings out of the
+    /// `match subcmd` in `fn run(...)` from this very file.
+    ///
+    /// We deliberately do NOT parse Rust syntax — a regex over the
+    /// raw source is sufficient because every dispatcher arm in
+    /// `run` follows the convention `"<name>" => commands::...` or
+    /// `"<name>" => { ... }`.
+    fn dispatcher_top_level_arms() -> BTreeSet<String> {
+        let src = fs::read_to_string(main_rs_path())
+            .expect("read main.rs source for catalog drift check");
+        // Extract the `fn run` body to avoid catching arms from nested
+        // inner `match`es when scanning the whole file.
+        let run_body = extract_block(&src, "fn run(args: &[String]) -> Result")
+            .or_else(|| extract_block(&src, "fn run() -> Result"))
+            .unwrap_or_else(|| src.clone());
+        // Top-level arms are those at the outermost `match subcmd`.
+        // We approximate: take string literals immediately preceding
+        // `=>` that are NOT preceded by another `match` keyword on
+        // the same line. The catalog test below catches false
+        // positives for us.
+        scrape_arms(&run_body)
+    }
+
+    /// Extract a balanced-brace block immediately following the
+    /// signature substring `needle`.
+    fn extract_block(src: &str, needle: &str) -> Option<String> {
+        let start = src.find(needle)?;
+        let body_start = src[start..].find('{').map(|o| start + o)?;
+        let mut depth = 0;
+        for (i, c) in src[body_start..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(src[body_start..=body_start + i].to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Returns the set of literal arm names found in the OUTERMOST
+    /// `match` of the block.
+    fn scrape_arms(block: &str) -> BTreeSet<String> {
+        // Find the outermost `match subcmd {` and bound the scan there.
+        let Some(match_at) = block.find("match subcmd {") else {
+            return BTreeSet::new();
+        };
+        let after_match = &block[match_at + "match subcmd {".len()..];
+        let Some(body) = balanced_match_body(after_match) else {
+            return BTreeSet::new();
+        };
+        // Only collect arms at brace-depth 0 within the match body so
+        // we don't pick up inner `match sub2` arms.
+        let mut out = BTreeSet::new();
+        let mut depth = 0usize;
+        let mut chars = body.char_indices().peekable();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                '"' if depth == 0 => {
+                    let start = i + 1;
+                    let mut end = start;
+                    for (j, cc) in body[start..].char_indices() {
+                        if cc == '"' && !body[start..start + j].ends_with('\\') {
+                            end = start + j;
+                            break;
+                        }
+                    }
+                    let lit = &body[start..end];
+                    let after = body[end + 1..].trim_start();
+                    if after.starts_with("=>") || after.starts_with("|") {
+                        if !lit.is_empty()
+                            && lit != "--help"
+                            && lit != "-h"
+                            && !lit.contains(' ')
+                        {
+                            out.insert(lit.to_owned());
+                        }
+                    }
+                    while let Some(&(_, ch)) = chars.peek() {
+                        if ch == '"' { chars.next(); break; }
+                        chars.next();
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn balanced_match_body(src: &str) -> Option<&str> {
+        let mut depth = 1usize;
+        for (i, c) in src.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&src[..i]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn top_level_catalog_matches_dispatcher_arms() {
+        let from_dispatcher = dispatcher_top_level_arms();
+        let from_catalog: BTreeSet<String> = TOP_LEVEL_SUBCOMMANDS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        let only_in_dispatcher: Vec<&String> =
+            from_dispatcher.difference(&from_catalog).collect();
+        let only_in_catalog: Vec<&String> =
+            from_catalog.difference(&from_dispatcher).collect();
+        assert!(
+            only_in_dispatcher.is_empty() && only_in_catalog.is_empty(),
+            "TOP_LEVEL_SUBCOMMANDS drift!\n  in dispatcher only: {only_in_dispatcher:?}\n  in catalog only:    {only_in_catalog:?}"
+        );
+    }
+
+    /// Static spot-check that every per-parent catalog has at least
+    /// one entry — guarantees the closeness machinery has SOMETHING
+    /// to suggest from for every parent command.
+    #[test]
+    fn per_parent_catalogs_are_non_empty() {
+        for (name, list) in [
+            ("policy",     POLICY_SUBCOMMANDS),
+            ("plan",       PLAN_SUBCOMMANDS),
+            ("initiative", INITIATIVE_SUBCOMMANDS),
+            ("operator",   OPERATOR_SUBCOMMANDS),
+            ("task",       TASK_SUBCOMMANDS),
+            ("session",    SESSION_SUBCOMMANDS),
+            ("delegation", DELEGATION_SUBCOMMANDS),
+            ("escalation", ESCALATION_SUBCOMMANDS),
+            ("epoch",      EPOCH_SUBCOMMANDS),
+            ("audit",      AUDIT_SUBCOMMANDS),
+            ("cert",       CERT_SUBCOMMANDS),
+        ] {
+            assert!(!list.is_empty(), "{name}_SUBCOMMANDS is empty");
+        }
+    }
+
+    /// Walks the same source file and verifies that every per-parent
+    /// catalog contains exactly the literal arm names dispatched
+    /// inside that parent's `match sub2` block.
+    #[test]
+    fn per_parent_catalogs_match_dispatcher_arms() {
+        let src = fs::read_to_string(main_rs_path()).expect("read main.rs source");
+
+        let pairs: &[(&str, &[&str])] = &[
+            ("\"policy\" =>",     POLICY_SUBCOMMANDS),
+            ("\"plan\" =>",       PLAN_SUBCOMMANDS),
+            ("\"initiative\" =>", INITIATIVE_SUBCOMMANDS),
+            ("\"operator\" =>",   OPERATOR_SUBCOMMANDS),
+            ("\"task\" =>",       TASK_SUBCOMMANDS),
+            ("\"session\" =>",    SESSION_SUBCOMMANDS),
+            ("\"delegation\" =>", DELEGATION_SUBCOMMANDS),
+            ("\"escalation\" =>", ESCALATION_SUBCOMMANDS),
+            ("\"epoch\" =>",      EPOCH_SUBCOMMANDS),
+            ("\"audit\" =>",      AUDIT_SUBCOMMANDS),
+            ("\"cert\" =>",       CERT_SUBCOMMANDS),
+        ];
+
+        for (anchor, catalog) in pairs {
+            let arms = scrape_inner_match_arms(&src, anchor);
+            let want: BTreeSet<String> =
+                catalog.iter().map(|s| (*s).to_owned()).collect();
+            let only_in_dispatcher: Vec<&String> =
+                arms.difference(&want).collect();
+            let only_in_catalog: Vec<&String> =
+                want.difference(&arms).collect();
+            assert!(
+                only_in_dispatcher.is_empty() && only_in_catalog.is_empty(),
+                "{anchor} catalog drift!\n  in dispatcher only: {only_in_dispatcher:?}\n  in catalog only:    {only_in_catalog:?}"
+            );
+        }
+    }
+
+    /// Scrape the inner `match sub2 { ... }` body that follows the
+    /// supplied anchor, and return the literal arm names.
+    fn scrape_inner_match_arms(src: &str, anchor: &str) -> BTreeSet<String> {
+        let Some(idx) = src.find(anchor) else {
+            return BTreeSet::new();
+        };
+        let after = &src[idx..];
+        let Some(match_at) = after.find("match sub2 {") else {
+            return BTreeSet::new();
+        };
+        let body_after = &after[match_at + "match sub2 {".len()..];
+        let Some(body) = balanced_match_body(body_after) else {
+            return BTreeSet::new();
+        };
+        let mut out = BTreeSet::new();
+        let mut depth = 0usize;
+        for (i, c) in body.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                '"' if depth == 0 => {
+                    let start = i + 1;
+                    let rest = &body[start..];
+                    let Some(end_off) = rest.find('"') else { continue };
+                    let lit = &rest[..end_off];
+                    let after_lit = body[start + end_off + 1..].trim_start();
+                    if after_lit.starts_with("=>") && !lit.is_empty() {
+                        out.insert(lit.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    }
 }

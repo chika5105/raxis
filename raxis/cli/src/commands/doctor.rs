@@ -747,6 +747,11 @@ mod tests {
         kind:                   &str,
         force_misconfig_bypass: bool,
     ) {
+        const POLICY_EPOCH_HISTORY:  &str =
+            raxis_store::Table::PolicyEpochHistory.as_str();
+        const OPERATOR_CERTIFICATES: &str =
+            raxis_store::Table::OperatorCertificates.as_str();
+
         // Open RW once to apply migrations + insert the row, then
         // drop the handle so the RO open downstream sees a complete
         // schema (migrations run on `Store::open`).
@@ -758,10 +763,12 @@ mod tests {
         // the PRIMARY KEY UNIQUE on (epoch_id) and pubkey UNIQUE on
         // policy_sha256.
         conn.execute(
-            "INSERT OR IGNORE INTO policy_epoch_history (\
-                epoch_id, policy_sha256, signed_by_authority, \
-                triggered_by_operator, advanced_at\
-             ) VALUES (1, 'sha-test', 'auth-test', 'op-test', 0)",
+            &format!(
+                "INSERT OR IGNORE INTO {POLICY_EPOCH_HISTORY} (\
+                    epoch_id, policy_sha256, signed_by_authority, \
+                    triggered_by_operator, advanced_at\
+                 ) VALUES (1, 'sha-test', 'auth-test', 'op-test', 0)"
+            ),
             [],
         ).unwrap();
         // Each cert needs a unique pubkey_hex (UNIQUE constraint on the
@@ -770,12 +777,14 @@ mod tests {
         let pubkey_hex = format!("{fp}{}", "0".repeat(64usize.saturating_sub(fp.len())));
         let self_sig   = "11".repeat(32);
         conn.execute(
-            "INSERT INTO operator_certificates (\
-                pubkey_fingerprint, epoch_id, kind, display_name, pubkey_hex, \
-                not_before, not_after, warn_before_expiry_days, grace_period_days, \
-                permitted_ops_json, contact_info, self_sig_hex, \
-                force_misconfig_bypass, installed_at\
-             ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '[]', NULL, ?9, ?10, 0)",
+            &format!(
+                "INSERT INTO {OPERATOR_CERTIFICATES} (\
+                    pubkey_fingerprint, epoch_id, kind, display_name, pubkey_hex, \
+                    not_before, not_after, warn_before_expiry_days, grace_period_days, \
+                    permitted_ops_json, contact_info, self_sig_hex, \
+                    force_misconfig_bypass, installed_at\
+                 ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '[]', NULL, ?9, ?10, 0)"
+            ),
             rusqlite::params![
                 fp,
                 kind,

@@ -584,6 +584,8 @@ async fn intent_with_real_session_token_clears_step2_envelope_acceptance() {
     );
     let real_session_id = SessionId::new_v4().as_str().to_owned();
 
+    const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
+
     let kernel_db_path = kernel.data_dir().join("kernel.db");
     {
         let conn = rusqlite::Connection::open(&kernel_db_path)
@@ -591,11 +593,13 @@ async fn intent_with_real_session_token_clears_step2_envelope_acceptance() {
         let now      = raxis_types::unix_now_secs() as i64;
         let far_exp  = now + 86_400;
         conn.execute(
-            "INSERT INTO sessions (
-                 session_id, role_id, session_token, lineage_id, worktree_root,
-                 fetch_quota, sequence_number, created_at, expires_at
-             ) VALUES (?1, 'planner', ?2, 'test-lineage', '/tmp/raxis-async-safety-test',
-                       10, 0, ?3, ?4)",
+            &format!(
+                "INSERT INTO {SESSIONS} ( \
+                     session_id, role_id, session_token, lineage_id, worktree_root, \
+                     fetch_quota, sequence_number, created_at, expires_at \
+                 ) VALUES (?1, 'planner', ?2, 'test-lineage', '/tmp/raxis-async-safety-test', \
+                           10, 0, ?3, ?4)"
+            ),
             rusqlite::params![real_session_id, real_token, now, far_exp],
         )
         .unwrap_or_else(|e| panic!("insert session row: {e}"));

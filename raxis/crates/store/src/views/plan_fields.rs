@@ -236,6 +236,9 @@ mod tests {
     /// the tempdir (kept alive for the test) and the (initiative,
     /// task) ids.
     fn fresh_store_with_plan(plan_toml: &str) -> (TempDir, String, String) {
+        const INITIATIVES:           &str = Table::Initiatives.as_str();
+        const TASKS:                 &str = Table::Tasks.as_str();
+        const SIGNED_PLAN_ARTIFACTS: &str = Table::SignedPlanArtifacts.as_str();
         let tmp           = TempDir::new().unwrap();
         let db            = tmp.path().join("kernel.db");
         let initiative_id = "init-1".to_owned();
@@ -244,22 +247,28 @@ mod tests {
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
             guard.execute(
-                "INSERT INTO initiatives \
-                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-                 VALUES (?1, 'Executing', '{}', 'sha-1', 1)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES (?1, 'Executing', '{{}}', 'sha-1', 1)"
+                ),
                 rusqlite::params![&initiative_id],
             ).unwrap();
             guard.execute(
-                "INSERT INTO tasks \
-                 (task_id, initiative_id, lane_id, state, actor, \
-                  policy_epoch, admitted_at, transitioned_at) \
-                 VALUES (?1, ?2, 'default', 'Running', 'op', 1, 1, 1)",
+                &format!(
+                    "INSERT INTO {TASKS} \
+                     (task_id, initiative_id, lane_id, state, actor, \
+                      policy_epoch, admitted_at, transitioned_at) \
+                     VALUES (?1, ?2, 'default', 'Running', 'op', 1, 1, 1)"
+                ),
                 rusqlite::params![&task_id, &initiative_id],
             ).unwrap();
             guard.execute(
-                "INSERT INTO signed_plan_artifacts \
-                 (initiative_id, plan_bytes, plan_sig, stored_at) \
-                 VALUES (?1, ?2, x'00', 1)",
+                &format!(
+                    "INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
+                     (initiative_id, plan_bytes, plan_sig, stored_at) \
+                     VALUES (?1, ?2, x'00', 1)"
+                ),
                 rusqlite::params![&initiative_id, plan_toml.as_bytes()],
             ).unwrap();
         }
@@ -343,22 +352,28 @@ mod tests {
         // row. The CLI surface is "the operator can see this task in
         // `tasks` but the plan blob is gone" — every other miss path
         // should fail loud, not silently render lockdown defaults.
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const TASKS:       &str = Table::Tasks.as_str();
         let tmp = TempDir::new().unwrap();
         let db  = tmp.path().join("kernel.db");
         {
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
             guard.execute(
-                "INSERT INTO initiatives \
-                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-                 VALUES ('init-x', 'Draft', '{}', 'sha-x', 1)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES ('init-x', 'Draft', '{{}}', 'sha-x', 1)"
+                ),
                 [],
             ).unwrap();
             guard.execute(
-                "INSERT INTO tasks \
-                 (task_id, initiative_id, lane_id, state, actor, \
-                  policy_epoch, admitted_at, transitioned_at) \
-                 VALUES ('t-x', 'init-x', 'default', 'Admitted', 'op', 1, 1, 1)",
+                &format!(
+                    "INSERT INTO {TASKS} \
+                     (task_id, initiative_id, lane_id, state, actor, \
+                      policy_epoch, admitted_at, transitioned_at) \
+                     VALUES ('t-x', 'init-x', 'default', 'Admitted', 'op', 1, 1, 1)"
+                ),
                 [],
             ).unwrap();
         }

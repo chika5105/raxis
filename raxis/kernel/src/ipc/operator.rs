@@ -3377,14 +3377,17 @@ mod quarantine_dispatch_tests {
     /// `async` because `Store::lock_sync` panics on a tokio worker; we
     /// hop to the blocking pool exactly like every real handler does.
     async fn insert_initiative(ctx: Arc<HandlerContext>, initiative_id: &str) {
+        const INITIATIVES: &str = raxis_store::Table::Initiatives.as_str();
         let id = initiative_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = ctx.store.lock_sync();
             conn.execute(
-                "INSERT INTO initiatives \
-                    (initiative_id, state, terminal_criteria_json, \
-                     plan_artifact_sha256, created_at) \
-                 VALUES (?1, 'ApprovedPlan', '{}', 'sha', 1700000000)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                        (initiative_id, state, terminal_criteria_json, \
+                         plan_artifact_sha256, created_at) \
+                     VALUES (?1, 'ApprovedPlan', '{{}}', 'sha', 1700000000)"
+                ),
                 rusqlite::params![id],
             ).unwrap();
         }).await.unwrap();
@@ -3401,14 +3404,18 @@ mod quarantine_dispatch_tests {
         initiative_id: &str,
         signed_by_fp:  &str,
     ) {
+        const SIGNED_PLAN_ARTIFACTS: &str =
+            raxis_store::Table::SignedPlanArtifacts.as_str();
         let id = initiative_id.to_owned();
         let fp = signed_by_fp.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = ctx.store.lock_sync();
             conn.execute(
-                "INSERT INTO signed_plan_artifacts \
-                    (initiative_id, plan_bytes, plan_sig, stored_at, signed_by_fingerprint) \
-                 VALUES (?1, x'00', x'00', 1700000000, ?2)",
+                &format!(
+                    "INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
+                        (initiative_id, plan_bytes, plan_sig, stored_at, signed_by_fingerprint) \
+                     VALUES (?1, x'00', x'00', 1700000000, ?2)"
+                ),
                 rusqlite::params![id, fp],
             ).unwrap();
         }).await.unwrap();

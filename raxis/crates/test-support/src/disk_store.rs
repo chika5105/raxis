@@ -191,15 +191,19 @@ mod tests {
     fn db_file_persists_across_close_and_reopen() {
         // Sanity: the SAME file is reopened, not a new one — so any
         // state written before close() is observable after reopen().
+        const INITIATIVES: &str = raxis_store::Table::Initiatives.as_str();
+
         let mut ds = DiskStore::new();
 
         {
             let conn = ds.store().lock_sync();
             conn.execute(
-                "INSERT INTO initiatives
-                    (initiative_id, state, terminal_criteria_json,
-                     plan_artifact_sha256, created_at)
-                 VALUES ('init-disk-persist', 'Executing', '{}', 'deadbeef', 0)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                        (initiative_id, state, terminal_criteria_json, \
+                         plan_artifact_sha256, created_at) \
+                     VALUES ('init-disk-persist', 'Executing', '{{}}', 'deadbeef', 0)"
+                ),
                 [],
             )
             .expect("seed insert failed");
@@ -211,7 +215,10 @@ mod tests {
         let conn = ds.store().lock_sync();
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM initiatives WHERE initiative_id='init-disk-persist'",
+                &format!(
+                    "SELECT COUNT(*) FROM {INITIATIVES} \
+                     WHERE initiative_id='init-disk-persist'"
+                ),
                 [],
                 |r| r.get(0),
             )

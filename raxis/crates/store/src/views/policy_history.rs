@@ -76,6 +76,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn fresh_store_with_seed_history() -> TempDir {
+        const POLICY_EPOCH_HISTORY: &str = Table::PolicyEpochHistory.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
@@ -86,10 +87,12 @@ mod tests {
             (3,     "sha-three",   "fp-2", 300),
         ] {
             guard.execute(
-                "INSERT INTO policy_epoch_history \
-                 (epoch_id, policy_sha256, signed_by_authority, \
-                  triggered_by_operator, advanced_at) \
-                 VALUES (?1, ?2, 'auth-fp', ?3, ?4)",
+                &format!(
+                    "INSERT INTO {POLICY_EPOCH_HISTORY} \
+                     (epoch_id, policy_sha256, signed_by_authority, \
+                      triggered_by_operator, advanced_at) \
+                     VALUES (?1, ?2, 'auth-fp', ?3, ?4)"
+                ),
                 rusqlite::params![epoch, sha, by, at],
             ).unwrap();
         }

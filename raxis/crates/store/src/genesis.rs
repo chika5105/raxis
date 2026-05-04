@@ -130,6 +130,12 @@ mod tests {
     use crate::{open_ro, Store};
     use tempfile::TempDir;
 
+    // Mirror the production module's typed-table-name discipline in the
+    // test fixtures so a future column-rename in `migration_*` only has
+    // to touch the `Table` enum, not every hand-rolled test SQL string.
+    const POLICY_EPOCH_HISTORY:    &str = Table::PolicyEpochHistory.as_str();
+    const OPERATOR_CERTIFICATES:   &str = Table::OperatorCertificates.as_str();
+
     fn fresh_store() -> (TempDir, Store) {
         let tmp = TempDir::new().expect("tempdir");
         let store = Store::open(&tmp.path().join("kernel.db")).expect("Store::open");
@@ -159,9 +165,11 @@ mod tests {
         let conn = open_ro(tmp.path()).expect("open_ro");
         let (epoch, sha, by, triggered, ts): (i64, String, String, String, i64) = conn
             .query_row(
-                "SELECT epoch_id, policy_sha256, signed_by_authority, \
-                        triggered_by_operator, advanced_at \
-                   FROM policy_epoch_history",
+                &format!(
+                    "SELECT epoch_id, policy_sha256, signed_by_authority, \
+                            triggered_by_operator, advanced_at \
+                       FROM {POLICY_EPOCH_HISTORY}"
+                ),
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
@@ -185,7 +193,7 @@ mod tests {
         let conn = open_ro(tmp.path()).expect("open_ro");
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM policy_epoch_history",
+                &format!("SELECT COUNT(*) FROM {POLICY_EPOCH_HISTORY}"),
                 [],
                 |r| r.get(0),
             )
@@ -194,7 +202,9 @@ mod tests {
         // The second timestamp (200) is ignored — the original row stands.
         let ts: i64 = conn
             .query_row(
-                "SELECT advanced_at FROM policy_epoch_history WHERE epoch_id = 1",
+                &format!(
+                    "SELECT advanced_at FROM {POLICY_EPOCH_HISTORY} WHERE epoch_id = 1"
+                ),
                 [],
                 |r| r.get(0),
             )
@@ -262,15 +272,20 @@ mod tests {
 
         // Genesis row is present.
         let n_epoch: i64 = conn
-            .query_row("SELECT COUNT(*) FROM policy_epoch_history", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {POLICY_EPOCH_HISTORY}"),
+                [], |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n_epoch, 1);
 
         // Cert row is present, scoped to epoch_id = 1.
         let (cert_fp, cert_epoch, cert_kind): (String, i64, String) = conn
             .query_row(
-                "SELECT pubkey_fingerprint, epoch_id, kind \
-                   FROM operator_certificates",
+                &format!(
+                    "SELECT pubkey_fingerprint, epoch_id, kind \
+                       FROM {OPERATOR_CERTIFICATES}"
+                ),
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -291,7 +306,10 @@ mod tests {
         drop(store);
         let conn = open_ro(tmp.path()).expect("open_ro");
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM operator_certificates", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {OPERATOR_CERTIFICATES}"),
+                [], |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 0,
             "legacy genesis path (no bundle) must leave operator_certificates empty");
@@ -320,14 +338,20 @@ mod tests {
         drop(store);
         let conn = open_ro(tmp.path()).expect("open_ro");
         let n: i64 = conn
-            .query_row("SELECT COUNT(*) FROM operator_certificates", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {OPERATOR_CERTIFICATES}"),
+                [], |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(n, 1,
             "second call's empty bundle must not erase first call's certs");
         // installed_at on the cert MUST still be 100 (the first-call
         // timestamp), not 200.
         let installed_at: i64 = conn
-            .query_row("SELECT installed_at FROM operator_certificates", [], |r| r.get(0))
+            .query_row(
+                &format!("SELECT installed_at FROM {OPERATOR_CERTIFICATES}"),
+                [], |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(installed_at, 100,
             "first-call installed_at wins (matches the policy_epoch_history.advanced_at contract)");

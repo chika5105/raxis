@@ -78,25 +78,33 @@ mod tests {
     /// and one Inconclusive result, plus a sibling task with one
     /// witness so we can confirm the WHERE filter.
     fn fresh_store_with_seed_witnesses() -> TempDir {
+        const INITIATIVES:        &str = Table::Initiatives.as_str();
+        const TASKS:              &str = Table::Tasks.as_str();
+        const VERIFIER_RUN_TOKENS: &str = Table::VerifierRunTokens.as_str();
+        const WITNESS_RECORDS:    &str = Table::WitnessRecords.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         guard
             .execute(
-                "INSERT INTO initiatives \
-                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-                 VALUES ('init-1', 'Executing', '{}', 'sha-1', 1)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
+                ),
                 [],
             )
             .unwrap();
         for (id, state) in [("t-1", "Running"), ("t-2", "Running")] {
             guard
                 .execute(
-                    "INSERT INTO tasks \
-                     (task_id, initiative_id, lane_id, state, actor, \
-                      policy_epoch, admitted_at, transitioned_at) \
-                     VALUES (?1, 'init-1', 'd', ?2, 'op', 1, 1, 1)",
+                    &format!(
+                        "INSERT INTO {TASKS} \
+                         (task_id, initiative_id, lane_id, state, actor, \
+                          policy_epoch, admitted_at, transitioned_at) \
+                         VALUES (?1, 'init-1', 'd', ?2, 'op', 1, 1, 1)"
+                    ),
                     rusqlite::params![id, state],
                 )
                 .unwrap();
@@ -110,10 +118,12 @@ mod tests {
         ] {
             guard
                 .execute(
-                    "INSERT INTO verifier_run_tokens \
-                     (verifier_run_id, task_id, gate_type, evaluation_sha, \
-                      token_hash, issued_at, expires_at, consumed) \
-                     VALUES (?1, ?2, ?3, ?4, 'th', 1, 9999999999, 1)",
+                    &format!(
+                        "INSERT INTO {VERIFIER_RUN_TOKENS} \
+                         (verifier_run_id, task_id, gate_type, evaluation_sha, \
+                          token_hash, issued_at, expires_at, consumed) \
+                         VALUES (?1, ?2, ?3, ?4, 'th', 1, 9999999999, 1)"
+                    ),
                     rusqlite::params![run_id, task_id, gate, sha],
                 )
                 .unwrap();
@@ -128,10 +138,12 @@ mod tests {
         ] {
             guard
                 .execute(
-                    "INSERT INTO witness_records \
-                     (verifier_run_id, evaluation_sha, task_id, gate_type, \
-                      result_class, blob_sha256, blob_path, recorded_at) \
-                     VALUES (?1, ?4, ?2, ?3, ?5, ?4, ?4, ?6)",
+                    &format!(
+                        "INSERT INTO {WITNESS_RECORDS} \
+                         (verifier_run_id, evaluation_sha, task_id, gate_type, \
+                          result_class, blob_sha256, blob_path, recorded_at) \
+                         VALUES (?1, ?4, ?2, ?3, ?5, ?4, ?4, ?6)"
+                    ),
                     rusqlite::params![run_id, task_id, gate, sha, result, recorded],
                 )
                 .unwrap();

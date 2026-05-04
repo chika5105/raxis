@@ -913,30 +913,40 @@ mod tests {
 
     #[test]
     fn workload_counts_combine_initiative_task_session_escalation() {
+        const INITIATIVES: &str = raxis_store::Table::Initiatives.as_str();
+        const TASKS:       &str = raxis_store::Table::Tasks.as_str();
+        const SESSIONS:    &str = raxis_store::Table::Sessions.as_str();
+
         let tmp = make_data_dir(true);
         // Seed one initiative + two tasks + one session.
         let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
         {
             let guard = store.lock_sync();
             guard.execute(
-                "INSERT INTO initiatives \
-                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-                 VALUES ('i-1', 'Executing', '{}', 'sha-1', 1)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES ('i-1', 'Executing', '{{}}', 'sha-1', 1)"
+                ),
                 [],
             ).unwrap();
             guard.execute(
-                "INSERT INTO tasks \
-                 (task_id, initiative_id, lane_id, state, actor, policy_epoch, \
-                  admitted_at, transitioned_at) \
-                 VALUES ('t-1', 'i-1', 'd', 'Running', 'op', 1, 1, 1), \
-                        ('t-2', 'i-1', 'd', 'Admitted', 'op', 1, 1, 1)",
+                &format!(
+                    "INSERT INTO {TASKS} \
+                     (task_id, initiative_id, lane_id, state, actor, policy_epoch, \
+                      admitted_at, transitioned_at) \
+                     VALUES ('t-1', 'i-1', 'd', 'Running', 'op', 1, 1, 1), \
+                            ('t-2', 'i-1', 'd', 'Admitted', 'op', 1, 1, 1)"
+                ),
                 [],
             ).unwrap();
             guard.execute(
-                "INSERT INTO sessions \
-                 (session_id, role_id, session_token, lineage_id, fetch_quota, \
-                  created_at, expires_at, revoked) \
-                 VALUES ('s-1', 'planner', 'tok', 'lin', 0, 1, 9999999999, 0)",
+                &format!(
+                    "INSERT INTO {SESSIONS} \
+                     (session_id, role_id, session_token, lineage_id, fetch_quota, \
+                      created_at, expires_at, revoked) \
+                     VALUES ('s-1', 'planner', 'tok', 'lin', 0, 1, 9999999999, 0)"
+                ),
                 [],
             ).unwrap();
         }

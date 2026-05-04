@@ -102,23 +102,30 @@ mod tests {
     use tempfile::TempDir;
 
     fn fresh_store_with_seed_reservations() -> TempDir {
+        const INITIATIVES:              &str = Table::Initiatives.as_str();
+        const TASKS:                    &str = Table::Tasks.as_str();
+        const LANE_BUDGET_RESERVATIONS: &str = Table::LaneBudgetReservations.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         guard.execute(
-            "INSERT INTO initiatives \
-             (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-             VALUES ('init-1', 'Executing', '{}', 'sha-1', 1)",
+            &format!(
+                "INSERT INTO {INITIATIVES} \
+                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                 VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
+            ),
             [],
         ).unwrap();
         // Tasks (FK target).
         for id in ["t-a", "t-b", "t-c"] {
             guard.execute(
-                "INSERT INTO tasks \
-                 (task_id, initiative_id, lane_id, state, actor, \
-                  policy_epoch, admitted_at, transitioned_at) \
-                 VALUES (?1, 'init-1', 'd', 'Running', 'op', 1, 1, 1)",
+                &format!(
+                    "INSERT INTO {TASKS} \
+                     (task_id, initiative_id, lane_id, state, actor, \
+                      policy_epoch, admitted_at, transitioned_at) \
+                     VALUES (?1, 'init-1', 'd', 'Running', 'op', 1, 1, 1)"
+                ),
                 rusqlite::params![id],
             ).unwrap();
         }
@@ -130,9 +137,11 @@ mod tests {
             ("high",    "t-c", 100,    300),
         ] {
             guard.execute(
-                "INSERT INTO lane_budget_reservations \
-                 (lane_id, task_id, reserved_cost, reserved_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
+                &format!(
+                    "INSERT INTO {LANE_BUDGET_RESERVATIONS} \
+                     (lane_id, task_id, reserved_cost, reserved_at) \
+                     VALUES (?1, ?2, ?3, ?4)"
+                ),
                 rusqlite::params![lane, task, cost, at],
             ).unwrap();
         }

@@ -422,16 +422,19 @@ mod tests {
     }
 
     fn fresh_store_with_seed_epoch() -> TempDir {
+        const POLICY_EPOCH_HISTORY: &str = Table::PolicyEpochHistory.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         // Seed a policy_epoch_history row so the FK constraint passes.
         guard.execute(
-            "INSERT INTO policy_epoch_history \
-             (epoch_id, policy_sha256, signed_by_authority, \
-              triggered_by_operator, advanced_at) \
-             VALUES (1, 'sha-1', 'auth-fp', 'op-fp', 100)",
+            &format!(
+                "INSERT INTO {POLICY_EPOCH_HISTORY} \
+                 (epoch_id, policy_sha256, signed_by_authority, \
+                  triggered_by_operator, advanced_at) \
+                 VALUES (1, 'sha-1', 'auth-fp', 'op-fp', 100)"
+            ),
             [],
         ).unwrap();
         tmp

@@ -369,6 +369,8 @@ mod tests {
     use tempfile::TempDir;
 
     fn fresh_store_with_seed_tasks() -> (TempDir, std::path::PathBuf) {
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const TASKS:       &str = Table::Tasks.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         {
@@ -376,9 +378,11 @@ mod tests {
             let guard = store.lock_sync();
             // Initiative the tasks point at.
             guard.execute(
-                "INSERT INTO initiatives \
-                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-                 VALUES ('init-1', 'Executing', '{}', 'sha-1', 1)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
+                ),
                 [],
             ).unwrap();
             // 4 tasks — Running, Admitted, Admitted (different lane),
@@ -391,10 +395,12 @@ mod tests {
                 ("t-4", "BlockedRecoveryPending", "default", 10, Some("waiting on t-1")),
             ] {
                 guard.execute(
-                    "INSERT INTO tasks \
-                     (task_id, initiative_id, lane_id, state, actor, \
-                      policy_epoch, admitted_at, transitioned_at, block_reason) \
-                     VALUES (?1, 'init-1', ?2, ?3, 'op', 1, ?4, ?4, ?5)",
+                    &format!(
+                        "INSERT INTO {TASKS} \
+                         (task_id, initiative_id, lane_id, state, actor, \
+                          policy_epoch, admitted_at, transitioned_at, block_reason) \
+                         VALUES (?1, 'init-1', ?2, ?3, 'op', 1, ?4, ?4, ?5)"
+                    ),
                     rusqlite::params![id, lane, state, admitted_at, block],
                 ).unwrap();
             }
@@ -483,15 +489,20 @@ mod tests {
     /// And we mark t-3 as `BlockedRecoveryPending` so the
     /// `blocking_edges` test has a real blocked task to find.
     fn fresh_store_with_seed_dag() -> (TempDir, std::path::PathBuf) {
+        const INITIATIVES:    &str = Table::Initiatives.as_str();
+        const TASKS:          &str = Table::Tasks.as_str();
+        const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         guard
             .execute(
-                "INSERT INTO initiatives \
-                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-                 VALUES ('init-1', 'Executing', '{}', 'sha-1', 1)",
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
+                ),
                 [],
             )
             .unwrap();
@@ -503,10 +514,12 @@ mod tests {
         ] {
             guard
                 .execute(
-                    "INSERT INTO tasks \
-                     (task_id, initiative_id, lane_id, state, actor, \
-                      policy_epoch, admitted_at, transitioned_at) \
-                     VALUES (?1, 'init-1', 'd', ?2, 'op', 1, 1, 1)",
+                    &format!(
+                        "INSERT INTO {TASKS} \
+                         (task_id, initiative_id, lane_id, state, actor, \
+                          policy_epoch, admitted_at, transitioned_at) \
+                         VALUES (?1, 'init-1', 'd', ?2, 'op', 1, 1, 1)"
+                    ),
                     rusqlite::params![id, state],
                 )
                 .unwrap();
@@ -518,9 +531,11 @@ mod tests {
         ] {
             guard
                 .execute(
-                    "INSERT INTO task_dag_edges \
-                     (initiative_id, predecessor_task_id, successor_task_id, predecessor_satisfied) \
-                     VALUES ('init-1', ?1, ?2, ?3)",
+                    &format!(
+                        "INSERT INTO {TASK_DAG_EDGES} \
+                         (initiative_id, predecessor_task_id, successor_task_id, predecessor_satisfied) \
+                         VALUES ('init-1', ?1, ?2, ?3)"
+                    ),
                     rusqlite::params![pred, succ, satisfied],
                 )
                 .unwrap();

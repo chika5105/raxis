@@ -122,22 +122,29 @@ mod tests {
     use tempfile::TempDir;
 
     fn fresh_store_with_seed_tokens() -> TempDir {
+        const INITIATIVES:         &str = Table::Initiatives.as_str();
+        const TASKS:               &str = Table::Tasks.as_str();
+        const VERIFIER_RUN_TOKENS: &str = Table::VerifierRunTokens.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         // Seed an initiative + a task so FKs pass.
         guard.execute(
-            "INSERT INTO initiatives \
-             (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-             VALUES ('init-1', 'Executing', '{}', 'sha-1', 1)",
+            &format!(
+                "INSERT INTO {INITIATIVES} \
+                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                 VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
+            ),
             [],
         ).unwrap();
         guard.execute(
-            "INSERT INTO tasks \
-             (task_id, initiative_id, lane_id, state, actor, \
-              policy_epoch, admitted_at, transitioned_at) \
-             VALUES ('t-1', 'init-1', 'd', 'Running', 'op', 1, 1, 1)",
+            &format!(
+                "INSERT INTO {TASKS} \
+                 (task_id, initiative_id, lane_id, state, actor, \
+                  policy_epoch, admitted_at, transitioned_at) \
+                 VALUES ('t-1', 'init-1', 'd', 'Running', 'op', 1, 1, 1)"
+            ),
             [],
         ).unwrap();
         // Three tokens:
@@ -150,10 +157,12 @@ mod tests {
             ("v-consumed", "tests", 100,     9999999999,     1),
         ] {
             guard.execute(
-                "INSERT INTO verifier_run_tokens \
-                 (verifier_run_id, task_id, gate_type, evaluation_sha, \
-                  token_hash, issued_at, expires_at, consumed) \
-                 VALUES (?1, 't-1', ?2, 'eval-sha', 'th', ?3, ?4, ?5)",
+                &format!(
+                    "INSERT INTO {VERIFIER_RUN_TOKENS} \
+                     (verifier_run_id, task_id, gate_type, evaluation_sha, \
+                      token_hash, issued_at, expires_at, consumed) \
+                     VALUES (?1, 't-1', ?2, 'eval-sha', 'th', ?3, ?4, ?5)"
+                ),
                 rusqlite::params![id, gate, issued, expires, consumed],
             ).unwrap();
         }

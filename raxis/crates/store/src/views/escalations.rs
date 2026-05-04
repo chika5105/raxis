@@ -134,29 +134,39 @@ mod tests {
     use tempfile::TempDir;
 
     fn fresh_store_with_seed_escalations() -> TempDir {
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const SESSIONS:    &str = Table::Sessions.as_str();
+        const TASKS:       &str = Table::Tasks.as_str();
+        const ESCALATIONS: &str = Table::Escalations.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         // Seed an initiative + a task + a session so FKs pass.
         guard.execute(
-            "INSERT INTO initiatives \
-             (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
-             VALUES ('init-1', 'Executing', '{}', 'sha-1', 1)",
+            &format!(
+                "INSERT INTO {INITIATIVES} \
+                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                 VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
+            ),
             [],
         ).unwrap();
         guard.execute(
-            "INSERT INTO sessions \
-             (session_id, role_id, session_token, lineage_id, fetch_quota, \
-              created_at, expires_at, revoked) \
-             VALUES ('sess-1', 'planner', 'tok-1', 'lin-1', 0, 1, 9999, 0)",
+            &format!(
+                "INSERT INTO {SESSIONS} \
+                 (session_id, role_id, session_token, lineage_id, fetch_quota, \
+                  created_at, expires_at, revoked) \
+                 VALUES ('sess-1', 'planner', 'tok-1', 'lin-1', 0, 1, 9999, 0)"
+            ),
             [],
         ).unwrap();
         guard.execute(
-            "INSERT INTO tasks \
-             (task_id, initiative_id, lane_id, state, actor, \
-              policy_epoch, admitted_at, transitioned_at) \
-             VALUES ('task-1', 'init-1', 'default', 'Running', 'op', 1, 1, 1)",
+            &format!(
+                "INSERT INTO {TASKS} \
+                 (task_id, initiative_id, lane_id, state, actor, \
+                  policy_epoch, admitted_at, transitioned_at) \
+                 VALUES ('task-1', 'init-1', 'default', 'Running', 'op', 1, 1, 1)"
+            ),
             [],
         ).unwrap();
 
@@ -167,13 +177,15 @@ mod tests {
             ("esc-denied",   "Denied",   100,     "i-denied"),
         ] {
             guard.execute(
-                "INSERT INTO escalations \
-                 (escalation_id, session_id, task_id, lineage_id, initiative_id, \
-                  class, requested_scope_json, justification, idempotency_key, \
-                  status, created_at, timeout_at) \
-                 VALUES (?1, 'sess-1', 'task-1', 'lin-1', 'init-1', \
-                         'CapabilityUpgrade', '{}', 'why', ?4, \
-                         ?2, ?3, ?3 + 3600)",
+                &format!(
+                    "INSERT INTO {ESCALATIONS} \
+                     (escalation_id, session_id, task_id, lineage_id, initiative_id, \
+                      class, requested_scope_json, justification, idempotency_key, \
+                      status, created_at, timeout_at) \
+                     VALUES (?1, 'sess-1', 'task-1', 'lin-1', 'init-1', \
+                             'CapabilityUpgrade', '{{}}', 'why', ?4, \
+                             ?2, ?3, ?3 + 3600)"
+                ),
                 rusqlite::params![id, status, created_at, idem],
             ).unwrap();
         }

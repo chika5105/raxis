@@ -49,11 +49,18 @@ use rusqlite::{Connection, OpenFlags};
 use thiserror::Error;
 
 use crate::migration::SCHEMA_VERSION;
+use crate::Table;
 
 /// File name (relative to `data_dir`) of the kernel's SQLite database.
 /// Centralised so callers don't repeat the literal — the kernel's
 /// `bootstrap.rs` and `Store::open` use the same suffix.
 pub const KERNEL_DB_FILE: &str = "kernel.db";
+
+// `Table::*.as_str()` is a `const fn` so we can lift it into module-
+// level constants. Per kernel-store.md §2.5.1 INV-STORE-03, every SQL
+// table reference in this crate goes through `Table` — including the
+// schema-version compatibility check.
+const SCHEMA_VERSION_TABLE: &str = Table::SchemaVersion.as_str();
 
 // ---------------------------------------------------------------------
 // RoError
@@ -238,7 +245,7 @@ pub fn assert_compatible_schema(conn: &RoConn, expected: u32) -> Result<(), RoEr
     // migration framework is identical on the kernel side; this
     // mirrors the same triage in `migration::read_current_version`.
     let row: Result<i64, rusqlite::Error> = conn.query_row(
-        "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+        &format!("SELECT COALESCE(MAX(version), 0) FROM {SCHEMA_VERSION_TABLE}"),
         [],
         |r| r.get(0),
     );
@@ -359,8 +366,11 @@ mod tests {
             let store = crate::Store::open(&tmp.path().join(KERNEL_DB_FILE)).unwrap();
             let guard = store.lock_sync();
             guard.execute(
-                "INSERT OR REPLACE INTO schema_version (version, applied_at) \
-                 VALUES (?1, strftime('%s', 'now'))",
+                &format!(
+                    "INSERT OR REPLACE INTO {SCHEMA_VERSION_TABLE} \
+                     (version, applied_at) \
+                     VALUES (?1, strftime('%s', 'now'))"
+                ),
                 rusqlite::params![SCHEMA_VERSION + 5],
             ).unwrap();
         }
@@ -414,7 +424,10 @@ mod tests {
         let conn = open(tmp.path()).expect("open");
 
         let result = conn.execute(
-            "INSERT INTO schema_version (version, applied_at) VALUES (?1, ?2)",
+            &format!(
+                "INSERT INTO {SCHEMA_VERSION_TABLE} (version, applied_at) \
+                 VALUES (?1, ?2)"
+            ),
             rusqlite::params![999, 0],
         );
         let err = result.expect_err("RO open must reject writes");

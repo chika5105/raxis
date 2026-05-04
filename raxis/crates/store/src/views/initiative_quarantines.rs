@@ -296,20 +296,22 @@ mod tests {
         let tx = conn.transaction().unwrap();
         // Two initiatives signed by Alice, one by Bob. Minimum shape
         // the sweep query joins against.
-        tx.execute_batch("
-            INSERT INTO initiatives
-                (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at)
-            VALUES
-                ('init-alice-1', 'Draft', '{}', 'aa', 0),
-                ('init-alice-2', 'Draft', '{}', 'aa', 0),
-                ('init-bob-1',   'Draft', '{}', 'bb', 0);
-            INSERT INTO signed_plan_artifacts
-                (initiative_id, plan_bytes, plan_sig, stored_at, signed_by_fingerprint)
-            VALUES
-                ('init-alice-1', x'00', x'00', 0, 'alice-fp'),
-                ('init-alice-2', x'00', x'00', 0, 'alice-fp'),
-                ('init-bob-1',   x'00', x'00', 0, 'bob-fp');
-        ").unwrap();
+        const INITIATIVES: &str           = Table::Initiatives.as_str();
+        const SIGNED_PLAN_ARTIFACTS: &str = Table::SignedPlanArtifacts.as_str();
+        tx.execute_batch(&format!(
+            "INSERT INTO {INITIATIVES} \
+                (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+             VALUES \
+                ('init-alice-1', 'Draft', '{{}}', 'aa', 0), \
+                ('init-alice-2', 'Draft', '{{}}', 'aa', 0), \
+                ('init-bob-1',   'Draft', '{{}}', 'bb', 0); \
+             INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
+                (initiative_id, plan_bytes, plan_sig, stored_at, signed_by_fingerprint) \
+             VALUES \
+                ('init-alice-1', x'00', x'00', 0, 'alice-fp'), \
+                ('init-alice-2', x'00', x'00', 0, 'alice-fp'), \
+                ('init-bob-1',   x'00', x'00', 0, 'bob-fp');"
+        )).unwrap();
         tx.commit().unwrap();
         drop(conn);
         drop(store);

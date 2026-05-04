@@ -847,6 +847,12 @@ mod run_genesis_e2e {
     use ed25519_dalek::SigningKey;
     use std::os::unix::fs::MetadataExt;
 
+    /// kernel-store.md §2.5.1 INV-STORE-03 — even test SQL goes
+    /// through the typed `Table` enum so a future column-rename does
+    /// not silently drift the e2e fixtures.
+    const POLICY_EPOCH_HISTORY: &str =
+        raxis_store::Table::PolicyEpochHistory.as_str();
+
     /// Deterministic operator key — same fixture pattern the kernel-side
     /// `bootstrap::integration` tests use, so failures reproduce across
     /// runs without depending on `getrandom`.
@@ -986,8 +992,10 @@ mod run_genesis_e2e {
         let conn = raxis_store::open_ro(tmp.path()).expect("open_ro");
         let (epoch, sha, triggered): (i64, String, String) = conn
             .query_row(
-                "SELECT epoch_id, policy_sha256, triggered_by_operator \
-                   FROM policy_epoch_history",
+                &format!(
+                    "SELECT epoch_id, policy_sha256, triggered_by_operator \
+                       FROM {POLICY_EPOCH_HISTORY}"
+                ),
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -1112,7 +1120,7 @@ mod run_genesis_e2e {
         let conn = raxis_store::open_ro(tmp.path()).expect("open_ro");
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM policy_epoch_history",
+                &format!("SELECT COUNT(*) FROM {POLICY_EPOCH_HISTORY}"),
                 [],
                 |r| r.get(0),
             )

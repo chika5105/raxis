@@ -169,7 +169,10 @@ mod tests {
         // of the operator-cert feature.
         let version: i64 = guard
             .query_row(
-                "SELECT MAX(version) FROM schema_version",
+                &format!(
+                    "SELECT MAX(version) FROM {}",
+                    crate::Table::SchemaVersion.as_str(),
+                ),
                 [],
                 |row| row.get(0),
             )
