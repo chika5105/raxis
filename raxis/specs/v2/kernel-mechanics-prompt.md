@@ -325,6 +325,9 @@ Submit EscalationRequest only when genuinely blocked. Include a structured expla
 
 [KERNEL: TOKEN LIMIT PROTOCOL]
 (see §4.2 — full token limit error code reference injected here)
+
+[KERNEL: LOCAL DEVELOPMENT SERVER PROTOCOL]
+(see §4.3 — dev server reserved ports and workflow injected here)
 ```
 
 ---
@@ -508,6 +511,61 @@ Escalation context for token limit (all 4 fields required):
   2. remaining_work:     what is left (be specific)
   3. estimated_tokens:   how many more tokens you estimate needing and why
   4. cannot_trim_reason: why you cannot reduce token usage further
+```
+
+### 4.3 — Local Development Server Protocol (Injected in Executor and Orchestrator NNSPs)
+
+```
+## Local Development Servers
+
+You may start local processes (dev servers, test servers, mock servers, message
+broker emulators) that listen on localhost inside the VM. Connections between
+processes within the VM via the loopback interface are unrestricted — no EgressRequest
+intent is needed. This is the normal development and debugging workflow.
+
+### Reserved Ports (occupied by RAXIS credential proxies if declared in your task):
+
+Check the [RAXIS:KERNEL_STATE] proxies field for the exact active ports this call.
+Do NOT bind your dev server to any port listed there.
+
+Default reserved ranges:
+  5432  -> PostgreSQL credential proxy
+  3306  -> MySQL credential proxy
+  1433  -> MSSQL credential proxy
+  27017 -> MongoDB credential proxy
+  6379  -> Redis credential proxy
+  8001  -> Kubernetes credential proxy
+  9001  -> AWS IMDS proxy
+  9002  -> GCP metadata proxy
+  9003  -> Azure IMDS proxy
+
+Recommended safe ports for your dev servers: 8000, 8080, 3000, 4000, 5000, 9100+
+
+### If you get EADDRINUSE binding a dev server:
+
+The port is reserved by a credential proxy. Switch to a different port.
+Do NOT escalate -- this is a local configuration issue, not a RAXIS restriction.
+
+### Dev server workflow:
+
+  Start:  uvicorn app.main:app --port 8000 &
+  Test:   pytest tests/integration/ -v
+  Stop:   kill $SERVER_PID
+
+Your dev server's calls to localhost credential proxies (localhost:5432 for Postgres,
+etc.) work transparently -- the proxy handles auth to the real database on your behalf.
+
+Your dev server's EXTERNAL calls (Stripe, GitHub, third-party APIs) are subject to
+the egress allowlist. If an external call fails with a network error:
+  - Is the host in your plan's allowed_egress? NO -> use a mock server for testing
+    or escalate PlanViolation to have the host added to the plan.
+  - YES and still failing -> escalate PlanViolation with the exact error message.
+
+### In-VM test databases:
+
+  SQLite: always available, no ports, no RAXIS controls -- use freely.
+  In-VM Postgres (pytest-postgresql, pg_tmp): use any port OTHER than 5432.
+  Docker-in-VM: only available if Docker is included in the vm_image.
 ```
 
 ---

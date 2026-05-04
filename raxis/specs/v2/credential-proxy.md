@@ -1892,6 +1892,303 @@ config; existing instances are not disrupted until they naturally terminate.
 
 ---
 
+## 13. Intra-VM Loopback and Local Development Servers
+
+### 13.1 — The Core Rule
+
+**Intra-VM loopback traffic is unrestricted.** The egress allowlist governs connections
+that leave the VM to external hosts. Communication between processes within the same VM
+via the loopback interface (`127.0.0.1` / `localhost`) is entirely internal to the VM's
+network namespace — no external routing occurs, no `EgressRequest` intent is required,
+and no egress allowlist check applies.
+
+An agent can freely:
+- Start HTTP/HTTPS servers on localhost ports
+- Start WebSocket servers
+- Start gRPC servers
+- Run test databases (SQLite, in-memory Postgres via pg_tmp, DynamoDB Local)
+- Run mock servers (WireMock, msw, nock)
+- Start message broker emulators (RabbitMQ, Kafka in local mode)
+- Make arbitrary HTTP requests to localhost processes
+
+This is the normal development and debugging flow — RAXIS does not restrict it.
+
+### 13.2 — Why: VM Network Namespace Isolation
+
+A Firecracker VM runs with its own network namespace. The loopback interface (`lo`)
+inside the VM is isolated from the host and from other VMs. This has two consequences:
+
+**1. Intra-VM loopback works normally:**
+```
+Process A (agent)                 Process B (dev server at localhost:8000)
+        |                                  |
+        |── HTTP GET localhost:8000 ───────→|    (kernel loopback, stays in VM)
+        |← 200 OK ──────────────────────── |
+```
+No external network involved. No RAXIS control point touched.
+
+**2. External actors cannot reach the dev server:**
+The VM's localhost is not reachable from outside the VM. If the agent starts a dev
+server on `localhost:8000`, nothing outside the VM (no attacker, no other system) can
+connect to it. The isolation is bidirectional.
+
+This means the dev server pattern is both **fully functional** and **safe** — the agent
+can test its implementation against a live server without exposing it externally.
+
+### 13.3 — Reserved Ports (Credential Proxy Ports)
+
+The Kernel starts credential proxies before the agent boots. These proxies listen on
+well-known localhost ports. The agent must not bind to these ports.
+
+**Reserved by default (only active if the task declares the credential):**
+
+| Port  | Proxy | Proxy type |
+|---|---|---|
+| 5432  | PostgreSQL credential proxy | `postgres` |
+| 3306  | MySQL credential proxy | `mysql` |
+| 1433  | MSSQL credential proxy | `mssql` |
+| 27017 | MongoDB credential proxy | `mongodb` |
+| 6379  | Redis credential proxy | `redis` |
+| 8001  | Kubernetes credential proxy | `k8s` |
+| 9001  | AWS IMDS credential proxy | `aws` |
+| 9002  | GCP metadata credential proxy | `gcp` |
+| 9003  | Azure IMDS credential proxy | `azure` |
+
+**Only the credentials declared in `[[tasks.credentials]]` for this task are active.**
+If a task declares no PostgreSQL credential, port 5432 is available for the agent to use.
+The `proxies` field in the KSB lists exactly which ports are occupied on this call:
+
+```
+[RAXIS:KERNEL_STATE v=1]
+...
+proxies  = postgres-staging:localhost:5432,k8s-staging:localhost:8001
+[/RAXIS:KERNEL_STATE]
+```
+
+**Recommended ports for agent dev servers:** 8000, 8080, 3000, 4000, 5000, 9000, or
+any port ≥ 9100 (above the proxy range). These are never occupied by RAXIS.
+
+**What happens on port conflict:** If the agent attempts to bind to a port already held
+by a credential proxy, the `bind()` syscall returns `EADDRINUSE`. The error message will
+show `Address already in use (os error 98)`. The agent should switch to a different port
+and does NOT need to escalate — this is a local configuration issue.
+
+### 13.4 — The Standard Dev Server Workflow
+
+**Scenario:** Agent implements a FastAPI endpoint, starts the server, runs integration tests.
+
+```bash
+# 1. Implement the feature
+# (agent writes code to its working directory under path_allowlist)
+
+# 2. Install dependencies (if internet egress is permitted for pypi)
+pip install fastapi uvicorn pytest httpx
+
+# 3. Start the dev server on an unreserved port
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload &
+DEV_SERVER_PID=$!
+
+# Wait for server to be ready
+sleep 2
+curl -s http://localhost:8000/health  # → {"status": "ok"}
+
+# 4. Run integration tests against the live server
+pytest tests/integration/ -v --base-url=http://localhost:8000
+
+# 5. Stop the dev server
+kill $DEV_SERVER_PID
+
+# 6. Commit the implementation
+# (submit SingleCommit intent)
+```
+
+**Python test example using the live dev server:**
+
+```python
+# tests/integration/test_users_api.py
+import httpx
+import pytest
+
+BASE_URL = "http://localhost:8000"  # agent's own dev server — intra-VM
+
+@pytest.fixture
+def client():
+    return httpx.Client(base_url=BASE_URL)
+
+def test_create_user(client):
+    response = client.post("/api/users", json={"name": "Alice", "email": "alice@test.com"})
+    assert response.status_code == 201
+    assert response.json()["name"] == "Alice"
+
+def test_get_user(client):
+    # Create then fetch
+    create_resp = client.post("/api/users", json={"name": "Bob", "email": "bob@test.com"})
+    user_id = create_resp.json()["id"]
+
+    get_resp = client.get(f"/api/users/{user_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["name"] == "Bob"
+```
+
+### 13.5 — Dev Server + Credential Proxy: How They Interact
+
+The dev server runs inside the VM. When it makes database calls, those calls go to the
+credential proxy (`localhost:5432`) — which is also inside the VM. The proxy forwards
+them to the real database. This chain works transparently:
+
+```
+Integration test (pytest)
+    │  HTTP POST /api/users
+    ▼
+Dev server (localhost:8000, FastAPI)
+    │  INSERT INTO users... via SQLAlchemy
+    │  (DATABASE_URL=postgresql://raxis@localhost:5432/myapp_staging)
+    ▼
+PostgreSQL credential proxy (localhost:5432, Kernel-managed)
+    │  Adds real auth, forwards to real DB
+    ▼
+Real PostgreSQL (postgres-staging.company.internal:5432)
+```
+
+Every leg of this chain is within the VM except the final proxy→real DB connection.
+The proxy→real DB connection is Kernel-managed and subject to:
+- Credential proxy restrictions (`allow_only_select`, `forbidden_tables`, etc.)
+- `DatabaseQueryExecuted` audit events (each query logged)
+
+**The agent code for the dev server is unchanged from production code.** It uses
+`os.environ["DATABASE_URL"]` which points to the proxy. In production, `DATABASE_URL`
+points to the real database directly (with credentials). The integration test exercises
+the actual code path with real (staging) data.
+
+### 13.6 — Dev Server + External API Calls
+
+When the dev server calls an external API (Stripe, SendGrid, an internal microservice),
+those calls go through the normal egress path because they are outbound from the VM:
+
+```
+Dev server (localhost:8000)
+    │  POST https://api.stripe.com/v1/charges
+    │  (outbound from VM — NOT intra-VM)
+    ▼
+raxis-egress proxy (via EgressRequest intent mechanism)
+    │  Check: is api.stripe.com in allowed_egress?
+    │  YES → forward
+    │  NO  → FAIL_EGRESS_NOT_PERMITTED
+    ▼
+Stripe API
+```
+
+The dev server process is inside the VM. All its outbound calls are subject to the same
+egress allowlist as the agent's own HTTP calls. The plan's `allowed_egress` must include
+any external hosts the dev server needs to reach.
+
+**If the egress is blocked:** The dev server call fails with a network error. The agent
+can use a mock server (WireMock, responses library) to replace external API calls in
+integration tests, or add the required host to `allowed_egress` in the plan.
+
+### 13.7 — In-VM Test Databases (Edge Cases)
+
+**SQLite (fully in-memory or file-based):**
+SQLite has no network involvement — it's a library call, not a TCP connection.
+The agent can freely use SQLite for lightweight tests without any RAXIS interaction:
+
+```python
+# tests/conftest.py
+import sqlite3
+engine = create_engine("sqlite:///./test.db")  # or "sqlite:///:memory:"
+# No credential proxy, no egress, no RAXIS controls — purely in-VM
+```
+
+**In-VM PostgreSQL (pg_tmp or testcontainers):**
+Some test setups start a throwaway PostgreSQL instance:
+
+```python
+# Using pytest-postgresql — starts a real Postgres server inside the VM
+# on a random port (e.g., 5555), separate from the credential proxy on 5432
+import pytest_postgresql
+
+@pytest.fixture
+def pg(postgresql):
+    # postgresql is a real in-VM Postgres server on a random port
+    # No credential proxy involved — this is a throw-away test DB
+    return create_engine(postgresql.info.dsn)
+```
+
+This works correctly because:
+1. The in-VM Postgres runs on a different port from the credential proxy (5432)
+2. The connection is to `localhost:<random_port>` — intra-VM, unrestricted
+3. No real credentials are involved — this is a test-only DB
+
+**Docker-in-VM (if Docker is available in the VM image):**
+If the VM image includes Docker, the agent can start containerized services:
+
+```bash
+docker run -d --name test-redis -p 6380:6379 redis:alpine
+# Note: uses port 6380, not 6379 (which is reserved for Redis credential proxy)
+
+redis-cli -p 6380 set test-key test-value
+redis-cli -p 6380 get test-key
+```
+
+The plan's `vm_image` must include Docker for this to work, and the operator must
+explicitly enable Docker-in-VM in the policy (a privileged capability). This is
+not enabled by default.
+
+### 13.8 — NNSP Update: Reserved Ports and Dev Server Protocol
+
+This section is added to the Executor and Orchestrator NNSPs (appended to §3.1 and §3.2
+in `kernel-mechanics-prompt.md`):
+
+```
+## Local Development Servers
+
+You may start local processes (dev servers, test servers, mock servers) that listen
+on localhost inside the VM. This is unrestricted — no EgressRequest intent is needed
+for intra-VM loopback connections.
+
+### Reserved ports (used by RAXIS credential proxies):
+
+Check the [RAXIS:KERNEL_STATE] proxies field for the exact ports active in this session.
+Standard reserved ports (may be occupied if the credential is declared in your task):
+
+  5432  → PostgreSQL credential proxy
+  3306  → MySQL credential proxy
+  1433  → MSSQL credential proxy
+  27017 → MongoDB credential proxy
+  6379  → Redis credential proxy
+  8001  → Kubernetes credential proxy
+  9001  → AWS IMDS proxy
+  9002  → GCP metadata proxy
+  9003  → Azure IMDS proxy
+
+Do NOT bind your dev server to any port listed in the proxies field.
+If you try and get EADDRINUSE: switch to a different port (8000, 8080, 3000, 4000,
+5000, 9100+). Do NOT escalate — this is a local config issue.
+
+### Dev server pattern:
+
+  Start server: uvicorn app.main:app --port 8000 &
+  Test it:      pytest tests/integration/ --base-url=http://localhost:8000
+  Stop it:      kill $DEV_SERVER_PID (or pkill -f uvicorn)
+
+Your dev server's calls to localhost credential proxy ports (5432, 3306, etc.) work
+normally — they connect to the RAXIS credential proxy which handles authentication.
+
+Your dev server's EXTERNAL calls (to Stripe, GitHub, internal APIs) go through the
+egress allowlist. If an external call fails with a connection error, check your
+plan's allowed_egress — the host may not be listed.
+
+### In-VM test databases:
+
+SQLite: always available, no network involved, use freely.
+In-VM Postgres (pytest-postgresql, pg_tmp): use a port other than 5432.
+Docker-in-VM: only available if explicitly enabled in the VM image and policy.
+```
+
+---
+
+---
+
 ## 10. Implementation Checklist
 
 - [ ] Design credential proxy trait: `trait CredentialProxy { fn start(&self, ...) -> ProxyHandle; }`
