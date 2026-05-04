@@ -223,16 +223,16 @@ The CLI commands read through the Kernel's query API.
 ## 5. Retention Policy
 
 By default, artifacts are retained indefinitely. The default value for every retention
-field is `"infinity"` — an explicit, unambiguous declaration that the artifact lives
+field is `"forever"` — an explicit, unambiguous declaration that the artifact lives
 forever.
 
 ```toml
 # policy.toml
 
 [artifact_retention]
-policy_bundles = "infinity"   # default — retain all policy bundles forever
-plans          = "infinity"   # default — retain all approved plans forever
-keys           = "infinity"   # default — retain all operator keys forever (strongly recommended)
+policy_bundles = "forever"   # default — retain all policy bundles forever
+plans          = "forever"   # default — retain all approved plans forever
+keys           = "forever"   # default — retain all operator keys forever (strongly recommended)
 ```
 
 For deployments with storage constraints, a specific retention window may be configured
@@ -242,7 +242,7 @@ using a positive integer (number of days):
 [artifact_retention]
 policy_bundles = 3650    # retain for 10 years
 plans          = 3650    # retain for 10 years
-keys           = "infinity"   # keys should never be deleted — see safety constraint below
+keys           = "forever"   # keys should never be deleted — see safety constraint below
 ```
 
 ### Rust Type — `RetentionDays`
@@ -256,7 +256,7 @@ error at `raxis policy push` time, not a silent "retain zero days" behavior.
 /// Retention window for a class of artifacts.
 ///
 /// Serialization:
-///   "infinity"         → RetentionDays::Forever
+///   "forever"         → RetentionDays::Forever
 ///   <positive integer> → RetentionDays::Days(NonZeroU64)
 ///   0                  → parse error (serde rejects before reaching kernel logic)
 ///   negative integer   → parse error
@@ -281,13 +281,13 @@ impl<'de> Deserialize<'de> for RetentionDays {
         }
 
         match Raw::deserialize(d)? {
-            Raw::Str(s) if s == "infinity" => Ok(RetentionDays::Forever),
+            Raw::Str(s) if s == "forever" => Ok(RetentionDays::Forever),
             Raw::Str(s) => Err(D::Error::custom(format!(
-                "invalid retention value {:?}: expected "infinity" or a positive integer",
+                "invalid retention value {:?}: expected "forever" or a positive integer",
                 s
             ))),
             Raw::Int(n) if n <= 0 => Err(D::Error::custom(format!(
-                "invalid retention value {}: must be a positive integer (≥ 1) or "infinity".                  Use "infinity" to retain forever.",
+                "invalid retention value {}: must be a positive integer (≥ 1) or "forever".                  Use "forever" to retain forever.",
                 n
             ))),
             Raw::Int(n) => Ok(RetentionDays::Days(
@@ -299,7 +299,7 @@ impl<'de> Deserialize<'de> for RetentionDays {
 
 impl Default for RetentionDays {
     fn default() -> Self {
-        RetentionDays::Forever   // "infinity" is the default for all retention fields
+        RetentionDays::Forever   // "forever" is the default for all retention fields
     }
 }
 ```
@@ -332,12 +332,12 @@ the Kernel checks that `policy_bundles` and `plans` are also set to `Days(M)` wh
 is rejected:
 
 ```
-ERROR: artifact_retention.keys = 365 (days) is shorter than artifact_retention.plans = "infinity".
+ERROR: artifact_retention.keys = 365 (days) is shorter than artifact_retention.plans = "forever".
 Plans retained longer than the key used to sign them cannot be re-verified.
-Set keys = "infinity" or reduce plans retention to ≤ 365 days.
+Set keys = "forever" or reduce plans retention to ≤ 365 days.
 ```
 
-The recommended posture is `keys = "infinity"` always.
+The recommended posture is `keys = "forever"` always.
 
 ---
 
@@ -494,7 +494,7 @@ Expiry candidates (as of 2026-05-03 16:05 UTC):
 
 Safety check results:
   BLOCKED  key j0k1l2... → referenced by live plan g7h8i9... (would outlive key)
-           Fix: delete plan g7h8i9... first, or set keys = "infinity"
+           Fix: delete plan g7h8i9... first, or set keys = "forever"
 
 Warnings:
   WARN  policy a1b2c3... is referenced by plan m3n4o5... (plan within retention).
@@ -515,7 +515,7 @@ For deployments that want automatic GC, the policy can configure a schedule:
 [artifact_retention]
 policy_bundles = 3650
 plans          = 3650
-keys           = "infinity"
+keys           = "forever"
 
 [artifact_retention.gc_schedule]
 enabled        = false        # default — GC is manual
