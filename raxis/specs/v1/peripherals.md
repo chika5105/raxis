@@ -230,6 +230,10 @@ enum OperatorRequest {
 
     // policy
     RotateEpoch        { policy_path: PathBuf, sig_path: PathBuf },
+
+    // step-10 quarantine primitives — see kernel-store.md §2.5.10
+    QuarantineInitiative { initiative_id: InitiativeId, reason: Option<String> },
+    QuarantinePlansBy    { target_fingerprint: String,  reason: Option<String> },
 }
 
 enum OperatorResponse {
@@ -238,6 +242,8 @@ enum OperatorResponse {
     PlanApproved          { initiative_id: InitiativeId, transitioned_at: UnixSeconds, n_tasks: u32 },
     PlanRejected          { initiative_id: InitiativeId, transitioned_at: UnixSeconds },
     InitiativeAborted     { initiative_id: InitiativeId, transitioned_at: UnixSeconds, n_tasks_cancelled: u32 },
+    InitiativeQuarantined { initiative_id: InitiativeId, quarantined_at: UnixSeconds, was_already_quarantined: bool },
+    QuarantineSwept       { target_fingerprint: String, newly_quarantined_ids: Vec<InitiativeId>, quarantined_at: UnixSeconds },
     // sessions and delegations
     SessionCreated        { session_id: SessionId, session_token: String /* 64-char lowercase hex */, role: Role, worktree_root: Option<PathBuf>, base_sha: Option<CommitSha>, base_tracking_ref: Option<String>, expires_at: UnixSeconds, bound_task_id: Option<TaskId>, lineage_id: LineageId },
     SessionRevoked        { session_id: SessionId, revoked_at: UnixSeconds },

@@ -313,6 +313,8 @@ mod tests {
             display_name:       "fp".into(),
             pubkey_hex:         "0".repeat(64),
             permitted_ops:      vec![],
+            cert:                  None,
+            force_misconfig_bypass: false,
         }]);
         // Mutate the test bundle in-place via a private setter by
         // re-validating from a synthesised raw section. The cleanest

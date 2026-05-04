@@ -52,7 +52,25 @@ All §4.1 subcommands that require kernel connectivity will fail with `ERR_SOCKE
 
 **Purpose:** Run the initial key generation ceremony. Generates all four key families and writes the initial `policy.toml`. Must be run before the kernel is started for the first time.
 
-**Usage:** `raxis-cli genesis [--operator-pubkey <path>] [--force]`
+**Usage:** `raxis-cli genesis [--operator-pubkey <path>] [--operator-cert <path>] [--force-misconfig] [--force]`
+
+**Cert-bound genesis:** Pass `--operator-cert <path>` to embed an
+operator certificate (output of `raxis cert mint`) into the freshly
+emitted `policy.toml` in the same ceremony. The CLI:
+
+1. Validates the cert's `pubkey_hex` matches the operator pubkey from
+   `--operator-pubkey` (a cert MUST be self-signed by the key it
+   accompanies; mismatch is a hard failure regardless of flags).
+2. Verifies the cert's self-signature.
+3. Performs structural validation (Standard kind: window sane,
+   permitted_ops non-empty; EmergencyRecovery kind: pinned values).
+   Add `--force-misconfig` to bypass structural failures only —
+   never the pubkey or self-signature checks. The bypass is recorded
+   verbatim in the policy entry's `force_misconfig_bypass = true`
+   field and audited as `OperatorCertMisconfigBypassed` on the next
+   policy load.
+4. Splices the cert into the sole `[[operators.entries]]` block; the
+   operator MUST then sign the modified policy with `policy sign`.
 
 **Behaviour:**
 1. Checks that `<data_dir>/keys/` does not already contain key files. Exits with `ERR_ALREADY_INITIALIZED` if it does (prevents accidental re-genesis). Use `--force` only with explicit intent to destroy existing keys. **`--force` semantics**: the genesis path MUST proactively `rm` every prior-genesis artifact (`authority_keypair.pem`, `quality_keypair.pem`, `verifier_token_key.bin`, every `operator_<fp>.pub`, and `<data_dir>/audit/segment-000.jsonl`) before re-running steps 2–7 — otherwise the per-file `O_CREAT|O_EXCL` writes inside the helpers will fire and `--force` will silently fail mid-ceremony. Both genesis emitters (CLI's `raxis genesis` and the kernel's `RAXIS_BOOTSTRAP=1` path) implement this purge.
@@ -65,7 +83,7 @@ All §4.1 subcommands that require kernel connectivity will fail with `ERR_SOCKE
 6. Writes initial `policy.toml` to `<data_dir>/policy/policy.toml` via the SHARED canonical emitter `raxis_genesis_tools::render_genesis_policy_toml` (the same function the kernel's `RAXIS_BOOTSTRAP=1` self-bootstrap path calls — see `philosophy.md` §1.6 `crates/genesis-tools/` for the convergence rationale and drift history). The CLI is responsible only for plumbing the inputs to the emitter; the spec invariants are all enforced inside the shared crate. The emitted artifact contains:
    - `authority_pubkey` = public key extracted from `authority_keypair.pem`
    - `quality_pubkey` = public key extracted from `quality_keypair.pem`
-   - `[[operators.entries]]` = the registered operator entry with `permitted_ops = ["CreateInitiative", "ApprovePlan", "RejectPlan", "CreateSession", "RevokeSession", "GrantDelegation", "RetryTask", "ResumeTask", "AbortTask", "AbortInitiative", "ApproveEscalation", "DenyEscalation", "RotateEpoch"]` (the canonical 13-operation v1 set per `kernel-store.md` §2.5.5 IPC discriminant table — omit keys only if you intentionally deny that capability)
+   - `[[operators.entries]]` = the registered operator entry with `permitted_ops = ["CreateInitiative", "ApprovePlan", "RejectPlan", "CreateSession", "RevokeSession", "GrantDelegation", "RetryTask", "ResumeTask", "AbortTask", "AbortInitiative", "ApproveEscalation", "DenyEscalation", "RotateEpoch", "QuarantineInitiative", "QuarantinePlansBy"]` (the canonical 15-operation v1 set per `kernel-store.md` §2.5.5 IPC discriminant table — the last two are the step-10 quarantine primitives; omit keys only if you intentionally deny that capability)
    - `[budget.base_cost_per_intent_kind]` = an entry for EACH of the four canonical `IntentKind` variants (`SingleCommit`, `IntegrationMerge`, `CompleteTask`, `ReportFailure`). Omitting any of these is a latent bug: any task whose intent-kind has no cost entry would fail admission with `BudgetError::UnknownIntentKindCost`. The shared emitter ships fixed defaults (10/50/5/1) that the operator may re-tune via `raxis epoch advance`.
    - `[[lanes]]` = a `default` lane entry. Without at least one lane entry, `scheduler::admit::admit_task` cannot resolve `lane_id = "default"` (the lane every plan defaults to) and admission fails with `SchedulerError::UnknownLane`.
    - `[sessions] allowed_worktree_roots` = a NON-EMPTY placeholder list (`<data_dir>/worktrees`), with a TOML comment directing the operator to replace it before creating sessions. **Writing an empty list at this step is a contract violation:** `raxis_policy::PolicyBundle::validate` rejects an empty `allowed_worktree_roots` as `MalformedArtifact`, so the kernel would refuse to load its own genesis-emitted artifact (regression-pinned by `bootstrap::integration::policy_toml_round_trips_through_raxis_policy_load_policy` AND by `cli/tests/genesis_emitter_round_trip.rs`). The placeholder is scoped under `<data_dir>` so it cannot grant access to anything the operator did not opt into; the operator is expected to advance the epoch with their real allowlist before creating sessions.
@@ -103,16 +121,23 @@ All §4.1 subcommands that require kernel connectivity will fail with `ERR_SOCKE
 
 **Purpose:** Sign a policy or plan artifact with the operator's private key.
 
-**Usage:** `raxis-cli policy sign <artifact.toml> --key <operator_private_key_path>`
+**Usage:** `raxis-cli policy sign <artifact.toml> --key <operator_private_key_path> [--force-misconfig]`
 
 **Behaviour:**
 1. Reads `<artifact.toml>` bytes verbatim.
-2. Computes `SHA-256(file_bytes)`.
-3. Signs the SHA-256 digest with the operator's Ed25519 private key.
-4. Writes `<artifact>.sig` (same directory as `<artifact.toml>`) in the TOML format defined in §2.5.3.
-5. Prints the fingerprint and plan_sha256 for verification.
+2. Performs a best-effort scan of the TOML for any `[[operators.entries]]`
+   row with `force_misconfig_bypass = true`. If any are found AND
+   `--force-misconfig` was not passed, signing aborts with a usage
+   error listing the offending entries — refuses to silently sign a
+   policy that has structural overrides baked in.
+3. With `--force-misconfig` present, emits a structured stderr warning
+   (`policy_sign_misconfig_bypass`) per offending entry and proceeds.
+4. Computes `SHA-256(file_bytes)`.
+5. Signs the SHA-256 digest with the operator's Ed25519 private key.
+6. Writes `<artifact>.sig` (same directory as `<artifact.toml>`) in the TOML format defined in §2.5.3.
+7. Prints the fingerprint and plan_sha256 for verification.
 
-**Note:** The operator's private key is read locally and is never sent to the kernel. `raxis-cli policy sign` does not open the operator socket.
+**Note:** The operator's private key is read locally and is never sent to the kernel. `raxis-cli policy sign` does not open the operator socket. The `--force-misconfig` flag is the operator-explicit acknowledgement that the policy contains a cert with a structural validation override; the matching kernel-side audit event is `OperatorCertMisconfigBypassed`.
 
 ---
 
@@ -174,6 +199,99 @@ All §4.1 subcommands that require kernel connectivity will fail with `ERR_SOCKE
 2. Sends `AbortInitiative { initiative_id }`.
 3. Kernel bulk-cancels tasks per store spec; initiative → `Aborted`.
 4. Requires `AbortInitiative ∈ permitted_ops`.
+
+---
+
+### `initiative quarantine`
+
+**Purpose:** Freeze an initiative without aborting it. Every subsequent
+`IntentRequest` against the initiative is rejected by the kernel with the
+terminal code `FAIL_INITIATIVE_QUARANTINED`
+(`raxis_types::PlannerErrorCode::FailInitiativeQuarantined`). In-flight
+tasks remain in their current state — quarantine is a curtain, not a
+guillotine. Use `initiative abort` for the destructive path.
+
+**Usage:** `raxis-cli initiative quarantine <initiative_id> [--reason <text>]`
+
+**Behaviour:**
+1. Opens operator socket; performs challenge-response handshake.
+2. Sends `QuarantineInitiative { initiative_id, reason }`. `reason` is
+   capped server-side at 512 bytes (truncated, not rejected).
+3. Kernel inserts one row into `initiative_quarantines`. The call is
+   idempotent: re-issuing it on an already-quarantined initiative
+   returns `was_already_quarantined: true` and does NOT re-emit the
+   audit event.
+4. Emits `InitiativeQuarantined { initiative_id, quarantined_by, reason }`
+   to the audit chain.
+5. Requires `QuarantineInitiative ∈ permitted_ops`.
+
+---
+
+### `operator quarantine-plans-by`
+
+**Purpose:** The big-red-button revocation primitive. Sweeps every
+initiative whose plan was approved by `<target_fingerprint>` and
+quarantines each in a single atomic transaction. Used as the immediate
+containment step when an operator key is suspected compromised;
+operator-key removal is a separate `policy sign` + `epoch advance`
+ceremony.
+
+**Usage:** `raxis-cli operator quarantine-plans-by <target_fingerprint> [--reason <text>]`
+
+**Behaviour:**
+1. Opens operator socket; performs challenge-response handshake.
+2. Sends `QuarantinePlansBy { target_fingerprint, reason }`.
+3. Kernel `JOIN`s `signed_plan_artifacts.signed_by_fingerprint = ?`
+   and `INSERT`s one `initiative_quarantines` row per match. Rows
+   already quarantined are silently skipped.
+4. Emits one `InitiativeQuarantined` audit event per newly-quarantined
+   initiative PLUS one rollup `OperatorQuarantineSwept { target_fingerprint, count }`.
+   The rollup is emitted even on an empty sweep so the audit chain
+   shows the operator pressed the button (forensic continuity).
+5. Initiatives whose `signed_plan_artifacts.signed_by_fingerprint` is
+   `NULL` (legacy approvals predating migration 3) are silently skipped
+   — the kernel cannot prove who approved them. The audit chain remains
+   the authoritative record for those.
+6. Requires `QuarantinePlansBy ∈ permitted_ops`.
+
+---
+
+### `cert mint` / `cert mint-emergency`
+
+**Purpose:** Issue an operator certificate that binds together
+`(display_name, pubkey, validity window, permitted_ops)` and is
+self-signed by the operator's Ed25519 private key. Standard certs have
+the four-zone expiry model (Active / Expiring / Grace / Expired);
+`EmergencyRecovery` certs are structurally pinned and never expire.
+
+**Usage:**
+- `raxis cert mint --display-name <text> --pubkey <pubkey.pem> --key <signing_key.pem> [--ops "RotateEpoch,ApprovePlan,..."] [--validity-days N] [--warn-days N] [--grace-days N] [--not-before <unix_ts>] --out <cert.toml>`
+- `raxis cert mint-emergency --display-name <text> --pubkey <pubkey.pem> --key <signing_key.pem> --out <cert.toml>`
+
+**Behaviour:**
+1. Reads the public key (PEM) and the signing key (PEM); asserts the
+   signing key matches the public key (an emergency cert MUST be
+   self-signed by the operator key it certifies).
+2. Builds the canonical signing input
+   `display_name|pubkey_hex|kind|not_before|not_after|warn|grace|permitted_ops_json`
+   (hashed before signing per `raxis_crypto::cert::sign_cert`).
+3. For `mint-emergency`: rejects `--ops` other than `["RotateEpoch"]`
+   and rejects `--not-before` outright. The kernel structurally pins
+   `permitted_ops = ["RotateEpoch"]` and `not_after = 0` (sentinel for
+   "always active"); supplying anything else is a misconfiguration the
+   CLI catches before policy-sign time.
+4. Writes a TOML cert artifact to `--out`.
+
+Defaults (Standard kind): `not_after = now + 365d`, `warn = 30d`, `grace = 7d`.
+
+### `cert show / verify / list / install`
+
+| subcommand | purpose |
+|------------|---------|
+| `cert show <cert.toml>` | Pretty-print a cert (use `--json` for machine output). |
+| `cert verify <cert.toml> [--at <unix_ts>]` | Verify structure + self-signature; report current zone (`active`, `expiring`, `grace`, `expired`, `not_yet_valid`, `always_active_emergency`). Returns `Ok` even on `expired` — expiry is informational. |
+| `cert list [--json]` | Read `operator_certificates` from `kernel.db` and print one row per installed cert with current zone. |
+| `cert install <cert.toml> --policy <policy.toml>` | Splice a cert into an existing `policy.operators[]` entry whose `pubkey_fingerprint` matches the cert's pubkey. Asserts pubkey-hex match before mutating the file. The policy MUST then be re-signed with `policy sign` before the next epoch advance picks it up. |
 
 ---
 

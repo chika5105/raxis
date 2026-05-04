@@ -347,6 +347,156 @@ pub enum AuditEventKind {
         reason:     String,
     },
 
+    // --- Operator certificates (kernel-store.md §2.5.7, security-model.md §cert-lifecycle) ---
+    /// Emitted by `policy_manager::advance_epoch` (and the genesis path)
+    /// for every cert-bound `OperatorEntry` mirrored into the
+    /// `operator_certificates` view table on a successful epoch
+    /// install. The audit-chain mirror is the authoritative ledger of
+    /// "who is currently a cert-bound operator at epoch N" — the
+    /// `operator_certificates` SQLite table is a denormalised view
+    /// optimised for reads, but if it is ever lost (disk corruption,
+    /// schema rebuild) it can be reconstructed by replaying these
+    /// audit records.
+    ///
+    /// Field semantics:
+    ///
+    /// * `pubkey_fingerprint` — SHA-256[:16] hex of `pubkey_hex`.
+    /// * `epoch_id` — the policy epoch this cert is now scoped to.
+    /// * `cert_kind` — `"Standard"` or `"EmergencyRecovery"` (matches
+    ///   `CertKind::as_str`). The field is named `cert_kind` (NOT just
+    ///   `kind`) because the audit-event enum uses `#[serde(tag =
+    ///   "kind")]` for the variant discriminator, and a payload field
+    ///   with the same key would collide on the JSON wire.
+    /// * `display_name` — operator label (free-form).
+    /// * `not_before` — unix seconds; cert validity start (sentinel `0`
+    ///   for `EmergencyRecovery`).
+    /// * `not_after` — unix seconds; cert validity end (sentinel `0`
+    ///   for `EmergencyRecovery`).
+    /// * `permitted_ops` — list of operator op names this cert is
+    ///   allowed to invoke. Already normalised by the policy bundle
+    ///   (e.g. `EmergencyRecovery` is structurally pinned to
+    ///   `["RotateEpoch"]`).
+    /// * `force_misconfig_bypass` — `true` if the operator entry opted
+    ///   into bypassing structural cert-validation errors. The bypass
+    ///   itself emits a separate `OperatorCertMisconfigBypassed` event
+    ///   for each rule that was relaxed.
+    OperatorCertInstalled {
+        pubkey_fingerprint:     String,
+        epoch_id:               u64,
+        cert_kind:              String,
+        display_name:           String,
+        not_before:             i64,
+        not_after:              i64,
+        permitted_ops:          Vec<String>,
+        force_misconfig_bypass: bool,
+    },
+
+    /// Emitted at policy load when an `OperatorEntry` lacks a `[cert]`
+    /// table (i.e. `cert = None`). This is the legacy / pre-cert flow:
+    /// the operator entry stays valid and the kernel still honours
+    /// its `permitted_ops` list, but no expiry / structural checks
+    /// apply. Recording this surface keeps the kernel's behaviour
+    /// observable — an operator who silently leaves a cert-less
+    /// entry in `policy.toml` will see this event and can decide to
+    /// mint a cert.
+    ///
+    /// Emitted exactly once per legacy entry per epoch advance (i.e.
+    /// per `policy.toml` install), NOT once per IPC request.
+    OperatorCertLegacyEntryDetected {
+        pubkey_fingerprint: String,
+        epoch_id:           u64,
+        display_name:       String,
+    },
+
+    /// Emitted at policy load when a structural cert-validation error
+    /// would normally fail the load BUT the operator entry has set
+    /// `force_misconfig_bypass = true`. The bypass is honoured (the
+    /// epoch advances) AND this audit event records every individual
+    /// invariant that was relaxed, so an auditor can reconstruct the
+    /// exact set of rules the operator chose to override.
+    ///
+    /// Self-signature failures and pubkey/fingerprint mismatches are
+    /// NEVER bypassable (they would let an attacker spoof an
+    /// operator's identity); those errors fail-closed regardless of
+    /// `force_misconfig_bypass` and never produce this event.
+    ///
+    /// `violations` is the verbatim `Display` string of every
+    /// structural error that was relaxed for this entry, in the
+    /// order the validator surfaced them. The strings come straight
+    /// from the `CertError` Display impls and are intentionally
+    /// human-readable (so a forensic auditor reading the chain sees
+    /// the same wording the operator saw at validate time).
+    OperatorCertMisconfigBypassed {
+        pubkey_fingerprint: String,
+        epoch_id:           u64,
+        cert_kind:          String,
+        display_name:       String,
+        violations:         Vec<String>,
+    },
+
+    /// Emitted by the cert-check runtime sweep when a Standard cert is
+    /// inside its Expiring zone (i.e. `now >= not_after - warn_window`
+    /// AND `now < not_after`). The operator IPC dispatcher emits this
+    /// AT MOST ONCE PER EPOCH for a given cert — the sweep is gated by
+    /// an in-process dedupe set keyed on `(pubkey_fingerprint, epoch_id)`.
+    /// Subsequent ops by the same operator in the same epoch are
+    /// silently allowed without re-emitting (so a chatty operator
+    /// doesn't flood the chain).
+    ///
+    /// The op the operator was about to invoke is included so an
+    /// auditor can correlate the warning with downstream activity.
+    OperatorCertExpiringSoon {
+        pubkey_fingerprint: String,
+        epoch_id:           u64,
+        op:                 String,
+        not_after:          i64,
+        days_remaining:     i64,
+    },
+
+    /// Emitted by the cert-check runtime sweep when a Standard cert is
+    /// inside its Grace zone (i.e. `now >= not_after` AND
+    /// `now < not_after + grace_window`). Same once-per-epoch dedupe
+    /// posture as `OperatorCertExpiringSoon`. Operations are still
+    /// permitted in the Grace zone — this event is the "this is your
+    /// last chance to rotate" warning before the cert hits the
+    /// Expired zone.
+    OperatorCertInGracePeriod {
+        pubkey_fingerprint: String,
+        epoch_id:           u64,
+        op:                 String,
+        not_after:          i64,
+        grace_ends_at:      i64,
+    },
+
+    /// Emitted by the cert-check runtime sweep when an op is DENIED
+    /// because the cert is in its Expired zone (i.e.
+    /// `now >= not_after + grace_window`). The IPC dispatcher returns
+    /// `FAIL_CERT_EXPIRED` to the operator and writes this audit
+    /// event in the same Phase-1.5 emit step as the rejection
+    /// response. Unlike the Expiring/Grace events this is NOT
+    /// deduped — every denied op produces one record so an auditor
+    /// can see exactly which operations were attempted post-expiry.
+    OperatorCertExpiredOpDenied {
+        pubkey_fingerprint: String,
+        epoch_id:           u64,
+        op:                 String,
+        not_after:          i64,
+        expired_at:         i64,
+    },
+
+    /// Emitted when an `EmergencyRecovery` cert is used to invoke
+    /// any operator op (in v1 always `RotateEpoch` because of the
+    /// structural pin). This is the audit hook for the break-glass
+    /// posture: emergency-cert use is never silent, so an operator
+    /// who legitimately rotated the epoch via the emergency key
+    /// has a record they can present, and an attacker who
+    /// compromises the key cannot use it without leaving a trace.
+    EmergencyOperatorUsed {
+        pubkey_fingerprint: String,
+        epoch_id:           u64,
+        op:                 String,
+    },
+
     // --- Read-only CLI: redaction reveal (cli-readonly.md §5.4.2 / §5.7.2) ---
     /// Emitted by the read-only CLI when an operator runs a command
     /// with `--reveal-paths` (or any future redaction-bypass flag).
@@ -382,6 +532,38 @@ pub enum AuditEventKind {
         column:   String,
         task_id:  String,
         command:  String,
+    },
+
+    // --- Initiative quarantine (kernel-store.md §2.5.8) -------------------
+    /// Emitted when an operator individually quarantines an initiative
+    /// via `raxis initiative quarantine <id>`. The IPC dispatcher
+    /// inserts a row into `initiative_quarantines` and writes this
+    /// audit event in the same Phase-1.5 emit step. Subsequent
+    /// `IntentRequest`s against this initiative are rejected with
+    /// `FAIL_INITIATIVE_QUARANTINED` by the planner intent gate.
+    ///
+    /// `quarantined_by` is the operator pubkey_fingerprint (32 hex
+    /// chars) issuing the command. `reason` is a free-form label;
+    /// NULL when the operator did not supply `--reason`.
+    InitiativeQuarantined {
+        initiative_id:  String,
+        quarantined_by: String,
+        reason:         Option<String>,
+    },
+
+    /// Rollup event written by `raxis operator quarantine-plans-by
+    /// <fingerprint>`. Surfaces the SWEEP itself (one record), with
+    /// the count of newly-quarantined initiatives + the target
+    /// operator. Each individual collateral quarantine still emits
+    /// its own `InitiativeQuarantined` event with the
+    /// `quarantined_by` field set to the rotating operator's
+    /// fingerprint — that's the per-row record. This event is the
+    /// "the operator pressed the big red button" header.
+    OperatorQuarantineSwept {
+        target_fingerprint: String,
+        quarantined_by:     String,
+        count:              u64,
+        reason:             Option<String>,
     },
 }
 
@@ -427,7 +609,16 @@ impl AuditEventKind {
             Self::GatewayQuarantined { .. } => "GatewayQuarantined",
             Self::GatewaySignalFailed { .. } => "GatewaySignalFailed",
             Self::NotificationDeliveryFailed { .. } => "NotificationDeliveryFailed",
+            Self::OperatorCertInstalled { .. } => "OperatorCertInstalled",
+            Self::OperatorCertLegacyEntryDetected { .. } => "OperatorCertLegacyEntryDetected",
+            Self::OperatorCertMisconfigBypassed { .. } => "OperatorCertMisconfigBypassed",
+            Self::OperatorCertExpiringSoon { .. } => "OperatorCertExpiringSoon",
+            Self::OperatorCertInGracePeriod { .. } => "OperatorCertInGracePeriod",
+            Self::OperatorCertExpiredOpDenied { .. } => "OperatorCertExpiredOpDenied",
+            Self::EmergencyOperatorUsed { .. } => "EmergencyOperatorUsed",
             Self::PathReadAccessed { .. } => "PathReadAccessed",
+            Self::InitiativeQuarantined { .. } => "InitiativeQuarantined",
+            Self::OperatorQuarantineSwept { .. } => "OperatorQuarantineSwept",
         }
     }
 }
@@ -464,6 +655,217 @@ mod path_read_accessed_tests {
         assert_eq!(v["column"], serde_json::json!("path_allowlist"));
         assert_eq!(v["task_id"], serde_json::json!("task-001"));
         assert_eq!(v["command"], serde_json::json!("inspect"));
+    }
+
+    // ── operator-cert audit kinds ──────────────────────────────────
+
+    /// Pin every cert-related variant's `kind` discriminant string.
+    /// A future rename of any variant breaks this test, so the wire
+    /// shape that downstream tools (`raxis verify-chain`,
+    /// `raxis cert list`, the notification router) match against
+    /// cannot drift silently.
+    #[test]
+    fn operator_cert_kind_strings_are_pinned() {
+        let cases: Vec<(AuditEventKind, &str)> = vec![
+            (AuditEventKind::OperatorCertInstalled {
+                pubkey_fingerprint: "fp".into(), epoch_id: 1, cert_kind: "Standard".into(),
+                display_name: "alice".into(), not_before: 0, not_after: 0,
+                permitted_ops: vec![], force_misconfig_bypass: false,
+            }, "OperatorCertInstalled"),
+            (AuditEventKind::OperatorCertLegacyEntryDetected {
+                pubkey_fingerprint: "fp".into(), epoch_id: 1, display_name: "alice".into(),
+            }, "OperatorCertLegacyEntryDetected"),
+            (AuditEventKind::OperatorCertMisconfigBypassed {
+                pubkey_fingerprint: "fp".into(), epoch_id: 1,
+                cert_kind: "Standard".into(), display_name: "alice".into(),
+                violations: vec!["x".into()],
+            }, "OperatorCertMisconfigBypassed"),
+            (AuditEventKind::OperatorCertExpiringSoon {
+                pubkey_fingerprint: "fp".into(), epoch_id: 1, op: "AbortTask".into(),
+                not_after: 0, days_remaining: 14,
+            }, "OperatorCertExpiringSoon"),
+            (AuditEventKind::OperatorCertInGracePeriod {
+                pubkey_fingerprint: "fp".into(), epoch_id: 1, op: "AbortTask".into(),
+                not_after: 0, grace_ends_at: 0,
+            }, "OperatorCertInGracePeriod"),
+            (AuditEventKind::OperatorCertExpiredOpDenied {
+                pubkey_fingerprint: "fp".into(), epoch_id: 1, op: "AbortTask".into(),
+                not_after: 0, expired_at: 0,
+            }, "OperatorCertExpiredOpDenied"),
+            (AuditEventKind::EmergencyOperatorUsed {
+                pubkey_fingerprint: "fp".into(), epoch_id: 1, op: "RotateEpoch".into(),
+            }, "EmergencyOperatorUsed"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.as_str(), expected,
+                "as_str() drifted for {expected}");
+        }
+    }
+
+    /// Confirm the cert-installed payload serialises with every field
+    /// and round-trips through JSON. This is the audit-chain mirror
+    /// of the `operator_certificates` view-table row, so a wire-shape
+    /// drift here would silently break replay-from-audit-chain
+    /// recovery (kernel-store.md §2.5.7).
+    #[test]
+    fn operator_cert_installed_serialises_all_fields() {
+        let kind = AuditEventKind::OperatorCertInstalled {
+            pubkey_fingerprint:     "abcd0123".to_owned(),
+            epoch_id:               2,
+            cert_kind:              "Standard".to_owned(),
+            display_name:           "alice".to_owned(),
+            not_before:             1_700_000_000,
+            not_after:              1_731_536_000,
+            permitted_ops:          vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()],
+            force_misconfig_bypass: false,
+        };
+        let v = serde_json::to_value(&kind).expect("serialises");
+        // The serde tag (`#[serde(tag = "kind")]`) writes the variant
+        // discriminator into the JSON `kind` field; the payload's own
+        // `cert_kind` field is named distinctly to avoid the collision
+        // that an identically-named payload field would cause.
+        assert_eq!(v["kind"], serde_json::json!("OperatorCertInstalled"));
+        assert_eq!(v["pubkey_fingerprint"], serde_json::json!("abcd0123"));
+        assert_eq!(v["epoch_id"], serde_json::json!(2));
+        assert_eq!(v["cert_kind"], serde_json::json!("Standard"));
+        assert_eq!(v["display_name"], serde_json::json!("alice"));
+        assert_eq!(v["not_before"], serde_json::json!(1_700_000_000_i64));
+        assert_eq!(v["not_after"], serde_json::json!(1_731_536_000_i64));
+        assert_eq!(v["permitted_ops"], serde_json::json!(["AbortTask", "ApprovePlan"]));
+        assert_eq!(v["force_misconfig_bypass"], serde_json::json!(false));
+
+        // Round-trip pins lossless field decode for chain replay.
+        let s = serde_json::to_string(&kind).unwrap();
+        let back: AuditEventKind = serde_json::from_str(&s).unwrap();
+        match back {
+            AuditEventKind::OperatorCertInstalled {
+                pubkey_fingerprint, epoch_id, cert_kind, display_name,
+                not_before, not_after, permitted_ops, force_misconfig_bypass,
+            } => {
+                assert_eq!(pubkey_fingerprint, "abcd0123");
+                assert_eq!(epoch_id,           2);
+                assert_eq!(cert_kind,          "Standard");
+                assert_eq!(display_name,       "alice");
+                assert_eq!(not_before,         1_700_000_000);
+                assert_eq!(not_after,          1_731_536_000);
+                assert_eq!(permitted_ops,      vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()]);
+                assert!(!force_misconfig_bypass);
+            }
+            other => panic!("expected OperatorCertInstalled; got {other:?}"),
+        }
+    }
+
+    /// Pin the wire shape of the two quarantine event kinds. Same
+    /// rationale as the cert-kind pin above: downstream tools
+    /// (`raxis verify-chain`, `raxis inspect quarantine`, the
+    /// notification router) match on the discriminator string and
+    /// any silent rename would break replay.
+    #[test]
+    fn quarantine_kind_strings_are_pinned() {
+        let cases: Vec<(AuditEventKind, &str)> = vec![
+            (AuditEventKind::InitiativeQuarantined {
+                initiative_id: "i1".into(), quarantined_by: "fp".into(),
+                reason: Some("compromised key".into()),
+            }, "InitiativeQuarantined"),
+            (AuditEventKind::OperatorQuarantineSwept {
+                target_fingerprint: "alice-fp".into(),
+                quarantined_by:     "rot-fp".into(),
+                count:              3,
+                reason:             None,
+            }, "OperatorQuarantineSwept"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(kind.as_str(), expected, "as_str() drifted for {expected}");
+        }
+    }
+
+    #[test]
+    fn initiative_quarantined_round_trips_through_json() {
+        let kind = AuditEventKind::InitiativeQuarantined {
+            initiative_id:  "init-7".to_owned(),
+            quarantined_by: "fp-rot".to_owned(),
+            reason:         Some("compromised plan signer".to_owned()),
+        };
+        let s = serde_json::to_string(&kind).unwrap();
+        let back: AuditEventKind = serde_json::from_str(&s).unwrap();
+        match back {
+            AuditEventKind::InitiativeQuarantined {
+                initiative_id, quarantined_by, reason,
+            } => {
+                assert_eq!(initiative_id,  "init-7");
+                assert_eq!(quarantined_by, "fp-rot");
+                assert_eq!(reason.as_deref(), Some("compromised plan signer"));
+            }
+            other => panic!("expected InitiativeQuarantined; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn operator_quarantine_swept_round_trips_through_json() {
+        let kind = AuditEventKind::OperatorQuarantineSwept {
+            target_fingerprint: "alice-fp".to_owned(),
+            quarantined_by:     "rot-fp".to_owned(),
+            count:              42,
+            reason:             None,
+        };
+        let s = serde_json::to_string(&kind).unwrap();
+        let back: AuditEventKind = serde_json::from_str(&s).unwrap();
+        match back {
+            AuditEventKind::OperatorQuarantineSwept {
+                target_fingerprint, quarantined_by, count, reason,
+            } => {
+                assert_eq!(target_fingerprint, "alice-fp");
+                assert_eq!(quarantined_by,     "rot-fp");
+                assert_eq!(count,              42);
+                assert!(reason.is_none());
+            }
+            other => panic!("expected OperatorQuarantineSwept; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn emergency_operator_used_round_trips() {
+        let kind = AuditEventKind::EmergencyOperatorUsed {
+            pubkey_fingerprint: "fp-emerg".to_owned(),
+            epoch_id:           5,
+            op:                 "RotateEpoch".to_owned(),
+        };
+        let s = serde_json::to_string(&kind).unwrap();
+        let back: AuditEventKind = serde_json::from_str(&s).unwrap();
+        match back {
+            AuditEventKind::EmergencyOperatorUsed { pubkey_fingerprint, epoch_id, op } => {
+                assert_eq!(pubkey_fingerprint, "fp-emerg");
+                assert_eq!(epoch_id, 5);
+                assert_eq!(op,       "RotateEpoch");
+            }
+            other => panic!("expected EmergencyOperatorUsed; got {other:?}"),
+        }
+    }
+
+    /// Pin the misconfig-bypass payload shape. The `violations` list
+    /// captures every relaxed structural rule verbatim; downstream
+    /// notification routes match on `kind == "OperatorCertMisconfigBypassed"`
+    /// and inspect `violations` to decide whether to page.
+    #[test]
+    fn operator_cert_misconfig_bypassed_serialises_violations_list() {
+        let kind = AuditEventKind::OperatorCertMisconfigBypassed {
+            pubkey_fingerprint: "fp-x".to_owned(),
+            epoch_id:           3,
+            cert_kind:          "EmergencyRecovery".to_owned(),
+            display_name:       "break-glass".to_owned(),
+            violations:         vec![
+                "EmergencyRecovery cert MUST declare permitted_ops = [\"RotateEpoch\"] only".to_owned(),
+                "warn_before_expiry_days must be > 0".to_owned(),
+            ],
+        };
+        let v = serde_json::to_value(&kind).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("OperatorCertMisconfigBypassed"));
+        assert_eq!(v["pubkey_fingerprint"], serde_json::json!("fp-x"));
+        assert_eq!(v["epoch_id"], serde_json::json!(3));
+        assert_eq!(v["cert_kind"], serde_json::json!("EmergencyRecovery"));
+        assert_eq!(v["display_name"], serde_json::json!("break-glass"));
+        assert_eq!(v["violations"].as_array().unwrap().len(), 2);
+        assert!(v["violations"][0].as_str().unwrap().contains("RotateEpoch"));
     }
 
     #[test]

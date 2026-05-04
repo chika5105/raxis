@@ -653,7 +653,7 @@ this moving" is the single most common operator question.
 **Checks (each emits a row):**
 
 ```
-[OK]   schema_version: kernel.db=1, raxis-cli expects 1
+[OK]   schema_version: kernel.db=3, raxis-cli expects 3
 [OK]   audit chain: 4,217 records, no breaks, no gaps
 [OK]   policy.sig: signature VALID against [meta].signed_by
 [OK]   heartbeat: fresh (3s ago), pid 47291 alive
@@ -662,13 +662,32 @@ this moving" is the single most common operator question.
 [OK]   no GatesPending tasks older than 1h
 [OK]   <data_dir>/notifications/inbox.jsonl exists and is writable
 [OK]   <data_dir>/runtime/heartbeat.json exists and is fresh
+[OK]   cert.list: 1 operator certificate(s) installed
+[OK]   cert.<fp>.status: Active (expires 2027-03-01T00:00:00Z, alice)
+[WARN] cert.<fp>.status: Expiring (alice — 12d remaining; rotate before grace)
+[FAIL] cert.<fp>.status: Expired (bob — 4d past grace; ops gated unless EmergencyRecovery)
+[WARN] cert.<fp>.misconfig_bypass: --force-misconfig was used at install time
 ```
 
 **Exit code:** `0` if no `[FAIL]` rows; `1` if any `[FAIL]` row; `[WARN]`
 rows do not affect exit code.
 
 **Data sources:** every `views::*` consistency check + the audit chain
-verifier + heartbeat freshness + filesystem stat of expected paths.
+verifier + heartbeat freshness + filesystem stat of expected paths +
+the `operator_certificates` view (kernel-store.md §2.5.9).
+
+**Cert checks** (added in step 11 of the operator-cert work):
+
+| Outcome | Conditions |
+|---|---|
+| `[OK]`   | `Active` (Standard or Emergency) |
+| `[WARN]` | `Expiring` (within `warn_window_secs`), `Grace` (past `not_after` but within `grace_window_secs`), `force_misconfig_bypass=true` |
+| `[FAIL]` | `Expired` (past grace), `NotYetValid` (clock skew or future `not_before`) |
+
+The `EmergencyRecovery` kind never expires (always `Active`) and is
+listed separately as `AlwaysActiveEmergency`. `doctor` reads
+`operator_certificates` directly via the SQLite WAL — it does **not**
+require a running kernel.
 
 ### §5.5.16 — `raxis inbox`
 

@@ -154,6 +154,38 @@ pub enum OperatorRequest {
         /// signature file. Same containment rule as `policy_path`.
         sig_path:    String,
     },
+
+    // ── initiative quarantine (kernel-store.md §2.5.8) ────────────────
+    //
+    // Operator marks an initiative (or every initiative whose plan
+    // was approved by a named operator) as frozen. The kernel inserts
+    // the quarantine row(s) atomically with the
+    // `InitiativeQuarantined` audit event(s); subsequent
+    // `IntentRequest`s against the targeted initiative(s) are
+    // rejected with `FAIL_INITIATIVE_QUARANTINED` by the planner
+    // intent gate. v1 has no "unquarantine" wire op — the operator
+    // recovers from a false positive by aborting the initiative.
+
+    /// Quarantine a single initiative.
+    QuarantineInitiative {
+        /// UUID-shaped initiative_id to freeze.
+        initiative_id:  String,
+        /// Free-form reason (e.g. "compromised plan signer"). Capped
+        /// to 512 bytes by the CLI before submission.
+        reason:         Option<String>,
+    },
+
+    /// Sweep every initiative whose plan was approved by
+    /// `target_fingerprint` and quarantine each one in a single
+    /// transaction. Used after key compromise to freeze blast
+    /// radius without aborting initiatives one-by-one.
+    QuarantinePlansBy {
+        /// Operator pubkey_fingerprint (32 hex chars) whose
+        /// approved plans should be swept.
+        target_fingerprint: String,
+        /// Same shape as the single-initiative `reason` field.
+        reason:             Option<String>,
+    },
 }
 
 /// Scope of an approval token issued for a `Pending` escalation.
@@ -258,6 +290,28 @@ pub enum OperatorResponse {
     /// Generic acknowledgement for handlers that have no structured
     /// success payload (today: stubs, abort/retry/resume responses).
     Ack { message: String },
+
+    /// Issued after a successful `QuarantineInitiative`. Carries the
+    /// initiative_id back so the CLI can echo it verbatim, plus
+    /// `was_already_quarantined` so the operator can tell the
+    /// difference between "this command moved the system" and "no-op
+    /// because someone else already quarantined it" without parsing
+    /// the audit chain.
+    InitiativeQuarantined {
+        initiative_id:           String,
+        quarantined_at:          i64,
+        was_already_quarantined: bool,
+    },
+
+    /// Issued after a successful `QuarantinePlansBy`. Returns the
+    /// list of newly-quarantined initiative_ids and the
+    /// `target_fingerprint` for echo. Empty list ⇒ no plans by that
+    /// operator OR all of them were already quarantined.
+    QuarantineSwept {
+        target_fingerprint:     String,
+        newly_quarantined_ids:  Vec<String>,
+        quarantined_at:         i64,
+    },
     /// Single canonical error envelope. `code` is an opaque short string
     /// the CLI keys off (e.g. `"FAIL_APPROVE_PLAN"`); `detail` is a
     /// human-readable explanation.
@@ -745,5 +799,97 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    // ── Quarantine wire shapes (step-10) ──────────────────────────────────
+    //
+    // These pin the wire shape exactly as the CLI emits and the kernel
+    // dispatcher decodes, mirroring the rest of this test module.
+
+    #[test]
+    fn quarantine_initiative_request_wire_shape_with_reason() {
+        round_trip(
+            &OperatorRequest::QuarantineInitiative {
+                initiative_id: "init-abc".into(),
+                reason:        Some("leaked key".into()),
+            },
+            json!({
+                "op": "QuarantineInitiative",
+                "payload": {
+                    "initiative_id": "init-abc",
+                    "reason":        "leaked key"
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn quarantine_initiative_request_wire_shape_without_reason() {
+        // INV-WIRE-OPT: optional `reason` MUST be present-and-null on the
+        // wire when None, matching the rest of `OperatorRequest`.
+        let val = OperatorRequest::QuarantineInitiative {
+            initiative_id: "init-abc".into(),
+            reason:        None,
+        };
+        let serialised = serde_json::to_value(&val).unwrap();
+        let payload    = serialised.get("payload").unwrap();
+        assert!(payload.get("reason").is_some(),
+            "optional `reason` MUST be present (as null), not omitted");
+        assert!(payload["reason"].is_null());
+    }
+
+    #[test]
+    fn quarantine_plans_by_request_wire_shape_with_reason() {
+        round_trip(
+            &OperatorRequest::QuarantinePlansBy {
+                target_fingerprint: "abcdef0123456789".into(),
+                reason:             Some("operator suspended".into()),
+            },
+            json!({
+                "op": "QuarantinePlansBy",
+                "payload": {
+                    "target_fingerprint": "abcdef0123456789",
+                    "reason":             "operator suspended"
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn initiative_quarantined_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::InitiativeQuarantined {
+                initiative_id:           "init-abc".into(),
+                quarantined_at:          1_700_000_000,
+                was_already_quarantined: false,
+            },
+            json!({
+                "status": "InitiativeQuarantined",
+                "payload": {
+                    "initiative_id":           "init-abc",
+                    "quarantined_at":          1_700_000_000_i64,
+                    "was_already_quarantined": false
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn quarantine_swept_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::QuarantineSwept {
+                target_fingerprint:    "abcdef0123456789".into(),
+                newly_quarantined_ids: vec!["init-1".into(), "init-2".into()],
+                quarantined_at:        1_700_000_000,
+            },
+            json!({
+                "status": "QuarantineSwept",
+                "payload": {
+                    "target_fingerprint":    "abcdef0123456789",
+                    "newly_quarantined_ids": ["init-1", "init-2"],
+                    "quarantined_at":        1_700_000_000_i64
+                }
+            }),
+        );
     }
 }

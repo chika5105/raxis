@@ -17,8 +17,23 @@ tokio       = { workspace = true }
 # Pinned at workspace level alongside the kernel's plan TOML parser.
 toml        = { workspace = true }
 raxis-types = { workspace = true }
+# `views::operator_certificates::repopulate` consumes a `PolicyBundle`
+# (the source-of-truth shape, owned by `raxis-policy`) inside the
+# write transaction opened by `policy_manager::advance_epoch`.
+# Layering rule check: `raxis-policy` does NOT depend on
+# `raxis-store`, so this edge is one-way and acyclic.
+raxis-policy = { workspace = true }
 
 [dev-dependencies]
 # Used by `ro::tests` to construct a temporary `data_dir` and the
 # kernel.db file inside it. Production code never touches `tempfile`.
-tempfile    = "3"
+tempfile      = "3"
+# `views::operator_certificates::tests` needs to mint freshly-signed
+# certs via `raxis-crypto::cert::sign_cert` to assert the writer +
+# reader round-trip. These deps are tests-only; the production code
+# in `repopulate` only writes already-signed bytes from the bundle
+# and never re-signs.
+raxis-crypto  = { workspace = true }
+ed25519-dalek = { workspace = true }
+sha2          = { workspace = true }
+hex           = { workspace = true }

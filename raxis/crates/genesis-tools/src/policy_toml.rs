@@ -71,6 +71,8 @@ pub const PERMITTED_OPS: &[&str] = &[
     "ApproveEscalation",
     "DenyEscalation",
     "RotateEpoch",
+    "QuarantineInitiative",
+    "QuarantinePlansBy",
 ];
 
 /// The four canonical `IntentKind` variants, matching `raxis_types::IntentKind`.
@@ -398,9 +400,10 @@ mod tests {
             assert!(toml_str.contains(&format!("\"{op}\"")),
                 "permitted op {op:?} missing from output");
         }
-        // Confirm exactly 13.
-        assert_eq!(PERMITTED_OPS.len(), 13,
-            "v1 permitted_ops set is fixed at 13 (cli-ceremony.md §4.2)");
+        // Confirm exactly 15 (the original 13 v1 ops plus the two
+        // quarantine ops added in step 10 — kernel-store.md §2.5.8).
+        assert_eq!(PERMITTED_OPS.len(), 15,
+            "v1+quarantine permitted_ops set is fixed at 15 (cli-ceremony.md §4.2 + §2.5.8)");
     }
 
     #[test]

@@ -121,6 +121,34 @@ pub async fn dispatch_loop(
             continue;
         }
 
+        // Cert four-zone gate (kernel-core.md §`authority/cert_check.rs`).
+        // Runs AFTER `is_permitted` so an unauthorised request never even
+        // reaches cert evaluation (avoids leaking cert state to operators
+        // who shouldn't be able to call the op anyway), and BEFORE
+        // handler dispatch so a denied request never mutates kernel state.
+        // Cert-less ("legacy") operators pass through silently.
+        let now_unix = raxis_types::unix_now_secs() as i64;
+        let bundle_snapshot = ctx.policy.load_full();
+        match ctx.cert_enforcer.enforce(
+            &operator.fingerprint,
+            op_name,
+            &bundle_snapshot,
+            ctx.audit.as_ref(),
+            now_unix,
+        ) {
+            crate::authority::cert_check::CertGuard::Allow => { /* fall through */ }
+            crate::authority::cert_check::CertGuard::Deny { wire_code, wire_detail } => {
+                dispatch_log::cert_denied(op_name, &operator.fingerprint, wire_code);
+                let resp = OperatorResponse::Error {
+                    code:   wire_code.to_owned(),
+                    detail: wire_detail,
+                };
+                write_json_frame_async(&mut stream, &resp).await?;
+                continue;
+            }
+        }
+        drop(bundle_snapshot);
+
         // Dispatch — instrument with request/response logging. We capture
         // the request's context fields BEFORE the handler runs so the log
         // works even on handlers that consume the request by value.
@@ -233,6 +261,12 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
         } => vec![
             ("policy_path", policy_path.clone()),
             ("sig_path", sig_path.clone()),
+        ],
+        OperatorRequest::QuarantineInitiative { initiative_id, .. } => vec![
+            ("initiative_id", initiative_id.clone()),
+        ],
+        OperatorRequest::QuarantinePlansBy { target_fingerprint, .. } => vec![
+            ("target_fingerprint", target_fingerprint.clone()),
         ],
     }
 }
@@ -405,6 +439,34 @@ pub(crate) mod dispatch_log {
         );
     }
 
+    /// Build the JSON log line for a cert-gate rejection (kernel-core.md
+    /// §`authority/cert_check.rs`). Mirrors `build_unauthorized_line`
+    /// shape but adds the wire `code` so an operator scanning stderr
+    /// can grep for `"code":"FAIL_CERT_EXPIRED"` directly.
+    pub(crate) fn build_cert_denied_line(
+        op: &'static str,
+        operator_fp: &str,
+        wire_code: &'static str,
+        ts_unix: i64,
+    ) -> String {
+        let mut body = serde_json::Map::with_capacity(4);
+        body.insert("op".into(), json!(op));
+        body.insert("operator_fp".into(), json!(operator_fp));
+        body.insert("code".into(), json!(wire_code));
+        finalize_line(level::WARN, MODULE, "cert_denied", body, ts_unix)
+    }
+
+    pub(super) fn cert_denied(
+        op: &'static str,
+        operator_fp: &str,
+        wire_code: &'static str,
+    ) {
+        eprintln!(
+            "{}",
+            build_cert_denied_line(op, operator_fp, wire_code, raxis_types::unix_now_secs()),
+        );
+    }
+
     // ── Operator-specific helpers ──
     //
     // The cross-dispatcher primitives `body_from_fields`,
@@ -426,6 +488,8 @@ pub(crate) mod dispatch_log {
             OperatorResponse::EpochAdvanced { .. }      => "EpochAdvanced",
             OperatorResponse::Ack { .. }                => "Ack",
             OperatorResponse::Error { .. }              => "Error",
+            OperatorResponse::InitiativeQuarantined { .. } => "InitiativeQuarantined",
+            OperatorResponse::QuarantineSwept { .. }    => "QuarantineSwept",
         }
     }
 }
@@ -484,6 +548,12 @@ async fn handle_request(
         }
         OperatorRequest::RotateEpoch { policy_path, sig_path } => {
             handle_rotate_epoch(policy_path, sig_path, operator, ctx).await
+        }
+        OperatorRequest::QuarantineInitiative { initiative_id, reason } => {
+            handle_quarantine_initiative(initiative_id, reason, operator, ctx).await
+        }
+        OperatorRequest::QuarantinePlansBy { target_fingerprint, reason } => {
+            handle_quarantine_plans_by(target_fingerprint, reason, operator, ctx).await
         }
     }
 }
@@ -1092,6 +1162,222 @@ async fn handle_abort_initiative(
 }
 
 // ---------------------------------------------------------------------------
+// Quarantine handlers (kernel-store.md §2.5.8)
+// ---------------------------------------------------------------------------
+//
+// Both handlers run their write through `tokio::task::spawn_blocking`
+// because the storage helpers rely on `Store::lock_sync()` →
+// `tokio::sync::Mutex::blocking_lock()` (panics on a tokio worker
+// thread). This is the same pattern `handle_abort_initiative` uses
+// above; `cap_reason` enforces the 512-byte ceiling on the operator-
+// supplied reason string before any storage work begins.
+
+const QUARANTINE_REASON_MAX_BYTES: usize = 512;
+
+fn cap_reason(reason: Option<String>) -> Option<String> {
+    reason.map(|s| {
+        if s.len() <= QUARANTINE_REASON_MAX_BYTES {
+            s
+        } else {
+            // UTF-8-aware truncation: walk back to the previous char
+            // boundary so we never cut a multi-byte sequence in half.
+            let mut end = QUARANTINE_REASON_MAX_BYTES;
+            while !s.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
+            s[..end].to_owned()
+        }
+    })
+}
+
+/// QuarantineInitiative — insert one row into `initiative_quarantines`
+/// (idempotent) + emit `InitiativeQuarantined` audit event on a fresh
+/// insert.
+async fn handle_quarantine_initiative(
+    initiative_id: String,
+    reason:        Option<String>,
+    operator:      &AuthenticatedOperator,
+    ctx:           &HandlerContext,
+) -> OperatorResponse {
+    let reason_capped   = cap_reason(reason);
+    let store_arc       = Arc::clone(&ctx.store);
+    let initiative_clone = initiative_id.clone();
+    let operator_fp     = operator.fingerprint.clone();
+    let now             = raxis_types::unix_now_secs() as i64;
+    let reason_for_blk  = reason_capped.clone();
+
+    let join_result = tokio::task::spawn_blocking(move || {
+        let mut conn = store_arc.lock_sync();
+        let tx = conn.transaction()?;
+        let was_new = raxis_store::views::initiative_quarantines::insert_single(
+            &tx,
+            &initiative_clone,
+            &operator_fp,
+            now,
+            reason_for_blk.as_deref(),
+        )?;
+        tx.commit()?;
+        Ok::<bool, QuarantineHandlerError>(was_new)
+    }).await;
+
+    let was_new = match join_result {
+        Ok(Ok(b))   => b,
+        Ok(Err(e))  => return OperatorResponse::Error {
+            code:   "FAIL_QUARANTINE_INITIATIVE".to_owned(),
+            detail: e.to_string(),
+        },
+        Err(e)      => return OperatorResponse::Error {
+            code:   "FAIL_QUARANTINE_INITIATIVE".to_owned(),
+            detail: format!("quarantine_initiative spawn_blocking join failed: {e}"),
+        },
+    };
+
+    if was_new {
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::InitiativeQuarantined {
+                initiative_id:  initiative_id.clone(),
+                quarantined_by: operator.fingerprint.clone(),
+                reason:         reason_capped,
+            },
+            None,
+            None,
+            Some(initiative_id.as_str()),
+        ) {
+            // Audit emission is best-effort post-commit per
+            // kernel-store.md §2.5.2 — log and proceed; the
+            // reconciler will detect the gap on next boot.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"InitiativeQuarantined\",\
+                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id}\"}}",
+            );
+        }
+    }
+
+    OperatorResponse::InitiativeQuarantined {
+        initiative_id,
+        quarantined_at:          now,
+        was_already_quarantined: !was_new,
+    }
+}
+
+/// QuarantinePlansBy — sweep all initiatives whose plan was approved
+/// by `target_fingerprint`, insert one row per initiative atomically,
+/// and emit one `InitiativeQuarantined` per new row plus one rollup
+/// `OperatorQuarantineSwept` event.
+async fn handle_quarantine_plans_by(
+    target_fingerprint: String,
+    reason:             Option<String>,
+    operator:           &AuthenticatedOperator,
+    ctx:                &HandlerContext,
+) -> OperatorResponse {
+    let reason_capped   = cap_reason(reason);
+    let store_arc       = Arc::clone(&ctx.store);
+    let target_clone    = target_fingerprint.clone();
+    let operator_fp     = operator.fingerprint.clone();
+    let now             = raxis_types::unix_now_secs() as i64;
+    let reason_for_blk  = reason_capped.clone();
+
+    let join_result = tokio::task::spawn_blocking(move || {
+        let mut conn = store_arc.lock_sync();
+        let tx = conn.transaction()?;
+        let newly = raxis_store::views::initiative_quarantines::sweep_for_operator(
+            &tx,
+            &target_clone,
+            &operator_fp,
+            now,
+            reason_for_blk.as_deref(),
+        )?;
+        tx.commit()?;
+        Ok::<Vec<String>, QuarantineHandlerError>(newly)
+    }).await;
+
+    let newly_quarantined_ids = match join_result {
+        Ok(Ok(v))   => v,
+        Ok(Err(e))  => return OperatorResponse::Error {
+            code:   "FAIL_QUARANTINE_PLANS_BY".to_owned(),
+            detail: e.to_string(),
+        },
+        Err(e)      => return OperatorResponse::Error {
+            code:   "FAIL_QUARANTINE_PLANS_BY".to_owned(),
+            detail: format!("quarantine_plans_by spawn_blocking join failed: {e}"),
+        },
+    };
+
+    // One per-initiative event PLUS the rollup. Per-initiative
+    // events let the audit chain answer "what did this command
+    // touch?" without a join; the rollup answers "did the
+    // operator press the big red button?".
+    for id in &newly_quarantined_ids {
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::InitiativeQuarantined {
+                initiative_id:  id.clone(),
+                quarantined_by: operator.fingerprint.clone(),
+                reason:         reason_capped.clone(),
+            },
+            None,
+            None,
+            Some(id.as_str()),
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"InitiativeQuarantined\",\
+                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{id}\"}}",
+            );
+        }
+    }
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::OperatorQuarantineSwept {
+            target_fingerprint: target_fingerprint.clone(),
+            quarantined_by:     operator.fingerprint.clone(),
+            count:              newly_quarantined_ids.len() as u64,
+            reason:             reason_capped,
+        },
+        None,
+        None,
+        None,
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"OperatorQuarantineSwept\",\
+             \"audit_emit_failed\":\"{e}\",\"target\":\"{target_fingerprint}\"}}",
+        );
+    }
+
+    OperatorResponse::QuarantineSwept {
+        target_fingerprint,
+        newly_quarantined_ids,
+        quarantined_at: now,
+    }
+}
+
+/// Internal error shim for the quarantine handlers — collapses the
+/// two distinct error sources (sqlite + the typed view-error) into
+/// one Display-able value the dispatcher can surface verbatim in
+/// `OperatorResponse::Error.detail`.
+#[derive(Debug)]
+enum QuarantineHandlerError {
+    Sqlite(rusqlite::Error),
+    View(raxis_store::views::initiative_quarantines::QuarantineViewError),
+}
+
+impl std::fmt::Display for QuarantineHandlerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sqlite(e) => write!(f, "sqlite: {e}"),
+            Self::View(e)   => write!(f, "{e}"),
+        }
+    }
+}
+impl From<rusqlite::Error> for QuarantineHandlerError {
+    fn from(e: rusqlite::Error) -> Self { Self::Sqlite(e) }
+}
+impl From<raxis_store::views::initiative_quarantines::QuarantineViewError>
+    for QuarantineHandlerError
+{
+    fn from(e: raxis_store::views::initiative_quarantines::QuarantineViewError) -> Self {
+        Self::View(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Escalation review handlers (kernel-store.md §2.5.5)
 // ---------------------------------------------------------------------------
 
@@ -1515,6 +1801,8 @@ fn op_name(req: &OperatorRequest) -> &'static str {
         OperatorRequest::ApproveEscalation { .. }=> "ApproveEscalation",
         OperatorRequest::DenyEscalation { .. }  => "DenyEscalation",
         OperatorRequest::RotateEpoch { .. }     => "RotateEpoch",
+        OperatorRequest::QuarantineInitiative { .. } => "QuarantineInitiative",
+        OperatorRequest::QuarantinePlansBy { .. }    => "QuarantinePlansBy",
     }
 }
 
@@ -1578,6 +1866,8 @@ mod escalation_dispatch_tests {
             display_name:       FP.to_owned(),
             pubkey_hex:         hex::encode(sk.verifying_key().to_bytes()),
             permitted_ops:      vec![],
+            cert:                  None,
+            force_misconfig_bypass: false,
         }]);
         Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
@@ -1951,6 +2241,8 @@ mod escalation_dispatch_tests {
             display_name:       FP.to_owned(),
             pubkey_hex:         hex::encode(sk.verifying_key().to_bytes()),
             permitted_ops:      vec!["ApproveEscalation".into()],
+            cert:                  None,
+            force_misconfig_bypass: false,
         }]);
         let policy_swap = Arc::new(arc_swap::ArcSwap::from_pointee(policy_bundle));
 
@@ -2216,7 +2508,7 @@ mod rotate_epoch_dispatch_tests {
         let store_for_blocking = Arc::clone(&store);
         tokio::task::spawn_blocking(move || {
             policy_manager::install_genesis_policy_epoch(
-                &store_for_blocking, "genesis-sha", "genesis-fp", 1,
+                &store_for_blocking, "genesis-sha", "genesis-fp", 1, None,
             ).unwrap();
         }).await.unwrap();
 
@@ -2687,6 +2979,29 @@ mod dispatch_logging_tests {
         );
     }
 
+    /// The cert-gate rejection line MUST carry `op`, `operator_fp`, AND
+    /// the wire `code` so an operator scanning kernel stderr can grep
+    /// for `"code":"FAIL_CERT_EXPIRED"` and immediately spot which
+    /// operator hit the gate. Pinned at WARN level (same severity as
+    /// `unauthorized`) so any log-routing config that filtered
+    /// "unauthorized" already catches this too.
+    #[test]
+    fn cert_denied_line_carries_op_operator_fp_and_wire_code_at_warn() {
+        let line = dispatch_log::build_cert_denied_line(
+            "RotateEpoch",
+            "abcd1234abcd1234abcd1234abcd1234",
+            "FAIL_CERT_EXPIRED",
+            1_700_000_006,
+        );
+        let v = parse_and_check_constants(&line, "cert_denied", "warn");
+        assert_eq!(v.get("op").and_then(Value::as_str), Some("RotateEpoch"));
+        assert_eq!(
+            v.get("operator_fp").and_then(Value::as_str),
+            Some("abcd1234abcd1234abcd1234abcd1234"),
+        );
+        assert_eq!(v.get("code").and_then(Value::as_str), Some("FAIL_CERT_EXPIRED"));
+    }
+
     #[test]
     fn detail_strings_with_embedded_quotes_round_trip_through_json() {
         // The five existing `eprintln!(\"{{...{e}}}\")` call sites in
@@ -2984,5 +3299,279 @@ mod role_parser_tests {
             inbound,
             "outbound wire string must equal the inbound canonical form",
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// quarantine_dispatch_tests — exercises `handle_quarantine_initiative`
+// and `handle_quarantine_plans_by` against an in-memory store.
+//
+// Wire-shape coverage lives in `raxis-types::operator_wire::tests`;
+// storage semantics live in
+// `raxis-store::views::initiative_quarantines::tests`. These tests
+// pin the kernel-side glue: the handlers must (a) commit the row,
+// (b) emit the right audit events, (c) be idempotent on re-runs.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod quarantine_dispatch_tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use raxis_audit_tools::FakeAuditSink;
+    use raxis_policy::PolicyBundle;
+    use raxis_store::Store;
+
+    use crate::authority::keys::KeyRegistry;
+    use crate::gateway::client::GatewayClient;
+    use crate::initiatives::PlanRegistry;
+    use crate::ipc::auth::AuthenticatedOperator;
+    use crate::policy_manager;
+
+    /// Minimal HandlerContext over an in-memory store; the quarantine
+    /// handlers don't need a real gateway connection or signed policy
+    /// artifact, just a writable Store + AuditSink.
+    async fn build_ctx(data_dir: &Path) -> (Arc<HandlerContext>, Arc<FakeAuditSink>) {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let store_for_blocking = Arc::clone(&store);
+        tokio::task::spawn_blocking(move || {
+            policy_manager::install_genesis_policy_epoch(
+                &store_for_blocking, "genesis-sha", "genesis-fp", 1, None,
+            ).unwrap();
+        }).await.unwrap();
+
+        let bundle   = PolicyBundle::for_tests_with_operators(vec![]);
+        let policy   = Arc::new(arc_swap::ArcSwap::from_pointee(bundle));
+        let registry = Arc::new(KeyRegistry::stub_for_tests());
+        let gateway  = Arc::new(GatewayClient::new());
+        let sink     = Arc::new(FakeAuditSink::new());
+
+        let ctx = Arc::new(HandlerContext::new(
+            policy,
+            registry,
+            store,
+            sink.clone(),
+            data_dir.to_path_buf(),
+            Arc::new(PlanRegistry::new()),
+            gateway,
+            Arc::new(crate::prompt::EpochBinding::new()),
+        ));
+        (ctx, sink)
+    }
+
+    fn fixture_operator(fp: &str) -> AuthenticatedOperator {
+        AuthenticatedOperator {
+            fingerprint:   fp.to_owned(),
+            permitted_ops: vec![
+                "QuarantineInitiative".into(),
+                "QuarantinePlansBy".into(),
+            ],
+        }
+    }
+
+    /// Insert a minimal `initiatives` row so the `initiative_quarantines`
+    /// FK to `initiatives(initiative_id)` is satisfied. Schema mirrors
+    /// `migration::render_migration_1_ddl::{initiatives}` (Table 2).
+    ///
+    /// `async` because `Store::lock_sync` panics on a tokio worker; we
+    /// hop to the blocking pool exactly like every real handler does.
+    async fn insert_initiative(ctx: Arc<HandlerContext>, initiative_id: &str) {
+        let id = initiative_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = ctx.store.lock_sync();
+            conn.execute(
+                "INSERT INTO initiatives \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES (?1, 'ApprovedPlan', '{}', 'sha', 1700000000)",
+                rusqlite::params![id],
+            ).unwrap();
+        }).await.unwrap();
+    }
+
+    /// Insert a `signed_plan_artifacts` row attributing approval to the
+    /// given fingerprint. Mirrors what `lifecycle::approve_plan` writes
+    /// once the step-10 column is wired in. Schema (Table 3 +
+    /// migration 3 `signed_by_fingerprint` column):
+    ///   (initiative_id PK, plan_bytes BLOB, plan_sig BLOB,
+    ///    stored_at INTEGER, signed_by_fingerprint TEXT)
+    async fn insert_signed_plan(
+        ctx:           Arc<HandlerContext>,
+        initiative_id: &str,
+        signed_by_fp:  &str,
+    ) {
+        let id = initiative_id.to_owned();
+        let fp = signed_by_fp.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = ctx.store.lock_sync();
+            conn.execute(
+                "INSERT INTO signed_plan_artifacts \
+                    (initiative_id, plan_bytes, plan_sig, stored_at, signed_by_fingerprint) \
+                 VALUES (?1, x'00', x'00', 1700000000, ?2)",
+                rusqlite::params![id, fp],
+            ).unwrap();
+        }).await.unwrap();
+    }
+
+    /// Read-side helper — hopped onto the blocking pool to match the
+    /// `Store::lock_sync` rule that handlers obey in production.
+    async fn is_quarantined_rw(ctx: Arc<HandlerContext>, initiative_id: &str) -> bool {
+        let id = initiative_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = ctx.store.lock_sync();
+            raxis_store::views::initiative_quarantines::is_quarantined_rw(&conn, &id).unwrap()
+        }).await.unwrap()
+    }
+
+    // ── Handler 1: QuarantineInitiative ──────────────────────────────
+
+    #[tokio::test]
+    async fn quarantine_initiative_inserts_row_and_emits_audit_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, sink) = build_ctx(tmp.path()).await;
+        insert_initiative(Arc::clone(&ctx), "init-1").await;
+
+        let resp = handle_quarantine_initiative(
+            "init-1".to_owned(),
+            Some("leaked key".to_owned()),
+            &fixture_operator("op-prime"),
+            &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::InitiativeQuarantined {
+                initiative_id, was_already_quarantined, ..
+            } => {
+                assert_eq!(initiative_id, "init-1");
+                assert!(!was_already_quarantined,
+                    "first quarantine MUST report was_already_quarantined=false");
+            }
+            other => panic!("expected InitiativeQuarantined, got {other:?}"),
+        }
+
+        let q = is_quarantined_rw(Arc::clone(&ctx), "init-1").await;
+        assert!(q, "is_quarantined_rw must return true after handler commits");
+
+        // Exactly one InitiativeQuarantined audit event for the new row.
+        let kinds = sink.event_kinds();
+        let n_quarantined = kinds.iter().filter(|k| **k == "InitiativeQuarantined").count();
+        assert_eq!(n_quarantined, 1,
+            "expected exactly one InitiativeQuarantined audit event, got: {kinds:?}");
+    }
+
+    #[tokio::test]
+    async fn quarantine_initiative_is_idempotent_and_skips_duplicate_audit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, sink) = build_ctx(tmp.path()).await;
+        insert_initiative(Arc::clone(&ctx), "init-1").await;
+
+        // First call: real insert.
+        let _ = handle_quarantine_initiative(
+            "init-1".to_owned(),
+            None,
+            &fixture_operator("op-prime"),
+            &ctx,
+        ).await;
+
+        // Second call: duplicate — must be a no-op write AND no-op audit.
+        let resp2 = handle_quarantine_initiative(
+            "init-1".to_owned(),
+            None,
+            &fixture_operator("op-prime"),
+            &ctx,
+        ).await;
+
+        match resp2 {
+            OperatorResponse::InitiativeQuarantined {
+                was_already_quarantined: true, ..
+            } => { /* expected */ }
+            other => panic!(
+                "second quarantine MUST flag was_already_quarantined=true; got {other:?}"
+            ),
+        }
+
+        let kinds = sink.event_kinds();
+        let n = kinds.iter().filter(|k| **k == "InitiativeQuarantined").count();
+        assert_eq!(n, 1,
+            "duplicate quarantine MUST NOT re-emit the audit event; got: {kinds:?}");
+    }
+
+    // ── Handler 2: QuarantinePlansBy ─────────────────────────────────
+
+    #[tokio::test]
+    async fn quarantine_plans_by_sweeps_every_initiative_signed_by_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, sink) = build_ctx(tmp.path()).await;
+
+        // Two initiatives signed by the compromised operator, one
+        // signed by someone else (must NOT be swept).
+        insert_initiative(Arc::clone(&ctx), "init-a").await;
+        insert_initiative(Arc::clone(&ctx), "init-b").await;
+        insert_initiative(Arc::clone(&ctx), "init-c").await;
+        insert_signed_plan(Arc::clone(&ctx), "init-a", "compromised-fp").await;
+        insert_signed_plan(Arc::clone(&ctx), "init-b", "compromised-fp").await;
+        insert_signed_plan(Arc::clone(&ctx), "init-c", "honest-fp").await;
+
+        let resp = handle_quarantine_plans_by(
+            "compromised-fp".to_owned(),
+            Some("rotated key".to_owned()),
+            &fixture_operator("op-prime"),
+            &ctx,
+        ).await;
+
+        let mut swept_ids = match resp {
+            OperatorResponse::QuarantineSwept { newly_quarantined_ids, .. } => {
+                newly_quarantined_ids
+            }
+            other => panic!("expected QuarantineSwept, got {other:?}"),
+        };
+        swept_ids.sort();
+        assert_eq!(swept_ids, vec!["init-a".to_owned(), "init-b".to_owned()]);
+
+        // Audit: one per-initiative event PLUS one rollup.
+        let kinds = sink.event_kinds();
+        let n_per = kinds.iter().filter(|k| **k == "InitiativeQuarantined").count();
+        let n_roll = kinds.iter().filter(|k| **k == "OperatorQuarantineSwept").count();
+        assert_eq!(n_per, 2,
+            "expected 2 per-initiative InitiativeQuarantined events, got: {kinds:?}");
+        assert_eq!(n_roll, 1,
+            "expected exactly one OperatorQuarantineSwept rollup event, got: {kinds:?}");
+
+        let q = is_quarantined_rw(Arc::clone(&ctx), "init-c").await;
+        assert!(!q, "initiatives signed by other operators MUST NOT be swept");
+    }
+
+    #[tokio::test]
+    async fn quarantine_plans_by_with_no_matching_plans_emits_rollup_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ctx, sink) = build_ctx(tmp.path()).await;
+        // No signed_plan_artifacts at all.
+
+        let resp = handle_quarantine_plans_by(
+            "nobody-fp".to_owned(),
+            None,
+            &fixture_operator("op-prime"),
+            &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::QuarantineSwept { newly_quarantined_ids, .. } => {
+                assert!(newly_quarantined_ids.is_empty());
+            }
+            other => panic!("expected QuarantineSwept, got {other:?}"),
+        }
+
+        // Per the design (kernel-store.md §2.5.8), an empty sweep STILL
+        // emits the rollup so the audit chain shows the operator
+        // attempted the action — forensic continuity matters even when
+        // no rows changed.
+        let kinds = sink.event_kinds();
+        let n_per = kinds.iter().filter(|k| **k == "InitiativeQuarantined").count();
+        let n_roll = kinds.iter().filter(|k| **k == "OperatorQuarantineSwept").count();
+        assert_eq!(n_per, 0,
+            "no per-initiative event should fire when nothing matched: {kinds:?}");
+        assert_eq!(n_roll, 1,
+            "rollup must fire even on empty sweep: {kinds:?}");
     }
 }

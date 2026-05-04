@@ -677,8 +677,10 @@ dependencies = [
 name = "raxis-policy"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "hex",
  "raxis-audit-tools",
+ "raxis-crypto",
  "raxis-types",
  "serde",
  "serde_json",
@@ -702,10 +704,15 @@ dependencies = [
 name = "raxis-store"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "raxis-crypto",
+ "raxis-policy",
  "raxis-types",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "tokio",
@@ -735,6 +742,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "toml",
  "uuid",
 ]
 

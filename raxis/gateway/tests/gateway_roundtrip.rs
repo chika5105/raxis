@@ -64,7 +64,9 @@ fn build_data_dir() -> tempfile::TempDir {
     let policy = format!(
         r#"[meta]
 epoch     = 1
-signed_by = "deadbeefdeadbeefdeadbeefdeadbeef"
+# pubkey_fingerprint = SHA-256[:16] of the 0xcc pubkey {c}; required
+# by the new `validate_operator_certs` consistency check.
+signed_by = "c2f480d4dda9f4522b9f6d590011636d"
 signed_at = 1700000000
 
 [authority]
@@ -96,7 +98,7 @@ CompleteTask     = 5
 ReportFailure    = 1
 
 [[operators.entries]]
-pubkey_fingerprint = "deadbeefdeadbeefdeadbeefdeadbeef"
+pubkey_fingerprint = "c2f480d4dda9f4522b9f6d590011636d"
 display_name       = "operator-1"
 pubkey_hex         = "{c}"
 permitted_ops      = ["CreateInitiative"]

@@ -103,6 +103,65 @@ raxis session create --role planner --worktree-root "$wt" \
 
 Adjust `refs/heads/main` if your pinned integration base differs. After editing policy, plans, or this repo’s code, commit and push according to your org’s workflow; the snippet above does not substitute for normal version control hygiene.
 
+### 5. Operator Certificates (optional but recommended)
+
+`raxis cert mint` issues an operator certificate that binds together
+`(display_name, pubkey, validity window, permitted_ops)` and is
+self-signed by the operator's Ed25519 key. Standard certs follow a
+four-zone expiry model (Active / Expiring / Grace / Expired) so
+expired keys fail closed automatically; `mint-emergency` produces a
+pinned `EmergencyRecovery` cert that never expires and can only
+perform `RotateEpoch` (the break-glass key).
+
+```bash
+# Mint a 1-year cert with the default 30-day warn window and
+# 7-day grace period.
+raxis cert mint \
+  --display-name "Alice"  \
+  --pubkey       operator_public.pem \
+  --key          operator_private.pem \
+  --ops          "CreateInitiative,ApprovePlan,RotateEpoch,QuarantineInitiative,QuarantinePlansBy" \
+  --out          alice.cert.toml
+
+# Embed it into the freshly-minted policy at genesis time.
+raxis genesis --operator-pubkey operator_public.pem \
+              --operator-cert    alice.cert.toml
+
+# Or splice it into an existing policy and re-sign:
+raxis cert install alice.cert.toml --policy "$RAXIS_DATA_DIR/policy/policy.toml"
+raxis policy sign            "$RAXIS_DATA_DIR/policy/policy.toml" --key operator_private.pem
+raxis epoch advance --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
+                    --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
+```
+
+Inspect installed certs and their expiry zones with `raxis cert list`,
+or run `raxis doctor` for a one-screen preflight that includes per-cert
+status (warns on Expiring/Grace, fails on Expired/NotYetValid, and
+flags any entry installed with `--force-misconfig`).
+
+### 6. Quarantine — the operator break-glass
+
+If an operator key or initiative is suspected compromised, freeze it
+immediately:
+
+```bash
+# Freeze a single initiative (in-flight tasks are NOT aborted —
+# new IntentRequests are rejected with FAIL_INITIATIVE_QUARANTINED).
+raxis initiative quarantine <initiative_id> --reason "leaked secret in #ops"
+
+# Sweep every initiative whose plan was approved by a compromised
+# operator. The kernel atomically inserts one quarantine row per
+# initiative + emits one InitiativeQuarantined audit event per row
+# plus a single OperatorQuarantineSwept rollup.
+raxis operator quarantine-plans-by <target_fingerprint> \
+                                   --reason "key suspected compromised"
+```
+
+Quarantine is the immediate containment primitive; the slower
+`policy sign` + `epoch advance` ceremony then handles operator-key
+rotation. Quarantine cannot be lifted in v1 — work that should
+continue must move to a fresh initiative.
+
 ### Prompt assembly — “prompt engineering” in v1 (spec level)
 
 Structural enforcement beats ad-hoc model steering. That said, **v1 does define prompt-related contracts**:
@@ -406,7 +465,7 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 |---|---|---|
 | [`specs/v1/philosophy.md`](specs/v1/philosophy.md) | Implementation philosophy · full INV table · v1 test matrix · release gates · workspace layout · shared crates · policy artifact format | ✅ Complete |
 | [`specs/v1/kernel-core.md`](specs/v1/kernel-core.md) | Source tree · startup · IPC server · VCS subsystem · authority · scheduler/DAG · gates · provider routing · prompt · policy manager · break-glass · Initiative and Task FSMs | ✅ Complete |
-| [`specs/v1/kernel-store.md`](specs/v1/kernel-store.md) | Store DDL (18 tables) · VCS path enforcement §2.5.8 · audit log §2.5.2 · plan signing §2.5.3 · key inventory §2.5.4 · operator auth §2.5.5 · gates schema §2.5.6 · INV amendments §2.5.7 | ✅ Complete |
+| [`specs/v1/kernel-store.md`](specs/v1/kernel-store.md) | Store DDL (21 tables across migrations 1–3) · VCS path enforcement §2.5.8 · audit log §2.5.2 · plan signing §2.5.3 · key inventory §2.5.4 · operator auth §2.5.5 · gates schema §2.5.6 · INV amendments §2.5.7 · operator certificates §2.5.9 · initiative quarantine §2.5.10 | ✅ Complete |
 | [`specs/v1/peripherals.md`](specs/v1/peripherals.md) | Planner IPC contract (§3.1) · gateway wire format (§3.2) · verifier subprocess contract (§3.3) | ✅ Complete |
 | [`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md) | `raxis` (Cargo crate `raxis-cli`) subcommands (§4.1) · genesis ceremony (§4.2) · integration test fixtures (§4.3) | ✅ Complete |
 | [`specs/v1/planner-api.md`](specs/v1/planner-api.md) | Machine-readable planner API — all error codes, remediation text, retry semantics. Injected verbatim into planner system prompt | ✅ Complete |

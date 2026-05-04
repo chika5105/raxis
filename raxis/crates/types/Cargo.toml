@@ -16,3 +16,7 @@ thiserror   = { workspace = true }
 # wire codec (`bincode::config::standard()`). Same pin as the workspace
 # wire codec in `raxis-ipc::frame` to keep the test honest.
 bincode     = { workspace = true }
+# Required for `operator_cert::tests` TOML round-trip pins. The on-disk
+# cert shape MUST match across CLI / kernel / future serde upgrades, so
+# the test asserts the exact byte output.
+toml        = { workspace = true }

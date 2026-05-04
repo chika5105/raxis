@@ -83,13 +83,28 @@ pub enum PlannerErrorCode {
     /// Approval token presented on an intent is invalid, expired, or scope-mismatched.
     #[serde(rename = "FAIL_APPROVAL_TOKEN_INVALID")]
     FailApprovalTokenInvalid,
+
+    /// The initiative is quarantined — a row exists in
+    /// `initiative_quarantines` for it. Set by either
+    /// `raxis initiative quarantine <id>` (single) or
+    /// `raxis operator quarantine-plans-by <fingerprint>` (sweep).
+    /// **Not retryable**: the quarantine is operator-initiated and
+    /// only lifts when the operator aborts the initiative entirely.
+    /// kernel-store.md §2.5.8.
+    #[serde(rename = "FAIL_INITIATIVE_QUARANTINED")]
+    FailInitiativeQuarantined,
 }
 
 impl PlannerErrorCode {
     /// Returns true when the error is definitively non-retryable.
     /// peripherals.md §3.1 retry semantics table.
     pub fn is_terminal(self) -> bool {
-        matches!(self, Self::FailUnknownTask | Self::Unauthorized)
+        matches!(
+            self,
+            Self::FailUnknownTask
+                | Self::Unauthorized
+                | Self::FailInitiativeQuarantined,
+        )
     }
 }
 
@@ -111,6 +126,7 @@ impl fmt::Display for PlannerErrorCode {
             Self::FetchDenied => "FETCH_DENIED",
             Self::InvalidRequest => "INVALID_REQUEST",
             Self::FailApprovalTokenInvalid => "FAIL_APPROVAL_TOKEN_INVALID",
+            Self::FailInitiativeQuarantined => "FAIL_INITIATIVE_QUARANTINED",
         };
         f.write_str(s)
     }

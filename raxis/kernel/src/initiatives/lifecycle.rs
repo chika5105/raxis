@@ -291,6 +291,22 @@ pub fn approve_plan(
         });
     }
 
+    // Stamp the approving operator into `signed_plan_artifacts` so the
+    // step-10 sweep `quarantine-plans-by` can answer "which initiatives
+    // did this operator approve?" without scanning the audit chain.
+    // Schema added by `migration_3` (kernel-store.md §2.5.8); the column
+    // is NULLABLE for backward compatibility, but every NEW approval
+    // MUST populate it. Done inside the same tx as the state flip so a
+    // committed `Executing` initiative ALWAYS has a non-NULL signer.
+    tx.execute(
+        &format!(
+            "UPDATE {SIGNED_PLAN_ARTIFACTS}
+                SET signed_by_fingerprint = ?1
+              WHERE initiative_id = ?2"
+        ),
+        rusqlite::params![approving_operator, initiative_id],
+    )?;
+
     // Admit every task. `admit_in_tx` owns no lock and no transaction; it
     // writes through the borrowed `&Connection` exposed by `tx`.
     //
@@ -1233,6 +1249,58 @@ mod tests {
             |r| r.get(0),
         ).unwrap();
         assert_eq!(epoch, 42, "policy_epoch must be the value passed to approve_plan");
+    }
+
+    /// Step-10 quarantine prerequisite: every successful approval MUST
+    /// stamp `signed_plan_artifacts.signed_by_fingerprint` with the
+    /// fingerprint of the approving operator. Without this row the
+    /// `quarantine-plans-by` sweep cannot map an operator key back to
+    /// the initiatives they approved (kernel-store.md §2.5.8).
+    #[test]
+    fn approve_plan_stamps_signed_by_fingerprint_on_signed_plan_artifacts() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_id = "t1"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        // Pre-approval: column exists (migration 3) but is NULL.
+        {
+            let conn = store.lock_sync();
+            let pre: Option<String> = conn.query_row(
+                &format!(
+                    "SELECT signed_by_fingerprint FROM {SIGNED_PLAN_ARTIFACTS} \
+                     WHERE initiative_id=?1"
+                ),
+                rusqlite::params![&init_id],
+                |r| r.get(0),
+            ).unwrap();
+            assert!(pre.is_none(),
+                "fresh signed_plan_artifacts row must have NULL signed_by_fingerprint until approval");
+        }
+
+        approve_plan(&init_id, "op-prime-fp", &pk_bytes, 1, &store, &audit, &registry)
+            .unwrap();
+
+        let conn = store.lock_sync();
+        let stamped: Option<String> = conn.query_row(
+            &format!(
+                "SELECT signed_by_fingerprint FROM {SIGNED_PLAN_ARTIFACTS} \
+                 WHERE initiative_id=?1"
+            ),
+            rusqlite::params![&init_id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(
+            stamped.as_deref(),
+            Some("op-prime-fp"),
+            "approve_plan MUST stamp the approving operator's fingerprint into \
+             signed_plan_artifacts.signed_by_fingerprint so quarantine-plans-by has \
+             data to sweep (kernel-store.md §2.5.8)",
+        );
     }
 
     // ── §2.5.8 path-scope wiring through approve_plan ──────────────────────

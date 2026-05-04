@@ -40,15 +40,31 @@
 //! 6. `audit/` has at least one `segment-NNN.jsonl` and the
 //!    quick-check passes.
 //! 7. Cross-check: bundle.epoch() == policy_epoch_history.MAX(epoch).
+//! 8. Operator-cert status (step-11): for every row in the
+//!    `operator_certificates` view table, classify against the
+//!    four-zone state machine (`raxis_crypto::cert::cert_status`)
+//!    and surface:
+//!    * `WARN` for `Expiring` (within `warn_before_expiry_days`),
+//!    * `WARN` for `Grace` (within `grace_period_days` past expiry),
+//!    * `FAIL` for `Expired` (recovery ops also denied),
+//!    * `FAIL` for `NotYetValid` (cert is dead-on-arrival),
+//!    * `OK`   for `Active` and `AlwaysActiveEmergency`.
+//!
+//!    Plus `WARN` for any operator entry with
+//!    `force_misconfig_bypass = true` so the operator is reminded
+//!    they have an audited structural override active.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use raxis_audit_tools::{quick_chain_check, ChainQuickCheck};
+use raxis_crypto::cert::{cert_status, CertStatus};
 use raxis_policy::load_policy;
 use raxis_runtime::{read as read_heartbeat, ReadError as HeartbeatReadError};
-use raxis_store::{open_ro, RoError};
+use raxis_store::views::operator_certificates;
 use raxis_store::views::policy_history;
+use raxis_store::{open_ro, RoError};
+use raxis_types::unix_now_secs;
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -353,7 +369,152 @@ fn collect(data_dir: &Path) -> Report {
         }
     }
 
+    // 8. Operator-cert status sweep (step-11). Only runs if the store
+    // opened cleanly above.
+    if let Some(conn) = conn.as_ref() {
+        check_operator_certs(&mut r, conn, unix_now_secs() as i64);
+    }
+
     r
+}
+
+/// Walk every row in the `operator_certificates` view and classify it
+/// against the four-zone model. See module docstring for the exact
+/// outcomes per zone.
+///
+/// Reading the kernel-managed view (rather than re-parsing
+/// `policy.toml`) keeps doctor honest: if `repopulate` skipped a
+/// cert (for instance due to migration drift), doctor will not see
+/// it either, which is the right behaviour — the kernel's view of
+/// the world is what matters at boot.
+fn check_operator_certs(
+    r:    &mut Report,
+    conn: &raxis_store::RoConn,
+    now:  i64,
+) {
+    let rows = match operator_certificates::list_all(conn) {
+        Ok(rows) => rows,
+        Err(e) => {
+            r.push("cert.list", Outcome::Fail, format!("{e}"));
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        // A fresh install with no operator certs is fine — emit a
+        // single OK so JSON consumers see a stable id.
+        r.push(
+            "cert.list",
+            Outcome::Ok,
+            "no operator certificates installed (legacy operator-key flow)",
+        );
+        return;
+    }
+
+    r.push(
+        "cert.list",
+        Outcome::Ok,
+        format!("found {n} operator certificate(s)", n = rows.len()),
+    );
+
+    for row in rows {
+        // Surface bypass-misconfig regardless of expiry zone — the
+        // operator deliberately overrode a structural validation
+        // check at policy-sign time and should be reminded.
+        if row.force_misconfig_bypass {
+            r.push(
+                Box::leak(format!("cert.{}.misconfig_bypass", &row.pubkey_fingerprint)
+                    .into_boxed_str()),
+                Outcome::Warn,
+                format!(
+                    "{display} ({fp}) was installed with --force-misconfig — \
+                     a structural validation check was bypassed at policy-sign time. \
+                     See `OperatorCertMisconfigBypassed` audit event for the reason.",
+                    display = row.display_name,
+                    fp      = row.pubkey_fingerprint,
+                ),
+            );
+        }
+
+        let cert   = row.clone().into_operator_cert();
+        let status = cert_status(&cert, now);
+        let id     = Box::leak(
+            format!("cert.{}.status", &row.pubkey_fingerprint).into_boxed_str(),
+        );
+
+        match status {
+            CertStatus::Active | CertStatus::AlwaysActiveEmergency => {
+                r.push(
+                    id,
+                    Outcome::Ok,
+                    format!(
+                        "{display} ({fp}) status={tag}",
+                        display = row.display_name,
+                        fp      = row.pubkey_fingerprint,
+                        tag     = status.tag(),
+                    ),
+                );
+            }
+            CertStatus::Expiring { secs_until_expiry } => {
+                let days = secs_until_expiry / 86_400;
+                r.push(
+                    id,
+                    Outcome::Warn,
+                    format!(
+                        "{display} ({fp}) expiring in ~{days}d \
+                         (warn_window={warn_d}d, not_after={not_after}); \
+                         rotate via `raxis cert mint` + `raxis cert install` \
+                         + `raxis epoch advance`",
+                        display   = row.display_name,
+                        fp        = row.pubkey_fingerprint,
+                        warn_d    = row.warn_before_expiry_days,
+                        not_after = row.not_after,
+                    ),
+                );
+            }
+            CertStatus::Grace { secs_until_grace_end } => {
+                let days = secs_until_grace_end / 86_400;
+                r.push(
+                    id,
+                    Outcome::Warn,
+                    format!(
+                        "{display} ({fp}) IN GRACE PERIOD — only recovery ops \
+                         allowed. {days}d remaining before all ops are denied. \
+                         Rotate immediately.",
+                        display = row.display_name,
+                        fp      = row.pubkey_fingerprint,
+                    ),
+                );
+            }
+            CertStatus::Expired { secs_since_expiry } => {
+                let days = secs_since_expiry / 86_400;
+                r.push(
+                    id,
+                    Outcome::Fail,
+                    format!(
+                        "{display} ({fp}) EXPIRED ~{days}d ago — all ops denied. \
+                         Operator key is unusable until rotated.",
+                        display = row.display_name,
+                        fp      = row.pubkey_fingerprint,
+                    ),
+                );
+            }
+            CertStatus::NotYetValid { secs_until_active } => {
+                let days = secs_until_active / 86_400;
+                r.push(
+                    id,
+                    Outcome::Fail,
+                    format!(
+                        "{display} ({fp}) NOT YET VALID — activates in ~{days}d \
+                         (not_before={not_before}). All ops denied until then.",
+                        display    = row.display_name,
+                        fp         = row.pubkey_fingerprint,
+                        not_before = row.not_before,
+                    ),
+                );
+            }
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -561,5 +722,217 @@ mod tests {
         assert_eq!(checks[0]["id"], "a.b");
         assert_eq!(checks[1]["id"], "c.d");
         assert_eq!(checks[1]["outcome"], "WARN");
+    }
+
+    // ── Step-11: cert.* check coverage ────────────────────────────────
+    //
+    // These tests build a real on-disk SQLite via `Store::open`,
+    // insert one or more `operator_certificates` rows directly with
+    // raw SQL (the kernel-side `repopulate` helper drives off a full
+    // PolicyBundle which is heavy to construct in a unit test), then
+    // re-open read-only and exercise `check_operator_certs`.
+    //
+    // The `cert_status` classification is already tested in
+    // `raxis-crypto::cert::tests`; here we only assert the
+    // doctor-side mapping (status → Outcome + id format).
+
+    fn setup_db_with_cert(
+        tmp:                    &TempDir,
+        fp:                     &str,
+        display_name:           &str,
+        not_before:             i64,
+        not_after:              i64,
+        warn_days:              u32,
+        grace_days:             u32,
+        kind:                   &str,
+        force_misconfig_bypass: bool,
+    ) {
+        // Open RW once to apply migrations + insert the row, then
+        // drop the handle so the RO open downstream sees a complete
+        // schema (migrations run on `Store::open`).
+        let store = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let conn = store.lock_sync();
+        // policy_epoch_history must have a row first — `operator_certificates.epoch_id`
+        // FK-references it. We use `INSERT OR IGNORE` so multiple cert
+        // inserts in one test (future-proofing for that case) don't trip
+        // the PRIMARY KEY UNIQUE on (epoch_id) and pubkey UNIQUE on
+        // policy_sha256.
+        conn.execute(
+            "INSERT OR IGNORE INTO policy_epoch_history (\
+                epoch_id, policy_sha256, signed_by_authority, \
+                triggered_by_operator, advanced_at\
+             ) VALUES (1, 'sha-test', 'auth-test', 'op-test', 0)",
+            [],
+        ).unwrap();
+        // Each cert needs a unique pubkey_hex (UNIQUE constraint on the
+        // column), so we derive one from the test-supplied fingerprint
+        // padded to 64 hex chars.
+        let pubkey_hex = format!("{fp}{}", "0".repeat(64usize.saturating_sub(fp.len())));
+        let self_sig   = "11".repeat(32);
+        conn.execute(
+            "INSERT INTO operator_certificates (\
+                pubkey_fingerprint, epoch_id, kind, display_name, pubkey_hex, \
+                not_before, not_after, warn_before_expiry_days, grace_period_days, \
+                permitted_ops_json, contact_info, self_sig_hex, \
+                force_misconfig_bypass, installed_at\
+             ) VALUES (?1, 1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '[]', NULL, ?9, ?10, 0)",
+            rusqlite::params![
+                fp,
+                kind,
+                display_name,
+                pubkey_hex,
+                not_before,
+                not_after,
+                warn_days as i64,
+                grace_days as i64,
+                self_sig,
+                force_misconfig_bypass as i64,
+            ],
+        ).unwrap();
+        drop(conn);
+        drop(store);
+    }
+
+    #[test]
+    fn cert_check_lists_no_certs_emits_single_ok_row() {
+        let tmp = TempDir::new().unwrap();
+        let _ = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
+        // Re-open read-only.
+        let conn = raxis_store::open_ro(tmp.path()).unwrap();
+        let mut r = Report::default();
+        check_operator_certs(&mut r, &conn, 1_700_000_000);
+
+        let ids: Vec<&str> = r.checks.iter().map(|c| c.id).collect();
+        assert!(ids.contains(&"cert.list"),
+            "must emit cert.list when zero certs are installed; got {ids:?}");
+        let cert_list = r.checks.iter().find(|c| c.id == "cert.list").unwrap();
+        assert_eq!(cert_list.outcome, Outcome::Ok);
+        assert!(cert_list.detail.contains("no operator certificates"),
+            "detail must explain the legacy flow: {:?}", cert_list.detail);
+    }
+
+    #[test]
+    fn cert_check_classifies_active_cert_as_ok() {
+        let tmp = TempDir::new().unwrap();
+        let now: i64 = 1_700_000_000;
+        let one_year = 365 * 86_400;
+        setup_db_with_cert(
+            &tmp, "abcd1234deadbeef", "Alice",
+            now - 86_400, now + one_year, // valid through next year
+            30, 7, "Standard", false,
+        );
+
+        let conn = raxis_store::open_ro(tmp.path()).unwrap();
+        let mut r = Report::default();
+        check_operator_certs(&mut r, &conn, now);
+
+        let status_check = r.checks.iter()
+            .find(|c| c.id.starts_with("cert.abcd1234deadbeef.status"))
+            .expect("must emit per-cert status check");
+        assert_eq!(status_check.outcome, Outcome::Ok);
+        assert!(status_check.detail.contains("status=active"),
+            "detail must carry the active tag: {:?}", status_check.detail);
+    }
+
+    #[test]
+    fn cert_check_warns_on_expiring_cert() {
+        let tmp = TempDir::new().unwrap();
+        let now: i64 = 1_700_000_000;
+        // Cert expires in 5 days, warn window is 30 days → Expiring.
+        setup_db_with_cert(
+            &tmp, "expiring00000001", "Bob",
+            now - 86_400 * 60, now + 86_400 * 5,
+            30, 7, "Standard", false,
+        );
+
+        let conn = raxis_store::open_ro(tmp.path()).unwrap();
+        let mut r = Report::default();
+        check_operator_certs(&mut r, &conn, now);
+
+        let status = r.checks.iter()
+            .find(|c| c.id.starts_with("cert.expiring00000001.status"))
+            .expect("must emit per-cert status check");
+        assert_eq!(status.outcome, Outcome::Warn);
+        assert!(status.detail.contains("expiring in"),
+            "detail must mention expiry runway: {:?}", status.detail);
+    }
+
+    #[test]
+    fn cert_check_fails_on_expired_cert() {
+        let tmp = TempDir::new().unwrap();
+        let now: i64 = 1_700_000_000;
+        // Cert expired 30 days ago and grace (7d) elapsed → Expired.
+        setup_db_with_cert(
+            &tmp, "expired000000001", "Charlie",
+            now - 86_400 * 365, now - 86_400 * 30,
+            30, 7, "Standard", false,
+        );
+
+        let conn = raxis_store::open_ro(tmp.path()).unwrap();
+        let mut r = Report::default();
+        check_operator_certs(&mut r, &conn, now);
+
+        let status = r.checks.iter()
+            .find(|c| c.id.starts_with("cert.expired000000001.status"))
+            .expect("must emit per-cert status check");
+        assert_eq!(status.outcome, Outcome::Fail);
+        assert!(status.detail.contains("EXPIRED"),
+            "detail must carry the loud EXPIRED marker: {:?}", status.detail);
+    }
+
+    #[test]
+    fn cert_check_warns_when_force_misconfig_bypass_is_set() {
+        let tmp = TempDir::new().unwrap();
+        let now: i64 = 1_700_000_000;
+        let one_year = 365 * 86_400;
+        setup_db_with_cert(
+            &tmp, "bypassedcert0001", "Dana",
+            now - 86_400, now + one_year,
+            30, 7, "Standard", true, // ← bypass on
+        );
+
+        let conn = raxis_store::open_ro(tmp.path()).unwrap();
+        let mut r = Report::default();
+        check_operator_certs(&mut r, &conn, now);
+
+        let bypass = r.checks.iter()
+            .find(|c| c.id.starts_with("cert.bypassedcert0001.misconfig_bypass"))
+            .expect("must emit a cert.<fp>.misconfig_bypass row");
+        assert_eq!(bypass.outcome, Outcome::Warn);
+        assert!(bypass.detail.contains("--force-misconfig"),
+            "bypass detail must reference the CLI flag for grep-traceability: {:?}",
+            bypass.detail);
+
+        // Status itself is Active (the bypass is orthogonal).
+        let status = r.checks.iter()
+            .find(|c| c.id.starts_with("cert.bypassedcert0001.status"))
+            .expect("status row must still appear alongside bypass row");
+        assert_eq!(status.outcome, Outcome::Ok);
+    }
+
+    #[test]
+    fn cert_check_treats_emergency_kind_as_always_active() {
+        let tmp = TempDir::new().unwrap();
+        let now: i64 = 1_700_000_000;
+        // EmergencyRecovery: the not_before / not_after / warn / grace
+        // values are STRUCTURALLY IGNORED by `cert_status` — we still
+        // pass realistic values so the row passes any future row-level
+        // CHECK constraints. The expected outcome is OK regardless.
+        setup_db_with_cert(
+            &tmp, "emergency00000001", "Break-Glass",
+            0, 0, 0, 0, "EmergencyRecovery", false,
+        );
+
+        let conn = raxis_store::open_ro(tmp.path()).unwrap();
+        let mut r = Report::default();
+        check_operator_certs(&mut r, &conn, now);
+
+        let status = r.checks.iter()
+            .find(|c| c.id.starts_with("cert.emergency00000001.status"))
+            .expect("must emit per-cert status check for emergency cert");
+        assert_eq!(status.outcome, Outcome::Ok);
+        assert!(status.detail.contains("always_active_emergency"),
+            "emergency cert detail must use the canonical zone tag: {:?}",
+            status.detail);
     }
 }

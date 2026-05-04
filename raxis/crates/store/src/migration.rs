@@ -53,7 +53,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -72,8 +72,12 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     if current_version < 1 {
         apply_migration_1(conn)?;
     }
-
-    // Future migrations: if current_version < 2 { apply_migration_2(conn)?; }
+    if current_version < 2 {
+        apply_migration_2(conn)?;
+    }
+    if current_version < 3 {
+        apply_migration_3(conn)?;
+    }
 
     Ok(())
 }
@@ -538,6 +542,253 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 2 — v1.x: operator_certificates view table.
+//
+// Normative reference (forthcoming): kernel-store.md §2.5.7
+// "Operator Certificates".
+//
+// **Why a denormalised view table?**
+//
+//   The canonical source of truth for an operator's cert is the
+//   `[[operators.entries.cert]]` sub-table inside the currently-
+//   installed `policy.toml`. The kernel's `cert_check` runtime path
+//   needs three queries on every operator IPC dispatch:
+//
+//     - lookup-by-fingerprint:  `WHERE pubkey_fingerprint = ?`
+//     - expiry sweep:           `WHERE not_after < ? AND kind = 'Standard'`
+//     - kind filter:            `WHERE kind = 'EmergencyRecovery'`
+//
+//   Doing those three from the in-memory `Arc<PolicyBundle>` would
+//   require iterating the operator-entry array on every dispatch.
+//   That's tolerable when there are 3 operators, painful when there
+//   are 30, and the kernel already has a SQLite database per the
+//   architecture — using the table for bulk filters and the bundle
+//   for the wire response is the right factoring.
+//
+// **Atomicity contract.** This table is repopulated by `advance_epoch`
+// in the SAME transaction that updates `policy_epoch_history`. A
+// power-loss between `policy_epoch_history` insert and the cert table
+// rebuild would leave the kernel running with stale certs — the
+// transaction boundary closes that window. The repopulation is a
+// `DELETE FROM operator_certificates` followed by a fresh `INSERT`
+// per cert, scoped to the new epoch_id; we do not maintain history
+// of past certs in this table (the audit chain is the historical
+// record).
+//
+// **Rows captured.** ONLY entries with an embedded cert. Legacy
+// (cert-less) entries are NOT inserted here — they're tracked
+// separately in `OperatorCertLegacyEntryDetected` audit events at
+// boot. This makes "cert lookup returns no row" mean "this operator
+// is on the legacy flow", which is a useful negative signal for the
+// kernel's `cert_check` path.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_2(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_2_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 2 failed: {e}"))
+    })
+}
+
+/// The complete migration-2 DDL — adds `operator_certificates` plus
+/// its lookup indexes. Same INV-STORE-03 contract as migration 1:
+/// no raw table-name literals.
+fn render_migration_2_ddl() -> String {
+    let operator_certificates = Table::OperatorCertificates.as_str();
+    let policy_epoch_history  = Table::PolicyEpochHistory.as_str();
+    let schema_version        = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── Table 20: operator_certificates ──────────────────────────────────────────
+-- Denormalised view of [[operators.entries.cert]] from the currently-
+-- installed policy.toml. Repopulated atomically on every advance_epoch.
+--
+-- Columns:
+--   pubkey_fingerprint    — SHA-256[:16] of the operator's pubkey;
+--                           UNIQUE (one cert per operator at any time).
+--   epoch_id              — policy_epoch_history.epoch_id this cert was
+--                           installed under. FK enforces that the
+--                           denormalised view cannot reference an epoch
+--                           that no longer exists in the history table.
+--   kind                  — 'Standard' | 'EmergencyRecovery' (from
+--                           CertKind::as_str). CHECK constraint pins
+--                           the universe of accepted values; a
+--                           future kind requires a new migration.
+--   display_name          — operator label (denormalised from cert).
+--   pubkey_hex            — 64-char raw Ed25519 pubkey (denormalised).
+--   not_before            — Unix seconds. 0 sentinel for emergency.
+--   not_after             — Unix seconds. 0 sentinel for emergency.
+--   warn_before_expiry_days — width of the Expiring zone.
+--   grace_period_days     — width of the Grace zone.
+--   permitted_ops_json    — JSON array of op names. Stored as JSON
+--                           rather than a separate child table so the
+--                           cert is always queryable as a single row
+--                           (no joins for the common path).
+--   contact_info          — optional free-form string; NULL when
+--                           absent.
+--   self_sig_hex          — 128-char self-signature for
+--                           re-verification on demand.
+--   force_misconfig_bypass — 0 or 1; mirrors the entry-level flag so
+--                           audit / doctor queries can `SELECT *
+--                           WHERE force_misconfig_bypass = 1` without
+--                           re-reading the policy bundle.
+--   installed_at          — Unix seconds when this row was rebuilt.
+CREATE TABLE IF NOT EXISTS {operator_certificates} (
+    pubkey_fingerprint      TEXT    NOT NULL PRIMARY KEY,
+    epoch_id                INTEGER NOT NULL
+        REFERENCES {policy_epoch_history}(epoch_id),
+    kind                    TEXT    NOT NULL
+        CHECK (kind IN ('Standard', 'EmergencyRecovery')),
+    display_name            TEXT    NOT NULL,
+    pubkey_hex              TEXT    NOT NULL UNIQUE,
+    not_before              INTEGER NOT NULL,
+    not_after               INTEGER NOT NULL,
+    warn_before_expiry_days INTEGER NOT NULL,
+    grace_period_days       INTEGER NOT NULL,
+    permitted_ops_json      TEXT    NOT NULL,
+    contact_info            TEXT,
+    self_sig_hex            TEXT    NOT NULL,
+    force_misconfig_bypass  INTEGER NOT NULL DEFAULT 0
+        CHECK (force_misconfig_bypass IN (0, 1)),
+    installed_at            INTEGER NOT NULL
+);
+
+-- Lookup: expiry sweep. Standard certs only — emergency certs have
+-- not_after = 0 sentinel and would always sort first; partial index
+-- on kind = 'Standard' keeps the index small and the sweep precise.
+CREATE INDEX IF NOT EXISTS idx_operator_certificates_expiry_sweep
+    ON {operator_certificates} (not_after, kind)
+    WHERE kind = 'Standard';
+
+-- Lookup: enumerate emergency certs without scanning the whole table.
+CREATE INDEX IF NOT EXISTS idx_operator_certificates_emergency
+    ON {operator_certificates} (kind)
+    WHERE kind = 'EmergencyRecovery';
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (2, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 3 — initiative_quarantines (kernel-store.md §2.5.8).
+//
+// Adds the `initiative_quarantines` table. A row in this table marks an
+// initiative as frozen: the planner intent dispatcher rejects every
+// subsequent `IntentRequest` against it with `FAIL_INITIATIVE_QUARANTINED`.
+//
+// Two operator commands populate this table:
+//
+//   * `raxis initiative quarantine <id>` inserts a single row.
+//   * `raxis operator quarantine-plans-by <fingerprint>` sweeps all
+//     initiatives whose plan was signed by the named operator (joining
+//     `initiatives` against `signed_plan_artifacts.signed_by`) and
+//     inserts one row per match in a single transaction.
+//
+// The table is append-only in v1 (no "unquarantine"). To recover from a
+// false positive, the operator aborts the initiative entirely and starts
+// a fresh one — the quarantine row is left in place as the audit-trail
+// record of the decision.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_3(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_3_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 3 failed: {e}"))
+    })
+}
+
+/// The complete migration-3 DDL — adds `initiative_quarantines` and
+/// extends `signed_plan_artifacts` with the operator fingerprint that
+/// signed the plan (needed by `quarantine-plans-by`'s sweep query).
+/// Same INV-STORE-03 contract as earlier migrations: no raw table-name
+/// literals.
+fn render_migration_3_ddl() -> String {
+    let initiative_quarantines = Table::InitiativeQuarantines.as_str();
+    let initiatives            = Table::Initiatives.as_str();
+    let signed_plan_artifacts  = Table::SignedPlanArtifacts.as_str();
+    let schema_version         = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── signed_plan_artifacts.signed_by_fingerprint ─────────────────────────────
+-- The operator pubkey_fingerprint that approved this plan (the operator
+-- whose Ed25519 signature `lifecycle::approve_plan` verified). Needed by
+-- `quarantine-plans-by` to sweep every initiative whose plan was approved
+-- by a now-compromised operator.
+--
+-- NULLABLE for backward compatibility with rows inserted under
+-- migration 1/2 (pre-step-10). Application code MUST set this column
+-- on every new INSERT going forward; the sweep skips NULL rows on the
+-- premise that v1 approvals predate this column entirely.
+ALTER TABLE {signed_plan_artifacts}
+    ADD COLUMN signed_by_fingerprint TEXT;
+
+-- Lookup: enumerate all initiatives a given operator approved.
+CREATE INDEX IF NOT EXISTS idx_signed_plan_artifacts_signed_by
+    ON {signed_plan_artifacts} (signed_by_fingerprint)
+    WHERE signed_by_fingerprint IS NOT NULL;
+
+-- ── Table 21: initiative_quarantines ────────────────────────────────────────
+-- Quarantine markers. One row per quarantined initiative. The kernel
+-- intent path rejects new IntentRequests against any initiative with a
+-- row here.
+--
+-- Columns:
+--   initiative_id      — PK; FK into initiatives so a quarantine row
+--                        cannot reference an unknown initiative.
+--   quarantined_at     — Unix seconds; clock-injected at insert time.
+--   quarantined_by     — operator pubkey_fingerprint that issued the
+--                        command (peripherals.md §3 'operator socket'
+--                        fingerprint format: SHA-256[:16] of the raw
+--                        Ed25519 pubkey, 32 hex chars).
+--   reason             — free-form operator-supplied label; capped at
+--                        the application layer to 512 bytes.
+--   sweep_target       — NULL for single-initiative quarantines;
+--                        carries the pubkey_fingerprint of the
+--                        operator whose plans were swept when this
+--                        row originated from the
+--                        `quarantine-plans-by` sweep. Lets `raxis
+--                        inspect` distinguish individually-quarantined
+--                        initiatives from collateral sweep entries
+--                        without joining against the audit chain.
+CREATE TABLE IF NOT EXISTS {initiative_quarantines} (
+    initiative_id   TEXT    NOT NULL PRIMARY KEY
+        REFERENCES {initiatives}(initiative_id),
+    quarantined_at  INTEGER NOT NULL,
+    quarantined_by  TEXT    NOT NULL,
+    reason          TEXT,
+    sweep_target    TEXT
+);
+
+-- Lookup: enumerate all initiatives a given operator quarantined.
+CREATE INDEX IF NOT EXISTS idx_initiative_quarantines_by_operator
+    ON {initiative_quarantines} (quarantined_by);
+
+-- Lookup: enumerate sweep-collateral entries for a given operator.
+CREATE INDEX IF NOT EXISTS idx_initiative_quarantines_sweep_target
+    ON {initiative_quarantines} (sweep_target)
+    WHERE sweep_target IS NOT NULL;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (3, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -547,16 +798,18 @@ mod tests {
     use rusqlite::Connection;
 
     /// Fresh (empty) DB → `schema_version` does not exist → `read_current_version`
-    /// reports `0`, `apply_pending` succeeds, and the schema is fully populated.
+    /// reports `0`, `apply_pending` succeeds, and every migration's schema
+    /// is fully populated up to the current `SCHEMA_VERSION`.
     #[test]
-    fn fresh_db_applies_migration_1() {
+    fn fresh_db_applies_all_pending_migrations() {
         let conn = Connection::open_in_memory().unwrap();
         assert_eq!(read_current_version(&conn).unwrap(), 0);
 
-        apply_pending(&conn).expect("migration 1 should apply on fresh db");
+        apply_pending(&conn).expect("all migrations should apply on fresh db");
 
         let v = read_current_version(&conn).unwrap();
-        assert_eq!(v, 1, "schema_version should be 1 after first apply");
+        assert_eq!(v, SCHEMA_VERSION as i64,
+            "schema_version should be SCHEMA_VERSION ({SCHEMA_VERSION}) after first apply");
 
         // Spot-check: a representative table exists post-migration.
         // We use `Table::Tasks.as_str()` here too — keeping the test
@@ -573,16 +826,16 @@ mod tests {
         assert_eq!(count, 1, "tasks table should exist after migration 1");
     }
 
-    /// Calling `apply_pending` twice in a row is a no-op; the schema_version
-    /// row remains `(version=1, applied_at=…)` and no error is raised.
+    /// Calling `apply_pending` twice in a row is a no-op; schema_version
+    /// holds exactly one row per applied migration and no error is raised.
     #[test]
     fn apply_pending_is_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         apply_pending(&conn).unwrap();
         apply_pending(&conn).unwrap();
-        assert_eq!(read_current_version(&conn).unwrap(), 1);
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
 
-        // Exactly one row in schema_version (PK on `version` enforces this).
+        // One row per applied migration (PK on `version` prevents duplicates).
         let n: i64 = conn
             .query_row(
                 &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
@@ -590,7 +843,8 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, SCHEMA_VERSION as i64,
+            "expected one row per applied migration");
     }
 
     /// If the DB has `schema_version` but `MAX(version)` returns NULL (no rows),
@@ -642,12 +896,12 @@ mod tests {
     }
 
     /// A second call to `apply_pending` after a successful first call must
-    /// detect "version >= 1" and skip migration 1 entirely (no DDL re-run).
-    /// We verify this by injecting a sentinel row into `tasks` between calls
-    /// and asserting it survives — if the DDL had re-run, the row would be
-    /// gone (DROP-then-CREATE would lose data; CREATE IF NOT EXISTS would
-    /// preserve it but the schema_version PK conflict on re-INSERT would
-    /// have raised).
+    /// detect every migration is already applied and skip them entirely
+    /// (no DDL re-run). We verify this by injecting a sentinel row into
+    /// `tasks` between calls and asserting it survives — if the DDL had
+    /// re-run, the row would be gone (DROP-then-CREATE would lose data;
+    /// CREATE IF NOT EXISTS would preserve it but the schema_version PK
+    /// conflict on re-INSERT would have raised).
     #[test]
     fn second_apply_does_not_drop_data() {
         let conn = Connection::open_in_memory().unwrap();
@@ -746,11 +1000,12 @@ mod tests {
         );
     }
 
-    /// All 19 v1 tables created by Migration 1 are reachable through
-    /// the `Table` enum — i.e. there are no DDL-only tables that would
-    /// be invisible to the kernel's INV-STORE-03 type-safe accessors.
+    /// All v1 + v1.x tables created by all applied migrations are
+    /// reachable through the `Table` enum — i.e. there are no DDL-
+    /// only tables that would be invisible to the kernel's
+    /// INV-STORE-03 type-safe accessors.
     #[test]
-    fn all_v1_tables_are_in_table_enum() {
+    fn all_tables_are_in_table_enum() {
         let conn = Connection::open_in_memory().unwrap();
         apply_pending(&conn).unwrap();
 
@@ -767,6 +1022,7 @@ mod tests {
             .collect();
 
         let expected: std::collections::BTreeSet<String> = [
+            // Migration 1 — v1 baseline (19 tables)
             Table::SchemaVersion,
             Table::Initiatives,
             Table::SignedPlanArtifacts,
@@ -786,6 +1042,10 @@ mod tests {
             Table::TaskIntentRanges,
             Table::TaskExportedPathSnapshots,
             Table::PolicyEpochHistory,
+            // Migration 2 — v1.x: operator certificates
+            Table::OperatorCertificates,
+            // Migration 3 — v1.x: initiative quarantines
+            Table::InitiativeQuarantines,
         ]
         .iter()
         .map(|t| t.as_str().to_owned())
@@ -793,8 +1053,182 @@ mod tests {
 
         assert_eq!(
             observed, expected,
-            "set of tables created by Migration 1 must equal `Table` enum (INV-STORE-03)",
+            "set of tables created by all migrations must equal `Table` enum (INV-STORE-03)",
         );
+    }
+
+    // ── Migration 2 — operator_certificates ──────────────────────────
+
+    /// Migration 2 creates the cert view table with the expected
+    /// column shape; columns / indexes are reachable from a fresh DB.
+    #[test]
+    fn migration_2_creates_operator_certificates_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64,
+            "schema_version must be SCHEMA_VERSION after applying all migrations");
+
+        // Column metadata sanity check via PRAGMA — every column
+        // we documented in the migration MUST be present.
+        let cols: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT name FROM pragma_table_info('{}')",
+                Table::OperatorCertificates.as_str(),
+            ))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for required in [
+            "pubkey_fingerprint",   "epoch_id",        "kind",
+            "display_name",         "pubkey_hex",      "not_before",
+            "not_after",            "warn_before_expiry_days",
+            "grace_period_days",    "permitted_ops_json",
+            "contact_info",         "self_sig_hex",
+            "force_misconfig_bypass", "installed_at",
+        ] {
+            assert!(cols.iter().any(|c| c == required),
+                "operator_certificates is missing column {required:?}; \
+                 got columns: {cols:?}");
+        }
+
+        // Both partial indexes registered.
+        let idx_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type='index' AND tbl_name='{}'",
+                Table::OperatorCertificates.as_str(),
+            ),
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(idx_count >= 2,
+            "expected at least 2 indexes on operator_certificates, got {idx_count}");
+    }
+
+    /// Migration 2 enforces CHECK (kind IN ('Standard', 'EmergencyRecovery')).
+    /// A malformed kind value MUST be rejected at INSERT time so we
+    /// can never drift into a state where the table holds rows the
+    /// kernel's `cert_check` cannot interpret.
+    #[test]
+    fn operator_certificates_rejects_unknown_kind() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        // First insert a parent epoch row (FK requirement).
+        conn.execute(
+            &format!(
+                "INSERT INTO {ph}(epoch_id, policy_sha256, signed_by_authority, \
+                 triggered_by_operator, advanced_at) VALUES (1, 'sha', 'auth', 'op', 0)",
+                ph = Table::PolicyEpochHistory.as_str(),
+            ),
+            [],
+        ).unwrap();
+
+        let result = conn.execute(
+            &format!(
+                "INSERT INTO {oc}(pubkey_fingerprint, epoch_id, kind, display_name, \
+                 pubkey_hex, not_before, not_after, warn_before_expiry_days, \
+                 grace_period_days, permitted_ops_json, self_sig_hex, installed_at) \
+                 VALUES ('fp', 1, 'NotARealKind', 'op', 'pk', 0, 0, 0, 0, '[]', 'sig', 0)",
+                oc = Table::OperatorCertificates.as_str(),
+            ),
+            [],
+        );
+        assert!(result.is_err(),
+            "INSERT with kind='NotARealKind' must violate CHECK constraint");
+    }
+
+    /// Migration 2's FK on epoch_id MUST point at policy_epoch_history.
+    /// PRAGMA foreign_keys is off by default in sqlite-rs, so we
+    /// explicitly enable it here to verify the constraint is wired.
+    #[test]
+    fn operator_certificates_epoch_fk_resolves_to_policy_epoch_history() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        apply_pending(&conn).unwrap();
+
+        // INSERT with a non-existent epoch_id MUST fail the FK constraint.
+        let result = conn.execute(
+            &format!(
+                "INSERT INTO {oc}(pubkey_fingerprint, epoch_id, kind, display_name, \
+                 pubkey_hex, not_before, not_after, warn_before_expiry_days, \
+                 grace_period_days, permitted_ops_json, self_sig_hex, installed_at) \
+                 VALUES ('fp', 999, 'Standard', 'op', 'pk', 0, 0, 0, 0, '[]', 'sig', 0)",
+                oc = Table::OperatorCertificates.as_str(),
+            ),
+            [],
+        );
+        assert!(result.is_err(),
+            "INSERT referencing missing epoch_id MUST trip the FK constraint");
+    }
+
+    // ── Migration 3 — initiative_quarantines ─────────────────────────
+
+    /// Migration 3 creates the quarantine table AND adds the
+    /// `signed_by_fingerprint` column on `signed_plan_artifacts`.
+    /// Both are reachable from a fresh DB after `apply_pending`.
+    #[test]
+    fn migration_3_creates_initiative_quarantines_table_and_signer_column() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64,
+            "schema_version must be SCHEMA_VERSION after applying all migrations");
+
+        // Quarantine table columns.
+        let cols: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT name FROM pragma_table_info('{}')",
+                Table::InitiativeQuarantines.as_str(),
+            ))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for required in [
+            "initiative_id", "quarantined_at", "quarantined_by",
+            "reason",        "sweep_target",
+        ] {
+            assert!(cols.iter().any(|c| c == required),
+                "initiative_quarantines is missing column {required:?}; got: {cols:?}");
+        }
+
+        // signed_plan_artifacts now carries signed_by_fingerprint.
+        let plan_cols: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT name FROM pragma_table_info('{}')",
+                Table::SignedPlanArtifacts.as_str(),
+            ))
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert!(plan_cols.iter().any(|c| c == "signed_by_fingerprint"),
+            "migration 3 must add signed_by_fingerprint; got: {plan_cols:?}");
+    }
+
+    /// FK on `initiative_id` MUST refer to the `initiatives` table.
+    /// PRAGMA foreign_keys is off by default in sqlite-rs, so we
+    /// explicitly enable it here.
+    #[test]
+    fn initiative_quarantines_initiative_id_fk_resolves() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        apply_pending(&conn).unwrap();
+
+        let result = conn.execute(
+            &format!(
+                "INSERT INTO {iq}(initiative_id, quarantined_at, quarantined_by, reason, sweep_target) \
+                 VALUES ('does-not-exist', 0, 'op', NULL, NULL)",
+                iq = Table::InitiativeQuarantines.as_str(),
+            ),
+            [],
+        );
+        assert!(result.is_err(),
+            "INSERT referencing missing initiative_id MUST trip the FK constraint");
     }
 
     /// Hash-pin the rendered Migration 1 DDL.

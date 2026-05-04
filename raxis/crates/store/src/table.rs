@@ -11,7 +11,8 @@
 //     guards against empty returns.
 //   - This enum is not serialized over the wire; it is a compile-time constant.
 
-/// All 19 kernel.db tables defined in kernel-store.md §2.5.1 migration 1.
+/// All kernel.db tables. v1 baseline = 19 tables (kernel-store.md §2.5.1
+/// migration 1); v1.x extensions append below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Table {
     // ── Core schema ───────────────────────────────────────────────────────
@@ -41,6 +42,31 @@ pub enum Table {
     TaskExportedPathSnapshots,
     // ── Policy ────────────────────────────────────────────────────────────
     PolicyEpochHistory,
+    // ── v1.x: Operator certificates (kernel-store.md §2.5.7) ─────────────
+    /// Denormalised view of `[[operators.entries.cert]]` from the
+    /// currently-installed `policy.toml`. Repopulated on every
+    /// `advance_epoch` (truncate + insert in the same transaction
+    /// that updates `policy_epoch_history`). The cert artefact in
+    /// the policy bundle remains the canonical source of truth;
+    /// this table exists for the kernel's `cert_check` runtime
+    /// path which must do `WHERE expires_at < ?` sweeps and per-
+    /// fingerprint lookups without re-parsing the policy bundle on
+    /// every operator IPC dispatch.
+    OperatorCertificates,
+
+    // ── v1.x: Initiative quarantine (kernel-store.md §2.5.8) ─────────────
+    /// Quarantine markers for individual initiatives. A row in this
+    /// table means the initiative is frozen — the planner intent path
+    /// rejects any subsequent `IntentRequest` against it with
+    /// `FAIL_INITIATIVE_QUARANTINED`. Created either by
+    /// `raxis initiative quarantine <id>` (single-initiative) or by
+    /// `raxis operator quarantine-plans-by <fingerprint>` (sweeps every
+    /// initiative whose plan was signed by the named operator). The
+    /// table is append-only: there is no operator command to lift a
+    /// quarantine in v1; the operator removes the initiative entirely
+    /// via `raxis initiative abort` and creates a fresh one if the
+    /// underlying compromise is resolved.
+    InitiativeQuarantines,
 }
 
 impl Table {
@@ -72,6 +98,8 @@ impl Table {
             Self::TaskIntentRanges          => "task_intent_ranges",
             Self::TaskExportedPathSnapshots => "task_exported_path_snapshots",
             Self::PolicyEpochHistory        => "policy_epoch_history",
+            Self::OperatorCertificates      => "operator_certificates",
+            Self::InitiativeQuarantines     => "initiative_quarantines",
         }
     }
 }
@@ -95,6 +123,7 @@ mod tests {
             Table::ApprovalProofs, Table::ApprovalTokenNonces, Table::VerifierRunTokens,
             Table::WitnessRecords, Table::LaneBudgetReservations, Table::LineageRateLimits,
             Table::TaskIntentRanges, Table::TaskExportedPathSnapshots, Table::PolicyEpochHistory,
+            Table::OperatorCertificates, Table::InitiativeQuarantines,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");

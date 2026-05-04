@@ -245,7 +245,7 @@ mod tests {
         let toml = r#"
 [meta]
 epoch     = 1
-signed_by = "aabbccdd"
+signed_by = "e0e77a507412b120f6ede61f62295b1a"
 signed_at = 0
 [authority]
 authority_pubkey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -267,7 +267,9 @@ max_cost_per_task = 10000
 [budget.base_cost_per_intent_kind]
 SingleCommit = 10
 [[operators.entries]]
-pubkey_fingerprint = "aabbccdd"
+# pubkey_fingerprint = SHA-256[:16] of the 0xaa pubkey above; required
+# by the new `validate_operator_certs` consistency check.
+pubkey_fingerprint = "e0e77a507412b120f6ede61f62295b1a"
 display_name = "Test"
 pubkey_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 permitted_ops = []

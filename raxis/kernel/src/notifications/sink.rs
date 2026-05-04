@@ -117,6 +117,8 @@ mod tests {
             display_name:       "fp".into(),
             pubkey_hex:         "0".repeat(64),
             permitted_ops:      vec![],
+            cert:                  None,
+            force_misconfig_bypass: false,
         }]);
         Arc::new(ArcSwap::from_pointee(b))
     }

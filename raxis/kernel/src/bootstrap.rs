@@ -500,7 +500,7 @@ fn install_genesis_policy_epoch_row(
     authority_vk: &VerifyingKey,
 ) -> Result<(), KernelError> {
     let policy_path = policy_dir.join("policy.toml");
-    let (_bundle, _raw_bytes, sha256_hex) =
+    let (bundle, _raw_bytes, sha256_hex) =
         raxis_policy::load_policy(&policy_path).map_err(|e| KernelError::BootstrapFailed {
             reason: format!(
                 "cannot re-load just-written policy artifact {}: {e}",
@@ -514,11 +514,18 @@ fn install_genesis_policy_epoch_row(
         reason: format!("cannot open kernel.db at {}: {e}", db_path.display()),
     })?;
 
+    // Pass the bundle through so any cert-bound operator entries get
+    // mirrored into `operator_certificates` atomically with the
+    // `policy_epoch_history` row INSERT. The `Some(&bundle)` argument
+    // is the kernel-side genesis path's contract that the cert table
+    // and the policy_epoch_history table never disagree about which
+    // operators are cert-bound at epoch 1.
     crate::policy_manager::install_genesis_policy_epoch(
         &store,
         &sha256_hex,
         &signed_by_authority,
         unix_now_secs() as i64,
+        Some(&bundle),
     )
     .map_err(|e| KernelError::BootstrapFailed {
         reason: format!("install_genesis_policy_epoch failed: {e}"),

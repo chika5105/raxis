@@ -131,9 +131,21 @@ fn run() -> Result<(), CliError> {
         "initiative" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "abort" => commands::initiative::run_abort(&flags, &rest[1..]),
+                "abort"      => commands::initiative::run_abort(&flags, &rest[1..]),
+                "quarantine" => commands::initiative::run_quarantine(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(format!(
                     "unknown initiative sub-command: {sub2:?}"
+                ))),
+            }
+        }
+        "operator" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "quarantine-plans-by" => {
+                    commands::operator::run_quarantine_plans_by(&flags, &rest[1..])
+                }
+                _ => Err(CliError::Usage(format!(
+                    "unknown operator sub-command: {sub2:?}"
                 ))),
             }
         }
@@ -187,6 +199,18 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "verify" => commands::audit::run_verify(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(format!("unknown audit sub-command: {sub2:?}"))),
+            }
+        }
+        "cert" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "mint"           => commands::cert::run_mint(&flags, &rest[1..]),
+                "mint-emergency" => commands::cert::run_mint_emergency(&flags, &rest[1..]),
+                "show"           => commands::cert::run_show(&flags, &rest[1..]),
+                "verify"         => commands::cert::run_verify(&flags, &rest[1..]),
+                "list"           => commands::cert::run_list(&flags, &rest[1..]),
+                "install"        => commands::cert::run_install(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(format!("unknown cert sub-command: {sub2:?}"))),
             }
         }
         "status" => commands::status::run(&flags, rest),
@@ -247,6 +271,21 @@ SUBCOMMANDS:
 
     initiative abort <initiative_id>
         Force-terminate an initiative and bulk-cancel all non-terminal tasks.
+
+    initiative quarantine <initiative_id> [--reason <text>]
+        Freeze an initiative — every subsequent IntentRequest is
+        rejected by the kernel with FAIL_INITIATIVE_QUARANTINED.
+        In-flight tasks are NOT aborted (use `initiative abort` for
+        that). Reason is capped at 512 bytes server-side and mirrored
+        into the audit chain.
+
+    operator quarantine-plans-by <target_fingerprint> [--reason <text>]
+        Sweep every initiative whose plan was approved by the given
+        operator fingerprint and quarantine each one in a single
+        atomic transaction. Used as the immediate containment
+        primitive when an operator key is suspected compromised;
+        operator-key removal is a separate `policy sign` + `epoch
+        advance` ceremony.
 
     task abort <task_id>
         Abort a running task immediately.

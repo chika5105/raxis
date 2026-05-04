@@ -87,11 +87,16 @@ mod tests {
     }
 
     #[test]
-    fn read_returns_schema_version_one_for_freshly_bootstrapped_db() {
+    fn read_returns_current_schema_version_for_freshly_bootstrapped_db() {
         let (tmp, _db) = fresh_store_path();
         let conn = open_ro(tmp.path()).expect("ro open");
         let meta = read(&conn).expect("kernel_meta");
-        assert_eq!(meta.schema_version, 1);
+        // Pin against `SCHEMA_VERSION` (not a hardcoded literal) so a
+        // future migration bump only edits one place. The previous
+        // assertion of `== 1` broke when migration_2 landed in
+        // step 4 of the operator-cert feature; locking to the
+        // exported constant prevents the same regression.
+        assert_eq!(meta.schema_version, crate::SCHEMA_VERSION as i64);
         // No policy_epoch row yet — bootstrap installs it on the
         // kernel's *first* boot, but `Store::open` alone does not.
         assert_eq!(meta.policy_epoch, None);

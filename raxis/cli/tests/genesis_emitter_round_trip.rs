@@ -26,7 +26,12 @@ const FIXED_QUALITY_PUBKEY_HEX: &str =
     "2222222222222222222222222222222222222222222222222222222222222222";
 const FIXED_OPERATOR_PUBKEY_HEX: &str =
     "3333333333333333333333333333333333333333333333333333333333333333";
-const FIXED_OPERATOR_FINGERPRINT: &str = "abcdef0123456789abcdef0123456789";
+// SHA-256[:16] of the raw 32-byte 0x33 pubkey above. Pinned here so
+// the fingerprint consistency check in
+// `raxis_policy::bundle::validate_operator_certs` accepts the
+// emitter's output. Real genesis policies derive this from the
+// actual pubkey via `raxis_genesis_tools::pubkey_fingerprint`.
+const FIXED_OPERATOR_FINGERPRINT: &str = "deb0e38ced1e41de6f92e70e80c418d2";
 
 #[test]
 fn cli_emitted_policy_round_trips_through_loader() {

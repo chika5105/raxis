@@ -14,6 +14,7 @@
 
 pub mod audit;
 pub mod budget;
+pub mod cert;
 pub mod delegation;
 pub mod doctor;
 pub mod epoch;
@@ -25,6 +26,7 @@ pub mod inbox;
 pub mod initiative;
 pub mod inspect;
 pub mod log;
+pub mod operator;
 pub mod plan;
 pub mod policy;
 pub mod policy_diff;

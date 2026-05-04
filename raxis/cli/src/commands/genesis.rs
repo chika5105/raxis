@@ -46,6 +46,8 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // Parse genesis-specific flags.
     let mut force = false;
     let mut operator_pubkey_path: Option<PathBuf> = None;
+    let mut operator_cert_path:   Option<PathBuf> = None;
+    let mut force_misconfig = false;
     let mut rotate_family: Option<String> = None;
     let mut i = 0;
 
@@ -60,6 +62,26 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                     })?,
                 ));
             }
+            // Operator-cert flow (cli-ceremony.md §4.4).
+            //
+            // When `--operator-cert <path>` is supplied, genesis embeds the
+            // cert into the just-emitted `[[operators.entries]]` table so
+            // the kernel boots with a cert-bound operator from epoch 1.
+            // The cert MUST be signed by the same key whose public half is
+            // passed via `--operator-pubkey`; mismatches fail loud.
+            "--operator-cert" => {
+                i += 1;
+                operator_cert_path = Some(PathBuf::from(
+                    args.get(i).ok_or_else(|| {
+                        CliError::Usage("--operator-cert requires a path".to_owned())
+                    })?,
+                ));
+            }
+            // Mirror of the `policy sign --force-misconfig` flag — needed at
+            // genesis time when the operator deliberately ships a cert with
+            // structural misconfig (rare but supported via the audited
+            // bypass path).
+            "--force-misconfig" => force_misconfig = true,
             "--rotate" => {
                 i += 1;
                 rotate_family = Some(
@@ -77,7 +99,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         return run_rotate(flags, &family);
     }
 
-    run_genesis(flags, force, operator_pubkey_path)
+    run_genesis(flags, force, operator_pubkey_path, operator_cert_path, force_misconfig)
 }
 
 // ---------------------------------------------------------------------------
@@ -88,6 +110,8 @@ fn run_genesis(
     flags: &GlobalFlags,
     force: bool,
     operator_pubkey_path: Option<PathBuf>,
+    operator_cert_path:   Option<PathBuf>,
+    force_misconfig:      bool,
 ) -> Result<(), CliError> {
     let data_dir = flags.data_dir();
     let keys_dir = data_dir.join("keys");
@@ -242,6 +266,34 @@ fn run_genesis(
     })?;
     println!("✓ Wrote policy.toml → {}", policy_path.display());
 
+    // Step 6.25 (cli-ceremony.md §4.4 — genesis cert flow):
+    //
+    // If the operator passed `--operator-cert <cert.toml>`, embed it
+    // into the just-written policy.toml's [[operators.entries]] entry
+    // BEFORE we install the epoch_history row. The cert MUST:
+    //   1. Be self-signed by the same key whose pubkey was passed via
+    //      --operator-pubkey (we already wrote that pubkey to
+    //      operator_<fp>.pub above); pubkey mismatch fails loud.
+    //   2. Pass structural validation (or have --force-misconfig set,
+    //      which sets force_misconfig_bypass = true on the entry; the
+    //      kernel will emit OperatorCertMisconfigBypassed audit at
+    //      first boot per kernel-store.md §2.5.7).
+    //
+    // Embedding is post-process so the canonical genesis-tools emitter
+    // stays cert-agnostic (no new field, no version bump in the shared
+    // crate). The Step 6.5 reload below picks up the embedded cert
+    // automatically and `repopulate` mirrors it into
+    // `operator_certificates` atomically with the epoch history row.
+    if let Some(cert_path) = operator_cert_path.as_ref() {
+        embed_operator_cert_into_policy(
+            cert_path,
+            &policy_path,
+            &operator_pubkey_hex,
+            force_misconfig,
+        )?;
+        println!("✓ Embedded operator cert from {}", cert_path.display());
+    }
+
     // Step 6.5: Install the canonical `epoch_id = 1` row in
     // `policy_epoch_history`. We re-load policy.toml from disk (rather
     // than re-using the in-memory `policy_toml` we just wrote) so the
@@ -288,6 +340,121 @@ fn run_genesis(
     Ok(())
 }
 
+/// Embed an operator cert into the just-emitted policy.toml.
+///
+/// Surfaces fail-loud:
+///   - cert pubkey ↔ operator-pubkey mismatch (`CertPubkeyMismatch`-class
+///     error; never bypassable, since a non-matching pubkey would let
+///     an attacker present a valid self-signed cert under someone
+///     else's operator entry).
+///   - structural violations without `--force-misconfig`.
+///   - self-signature failures (NEVER bypassable).
+///
+/// On success, rewrites `policy_path` with the cert embedded in the
+/// `[operators.entries.cert]` sub-table and (if force_misconfig is set)
+/// `force_misconfig_bypass = true` on the entry.
+fn embed_operator_cert_into_policy(
+    cert_path:          &Path,
+    policy_path:        &Path,
+    operator_pubkey_hex: &str,
+    force_misconfig:    bool,
+) -> Result<(), CliError> {
+    use raxis_crypto::cert::{validate_cert_structurally, verify_cert_self_signature};
+    use raxis_types::operator_cert::OperatorCert;
+
+    let cert_bytes = fs::read_to_string(cert_path).map_err(|e| CliError::Io {
+        path: cert_path.display().to_string(),
+        source: e,
+    })?;
+    let cert: OperatorCert = toml::from_str(&cert_bytes).map_err(|e| {
+        CliError::Key(format!("parse cert {}: {e}", cert_path.display()))
+    })?;
+
+    // Pubkey consistency: the cert's pubkey MUST match the operator
+    // pubkey we just registered. Mismatch ⇒ refuse loudly. The kernel
+    // would also reject this at policy load (PolicyError::CertPubkeyMismatch),
+    // but failing here gives a sharper error before the policy is signed.
+    if !cert.pubkey_hex.eq_ignore_ascii_case(operator_pubkey_hex) {
+        return Err(CliError::Key(format!(
+            "cert pubkey_hex ({}) does not match --operator-pubkey ({}); \
+             a cert MUST be self-signed by the operator key it accompanies",
+            cert.pubkey_hex, operator_pubkey_hex,
+        )));
+    }
+
+    // Self-signature is the integrity story for the cert; never
+    // bypassable.
+    verify_cert_self_signature(&cert).map_err(|e| {
+        CliError::Key(format!(
+            "cert {} self-signature check failed: {e}",
+            cert_path.display()
+        ))
+    })?;
+
+    // Structural — bypassable with --force-misconfig.
+    let violations = validate_cert_structurally(&cert);
+    if !violations.is_empty() && !force_misconfig {
+        let joined = violations.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n");
+        return Err(CliError::Usage(format!(
+            "cert {} has structural violations:\n{joined}\n\
+             Re-run with --force-misconfig to set force_misconfig_bypass = true on the \
+             genesis operator entry; the kernel will emit OperatorCertMisconfigBypassed \
+             at first boot per kernel-store.md §2.5.7.",
+            cert_path.display()
+        )));
+    }
+
+    // Edit the just-written policy.toml: locate the sole genesis entry
+    // and splice the cert in. We use the typed `toml::Value` editor
+    // (rather than string splicing) so the rewrite stays byte-stable
+    // for any TOML the parser accepts.
+    let policy_str = fs::read_to_string(policy_path).map_err(|e| CliError::Io {
+        path: policy_path.display().to_string(),
+        source: e,
+    })?;
+    let mut doc = policy_str.parse::<toml::Value>().map_err(|e| {
+        CliError::Policy(format!(
+            "cannot re-parse just-written policy {} for cert embed: {e}",
+            policy_path.display()
+        ))
+    })?;
+    let entries = doc
+        .get_mut("operators")
+        .and_then(|o| o.get_mut("entries"))
+        .and_then(|e| e.as_array_mut())
+        .ok_or_else(|| CliError::Policy(format!(
+            "internal: policy {} has no [[operators.entries]]",
+            policy_path.display()
+        )))?;
+    // Genesis writes EXACTLY one entry; assert that invariant.
+    if entries.len() != 1 {
+        return Err(CliError::Policy(format!(
+            "internal: genesis policy {} has {} operator entries; expected exactly 1",
+            policy_path.display(),
+            entries.len()
+        )));
+    }
+    let table = entries[0].as_table_mut().ok_or_else(|| {
+        CliError::Policy("internal: operator entry is not a TOML table".to_owned())
+    })?;
+    let cert_value = toml::Value::try_from(&cert).map_err(|e| {
+        CliError::Key(format!("serialise cert as TOML: {e}"))
+    })?;
+    table.insert("cert".to_owned(), cert_value);
+    if force_misconfig {
+        table.insert("force_misconfig_bypass".to_owned(), toml::Value::Boolean(true));
+    }
+
+    let new_bytes = toml::to_string(&doc).map_err(|e| {
+        CliError::Policy(format!("re-serialise policy with embedded cert: {e}"))
+    })?;
+    fs::write(policy_path, new_bytes.as_bytes()).map_err(|e| CliError::Io {
+        path: policy_path.display().to_string(),
+        source: e,
+    })?;
+    Ok(())
+}
+
 /// Open the kernel.db (creating + migrating on first run), insert the
 /// genesis row, and drop the handle. Centralised here so the
 /// short-lived store handle's lifetime is obvious to a reviewer.
@@ -297,7 +464,7 @@ fn install_genesis_epoch_row(
     authority_pubkey_bytes: &[u8; 32],
     advanced_at_unix_secs: i64,
 ) -> Result<(), CliError> {
-    let (_bundle, _raw_bytes, sha256_hex) = raxis_policy::load_policy(policy_path)
+    let (bundle, _raw_bytes, sha256_hex) = raxis_policy::load_policy(policy_path)
         .map_err(|e| {
             CliError::Policy(format!(
                 "cannot re-load just-written policy artifact {}: {e}",
@@ -313,11 +480,20 @@ fn install_genesis_epoch_row(
             db_path.display(),
         ))
     })?;
+    // Pass the bundle through so any cert-bound operator entries get
+    // mirrored into `operator_certificates` atomically with the
+    // `policy_epoch_history` row INSERT (kernel-store.md §2.5.7).
+    // For the v1 default genesis (which writes a cert-less policy.toml
+    // until step 9 lands the `--operator-cert` flow) the bundle has
+    // zero cert-bound entries and `repopulate` is a no-op, so this
+    // change is forward-compatible: the call site is ready for step 9
+    // without any additional plumbing.
     raxis_store::install_genesis_policy_epoch_row(
         &store,
         &sha256_hex,
         &signed_by_authority,
         advanced_at_unix_secs,
+        Some(&bundle),
     )
     .map_err(|e| CliError::Policy(format!("install_genesis_policy_epoch_row failed: {e}")))?;
     // Explicit drop so it is visible at review time that the WAL
@@ -711,7 +887,7 @@ mod run_genesis_e2e {
         let (_sk, pk_hex) = fixed_operator();
         let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
 
-        run_genesis(&flags, false, Some(pk_path)).expect("run_genesis must succeed");
+        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis must succeed");
 
         let data_dir = tmp.path();
         // Every directory `raxis doctor` checks (commands/doctor.rs
@@ -764,7 +940,7 @@ mod run_genesis_e2e {
         let (_sk, pk_hex) = fixed_operator();
         let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
 
-        run_genesis(&flags, false, Some(pk_path)).expect("run_genesis");
+        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
 
         // `raxis doctor` flags any other mode for these dirs as FAIL.
         assert_eq!(mode_bits(&tmp.path().join("keys")), 0o700);
@@ -778,7 +954,7 @@ mod run_genesis_e2e {
         let (_sk, pk_hex) = fixed_operator();
         let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
 
-        run_genesis(&flags, false, Some(pk_path)).expect("run_genesis");
+        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
 
         // cli-ceremony.md §4.2 — these modes match what
         // `kernel/bootstrap::write_file_0400` and `_0444` produce.
@@ -799,7 +975,7 @@ mod run_genesis_e2e {
         let (_sk, pk_hex) = fixed_operator();
         let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
 
-        run_genesis(&flags, false, Some(pk_path)).expect("run_genesis");
+        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
 
         // Independently re-load policy.toml so the SHA we expect in the
         // row is the kernel's SHA, not whatever genesis happens to print.
@@ -834,7 +1010,7 @@ mod run_genesis_e2e {
         let (_sk, pk_hex) = fixed_operator();
         let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
 
-        run_genesis(&flags, false, Some(pk_path)).expect("run_genesis");
+        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
 
         match raxis_audit_tools::quick_chain_check(&tmp.path().join("audit")) {
             raxis_audit_tools::ChainQuickCheck::Ok { last_seq, segment_count } => {
@@ -860,7 +1036,7 @@ mod run_genesis_e2e {
         let (_sk, pk_hex) = fixed_operator();
         let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
 
-        run_genesis(&flags, false, Some(pk_path)).expect("run_genesis");
+        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
 
         // 0o755 is what `mkdir(2)` produces under the standard 0o022
         // umask. We do NOT chmod these dirs — the spec doesn't require
@@ -916,10 +1092,10 @@ mod run_genesis_e2e {
         let (_sk, pk_hex) = fixed_operator();
         let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
 
-        run_genesis(&flags, false, Some(pk_path.clone())).expect("first run");
+        run_genesis(&flags, false, Some(pk_path.clone()), None, false).expect("first run");
         // A second run without --force MUST be rejected — operators must
         // see ERR_ALREADY_INITIALIZED, not silent overwrite.
-        let err = run_genesis(&flags, false, Some(pk_path.clone()))
+        let err = run_genesis(&flags, false, Some(pk_path.clone()), None, false)
             .expect_err("second run without --force must fail");
         assert!(
             err.to_string().contains("ERR_ALREADY_INITIALIZED"),
@@ -928,7 +1104,7 @@ mod run_genesis_e2e {
         // A third run with --force MUST succeed — the cleanup removes
         // every artifact the per-file 0400 writes would refuse to
         // overwrite (mirrors `bootstrap::purge_existing_genesis_artifacts`).
-        run_genesis(&flags, true, Some(pk_path)).expect("--force re-run");
+        run_genesis(&flags, true, Some(pk_path), None, false).expect("--force re-run");
 
         // After the --force re-run, all post-conditions still hold.
         assert!(tmp.path().join("audit/segment-000.jsonl").exists());
@@ -945,5 +1121,105 @@ mod run_genesis_e2e {
             count, 1,
             "exactly one genesis row even after --force; --force purges the prior DB",
         );
+    }
+
+    // ── --operator-cert flow (cli-ceremony.md §4.4) ────────────────
+
+    /// Mint a Standard cert signed by `sk`, write it to `<dir>/op.cert.toml`,
+    /// and return the path. Skips through `raxis-crypto::cert::sign_cert`
+    /// directly (rather than shelling out to `raxis cert mint`) so the
+    /// fixture is self-contained.
+    fn mint_standard_cert_for(sk: &SigningKey, dir: &Path) -> PathBuf {
+        use raxis_crypto::cert::sign_cert;
+        use raxis_types::operator_cert::{CertKind, OperatorCert};
+
+        let mut cert = OperatorCert {
+            kind:                    CertKind::Standard,
+            display_name:            "Alice".to_owned(),
+            pubkey_hex:              hex::encode(sk.verifying_key().to_bytes()),
+            // 1 day window so the cert is unambiguously Active at test time.
+            not_before:              0,
+            not_after:               i64::MAX / 2,
+            warn_before_expiry_days: 30,
+            grace_period_days:       7,
+            permitted_ops:           vec!["AbortTask".to_owned()],
+            contact_info:            None,
+            self_sig_hex:            String::new(),
+        };
+        cert.self_sig_hex = sign_cert(&cert, sk);
+        let p = dir.join("op.cert.toml");
+        std::fs::write(&p, toml::to_string(&cert).unwrap()).unwrap();
+        p
+    }
+
+    #[test]
+    fn run_genesis_with_operator_cert_embeds_cert_into_policy_and_mirrors_into_db() {
+        let (tmp, flags) = fresh_flags();
+        let (sk, pk_hex) = fixed_operator();
+        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let cert_path = mint_standard_cert_for(&sk, tmp.path());
+
+        run_genesis(&flags, false, Some(pk_path), Some(cert_path), false)
+            .expect("genesis with --operator-cert must succeed");
+
+        // 1. The on-disk policy must carry the embedded cert sub-table.
+        let policy_str = std::fs::read_to_string(tmp.path().join("policy/policy.toml")).unwrap();
+        assert!(policy_str.contains("[operators.entries.cert]"),
+            "embedded cert missing from policy.toml:\n{policy_str}");
+        assert!(policy_str.contains("kind = \"Standard\""));
+
+        // 2. The kernel.db `operator_certificates` table must have one row
+        //    for our operator (mirrored by `repopulate` inside the genesis
+        //    epoch_history INSERT, kernel-store.md §2.5.7).
+        let conn = raxis_store::open_ro(tmp.path()).expect("open_ro");
+        let rows = raxis_store::views::operator_certificates::list_all(&conn).expect("list_all");
+        assert_eq!(rows.len(), 1, "expected exactly one cert row at genesis");
+        assert_eq!(rows[0].kind.as_str(), "Standard");
+        assert_eq!(rows[0].display_name, "Alice");
+        // The cert should be installed at epoch 1.
+        assert_eq!(rows[0].epoch_id, 1);
+    }
+
+    #[test]
+    fn run_genesis_rejects_cert_with_pubkey_mismatch_against_operator_pubkey() {
+        let (tmp, flags) = fresh_flags();
+        let (_sk, pk_hex) = fixed_operator();
+        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+
+        // Mint a cert for a DIFFERENT key. `embed_operator_cert_into_policy`
+        // must refuse loudly: a non-matching pubkey would let the cert
+        // self-sign for a key the entry isn't bound to.
+        let other_sk = SigningKey::from_bytes(&[0x42u8; 32]);
+        let cert_path = mint_standard_cert_for(&other_sk, tmp.path());
+
+        let err = run_genesis(&flags, false, Some(pk_path), Some(cert_path), false)
+            .expect_err("pubkey mismatch must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("does not match --operator-pubkey"),
+            "expected pubkey-mismatch error, got: {msg}");
+    }
+
+    #[test]
+    fn run_genesis_rejects_cert_with_tampered_self_signature() {
+        let (tmp, flags) = fresh_flags();
+        let (sk, pk_hex) = fixed_operator();
+        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let cert_path = mint_standard_cert_for(&sk, tmp.path());
+
+        // Tamper with the self_sig_hex field (flip the first hex char).
+        // self-signature failures are NEVER bypassable.
+        use raxis_types::operator_cert::OperatorCert;
+        let s = std::fs::read_to_string(&cert_path).unwrap();
+        let mut cert: OperatorCert = toml::from_str(&s).unwrap();
+        let mut chars: Vec<char> = cert.self_sig_hex.chars().collect();
+        chars[0] = if chars[0] == '0' { '1' } else { '0' };
+        cert.self_sig_hex = chars.into_iter().collect();
+        std::fs::write(&cert_path, toml::to_string(&cert).unwrap()).unwrap();
+
+        let err = run_genesis(&flags, false, Some(pk_path), Some(cert_path), false)
+            .expect_err("tampered self-sig must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("self-signature"),
+            "expected self-signature error, got: {msg}");
     }
 }

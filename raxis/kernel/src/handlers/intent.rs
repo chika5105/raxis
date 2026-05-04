@@ -356,6 +356,58 @@ fn run_phase_a(
         s => return PreGateOutcome::Reject(PlannerErrorCode::FailTaskNotRunning, s),
     }
 
+    // ── Step 3A: Initiative-quarantine check (kernel-store.md §2.5.8) ─────
+    //
+    // A quarantined initiative rejects every new IntentRequest, regardless
+    // of intent kind (ReportFailure / CompleteTask / SingleCommit /
+    // IntegrationMerge). The `initiative_quarantines` row is set by the
+    // operator IPC handler `handle_quarantine_initiative` (or as part of a
+    // sweep via `handle_quarantine_plans_by`). Per INV-08 the wire surface
+    // is the dedicated terminal code `FAIL_INITIATIVE_QUARANTINED` so the
+    // planner does not retry.
+    //
+    // We run this AFTER Step 3 because we need `task.initiative_id` to do
+    // the lookup, and AFTER the task-state gate so an already-Aborted task
+    // surfaces the more specific `FailTaskNotRunning` rather than being
+    // shadowed by quarantine.
+    // Use the RW variant because we're already holding the writer mutex
+    // throughout `run_phase_a` (Steps 2/3 acquire it via `load_task` and
+    // `accept_envelope_and_advance_sequence`). Opening a separate `RoConn`
+    // here would race the WAL snapshot against the in-flight transaction.
+    let quarantine_lookup = {
+        let conn = store.lock_sync();
+        raxis_store::views::initiative_quarantines::is_quarantined_rw(
+            &conn,
+            &task.initiative_id,
+        )
+    };
+    match quarantine_lookup {
+        Ok(false) => {}
+        Ok(true) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"IntentRejectedQuarantined\",\
+                 \"task_id\":\"{}\",\"initiative_id\":\"{}\"}}",
+                req.task_id.as_str(),
+                task.initiative_id,
+            );
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailInitiativeQuarantined, task_state);
+        }
+        Err(e) => {
+            // Treat read errors as quarantine-uncertain → fail closed,
+            // since the alternative is letting work through past a
+            // possibly-quarantined initiative.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"QuarantineLookupError\",\
+                 \"task_id\":\"{}\",\"initiative_id\":\"{}\",\"reason\":\"{e}\"}}",
+                req.task_id.as_str(),
+                task.initiative_id,
+            );
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailInitiativeQuarantined, task_state);
+        }
+    }
+
     // ── Dispatch by intent kind ───────────────────────────────────────────
     //
     // ReportFailure and CompleteTask are entirely sync: they do not need

@@ -874,7 +874,9 @@ mod stub_round_trip {
                     "1111111111111111111111111111111111111111111111111111111111111111",
                 operator_pubkey_hex:
                     "2222222222222222222222222222222222222222222222222222222222222222",
-                operator_fingerprint:   "deadbeefdeadbeefdeadbeefdeadbeef",
+                // SHA-256[:16] of the 0x22 pubkey above; required by the
+                // new `validate_operator_certs` consistency check.
+                operator_fingerprint:   "9f72ea0cf49536e3c66c787f705186df",
                 signed_at_unix_secs:    1_700_000_000,
                 allowed_worktree_roots: &[worktree_root_str.as_str()],
             },

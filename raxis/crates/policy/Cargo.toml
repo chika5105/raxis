@@ -11,8 +11,18 @@ toml        = { workspace = true }
 sha2        = { workspace = true }
 hex         = { workspace = true }
 thiserror   = { workspace = true }
-raxis-types = { workspace = true }
+raxis-types  = { workspace = true }
+# Cert structural / self-signature validation lives in raxis-crypto; the
+# policy bundle calls into it during PolicyBundle::validate. Keeping the
+# crypto code centralised means the kernel and CLI ALWAYS validate certs
+# the same way (no parallel implementations).
+raxis-crypto = { workspace = true }
 
 [dev-dependencies]
 tempfile          = "3"
 raxis-audit-tools = { workspace = true }
+# Cert validation tests need to mint freshly-signed certs via raxis-crypto's
+# `sign_cert`, which takes an `ed25519_dalek::SigningKey`. This dep is
+# tests-only — runtime cert verification only needs the public-key path
+# which raxis-crypto already exposes.
+ed25519-dalek     = { workspace = true }

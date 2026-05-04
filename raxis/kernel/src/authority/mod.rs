@@ -30,6 +30,7 @@ pub mod delegation;
 pub mod verifier_token;
 pub mod approval;
 pub mod escalation;
+pub mod cert_check;
 
 // Re-export the public API surface per kernel-core.md §2.3 authority/mod.rs.
 pub use delegation::{
@@ -43,3 +44,4 @@ pub use session::{
 pub use verifier_token::{issue_verifier_token, validate_verifier_token, consume_verifier_token};
 pub use keys::{verify_hmac, sign_audit_record, authority_pubkey_fingerprint, KeyRegistry, load_key_registry};
 pub use approval::{validate_approval_token, revoke_approval};
+pub use cert_check::{CertEnforcer, CertGuard};

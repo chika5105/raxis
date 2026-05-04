@@ -19,6 +19,7 @@ use raxis_audit_tools::AuditSink;
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
+use crate::authority::cert_check::CertEnforcer;
 use crate::authority::keys::KeyRegistry;
 use crate::gateway::client::GatewayClient;
 use crate::initiatives::PlanRegistry;
@@ -91,6 +92,15 @@ pub struct HandlerContext {
     /// `policy_manager::advance_epoch` which calls `mark_all_invalid`
     /// over the current set of active session IDs.
     pub epoch_binding: Arc<EpochBinding>,
+
+    /// Operator-cert four-zone runtime gate (kernel-core.md
+    /// §`authority/cert_check.rs`). Owns the in-process dedupe set
+    /// for `OperatorCertExpiringSoon` / `OperatorCertInGracePeriod`
+    /// audits so a chatty operator cannot flood the chain with
+    /// expiry warnings. Used by the operator IPC dispatcher between
+    /// the `permitted_ops` gate and handler dispatch — see
+    /// `ipc::operator::accept_operator_loop` for the call site.
+    pub cert_enforcer: Arc<CertEnforcer>,
 }
 
 impl HandlerContext {
@@ -116,6 +126,7 @@ impl HandlerContext {
             plan_registry,
             gateway,
             epoch_binding,
+            cert_enforcer: Arc::new(CertEnforcer::new()),
         }
     }
 

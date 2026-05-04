@@ -540,6 +540,8 @@ mod tests {
                 display_name:       "op-prime".into(),
                 pubkey_hex:         hex::encode([7u8; 32]),
                 permitted_ops:      vec![],
+                cert:                  None,
+                force_misconfig_bypass: false,
             }],
             escalation_policy,
         );

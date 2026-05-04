@@ -18,6 +18,7 @@
 // which apply business-rule validation and return well-typed values rather
 // than raw TOML scalars.
 
+use raxis_types::operator_cert::{CertKind, OperatorCert};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -271,6 +272,30 @@ pub(crate) struct OperatorsBlock {
 }
 
 /// A single operator entry in `[[operators.entries]]`.
+///
+/// **Cert vs legacy entries.** v1 supports two coexisting shapes:
+///
+///   - **Legacy** — `cert = None`. The entry carries a raw `pubkey_hex`
+///     and `permitted_ops` directly. No metadata, no expiry. Loaded
+///     for backward compatibility with existing deployments and emits
+///     `OperatorCertLegacyEntryDetected` at boot so operators see
+///     they're not on the cert flow yet.
+///   - **Cert-bound** — `cert = Some(OperatorCert)`. The cert carries
+///     the operator's metadata (`display_name`, expiry window,
+///     `permitted_ops`, contact info) and is self-signed by the
+///     operator's private key. The `pubkey_hex` and `display_name` on
+///     the entry MUST agree with the embedded cert; mismatches fail
+///     loud at validate time. The entry's `permitted_ops` is IGNORED
+///     when a cert is present — the cert is the authority.
+///
+/// **Misconfiguration policy.** Structural problems with the embedded
+/// cert (inverted validity window, emergency cert with extra ops, etc.)
+/// fail policy load by default. Operators who NEED to deploy a known-
+/// inconsistent entry can set `force_misconfig_bypass = true` per
+/// entry; the bypass is captured into [`PolicyBundle::bypassed_cert_misconfigs`]
+/// so the kernel boot can emit an `OperatorCertMisconfigBypassed`
+/// audit event for each one. **Self-signature failures are NEVER
+/// bypassable** — a forged cert is always rejected.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OperatorEntry {
     /// SHA-256[:16] fingerprint of the operator's Ed25519 public key (32 hex chars).
@@ -280,7 +305,67 @@ pub struct OperatorEntry {
     pub pubkey_hex: String,
     /// The subset of operator IPC operations this operator is allowed to invoke.
     /// Canonical v1 set: 13 operations listed in kernel-store.md §2.5.5.
+    ///
+    /// **When `cert` is `Some`**, this field is IGNORED in favour of
+    /// `cert.permitted_ops` (the cert is the authority).
     pub permitted_ops: Vec<String>,
+    /// Optional embedded operator certificate. When set, the cert
+    /// drives `permitted_ops`, expiry semantics, and audit metadata;
+    /// the entry's loose fields exist only for backward compatibility
+    /// and consistency checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cert: Option<OperatorCert>,
+    /// Operator-acknowledged misconfig bypass. Defaults to `false`.
+    ///
+    /// When `true`, structural cert validation errors do NOT block
+    /// policy load — they are captured into
+    /// [`PolicyBundle::bypassed_cert_misconfigs`] for the kernel boot
+    /// to audit. Self-signature errors and pubkey-mismatch errors
+    /// are still fatal (no bypass).
+    ///
+    /// Operators set this when they need to deploy a known-broken
+    /// cert (e.g. emergency cert with extra metadata for
+    /// documentation), accepting that the kernel will pin the
+    /// structural invariants regardless and that the bypass shows
+    /// up in the audit chain.
+    #[serde(default)]
+    pub force_misconfig_bypass: bool,
+}
+
+/// One bypassed cert misconfiguration recorded at policy load.
+///
+/// Emitted into [`PolicyBundle::bypassed_cert_misconfigs`] when an
+/// `OperatorEntry` had `force_misconfig_bypass = true` AND its
+/// embedded cert tripped at least one structural invariant. The
+/// kernel boot consumes this list and emits one
+/// `OperatorCertMisconfigBypassed` audit event per entry so the
+/// chain of custody is visible.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BypassedCertMisconfig {
+    /// SHA-256[:16] of the operator's pubkey — matches the
+    /// `pubkey_fingerprint` field on the originating entry.
+    pub operator_fingerprint: String,
+    /// Operator display name as declared on the entry (NOT the cert,
+    /// since the cert may itself be the source of the mismatch).
+    pub display_name:         String,
+    pub kind:                 CertKind,
+    /// The structural validation errors the operator chose to bypass.
+    /// Stored as their `Display` strings so the audit event captures
+    /// the exact wording the operator saw at validate time.
+    pub violations:           Vec<String>,
+}
+
+/// One legacy (cert-less) operator entry recorded at policy load.
+///
+/// Emitted into [`PolicyBundle::legacy_operator_entries`] for every
+/// `OperatorEntry` that omits the `cert` field. The kernel boot
+/// uses this to emit `OperatorCertLegacyEntryDetected` so operators
+/// are reminded to migrate, but it is NOT a load-time error —
+/// existing deployments continue to work unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyOperatorEntry {
+    pub operator_fingerprint: String,
+    pub display_name:         String,
 }
 
 // ---------------------------------------------------------------------------
@@ -651,8 +736,15 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "GatewaySignalFailed",
     // notifications (self-reflective)
     "NotificationDeliveryFailed",
+    // operator certificates (kernel-store.md §2.5.7, security-model.md §cert-lifecycle)
+    "OperatorCertInstalled", "OperatorCertLegacyEntryDetected",
+    "OperatorCertMisconfigBypassed", "OperatorCertExpiringSoon",
+    "OperatorCertInGracePeriod", "OperatorCertExpiredOpDenied",
+    "EmergencyOperatorUsed",
     // read-only CLI redaction reveal (cli-readonly.md §5.4.2 / §5.7.2)
     "PathReadAccessed",
+    // initiative quarantine (kernel-store.md §2.5.8)
+    "InitiativeQuarantined", "OperatorQuarantineSwept",
 ];
 
 /// Validate the raw `[notifications]` section and produce the final
@@ -877,6 +969,24 @@ pub struct PolicyBundle {
     /// route (cli-readonly.md §5.6.2). Always at least `["shell"]`
     /// when the operator does not override.
     default_notification_channels: Vec<String>,
+
+    /// Operator entries whose embedded cert tripped at least one
+    /// structural invariant AND had `force_misconfig_bypass = true`
+    /// set on the entry. The kernel boot consumes this list and
+    /// emits one `OperatorCertMisconfigBypassed` audit event per
+    /// item so the bypass cannot happen silently.
+    ///
+    /// This list is INTENTIONALLY exposed as a public accessor — the
+    /// kernel boot reads it during the audit-chain warm-up. Tests
+    /// that care about misconfig handling (step 3 unit tests) read
+    /// it through [`PolicyBundle::bypassed_cert_misconfigs`].
+    bypassed_cert_misconfigs:      Vec<BypassedCertMisconfig>,
+
+    /// Operator entries that omit the `cert` field entirely. v1 keeps
+    /// these working unchanged for backward compatibility, but the
+    /// kernel boot emits one `OperatorCertLegacyEntryDetected` audit
+    /// event per item so operators get a visible nudge to migrate.
+    legacy_operator_entries:       Vec<LegacyOperatorEntry>,
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -918,6 +1028,25 @@ impl PolicyBundle {
                 "[[operators.entries]] is empty — at least one operator required".to_owned(),
             ));
         }
+
+        // Per-entry cert validation. Mutates `entries` in place to:
+        //   - Apply structural pinning to emergency certs (force
+        //     `permitted_ops = ["RotateEpoch"]` regardless of TOML).
+        //   - Replace `entry.permitted_ops` with the cert's
+        //     `permitted_ops` when a cert is present (the cert is the
+        //     authority — entry-level ops would otherwise drift).
+        // Returns:
+        //   - `bypassed` — the set of entries whose structural errors
+        //     were swallowed via `force_misconfig_bypass = true`.
+        //     Audited at boot.
+        //   - `legacy`   — the set of entries with no embedded cert.
+        //     Audited at boot.
+        //
+        // Hard failures (signature invalid, pubkey/fingerprint
+        // mismatch) are NEVER bypassable and short-circuit here.
+        let mut entries = raw.operators_block.entries;
+        let (bypassed_cert_misconfigs, legacy_operator_entries) =
+            validate_operator_certs(&mut entries)?;
 
         // Require at least one allowed worktree root.
         if raw.sessions.allowed_worktree_roots.is_empty() {
@@ -1051,7 +1180,7 @@ impl PolicyBundle {
             epoch: raw.meta.epoch,
             authority_pubkey_hex: raw.authority.authority_pubkey,
             quality_pubkey_hex: raw.authority.quality_pubkey,
-            operators: raw.operators_block.entries,
+            operators: entries,
             gates: raw.gates,
             lanes: raw.lanes,
             role_ceilings,
@@ -1079,6 +1208,8 @@ impl PolicyBundle {
             notification_channels,
             notification_routes,
             default_notification_channels,
+            bypassed_cert_misconfigs,
+            legacy_operator_entries,
         })
     }
 
@@ -1117,6 +1248,26 @@ impl PolicyBundle {
         self.operators
             .iter()
             .find(|op| op.pubkey_fingerprint == fingerprint)
+    }
+
+    /// Operator entries whose embedded cert tripped at least one
+    /// structural invariant AND were marked `force_misconfig_bypass = true`.
+    /// The kernel boot reads this list and emits one
+    /// `OperatorCertMisconfigBypassed` audit event per item.
+    ///
+    /// Empty in normal deployments. Operators see this list grow only
+    /// when they explicitly opt into a known-broken cert (e.g. for
+    /// staged migration or v2 forward-compat experimentation).
+    pub fn bypassed_cert_misconfigs(&self) -> &[BypassedCertMisconfig] {
+        &self.bypassed_cert_misconfigs
+    }
+
+    /// Operator entries that omit the `cert` field entirely. The kernel
+    /// boot emits one `OperatorCertLegacyEntryDetected` audit event
+    /// per item to nudge operators to migrate to the cert flow. NOT
+    /// a load-time error — legacy entries continue to function.
+    pub fn legacy_operator_entries(&self) -> &[LegacyOperatorEntry] {
+        &self.legacy_operator_entries
     }
 
     /// Test-only constructor that builds a minimal bundle whose only
@@ -1188,6 +1339,8 @@ impl PolicyBundle {
             }],
             notification_routes: HashMap::new(),
             default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
+            bypassed_cert_misconfigs: Vec::new(),
+            legacy_operator_entries:  Vec::new(),
         }
     }
 
@@ -1439,6 +1592,181 @@ impl PolicyBundle {
 }
 
 // ---------------------------------------------------------------------------
+// validate_operator_certs — fail-loud cert validation with audited bypass.
+//
+// Called by `PolicyBundle::validate` for every entry in
+// `[[operators.entries]]`. Mutates `entries` in place to apply
+// structural pinning (e.g. emergency cert `permitted_ops` overridden
+// to `["RotateEpoch"]`) and to copy the cert's `permitted_ops` onto
+// the entry-level field when a cert is present.
+//
+// Returns `(bypassed, legacy)`:
+//   - `bypassed` — entries whose embedded cert tripped at least one
+//     structural invariant AND were marked `force_misconfig_bypass = true`.
+//     The kernel boot will audit each as `OperatorCertMisconfigBypassed`.
+//   - `legacy`   — entries with no embedded cert (`cert = None`).
+//     Audited as `OperatorCertLegacyEntryDetected`.
+//
+// **Hard failures (NEVER bypassable):**
+//   - Self-signature verification failure → `PolicyError::CertValidation`.
+//     A forged cert MUST never be installed; the bypass flag does not
+//     extend to signature-level claims.
+//   - Pubkey mismatch between entry and embedded cert →
+//     `PolicyError::CertPubkeyMismatch`. The two MUST agree so the
+//     audit chain has a single canonical operator identity per
+//     fingerprint.
+//   - Fingerprint mismatch between entry's pubkey_hex and its
+//     declared pubkey_fingerprint → `PolicyError::FingerprintMismatch`.
+//     Bypassing this would let an operator declare arbitrary
+//     fingerprints for an existing key, breaking the operator-by-fp
+//     lookup contract.
+//
+// **Soft failures (bypassable):**
+//   - Structural invariants from `validate_cert_structurally`:
+//     - InvertedValidityWindow
+//     - WarnWindowExceedsValidity
+//     - DisplayNameLength
+//     - StandardCertHasNoPermissions
+//     - EmergencyHasWrongPermissions   ← STRUCTURAL OVERRIDE applied
+//     - EmergencyHasValidityWindow     ← STRUCTURAL OVERRIDE applied
+//     - MalformedPubkey / MalformedSelfSig
+// ---------------------------------------------------------------------------
+
+fn validate_operator_certs(
+    entries: &mut Vec<OperatorEntry>,
+) -> Result<
+    (Vec<BypassedCertMisconfig>, Vec<LegacyOperatorEntry>),
+    PolicyError,
+> {
+    use raxis_crypto::cert::{
+        validate_cert_structurally, verify_cert_self_signature,
+    };
+    use sha2::{Digest, Sha256};
+
+    let mut bypassed = Vec::new();
+    let mut legacy   = Vec::new();
+
+    for entry in entries.iter_mut() {
+        // ── Always-on: entry pubkey_hex ↔ pubkey_fingerprint check ──
+        //
+        // `pubkey_fingerprint` is denormalised on the entry for cheap
+        // O(1) lookups; if the operator hand-edits it out of sync with
+        // `pubkey_hex` the lookup contract breaks. Pin both halves.
+        // (NEVER bypassable.)
+        let computed_fp = {
+            let raw = hex::decode(&entry.pubkey_hex)?;
+            let mut h = Sha256::new();
+            h.update(&raw);
+            hex::encode(&h.finalize()[..16])
+        };
+        if computed_fp != entry.pubkey_fingerprint {
+            return Err(PolicyError::FingerprintMismatch {
+                fingerprint:          entry.pubkey_fingerprint.clone(),
+                entry_pubkey_hex:     entry.pubkey_hex.clone(),
+                computed_fingerprint: computed_fp,
+            });
+        }
+
+        // ── Cert-less entry: record as legacy and continue ──────────
+        let Some(cert) = entry.cert.clone() else {
+            legacy.push(LegacyOperatorEntry {
+                operator_fingerprint: entry.pubkey_fingerprint.clone(),
+                display_name:         entry.display_name.clone(),
+            });
+            continue;
+        };
+
+        // ── Pubkey consistency between entry and cert (NEVER bypassable) ──
+        if cert.pubkey_hex != entry.pubkey_hex {
+            return Err(PolicyError::CertPubkeyMismatch {
+                fingerprint:      entry.pubkey_fingerprint.clone(),
+                entry_pubkey_hex: entry.pubkey_hex.clone(),
+                cert_pubkey_hex:  cert.pubkey_hex.clone(),
+            });
+        }
+
+        // ── Self-signature verification (NEVER bypassable) ─────────
+        //
+        // We run this BEFORE structural validation: a forged cert
+        // could otherwise dress itself up as "well-structured" and
+        // get into the bypass path. Signature first, structure second.
+        if let Err(sig_err) = verify_cert_self_signature(&cert) {
+            return Err(PolicyError::CertValidation {
+                fingerprint:  entry.pubkey_fingerprint.clone(),
+                display_name: entry.display_name.clone(),
+                errors:       format!("  - {sig_err}"),
+            });
+        }
+
+        // ── Structural invariants (BYPASSABLE) ─────────────────────
+        let violations = validate_cert_structurally(&cert);
+        if !violations.is_empty() {
+            if !entry.force_misconfig_bypass {
+                let joined = violations
+                    .iter()
+                    .map(|e| format!("  - {e}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(PolicyError::CertValidation {
+                    fingerprint:  entry.pubkey_fingerprint.clone(),
+                    display_name: entry.display_name.clone(),
+                    errors:       joined,
+                });
+            }
+            // Bypass path: capture the violations for audit AND log
+            // a structured warning so the operator sees what just
+            // got swallowed (the boot audit event is the canonical
+            // record; this stderr line is a redundant safety net).
+            let violation_strs: Vec<String> =
+                violations.iter().map(|e| e.to_string()).collect();
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"operator_cert_misconfig_bypassed\",\
+                 \"operator_fp\":\"{}\",\"display_name\":\"{}\",\
+                 \"kind\":\"{}\",\"violations\":[{}]}}",
+                entry.pubkey_fingerprint,
+                entry.display_name.replace('"', "\\\""),
+                cert.kind.as_str(),
+                violation_strs
+                    .iter()
+                    .map(|v| format!("\"{}\"", v.replace('"', "\\\"").replace('\n', " ")))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            bypassed.push(BypassedCertMisconfig {
+                operator_fingerprint: entry.pubkey_fingerprint.clone(),
+                display_name:         entry.display_name.clone(),
+                kind:                 cert.kind,
+                violations:           violation_strs,
+            });
+        }
+
+        // ── Apply structural pinning to the in-memory entry ────────
+        //
+        // Even on the bypass path, the kernel structurally pins
+        // emergency cert permissions to {"RotateEpoch"} so the
+        // bypass cannot widen the blast radius. The audit event
+        // emitted at boot makes the override visible.
+        let pinned_cert = match cert.kind {
+            CertKind::EmergencyRecovery => OperatorCert {
+                permitted_ops: vec!["RotateEpoch".to_owned()],
+                ..cert.clone()
+            },
+            CertKind::Standard => cert.clone(),
+        };
+
+        // The cert is the authority for permitted_ops; mirror it
+        // onto the entry-level field so all downstream lookups (which
+        // currently consult `entry.permitted_ops`) get the right
+        // answer without each call site having to learn the cert
+        // protocol.
+        entry.permitted_ops = pinned_cert.permitted_ops.clone();
+        entry.cert = Some(pinned_cert);
+    }
+
+    Ok((bypassed, legacy))
+}
+
+// ---------------------------------------------------------------------------
 // Tests — worktree_root_allowed component-aware comparison.
 // ---------------------------------------------------------------------------
 //
@@ -1494,6 +1822,8 @@ mod tests {
             }],
             notification_routes: HashMap::new(),
             default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
+            bypassed_cert_misconfigs: Vec::new(),
+            legacy_operator_entries:  Vec::new(),
         }
     }
 
@@ -1587,9 +1917,14 @@ mod gateway_providers_tests {
     }
 
     fn minimal_policy_toml() -> String {
+        // pubkey_fingerprint = SHA-256[:16] of the raw 32-byte 0xcc pubkey
+        // bytes; computed once and pinned here so the new fingerprint
+        // consistency check in `validate_operator_certs` accepts the
+        // fixture. Real genesis policies derive this from the actual
+        // pubkey via `raxis_genesis_tools::pubkey_fingerprint`.
         r#"[meta]
 epoch     = 1
-signed_by = "deadbeefdeadbeefdeadbeefdeadbeef"
+signed_by = "c2f480d4dda9f4522b9f6d590011636d"
 signed_at = 1700000000
 
 [authority]
@@ -1621,7 +1956,7 @@ CompleteTask     = 5
 ReportFailure    = 1
 
 [[operators.entries]]
-pubkey_fingerprint = "deadbeefdeadbeefdeadbeefdeadbeef"
+pubkey_fingerprint = "c2f480d4dda9f4522b9f6d590011636d"
 display_name       = "operator-1"
 pubkey_hex         = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 permitted_ops      = ["CreateInitiative"]
@@ -2151,7 +2486,16 @@ channels   = []
             AuditEventKind::GatewayQuarantined { reason: "x".into(), total_attempts: 0 }.as_str(),
             AuditEventKind::GatewaySignalFailed { signal: "x".into(), new_epoch_id: None, reason: "x".into() }.as_str(),
             AuditEventKind::NotificationDeliveryFailed { channel_id: "x".into(), event_kind: "x".into(), reason: "x".into() }.as_str(),
+            AuditEventKind::OperatorCertInstalled { pubkey_fingerprint: "x".into(), epoch_id: 0, cert_kind: "x".into(), display_name: "x".into(), not_before: 0, not_after: 0, permitted_ops: vec![], force_misconfig_bypass: false }.as_str(),
+            AuditEventKind::OperatorCertLegacyEntryDetected { pubkey_fingerprint: "x".into(), epoch_id: 0, display_name: "x".into() }.as_str(),
+            AuditEventKind::OperatorCertMisconfigBypassed { pubkey_fingerprint: "x".into(), epoch_id: 0, cert_kind: "x".into(), display_name: "x".into(), violations: vec![] }.as_str(),
+            AuditEventKind::OperatorCertExpiringSoon { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into(), not_after: 0, days_remaining: 0 }.as_str(),
+            AuditEventKind::OperatorCertInGracePeriod { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into(), not_after: 0, grace_ends_at: 0 }.as_str(),
+            AuditEventKind::OperatorCertExpiredOpDenied { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into(), not_after: 0, expired_at: 0 }.as_str(),
+            AuditEventKind::EmergencyOperatorUsed { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into() }.as_str(),
             AuditEventKind::PathReadAccessed { actor: "x".into(), table: "x".into(), column: "x".into(), task_id: "x".into(), command: "x".into() }.as_str(),
+            AuditEventKind::InitiativeQuarantined { initiative_id: "x".into(), quarantined_by: "x".into(), reason: None }.as_str(),
+            AuditEventKind::OperatorQuarantineSwept { target_fingerprint: "x".into(), quarantined_by: "x".into(), count: 0, reason: None }.as_str(),
         ];
 
         let policy_kinds: std::collections::HashSet<&str> =
@@ -2172,3 +2516,418 @@ channels   = []
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests — `validate_operator_certs` cert-flow validation.
+// ---------------------------------------------------------------------------
+//
+// Covers the three branches of the cert validation logic:
+//
+//   1. **Hard failures (NEVER bypassable):**
+//      - FingerprintMismatch (entry pubkey_hex vs declared fingerprint)
+//      - CertPubkeyMismatch (entry pubkey_hex vs cert pubkey_hex)
+//      - CertValidation on signature failure
+//
+//   2. **Soft failures (bypassable with `force_misconfig_bypass = true`):**
+//      - Structural invariants from raxis-crypto::validate_cert_structurally
+//      - Bypass produces a `BypassedCertMisconfig` entry, audit-bound at boot
+//
+//   3. **Structural pinning:**
+//      - EmergencyRecovery cert with `permitted_ops = ["X", "Y"]` MUST end up
+//        with `permitted_ops = ["RotateEpoch"]` at the entry level after
+//        validation, regardless of the bypass path
+//
+// Plus the `legacy_operator_entries` accumulation for cert-less entries.
+
+#[cfg(test)]
+mod cert_validation_tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+    use raxis_crypto::cert::sign_cert;
+    use raxis_types::operator_cert::{CertKind, OperatorCert};
+
+    // Deterministic seed → same pubkey + signatures across test runs.
+    const TEST_SEED: [u8; 32] = [0x42u8; 32];
+
+    fn test_signing_key() -> SigningKey { SigningKey::from_bytes(&TEST_SEED) }
+
+    fn test_pubkey_hex() -> String {
+        hex::encode(test_signing_key().verifying_key().to_bytes())
+    }
+
+    fn test_fingerprint() -> String {
+        use sha2::{Digest, Sha256};
+        let raw = hex::decode(test_pubkey_hex()).unwrap();
+        let mut h = Sha256::new();
+        h.update(&raw);
+        hex::encode(&h.finalize()[..16])
+    }
+
+    fn signed_standard_cert(now: i64, perms: Vec<&str>) -> OperatorCert {
+        let mut c = OperatorCert {
+            kind:                    CertKind::Standard,
+            display_name:            "Alice".to_owned(),
+            pubkey_hex:              test_pubkey_hex(),
+            not_before:              now - 86_400,
+            not_after:               now + 90 * 86_400,
+            warn_before_expiry_days: 30,
+            grace_period_days:       7,
+            permitted_ops:           perms.into_iter().map(str::to_owned).collect(),
+            contact_info:            None,
+            self_sig_hex:            String::new(),
+        };
+        c.self_sig_hex = sign_cert(&c, &test_signing_key());
+        c
+    }
+
+    fn signed_emergency_cert(perms: Vec<&str>) -> OperatorCert {
+        let mut c = OperatorCert {
+            kind:                    CertKind::EmergencyRecovery,
+            display_name:            "break-glass".to_owned(),
+            pubkey_hex:              test_pubkey_hex(),
+            not_before:              0,
+            not_after:               0,
+            warn_before_expiry_days: 0,
+            grace_period_days:       0,
+            permitted_ops:           perms.into_iter().map(str::to_owned).collect(),
+            contact_info:            None,
+            self_sig_hex:            String::new(),
+        };
+        c.self_sig_hex = sign_cert(&c, &test_signing_key());
+        c
+    }
+
+    fn entry_with_cert(cert: Option<OperatorCert>, force_bypass: bool) -> OperatorEntry {
+        OperatorEntry {
+            pubkey_fingerprint:    test_fingerprint(),
+            display_name:          "Alice".to_owned(),
+            pubkey_hex:            test_pubkey_hex(),
+            permitted_ops:         vec!["CreateInitiative".to_owned()],
+            cert,
+            force_misconfig_bypass: force_bypass,
+        }
+    }
+
+    // ── Legacy entries (cert = None) ──────────────────────────────────
+
+    #[test]
+    fn legacy_entry_with_no_cert_is_recorded_in_legacy_list() {
+        let mut entries = vec![entry_with_cert(None, false)];
+        let (bypassed, legacy) = validate_operator_certs(&mut entries).unwrap();
+        assert!(bypassed.is_empty());
+        assert_eq!(legacy.len(), 1, "cert-less entry must be recorded as legacy");
+        assert_eq!(legacy[0].operator_fingerprint, test_fingerprint());
+        assert_eq!(legacy[0].display_name, "Alice");
+    }
+
+    #[test]
+    fn legacy_entry_does_not_have_permitted_ops_overwritten() {
+        // Legacy entries keep their entry-level permitted_ops untouched —
+        // the cert-driven override only applies when a cert is present.
+        let mut entries = vec![entry_with_cert(None, false)];
+        validate_operator_certs(&mut entries).unwrap();
+        assert_eq!(entries[0].permitted_ops, vec!["CreateInitiative".to_owned()]);
+    }
+
+    // ── Cert-bound happy path ─────────────────────────────────────────
+
+    #[test]
+    fn well_formed_standard_cert_passes_and_overrides_entry_permitted_ops() {
+        let cert = signed_standard_cert(1_700_000_000, vec!["AbortTask", "ApprovePlan"]);
+        let mut entries = vec![entry_with_cert(Some(cert), false)];
+        let (bypassed, legacy) = validate_operator_certs(&mut entries).unwrap();
+        assert!(bypassed.is_empty());
+        assert!(legacy.is_empty(), "cert-bound entry must NOT be in legacy list");
+        // Cert is the authority for permitted_ops — entry-level field is
+        // overridden during validation so downstream lookups are consistent.
+        assert_eq!(
+            entries[0].permitted_ops,
+            vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()],
+            "entry.permitted_ops must mirror cert.permitted_ops"
+        );
+    }
+
+    #[test]
+    fn well_formed_emergency_cert_passes_and_pins_permitted_ops_to_rotate_epoch() {
+        let cert = signed_emergency_cert(vec!["RotateEpoch"]);
+        let mut entries = vec![entry_with_cert(Some(cert), false)];
+        let (bypassed, _) = validate_operator_certs(&mut entries).unwrap();
+        assert!(bypassed.is_empty(), "emergency cert with correct ops should not bypass");
+        assert_eq!(entries[0].permitted_ops, vec!["RotateEpoch".to_owned()]);
+        assert_eq!(
+            entries[0].cert.as_ref().unwrap().permitted_ops,
+            vec!["RotateEpoch".to_owned()],
+        );
+    }
+
+    // ── Hard failures (NEVER bypassable) ──────────────────────────────
+
+    /// Fingerprint mismatch: entry's pubkey_fingerprint does not equal
+    /// SHA-256[:16] of pubkey_hex. NEVER bypassable.
+    #[test]
+    fn fingerprint_mismatch_is_a_hard_failure() {
+        let mut entry = entry_with_cert(
+            Some(signed_standard_cert(1_700_000_000, vec!["CreateInitiative"])),
+            true, // force_bypass MUST NOT save us — this is a hard failure
+        );
+        entry.pubkey_fingerprint = "0".repeat(32);
+        let mut entries = vec![entry];
+        let err = validate_operator_certs(&mut entries).expect_err("must fail");
+        assert!(
+            matches!(err, PolicyError::FingerprintMismatch { .. }),
+            "expected FingerprintMismatch, got: {err:?}"
+        );
+    }
+
+    /// Cert pubkey ≠ entry pubkey: the entry and the cert must agree on
+    /// the operator identity. NEVER bypassable.
+    #[test]
+    fn cert_pubkey_mismatch_is_a_hard_failure() {
+        let mut cert = signed_standard_cert(1_700_000_000, vec!["CreateInitiative"]);
+        cert.pubkey_hex = "ee".repeat(32);
+        // Re-sign so we don't ALSO trip on signature verification.
+        cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
+        // The cert is now signed by THIS key but advertises a DIFFERENT
+        // pubkey — the self-sig will fail first. To isolate the
+        // pubkey-mismatch path we'd need a cert signed by a different
+        // key; we test the signature path separately. Here we expect
+        // EITHER PolicyError::CertValidation (sig fail) or
+        // PolicyError::CertPubkeyMismatch — both are hard failures.
+        let mut entries = vec![entry_with_cert(Some(cert), true)];
+        let err = validate_operator_certs(&mut entries).expect_err("must fail");
+        assert!(
+            matches!(
+                err,
+                PolicyError::CertValidation { .. } | PolicyError::CertPubkeyMismatch { .. }
+            ),
+            "expected hard cert failure, got: {err:?}"
+        );
+    }
+
+    /// Forged cert (signed by a DIFFERENT private key than the one the
+    /// cert advertises) is REJECTED even with the bypass flag.
+    #[test]
+    fn forged_self_signature_is_a_hard_failure_even_with_bypass() {
+        let mut cert = signed_standard_cert(1_700_000_000, vec!["CreateInitiative"]);
+        let imposter = SigningKey::from_bytes(&[0xCDu8; 32]);
+        cert.self_sig_hex = sign_cert(&cert, &imposter);
+        let mut entries = vec![entry_with_cert(Some(cert), true)];
+        let err = validate_operator_certs(&mut entries).expect_err("must fail");
+        assert!(
+            matches!(err, PolicyError::CertValidation { .. }),
+            "forged sig must produce CertValidation, got: {err:?}"
+        );
+        // The error message must mention self-signature so the
+        // operator can debug.
+        let s = format!("{err}");
+        assert!(s.to_lowercase().contains("self-sig") || s.contains("signature"),
+            "error must describe signature failure; got: {s}");
+    }
+
+    // ── Soft failures: bypass path ────────────────────────────────────
+
+    #[test]
+    fn structural_misconfig_without_bypass_is_rejected() {
+        // EmergencyRecovery cert with extra ops = misconfig.
+        let cert = signed_emergency_cert(vec!["RotateEpoch", "AbortInitiative"]);
+        let mut entries = vec![entry_with_cert(Some(cert), false)];
+        let err = validate_operator_certs(&mut entries).expect_err("must fail");
+        let s = format!("{err}");
+        assert!(matches!(err, PolicyError::CertValidation { .. }));
+        assert!(s.contains("EmergencyRecovery") || s.contains("RotateEpoch"),
+            "error must explain WHICH structural rule was violated; got: {s}");
+    }
+
+    #[test]
+    fn structural_misconfig_with_bypass_is_recorded_for_audit_and_pinned() {
+        let cert = signed_emergency_cert(vec!["RotateEpoch", "AbortInitiative"]);
+        let mut entries = vec![entry_with_cert(Some(cert), true)];
+        let (bypassed, _) = validate_operator_certs(&mut entries).unwrap();
+        assert_eq!(bypassed.len(), 1, "bypass must produce exactly one audit record");
+
+        let bp = &bypassed[0];
+        assert_eq!(bp.operator_fingerprint, test_fingerprint());
+        assert_eq!(bp.display_name, "Alice");
+        assert_eq!(bp.kind, CertKind::EmergencyRecovery);
+        assert!(!bp.violations.is_empty(),
+            "violations list must be non-empty (operator sees what they bypassed)");
+        // The violation strings must include the full Display message.
+        let joined = bp.violations.join("\n");
+        assert!(joined.contains("EmergencyRecovery") || joined.contains("RotateEpoch"),
+            "violation Display strings must be preserved verbatim; got:\n{joined}");
+
+        // Crucially: structural pinning still happened. The kernel
+        // ENFORCES emergency_cert.permitted_ops = ["RotateEpoch"] even
+        // when the operator bypassed the misconfig check — bypass means
+        // "I accept the audit", not "I get to widen the blast radius".
+        assert_eq!(entries[0].permitted_ops, vec!["RotateEpoch".to_owned()]);
+        assert_eq!(
+            entries[0].cert.as_ref().unwrap().permitted_ops,
+            vec!["RotateEpoch".to_owned()],
+            "cert in-memory must reflect the structurally pinned op set",
+        );
+    }
+
+    #[test]
+    fn standard_cert_with_inverted_validity_window_without_bypass_is_rejected() {
+        let mut cert = signed_standard_cert(1_700_000_000, vec!["CreateInitiative"]);
+        cert.not_before = cert.not_after + 1;
+        cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
+        let mut entries = vec![entry_with_cert(Some(cert), false)];
+        let err = validate_operator_certs(&mut entries).expect_err("must fail");
+        let s = format!("{err}");
+        assert!(matches!(err, PolicyError::CertValidation { .. }));
+        assert!(s.contains("not_before") || s.contains("InvertedValidityWindow") ||
+                s.contains("not_after"),
+            "error must mention the inverted-window violation; got: {s}");
+    }
+
+    #[test]
+    fn standard_cert_with_inverted_validity_window_with_bypass_succeeds() {
+        let mut cert = signed_standard_cert(1_700_000_000, vec!["CreateInitiative"]);
+        cert.not_before = cert.not_after + 1;
+        cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
+        let mut entries = vec![entry_with_cert(Some(cert), true)];
+        let (bypassed, _) = validate_operator_certs(&mut entries).unwrap();
+        assert_eq!(bypassed.len(), 1);
+        assert_eq!(bypassed[0].kind, CertKind::Standard);
+    }
+
+    // ── Multi-entry mixing ────────────────────────────────────────────
+
+    #[test]
+    fn legacy_and_cert_bound_entries_can_coexist() {
+        let cert = signed_standard_cert(1_700_000_000, vec!["AbortTask"]);
+        let mut entries = vec![
+            entry_with_cert(None, false),
+            entry_with_cert(Some(cert), false),
+        ];
+        let (bypassed, legacy) = validate_operator_certs(&mut entries).unwrap();
+        assert!(bypassed.is_empty());
+        assert_eq!(legacy.len(), 1, "exactly the first entry is legacy");
+    }
+
+    // ── PolicyBundle integration: end-to-end TOML round-trip ──────────
+
+    #[test]
+    fn policy_with_cert_bound_operator_loads_and_exposes_no_legacy_entries() {
+        // Build a policy.toml with the operator cert embedded inline.
+        // The cert TOML is generated by serialising a freshly-signed
+        // cert and inlining it under the operator entry.
+        let cert = signed_standard_cert(1_700_000_000, vec!["CreateInitiative"]);
+        let cert_toml = toml::to_string(&cert).unwrap();
+        // Indent the cert body so it nests cleanly under
+        // `[operators.entries.cert]`.
+        let cert_subtable = cert_toml
+            .lines()
+            .map(|l| format!("{l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let toml_text = format!(
+            r#"[meta]
+epoch     = 1
+signed_by = "{fp}"
+signed_at = 1700000000
+
+[authority]
+authority_pubkey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+quality_pubkey   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[escalation_policy]
+timeout_secs         = 3600
+window_secs          = 300
+max_per_window       = 5
+quarantine_threshold = 3
+
+[sessions]
+default_ttl_secs       = 86400
+max_ttl_secs           = 604800
+allowed_worktree_roots = ["/tmp/raxis-cert-test"]
+
+[delegations]
+max_ttl_secs = 86400
+
+[budget]
+[budget.base_cost_per_intent_kind]
+SingleCommit = 10
+
+[[operators.entries]]
+pubkey_fingerprint = "{fp}"
+display_name       = "Alice"
+pubkey_hex         = "{pk}"
+permitted_ops      = ["AbortTask"]   # ignored — cert is the authority
+
+[operators.entries.cert]
+{cert_subtable}
+"#,
+            fp = test_fingerprint(),
+            pk = test_pubkey_hex(),
+            cert_subtable = cert_subtable,
+        );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &toml_text).unwrap();
+        let bundle = crate::load_policy(tmp.path())
+            .expect("cert-bound policy must load")
+            .0;
+
+        assert!(bundle.bypassed_cert_misconfigs().is_empty());
+        assert!(bundle.legacy_operator_entries().is_empty(),
+            "cert-bound entry must NOT show up as legacy");
+
+        // Cert overrides entry-level permitted_ops.
+        let op = &bundle.operators()[0];
+        assert_eq!(op.permitted_ops, vec!["CreateInitiative".to_owned()],
+            "cert-driven permitted_ops must be installed (entry's AbortTask discarded)");
+        assert!(op.cert.is_some());
+    }
+
+    #[test]
+    fn policy_with_legacy_only_entries_loads_and_records_them_as_legacy() {
+        let toml_text = format!(
+            r#"[meta]
+epoch     = 1
+signed_by = "{fp}"
+signed_at = 1700000000
+
+[authority]
+authority_pubkey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+quality_pubkey   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+[escalation_policy]
+timeout_secs         = 3600
+window_secs          = 300
+max_per_window       = 5
+quarantine_threshold = 3
+
+[sessions]
+default_ttl_secs       = 86400
+max_ttl_secs           = 604800
+allowed_worktree_roots = ["/tmp/raxis-legacy-test"]
+
+[delegations]
+max_ttl_secs = 86400
+
+[budget]
+[budget.base_cost_per_intent_kind]
+SingleCommit = 10
+
+[[operators.entries]]
+pubkey_fingerprint = "{fp}"
+display_name       = "Alice"
+pubkey_hex         = "{pk}"
+permitted_ops      = ["CreateInitiative"]
+"#,
+            fp = test_fingerprint(),
+            pk = test_pubkey_hex(),
+        );
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &toml_text).unwrap();
+        let bundle = crate::load_policy(tmp.path()).expect("legacy policy must still load").0;
+
+        assert_eq!(bundle.legacy_operator_entries().len(), 1);
+        assert_eq!(bundle.legacy_operator_entries()[0].operator_fingerprint, test_fingerprint());
+        assert!(bundle.bypassed_cert_misconfigs().is_empty());
+    }
+}

@@ -17,6 +17,7 @@ pub mod fsm;
 pub mod id;
 pub mod intent;
 pub mod operator;
+pub mod operator_cert;
 pub mod operator_wire;
 pub mod policy;
 pub mod witness;
@@ -39,5 +40,6 @@ pub use intent::{
     PlannerErrorTemplate, SubmittedClaim,
 };
 pub use operator::{ApprovalScope, OperatorErrorDetail, OperatorRequest, OperatorResponse};
+pub use operator_cert::{CertKind, OperatorCert};
 pub use policy::Role;
 pub use witness::{WitnessResultClass, WitnessSubmission};

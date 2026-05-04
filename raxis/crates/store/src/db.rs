@@ -162,7 +162,11 @@ mod tests {
         let store = Store::open_in_memory().expect("in-memory store");
         let guard = store.lock().await;
 
-        // Verify schema_version table exists and migration 1 was applied.
+        // Verify schema_version table exists and ALL migrations were
+        // applied. Pin to the exported `SCHEMA_VERSION` (not a literal)
+        // so a future migration bump only edits one place; the previous
+        // hardcoded `== 1` regressed when migration_2 landed in step 4
+        // of the operator-cert feature.
         let version: i64 = guard
             .query_row(
                 "SELECT MAX(version) FROM schema_version",
@@ -171,7 +175,11 @@ mod tests {
             )
             .expect("schema_version query");
 
-        assert_eq!(version, 1, "migration 1 should be applied");
+        assert_eq!(
+            version,
+            crate::SCHEMA_VERSION as i64,
+            "all pending migrations should be applied",
+        );
     }
 
     #[tokio::test]

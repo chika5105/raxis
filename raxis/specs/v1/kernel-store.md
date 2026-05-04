@@ -2273,3 +2273,182 @@ Same normative command as all other intent types. `base_sha` is the policy-pinne
 
 See §`vcs::diff` normative specification above — specifically the `worktree_root` paragraph immediately following the diff command. **Planner** sessions: non-NULL path, set at `create_session`, read by the intent handler via `authority::get_session`. **Gateway / Verifier** sessions: **SQL NULL** on their own row (§2.5.1 Table 4); verifier spawn and witness recheck still use the **planner** session’s `worktree_root` from `task.session_id`.
 
+---
+
+### §2.5.9 — Operator Certificates
+
+#### Overview
+
+Operator certificates bind together `(display_name, pubkey, validity
+window, permitted_ops)` into a single self-signed artifact. They are
+the v1+ replacement for raw operator pubkey entries in `policy.toml`,
+adding metadata (display name, contact info, expiry) and a
+fail-closed lifecycle.
+
+Two storage layers carry the same data:
+
+1. **Canonical (signed) source of truth** — embedded inside the
+   `[[operators.entries]]` block of `policy.toml`. The whole policy
+   is signed by the authority key, so the cert inherits the
+   authority's chain of trust at epoch advance.
+
+2. **Denormalised view (kernel-managed)** — `operator_certificates`
+   table, repopulated on every successful epoch advance via
+   `operator_certificates::repopulate(conn, bundle, epoch_id, installed_at)`.
+   Truncated and rebuilt on each advance; the canonical layer is
+   the source. Mirrored into the audit chain as a sequence of
+   `OperatorCertInstalled` and (where applicable)
+   `OperatorCertLegacyEntryDetected` /
+   `OperatorCertMisconfigBypassed` events.
+
+#### Four-zone expiry model
+
+Implemented in `raxis_crypto::cert::cert_status`. Inputs: cert
+`(not_before, not_after, warn_before_expiry_days, grace_period_days)`
+plus wall clock `now`.
+
+| Zone | Window | Allowed ops | Audit |
+|------|--------|-------------|-------|
+| `Active` | `[not_before, not_after - warn_window)` | all `permitted_ops` | none |
+| `Expiring` | `[not_after - warn_window, not_after)` | all `permitted_ops` | per-op `OperatorCertExpiringSoon` (deduplicated by `CertEnforcer`) |
+| `Grace` | `[not_after, not_after + grace_window)` | recovery only (`AbortTask`, `AbortInitiative`, `RevokeSession`, `DenyEscalation`, `RotateEpoch`) | per-op `OperatorCertInGracePeriod` |
+| `Expired` | `[not_after + grace_window, ∞)` | none | per-op `OperatorCertExpiredOpDenied` |
+| `NotYetValid` | `[0, not_before)` | none | per-op `OperatorCertExpiredOpDenied` (same code, different reason field) |
+
+`EmergencyRecovery` certs are structurally pinned to
+`AlwaysActiveEmergency` regardless of `now` — their validity window
+is ignored. `EmergencyOperatorUsed` is emitted on every operation
+they perform so emergency-key usage is loud in the audit chain.
+
+#### `operator_certificates` schema (Table 20, migration 2)
+
+```sql
+CREATE TABLE IF NOT EXISTS operator_certificates (
+    pubkey_fingerprint      TEXT    NOT NULL PRIMARY KEY,
+    epoch_id                INTEGER NOT NULL
+        REFERENCES policy_epoch_history(epoch_id),
+    kind                    TEXT    NOT NULL
+        CHECK (kind IN ('Standard', 'EmergencyRecovery')),
+    display_name            TEXT    NOT NULL,
+    pubkey_hex              TEXT    NOT NULL UNIQUE,
+    not_before              INTEGER NOT NULL,
+    not_after               INTEGER NOT NULL,
+    warn_before_expiry_days INTEGER NOT NULL,
+    grace_period_days       INTEGER NOT NULL,
+    permitted_ops_json      TEXT    NOT NULL,
+    contact_info            TEXT,
+    self_sig_hex            TEXT    NOT NULL,
+    force_misconfig_bypass  INTEGER NOT NULL DEFAULT 0,
+    installed_at            INTEGER NOT NULL
+);
+```
+
+The pubkey fingerprint is the SHA-256[:16] hex prefix of the
+operator's Ed25519 public key (same scheme used everywhere else).
+`force_misconfig_bypass` is a boolean (stored as INTEGER 0/1)
+flagging entries that bypassed structural validation at policy-sign
+time via `--force-misconfig`. `raxis doctor` warns on these so the
+override is never invisible to operators.
+
+#### Misconfig bypass contract (fail-loud principle)
+
+The kernel's behaviour around malformed certs is intentionally NOT
+opaque: every structural failure is loudly surfaced unless the
+operator explicitly acknowledges it with `--force-misconfig`, in
+which case the bypass itself is audited.
+
+| Layer | Without `--force-misconfig` | With `--force-misconfig` |
+|-------|------------------------------|--------------------------|
+| `raxis policy sign` | Refuses to sign if any entry has `force_misconfig_bypass = true` | Signs and emits `policy_sign_misconfig_bypass` warning per entry |
+| Policy load | Rejects malformed cert with `PolicyError::CertValidation` | Allows load and emits `OperatorCertMisconfigBypassed` to the audit chain |
+| `raxis genesis --operator-cert` | Refuses to embed if structural check fails | Embeds with `force_misconfig_bypass = true` set on the entry |
+
+The bypass NEVER applies to fundamental security invariants:
+- pubkey/fingerprint mismatch — always a hard failure
+- self-signature mismatch — always a hard failure
+- `EmergencyRecovery` permitted_ops other than `["RotateEpoch"]` — pinned at the type level, never reachable by `--force-misconfig`
+
+---
+
+### §2.5.10 — Initiative Quarantine
+
+#### Overview
+
+Quarantine is the immediate containment primitive for a compromised
+operator key or a misbehaving plan. It freezes an initiative
+(rejects new IntentRequests with `FAIL_INITIATIVE_QUARANTINED`)
+WITHOUT aborting in-flight tasks. The slower `policy sign` + `epoch
+advance` ceremony then handles operator-key removal; quarantine
+buys time.
+
+Two operator IPC primitives map onto one storage table:
+
+1. `QuarantineInitiative { initiative_id, reason }` — quarantine one
+   initiative. Idempotent. Audit: `InitiativeQuarantined`.
+
+2. `QuarantinePlansBy { target_fingerprint, reason }` — sweep every
+   initiative whose plan was approved by `target_fingerprint` and
+   quarantine each in a single transaction. Audit: one
+   `InitiativeQuarantined` per newly-quarantined initiative PLUS one
+   rollup `OperatorQuarantineSwept { target_fingerprint, count }`.
+   The rollup fires even on an empty sweep so the audit chain
+   records the operator pressed the button.
+
+#### `initiative_quarantines` schema (Table 21, migration 3)
+
+```sql
+CREATE TABLE IF NOT EXISTS initiative_quarantines (
+    initiative_id   TEXT    NOT NULL PRIMARY KEY
+        REFERENCES initiatives(initiative_id),
+    quarantined_at  INTEGER NOT NULL,
+    quarantined_by  TEXT    NOT NULL,
+    reason          TEXT,
+    sweep_target    TEXT
+);
+
+CREATE INDEX idx_initiative_quarantines_quarantined_at
+    ON initiative_quarantines (quarantined_at);
+CREATE INDEX idx_initiative_quarantines_sweep_target
+    ON initiative_quarantines (sweep_target)
+    WHERE sweep_target IS NOT NULL;
+```
+
+`sweep_target` is non-NULL on rows inserted by `QuarantinePlansBy`
+and carries the `target_fingerprint` so forensics can answer "which
+sweep created this row?" without a separate join. Single-initiative
+quarantines have it NULL.
+
+#### `signed_plan_artifacts.signed_by_fingerprint` (migration 3 column)
+
+The sweep `QuarantinePlansBy` joins on this column to find every
+initiative an operator approved. Migration 3 adds it as a NULLABLE
+TEXT column with an index:
+
+```sql
+ALTER TABLE signed_plan_artifacts ADD COLUMN signed_by_fingerprint TEXT;
+CREATE INDEX idx_signed_plan_artifacts_signed_by
+    ON signed_plan_artifacts (signed_by_fingerprint)
+    WHERE signed_by_fingerprint IS NOT NULL;
+```
+
+`lifecycle::approve_plan` stamps this column inside the same
+transaction that flips the initiative state to `Executing`, so
+every initiative committed past `Executing` ALWAYS has a non-NULL
+`signed_by_fingerprint`. The NULLABLE form exists only because
+migration 3 runs over rows inserted by migration 1/2 (pre-step-10),
+and we don't backfill: legacy rows are silently skipped by the
+sweep on the premise that their approvals predate the column.
+
+#### Intent-handler integration
+
+`handlers/intent.rs::run_phase_a` runs the quarantine guard at Step
+3A — AFTER task lookup (so we have `task.initiative_id`) and AFTER
+the task-state gate (so an already-Aborted task surfaces the more
+specific `FAIL_TASK_NOT_RUNNING`). All four intent kinds
+(`SingleCommit`, `IntegrationMerge`, `ReportFailure`, `CompleteTask`)
+go through this gate; a quarantine freezes the initiative completely.
+
+A read error during the quarantine lookup is treated as
+quarantine-uncertain and fails closed — the alternative of letting
+work through past a possibly-quarantined initiative is unsafe.
+

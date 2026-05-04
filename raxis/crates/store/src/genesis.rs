@@ -27,15 +27,21 @@
 // CLI-side `raxis genesis`) call one implementation, so a future schema
 // rename or column addition is a single-file change and cannot drift.
 
+use raxis_policy::PolicyBundle;
+
+use crate::views::operator_certificates;
 use crate::{Store, StoreError, Table};
 
 /// Insert the canonical `epoch_id = 1, triggered_by_operator = "genesis"`
-/// row into `policy_epoch_history`.
+/// row into `policy_epoch_history` AND, if a bundle is provided,
+/// repopulate `operator_certificates` with the bundle's cert-bound
+/// operator entries — atomically, in one BEGIN IMMEDIATE transaction.
 ///
 /// Idempotent: if a row with `epoch_id = 1` already exists, the function
-/// returns `Ok(())` without modifying anything. This makes it safe to
-/// invoke from a re-bootstrap that crashed after this row was written
-/// previously (the deterministic-input fixture in the kernel's
+/// returns `Ok(())` without modifying anything (including
+/// `operator_certificates`). This makes it safe to invoke from a
+/// re-bootstrap that crashed after this row was written previously
+/// (the deterministic-input fixture in the kernel's
 /// `bootstrap::integration` tests pins this property).
 ///
 /// Inputs (all caller-supplied so the function stays pure / clock-free):
@@ -48,14 +54,35 @@ use crate::{Store, StoreError, Table};
 ///   * `advanced_at_unix_secs` — wall-clock timestamp the genesis row
 ///                                records as `advanced_at`. Caller controls
 ///                                the clock so tests can pin this value.
+///   * `bundle`                — optional. When provided, the cert-bound
+///                                operator entries are mirrored into the
+///                                `operator_certificates` view table inside
+///                                the SAME transaction as the genesis row
+///                                INSERT. `None` is permitted for
+///                                backward-compat with call sites that
+///                                haven't been updated to plumb the
+///                                bundle through (the table simply stays
+///                                empty until the first epoch advance
+///                                rebuilds it).
 pub fn install_genesis_policy_epoch_row(
     store: &Store,
     policy_sha256: &str,
     signed_by_authority: &str,
     advanced_at_unix_secs: i64,
+    bundle: Option<&PolicyBundle>,
 ) -> Result<(), StoreError> {
-    let conn = store.lock_sync();
+    let mut conn = store.lock_sync();
     let table = Table::PolicyEpochHistory.as_str();
+
+    // BEGIN IMMEDIATE so both the genesis row INSERT and the cert
+    // repopulate either commit-together or rollback-together. Without
+    // the transaction, a power-loss between the two would leave a
+    // post-genesis kernel.db with no operator_certificates rows even
+    // though the policy.toml on disk declares them — which would then
+    // cause the kernel's first cert lookup to silently classify a
+    // cert-bound operator as "legacy", breaking the audit chain
+    // (cli-ceremony.md §4.2 step "atomic genesis").
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
     // INSERT OR IGNORE so a re-bootstrap that crashed after this row was
     // already committed surfaces as a clean Ok(()) rather than a UNIQUE
@@ -65,7 +92,7 @@ pub fn install_genesis_policy_epoch_row(
     // — which is detected at a different code path (the kernel's
     // `bootstrap::integration::genesis_install_is_idempotent_under_force_re_run`
     // pins this).
-    conn.execute(
+    let n_inserted = tx.execute(
         &format!(
             "INSERT OR IGNORE INTO {table} (
                  epoch_id, policy_sha256, signed_by_authority,
@@ -74,6 +101,26 @@ pub fn install_genesis_policy_epoch_row(
         ),
         rusqlite::params![policy_sha256, signed_by_authority, advanced_at_unix_secs],
     )?;
+
+    // Only repopulate certs when we actually inserted the genesis row.
+    // For an idempotent second-call (n_inserted == 0) the table is
+    // already populated from the first call, and re-running repopulate
+    // would clobber rows whose `installed_at` should reflect the
+    // ORIGINAL install timestamp. This mirrors the "first-write
+    // timestamp wins" contract that
+    // `second_call_with_identical_inputs_is_idempotent` already pins
+    // for `policy_epoch_history.advanced_at`.
+    if n_inserted > 0 {
+        if let Some(b) = bundle {
+            operator_certificates::repopulate(&tx, b, 1, advanced_at_unix_secs).map_err(|e| {
+                StoreError::Invariant(format!(
+                    "operator_certificates repopulate at genesis failed: {e}",
+                ))
+            })?;
+        }
+    }
+
+    tx.commit()?;
     Ok(())
 }
 
@@ -89,6 +136,12 @@ mod tests {
         (tmp, store)
     }
 
+    use ed25519_dalek::SigningKey;
+    use raxis_crypto::cert::sign_cert;
+    use raxis_policy::{OperatorEntry, PolicyBundle};
+    use raxis_types::operator_cert::{CertKind, OperatorCert};
+    use sha2::{Digest, Sha256};
+
     #[test]
     fn writes_epoch_one_row_with_genesis_marker() {
         let (tmp, store) = fresh_store();
@@ -97,6 +150,7 @@ mod tests {
             "deadbeef",
             "ffeeddcc",
             1_700_000_000,
+            None,
         )
         .expect("install");
         // Drop the writer handle before opening RO so RO does not race the WAL.
@@ -122,9 +176,9 @@ mod tests {
     #[test]
     fn second_call_with_identical_inputs_is_idempotent() {
         let (tmp, store) = fresh_store();
-        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 100)
+        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 100, None)
             .expect("first install");
-        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 200)
+        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 200, None)
             .expect("second install must succeed (INSERT OR IGNORE)");
         drop(store);
 
@@ -146,5 +200,136 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ts, 100, "first-write timestamp wins under INSERT OR IGNORE");
+    }
+
+    // ── cert-bundle path ───────────────────────────────────────────
+
+    fn signing_key() -> SigningKey { SigningKey::from_bytes(&[7u8; 32]) }
+    fn pk_hex() -> String { hex::encode(signing_key().verifying_key().to_bytes()) }
+    fn fp() -> String {
+        let mut h = Sha256::new();
+        h.update(hex::decode(pk_hex()).unwrap());
+        hex::encode(&h.finalize()[..16])
+    }
+
+    fn signed_cert() -> OperatorCert {
+        let mut c = OperatorCert {
+            kind:                    CertKind::Standard,
+            display_name:            "genesis-op".to_owned(),
+            pubkey_hex:              pk_hex(),
+            not_before:              1_700_000_000,
+            not_after:               1_731_536_000,
+            warn_before_expiry_days: 30,
+            grace_period_days:       7,
+            permitted_ops:           vec!["RotateEpoch".to_owned()],
+            contact_info:            None,
+            self_sig_hex:            String::new(),
+        };
+        c.self_sig_hex = sign_cert(&c, &signing_key());
+        c
+    }
+
+    fn bundle_with_cert() -> PolicyBundle {
+        PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
+            pubkey_fingerprint:     fp(),
+            display_name:           "genesis-op".to_owned(),
+            pubkey_hex:             pk_hex(),
+            permitted_ops:          vec!["RotateEpoch".to_owned()],
+            cert:                   Some(signed_cert()),
+            force_misconfig_bypass: false,
+        }])
+    }
+
+    /// Genesis with a cert-bound operator entry must mirror it into
+    /// `operator_certificates` atomically — i.e. opening RO right
+    /// after the call must observe BOTH the policy_epoch_history row
+    /// AND the cert row.
+    #[test]
+    fn genesis_with_bundle_installs_certs_atomically() {
+        let (tmp, store) = fresh_store();
+        let bundle = bundle_with_cert();
+        install_genesis_policy_epoch_row(
+            &store,
+            "deadbeef",
+            "ffeeddcc",
+            1_700_000_000,
+            Some(&bundle),
+        )
+        .expect("install");
+        drop(store);
+
+        let conn = open_ro(tmp.path()).expect("open_ro");
+
+        // Genesis row is present.
+        let n_epoch: i64 = conn
+            .query_row("SELECT COUNT(*) FROM policy_epoch_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n_epoch, 1);
+
+        // Cert row is present, scoped to epoch_id = 1.
+        let (cert_fp, cert_epoch, cert_kind): (String, i64, String) = conn
+            .query_row(
+                "SELECT pubkey_fingerprint, epoch_id, kind \
+                   FROM operator_certificates",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("operator_certificates row must be present after genesis");
+        assert_eq!(cert_fp, fp());
+        assert_eq!(cert_epoch, 1, "cert must be scoped to genesis epoch");
+        assert_eq!(cert_kind, "Standard");
+    }
+
+    /// Genesis with `bundle = None` is the legacy / cert-less path.
+    /// `operator_certificates` stays empty — the table will be
+    /// populated on the first operator-driven `RotateEpoch` instead.
+    #[test]
+    fn genesis_without_bundle_leaves_operator_certificates_empty() {
+        let (tmp, store) = fresh_store();
+        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 100, None)
+            .expect("install");
+        drop(store);
+        let conn = open_ro(tmp.path()).expect("open_ro");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM operator_certificates", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 0,
+            "legacy genesis path (no bundle) must leave operator_certificates empty");
+    }
+
+    /// A re-bootstrap (second call after a successful first call)
+    /// must NOT clobber the certs that were installed on the first
+    /// call. The first-write-wins contract for `advanced_at` already
+    /// covered this for the genesis row; this pins the same contract
+    /// for the certs table.
+    #[test]
+    fn second_call_does_not_re_repopulate_certs() {
+        let (tmp, store) = fresh_store();
+        let bundle = bundle_with_cert();
+        install_genesis_policy_epoch_row(
+            &store, "deadbeef", "ffeeddcc", 100,
+            Some(&bundle),
+        ).expect("first install");
+        // Same call again — even with a DIFFERENT (empty) bundle — must
+        // be a no-op because n_inserted = 0 ⇒ skip repopulate.
+        let empty = PolicyBundle::for_tests_with_operators(vec![]);
+        install_genesis_policy_epoch_row(
+            &store, "deadbeef", "ffeeddcc", 200,
+            Some(&empty),
+        ).expect("idempotent re-install must succeed");
+        drop(store);
+        let conn = open_ro(tmp.path()).expect("open_ro");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM operator_certificates", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1,
+            "second call's empty bundle must not erase first call's certs");
+        // installed_at on the cert MUST still be 100 (the first-call
+        // timestamp), not 200.
+        let installed_at: i64 = conn
+            .query_row("SELECT installed_at FROM operator_certificates", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(installed_at, 100,
+            "first-call installed_at wins (matches the policy_epoch_history.advanced_at contract)");
     }
 }

@@ -156,6 +156,25 @@ Wait. The kernel will notify you (or you will see the gate resolve on your next 
 
 ---
 
+### `FAIL_INITIATIVE_QUARANTINED`
+
+**Meaning:** The initiative your task belongs to has been quarantined by an
+operator (via `raxis initiative quarantine` or `raxis operator
+quarantine-plans-by`). The kernel has frozen the initiative as a
+containment measure — typically because the approving operator key is
+suspected compromised. In-flight tasks were left in their current state,
+but no new `IntentRequest` will be accepted against any task in this
+initiative. The kernel ALSO returns this code if the quarantine lookup
+itself fails — the kernel fails closed (kernel-store.md §2.5.10).
+
+**What to do:** Stop submitting intents on this `task_id`. Submit
+`ReportFailure` with a justification that cites quarantine, then exit
+the agent loop. Do not retry. Quarantine cannot be lifted in v1; work
+that should continue must move to a fresh initiative under a re-issued
+plan. The corresponding audit event is `IntentRejectedQuarantined`.
+
+---
+
 ### `INVALID_REQUEST`
 
 **Meaning:** The kernel rejected the envelope as malformed or semantically invalid for the planner socket (not an auth-layer replay — those map to `UNAUTHORIZED`).

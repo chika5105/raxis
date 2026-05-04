@@ -31,6 +31,7 @@ use crate::GlobalFlags;
 pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let mut artifact_path: Option<PathBuf> = None;
     let mut key_path: Option<PathBuf> = None;
+    let mut force_misconfig: bool = false;
     let mut i = 0;
 
     while i < args.len() {
@@ -41,6 +42,15 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                     args.get(i)
                         .ok_or_else(|| CliError::Usage("--key requires a path".to_owned()))?,
                 ));
+            }
+            // Per cli-ceremony.md §4.1 `policy sign --force-misconfig`:
+            // operator-explicit acknowledgement that the artifact contains
+            // operator entries with `force_misconfig_bypass = true`. Without
+            // this flag, signing such an artifact is refused — the bypass
+            // must be visible in shell history / CI logs, not silently
+            // hidden inside a TOML field.
+            "--force-misconfig" => {
+                force_misconfig = true;
             }
             arg if !arg.starts_with('-') && artifact_path.is_none() => {
                 artifact_path = Some(PathBuf::from(arg));
@@ -67,6 +77,41 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         path: artifact_path.display().to_string(),
         source: e,
     })?;
+
+    // Step 7 (operator-cert ceremony) — refuse to sign a policy artifact
+    // that opts into structural cert-misconfig bypass UNLESS the operator
+    // explicitly passed `--force-misconfig`. We never block plan.toml or
+    // any other artifact: the detector is intentionally conservative
+    // (parses as a permissive TOML and only fires when there's at least
+    // one operators.entries[*].force_misconfig_bypass = true).
+    let bypass_entries = scan_for_misconfig_bypass(&artifact_bytes);
+    if !bypass_entries.is_empty() && !force_misconfig {
+        return Err(CliError::Usage(format!(
+            "refusing to sign {}: {n} operator entr{ies_or_y} declare \
+             force_misconfig_bypass = true (operators: {ops}). \
+             Re-run with `--force-misconfig` to acknowledge the bypass; \
+             the kernel will emit one OperatorCertMisconfigBypassed audit \
+             event per relaxed structural rule at boot.",
+            artifact_path.display(),
+            n              = bypass_entries.len(),
+            ies_or_y       = if bypass_entries.len() == 1 { "y" } else { "ies" },
+            ops            = bypass_entries.join(", "),
+        )));
+    }
+    if !bypass_entries.is_empty() {
+        // --force-misconfig path: print a structured warning to stderr so
+        // CI logs and shell scrollback both record the bypass at sign time.
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"policy_sign_misconfig_bypass\",\
+             \"artifact\":\"{}\",\"bypassed_operators\":[{}]}}",
+            artifact_path.display(),
+            bypass_entries
+                .iter()
+                .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
 
     // Plain SHA-256 of the bytes (for `plan_sha256` field — surfaces in the
     // kernel's `signed_plan_artifacts.plan_bytes` and audit records).
@@ -107,4 +152,167 @@ signed_at      = {signed_at}
     println!("  plan_sha256:  {sha256}");
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// scan_for_misconfig_bypass — best-effort detector for the
+// `--force-misconfig` gate.
+//
+// We intentionally do NOT route through `raxis-policy::PolicyBundle::validate`:
+// validation does signature checks, fingerprint checks, and bundle-wide
+// invariants that haven't been enforced yet at sign time (the operator
+// may be mid-edit). We just want to know "does this artifact carry at
+// least one operator entry with `force_misconfig_bypass = true`?" — a
+// permissive serde shape over the few fields we care about gives us
+// exactly that, with zero false positives on plan.toml / non-policy
+// artifacts (which never carry `[[operators.entries]]`).
+//
+// Returns the display_names (or fingerprints, if display_name is missing)
+// of every entry that opted into bypass, in declaration order. Empty
+// vector means "no bypass detected" — caller proceeds normally.
+// ---------------------------------------------------------------------------
+fn scan_for_misconfig_bypass(artifact_bytes: &[u8]) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Probe {
+        #[serde(default)]
+        operators: Option<OperatorsBlock>,
+    }
+    #[derive(serde::Deserialize)]
+    struct OperatorsBlock {
+        #[serde(default)]
+        entries: Vec<OperatorEntryProbe>,
+    }
+    #[derive(serde::Deserialize)]
+    struct OperatorEntryProbe {
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        pubkey_fingerprint: Option<String>,
+        #[serde(default)]
+        force_misconfig_bypass: bool,
+    }
+
+    let s = match std::str::from_utf8(artifact_bytes) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let parsed: Probe = match toml::from_str(s) {
+        Ok(p) => p,
+        // Not parseable as TOML, or the shape doesn't match — treat as
+        // not-a-policy. The downstream signing step still runs because the
+        // signature is over raw bytes; we only block when we can prove the
+        // artifact opted into bypass.
+        Err(_) => return Vec::new(),
+    };
+    let entries = parsed.operators.map(|b| b.entries).unwrap_or_default();
+    entries
+        .into_iter()
+        .filter(|e| e.force_misconfig_bypass)
+        .map(|e| {
+            e.display_name
+                .or(e.pubkey_fingerprint)
+                .unwrap_or_else(|| "<unnamed>".to_owned())
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Tests — `--force-misconfig` gate.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_returns_empty_for_a_plan_toml_without_operators() {
+        // A plan.toml has no `[[operators.entries]]` block; the detector
+        // must never flag it.
+        let plan = br#"
+[meta]
+title = "demo plan"
+[[tasks]]
+task_id = "t1"
+"#;
+        assert!(scan_for_misconfig_bypass(plan).is_empty());
+    }
+
+    #[test]
+    fn scan_returns_empty_when_no_entry_opts_into_bypass() {
+        let policy = br#"
+[meta]
+epoch = 1
+[[operators.entries]]
+pubkey_fingerprint = "abcd1234abcd1234abcd1234abcd1234"
+display_name       = "alice"
+"#;
+        assert!(scan_for_misconfig_bypass(policy).is_empty());
+    }
+
+    #[test]
+    fn scan_lists_bypassed_entries_in_declaration_order() {
+        // Two entries: alice does NOT bypass, bob DOES. The detector must
+        // surface only bob, and surface him by display_name.
+        let policy = br#"
+[[operators.entries]]
+pubkey_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+display_name       = "alice"
+force_misconfig_bypass = false
+
+[[operators.entries]]
+pubkey_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+display_name       = "bob"
+force_misconfig_bypass = true
+"#;
+        assert_eq!(scan_for_misconfig_bypass(policy), vec!["bob".to_owned()]);
+    }
+
+    #[test]
+    fn scan_falls_back_to_fingerprint_when_display_name_missing() {
+        // Defensive: if the operator omitted display_name on the bypass
+        // entry, the warning still has to identify _which_ entry. Fall
+        // back to the fingerprint so the operator can grep for it.
+        let policy = br#"
+[[operators.entries]]
+pubkey_fingerprint = "ccccccccccccccccccccccccccccccccc"
+force_misconfig_bypass = true
+"#;
+        assert_eq!(
+            scan_for_misconfig_bypass(policy),
+            vec!["ccccccccccccccccccccccccccccccccc".to_owned()]
+        );
+    }
+
+    #[test]
+    fn scan_returns_empty_for_non_utf8_bytes() {
+        // Garbage bytes (e.g. a sliced binary file) must fail closed:
+        // empty list ⇒ no block, signing proceeds. We never want
+        // false positives on artifacts that aren't policies.
+        let bytes = &[0xff_u8, 0xfe, 0x00, 0x80, 0xfe];
+        assert!(scan_for_misconfig_bypass(bytes).is_empty());
+    }
+
+    #[test]
+    fn scan_returns_empty_for_unparseable_toml() {
+        assert!(scan_for_misconfig_bypass(b"not a valid = = = TOML").is_empty());
+    }
+
+    #[test]
+    fn scan_handles_multiple_bypassed_entries() {
+        let policy = br#"
+[[operators.entries]]
+pubkey_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+display_name = "alice"
+force_misconfig_bypass = true
+
+[[operators.entries]]
+pubkey_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+display_name = "bob"
+force_misconfig_bypass = true
+"#;
+        assert_eq!(
+            scan_for_misconfig_bypass(policy),
+            vec!["alice".to_owned(), "bob".to_owned()]
+        );
+    }
 }

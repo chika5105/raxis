@@ -100,10 +100,14 @@ mod tests {
     /// check). Including the field in test fixtures would require either a
     /// wrong value (dishonest) or an infeasible convergence loop.
     fn minimal_policy_toml() -> String {
+        // pubkey_fingerprint = SHA-256[:16] of the raw 32-byte 0xcc pubkey
+        // bytes; pinned here so the new fingerprint consistency check in
+        // `validate_operator_certs` accepts the fixture. Real genesis
+        // policies derive this from the actual pubkey.
         format!(
             "[meta]\n\
              epoch     = 1\n\
-             signed_by = \"abcd1234abcd1234abcd1234abcd1234\"\n\
+             signed_by = \"c2f480d4dda9f4522b9f6d590011636d\"\n\
              signed_at = 1714500000\n\
              \n\
              [authority]\n\
@@ -130,7 +134,7 @@ mod tests {
              \n\
              [operators]\n\
              [[operators.entries]]\n\
-             pubkey_fingerprint = \"abcd1234abcd1234abcd1234abcd1234\"\n\
+             pubkey_fingerprint = \"c2f480d4dda9f4522b9f6d590011636d\"\n\
              display_name       = \"Alice\"\n\
              pubkey_hex         = \"{op}\"\n\
              permitted_ops      = [\"CreateInitiative\"]\n",

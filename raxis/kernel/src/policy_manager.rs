@@ -172,17 +172,21 @@ pub fn install_genesis_policy_epoch(
     policy_sha256: &str,
     signed_by_authority: &str,
     advanced_at_unix_secs: i64,
+    bundle: Option<&PolicyBundle>,
 ) -> Result<(), PolicyError> {
     // Delegate to the shared writer in `raxis-store`. Both this kernel-side
     // genesis path and the operator-facing `raxis genesis` CLI command call
     // the same function, so a future schema rename or column addition is a
     // single-file change. See `crates/store/src/genesis.rs` for the
-    // INSERT OR IGNORE rationale that used to live here.
+    // INSERT OR IGNORE rationale that used to live here AND for the
+    // operator_certificates atomic-mirror contract added in step 4 of
+    // the cert feature.
     raxis_store::install_genesis_policy_epoch_row(
         store,
         policy_sha256,
         signed_by_authority,
         advanced_at_unix_secs,
+        bundle,
     )
     .map_err(|e| PolicyError::StoreWriteFailed {
         reason: format!("INSERT OR IGNORE {POLICY_EPOCH_HISTORY} failed: {e}"),
@@ -244,7 +248,16 @@ pub fn load_and_verify(
             | raxis_policy::PolicyError::HexDecode(_)
             | raxis_policy::PolicyError::MalformedArtifact(_)
             | raxis_policy::PolicyError::UnknownCapabilityClass(_)
-            | raxis_policy::PolicyError::UnknownGateType(_) => PolicyError::MalformedArtifact {
+            | raxis_policy::PolicyError::UnknownGateType(_)
+            // Cert-related validation failures from the new
+            // operator-cert flow (raxis-policy::bundle::validate_operator_certs).
+            // All four variants are categorically "the policy artifact is
+            // malformed in a way the kernel will not silently accept" —
+            // we surface the full error message verbatim so the operator
+            // sees exactly which cert tripped which invariant.
+            | raxis_policy::PolicyError::CertValidation { .. }
+            | raxis_policy::PolicyError::CertPubkeyMismatch { .. }
+            | raxis_policy::PolicyError::FingerprintMismatch { .. } => PolicyError::MalformedArtifact {
                 reason: e.to_string(),
             },
         })?;
@@ -382,7 +395,7 @@ pub fn advance_epoch(
     // inside the closure rolls the transaction back and surfaces as
     // `PolicyError::StoreWriteFailed` (or `PolicyArtifactAlreadyInstalled`
     // for the UNIQUE(policy_sha256) trip).
-    let (n_delegations_marked_stale, active_session_ids) = {
+    let (n_delegations_marked_stale, active_session_ids, n_certs_installed) = {
         let mut conn = store.lock_sync();
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -480,12 +493,32 @@ pub fn advance_epoch(
             });
         }
 
+        // Step 4: rebuild the operator_certificates view table from the
+        // freshly-loaded bundle. MUST run inside the same transaction as
+        // the policy_epoch_history INSERT above so a power-loss between
+        // the two cannot leave the kernel running with stale cert rows
+        // for an old epoch (the FK would fail; equivalently the cert
+        // rows would point at an epoch that doesn't exist). Cert-less
+        // ("legacy") operator entries are skipped — see the writer's
+        // doc comment for the audit-emission contract that lives in
+        // step 5.
+        let n_certs_installed = raxis_store::views::operator_certificates::repopulate(
+            &tx,
+            &new_bundle,
+            new_epoch_id,
+            advanced_at_unix_secs,
+        )
+        .map_err(|e| PolicyError::StoreWriteFailed {
+            reason: format!("operator_certificates repopulate failed: {e}"),
+        })?;
+
         tx.commit().map_err(|e| PolicyError::StoreWriteFailed {
             reason: format!("COMMIT failed: {e}"),
         })?;
 
-        (n_delegations, session_id_strs)
+        (n_delegations, session_id_strs, n_certs_installed)
     };
+    let _ = n_certs_installed;
 
     // ── Phase 1.5b: in-memory prompt-epoch sweep ─────────────────────
     // The in-memory `EpochBinding` is the v1 substitute for the
@@ -524,6 +557,26 @@ pub fn advance_epoch(
         );
     }
 
+    // ── Phase 1.5c: cert audit-chain mirror ─────────────────────────
+    // For every cert-bound operator entry we emit OperatorCertInstalled
+    // (one record per cert), and for every legacy entry we emit
+    // OperatorCertLegacyEntryDetected. These records are the
+    // authoritative ledger that backs the operator_certificates view
+    // table — if the table is ever lost (disk corruption, schema
+    // rebuild) it can be reconstructed by replaying these records up
+    // to the latest PolicyEpochAdvanced. We also emit one
+    // OperatorCertMisconfigBypassed per relaxed invariant so the
+    // ledger captures every structural override the operator opted
+    // into. Self-signature failures and pubkey mismatches are
+    // unbypassable and never reach this point — `validate_operator_certs`
+    // already returned a hard PolicyError before the SQL transaction
+    // even opened. Errors from individual emits are logged and DO NOT
+    // unwind the epoch advance — the in-memory visibility flip below
+    // must still happen so the operator gets the new epoch's enforcement.
+    cert_audit_emit::emit_cert_chain_mirror(
+        audit.as_ref(), &new_bundle, new_epoch_id,
+    );
+
     // ── Phase 2: in-memory visibility flip ───────────────────────────
     // `ArcSwap::store` is sequentially consistent (`AcqRel` ordering on
     // the swap), so subsequent reader `load`s observe the new bundle.
@@ -539,6 +592,108 @@ pub fn advance_epoch(
         n_sessions_invalidated,
         advanced_at_unix_secs,
     })
+}
+
+// ---------------------------------------------------------------------------
+// cert_audit_emit — operator-cert audit-chain mirror helpers.
+// ---------------------------------------------------------------------------
+
+/// Audit-emit helpers that mirror the `operator_certificates` view
+/// table state into the audit chain whenever a new policy epoch is
+/// installed.
+///
+/// **Why this is its own module.** The cert ledger is a
+/// security-critical durability story (kernel-store.md §2.5.7): if
+/// the SQLite view is ever lost, the audit chain MUST be enough to
+/// reconstruct "which cert was bound to which operator at epoch N".
+/// Keeping the emit logic isolated lets us unit-test it against a
+/// `FakeAuditSink` without spinning up the whole `advance_epoch`
+/// transaction, and lets a future reader audit the emit set in one
+/// file.
+///
+/// **Idempotency / dedupe.** Each operator entry produces:
+///   - exactly one `OperatorCertInstalled` (cert-bound entries), OR
+///   - exactly one `OperatorCertLegacyEntryDetected` (cert-less
+///     entries), AND
+///   - zero or more `OperatorCertMisconfigBypassed` (one per
+///     relaxed structural invariant; only emitted when the operator
+///     entry has `force_misconfig_bypass = true` AND validation
+///     surfaced violations).
+///
+/// **Failure posture.** Individual emit errors are logged via
+/// `eprintln!` and DROPPED. Per kernel-store.md §2.5.2 the
+/// audit-after-commit ordering means the SQLite write has already
+/// landed; failing the epoch advance now would leave the kernel
+/// running on an out-of-date in-memory bundle, which is strictly
+/// worse than a one-record audit gap (`ReconciliationGap` is
+/// designed for exactly this case).
+mod cert_audit_emit {
+    use raxis_audit_tools::{AuditEventKind, AuditSink};
+    use raxis_policy::PolicyBundle;
+
+    /// Drive every cert-related post-commit audit emit for one
+    /// `advance_epoch` (or genesis) call.
+    pub(super) fn emit_cert_chain_mirror(
+        audit:        &dyn AuditSink,
+        bundle:       &PolicyBundle,
+        new_epoch_id: u64,
+    ) {
+        // 1. One `OperatorCertInstalled` per cert-bound entry,
+        //    matching the `operator_certificates` row written inside
+        //    the just-committed transaction.
+        for entry in bundle.operators() {
+            let Some(cert) = &entry.cert else { continue; };
+            try_emit(audit, AuditEventKind::OperatorCertInstalled {
+                pubkey_fingerprint:     entry.pubkey_fingerprint.clone(),
+                epoch_id:               new_epoch_id,
+                cert_kind:              cert.kind.as_str().to_owned(),
+                display_name:           cert.display_name.clone(),
+                not_before:             cert.not_before,
+                not_after:              cert.not_after,
+                permitted_ops:          cert.permitted_ops.clone(),
+                force_misconfig_bypass: entry.force_misconfig_bypass,
+            }, "OperatorCertInstalled");
+        }
+
+        // 2. One `OperatorCertLegacyEntryDetected` per cert-less entry.
+        //    The kernel still honours these entries' `permitted_ops`,
+        //    but no cert checks apply — operators see this event in
+        //    the audit chain and can choose to mint a cert.
+        for entry in bundle.operators() {
+            if entry.cert.is_some() { continue; }
+            try_emit(audit, AuditEventKind::OperatorCertLegacyEntryDetected {
+                pubkey_fingerprint: entry.pubkey_fingerprint.clone(),
+                epoch_id:           new_epoch_id,
+                display_name:       entry.display_name.clone(),
+            }, "OperatorCertLegacyEntryDetected");
+        }
+
+        // 3. One `OperatorCertMisconfigBypassed` per operator entry that
+        //    opted into bypassing structural cert-validation errors. The
+        //    full violations list is bundled into a single record so a
+        //    forensic auditor sees the entire relaxed-rule set in one
+        //    chain entry. The policy bundle only emits these entries
+        //    when `force_misconfig_bypass = true` AND the entry
+        //    surfaced violations.
+        for bypass in bundle.bypassed_cert_misconfigs() {
+            try_emit(audit, AuditEventKind::OperatorCertMisconfigBypassed {
+                pubkey_fingerprint: bypass.operator_fingerprint.clone(),
+                epoch_id:           new_epoch_id,
+                cert_kind:          bypass.kind.as_str().to_owned(),
+                display_name:       bypass.display_name.clone(),
+                violations:         bypass.violations.clone(),
+            }, "OperatorCertMisconfigBypassed");
+        }
+    }
+
+    fn try_emit(audit: &dyn AuditSink, ev: AuditEventKind, label: &'static str) {
+        if let Err(e) = audit.emit(ev, None, None, None) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"{label}\",\
+                 \"audit_emit_failed\":\"{e}\"}}",
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -605,6 +760,7 @@ mod tests {
             "abc123",
             "deadbeefdeadbeefdeadbeefdeadbeef",
             1_700_000_000,
+            None,
         )
         .unwrap();
         assert_eq!(read_current_epoch(&store).unwrap(), 1);
@@ -618,11 +774,11 @@ mod tests {
         // INSERT but before returning.
         let store = open_mem_store();
         install_genesis_policy_epoch(
-            &store, "abc123", "fp", 1_700_000_000,
+            &store, "abc123", "fp", 1_700_000_000, None,
         )
         .unwrap();
         install_genesis_policy_epoch(
-            &store, "abc123", "fp", 1_700_000_000,
+            &store, "abc123", "fp", 1_700_000_000, None,
         )
         .expect("second install must be a no-op");
         assert_eq!(read_current_epoch(&store).unwrap(), 1);
@@ -632,7 +788,7 @@ mod tests {
     fn install_genesis_persists_metadata_columns() {
         let store = open_mem_store();
         install_genesis_policy_epoch(
-            &store, "deadc0de", "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", 1_700_000_001,
+            &store, "deadc0de", "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", 1_700_000_001, None,
         )
         .unwrap();
         let conn = store.lock_sync();
@@ -777,7 +933,7 @@ mod tests {
         // can move us to epoch 2 onwards. SHA + fingerprint values
         // are stable test fixtures; their content is not what we
         // assert on in these tests.
-        install_genesis_policy_epoch(&store, "genesis-sha", "genesis-fp", 1).unwrap();
+        install_genesis_policy_epoch(&store, "genesis-sha", "genesis-fp", 1, None).unwrap();
 
         let bundle = PolicyBundle::for_tests_with_operators(vec![]);
         let policy_swap = StdArc::new(ArcSwap::from_pointee(bundle));
@@ -888,6 +1044,38 @@ mod tests {
         let kinds = sink.event_kinds();
         assert!(kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
             "expected PolicyEpochAdvanced in {kinds:?}");
+    }
+
+    /// Pin the cert audit-chain mirror for the cert-less ("legacy")
+    /// operator entry path. The fixture's policy.toml contains exactly
+    /// one operator entry without a `[cert]` table, so a successful
+    /// `advance_epoch` must emit exactly one
+    /// `OperatorCertLegacyEntryDetected` AND zero
+    /// `OperatorCertInstalled` AND zero
+    /// `OperatorCertMisconfigBypassed` events. The presence /
+    /// cardinality of the legacy event is the visible signal that
+    /// kernel-store.md §2.5.7 audit-chain mirroring is wired through
+    /// the advance path. Step 9 (cert-bound genesis) will add the
+    /// companion `OperatorCertInstalled` test.
+    #[test]
+    fn advance_epoch_emits_legacy_cert_audit_for_cert_less_operator() {
+        let (registry, sk, store, swap, audit, sink) = boot_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let (policy_path, sig_path) = write_signed_policy_artifact(tmp.path(), 2, &sk);
+
+        let binding = EpochBinding::new();
+        advance_epoch(
+            &policy_path, &sig_path, "op-prime",
+            &registry, &swap, &store, &audit, &binding,
+        ).unwrap();
+
+        let kinds = sink.event_kinds();
+        let n_legacy   = kinds.iter().filter(|k| **k == "OperatorCertLegacyEntryDetected").count();
+        let n_installed= kinds.iter().filter(|k| **k == "OperatorCertInstalled").count();
+        let n_bypass   = kinds.iter().filter(|k| **k == "OperatorCertMisconfigBypassed").count();
+        assert_eq!(n_legacy,    1, "expected exactly one OperatorCertLegacyEntryDetected (one cert-less entry); kinds={kinds:?}");
+        assert_eq!(n_installed, 0, "no cert-bound entries in fixture; kinds={kinds:?}");
+        assert_eq!(n_bypass,    0, "no bypass entries in fixture; kinds={kinds:?}");
     }
 
     #[test]

@@ -393,6 +393,8 @@ mod tests {
             display_name:       fp.to_owned(),
             pubkey_hex,
             permitted_ops:      vec![],
+            cert:                  None,
+            force_misconfig_bypass: false,
         }])
     }
 
