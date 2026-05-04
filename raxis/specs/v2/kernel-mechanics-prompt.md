@@ -582,10 +582,10 @@ Your dev server's calls to localhost credential proxies (localhost:5432 for Post
 etc.) work transparently -- the proxy handles auth to the real database on your behalf.
 
 Your dev server's EXTERNAL calls (Stripe, GitHub, third-party APIs) are subject to
-the egress allowlist. If an external call fails with a network error:
-  - Is the host in your plan's allowed_egress? NO -> use a mock server for testing
-    or escalate PlanViolation to have the host added to the plan.
-  - YES and still failing -> escalate PlanViolation with the exact error message.
+the egress allowlist. If an external call fails with FAIL_EGRESS_NOT_PERMITTED:
+  - Do NOT try alternative URLs or direct connections.
+  - Escalate PlanViolation with the exact URL and method that was blocked.
+  - The operator decides whether to permit the host.
 
 ### In-VM test databases:
 

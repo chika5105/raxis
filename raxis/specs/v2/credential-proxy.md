@@ -2084,7 +2084,7 @@ any external hosts the dev server needs to reach.
 
 **If the egress is blocked:** The dev server call fails with a network error. The agent
 can use a mock server (WireMock, responses library) to replace external API calls in
-integration tests, or add the required host to `allowed_egress` in the plan.
+integration tests, or the operator can update the plan and re-approve it with the required host in `allowed_egress`.
 
 ### 13.7 — In-VM Test Databases (Edge Cases)
 
