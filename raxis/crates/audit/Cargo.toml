@@ -12,6 +12,10 @@ uuid        = { workspace = true }
 sha2        = { workspace = true }
 hex         = { workspace = true }
 raxis-types = { workspace = true }
+# Single source of truth for the chain-anchor record's JSON shape.
+# `genesis::write_genesis_segment` calls `render_genesis_audit_record`
+# from this crate; no other audit-tools module touches it.
+raxis-genesis-tools = { workspace = true }
 
 [dev-dependencies]
 tempfile    = "3"

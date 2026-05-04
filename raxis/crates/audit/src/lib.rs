@@ -16,11 +16,13 @@
 //     recovery::reconcile appends a ReconciliationGap record.
 
 pub mod event;
+pub mod genesis;
 pub mod reader;
 pub mod sink;
 pub mod writer;
 
 pub use event::{AuditEvent, AuditEventKind};
+pub use genesis::{write_genesis_segment, GenesisWriteError};
 pub use reader::{
     quick_chain_check, verify_chain_full, ChainQuickCheck, ChainReadError, ChainReader,
     ChainRecord, ChainStats, AUDIT_DIR_NAME, GENESIS_PREV_SHA256_LITERAL, SEGMENT_PREFIX,

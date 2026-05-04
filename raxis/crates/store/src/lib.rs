@@ -22,12 +22,14 @@
 //   - The mutex must be held for the entire duration of any transaction.
 
 pub mod db;
+pub mod genesis;
 pub mod migration;
 pub mod ro;
 pub mod table;
 pub mod views;
 
 pub use db::{Store, StoreError};
+pub use genesis::install_genesis_policy_epoch_row;
 pub use migration::SCHEMA_VERSION;
 pub use ro::{assert_compatible_schema, open as open_ro, RoConn, RoError, KERNEL_DB_FILE};
 pub use table::Table;

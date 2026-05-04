@@ -25,7 +25,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use sha2::{Digest, Sha256};
 
 use crate::errors::KernelError;
 use raxis_crypto::token::try_random_array;
@@ -114,24 +113,59 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
     // itself is 0644 — readable by any local operator process); the
     // file contains no secrets, only public liveness counters.
     let runtime_dir = config.data_dir.join("runtime");
+    // `sockets/` holds the three UDS endpoints (operator/planner/gateway)
+    // bound by `ipc::server::start` (see kernel-store.md §2.5.5). The
+    // server bind path also calls `create_dir_all` so the kernel can
+    // boot on a non-genesis'd data dir, but we mkdir here so:
+    //   1. `raxis doctor` run between genesis and the first kernel
+    //      start does NOT report `[FAIL] sockets.exists missing: …`
+    //      (the operator's observable symptom that motivated this fix);
+    //   2. the directory inherits genesis-time mode 0755 deterministically
+    //      rather than depending on whichever umask `raxis-kernel`
+    //      happens to inherit on first boot.
+    // Mode is plain 0755 — the socket *files* themselves carry the
+    // sensitive bits (operator.sock is 0600 per kernel-store.md §2.5.5).
+    let sockets_dir = config.data_dir.join("sockets");
+    // `notifications/` holds `inbox.jsonl` produced by the Shell
+    // notification channel handler (kernel-core.md §2.3 + cli-readonly.md
+    // §5.6). Without this directory, a freshly-bootstrapped kernel that
+    // ever fires a notification would crash the writer thread. Doctor
+    // tolerates a missing `notifications/` as WARN, but creating it at
+    // genesis is the cleaner contract: every directory `raxis doctor`
+    // checks should be present immediately after the ceremony.
+    let notifications_dir = config.data_dir.join("notifications");
 
     // Create directory tree.
-    for dir in &[&keys_dir, &policy_dir, &audit_dir, &providers_dir, &runtime_dir] {
+    for dir in &[
+        &keys_dir,
+        &policy_dir,
+        &audit_dir,
+        &providers_dir,
+        &runtime_dir,
+        &sockets_dir,
+        &notifications_dir,
+    ] {
         std::fs::create_dir_all(dir).map_err(|e| KernelError::BootstrapFailed {
             reason: format!("cannot create directory {}: {e}", dir.display()),
         })?;
     }
-    // Tighten permissions on the new providers/ dir to match the spec
-    // ("readable only by the kernel OS user"). `create_dir_all` honours
-    // the process umask which on most systems leaves group-readable; we
-    // chmod explicitly so the spec contract is byte-for-byte enforced.
-    if let Err(e) = std::fs::set_permissions(
-        &providers_dir,
-        std::fs::Permissions::from_mode(0o700),
-    ) {
-        return Err(KernelError::BootstrapFailed {
-            reason: format!("cannot chmod 0700 {}: {e}", providers_dir.display()),
-        });
+    // Tighten permissions on the new keys/ and providers/ dirs.
+    //
+    // Why both — `create_dir_all` honours the process umask (typically
+    // 0022), which leaves the directory at 0o755. The kernel-store.md
+    // §2.5.1 contract demands keys/ at 0o700 (the four key-material
+    // files inside are 0o400) and peripherals.md §3.2 demands
+    // providers/ at 0o700 (per-provider credential files are 0o600).
+    // `raxis doctor` flags any other mode for these two dirs as FAIL
+    // (`commands/doctor.rs::check_subdir`), so a kernel that genesis'd
+    // its own data dir was reporting `[FAIL] keys.mode mode is 0755`
+    // until this chmod was added — the exact symptom this fix repairs.
+    for dir in &[&keys_dir, &providers_dir] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            KernelError::BootstrapFailed {
+                reason: format!("cannot chmod 0700 {}: {e}", dir.display()),
+            }
+        })?;
     }
 
     // Guard: prevent accidental re-genesis.
@@ -295,24 +329,49 @@ fn generate_verifier_token_key(keys_dir: &Path) -> Result<(), KernelError> {
     write_file_0400(&path, &key_bytes)
 }
 
-/// Load operator public key bytes (hex-encoded) from file or stdin prompt.
+/// Load the operator's Ed25519 public key from file or stdin and return
+/// it in canonical lowercase 64-char hex form.
+///
+/// Accepts either:
+///   * a 64-char lowercase/uppercase hex string (raw 32 bytes hex-encoded), or
+///   * a PEM block (`-----BEGIN PUBLIC KEY-----`) wrapping the standard
+///     RFC 8410 SubjectPublicKeyInfo emitted by `openssl pkey -pubout`.
+///
+/// Both formats are handed to `raxis_crypto::parse_ed25519_public_material`
+/// which validates the bytes through `ed25519_dalek::VerifyingKey::from_bytes`
+/// and then we re-encode to hex so the rest of bootstrap (fingerprinting,
+/// `operator_<fp>.pub` write, `policy.toml` operator entry) stays unchanged.
+///
+/// Why both formats — operators following the README run `openssl pkey
+/// -pubout` (PEM); operators copying from `policy.toml` paste hex. Without
+/// this, `RAXIS_BOOTSTRAP=1 raxis-kernel` with `RAXIS_OPERATOR_PUBKEY` set
+/// to a `.pem` path failed with `BOOT_ERR_BOOTSTRAP_FAILED: hex decode
+/// failed: Invalid character '-' at position 0` — this function exists to
+/// make that flow Just Work.
 fn load_operator_pubkey(config: &BootstrapConfig) -> Result<String, KernelError> {
-    if let Some(path) = &config.operator_pubkey_path {
-        let raw = std::fs::read_to_string(path).map_err(|e| KernelError::BootstrapFailed {
+    let raw = if let Some(path) = &config.operator_pubkey_path {
+        std::fs::read_to_string(path).map_err(|e| KernelError::BootstrapFailed {
             reason: format!("cannot read operator pubkey {}: {e}", path.display()),
-        })?;
-        Ok(raw.trim().to_owned())
+        })?
     } else {
-        // Interactive prompt — read from stdin.
-        eprintln!("Paste the operator Ed25519 public key (64 hex chars) and press Enter:");
+        eprintln!(
+            "Paste the operator Ed25519 public key (64 hex chars or PEM) and press Enter:",
+        );
         let mut line = String::new();
         std::io::stdin()
             .read_line(&mut line)
             .map_err(|e| KernelError::BootstrapFailed {
                 reason: format!("stdin read failed: {e}"),
             })?;
-        Ok(line.trim().to_owned())
-    }
+        line
+    };
+
+    let bytes = raxis_crypto::parse_ed25519_public_material(&raw).map_err(|e| {
+        KernelError::BootstrapFailed {
+            reason: format!("operator pubkey parse failed: {e}"),
+        }
+    })?;
+    Ok(hex::encode(bytes))
 }
 
 /// Read the Ed25519 verifying key from a PEM file written by `generate_ed25519_keypair`.
@@ -473,71 +532,29 @@ fn install_genesis_policy_epoch_row(
 
 /// Write the chain-initiating genesis audit record.
 ///
-/// Field-level rendering lives in `raxis_genesis_tools::render_genesis_audit_record`;
-/// this function is responsible for the I/O contract:
-///   1. Mint 64 CSPRNG bytes (512 bits — 256 bits over the spec floor) via
-///      the workspace `try_random_array` shim.
-///   2. Compute the authority pubkey fingerprint through the shared helper.
-///   3. Build the JSONL line via the shared emitter.
-///   4. Append-write to `audit/segment-000.jsonl` and `fsync` before returning,
-///      per the chain-write protocol in `raxis_audit_tools`.
-///
-/// Steps 1–3 are pure; only step 4 touches the disk. Rendering and I/O are
-/// kept apart so the test fixture (`raxis-test-support::AuditDir`) can
-/// re-use the same emitter without re-implementing the JSON shape.
+/// Mints the genesis nonce via the workspace CSPRNG shim (any RNG failure
+/// aborts bootstrap before we touch the disk) and delegates the byte-level
+/// rendering + file I/O to `raxis_audit_tools::write_genesis_segment`.
+/// Both the kernel-side `RAXIS_BOOTSTRAP=1` path and the operator-facing
+/// `raxis genesis` CLI command call the same writer so the chain-anchor
+/// shape cannot drift between the two genesis entry points.
 fn write_genesis_audit_record(
     audit_dir: &Path,
     authority_vk: &VerifyingKey,
 ) -> Result<(), KernelError> {
-    use std::io::Write;
-
-    let segment_path = audit_dir.join("segment-000.jsonl");
-
-    // Step 1: mint 64 random bytes. ANY rng failure aborts bootstrap before
-    // we touch the disk — we never write a partially-random nonce.
     let nonce_bytes: [u8; 64] = try_random_array().map_err(|e| KernelError::BootstrapFailed {
         reason: format!("OS CSPRNG unavailable for genesis nonce: {e}"),
     })?;
 
-    // Step 2: authority fingerprint. Goes through the shared
-    // `raxis_genesis_tools::pubkey_fingerprint` so a future change to the
-    // hash function or slice length flows to every fingerprint site at once.
-    let fingerprint = raxis_genesis_tools::pubkey_fingerprint(authority_vk.as_bytes());
-
-    // Step 3: render the JSONL line. Pure — no I/O, no logging.
-    let event_id = uuid::Uuid::new_v4().to_string();
-    let line = raxis_genesis_tools::render_genesis_audit_record(
-        raxis_genesis_tools::GenesisAuditInputs {
-            authority_pubkey_fingerprint: &fingerprint,
-            nonce_bytes:                  &nonce_bytes,
-            emitted_at_unix_secs:         unix_now_secs() as u64,
-            event_id:                     &event_id,
-        },
-    );
-
-    // Step 4: write + fsync. We deliberately use `append(true) + create(true)`
-    // (not `create_new(true)`) so a future version of bootstrap that emits
-    // additional pre-IPC audit records (e.g. an `OperatorRegistered` event
-    // immediately after genesis) can chain off the same segment file. The
-    // `--force` cleanup path is responsible for removing prior segment-000.jsonl
-    // before this code runs.
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&segment_path)
-        .map_err(|e| KernelError::BootstrapFailed {
-            reason: format!("cannot open {}: {e}", segment_path.display()),
-        })?;
-
-    file.write_all(line.as_bytes())
-        .map_err(|e| KernelError::BootstrapFailed {
-            reason: format!("cannot write genesis record: {e}"),
-        })?;
-    file.sync_all().map_err(|e| KernelError::BootstrapFailed {
-        reason: format!("fsync genesis segment failed: {e}"),
-    })?;
-
-    Ok(())
+    raxis_audit_tools::write_genesis_segment(
+        audit_dir,
+        authority_vk.as_bytes(),
+        &nonce_bytes,
+        unix_now_secs() as u64,
+    )
+    .map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("write genesis audit segment failed: {e}"),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -699,6 +716,7 @@ fn write_file_0644(path: &Path, data: &[u8]) -> Result<(), KernelError> {
 mod integration {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
     use std::os::unix::fs::MetadataExt;
     use tempfile::TempDir;
 
@@ -1121,6 +1139,7 @@ mod integration {
 mod edge_cases {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
     fn fresh_env_with_pubkey_hex(pubkey_hex: &str) -> (TempDir, BootstrapConfig) {
@@ -1185,6 +1204,74 @@ mod edge_cases {
         let mode = meta.permissions().mode() & 0o777;
         assert_eq!(mode, 0o700,
             "providers/ must be chmod 0700; got 0{mode:o}");
+    }
+
+    // ── keys/ directory mode (raxis doctor FAIL fix) ───────────────────────
+
+    #[test]
+    fn bootstrap_chmods_keys_directory_to_0700() {
+        // `raxis doctor` (cli/src/commands/doctor.rs::EXPECTED_MODES)
+        // pins keys/ at 0o700 and treats any other mode as FAIL — the
+        // operator's observable symptom was
+        //
+        //     [FAIL] keys.mode  mode is 0755, expected 0700
+        //
+        // immediately after `RAXIS_BOOTSTRAP=1 raxis-kernel`, because
+        // the previous bootstrap ran `create_dir_all` and trusted the
+        // umask. Pin the chmod here so a future "simplify the dir-
+        // creation loop" PR can't quietly re-introduce the bug.
+        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        run_inner(&config).expect("bootstrap");
+
+        let keys_dir = tmp.path().join("keys");
+        let meta = std::fs::metadata(&keys_dir).expect("keys/ must exist");
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "keys/ must be chmod 0700 after bootstrap (raxis doctor flags any other mode as FAIL); got 0{mode:o}",
+        );
+    }
+
+    // ── sockets/ + notifications/ existence (raxis doctor FAIL fix) ─────────
+
+    #[test]
+    fn bootstrap_creates_sockets_directory_so_doctor_does_not_flag_it() {
+        // Before this fix, `<data_dir>/sockets/` was created lazily by
+        // `ipc::server::start` only on first kernel boot — meaning an
+        // operator running `raxis doctor` between `RAXIS_BOOTSTRAP=1
+        // raxis-kernel` and the next start saw
+        //
+        //     [FAIL] sockets.exists  missing: <data_dir>/sockets
+        //
+        // Pin that bootstrap creates the directory eagerly. Mode is
+        // intentionally 0755 (the socket *files* themselves are mode-
+        // hardened individually per kernel-store.md §2.5.5).
+        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        run_inner(&config).expect("bootstrap");
+
+        let sockets_dir = tmp.path().join("sockets");
+        let meta = std::fs::metadata(&sockets_dir)
+            .expect("sockets/ must exist after bootstrap so `raxis doctor` does not FAIL");
+        assert!(meta.is_dir(), "sockets/ must be a directory");
+    }
+
+    #[test]
+    fn bootstrap_creates_notifications_directory_so_doctor_reports_ok() {
+        // Doctor degrades a missing `notifications/` to WARN (not FAIL),
+        // because the Shell notification channel creates it lazily on
+        // first delivery. But operators reading the doctor report after
+        // a fresh genesis shouldn't see WARN rows for things genesis
+        // could have trivially set up. Pin that bootstrap creates the
+        // directory so `raxis doctor` is fully green right after the
+        // ceremony.
+        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        run_inner(&config).expect("bootstrap");
+
+        let notifications_dir = tmp.path().join("notifications");
+        let meta = std::fs::metadata(&notifications_dir)
+            .expect("notifications/ must exist after bootstrap");
+        assert!(meta.is_dir(), "notifications/ must be a directory");
     }
 
     // ── runtime/ directory (Phase A1 / T2.1) ────────────────────────────────
@@ -1273,16 +1360,29 @@ mod edge_cases {
     }
 
     #[test]
-    fn malformed_operator_pubkey_hex_fails_with_decode_message() {
-        // pubkey_fingerprint_from_hex returns an Err string on hex decode
-        // failure, which run_inner wraps in BootstrapFailed.
+    fn malformed_operator_pubkey_input_fails_with_parse_message() {
+        // `load_operator_pubkey` now routes through
+        // `raxis_crypto::parse_ed25519_public_material`, which rejects
+        // input that is neither 64-char hex nor a PEM block with a
+        // diagnostic that names BOTH supported formats. We pin the
+        // diagnostic shape (mentions "hex" and "PEM") rather than the
+        // exact wording so a future copy-edit doesn't break this test —
+        // but we do NOT want a future "make this terser" PR to drop
+        // either format hint, since the whole reason the kernel accepts
+        // PEM in the first place is to fix the operator-confusion bug
+        // where `--operator-pubkey path/to/openssl.pem` errored out.
         let (_tmp, config) = fresh_env_with_pubkey_hex("not-valid-hex");
-        let err = run_inner(&config).expect_err("malformed hex must error");
+        let err = run_inner(&config).expect_err("malformed pubkey must error");
         match err {
             KernelError::BootstrapFailed { reason } => {
                 assert!(
-                    reason.contains("hex decode failed"),
-                    "expected hex-decode error, got {reason:?}",
+                    reason.contains("operator pubkey parse failed"),
+                    "expected parse-failed error, got {reason:?}",
+                );
+                assert!(
+                    reason.contains("hex") && reason.contains("PEM"),
+                    "diagnostic must name both supported formats so the \
+                     operator can pick one, got {reason:?}",
                 );
             }
             other => panic!("expected BootstrapFailed, got {other:?}"),
@@ -1291,11 +1391,93 @@ mod edge_cases {
 
     #[test]
     fn operator_pubkey_with_leading_whitespace_is_trimmed() {
-        // load_operator_pubkey calls .trim() on the file contents. A real
-        // operator running `echo $PK > operator.pub` ends up with a
-        // trailing newline that we must tolerate. This test pins that.
+        // load_operator_pubkey delegates trimming to
+        // `raxis_crypto::parse_ed25519_public_material`. A real operator
+        // running `echo $PK > operator.pub` ends up with a trailing
+        // newline that we must tolerate.
         let (_tmp, config) = fresh_env_with_pubkey_hex(&format!("  {}  \n", good_pubkey_hex()));
         run_inner(&config).expect("whitespace-padded pubkey must be accepted");
+    }
+
+    #[test]
+    fn operator_pubkey_pem_from_openssl_is_accepted_and_canonicalised_to_hex() {
+        // The original symptom: operators followed the README's
+        // `openssl pkey -pubout` recipe and pointed RAXIS_OPERATOR_PUBKEY
+        // at a `.pem` file. The kernel's older bootstrap path treated
+        // file contents as raw hex and bailed with
+        //
+        //     BOOT_ERR_BOOTSTRAP_FAILED: hex decode failed:
+        //         Invalid character '-' at position 0
+        //
+        // (the leading `-` of `-----BEGIN`). Pin the fix end-to-end:
+        // PEM input must complete genesis, AND the on-disk
+        // `operator_<fp>.pub` must contain canonical lowercase hex (not
+        // the raw PEM blob), since downstream consumers — policy.toml
+        // operator entry, fingerprint computation, IPC challenge-response
+        // — all expect 64-char hex.
+        let pem = "-----BEGIN PUBLIC KEY-----\n\
+MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\n\
+-----END PUBLIC KEY-----\n";
+        // Compute the expected hex via the same shared parser the kernel
+        // uses, so this test pins behavioural equivalence (PEM in →
+        // canonical hex on disk) rather than a brittle hand-computed
+        // string.
+        let expected_bytes =
+            raxis_crypto::parse_ed25519_public_material(pem).expect("PEM is well-formed");
+        let expected_hex = hex::encode(expected_bytes);
+        let (_tmp, config) = fresh_env_with_pubkey_hex(pem);
+        run_inner(&config).expect("PEM operator pubkey must be accepted");
+
+        // Locate the `operator_<fp>.pub` file and assert canonical hex.
+        let keys_dir = config.data_dir.join("keys");
+        let mut op_file = None;
+        for entry in std::fs::read_dir(&keys_dir).expect("keys dir readable") {
+            let entry = entry.unwrap();
+            let name = entry.file_name();
+            let name = name.to_string_lossy().to_string();
+            if name.starts_with("operator_") && name.ends_with(".pub") {
+                op_file = Some(entry.path());
+                break;
+            }
+        }
+        let op_path = op_file.expect("bootstrap must write operator_<fp>.pub");
+        let on_disk = std::fs::read_to_string(&op_path).unwrap();
+        assert_eq!(
+            on_disk.trim(),
+            expected_hex,
+            "PEM input must be normalised to canonical lowercase hex on disk",
+        );
+        assert!(
+            on_disk.trim().chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "on-disk operator pubkey must be lowercase hex only, got {on_disk:?}",
+        );
+        assert_eq!(
+            on_disk.trim().len(),
+            64,
+            "on-disk operator pubkey must be 64 hex chars (raw 32 bytes)",
+        );
+    }
+
+    #[test]
+    fn operator_pubkey_pem_with_crlf_line_endings_is_accepted() {
+        // Operators on Windows or pasting from email clients end up with
+        // CRLF line endings inside the PEM block. The shared parser
+        // strips them; pin that the kernel surfaces the same tolerance.
+        let pem = "-----BEGIN PUBLIC KEY-----\r\n\
+MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\r\n\
+-----END PUBLIC KEY-----\r\n";
+        let (_tmp, config) = fresh_env_with_pubkey_hex(pem);
+        run_inner(&config).expect("CRLF-terminated PEM must be accepted");
+    }
+
+    #[test]
+    fn operator_pubkey_uppercase_hex_is_accepted() {
+        // Some operators paste hex copied from logs that capitalised it.
+        // Pre-fix the kernel decoded uppercase hex fine via `hex::decode`;
+        // confirm that hasn't regressed under the new parser.
+        let upper = good_pubkey_hex().to_uppercase();
+        let (_tmp, config) = fresh_env_with_pubkey_hex(&upper);
+        run_inner(&config).expect("uppercase hex pubkey must be accepted");
     }
 
     // ── Authority and quality keys must be DISTINCT ─────────────────────────

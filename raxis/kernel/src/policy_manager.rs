@@ -173,23 +173,16 @@ pub fn install_genesis_policy_epoch(
     signed_by_authority: &str,
     advanced_at_unix_secs: i64,
 ) -> Result<(), PolicyError> {
-    let conn = store.lock_sync();
-
-    // INSERT OR IGNORE means a re-bootstrap attempt that crashed after
-    // this row was already written cleanly succeeds without surfacing a
-    // false UNIQUE-constraint error to the operator. The genesis policy
-    // bytes are deterministic per-install (same policy.toml on disk),
-    // so a re-run that produced different bytes would conflict on the
-    // UNIQUE(policy_sha256) constraint AT a different code path —
-    // covered by the test below.
-    conn.execute(
-        &format!(
-            "INSERT OR IGNORE INTO {POLICY_EPOCH_HISTORY} (
-                 epoch_id, policy_sha256, signed_by_authority,
-                 triggered_by_operator, advanced_at
-             ) VALUES (1, ?1, ?2, 'genesis', ?3)"
-        ),
-        rusqlite::params![policy_sha256, signed_by_authority, advanced_at_unix_secs],
+    // Delegate to the shared writer in `raxis-store`. Both this kernel-side
+    // genesis path and the operator-facing `raxis genesis` CLI command call
+    // the same function, so a future schema rename or column addition is a
+    // single-file change. See `crates/store/src/genesis.rs` for the
+    // INSERT OR IGNORE rationale that used to live here.
+    raxis_store::install_genesis_policy_epoch_row(
+        store,
+        policy_sha256,
+        signed_by_authority,
+        advanced_at_unix_secs,
     )
     .map_err(|e| PolicyError::StoreWriteFailed {
         reason: format!("INSERT OR IGNORE {POLICY_EPOCH_HISTORY} failed: {e}"),

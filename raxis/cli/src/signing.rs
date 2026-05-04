@@ -8,8 +8,6 @@
 
 use std::path::Path;
 
-use ed25519_dalek::VerifyingKey;
-
 use crate::errors::CliError;
 
 /// Parse an operator **public** Ed25519 key from file contents:
@@ -18,53 +16,25 @@ use crate::errors::CliError;
 ///
 /// Genesis and interactive pubkey paste paths use this so `--operator-pubkey
 /// operator_public.pem` matches what operators generate locally.
+///
+/// Implementation lives in
+/// [`raxis_crypto::pubkey::parse_ed25519_public_material`] so the kernel's
+/// `bootstrap::load_operator_pubkey` path uses the exact same parser — see
+/// the comment block in that module for why a single shared parser exists.
+/// This wrapper exists only to map the typed `PubkeyParseError` into the
+/// CLI's `CliError::Key` variant and to append the CLI-specific hint about
+/// `raxis genesis --operator-pubkey` in the "no recognised encoding" path.
 pub fn parse_operator_public_key_material(content: &str) -> Result<[u8; 32], CliError> {
-    let trimmed = content.trim();
+    use raxis_crypto::PubkeyParseError;
 
-    if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
-        let vec = hex::decode(trimmed).map_err(|e| CliError::Key(format!("hex decode error: {e}")))?;
-        let arr: [u8; 32] = vec
-            .try_into()
-            .map_err(|_| CliError::Key("operator pubkey must be 32 bytes (64 hex chars)".to_owned()))?;
-        VerifyingKey::from_bytes(&arr).map_err(|e| CliError::Key(format!("invalid Ed25519 pubkey: {e}")))?;
-        return Ok(arr);
-    }
-
-    if trimmed.starts_with("-----BEGIN") {
-        let b64: String = trimmed
-            .lines()
-            .filter(|l| !l.starts_with("-----"))
-            .collect::<Vec<_>>()
-            .join("");
-        let der =
-            base64_decode(&b64).map_err(|e| CliError::Key(format!("PEM base64 decode failed: {e}")))?;
-        let pubkey: [u8; 32] = ed25519_pubkey_bytes_from_spki_der(&der)?;
-        VerifyingKey::from_bytes(&pubkey)
-            .map_err(|e| CliError::Key(format!("invalid Ed25519 pubkey in PEM: {e}")))?;
-        return Ok(pubkey);
-    }
-
-    Err(CliError::Key(
-        "operator public key: expected 64-char hex or PEM (-----BEGIN PUBLIC KEY-----); \
-         for PEM files use: raxis genesis --operator-pubkey /path/to/operator_public.pem"
-            .to_owned(),
-    ))
-}
-
-/// OpenSSL / RFC 8410 SubjectPublicKeyInfo for Ed25519 is **44 bytes**; the raw
-/// 32-byte public key starts at offset **12** (after algorithm OID + BIT STRING wrapper).
-fn ed25519_pubkey_bytes_from_spki_der(der: &[u8]) -> Result<[u8; 32], CliError> {
-    match der.len() {
-        44 => der[12..44]
-            .try_into()
-            .map_err(|_| CliError::Key("internal: Ed25519 SPKI slice".to_owned())),
-        32 => der
-            .try_into()
-            .map_err(|_| CliError::Key("internal: raw 32-byte pubkey".to_owned())),
-        n => Err(CliError::Key(format!(
-            "unsupported Ed25519 public key encoding: DER is {n} bytes (expected 44-byte SPKI or 32 raw)"
-        ))),
-    }
+    raxis_crypto::parse_ed25519_public_material(content).map_err(|e| match e {
+        PubkeyParseError::UnknownEncoding => CliError::Key(
+            "operator public key: expected 64-char hex or PEM (-----BEGIN PUBLIC KEY-----); \
+             for PEM files use: raxis genesis --operator-pubkey /path/to/operator_public.pem"
+                .to_owned(),
+        ),
+        other => CliError::Key(other.to_string()),
+    })
 }
 
 /// Load an Ed25519 keypair from a PEM file.
@@ -205,6 +175,7 @@ pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::VerifyingKey;
 
     /// Sample `openssl pkey -pubout` PEM (Ed25519 SPKI DER length 44).
     const SAMPLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\

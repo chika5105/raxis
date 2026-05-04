@@ -14,7 +14,9 @@
 pub mod delegation;
 pub mod escalation;
 pub mod plan;
+pub mod pubkey;
 pub mod token;
 pub mod verify;
 
+pub use pubkey::{PubkeyParseError, parse_ed25519_public_material};
 pub use verify::{CryptoError, verify_ed25519};

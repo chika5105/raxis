@@ -551,6 +551,7 @@ name = "raxis-audit-tools"
 version = "0.1.0"
 dependencies = [
  "hex",
+ "raxis-genesis-tools",
  "raxis-types",
  "serde",
  "serde_json",
