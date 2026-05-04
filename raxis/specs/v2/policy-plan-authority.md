@@ -260,6 +260,46 @@ policy-level protection already covers it.
 
 ---
 
+### WARN_UNCAPPED_TOKEN_LIMIT
+
+**Trigger:** A `[[tasks.token_policy]]` section is present in `plan.toml` but one or
+more limit fields are omitted (defaulting to `TokenLimit::Uncapped` implicitly). Or a
+plan has no `[tasks.token_policy]` section at all, meaning all limits are implicitly
+uncapped for that task.
+
+**Kernel behavior:** The session runs with no ceiling on token consumption for the
+uncapped limit types. A session with `TokenLimit::Uncapped` on `max_tokens_total` can
+consume unlimited tokens — constrained only by the budget lane ceiling (which is
+token-blind in the current spec unless `token_proportional` weights are configured).
+
+**Why a warning, not an error:** Some tasks are genuinely exploratory and the operator
+may not know an appropriate limit in advance. The warning surfaces the risk consciously:
+the operator must either set a limit OR explicitly declare `"uncapped"` to suppress it.
+
+**Suppressing the warning:** Explicitly declare `"uncapped"` in the plan:
+
+```toml
+[tasks.token_policy]
+max_tokens_input_per_request  = "uncapped"   # explicit — warning suppressed
+max_tokens_output_per_request = "uncapped"   # explicit — warning suppressed
+max_tokens_total              = 2_000_000    # capped — no warning
+```
+
+An implicit omission generates the warning. An explicit `"uncapped"` does not — the
+operator has consciously acknowledged the choice.
+
+**With `--strict` (default):** Plan rejected. The operator must either set limits or
+explicitly declare `"uncapped"` for each uncapped dimension.
+
+**With `--no-strict`:** Plan approved with warning. Uncapped limits are recorded in the
+`InitiativeCreated` audit event's `approve_warnings`.
+
+**Recommended fix:** Set explicit limits appropriate to the task's expected complexity.
+If the task is genuinely unbounded, declare `"uncapped"` explicitly.
+
+
+---
+
 ## 4. Policy Bundle — New Fields for INV-POLICY-01
 
 ### `require_push_approval_minimum`
@@ -322,10 +362,15 @@ The `approve_plan` validation now runs in this order:
 5. Check plan.require_push_approval vs policy.push_policy.require_push_approval_minimum:
    - plan = false AND policy_min = true?
      → WARN_PUSH_APPROVAL_DOWNGRADED (warning)
-6. Check plan.estimated_cost vs lane budget ceiling:
+6. For each task with a token_policy section (or no token_policy section):
+   - Any limit field omitted (not explicitly "uncapped" and not a Count)?
+     → WARN_UNCAPPED_TOKEN_LIMIT { task_id, uncapped_fields: [...] } (warning)
+   - No token_policy section at all?
+     → WARN_UNCAPPED_TOKEN_LIMIT { task_id, uncapped_fields: ["all"] } (warning)
+7. Check plan.estimated_cost vs lane budget ceiling:
    - estimated_cost > ceiling? → FAIL_ESTIMATED_COST_EXCEEDS_CEILING (hard error)
-7. Collect all warnings
-8. If policy.approve_plan_strict_by_default = false AND --no-strict flag:
+8. Collect all warnings
+9. If policy.approve_plan_strict_by_default = false AND --no-strict flag:
    - Approve plan, emit all warnings to stdout
    - Record warnings in InitiativeCreated audit event (approved_strict = false)
 9. Else (default — strict mode):
