@@ -229,19 +229,42 @@ empty initiative list.
 > `inbox`, `sessions`, `escalations`, `verifiers`, `witnesses`,
 > `budget`) do NOT need it.
 >
-> To avoid retyping the path on every command, define a short alias
-> for the rest of this guide:
+> To avoid retyping the path on every command, you have two choices:
 >
-> ```bash
-> alias raxisop='raxis --operator-key "$HOME/raxis-keys/operator_private.pem"'
-> ```
+> 1. **Env var (preferred — survives `$(...)` subshells):**
 >
-> Every later command shown below uses `raxisop` for any
-> operator-socket call and bare `raxis` for read-only / signing
-> calls. If your shell does not preserve aliases across subshells
-> for `$()` command substitution, just inline the full
-> `raxis --operator-key "$HOME/raxis-keys/operator_private.pem"`
-> form instead.
+>    ```bash
+>    export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"
+>    ```
+>
+>    The CLI honors `RAXIS_OPERATOR_KEY` as a fallback whenever
+>    `--operator-key` is not passed explicitly. The env var holds a
+>    **path** only — never key bytes — which preserves the security
+>    model: no secret material ever transits the process
+>    environment, where it would be visible to `ps eww`,
+>    `/proc/$pid/environ`, kernel core dumps, or any child process
+>    that inherits the env block. See
+>    [`specs/v1/env-vars.md`](../specs/v1/env-vars.md) for the full
+>    inventory and security model.
+>
+> 2. **Shell alias (works only in interactive shells):**
+>
+>    ```bash
+>    alias raxisop='raxis --operator-key "$HOME/raxis-keys/operator_private.pem"'
+>    ```
+>
+>    Useful if you want a visible reminder on every line that
+>    you're about to write. Aliases are not preserved across
+>    `$(...)` subshells, so command substitution has to inline the
+>    full flag.
+>
+> Every later command shown below assumes option 1 — the
+> `RAXIS_OPERATOR_KEY` export — and drops the `--operator-key` flag
+> from the snippets. If you skipped the export, prepend
+> `--operator-key "$HOME/raxis-keys/operator_private.pem"` to every
+> write command. Explicit `--operator-key` always wins over the env
+> var (defence-in-depth: a stale shell export must not silently
+> override a freshly-typed flag).
 
 ---
 
@@ -265,21 +288,18 @@ The kernel always mints a fresh UUID v4 as the canonical `initiative_id`. The
 first argument to `plan submit` is a **free-form label** for log lines only
 — capture the UUID it echoes back, **not** the label:
 
-Both commands are operator-socket calls and need `--operator-key` (see
-the box at the end of Step 7 for the full rationale; the snippet below
-inlines the flag rather than relying on the alias so the command-
-substitution `$(...)` always sees it):
+Both commands are operator-socket calls and pick up the operator key
+from the `RAXIS_OPERATOR_KEY` export you set after Step 7 (or the
+explicit `--operator-key` flag if you skipped the export):
 
 ```bash
-SUBMIT_OUT="$(raxis --operator-key "$HOME/raxis-keys/operator_private.pem" \
-                plan submit demo "$PLAN_DIR")"
+SUBMIT_OUT="$(raxis plan submit demo "$PLAN_DIR")"
 printf '%s\n' "$SUBMIT_OUT"
 
 INIT_ID="$(printf '%s\n' "$SUBMIT_OUT" | awk '/^Initiative/ {print $2; exit}')"
 echo "INIT_ID=$INIT_ID"
 
-raxis --operator-key "$HOME/raxis-keys/operator_private.pem" \
-      plan approve "$INIT_ID"
+raxis plan approve "$INIT_ID"
 ```
 
 After `plan approve` the initiative transitions `Draft → ApprovedPlan`, and
@@ -319,8 +339,7 @@ mkdir -p "$(dirname "$WT")"
 
 git -C "$REPO_ROOT" worktree add "$WT" -b "agents/$LINEAGE_ID"
 
-raxis --operator-key "$HOME/raxis-keys/operator_private.pem" \
-      session create \
+raxis session create \
         --role planner \
         --worktree-root "$WT" \
         --base-tracking-ref refs/heads/main \
@@ -428,7 +447,7 @@ rm -rf "$RAXIS_DATA_DIR" "$DEMO_ROOT" /tmp/raxis-e2e-worktrees
 |---|---|---|
 | `Algorithm ed25519 not found` on `openssl genpkey` | macOS default LibreSSL | Install Homebrew `openssl@3` and put it on `$PATH` (Step 0) |
 | `unknown flag --operator-pubkey` from `raxis genesis` | Cert-mandatory release removed it | Use `--operator-key` (convenience) or `--operator-cert` (air-gapped) |
-| `--operator-key <path> is required for this command` on `plan submit` / `plan approve` / `session create` / etc. | Operator-socket commands need the key to perform the kernel's challenge-response handshake | Pass `--operator-key <path>` as a **global flag BEFORE the subcommand** (not after). See the box at the end of Step 7 for the full list of operator-socket commands |
+| `--operator-key <path> is required for this command` on `plan submit` / `plan approve` / `session create` / etc. | Operator-socket commands need the key to perform the kernel's challenge-response handshake; neither `--operator-key` nor `RAXIS_OPERATOR_KEY` was found | Either `export RAXIS_OPERATOR_KEY="$HOME/raxis-keys/operator_private.pem"` once per shell, or pass `--operator-key <path>` as a **global flag BEFORE the subcommand** (not after). See the box at the end of Step 7 for the full list of operator-socket commands |
 | `FAIL_WORKTREE_OUTSIDE_ALLOWED_ROOTS` on `session create` | Worktree path not under any `[sessions].allowed_worktree_roots` entry | Edit policy → re-sign → restart kernel (or `raxis epoch advance` if it's running) |
 | `FAIL_UNKNOWN_SIGNER` on `plan submit` | Plan signed with a key not in `policy.toml`'s operator entry | Re-sign the plan with the same `--key` you used for genesis |
 | `ERR_SCHEMA_MISMATCH` (exit 7) from any read-only command | CLI compiled against a different `SCHEMA_VERSION` than the kernel that wrote the DB | Rebuild + reinstall the CLI from the same workspace as the kernel |

@@ -133,6 +133,16 @@ fn run() -> Result<(), CliError> {
         pos += 1;
     }
 
+    // Env-var fallback for `--operator-key`. Explicit flag wins; the
+    // env var is consulted only when no flag was passed. We thread the
+    // resolution through a pure helper (`resolve_operator_key_path`)
+    // so the precedence rules are unit-testable without spinning up
+    // the full CLI. The env var stores a *file path*, never the key
+    // bytes themselves — see `specs/v1/env-vars.md` "Security model".
+    let operator_key_path = resolve_operator_key_path(operator_key_path, |k| {
+        std::env::var_os(k).map(PathBuf::from)
+    });
+
     let flags = GlobalFlags {
         data_dir,
         socket_path,
@@ -294,6 +304,39 @@ fn require_arg<'a>(args: &'a [String], pos: usize, flag: &str) -> Result<&'a str
         .ok_or_else(|| CliError::Usage(format!("{flag} requires an argument")))
 }
 
+/// Precedence resolver for `--operator-key` / `RAXIS_OPERATOR_KEY`.
+///
+/// Rules (pinned by `operator_key_resolution_*` tests below):
+///
+/// 1. Explicit `--operator-key <path>` (the `flag_value`) always
+///    wins, even if `RAXIS_OPERATOR_KEY` is set. Defence-in-depth:
+///    a stale shell export must not silently override the path the
+///    operator just typed.
+/// 2. If no flag was passed, fall back to `RAXIS_OPERATOR_KEY`
+///    looked up through `env_lookup`. The lookup is injected so
+///    tests can drive both branches without mutating the real
+///    process environment (which would race with parallel cargo
+///    test runners).
+/// 3. If neither is set, return `None` and let the per-subcommand
+///    validation surface the standard
+///    "usage: --operator-key <path> is required" error so the
+///    operator sees the same message they would have seen before
+///    the env-var fallback existed (no silent skipping).
+///
+/// Security model: the env var stores a **path** (which is then
+/// `chmod 600` on disk), never the key bytes themselves. This
+/// preserves the §"Security model" invariant in
+/// `specs/v1/env-vars.md` — no secret material ever transits the
+/// process environment, where it would be visible to `ps eww`,
+/// `/proc/$pid/environ`, kernel-exported core dumps, and any child
+/// process inheriting the env block.
+fn resolve_operator_key_path(
+    flag_value: Option<PathBuf>,
+    env_lookup: impl FnOnce(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
+    flag_value.or_else(|| env_lookup("RAXIS_OPERATOR_KEY"))
+}
+
 fn print_help() {
     println!(
         r#"raxis — RAXIS kernel operator CLI
@@ -302,9 +345,14 @@ USAGE:
     raxis [--data-dir <path>] [--socket <path>] [--operator-key <path>] <subcommand>
 
 GLOBAL FLAGS:
-    --data-dir <path>       Kernel data directory (default: ~/.raxis or $RAXIS_DATA_DIR)
-    --socket <path>         Operator socket path (default: <data-dir>/sockets/operator.sock)
-    --operator-key <path>   Operator Ed25519 private key for signing (PEM format)
+    --data-dir <path>       Kernel data directory
+                            (default: ~/.raxis or $RAXIS_DATA_DIR)
+    --socket <path>         Operator socket path
+                            (default: <data-dir>/sockets/operator.sock)
+    --operator-key <path>   Operator Ed25519 private key for signing (PEM format).
+                            Falls back to $RAXIS_OPERATOR_KEY when not passed.
+                            Stores a path only; the env var must NEVER hold
+                            key bytes. See specs/v1/env-vars.md.
 
 SUBCOMMANDS:
     genesis [--force]
@@ -463,6 +511,96 @@ READ-ONLY OBSERVATION:
         disables ANSI clear-screen for log-friendly output.
 "#
     );
+}
+
+// ---------------------------------------------------------------------------
+// Operator-key resolution tests
+//
+// Pin the precedence rules between `--operator-key <path>` (the
+// global flag) and the `RAXIS_OPERATOR_KEY` env-var fallback. We
+// drive `resolve_operator_key_path` with an injected env-lookup
+// closure rather than touching the real process environment so
+// these tests are safe to run under `cargo test --jobs N` without
+// inter-test bleed-over.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod operator_key_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn flag_wins_when_both_flag_and_env_are_set() {
+        let flag = Some(PathBuf::from("/keys/from-flag.pem"));
+        let resolved = resolve_operator_key_path(flag.clone(), |key| {
+            assert_eq!(key, "RAXIS_OPERATOR_KEY");
+            Some(PathBuf::from("/keys/from-env.pem"))
+        });
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("/keys/from-flag.pem")),
+            "explicit --operator-key MUST override RAXIS_OPERATOR_KEY (a stale shell export must never silently take over from a freshly-typed flag)",
+        );
+    }
+
+    #[test]
+    fn env_is_consulted_when_flag_is_absent() {
+        let resolved = resolve_operator_key_path(None, |key| {
+            assert_eq!(key, "RAXIS_OPERATOR_KEY");
+            Some(PathBuf::from("/keys/from-env.pem"))
+        });
+        assert_eq!(
+            resolved,
+            Some(PathBuf::from("/keys/from-env.pem")),
+            "RAXIS_OPERATOR_KEY MUST be honored when --operator-key is not passed",
+        );
+    }
+
+    #[test]
+    fn returns_none_when_neither_flag_nor_env_is_set() {
+        let resolved = resolve_operator_key_path(None, |_| None);
+        assert_eq!(
+            resolved, None,
+            "neither flag nor env set MUST yield None so per-subcommand validation can surface the standard 'usage: --operator-key <path> is required' error",
+        );
+    }
+
+    /// When `--operator-key` is passed, `resolve_operator_key_path`
+    /// MUST NOT touch the env var at all — not even to read it.
+    /// This pins the contract that an explicit flag short-circuits
+    /// the lookup so a misconfigured env block (e.g. set to a
+    /// path that no longer exists) cannot leak into a request the
+    /// operator believes is fully self-contained.
+    #[test]
+    fn env_is_not_consulted_when_flag_is_set() {
+        let mut env_was_consulted = false;
+        let flag = Some(PathBuf::from("/keys/from-flag.pem"));
+        let _ = resolve_operator_key_path(flag, |_| {
+            env_was_consulted = true;
+            Some(PathBuf::from("/keys/from-env.pem"))
+        });
+        assert!(
+            !env_was_consulted,
+            "env lookup MUST be short-circuited when --operator-key is set; otherwise a broken RAXIS_OPERATOR_KEY (e.g. unreadable file) could surface a confusing error after the user already supplied a valid path",
+        );
+    }
+
+    /// Defensive: the helper MUST query exactly the canonical name
+    /// `RAXIS_OPERATOR_KEY`. Drift to e.g. `RAXIS_OP_KEY` or
+    /// `RAXIS_OPERATOR_KEY_PATH` would silently break operator
+    /// muscle memory across releases.
+    #[test]
+    fn env_var_name_is_exactly_RAXIS_OPERATOR_KEY() {
+        let mut seen: Option<String> = None;
+        let _ = resolve_operator_key_path(None, |key| {
+            seen = Some(key.to_owned());
+            None
+        });
+        assert_eq!(
+            seen.as_deref(),
+            Some("RAXIS_OPERATOR_KEY"),
+            "env var name drifted; specs/v1/env-vars.md and the demo README pin RAXIS_OPERATOR_KEY",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
