@@ -493,14 +493,14 @@ mod tests {
     fn fixture_standard_cert(now: i64) -> OperatorCert {
         let mut c = OperatorCert {
             kind:                    CertKind::Standard,
-            display_name:            "Alice".to_owned(),
+            display_name:            "Chika".to_owned(),
             pubkey_hex:              test_pubkey_hex(),
             not_before:              now - 86_400,
             not_after:               now + 90 * 86_400,
             warn_before_expiry_days: 30,
             grace_period_days:       7,
             permitted_ops:           vec!["CreateInitiative".to_owned()],
-            contact_info:            Some("alice@example.com".to_owned()),
+            contact_info:            Some("chika@example.com".to_owned()),
             self_sig_hex:            String::new(),
         };
         c.self_sig_hex = sign_cert(&c, &test_signing_key());
@@ -534,23 +534,23 @@ mod tests {
         // what an operator signs.
         let bytes = cert_canonical_signing_input(
             CertKind::Standard,
-            "Alice",
+            "Chika",
             "aa".repeat(32).as_str(),
             1_700_000_000,
             1_731_536_000,
             30,
             7,
             &["CreateInitiative".to_owned(), "AbortTask".to_owned()],
-            Some("alice@example.com"),
+            Some("chika@example.com"),
         );
         let s = std::str::from_utf8(&bytes).unwrap();
         // permitted_ops are sorted by canonicalize_ops (AbortTask < CreateInitiative).
         assert_eq!(
             s,
-            "raxis-cert/v1|Standard|Alice|\
+            "raxis-cert/v1|Standard|Chika|\
              aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|\
              1700000000|1731536000|30|7|\
-             AbortTask,CreateInitiative|alice@example.com"
+             AbortTask,CreateInitiative|chika@example.com"
         );
     }
 
@@ -558,7 +558,7 @@ mod tests {
     fn canonical_signing_input_emits_empty_contact_when_none() {
         let bytes = cert_canonical_signing_input(
             CertKind::Standard,
-            "Alice",
+            "Chika",
             "aa".repeat(32).as_str(),
             0, 0, 0, 0,
             &["CreateInitiative".to_owned()],

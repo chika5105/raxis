@@ -331,7 +331,7 @@ mod tests {
     fn signed_standard() -> OperatorCert {
         let mut c = OperatorCert {
             kind:                    CertKind::Standard,
-            display_name:            "alice".to_owned(),
+            display_name:            "chika".to_owned(),
             pubkey_hex:              pk_hex(),
             not_before:              NOT_BEFORE,
             not_after:               NOT_AFTER,
@@ -365,7 +365,7 @@ mod tests {
     fn entry(cert: OperatorCert) -> OperatorEntry {
         OperatorEntry {
             pubkey_fingerprint:     fp(),
-            display_name:           "alice".to_owned(),
+            display_name:           "chika".to_owned(),
             pubkey_hex:             pk_hex(),
             permitted_ops:          vec!["AbortTask".to_owned()],
             cert,

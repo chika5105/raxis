@@ -76,12 +76,12 @@ RAXIS expects **Ed25519 PEM** keys compatible with **OpenSSL 3**’s `genpkey` /
 
    **Convenience (single-machine / development).** Hand the CLI your operator private key; it mints the cert in-process and embeds it in the freshly emitted `policy.toml`. The private key is read into memory only — it is **NEVER persisted** under `<data_dir>`. The CLI tests assert this with a recursive seed-leakage scan.
    ```bash
-   raxis genesis --operator-key operator_private.pem --operator-name "Alice"
+   raxis genesis --operator-key operator_private.pem --operator-name "Chika"
    ```
 
    **Air-gapped (recommended for production / tighter security).** Mint the cert on a separate machine that holds the operator private key (see §5 below for `raxis cert mint`), copy the resulting `*.cert.toml` to the kernel host, and embed it without ever exposing the private key to the host running the kernel:
    ```bash
-   raxis genesis --operator-cert alice.cert.toml
+   raxis genesis --operator-cert chika.cert.toml
    ```
 
 2. **Start the Kernel**:
@@ -132,22 +132,22 @@ expects you to pre-mint it offline:
 # 7-day grace period (run on the offline machine that holds the
 # operator private key).
 raxis cert mint \
-  --display-name "Alice"  \
+  --display-name "Chika"  \
   --pubkey       operator_public.pem \
   --key          operator_private.pem \
   --ops          "CreateInitiative,ApprovePlan,RotateEpoch,QuarantineInitiative,QuarantinePlansBy" \
-  --out          alice.cert.toml
+  --out          chika.cert.toml
 
 # Air-gapped genesis — embed the pre-minted cert without ever
 # exposing the operator private key to the kernel host.
-raxis genesis --operator-cert alice.cert.toml
+raxis genesis --operator-cert chika.cert.toml
 
 # Cert rotation (INV-CERT-04): replace an existing cert for the same
 # operator pubkey. The new cert MUST have an identical pubkey_hex; a
 # pubkey change is a different operator entirely and goes through
 # `policy sign` + `epoch advance` instead.
 raxis cert install --replace-for <old-fingerprint> \
-                   --new-cert     alice-renewed.cert.toml \
+                   --new-cert     chika-renewed.cert.toml \
                    --policy       "$RAXIS_DATA_DIR/policy/policy.toml"
 raxis policy sign  "$RAXIS_DATA_DIR/policy/policy.toml" --key operator_private.pem
 raxis epoch advance --policy "$RAXIS_DATA_DIR/policy/policy.toml" \

@@ -724,10 +724,10 @@ mod tests {
     fn mint_standard_writes_self_signed_cert_round_trippable() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
-        let out = dir.path().join("alice.cert.toml");
+        let out = dir.path().join("chika.cert.toml");
         let args = make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", out.to_str().unwrap(),
             "--ops", "CreateInitiative,ApprovePlan",
             "--validity-days", "30",
@@ -738,7 +738,7 @@ mod tests {
         let cert = read_cert_toml(&out).unwrap();
 
         assert_eq!(cert.kind,         CertKind::Standard);
-        assert_eq!(cert.display_name, "Alice");
+        assert_eq!(cert.display_name, "Chika");
         assert_eq!(cert.pubkey_hex,   pubkey_hex_of(&fixture_key()));
         assert_eq!(cert.permitted_ops,
             vec!["CreateInitiative".to_owned(), "ApprovePlan".to_owned()]);
@@ -812,10 +812,10 @@ mod tests {
     fn mint_standard_requires_ops_flag() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
-        let out = dir.path().join("alice.cert.toml");
+        let out = dir.path().join("chika.cert.toml");
         let args = make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", out.to_str().unwrap(),
         ]);
         let err = run_mint(&empty_flags(), &args).unwrap_err();
@@ -828,10 +828,10 @@ mod tests {
     fn verify_passes_for_freshly_minted_standard_cert_at_now() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
-        let out = dir.path().join("alice.cert.toml");
+        let out = dir.path().join("chika.cert.toml");
         run_mint(&empty_flags(), &make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", out.to_str().unwrap(),
             "--ops", "AbortTask",
             "--validity-days", "365",
@@ -844,10 +844,10 @@ mod tests {
     fn verify_fails_on_tampered_self_sig() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
-        let out = dir.path().join("alice.cert.toml");
+        let out = dir.path().join("chika.cert.toml");
         run_mint(&empty_flags(), &make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", out.to_str().unwrap(),
             "--ops", "AbortTask",
         ])).unwrap();
@@ -867,12 +867,12 @@ mod tests {
     fn verify_at_time_after_not_after_reports_expired_or_grace() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
-        let out = dir.path().join("alice.cert.toml");
+        let out = dir.path().join("chika.cert.toml");
         // Mint a cert valid for 30 days from a fixed point in the past
         // so we have a deterministic not_after to step beyond.
         run_mint(&empty_flags(), &make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", out.to_str().unwrap(),
             "--ops", "AbortTask",
             "--validity-days", "30",
@@ -899,13 +899,13 @@ mod tests {
     fn install_embeds_cert_into_matching_operator_entry() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
-        let cert_path = dir.path().join("alice.cert.toml");
+        let cert_path = dir.path().join("chika.cert.toml");
         let policy_path = dir.path().join("policy.toml");
 
         // Mint a cert.
         run_mint(&empty_flags(), &make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", cert_path.to_str().unwrap(),
             "--ops", "AbortTask",
         ])).unwrap();
@@ -919,7 +919,7 @@ mod tests {
             r#"
 [[operators.entries]]
 pubkey_fingerprint = "{fp}"
-display_name       = "Alice"
+display_name       = "Chika"
 pubkey_hex         = "{}"
 permitted_ops      = ["AbortTask"]
 "#,
@@ -942,12 +942,12 @@ permitted_ops      = ["AbortTask"]
     fn install_rejects_when_no_entry_matches_pubkey() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
-        let cert_path = dir.path().join("alice.cert.toml");
+        let cert_path = dir.path().join("chika.cert.toml");
         let policy_path = dir.path().join("policy.toml");
 
         run_mint(&empty_flags(), &make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", cert_path.to_str().unwrap(),
             "--ops", "AbortTask",
         ])).unwrap();
@@ -958,7 +958,7 @@ permitted_ops      = ["AbortTask"]
             r#"
 [[operators.entries]]
 pubkey_fingerprint = "{}"
-display_name       = "Bob"
+display_name       = "Jinanwa"
 pubkey_hex         = "{other_pubkey}"
 permitted_ops      = ["AbortTask"]
 "#,
@@ -980,21 +980,21 @@ permitted_ops      = ["AbortTask"]
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
 
-        let initial_cert = dir.path().join("alice-v1.cert.toml");
-        let rotated_cert = dir.path().join("alice-v2.cert.toml");
+        let initial_cert = dir.path().join("chika-v1.cert.toml");
+        let rotated_cert = dir.path().join("chika-v2.cert.toml");
         let policy_path  = dir.path().join("policy.toml");
 
         // Mint two certs from the SAME key (rotation refreshes the
         // cert content but keeps the pubkey by INV-CERT-04).
         run_mint(&empty_flags(), &make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", initial_cert.to_str().unwrap(),
             "--ops", "AbortTask",
         ])).unwrap();
         run_mint(&empty_flags(), &make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice (renewed)",
+            "--display-name", "Chika (renewed)",
             "--out", rotated_cert.to_str().unwrap(),
             "--ops", "AbortTask",
             "--ops", "ApprovePlan",
@@ -1007,7 +1007,7 @@ permitted_ops      = ["AbortTask"]
             r#"
 [[operators.entries]]
 pubkey_fingerprint = "{fp}"
-display_name       = "Alice"
+display_name       = "Chika"
 pubkey_hex         = "{}"
 permitted_ops      = ["AbortTask"]
 "#,
@@ -1027,7 +1027,7 @@ permitted_ops      = ["AbortTask"]
         ])).unwrap();
 
         let after = fs::read_to_string(&policy_path).unwrap();
-        assert!(after.contains("display_name = \"Alice (renewed)\""),
+        assert!(after.contains("display_name = \"Chika (renewed)\""),
             "expected rotated display_name in policy; got:\n{after}");
     }
 
@@ -1048,13 +1048,13 @@ permitted_ops      = ["AbortTask"]
 
         run_mint(&empty_flags(), &make_args(&[
             "--key", key_a.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", cert_a.to_str().unwrap(),
             "--ops", "AbortTask",
         ])).unwrap();
         run_mint(&empty_flags(), &make_args(&[
             "--key", key_b.to_str().unwrap(),
-            "--display-name", "Bob",
+            "--display-name", "Jinanwa",
             "--out", cert_b.to_str().unwrap(),
             "--ops", "AbortTask",
         ])).unwrap();
@@ -1065,7 +1065,7 @@ permitted_ops      = ["AbortTask"]
             r#"
 [[operators.entries]]
 pubkey_fingerprint = "{fp_a}"
-display_name       = "Alice"
+display_name       = "Chika"
 pubkey_hex         = "{}"
 permitted_ops      = ["AbortTask"]
 "#,
@@ -1111,10 +1111,10 @@ permitted_ops      = ["AbortTask"]
     fn show_does_not_error_for_a_valid_cert_file() {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
-        let out = dir.path().join("alice.cert.toml");
+        let out = dir.path().join("chika.cert.toml");
         run_mint(&empty_flags(), &make_args(&[
             "--key", key.to_str().unwrap(),
-            "--display-name", "Alice",
+            "--display-name", "Chika",
             "--out", out.to_str().unwrap(),
             "--ops", "AbortTask",
         ])).unwrap();

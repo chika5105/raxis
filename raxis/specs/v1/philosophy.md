@@ -449,7 +449,7 @@ The loader reads both files. It verifies the signature before parsing any TOML c
 schema_version = 1                        # u32; loader fails-closed if > LOADER_SUPPORTED_MAX
 epoch = 42                                # u64; strictly monotonic; loader rejects if <= current epoch
 issued_at = "2026-04-29T19:00:00Z"       # RFC 3339 timestamp
-issued_by = "operator-alice"             # OperatorId; must appear in [[operators.entries]]
+issued_by = "operator-chika"             # OperatorId; must appear in [[operators.entries]]
 
 [budget]
 cost_per_touched_path = 1                # u64; global weight per touched path (admission formula)
@@ -552,7 +552,7 @@ valid_until      = "2027-01-01T00:00:00Z"
 
 # Operator entries — public keys for humans authorized to sign approvals, activate breakglass, etc.
 [[operators.entries]]
-operator_id      = "alice"
+operator_id      = "chika"
 public_key_base64 = "..."
 permitted_ops    = ["SignApproval", "ActivateBreakglass", "SignQualityException"]
 ```

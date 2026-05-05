@@ -131,7 +131,7 @@ mod tests {
     fn standard_fixture() -> OperatorCert {
         OperatorCert {
             kind:                    CertKind::Standard,
-            display_name:            "Alice".to_owned(),
+            display_name:            "Chika".to_owned(),
             pubkey_hex:              "aa".repeat(32),
             not_before:              1_700_000_000,
             not_after:               1_731_536_000,
@@ -141,7 +141,7 @@ mod tests {
                 "CreateInitiative".to_owned(),
                 "ApprovePlan".to_owned(),
             ],
-            contact_info:            Some("alice@example.com".to_owned()),
+            contact_info:            Some("chika@example.com".to_owned()),
             self_sig_hex:            "bb".repeat(64),
         }
     }
@@ -253,14 +253,14 @@ mod tests {
         let s = toml::to_string(&standard_fixture()).unwrap();
         let expected = "\
 kind = \"Standard\"
-display_name = \"Alice\"
+display_name = \"Chika\"
 pubkey_hex = \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
 not_before = 1700000000
 not_after = 1731536000
 warn_before_expiry_days = 30
 grace_period_days = 7
 permitted_ops = [\"CreateInitiative\", \"ApprovePlan\"]
-contact_info = \"alice@example.com\"
+contact_info = \"chika@example.com\"
 self_sig_hex = \"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"
 ";
         assert_eq!(s, expected, "TOML byte shape drift; got:\n{s}");

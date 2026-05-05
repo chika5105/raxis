@@ -664,13 +664,13 @@ mod path_read_accessed_tests {
         let cases: Vec<(AuditEventKind, &str)> = vec![
             (AuditEventKind::OperatorCertInstalled {
                 pubkey_fingerprint: "fp".into(), epoch_id: 1, cert_kind: "Standard".into(),
-                display_name: "alice".into(), not_before: 0, not_after: 0,
+                display_name: "chika".into(), not_before: 0, not_after: 0,
                 permitted_ops: vec![], force_misconfig_bypass: false,
                 previous_fingerprint: None,
             }, "OperatorCertInstalled"),
             (AuditEventKind::OperatorCertMisconfigBypassed {
                 pubkey_fingerprint: "fp".into(), epoch_id: 1,
-                cert_kind: "Standard".into(), display_name: "alice".into(),
+                cert_kind: "Standard".into(), display_name: "chika".into(),
                 violations: vec!["x".into()],
             }, "OperatorCertMisconfigBypassed"),
             (AuditEventKind::OperatorCertExpiringSoon {
@@ -706,7 +706,7 @@ mod path_read_accessed_tests {
             pubkey_fingerprint:     "abcd0123".to_owned(),
             epoch_id:               2,
             cert_kind:              "Standard".to_owned(),
-            display_name:           "alice".to_owned(),
+            display_name:           "chika".to_owned(),
             not_before:             1_700_000_000,
             not_after:              1_731_536_000,
             permitted_ops:          vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()],
@@ -722,7 +722,7 @@ mod path_read_accessed_tests {
         assert_eq!(v["pubkey_fingerprint"], serde_json::json!("abcd0123"));
         assert_eq!(v["epoch_id"], serde_json::json!(2));
         assert_eq!(v["cert_kind"], serde_json::json!("Standard"));
-        assert_eq!(v["display_name"], serde_json::json!("alice"));
+        assert_eq!(v["display_name"], serde_json::json!("chika"));
         assert_eq!(v["not_before"], serde_json::json!(1_700_000_000_i64));
         assert_eq!(v["not_after"], serde_json::json!(1_731_536_000_i64));
         assert_eq!(v["permitted_ops"], serde_json::json!(["AbortTask", "ApprovePlan"]));
@@ -740,7 +740,7 @@ mod path_read_accessed_tests {
                 assert_eq!(pubkey_fingerprint, "abcd0123");
                 assert_eq!(epoch_id,           2);
                 assert_eq!(cert_kind,          "Standard");
-                assert_eq!(display_name,       "alice");
+                assert_eq!(display_name,       "chika");
                 assert_eq!(not_before,         1_700_000_000);
                 assert_eq!(not_after,          1_731_536_000);
                 assert_eq!(permitted_ops,      vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()]);
@@ -765,7 +765,7 @@ mod path_read_accessed_tests {
                 reason: Some("compromised key".into()),
             }, "InitiativeQuarantined"),
             (AuditEventKind::OperatorQuarantineSwept {
-                target_fingerprint: "alice-fp".into(),
+                target_fingerprint: "chika-fp".into(),
                 quarantined_by:     "rot-fp".into(),
                 count:              3,
                 reason:             None,
@@ -800,7 +800,7 @@ mod path_read_accessed_tests {
     #[test]
     fn operator_quarantine_swept_round_trips_through_json() {
         let kind = AuditEventKind::OperatorQuarantineSwept {
-            target_fingerprint: "alice-fp".to_owned(),
+            target_fingerprint: "chika-fp".to_owned(),
             quarantined_by:     "rot-fp".to_owned(),
             count:              42,
             reason:             None,
@@ -811,7 +811,7 @@ mod path_read_accessed_tests {
             AuditEventKind::OperatorQuarantineSwept {
                 target_fingerprint, quarantined_by, count, reason,
             } => {
-                assert_eq!(target_fingerprint, "alice-fp");
+                assert_eq!(target_fingerprint, "chika-fp");
                 assert_eq!(quarantined_by,     "rot-fp");
                 assert_eq!(count,              42);
                 assert!(reason.is_none());
@@ -868,7 +868,7 @@ mod path_read_accessed_tests {
     #[test]
     fn path_read_accessed_round_trips_through_json() {
         let kind = AuditEventKind::PathReadAccessed {
-            actor:   "cli:alice".to_owned(),
+            actor:   "cli:chika".to_owned(),
             table:   "task_plan_fields".to_owned(),
             column:  "path_export_globs".to_owned(),
             task_id: "t-42".to_owned(),
@@ -878,7 +878,7 @@ mod path_read_accessed_tests {
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
             AuditEventKind::PathReadAccessed { actor, table, column, task_id, command } => {
-                assert_eq!(actor,   "cli:alice");
+                assert_eq!(actor,   "cli:chika");
                 assert_eq!(table,   "task_plan_fields");
                 assert_eq!(column,  "path_export_globs");
                 assert_eq!(task_id, "t-42");

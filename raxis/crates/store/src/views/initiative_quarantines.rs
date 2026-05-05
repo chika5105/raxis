@@ -294,7 +294,7 @@ mod tests {
         let store = Store::open(&db_path).expect("Store::open");
         let mut conn = store.lock_sync();
         let tx = conn.transaction().unwrap();
-        // Two initiatives signed by Alice, one by Bob. Minimum shape
+        // Two initiatives signed by Chika, one by Jinanwa. Minimum shape
         // the sweep query joins against.
         const INITIATIVES: &str           = Table::Initiatives.as_str();
         const SIGNED_PLAN_ARTIFACTS: &str = Table::SignedPlanArtifacts.as_str();
@@ -302,15 +302,15 @@ mod tests {
             "INSERT INTO {INITIATIVES} \
                 (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
              VALUES \
-                ('init-alice-1', 'Draft', '{{}}', 'aa', 0), \
-                ('init-alice-2', 'Draft', '{{}}', 'aa', 0), \
-                ('init-bob-1',   'Draft', '{{}}', 'bb', 0); \
+                ('init-chika-1', 'Draft', '{{}}', 'aa', 0), \
+                ('init-chika-2', 'Draft', '{{}}', 'aa', 0), \
+                ('init-jinanwa-1',   'Draft', '{{}}', 'bb', 0); \
              INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
                 (initiative_id, plan_bytes, plan_sig, stored_at, signed_by_fingerprint) \
              VALUES \
-                ('init-alice-1', x'00', x'00', 0, 'alice-fp'), \
-                ('init-alice-2', x'00', x'00', 0, 'alice-fp'), \
-                ('init-bob-1',   x'00', x'00', 0, 'bob-fp');"
+                ('init-chika-1', x'00', x'00', 0, 'chika-fp'), \
+                ('init-chika-2', x'00', x'00', 0, 'chika-fp'), \
+                ('init-jinanwa-1',   x'00', x'00', 0, 'jinanwa-fp');"
         )).unwrap();
         tx.commit().unwrap();
         drop(conn);
@@ -335,8 +335,8 @@ mod tests {
         let tmp = fresh_store_with_initiatives();
         let ro = open_ro(tmp.path()).unwrap();
         assert!(list_all(&ro).unwrap().is_empty());
-        assert!(!is_quarantined(&ro, "init-alice-1").unwrap());
-        assert!(get_by_initiative_id(&ro, "init-alice-1").unwrap().is_none());
+        assert!(!is_quarantined(&ro, "init-chika-1").unwrap());
+        assert!(get_by_initiative_id(&ro, "init-chika-1").unwrap().is_none());
     }
 
     #[test]
@@ -344,21 +344,21 @@ mod tests {
         let tmp = fresh_store_with_initiatives();
 
         let was_new = with_writer(&tmp, |c| {
-            insert_single(c, "init-alice-1", "op-fp", 1700, Some("compromised")).unwrap()
+            insert_single(c, "init-chika-1", "op-fp", 1700, Some("compromised")).unwrap()
         });
         assert!(was_new);
 
         let ro = open_ro(tmp.path()).unwrap();
-        assert!(is_quarantined(&ro, "init-alice-1").unwrap());
+        assert!(is_quarantined(&ro, "init-chika-1").unwrap());
 
         // Second insert MUST be a no-op (returns false) and MUST NOT
         // overwrite the original row.
         let was_new = with_writer(&tmp, |c| {
-            insert_single(c, "init-alice-1", "different-op", 9999, Some("other")).unwrap()
+            insert_single(c, "init-chika-1", "different-op", 9999, Some("other")).unwrap()
         });
         assert!(!was_new);
         let ro = open_ro(tmp.path()).unwrap();
-        let row = get_by_initiative_id(&ro, "init-alice-1").unwrap().unwrap();
+        let row = get_by_initiative_id(&ro, "init-chika-1").unwrap().unwrap();
         assert_eq!(row.quarantined_by, "op-fp");
         assert_eq!(row.quarantined_at, 1700);
         assert_eq!(row.reason.as_deref(), Some("compromised"));
@@ -369,22 +369,22 @@ mod tests {
     fn sweep_for_operator_quarantines_every_matching_initiative() {
         let tmp = fresh_store_with_initiatives();
         let newly = with_writer(&tmp, |c| {
-            sweep_for_operator(c, "alice-fp", "rotator-fp", 2000, Some("compromised key")).unwrap()
+            sweep_for_operator(c, "chika-fp", "rotator-fp", 2000, Some("compromised key")).unwrap()
         });
         assert_eq!(newly.len(), 2);
-        assert!(newly.iter().any(|s| s == "init-alice-1"));
-        assert!(newly.iter().any(|s| s == "init-alice-2"));
+        assert!(newly.iter().any(|s| s == "init-chika-1"));
+        assert!(newly.iter().any(|s| s == "init-chika-2"));
 
         let ro = open_ro(tmp.path()).unwrap();
-        assert!(!is_quarantined(&ro, "init-bob-1").unwrap());
-        let row = get_by_initiative_id(&ro, "init-alice-1").unwrap().unwrap();
-        assert_eq!(row.sweep_target.as_deref(), Some("alice-fp"));
+        assert!(!is_quarantined(&ro, "init-jinanwa-1").unwrap());
+        let row = get_by_initiative_id(&ro, "init-chika-1").unwrap().unwrap();
+        assert_eq!(row.sweep_target.as_deref(), Some("chika-fp"));
         assert_eq!(row.quarantined_by, "rotator-fp");
 
         // Re-running the sweep against the same operator returns an
         // empty newly-quarantined list (idempotent).
         let again = with_writer(&tmp, |c| {
-            sweep_for_operator(c, "alice-fp", "rotator-fp", 3000, None).unwrap()
+            sweep_for_operator(c, "chika-fp", "rotator-fp", 3000, None).unwrap()
         });
         assert!(again.is_empty(), "sweep is idempotent over already-quarantined ids");
     }
@@ -404,25 +404,25 @@ mod tests {
     fn list_all_returns_rows_newest_first() {
         let tmp = fresh_store_with_initiatives();
         with_writer(&tmp, |c| {
-            insert_single(c, "init-alice-1", "op-fp", 100, None).unwrap();
-            insert_single(c, "init-alice-2", "op-fp", 999, None).unwrap();
+            insert_single(c, "init-chika-1", "op-fp", 100, None).unwrap();
+            insert_single(c, "init-chika-2", "op-fp", 999, None).unwrap();
         });
         let ro = open_ro(tmp.path()).unwrap();
         let rows = list_all(&ro).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].initiative_id, "init-alice-2"); // newest first
-        assert_eq!(rows[1].initiative_id, "init-alice-1");
+        assert_eq!(rows[0].initiative_id, "init-chika-2"); // newest first
+        assert_eq!(rows[1].initiative_id, "init-chika-1");
     }
 
     #[test]
     fn is_quarantined_after_a_sweep_returns_true_for_swept_targets() {
         let tmp = fresh_store_with_initiatives();
         with_writer(&tmp, |c| {
-            sweep_for_operator(c, "alice-fp", "rotator-fp", 5000, None).unwrap();
+            sweep_for_operator(c, "chika-fp", "rotator-fp", 5000, None).unwrap();
         });
         let ro = open_ro(tmp.path()).unwrap();
-        assert!(is_quarantined(&ro, "init-alice-1").unwrap());
-        assert!(is_quarantined(&ro, "init-alice-2").unwrap());
-        assert!(!is_quarantined(&ro, "init-bob-1").unwrap());
+        assert!(is_quarantined(&ro, "init-chika-1").unwrap());
+        assert!(is_quarantined(&ro, "init-chika-2").unwrap());
+        assert!(!is_quarantined(&ro, "init-jinanwa-1").unwrap());
     }
 }

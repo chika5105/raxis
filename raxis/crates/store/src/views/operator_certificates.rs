@@ -375,14 +375,14 @@ mod tests {
     fn signed_standard(perms: Vec<&str>) -> OperatorCert {
         let mut c = OperatorCert {
             kind:                    CertKind::Standard,
-            display_name:            "Alice".to_owned(),
+            display_name:            "Chika".to_owned(),
             pubkey_hex:              pk_hex(),
             not_before:              1_700_000_000,
             not_after:               1_731_536_000,
             warn_before_expiry_days: 30,
             grace_period_days:       7,
             permitted_ops:           perms.into_iter().map(str::to_owned).collect(),
-            contact_info:            Some("alice@example.com".to_owned()),
+            contact_info:            Some("chika@example.com".to_owned()),
             self_sig_hex:            String::new(),
         };
         c.self_sig_hex = sign_cert(&c, &signing_key());
@@ -409,7 +409,7 @@ mod tests {
     fn entry(cert: OperatorCert, force_bypass: bool) -> OperatorEntry {
         OperatorEntry {
             pubkey_fingerprint: fp(),
-            display_name:       "Alice".to_owned(),
+            display_name:       "Chika".to_owned(),
             pubkey_hex:         pk_hex(),
             permitted_ops:      vec!["CreateInitiative".to_owned()],
             cert,
@@ -457,12 +457,12 @@ mod tests {
         let conn = open_ro(tmp.path()).unwrap();
         let row = get_by_fingerprint(&conn, &fp()).unwrap().expect("row exists");
         assert_eq!(row.kind, CertKind::Standard);
-        assert_eq!(row.display_name, "Alice");
+        assert_eq!(row.display_name, "Chika");
         assert_eq!(row.permitted_ops, vec!["AbortTask".to_owned()]);
         assert_eq!(row.epoch_id, 1);
         assert_eq!(row.installed_at, 1_700_000_500);
         assert!(!row.force_misconfig_bypass);
-        assert_eq!(row.contact_info.as_deref(), Some("alice@example.com"));
+        assert_eq!(row.contact_info.as_deref(), Some("chika@example.com"));
     }
 
     #[test]

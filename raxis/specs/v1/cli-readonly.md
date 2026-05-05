@@ -673,9 +673,9 @@ this moving" is the single most common operator question.
 [OK]   <data_dir>/notifications/inbox.jsonl exists and is writable
 [OK]   <data_dir>/runtime/heartbeat.json exists and is fresh
 [OK]   cert.list: 1 operator certificate(s) installed
-[OK]   cert.<fp>.status: Active (expires 2027-03-01T00:00:00Z, alice)
-[WARN] cert.<fp>.status: Expiring (alice — 12d remaining; rotate before grace)
-[FAIL] cert.<fp>.status: Expired (bob — 4d past grace; ops gated unless EmergencyRecovery)
+[OK]   cert.<fp>.status: Active (expires 2027-03-01T00:00:00Z, chika)
+[WARN] cert.<fp>.status: Expiring (chika — 12d remaining; rotate before grace)
+[FAIL] cert.<fp>.status: Expired (jinanwa — 4d past grace; ops gated unless EmergencyRecovery)
 [WARN] cert.<fp>.misconfig_bypass: --force-misconfig was used at install time
 ```
 

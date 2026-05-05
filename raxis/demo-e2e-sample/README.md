@@ -113,7 +113,7 @@ writes `policy.toml` with the cert embedded under `[operators.entries.cert]`:
 ```bash
 raxis genesis \
   --operator-key  "$HOME/raxis-keys/operator_private.pem" \
-  --operator-name "Alice"
+  --operator-name "Chika"
 ```
 
 Your private bytes are read into memory only and **never persisted** under

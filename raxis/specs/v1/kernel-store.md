@@ -1802,7 +1802,7 @@ Each operator entry in `policy.toml` carries a `permitted_ops` list. The snippet
 ```toml
 [[operators.entries]]
 pubkey_fingerprint = "abcd1234..."
-display_name       = "Alice"
+display_name       = "Chika"
 permitted_ops      = [
   "CreateInitiative", "ApprovePlan", "RejectPlan",
   "CreateSession", "RevokeSession", "GrantDelegation",

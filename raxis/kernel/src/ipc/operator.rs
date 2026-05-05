@@ -2471,7 +2471,7 @@ mod rotate_epoch_dispatch_tests {
         let op_cert  = raxis_test_support::ephemeral_cert_with_key(
             &op_key,
             raxis_test_support::CertOpts {
-                display_name: "Alice".to_owned(),
+                display_name: "Chika".to_owned(),
                 permitted_ops: vec!["RotateEpoch".into()],
                 ..raxis_test_support::CertOpts::default()
             },
@@ -2516,7 +2516,7 @@ mod rotate_epoch_dispatch_tests {
              [operators]\n\
              [[operators.entries]]\n\
              pubkey_fingerprint = \"{op_fp}\"\n\
-             display_name       = \"Alice\"\n\
+             display_name       = \"Chika\"\n\
              pubkey_hex         = \"{op_pk_hex}\"\n\
              permitted_ops      = [\"RotateEpoch\"]\n\
              [operators.entries.cert]\n\

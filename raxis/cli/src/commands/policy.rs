@@ -244,27 +244,27 @@ task_id = "t1"
 epoch = 1
 [[operators.entries]]
 pubkey_fingerprint = "abcd1234abcd1234abcd1234abcd1234"
-display_name       = "alice"
+display_name       = "chika"
 "#;
         assert!(scan_for_misconfig_bypass(policy).is_empty());
     }
 
     #[test]
     fn scan_lists_bypassed_entries_in_declaration_order() {
-        // Two entries: alice does NOT bypass, bob DOES. The detector must
-        // surface only bob, and surface him by display_name.
+        // Two entries: chika does NOT bypass, jinanwa DOES. The detector must
+        // surface only jinanwa, and surface him by display_name.
         let policy = br#"
 [[operators.entries]]
 pubkey_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-display_name       = "alice"
+display_name       = "chika"
 force_misconfig_bypass = false
 
 [[operators.entries]]
 pubkey_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-display_name       = "bob"
+display_name       = "jinanwa"
 force_misconfig_bypass = true
 "#;
-        assert_eq!(scan_for_misconfig_bypass(policy), vec!["bob".to_owned()]);
+        assert_eq!(scan_for_misconfig_bypass(policy), vec!["jinanwa".to_owned()]);
     }
 
     #[test]
@@ -302,17 +302,17 @@ force_misconfig_bypass = true
         let policy = br#"
 [[operators.entries]]
 pubkey_fingerprint = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-display_name = "alice"
+display_name = "chika"
 force_misconfig_bypass = true
 
 [[operators.entries]]
 pubkey_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-display_name = "bob"
+display_name = "jinanwa"
 force_misconfig_bypass = true
 "#;
         assert_eq!(
             scan_for_misconfig_bypass(policy),
-            vec!["alice".to_owned(), "bob".to_owned()]
+            vec!["chika".to_owned(), "jinanwa".to_owned()]
         );
     }
 }

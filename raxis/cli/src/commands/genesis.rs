@@ -1086,7 +1086,7 @@ mod run_genesis_e2e {
     fn stage_operator_cert(sk: &SigningKey, dir: &Path) -> PathBuf {
         let cert = OperatorCert {
             kind:                    CertKind::Standard,
-            display_name:            "Alice".to_owned(),
+            display_name:            "Chika".to_owned(),
             pubkey_hex:              hex::encode(sk.verifying_key().to_bytes()),
             // Spans well into the future so the cert is unambiguously
             // Active at test time regardless of the host clock.
@@ -1419,7 +1419,7 @@ mod run_genesis_e2e {
         let rows = raxis_store::views::operator_certificates::list_all(&conn).expect("list_all");
         assert_eq!(rows.len(), 1, "expected exactly one cert row at genesis");
         assert_eq!(rows[0].kind.as_str(), "Standard");
-        assert_eq!(rows[0].display_name, "Alice");
+        assert_eq!(rows[0].display_name, "Chika");
         // The cert should be installed at epoch 1.
         assert_eq!(rows[0].epoch_id, 1);
     }
@@ -1472,7 +1472,7 @@ mod run_genesis_e2e {
         std::fs::write(&key_path, &seed_hex).unwrap();
 
         run_genesis(
-            &flags, false, None, Some(key_path.clone()), Some("Alice".to_owned()),
+            &flags, false, None, Some(key_path.clone()), Some("Chika".to_owned()),
             crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
         ).expect("genesis with --operator-key must succeed");
 
@@ -1489,7 +1489,7 @@ mod run_genesis_e2e {
              expected at {}", cert_on_disk.display());
         let policy = std::fs::read_to_string(tmp.path().join("policy/policy.toml")).unwrap();
         assert!(policy.contains("[operators.entries.cert]"));
-        assert!(policy.contains(&format!("display_name = \"Alice\"")));
+        assert!(policy.contains(&format!("display_name = \"Chika\"")));
 
         // (2) The CRITICAL invariant: the seed_hex string from the
         //     operator's key file must NOT appear anywhere under

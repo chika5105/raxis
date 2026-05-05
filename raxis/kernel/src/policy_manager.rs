@@ -917,7 +917,7 @@ mod tests {
         let cert = raxis_test_support::ephemeral_cert_with_key(
             &op_sk,
             raxis_test_support::CertOpts {
-                display_name: "Alice".to_owned(),
+                display_name: "Chika".to_owned(),
                 permitted_ops: vec!["CreateInitiative".to_owned()],
                 ..raxis_test_support::CertOpts::default()
             },
@@ -959,7 +959,7 @@ mod tests {
              [operators]\n\
              [[operators.entries]]\n\
              pubkey_fingerprint = \"{op_fp}\"\n\
-             display_name       = \"Alice\"\n\
+             display_name       = \"Chika\"\n\
              pubkey_hex         = \"{op_pk_hex}\"\n\
              permitted_ops      = [\"CreateInitiative\"]\n\
              \n\

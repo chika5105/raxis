@@ -527,14 +527,14 @@ mod tests {
                 event_kind:    "EscalationApproved".to_owned(),
                 event_seq:     42,
                 payload:       serde_json::json!({}),
-                human_summary: "approved by alice".to_owned(),
+                human_summary: "approved by chika".to_owned(),
             },
         ];
         render_human(&mut buf, &rows, 0, Path::new("/tmp/inbox.jsonl"));
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("1 record"), "got: {s}");
         assert!(s.contains("EscalationApproved"), "got: {s}");
-        assert!(s.contains("approved by alice"), "got: {s}");
+        assert!(s.contains("approved by chika"), "got: {s}");
         assert!(s.contains("seq=42"), "got: {s}");
     }
 

@@ -262,7 +262,7 @@ fn default_priority() -> u8 { 100 }
 /// [operators]
 /// [[operators.entries]]
 /// pubkey_fingerprint = "abcd1234..."
-/// display_name       = "Alice"
+/// display_name       = "Chika"
 /// pubkey_hex         = "<64-char hex raw Ed25519 public key>"
 /// permitted_ops      = ["CreateInitiative", ...]
 /// ```
@@ -2555,7 +2555,7 @@ mod cert_validation_tests {
             &test_signing_key(),
             CertOpts {
                 kind:                    CertKind::Standard,
-                display_name:            "Alice".to_owned(),
+                display_name:            "Chika".to_owned(),
                 now_unix_secs:           now,
                 warn_before_expiry_days: 30,
                 grace_period_days:       7,
@@ -2590,7 +2590,7 @@ mod cert_validation_tests {
     fn entry_with_cert(cert: OperatorCert, force_bypass: bool) -> OperatorEntry {
         OperatorEntry {
             pubkey_fingerprint:    test_fingerprint(),
-            display_name:          "Alice".to_owned(),
+            display_name:          "Chika".to_owned(),
             pubkey_hex:            test_pubkey_hex(),
             permitted_ops:         vec!["CreateInitiative".to_owned()],
             cert,
@@ -2636,7 +2636,7 @@ SingleCommit = 10
 
 [[operators.entries]]
 pubkey_fingerprint = "{fp}"
-display_name       = "Alice"
+display_name       = "Chika"
 pubkey_hex         = "{pk}"
 permitted_ops      = ["CreateInitiative"]
 "#,
@@ -2775,7 +2775,7 @@ permitted_ops      = ["CreateInitiative"]
 
         let bp = &bypassed[0];
         assert_eq!(bp.operator_fingerprint, test_fingerprint());
-        assert_eq!(bp.display_name, "Alice");
+        assert_eq!(bp.display_name, "Chika");
         assert_eq!(bp.kind, CertKind::EmergencyRecovery);
         assert!(!bp.violations.is_empty(),
             "violations list must be non-empty (operator sees what they bypassed)");
@@ -2866,7 +2866,7 @@ SingleCommit = 10
 
 [[operators.entries]]
 pubkey_fingerprint = "{fp}"
-display_name       = "Alice"
+display_name       = "Chika"
 pubkey_hex         = "{pk}"
 permitted_ops      = ["AbortTask"]   # ignored — cert is the authority
 

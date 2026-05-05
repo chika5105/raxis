@@ -662,10 +662,10 @@ target host with the cert file:
 ```bash
 # On the operator's air-gapped workstation
 raxis-cli cert mint --key ~/my-operator-key.pem \
-    --display-name "alice" --out alice.cert.toml
+    --display-name "chika" --out chika.cert.toml
 
-# Transfer alice.cert.toml to the kernel host, then:
-raxis-cli genesis --operator-cert ./alice.cert.toml
+# Transfer chika.cert.toml to the kernel host, then:
+raxis-cli genesis --operator-cert ./chika.cert.toml
 ```
 
 **Path B — convenience (single-machine setups)**: hand the CLI the
@@ -674,7 +674,7 @@ never persists the private bytes:
 
 ```bash
 raxis-cli genesis --operator-key ~/my-operator-key.pem \
-    --operator-name "alice"
+    --operator-name "chika"
 ```
 
 Both paths generate all kernel keys and a skeleton `policy.toml`

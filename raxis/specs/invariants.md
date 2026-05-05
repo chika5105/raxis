@@ -510,9 +510,9 @@ that strands operators mid-incident; without grace's recovery-op
 allowlist, the operator could not even rotate the expired cert
 because cert rotation requires their authority.
 
-**Scenario.** Alice's cert hits the `Grace` zone the night before
+**Scenario.** Chika's cert hits the `Grace` zone the night before
 an outage. She runs `raxis cert install --replace-for <fp>
---new-cert alice-renewed.cert.toml --policy …` — `cert install`
+--new-cert chika-renewed.cert.toml --policy …` — `cert install`
 is in the recovery-op allowlist, so the rotation succeeds even in
 grace. She re-signs the policy and advances the epoch. The
 `OperatorCertInstalled.previous_fingerprint` event records the
@@ -985,12 +985,12 @@ another while the audit chain reads "rotation, not new operator,"
 obscuring the change of authority. Pinning pubkey continuity
 makes the audit chain's rotation walk unambiguous.
 
-**Scenario.** An operator wants to "rotate" Alice's cert to
-Bob's key. `cert install --replace-for <alice-fp> --new-cert
-bob.cert.toml` rejects with `OperatorCertPubkeyMismatch` before
-splicing; the operator must instead remove Alice's entry, add
-Bob's entry, re-sign the policy, and advance the epoch — all of
-which produce loud audit events (`OperatorCertInstalled` for Bob
+**Scenario.** An operator wants to "rotate" Chika's cert to
+Jinanwa's key. `cert install --replace-for <chika-fp> --new-cert
+jinanwa.cert.toml` rejects with `OperatorCertPubkeyMismatch` before
+splicing; the operator must instead remove Chika's entry, add
+Jinanwa's entry, re-sign the policy, and advance the epoch — all of
+which produce loud audit events (`OperatorCertInstalled` for Jinanwa
 with no `previous_fingerprint`, not a rotation rollup).
 
 ---
@@ -1015,15 +1015,15 @@ per `force_misconfig_bypass = true` entry); `CertEnforcer` (emits
 of forensic truth. If a cert event went unrecorded, an
 investigator could not reconstruct who held authority at any
 historical moment. Emitting per-event keeps the granularity
-high enough to answer "did Alice's cert grant permission to
-*this specific approval*?" rather than just "was Alice's cert
+high enough to answer "did Chika's cert grant permission to
+*this specific approval*?" rather than just "was Chika's cert
 installed at any point?". The `previous_fingerprint` field on
 `OperatorCertInstalled` makes rotations unambiguously traceable
 end-to-end.
 
 **Scenario.** An investigator pulls the audit chain six months
-later and asks "who was the active Alice cert at timestamp T?"
-They `grep OperatorCertInstalled` for Alice's pubkey, sort by
+later and asks "who was the active Chika cert at timestamp T?"
+They `grep OperatorCertInstalled` for Chika's pubkey, sort by
 audit chain index, walk the `previous_fingerprint` chain forward
 to T, and arrive at exactly one cert fingerprint — the one in
 force at that moment. No combination of (no-op rotations,

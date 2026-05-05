@@ -849,7 +849,7 @@ mod tests {
         let now: i64 = 1_700_000_000;
         let one_year = 365 * 86_400;
         setup_db_with_cert(
-            &tmp, "abcd1234deadbeef", "Alice",
+            &tmp, "abcd1234deadbeef", "Chika",
             now - 86_400, now + one_year, // valid through next year
             30, 7, "Standard", false,
         );
@@ -872,7 +872,7 @@ mod tests {
         let now: i64 = 1_700_000_000;
         // Cert expires in 5 days, warn window is 30 days → Expiring.
         setup_db_with_cert(
-            &tmp, "expiring00000001", "Bob",
+            &tmp, "expiring00000001", "Jinanwa",
             now - 86_400 * 60, now + 86_400 * 5,
             30, 7, "Standard", false,
         );

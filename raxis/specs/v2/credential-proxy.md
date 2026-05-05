@@ -1712,8 +1712,8 @@ Events (last 30 days):
 2025-04-30T16:43:10Z  CredentialProxyStopped  session=3f7a9c2e  queries=14 blocked=0
 2025-04-29T11:20:00Z  CredentialProxyStarted  session=a1b2c3d4  task=run-migrations
 2025-04-29T11:20:45Z  CredentialProxyStopped  session=a1b2c3d4  queries=8 blocked=0
-2025-03-01T09:00:00Z  CredentialRotated       operator=alice
-2025-01-15T10:23:00Z  CredentialRegistered    operator=alice
+2025-03-01T09:00:00Z  CredentialRotated       operator=chika
+2025-01-15T10:23:00Z  CredentialRegistered    operator=chika
 ```
 
 ---
@@ -2016,18 +2016,18 @@ def client():
     return httpx.Client(base_url=BASE_URL)
 
 def test_create_user(client):
-    response = client.post("/api/users", json={"name": "Alice", "email": "alice@test.com"})
+    response = client.post("/api/users", json={"name": "Chika", "email": "chika@test.com"})
     assert response.status_code == 201
-    assert response.json()["name"] == "Alice"
+    assert response.json()["name"] == "Chika"
 
 def test_get_user(client):
     # Create then fetch
-    create_resp = client.post("/api/users", json={"name": "Bob", "email": "bob@test.com"})
+    create_resp = client.post("/api/users", json={"name": "Jinanwa", "email": "jinanwa@test.com"})
     user_id = create_resp.json()["id"]
 
     get_resp = client.get(f"/api/users/{user_id}")
     assert get_resp.status_code == 200
-    assert get_resp.json()["name"] == "Bob"
+    assert get_resp.json()["name"] == "Jinanwa"
 ```
 
 ### 13.5 — Dev Server + Credential Proxy: How They Interact
