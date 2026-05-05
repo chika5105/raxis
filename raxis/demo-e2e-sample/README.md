@@ -252,13 +252,23 @@ After `plan approve` the initiative transitions `Draft → ApprovedPlan`, and
 the single demo task (`task-alpha`) is scheduled (`Admitted`). Confirm:
 
 ```bash
-raxis status
-raxis initiative show "$INIT_ID"
+raxis status                 # kernel-wide rollup (counts by initiative state)
+raxis inspect task-alpha     # task-level deep-dive: shows initiative_id,
+                             # initiative_state, predecessors, gates, witnesses
 ```
 
-The same `INIT_ID` is what every later command keys off — `plan reject`,
-`initiative abort`, `task retry`, etc. all expect the kernel-assigned UUID,
-never the label you passed to `plan submit`.
+> v1 has no per-initiative `show` subcommand — `raxis initiative` only
+> exposes `abort` and `quarantine`. The information you'd want from
+> "show this initiative" is reachable two ways: (1) `raxis status`
+> aggregates initiative state counts kernel-wide; (2) `raxis inspect
+> <task_id>` (run for any task in the initiative — for the demo,
+> `task-alpha`) reports `initiative_id`, `initiative_state`, and the
+> task's full lifecycle context. For chronological history, `raxis log`
+> and `raxis audit verify` walk every state transition.
+
+The same `INIT_ID` is what every WRITE command keys off — `plan reject`,
+`initiative abort`, `initiative quarantine`, `task retry`, etc. all expect
+the kernel-assigned UUID, never the label you passed to `plan submit`.
 
 ---
 
@@ -306,10 +316,15 @@ created) was hash-chained into `$RAXIS_DATA_DIR/audit/segment-000.jsonl`.
 Verify it end-to-end:
 
 ```bash
-raxis audit verify
-raxis audit gaps              # should report no gaps
+raxis audit verify            # prints record count, chain breaks, and gap count
+                              # (exits non-zero if any breaks or gaps are found)
 tail -n 5 "$RAXIS_DATA_DIR/audit/segment-000.jsonl"
 ```
+
+> `raxis verify-chain` is a top-level alias that runs the same chain
+> verification with slightly different output formatting; either one
+> works. There is no separate `audit gaps` subcommand — gap counts
+> are part of the `audit verify` output line `Gaps: <n>`.
 
 You should see (roughly in order): `KernelStarted`, `OperatorAuthenticated`,
 `InitiativeCreated`, `PlanApproved`, `SessionCreated`. INV-04 (audit
