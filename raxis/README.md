@@ -8,7 +8,75 @@ The core principle: **intelligence and authority must be separated.** The compon
 
 RAXIS answers the question: *how do you trust an AI agent's actions in a system where the cost of being wrong is real?* Not by training the model to be trustworthy. By verifying — independently, at runtime, before admission — that what the agent claims to have done is what actually happened, and that it was authorized to do it.
 
-> **This repository is the v1 + v2 reference implementation** — a proof of concept of the RAXIS paradigm applied to autonomous software engineering. See [`perspectives/naming-rationale.md`](perspectives/naming-rationale.md) for the full origin story, why the project was renamed, and how far v1+v2 are from a complete RAXIS system. For a deliberate steel-man **case against** that approach—and a structured **defense**—see [`perspectives/case-against-raxis.md`](perspectives/case-against-raxis.md) and [`perspectives/raxis-defense.md`](perspectives/raxis-defense.md) (indexed from [`perspectives/README.md`](perspectives/README.md)).
+> **This repository is the v1 + v2 reference implementation of RAXIS for autonomous software engineering.** RAXIS itself is a paradigm — twelve structural invariants ([`specs/paradigm.md`](specs/paradigm.md)) any conformant implementation must satisfy. The Rust workspace here applies that paradigm to one domain (planner agents reading and writing code, integrating changes into a master git repository). Other reference implementations could exist for other domains — autonomous customer support, autonomous trading, autonomous robotics — sharing the same R-invariants but different domain-specific authority operations. See [`POSITIONING.md`](POSITIONING.md) for how RAXIS positions against existing categories (alignment, agent frameworks, sandbox runtimes, policy engines, AIOS, MCP) and [`specs/paradigm.md`](specs/paradigm.md) for the formal paradigm definition. For background on how this project arrived at the paradigm and how far the current implementation is from the full vision, see [`perspectives/naming-rationale.md`](perspectives/naming-rationale.md), and for a deliberate steel-man critique with structured defense see [`perspectives/case-against-raxis.md`](perspectives/case-against-raxis.md) and [`perspectives/raxis-defense.md`](perspectives/raxis-defense.md) (indexed from [`perspectives/README.md`](perspectives/README.md)).
+
+---
+
+## RAXIS as a Paradigm
+
+RAXIS is a paradigm for autonomous-system safety; this repository is one implementation of it. Treating the two layers separately is essential to understanding both what RAXIS *is* and what this codebase *does*.
+
+### The two layers
+
+| Layer | Definition | Source of truth |
+|---|---|---|
+| **The paradigm** | Twelve structural invariants any RAXIS implementation must satisfy. Domain-agnostic. Implementation-language-agnostic. Isolation-primitive-agnostic. | [`specs/paradigm.md`](specs/paradigm.md) |
+| **This reference implementation** | A Rust workspace realizing the paradigm for autonomous software engineering. Concrete tech choices: microVMs (Firecracker / Apple Virtualization.framework), Ed25519-signed TOML policy artifacts, hash-chained JSONL audit log (Merkle-tree in V3), git-shaped intent kinds (`IntegrationMerge`, `CompleteTask`, `SubmitReview`, …). | [`README.md`](README.md), [`specs/v1/`](specs/v1/), [`specs/v2/`](specs/v2/) |
+
+When prospects ask "is RAXIS [X]?", the answer depends on which layer they mean:
+
+- *"Is RAXIS Rust?"* — Paradigm: no. This implementation: yes.
+- *"Does RAXIS use git?"* — Paradigm: no. This implementation: yes (the domain is software engineering).
+- *"Does RAXIS run on Windows?"* — Paradigm: agnostic. This implementation: not yet (Linux + macOS only — see [`specs/v2/system-requirements.md`](specs/v2/system-requirements.md)).
+- *"Is RAXIS for coding agents?"* — Paradigm: applicable to any autonomous-action domain. This implementation: yes, coding is the domain.
+
+### The twelve paradigm invariants
+
+Every RAXIS implementation, in every domain, on any tech stack, satisfies these. Full statements with rationale and verification methods are in [`specs/paradigm.md`](specs/paradigm.md) §3.
+
+**Structural separation:**
+
+- **R-1 Domain Separation** — Intelligence and authority run in distinct execution domains; no shared mutable state.
+- **R-2 Mediated I/O** — All credential, network, storage, and peer-intelligence access mediated by authority through typed intents.
+
+**Authority model:**
+
+- **R-3 Signed Capability Declaration** — Every capability declared in a cryptographically signed policy artifact attributable to a human principal.
+- **R-4 Authority Derivation Hierarchy** — Sub-artifacts (plans, sub-policies, delegated sessions) may only narrow parent authority, never expand it.
+- **R-5 Bounded Capabilities** — Every granted capability carries explicit numerical bounds (count, rate, value, time).
+- **R-6 Fail-Closed Default** — Ambiguity, missing policy, evaluation failure, and system failure all resolve to deny.
+
+**Accountability:**
+
+- **R-7 Cryptographic Audit Chain** — Audit modifications detectable by an independent verifier holding only the log and public keys.
+- **R-8 Auditable Decisions** — Authority decisions reproducible from recorded inputs; ambient state recorded.
+- **R-9 Attributable Intent** — Every intent traces to a verified intelligence identity.
+- **R-10 Opaque Rejection** — Agent-facing rejections reveal no specific rule; internal policy structure is not leaked.
+
+**Coordination and recovery:**
+
+- **R-11 Mediated Coordination** — Multi-agent communication passes through authority subject to admission checks.
+- **R-12 Out-of-Band Escalation** — Authority widening requires human approval via a channel intelligence cannot reach.
+
+A system claiming to be RAXIS satisfies all twelve. Anything less is not RAXIS — it may be useful, well-engineered, even safer than alternatives, but the paradigm is the conjunction of all twelve invariants and none can be dropped without losing the property the paradigm provides.
+
+The reference implementation in this repository enforces each R-invariant through specific INV-* mechanisms; the mapping is in [`specs/paradigm.md`](specs/paradigm.md) §6.
+
+### What it means to be RAXIS-Verified
+
+To prevent "RAXIS-Verified" from becoming meaningless marketing, conformance has three tiers with progressively stronger evidentiary requirements ([`specs/paradigm.md`](specs/paradigm.md) §4 has the full contract).
+
+| Tier | Name | Evidence required | Verification |
+|---|---|---|---|
+| **Tier 1** | **RAXIS-Aligned** | Public conformance statement mapping each R-invariant to its enforcement mechanism, with architectural diagram of the intelligence/authority boundary | Self-attested |
+| **Tier 2** | **RAXIS-Tested** | Tier 1 + canonical RAXIS conformance test suite passes (positive and adversarial cases for every R-invariant) | Self-tested with open-source reproducible test suite |
+| **Tier 3** | **RAXIS-Verified** | Tier 2 + independent third-party audit by a qualified verifier; covers source-code audit of the authority layer, isolation soundness review, audit format conformance, credential-isolation pen-test, policy artifact format conformance; annual re-audit | Independent third-party audit |
+
+The unqualified term **"RAXIS-Verified"** refers to Tier 3 only. Lower tiers must be qualified ("RAXIS-Aligned" or "RAXIS-Tested").
+
+Qualified verifiers must satisfy independence (no financial relationship beyond audit fee), methodology transparency (published audit methodology open to community review), reproducibility (findings reproducible by a second independent verifier), conflict disclosure, and certification by the RAXIS specification body. This mirrors the model used by FIPS 140 cryptographic module validation labs and Common Criteria evaluation labs.
+
+**Status of this reference implementation:** Tier 1 — RAXIS-Aligned (architectural mechanisms for all twelve R-invariants are present and documented). Partial Tier 2 — extensive INV-* test coverage in this codebase, but the canonical paradigm conformance test suite is V3 GA scope. Tier 3 is not currently claimed and would require both the canonical conformance suite to be adopted and a qualified verifier engagement.
 
 ---
 
@@ -487,6 +555,13 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 
 ## Documentation Index
 
+### Paradigm and positioning
+
+| Document | Scope |
+|---|---|
+| [`specs/paradigm.md`](specs/paradigm.md) | **The RAXIS paradigm** — formal definition, twelve R-invariants, RAXIS-Verified conformance contract, mapping from paradigm invariants to this implementation's INV-* invariants, acknowledged paradigm limitations. The authoritative source for what RAXIS *is* |
+| [`POSITIONING.md`](POSITIONING.md) | **External positioning** — the one-line positioning, working taglines, why "Docker for agents" was rejected, where RAXIS sits in the stack, side-by-side comparison against alignment / agent frameworks / sandbox runtimes / policy engines / AIOS / MCP / coding-agent products / confidential computing, talking points and FAQ |
+
 ### Background
 
 | Document | Scope |
@@ -496,7 +571,7 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 | [`perspectives/README.md`](perspectives/README.md) | Index of perspective essays (origin, motivation, limits, pro/con) |
 | [`perspectives/case-against-raxis.md`](perspectives/case-against-raxis.md) | Steel-man critique: why constraining models this way may be the wrong trade |
 | [`perspectives/raxis-defense.md`](perspectives/raxis-defense.md) | Response: constraints on action, determinism, scaling, complements with better models |
-| [`perspectives/raxis-concept.md`](perspectives/raxis-concept.md) | What “RAXIS” claims and where this repo stops short |
+| [`perspectives/raxis-concept.md`](perspectives/raxis-concept.md) | What “RAXIS” claims and where this repo stops short — earlier conceptual analysis that [`specs/paradigm.md`](specs/paradigm.md) formalizes |
 | [`specs/design-decisions.md`](specs/design-decisions.md) | 20 design alternatives considered and rejected. Read before proposing a design change |
 
 ### Operator Guides
