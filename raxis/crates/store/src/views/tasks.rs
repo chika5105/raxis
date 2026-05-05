@@ -247,6 +247,58 @@ fn map_ready_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadyTaskRow> {
     })
 }
 
+/// Every task belonging to one initiative, newest-first by
+/// `admitted_at`. Used by `raxis inspect-initiative <init_id>` to
+/// render the per-initiative task table.
+///
+/// `limit` caps the result set so a malformed `initiative_id` (or a
+/// degenerate plan with thousands of tasks on a misbehaving
+/// installation) cannot make the CLI page through unbounded rows.
+/// The CLI surface defaults to 100; the v1 plan-size invariant is
+/// well below that.
+pub fn list_by_initiative(
+    conn: &RoConn,
+    initiative_id: &str,
+    limit: usize,
+) -> Result<Vec<TaskRow>, TaskViewError> {
+    let sql = format!(
+        "SELECT t.task_id, t.initiative_id, i.state, t.lane_id, t.state, \
+                t.block_reason, t.actor, t.policy_epoch, t.admitted_at, \
+                t.transitioned_at, t.session_id, t.evaluation_sha, \
+                t.base_sha, t.admission_reserved_units, t.actual_cost \
+         FROM {tasks} t \
+         JOIN {initiatives} i ON i.initiative_id = t.initiative_id \
+         WHERE t.initiative_id = ?1 \
+         ORDER BY t.admitted_at ASC, t.task_id ASC \
+         LIMIT ?2",
+        tasks = Table::Tasks.as_str(),
+        initiatives = Table::Initiatives.as_str(),
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt
+        .query_map(rusqlite::params![initiative_id, limit as i64], |r| {
+            Ok(TaskRow {
+                task_id:                  r.get(0)?,
+                initiative_id:            r.get(1)?,
+                initiative_state:         r.get(2)?,
+                lane_id:                  r.get(3)?,
+                state:                    r.get(4)?,
+                block_reason:             r.get(5)?,
+                actor:                    r.get(6)?,
+                policy_epoch:             r.get::<_, i64>(7)?.max(0) as u64,
+                admitted_at:              r.get::<_, i64>(8)?.max(0) as u64,
+                transitioned_at:          r.get::<_, i64>(9)?.max(0) as u64,
+                session_id:               r.get(10)?,
+                evaluation_sha:           r.get(11)?,
+                base_sha:                 r.get(12)?,
+                admission_reserved_units: r.get(13)?,
+                actual_cost:              r.get(14)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 // ────────────────────────────────────────────────────────────────────
 // DAG-edge views (cli-readonly.md §5.5.3, §5.5.6)
 // ────────────────────────────────────────────────────────────────────
@@ -474,6 +526,58 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].task_id, "t-4");
         assert_eq!(rows[0].state, "BlockedRecoveryPending");
+    }
+
+    /// `list_by_initiative` MUST return every task for the given
+    /// initiative, ordered oldest-first by `admitted_at`. Pin the
+    /// ordering: it's the contract `raxis inspect-initiative`
+    /// renders the per-initiative task table by, and an
+    /// `ORDER BY` flip would silently reorder operator-visible
+    /// output.
+    #[test]
+    fn list_by_initiative_returns_all_tasks_oldest_first() {
+        let (tmp, _) = fresh_store_with_seed_tasks();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_by_initiative(&conn, "init-1", 100).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.task_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["t-4", "t-3", "t-1", "t-2"],
+            "expected ascending admitted_at ordering: 10, 50, 100, 200",
+        );
+        assert!(
+            rows.iter().all(|r| r.initiative_id == "init-1"),
+            "every row MUST belong to the queried initiative",
+        );
+        assert!(
+            rows.iter().all(|r| r.initiative_state == "Executing"),
+            "denormalised initiative_state MUST come from the JOIN, not be left blank",
+        );
+    }
+
+    #[test]
+    fn list_by_initiative_returns_empty_for_unknown_initiative() {
+        let (tmp, _) = fresh_store_with_seed_tasks();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_by_initiative(&conn, "init-does-not-exist", 100).unwrap();
+        assert!(
+            rows.is_empty(),
+            "unknown initiative MUST return empty Vec, not error — the CLI surfaces 'no tasks' as the renderer's job",
+        );
+    }
+
+    /// Limit MUST cap the result set even when more rows exist —
+    /// pinned because the CLI defaults to 100 and a runaway plan
+    /// must not page through unbounded rows.
+    #[test]
+    fn list_by_initiative_respects_limit() {
+        let (tmp, _) = fresh_store_with_seed_tasks();
+        let conn = open_ro(tmp.path()).unwrap();
+        let only_two = list_by_initiative(&conn, "init-1", 2).unwrap();
+        assert_eq!(only_two.len(), 2);
+        // Oldest two: t-4 (admitted=10) and t-3 (admitted=50).
+        assert_eq!(only_two[0].task_id, "t-4");
+        assert_eq!(only_two[1].task_id, "t-3");
     }
 
     /// Seed: four tasks (t-1..t-4) all under init-1 with three edges:

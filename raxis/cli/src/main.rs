@@ -44,9 +44,9 @@ use errors::CliError;
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "genesis", "policy", "plan", "initiative", "operator", "task", "session",
     "delegation", "escalation", "epoch", "audit", "cert",
-    "status", "log", "verify-chain", "queue", "inspect", "sessions",
-    "escalations", "inbox", "doctor", "verifiers", "witnesses", "budget",
-    "explain", "top",
+    "status", "log", "verify-chain", "queue", "inspect", "inspect-initiative",
+    "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
+    "budget", "explain", "top",
 ];
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
@@ -279,6 +279,7 @@ fn run() -> Result<(), CliError> {
         "verify-chain" => commands::verify_chain::run(&flags, rest),
         "queue" => commands::queue::run(&flags, rest),
         "inspect" => commands::inspect::run(&flags, rest),
+        "inspect-initiative" => commands::inspect_initiative::run(&flags, rest),
         "sessions" => commands::sessions::run(&flags, rest),
         "escalations" => commands::escalations::run(&flags, rest),
         "inbox" => commands::inbox::run(&flags, rest),
@@ -459,6 +460,13 @@ READ-ONLY OBSERVATION:
         Forensic deep-dive into a single task: state, dependencies,
         witnesses. --reveal-paths shows path_allowlist + path_export_globs
         AND appends a PathReadAccessed audit event (cli-readonly.md §5.4.2).
+
+    inspect-initiative <initiative_id> [--json] [--with-tasks] [--task-limit N]
+        Forensic deep-dive into a single initiative: state, plan
+        signature header (signed_by + stored_at), quarantine status,
+        and the per-task table. signed_by / quarantined_by render
+        with operator display names per kernel-store.md §2.5.2.
+        plan_bytes is NEVER surfaced (cli-readonly.md §5.4.2).
 
     sessions [--limit N] [--json]
         List currently-active planner / gateway / verifier sessions

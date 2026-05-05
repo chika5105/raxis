@@ -494,6 +494,57 @@ fields are emitted as `{"redacted": true, "len": 12}`.
 `views::tasks::dependency_closure`, `views::witnesses::for_task`,
 `views::verifier_tokens::for_task`, optional `views::tasks::reveal_path_field`.
 
+### §5.5.6a — `raxis inspect-initiative <initiative_id>`
+
+**Purpose:** companion read surface to §5.5.6 — forensic deep-dive into a single initiative. Joins `initiatives` × `signed_plan_artifacts` (header only) × `initiative_quarantines` × `tasks`.
+
+**Flags:**
+- `--with-tasks` — expand the per-task table. Default emits the count + a `use --with-tasks to expand` hint, keeping the default render terse for initiatives with many tasks.
+- `--task-limit N` — cap the per-task table at `N` rows (default `100`). Exists so a degenerate plan with thousands of tasks cannot make the CLI page through unbounded rows.
+- `--json` — emit a single JSON object with the same fields.
+
+**Operator-bearing fields render with display names** per `kernel-store.md` §2.5.2 — `signed_by` and `quarantined_by` route through the canonical `cli/src/operator_display::format_operator_with_lookup`, so the rendered identity is consistent with `raxis log`, `raxis inbox`, and `raxis policy show --history`.
+
+**Output (human):**
+
+```
+Initiative 01J7…init-x
+  state:               Executing
+  plan_sha256:         abc123…
+  created_at:          1700000000
+  approved_at:         1700000010
+
+Plan signature:
+  signed_by:           Chika (abcd1234)
+  stored_at:           1700000005
+
+Quarantine:            NO
+
+Tasks (4): use --with-tasks to expand the per-task table
+```
+
+With `--with-tasks`:
+
+```
+…
+Tasks (4):
+  task_id                  state                    lane           transitioned_at  actor
+  task-alpha               Running                  default        1700000030       planner
+  task-beta                Admitted                 io-bound       1700000040       planner
+  task-gamma               Completed                compute-heavy  1700000050       planner
+  task-delta               BlockedRecoveryPending   default        1700000060       planner
+```
+
+When the initiative is quarantined, the `Quarantine: YES` block expands inline with `quarantined_at`, `quarantined_by` (with display name), `reason`, and `sweep_target` (when the row was inserted by an operator-fingerprint sweep — it carries the swept operator's resolved name too).
+
+**Output (--json):** single JSON object. `plan_signature` is `null` when no `signed_plan_artifacts` row exists; otherwise `{ signed_by: { fingerprint, fingerprint_prefix, display }, stored_at }`. `quarantine` is a discriminated record — `{ quarantined: false }` for the unquarantined case, otherwise `{ quarantined: true, quarantined_at, quarantined_by: { fingerprint, fingerprint_prefix, display }, reason, sweep_target }`. `tasks` is always an array (possibly empty).
+
+**Redaction contract.** `signed_plan_artifacts.plan_bytes` and `plan_sig` are **never** surfaced through this command — `kernel-store.md` §2.5.3 makes the sealed plan bytes audit-grade material, and §5.4.2 (this document) forbids leaking them through any non-`--reveal-*`-gated CLI surface. A future `--reveal-plan` flag (mirroring the `--reveal-paths` audit-gated reveal on §5.5.6) would emit a `PathReadAccessed`-shaped event; not in scope for v1.
+
+**Data sources:** `views::initiatives::by_id`, `views::signed_plan_artifacts::header_by_initiative`, `views::initiative_quarantines::get_by_initiative_id`, `views::tasks::list_by_initiative`. Operator name resolution: `cli::operator_display::OperatorNameLookup` (one snapshot of `operator_certificates` per invocation, served from memory for every render call).
+
+**Exit codes:** `0` on success; `1` on `INITIATIVE_NOT_FOUND` (the only command-specific error — the renderer cannot tell `--task-limit 0` from "no tasks", so an empty task list is rendered explicitly rather than treated as an error).
+
 ### §5.5.7 — `raxis escalations`
 
 **Purpose:** the operator's inbox.

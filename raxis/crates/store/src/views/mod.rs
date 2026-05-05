@@ -72,6 +72,7 @@ pub mod operator_certificates;
 pub mod plan_fields;
 pub mod policy_history;
 pub mod sessions;
+pub mod signed_plan_artifacts;
 pub mod tasks;
 pub mod verifier_tokens;
 pub mod witnesses;
@@ -87,6 +88,7 @@ pub use operator_certificates::{OperatorCertRow, OperatorCertViewError};
 pub use plan_fields::{reveal_for_task as reveal_plan_fields_for_task, PlanFieldsError, PlanPathFields};
 pub use policy_history::PolicyEpochRow;
 pub use sessions::{SessionRow, SessionStateCounts};
+pub use signed_plan_artifacts::{SignedPlanArtifactHeader, SignedPlanArtifactViewError};
 pub use tasks::{
     BlockingEdgeRow, DagEdgeRow, EdgeDirection, ReadyTaskRow, TaskRow, TaskStateCounts,
 };
