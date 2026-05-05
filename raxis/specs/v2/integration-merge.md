@@ -226,19 +226,40 @@ If `commit_sha` differs from `initiatives.current_sha` and is not a descendant o
 (Check 3), this is `FAIL_ANCESTRY_VIOLATION`.
 
 ### Check 8 — Database Commit (INV-STORE-02 Atomicity)
-If all checks pass, the Kernel executes in a single `BEGIN IMMEDIATE` transaction:
+
+Check 8 performs the merge as a three-phase operation: a SQLite "intent" commit, the git work, and a SQLite "applied" update. The full ordering, failure modes, and crash-recovery semantics are specified in §11 Transactional Boundary: SQLite ↔ Git. Check 8 itself implements only Phase 1 (SQLite intent); Phases 2 and 3 are dispatched immediately afterward by the merge handler.
+
+**Phase 1** (this Check): single `BEGIN IMMEDIATE` transaction.
+
 ```sql
-UPDATE initiatives SET current_sha = :commit_sha WHERE id = :initiative_id;
+-- Pre-flight: assert no in-flight git apply is pending for this initiative.
+-- If git_apply_pending = 1, recovery (§11.3) must run first; this Check returns
+-- FAIL_GIT_APPLY_PENDING to surface the inconsistency.
+SELECT git_apply_pending FROM initiatives WHERE id = :initiative_id;
+
+-- Commit the merge intent.
+UPDATE initiatives
+   SET current_sha = :commit_sha,
+       git_apply_pending = 1                   -- recovery driver flag (§11)
+ WHERE id = :initiative_id;
 INSERT INTO audit_events (kind, ...) VALUES ('IntegrationMergeCompleted', ...);
 UPDATE subtask_activations
    SET merge_included = 1
  WHERE task_id IN (:merged_task_ids...);
 ```
-The git fast-forward is executed immediately after the transaction commits:
+
+**Phases 2 and 3** (dispatched after Phase 1 commits, NOT in this Check): see §11.2.
+
 ```
+# Phase 2 (idempotent git work)
 git -C <master_repo> fetch <orchestrator_worktree> <commit_sha>
 git -C <master_repo> update-ref refs/heads/master <commit_sha>
+
+# Phase 3 (single SQLite UPDATE)
+UPDATE initiatives SET git_apply_pending = 0 WHERE id = :initiative_id;
 ```
+
+The handler dispatches Phase 2 + Phase 3 inline before returning the response to the Orchestrator. If the kernel crashes during Phase 2 or between Phase 2 and Phase 3, recovery on next startup re-runs the missing phases (§11.3).
 
 ---
 
@@ -480,7 +501,209 @@ continues normally. No duplicate `IntegrationMergeCompleted` event is emitted.
 
 ---
 
-## 11. Implementation Checklist
+## 11. Transactional Boundary: SQLite ↔ Git
+
+Check 8 has two distinct durable side effects:
+
+1. **SQLite commit** — `initiatives.current_sha` advances; `IntegrationMergeCompleted` audit event is recorded; `subtask_activations.merge_included` flags are set.
+2. **Git operation** — `git fetch` from the Orchestrator's worktree pulls the new commit objects into `master_repo`; `git update-ref refs/heads/master <commit_sha>` advances the local master ref.
+
+These two operations cannot be made atomic. SQLite has no awareness of git, and `gix` does not participate in SQLite's transaction. There is always a window between them. This section specifies the ordering, the failure modes, and the recovery semantics that restore consistency after a crash.
+
+The corresponding cross-reference from `key-revocation.md §7.5` Case C points here: when a session is revoked while an `IntegrationMerge` is in flight, the revocation interacts with whichever phase the merge has reached.
+
+### 11.1 Ordering: SQLite First, then Git, then SQLite Again
+
+The Kernel uses a three-phase model:
+
+| Phase | Operation | Durable | Idempotent |
+|---|---|---|---|
+| 1 | SQLite `BEGIN IMMEDIATE`: UPDATE `current_sha`, set `git_apply_pending = 1`, INSERT audit event, UPDATE `merge_included`. Single transaction, atomic on commit. | Yes | Yes (Check 7 idempotency guard) |
+| 2 | Git: `git fetch <orchestrator_worktree> <commit_sha>`; `git update-ref refs/heads/master <commit_sha>`. | Yes (writes to master_repo on disk) | Yes (re-fetching same SHA and re-updating ref to same SHA are no-ops) |
+| 3 | SQLite UPDATE: `git_apply_pending = 0`. Single statement, no transaction wrapper needed. | Yes | Yes |
+
+The `git_apply_pending` column (new in V2) is the recovery driver flag. It transitions `0 → 1` in Phase 1 and `1 → 0` in Phase 3. Between phases, it is `1` and signals to startup recovery that Phase 2 may be incomplete.
+
+```sql
+-- DDL addition to initiatives table
+ALTER TABLE initiatives ADD COLUMN git_apply_pending INTEGER NOT NULL DEFAULT 0;
+
+CREATE INDEX idx_initiatives_pending_git
+    ON initiatives(id)
+    WHERE git_apply_pending = 1;
+```
+
+The partial index makes startup recovery's scan O(in-flight merges), not O(all initiatives).
+
+### 11.2 Failure Modes
+
+There are five distinct failure points between Phase 1 begin and Phase 3 complete:
+
+| # | Failure point | Observable state after kernel crash | Recovery |
+|---|---|---|---|
+| 1 | Crash before Phase 1 commits | SQLite unchanged; git unchanged. No partial work. | None. The merge effectively never happened. Orchestrator may resubmit. |
+| 2 | Crash after Phase 1 commits, before Phase 2 starts | SQLite: `current_sha = commit_sha`, `git_apply_pending = 1`. Git: `refs/heads/master` still at base_sha. | §11.3 Case A — re-run Phase 2 from worktree. |
+| 3 | Phase 2 `git fetch` fails (e.g., orchestrator worktree disk error, SHA not present) | SQLite: as above. Git: `refs/heads/master` still at base_sha; objects not fetched. | §11.3 Case A — retry; if persistently fails, transition initiative to `Blocked`. |
+| 4 | Phase 2 `git update-ref` fails (rare; refs/heads/master became unwritable) | SQLite: as above. Git: objects fetched but ref not updated. | §11.3 Case A — re-run update-ref step; the fetch portion is a no-op. |
+| 5 | Crash after Phase 2 completes, before Phase 3 commits | SQLite: as above. Git: `refs/heads/master = commit_sha` (fully consistent on the git side). | §11.3 Case B — verify git state, then run Phase 3. |
+
+In all cases except #1, the `git_apply_pending = 1` flag in SQLite is the durable signal that drives recovery.
+
+### 11.3 Recovery on Startup
+
+After policy load and after `key-revocation.md §5.3` reconciliation, before accepting new IPC connections, `kernel/src/startup.rs` runs the merge-consistency recovery pass:
+
+```
+SELECT id, current_sha, master_repo_path
+  FROM initiatives
+ WHERE git_apply_pending = 1;
+
+for each row i:
+    db_sha = i.current_sha
+    git_sha = read refs/heads/master in i.master_repo_path
+
+    case A — db_sha != git_sha (Phase 2 partially or fully missed):
+        // Find the originating Orchestrator worktree from the audit event.
+        SELECT s.worktree_path
+          FROM audit_events e
+          JOIN sessions s ON s.id = e.session_id
+         WHERE e.kind = 'IntegrationMergeCompleted'
+           AND e.initiative_id = i.id
+           AND e.commit_sha = db_sha
+         ORDER BY e.seq DESC LIMIT 1;
+
+        if worktree_path exists on disk and contains db_sha as a reachable commit:
+            git_fetch(master_repo_path, worktree_path, db_sha)
+            git_update_ref(master_repo_path, "refs/heads/master", db_sha)
+            verify: read refs/heads/master == db_sha   // assertion
+            UPDATE initiatives SET git_apply_pending = 0 WHERE id = i.id
+            INSERT audit_events (kind = 'GitConsistencyRepaired', initiative_id = i.id,
+                                 db_sha, previous_git_sha = git_sha)
+        else:
+            // Orchestrator worktree was GC'd, deleted, or corrupted before
+            // git apply completed. We have no source for the commit objects.
+            INSERT audit_events (
+                kind = 'SecurityViolation',
+                violation_kind = 'GitStateInconsistent',
+                initiative_id = i.id,
+                detail = json!({
+                    "db_sha": db_sha,
+                    "git_sha": git_sha,
+                    "reason": "OrchestratorWorktreeMissing"
+                })
+            )
+            UPDATE initiatives SET state = 'Blocked',
+                                   failure_reason = 'GitInconsistent'
+                          WHERE id = i.id
+            // Do NOT clear git_apply_pending; the inconsistency persists in the
+            // record until operator intervenes.
+
+    case B — db_sha == git_sha (Phase 2 fully succeeded, only Phase 3 was missed):
+        UPDATE initiatives SET git_apply_pending = 0 WHERE id = i.id
+        INSERT audit_events (kind = 'GitConsistencyVerified',
+                             initiative_id = i.id, sha = db_sha)
+```
+
+Recovery is idempotent: running it twice on the same state produces the same final state. `git_fetch` and `git_update_ref` are individually idempotent (re-fetching a SHA already present is a no-op; updating a ref to the value it already has is a no-op). The SQLite UPDATEs are also idempotent.
+
+**Recovery runs before IPC accepts new connections.** This guarantees that no new IntegrationMerge for the same initiative can be admitted while a previous one is still pending git apply — the new admission would otherwise see SQLite's `current_sha` ahead of git's `refs/heads/master` and produce a Check 3 ancestry violation.
+
+### 11.4 Worktree Retention Requirement
+
+The recovery procedure depends on the originating Orchestrator's worktree being available on disk for the duration of `git_apply_pending = 1`. This adds a constraint on worktree garbage collection that is parallel to (but distinct from) the forensic retention rule in `key-revocation.md §7.4`:
+
+**INV-MERGE-WORKTREE-RETAIN.** A session's worktree must NOT be garbage-collected while any initiative referencing the session has `git_apply_pending = 1`.
+
+The worktree GC implementation must check this before removing a worktree:
+
+```sql
+SELECT 1
+  FROM initiatives i
+  JOIN sessions s ON s.initiative_id = i.id
+ WHERE s.worktree_path = ?
+   AND i.git_apply_pending = 1
+ LIMIT 1;
+```
+
+If any row returns, the worktree is held until `git_apply_pending` clears. In normal operation this is a sub-second window between Phase 2 and Phase 3; the GC essentially never blocks. The check exists to handle the crash-recovery window, where a worktree may need to be retained for as long as the kernel is down.
+
+This complements (does not replace) the forensic retention from `key-revocation.md §7.4`. Forensic retention applies to terminated sessions for 30 days; INV-MERGE-WORKTREE-RETAIN applies to any session whose worktree is needed for an in-flight merge regardless of session state.
+
+### 11.5 Cross-Cutting: Subsequent Operations Must Check `git_apply_pending`
+
+Operations that read git state must be aware that `current_sha` may be ahead of `refs/heads/master` during the Phase 1 → Phase 3 window:
+
+- **Subsequent IntegrationMerge admission** (Check 8 Phase 1 pre-flight): asserts `git_apply_pending = 0`. If 1, returns `FAIL_GIT_APPLY_PENDING` and the caller should retry shortly. This prevents wave 2 from beginning before wave 1's git is applied. In normal operation this assertion always passes (Phase 3 completes inline within the same handler call); it can fail only after a crash, in which case recovery on the next startup clears the flag.
+- **Push to remote** (§14 Push Approval Gate): waits for `git_apply_pending = 0` before reading `refs/heads/master` and pushing. A push during the pending window would push the OLD sha, which is wrong. The push handler polls the flag with a short timeout (default 5s) before either pushing or returning a transient error.
+- **Audit replay tooling**: when a tool reconstructs git state at a historical timestamp, it should consult `git_apply_pending` at that timestamp. If 1, the tool reports both `current_sha` (kernel-authoritative) and `refs/heads/master` at that moment, and explicitly notes the pending git apply.
+
+### 11.6 Why Not Reverse Ordering (Git First, SQLite Second)
+
+Considered: do `git fetch` + `git update-ref` first, then commit SQLite. Rejected:
+
+- **No durable marker for recovery.** If git completes but the kernel crashes before SQLite commits, there is no kernel-side record that the merge happened. Recovery has nothing to drive from. Detection would require scanning `master_repo`'s reflog and trying to reconstruct intent, which is fragile and breaks the "audit log is the source of truth" invariant.
+- **Audit event ordering inversion.** The `IntegrationMergeCompleted` audit event records that the merge was admitted. If git happens first and audit is written later, an external observer monitoring git could see the new commit before the audit log says it was admitted — a transient inversion.
+- **Master ref poisoning on rejection.** If SQLite commit fails for any reason (transient I/O error, foreign-key violation surfaced late, ...), the git ref is already advanced and cannot easily be retracted. Rolling back a git ref requires writing the old SHA, which is itself a state change that would need its own audit record.
+- **Idempotency surface.** Putting the non-transactional side AFTER the transactional one means the only thing that needs idempotency-on-recovery is the git side, which is naturally idempotent. The reverse forces SQLite to be re-runnable, which it is not designed to be (no `INSERT OR IGNORE` for audit events that should be append-once).
+
+### 11.7 Why Not Single-Phase (No `git_apply_pending` Flag)
+
+Considered: just commit SQLite, then run git, with no marker. Recovery scans for `current_sha != refs/heads/master` mismatches and replays. Rejected:
+
+- **Mismatch is ambiguous.** A mismatch could mean "Phase 2 didn't complete" (recoverable) or "git was tampered with externally" (security concern, not recoverable). Without a marker explicitly saying "we expected to apply and didn't," recovery cannot distinguish.
+- **No way to enforce worktree retention.** Worktree GC needs to know whether a worktree is still required for an in-flight git apply. Without `git_apply_pending`, the GC has to make a conservative assumption (never GC, or always GC and risk losing recovery objects). Neither is acceptable.
+- **Subsequent-operation guard becomes guessing.** Phase 1 pre-flight (§11.5) needs to know whether the previous merge's git is applied. Without an explicit flag, it would have to compare `current_sha` against `refs/heads/master` on every IntegrationMerge admission, which requires a git read inside an SQLite transaction (cross-store I/O during a `BEGIN IMMEDIATE` lock — a concurrency hazard).
+
+The `git_apply_pending` flag costs 1 byte per initiative row and resolves all three problems.
+
+### 11.8 INV-MERGE-CONSISTENCY
+
+For every initiative, exactly one of the following holds at any moment:
+
+(a) **Consistent.** `initiatives.current_sha = refs/heads/master` AND `git_apply_pending = 0`.
+
+(b) **Recoverable.** `initiatives.git_apply_pending = 1` AND there exists an `IntegrationMergeCompleted` audit event with `commit_sha = initiatives.current_sha` AND the Orchestrator worktree referenced by that event still exists on disk with `commit_sha` reachable.
+
+(c) **Inconsistent (security violation).** Neither (a) nor (b). The kernel emits `SecurityViolation { kind: GitStateInconsistent }` and transitions the initiative to `Blocked`.
+
+Where it is enforced:
+
+- Check 8 Phase 1 pre-flight (§4 Check 8) asserts the previous merge satisfied (a) before beginning a new merge.
+- Startup recovery (§11.3) detects (b) and either restores (a) by re-running Phase 2/3 or detects (c) and halts.
+- Worktree GC (§11.4 INV-MERGE-WORKTREE-RETAIN) preserves the precondition for (b).
+
+The invariant pairs with INV-PUSH-01 (kernel-push-protocol.md §12) and INV-KEY-08 (key-revocation.md §10) to give the kernel a consistent crash-recovery story across all three storage layers (SQLite, git, and KernelPush queue).
+
+### 11.9 Audit Events Added
+
+```rust
+AuditEventKind::GitConsistencyRepaired {
+    initiative_id:      Uuid,
+    db_sha:             String,    // the SHA SQLite already committed to
+    previous_git_sha:   String,    // what refs/heads/master was at, before recovery
+    recovered_at_startup_run: Uuid, // links to StartupReconciliationCompleted
+}
+
+AuditEventKind::GitConsistencyVerified {
+    initiative_id:      Uuid,
+    sha:                String,    // current_sha == refs/heads/master at recovery
+    recovered_at_startup_run: Uuid,
+}
+
+// Existing AuditEventKind::SecurityViolation gets a new sub-kind:
+SecurityViolationKind::GitStateInconsistent {
+    initiative_id:      Uuid,
+    db_sha:             String,
+    git_sha:            String,
+    reason:             String,    // e.g., "OrchestratorWorktreeMissing"
+}
+```
+
+These three events are the only places where the SQLite ↔ git boundary surfaces in the audit log. Their presence indicates a crash recovery occurred (which is operationally interesting but not necessarily a security incident); GitStateInconsistent specifically indicates an unrecoverable inconsistency requiring operator action.
+
+---
+
+## 12. Implementation Checklist
 
 - [ ] Add `merged_task_ids: Vec<TaskId>` field to `IntegrationMerge` struct in
       `crates/types/src/operator_wire.rs`
@@ -507,9 +730,34 @@ continues normally. No duplicate `IntegrationMergeCompleted` event is emitted.
       - Crash recovery (double-submission idempotency)
       - Partial wave (failed sub-task, partial IntegrationMerge)
 
+### Transactional Boundary (§11)
+
+- [ ] Add `git_apply_pending INTEGER NOT NULL DEFAULT 0` column to `initiatives` (DDL migration)
+- [ ] Add partial index `idx_initiatives_pending_git ON initiatives(id) WHERE git_apply_pending = 1`
+- [ ] Update `handle_integration_merge` to set `git_apply_pending = 1` in Phase 1 SQLite transaction
+- [ ] Update `handle_integration_merge` to dispatch Phase 2 (git fetch + update-ref) inline after Phase 1 commit
+- [ ] Update `handle_integration_merge` to dispatch Phase 3 (`UPDATE git_apply_pending = 0`) inline after Phase 2 success
+- [ ] Add Phase 1 pre-flight assertion: `SELECT git_apply_pending FROM initiatives WHERE id = ?`; if 1, return `FAIL_GIT_APPLY_PENDING`
+- [ ] Implement startup recovery in `kernel/src/startup.rs` per §11.3 (Cases A and B)
+- [ ] Add `GitConsistencyRepaired { initiative_id, db_sha, previous_git_sha, recovered_at_startup_run }` audit event variant
+- [ ] Add `GitConsistencyVerified { initiative_id, sha, recovered_at_startup_run }` audit event variant
+- [ ] Add `SecurityViolationKind::GitStateInconsistent { initiative_id, db_sha, git_sha, reason }` variant
+- [ ] Add `FAIL_GIT_APPLY_PENDING` to `KernelError` enum
+- [ ] Update worktree GC to enforce INV-MERGE-WORKTREE-RETAIN (§11.4) — block GC of any worktree referenced by an initiative with `git_apply_pending = 1`
+- [ ] Update push handler (§14) to wait for `git_apply_pending = 0` before reading `refs/heads/master` (default 5s poll timeout, return transient error on timeout)
+- [ ] Tests:
+      - Crash between Phase 1 and Phase 2: SIGKILL kernel after Phase 1 commit; restart; verify §11.3 Case A re-runs Phase 2; final state matches no-crash baseline.
+      - Phase 2 git fetch failure: stub `gix::fetch` to fail once; verify error surfaced to Orchestrator; on retry, Phase 2 succeeds.
+      - Crash between Phase 2 and Phase 3: SIGKILL after `update-ref` but before SQLite Phase 3 UPDATE; restart; verify §11.3 Case B clears flag; no `GitConsistencyRepaired` (it's a Verified, not Repaired).
+      - Worktree GC blocks during pending: simulate long Phase 2 by stalling `gix::fetch`; concurrently invoke worktree GC; verify GC skips the worktree until flag clears.
+      - GitStateInconsistent (case C of §11.3): manually delete the Orchestrator's worktree before restart; verify SecurityViolation emitted, initiative transitions to Blocked, kernel does NOT clear `git_apply_pending`.
+      - Subsequent IntegrationMerge during pending: hold Phase 2 stalled; submit a second IntegrationMerge from the same Orchestrator; verify `FAIL_GIT_APPLY_PENDING`; release Phase 2; verify second merge succeeds on retry.
+      - Push during pending: hold Phase 2 stalled; trigger push (auto-push initiative); verify push handler waits for flag; release Phase 2; verify push proceeds with the correct SHA.
+      - INV-MERGE-CONSISTENCY assertion at startup: corrupt `refs/heads/master` to point at base_sha while leaving `current_sha = commit_sha` and `git_apply_pending = 1`; restart; verify §11.3 Case A re-applies and the invariant is restored to (a).
+
 ---
 
-## 12. Sensitive Path Operator Approval
+## 13. Sensitive Path Operator Approval
 
 ### The Problem
 
@@ -669,7 +917,7 @@ the compliance guarantee. Protection must be at the policy level to be enforceab
 all initiatives.
 
 *Note: Plan-level gates that are **additive** — additional paths required approval beyond
-what the policy bundle already requires — are permitted. See §12.b.*
+what the policy bundle already requires — are permitted. See §13.b.*
 
 **Alt C — Use the existing Reviewer mechanism — add a human Reviewer session.**
 Rejected. Human Reviewers do not exist in the RAXIS session model. Reviewers are LLM
@@ -706,7 +954,7 @@ re-attempt with approval) is the correct flow.
 - [ ] Tests: protected path fires + approved, protected path fires + rejected,
       SHA mismatch rejection, policy bundle with no protected paths (no-op),
       simultaneous MergeConflict + ProtectedPathMerge escalations
-### §12.b — Plan-Level Integration Merge Gates (Additive-Only)
+### §13.b — Plan-Level Integration Merge Gates (Additive-Only)
 
 Operators may declare additional protected path gates in `plan.toml` that are specific to
 a single initiative. These are **additive only** — they can add paths that require approval
@@ -760,7 +1008,7 @@ which lists all paths from both sources that triggered an approval for this merg
 
 ---
 
-## 13. Git Push Approval Gate
+## 14. Git Push Approval Gate
 
 ### The Problem
 
