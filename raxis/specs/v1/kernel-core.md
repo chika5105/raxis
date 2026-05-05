@@ -1894,7 +1894,171 @@ Re-exports the public initiative API: `create`, `approve_plan`, `reject_plan`, `
 - **INV-INIT-08:** Gate progress is **always recoverable** from `witness_records` (Table 13) plus the policy artifact, without any in-memory state surviving a crash. The verifier subsystem holds two pieces of in-memory state — the **pending spawn queue** (`gates::verifier_runner::spawn_verifier` step 1) and the **running-verifier counter** — and both are explicitly best-effort: lost on crash, rebuilt as the empty queue + zero counter at startup. The persistent state of "which gates are satisfied for which `(task_id, evaluation_sha)`" lives in `witness_records`; the persistent state of "which gates are required" is computable from `policy_lookup::required_claims` against `task.touched_paths` at any time. After a crash, `recovery::reconcile_tasks` sweeps every non-terminal task to `BlockedRecoveryPending`, `expire_orphan_verifier_tokens` invalidates every unconsumed verifier token whose owning task is now `BlockedRecoveryPending` (defence in depth against stray subprocesses), and operator `task resume` + planner's first post-resume `IntentRequest` re-runs `evaluate_claims` which reads `witness_records` and re-spawns only the still-missing gates' verifiers. This invariant is what makes the "pending spawn queue is in-memory" decision safe: no kernel decision depends on the queue being durable, because every task whose progress depended on it is rebuilt deterministically from durable state on the recovery path.
 - **INV-INIT-09:** v1 has **no automatic task-level or initiative-level wall-clock deadline.** Neither `tasks` (`kernel-store.md` §2.5.1 Table 5) nor `initiatives` (Table 2) carries a `deadline_at` column; no kernel sweep periodically scans non-terminal tasks for elapsed wall-clock time and forces an `Aborted` transition; no `BlockReason::DeadlineExpired` variant exists in §4.4; no `FAIL_TASK_DEADLINE_EXPIRED` planner error code exists in `peripherals.md` §3.1. Task lifetime in v1 is bounded by the seven mechanisms enumerated in §4.5 "Task lifetime bounds (no v1 task-level deadline)" — most importantly lane budget exhaustion (`max_cost_per_epoch` → `FAIL_BUDGET_EXCEEDED`), verifier subprocess rlimits (per-spawn, not per-task), and operator levers (`task abort`, `initiative abort`, `session revoke`). The planner can cooperatively self-deadline by submitting `IntentKind::ReportFailure` (→ `Running → Failed`); this is the v1 equivalent of a deadline. Adding deadline columns, a sweep, the `DeadlineExpired` block reason, the `TaskDeadlineExpired` audit event, and the `FAIL_TASK_DEADLINE_EXPIRED` planner code is a v2 feature documented in §4.5 "v2 plan" — any code or auxiliary doc that asserts a v1 task has a wall-clock deadline is a spec violation.
 - **INV-INIT-10 (quarantine — step 10):** A row in `initiative_quarantines` (`kernel-store.md` §2.5.10 Table 21) freezes its initiative against new `IntentRequest`s. The intent handler's `run_phase_a` runs the quarantine guard at Step 3A — after task lookup (so `task.initiative_id` is known) and after the task-state gate (so an already-Aborted task surfaces the more specific `FAIL_TASK_NOT_RUNNING`). All four `IntentKind` variants (`SingleCommit`, `IntegrationMerge`, `ReportFailure`, `CompleteTask`) hit this gate; quarantine is total. In-flight tasks are NOT aborted — quarantine is a curtain, not a guillotine; use `initiative abort` for the destructive path. Read failures during the quarantine lookup fail closed (the alternative is letting work through past a possibly-quarantined initiative). Quarantine cannot be lifted in v1; an operator who quarantines in error must rebuild the work in a fresh initiative. The companion sweep `OperatorRequest::QuarantinePlansBy { target_fingerprint, reason }` joins on `signed_plan_artifacts.signed_by_fingerprint` (also added in migration 3) to quarantine every initiative an operator approved — used as the immediate containment primitive when an operator key is suspected compromised.
-- **INV-INIT-11 (operator-cert four-zone gate — step 6):** Every operator op is gated by `kernel/authority/cert_check::CertEnforcer` against the cert's four-zone status (`raxis_crypto::cert::cert_status`). `Active` and `AlwaysActiveEmergency` allow all `permitted_ops`. `Expiring` allows all ops but emits `OperatorCertExpiringSoon` (deduplicated). `Grace` allows only recovery ops (`AbortTask`, `AbortInitiative`, `RevokeSession`, `DenyEscalation`, `RotateEpoch`); other ops are denied with `OperatorCertExpiredOpDenied`. `Expired` and `NotYetValid` deny all ops. `EmergencyRecovery` certs are structurally pinned to `permitted_ops = ["RotateEpoch"]` and `not_after = 0` (sentinel for "never expires"); any operation they perform also emits `EmergencyOperatorUsed`. Operators on the legacy raw-pubkey flow (no cert installed) bypass this gate entirely — but the policy load emits `OperatorCertLegacyEntryDetected` so the absence is loud in the audit chain. Misconfigured certs are loadable only via `--force-misconfig` at policy-sign time, which records `OperatorCertMisconfigBypassed`; the bypass NEVER applies to pubkey/fingerprint or self-signature mismatches.
+- **INV-INIT-11 (operator-cert four-zone gate — step 6):** Every operator op is gated by `kernel/authority/cert_check::CertEnforcer` against the cert's four-zone status (`raxis_crypto::cert::cert_status`). `Active` and `AlwaysActiveEmergency` allow all `permitted_ops`. `Expiring` allows all ops but emits `OperatorCertExpiringSoon` (deduplicated). `Grace` allows only recovery ops (`AbortTask`, `AbortInitiative`, `RevokeSession`, `DenyEscalation`, `RotateEpoch`); other ops are denied with `OperatorCertExpiredOpDenied`. `Expired` and `NotYetValid` deny all ops. `EmergencyRecovery` certs are structurally pinned to `permitted_ops = ["RotateEpoch"]` and `not_after = 0` (sentinel for "never expires"); any operation they perform also emits `EmergencyOperatorUsed`. Misconfigured certs are loadable only via `--force-misconfig` at policy-sign time, which records `OperatorCertMisconfigBypassed`; the bypass NEVER applies to pubkey/fingerprint or self-signature mismatches. **Cert is mandatory (INV-CERT-01)** — there is no legacy raw-pubkey "no cert installed" branch that bypasses this gate. Loading a `policy.toml` whose `[[operators.entries]]` is missing the `[operators.entries.cert]` sub-table fails serde deserialisation with `missing field "cert"` before the bundle ever reaches `validate_operator_certs`. Existing cert-bearing entries that fail self-sig verification are **always** rejected (no `--force-misconfig` escape hatch).
+
+#### Cross-cutting cert invariants (INV-CERT-01..05)
+
+The cert-mandatory release tightened operator-identity to a single
+canonical shape: every operator entry carries a self-signed cert that
+the kernel re-verifies on every policy load and re-evaluates against
+wall-clock on every operator op. The five INV-CERT-* invariants
+below cut across `raxis-policy`, `raxis-store`, `raxis-kernel`, and
+`raxis-cli`; they are restated in their respective module specs but
+the canonical statement and its justification live here.
+
+- **INV-CERT-01 (cert-mandatory):** Every `[[operators.entries]]`
+  block in any policy bundle the kernel will accept carries a
+  self-signed `[operators.entries.cert]` sub-table. There is no
+  legacy bare-pubkey path. **Enforced at:** `raxis_policy::loader`
+  (serde rejects `missing field "cert"` before the bundle is
+  constructed); `raxis_genesis_tools::render_genesis_policy_toml`
+  (the canonical emitter unconditionally writes the cert sub-table —
+  the cert-less branch was deleted); `raxis_kernel::bootstrap`
+  (the kernel-side `RAXIS_BOOTSTRAP=1` path uses the same emitter so
+  it cannot diverge); `raxis_store::operator_certificates::repopulate`
+  (one row per operator entry on every successful epoch advance);
+  `raxis_cli::commands::doctor::check_operator_certs` (an empty
+  `operator_certificates` table after a successful advance is a
+  structural impossibility and surfaces as `[FAIL]`).
+  **Justification:** Operator authority is the kernel's single
+  authoritative root-of-trust. A cert-less entry would have no
+  recoverable display name (audit chain can't say *who* approved a
+  plan), no expiry (a leaked key never auto-fails-closed), and no
+  declared `permitted_ops` (ambient authority defeats the
+  least-privilege model behind the four-zone gate). Making the
+  cert mandatory at the loader level pushes detection of the
+  problem to the earliest possible moment (loader, not first
+  operator op) and makes the absence unforgeable.
+  **Scenario:** an operator hand-edits `policy.toml` to remove the
+  cert sub-table and re-signs with their key. `policy_load` fails
+  with `serde: missing field "cert" for operators.entries[0]`; the
+  kernel refuses to advance the epoch; `raxis doctor` (which reads
+  `operator_certificates` directly via WAL) prints `[FAIL]
+  cert.list: no operator certificates installed (INV-CERT-01)` and
+  exits non-zero.
+
+- **INV-CERT-02 (self-signature unforgeable):** Every cert the
+  kernel accepts has been verified to be self-signed by the
+  Ed25519 key whose public hex equals `cert.pubkey_hex`. **Enforced
+  at:** `raxis_crypto::cert::verify_cert_self_signature`
+  (cryptographic check); `raxis_policy::bundle::validate_operator_certs`
+  (called on every policy load — there is no `--force-misconfig`
+  bypass for this check); `raxis_cli::commands::cert::run` (every
+  install path verifies before splicing); `raxis_cli::commands::genesis::run`
+  (both `--operator-cert` and `--operator-key` paths verify before
+  embedding). **Justification:** A cert is the operator's claim
+  about their own pubkey, validity window, and permitted ops; if
+  the self-signature could be forged or skipped, an attacker who
+  controlled the policy file could reissue an arbitrary cert
+  bearing the victim operator's pubkey and grant themselves any
+  `permitted_ops` they liked. Pinning self-signature verification
+  as the **only** unbypassable cert invariant (structural failures
+  are bypassable via `--force-misconfig`) keeps the trust root
+  cryptographically anchored even when operators need to ship
+  partially-misconfigured certs in emergencies.
+  **Scenario:** an attacker with write access to `policy.toml`
+  copies a victim operator's cert, changes `permitted_ops` to add
+  `RotateEpoch`, and re-bumps the file. `validate_operator_certs`
+  recomputes the canonical cert bytes, runs `Verify` against the
+  edited cert's `self_sig_hex` field, and rejects the load with
+  `OperatorCertSelfSigInvalid`. No `--force-misconfig` flag relaxes
+  this check. The attacker would need the operator's private key,
+  at which point they already have everything.
+
+- **INV-CERT-03 (private key never persisted):** No CLI command
+  ever writes operator private-key bytes to `<data_dir>` or any
+  other persistent location. Private keys are read into process
+  memory exclusively for the in-process `sign_cert` /
+  `sign_policy` calls, then dropped. **Enforced at:**
+  `raxis_cli::commands::genesis::run` (the `--operator-key` path
+  loads the key with `signing::load_operator_key`, uses it for
+  `sign_cert`, and never serialises the secret bytes; a CLI test
+  asserts this with a recursive seed-leakage scan over `<data_dir>`
+  after `genesis` completes); `raxis_cli::commands::cert::run`
+  (cert install paths only consume `*.cert.toml`, never private
+  PEM); `raxis_cli::commands::policy::sign` (private key is the
+  sole input that does not get written back to disk). **The
+  kernel itself never sees the operator private key on any path**
+  — the operator key lives only on the operator's machine (or
+  whatever air-gapped device minted the cert).
+  **Justification:** The operator key is the apex of the trust
+  chain — losing it means losing the ability to sign new policy
+  bundles and (worse) means an attacker who exfiltrates the data
+  directory could mint policy bundles indistinguishable from the
+  legitimate operator. Refusing to write private bytes anywhere
+  the kernel manages keeps the blast radius of a `<data_dir>`
+  compromise bounded to "attacker can read public keys, certs,
+  and audit log" — none of which lets them spoof an operator.
+  **Scenario:** a misconfigured backup tool snapshots `<data_dir>`
+  to an off-host destination. Even if the snapshot leaks publicly,
+  the operator's private key is not in it; the attacker cannot
+  sign a fresh policy bundle, cannot mint an `OperatorCert` bound
+  to the operator's pubkey (cert self-signature would not verify
+  against any key the attacker controls), and the kernel will
+  refuse any policy load whose `operator_signature_hex` was not
+  produced by the legitimate operator key.
+
+- **INV-CERT-04 (rotation pubkey continuity):** When `raxis cert
+  install --replace-for <fp> --new-cert <path>` rotates a cert,
+  the new cert's `pubkey_hex` MUST equal the old cert's
+  `pubkey_hex`. A pubkey change is a different operator entirely
+  and goes through `policy sign` + `epoch advance` instead.
+  **Enforced at:** `raxis_cli::commands::cert::run` (the rotation
+  path loads the existing cert by `--replace-for` fingerprint,
+  compares `pubkey_hex` to the new cert, and aborts with a hard
+  error on mismatch — there is no `--force-misconfig` bypass for
+  this check); audited via
+  `AuditEventKind::OperatorCertInstalled.previous_fingerprint =
+  Some(<old fp>)`. **Justification:** A "cert rotation" semantically
+  means *the same operator extending their identity* — new
+  validity window, possibly trimmed `permitted_ops`, possibly a
+  new display name. Allowing the pubkey to change under a
+  rotation would let an attacker (or careless operator) silently
+  swap one operator for another while the audit chain reads
+  "rotation, not a new operator," obscuring the change of
+  authority. Pinning pubkey continuity makes the audit chain
+  unambiguous: if the audit log shows
+  `OperatorCertInstalled.previous_fingerprint = Some(X)`, the
+  reader can rely on the new and old certs sharing a key.
+  **Scenario:** an operator wants to "rotate" Alice's cert to
+  Bob's key. `cert install --replace-for <alice-fp> --new-cert
+  bob.cert.toml` rejects with `OperatorCertPubkeyMismatch`
+  before splicing; the operator must instead remove Alice's
+  entry, add Bob's entry, re-sign the policy, and advance the
+  epoch — all of which produce loud audit events
+  (`OperatorCertInstalled` for Bob with no `previous_fingerprint`,
+  not a rotation rollup).
+
+- **INV-CERT-05 (audit chain captures every cert event):** Every
+  state transition involving an operator cert produces an audit
+  event on the chain — install, rotation, structural bypass,
+  expiry-window crossing, expired-op denial, emergency use.
+  **Enforced at:** `raxis_kernel::ipc::operator::emit_cert_chain_mirror`
+  (called from epoch-advance dispatch; emits
+  `OperatorCertInstalled` per cert with `previous_fingerprint`
+  populated when the prior bundle held a cert for the same
+  pubkey, plus `OperatorCertMisconfigBypassed` per
+  `force_misconfig_bypass = true` entry); `CertEnforcer` (emits
+  `OperatorCertExpiringSoon` deduplicated per `(fp, day)`,
+  `OperatorCertExpiredOpDenied` per denied op,
+  `EmergencyOperatorUsed` per emergency-cert op). **Justification:**
+  The audit chain is the kernel's single source of forensic
+  truth; if a cert event went unrecorded, an investigator could
+  not reconstruct who held authority at any historical moment.
+  Emitting per-event (rather than per-policy-load) keeps the
+  granularity high enough to answer "did Alice's cert grant
+  permission to *this specific approval*?" rather than just "was
+  Alice's cert installed at any point?". The
+  `previous_fingerprint` field on `OperatorCertInstalled` makes
+  rotations unambiguously traceable end-to-end.
+  **Scenario:** an investigator pulls the audit chain six months
+  later and asks "who was the active Alice cert at timestamp T?"
+  They `grep OperatorCertInstalled` for Alice's pubkey, sort by
+  audit chain index, walk the `previous_fingerprint` chain
+  forward to T, and arrive at exactly one cert fingerprint — the
+  one in force at that moment. No combination of (no-op
+  rotations, structural bypass, expiry crossings, emergency
+  uses) is invisible to this walk.
 
 ---
 

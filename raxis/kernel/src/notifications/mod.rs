@@ -308,12 +308,17 @@ mod tests {
         extra_channels: Vec<NotificationChannel>,
         extra_routes:   Vec<(String, Vec<String>)>,
     ) -> PolicyBundle {
+        // See the explanation on `notifications::sink::tests::bundle`
+        // for why the stub cert is the right helper here: this fixture
+        // only needs an OperatorEntry to populate the bundle; it does
+        // NOT exercise cert validation.
+        let pubkey = "0".repeat(64);
         let mut b = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: "fp".into(),
             display_name:       "fp".into(),
-            pubkey_hex:         "0".repeat(64),
+            pubkey_hex:         pubkey.clone(),
             permitted_ops:      vec![],
-            cert:                  None,
+            cert:                  raxis_test_support::stub_cert_for_pubkey(pubkey),
             force_misconfig_bypass: false,
         }]);
         // Mutate the test bundle in-place via a private setter by

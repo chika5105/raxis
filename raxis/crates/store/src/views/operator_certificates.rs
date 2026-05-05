@@ -35,11 +35,12 @@
 //! (3) leaves the kernel running with stale certs at boot — the
 //! transaction boundary closes that window.
 //!
-//! Cert-less ("legacy") operator entries are NOT inserted into this
-//! table. The kernel's `cert_check` runtime path interprets "no row
-//! for this fingerprint" as "this operator is on the legacy flow"
-//! and skips cert enforcement (subject to the
-//! `OperatorCertLegacyEntryDetected` audit emitted at boot).
+//! Cert is mandatory (INV-CERT-01); every `OperatorEntry` carries a
+//! fully self-signed `OperatorCert` and produces exactly one row in
+//! this table per epoch. There is no cert-less / "legacy" path — the
+//! kernel boot fails closed on an empty table (see `raxis doctor`'s
+//! cert-empty check), and policy.toml is rejected at deserialise
+//! time when the `[operators.entries.cert]` sub-table is missing.
 
 use rusqlite::{params, Connection};
 use thiserror::Error;
@@ -125,10 +126,9 @@ pub enum OperatorCertViewError {
 /// **Behaviour:**
 ///   - Truncates the table (`DELETE FROM operator_certificates`); the
 ///     view is rebuilt-from-scratch on every epoch advance.
-///   - For every operator entry whose `cert` is `Some`, inserts one
-///     row scoped to `epoch_id` and `installed_at_unix_secs`.
-///   - Skips entries with `cert = None` — those are the legacy flow
-///     (audited separately as `OperatorCertLegacyEntryDetected`).
+///   - For every operator entry, inserts one row scoped to `epoch_id`
+///     and `installed_at_unix_secs`. Cert is mandatory (INV-CERT-01)
+///     so there is no skip-cert-less branch.
 ///
 /// Returns the number of rows inserted, so the caller can include
 /// it in the `PolicyEpochAdvanced` audit metadata.
@@ -161,7 +161,7 @@ pub fn repopulate(
 
     let mut inserted = 0usize;
     for entry in bundle.operators() {
-        let Some(cert) = &entry.cert else { continue; };
+        let cert = &entry.cert;
         let permitted_ops_json = serde_json::to_string(&cert.permitted_ops)
             // `permitted_ops` is `Vec<String>` — serde_json cannot fail
             // on this shape; we still propagate to avoid panic.
@@ -406,7 +406,7 @@ mod tests {
         c
     }
 
-    fn entry(cert: Option<OperatorCert>, force_bypass: bool) -> OperatorEntry {
+    fn entry(cert: OperatorCert, force_bypass: bool) -> OperatorEntry {
         OperatorEntry {
             pubkey_fingerprint: fp(),
             display_name:       "Alice".to_owned(),
@@ -443,10 +443,10 @@ mod tests {
     // ── Repopulate happy path ───────────────────────────────────────
 
     #[test]
-    fn repopulate_inserts_one_row_per_cert_bound_entry() {
+    fn repopulate_inserts_one_row_per_entry() {
         let tmp = fresh_store_with_seed_epoch();
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
-        let bundle = bundle_with_entries(vec![entry(Some(signed_standard(vec!["AbortTask"])), false)]);
+        let bundle = bundle_with_entries(vec![entry(signed_standard(vec!["AbortTask"]), false)]);
 
         let n = {
             let guard = store.lock_sync();
@@ -466,25 +466,6 @@ mod tests {
     }
 
     #[test]
-    fn repopulate_skips_legacy_entries() {
-        let tmp = fresh_store_with_seed_epoch();
-        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
-        let bundle = bundle_with_entries(vec![
-            entry(None, false),
-            entry(Some(signed_standard(vec!["AbortTask"])), false),
-        ]);
-
-        let n = {
-            let guard = store.lock_sync();
-            repopulate(&guard, &bundle, 1, 0).unwrap()
-        };
-        assert_eq!(n, 1, "one cert-bound entry → one row; legacy entry skipped");
-
-        let conn = open_ro(tmp.path()).unwrap();
-        assert_eq!(list_all(&conn).unwrap().len(), 1);
-    }
-
-    #[test]
     fn repopulate_truncates_before_inserting_so_stale_rows_disappear() {
         let tmp = fresh_store_with_seed_epoch();
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
@@ -492,13 +473,14 @@ mod tests {
         // First epoch: one cert.
         {
             let guard = store.lock_sync();
-            let bundle = bundle_with_entries(vec![entry(Some(signed_standard(vec!["A"])), false)]);
+            let bundle = bundle_with_entries(vec![entry(signed_standard(vec!["A"]), false)]);
             repopulate(&guard, &bundle, 1, 0).unwrap();
         }
-        // Second epoch: empty bundle (operator removed all certs).
+        // Second epoch: empty bundle (operator removed the entry — e.g.
+        // ahead of `epoch advance` after deleting the operator block).
         {
             let guard = store.lock_sync();
-            let bundle = bundle_with_entries(vec![entry(None, false)]);
+            let bundle = bundle_with_entries(vec![]);
             repopulate(&guard, &bundle, 1, 0).unwrap();
         }
 
@@ -512,7 +494,7 @@ mod tests {
         let tmp = fresh_store_with_seed_epoch();
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
         let bundle = bundle_with_entries(vec![
-            entry(Some(signed_emergency()), true),
+            entry(signed_emergency(), true),
         ]);
         {
             let guard = store.lock_sync();
@@ -535,7 +517,7 @@ mod tests {
         let tmp = fresh_store_with_seed_epoch();
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
         let original = signed_standard(vec!["AbortTask", "ApprovePlan"]);
-        let bundle = bundle_with_entries(vec![entry(Some(original.clone()), false)]);
+        let bundle = bundle_with_entries(vec![entry(original.clone(), false)]);
 
         {
             let guard = store.lock_sync();
@@ -561,7 +543,7 @@ mod tests {
         let tmp = fresh_store_with_seed_epoch();
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
         let bundle = bundle_with_entries(vec![
-            entry(Some(signed_emergency()), false),
+            entry(signed_emergency(), false),
         ]);
         {
             let guard = store.lock_sync();
@@ -579,7 +561,7 @@ mod tests {
         let tmp = fresh_store_with_seed_epoch();
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
         let bundle = bundle_with_entries(vec![
-            entry(Some(signed_standard(vec!["AbortTask"])), false),
+            entry(signed_standard(vec!["AbortTask"]), false),
         ]);
         {
             let guard = store.lock_sync();
@@ -601,15 +583,8 @@ mod tests {
     fn list_emergency_returns_only_emergency_certs() {
         let tmp = fresh_store_with_seed_epoch();
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
-        // Mix of emergency and standard.
-        // Note: both certs are signed by the same TEST_SEED key so
-        // they share a fingerprint. The PRIMARY KEY constraint on
-        // pubkey_fingerprint would normally reject the second insert;
-        // for this test we just install one of each by repopulating
-        // twice and asserting list_emergency only sees the second
-        // (most recent) state.
         let bundle = bundle_with_entries(vec![
-            entry(Some(signed_emergency()), false),
+            entry(signed_emergency(), false),
         ]);
         {
             let guard = store.lock_sync();
@@ -622,18 +597,16 @@ mod tests {
     }
 
     #[test]
-    fn get_by_fingerprint_returns_none_for_unknown_or_legacy() {
+    fn get_by_fingerprint_returns_none_for_unknown_fp() {
         let tmp = fresh_store_with_seed_epoch();
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
-        // Empty bundle ⇒ nothing inserted.
-        let bundle = bundle_with_entries(vec![entry(None, false)]);
+        let bundle = bundle_with_entries(vec![entry(signed_standard(vec!["A"]), false)]);
         {
             let guard = store.lock_sync();
             repopulate(&guard, &bundle, 1, 0).unwrap();
         }
         let conn = open_ro(tmp.path()).unwrap();
-        assert!(get_by_fingerprint(&conn, &fp()).unwrap().is_none(),
-            "legacy entry has no cert ⇒ no row");
-        assert!(get_by_fingerprint(&conn, "no-such-fp").unwrap().is_none());
+        assert!(get_by_fingerprint(&conn, "no-such-fp").unwrap().is_none(),
+            "an unknown fingerprint returns None");
     }
 }

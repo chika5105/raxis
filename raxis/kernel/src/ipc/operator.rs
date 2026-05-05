@@ -1861,12 +1861,17 @@ mod escalation_dispatch_tests {
     }
 
     fn build_ctx(store: Arc<Store>, sink: Arc<FakeAuditSink>, sk: &SigningKey) -> Arc<HandlerContext> {
+        let pubkey = hex::encode(sk.verifying_key().to_bytes());
+        // Stub cert: this fixture exercises the operator IPC handlers
+        // bypassing PolicyBundle::validate. See
+        // `notifications::sink::tests::bundle` for the rationale.
+        let cert = raxis_test_support::stub_cert_for_pubkey(pubkey.clone());
         let policy = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: FP.to_owned(),
             display_name:       FP.to_owned(),
-            pubkey_hex:         hex::encode(sk.verifying_key().to_bytes()),
+            pubkey_hex:         pubkey,
             permitted_ops:      vec![],
-            cert:                  None,
+            cert,
             force_misconfig_bypass: false,
         }]);
         Arc::new(HandlerContext::new(
@@ -2236,12 +2241,14 @@ mod escalation_dispatch_tests {
         data_dir: PathBuf,
         sk:       &SigningKey,
     ) -> (Arc<HandlerContext>, Arc<FakeAuditSink>) {
+        let pubkey = hex::encode(sk.verifying_key().to_bytes());
+        let cert = raxis_test_support::stub_cert_for_pubkey(pubkey.clone());
         let policy_bundle = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: FP.to_owned(),
             display_name:       FP.to_owned(),
-            pubkey_hex:         hex::encode(sk.verifying_key().to_bytes()),
+            pubkey_hex:         pubkey,
             permitted_ops:      vec!["ApproveEscalation".into()],
-            cert:                  None,
+            cert,
             force_misconfig_bypass: false,
         }]);
         let policy_swap = Arc::new(arc_swap::ArcSwap::from_pointee(policy_bundle));
@@ -2435,6 +2442,14 @@ mod rotate_epoch_dispatch_tests {
     /// Build a signed `policy.toml` artifact at the requested epoch and
     /// write it under `<data_dir>/policy/`. Returns `(policy_path, sig_path)`.
     /// Mirrors `policy_manager::tests::write_signed_policy_artifact`.
+    ///
+    /// Cert-mandatory (INV-CERT-01): the loader's `validate_operator_certs`
+    /// step now rejects any `[[operators.entries]]` block missing a
+    /// self-signed cert whose `pubkey_hex` matches the entry's
+    /// `pubkey_hex`. We mint that cert here from a deterministic
+    /// operator key so the artifact survives the strict deserialise +
+    /// self-sig verification path even though the test code only
+    /// exercises the rotate-epoch dispatcher.
     fn write_signed_policy_artifact(
         data_dir: &Path,
         epoch:    u64,
@@ -2447,8 +2462,28 @@ mod rotate_epoch_dispatch_tests {
 
         let auth_hex  = hex::encode(sk.verifying_key().to_bytes());
         let qual_hex  = "b".repeat(64);
-        let op_pk_hex = "c".repeat(64);
-        let op_fp     = raxis_policy::loader::operator_pubkey_fingerprint(&op_pk_hex).unwrap();
+        // Real operator keypair for cert minting — the all-c
+        // placeholder no longer works because the cert must self-verify
+        // under the operator's pubkey.
+        let op_key   = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
+        let op_pk_hex = raxis_test_support::pubkey_hex(&op_key);
+        let op_fp    = raxis_policy::loader::operator_pubkey_fingerprint(&op_pk_hex).unwrap();
+        let op_cert  = raxis_test_support::ephemeral_cert_with_key(
+            &op_key,
+            raxis_test_support::CertOpts {
+                display_name: "Alice".to_owned(),
+                permitted_ops: vec!["RotateEpoch".into()],
+                ..raxis_test_support::CertOpts::default()
+            },
+        );
+        // Render the cert as an inline TOML sub-table the loader's
+        // strict-deserialise path accepts.
+        let cert_toml = toml::to_string(&op_cert).unwrap();
+        let cert_block_indented = cert_toml
+            .lines()
+            .map(|l| format!("             {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let toml = format!(
             "[meta]\n\
@@ -2483,7 +2518,9 @@ mod rotate_epoch_dispatch_tests {
              pubkey_fingerprint = \"{op_fp}\"\n\
              display_name       = \"Alice\"\n\
              pubkey_hex         = \"{op_pk_hex}\"\n\
-             permitted_ops      = [\"RotateEpoch\"]\n",
+             permitted_ops      = [\"RotateEpoch\"]\n\
+             [operators.entries.cert]\n\
+             {cert_block_indented}\n",
         );
         std::fs::write(&policy_path, toml.as_bytes()).unwrap();
         let sig = sk.sign(toml.as_bytes());
@@ -2507,8 +2544,12 @@ mod rotate_epoch_dispatch_tests {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let store_for_blocking = Arc::clone(&store);
         tokio::task::spawn_blocking(move || {
+            // Genesis row writer test: the cert table receives 0 rows
+            // because the bundle is empty (this fixture only exercises
+            // the policy_epoch_history insert path).
+            let empty_bundle = PolicyBundle::for_tests_with_operators(vec![]);
             policy_manager::install_genesis_policy_epoch(
-                &store_for_blocking, "genesis-sha", "genesis-fp", 1, None,
+                &store_for_blocking, "genesis-sha", "genesis-fp", 1, &empty_bundle,
             ).unwrap();
         }).await.unwrap();
 
@@ -3336,8 +3377,9 @@ mod quarantine_dispatch_tests {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let store_for_blocking = Arc::clone(&store);
         tokio::task::spawn_blocking(move || {
+            let empty_bundle = PolicyBundle::for_tests_with_operators(vec![]);
             policy_manager::install_genesis_policy_epoch(
-                &store_for_blocking, "genesis-sha", "genesis-fp", 1, None,
+                &store_for_blocking, "genesis-sha", "genesis-fp", 1, &empty_bundle,
             ).unwrap();
         }).await.unwrap();
 

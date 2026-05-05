@@ -442,14 +442,40 @@ mod list {
 }
 
 // ---------------------------------------------------------------------------
-// `raxis cert install` — embed a cert into a policy.toml entry.
+// `raxis cert install` — embed (or rotate) a cert in a policy.toml entry.
 // ---------------------------------------------------------------------------
 //
-// Locates the [[operators.entries]] block whose `pubkey_hex` matches
-// the cert and rewrites it with the embedded `[operators.entries.cert]`
-// sub-table. We use the typed `toml::Table` editor (rather than string
-// splicing) so the rewrite is byte-stable for any policy that the
-// `toml` crate can round-trip.
+// Two modes (mutually exclusive):
+//
+//   1. Initial install / refresh-without-rotation:
+//
+//          raxis cert install <cert.toml> --policy <policy.toml>
+//
+//      Locates the `[[operators.entries]]` block whose `pubkey_hex`
+//      matches the cert's `pubkey_hex` and rewrites the embedded
+//      `[operators.entries.cert]` sub-table in place. Used for the
+//      first install and for refreshing the same cert with no
+//      operator-meaningful change (rare; mostly during development).
+//
+//   2. **Rotation** (the typed primitive — INV-CERT-04):
+//
+//          raxis cert install --replace-for <old-fingerprint> \
+//                             --new-cert    <path>            \
+//                             --policy      <policy.toml>
+//
+//      Locates the entry by `<old-fingerprint>`, validates that the
+//      new cert's `pubkey_hex` MATCHES the existing entry's
+//      `pubkey_hex` (INV-CERT-04: cert install --replace-for never
+//      changes the underlying public key — that is the operator-key
+//      rotation operation, not a cert rotation), then rewrites the
+//      cert sub-table. The kernel's epoch-advance cert-mirror emits
+//      `OperatorCertInstalled.previous_fingerprint = Some(...)` so
+//      the audit chain captures the rotation event with continuity
+//      back to the prior cert.
+//
+// We use the typed `toml::Table` editor (rather than string splicing)
+// so the rewrite is byte-stable for any policy the `toml` crate can
+// round-trip.
 //
 // **Important contract:** `install` MUST be followed by `raxis policy
 // sign` because rewriting the file invalidates the existing
@@ -459,14 +485,24 @@ mod install {
     use super::*;
 
     pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-        let mut cert_path:  Option<PathBuf> = None;
-        let mut policy_path: Option<PathBuf> = None;
+        let mut cert_path:    Option<PathBuf> = None;
+        let mut new_cert_path: Option<PathBuf> = None;
+        let mut replace_for:  Option<String>  = None;
+        let mut policy_path:  Option<PathBuf> = None;
         let mut force_misconfig = false;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
                 "--policy" => { i += 1; policy_path = Some(PathBuf::from(arg(args, i, "--policy")?)); }
                 "--force-misconfig" => { force_misconfig = true; }
+                "--replace-for" => {
+                    i += 1;
+                    replace_for = Some(arg(args, i, "--replace-for")?.to_owned());
+                }
+                "--new-cert" => {
+                    i += 1;
+                    new_cert_path = Some(PathBuf::from(arg(args, i, "--new-cert")?));
+                }
                 a if !a.starts_with('-') && cert_path.is_none() => {
                     cert_path = Some(PathBuf::from(a));
                 }
@@ -474,10 +510,42 @@ mod install {
             }
             i += 1;
         }
-        let cert_path = cert_path
-            .ok_or_else(|| CliError::Usage("cert install requires <cert.toml>".to_owned()))?;
         let policy_path = policy_path
             .ok_or_else(|| CliError::Usage("cert install requires --policy <policy.toml>".to_owned()))?;
+
+        // Mode resolution. The two primitives are deliberately
+        // surfaced as distinct flag shapes (rather than overloading
+        // the positional cert argument) so the operator's intent is
+        // unambiguous in shell history and so the validator can fail
+        // loud on the half-specified rotation form.
+        let (cert_path, replace_for) = match (cert_path, replace_for, new_cert_path) {
+            (Some(p), None, None) => (p, None),
+            (None, Some(fp), Some(p)) => (p, Some(fp)),
+            (None, Some(_), None) => {
+                return Err(CliError::Usage(
+                    "cert install --replace-for <fp> requires --new-cert <path>".to_owned(),
+                ));
+            }
+            (None, None, Some(_)) => {
+                return Err(CliError::Usage(
+                    "cert install --new-cert <path> requires --replace-for <fp> \
+                     (use the positional `cert install <cert.toml>` form for first install)".to_owned(),
+                ));
+            }
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
+                return Err(CliError::Usage(
+                    "cert install: positional <cert.toml> form is mutually exclusive with \
+                     --replace-for / --new-cert (rotation form)".to_owned(),
+                ));
+            }
+            (None, None, None) => {
+                return Err(CliError::Usage(
+                    "cert install requires either:\n  \
+                       cert install <cert.toml> --policy <policy.toml>            (first install)\n  \
+                       cert install --replace-for <fp> --new-cert <path> --policy <policy.toml>  (rotation)".to_owned(),
+                ));
+            }
+        };
 
         let cert = read_cert_toml(&cert_path)?;
 
@@ -512,31 +580,78 @@ mod install {
                 policy_path.display()
             )))?;
 
+        // Match strategy depends on mode. In rotation mode we look up
+        // by the old fingerprint and validate pubkey continuity; in
+        // first-install mode we look up by pubkey_hex (the cert IS
+        // the source of truth there).
         let mut matched = false;
         for entry in entries.iter_mut() {
-            let pubkey_hex = entry.get("pubkey_hex")
+            let entry_pk = entry.get("pubkey_hex")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if pubkey_hex.eq_ignore_ascii_case(&cert.pubkey_hex) {
-                let table = entry.as_table_mut().ok_or_else(|| CliError::Key(
-                    "[[operators.entries]] entry is not a TOML table".to_owned(),
-                ))?;
-                let cert_value = toml::Value::try_from(&cert)
-                    .map_err(|e| CliError::Key(format!("serialise cert: {e}")))?;
-                table.insert("cert".to_owned(), cert_value);
-                if force_misconfig {
-                    table.insert("force_misconfig_bypass".to_owned(), toml::Value::Boolean(true));
-                }
-                matched = true;
-                break;
+                .unwrap_or("")
+                .to_owned();
+            let entry_fp = entry.get("pubkey_fingerprint")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+
+            let is_match = match &replace_for {
+                Some(fp) => fp.eq_ignore_ascii_case(&entry_fp),
+                None     => entry_pk.eq_ignore_ascii_case(&cert.pubkey_hex),
+            };
+            if !is_match { continue; }
+
+            // INV-CERT-04: rotation MUST NOT change the underlying
+            // pubkey. The new cert's `pubkey_hex` MUST equal the
+            // existing entry's `pubkey_hex`. (For first-install this
+            // is implied by the matching strategy.)
+            if replace_for.is_some()
+                && !cert.pubkey_hex.eq_ignore_ascii_case(&entry_pk)
+            {
+                return Err(CliError::Usage(format!(
+                    "rotation INV-CERT-04 violation: --new-cert {} carries pubkey {} but \
+                     [[operators.entries]] for fingerprint {entry_fp} has pubkey {entry_pk}. \
+                     `cert install --replace-for` only refreshes the cert; to rotate the \
+                     underlying operator key, use `raxis genesis --rotate operator` (which \
+                     emits a new fingerprint and is a separate, audited operation).",
+                    cert_path.display(), cert.pubkey_hex,
+                )));
             }
+
+            let table = entry.as_table_mut().ok_or_else(|| CliError::Key(
+                "[[operators.entries]] entry is not a TOML table".to_owned(),
+            ))?;
+            let cert_value = toml::Value::try_from(&cert)
+                .map_err(|e| CliError::Key(format!("serialise cert: {e}")))?;
+            table.insert("cert".to_owned(), cert_value);
+            if force_misconfig {
+                table.insert("force_misconfig_bypass".to_owned(), toml::Value::Boolean(true));
+            } else {
+                // A rotation MUST drop a stale `force_misconfig_bypass = true`
+                // from the prior cert: the new cert has been re-validated
+                // structurally above, so leaving the bypass in place would
+                // silently grant the new cert a relaxation it did not opt
+                // into. Removing the key is a no-op for entries that never
+                // had the bypass.
+                table.remove("force_misconfig_bypass");
+            }
+            matched = true;
+            break;
         }
         if !matched {
-            return Err(CliError::Usage(format!(
-                "no [[operators.entries]] in {} matches cert pubkey_hex {}; \
-                 add the operator entry first via `raxis genesis --operator-pubkey ...`",
-                policy_path.display(), cert.pubkey_hex
-            )));
+            return Err(CliError::Usage(match &replace_for {
+                Some(fp) => format!(
+                    "no [[operators.entries]] in {} has pubkey_fingerprint {fp}; \
+                     verify with `raxis cert list` and re-run with the correct old fingerprint",
+                    policy_path.display(),
+                ),
+                None => format!(
+                    "no [[operators.entries]] in {} matches cert pubkey_hex {}; \
+                     add the operator entry first via `raxis genesis --operator-cert <path>` \
+                     or rotate certs via `raxis cert install --replace-for <fp> --new-cert <path>`",
+                    policy_path.display(), cert.pubkey_hex
+                ),
+            }));
         }
 
         let new_bytes = toml::to_string(&doc)
@@ -547,8 +662,16 @@ mod install {
         })?;
 
         let fp = fingerprint_of(&cert.pubkey_hex)?;
-        println!("✓ Installed cert into {}", policy_path.display());
-        println!("  operator: {fp}  ({})", cert.display_name);
+        if let Some(prev_fp) = &replace_for {
+            println!("✓ Rotated cert in {}", policy_path.display());
+            println!("  operator: {fp}  ({})", cert.display_name);
+            println!("  previous fingerprint: {prev_fp}");
+            println!("  the kernel will emit OperatorCertInstalled.previous_fingerprint = \"{prev_fp}\"");
+            println!("  on the next epoch advance (audit chain captures the rotation).");
+        } else {
+            println!("✓ Installed cert into {}", policy_path.display());
+            println!("  operator: {fp}  ({})", cert.display_name);
+        }
         println!("  reminder: re-sign the policy → `raxis policy sign {} --key <op_key>`", policy_path.display());
         if force_misconfig {
             println!("  reminder: --force-misconfig set → `raxis policy sign --force-misconfig` is required");
@@ -848,6 +971,138 @@ permitted_ops      = ["AbortTask"]
             "--policy", policy_path.to_str().unwrap(),
         ])).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    // ── install --replace-for (rotation) ───────────────────────────
+
+    #[test]
+    fn install_replace_for_rotates_cert_when_pubkey_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = write_seed_key_file(dir.path());
+
+        let initial_cert = dir.path().join("alice-v1.cert.toml");
+        let rotated_cert = dir.path().join("alice-v2.cert.toml");
+        let policy_path  = dir.path().join("policy.toml");
+
+        // Mint two certs from the SAME key (rotation refreshes the
+        // cert content but keeps the pubkey by INV-CERT-04).
+        run_mint(&empty_flags(), &make_args(&[
+            "--key", key.to_str().unwrap(),
+            "--display-name", "Alice",
+            "--out", initial_cert.to_str().unwrap(),
+            "--ops", "AbortTask",
+        ])).unwrap();
+        run_mint(&empty_flags(), &make_args(&[
+            "--key", key.to_str().unwrap(),
+            "--display-name", "Alice (renewed)",
+            "--out", rotated_cert.to_str().unwrap(),
+            "--ops", "AbortTask",
+            "--ops", "ApprovePlan",
+        ])).unwrap();
+        let cert  = read_cert_toml(&initial_cert).unwrap();
+        let fp    = fingerprint_of(&cert.pubkey_hex).unwrap();
+
+        // Stage a policy.toml with the initial cert installed.
+        let policy_toml = format!(
+            r#"
+[[operators.entries]]
+pubkey_fingerprint = "{fp}"
+display_name       = "Alice"
+pubkey_hex         = "{}"
+permitted_ops      = ["AbortTask"]
+"#,
+            cert.pubkey_hex
+        );
+        fs::write(&policy_path, policy_toml).unwrap();
+        run_install(&empty_flags(), &make_args(&[
+            initial_cert.to_str().unwrap(),
+            "--policy", policy_path.to_str().unwrap(),
+        ])).unwrap();
+
+        // Rotation: by fingerprint + new cert path.
+        run_install(&empty_flags(), &make_args(&[
+            "--replace-for", &fp,
+            "--new-cert",    rotated_cert.to_str().unwrap(),
+            "--policy",      policy_path.to_str().unwrap(),
+        ])).unwrap();
+
+        let after = fs::read_to_string(&policy_path).unwrap();
+        assert!(after.contains("display_name = \"Alice (renewed)\""),
+            "expected rotated display_name in policy; got:\n{after}");
+    }
+
+    #[test]
+    fn install_replace_for_rejects_pubkey_mismatch() {
+        // Two distinct keys → two distinct fingerprints. Try to rotate
+        // operator A's cert with a cert minted for B; INV-CERT-04 must
+        // fail loud.
+        let dir = tempfile::tempdir().unwrap();
+        let key_a = dir.path().join("a.hex");
+        let key_b = dir.path().join("b.hex");
+        fs::write(&key_a, hex::encode([0x77u8; 32])).unwrap();
+        fs::write(&key_b, hex::encode([0x88u8; 32])).unwrap();
+
+        let cert_a = dir.path().join("a.cert.toml");
+        let cert_b = dir.path().join("b.cert.toml");
+        let policy_path = dir.path().join("policy.toml");
+
+        run_mint(&empty_flags(), &make_args(&[
+            "--key", key_a.to_str().unwrap(),
+            "--display-name", "Alice",
+            "--out", cert_a.to_str().unwrap(),
+            "--ops", "AbortTask",
+        ])).unwrap();
+        run_mint(&empty_flags(), &make_args(&[
+            "--key", key_b.to_str().unwrap(),
+            "--display-name", "Bob",
+            "--out", cert_b.to_str().unwrap(),
+            "--ops", "AbortTask",
+        ])).unwrap();
+        let parsed_a = read_cert_toml(&cert_a).unwrap();
+        let fp_a     = fingerprint_of(&parsed_a.pubkey_hex).unwrap();
+
+        let policy_toml = format!(
+            r#"
+[[operators.entries]]
+pubkey_fingerprint = "{fp_a}"
+display_name       = "Alice"
+pubkey_hex         = "{}"
+permitted_ops      = ["AbortTask"]
+"#,
+            parsed_a.pubkey_hex
+        );
+        fs::write(&policy_path, policy_toml).unwrap();
+        run_install(&empty_flags(), &make_args(&[
+            cert_a.to_str().unwrap(),
+            "--policy", policy_path.to_str().unwrap(),
+        ])).unwrap();
+
+        let err = run_install(&empty_flags(), &make_args(&[
+            "--replace-for", &fp_a,
+            "--new-cert",    cert_b.to_str().unwrap(),
+            "--policy",      policy_path.to_str().unwrap(),
+        ])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("INV-CERT-04"),
+            "expected INV-CERT-04 violation message, got: {msg}");
+    }
+
+    #[test]
+    fn install_replace_for_requires_new_cert_flag() {
+        let err = run_install(&empty_flags(), &make_args(&[
+            "--replace-for", "deadbeef",
+            "--policy",      "/tmp/raxis-x.toml",
+        ])).unwrap_err();
+        assert!(err.to_string().contains("requires --new-cert"));
+    }
+
+    #[test]
+    fn install_new_cert_requires_replace_for_flag() {
+        let err = run_install(&empty_flags(), &make_args(&[
+            "--new-cert", "/tmp/x.cert.toml",
+            "--policy",   "/tmp/raxis-x.toml",
+        ])).unwrap_err();
+        assert!(err.to_string().contains("requires --replace-for"));
     }
 
     // ── show ───────────────────────────────────────────────────────

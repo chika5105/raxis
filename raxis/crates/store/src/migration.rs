@@ -575,12 +575,10 @@ COMMIT;
 // of past certs in this table (the audit chain is the historical
 // record).
 //
-// **Rows captured.** ONLY entries with an embedded cert. Legacy
-// (cert-less) entries are NOT inserted here — they're tracked
-// separately in `OperatorCertLegacyEntryDetected` audit events at
-// boot. This makes "cert lookup returns no row" mean "this operator
-// is on the legacy flow", which is a useful negative signal for the
-// kernel's `cert_check` path.
+// **Rows captured.** Every operator entry (cert is mandatory —
+// INV-CERT-01 — so there is no cert-less / "legacy" flow). An empty
+// table at boot indicates the genesis ceremony was incomplete and is
+// itself a `raxis doctor` failure rather than a permitted state.
 // ---------------------------------------------------------------------------
 
 fn apply_migration_2(conn: &Connection) -> Result<(), StoreError> {

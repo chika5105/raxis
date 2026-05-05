@@ -67,14 +67,21 @@ RAXIS expects **Ed25519 PEM** keys compatible with **OpenSSL 3**’s `genpkey` /
 |---------|--------|-----|
 | **`Algorithm ed25519 not found`** (or similar) on `genpkey` | Default `openssl` is **LibreSSL** (common on macOS) | Install **`openssl@3`** via Homebrew and use that binary (see step 1 above). |
 | **`unable to load key`** / **No such file** on `pkey` | First command failed, so `operator_private.pem` was never created | Fix `genpkey` with OpenSSL 3, then re-run both commands in order. |
-| **`hex decode error: Invalid character '-' at position 0`** on **`genesis --operator-pubkey operator_public.pem`** | PEM files start with **`-----`**, while some older **`raxis`** versions treated **`--operator-pubkey`** as raw **hex only**. | Rebuild **`raxis`** so **`genesis` accepts PEM** (current main). Older CLI: decode to DER and export 32-byte hex manually, or use interactive paste (**64-character hex**, one line) instead of PEM. |
+| **`unknown flag --operator-pubkey`** on `genesis` | Cert-mandatory release removed the bare-pubkey flag (INV-CERT-01) — every operator entry MUST ship a self-signed cert. | Use **`raxis genesis --operator-cert <path>`** (air-gapped: pre-mint a cert with `raxis cert mint` on the offline machine that holds the private key) **or** **`raxis genesis --operator-key <path> --operator-name <display>`** (convenience: in-process minting; the private key is read into memory only and is **never persisted** under `<data_dir>`). |
 | Unsure which binary runs | — | Run `openssl version`. You want **OpenSSL 3.x**, not LibreSSL, for generating these keys. |
 
 ### 3. Bootstrap and Run
 
-1. **Run the Genesis Ceremony** with the **`operator_public.pem`** file produced above (PEM from **`openssl pkey -pubout`** is accepted; genesis stores **64-character hex** in policy internally):
+1. **Run the Genesis Ceremony**. RAXIS is **cert-mandatory** (INV-CERT-01): every operator entry in `policy.toml` carries a self-signed `OperatorCert`. There is no bare-pubkey path. Pick one of two flows:
+
+   **Convenience (single-machine / development).** Hand the CLI your operator private key; it mints the cert in-process and embeds it in the freshly emitted `policy.toml`. The private key is read into memory only — it is **NEVER persisted** under `<data_dir>`. The CLI tests assert this with a recursive seed-leakage scan.
    ```bash
-   raxis genesis --operator-pubkey operator_public.pem
+   raxis genesis --operator-key operator_private.pem --operator-name "Alice"
+   ```
+
+   **Air-gapped (recommended for production / tighter security).** Mint the cert on a separate machine that holds the operator private key (see §5 below for `raxis cert mint`), copy the resulting `*.cert.toml` to the kernel host, and embed it without ever exposing the private key to the host running the kernel:
+   ```bash
+   raxis genesis --operator-cert alice.cert.toml
    ```
 
 2. **Start the Kernel**:
@@ -103,7 +110,7 @@ raxis session create --role planner --worktree-root "$wt" \
 
 Adjust `refs/heads/main` if your pinned integration base differs. After editing policy, plans, or this repo’s code, commit and push according to your org’s workflow; the snippet above does not substitute for normal version control hygiene.
 
-### 5. Operator Certificates (optional but recommended)
+### 5. Operator Certificates (mandatory — INV-CERT-01)
 
 `raxis cert mint` issues an operator certificate that binds together
 `(display_name, pubkey, validity window, permitted_ops)` and is
@@ -113,9 +120,17 @@ expired keys fail closed automatically; `mint-emergency` produces a
 pinned `EmergencyRecovery` cert that never expires and can only
 perform `RotateEpoch` (the break-glass key).
 
+Operator certs are **mandatory** in v1: every `[[operators.entries]]`
+block in `policy.toml` carries a self-signed `[operators.entries.cert]`
+sub-table, and the policy loader rejects any entry without one with a
+serde `missing field "cert"` error. The convenience genesis flow
+(§3.1 above) mints this cert for you in-process; the air-gapped flow
+expects you to pre-mint it offline:
+
 ```bash
 # Mint a 1-year cert with the default 30-day warn window and
-# 7-day grace period.
+# 7-day grace period (run on the offline machine that holds the
+# operator private key).
 raxis cert mint \
   --display-name "Alice"  \
   --pubkey       operator_public.pem \
@@ -123,21 +138,31 @@ raxis cert mint \
   --ops          "CreateInitiative,ApprovePlan,RotateEpoch,QuarantineInitiative,QuarantinePlansBy" \
   --out          alice.cert.toml
 
-# Embed it into the freshly-minted policy at genesis time.
-raxis genesis --operator-pubkey operator_public.pem \
-              --operator-cert    alice.cert.toml
+# Air-gapped genesis — embed the pre-minted cert without ever
+# exposing the operator private key to the kernel host.
+raxis genesis --operator-cert alice.cert.toml
 
-# Or splice it into an existing policy and re-sign:
-raxis cert install alice.cert.toml --policy "$RAXIS_DATA_DIR/policy/policy.toml"
-raxis policy sign            "$RAXIS_DATA_DIR/policy/policy.toml" --key operator_private.pem
+# Cert rotation (INV-CERT-04): replace an existing cert for the same
+# operator pubkey. The new cert MUST have an identical pubkey_hex; a
+# pubkey change is a different operator entirely and goes through
+# `policy sign` + `epoch advance` instead.
+raxis cert install --replace-for <old-fingerprint> \
+                   --new-cert     alice-renewed.cert.toml \
+                   --policy       "$RAXIS_DATA_DIR/policy/policy.toml"
+raxis policy sign  "$RAXIS_DATA_DIR/policy/policy.toml" --key operator_private.pem
 raxis epoch advance --policy "$RAXIS_DATA_DIR/policy/policy.toml" \
                     --sig    "$RAXIS_DATA_DIR/policy/policy.sig"
 ```
 
+Rotations are auditable: `OperatorCertInstalled.previous_fingerprint`
+records the prior cert fingerprint so a forensic auditor can
+reconstruct the rotation chain end-to-end. Initial installs (no
+prior cert for that pubkey) leave the field unset.
+
 Inspect installed certs and their expiry zones with `raxis cert list`,
 or run `raxis doctor` for a one-screen preflight that includes per-cert
 status (warns on Expiring/Grace, fails on Expired/NotYetValid, and
-flags any entry installed with `--force-misconfig`).
+fails loud on an empty `operator_certificates` table — INV-CERT-01).
 
 ### 6. Quarantine — the operator break-glass
 

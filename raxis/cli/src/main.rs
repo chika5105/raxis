@@ -306,8 +306,15 @@ GLOBAL FLAGS:
     --operator-key <path>   Operator Ed25519 private key for signing (PEM format)
 
 SUBCOMMANDS:
-    genesis [--force] [--operator-pubkey <path>]
-        Run the initial key generation ceremony.
+    genesis [--force]
+            (--operator-cert <path> | --operator-key <path> --operator-name <name>
+                                                            [--cert-validity-days <days>])
+            [--force-misconfig]
+        Run the initial key generation ceremony. Operator identity is
+        cert-mandatory (INV-CERT-01); supply EITHER a pre-minted
+        `*.cert.toml` (air-gapped: produced by `raxis cert mint` on a
+        separate machine) OR a private-key PEM (the CLI mints the cert
+        in-process; private bytes are never persisted).
 
     policy sign <artifact.toml> --key <path>
         Sign a policy or plan artifact with the operator's private key.

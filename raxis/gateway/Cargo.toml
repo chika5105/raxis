@@ -41,3 +41,13 @@ thiserror    = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 ed25519-dalek = { workspace = true }
+# Cert-mandatory test fixtures: the gateway-roundtrip integration
+# test stages a `policy.toml` for the gateway to load, and that
+# load now requires a self-signed `[operators.entries.cert]`. The
+# helper crate mints structurally-valid certs from deterministic
+# test keys.
+raxis-test-support = { path = "../crates/test-support" }
+raxis-genesis-tools = { workspace = true }
+# Cert serialisation + pubkey hex-decoding for the same fixture.
+toml = { workspace = true }
+hex = { workspace = true }

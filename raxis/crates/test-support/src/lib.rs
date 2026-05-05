@@ -106,6 +106,8 @@
 #[cfg(any(debug_assertions, test))]
 pub mod audit_dir;
 #[cfg(any(debug_assertions, test))]
+pub mod cert;
+#[cfg(any(debug_assertions, test))]
 pub mod clock;
 #[cfg(any(debug_assertions, test))]
 pub mod disk_store;
@@ -116,6 +118,11 @@ mod workspace_guard;
 
 #[cfg(any(debug_assertions, test))]
 pub use audit_dir::{AuditDir, GenesisInfo};
+#[cfg(any(debug_assertions, test))]
+pub use cert::{
+    ephemeral_cert, ephemeral_cert_with_key, ephemeral_cert_with_opts,
+    ephemeral_signing_key, pubkey_hex, stub_cert_for_pubkey, CertOpts,
+};
 #[cfg(any(debug_assertions, test))]
 pub use clock::FakeClock;
 #[cfg(any(debug_assertions, test))]

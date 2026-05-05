@@ -2283,9 +2283,17 @@ See §`vcs::diff` normative specification above — specifically the `worktree_r
 
 Operator certificates bind together `(display_name, pubkey, validity
 window, permitted_ops)` into a single self-signed artifact. They are
-the v1+ replacement for raw operator pubkey entries in `policy.toml`,
-adding metadata (display name, contact info, expiry) and a
-fail-closed lifecycle.
+the **mandatory** (INV-CERT-01) operator-identity shape in v1: every
+`[[operators.entries]]` block in `policy.toml` carries a self-signed
+`[operators.entries.cert]` sub-table. The cert-mandatory release
+deleted the legacy raw-pubkey path entirely — the loader rejects
+entries without a cert sub-table at deserialisation time, the
+canonical genesis emitter unconditionally writes the cert sub-table,
+and `raxis doctor` surfaces an empty `operator_certificates` table
+as `[FAIL]` (a structural impossibility under a correctly-loaded
+cert-mandatory policy). See `philosophy.md` §1.2 INV-CERT-01..05 for
+the full cross-cutting invariant statements; this section is the
+store-layer normative authority.
 
 Two storage layers carry the same data:
 
@@ -2300,8 +2308,17 @@ Two storage layers carry the same data:
    Truncated and rebuilt on each advance; the canonical layer is
    the source. Mirrored into the audit chain as a sequence of
    `OperatorCertInstalled` and (where applicable)
-   `OperatorCertLegacyEntryDetected` /
-   `OperatorCertMisconfigBypassed` events.
+   `OperatorCertMisconfigBypassed` events. **Cert is mandatory
+   (INV-CERT-01)** — every `[[operators.entries]]` block in the
+   canonical layer carries a self-signed `OperatorCert`, so the view
+   table contains exactly one row per operator entry on every
+   successful advance. There is no cert-less path; the
+   `OperatorCertLegacyEntryDetected` event variant was deleted
+   alongside the legacy code path in the cert-mandatory release. An
+   empty `operator_certificates` table after a successful advance is
+   a structural impossibility — `raxis doctor`'s `cert.list` check
+   surfaces this as `[FAIL]` with INV-CERT-01 cited so the operator
+   can act.
 
 #### Four-zone expiry model
 

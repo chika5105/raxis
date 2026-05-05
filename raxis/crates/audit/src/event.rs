@@ -380,6 +380,17 @@ pub enum AuditEventKind {
     ///   into bypassing structural cert-validation errors. The bypass
     ///   itself emits a separate `OperatorCertMisconfigBypassed` event
     ///   for each rule that was relaxed.
+    /// * `previous_fingerprint` — `Some(fp)` when this cert install is a
+    ///   rotation (the operator ran `raxis cert install --replace-for
+    ///   <previous_fp> --new-cert <path>`), `None` for the very first
+    ///   install of a fresh operator entry. The kernel infers a
+    ///   rotation by diffing the old and new policy bundles at epoch
+    ///   advance: if an entry's `pubkey_hex` is unchanged but the
+    ///   embedded cert's `self_sig_hex` (or any other cert field) is
+    ///   different, it's a rotation and we record the prior cert's
+    ///   fingerprint so the audit chain captures continuity. (The
+    ///   pubkey is unchanged across a rotation by INV-CERT-04 — see
+    ///   `cli/src/commands/cert.rs::install`.)
     OperatorCertInstalled {
         pubkey_fingerprint:     String,
         epoch_id:               u64,
@@ -389,23 +400,8 @@ pub enum AuditEventKind {
         not_after:              i64,
         permitted_ops:          Vec<String>,
         force_misconfig_bypass: bool,
-    },
-
-    /// Emitted at policy load when an `OperatorEntry` lacks a `[cert]`
-    /// table (i.e. `cert = None`). This is the legacy / pre-cert flow:
-    /// the operator entry stays valid and the kernel still honours
-    /// its `permitted_ops` list, but no expiry / structural checks
-    /// apply. Recording this surface keeps the kernel's behaviour
-    /// observable — an operator who silently leaves a cert-less
-    /// entry in `policy.toml` will see this event and can decide to
-    /// mint a cert.
-    ///
-    /// Emitted exactly once per legacy entry per epoch advance (i.e.
-    /// per `policy.toml` install), NOT once per IPC request.
-    OperatorCertLegacyEntryDetected {
-        pubkey_fingerprint: String,
-        epoch_id:           u64,
-        display_name:       String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_fingerprint:   Option<String>,
     },
 
     /// Emitted at policy load when a structural cert-validation error
@@ -610,7 +606,6 @@ impl AuditEventKind {
             Self::GatewaySignalFailed { .. } => "GatewaySignalFailed",
             Self::NotificationDeliveryFailed { .. } => "NotificationDeliveryFailed",
             Self::OperatorCertInstalled { .. } => "OperatorCertInstalled",
-            Self::OperatorCertLegacyEntryDetected { .. } => "OperatorCertLegacyEntryDetected",
             Self::OperatorCertMisconfigBypassed { .. } => "OperatorCertMisconfigBypassed",
             Self::OperatorCertExpiringSoon { .. } => "OperatorCertExpiringSoon",
             Self::OperatorCertInGracePeriod { .. } => "OperatorCertInGracePeriod",
@@ -671,10 +666,8 @@ mod path_read_accessed_tests {
                 pubkey_fingerprint: "fp".into(), epoch_id: 1, cert_kind: "Standard".into(),
                 display_name: "alice".into(), not_before: 0, not_after: 0,
                 permitted_ops: vec![], force_misconfig_bypass: false,
+                previous_fingerprint: None,
             }, "OperatorCertInstalled"),
-            (AuditEventKind::OperatorCertLegacyEntryDetected {
-                pubkey_fingerprint: "fp".into(), epoch_id: 1, display_name: "alice".into(),
-            }, "OperatorCertLegacyEntryDetected"),
             (AuditEventKind::OperatorCertMisconfigBypassed {
                 pubkey_fingerprint: "fp".into(), epoch_id: 1,
                 cert_kind: "Standard".into(), display_name: "alice".into(),
@@ -718,6 +711,7 @@ mod path_read_accessed_tests {
             not_after:              1_731_536_000,
             permitted_ops:          vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()],
             force_misconfig_bypass: false,
+            previous_fingerprint:   None,
         };
         let v = serde_json::to_value(&kind).expect("serialises");
         // The serde tag (`#[serde(tag = "kind")]`) writes the variant
@@ -741,6 +735,7 @@ mod path_read_accessed_tests {
             AuditEventKind::OperatorCertInstalled {
                 pubkey_fingerprint, epoch_id, cert_kind, display_name,
                 not_before, not_after, permitted_ops, force_misconfig_bypass,
+                previous_fingerprint,
             } => {
                 assert_eq!(pubkey_fingerprint, "abcd0123");
                 assert_eq!(epoch_id,           2);
@@ -750,6 +745,8 @@ mod path_read_accessed_tests {
                 assert_eq!(not_after,          1_731_536_000);
                 assert_eq!(permitted_ops,      vec!["AbortTask".to_owned(), "ApprovePlan".to_owned()]);
                 assert!(!force_misconfig_bypass);
+                assert!(previous_fingerprint.is_none(),
+                    "previous_fingerprint defaults to None for non-rotation installs");
             }
             other => panic!("expected OperatorCertInstalled; got {other:?}"),
         }

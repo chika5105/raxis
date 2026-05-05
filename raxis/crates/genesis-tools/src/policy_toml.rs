@@ -7,6 +7,8 @@
 
 use std::fmt::Write;
 
+use raxis_types::operator_cert::OperatorCert;
+
 // ---------------------------------------------------------------------------
 // Canonical inputs (named for spec correspondence, not for terseness)
 // ---------------------------------------------------------------------------
@@ -46,6 +48,14 @@ pub struct GenesisPolicyInputs<'a> {
     /// passing an empty slice is a programming error and panics; see the
     /// `empty_worktree_roots_panics` test.
     pub allowed_worktree_roots: &'a [&'a str],
+    /// The genesis operator's cert. **Required** (cert is mandatory —
+    /// INV-CERT-01); the emitter writes it under
+    /// `[operators.entries.cert]` so the artifact survives the
+    /// loader's strict-deserialise check. The cert's `pubkey_hex` MUST
+    /// equal `operator_pubkey_hex` and the cert's `self_sig_hex` MUST
+    /// be a valid Ed25519 self-signature; both are validated by
+    /// `raxis_policy::PolicyBundle::validate` on the round-trip read.
+    pub operator_cert: &'a OperatorCert,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +116,17 @@ const DEFAULT_LANE_PRIORITY: u8 = 100;
 // ---------------------------------------------------------------------------
 // Emitter
 // ---------------------------------------------------------------------------
+
+/// Escape a string for emission as a TOML basic string. Conservative:
+/// quotes get escaped so the operator-supplied display name cannot break
+/// out of the surrounding `"..."` and inject TOML structure. The cert
+/// validator (`validate_cert_structurally::DisplayNameLength`) already
+/// rejects empty / overlong names; this layer just guards against
+/// quote injection on names that DO pass that check.
+fn escape_toml_basic_string(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
 
 /// Build the epoch-1 policy.toml as a `String`. Pure function — caller is
 /// responsible for writing the bytes to disk (kernel uses
@@ -225,13 +246,21 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
 
     // [[operators.entries]] — the genesis operator. Exactly one entry; the
     // operator can register additional keys via `raxis epoch advance`.
+    // Cert is mandatory (INV-CERT-01): we ALWAYS emit a
+    // `[operators.entries.cert]` sub-table here. The cert's
+    // `permitted_ops` is the authority at runtime; the entry-level
+    // `permitted_ops` field is preserved for backward compatibility
+    // with operators who `cat policy.toml` looking for the op set, but
+    // `validate_operator_certs` overwrites it from the cert at load
+    // time.
     write!(out, "[[operators.entries]]\n\
         pubkey_fingerprint = \"{op_fp}\"\n\
-        display_name       = \"operator-1\"\n\
+        display_name       = \"{display_name}\"\n\
         pubkey_hex         = \"{op_pk}\"\n\
         permitted_ops      = [\n",
         op_fp = inputs.operator_fingerprint,
         op_pk = inputs.operator_pubkey_hex,
+        display_name = escape_toml_basic_string(&inputs.operator_cert.display_name),
     ).expect("String write_fmt is infallible");
     for (i, op) in PERMITTED_OPS.iter().enumerate() {
         // Trailing comma after every op including the last is legal TOML
@@ -241,6 +270,22 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
         write!(out, "  \"{op}\"").expect("String write_fmt is infallible");
     }
     out.push_str(",\n]\n\n");
+
+    // [operators.entries.cert] — the embedded self-signed cert. We
+    // route through the `toml` crate's serializer rather than
+    // hand-rolling the field block: the cert format owns its own
+    // canonical-byte contract (`raxis-crypto::cert::cert_canonical_signing_input`)
+    // and the only safe way to keep that contract while avoiding
+    // hand-rolled escaping bugs is to delegate to the same serde
+    // pipeline that `[[operators.entries]]` itself goes through on
+    // load. The serialiser is infallible for `OperatorCert` (every
+    // field is `String`/`i64`/`u32`/`Vec<String>`).
+    let cert_block = toml::to_string(inputs.operator_cert)
+        .expect("OperatorCert serialise is infallible");
+    out.push_str("[operators.entries.cert]\n");
+    out.push_str(&cert_block);
+    if !cert_block.ends_with('\n') { out.push('\n'); }
+    out.push('\n');
 
     // [[lanes]] — the default execution lane. Without at least one lane
     // entry, `scheduler::admit::admit_task` cannot resolve `lane_id = "default"`
@@ -302,24 +347,60 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
 mod tests {
     use super::*;
     use crate::pubkey_fingerprint;
+    use raxis_test_support::{ephemeral_cert_with_key, ephemeral_signing_key, pubkey_hex, CertOpts};
 
-    /// 32-byte all-zero "pubkey hex" used as a fixed-input test fixture so
-    /// the goldens below are stable across hosts.
+    /// Fixed all-zero / all-1s test pubkeys for the AUTHORITY and
+    /// QUALITY keys (these are validated at the loader as 64-hex-char
+    /// strings only — they don't need to be real Ed25519 keys for
+    /// these unit tests). The OPERATOR pubkey, by contrast, MUST be a
+    /// real Ed25519 key now so the cert it embeds can self-sign and
+    /// pass `PolicyBundle::validate`'s mandatory cert-validation step
+    /// (INV-CERT-01).
     const FIXED_AUTHORITY_PUBKEY_HEX: &str =
         "0000000000000000000000000000000000000000000000000000000000000000";
     const FIXED_QUALITY_PUBKEY_HEX: &str =
         "1111111111111111111111111111111111111111111111111111111111111111";
-    const FIXED_OPERATOR_PUBKEY_HEX: &str =
-        "2222222222222222222222222222222222222222222222222222222222222222";
 
-    fn fixed_inputs<'a>(roots: &'a [&'a str], op_fp: &'a str) -> GenesisPolicyInputs<'a> {
+    /// Deterministic seed for the test operator key. Same seed on every
+    /// run → byte-identical pubkey + cert → byte-identical policy.toml
+    /// (which is what makes `output_is_byte_deterministic_across_invocations`
+    /// hold even after we mint a cert here).
+    const FIXED_OPERATOR_SEED: [u8; 32] = [0x42u8; 32];
+
+    /// Build a cert + the matching pubkey hex + fingerprint, all derived
+    /// from the deterministic test seed.
+    fn fixture_operator_identity() -> (String, String, OperatorCert) {
+        let key = ephemeral_signing_key(FIXED_OPERATOR_SEED);
+        let pk_hex = pubkey_hex(&key);
+        let fp = pubkey_fingerprint(&hex::decode(&pk_hex).unwrap());
+        let cert = ephemeral_cert_with_key(
+            &key,
+            CertOpts {
+                display_name: "operator-1".to_owned(),
+                permitted_ops: PERMITTED_OPS
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                ..CertOpts::default()
+            },
+        );
+        (pk_hex, fp, cert)
+    }
+
+    fn fixed_inputs<'a>(
+        roots:  &'a [&'a str],
+        op_pk:  &'a str,
+        op_fp:  &'a str,
+        cert:   &'a OperatorCert,
+    ) -> GenesisPolicyInputs<'a> {
         GenesisPolicyInputs {
             authority_pubkey_hex:   FIXED_AUTHORITY_PUBKEY_HEX,
             quality_pubkey_hex:     FIXED_QUALITY_PUBKEY_HEX,
-            operator_pubkey_hex:    FIXED_OPERATOR_PUBKEY_HEX,
+            operator_pubkey_hex:    op_pk,
             operator_fingerprint:   op_fp,
             signed_at_unix_secs:    1_700_000_000, // 2023-11-14T22:13:20Z
             allowed_worktree_roots: roots,
+            operator_cert:          cert,
         }
     }
 
@@ -329,10 +410,9 @@ mod tests {
     fn output_round_trips_through_load_policy() {
         // The single most important test in this crate. Anything that
         // breaks the loader contract surfaces here on the next test run.
-        let op_pk_bytes = hex::decode(FIXED_OPERATOR_PUBKEY_HEX).unwrap();
-        let op_fp = pubkey_fingerprint(&op_pk_bytes);
+        let (op_pk_hex, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
-        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_fp));
+        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk_hex, &op_fp, &cert));
 
         // Write to a temp file because `load_policy` takes a path.
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -342,13 +422,17 @@ mod tests {
 
         assert_eq!(bundle.epoch(), 1, "genesis epoch is always 1");
         assert_eq!(bundle.operators().len(), 1, "genesis registers exactly one operator");
-        assert_eq!(bundle.operators()[0].pubkey_hex, FIXED_OPERATOR_PUBKEY_HEX);
+        assert_eq!(bundle.operators()[0].pubkey_hex, op_pk_hex);
         assert_eq!(bundle.operators()[0].pubkey_fingerprint, op_fp);
         assert_eq!(bundle.signed_by(), op_fp);
         assert_eq!(bundle.signed_at(), 1_700_000_000);
         assert_eq!(bundle.lanes().len(), 1, "exactly one default lane at genesis");
         assert_eq!(bundle.lanes()[0].lane_id, "default");
         assert_eq!(sha.len(), 64, "policy_sha256 is hex-SHA-256 = 64 chars");
+        // Cert mandatory: every operator entry MUST carry a cert that
+        // round-trips losslessly through TOML.
+        assert_eq!(bundle.operators()[0].cert.pubkey_hex, op_pk_hex,
+            "embedded cert must agree with entry-level pubkey_hex");
     }
 
     #[test]
@@ -363,10 +447,9 @@ mod tests {
         // the kernel and isn't a workspace dep we have here), so the
         // canonical list is hardcoded. Any addition MUST update this test
         // AND BASE_COST_PER_INTENT_KIND in lock step.
-        let toml_str = {
-            let roots = ["/tmp/raxis-test-worktrees"];
-            render_genesis_policy_toml(fixed_inputs(&roots, "deadbeef"))
-        };
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
+        let roots = ["/tmp/raxis-test-worktrees"];
+        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
         for kind in &["SingleCommit", "IntegrationMerge", "CompleteTask", "ReportFailure"] {
             assert!(toml_str.contains(&format!("{kind:<17} = ")),
                 "expected canonical intent kind {kind:?} in output, got:\n{toml_str}");
@@ -385,8 +468,9 @@ mod tests {
         // Pinned because the kernel emitter previously omitted [[lanes]]
         // entirely. Without this section, every task admission for the
         // default lane fails with SchedulerError::UnknownLane.
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
-        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, "deadbeef"));
+        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
         assert!(toml_str.contains("[[lanes]]"), "missing [[lanes]] section");
         assert!(toml_str.contains("lane_id              = \"default\""),
             "missing default lane_id");
@@ -394,8 +478,9 @@ mod tests {
 
     #[test]
     fn all_thirteen_v1_permitted_ops_appear_in_operator_entry() {
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
-        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, "deadbeef"));
+        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
         for op in PERMITTED_OPS {
             assert!(toml_str.contains(&format!("\"{op}\"")),
                 "permitted op {op:?} missing from output");
@@ -408,8 +493,9 @@ mod tests {
 
     #[test]
     fn multiple_worktree_roots_are_emitted_with_correct_separator() {
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-a", "/tmp/raxis-b", "/tmp/raxis-c"];
-        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, "deadbeef"));
+        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
         // Expect `["/tmp/raxis-a", "/tmp/raxis-b", "/tmp/raxis-c"]` — one
         // pair of brackets, two separators of exactly `, ` between three
         // string literals.
@@ -423,9 +509,10 @@ mod tests {
         // No SystemTime::now() inside the emitter, no random bytes — for
         // the same inputs the bytes MUST match. This is what gives us
         // reproducible genesis policy artifacts across machines.
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
-        let a = render_genesis_policy_toml(fixed_inputs(&roots, "deadbeef"));
-        let b = render_genesis_policy_toml(fixed_inputs(&roots, "deadbeef"));
+        let a = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
+        let b = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
         assert_eq!(a, b, "emitter must be byte-deterministic for fixed inputs");
     }
 
@@ -434,14 +521,28 @@ mod tests {
         // The previous emitters called SystemTime::now() inline, which
         // made the goldens above impossible to write. Pin the contract
         // that the caller-supplied timestamp is the one that appears.
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
         let inputs = GenesisPolicyInputs {
             signed_at_unix_secs: 42,
-            ..fixed_inputs(&roots, "deadbeef")
+            ..fixed_inputs(&roots, &op_pk, &op_fp, &cert)
         };
         let toml_str = render_genesis_policy_toml(inputs);
         assert!(toml_str.contains("signed_at     = 42"),
             "expected `signed_at = 42` literal, got:\n{toml_str}");
+    }
+
+    /// New contract (INV-CERT-01): the emitter MUST always produce a
+    /// `[operators.entries.cert]` sub-table. A consumer scanning the
+    /// emitted bytes MUST see the cert block; a missing block would
+    /// make the loader reject the artifact at next boot.
+    #[test]
+    fn output_always_emits_an_operators_entries_cert_subtable() {
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
+        let roots = ["/tmp/raxis-test-worktrees"];
+        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
+        assert!(toml_str.contains("[operators.entries.cert]"),
+            "emitter MUST always produce a `[operators.entries.cert]` sub-table; got:\n{toml_str}");
     }
 
     // ── Negative cases ─────────────────────────────────────────────────────
@@ -451,7 +552,8 @@ mod tests {
     fn empty_worktree_roots_panics() {
         // Loader-rejects-empty-list contract: failing fast here gives a
         // clearer error than waiting for the loader to choke.
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots: [&str; 0] = [];
-        let _ = render_genesis_policy_toml(fixed_inputs(&roots, "deadbeef"));
+        let _ = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
     }
 }

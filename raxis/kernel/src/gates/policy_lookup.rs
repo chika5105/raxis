@@ -242,38 +242,36 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("policy.toml");
-        let toml = r#"
-[meta]
-epoch     = 1
-signed_by = "e0e77a507412b120f6ede61f62295b1a"
-signed_at = 0
-[authority]
-authority_pubkey = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-quality_pubkey   = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-[escalation_policy]
-timeout_secs = 3600
-window_secs  = 300
-max_per_window = 5
-quarantine_threshold = 3
-[sessions]
-default_ttl_secs = 86400
-max_ttl_secs     = 604800
-allowed_worktree_roots = ["/work"]
-[delegations]
-max_ttl_secs = 86400
-[budget]
-cost_per_touched_path = 1
-max_cost_per_task = 10000
-[budget.base_cost_per_intent_kind]
-SingleCommit = 10
-[[operators.entries]]
-# pubkey_fingerprint = SHA-256[:16] of the 0xaa pubkey above; required
-# by the new `validate_operator_certs` consistency check.
-pubkey_fingerprint = "e0e77a507412b120f6ede61f62295b1a"
-display_name = "Test"
-pubkey_hex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-permitted_ops = []
-"#;
+        // Cert-mandatory (INV-CERT-01): the loader's
+        // `validate_operator_certs` step rejects any
+        // `[[operators.entries]]` block missing a self-signed cert,
+        // so we mint one from a deterministic test key and round-trip
+        // through the shared genesis emitter rather than hand-rolling
+        // a TOML body that the loader would refuse.
+        let key  = raxis_test_support::ephemeral_signing_key([0xAAu8; 32]);
+        let pk   = raxis_test_support::pubkey_hex(&key);
+        let fp   = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
+        let cert = raxis_test_support::ephemeral_cert_with_key(&key, raxis_test_support::CertOpts {
+            display_name: "Test".to_owned(),
+            permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            ..raxis_test_support::CertOpts::default()
+        });
+        let toml = raxis_genesis_tools::render_genesis_policy_toml(
+            raxis_genesis_tools::GenesisPolicyInputs {
+                authority_pubkey_hex:
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                quality_pubkey_hex:
+                    "2222222222222222222222222222222222222222222222222222222222222222",
+                operator_pubkey_hex:    &pk,
+                operator_fingerprint:   &fp,
+                signed_at_unix_secs:    1_700_000_000,
+                allowed_worktree_roots: &["/work"],
+                operator_cert:          &cert,
+            },
+        );
         std::fs::write(&p, toml).unwrap();
         let (policy, _, _) = load_policy(&p).unwrap();
         let paths = vec![PathBuf::from("src/main.rs")];

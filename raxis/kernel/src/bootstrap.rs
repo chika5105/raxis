@@ -16,10 +16,14 @@
 //   <data_dir>/keys/quality_keypair.pem     — Ed25519 quality keypair (0400)
 //   <data_dir>/keys/verifier_token_key.bin  — 32 CSPRNG bytes (0400)
 //   <data_dir>/keys/operator_<fp>.pub       — operator public key (0444)
+//   <data_dir>/keys/operator_<fp>.cert.toml — operator self-signed cert (0444)
 //   <data_dir>/policy/policy.toml           — first policy epoch (0644)
 //
-// Operator private key is NEVER stored by the kernel. The operator runs
-// `raxis-cli policy sign` separately to produce policy.sig.
+// Operator private key is NEVER stored or seen by the kernel. The kernel
+// bootstrap takes a pre-minted self-signed cert (produced by `raxis cert
+// mint` on an air-gapped operator workstation) and embeds it into the
+// genesis policy.toml. Cert is mandatory (INV-CERT-01); there is no
+// pubkey-only path.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -27,7 +31,9 @@ use std::path::{Path, PathBuf};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
 use crate::errors::KernelError;
+use raxis_crypto::cert::{validate_cert_structurally, verify_cert_self_signature};
 use raxis_crypto::token::try_random_array;
+use raxis_types::operator_cert::OperatorCert;
 use raxis_types::unix_now_secs;
 
 // INV-STORE-03 (kernel-store.md §2.5.1): no raw SQL table-name literals
@@ -40,9 +46,18 @@ const POLICY_EPOCH_HISTORY: &str = raxis_store::Table::PolicyEpochHistory.as_str
 pub struct BootstrapConfig {
     /// Root data directory (e.g. `~/.raxis`).
     pub data_dir: PathBuf,
-    /// Path to an operator Ed25519 public key file, if supplied via
-    /// `--operator-pubkey`. If None, operator pubkey must be pasted interactively.
-    pub operator_pubkey_path: Option<PathBuf>,
+    /// Path to a pre-minted operator certificate file (`*.cert.toml` shape;
+    /// produced by `raxis cert mint`). The cert MUST be self-signed and
+    /// structurally valid; bootstrap fails closed otherwise.
+    ///
+    /// Cert-mandatory (INV-CERT-01): there is no pubkey-only path. Operators
+    /// must mint their cert offline (typically on an air-gapped workstation
+    /// holding the operator private key) and pass the resulting `*.cert.toml`
+    /// here. The kernel never sees the operator private key.
+    ///
+    /// If `None`, the kernel reads the cert TOML body from stdin in bootstrap
+    /// mode (used by `RAXIS_BOOTSTRAP=1 raxis-kernel < cert.toml`).
+    pub operator_cert_path: Option<PathBuf>,
     /// If true, allow re-genesis even if key files already exist.
     /// Only set from `--force`; not set in normal usage.
     pub force: bool,
@@ -210,8 +225,15 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
         "{{\"level\":\"info\",\"step\":\"bootstrap\",\"action\":\"generated verifier_token_key\"}}",
     );
 
-    // Step 5: Register operator public key.
-    let operator_pubkey_hex = load_operator_pubkey(config)?;
+    // Step 5: Load and validate the operator's pre-minted cert.
+    //
+    // Cert-mandatory (INV-CERT-01). The kernel never sees the operator
+    // private key — the cert is produced offline on an air-gapped
+    // operator workstation and supplied here as a `*.cert.toml` file.
+    // Bootstrap fails closed if the cert is structurally invalid or
+    // its self-signature does not verify under its declared pubkey.
+    let operator_cert = load_operator_cert(config)?;
+    let operator_pubkey_hex = operator_cert.pubkey_hex.clone();
     let operator_fingerprint = pubkey_fingerprint_from_hex(&operator_pubkey_hex)
         .map_err(|e| KernelError::BootstrapFailed { reason: e })?;
     let op_pub_path = keys_dir.join(format!("operator_{operator_fingerprint}.pub"));
@@ -219,8 +241,19 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
         &op_pub_path,
         operator_pubkey_hex.as_bytes(),
     )?;
+    // Persist the supplied cert into <keys_dir>/operator_<fp>.cert.toml so
+    // a future `raxis cert show` / `raxis cert verify` against the data
+    // dir can find the genesis cert without the operator having to retain
+    // their original cert artefact.
+    let op_cert_path = keys_dir.join(format!("operator_{operator_fingerprint}.cert.toml"));
+    let cert_toml = toml::to_string(&operator_cert)
+        .map_err(|e| KernelError::BootstrapFailed {
+            reason: format!("cannot serialise cert for {}: {e}", op_cert_path.display()),
+        })?;
+    write_file_0444(&op_cert_path, cert_toml.as_bytes())?;
     eprintln!(
-        "{{\"level\":\"info\",\"step\":\"bootstrap\",\"action\":\"registered operator\",\"fingerprint\":\"{operator_fingerprint}\"}}",
+        "{{\"level\":\"info\",\"step\":\"bootstrap\",\"action\":\"registered operator\",\"fingerprint\":\"{operator_fingerprint}\",\"cert_kind\":\"{kind}\"}}",
+        kind = operator_cert.kind.as_str(),
     );
 
     // Step 6: Write initial policy.toml.
@@ -233,6 +266,7 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
         &quality_vk,
         &operator_pubkey_hex,
         &operator_fingerprint,
+        &operator_cert,
     )?;
     eprintln!(
         "{{\"level\":\"info\",\"step\":\"bootstrap\",\"action\":\"wrote policy.toml\",\"epoch\":1}}",
@@ -267,6 +301,8 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
     println!("  quality_keypair   : {}", keys_dir.join("quality_keypair.pem").display());
     println!("  verifier_token_key: {}", keys_dir.join("verifier_token_key.bin").display());
     println!("  operator key      : {}", op_pub_path.display());
+    println!("  operator cert     : {} (kind={})",
+        op_cert_path.display(), operator_cert.kind.as_str());
     println!("  policy.toml       : {}", policy_dir.join("policy.toml").display());
     println!("\nNext step: sign the policy artifact:");
     println!("  raxis-cli policy sign {} --key <your_private_key>", policy_dir.join("policy.toml").display());
@@ -329,49 +365,69 @@ fn generate_verifier_token_key(keys_dir: &Path) -> Result<(), KernelError> {
     write_file_0400(&path, &key_bytes)
 }
 
-/// Load the operator's Ed25519 public key from file or stdin and return
-/// it in canonical lowercase 64-char hex form.
+/// Load the operator's pre-minted self-signed cert from file or stdin and
+/// return the parsed [`OperatorCert`] (cert-mandatory: INV-CERT-01).
 ///
-/// Accepts either:
-///   * a 64-char lowercase/uppercase hex string (raw 32 bytes hex-encoded), or
-///   * a PEM block (`-----BEGIN PUBLIC KEY-----`) wrapping the standard
-///     RFC 8410 SubjectPublicKeyInfo emitted by `openssl pkey -pubout`.
+/// The cert is supplied as a TOML document matching `OperatorCert`'s serde
+/// shape (the same shape `raxis cert mint` writes and `policy.toml` embeds
+/// under `[operators.entries.cert]`).
 ///
-/// Both formats are handed to `raxis_crypto::parse_ed25519_public_material`
-/// which validates the bytes through `ed25519_dalek::VerifyingKey::from_bytes`
-/// and then we re-encode to hex so the rest of bootstrap (fingerprinting,
-/// `operator_<fp>.pub` write, `policy.toml` operator entry) stays unchanged.
+/// Bootstrap fails closed if any of the following hold:
+///   * file/stdin I/O fails;
+///   * the bytes do not parse as TOML / `OperatorCert`;
+///   * `validate_cert_structurally` returns any errors (malformed pubkey,
+///     bad expiry positions for `Standard`, etc.); or
+///   * `verify_cert_self_signature` fails (the cert was not signed by the
+///     private key matching `cert.pubkey_hex`).
 ///
-/// Why both formats — operators following the README run `openssl pkey
-/// -pubout` (PEM); operators copying from `policy.toml` paste hex. Without
-/// this, `RAXIS_BOOTSTRAP=1 raxis-kernel` with `RAXIS_OPERATOR_PUBKEY` set
-/// to a `.pem` path failed with `BOOT_ERR_BOOTSTRAP_FAILED: hex decode
-/// failed: Invalid character '-' at position 0` — this function exists to
-/// make that flow Just Work.
-fn load_operator_pubkey(config: &BootstrapConfig) -> Result<String, KernelError> {
-    let raw = if let Some(path) = &config.operator_pubkey_path {
+/// **Why fail closed at this layer (not just at next-boot loader read):**
+/// the kernel will write `policy.toml` before the loader runs again. If we
+/// accepted an invalid cert here, we would emit a policy.toml the loader
+/// rejects on the very next boot — leaving the operator with a "successful"
+/// genesis that cannot start. Failing closed in `load_operator_cert` keeps
+/// the on-disk artefact set internally consistent: either every file is
+/// valid, or no policy.toml exists at all.
+fn load_operator_cert(config: &BootstrapConfig) -> Result<OperatorCert, KernelError> {
+    let raw = if let Some(path) = &config.operator_cert_path {
         std::fs::read_to_string(path).map_err(|e| KernelError::BootstrapFailed {
-            reason: format!("cannot read operator pubkey {}: {e}", path.display()),
+            reason: format!("cannot read operator cert {}: {e}", path.display()),
         })?
     } else {
         eprintln!(
-            "Paste the operator Ed25519 public key (64 hex chars or PEM) and press Enter:",
+            "Paste the operator cert (TOML body produced by `raxis cert mint`) and press Ctrl-D:",
         );
-        let mut line = String::new();
-        std::io::stdin()
-            .read_line(&mut line)
-            .map_err(|e| KernelError::BootstrapFailed {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).map_err(|e| {
+            KernelError::BootstrapFailed {
                 reason: format!("stdin read failed: {e}"),
-            })?;
-        line
+            }
+        })?;
+        buf
     };
 
-    let bytes = raxis_crypto::parse_ed25519_public_material(&raw).map_err(|e| {
-        KernelError::BootstrapFailed {
-            reason: format!("operator pubkey parse failed: {e}"),
-        }
+    let cert: OperatorCert = toml::from_str(&raw).map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("operator cert parse failed: {e}"),
     })?;
-    Ok(hex::encode(bytes))
+
+    let structural = validate_cert_structurally(&cert);
+    if !structural.is_empty() {
+        return Err(KernelError::BootstrapFailed {
+            reason: format!(
+                "operator cert structural validation failed: {}",
+                structural
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ),
+        });
+    }
+
+    verify_cert_self_signature(&cert).map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("operator cert self-signature verification failed: {e}"),
+    })?;
+
+    Ok(cert)
 }
 
 /// Read the Ed25519 verifying key from a PEM file written by `generate_ed25519_keypair`.
@@ -442,6 +498,7 @@ fn write_genesis_policy(
     quality_vk: &VerifyingKey,
     operator_pubkey_hex: &str,
     operator_fingerprint: &str,
+    operator_cert: &OperatorCert,
 ) -> Result<(), KernelError> {
     let policy_path = policy_dir.join("policy.toml");
 
@@ -467,8 +524,10 @@ fn write_genesis_policy(
             // helper every other audit emit site uses, so the genesis
             // record's `signed_at` and the audit record's `emitted_at` are
             // taken from the same monotonic baseline.
+            // `raxis_types::unix_now_secs()` already returns i64.
             signed_at_unix_secs:    unix_now_secs(),
             allowed_worktree_roots: &allowed_worktree_roots,
+            operator_cert,
         },
     );
 
@@ -514,18 +573,19 @@ fn install_genesis_policy_epoch_row(
         reason: format!("cannot open kernel.db at {}: {e}", db_path.display()),
     })?;
 
-    // Pass the bundle through so any cert-bound operator entries get
-    // mirrored into `operator_certificates` atomically with the
-    // `policy_epoch_history` row INSERT. The `Some(&bundle)` argument
-    // is the kernel-side genesis path's contract that the cert table
-    // and the policy_epoch_history table never disagree about which
-    // operators are cert-bound at epoch 1.
+    // Pass the bundle through so the operator entries get mirrored
+    // into `operator_certificates` atomically with the
+    // `policy_epoch_history` row INSERT. Cert is mandatory
+    // (INV-CERT-01), so the bundle's `operators` is non-empty and
+    // every entry carries a cert; the cert table and the
+    // policy_epoch_history table cannot disagree about which
+    // operators exist at epoch 1.
     crate::policy_manager::install_genesis_policy_epoch(
         &store,
         &sha256_hex,
         &signed_by_authority,
         unix_now_secs() as i64,
-        Some(&bundle),
+        &bundle,
     )
     .map_err(|e| KernelError::BootstrapFailed {
         reason: format!("install_genesis_policy_epoch failed: {e}"),
@@ -598,16 +658,23 @@ fn purge_existing_genesis_artifacts(keys_dir: &Path, audit_dir: &Path) -> Result
         }
     }
 
-    // Stale operator pubkey files (`operator_<fp>.pub`) from a previous
-    // genesis must also go: a fresh genesis may register a different
-    // operator, leaving the old fingerprint orphaned in the keys dir
-    // would let a stale entry shadow lookups. We pattern-match by
-    // filename to avoid removing unrelated files in keys/.
+    // Stale operator pubkey files (`operator_<fp>.pub`) and stale
+    // operator cert artefacts (`operator_<fp>.cert.toml`) from a
+    // previous genesis must also go: a fresh genesis may register a
+    // different operator, leaving the old fingerprint orphaned in
+    // the keys dir would let a stale entry shadow lookups. The cert
+    // file is now part of the canonical genesis output set
+    // (cert-mandatory per INV-CERT-01) and is written with mode 0444
+    // — without removing it, the second genesis attempt would fail
+    // with EACCES on `write_file_0444`. We pattern-match by filename
+    // to avoid removing unrelated files in keys/.
     if let Ok(entries) = std::fs::read_dir(keys_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("operator_") && name.ends_with(".pub") {
+            if name.starts_with("operator_")
+                && (name.ends_with(".pub") || name.ends_with(".cert.toml"))
+            {
                 let p = entry.path();
                 std::fs::remove_file(&p).map_err(|e| KernelError::BootstrapFailed {
                     reason: format!("--force cleanup: cannot remove {}: {e}", p.display()),
@@ -733,34 +800,53 @@ mod integration {
     /// Avoids `getrandom` so tests are reproducible across runs.
     ///
     /// Returns `(signing_key, hex-encoded public key)` because every caller
-    /// needs the hex form (that's what bootstrap reads from the on-disk
-    /// `--operator-pubkey` file).
+    /// needs the hex form (that's what we embed inside the cert that
+    /// bootstrap reads from the on-disk `--operator-cert` file).
     fn fixed_operator_key() -> (SigningKey, String) {
         let sk = SigningKey::from_bytes(&[0xC1u8; 32]);
         let pk_hex = hex::encode(sk.verifying_key().to_bytes());
         (sk, pk_hex)
     }
 
+    /// Mint a self-signed `Standard` cert from the fixed test key so
+    /// bootstrap can be exercised end-to-end without going through the
+    /// CLI's `raxis cert mint`. We sign at fixture-time rather than at
+    /// suite-time so every cert byte (including the signature) is
+    /// deterministic.
+    fn fixed_operator_cert() -> OperatorCert {
+        // Seed deliberately differs from the prod default `[42u8;32]` of
+        // `raxis_test_support::ephemeral_cert` so a leak between this
+        // fixture and any other surfaces immediately.
+        let seed = [0xC1u8; 32];
+        // Fixed `now` so the cert's [not_before, not_after] window is
+        // byte-stable across runs.
+        let now = 1_700_000_000;
+        raxis_test_support::ephemeral_cert(seed, now)
+    }
+
     /// Build a `BootstrapConfig` pointing at a fresh `TempDir` with a
-    /// pre-written operator pubkey file. Returns the `TempDir` (held by
-    /// the caller for the test's duration so it isn't dropped) and the
-    /// corresponding `BootstrapConfig`. The pubkey hex is also returned so
-    /// tests can assert against the exact bytes that bootstrap wrote.
+    /// pre-written operator **cert** file (`*.cert.toml`). Returns the
+    /// `TempDir` (held by the caller for the test's duration so it isn't
+    /// dropped), the corresponding `BootstrapConfig`, and the operator
+    /// pubkey hex (extracted from the cert) so tests can assert against
+    /// the exact bytes that bootstrap wrote.
     fn fresh_bootstrap_env() -> (TempDir, BootstrapConfig, String) {
         let tmp = TempDir::new().expect("TempDir::new");
         let data_dir = tmp.path().to_path_buf();
 
-        let (_, op_pk_hex) = fixed_operator_key();
-        let pk_path = data_dir.join("operator.pub");
+        let cert = fixed_operator_cert();
+        let op_pk_hex = cert.pubkey_hex.clone();
+        let cert_path = data_dir.join("operator.cert.toml");
         // The data_dir doesn't exist yet — bootstrap creates the subdirs,
-        // not the root — but we need a place to put the pubkey file so
+        // not the root — but we need a place to put the cert file so
         // bootstrap can read it. Stash it in the root data_dir, which is
         // the TempDir itself (always exists).
-        std::fs::write(&pk_path, op_pk_hex.as_bytes()).expect("write operator pubkey");
+        let cert_toml = toml::to_string(&cert).expect("serialise cert");
+        std::fs::write(&cert_path, cert_toml.as_bytes()).expect("write operator cert");
 
         let config = BootstrapConfig {
             data_dir,
-            operator_pubkey_path: Some(pk_path),
+            operator_cert_path: Some(cert_path),
             force: false,
         };
 
@@ -1146,25 +1232,57 @@ mod integration {
 mod edge_cases {
     use super::*;
     use ed25519_dalek::SigningKey;
+    use raxis_test_support::{ephemeral_cert_with_key, CertOpts};
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
-    fn fresh_env_with_pubkey_hex(pubkey_hex: &str) -> (TempDir, BootstrapConfig) {
+    /// Build a fresh `(TempDir, BootstrapConfig)` pair that points at a
+    /// pre-written, structurally-valid cert TOML on disk. The cert is
+    /// deterministic (fixed seed) so failures reproduce byte-identically.
+    fn fresh_env_with_good_cert() -> (TempDir, BootstrapConfig) {
         let tmp = TempDir::new().unwrap();
-        let pk_path = tmp.path().join("operator.pub");
-        std::fs::write(&pk_path, pubkey_hex.as_bytes()).unwrap();
+        let cert = good_cert();
+        let cert_path = tmp.path().join("operator.cert.toml");
+        std::fs::write(
+            &cert_path,
+            toml::to_string(&cert).expect("serialise cert").as_bytes(),
+        ).unwrap();
         let config = BootstrapConfig {
             data_dir: tmp.path().to_path_buf(),
-            operator_pubkey_path: Some(pk_path),
+            operator_cert_path: Some(cert_path),
             force: false,
         };
         (tmp, config)
     }
 
-    fn good_pubkey_hex() -> String {
-        let sk = SigningKey::from_bytes(&[0xD1u8; 32]);
-        hex::encode(sk.verifying_key().to_bytes())
+    /// Variant of [`fresh_env_with_good_cert`] that lets the caller supply
+    /// raw cert-file bytes (used by malformed-input tests).
+    fn fresh_env_with_cert_bytes(cert_bytes: &[u8]) -> (TempDir, BootstrapConfig) {
+        let tmp = TempDir::new().unwrap();
+        let cert_path = tmp.path().join("operator.cert.toml");
+        std::fs::write(&cert_path, cert_bytes).unwrap();
+        let config = BootstrapConfig {
+            data_dir: tmp.path().to_path_buf(),
+            operator_cert_path: Some(cert_path),
+            force: false,
+        };
+        (tmp, config)
     }
+
+    /// Mint a deterministic, structurally-valid, self-signed `Standard`
+    /// cert from a fixed seed. Used by every happy-path edge-case test in
+    /// this module.
+    fn good_cert() -> OperatorCert {
+        let key = SigningKey::from_bytes(&[0xD1u8; 32]);
+        ephemeral_cert_with_key(&key, CertOpts {
+            // Anchor `now` to a value that places the cert squarely in
+            // the Active zone — no warn / grace overlap inside any
+            // edge-case test.
+            now_unix_secs: 1_700_000_000,
+            ..CertOpts::default()
+        })
+    }
+
 
     // ── Re-genesis guard ────────────────────────────────────────────────────
 
@@ -1174,7 +1292,7 @@ mod edge_cases {
         // accidentally regenerate keys (which would invalidate every
         // existing session, plan signature, and witness blob — the kernel
         // has no migration path for that).
-        let (_tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (_tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("first run");
 
         let err = run_inner(&config).expect_err("second run must fail");
@@ -1199,7 +1317,7 @@ mod edge_cases {
         // operator dropping a credentials file does not have to mkdir
         // first) AND chmod 0700 (so a careless umask does not leak the
         // directory listing to other users on the host).
-        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("bootstrap");
 
         let providers_dir = tmp.path().join("providers");
@@ -1227,7 +1345,7 @@ mod edge_cases {
         // the previous bootstrap ran `create_dir_all` and trusted the
         // umask. Pin the chmod here so a future "simplify the dir-
         // creation loop" PR can't quietly re-introduce the bug.
-        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("bootstrap");
 
         let keys_dir = tmp.path().join("keys");
@@ -1254,7 +1372,7 @@ mod edge_cases {
         // Pin that bootstrap creates the directory eagerly. Mode is
         // intentionally 0755 (the socket *files* themselves are mode-
         // hardened individually per kernel-store.md §2.5.5).
-        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("bootstrap");
 
         let sockets_dir = tmp.path().join("sockets");
@@ -1272,7 +1390,7 @@ mod edge_cases {
         // could have trivially set up. Pin that bootstrap creates the
         // directory so `raxis doctor` is fully green right after the
         // ceremony.
-        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("bootstrap");
 
         let notifications_dir = tmp.path().join("notifications");
@@ -1291,7 +1409,7 @@ mod edge_cases {
         // first heartbeat write happens — the writer uses
         // `tempfile + atomic rename` and would crash on a missing
         // parent. Genesis is the natural place to mkdir it.
-        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("bootstrap");
 
         let runtime_dir = tmp.path().join("runtime");
@@ -1309,7 +1427,7 @@ mod edge_cases {
         // as commented blocks. A freshly-bootstrapped kernel must therefore
         // load policy.toml with `gateway() == None` and `providers() == &[]`
         // — the no-LLM degraded mode mentioned in the spec.
-        let (tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("bootstrap");
 
         let (bundle, _, _) = raxis_policy::load_policy(
@@ -1326,7 +1444,7 @@ mod edge_cases {
         // The escape hatch: --force lets an operator deliberately re-run
         // genesis (e.g. to recover from a torn first run). The new
         // authority key MUST replace the old one byte-for-byte.
-        let (_tmp, mut config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (_tmp, mut config) = fresh_env_with_good_cert();
         run_inner(&config).expect("first run");
 
         // Capture the authority pubkey from run #1.
@@ -1344,21 +1462,21 @@ mod edge_cases {
             "force re-genesis must mint a new authority keypair");
     }
 
-    // ── Operator pubkey input validation ────────────────────────────────────
+    // ── Operator cert input validation ──────────────────────────────────────
 
     #[test]
-    fn missing_operator_pubkey_file_fails_with_path_in_message() {
+    fn missing_operator_cert_file_fails_with_path_in_message() {
         let tmp = TempDir::new().unwrap();
         let config = BootstrapConfig {
             data_dir: tmp.path().to_path_buf(),
-            operator_pubkey_path: Some(tmp.path().join("does/not/exist.pub")),
+            operator_cert_path: Some(tmp.path().join("does/not/exist.cert.toml")),
             force: false,
         };
-        let err = run_inner(&config).expect_err("missing pubkey file must error");
+        let err = run_inner(&config).expect_err("missing cert file must error");
         match err {
             KernelError::BootstrapFailed { reason } => {
                 assert!(
-                    reason.contains("operator pubkey") && reason.contains("does/not/exist.pub"),
+                    reason.contains("operator cert") && reason.contains("does/not/exist.cert.toml"),
                     "error message should name the missing path: {reason:?}",
                 );
             }
@@ -1367,29 +1485,19 @@ mod edge_cases {
     }
 
     #[test]
-    fn malformed_operator_pubkey_input_fails_with_parse_message() {
-        // `load_operator_pubkey` now routes through
-        // `raxis_crypto::parse_ed25519_public_material`, which rejects
-        // input that is neither 64-char hex nor a PEM block with a
-        // diagnostic that names BOTH supported formats. We pin the
-        // diagnostic shape (mentions "hex" and "PEM") rather than the
-        // exact wording so a future copy-edit doesn't break this test —
-        // but we do NOT want a future "make this terser" PR to drop
-        // either format hint, since the whole reason the kernel accepts
-        // PEM in the first place is to fix the operator-confusion bug
-        // where `--operator-pubkey path/to/openssl.pem` errored out.
-        let (_tmp, config) = fresh_env_with_pubkey_hex("not-valid-hex");
-        let err = run_inner(&config).expect_err("malformed pubkey must error");
+    fn malformed_operator_cert_input_fails_with_parse_message() {
+        // The cert is supplied as a TOML document. Anything that is not
+        // a valid TOML body (or that parses but is missing a required
+        // `OperatorCert` field) MUST surface a `cert parse failed`
+        // diagnostic rather than panicking deeper inside the policy
+        // emitter — operators need to know the symptom.
+        let (_tmp, config) = fresh_env_with_cert_bytes(b"not a TOML cert");
+        let err = run_inner(&config).expect_err("malformed cert must error");
         match err {
             KernelError::BootstrapFailed { reason } => {
                 assert!(
-                    reason.contains("operator pubkey parse failed"),
+                    reason.contains("operator cert parse failed"),
                     "expected parse-failed error, got {reason:?}",
-                );
-                assert!(
-                    reason.contains("hex") && reason.contains("PEM"),
-                    "diagnostic must name both supported formats so the \
-                     operator can pick one, got {reason:?}",
                 );
             }
             other => panic!("expected BootstrapFailed, got {other:?}"),
@@ -1397,94 +1505,94 @@ mod edge_cases {
     }
 
     #[test]
-    fn operator_pubkey_with_leading_whitespace_is_trimmed() {
-        // load_operator_pubkey delegates trimming to
-        // `raxis_crypto::parse_ed25519_public_material`. A real operator
-        // running `echo $PK > operator.pub` ends up with a trailing
-        // newline that we must tolerate.
-        let (_tmp, config) = fresh_env_with_pubkey_hex(&format!("  {}  \n", good_pubkey_hex()));
-        run_inner(&config).expect("whitespace-padded pubkey must be accepted");
+    fn structurally_invalid_operator_cert_fails_closed_at_bootstrap() {
+        // A cert whose `pubkey_hex` is the wrong length must be rejected
+        // by `validate_cert_structurally` BEFORE we touch policy.toml.
+        // Otherwise the round-trip read at next boot would fail and the
+        // operator would see a "successful" genesis they cannot start.
+        let mut cert = good_cert();
+        cert.pubkey_hex = "deadbeef".to_owned(); // 8 chars, not 64
+        let (_tmp, config) = fresh_env_with_cert_bytes(
+            toml::to_string(&cert).unwrap().as_bytes(),
+        );
+        let err = run_inner(&config).expect_err("structurally-invalid cert must error");
+        match err {
+            KernelError::BootstrapFailed { reason } => {
+                assert!(
+                    reason.contains("structural validation failed"),
+                    "expected structural-validation error, got {reason:?}",
+                );
+            }
+            other => panic!("expected BootstrapFailed, got {other:?}"),
+        }
     }
 
     #[test]
-    fn operator_pubkey_pem_from_openssl_is_accepted_and_canonicalised_to_hex() {
-        // The original symptom: operators followed the README's
-        // `openssl pkey -pubout` recipe and pointed RAXIS_OPERATOR_PUBKEY
-        // at a `.pem` file. The kernel's older bootstrap path treated
-        // file contents as raw hex and bailed with
-        //
-        //     BOOT_ERR_BOOTSTRAP_FAILED: hex decode failed:
-        //         Invalid character '-' at position 0
-        //
-        // (the leading `-` of `-----BEGIN`). Pin the fix end-to-end:
-        // PEM input must complete genesis, AND the on-disk
-        // `operator_<fp>.pub` must contain canonical lowercase hex (not
-        // the raw PEM blob), since downstream consumers — policy.toml
-        // operator entry, fingerprint computation, IPC challenge-response
-        // — all expect 64-char hex.
-        let pem = "-----BEGIN PUBLIC KEY-----\n\
-MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\n\
------END PUBLIC KEY-----\n";
-        // Compute the expected hex via the same shared parser the kernel
-        // uses, so this test pins behavioural equivalence (PEM in →
-        // canonical hex on disk) rather than a brittle hand-computed
-        // string.
-        let expected_bytes =
-            raxis_crypto::parse_ed25519_public_material(pem).expect("PEM is well-formed");
-        let expected_hex = hex::encode(expected_bytes);
-        let (_tmp, config) = fresh_env_with_pubkey_hex(pem);
-        run_inner(&config).expect("PEM operator pubkey must be accepted");
+    fn operator_cert_with_invalid_self_signature_fails_closed_at_bootstrap() {
+        // A cert that parses + structurally validates but whose
+        // `self_sig_hex` does not actually verify under `pubkey_hex`
+        // (e.g. an operator hand-edited their cert.toml after minting)
+        // must fail closed at bootstrap rather than be rubber-stamped
+        // into policy.toml.
+        let mut cert = good_cert();
+        // Flip the last byte of the signature — still 128 hex chars,
+        // still parses, but no longer a valid Ed25519 signature.
+        let mut sig_bytes = hex::decode(&cert.self_sig_hex).unwrap();
+        sig_bytes[63] ^= 0x01;
+        cert.self_sig_hex = hex::encode(&sig_bytes);
+        let (_tmp, config) = fresh_env_with_cert_bytes(
+            toml::to_string(&cert).unwrap().as_bytes(),
+        );
+        let err = run_inner(&config).expect_err("tampered self-sig must error");
+        match err {
+            KernelError::BootstrapFailed { reason } => {
+                assert!(
+                    reason.contains("self-signature verification failed"),
+                    "expected self-sig-verification error, got {reason:?}",
+                );
+            }
+            other => panic!("expected BootstrapFailed, got {other:?}"),
+        }
+    }
 
-        // Locate the `operator_<fp>.pub` file and assert canonical hex.
-        let keys_dir = config.data_dir.join("keys");
-        let mut op_file = None;
+    #[test]
+    fn operator_cert_is_persisted_to_keys_dir_after_bootstrap() {
+        // The kernel must persist the supplied cert to
+        // `keys/operator_<fp>.cert.toml` so a future `raxis cert show`
+        // / `raxis cert verify` against the data dir can find it
+        // without the operator having to retain their original cert
+        // artefact. The on-disk bytes MUST round-trip back to the
+        // same `OperatorCert` we passed in.
+        let (tmp, config) = fresh_env_with_good_cert();
+        run_inner(&config).expect("bootstrap");
+
+        let keys_dir = tmp.path().join("keys");
+        let mut cert_file = None;
         for entry in std::fs::read_dir(&keys_dir).expect("keys dir readable") {
             let entry = entry.unwrap();
             let name = entry.file_name();
             let name = name.to_string_lossy().to_string();
-            if name.starts_with("operator_") && name.ends_with(".pub") {
-                op_file = Some(entry.path());
+            if name.starts_with("operator_") && name.ends_with(".cert.toml") {
+                cert_file = Some(entry.path());
                 break;
             }
         }
-        let op_path = op_file.expect("bootstrap must write operator_<fp>.pub");
-        let on_disk = std::fs::read_to_string(&op_path).unwrap();
-        assert_eq!(
-            on_disk.trim(),
-            expected_hex,
-            "PEM input must be normalised to canonical lowercase hex on disk",
-        );
-        assert!(
-            on_disk.trim().chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
-            "on-disk operator pubkey must be lowercase hex only, got {on_disk:?}",
-        );
-        assert_eq!(
-            on_disk.trim().len(),
-            64,
-            "on-disk operator pubkey must be 64 hex chars (raw 32 bytes)",
-        );
-    }
+        let cert_path = cert_file
+            .expect("bootstrap must write operator_<fp>.cert.toml under keys/");
+        let raw = std::fs::read_to_string(&cert_path).unwrap();
+        let parsed: OperatorCert =
+            toml::from_str(&raw).expect("persisted cert must round-trip");
+        assert_eq!(parsed, good_cert(),
+            "persisted cert must equal the cert bootstrap was supplied");
 
-    #[test]
-    fn operator_pubkey_pem_with_crlf_line_endings_is_accepted() {
-        // Operators on Windows or pasting from email clients end up with
-        // CRLF line endings inside the PEM block. The shared parser
-        // strips them; pin that the kernel surfaces the same tolerance.
-        let pem = "-----BEGIN PUBLIC KEY-----\r\n\
-MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\r\n\
------END PUBLIC KEY-----\r\n";
-        let (_tmp, config) = fresh_env_with_pubkey_hex(pem);
-        run_inner(&config).expect("CRLF-terminated PEM must be accepted");
-    }
-
-    #[test]
-    fn operator_pubkey_uppercase_hex_is_accepted() {
-        // Some operators paste hex copied from logs that capitalised it.
-        // Pre-fix the kernel decoded uppercase hex fine via `hex::decode`;
-        // confirm that hasn't regressed under the new parser.
-        let upper = good_pubkey_hex().to_uppercase();
-        let (_tmp, config) = fresh_env_with_pubkey_hex(&upper);
-        run_inner(&config).expect("uppercase hex pubkey must be accepted");
+        // Mode bits: the cert is public material (it embeds only the
+        // pubkey, never the private key) and must be world-readable
+        // (0o444) so that `raxis cert show` running as a different uid
+        // can inspect it.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&cert_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o444,
+            "operator_<fp>.cert.toml must be chmod 0444 (public material); got 0{mode:o}");
     }
 
     // ── Authority and quality keys must be DISTINCT ─────────────────────────
@@ -1496,7 +1604,7 @@ MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\r\n\
         // state for both would silently produce identical keys, and v2's
         // witness attestation (which uses quality_keypair) would then be
         // signing under the authority key — a trust-boundary violation.
-        let (_tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (_tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).unwrap();
 
         let auth_path = config.data_dir.join("keys").join("authority_keypair.pem");
@@ -1511,7 +1619,7 @@ MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\r\n\
 
     #[test]
     fn verifier_token_key_is_exactly_32_bytes() {
-        let (_tmp, config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (_tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).unwrap();
         let key = std::fs::read(
             config.data_dir.join("keys").join("verifier_token_key.bin"),
@@ -1527,7 +1635,7 @@ MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\r\n\
         // The genesis nonce is the chain-anchor entropy; two genesis runs
         // on the same machine MUST produce different nonces or operators
         // could not distinguish two distinct kernel installs from one.
-        let (_tmp, mut config) = fresh_env_with_pubkey_hex(&good_pubkey_hex());
+        let (_tmp, mut config) = fresh_env_with_good_cert();
         run_inner(&config).unwrap();
         let line1 = std::fs::read_to_string(
             config.data_dir.join("audit").join("segment-000.jsonl"),

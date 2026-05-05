@@ -172,7 +172,7 @@ pub fn install_genesis_policy_epoch(
     policy_sha256: &str,
     signed_by_authority: &str,
     advanced_at_unix_secs: i64,
-    bundle: Option<&PolicyBundle>,
+    bundle: &PolicyBundle,
 ) -> Result<(), PolicyError> {
     // Delegate to the shared writer in `raxis-store`. Both this kernel-side
     // genesis path and the operator-facing `raxis genesis` CLI command call
@@ -180,7 +180,8 @@ pub fn install_genesis_policy_epoch(
     // single-file change. See `crates/store/src/genesis.rs` for the
     // INSERT OR IGNORE rationale that used to live here AND for the
     // operator_certificates atomic-mirror contract added in step 4 of
-    // the cert feature.
+    // the cert feature. Cert is mandatory (INV-CERT-01); bundle is
+    // non-Option.
     raxis_store::install_genesis_policy_epoch_row(
         store,
         policy_sha256,
@@ -558,23 +559,30 @@ pub fn advance_epoch(
     }
 
     // ── Phase 1.5c: cert audit-chain mirror ─────────────────────────
-    // For every cert-bound operator entry we emit OperatorCertInstalled
-    // (one record per cert), and for every legacy entry we emit
-    // OperatorCertLegacyEntryDetected. These records are the
-    // authoritative ledger that backs the operator_certificates view
-    // table — if the table is ever lost (disk corruption, schema
-    // rebuild) it can be reconstructed by replaying these records up
-    // to the latest PolicyEpochAdvanced. We also emit one
-    // OperatorCertMisconfigBypassed per relaxed invariant so the
-    // ledger captures every structural override the operator opted
-    // into. Self-signature failures and pubkey mismatches are
-    // unbypassable and never reach this point — `validate_operator_certs`
-    // already returned a hard PolicyError before the SQL transaction
-    // even opened. Errors from individual emits are logged and DO NOT
-    // unwind the epoch advance — the in-memory visibility flip below
-    // must still happen so the operator gets the new epoch's enforcement.
+    // For every operator entry we emit OperatorCertInstalled (cert is
+    // mandatory — INV-CERT-01 — so every entry produces exactly one
+    // record). These records are the authoritative ledger that backs
+    // the operator_certificates view table — if the table is ever
+    // lost (disk corruption, schema rebuild) it can be reconstructed
+    // by replaying these records up to the latest PolicyEpochAdvanced.
+    // We also emit one OperatorCertMisconfigBypassed per relaxed
+    // invariant so the ledger captures every structural override the
+    // operator opted into. Self-signature failures and pubkey
+    // mismatches are unbypassable and never reach this point —
+    // `validate_operator_certs` already returned a hard PolicyError
+    // before the SQL transaction even opened. Errors from individual
+    // emits are logged and DO NOT unwind the epoch advance — the
+    // in-memory visibility flip below must still happen so the operator
+    // gets the new epoch's enforcement.
+    //
+    // Pass the OUTGOING bundle so the cert mirror can detect rotations
+    // (same pubkey, different cert content → `previous_fingerprint`
+    // populated on `OperatorCertInstalled`). The load here happens
+    // before the `policy_swap.store(...)` below so we still observe
+    // the pre-advance state.
+    let prev_bundle_arc = policy_swap.load_full();
     cert_audit_emit::emit_cert_chain_mirror(
-        audit.as_ref(), &new_bundle, new_epoch_id,
+        audit.as_ref(), &new_bundle, Some(&*prev_bundle_arc), new_epoch_id,
     );
 
     // ── Phase 2: in-memory visibility flip ───────────────────────────
@@ -612,9 +620,8 @@ pub fn advance_epoch(
 /// file.
 ///
 /// **Idempotency / dedupe.** Each operator entry produces:
-///   - exactly one `OperatorCertInstalled` (cert-bound entries), OR
-///   - exactly one `OperatorCertLegacyEntryDetected` (cert-less
-///     entries), AND
+///   - exactly one `OperatorCertInstalled` (cert is mandatory —
+///     INV-CERT-01 — so every entry produces exactly one record);
 ///   - zero or more `OperatorCertMisconfigBypassed` (one per
 ///     relaxed structural invariant; only emitted when the operator
 ///     entry has `force_misconfig_bypass = true` AND validation
@@ -633,16 +640,50 @@ mod cert_audit_emit {
 
     /// Drive every cert-related post-commit audit emit for one
     /// `advance_epoch` (or genesis) call.
+    ///
+    /// `prev_bundle` is the OUTGOING policy bundle (i.e. the one being
+    /// replaced by `bundle`). It is `None` only at genesis — there is
+    /// no prior bundle to diff against. For every subsequent epoch
+    /// advance the kernel passes `Some(prev_bundle)` so the cert
+    /// mirror can detect cert rotations: an operator entry whose
+    /// `pubkey_hex` matches a prior entry but whose embedded cert's
+    /// `self_sig_hex` differs is a rotation, and we record the prior
+    /// fingerprint on `OperatorCertInstalled.previous_fingerprint` so
+    /// the audit chain captures continuity. (INV-CERT-04 forbids
+    /// pubkey changes on `cert install --replace-for`, so the prior
+    /// fingerprint is the same string as the current one — but its
+    /// presence vs absence is the operator-meaningful signal.)
     pub(super) fn emit_cert_chain_mirror(
         audit:        &dyn AuditSink,
         bundle:       &PolicyBundle,
+        prev_bundle:  Option<&PolicyBundle>,
         new_epoch_id: u64,
     ) {
-        // 1. One `OperatorCertInstalled` per cert-bound entry,
-        //    matching the `operator_certificates` row written inside
-        //    the just-committed transaction.
+        // 1. One `OperatorCertInstalled` per operator entry, matching
+        //    the `operator_certificates` row written inside the
+        //    just-committed transaction. Cert is mandatory
+        //    (INV-CERT-01) so every entry produces an event — there
+        //    is no cert-less / "legacy" branch to skip.
         for entry in bundle.operators() {
-            let Some(cert) = &entry.cert else { continue; };
+            let cert = &entry.cert;
+            // Rotation detection: same pubkey, different cert content
+            // (`self_sig_hex` is the integrity tag over every
+            // signed-into field, so any field change forces a
+            // different signature). Per INV-CERT-04 the pubkey cannot
+            // change across a rotation, so we look up the prior entry
+            // by `pubkey_hex` rather than `pubkey_fingerprint` — the
+            // two are equivalent here but `pubkey_hex` is the value
+            // the policy.toml carries verbatim.
+            let previous_fingerprint = prev_bundle.and_then(|prev| {
+                let prior = prev.operators()
+                    .iter()
+                    .find(|e| e.pubkey_hex.eq_ignore_ascii_case(&entry.pubkey_hex))?;
+                if prior.cert.self_sig_hex != cert.self_sig_hex {
+                    Some(prior.pubkey_fingerprint.clone())
+                } else {
+                    None
+                }
+            });
             try_emit(audit, AuditEventKind::OperatorCertInstalled {
                 pubkey_fingerprint:     entry.pubkey_fingerprint.clone(),
                 epoch_id:               new_epoch_id,
@@ -652,23 +693,11 @@ mod cert_audit_emit {
                 not_after:              cert.not_after,
                 permitted_ops:          cert.permitted_ops.clone(),
                 force_misconfig_bypass: entry.force_misconfig_bypass,
+                previous_fingerprint,
             }, "OperatorCertInstalled");
         }
 
-        // 2. One `OperatorCertLegacyEntryDetected` per cert-less entry.
-        //    The kernel still honours these entries' `permitted_ops`,
-        //    but no cert checks apply — operators see this event in
-        //    the audit chain and can choose to mint a cert.
-        for entry in bundle.operators() {
-            if entry.cert.is_some() { continue; }
-            try_emit(audit, AuditEventKind::OperatorCertLegacyEntryDetected {
-                pubkey_fingerprint: entry.pubkey_fingerprint.clone(),
-                epoch_id:           new_epoch_id,
-                display_name:       entry.display_name.clone(),
-            }, "OperatorCertLegacyEntryDetected");
-        }
-
-        // 3. One `OperatorCertMisconfigBypassed` per operator entry that
+        // 2. One `OperatorCertMisconfigBypassed` per operator entry that
         //    opted into bypassing structural cert-validation errors. The
         //    full violations list is bundled into a single record so a
         //    forensic auditor sees the entire relaxed-rule set in one
@@ -752,15 +781,24 @@ mod tests {
         assert_eq!(read_current_epoch(&store).unwrap(), 0);
     }
 
+    /// Helper used by the genesis-row tests that don't care about
+    /// cert mirroring — the bundle is empty, so `repopulate` inserts
+    /// 0 rows into `operator_certificates` and the test exercises the
+    /// `policy_epoch_history` writer in isolation.
+    fn empty_bundle_for_genesis_test() -> PolicyBundle {
+        PolicyBundle::for_tests_with_operators(vec![])
+    }
+
     #[test]
     fn install_genesis_writes_epoch_one() {
         let store = open_mem_store();
+        let bundle = empty_bundle_for_genesis_test();
         install_genesis_policy_epoch(
             &store,
             "abc123",
             "deadbeefdeadbeefdeadbeefdeadbeef",
             1_700_000_000,
-            None,
+            &bundle,
         )
         .unwrap();
         assert_eq!(read_current_epoch(&store).unwrap(), 1);
@@ -773,12 +811,13 @@ mod tests {
         // the recovery contract for a bootstrap that crashed after the
         // INSERT but before returning.
         let store = open_mem_store();
+        let bundle = empty_bundle_for_genesis_test();
         install_genesis_policy_epoch(
-            &store, "abc123", "fp", 1_700_000_000, None,
+            &store, "abc123", "fp", 1_700_000_000, &bundle,
         )
         .unwrap();
         install_genesis_policy_epoch(
-            &store, "abc123", "fp", 1_700_000_000, None,
+            &store, "abc123", "fp", 1_700_000_000, &bundle,
         )
         .expect("second install must be a no-op");
         assert_eq!(read_current_epoch(&store).unwrap(), 1);
@@ -787,8 +826,9 @@ mod tests {
     #[test]
     fn install_genesis_persists_metadata_columns() {
         let store = open_mem_store();
+        let bundle = empty_bundle_for_genesis_test();
         install_genesis_policy_epoch(
-            &store, "deadc0de", "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", 1_700_000_001, None,
+            &store, "deadc0de", "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", 1_700_000_001, &bundle,
         )
         .unwrap();
         let conn = store.lock_sync();
@@ -865,8 +905,24 @@ mod tests {
 
         let auth_hex = hex::encode(authority_sk.verifying_key().to_bytes());
         let qual_hex = "b".repeat(64);
-        let op_pk_hex = "c".repeat(64);
+
+        // Mint a real Ed25519 operator key + self-signed cert so the
+        // policy.toml passes `PolicyBundle::validate`'s mandatory cert
+        // checks (INV-CERT-01). The seed [0x33; 32] is deterministic
+        // so the test's outputs are stable across runs.
+        let op_sk = SigningKey::from_bytes(&[0x33u8; 32]);
+        let op_pk_hex = hex::encode(op_sk.verifying_key().to_bytes());
         let op_fp = raxis_policy::loader::operator_pubkey_fingerprint(&op_pk_hex).unwrap();
+
+        let cert = raxis_test_support::ephemeral_cert_with_key(
+            &op_sk,
+            raxis_test_support::CertOpts {
+                display_name: "Alice".to_owned(),
+                permitted_ops: vec!["CreateInitiative".to_owned()],
+                ..raxis_test_support::CertOpts::default()
+            },
+        );
+        let cert_subtable = toml::to_string(&cert).unwrap();
 
         // Hand-built policy.toml that satisfies `PolicyBundle::validate`.
         // Keeping it inline avoids a dependency on the genesis emitter
@@ -905,7 +961,10 @@ mod tests {
              pubkey_fingerprint = \"{op_fp}\"\n\
              display_name       = \"Alice\"\n\
              pubkey_hex         = \"{op_pk_hex}\"\n\
-             permitted_ops      = [\"CreateInitiative\"]\n",
+             permitted_ops      = [\"CreateInitiative\"]\n\
+             \n\
+             [operators.entries.cert]\n\
+             {cert_subtable}\n",
         );
         std::fs::write(&policy_path, toml.as_bytes()).unwrap();
 
@@ -933,7 +992,8 @@ mod tests {
         // can move us to epoch 2 onwards. SHA + fingerprint values
         // are stable test fixtures; their content is not what we
         // assert on in these tests.
-        install_genesis_policy_epoch(&store, "genesis-sha", "genesis-fp", 1, None).unwrap();
+        let empty = PolicyBundle::for_tests_with_operators(vec![]);
+        install_genesis_policy_epoch(&store, "genesis-sha", "genesis-fp", 1, &empty).unwrap();
 
         let bundle = PolicyBundle::for_tests_with_operators(vec![]);
         let policy_swap = StdArc::new(ArcSwap::from_pointee(bundle));
@@ -1046,19 +1106,19 @@ mod tests {
             "expected PolicyEpochAdvanced in {kinds:?}");
     }
 
-    /// Pin the cert audit-chain mirror for the cert-less ("legacy")
-    /// operator entry path. The fixture's policy.toml contains exactly
-    /// one operator entry without a `[cert]` table, so a successful
-    /// `advance_epoch` must emit exactly one
-    /// `OperatorCertLegacyEntryDetected` AND zero
-    /// `OperatorCertInstalled` AND zero
-    /// `OperatorCertMisconfigBypassed` events. The presence /
-    /// cardinality of the legacy event is the visible signal that
-    /// kernel-store.md §2.5.7 audit-chain mirroring is wired through
-    /// the advance path. Step 9 (cert-bound genesis) will add the
-    /// companion `OperatorCertInstalled` test.
+    /// Pin the cert audit-chain mirror for the cert-bound operator
+    /// entry path. The fixture's policy.toml contains exactly one
+    /// operator entry whose `[cert]` block is a freshly-self-signed
+    /// Standard cert, so a successful `advance_epoch` must emit
+    /// exactly one `OperatorCertInstalled` AND zero
+    /// `OperatorCertMisconfigBypassed` events. Cert is mandatory
+    /// (INV-CERT-01); there is no cert-less / "legacy" path, and
+    /// `OperatorCertLegacyEntryDetected` was deleted alongside it.
+    /// The presence / cardinality of the install event is the
+    /// visible signal that kernel-store.md §2.5.7 audit-chain
+    /// mirroring is wired through the advance path.
     #[test]
-    fn advance_epoch_emits_legacy_cert_audit_for_cert_less_operator() {
+    fn advance_epoch_emits_one_cert_installed_per_cert_bound_operator() {
         let (registry, sk, store, swap, audit, sink) = boot_state();
         let tmp = tempfile::tempdir().unwrap();
         let (policy_path, sig_path) = write_signed_policy_artifact(tmp.path(), 2, &sk);
@@ -1070,12 +1130,14 @@ mod tests {
         ).unwrap();
 
         let kinds = sink.event_kinds();
-        let n_legacy   = kinds.iter().filter(|k| **k == "OperatorCertLegacyEntryDetected").count();
         let n_installed= kinds.iter().filter(|k| **k == "OperatorCertInstalled").count();
         let n_bypass   = kinds.iter().filter(|k| **k == "OperatorCertMisconfigBypassed").count();
-        assert_eq!(n_legacy,    1, "expected exactly one OperatorCertLegacyEntryDetected (one cert-less entry); kinds={kinds:?}");
-        assert_eq!(n_installed, 0, "no cert-bound entries in fixture; kinds={kinds:?}");
+        assert_eq!(n_installed, 1, "expected exactly one OperatorCertInstalled (one cert-bound entry); kinds={kinds:?}");
         assert_eq!(n_bypass,    0, "no bypass entries in fixture; kinds={kinds:?}");
+        // Sanity: the deleted OperatorCertLegacyEntryDetected MUST
+        // never appear in any kernel emit path again.
+        assert!(!kinds.iter().any(|k| *k == "OperatorCertLegacyEntryDetected"),
+            "deleted variant must never be emitted; kinds={kinds:?}");
     }
 
     #[test]

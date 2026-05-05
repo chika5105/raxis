@@ -61,12 +61,27 @@ fn build_data_dir() -> tempfile::TempDir {
     std::fs::create_dir_all(dd.join("policy")).unwrap();
     std::fs::create_dir_all(dd.join("providers")).unwrap();
 
+    // Cert-mandatory (INV-CERT-01): the policy loader (which the
+    // gateway calls into via `raxis_policy::load_policy`) rejects any
+    // `[[operators.entries]]` block missing a self-signed cert whose
+    // `pubkey_hex` matches the entry's. Mint that cert here from a
+    // deterministic operator key so the gateway accepts the fixture.
+    let op_key   = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
+    let op_pk_hex = raxis_test_support::pubkey_hex(&op_key);
+    let op_fp    = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&op_pk_hex).unwrap());
+    let op_cert  = raxis_test_support::ephemeral_cert_with_key(
+        &op_key,
+        raxis_test_support::CertOpts {
+            display_name: "operator-1".to_owned(),
+            permitted_ops: vec!["CreateInitiative".into()],
+            ..raxis_test_support::CertOpts::default()
+        },
+    );
+    let cert_subtable = toml::to_string(&op_cert).unwrap();
     let policy = format!(
         r#"[meta]
 epoch     = 1
-# pubkey_fingerprint = SHA-256[:16] of the 0xcc pubkey {c}; required
-# by the new `validate_operator_certs` consistency check.
-signed_by = "c2f480d4dda9f4522b9f6d590011636d"
+signed_by = "{op_fp}"
 signed_at = 1700000000
 
 [authority]
@@ -98,10 +113,13 @@ CompleteTask     = 5
 ReportFailure    = 1
 
 [[operators.entries]]
-pubkey_fingerprint = "c2f480d4dda9f4522b9f6d590011636d"
+pubkey_fingerprint = "{op_fp}"
 display_name       = "operator-1"
-pubkey_hex         = "{c}"
+pubkey_hex         = "{op_pk_hex}"
 permitted_ops      = ["CreateInitiative"]
+
+[operators.entries.cert]
+{cert_subtable}
 
 [[lanes]]
 lane_id              = "default"
@@ -121,7 +139,6 @@ credentials_file = "anthropic-prod.toml"
 "#,
         a = "a".repeat(64),
         b = "b".repeat(64),
-        c = "c".repeat(64),
     );
     std::fs::write(dd.join("policy/policy.toml"), policy).unwrap();
     std::fs::write(

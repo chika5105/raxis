@@ -37,16 +37,38 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
+use raxis_crypto::cert::{
+    sign_cert, validate_cert_structurally, verify_cert_self_signature,
+};
 use raxis_crypto::token::try_random_array;
+use raxis_types::operator_cert::{CertKind, OperatorCert};
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
 
 pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // Parse genesis-specific flags.
+    //
+    // Operator-identity input is cert-mandatory (INV-CERT-01). Exactly one
+    // of `--operator-cert` (air-gapped: operator minted the cert offline
+    // and supplies the *.cert.toml) OR `--operator-key` (convenience: CLI
+    // mints the cert in-process from the supplied private-key PEM and
+    // never persists the private bytes) MUST be supplied. If neither is
+    // supplied AND we have a TTY, we prompt the operator to paste the
+    // cert TOML body — same fallback as the kernel-side
+    // `RAXIS_BOOTSTRAP=1` path.
+    //
+    // `--operator-pubkey` was the legacy pubkey-only path; it has been
+    // deleted because cert is mandatory and a bare pubkey cannot
+    // accompany the bundle. Operators who hit "unknown flag
+    // --operator-pubkey" should switch to either of the two paths
+    // above (the migration message inside `parse_args_validation`
+    // names both options).
     let mut force = false;
-    let mut operator_pubkey_path: Option<PathBuf> = None;
     let mut operator_cert_path:   Option<PathBuf> = None;
+    let mut operator_key_path:    Option<PathBuf> = None;
+    let mut operator_name:        Option<String>  = None;
+    let mut cert_validity_days:   u32             = crate::commands::cert::DEFAULT_VALIDITY_DAYS;
     let mut force_misconfig = false;
     let mut rotate_family: Option<String> = None;
     let mut i = 0;
@@ -54,27 +76,60 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     while i < args.len() {
         match args[i].as_str() {
             "--force" => force = true,
-            "--operator-pubkey" => {
-                i += 1;
-                operator_pubkey_path = Some(PathBuf::from(
-                    args.get(i).ok_or_else(|| {
-                        CliError::Usage("--operator-pubkey requires a path".to_owned())
-                    })?,
-                ));
-            }
-            // Operator-cert flow (cli-ceremony.md §4.4).
-            //
-            // When `--operator-cert <path>` is supplied, genesis embeds the
-            // cert into the just-emitted `[[operators.entries]]` table so
-            // the kernel boots with a cert-bound operator from epoch 1.
-            // The cert MUST be signed by the same key whose public half is
-            // passed via `--operator-pubkey`; mismatches fail loud.
+            // Air-gapped operator workflow: operator minted the cert
+            // offline (typically `raxis cert mint` on a separate
+            // machine) and hands us the resulting `*.cert.toml`. The
+            // CLI never sees the operator private key.
             "--operator-cert" => {
                 i += 1;
                 operator_cert_path = Some(PathBuf::from(
                     args.get(i).ok_or_else(|| {
                         CliError::Usage("--operator-cert requires a path".to_owned())
                     })?,
+                ));
+            }
+            // Convenience workflow: operator hands us a private-key PEM;
+            // the CLI mints a cert in-process and embeds it. The private
+            // key bytes are NEVER persisted to the data dir — only the
+            // resulting cert (which holds only the public half plus the
+            // self-signature) is written. For tighter security operators
+            // SHOULD use `--operator-cert` instead and keep the private
+            // key on a separate machine.
+            "--operator-key" => {
+                i += 1;
+                operator_key_path = Some(PathBuf::from(
+                    args.get(i).ok_or_else(|| {
+                        CliError::Usage("--operator-key requires a path".to_owned())
+                    })?,
+                ));
+            }
+            "--operator-name" => {
+                i += 1;
+                operator_name = Some(
+                    args.get(i)
+                        .ok_or_else(|| CliError::Usage(
+                            "--operator-name requires a string (display_name embedded into the cert)".to_owned()
+                        ))?
+                        .clone(),
+                );
+            }
+            "--cert-validity-days" => {
+                i += 1;
+                let raw = args.get(i).ok_or_else(|| CliError::Usage(
+                    "--cert-validity-days requires an unsigned integer".to_owned()
+                ))?;
+                cert_validity_days = raw.parse::<u32>().map_err(|e| CliError::Usage(format!(
+                    "--cert-validity-days expects an unsigned integer; got {raw:?}: {e}"
+                )))?;
+            }
+            "--operator-pubkey" => {
+                return Err(CliError::Usage(
+                    "--operator-pubkey was removed in the cert-mandatory release \
+                     (INV-CERT-01): a bare pubkey cannot accompany the policy bundle. \
+                     Re-run genesis with one of:\n  \
+                       --operator-cert <path>   (air-gapped: pre-mint via `raxis cert mint`)\n  \
+                       --operator-key  <path>   (convenience: CLI mints + embeds in-process; \
+                                                 private key bytes are NOT persisted)".to_owned(),
                 ));
             }
             // Mirror of the `policy sign --force-misconfig` flag — needed at
@@ -99,7 +154,49 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         return run_rotate(flags, &family);
     }
 
-    run_genesis(flags, force, operator_pubkey_path, operator_cert_path, force_misconfig)
+    // Mutually-exclusive: --operator-cert and --operator-key never
+    // appear together. Each represents a distinct operator-identity
+    // origin (one says "I minted this off-machine"; the other says
+    // "mint here from this key"). Combining them would mean two
+    // operator pubkeys on the same genesis ceremony, which the
+    // single-entry policy.toml cannot represent.
+    if operator_cert_path.is_some() && operator_key_path.is_some() {
+        return Err(CliError::Usage(
+            "--operator-cert and --operator-key are mutually exclusive: each \
+             specifies a distinct origin for the genesis operator identity. \
+             Pick the air-gapped path (--operator-cert) or the in-process \
+             mint path (--operator-key); not both.".to_owned(),
+        ));
+    }
+
+    // --operator-name and --cert-validity-days only apply when we are
+    // minting the cert in-process. With --operator-cert the values come
+    // from the cert itself.
+    if operator_cert_path.is_some() && operator_name.is_some() {
+        return Err(CliError::Usage(
+            "--operator-name only applies with --operator-key (when the CLI \
+             mints the cert here); the display_name comes from the cert itself \
+             when --operator-cert is supplied.".to_owned(),
+        ));
+    }
+    if operator_cert_path.is_some()
+        && cert_validity_days != crate::commands::cert::DEFAULT_VALIDITY_DAYS
+    {
+        return Err(CliError::Usage(
+            "--cert-validity-days only applies with --operator-key; with \
+             --operator-cert the validity window is fixed by the cert.".to_owned(),
+        ));
+    }
+
+    run_genesis(
+        flags,
+        force,
+        operator_cert_path,
+        operator_key_path,
+        operator_name,
+        cert_validity_days,
+        force_misconfig,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -109,8 +206,10 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 fn run_genesis(
     flags: &GlobalFlags,
     force: bool,
-    operator_pubkey_path: Option<PathBuf>,
     operator_cert_path:   Option<PathBuf>,
+    operator_key_path:    Option<PathBuf>,
+    operator_name:        Option<String>,
+    cert_validity_days:   u32,
     force_misconfig:      bool,
 ) -> Result<(), CliError> {
     let data_dir = flags.data_dir();
@@ -208,12 +307,48 @@ fn run_genesis(
     set_permissions_400(&vtk_path)?;
     println!("✓ Generated verifier_token_key → {}", vtk_path.display());
 
-    // Step 5: Operator public key handling.
-    let (operator_pubkey_hex, operator_fingerprint) = match operator_pubkey_path {
-        Some(ref path) => load_operator_pubkey(path)?,
-        None => prompt_operator_pubkey()?,
+    // Step 5: Resolve the operator cert (cert-mandatory: INV-CERT-01).
+    //
+    // Three paths converge here:
+    //   - --operator-cert <path>   ⇒ read + structural-validate + verify
+    //   - --operator-key  <path>   ⇒ read PEM, mint cert in-process,
+    //                                 NEVER persist the private key
+    //   - neither flag             ⇒ prompt for cert TOML on stdin
+    //                                 (matches the kernel-side fallback)
+    let operator_cert: OperatorCert = match (operator_cert_path.as_ref(), operator_key_path.as_ref()) {
+        (Some(cert_path), None) => {
+            load_and_validate_operator_cert(cert_path, force_misconfig)?
+        }
+        (None, Some(key_path)) => {
+            // Display name is required when minting (otherwise the cert
+            // has nothing to bind the operator's identity to). The
+            // ceremony's failure mode here is fail-loud, not silent
+            // default — a placeholder display_name on the genesis cert
+            // would surface in `raxis cert show` and mislead operators
+            // about who minted it.
+            let display_name = operator_name.ok_or_else(|| CliError::Usage(
+                "--operator-key requires --operator-name <display> so the minted \
+                 cert carries a meaningful operator identity".to_owned()
+            ))?;
+            mint_genesis_operator_cert(key_path, &display_name, cert_validity_days, force_misconfig)?
+        }
+        (Some(_), Some(_)) => {
+            // Caught earlier in `run`; reached only if the validation
+            // there is bypassed (tests calling run_genesis directly).
+            return Err(CliError::Usage(
+                "internal: --operator-cert and --operator-key are mutually exclusive".to_owned(),
+            ));
+        }
+        (None, None) => prompt_operator_cert(force_misconfig)?,
     };
+    let operator_pubkey_hex   = operator_cert.pubkey_hex.clone();
+    let operator_pubkey_bytes = hex::decode(&operator_pubkey_hex)
+        .map_err(|e| CliError::Key(format!("internal: cert pubkey_hex is not valid hex: {e}")))?;
+    let operator_fingerprint  = crate::conn::pubkey_fingerprint(&operator_pubkey_bytes);
 
+    // Persist the operator pubkey hex (`operator_<fp>.pub`, mode 0444)
+    // for backward-compatible discovery — `raxis doctor`, `raxis policy
+    // show`, and the kernel's recovery path all look here.
     let operator_pub_path = keys_dir.join(format!("operator_{operator_fingerprint}.pub"));
     fs::write(&operator_pub_path, &operator_pubkey_hex).map_err(|e| CliError::Io {
         path: operator_pub_path.display().to_string(),
@@ -221,6 +356,23 @@ fn run_genesis(
     })?;
     set_permissions_444(&operator_pub_path)?;
     println!("✓ Registered operator pubkey → {}", operator_pub_path.display());
+
+    // Persist the cert itself to `keys/operator_<fp>.cert.toml` (mode
+    // 0444 — the cert holds only public material). This is the
+    // canonical on-disk source for `raxis cert show` / `raxis cert
+    // verify` against the data dir, so an operator who has lost their
+    // original cert artefact can still inspect what the kernel boots
+    // with.
+    let operator_cert_path_on_disk =
+        keys_dir.join(format!("operator_{operator_fingerprint}.cert.toml"));
+    let cert_toml_body = toml::to_string(&operator_cert)
+        .map_err(|e| CliError::Key(format!("serialise cert as TOML: {e}")))?;
+    fs::write(&operator_cert_path_on_disk, cert_toml_body.as_bytes()).map_err(|e| CliError::Io {
+        path: operator_cert_path_on_disk.display().to_string(),
+        source: e,
+    })?;
+    set_permissions_444(&operator_cert_path_on_disk)?;
+    println!("✓ Persisted operator cert → {}", operator_cert_path_on_disk.display());
 
     // Step 6: Write initial policy.toml via the shared writer.
     //
@@ -258,6 +410,7 @@ fn run_genesis(
             operator_fingerprint:   &operator_fingerprint,
             signed_at_unix_secs,
             allowed_worktree_roots: &allowed_worktree_roots,
+            operator_cert:          &operator_cert,
         },
     );
     fs::write(&policy_path, &policy_toml).map_err(|e| CliError::Io {
@@ -266,32 +419,19 @@ fn run_genesis(
     })?;
     println!("✓ Wrote policy.toml → {}", policy_path.display());
 
-    // Step 6.25 (cli-ceremony.md §4.4 — genesis cert flow):
-    //
-    // If the operator passed `--operator-cert <cert.toml>`, embed it
-    // into the just-written policy.toml's [[operators.entries]] entry
-    // BEFORE we install the epoch_history row. The cert MUST:
-    //   1. Be self-signed by the same key whose pubkey was passed via
-    //      --operator-pubkey (we already wrote that pubkey to
-    //      operator_<fp>.pub above); pubkey mismatch fails loud.
-    //   2. Pass structural validation (or have --force-misconfig set,
-    //      which sets force_misconfig_bypass = true on the entry; the
-    //      kernel will emit OperatorCertMisconfigBypassed audit at
-    //      first boot per kernel-store.md §2.5.7).
-    //
-    // Embedding is post-process so the canonical genesis-tools emitter
-    // stays cert-agnostic (no new field, no version bump in the shared
-    // crate). The Step 6.5 reload below picks up the embedded cert
-    // automatically and `repopulate` mirrors it into
-    // `operator_certificates` atomically with the epoch history row.
-    if let Some(cert_path) = operator_cert_path.as_ref() {
-        embed_operator_cert_into_policy(
-            cert_path,
-            &policy_path,
-            &operator_pubkey_hex,
-            force_misconfig,
-        )?;
-        println!("✓ Embedded operator cert from {}", cert_path.display());
+    // If the operator opted into the audited misconfig bypass via
+    // `--force-misconfig`, splice `force_misconfig_bypass = true` onto
+    // the genesis operator entry. The genesis emitter is cert-aware
+    // but bypass-agnostic — it never silently emits the bypass flag
+    // (its presence is operator-meaningful and must be a deliberate
+    // CLI flag).
+    if force_misconfig {
+        attach_force_misconfig_bypass(&policy_path)?;
+        println!(
+            "✓ Recorded force_misconfig_bypass = true on the genesis operator entry; \
+             the kernel will emit OperatorCertMisconfigBypassed at first boot \
+             per kernel-store.md §2.5.7."
+        );
     }
 
     // Step 6.5: Install the canonical `epoch_id = 1` row in
@@ -342,48 +482,29 @@ fn run_genesis(
 
 /// Embed an operator cert into the just-emitted policy.toml.
 ///
-/// Surfaces fail-loud:
-///   - cert pubkey ↔ operator-pubkey mismatch (`CertPubkeyMismatch`-class
-///     error; never bypassable, since a non-matching pubkey would let
-///     an attacker present a valid self-signed cert under someone
-///     else's operator entry).
-///   - structural violations without `--force-misconfig`.
-///   - self-signature failures (NEVER bypassable).
+/// Read a cert TOML, parse it, structurally validate it (bypassable via
+/// `force_misconfig`), and verify its self-signature (NEVER bypassable).
 ///
-/// On success, rewrites `policy_path` with the cert embedded in the
-/// `[operators.entries.cert]` sub-table and (if force_misconfig is set)
-/// `force_misconfig_bypass = true` on the entry.
-fn embed_operator_cert_into_policy(
-    cert_path:          &Path,
-    policy_path:        &Path,
-    operator_pubkey_hex: &str,
-    force_misconfig:    bool,
-) -> Result<(), CliError> {
-    use raxis_crypto::cert::{validate_cert_structurally, verify_cert_self_signature};
-    use raxis_types::operator_cert::OperatorCert;
-
-    let cert_bytes = fs::read_to_string(cert_path).map_err(|e| CliError::Io {
+/// This is the reader half of the air-gapped operator workflow: the
+/// operator minted the cert offline (typically with `raxis cert mint`)
+/// and supplies the `*.cert.toml` here. Returning the parsed cert keeps
+/// the caller (`run_genesis`) cert-aware without sprawling the
+/// validation logic across multiple sites.
+fn load_and_validate_operator_cert(
+    cert_path:       &Path,
+    force_misconfig: bool,
+) -> Result<OperatorCert, CliError> {
+    let raw = fs::read_to_string(cert_path).map_err(|e| CliError::Io {
         path: cert_path.display().to_string(),
         source: e,
     })?;
-    let cert: OperatorCert = toml::from_str(&cert_bytes).map_err(|e| {
+    let cert: OperatorCert = toml::from_str(&raw).map_err(|e| {
         CliError::Key(format!("parse cert {}: {e}", cert_path.display()))
     })?;
 
-    // Pubkey consistency: the cert's pubkey MUST match the operator
-    // pubkey we just registered. Mismatch ⇒ refuse loudly. The kernel
-    // would also reject this at policy load (PolicyError::CertPubkeyMismatch),
-    // but failing here gives a sharper error before the policy is signed.
-    if !cert.pubkey_hex.eq_ignore_ascii_case(operator_pubkey_hex) {
-        return Err(CliError::Key(format!(
-            "cert pubkey_hex ({}) does not match --operator-pubkey ({}); \
-             a cert MUST be self-signed by the operator key it accompanies",
-            cert.pubkey_hex, operator_pubkey_hex,
-        )));
-    }
-
     // Self-signature is the integrity story for the cert; never
-    // bypassable.
+    // bypassable. A non-self-verifying cert cannot be the operator's
+    // identity by construction.
     verify_cert_self_signature(&cert).map_err(|e| {
         CliError::Key(format!(
             "cert {} self-signature check failed: {e}",
@@ -391,7 +512,9 @@ fn embed_operator_cert_into_policy(
         ))
     })?;
 
-    // Structural — bypassable with --force-misconfig.
+    // Structural — bypassable with --force-misconfig (audited at
+    // first boot via OperatorCertMisconfigBypassed; see
+    // kernel-store.md §2.5.7).
     let violations = validate_cert_structurally(&cert);
     if !violations.is_empty() && !force_misconfig {
         let joined = violations.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n");
@@ -404,17 +527,129 @@ fn embed_operator_cert_into_policy(
         )));
     }
 
-    // Edit the just-written policy.toml: locate the sole genesis entry
-    // and splice the cert in. We use the typed `toml::Value` editor
-    // (rather than string splicing) so the rewrite stays byte-stable
-    // for any TOML the parser accepts.
+    Ok(cert)
+}
+
+/// Read an operator private-key PEM, derive the pubkey, mint a Standard
+/// cert in-process, and return it. The private key bytes are dropped
+/// at the end of this function and NEVER persisted to the data
+/// directory — only the public-half-only cert is written.
+///
+/// This is the convenience workflow. For tighter security operators
+/// SHOULD use `--operator-cert` with an offline-minted cert and keep
+/// the private key on a separate machine; the CLI prints a one-line
+/// reminder to that effect.
+fn mint_genesis_operator_cert(
+    key_path:           &Path,
+    display_name:       &str,
+    cert_validity_days: u32,
+    force_misconfig:    bool,
+) -> Result<OperatorCert, CliError> {
+    println!(
+        "ℹ private-key custody: --operator-key reads {} into memory to mint the \
+         genesis cert. The private bytes are NEVER written to the data dir; \
+         only the resulting cert (public material) is persisted. For \
+         air-gapped security, prefer `raxis cert mint` on a separate machine \
+         and supply the result via --operator-cert.",
+        key_path.display(),
+    );
+
+    let signing_key = crate::signing::load_operator_key(key_path)?;
+    let pubkey_hex  = hex::encode(signing_key.verifying_key().to_bytes());
+
+    let now_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let not_after = now_unix_secs
+        + (cert_validity_days as i64) * crate::commands::cert::SECS_PER_DAY;
+
+    let mut cert = OperatorCert {
+        kind: CertKind::Standard,
+        display_name: display_name.to_owned(),
+        pubkey_hex,
+        not_before:              now_unix_secs,
+        not_after,
+        warn_before_expiry_days: crate::commands::cert::DEFAULT_WARN_DAYS,
+        grace_period_days:       crate::commands::cert::DEFAULT_GRACE_DAYS,
+        // The genesis cert grants the canonical full v1 op set so the
+        // operator can immediately drive the kernel through any
+        // operator op without having to mint a wider cert first. This
+        // is consistent with the policy.toml emitter's
+        // `permitted_ops` list (the entry-level `permitted_ops`
+        // is overwritten from the cert's at load time anyway).
+        permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        contact_info: None,
+        self_sig_hex: String::new(),
+    };
+    cert.self_sig_hex = sign_cert(&cert, &signing_key);
+
+    // Sanity: the just-minted cert MUST self-verify. Failure here is
+    // a kernel/CLI bug.
+    verify_cert_self_signature(&cert).map_err(|e| CliError::Key(format!(
+        "internal: minted cert failed self-sig check: {e}"
+    )))?;
+
+    let violations = validate_cert_structurally(&cert);
+    if !violations.is_empty() && !force_misconfig {
+        let joined = violations.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n");
+        return Err(CliError::Usage(format!(
+            "minted cert has structural violations:\n{joined}\n\
+             Re-run with --force-misconfig to record force_misconfig_bypass = true \
+             on the genesis operator entry; the kernel will emit \
+             OperatorCertMisconfigBypassed at first boot per kernel-store.md §2.5.7."
+        )));
+    }
+    Ok(cert)
+}
+
+/// Prompt the operator to paste a cert TOML body on stdin and validate
+/// the result. Used when the operator runs `raxis genesis` interactively
+/// without supplying any operator-identity flag.
+fn prompt_operator_cert(force_misconfig: bool) -> Result<OperatorCert, CliError> {
+    use std::io::Read;
+    eprintln!(
+        "Paste operator cert (TOML body produced by `raxis cert mint`) and press Ctrl-D:"
+    );
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf).map_err(|e| CliError::Io {
+        path: "stdin".to_owned(),
+        source: e,
+    })?;
+    let cert: OperatorCert = toml::from_str(&buf).map_err(|e| {
+        CliError::Key(format!("parse cert from stdin: {e}"))
+    })?;
+    verify_cert_self_signature(&cert).map_err(|e| CliError::Key(format!(
+        "cert (from stdin) self-signature check failed: {e}"
+    )))?;
+    let violations = validate_cert_structurally(&cert);
+    if !violations.is_empty() && !force_misconfig {
+        let joined = violations.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n");
+        return Err(CliError::Usage(format!(
+            "cert (from stdin) has structural violations:\n{joined}\n\
+             Re-run with --force-misconfig to set force_misconfig_bypass = true on the \
+             genesis operator entry; the kernel will emit OperatorCertMisconfigBypassed \
+             at first boot per kernel-store.md §2.5.7."
+        )));
+    }
+    Ok(cert)
+}
+
+/// Splice `force_misconfig_bypass = true` onto the sole genesis
+/// `[[operators.entries]]` block of an already-written policy.toml.
+/// Used when the operator passed `--force-misconfig`; never invoked
+/// otherwise.
+fn attach_force_misconfig_bypass(policy_path: &Path) -> Result<(), CliError> {
     let policy_str = fs::read_to_string(policy_path).map_err(|e| CliError::Io {
         path: policy_path.display().to_string(),
         source: e,
     })?;
     let mut doc = policy_str.parse::<toml::Value>().map_err(|e| {
         CliError::Policy(format!(
-            "cannot re-parse just-written policy {} for cert embed: {e}",
+            "cannot re-parse just-written policy {} for force_misconfig_bypass attach: {e}",
             policy_path.display()
         ))
     })?;
@@ -426,7 +661,6 @@ fn embed_operator_cert_into_policy(
             "internal: policy {} has no [[operators.entries]]",
             policy_path.display()
         )))?;
-    // Genesis writes EXACTLY one entry; assert that invariant.
     if entries.len() != 1 {
         return Err(CliError::Policy(format!(
             "internal: genesis policy {} has {} operator entries; expected exactly 1",
@@ -437,16 +671,10 @@ fn embed_operator_cert_into_policy(
     let table = entries[0].as_table_mut().ok_or_else(|| {
         CliError::Policy("internal: operator entry is not a TOML table".to_owned())
     })?;
-    let cert_value = toml::Value::try_from(&cert).map_err(|e| {
-        CliError::Key(format!("serialise cert as TOML: {e}"))
-    })?;
-    table.insert("cert".to_owned(), cert_value);
-    if force_misconfig {
-        table.insert("force_misconfig_bypass".to_owned(), toml::Value::Boolean(true));
-    }
+    table.insert("force_misconfig_bypass".to_owned(), toml::Value::Boolean(true));
 
     let new_bytes = toml::to_string(&doc).map_err(|e| {
-        CliError::Policy(format!("re-serialise policy with embedded cert: {e}"))
+        CliError::Policy(format!("re-serialise policy with force_misconfig_bypass: {e}"))
     })?;
     fs::write(policy_path, new_bytes.as_bytes()).map_err(|e| CliError::Io {
         path: policy_path.display().to_string(),
@@ -480,20 +708,18 @@ fn install_genesis_epoch_row(
             db_path.display(),
         ))
     })?;
-    // Pass the bundle through so any cert-bound operator entries get
-    // mirrored into `operator_certificates` atomically with the
+    // Pass the bundle through so the operator entries get mirrored
+    // into `operator_certificates` atomically with the
     // `policy_epoch_history` row INSERT (kernel-store.md §2.5.7).
-    // For the v1 default genesis (which writes a cert-less policy.toml
-    // until step 9 lands the `--operator-cert` flow) the bundle has
-    // zero cert-bound entries and `repopulate` is a no-op, so this
-    // change is forward-compatible: the call site is ready for step 9
-    // without any additional plumbing.
+    // Cert is mandatory (INV-CERT-01); a bundle that survived
+    // PolicyBundle::validate is guaranteed to have at least one
+    // cert-bound entry, so `repopulate` always inserts ≥ 1 row.
     raxis_store::install_genesis_policy_epoch_row(
         &store,
         &sha256_hex,
         &signed_by_authority,
         advanced_at_unix_secs,
-        Some(&bundle),
+        &bundle,
     )
     .map_err(|e| CliError::Policy(format!("install_genesis_policy_epoch_row failed: {e}")))?;
     // Explicit drop so it is visible at review time that the WAL
@@ -523,15 +749,22 @@ fn purge_existing_artifacts(
         }
     }
 
-    // Stale operator pubkey files (`operator_<fp>.pub`) from a prior
+    // Stale operator pubkey files (`operator_<fp>.pub`) and stale
+    // operator cert artefacts (`operator_<fp>.cert.toml`) from a prior
     // genesis must be cleaned out — a fresh genesis may register a
     // different operator and we must not leave the old fingerprint
-    // shadowing lookups.
+    // shadowing lookups, and the new cert file is written with mode
+    // 0444 so a second `fs::write` would fail with EACCES if we did
+    // not remove it here. (Cert is mandatory — INV-CERT-01 — so the
+    // cert.toml file is now part of the canonical genesis output set
+    // alongside the pubkey file.)
     if let Ok(entries) = fs::read_dir(keys_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("operator_") && name.ends_with(".pub") {
+            if name.starts_with("operator_")
+                && (name.ends_with(".pub") || name.ends_with(".cert.toml"))
+            {
                 let p = entry.path();
                 fs::remove_file(&p).map_err(|e| CliError::Io {
                     path: p.display().to_string(),
@@ -623,29 +856,27 @@ fn run_rotate(flags: &GlobalFlags, family: &str) -> Result<(), CliError> {
             println!("✓ Rotated verifier_token_key → {}", path.display());
         }
         "operator" => {
-            println!("Paste new operator Ed25519 public key (64-char hex):");
-            let (pubkey_hex, fingerprint) = prompt_operator_pubkey()?;
-
-            // Remove old operator .pub files.
-            let entries = fs::read_dir(&keys_dir).map_err(|e| CliError::Io {
-                path: keys_dir.display().to_string(),
-                source: e,
-            })?;
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("operator_") && name.ends_with(".pub") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-
-            let path = keys_dir.join(format!("operator_{fingerprint}.pub"));
-            fs::write(&path, &pubkey_hex).map_err(|e| CliError::Io {
-                path: path.display().to_string(),
-                source: e,
-            })?;
-            set_permissions_444(&path)?;
-            println!("✓ Rotated operator pubkey → {}", path.display());
+            // Cert-mandatory (INV-CERT-01) made `genesis --rotate operator`
+            // a footgun: the old flow swapped the on-disk pubkey file but
+            // left the `[[operators.entries]]` block (and embedded cert)
+            // unchanged, so the kernel's epoch-advance check would reject
+            // the policy with a fingerprint mismatch. The replacement is
+            // `raxis cert install --replace-for <old-fp> --new-cert <path>`,
+            // which atomically rewrites the cert block in `policy.toml`,
+            // mirrors into `operator_certificates`, and emits a typed
+            // `OperatorCertInstalled { previous_fingerprint }` audit
+            // event. The CLI fails loud here rather than silently
+            // half-rotating.
+            return Err(CliError::Usage(
+                "`raxis genesis --rotate operator` was removed in the cert-mandatory \
+                 release (INV-CERT-01). To rotate the operator identity, use \
+                 the typed rotation primitive:\n  \
+                   raxis cert install --replace-for <old-fingerprint> --new-cert <path>\n\
+                 which atomically updates `policy.toml`, mirrors the new cert into \
+                 the kernel's `operator_certificates` table, and emits an audit \
+                 event with `previous_fingerprint` set so the rotation is \
+                 forensically traceable.".to_owned(),
+            ));
         }
         other => {
             return Err(CliError::Usage(format!(
@@ -666,31 +897,6 @@ fn run_rotate(flags: &GlobalFlags, family: &str) -> Result<(), CliError> {
 // ---------------------------------------------------------------------------
 // Private helpers
 // ---------------------------------------------------------------------------
-
-fn load_operator_pubkey(path: &std::path::Path) -> Result<(String, String), CliError> {
-    let content = fs::read_to_string(path).map_err(|e| CliError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
-    let pubkey_bytes = crate::signing::parse_operator_public_key_material(&content)?;
-    let pubkey_hex = hex::encode(pubkey_bytes);
-    let fingerprint = crate::conn::pubkey_fingerprint(&pubkey_bytes);
-    Ok((pubkey_hex, fingerprint))
-}
-
-fn prompt_operator_pubkey() -> Result<(String, String), CliError> {
-    use std::io::BufRead;
-    eprintln!("Paste operator Ed25519 public key as a single line — 64-character hex (preferred).");
-    eprintln!("For `operator_public.pem`, use: raxis genesis --operator-pubkey /path/to/file.pem");
-    let stdin = std::io::stdin();
-    let line = stdin.lock().lines().next()
-        .ok_or_else(|| CliError::Key("no input".to_owned()))?
-        .map_err(|e| CliError::Io { path: "stdin".to_owned(), source: e })?;
-    let pubkey_bytes = crate::signing::parse_operator_public_key_material(&line)?;
-    let pubkey_hex = hex::encode(pubkey_bytes);
-    let fingerprint = crate::conn::pubkey_fingerprint(&pubkey_bytes);
-    Ok((pubkey_hex, fingerprint))
-}
 
 fn write_key_pem(path: &std::path::Path, key: &SigningKey) -> Result<(), CliError> {
     // Must match `kernel/bootstrap::generate_ed25519_keypair` and
@@ -872,12 +1078,45 @@ mod run_genesis_e2e {
         (tmp, flags)
     }
 
-    /// Write `pubkey_hex` to a sibling `operator.pub` file inside `dir`
-    /// and return the path — what `--operator-pubkey` would point to.
-    fn stage_operator_pubkey(dir: &Path, pubkey_hex: &str) -> PathBuf {
-        let p = dir.join("operator.pub");
-        std::fs::write(&p, pubkey_hex.as_bytes()).expect("write operator pubkey");
+    /// Mint a default Standard cert from the fixed test key, write it to
+    /// `<dir>/op.cert.toml`, and return the path. Used by every
+    /// happy-path test in this module — keeps the bootstrap-genesis
+    /// fixture cert-mandatory (INV-CERT-01) without sprawling cert
+    /// minting across each test.
+    fn stage_operator_cert(sk: &SigningKey, dir: &Path) -> PathBuf {
+        let cert = OperatorCert {
+            kind:                    CertKind::Standard,
+            display_name:            "Alice".to_owned(),
+            pubkey_hex:              hex::encode(sk.verifying_key().to_bytes()),
+            // Spans well into the future so the cert is unambiguously
+            // Active at test time regardless of the host clock.
+            not_before:              0,
+            not_after:               i64::MAX / 2,
+            warn_before_expiry_days: 30,
+            grace_period_days:       7,
+            permitted_ops:           raxis_genesis_tools::PERMITTED_OPS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            contact_info:            None,
+            self_sig_hex:            String::new(),
+        };
+        // sign_cert is in `crate::commands::genesis`'s use-list at the top
+        // of this file — same canonical signing input the kernel verifies.
+        let mut signed = cert;
+        signed.self_sig_hex = sign_cert(&signed, sk);
+        let p = dir.join("op.cert.toml");
+        std::fs::write(&p, toml::to_string(&signed).unwrap()).unwrap();
         p
+    }
+
+    /// Convenience: stage a cert from the fixed-test-key, returning the
+    /// cert path AND the matching pubkey hex. Most tests want both.
+    fn stage_default_op() -> (tempfile::TempDir, GlobalFlags, PathBuf, String) {
+        let (tmp, flags) = fresh_flags();
+        let (sk, pk_hex) = fixed_operator();
+        let cert_path = stage_operator_cert(&sk, tmp.path());
+        (tmp, flags, cert_path, pk_hex)
     }
 
     fn mode_bits(path: &Path) -> u32 {
@@ -889,11 +1128,17 @@ mod run_genesis_e2e {
 
     #[test]
     fn run_genesis_creates_every_artifact_the_kernel_needs_at_boot() {
-        let (tmp, flags) = fresh_flags();
-        let (_sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let (tmp, flags, cert_path, pk_hex) = stage_default_op();
 
-        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis must succeed");
+        run_genesis(
+            &flags,
+            /*force=*/ false,
+            /*operator_cert_path=*/ Some(cert_path),
+            /*operator_key_path=*/ None,
+            /*operator_name=*/ None,
+            /*cert_validity_days=*/ crate::commands::cert::DEFAULT_VALIDITY_DAYS,
+            /*force_misconfig=*/ false,
+        ).expect("run_genesis must succeed");
 
         let data_dir = tmp.path();
         // Every directory `raxis doctor` checks (commands/doctor.rs
@@ -927,6 +1172,12 @@ mod run_genesis_e2e {
             &hex::decode(&pk_hex).expect("hex"),
         );
         assert!(keys.join(format!("operator_{fp}.pub")).exists());
+        // Cert-mandatory (INV-CERT-01): genesis MUST also persist the
+        // operator's cert under keys/operator_<fp>.cert.toml so
+        // `raxis cert show` against the data dir succeeds without the
+        // operator retaining their original cert artefact.
+        assert!(keys.join(format!("operator_{fp}.cert.toml")).exists(),
+            "genesis must persist operator_<fp>.cert.toml under keys/");
         // The signed-policy file the kernel re-loads at boot step 3.
         assert!(data_dir.join("policy/policy.toml").exists());
         // The audit chain anchor — without this, the kernel exits
@@ -942,11 +1193,12 @@ mod run_genesis_e2e {
     #[test]
     #[cfg(unix)]
     fn keys_and_providers_dirs_are_zero_seven_zero_zero() {
-        let (tmp, flags) = fresh_flags();
-        let (_sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let (tmp, flags, cert_path, _pk_hex) = stage_default_op();
 
-        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
+        run_genesis(
+            &flags, false, Some(cert_path), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("run_genesis");
 
         // `raxis doctor` flags any other mode for these dirs as FAIL.
         assert_eq!(mode_bits(&tmp.path().join("keys")), 0o700);
@@ -956,11 +1208,12 @@ mod run_genesis_e2e {
     #[test]
     #[cfg(unix)]
     fn key_files_match_cli_ceremony_spec_modes() {
-        let (tmp, flags) = fresh_flags();
-        let (_sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let (tmp, flags, cert_path, pk_hex) = stage_default_op();
 
-        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
+        run_genesis(
+            &flags, false, Some(cert_path), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("run_genesis");
 
         // cli-ceremony.md §4.2 — these modes match what
         // `kernel/bootstrap::write_file_0400` and `_0444` produce.
@@ -973,15 +1226,18 @@ mod run_genesis_e2e {
             &hex::decode(&pk_hex).expect("hex"),
         );
         assert_eq!(mode_bits(&keys.join(format!("operator_{fp}.pub"))), 0o444);
+        // Cert is public material; 0o444 same as the .pub file.
+        assert_eq!(mode_bits(&keys.join(format!("operator_{fp}.cert.toml"))), 0o444);
     }
 
     #[test]
     fn policy_epoch_history_carries_the_genesis_row() {
-        let (tmp, flags) = fresh_flags();
-        let (_sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let (tmp, flags, cert_path, _pk_hex) = stage_default_op();
 
-        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
+        run_genesis(
+            &flags, false, Some(cert_path), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("run_genesis");
 
         // Independently re-load policy.toml so the SHA we expect in the
         // row is the kernel's SHA, not whatever genesis happens to print.
@@ -1014,11 +1270,12 @@ mod run_genesis_e2e {
         // BOOT_ERR_AUDIT_CHAIN. Pinning this round-trip keeps the
         // post-condition load-bearing for every future change to the
         // genesis writer or the chain reader.
-        let (tmp, flags) = fresh_flags();
-        let (_sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let (tmp, flags, cert_path, _pk_hex) = stage_default_op();
 
-        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
+        run_genesis(
+            &flags, false, Some(cert_path), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("run_genesis");
 
         match raxis_audit_tools::quick_chain_check(&tmp.path().join("audit")) {
             raxis_audit_tools::ChainQuickCheck::Ok { last_seq, segment_count } => {
@@ -1040,11 +1297,12 @@ mod run_genesis_e2e {
         // `[WARN] notifications.exists`. Pin the modes here so a future
         // "tighten everything to 0700" PR has to deliberately update
         // both this test AND the doctor's expected-modes table.
-        let (tmp, flags) = fresh_flags();
-        let (_sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let (tmp, flags, cert_path, _pk_hex) = stage_default_op();
 
-        run_genesis(&flags, false, Some(pk_path), None, false).expect("run_genesis");
+        run_genesis(
+            &flags, false, Some(cert_path), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("run_genesis");
 
         // 0o755 is what `mkdir(2)` produces under the standard 0o022
         // umask. We do NOT chmod these dirs — the spec doesn't require
@@ -1096,15 +1354,18 @@ mod run_genesis_e2e {
 
     #[test]
     fn force_re_run_against_the_same_data_dir_succeeds() {
-        let (tmp, flags) = fresh_flags();
-        let (_sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
+        let (tmp, flags, cert_path, _pk_hex) = stage_default_op();
 
-        run_genesis(&flags, false, Some(pk_path.clone()), None, false).expect("first run");
+        run_genesis(
+            &flags, false, Some(cert_path.clone()), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("first run");
         // A second run without --force MUST be rejected — operators must
         // see ERR_ALREADY_INITIALIZED, not silent overwrite.
-        let err = run_genesis(&flags, false, Some(pk_path.clone()), None, false)
-            .expect_err("second run without --force must fail");
+        let err = run_genesis(
+            &flags, false, Some(cert_path.clone()), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect_err("second run without --force must fail");
         assert!(
             err.to_string().contains("ERR_ALREADY_INITIALIZED"),
             "expected ERR_ALREADY_INITIALIZED, got: {err}",
@@ -1112,7 +1373,10 @@ mod run_genesis_e2e {
         // A third run with --force MUST succeed — the cleanup removes
         // every artifact the per-file 0400 writes would refuse to
         // overwrite (mirrors `bootstrap::purge_existing_genesis_artifacts`).
-        run_genesis(&flags, true, Some(pk_path), None, false).expect("--force re-run");
+        run_genesis(
+            &flags, true, Some(cert_path), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("--force re-run");
 
         // After the --force re-run, all post-conditions still hold.
         assert!(tmp.path().join("audit/segment-000.jsonl").exists());
@@ -1131,44 +1395,16 @@ mod run_genesis_e2e {
         );
     }
 
-    // ── --operator-cert flow (cli-ceremony.md §4.4) ────────────────
-
-    /// Mint a Standard cert signed by `sk`, write it to `<dir>/op.cert.toml`,
-    /// and return the path. Skips through `raxis-crypto::cert::sign_cert`
-    /// directly (rather than shelling out to `raxis cert mint`) so the
-    /// fixture is self-contained.
-    fn mint_standard_cert_for(sk: &SigningKey, dir: &Path) -> PathBuf {
-        use raxis_crypto::cert::sign_cert;
-        use raxis_types::operator_cert::{CertKind, OperatorCert};
-
-        let mut cert = OperatorCert {
-            kind:                    CertKind::Standard,
-            display_name:            "Alice".to_owned(),
-            pubkey_hex:              hex::encode(sk.verifying_key().to_bytes()),
-            // 1 day window so the cert is unambiguously Active at test time.
-            not_before:              0,
-            not_after:               i64::MAX / 2,
-            warn_before_expiry_days: 30,
-            grace_period_days:       7,
-            permitted_ops:           vec!["AbortTask".to_owned()],
-            contact_info:            None,
-            self_sig_hex:            String::new(),
-        };
-        cert.self_sig_hex = sign_cert(&cert, sk);
-        let p = dir.join("op.cert.toml");
-        std::fs::write(&p, toml::to_string(&cert).unwrap()).unwrap();
-        p
-    }
+    // ── --operator-cert / --operator-key flows (cli-ceremony.md §4.4) ───
 
     #[test]
     fn run_genesis_with_operator_cert_embeds_cert_into_policy_and_mirrors_into_db() {
-        let (tmp, flags) = fresh_flags();
-        let (sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
-        let cert_path = mint_standard_cert_for(&sk, tmp.path());
+        let (tmp, flags, cert_path, _pk_hex) = stage_default_op();
 
-        run_genesis(&flags, false, Some(pk_path), Some(cert_path), false)
-            .expect("genesis with --operator-cert must succeed");
+        run_genesis(
+            &flags, false, Some(cert_path), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("genesis with --operator-cert must succeed");
 
         // 1. The on-disk policy must carry the embedded cert sub-table.
         let policy_str = std::fs::read_to_string(tmp.path().join("policy/policy.toml")).unwrap();
@@ -1189,34 +1425,11 @@ mod run_genesis_e2e {
     }
 
     #[test]
-    fn run_genesis_rejects_cert_with_pubkey_mismatch_against_operator_pubkey() {
-        let (tmp, flags) = fresh_flags();
-        let (_sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
-
-        // Mint a cert for a DIFFERENT key. `embed_operator_cert_into_policy`
-        // must refuse loudly: a non-matching pubkey would let the cert
-        // self-sign for a key the entry isn't bound to.
-        let other_sk = SigningKey::from_bytes(&[0x42u8; 32]);
-        let cert_path = mint_standard_cert_for(&other_sk, tmp.path());
-
-        let err = run_genesis(&flags, false, Some(pk_path), Some(cert_path), false)
-            .expect_err("pubkey mismatch must fail");
-        let msg = err.to_string();
-        assert!(msg.contains("does not match --operator-pubkey"),
-            "expected pubkey-mismatch error, got: {msg}");
-    }
-
-    #[test]
     fn run_genesis_rejects_cert_with_tampered_self_signature() {
-        let (tmp, flags) = fresh_flags();
-        let (sk, pk_hex) = fixed_operator();
-        let pk_path = stage_operator_pubkey(tmp.path(), &pk_hex);
-        let cert_path = mint_standard_cert_for(&sk, tmp.path());
+        let (tmp, flags, cert_path, _pk_hex) = stage_default_op();
 
         // Tamper with the self_sig_hex field (flip the first hex char).
         // self-signature failures are NEVER bypassable.
-        use raxis_types::operator_cert::OperatorCert;
         let s = std::fs::read_to_string(&cert_path).unwrap();
         let mut cert: OperatorCert = toml::from_str(&s).unwrap();
         let mut chars: Vec<char> = cert.self_sig_hex.chars().collect();
@@ -1224,10 +1437,145 @@ mod run_genesis_e2e {
         cert.self_sig_hex = chars.into_iter().collect();
         std::fs::write(&cert_path, toml::to_string(&cert).unwrap()).unwrap();
 
-        let err = run_genesis(&flags, false, Some(pk_path), Some(cert_path), false)
-            .expect_err("tampered self-sig must fail");
+        let err = run_genesis(
+            &flags, false, Some(cert_path), None, None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect_err("tampered self-sig must fail");
         let msg = err.to_string();
         assert!(msg.contains("self-signature"),
             "expected self-signature error, got: {msg}");
+        // tmp must outlive the assertions.
+        let _ = tmp;
+    }
+
+    /// `--operator-key` must mint a cert in-process and produce
+    /// the same set of post-conditions as `--operator-cert` —
+    /// AND the private-key bytes MUST NOT appear anywhere under
+    /// the data dir. This is the load-bearing assertion of the
+    /// CLI's "we never persist the operator private key"
+    /// promise.
+    #[test]
+    fn run_genesis_with_operator_key_mints_cert_and_does_not_persist_private_bytes() {
+        let (tmp, flags) = fresh_flags();
+
+        // Stage an operator private-key in the CLI's hex-seed convenience
+        // format. `signing::load_operator_key` accepts a bare 64-char
+        // Ed25519 seed as a "test convenience format" before falling back
+        // to PEM parsing — using it here keeps this test's
+        // private-key-leakage assertion focused on the FILE-PERSISTENCE
+        // contract (seed_hex MUST NOT appear under data_dir/) without
+        // also exercising the PEM parser, which has its own dedicated
+        // test surface in `signing::tests`.
+        let (sk, _pk_hex) = fixed_operator();
+        let key_path = tmp.path().join("operator.key");
+        let seed_hex = hex::encode(sk.to_bytes());
+        std::fs::write(&key_path, &seed_hex).unwrap();
+
+        run_genesis(
+            &flags, false, None, Some(key_path.clone()), Some("Alice".to_owned()),
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect("genesis with --operator-key must succeed");
+
+        // (1) Cert is on disk in keys/ and embedded in policy.toml.
+        //     We derive `fp` from the *signing key's* verifying key —
+        //     the same path `mint_genesis_operator_cert` walks — so
+        //     the assertion does not depend on whichever PEM-vs-hex
+        //     loader path was exercised.
+        let pk_hex = hex::encode(sk.verifying_key().to_bytes());
+        let fp = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk_hex).unwrap());
+        let cert_on_disk = tmp.path().join(format!("keys/operator_{fp}.cert.toml"));
+        assert!(cert_on_disk.exists(),
+            "minted cert must be persisted at keys/operator_<fp>.cert.toml; \
+             expected at {}", cert_on_disk.display());
+        let policy = std::fs::read_to_string(tmp.path().join("policy/policy.toml")).unwrap();
+        assert!(policy.contains("[operators.entries.cert]"));
+        assert!(policy.contains(&format!("display_name = \"Alice\"")));
+
+        // (2) The CRITICAL invariant: the seed_hex string from the
+        //     operator's key file must NOT appear anywhere under
+        //     <data_dir>. We walk the tree by hand and assert no file
+        //     body contains the seed bytes' hex string. (We
+        //     deliberately re-derive `seed_hex` here rather than
+        //     shadow it from the stage block above to make the
+        //     contract explicit.)
+        let leaked_seed_hex = hex::encode(SigningKey::from_bytes(&[0xC1u8; 32]).to_bytes());
+        let staged_key_path = key_path;
+        let mut stack: Vec<PathBuf> = vec![tmp.path().to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                let p = entry.path();
+                if entry.file_type().unwrap().is_dir() {
+                    stack.push(p);
+                    continue;
+                }
+                // Skip the operator key the test itself staged.
+                if p == staged_key_path { continue; }
+                if let Ok(body) = std::fs::read_to_string(&p) {
+                    assert!(
+                        !body.contains(&leaked_seed_hex),
+                        "operator private-key seed leaked into {}: \
+                         genesis with --operator-key MUST NOT persist \
+                         private bytes anywhere under the data dir \
+                         (cli-ceremony.md §4.4)",
+                        p.display(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn run_genesis_with_operator_key_requires_operator_name() {
+        let (tmp, flags) = fresh_flags();
+        let (sk, _pk_hex) = fixed_operator();
+        // Use the bare hex-seed format `signing::load_operator_key`
+        // accepts; the missing-name guard fires before the key is
+        // actually loaded but staging a parseable file keeps the
+        // failure mode unambiguous.
+        let key_path = tmp.path().join("operator.key");
+        let seed_hex = hex::encode(sk.to_bytes());
+        std::fs::write(&key_path, &seed_hex).unwrap();
+
+        let err = run_genesis(
+            &flags, false, None, Some(key_path), None,
+            crate::commands::cert::DEFAULT_VALIDITY_DAYS, false,
+        ).expect_err("missing --operator-name must fail");
+        assert!(err.to_string().contains("requires --operator-name"),
+            "expected --operator-name requirement, got: {err}");
+    }
+
+    #[test]
+    fn parse_rejects_operator_pubkey_flag_with_migration_message() {
+        // Direct flag-parsing test: --operator-pubkey is gone. The
+        // diagnostic MUST name both replacement paths so an operator
+        // hitting this can fix it without spelunking in the spec.
+        let flags = GlobalFlags {
+            data_dir: tempfile::tempdir().unwrap().path().to_path_buf(),
+            socket_path: None,
+            operator_key_path: None,
+        };
+        let err = run(&flags, &["--operator-pubkey".to_owned(), "/tmp/x".to_owned()])
+            .expect_err("--operator-pubkey must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("--operator-pubkey was removed"));
+        assert!(msg.contains("--operator-cert"));
+        assert!(msg.contains("--operator-key"));
+        assert!(msg.contains("INV-CERT-01"));
+    }
+
+    #[test]
+    fn parse_rejects_both_operator_cert_and_operator_key() {
+        let flags = GlobalFlags {
+            data_dir: tempfile::tempdir().unwrap().path().to_path_buf(),
+            socket_path: None,
+            operator_key_path: None,
+        };
+        let err = run(&flags, &[
+            "--operator-cert".to_owned(), "/tmp/c".to_owned(),
+            "--operator-key".to_owned(),  "/tmp/k".to_owned(),
+        ]).expect_err("conflicting flags must be rejected");
+        assert!(err.to_string().contains("mutually exclusive"),
+            "expected mutually-exclusive error, got: {err}");
     }
 }

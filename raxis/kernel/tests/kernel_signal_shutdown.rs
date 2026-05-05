@@ -70,21 +70,28 @@ fn build_and_locate_kernel() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_raxis-kernel"))
 }
 
-/// Write an Ed25519 public key (hex) to `<dir>/operator_pubkey.hex`,
-/// return the file path. The kernel's bootstrap reads this via the
-/// `RAXIS_OPERATOR_PUBKEY` env var (per
-/// `bootstrap::BootstrapConfig::operator_pubkey_path`).
+/// Mint a deterministic, self-signed operator cert and write its TOML
+/// body to `<dir>/operator.cert.toml`, returning the file path. The
+/// kernel's bootstrap reads this via the `RAXIS_OPERATOR_CERT` env var
+/// (per `bootstrap::BootstrapConfig::operator_cert_path`).
 ///
 /// We use a deterministic test seed rather than `OsRng`. The signal test
 /// never re-uses the resulting key for anything that interacts with the
-/// real world; it just needs *some* well-formed pubkey for the kernel's
+/// real world; it just needs *some* well-formed cert for the kernel's
 /// genesis ceremony to accept. Determinism makes test failures
 /// reproducible from the byte level.
-fn write_operator_pubkey(dir: &Path) -> PathBuf {
+fn write_operator_cert(dir: &Path) -> PathBuf {
     let signing = SigningKey::from_bytes(&[0xA5u8; 32]);
-    let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
-    let path = dir.join("operator_pubkey.hex");
-    std::fs::write(&path, pubkey_hex).expect("write operator pubkey hex");
+    let cert = raxis_test_support::ephemeral_cert_with_key(
+        &signing,
+        raxis_test_support::CertOpts {
+            now_unix_secs: 1_700_000_000,
+            ..raxis_test_support::CertOpts::default()
+        },
+    );
+    let path = dir.join("operator.cert.toml");
+    let toml_body = toml::to_string(&cert).expect("serialise cert");
+    std::fs::write(&path, toml_body).expect("write operator cert toml");
     path
 }
 
@@ -93,12 +100,12 @@ fn write_operator_pubkey(dir: &Path) -> PathBuf {
 fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir for kernel data dir");
     let data_dir = tmp.path();
-    let pubkey_path = write_operator_pubkey(data_dir);
+    let cert_path = write_operator_cert(data_dir);
 
     let output = Command::new(kernel_bin)
         .env("RAXIS_BOOTSTRAP", "1")
         .env("RAXIS_DATA_DIR", data_dir)
-        .env("RAXIS_OPERATOR_PUBKEY", &pubkey_path)
+        .env("RAXIS_OPERATOR_CERT", &cert_path)
         .output()
         .expect("spawn kernel in bootstrap mode");
 

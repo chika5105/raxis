@@ -74,38 +74,82 @@ The closeness ranking and the per-parent subcommand catalogues used to drive it 
 
 **Purpose:** Run the initial key generation ceremony. Generates all four key families and writes the initial `policy.toml`. Must be run before the kernel is started for the first time.
 
-**Usage:** `raxis-cli genesis [--operator-pubkey <path>] [--operator-cert <path>] [--force-misconfig] [--force]`
+**Usage:**
 
-**Cert-bound genesis:** Pass `--operator-cert <path>` to embed an
-operator certificate (output of `raxis cert mint`) into the freshly
-emitted `policy.toml` in the same ceremony. The CLI:
+```text
+raxis-cli genesis [--force]
+                  ( --operator-cert <path>                                           # air-gapped path
+                  | --operator-key <path>
+                       --operator-name <display>
+                       [--cert-validity-days <n>]                                    # convenience path
+                  )
+                  [--force-misconfig]
+```
 
-1. Validates the cert's `pubkey_hex` matches the operator pubkey from
-   `--operator-pubkey` (a cert MUST be self-signed by the key it
-   accompanies; mismatch is a hard failure regardless of flags).
-2. Verifies the cert's self-signature.
-3. Performs structural validation (Standard kind: window sane,
-   permitted_ops non-empty; EmergencyRecovery kind: pinned values).
-   Add `--force-misconfig` to bypass structural failures only —
-   never the pubkey or self-signature checks. The bypass is recorded
-   verbatim in the policy entry's `force_misconfig_bypass = true`
-   field and audited as `OperatorCertMisconfigBypassed` on the next
-   policy load.
-4. Splices the cert into the sole `[[operators.entries]]` block; the
-   operator MUST then sign the modified policy with `policy sign`.
+> **Cert is mandatory (INV-CERT-01).** The legacy `--operator-pubkey`
+> flag was removed: a bare public key cannot accompany the policy
+> bundle because every `[[operators.entries]]` block now requires a
+> self-signed `[operators.entries.cert]` sub-table, and minting that
+> sub-table requires the operator's private key. The two flows below
+> are the only two genesis paths.
+
+**Two operator-identity paths (mutually exclusive):**
+
+1. **Air-gapped (`--operator-cert <path>`)** — the operator minted the
+   cert offline (typically `raxis cert mint` on a separate machine
+   that holds the private key) and supplies the resulting
+   `*.cert.toml`. The CLI never sees the operator private key. This
+   is the recommended path for production: the operator key never
+   touches the host running the kernel.
+
+2. **Convenience (`--operator-key <path> --operator-name <display>`)** —
+   the operator hands the CLI a private-key PEM (or 64-char hex
+   seed); the CLI mints a cert in-process from that key and embeds
+   it in the policy. The private key bytes are read into memory and
+   used only for the in-process `sign_cert` call; **they are NEVER
+   persisted under `<data_dir>`** (the CLI tests assert this with a
+   recursive seed-leakage scan). Optional `--cert-validity-days <n>`
+   sets the cert's `not_after = now + n*86400`; default is the
+   `cert::DEFAULT_VALIDITY_DAYS` constant (one year). Use this path
+   for development / single-machine setups; use `--operator-cert`
+   for tighter security.
+
+If neither flag is supplied AND the CLI is attached to a TTY, it
+prompts the operator to paste a cert TOML body on stdin (Ctrl-D to
+end). This mirrors the kernel-side `RAXIS_BOOTSTRAP=1` fallback so
+both genesis entry points behave identically.
+
+**Cert validation:** every path runs `validate_cert_structurally`
+(window sanity for `Standard`, value pinning for `EmergencyRecovery`)
+and `verify_cert_self_signature`. Self-signature failures and
+pubkey mismatches are unbypassable (they would let an attacker spoof
+an operator's identity). Structural failures can be bypassed by
+adding `--force-misconfig`, which:
+
+1. Sets `force_misconfig_bypass = true` on the genesis operator
+   entry in `policy.toml`.
+2. Triggers an `OperatorCertMisconfigBypassed` audit event on the
+   first policy load (one event per relaxed invariant).
+
+The bypass is loud by design — every read path for the operator
+entry surfaces it (`raxis cert show`, `raxis doctor`, the kernel's
+boot log) so a forensic auditor can reconstruct exactly which
+checks the operator overrode and why.
 
 **Behaviour:**
-1. Checks that `<data_dir>/keys/` does not already contain key files. Exits with `ERR_ALREADY_INITIALIZED` if it does (prevents accidental re-genesis). Use `--force` only with explicit intent to destroy existing keys. **`--force` semantics**: the genesis path MUST proactively `rm` every prior-genesis artifact (`authority_keypair.pem`, `quality_keypair.pem`, `verifier_token_key.bin`, every `operator_<fp>.pub`, and `<data_dir>/audit/segment-000.jsonl`) before re-running steps 2–7 — otherwise the per-file `O_CREAT|O_EXCL` writes inside the helpers will fire and `--force` will silently fail mid-ceremony. Both genesis emitters (CLI's `raxis genesis` and the kernel's `RAXIS_BOOTSTRAP=1` path) implement this purge.
+1. Checks that `<data_dir>/keys/` does not already contain key files. Exits with `ERR_ALREADY_INITIALIZED` if it does (prevents accidental re-genesis). Use `--force` only with explicit intent to destroy existing keys. **`--force` semantics**: the genesis path MUST proactively `rm` every prior-genesis artifact (`authority_keypair.pem`, `quality_keypair.pem`, `verifier_token_key.bin`, every `operator_<fp>.pub`, every `operator_<fp>.cert.toml`, and `<data_dir>/audit/segment-000.jsonl`) before re-running steps 2–7 — otherwise the per-file `O_CREAT|O_EXCL` writes inside the helpers will fire and `--force` will silently fail mid-ceremony. The cert file MUST be in the purge set because it is written at mode `0444` and a second `fs::write` would otherwise fail with `EACCES`. Both genesis emitters (CLI's `raxis genesis` and the kernel's `RAXIS_BOOTSTRAP=1` path) implement this purge.
 2. Generates `authority_keypair` (Ed25519) → writes `<data_dir>/keys/authority_keypair.pem`.
 3. Generates `quality_keypair` (Ed25519) → writes `<data_dir>/keys/quality_keypair.pem`.
 4. Generates `verifier_token_key` (32 CSPRNG bytes) → writes `<data_dir>/keys/verifier_token_key.bin`.
-5. Operator public key handling:
-   - If `--operator-pubkey <path>` is provided: read the Ed25519 **public** key from that path. The path may contain **PEM** (`-----BEGIN PUBLIC KEY-----`, as produced by **`openssl pkey -in operator_private.pem -pubout`**) or **64-character hex** (raw 32-byte public key, one line). Computes the fingerprint, then writes `<data_dir>/keys/operator_<fingerprint>.pub` (ASCII hex bytes). The kernel never sees the operator's private key.
-   - If not provided: prompts the operator to paste their Ed25519 public key as a **single line of 64 hex characters** (PEM is multi-line — use **`--operator-pubkey file.pem`** instead).
+5. Operator cert handling (see "Two operator-identity paths" above): the resolved cert is validated, then both the cert and the public-key-only artefact are persisted to `<data_dir>/keys/`:
+   - `<data_dir>/keys/operator_<fp>.pub` — operator pubkey hex (mode `0444`); kept for backward-compatible discovery (`raxis doctor`, `raxis policy show`).
+   - `<data_dir>/keys/operator_<fp>.cert.toml` — the full self-signed cert TOML (mode `0444`); the canonical on-disk source for `raxis cert show` / `raxis cert verify --data-dir`.
+   The kernel **never** sees the operator's private key — even on the convenience path, the private bytes live only in process memory.
 6. Writes initial `policy.toml` to `<data_dir>/policy/policy.toml` via the SHARED canonical emitter `raxis_genesis_tools::render_genesis_policy_toml` (the same function the kernel's `RAXIS_BOOTSTRAP=1` self-bootstrap path calls — see `philosophy.md` §1.6 `crates/genesis-tools/` for the convergence rationale and drift history). The CLI is responsible only for plumbing the inputs to the emitter; the spec invariants are all enforced inside the shared crate. The emitted artifact contains:
    - `authority_pubkey` = public key extracted from `authority_keypair.pem`
    - `quality_pubkey` = public key extracted from `quality_keypair.pem`
    - `[[operators.entries]]` = the registered operator entry with `permitted_ops = ["CreateInitiative", "ApprovePlan", "RejectPlan", "CreateSession", "RevokeSession", "GrantDelegation", "RetryTask", "ResumeTask", "AbortTask", "AbortInitiative", "ApproveEscalation", "DenyEscalation", "RotateEpoch", "QuarantineInitiative", "QuarantinePlansBy"]` (the canonical 15-operation v1 set per `kernel-store.md` §2.5.5 IPC discriminant table — the last two are the step-10 quarantine primitives; omit keys only if you intentionally deny that capability)
+   - `[operators.entries.cert]` = the self-signed `OperatorCert` (mandatory by INV-CERT-01). The emitter ALWAYS writes this sub-table — there is no cert-less branch. Loading a `policy.toml` without this sub-table fails serde deserialisation with a clear `missing field "cert"` error.
    - `[budget.base_cost_per_intent_kind]` = an entry for EACH of the four canonical `IntentKind` variants (`SingleCommit`, `IntegrationMerge`, `CompleteTask`, `ReportFailure`). Omitting any of these is a latent bug: any task whose intent-kind has no cost entry would fail admission with `BudgetError::UnknownIntentKindCost`. The shared emitter ships fixed defaults (10/50/5/1) that the operator may re-tune via `raxis epoch advance`.
    - `[[lanes]]` = a `default` lane entry. Without at least one lane entry, `scheduler::admit::admit_task` cannot resolve `lane_id = "default"` (the lane every plan defaults to) and admission fails with `SchedulerError::UnknownLane`.
    - `[sessions] allowed_worktree_roots` = a NON-EMPTY placeholder list (`<data_dir>/worktrees`), with a TOML comment directing the operator to replace it before creating sessions. **Writing an empty list at this step is a contract violation:** `raxis_policy::PolicyBundle::validate` rejects an empty `allowed_worktree_roots` as `MalformedArtifact`, so the kernel would refuse to load its own genesis-emitted artifact (regression-pinned by `bootstrap::integration::policy_toml_round_trips_through_raxis_policy_load_policy` AND by `cli/tests/genesis_emitter_round_trip.rs`). The placeholder is scoped under `<data_dir>` so it cannot grant access to anything the operator did not opt into; the operator is expected to advance the epoch with their real allowlist before creating sessions.
@@ -113,11 +157,26 @@ emitted `policy.toml` in the same ceremony. The CLI:
 7. Prompts the operator to sign `policy.toml` with their private key using `raxis-cli policy sign` and store `policy.sig` alongside it. The ceremony is not complete until `policy.sig` exists.
 8. Prints a summary of generated files and next steps.
 
+**Migration note (legacy `--operator-pubkey`):** Operators who hit
+`unknown flag --operator-pubkey` from prior CLI versions should
+switch to one of the two flows above. The CLI emits a typed error
+naming both replacement paths to make migration mechanical:
+
+```text
+--operator-pubkey was removed in the cert-mandatory release
+(INV-CERT-01): a bare pubkey cannot accompany the policy bundle.
+Re-run genesis with one of:
+  --operator-cert <path>   (air-gapped: pre-mint via `raxis cert mint`)
+  --operator-key  <path>   (convenience: CLI mints + embeds in-process;
+                            private key bytes are NOT persisted)
+```
+
 **Files written:**
 - `<data_dir>/keys/authority_keypair.pem`
 - `<data_dir>/keys/quality_keypair.pem`
 - `<data_dir>/keys/verifier_token_key.bin`
 - `<data_dir>/keys/operator_<fingerprint>.pub`
+- `<data_dir>/keys/operator_<fingerprint>.cert.toml`
 - `<data_dir>/policy/policy.toml`
 
 **Does not start the kernel.** The operator starts the kernel separately after ceremony completion.
@@ -128,14 +187,31 @@ emitted `policy.toml` in the same ceremony. The CLI:
 
 **Purpose:** Key rotation ceremony for a single key family. Safe to run while kernel is stopped.
 
-**Usage:** `raxis-cli genesis --rotate [authority | quality | verifier-token | operator]`
+**Usage:** `raxis-cli genesis --rotate [authority | quality | verifier-token]`
 
 **Behaviour:**
 - Stops cleanly if the kernel is detected as running (checks for active socket).
 - Generates new key material for the specified family.
-- For `operator`: prompts for new public key; removes old `.pub` file; writes new one; operator must re-sign all active plan artifacts with the new key.
 - For any key: prints "You must advance the policy epoch before resuming work. After restarting the kernel, stage the new signed policy artifact under `<data_dir>/policy/` and run: `raxis-cli epoch advance --policy <path> --sig <path>` (both arguments required; see the `epoch advance` section below)."
 - Does **not** automatically advance the epoch — that is a separate explicit step requiring the operator to stage the new signed artifact and pass its paths.
+
+> **Note on `operator` family.** `genesis --rotate operator` was
+> removed in the cert-mandatory release (INV-CERT-01) — it was a
+> footgun: the old flow swapped the on-disk pubkey file but left
+> the policy's `[[operators.entries]]` cert sub-table untouched, so
+> the kernel's epoch-advance check would reject the resulting policy
+> with a fingerprint mismatch. The replacement is `raxis cert
+> install --replace-for <old-fp> --new-cert <path>` (see [`cert
+> install`](#cert-install) below), which atomically rewrites the
+> cert block in `policy.toml`, mirrors the new cert into the
+> `operator_certificates` view table at next epoch advance, and
+> emits a typed `OperatorCertInstalled.previous_fingerprint =
+> Some(<old-fp>)` audit event so the rotation is forensically
+> traceable. Per INV-CERT-04 a `cert install --replace-for` MUST
+> NOT change the underlying public key — to rotate the operator's
+> Ed25519 key itself (a separate, audited operation), the operator
+> must run a fresh `raxis genesis` ceremony in a new data dir; v1
+> does not support in-place pubkey rotation.
 
 ---
 
@@ -313,7 +389,18 @@ Defaults (Standard kind): `not_after = now + 365d`, `warn = 30d`, `grace = 7d`.
 | `cert show <cert.toml>` | Pretty-print a cert (use `--json` for machine output). |
 | `cert verify <cert.toml> [--at <unix_ts>]` | Verify structure + self-signature; report current zone (`active`, `expiring`, `grace`, `expired`, `not_yet_valid`, `always_active_emergency`). Returns `Ok` even on `expired` — expiry is informational. |
 | `cert list [--json]` | Read `operator_certificates` from `kernel.db` and print one row per installed cert with current zone. |
-| `cert install <cert.toml> --policy <policy.toml>` | Splice a cert into an existing `policy.operators[]` entry whose `pubkey_fingerprint` matches the cert's pubkey. Asserts pubkey-hex match before mutating the file. The policy MUST then be re-signed with `policy sign` before the next epoch advance picks it up. |
+| `cert install <cert.toml> --policy <policy.toml>` | **First install / refresh** mode. Splice a cert into the `[[operators.entries]]` entry whose `pubkey_hex` matches the cert's pubkey. Asserts pubkey-hex match before mutating the file. The policy MUST then be re-signed with `policy sign` before the next epoch advance picks it up. |
+| `cert install --replace-for <old-fp> --new-cert <path> --policy <policy.toml>` | **Rotation primitive (typed; INV-CERT-04).** Locate the entry by `<old-fp>` and rewrite its embedded cert sub-table with the contents of `<path>`. The new cert's `pubkey_hex` MUST equal the existing entry's (rotation never changes the underlying pubkey — that is `genesis` in a fresh data dir, not `cert install`). On the next epoch advance the kernel's cert mirror emits `OperatorCertInstalled.previous_fingerprint = Some(<old-fp>)` so the audit chain captures the rotation event with continuity back to the prior cert. The two install forms are mutually exclusive at the CLI parse layer; mixing them or omitting one half of the rotation pair fails loud. |
+
+**`cert install --force-misconfig`** (applies to either form): the new
+cert's structural validation can be bypassed with `--force-misconfig`;
+the bypass sets `force_misconfig_bypass = true` on the entry and the
+kernel will emit `OperatorCertMisconfigBypassed` per relaxed
+invariant on the next policy load. Self-signature failures and
+pubkey mismatches are NEVER bypassable. Rotations also drop any
+prior `force_misconfig_bypass = true` from the entry on success
+(unless `--force-misconfig` is also passed for the new cert), so a
+silent over-relaxation across rotations is impossible.
 
 ---
 
@@ -564,14 +651,36 @@ This section is the normative walkthrough for a first-time operator setting up R
 - The `raxis-kernel` and `raxis-cli` binaries are installed and on `$PATH`.
 - The operator has generated their own Ed25519 keypair on a machine they control (the private key should never touch the machine running the kernel if possible, but v1 permits co-location).
 - The data directory (`~/.raxis` by default) is empty.
+- The operator has minted a self-signed `OperatorCert` (cert-mandatory by INV-CERT-01) — see [`cert mint`](#cert-mint) below — OR is willing to let the CLI mint one in-process from a private-key PEM via `--operator-key` (the convenience path; private bytes are never persisted).
 
 ### Step 1 — Run genesis
 
+**Path A — air-gapped (recommended)**: pre-mint the cert on the
+machine that holds the operator private key, then run genesis on the
+target host with the cert file:
+
 ```bash
-raxis-cli genesis --operator-pubkey ~/my-operator-key.pub
+# On the operator's air-gapped workstation
+raxis-cli cert mint --key ~/my-operator-key.pem \
+    --display-name "alice" --out alice.cert.toml
+
+# Transfer alice.cert.toml to the kernel host, then:
+raxis-cli genesis --operator-cert ./alice.cert.toml
 ```
 
-This generates all kernel keys and a skeleton `policy.toml`. Review the output file at `~/.raxis/policy/policy.toml` before proceeding.
+**Path B — convenience (single-machine setups)**: hand the CLI the
+private key directly; it mints + embeds the cert in-process and
+never persists the private bytes:
+
+```bash
+raxis-cli genesis --operator-key ~/my-operator-key.pem \
+    --operator-name "alice"
+```
+
+Both paths generate all kernel keys and a skeleton `policy.toml`
+with the operator cert embedded under `[operators.entries.cert]`.
+Review the output file at `~/.raxis/policy/policy.toml` before
+proceeding.
 
 ### Step 2 — Edit `policy.toml`
 

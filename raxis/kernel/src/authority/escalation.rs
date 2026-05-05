@@ -388,12 +388,17 @@ mod tests {
     }
 
     fn policy_with_operator(fp: &str, pubkey_hex: String) -> PolicyBundle {
+        // Stub cert: the escalation tests exercise rate-limiting /
+        // quarantine state transitions and don't go through the
+        // cert-validation gate. See `notifications::sink::tests::bundle`
+        // for the rationale on `stub_cert_for_pubkey`.
+        let cert = raxis_test_support::stub_cert_for_pubkey(pubkey_hex.clone());
         PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: fp.to_owned(),
             display_name:       fp.to_owned(),
             pubkey_hex,
             permitted_ops:      vec![],
-            cert:                  None,
+            cert,
             force_misconfig_bypass: false,
         }])
     }

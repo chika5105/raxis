@@ -62,9 +62,14 @@ async fn main() {
     // pool worker, which exits the whole process — control never
     // returns here.
     if bootstrap_mode {
+        // Cert-mandatory (INV-CERT-01): the kernel only ever consumes a
+        // pre-minted operator cert; the operator-private-key + cert-mint
+        // flow lives offline (typically `raxis cert mint` on an
+        // air-gapped workstation). The env var is `RAXIS_OPERATOR_CERT`
+        // pointing at the resulting `*.cert.toml`.
         let config = bootstrap::BootstrapConfig {
             data_dir: data_dir.clone(),
-            operator_pubkey_path: std::env::var("RAXIS_OPERATOR_PUBKEY").ok().map(Into::into),
+            operator_cert_path: std::env::var("RAXIS_OPERATOR_CERT").ok().map(Into::into),
             force: std::env::var("RAXIS_FORCE").is_ok(),
         };
         let join_outcome =

@@ -10,32 +10,14 @@ use std::path::Path;
 
 use crate::errors::CliError;
 
-/// Parse an operator **public** Ed25519 key from file contents:
-/// either **64-char lowercase/uppercase hex** (raw 32 bytes) or **`openssl`**-style
-/// **PEM** (`-----BEGIN PUBLIC KEY-----` wrapping RFC 8410 SPKI DER).
-///
-/// Genesis and interactive pubkey paste paths use this so `--operator-pubkey
-/// operator_public.pem` matches what operators generate locally.
-///
-/// Implementation lives in
-/// [`raxis_crypto::pubkey::parse_ed25519_public_material`] so the kernel's
-/// `bootstrap::load_operator_pubkey` path uses the exact same parser — see
-/// the comment block in that module for why a single shared parser exists.
-/// This wrapper exists only to map the typed `PubkeyParseError` into the
-/// CLI's `CliError::Key` variant and to append the CLI-specific hint about
-/// `raxis genesis --operator-pubkey` in the "no recognised encoding" path.
-pub fn parse_operator_public_key_material(content: &str) -> Result<[u8; 32], CliError> {
-    use raxis_crypto::PubkeyParseError;
-
-    raxis_crypto::parse_ed25519_public_material(content).map_err(|e| match e {
-        PubkeyParseError::UnknownEncoding => CliError::Key(
-            "operator public key: expected 64-char hex or PEM (-----BEGIN PUBLIC KEY-----); \
-             for PEM files use: raxis genesis --operator-pubkey /path/to/operator_public.pem"
-                .to_owned(),
-        ),
-        other => CliError::Key(other.to_string()),
-    })
-}
+// `parse_operator_public_key_material` was the CLI's wrapper over
+// `raxis_crypto::parse_ed25519_public_material`, kept only as long as
+// `raxis genesis --operator-pubkey` accepted a bare pubkey. With cert
+// mandatory (INV-CERT-01) the genesis flow takes either a `*.cert.toml`
+// (which embeds its own pubkey) or a private-key PEM (from which the
+// pubkey is derived); no call site needs a CLI-side pubkey parser. The
+// crypto-crate parser remains available for the kernel's runtime pubkey
+// checks (cert pubkey decode, signed-plan-artifact verification, …).
 
 /// Load an Ed25519 keypair from a PEM file.
 ///
@@ -172,92 +154,8 @@ pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ed25519_dalek::VerifyingKey;
-
-    /// Sample `openssl pkey -pubout` PEM (Ed25519 SPKI DER length 44).
-    const SAMPLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\n\
-MCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\n\
------END PUBLIC KEY-----\n";
-
-    #[test]
-    fn parse_operator_public_hex_round_trip() {
-        let bytes = parse_operator_public_key_material(SAMPLE_PEM).expect("pem");
-        let h = hex::encode(bytes);
-        let again = parse_operator_public_key_material(&h).expect("hex round-trip");
-        assert_eq!(again, bytes);
-    }
-
-    #[test]
-    fn parse_operator_public_pem_openssl_subject_public_key_info() {
-        let bytes = parse_operator_public_key_material(SAMPLE_PEM).expect("pem");
-        let _vk = VerifyingKey::from_bytes(&bytes).expect("dalek verifies");
-        assert_eq!(
-            hex::encode(bytes).len(),
-            64,
-            "stored policy form is 64-char hex"
-        );
-    }
-
-    #[test]
-    fn parse_operator_public_hex_accepts_uppercase() {
-        let bytes = parse_operator_public_key_material(SAMPLE_PEM).expect("pem");
-        let mixed = hex::encode(bytes).to_uppercase();
-        let got = parse_operator_public_key_material(&mixed).expect("uppercase hex");
-        assert_eq!(got, bytes);
-    }
-
-    #[test]
-    fn parse_operator_public_hex_trims_surrounding_whitespace() {
-        let bytes = parse_operator_public_key_material(SAMPLE_PEM).expect("pem");
-        let h = hex::encode(bytes);
-        let padded = format!("\n\t  {h}  \r\n");
-        let got = parse_operator_public_key_material(&padded).expect("trimmed hex");
-        assert_eq!(got, bytes);
-    }
-
-    #[test]
-    fn parse_operator_public_pem_accepts_crlf_and_blank_lines() {
-        let pem = "-----BEGIN PUBLIC KEY-----\r\n\r\nMCowBQYDK2VwAyEAB0zQxEa3aAatS9pffcLP416Kki9VPms3q15Kyl3cFEI=\r\n\r\n-----END PUBLIC KEY-----\r\n";
-        let a = parse_operator_public_key_material(SAMPLE_PEM).expect("lf pem");
-        let b = parse_operator_public_key_material(pem).expect("crlf pem");
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn parse_operator_public_rejects_non_64_hex_without_pem_header() {
-        let err = parse_operator_public_key_material(&"a".repeat(63)).expect_err("63 chars");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("expected 64-char hex") || msg.contains("operator public key"),
-            "{msg}"
-        );
-    }
-
-    #[test]
-    fn parse_operator_public_pem_rejects_wrong_der_length() {
-        // Valid base64 that decodes to 8 bytes — not 32 raw nor 44-byte SPKI.
-        let pem = "-----BEGIN PUBLIC KEY-----\n\
-wjukMjM=\n\
------END PUBLIC KEY-----\n";
-        let err = parse_operator_public_key_material(pem).expect_err("short der");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("unsupported Ed25519 public key encoding") || msg.contains("DER"),
-            "{msg}"
-        );
-    }
-
-    #[test]
-    fn parse_operator_public_pem_rejects_invalid_base64_payload() {
-        let pem = "-----BEGIN PUBLIC KEY-----\n!!!!\n-----END PUBLIC KEY-----\n";
-        let err = parse_operator_public_key_material(pem).expect_err("bad b64");
-        let msg = format!("{err}");
-        assert!(
-            msg.contains("base64") || msg.contains("PEM") || msg.contains("invalid"),
-            "{msg}"
-        );
-    }
-}
+// The `parse_operator_public_key_material` tests were removed alongside
+// the function itself when the CLI dropped `--operator-pubkey` (cert
+// mandatory). The shared parser still lives in `raxis-crypto::pubkey`
+// and is exhaustively tested there; this crate has no remaining
+// pubkey-parsing surface to test.

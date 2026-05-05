@@ -575,6 +575,7 @@ dependencies = [
  "raxis-policy",
  "raxis-runtime",
  "raxis-store",
+ "raxis-test-support",
  "raxis-types",
  "rusqlite",
  "serde",
@@ -605,8 +606,10 @@ version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
  "hex",
+ "raxis-genesis-tools",
  "raxis-ipc",
  "raxis-policy",
+ "raxis-test-support",
  "raxis-types",
  "serde",
  "serde_json",
@@ -624,9 +627,12 @@ dependencies = [
  "hex",
  "raxis-crypto",
  "raxis-policy",
+ "raxis-test-support",
+ "raxis-types",
  "serde_json",
  "sha2",
  "tempfile",
+ "toml",
  "uuid",
 ]
 
@@ -681,6 +687,7 @@ dependencies = [
  "hex",
  "raxis-audit-tools",
  "raxis-crypto",
+ "raxis-test-support",
  "raxis-types",
  "serde",
  "serde_json",
@@ -724,8 +731,10 @@ dependencies = [
 name = "raxis-test-support"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "hex",
  "raxis-audit-tools",
+ "raxis-crypto",
  "raxis-store",
  "raxis-types",
  "serde_json",

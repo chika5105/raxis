@@ -66,3 +66,7 @@ sha2         = { workspace = true }
 # initiative + signed_plan_artifacts row so the audit-on-reveal
 # path can be exercised end-to-end without standing up the kernel.
 rusqlite     = { workspace = true }
+# Cert-mandatory test fixtures: the genesis-emitter round-trip test
+# needs a structurally-valid self-signed cert that matches the
+# operator pubkey, and `commands::genesis::tests` needs the same.
+raxis-test-support = { path = "../crates/test-support" }

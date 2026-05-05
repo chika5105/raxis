@@ -692,12 +692,29 @@ the `operator_certificates` view (kernel-store.md §2.5.9).
 |---|---|
 | `[OK]`   | `Active` (Standard or Emergency) |
 | `[WARN]` | `Expiring` (within `warn_window_secs`), `Grace` (past `not_after` but within `grace_window_secs`), `force_misconfig_bypass=true` |
-| `[FAIL]` | `Expired` (past grace), `NotYetValid` (clock skew or future `not_before`) |
+| `[FAIL]` | `Expired` (past grace), `NotYetValid` (clock skew or future `not_before`), **`operator_certificates` table empty** (INV-CERT-01 violation — see below) |
 
 The `EmergencyRecovery` kind never expires (always `Active`) and is
 listed separately as `AlwaysActiveEmergency`. `doctor` reads
 `operator_certificates` directly via the SQLite WAL — it does **not**
 require a running kernel.
+
+**Cert-mandatory enforcement (INV-CERT-01):** if the
+`operator_certificates` table is empty, `doctor` emits a single
+`[FAIL] cert.list: no operator certificates installed` row regardless
+of any other check. This is a structural impossibility under a
+correctly-loaded cert-mandatory `policy.toml` (every
+`[[operators.entries]]` MUST carry an `[operators.entries.cert]`
+sub-table, and successful epoch advance repopulates the view), so an
+empty table means either (a) no genesis has run yet — operator must
+run `raxis genesis --operator-cert <path>` or
+`raxis genesis --operator-key <path> --operator-name <display>`, or
+(b) the kernel was started against a hand-edited legacy policy that
+somehow bypassed the loader's `missing field "cert"` rejection (a
+spec violation). Either way the kernel cannot accept operator IPC
+until the table is repopulated, so failing loud here gives the
+operator a concrete next action before the failure manifests as
+opaque IPC rejections.
 
 ### §5.5.16 — `raxis inbox`
 

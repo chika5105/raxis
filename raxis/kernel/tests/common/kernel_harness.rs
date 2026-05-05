@@ -47,6 +47,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use ed25519_dalek::SigningKey;
+use raxis_test_support::{ephemeral_cert_with_key, CertOpts};
 
 // ---------------------------------------------------------------------------
 // File-scope serialisation
@@ -87,17 +88,27 @@ pub fn build_and_locate_kernel() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_raxis-kernel"))
 }
 
-/// Write a deterministic Ed25519 public key (hex) to `<dir>/operator_pubkey.hex`.
+/// Mint a deterministic, self-signed operator cert and write the TOML
+/// body to `<dir>/operator.cert.toml`.
 ///
 /// The kernel reads this in bootstrap mode (`bootstrap::BootstrapConfig::
-/// operator_pubkey_path`). We use a fixed seed so failures reproduce
-/// byte-identically; this key is never used for anything that touches the
-/// outside world.
-fn write_operator_pubkey(dir: &Path) -> PathBuf {
-    let signing = SigningKey::from_bytes(&[0xA5u8; 32]);
-    let pubkey_hex = hex::encode(signing.verifying_key().to_bytes());
-    let path = dir.join("operator_pubkey.hex");
-    std::fs::write(&path, pubkey_hex).expect("write operator pubkey hex");
+/// operator_cert_path`, threaded through the `RAXIS_OPERATOR_CERT` env
+/// var). We use a fixed seed so failures reproduce byte-identically; this
+/// key is never used for anything that touches the outside world.
+///
+/// Cert-mandatory (INV-CERT-01): the harness no longer writes a
+/// pubkey-only file because the kernel no longer accepts one.
+fn write_operator_cert(dir: &Path) -> PathBuf {
+    let key = SigningKey::from_bytes(&[0xA5u8; 32]);
+    let cert = ephemeral_cert_with_key(&key, CertOpts {
+        // Same fixed `now` every harness run produces ⇒ same cert
+        // bytes, which keeps integration-test fixtures byte-stable.
+        now_unix_secs: 1_700_000_000,
+        ..CertOpts::default()
+    });
+    let path = dir.join("operator.cert.toml");
+    let toml_body = toml::to_string(&cert).expect("serialise cert");
+    std::fs::write(&path, toml_body).expect("write operator cert toml");
     path
 }
 
@@ -107,12 +118,12 @@ fn write_operator_pubkey(dir: &Path) -> PathBuf {
 fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir for kernel data dir");
     let data_dir = tmp.path();
-    let pubkey_path = write_operator_pubkey(data_dir);
+    let cert_path = write_operator_cert(data_dir);
 
     let output = Command::new(kernel_bin)
         .env("RAXIS_BOOTSTRAP", "1")
         .env("RAXIS_DATA_DIR", data_dir)
-        .env("RAXIS_OPERATOR_PUBKEY", &pubkey_path)
+        .env("RAXIS_OPERATOR_CERT", &cert_path)
         .output()
         .expect("spawn kernel in bootstrap mode");
 

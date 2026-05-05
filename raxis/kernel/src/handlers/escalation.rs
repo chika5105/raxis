@@ -534,13 +534,19 @@ mod tests {
         escalation_policy: EscalationPolicyForTests,
     ) -> (Arc<HandlerContext>, Arc<FakeAuditSink>) {
         let store  = Store::open_in_memory().unwrap();
+        // Stub cert: this fixture exercises the escalation handler's
+        // rate-limit / quarantine branches and never goes through the
+        // cert-validation gate. See `notifications::sink::tests::bundle`
+        // for the rationale on `stub_cert_for_pubkey`.
+        let pubkey_hex = hex::encode([7u8; 32]);
+        let cert = raxis_test_support::stub_cert_for_pubkey(pubkey_hex.clone());
         let policy = PolicyBundle::for_tests_with_operators_and_escalation_policy(
             vec![OperatorEntry {
                 pubkey_fingerprint: "op-prime".into(),
                 display_name:       "op-prime".into(),
-                pubkey_hex:         hex::encode([7u8; 32]),
+                pubkey_hex,
                 permitted_ops:      vec![],
-                cert:                  None,
+                cert,
                 force_misconfig_bypass: false,
             }],
             escalation_policy,

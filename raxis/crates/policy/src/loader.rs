@@ -99,15 +99,35 @@ mod tests {
     /// fixed-point solution; the Ed25519 signature is the actual integrity
     /// check). Including the field in test fixtures would require either a
     /// wrong value (dishonest) or an infeasible convergence loop.
+    ///
+    /// Cert-mandatory (INV-CERT-01): the loader's `validate_operator_certs`
+    /// step rejects any `[[operators.entries]]` block missing a self-signed
+    /// cert whose `pubkey_hex` matches the entry's `pubkey_hex`. We mint
+    /// the cert here from a deterministic operator key so the fixture
+    /// passes the strict-deserialise + self-sig verification path.
     fn minimal_policy_toml() -> String {
-        // pubkey_fingerprint = SHA-256[:16] of the raw 32-byte 0xcc pubkey
-        // bytes; pinned here so the new fingerprint consistency check in
-        // `validate_operator_certs` accepts the fixture. Real genesis
-        // policies derive this from the actual pubkey.
+        let op_key = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
+        let op_pk_hex = raxis_test_support::pubkey_hex(&op_key);
+        let op_fp = operator_pubkey_fingerprint(&op_pk_hex).unwrap();
+        let cert = raxis_test_support::ephemeral_cert_with_key(
+            &op_key,
+            raxis_test_support::CertOpts {
+                display_name: "Alice".to_owned(),
+                permitted_ops: vec!["CreateInitiative".into()],
+                ..raxis_test_support::CertOpts::default()
+            },
+        );
+        let cert_toml = ::toml::to_string(&cert).unwrap();
+        let cert_block = cert_toml
+            .lines()
+            .map(|l| format!("             {l}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         format!(
             "[meta]\n\
              epoch     = 1\n\
-             signed_by = \"c2f480d4dda9f4522b9f6d590011636d\"\n\
+             signed_by = \"{op_fp}\"\n\
              signed_at = 1714500000\n\
              \n\
              [authority]\n\
@@ -134,13 +154,14 @@ mod tests {
              \n\
              [operators]\n\
              [[operators.entries]]\n\
-             pubkey_fingerprint = \"c2f480d4dda9f4522b9f6d590011636d\"\n\
+             pubkey_fingerprint = \"{op_fp}\"\n\
              display_name       = \"Alice\"\n\
-             pubkey_hex         = \"{op}\"\n\
-             permitted_ops      = [\"CreateInitiative\"]\n",
+             pubkey_hex         = \"{op_pk_hex}\"\n\
+             permitted_ops      = [\"CreateInitiative\"]\n\
+             [operators.entries.cert]\n\
+             {cert_block}\n",
             auth = "a".repeat(64),
             qual = "b".repeat(64),
-            op   = "c".repeat(64),
         )
     }
 

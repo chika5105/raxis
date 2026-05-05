@@ -112,12 +112,20 @@ mod tests {
     use serde_json::json;
 
     fn bundle() -> Arc<ArcSwap<PolicyBundle>> {
+        // The notification sink tests don't exercise the cert-validation
+        // path; they need an OperatorEntry to exist only to satisfy the
+        // bundle's "operators must not be empty" rule. `stub_cert_for_pubkey`
+        // returns a structurally-shaped placeholder cert that
+        // `for_tests_with_operators` accepts (validation is bypassed)
+        // but would loudly fail any real `verify_cert_self_signature`
+        // call — which is precisely the safety net we want.
+        let pubkey = "0".repeat(64);
         let b = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: "fp".into(),
             display_name:       "fp".into(),
-            pubkey_hex:         "0".repeat(64),
+            pubkey_hex:         pubkey.clone(),
             permitted_ops:      vec![],
-            cert:                  None,
+            cert:                  raxis_test_support::stub_cert_for_pubkey(pubkey),
             force_misconfig_bypass: false,
         }]);
         Arc::new(ArcSwap::from_pointee(b))

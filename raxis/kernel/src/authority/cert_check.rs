@@ -158,13 +158,12 @@ impl CertEnforcer {
             None => return CertGuard::Allow,
         };
 
-        // Legacy entry (no cert) ⇒ pass-through. The
-        // OperatorCertLegacyEntryDetected audit was already emitted
-        // at policy load; we don't repeat it per request.
-        let cert = match &entry.cert {
-            Some(c) => c,
-            None    => return CertGuard::Allow,
-        };
+        // Cert is mandatory (INV-CERT-01 / INV-CERT-02): every
+        // operator entry in the bundle carries a self-signed cert.
+        // There is no permissive default — empty `operator_certificates`
+        // means the boot ceremony was incomplete and the kernel
+        // should not have started in the first place.
+        let cert = &entry.cert;
 
         match cert_status(cert, now_unix_secs) {
             CertStatus::Active => CertGuard::Allow,
@@ -363,7 +362,7 @@ mod tests {
         c
     }
 
-    fn entry(cert: Option<OperatorCert>) -> OperatorEntry {
+    fn entry(cert: OperatorCert) -> OperatorEntry {
         OperatorEntry {
             pubkey_fingerprint:     fp(),
             display_name:           "alice".to_owned(),
@@ -374,7 +373,7 @@ mod tests {
         }
     }
 
-    fn bundle(cert: Option<OperatorCert>) -> PolicyBundle {
+    fn bundle(cert: OperatorCert) -> PolicyBundle {
         PolicyBundle::for_tests_with_operators(vec![entry(cert)])
     }
 
@@ -388,7 +387,7 @@ mod tests {
     #[test]
     fn active_zone_allows_silently() {
         let (enf, sink) = enforcer_with_sink();
-        let b = bundle(Some(signed_standard()));
+        let b = bundle(signed_standard());
         let now = NOT_AFTER - 60 * 86_400; // 60 days before expiry; outside warn window
         let g = enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now);
         assert_eq!(g, CertGuard::Allow);
@@ -401,7 +400,7 @@ mod tests {
     #[test]
     fn expiring_zone_emits_once_then_dedupes_within_epoch() {
         let (enf, sink) = enforcer_with_sink();
-        let b = bundle(Some(signed_standard()));
+        let b = bundle(signed_standard());
         // 14 days before expiry → inside the 30-day warn window.
         let now = NOT_AFTER - 14 * 86_400;
 
@@ -426,7 +425,7 @@ mod tests {
     #[test]
     fn grace_zone_allows_and_emits_once_per_epoch() {
         let (enf, sink) = enforcer_with_sink();
-        let b = bundle(Some(signed_standard()));
+        let b = bundle(signed_standard());
         // 1 day past expiry → inside 7-day grace window.
         let now = NOT_AFTER + 86_400;
         assert_eq!(enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now), CertGuard::Allow);
@@ -442,7 +441,7 @@ mod tests {
     #[test]
     fn expired_zone_denies_with_wire_code_and_emits_per_op() {
         let (enf, sink) = enforcer_with_sink();
-        let b = bundle(Some(signed_standard()));
+        let b = bundle(signed_standard());
         // 14 days past expiry → past 7-day grace window.
         let now = NOT_AFTER + 14 * 86_400;
         match enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now) {
@@ -468,7 +467,7 @@ mod tests {
     #[test]
     fn not_yet_valid_zone_denies_with_wire_code() {
         let (enf, sink) = enforcer_with_sink();
-        let b = bundle(Some(signed_standard()));
+        let b = bundle(signed_standard());
         // 1 day before not_before → cert isn't valid yet.
         let now = NOT_BEFORE - 86_400;
         match enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now) {
@@ -491,7 +490,7 @@ mod tests {
     #[test]
     fn emergency_cert_allows_and_emits_per_op_no_dedupe() {
         let (enf, sink) = enforcer_with_sink();
-        let b = bundle(Some(signed_emergency()));
+        let b = bundle(signed_emergency());
         // Time of day doesn't matter for emergency certs; pick anything.
         let now = NOT_AFTER + 365 * 86_400;
         for _ in 0..3 {
@@ -504,19 +503,6 @@ mod tests {
         assert_eq!(n, 3,
             "EmergencyOperatorUsed MUST emit once per op (no dedupe); got {n} for {:?}",
             sink.event_kinds());
-    }
-
-    // ── Legacy (cert-less) entry ──────────────────────────────────
-
-    #[test]
-    fn legacy_entry_passes_through_silently() {
-        let (enf, sink) = enforcer_with_sink();
-        let b = bundle(None);
-        let now = NOT_AFTER + 14 * 86_400; // would be past-expiry if cert existed
-        assert_eq!(enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now),
-            CertGuard::Allow);
-        assert!(sink.event_kinds().is_empty(),
-            "legacy entry must not produce per-request audit; got {:?}", sink.event_kinds());
     }
 
     // ── Unknown fingerprint (kernel invariant — fail-open) ─────────

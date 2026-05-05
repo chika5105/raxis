@@ -8,10 +8,10 @@
 // The kernel side has an equivalent regression-pin
 // (`bootstrap::integration::policy_toml_round_trips_through_raxis_policy_load_policy`),
 // but a CLI-side mirror is worth its weight: any future CLI flag that
-// changes how the inputs are derived (`--data-dir`, `--operator-pubkey`,
-// `--rotate`, etc.) would silently break operator workflows without it,
-// because the kernel-side test only validates the kernel's own input
-// derivation.
+// changes how the inputs are derived (`--data-dir`, `--operator-cert`,
+// `--operator-key`, `--rotate`, etc.) would silently break operator
+// workflows without it, because the kernel-side test only validates
+// the kernel's own input derivation.
 //
 // Test strategy: rather than invoke the CLI binary (which would need a
 // child process and operator stdin), we call `render_genesis_policy_toml`
@@ -19,19 +19,12 @@
 // step 6, then write the bytes to a tempdir and parse them back.
 
 use raxis_genesis_tools::{render_genesis_policy_toml, GenesisPolicyInputs};
+use raxis_test_support::{ephemeral_signing_key, pubkey_hex, ephemeral_cert_with_key, CertOpts};
 
 const FIXED_AUTHORITY_PUBKEY_HEX: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
 const FIXED_QUALITY_PUBKEY_HEX: &str =
     "2222222222222222222222222222222222222222222222222222222222222222";
-const FIXED_OPERATOR_PUBKEY_HEX: &str =
-    "3333333333333333333333333333333333333333333333333333333333333333";
-// SHA-256[:16] of the raw 32-byte 0x33 pubkey above. Pinned here so
-// the fingerprint consistency check in
-// `raxis_policy::bundle::validate_operator_certs` accepts the
-// emitter's output. Real genesis policies derive this from the
-// actual pubkey via `raxis_genesis_tools::pubkey_fingerprint`.
-const FIXED_OPERATOR_FINGERPRINT: &str = "deb0e38ced1e41de6f92e70e80c418d2";
 
 #[test]
 fn cli_emitted_policy_round_trips_through_loader() {
@@ -39,13 +32,33 @@ fn cli_emitted_policy_round_trips_through_loader() {
     let placeholder_root = tmp.path().join("worktrees").display().to_string();
     let allowlist: [&str; 1] = [placeholder_root.as_str()];
 
+    // Cert-mandatory (INV-CERT-01): the loader's
+    // `validate_operator_certs` step requires a structurally-valid,
+    // self-signed cert whose pubkey matches the operator entry's
+    // `pubkey_hex`. We mint that cert here from a deterministic seed so
+    // the test is reproducible.
+    let key   = ephemeral_signing_key([0x33u8; 32]);
+    let pk    = pubkey_hex(&key);
+    let fp    = raxis_genesis_tools::pubkey_fingerprint(
+        &hex::decode(&pk).expect("pubkey hex must decode"),
+    );
+    let cert  = ephemeral_cert_with_key(&key, CertOpts {
+        display_name: "test-operator".to_owned(),
+        permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        ..CertOpts::default()
+    });
+
     let toml_str = render_genesis_policy_toml(GenesisPolicyInputs {
         authority_pubkey_hex:   FIXED_AUTHORITY_PUBKEY_HEX,
         quality_pubkey_hex:     FIXED_QUALITY_PUBKEY_HEX,
-        operator_pubkey_hex:    FIXED_OPERATOR_PUBKEY_HEX,
-        operator_fingerprint:   FIXED_OPERATOR_FINGERPRINT,
+        operator_pubkey_hex:    &pk,
+        operator_fingerprint:   &fp,
         signed_at_unix_secs:    1_700_000_000,
         allowed_worktree_roots: &allowlist,
+        operator_cert:          &cert,
     });
 
     let policy_path = tmp.path().join("policy.toml");
@@ -55,11 +68,13 @@ fn cli_emitted_policy_round_trips_through_loader() {
         raxis_policy::load_policy(&policy_path).expect("loader must accept CLI emitter output");
 
     assert_eq!(bundle.epoch(), 1);
-    assert_eq!(bundle.signed_by(), FIXED_OPERATOR_FINGERPRINT);
+    assert_eq!(bundle.signed_by(), fp);
     assert_eq!(bundle.signed_at(), 1_700_000_000);
     assert_eq!(bundle.operators().len(), 1);
-    assert_eq!(bundle.operators()[0].pubkey_hex, FIXED_OPERATOR_PUBKEY_HEX);
-    assert_eq!(bundle.operators()[0].pubkey_fingerprint, FIXED_OPERATOR_FINGERPRINT);
+    assert_eq!(bundle.operators()[0].pubkey_hex, pk);
+    assert_eq!(bundle.operators()[0].pubkey_fingerprint, fp);
+    assert_eq!(bundle.operators()[0].cert.pubkey_hex, pk,
+        "embedded cert must agree with entry-level pubkey_hex (INV-CERT-01)");
     assert_eq!(bundle.lanes().len(), 1, "exactly one default lane");
     assert_eq!(bundle.lanes()[0].lane_id, "default");
     assert_eq!(sha.len(), 64);
@@ -80,16 +95,28 @@ fn cli_emitter_and_kernel_emitter_produce_identical_bytes_for_identical_inputs()
     //       (verified by reading the source), and
     //   (b) this test pinning the byte shape of that one emitter against
     //       the structural assertions below.
+    let key  = ephemeral_signing_key([0x33u8; 32]);
+    let pk   = pubkey_hex(&key);
+    let fp   = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
+    let cert = ephemeral_cert_with_key(&key, CertOpts {
+        display_name: "test-operator".to_owned(),
+        permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        ..CertOpts::default()
+    });
 
     let placeholder = "/var/lib/raxis/worktrees";
     let allowlist: [&str; 1] = [placeholder];
     let inputs = GenesisPolicyInputs {
         authority_pubkey_hex:   FIXED_AUTHORITY_PUBKEY_HEX,
         quality_pubkey_hex:     FIXED_QUALITY_PUBKEY_HEX,
-        operator_pubkey_hex:    FIXED_OPERATOR_PUBKEY_HEX,
-        operator_fingerprint:   FIXED_OPERATOR_FINGERPRINT,
+        operator_pubkey_hex:    &pk,
+        operator_fingerprint:   &fp,
         signed_at_unix_secs:    1_700_000_000,
         allowed_worktree_roots: &allowlist,
+        operator_cert:          &cert,
     };
 
     let bytes_a = render_genesis_policy_toml(inputs);
@@ -108,6 +135,7 @@ fn cli_emitter_and_kernel_emitter_produce_identical_bytes_for_identical_inputs()
         "[budget]",
         "[budget.base_cost_per_intent_kind]",
         "[[operators.entries]]",
+        "[operators.entries.cert]",
         "[[lanes]]",
         // Canonical IntentKind keys (the CLI's old emitter and the
         // kernel's old emitter disagreed on these — convergence pin).

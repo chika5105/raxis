@@ -401,12 +401,25 @@ fn check_operator_certs(
     };
 
     if rows.is_empty() {
-        // A fresh install with no operator certs is fine — emit a
-        // single OK so JSON consumers see a stable id.
+        // Cert-mandatory (INV-CERT-01): every operator entry MUST have
+        // a self-signed cert. An empty `operator_certificates` table
+        // therefore signals one of:
+        //   * the kernel never ran genesis (no cert was installed); or
+        //   * the cert mirror failed to repopulate the view table on
+        //     the last epoch advance (transactional invariant
+        //     INV-STORE-01 violated — likely a prior crash); or
+        //   * a third-party tool truncated the table.
+        // Any of these is operator-actionable and FAIL-worthy: the
+        // kernel will refuse to admit any operator op until a cert is
+        // installed (the auth path enforces the same invariant). The
+        // "legacy operator-key flow" OK branch was deleted alongside
+        // the legacy code path itself.
         r.push(
             "cert.list",
-            Outcome::Ok,
-            "no operator certificates installed (legacy operator-key flow)",
+            Outcome::Fail,
+            "operator_certificates is empty — every operator MUST have a self-signed cert \
+             (INV-CERT-01). Re-run `raxis genesis` (which always installs a cert) or use \
+             `raxis cert install` to register one for an existing entry.",
         );
         return;
     }
@@ -803,7 +816,12 @@ mod tests {
     }
 
     #[test]
-    fn cert_check_lists_no_certs_emits_single_ok_row() {
+    fn cert_check_fails_when_operator_certificates_table_is_empty() {
+        // Cert-mandatory (INV-CERT-01): an empty `operator_certificates`
+        // table is unrecoverable without operator action — the kernel
+        // would refuse to admit any operator op. Doctor MUST surface
+        // this as `[FAIL]`, not `[OK]`. The legacy operator-key flow
+        // (no cert installed) was deleted alongside this branch.
         let tmp = TempDir::new().unwrap();
         let _ = raxis_store::Store::open(&tmp.path().join("kernel.db")).unwrap();
         // Re-open read-only.
@@ -815,9 +833,14 @@ mod tests {
         assert!(ids.contains(&"cert.list"),
             "must emit cert.list when zero certs are installed; got {ids:?}");
         let cert_list = r.checks.iter().find(|c| c.id == "cert.list").unwrap();
-        assert_eq!(cert_list.outcome, Outcome::Ok);
-        assert!(cert_list.detail.contains("no operator certificates"),
-            "detail must explain the legacy flow: {:?}", cert_list.detail);
+        assert_eq!(cert_list.outcome, Outcome::Fail,
+            "INV-CERT-01: empty operator_certificates MUST be a hard failure");
+        assert!(cert_list.detail.contains("INV-CERT-01"),
+            "detail must cite INV-CERT-01 so an operator can find the spec: {:?}",
+            cert_list.detail);
+        assert!(cert_list.detail.contains("raxis genesis")
+                || cert_list.detail.contains("raxis cert install"),
+            "detail must point at the recovery commands: {:?}", cert_list.detail);
     }
 
     #[test]

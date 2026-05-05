@@ -16,6 +16,8 @@ description = "RAXIS workspace-wide test helpers (FakeClock, in-memory store, au
 raxis-types       = { workspace = true }
 raxis-store       = { workspace = true }
 raxis-audit-tools = { workspace = true }
+raxis-crypto      = { workspace = true }
+ed25519-dalek     = { workspace = true }
 
 # Temp-dir lifecycle for the GitRepo / AuditDir / DiskStore fixtures.
 # `tempfile` is already a dev-dep of `raxis-kernel`; we re-pin the same

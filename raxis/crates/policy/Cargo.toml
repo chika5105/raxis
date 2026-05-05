@@ -26,3 +26,9 @@ raxis-audit-tools = { workspace = true }
 # tests-only — runtime cert verification only needs the public-key path
 # which raxis-crypto already exposes.
 ed25519-dalek     = { workspace = true }
+# Cert-mandatory test fixtures use `test_support::cert::ephemeral_cert*`
+# so every test that constructs an `OperatorEntry` mints a structurally
+# valid, self-signed cert without hand-rolling the ceremony at every
+# call site. dev-dep only by Layer-1/2/3 enforcement
+# (raxis-test-support/lib.rs) — never appears in production deps.
+raxis-test-support = { path = "../test-support" }

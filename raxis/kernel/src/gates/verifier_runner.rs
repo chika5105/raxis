@@ -866,19 +866,36 @@ mod stub_round_trip {
         // borrow inside `&[..]` outlives the call (a temporary chain
         // would be dropped at the semicolon and the borrow would dangle).
         let worktree_root_str = witness_dir.display().to_string();
+        // Cert-mandatory (INV-CERT-01): we must mint a structurally-valid
+        // self-signed cert here so the loader's
+        // `validate_operator_certs` step accepts the artifact even though
+        // the witness handler never consults it. Use a deterministic seed
+        // for byte-stable test output.
+        let key  = raxis_test_support::ephemeral_signing_key([0x22u8; 32]);
+        let pk   = raxis_test_support::pubkey_hex(&key);
+        let fp   = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
+        let cert = raxis_test_support::ephemeral_cert_with_key(
+            &key,
+            raxis_test_support::CertOpts {
+                display_name: "verifier-runner-stub".to_owned(),
+                permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                ..raxis_test_support::CertOpts::default()
+            },
+        );
         let policy_toml = raxis_genesis_tools::render_genesis_policy_toml(
             raxis_genesis_tools::GenesisPolicyInputs {
                 authority_pubkey_hex:
                     "0000000000000000000000000000000000000000000000000000000000000000",
                 quality_pubkey_hex:
                     "1111111111111111111111111111111111111111111111111111111111111111",
-                operator_pubkey_hex:
-                    "2222222222222222222222222222222222222222222222222222222222222222",
-                // SHA-256[:16] of the 0x22 pubkey above; required by the
-                // new `validate_operator_certs` consistency check.
-                operator_fingerprint:   "9f72ea0cf49536e3c66c787f705186df",
+                operator_pubkey_hex:    &pk,
+                operator_fingerprint:   &fp,
                 signed_at_unix_secs:    1_700_000_000,
                 allowed_worktree_roots: &[worktree_root_str.as_str()],
+                operator_cert:          &cert,
             },
         );
         let tmp_policy = tempfile::NamedTempFile::new().expect("tempfile");
