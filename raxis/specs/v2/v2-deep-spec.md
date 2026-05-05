@@ -1661,6 +1661,100 @@ different dates; (3) no digest to verify. Operator-built images are pull-once, d
 verified, and deterministic. The operator controls what's in the image; the policy bundle
 controls which images are permitted.
 
+**Environment variables in the VM image:**
+OCI images support `ENV` instructions (Dockerfile) which are inherited by `raxis-planner`
+as PID 1. Operators may use this to configure non-secret toolchain and project defaults
+(e.g. `CARGO_HOME`, `RUST_LOG`, `NODE_ENV`). The Kernel's enforcement boundary ends at the
+image digest — it verifies the image matches the policy-pinned digest, but it does not
+inspect or validate the environment variable contents of an image.
+
+**Operator responsibility:** If an operator embeds secrets (API keys, passwords, tokens)
+as `ENV` instructions in a VM image, those values are present in the planner's process
+environment and are therefore reachable by the agent — including via prompt injection.
+This is a violation of `INV-02A` in spirit, but **it is not enforceable by the Kernel**.
+The Kernel cannot scan image layers for secret-shaped values, and any attempt to do so
+would be both incomplete and bypassable (secrets could be base64-encoded, split across
+vars, or assembled at runtime). The credential proxy architecture (`credential-proxy.md`)
+is the correct mechanism for runtime secret access. Embedding secrets in image env vars
+is operator error; RAXIS cannot prevent it.
+
+**Kernel-injected env vars — `[env]` in `plan.toml` (INV-VM-CAP-05):**
+Requiring operators to bake per-task configuration (e.g. `NODE_ENV=production`,
+`LOG_LEVEL=debug`, `API_BASE_URL=https://staging.example.com`) into the VM image is
+not ergonomic: a single config change would require a new image build, digest update in
+the policy bundle, and re-approval of the plan. Instead, operators may declare
+non-secret env vars in `plan.toml` at the plan level (defaults) or per-task (override):
+
+```toml
+[plan]
+vm_image = "raxis/rust-node:1.87-20"
+
+[plan.env]                          # plan-level defaults, applied to all tasks
+RUST_LOG   = "info"
+NODE_ENV   = "production"
+
+[[tasks]]
+task_id            = "auth_implementer"
+session_agent_type = "Executor"
+
+[tasks.env]                         # per-task override — merged with plan.env
+RUST_LOG = "debug"                  # overrides plan-level default for this task only
+```
+
+**Merge semantics — explicit tension resolution:**
+
+The two sources (`[plan.env]` and `[tasks.env]`) can produce three distinct cases for
+any given key. The Kernel resolves each as follows:
+
+| Case | `[plan.env]` | `[tasks.env]` | Result in `session.env` | Rationale |
+|---|---|---|---|---|
+| **Override** | `RUST_LOG = "info"` | `RUST_LOG = "debug"` | `RUST_LOG=debug` | Task-level intent is more specific than plan-level default. The task author knew the plan default and explicitly chose to differ. |
+| **Additive** | *(absent)* | `MY_VAR = "x"` | `MY_VAR=x` | Task declares a var with no plan-level counterpart. Included as-is. |
+| **Default passthrough** | `NODE_ENV = "production"` | *(absent)* | `NODE_ENV=production` | Task does not override; plan default applies. |
+
+There is no "conflict" in the error sense — both sources are operator-authored and
+operator-signed as part of the same plan artifact. The override rule (`[tasks.env]`
+wins) is not a safety mechanism; it is a predictability guarantee. Any plan reader
+can determine the exact env set for any task by inspecting two tables with a
+deterministic rule, without needing to understand evaluation order or priority stacks.
+
+**Concrete example** — given the plan fragment above, the `auth_implementer` task's
+`/raxis/session.env` would contain:
+```
+RAXIS_SESSION_TOKEN=<kernel-issued>
+RAXIS_TASK_ID=auth_implementer
+RAXIS_INITIATIVE_ID=<kernel-issued>
+RUST_LOG=debug        # tasks.env override wins
+NODE_ENV=production   # plan.env default passthrough
+```
+
+The merged set is what the Kernel writes into `/raxis/session.env` for that session.
+
+**Kernel write path:** At session activation, the Kernel:
+1. Resolves the merged env map for the task (plan defaults + task overrides).
+2. Appends the operator-declared vars to `/raxis/session.env` after the reserved
+   `RAXIS_*` entries.
+3. Mounts `/raxis/` read-only before VM boot — the planner cannot alter the file.
+
+`raxis-planner` sources `/raxis/session.env` at startup, exporting all vars into its
+process environment before launching the agent loop.
+
+**`RAXIS_` prefix is reserved:** Any key whose name begins with `RAXIS_` (case-
+insensitive) is rejected at `approve_plan` time with:
+```
+{ rule: "reserved_env_key", key: "RAXIS_MY_KEY",
+  suggestion: "The RAXIS_ prefix is reserved for Kernel-issued values. Rename the key." }
+```
+This prevents plan authors from shadowing `RAXIS_SESSION_TOKEN`, `RAXIS_TASK_ID`, or
+`RAXIS_INITIATIVE_ID` with operator-supplied values.
+
+**Secrets via this mechanism:** The same operator-responsibility principle applies —
+the Kernel does not inspect values for secret-shaped content. An operator who places a
+raw API key in `[plan.env]` is making the same error as baking it into an image `ENV`
+instruction, with one difference: the plan is operator-signed and audit-logged, so the
+injected key name (but not its value) is visible in the audit record. For runtime secret
+access, use the credential proxy.
+
 **Standard image naming convention:**
 
 | Image | Toolchain | Typical use |
@@ -1727,7 +1821,7 @@ be extended without a code change and a new binary deployment.
 
 | File | Contents | Written by |
 |---|---|---|
-| `session.env` | `RAXIS_SESSION_TOKEN`, `RAXIS_TASK_ID`, `RAXIS_INITIATIVE_ID` | Kernel token issuance |
+| `session.env` | `RAXIS_SESSION_TOKEN`, `RAXIS_TASK_ID`, `RAXIS_INITIATIVE_ID`; followed by operator-declared `[env]` vars from `plan.toml` | Kernel token issuance + plan env merge |
 | `system_prompt.txt` | Role-specific non-negotiable prefix + operator context | Kernel Prompt Assembler |
 | `bundles/<task_id>.bundle` | Executor git bundles (Orchestrator sessions only) | Kernel on `KernelPush::SubTaskCompleted` |
 
@@ -1774,6 +1868,7 @@ manipulating the filesystem layout.
 | Which VM image to use | ✅ `vm_image` field | Kernel resolves against policy bundle digest |
 | Path allowlist (within worktree) | ✅ `path_allowlist` per task | Kernel VCS diff at `SingleCommit` admission |
 | Allowed egress URLs | ✅ `allowed_egress` per task | Kernel Check E3 at `EgressRequest` admission |
+| Non-secret env vars | ✅ `[plan.env]` (defaults) + `[tasks.env]` (per-task override) | Kernel merges into `/raxis/session.env`; `RAXIS_` prefix rejected at `approve_plan` |
 | Additional VirtioFS mounts | ❌ Not in spec | No code path exists |
 | Mount the policy directory | ❌ Not in spec | No code path exists |
 | Mount the audit directory | ❌ Not in spec | No code path exists |
