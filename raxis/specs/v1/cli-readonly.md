@@ -269,6 +269,16 @@ Global flags (apply to every subcommand):
 - `--quiet` — suppress informational output; print only the body.
 - `-h, --help` — context-sensitive help.
 
+**Unknown subcommand suggestions.** Read-only commands share the
+top-level dispatcher with `cli-ceremony.md` §4.1, so the
+`Did you mean …?` behaviour described there applies equally here:
+typos like `raxis stauts` surface `status`, and typos under a parent
+(e.g. `raxis policy diffr`) surface `diff` / `show`. Ranking,
+length-aware threshold, exact-prefix priority, the 5-suggestion cap,
+and the dispatcher↔catalog drift test all live in
+`cli/src/closeness.rs` + `cli/src/main.rs` and are spec'd once in
+`cli-ceremony.md` §4.1 to avoid drift between this file and that one.
+
 ### §5.5.1 — `raxis status`
 
 **Purpose:** one-screen kernel health snapshot. The "is anything on fire"

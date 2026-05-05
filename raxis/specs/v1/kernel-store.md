@@ -157,9 +157,11 @@ Audit emission **after** commit is mandatory: an audit record for an operation t
 
 #### SQL Type-Safety and Codebase Representation
 
-**Type-safety invariant (INV-STORE-03):** To prevent runtime SQL errors from typos or schema drift, **no Rust source file in `raxis/kernel/src` may contain a raw SQL table-name or state-value string literal**. 
-- **Table names** must be dynamically interpolated using the `raxis-store::Table` enum. A module interacting with the database must define a module-level constant (e.g., `const TASKS: &str = Table::Tasks.as_str();`) and use `format!()` to inject it into the query string.
+**Type-safety invariant (INV-STORE-03):** To prevent runtime SQL errors from typos or schema drift, **no Rust source file across the workspace — production *or* test code, in any crate that touches `kernel.db` (`raxis-kernel`, `raxis-store`, `raxis-cli`, `raxis-test-support`, and any future store consumer) — may contain a raw SQL table-name or state-value string literal**.
+- **Table names** must be dynamically interpolated using the `raxis-store::Table` enum. A module interacting with the database must define a module-level constant (e.g., `const TASKS: &str = Table::Tasks.as_str();`) and use `format!()` to inject it into the query string. The same rule applies inside `#[cfg(test)]` modules and integration-test fixtures: tests that hand-roll seed data via `INSERT`/`UPDATE`/`DELETE` MUST resolve their table names through `Table::*.as_str()` (typically by importing `raxis_store::Table` and re-binding it as a `const`). This ensures that renaming a table in `crates/store/src/table.rs` propagates through every `INSERT INTO …` / `SELECT … FROM …` site at compile time, including the test harness.
 - **State values** (e.g., TaskState, InitiativeState) must use the relevant enum's `.as_sql_str()` method as bound parameters.
+
+A workspace-wide `rg` over `INSERT INTO <ident>|UPDATE <ident> SET|DELETE FROM <ident>|FROM <ident>` with `<ident>` matching any name in `Table::ALL` MUST return zero hits in `*.rs`; the only legitimate occurrences of those bare identifiers are inside `crates/store/src/table.rs` (the enum definition itself) and in the migration DDL strings under `crates/store/src/migration.rs`. CI may codify this as a grep gate.
 
 ---
 
@@ -1105,7 +1107,7 @@ CREATE INDEX IF NOT EXISTS idx_nonce_cache_observed_at
 > | Part 3 | `witness_records` (13), `lane_budget_reservations` (14), `lineage_rate_limits` (15), `nonce_cache` (16) |
 > | Part 4 | `task_intent_ranges` (17), `task_exported_path_snapshots` (18), `policy_epoch_history` (19) |
 >
-> The v1 baseline migration (migration 1) creates all 19 tables atomically. All table names in this DDL are canonical and supersede any conflicting names in Parts 2.1–2.4. The Rust implementation enforces this via the `raxis_store::Table` enum and the `INV-STORE-03` rule "no raw SQL table-name literals in `raxis/kernel/src`; use `Table` enum + `.as_str()`".
+> The v1 baseline migration (migration 1) creates all 19 tables atomically. All table names in this DDL are canonical and supersede any conflicting names in Parts 2.1–2.4. The Rust implementation enforces this via the `raxis_store::Table` enum and the `INV-STORE-03` rule "no raw SQL table-name literals in any workspace crate that touches `kernel.db` (production *and* test code); use `Table` enum + `.as_str()`" — see §2.5.1 above for the full normative statement.
 
 **DDL Part 4 of 4 — VCS Path Scope Enforcement tables (Tables 17–18) and policy epoch ledger (Table 19)**
 

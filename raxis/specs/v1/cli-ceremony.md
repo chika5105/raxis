@@ -46,6 +46,28 @@ raxis [--data-dir <path>] [--socket <path>] <subcommand>
 
 All §4.1 subcommands that require kernel connectivity will fail with `ERR_SOCKET_NOT_FOUND` if the operator socket does not exist (kernel not running). Read-only subcommands (`cli-readonly.md` Part 5) work whether the kernel is running or stopped — they read state directly from disk.
 
+### Unknown-subcommand handling — "did you mean ...?"
+
+When the operator types a subcommand the dispatcher does not recognise — at any level (top-level, or inside a parent like `cert`, `plan`, `initiative`, `operator`, `task`, `session`, `delegation`, `escalation`, `epoch`, `audit`, `policy`) — the CLI MUST print to **stderr** (and exit non-zero — `1`, the standard `CliError::Usage` exit) a single line of the shape:
+
+```
+error: usage: unknown <kind>: "<typo>"[. Did you mean ...?]
+```
+
+where `<kind>` is `subcommand` at the top level and `<parent> sub-command` underneath a parent (e.g. `cert sub-command`, `plan sub-command`, `initiative sub-command`). The `error: ` prefix comes from `main`'s `eprintln!`; the `usage: ` prefix comes from the `CliError::Usage` `Display` impl; the `unknown <kind>: "<typo>"` core comes from `closeness::unknown_with_suggestion`. The `. Did you mean …?` clause is appended only when at least one candidate clears the closeness threshold below.
+
+Closeness ranking is deterministic and operator-friendly:
+
+- **Distance:** Damerau–Levenshtein with optimal string alignment — adjacent transpositions count as one edit (so `apporve` → `approve` is distance 1 rather than 2).
+- **Threshold:** length-aware. Single-letter inputs only match exact prefixes; len-2/3 inputs accept distance ≤ 1; len-4 accept ≤ 2; len-5+ accept ≤ 3. This keeps `raxis xyzzy` quiet rather than suggesting random commands.
+- **Order:** exact-prefix matches always come first, in the dictionary's canonical order (so `raxis ce` surfaces `cert` before any distance-bounded match). Distance-bounded matches follow, sorted by `(distance, original_index)`.
+- **Cap:** at most 5 suggestions per error to keep the line short. Three formatting variants:
+  - 1 entry — `Did you mean `cert`?`
+  - 2 entries — `Did you mean `cert` or `escalation`?`
+  - 3+ — `Did you mean one of: `cert`, `escalation`, `epoch`?`
+
+The closeness ranking and the per-parent subcommand catalogues used to drive it live in `cli/src/closeness.rs`. The dispatcher in `cli/src/main.rs` MUST keep its `*_SUBCOMMANDS` constants in sync with the actual `match` arms; two `catalog_consistency_tests` scrape `main.rs` and hard-fail on drift, so the suggestions can never silently lie about which commands exist. The exit code is `1` (the standard `CliError::Usage` exit) regardless of whether a suggestion was emitted.
+
 ---
 
 ### `genesis`

@@ -162,6 +162,32 @@ Quarantine is the immediate containment primitive; the slower
 rotation. Quarantine cannot be lifted in v1 — work that should
 continue must move to a fresh initiative.
 
+### 7. CLI ergonomics — typo suggestions
+
+Like `git`, the `raxis` CLI proposes corrections when you mistype a
+subcommand at any depth (top-level or under a parent like `cert`,
+`plan`, `policy`, `initiative`, `operator`):
+
+```bash
+$ raxis stauts
+error: usage: unknown subcommand: "stauts". Did you mean `status`?
+
+$ raxis cert mintt
+error: usage: unknown cert sub-command: "mintt". Did you mean `mint` or `mint-emergency`?
+
+$ raxis ce
+error: usage: unknown subcommand: "ce". Did you mean one of: `cert`, `epoch`, `escalation`?
+```
+
+Suggestions are Damerau–Levenshtein-ranked, prefix-matches surface
+first, the threshold scales with input length (single-letter inputs
+match prefixes only), and the line is capped at 5 candidates so it
+stays scannable. The dispatcher and the suggestion catalogue are
+drift-tested against each other so the suggestions can never lie
+about which commands actually exist. Spec'd in
+[`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md) §4.1
+("Unknown-subcommand handling — \"did you mean ...?\"").
+
 ### Prompt assembly — “prompt engineering” in v1 (spec level)
 
 Structural enforcement beats ad-hoc model steering. That said, **v1 does define prompt-related contracts**:

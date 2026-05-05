@@ -75,8 +75,13 @@ impl Table {
     /// Matches kernel-store.md §2.5.1 table names verbatim.
     ///
     /// `const fn` so callers can write `const TASKS: &str = Table::Tasks.as_str();`
-    /// at module top-level — see kernel-store.md §2.5.1 INV-STORE-03 ("no raw SQL
-    /// table-name literals in raxis/kernel/src; use Table enum + .as_str()").
+    /// at module top-level — see kernel-store.md §2.5.1 INV-STORE-03 ("no raw
+    /// SQL table-name literals in **any workspace crate that touches
+    /// `kernel.db`** — production *or* test code: `raxis-kernel`, `raxis-store`,
+    /// `raxis-cli`, `raxis-test-support`, …; use `Table` enum + `.as_str()`").
+    /// The `#[cfg(test)]` modules of any of those crates that hand-roll
+    /// `INSERT`/`UPDATE` fixtures MUST resolve their table names through this
+    /// method as well, so renaming a table propagates at compile time.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::SchemaVersion             => "schema_version",
