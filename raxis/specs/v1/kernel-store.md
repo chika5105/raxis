@@ -1563,6 +1563,47 @@ The second mode is structurally impossible given the write ordering invariant. I
 
 The kernel write path is append-only to JSONL. No kernel handler reads JSONL. Chain verification, gap analysis, and audit queries are exclusively `raxis-audit-tools` responsibilities. This is enforced by module boundaries: `src/audit.rs` exposes only `append` — no read interface.
 
+#### Operator display-name fields
+
+Audit-event variants that name an operator carry **two** fields, never one:
+
+| Variant | Fingerprint field (always present) | Display-name field (optional snapshot) |
+|---|---|---|
+| `InitiativeAborted` | `triggered_by_operator: Option<String>` | `triggered_by_operator_display_name: Option<String>` |
+| `PathScopeOverrideApplied` | `approving_operator: String` | `approving_operator_display_name: Option<String>` |
+| `SessionRevoked` | `revoked_by: String` | `revoked_by_display_name: Option<String>` |
+| `DelegationGranted` | `granted_by: String` | `granted_by_display_name: Option<String>` |
+| `EscalationApproved` | `approved_by: String` | `approved_by_display_name: Option<String>` |
+| `EscalationDenied` | `denied_by: String` | `denied_by_display_name: Option<String>` |
+| `PolicyEpochAdvanced` | `triggered_by: String` | `triggered_by_display_name: Option<String>` |
+| `InitiativeQuarantined` | `quarantined_by: String` | `quarantined_by_display_name: Option<String>` |
+| `OperatorQuarantineSwept` | `quarantined_by: String`, `target_fingerprint: String` | `quarantined_by_display_name: Option<String>`, `target_display_name: Option<String>` |
+
+**Wire-format invariants.**
+
+- The fingerprint is the canonical, unforgeable identifier — it is derived from the operator's pubkey and never changes for a given key. It is the field downstream tools key against.
+- The display name is a **snapshot** taken from the operator's policy entry at the moment the audit event is emitted. It is best-effort: present whenever the kernel can resolve the fingerprint against the live `PolicyBundle` at emit time, absent otherwise.
+- Both display-name fields are serialised with `#[serde(default, skip_serializing_if = "Option::is_none")]`. Audit-chain segments written by older kernel binaries (no display-name plumbing) deserialise cleanly into the new shape with the field defaulting to `None` — adding the field is a strictly forward-compat change to the JSONL wire format.
+
+**When the display name is `None`.**
+
+1. **Legacy segment.** The event was written before the display-name plumbing shipped. CLI render layers MUST fall back to a live lookup against the `operator_certificates` view (see §2.5.7) and annotate the rendered name as historical so the operator knows the event itself does not vouch for the name (cert may have rotated since).
+2. **Operator removed in flight.** The kernel could not resolve the fingerprint at emit time — extremely rare, would require the operator to have been removed from the bundle between authentication and the post-commit audit emit. Same render-layer fallback applies.
+3. **PolicyEpochAdvanced lookup against the *new* bundle.** `triggered_by_display_name` is resolved against the **incoming** bundle (the one being installed by the advance), not the previous one. An operator who removes themselves as part of the rotation legitimately yields `None` here; the previous name lives in the prior `PolicyEpochAdvanced` chain entry.
+
+**Render-layer fallback (CLI side, normative).**
+
+When a CLI consumer (`raxis log`, `raxis inbox`, `raxis status`, `raxis audit verify`, etc.) renders an operator-bearing audit event:
+
+1. If the embedded display name is `Some(name)`, render `"name (fp_prefix)"` — this is the snapshot the kernel pinned at emit time. The name shown is the name the operator had **at the time of the event**, even if their cert has since rotated to a different display name.
+2. If the embedded display name is `None`, look up the fingerprint in the current `operator_certificates` view (§2.5.7).
+   1. If found, render `"name (fp_prefix) [historical cert; current name shown — event predates display-name plumbing]"`. The annotation is mandatory: the renderer cannot prove the current name was the name at emit time, so the operator MUST see the caveat.
+   2. If not found, render `"<unknown> (fp_prefix) [operator no longer in policy]"`. This indicates a removed operator (e.g. revoked cert) — the audit event is still authoritative for the action, but the human-readable identity is irrecoverable in the live deployment.
+
+**Why both fields, not just the snapshot.**
+
+The fingerprint stays canonical so `raxis audit verify` and any forensic tool can join across the chain by a stable, unforgeable key. The display name is a humane affordance — it is what the operator sees when they read their own logs, and it survives the case where the policy bundle shrinks (e.g. the operator who triggered the event was later removed, but the audit chain still tells you who they were). The two fields together let the audit chain be both machine-correct and human-readable without conflating identity with label.
+
 ---
 
 ### §2.5.3 — Plan Artifact Signing Contract

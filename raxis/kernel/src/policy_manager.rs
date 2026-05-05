@@ -542,6 +542,17 @@ pub fn advance_epoch(
     // Per kernel-store.md §2.5.2 audit emission MUST follow a
     // successful SQLite commit; emitting inside the transaction would
     // strand the audit record on rollback.
+    // §2.5.2 "Operator display-name fields" — resolve the
+    // triggering operator's name from the **incoming** bundle (the
+    // one being installed by this advance), not the outgoing one.
+    // Rationale: an operator whose own rename is part of the
+    // rotation should be recorded under the new name; the previous
+    // name lives in the prior `PolicyEpochAdvanced` chain entry.
+    // `None` only if the operator removed themselves in this
+    // rotation (legal — an emergency cert can rotate to a bundle
+    // that no longer contains the rotating fingerprint).
+    let triggered_by_display_name = new_bundle
+        .operator_display_name(triggered_by);
     if let Err(e) = audit.emit(
         AuditEventKind::PolicyEpochAdvanced {
             new_epoch_id,
@@ -549,6 +560,7 @@ pub fn advance_epoch(
             triggered_by:            triggered_by.to_owned(),
             delegations_marked_stale: n_delegations_marked_stale,
             sessions_invalidated:    n_sessions_invalidated,
+            triggered_by_display_name,
         },
         None, None, None,
     ) {

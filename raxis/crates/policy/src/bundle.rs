@@ -1228,6 +1228,23 @@ impl PolicyBundle {
             .find(|op| op.pubkey_fingerprint == fingerprint)
     }
 
+    /// Convenience around [`operator_entry`] for the (very common)
+    /// audit-emit + log-line lookup of "what is this fingerprint's
+    /// human-readable display name?". Returns `None` when the
+    /// fingerprint is not in this bundle (e.g. the operator was
+    /// removed in an earlier rotation, or the fingerprint belongs
+    /// to a different deployment entirely).
+    ///
+    /// Cheap allocation: callers typically need the display name
+    /// for an `Option<String>` field on an `AuditEventKind` or for
+    /// a JSON-stderr line, both of which want owned strings, so
+    /// returning `String` is the right shape (no `&str` lifetime
+    /// surfaced into call sites that span `tokio::spawn_blocking`).
+    pub fn operator_display_name(&self, fingerprint: &str) -> Option<String> {
+        self.operator_entry(fingerprint)
+            .map(|e| e.display_name.clone())
+    }
+
     /// Operator entries whose embedded cert tripped at least one
     /// structural invariant AND were marked `force_misconfig_bypass = true`.
     /// The kernel boot reads this list and emits one
@@ -2440,28 +2457,28 @@ channels   = []
             AuditEventKind::InitiativeCreated { initiative_id: "x".into(), plan_hash: "x".into(), signed_by: "x".into(), signed_at: 0 }.as_str(),
             AuditEventKind::PlanApproved { initiative_id: "x".into(), task_count: 0 }.as_str(),
             AuditEventKind::PlanRejected { initiative_id: "x".into() }.as_str(),
-            AuditEventKind::PathScopeOverrideApplied { initiative_id: "x".into(), task_id: "x".into(), approving_operator: "x".into() }.as_str(),
+            AuditEventKind::PathScopeOverrideApplied { initiative_id: "x".into(), task_id: "x".into(), approving_operator: "x".into(), approving_operator_display_name: None }.as_str(),
             AuditEventKind::InitiativeStateChanged { initiative_id: "x".into(), from_state: "x".into(), to_state: "x".into() }.as_str(),
-            AuditEventKind::InitiativeAborted { initiative_id: "x".into(), triggered_by_operator: None }.as_str(),
+            AuditEventKind::InitiativeAborted { initiative_id: "x".into(), triggered_by_operator: None, triggered_by_operator_display_name: None }.as_str(),
             AuditEventKind::TaskAdmitted { task_id: "x".into(), initiative_id: "x".into(), lane_id: "x".into() }.as_str(),
             AuditEventKind::TaskStateChanged { task_id: "x".into(), from_state: "x".into(), to_state: "x".into(), actor: "x".into(), policy_epoch: 0 }.as_str(),
             AuditEventKind::IntentAccepted { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), base_sha: None, head_sha: None, sequence_number: 0, remaining_units: 0 }.as_str(),
             AuditEventKind::IntentRejected { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), error_code: "x".into(), sequence_number: 0 }.as_str(),
             AuditEventKind::SessionCreated { session_id: "x".into(), role: "x".into(), lineage_id: "x".into(), worktree_root: None }.as_str(),
-            AuditEventKind::SessionRevoked { session_id: "x".into(), revoked_by: "x".into() }.as_str(),
-            AuditEventKind::DelegationGranted { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), expires_at: 0, granted_by: "x".into() }.as_str(),
+            AuditEventKind::SessionRevoked { session_id: "x".into(), revoked_by: "x".into(), revoked_by_display_name: None }.as_str(),
+            AuditEventKind::DelegationGranted { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), expires_at: 0, granted_by: "x".into(), granted_by_display_name: None }.as_str(),
             AuditEventKind::DelegationMarkedStale { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), reason: "x".into() }.as_str(),
             AuditEventKind::WitnessAccepted { verifier_run_id: "x".into(), task_id: "x".into(), gate_type: "x".into(), result_class: "x".into(), evaluation_sha: "x".into() }.as_str(),
             AuditEventKind::WitnessRejected { verifier_run_id: "x".into(), task_id: "x".into(), reason: "x".into() }.as_str(),
             AuditEventKind::VerifierProcessFailed { task_id: "x".into(), exit_code: None, gate_type: "x".into() }.as_str(),
             AuditEventKind::EscalationSubmitted { escalation_id: "x".into(), task_id: "x".into(), class: "x".into(), lineage_id: "x".into() }.as_str(),
-            AuditEventKind::EscalationApproved { escalation_id: "x".into(), approved_by: "x".into() }.as_str(),
-            AuditEventKind::EscalationDenied { escalation_id: "x".into(), denied_by: "x".into(), reason: None }.as_str(),
+            AuditEventKind::EscalationApproved { escalation_id: "x".into(), approved_by: "x".into(), approved_by_display_name: None }.as_str(),
+            AuditEventKind::EscalationDenied { escalation_id: "x".into(), denied_by: "x".into(), reason: None, denied_by_display_name: None }.as_str(),
             AuditEventKind::EscalationTimedOut { escalation_id: "x".into() }.as_str(),
             AuditEventKind::EscalationConsumed { escalation_id: "x".into(), approval_token_id: "x".into(), action_hash: "x".into(), policy_epoch: 0 }.as_str(),
             AuditEventKind::LineageQuarantined { lineage_id: "x".into(), trigger_count: 0 }.as_str(),
             AuditEventKind::EscalationRateLimitExceeded { lineage_id: "x".into(), attempted_count: 0, window_start: 0 }.as_str(),
-            AuditEventKind::PolicyEpochAdvanced { new_epoch_id: 0, policy_sha256: "x".into(), triggered_by: "x".into(), delegations_marked_stale: 0, sessions_invalidated: 0 }.as_str(),
+            AuditEventKind::PolicyEpochAdvanced { new_epoch_id: 0, policy_sha256: "x".into(), triggered_by: "x".into(), delegations_marked_stale: 0, sessions_invalidated: 0, triggered_by_display_name: None }.as_str(),
             AuditEventKind::PolicyAdvanceRejected { reason: "x".into(), artifact_epoch: None, current_epoch: 0 }.as_str(),
             AuditEventKind::PolicyAdvanceFailed { reason: "x".into(), new_epoch_id: 0 }.as_str(),
             AuditEventKind::ReplayRejected { session_id: "x".into(), sequence_num: 0, reason: "x".into() }.as_str(),
@@ -2480,8 +2497,8 @@ channels   = []
             AuditEventKind::OperatorCertExpiredOpDenied { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into(), not_after: 0, expired_at: 0 }.as_str(),
             AuditEventKind::EmergencyOperatorUsed { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into() }.as_str(),
             AuditEventKind::PathReadAccessed { actor: "x".into(), table: "x".into(), column: "x".into(), task_id: "x".into(), command: "x".into() }.as_str(),
-            AuditEventKind::InitiativeQuarantined { initiative_id: "x".into(), quarantined_by: "x".into(), reason: None }.as_str(),
-            AuditEventKind::OperatorQuarantineSwept { target_fingerprint: "x".into(), quarantined_by: "x".into(), count: 0, reason: None }.as_str(),
+            AuditEventKind::InitiativeQuarantined { initiative_id: "x".into(), quarantined_by: "x".into(), reason: None, quarantined_by_display_name: None }.as_str(),
+            AuditEventKind::OperatorQuarantineSwept { target_fingerprint: "x".into(), quarantined_by: "x".into(), count: 0, reason: None, quarantined_by_display_name: None, target_display_name: None }.as_str(),
         ];
 
         let policy_kinds: std::collections::HashSet<&str> =

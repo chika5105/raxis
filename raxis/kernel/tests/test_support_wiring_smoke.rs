@@ -92,6 +92,7 @@ fn fake_audit_sink_captures_a_real_audit_event_variant() {
     let event = AuditEventKind::SessionRevoked {
         session_id: "sess-test".into(),
         revoked_by: "op-test".into(),
+        revoked_by_display_name: None,
     };
     sink.emit(event, Some("sess-test"), None, None)
         .expect("FakeAuditSink::emit must not fail");

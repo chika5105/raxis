@@ -105,19 +105,45 @@ pub enum AuditEventKind {
     /// NOT replace this kernel-side audit emit — offline-signing
     /// workflows still produce this event when the kernel processes
     /// the plan.
+    ///
+    /// `approving_operator_display_name` is the operator's
+    /// `display_name` from the policy bundle at the moment of emit
+    /// (a snapshot, not a live join). It is `None` for two reasons
+    /// only:
+    ///   1. The event was written before the display-name plumbing
+    ///      shipped (legacy segment); the CLI render layer falls
+    ///      back to `operator_certificates` lookup and marks the
+    ///      result as historical.
+    ///   2. The kernel could not resolve the fingerprint at emit
+    ///      time (extremely rare — would require the operator that
+    ///      just authenticated and signed the plan to have been
+    ///      removed from the bundle a microsecond later; only
+    ///      realistic in tight epoch-rotation races).
+    /// See `kernel-store.md` §2.5.2 "Operator display-name fields"
+    /// for the cross-variant convention.
     PathScopeOverrideApplied {
         initiative_id: String,
         task_id: String,
         approving_operator: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approving_operator_display_name: Option<String>,
     },
     InitiativeStateChanged {
         initiative_id: String,
         from_state: String,
         to_state: String,
     },
+    /// `triggered_by_operator_display_name` mirrors the convention
+    /// described on `PathScopeOverrideApplied` above. Both fields are
+    /// `Option` because `triggered_by_operator` itself is optional
+    /// (kernel-internal aborts have no operator) — when the
+    /// fingerprint is `None` the display name is necessarily `None`
+    /// as well.
     InitiativeAborted {
         initiative_id: String,
         triggered_by_operator: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        triggered_by_operator_display_name: Option<String>,
     },
 
     // --- Task lifecycle ---
@@ -159,18 +185,31 @@ pub enum AuditEventKind {
         lineage_id: String,
         worktree_root: Option<String>,
     },
+    /// `revoked_by_display_name` follows the cross-variant
+    /// convention in `kernel-store.md` §2.5.2 "Operator display-name
+    /// fields": present when the kernel could resolve `revoked_by` to
+    /// an operator entry in the policy bundle at emit time, absent
+    /// otherwise (legacy segment, or an operator that vanished from
+    /// policy between authentication and emit — extremely rare).
     SessionRevoked {
         session_id: String,
         revoked_by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revoked_by_display_name: Option<String>,
     },
 
     // --- Delegation ---
+    /// `granted_by_display_name` follows the cross-variant
+    /// convention in `kernel-store.md` §2.5.2 "Operator display-name
+    /// fields".
     DelegationGranted {
         delegation_id: String,
         session_id: String,
         capability_class: String,
         expires_at: i64,
         granted_by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        granted_by_display_name: Option<String>,
     },
     DelegationMarkedStale {
         delegation_id: String,
@@ -205,14 +244,23 @@ pub enum AuditEventKind {
         class: String,
         lineage_id: String,
     },
+    /// `approved_by_display_name` follows the cross-variant
+    /// convention in `kernel-store.md` §2.5.2 "Operator display-name
+    /// fields".
     EscalationApproved {
         escalation_id: String,
         approved_by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approved_by_display_name: Option<String>,
     },
+    /// `denied_by_display_name` follows the cross-variant convention
+    /// in `kernel-store.md` §2.5.2 "Operator display-name fields".
     EscalationDenied {
         escalation_id: String,
         denied_by: String,
         reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        denied_by_display_name: Option<String>,
     },
     EscalationTimedOut {
         escalation_id: String,
@@ -244,12 +292,20 @@ pub enum AuditEventKind {
     },
 
     // --- Policy epoch ---
+    /// `triggered_by_display_name` follows the cross-variant
+    /// convention in `kernel-store.md` §2.5.2 "Operator display-name
+    /// fields". The lookup is performed against the **incoming**
+    /// bundle (i.e. the one being installed by this advance), not
+    /// the previous one — so an operator who renames themselves as
+    /// part of the rotation is recorded under the new name.
     PolicyEpochAdvanced {
         new_epoch_id: u64,
         policy_sha256: String,
         triggered_by: String,
         delegations_marked_stale: u64,
         sessions_invalidated: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        triggered_by_display_name: Option<String>,
     },
     PolicyAdvanceRejected {
         reason: String,
@@ -541,10 +597,15 @@ pub enum AuditEventKind {
     /// `quarantined_by` is the operator pubkey_fingerprint (32 hex
     /// chars) issuing the command. `reason` is a free-form label;
     /// NULL when the operator did not supply `--reason`.
+    /// `quarantined_by_display_name` follows the cross-variant
+    /// convention in `kernel-store.md` §2.5.2 "Operator display-name
+    /// fields".
     InitiativeQuarantined {
         initiative_id:  String,
         quarantined_by: String,
         reason:         Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quarantined_by_display_name: Option<String>,
     },
 
     /// Rollup event written by `raxis operator quarantine-plans-by
@@ -555,11 +616,25 @@ pub enum AuditEventKind {
     /// `quarantined_by` field set to the rotating operator's
     /// fingerprint — that's the per-row record. This event is the
     /// "the operator pressed the big red button" header.
+    /// `quarantined_by_display_name` and `target_display_name`
+    /// follow the cross-variant convention in `kernel-store.md`
+    /// §2.5.2 "Operator display-name fields". Both are independently
+    /// optional because the *target* of a quarantine sweep may have
+    /// already been removed from the active policy (e.g. the
+    /// operator just rotated `target_fingerprint` out of policy
+    /// before pressing the big red button to clean up the
+    /// initiatives that operator approved); in that case the
+    /// `target_display_name` falls back to a CLI-side lookup with
+    /// the historical-cert annotation per `kernel-store.md` §2.5.2.
     OperatorQuarantineSwept {
         target_fingerprint: String,
         quarantined_by:     String,
         count:              u64,
         reason:             Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        quarantined_by_display_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_display_name: Option<String>,
     },
 }
 
@@ -763,12 +838,15 @@ mod path_read_accessed_tests {
             (AuditEventKind::InitiativeQuarantined {
                 initiative_id: "i1".into(), quarantined_by: "fp".into(),
                 reason: Some("compromised key".into()),
+                quarantined_by_display_name: None,
             }, "InitiativeQuarantined"),
             (AuditEventKind::OperatorQuarantineSwept {
                 target_fingerprint: "chika-fp".into(),
                 quarantined_by:     "rot-fp".into(),
                 count:              3,
                 reason:             None,
+                quarantined_by_display_name: None,
+                target_display_name:        None,
             }, "OperatorQuarantineSwept"),
         ];
         for (kind, expected) in cases {
@@ -782,16 +860,20 @@ mod path_read_accessed_tests {
             initiative_id:  "init-7".to_owned(),
             quarantined_by: "fp-rot".to_owned(),
             reason:         Some("compromised plan signer".to_owned()),
+            quarantined_by_display_name: Some("Chika".to_owned()),
         };
         let s = serde_json::to_string(&kind).unwrap();
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
             AuditEventKind::InitiativeQuarantined {
                 initiative_id, quarantined_by, reason,
+                quarantined_by_display_name,
             } => {
                 assert_eq!(initiative_id,  "init-7");
                 assert_eq!(quarantined_by, "fp-rot");
                 assert_eq!(reason.as_deref(), Some("compromised plan signer"));
+                assert_eq!(quarantined_by_display_name.as_deref(), Some("Chika"),
+                    "display name must round-trip through the JSON wire");
             }
             other => panic!("expected InitiativeQuarantined; got {other:?}"),
         }
@@ -804,17 +886,62 @@ mod path_read_accessed_tests {
             quarantined_by:     "rot-fp".to_owned(),
             count:              42,
             reason:             None,
+            quarantined_by_display_name: Some("Jinanwa".to_owned()),
+            target_display_name:        Some("Chika".to_owned()),
         };
         let s = serde_json::to_string(&kind).unwrap();
         let back: AuditEventKind = serde_json::from_str(&s).unwrap();
         match back {
             AuditEventKind::OperatorQuarantineSwept {
                 target_fingerprint, quarantined_by, count, reason,
+                quarantined_by_display_name, target_display_name,
             } => {
                 assert_eq!(target_fingerprint, "chika-fp");
                 assert_eq!(quarantined_by,     "rot-fp");
                 assert_eq!(count,              42);
                 assert!(reason.is_none());
+                assert_eq!(quarantined_by_display_name.as_deref(), Some("Jinanwa"));
+                assert_eq!(target_display_name.as_deref(),         Some("Chika"));
+            }
+            other => panic!("expected OperatorQuarantineSwept; got {other:?}"),
+        }
+    }
+
+    /// `display_name` fields are optional; legacy chain segments
+    /// written before the plumbing shipped MUST still deserialize.
+    /// This pins the forward-compat shape — adding the field can
+    /// never break an old reader.
+    #[test]
+    fn legacy_quarantine_records_without_display_name_still_deserialize() {
+        let legacy_initiative = serde_json::json!({
+            "kind":           "InitiativeQuarantined",
+            "initiative_id":  "init-9",
+            "quarantined_by": "fp-old",
+            "reason":         null,
+        });
+        let parsed: AuditEventKind = serde_json::from_value(legacy_initiative).unwrap();
+        match parsed {
+            AuditEventKind::InitiativeQuarantined {
+                quarantined_by_display_name, ..
+            } => assert!(quarantined_by_display_name.is_none(),
+                "missing field must default to None"),
+            other => panic!("expected InitiativeQuarantined; got {other:?}"),
+        }
+
+        let legacy_swept = serde_json::json!({
+            "kind":               "OperatorQuarantineSwept",
+            "target_fingerprint": "chika-fp",
+            "quarantined_by":     "rot-fp",
+            "count":              0,
+            "reason":             null,
+        });
+        let parsed: AuditEventKind = serde_json::from_value(legacy_swept).unwrap();
+        match parsed {
+            AuditEventKind::OperatorQuarantineSwept {
+                quarantined_by_display_name, target_display_name, ..
+            } => {
+                assert!(quarantined_by_display_name.is_none());
+                assert!(target_display_name.is_none());
             }
             other => panic!("expected OperatorQuarantineSwept; got {other:?}"),
         }

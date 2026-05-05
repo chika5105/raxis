@@ -962,6 +962,11 @@ async fn handle_approve_plan(
     };
 
     let policy_epoch = policy_snapshot.epoch();
+    // Snapshot the operator's display name from the same bundle we
+    // resolved the pubkey from, so the audit event records the name
+    // that was authoritative at approval time. See
+    // `kernel-store.md` §2.5.2 "Operator display-name fields".
+    let approving_op_display_name = Some(entry.display_name.clone());
     let store_for_blocking          = Arc::clone(&ctx.store);
     let audit_for_blocking          = Arc::clone(&ctx.audit);
     let plan_registry_for_blocking  = Arc::clone(&ctx.plan_registry);
@@ -971,6 +976,7 @@ async fn handle_approve_plan(
         lifecycle::approve_plan(
             &initiative_id_for_blocking,
             &approving_op_for_blocking,
+            approving_op_display_name,
             &pubkey_bytes,
             policy_epoch,
             &store_for_blocking,
@@ -1205,6 +1211,10 @@ async fn handle_quarantine_initiative(
     let operator_fp     = operator.fingerprint.clone();
     let now             = raxis_types::unix_now_secs() as i64;
     let reason_for_blk  = reason_capped.clone();
+    // §2.5.2 "Operator display-name fields" — snapshot now, before
+    // we cross the spawn_blocking boundary.
+    let quarantined_by_display_name = ctx.policy.load_full()
+        .operator_display_name(&operator.fingerprint);
 
     let join_result = tokio::task::spawn_blocking(move || {
         let mut conn = store_arc.lock_sync();
@@ -1238,6 +1248,7 @@ async fn handle_quarantine_initiative(
                 initiative_id:  initiative_id.clone(),
                 quarantined_by: operator.fingerprint.clone(),
                 reason:         reason_capped,
+                quarantined_by_display_name,
             },
             None,
             None,
@@ -1276,6 +1287,21 @@ async fn handle_quarantine_plans_by(
     let operator_fp     = operator.fingerprint.clone();
     let now             = raxis_types::unix_now_secs() as i64;
     let reason_for_blk  = reason_capped.clone();
+    // §2.5.2 "Operator display-name fields" — snapshot both
+    // operator names from the same policy bundle. The *target*
+    // operator may have already been removed from policy (this
+    // sweep typically follows a `cert rotate-out` of the target),
+    // in which case `target_display_name` is `None` and the CLI
+    // render layer falls back to a historical lookup against the
+    // `operator_certificates` view (which is also stale by then —
+    // so the rendered name will be marked as historical, exactly
+    // as `kernel-store.md` §2.5.2 prescribes).
+    let policy_snapshot = ctx.policy.load_full();
+    let quarantined_by_display_name = policy_snapshot
+        .operator_display_name(&operator.fingerprint);
+    let target_display_name = policy_snapshot
+        .operator_display_name(&target_fingerprint);
+    drop(policy_snapshot);
 
     let join_result = tokio::task::spawn_blocking(move || {
         let mut conn = store_arc.lock_sync();
@@ -1313,6 +1339,7 @@ async fn handle_quarantine_plans_by(
                 initiative_id:  id.clone(),
                 quarantined_by: operator.fingerprint.clone(),
                 reason:         reason_capped.clone(),
+                quarantined_by_display_name: quarantined_by_display_name.clone(),
             },
             None,
             None,
@@ -1330,6 +1357,8 @@ async fn handle_quarantine_plans_by(
             quarantined_by:     operator.fingerprint.clone(),
             count:              newly_quarantined_ids.len() as u64,
             reason:             reason_capped,
+            quarantined_by_display_name,
+            target_display_name,
         },
         None,
         None,
@@ -1412,6 +1441,14 @@ async fn handle_approve_escalation(
     // Pin one snapshot of the bundle: the FSM call below must run
     // against the same epoch we recorded in the audit metadata.
     let policy_snapshot       = ctx.policy.load_full();
+    // §2.5.2 "Operator display-name fields" — snapshot the
+    // operator's display name from the same bundle the FSM call
+    // will use. We resolve before `policy_snapshot` moves into
+    // `spawn_blocking` so the audit emit (which runs after the
+    // join) can use the cached value without re-loading the
+    // ArcSwap (which might point at a newer epoch by then).
+    let approved_by_display_name = policy_snapshot
+        .operator_display_name(&operator.fingerprint);
     let store_for_blocking    = Arc::clone(&ctx.store);
     let fp_for_blocking       = operator.fingerprint.clone();
     let escalation_id_blocking = escalation_id.clone();
@@ -1446,10 +1483,16 @@ async fn handle_approve_escalation(
             // logged but do not propagate so the operator's intent is
             // still honoured (`recovery::reconcile` will detect any
             // §2.5.2 commit-vs-audit gap on next boot).
+            // `approved_by_display_name` was snapshotted from the
+            // same policy bundle the FSM ran against (see the pre-
+            // spawn_blocking section above) so the audit row reflects
+            // the operator's name at approval time, not whatever
+            // the ArcSwap currently points at.
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::EscalationApproved {
                     escalation_id: escalation_id.clone(),
                     approved_by:   operator.fingerprint.clone(),
+                    approved_by_display_name,
                 },
                 None,
                 None,
@@ -1494,6 +1537,13 @@ async fn handle_deny_escalation(
             };
         }
     }
+    // §2.5.2 "Operator display-name fields" — snapshot the
+    // operator's display name from the live policy before doing
+    // any blocking work. The deny path doesn't otherwise pin a
+    // bundle (it has no FSM-vs-epoch coupling like approve does),
+    // but we still want a consistent audit-emit name.
+    let denied_by_display_name = ctx.policy.load_full()
+        .operator_display_name(&operator.fingerprint);
     let store_for_blocking     = Arc::clone(&ctx.store);
     let fp_for_blocking        = operator.fingerprint.clone();
     let escalation_id_blocking = escalation_id.clone();
@@ -1520,6 +1570,7 @@ async fn handle_deny_escalation(
                     escalation_id: escalation_id.clone(),
                     denied_by:     operator.fingerprint.clone(),
                     reason:        reason.clone(),
+                    denied_by_display_name,
                 },
                 None,
                 None,
@@ -1999,9 +2050,18 @@ mod escalation_dispatch_tests {
             .find(|e| matches!(e.kind, AuditEventKind::EscalationApproved { .. }))
             .expect("EscalationApproved event present");
         match evt.kind {
-            AuditEventKind::EscalationApproved { escalation_id, approved_by } => {
+            AuditEventKind::EscalationApproved {
+                escalation_id, approved_by, approved_by_display_name,
+            } => {
                 assert_eq!(escalation_id, "esc-A");
                 assert_eq!(approved_by, FP);
+                // Display name should be populated when the operator's
+                // fingerprint resolves in the test policy bundle, and
+                // missing when the test harness doesn't seed an entry
+                // for this fingerprint. Don't pin a specific value
+                // here — the harness may grow operator entries in
+                // future. Just assert the type round-trips.
+                let _ = approved_by_display_name;
             }
             other => panic!("wrong event kind: {other:?}"),
         }
@@ -2092,10 +2152,13 @@ mod escalation_dispatch_tests {
             .find(|e| matches!(e.kind, AuditEventKind::EscalationDenied { .. }))
             .expect("EscalationDenied event present");
         match evt.kind {
-            AuditEventKind::EscalationDenied { escalation_id, denied_by, reason } => {
+            AuditEventKind::EscalationDenied {
+                escalation_id, denied_by, reason, denied_by_display_name,
+            } => {
                 assert_eq!(escalation_id, "esc-D");
                 assert_eq!(denied_by, FP);
                 assert_eq!(reason.as_deref(), Some("scope too broad"));
+                let _ = denied_by_display_name;
             }
             other => panic!("wrong event kind: {other:?}"),
         }

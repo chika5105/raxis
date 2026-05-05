@@ -149,6 +149,7 @@ mod tests {
             AuditEventKind::EscalationApproved {
                 escalation_id: "esc-A".into(),
                 approved_by:   "op".into(),
+                approved_by_display_name: None,
             },
             None, None, None,
         ).unwrap();
@@ -175,6 +176,7 @@ mod tests {
             AuditEventKind::EscalationApproved {
                 escalation_id: "esc-B".into(),
                 approved_by:   "op".into(),
+                approved_by_display_name: None,
             },
             None, None, None,
         ).unwrap();

@@ -218,14 +218,27 @@ pub fn create_initiative(
 /// The audit event is intentionally emitted **after** `tx.commit()` per
 /// kernel-store.md §2.5.2 ("SQLite committed first, JSONL appended second").
 /// PR-8 will replace the `eprintln!` with `AuditWriter::append`.
+/// Approve a signed plan and admit its tasks. See module docstring
+/// for the full transaction-boundary contract.
+///
+/// `approving_operator_display_name` is the operator's display name
+/// resolved from the policy entry by the IPC handler (kernel-store.md
+/// §2.5.2 "Operator display-name fields"). It is plumbed in rather
+/// than re-resolved here because `approve_plan` runs on a
+/// `spawn_blocking` thread that does not own a `PolicyBundle`
+/// snapshot, and fetching one mid-fn would break the "single epoch
+/// view per approval" guarantee the dispatcher already establishes.
+/// `None` when the dispatcher could not resolve the fingerprint
+/// (legacy callers, or a tight rotation race).
 pub fn approve_plan(
-    initiative_id:         &str,
-    approving_operator:    &str,
-    operator_pubkey_bytes: &[u8],
-    policy_epoch:          u64,
-    store:                 &Store,
-    audit:                 &dyn AuditSink,
-    plan_registry:         &PlanRegistry,
+    initiative_id:                   &str,
+    approving_operator:              &str,
+    approving_operator_display_name: Option<String>,
+    operator_pubkey_bytes:           &[u8],
+    policy_epoch:                    u64,
+    store:                           &Store,
+    audit:                           &dyn AuditSink,
+    plan_registry:                   &PlanRegistry,
 ) -> Result<PlanApproved, LifecycleError> {
     let mut conn = store.lock_sync();
 
@@ -411,6 +424,8 @@ pub fn approve_plan(
                 initiative_id:      initiative_id.to_owned(),
                 task_id:            task_id.clone(),
                 approving_operator: approving_operator.to_owned(),
+                approving_operator_display_name:
+                    approving_operator_display_name.clone(),
             },
             None,
             Some(task_id),
@@ -1108,7 +1123,7 @@ mod tests {
 
         let registry = PlanRegistry::new();
         let result = approve_plan(
-            &init_id, "op-test", &pk_bytes, 1, &store, &audit, &registry,
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap();
         assert_eq!(result.tasks_admitted, 2);
         assert_eq!(
@@ -1156,7 +1171,7 @@ mod tests {
 
         let registry = PlanRegistry::new();
         let err = approve_plan(
-            &init_id, "op-test", &pk_bytes, 1, &store, &audit, &registry,
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         assert!(
             matches!(err, LifecycleError::Scheduler(SchedulerError::CyclicDependency)),
@@ -1203,7 +1218,7 @@ mod tests {
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
         let err = approve_plan(
-            &init_id, "op-test", &wrong_pk, 1, &store, &audit, &registry,
+            &init_id, "op-test", None, &wrong_pk, 1, &store, &audit, &registry,
         ).unwrap_err();
         assert!(
             matches!(err, LifecycleError::PlanSignatureInvalid { .. }),
@@ -1232,8 +1247,8 @@ mod tests {
         let audit = FakeAuditSink::new();
 
         let registry = PlanRegistry::new();
-        approve_plan(&init_id, "op-1", &pk_bytes, 1, &store, &audit, &registry).unwrap();
-        let second = approve_plan(&init_id, "op-2", &pk_bytes, 1, &store, &audit, &registry);
+        approve_plan(&init_id, "op-1", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        let second = approve_plan(&init_id, "op-2", None, &pk_bytes, 1, &store, &audit, &registry);
         assert!(second.is_err(), "second approve must fail (not Draft)");
 
         assert_eq!(read_initiative_state(&store, &init_id), "Executing");
@@ -1262,7 +1277,7 @@ mod tests {
         let audit = FakeAuditSink::new();
 
         let registry = PlanRegistry::new();
-        approve_plan(&init_id, "op", &pk_bytes, 42, &store, &audit, &registry).unwrap();
+        approve_plan(&init_id, "op", None, &pk_bytes, 42, &store, &audit, &registry).unwrap();
 
         let conn = store.lock_sync();
         let epoch: i64 = conn.query_row(
@@ -1304,7 +1319,7 @@ mod tests {
                 "fresh signed_plan_artifacts row must have NULL signed_by_fingerprint until approval");
         }
 
-        approve_plan(&init_id, "op-prime-fp", &pk_bytes, 1, &store, &audit, &registry)
+        approve_plan(&init_id, "op-prime-fp", None, &pk_bytes, 1, &store, &audit, &registry)
             .unwrap();
 
         let conn = store.lock_sync();
@@ -1348,7 +1363,7 @@ mod tests {
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(&init_id, "op", &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let f1 = registry.get(&TaskKey::new(&init_id, "t1"))
             .expect("registry must contain t1");
@@ -1394,7 +1409,7 @@ mod tests {
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(&init_id, "op-prime", &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan(&init_id, "op-prime", Some("Chika".to_owned()), &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let evs = audit.events();
         let kinds: Vec<_> = evs.iter().map(|e| e.kind.as_str()).collect();
@@ -1413,11 +1428,17 @@ mod tests {
 
         for ev in evs.iter().filter(|e| e.kind.as_str() == "PathScopeOverrideApplied") {
             assert_eq!(ev.initiative_id.as_deref(), Some(init_id.as_str()));
-            // The approving operator goes into the AuditEventKind variant
-            // payload — covered by the variant's `Debug` repr below.
+            // Both the operator fingerprint AND the display name
+            // (kernel-store.md §2.5.2 "Operator display-name fields")
+            // go into the AuditEventKind variant payload. Pin both
+            // so a future schema change can't silently drop either.
             let dbg = format!("{:?}", ev.kind);
             assert!(dbg.contains("op-prime"),
                     "PathScopeOverrideApplied payload must record approving_operator: {dbg}");
+            assert!(dbg.contains("Chika"),
+                    "PathScopeOverrideApplied payload must record \
+                     approving_operator_display_name when the dispatcher \
+                     resolved one: {dbg}");
         }
     }
 
@@ -1436,7 +1457,7 @@ mod tests {
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(&init_id, "op", &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let kinds: Vec<_> = audit.events().iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(kinds, vec!["PlanApproved"],
@@ -1469,7 +1490,7 @@ mod tests {
         let live_registry = PlanRegistry::new();
 
         approve_plan(
-            &init_id, "op", &pk_bytes, 1, &store, &audit, &live_registry,
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &live_registry,
         ).unwrap();
 
         // Simulate a kernel restart — fresh registry, populated only
@@ -1505,7 +1526,7 @@ mod tests {
         let live_registry = PlanRegistry::new();
 
         approve_plan(
-            &init_id, "op", &pk_bytes, 1, &store, &audit, &live_registry,
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &live_registry,
         ).unwrap();
         abort_initiative(&init_id, "op", &store).unwrap();
 
@@ -1572,7 +1593,7 @@ mod tests {
         let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
         let audit         = FakeAuditSink::new();
         let live_registry = PlanRegistry::new();
-        approve_plan(&init_id, "op", &pk, 1, &store, &audit, &live_registry).unwrap();
+        approve_plan(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry).unwrap();
 
         // Sanity: task is Admitted, initiative is Executing.
         {
