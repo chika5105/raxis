@@ -701,6 +701,16 @@ CREATE TABLE IF NOT EXISTS task_dag_edges (
         CHECK (predecessor_satisfied IN (0, 1)),   -- BOOLEAN; monotonically set
     PRIMARY KEY (predecessor_task_id, successor_task_id)
 );
+
+-- The PK above is a covering index for `release_successors` lookups
+-- (`WHERE predecessor_task_id = ?`). The complementary direction —
+-- "find every predecessor edge for task T" — is what `next_ready_tasks`
+-- and `dag::predecessors_of` need; without an explicit index on
+-- `successor_task_id` SQLite falls back to a full table scan plus a
+-- temp-btree, which is fine for ~hundreds of edges and pathological
+-- for the thousands an initiative may eventually carry.
+CREATE INDEX IF NOT EXISTS idx_task_dag_edges_successor
+    ON task_dag_edges (successor_task_id);
 ```
 
 **`next_ready_tasks` query pattern** (for implementer reference):
@@ -781,6 +791,17 @@ CREATE TABLE IF NOT EXISTS delegations (
     epoch_stale_set_at    INTEGER,             -- NULL until mark_stale_on_epoch_advance fires (Active → StaleOnNextUse)
     UNIQUE (session_id, capability_class)      -- one delegation per (session, capability); O(1) lookup key
 );
+
+-- NOTE (spec/migration parity audit): this index is REDUNDANT with
+-- the implicit `sqlite_autoindex_delegations_*` that SQLite creates
+-- for the `UNIQUE (session_id, capability_class)` constraint above
+-- (per https://sqlite.org/lang_createtable.html). It is preserved in
+-- the migration heredoc only because v1 deployed databases already
+-- carry it; new tables MUST NOT add a duplicate explicit index when
+-- a UNIQUE constraint already covers the same column tuple. The
+-- `check_capability` lookup at step 1 below uses the implicit index.
+CREATE INDEX IF NOT EXISTS idx_delegations_session_capability
+    ON delegations (session_id, capability_class);
 ```
 
 **`check_capability` check order (normative; maps to `authority::delegation::check_capability` in Part 2.3):**
@@ -2628,6 +2649,21 @@ CREATE TABLE IF NOT EXISTS operator_certificates (
     force_misconfig_bypass  INTEGER NOT NULL DEFAULT 0,
     installed_at            INTEGER NOT NULL
 );
+
+-- Standard-cert expiry sweep: `cert_check` filters by
+-- `WHERE not_after < ? AND kind = 'Standard'` on every operator IPC
+-- dispatch. Emergency-recovery certs use the `not_after = 0` sentinel
+-- (they never expire on the time axis), so a partial index on
+-- `kind = 'Standard'` keeps the index small and the sweep precise.
+CREATE INDEX IF NOT EXISTS idx_operator_certificates_expiry_sweep
+    ON operator_certificates (not_after, kind)
+    WHERE kind = 'Standard';
+
+-- Emergency-cert enumeration: doctor and recovery flows answer "are
+-- there any active recovery certs?" without scanning the whole table.
+CREATE INDEX IF NOT EXISTS idx_operator_certificates_emergency
+    ON operator_certificates (kind)
+    WHERE kind = 'EmergencyRecovery';
 ```
 
 The pubkey fingerprint is the SHA-256[:16] hex prefix of the
@@ -2693,11 +2729,30 @@ CREATE TABLE IF NOT EXISTS initiative_quarantines (
     sweep_target    TEXT
 );
 
+-- ORDER BY quarantined_at DESC for `views::initiative_quarantines::
+-- list_all` (the operator inspect / doctor surface). Without this
+-- index SQLite must scan + sort the full table on every list. Added
+-- to deployed databases by migration 4 (kernel-store.md §2.5.1
+-- migration table).
 CREATE INDEX idx_initiative_quarantines_quarantined_at
     ON initiative_quarantines (quarantined_at);
+
+-- Sweep-collateral provenance lookup: "which sweep created this
+-- row?" — the only direct reader of `sweep_target` today. Partial
+-- index because single-initiative quarantines (which leave
+-- `sweep_target = NULL`) are the common case.
 CREATE INDEX idx_initiative_quarantines_sweep_target
     ON initiative_quarantines (sweep_target)
     WHERE sweep_target IS NOT NULL;
+
+-- Reserved for the planned `raxis inspect --quarantined-by <op-fp>`
+-- surface. No v1 kernel code path filters by this column yet, but the
+-- column is populated for forensics and the index is small (one entry
+-- per quarantined initiative). Documented here for spec/migration
+-- parity rather than as an admission gate; safe to keep, safe to drop
+-- in a future migration if the inspect surface never lands.
+CREATE INDEX idx_initiative_quarantines_by_operator
+    ON initiative_quarantines (quarantined_by);
 ```
 
 `sweep_target` is non-NULL on rows inserted by `QuarantinePlansBy`

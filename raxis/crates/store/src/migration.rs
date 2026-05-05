@@ -53,7 +53,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -77,6 +77,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 3 {
         apply_migration_3(conn)?;
+    }
+    if current_version < 4 {
+        apply_migration_4(conn)?;
     }
 
     Ok(())
@@ -341,6 +344,17 @@ CREATE TABLE IF NOT EXISTS {delegations} (
     UNIQUE (session_id, capability_class)
 );
 
+-- NOTE (spec/migration parity audit, 2026-05): this explicit index is
+-- REDUNDANT with the implicit `sqlite_autoindex_delegations_*` that
+-- SQLite creates from the `UNIQUE (session_id, capability_class)`
+-- constraint above (per sqlite.org/lang_createtable.html). It is
+-- preserved here unchanged because (a) v1 deployed databases already
+-- carry it and dropping it would force a no-op rebuild on every
+-- running kernel, (b) IF NOT EXISTS makes the redundancy harmless,
+-- and (c) the spec DDL block in kernel-store.md §2.5.1 Table 7
+-- documents the same redundancy. New tables MUST NOT add a duplicate
+-- explicit index when a UNIQUE constraint already covers the same
+-- column tuple.
 CREATE INDEX IF NOT EXISTS idx_delegations_session_capability
     ON {delegations} (session_id, capability_class);
 
@@ -769,6 +783,15 @@ CREATE TABLE IF NOT EXISTS {initiative_quarantines} (
 );
 
 -- Lookup: enumerate all initiatives a given operator quarantined.
+-- NOTE (spec/migration parity audit, 2026-05): no v1 kernel code
+-- path filters by `quarantined_by` yet — the column is populated for
+-- forensics, but the only reader (`views::initiative_quarantines::
+-- list_all`) does an unfiltered scan ordered by `quarantined_at`. The
+-- index is preserved as it supports the obvious future
+-- `raxis inspect --quarantined-by <op-fp>` surface and is small (one
+-- entry per quarantined initiative). The spec DDL block in
+-- kernel-store.md §2.5.8 documents this index with the same future-
+-- use note.
 CREATE INDEX IF NOT EXISTS idx_initiative_quarantines_by_operator
     ON {initiative_quarantines} (quarantined_by);
 
@@ -780,6 +803,65 @@ CREATE INDEX IF NOT EXISTS idx_initiative_quarantines_sweep_target
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (3, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 4 — spec/migration index parity (kernel-store.md §2.5.8).
+//
+// Adds `idx_initiative_quarantines_quarantined_at` to support the
+// `views::initiative_quarantines::list_all` reader, which executes
+//   `SELECT ... FROM initiative_quarantines ORDER BY quarantined_at DESC`
+// on the operator-side `raxis inspect` surface. Without this index
+// SQLite must scan + sort the full table on every list; the table is
+// small in v1 but listing is the read-side hot path for forensics, so
+// we pay the index cost upfront rather than re-tuning later.
+//
+// The spec DDL block (kernel-store.md §2.5.8 "initiative_quarantines
+// schema") has always listed this index. Migration 3 shipped without
+// it (the historical v1 install had `idx_initiative_quarantines_by_
+// operator` instead, which targets a different — currently unused —
+// query). This migration brings deployed databases into parity with
+// the spec without removing the legacy index (legacy is harmless and
+// dropping it would force every running kernel to rebuild a perfectly
+// good index for no benefit).
+//
+// Why a separate migration rather than editing migration 3?
+// Migration 3 is HISTORICAL: changing its rendered DDL would force
+// already-installed v1 databases to re-run a migration they already
+// completed, which they cannot. New indexes for already-migrated DBs
+// MUST land as a fresh migration step.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_4(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_4_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 4 failed: {e}"))
+    })
+}
+
+/// The complete migration-4 DDL — one new index, identical column
+/// shape and naming to the spec's §2.5.8 DDL block. Same INV-STORE-03
+/// contract as earlier migrations: no raw table-name literals.
+fn render_migration_4_ddl() -> String {
+    let initiative_quarantines = Table::InitiativeQuarantines.as_str();
+    let schema_version         = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- Lookup: ORDER BY quarantined_at DESC for `list_all` (operator
+-- inspect / doctor surfaces). See kernel-store.md §2.5.8.
+CREATE INDEX IF NOT EXISTS idx_initiative_quarantines_quarantined_at
+    ON {initiative_quarantines} (quarantined_at);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (4, strftime('%s', 'now'));
 
 COMMIT;
 "
@@ -1208,6 +1290,128 @@ mod tests {
             "migration 3 must add signed_by_fingerprint; got: {plan_cols:?}");
     }
 
+    // ── Migration 4 — quarantined_at index for spec parity ──────────
+
+    /// Migration 4 adds `idx_initiative_quarantines_quarantined_at` so
+    /// the `views::initiative_quarantines::list_all` reader (which
+    /// `ORDER BY quarantined_at DESC`) does not need a temp-btree
+    /// sort. The index existed in the kernel-store.md §2.5.8 DDL
+    /// block from day one but the original migration 3 shipped
+    /// without it; this test pins the parity fix.
+    #[test]
+    fn migration_4_creates_quarantined_at_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64,
+            "schema_version must be SCHEMA_VERSION after applying all migrations");
+
+        // `sqlite_master` is the authoritative inventory of indexes; we
+        // verify both the index name and its target table to catch
+        // accidental rename or misplaced ON-clause regressions.
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT name, tbl_name FROM sqlite_master \
+                 WHERE type = 'index' AND name = ?1",
+                ["idx_initiative_quarantines_quarantined_at"],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .expect("idx_initiative_quarantines_quarantined_at should exist after migration 4");
+        assert_eq!(row.0, "idx_initiative_quarantines_quarantined_at");
+        assert_eq!(row.1, Table::InitiativeQuarantines.as_str(),
+            "index must be on the initiative_quarantines table");
+
+        // The PRAGMA index_info confirms the index targets the right
+        // column — protects against a future "fix" that points the
+        // index at quarantined_by by mistake.
+        let cols: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_index_info('idx_initiative_quarantines_quarantined_at')")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(cols, vec!["quarantined_at".to_string()],
+            "index must be on the quarantined_at column only");
+    }
+
+    /// Upgrade scenario: a database that completed migration 3 but
+    /// not migration 4 (i.e. installed under a build prior to this
+    /// patch) must pick up the new index when `apply_pending` runs.
+    /// Pinning this guards against the class of bug where a future
+    /// `apply_pending` refactor accidentally short-circuits when the
+    /// schema_version row says 3 even though the on-disk schema lacks
+    /// the index — by manually setting schema_version to 3 and
+    /// confirming the index appears after re-apply we exercise the
+    /// `current_version < 4` gate in `apply_pending`.
+    #[test]
+    fn migration_4_applies_to_a_v3_database() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        // Simulate a database that completed migration 3. We get
+        // there by running `apply_pending` and then deleting the
+        // migration_4 artifacts (the index + the v=4 schema_version
+        // row). This is a closer simulation of an upgraded install
+        // than running just migrations 1–3 by hand.
+        apply_pending(&conn).unwrap();
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS idx_initiative_quarantines_quarantined_at;
+             DELETE FROM schema_version WHERE version = 4;"
+        ).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 3,
+            "test pre-condition: database must be at version 3");
+        let n_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_initiative_quarantines_quarantined_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n_before, 0, "test pre-condition: index must be absent");
+
+        // Now run apply_pending — it must apply ONLY migration 4
+        // (the gate `current_version < 4` should skip 1–3).
+        apply_pending(&conn).unwrap();
+
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+        let n_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_initiative_quarantines_quarantined_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n_after, 1,
+            "migration 4 must add the index when re-running on a v3 database");
+    }
+
+    /// `apply_pending` followed by a second `apply_pending` MUST be
+    /// idempotent for migration 4 too — the `IF NOT EXISTS` clause on
+    /// the index plus the `INSERT OR IGNORE` on schema_version make
+    /// re-running a no-op rather than a constraint violation. The
+    /// generic `apply_pending_is_idempotent` test above covers this
+    /// at the table level; this one pins the index specifically.
+    #[test]
+    fn migration_4_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+
+        // Exactly one index row by this name — re-running must not
+        // produce a duplicate (which would be a SQLite error anyway,
+        // but the assert is the regression pin).
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_initiative_quarantines_quarantined_at'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "exactly one index row expected after re-apply");
+    }
+
     /// FK on `initiative_id` MUST refer to the `initiatives` table.
     /// PRAGMA foreign_keys is off by default in sqlite-rs, so we
     /// explicitly enable it here.
@@ -1287,7 +1491,13 @@ mod tests {
     /// possible), this constant will need a one-time refresh.
     /// That refresh is itself a "cosmetic-only" change and does NOT
     /// require a new migration.
-    const MIGRATION_1_DDL_PINNED_HASH: u64 = 0xe3ec_727b_574e_cb66;
+    /// Refresh history:
+    ///   - 2026-05: spec/migration parity audit added a SQL comment
+    ///     above `idx_delegations_session_capability` documenting its
+    ///     redundancy with the implicit `UNIQUE (session_id,
+    ///     capability_class)` autoindex. Comment-only — no schema
+    ///     change in `sqlite_master`. Old hash 0xe3ec_727b_574e_cb66.
+    const MIGRATION_1_DDL_PINNED_HASH: u64 = 0xfeb2_8c71_a42f_649f;
 
     /// Variant counts of every enum the DDL renders are pinned. A
     /// future PR that adds a new `TaskState` variant (etc.) MUST
