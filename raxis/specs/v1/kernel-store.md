@@ -1604,6 +1604,10 @@ When a CLI consumer (`raxis log`, `raxis inbox`, `raxis status`, `raxis audit ve
 
 The fingerprint stays canonical so `raxis audit verify` and any forensic tool can join across the chain by a stable, unforgeable key. The display name is a humane affordance — it is what the operator sees when they read their own logs, and it survives the case where the policy bundle shrinks (e.g. the operator who triggered the event was later removed, but the audit chain still tells you who they were). The two fields together let the audit chain be both machine-correct and human-readable without conflating identity with label.
 
+**Kernel-stderr dispatch logs (third surface).**
+
+In addition to the audit chain (the persistent record) and CLI render layers (the human-facing reader), the kernel emits per-request JSON log lines to its own `stderr` from the operator IPC dispatcher (`kernel/src/ipc/operator.rs::dispatch_log`). Every line that names an operator-fingerprint actor — `op_request`, `op_response`, `frame_decode_failed`, `unauthorized`, `cert_denied` — carries the same `operator_display` snapshot as an optional top-level JSON field, resolved per-request from the live `PolicyBundle` snapshot via `PolicyBundle::operator_display_name(&fingerprint)`. The dispatcher does the lookup at the **start of each request iteration** rather than once at connection time so a policy rotation mid-loop is reflected in subsequent log lines without restarting the per-operator connection. The field is omitted (not emitted as `null`) when the lookup yields `None`, so existing log-grep recipes that key off `operator_fp` continue to work unchanged. This third surface uses the same snapshot semantics as the audit chain — `operator_display` is what the name was *at the moment the request was logged*, not necessarily the current name — but unlike the audit chain it is not part of any tamper-evident record and is intended purely for operator-side log triage.
+
 ---
 
 ### §2.5.3 — Plan Artifact Signing Contract

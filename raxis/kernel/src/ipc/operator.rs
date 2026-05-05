@@ -87,6 +87,21 @@ pub async fn dispatch_loop(
     // independent hand-rolled framings with different byte orders, making
     // the operator socket non-functional end-to-end).
     loop {
+        // §2.5.2 "Operator display-name fields" — resolve the
+        // operator's name once per request iteration. The lookup
+        // is an ArcSwap snapshot + linear scan over `operators[]`
+        // (handful of entries in any realistic deployment), so
+        // doing it per-iteration costs roughly nothing yet
+        // guarantees that every stderr log line — even for
+        // requests that fail decode/auth before they ever hit a
+        // handler — carries the resolved name. Resolved here
+        // rather than once at `dispatch_loop` entry so a policy
+        // rotation mid-loop is reflected in subsequent logs
+        // without restarting the per-operator connection.
+        let operator_display: Option<String> = ctx.policy.load_full()
+            .operator_display_name(&operator.fingerprint);
+        let operator_display_str: Option<&str> = operator_display.as_deref();
+
         let request: OperatorRequest = match read_json_frame_async(&mut stream).await {
             Ok(r) => r,
             // Clean disconnect between frames — peer closed the socket.
@@ -94,7 +109,9 @@ pub async fn dispatch_loop(
             // Malformed JSON: send an error frame and keep the connection
             // open so the CLI can show a useful message.
             Err(JsonFrameError::Decode(e)) => {
-                dispatch_log::frame_decode_failed(&operator.fingerprint, &e.to_string());
+                dispatch_log::frame_decode_failed(
+                    &operator.fingerprint, operator_display_str, &e.to_string(),
+                );
                 let resp = OperatorResponse::Error {
                     code: "INVALID_REQUEST".to_owned(),
                     detail: e.to_string(),
@@ -109,7 +126,7 @@ pub async fn dispatch_loop(
         // permitted_ops gate.
         let op_name = op_name(&request);
         if !crate::ipc::auth::is_permitted(&operator, op_name) {
-            dispatch_log::unauthorized(op_name, &operator.fingerprint);
+            dispatch_log::unauthorized(op_name, &operator.fingerprint, operator_display_str);
             let resp = OperatorResponse::Error {
                 code: "UNAUTHORIZED".to_owned(),
                 detail: format!(
@@ -138,7 +155,9 @@ pub async fn dispatch_loop(
         ) {
             crate::authority::cert_check::CertGuard::Allow => { /* fall through */ }
             crate::authority::cert_check::CertGuard::Deny { wire_code, wire_detail } => {
-                dispatch_log::cert_denied(op_name, &operator.fingerprint, wire_code);
+                dispatch_log::cert_denied(
+                    op_name, &operator.fingerprint, operator_display_str, wire_code,
+                );
                 let resp = OperatorResponse::Error {
                     code:   wire_code.to_owned(),
                     detail: wire_detail,
@@ -153,13 +172,16 @@ pub async fn dispatch_loop(
         // the request's context fields BEFORE the handler runs so the log
         // works even on handlers that consume the request by value.
         let context_fields = request_context_fields(&request);
-        dispatch_log::op_request(op_name, &operator.fingerprint, &context_fields);
+        dispatch_log::op_request(
+            op_name, &operator.fingerprint, operator_display_str, &context_fields,
+        );
         let started = std::time::Instant::now();
         let response = handle_request(request, &operator, &ctx).await;
         let latency_ms = started.elapsed().as_millis() as u64;
         dispatch_log::op_response(
             op_name,
             &operator.fingerprint,
+            operator_display_str,
             &response,
             &context_fields,
             latency_ms,
@@ -308,15 +330,26 @@ pub(crate) mod dispatch_log {
     /// Build the JSON line that `op_request` will print. Pure — does no
     /// I/O. The test suite at the bottom of this file calls this
     /// directly and asserts the parsed `serde_json::Value` shape.
+    ///
+    /// `operator_display` is the operator's display-name resolved
+    /// from the live `PolicyBundle` per `kernel-store.md` §2.5.2
+    /// "Operator display-name fields". When `Some`, the line gets
+    /// an extra `"operator_display"` field so an operator scanning
+    /// stderr sees `Chika` next to `abcd1234abcd…` without having
+    /// to cross-reference `raxis cert list`.
     pub(crate) fn build_op_request_line(
         op: &'static str,
         operator_fp: &str,
+        operator_display: Option<&str>,
         context_fields: &[(&'static str, String)],
         ts_unix: i64,
     ) -> String {
         let mut body = body_from_fields(context_fields);
         body.insert("op".into(), json!(op));
         body.insert("operator_fp".into(), json!(operator_fp));
+        if let Some(name) = operator_display {
+            body.insert("operator_display".into(), json!(name));
+        }
         finalize_line(level::INFO, MODULE, "op_request", body, ts_unix)
     }
 
@@ -335,6 +368,7 @@ pub(crate) mod dispatch_log {
     pub(crate) fn build_op_response_line(
         op: &'static str,
         operator_fp: &str,
+        operator_display: Option<&str>,
         response: &OperatorResponse,
         context_fields: &[(&'static str, String)],
         latency_ms: u64,
@@ -343,6 +377,9 @@ pub(crate) mod dispatch_log {
         let mut body = body_from_fields(context_fields);
         body.insert("op".into(), json!(op));
         body.insert("operator_fp".into(), json!(operator_fp));
+        if let Some(name) = operator_display {
+            body.insert("operator_display".into(), json!(name));
+        }
         body.insert("latency_ms".into(), json!(latency_ms));
 
         let log_level = match response {
@@ -369,11 +406,15 @@ pub(crate) mod dispatch_log {
     /// line carries only the operator fingerprint and the decode error.
     pub(crate) fn build_frame_decode_failed_line(
         operator_fp: &str,
+        operator_display: Option<&str>,
         detail: &str,
         ts_unix: i64,
     ) -> String {
         let mut body = serde_json::Map::with_capacity(4);
         body.insert("operator_fp".into(), json!(operator_fp));
+        if let Some(name) = operator_display {
+            body.insert("operator_display".into(), json!(name));
+        }
         body.insert("detail".into(), json!(detail));
         finalize_line(level::WARN, MODULE, "frame_decode_failed", body, ts_unix)
     }
@@ -384,11 +425,15 @@ pub(crate) mod dispatch_log {
     pub(crate) fn build_unauthorized_line(
         op: &'static str,
         operator_fp: &str,
+        operator_display: Option<&str>,
         ts_unix: i64,
     ) -> String {
         let mut body = serde_json::Map::with_capacity(4);
         body.insert("op".into(), json!(op));
         body.insert("operator_fp".into(), json!(operator_fp));
+        if let Some(name) = operator_display {
+            body.insert("operator_display".into(), json!(name));
+        }
         finalize_line(level::WARN, MODULE, "unauthorized", body, ts_unix)
     }
 
@@ -397,17 +442,22 @@ pub(crate) mod dispatch_log {
     pub(super) fn op_request(
         op: &'static str,
         operator_fp: &str,
+        operator_display: Option<&str>,
         context_fields: &[(&'static str, String)],
     ) {
         eprintln!(
             "{}",
-            build_op_request_line(op, operator_fp, context_fields, raxis_types::unix_now_secs()),
+            build_op_request_line(
+                op, operator_fp, operator_display, context_fields,
+                raxis_types::unix_now_secs(),
+            ),
         );
     }
 
     pub(super) fn op_response(
         op: &'static str,
         operator_fp: &str,
+        operator_display: Option<&str>,
         response: &OperatorResponse,
         context_fields: &[(&'static str, String)],
         latency_ms: u64,
@@ -417,6 +467,7 @@ pub(crate) mod dispatch_log {
             build_op_response_line(
                 op,
                 operator_fp,
+                operator_display,
                 response,
                 context_fields,
                 latency_ms,
@@ -425,17 +476,29 @@ pub(crate) mod dispatch_log {
         );
     }
 
-    pub(super) fn frame_decode_failed(operator_fp: &str, detail: &str) {
+    pub(super) fn frame_decode_failed(
+        operator_fp: &str,
+        operator_display: Option<&str>,
+        detail: &str,
+    ) {
         eprintln!(
             "{}",
-            build_frame_decode_failed_line(operator_fp, detail, raxis_types::unix_now_secs()),
+            build_frame_decode_failed_line(
+                operator_fp, operator_display, detail, raxis_types::unix_now_secs(),
+            ),
         );
     }
 
-    pub(super) fn unauthorized(op: &'static str, operator_fp: &str) {
+    pub(super) fn unauthorized(
+        op: &'static str,
+        operator_fp: &str,
+        operator_display: Option<&str>,
+    ) {
         eprintln!(
             "{}",
-            build_unauthorized_line(op, operator_fp, raxis_types::unix_now_secs()),
+            build_unauthorized_line(
+                op, operator_fp, operator_display, raxis_types::unix_now_secs(),
+            ),
         );
     }
 
@@ -446,12 +509,16 @@ pub(crate) mod dispatch_log {
     pub(crate) fn build_cert_denied_line(
         op: &'static str,
         operator_fp: &str,
+        operator_display: Option<&str>,
         wire_code: &'static str,
         ts_unix: i64,
     ) -> String {
         let mut body = serde_json::Map::with_capacity(4);
         body.insert("op".into(), json!(op));
         body.insert("operator_fp".into(), json!(operator_fp));
+        if let Some(name) = operator_display {
+            body.insert("operator_display".into(), json!(name));
+        }
         body.insert("code".into(), json!(wire_code));
         finalize_line(level::WARN, MODULE, "cert_denied", body, ts_unix)
     }
@@ -459,11 +526,15 @@ pub(crate) mod dispatch_log {
     pub(super) fn cert_denied(
         op: &'static str,
         operator_fp: &str,
+        operator_display: Option<&str>,
         wire_code: &'static str,
     ) {
         eprintln!(
             "{}",
-            build_cert_denied_line(op, operator_fp, wire_code, raxis_types::unix_now_secs()),
+            build_cert_denied_line(
+                op, operator_fp, operator_display, wire_code,
+                raxis_types::unix_now_secs(),
+            ),
         );
     }
 
@@ -2915,6 +2986,7 @@ mod dispatch_logging_tests {
         let line = dispatch_log::build_op_request_line(
             "ApprovePlan",
             "abcd1234abcd1234abcd1234abcd1234",
+            Some("Chika"),
             &fields,
             1_700_000_000,
         );
@@ -2923,6 +2995,14 @@ mod dispatch_logging_tests {
         assert_eq!(
             v.get("operator_fp").and_then(Value::as_str),
             Some("abcd1234abcd1234abcd1234abcd1234"),
+        );
+        // §2.5.2 "Operator display-name fields" — the resolved
+        // display name MUST appear on the same line as the
+        // fingerprint when the dispatcher could resolve it.
+        assert_eq!(
+            v.get("operator_display").and_then(Value::as_str),
+            Some("Chika"),
+            "operator_display MUST be present on op_request lines when resolvable",
         );
         assert_eq!(
             v.get("initiative_id").and_then(Value::as_str),
@@ -2933,6 +3013,29 @@ mod dispatch_logging_tests {
             Some("abcd1234abcd1234abcd1234abcd1234"),
         );
         assert_eq!(v.get("ts_unix").and_then(Value::as_i64), Some(1_700_000_000));
+    }
+
+    /// The dispatcher MAY have no display-name (operator removed
+    /// in flight, or kernel.db not yet bootstrapped). The line
+    /// MUST still emit cleanly — just without the
+    /// `operator_display` key — so existing log-grep recipes that
+    /// match on `operator_fp` still work.
+    #[test]
+    fn op_request_line_omits_operator_display_when_unresolved() {
+        let fields = vec![("initiative_id", "test-001".to_owned())];
+        let line = dispatch_log::build_op_request_line(
+            "ApprovePlan",
+            "abcd1234abcd1234abcd1234abcd1234",
+            None,
+            &fields,
+            1_700_000_000,
+        );
+        let v: Value = serde_json::from_str(&line).expect("valid JSON");
+        assert_eq!(
+            v.get("operator_display"),
+            None,
+            "operator_display MUST be omitted (not null) when unresolved",
+        );
     }
 
     #[test]
@@ -2949,6 +3052,7 @@ mod dispatch_logging_tests {
         let line = dispatch_log::build_op_response_line(
             "ApprovePlan",
             "abcd1234abcd1234abcd1234abcd1234",
+            Some("Chika"),
             &response,
             &fields,
             42,
@@ -2992,6 +3096,7 @@ mod dispatch_logging_tests {
         let line = dispatch_log::build_op_response_line(
             "CreateSession",
             "abcd1234abcd1234abcd1234abcd1234",
+            Some("Chika"),
             &response,
             &[("lineage_id", "00000000-0000-4000-8000-00000000000a".to_owned())],
             7,
@@ -3030,6 +3135,7 @@ mod dispatch_logging_tests {
         let line = dispatch_log::build_op_response_line(
             "CreateInitiative",
             "abcd1234abcd1234abcd1234abcd1234",
+            Some("Chika"),
             &response,
             &[("submitted_by", "abcd1234abcd1234abcd1234abcd1234".to_owned())],
             5,
@@ -3051,6 +3157,7 @@ mod dispatch_logging_tests {
     fn frame_decode_failed_line_carries_operator_fp_and_detail_at_warn() {
         let line = dispatch_log::build_frame_decode_failed_line(
             "abcd1234abcd1234abcd1234abcd1234",
+            Some("Chika"),
             "expected `,` or `}` at line 1 column 42",
             1_700_000_004,
         );
@@ -3073,6 +3180,7 @@ mod dispatch_logging_tests {
         let line = dispatch_log::build_unauthorized_line(
             "RotateEpoch",
             "abcd1234abcd1234abcd1234abcd1234",
+            Some("Chika"),
             1_700_000_005,
         );
         let v = parse_and_check_constants(&line, "unauthorized", "warn");
@@ -3094,6 +3202,7 @@ mod dispatch_logging_tests {
         let line = dispatch_log::build_cert_denied_line(
             "RotateEpoch",
             "abcd1234abcd1234abcd1234abcd1234",
+            Some("Chika"),
             "FAIL_CERT_EXPIRED",
             1_700_000_006,
         );
@@ -3122,6 +3231,7 @@ mod dispatch_logging_tests {
         let line = dispatch_log::build_op_response_line(
             "ApprovePlan",
             "abcd1234abcd1234abcd1234abcd1234",
+            Some("Chika"),
             &response,
             &[],
             0,
