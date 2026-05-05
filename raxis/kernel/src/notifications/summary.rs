@@ -36,20 +36,19 @@ pub fn render(event: &AuditEvent) -> String {
         "EscalationApproved" => format!(
             "Escalation {esc_id} APPROVED by {approver}",
             esc_id   = json_str(p, "escalation_id"),
-            approver = json_str(p, "approved_by"),
+            approver = operator_label(p, "approved_by", "approved_by_display_name"),
         ),
         "EscalationDenied" => {
             let reason = p.get("reason").and_then(Value::as_str);
+            let denier = operator_label(p, "denied_by", "denied_by_display_name");
             match reason {
                 Some(r) if !r.is_empty() => format!(
                     "Escalation {esc_id} DENIED by {denier}: {r}",
                     esc_id = json_str(p, "escalation_id"),
-                    denier = json_str(p, "denied_by"),
                 ),
                 _ => format!(
                     "Escalation {esc_id} DENIED by {denier}",
                     esc_id = json_str(p, "escalation_id"),
-                    denier = json_str(p, "denied_by"),
                 ),
             }
         }
@@ -71,7 +70,7 @@ pub fn render(event: &AuditEvent) -> String {
             "Policy advanced to epoch {epoch} by {by} \
              ({stale} delegations marked stale, {sess} sessions invalidated)",
             epoch = json_num(p, "new_epoch_id"),
-            by    = json_str(p, "triggered_by"),
+            by    = operator_label(p, "triggered_by", "triggered_by_display_name"),
             stale = json_num(p, "delegations_marked_stale"),
             sess  = json_num(p, "sessions_invalidated"),
         ),
@@ -88,7 +87,7 @@ pub fn render(event: &AuditEvent) -> String {
             "Initiative {init_id} task {task_id}: PATH SCOPE OVERRIDE applied by {approver}",
             init_id  = json_str(p, "initiative_id"),
             task_id  = json_str(p, "task_id"),
-            approver = json_str(p, "approving_operator"),
+            approver = operator_label(p, "approving_operator", "approving_operator_display_name"),
         ),
         "TaskStateChanged" => format!(
             "Task {task_id}: {from} → {to} (actor {actor})",
@@ -129,6 +128,38 @@ fn json_str(v: &Value, key: &str) -> String {
         .and_then(Value::as_str)
         .map(str::to_owned)
         .unwrap_or_else(|| "<?>".to_owned())
+}
+
+/// Render an operator-bearing payload field as `"Display (fp_prefix)"`
+/// when both the fingerprint and the embedded display-name snapshot
+/// are present, falling back to just the fingerprint (full or
+/// `<?>`) when the snapshot is missing or empty. See `kernel-store.md`
+/// §2.5.2 "Operator display-name fields" for the cross-variant
+/// convention; this is the inbox-summary equivalent of the CLI's
+/// `operator_display::format_operator_with_lookup` helper. We do
+/// NOT do a live cert-table lookup here because the summary runs
+/// at audit-emit time when the kernel already knows the live
+/// state — if the fingerprint resolved, the embedded name is set;
+/// if it didn't, neither will be.
+///
+/// `fp_field` is the canonical fingerprint key (e.g.
+/// `"approved_by"`); `name_field` is the snapshot key (e.g.
+/// `"approved_by_display_name"`).
+fn operator_label(v: &Value, fp_field: &str, name_field: &str) -> String {
+    let fp = v.get(fp_field).and_then(Value::as_str);
+    let name = v.get(name_field).and_then(Value::as_str).filter(|s| !s.is_empty());
+    match (fp, name) {
+        (Some(fp), Some(name)) => {
+            // 8 hex chars = 4 bytes of entropy is plenty to disambiguate
+            // operators in any realistic deployment; matches the CLI's
+            // `FINGERPRINT_DISPLAY_PREFIX_LEN` so the summary reads
+            // identically to `raxis log`.
+            let prefix_len = 8.min(fp.len());
+            format!("{name} ({})", &fp[..prefix_len])
+        }
+        (Some(fp), None) => fp.to_owned(),
+        (None, _)        => "<?>".to_owned(),
+    }
 }
 
 fn json_num(v: &Value, key: &str) -> String {
@@ -197,6 +228,9 @@ mod tests {
 
     #[test]
     fn escalation_approved_includes_approver() {
+        // Legacy event (no embedded display name): the formatter
+        // falls back to the bare fingerprint so the summary still
+        // identifies the actor.
         let e = make_event("EscalationApproved", serde_json::json!({
             "escalation_id": "esc-2",
             "approved_by":   "op-prime",
@@ -206,28 +240,48 @@ mod tests {
         assert!(s.contains("op-prime"));
     }
 
+    /// §2.5.2 "Operator display-name fields" — when the embedded
+    /// snapshot is present, the inbox summary MUST surface the
+    /// human-readable name with the fingerprint prefix in
+    /// parentheses, not just the bare fingerprint.
+    #[test]
+    fn escalation_approved_uses_embedded_display_name_when_present() {
+        let e = make_event("EscalationApproved", serde_json::json!({
+            "escalation_id":            "esc-2",
+            "approved_by":              "abcd1234abcd1234abcd1234abcd1234",
+            "approved_by_display_name": "Chika",
+        }));
+        let s = render(&e);
+        assert!(s.contains("APPROVED by Chika (abcd1234)"),
+            "summary must read 'Chika (abcd1234)' when display-name snapshot is present; got: {s}");
+        assert!(!s.contains("abcd1234abcd1234abcd1234abcd1234"),
+            "the full fingerprint MUST NOT appear in the human summary when the prefix form is available; got: {s}");
+    }
+
     #[test]
     fn escalation_denied_with_reason_includes_reason() {
         let e = make_event("EscalationDenied", serde_json::json!({
-            "escalation_id": "esc-3",
-            "denied_by":     "op-prime",
-            "reason":        "scope too broad",
+            "escalation_id":           "esc-3",
+            "denied_by":               "abcd1234abcd1234abcd1234abcd1234",
+            "denied_by_display_name":  "Chika",
+            "reason":                  "scope too broad",
         }));
         let s = render(&e);
         assert!(s.contains("DENIED"));
-        assert!(s.contains("op-prime"));
+        assert!(s.contains("Chika (abcd1234)"));
         assert!(s.contains("scope too broad"));
     }
 
     #[test]
     fn escalation_denied_without_reason_omits_colon_clause() {
         let e = make_event("EscalationDenied", serde_json::json!({
-            "escalation_id": "esc-4",
-            "denied_by":     "op-prime",
-            "reason":        Value::Null,
+            "escalation_id":           "esc-4",
+            "denied_by":               "abcd1234abcd1234abcd1234abcd1234",
+            "denied_by_display_name":  "Chika",
+            "reason":                  Value::Null,
         }));
         let s = render(&e);
-        assert!(s.contains("DENIED by op-prime"));
+        assert!(s.contains("DENIED by Chika (abcd1234)"));
         assert!(!s.contains(": "), "no reason ⇒ no colon clause; got: {s}");
     }
 
@@ -244,9 +298,9 @@ mod tests {
         // try to inject a newline that breaks JSONL framing. The
         // formatter MUST collapse it to a single space.
         let e = make_event("EscalationDenied", serde_json::json!({
-            "escalation_id": "esc-5",
-            "denied_by":     "op",
-            "reason":        "line1\nline2\rline3\tline4",
+            "escalation_id":           "esc-5",
+            "denied_by":               "op",
+            "reason":                  "line1\nline2\rline3\tline4",
         }));
         let s = render(&e);
         assert!(!s.contains('\n'));

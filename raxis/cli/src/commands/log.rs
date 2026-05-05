@@ -16,6 +16,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use raxis_audit_tools::{ChainReader, ChainRecord, AUDIT_DIR_NAME};
 
 use crate::errors::CliError;
+use crate::operator_display::{
+    extract_operators_from_event, format_operator_with_lookup, OperatorNameLookup,
+};
 use crate::GlobalFlags;
 
 /// Default cap when `--limit` is not provided. Matches cli-readonly.md
@@ -31,13 +34,20 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let opts = parse_args(args)?;
     let audit_dir = flags.data_dir().join(AUDIT_DIR_NAME);
 
+    // Build the operator-name lookup once per invocation so every
+    // rendered record gets fingerprint→display_name resolution
+    // without per-record DB hits. See `operator_display` module
+    // docstring for the perf rationale.
+    let name_lookup = OperatorNameLookup::load_from_data_dir(flags.data_dir())
+        .unwrap_or_else(|_| OperatorNameLookup::empty());
+
     if opts.follow {
         // Follow-mode runs forever (or until SIGINT). It still
         // honours every filter — the filter combinator is the same
         // function the one-shot path uses.
-        run_follow(&audit_dir, &opts)
+        run_follow(&audit_dir, &opts, &name_lookup)
     } else {
-        run_one_shot(&audit_dir, &opts)
+        run_one_shot(&audit_dir, &opts, &name_lookup)
     }
 }
 
@@ -45,7 +55,11 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 // One-shot mode
 // ────────────────────────────────────────────────────────────────────
 
-fn run_one_shot(audit_dir: &std::path::Path, opts: &LogOpts) -> Result<(), CliError> {
+fn run_one_shot(
+    audit_dir:   &std::path::Path,
+    opts:        &LogOpts,
+    name_lookup: &OperatorNameLookup,
+) -> Result<(), CliError> {
     let reader = match ChainReader::open(audit_dir) {
         Ok(r) => r,
         Err(raxis_audit_tools::ChainReadError::NoSegments { .. }) => {
@@ -87,7 +101,7 @@ fn run_one_shot(audit_dir: &std::path::Path, opts: &LogOpts) -> Result<(), CliEr
     let mut out = stdout.lock();
     let now = unix_now_secs();
     for r in &all {
-        render_one(&mut out, r, opts.json, now);
+        render_one(&mut out, r, opts.json, now, name_lookup);
     }
     let _ = out.flush();
     Ok(())
@@ -103,7 +117,11 @@ fn run_one_shot(audit_dir: &std::path::Path, opts: &LogOpts) -> Result<(), CliEr
 /// the chain reader from where the previous tick stopped (tracked by
 /// per-record `seq` rather than file offset, so a segment rotation
 /// doesn't mis-resume).
-fn run_follow(audit_dir: &std::path::Path, opts: &LogOpts) -> Result<(), CliError> {
+fn run_follow(
+    audit_dir:   &std::path::Path,
+    opts:        &LogOpts,
+    name_lookup: &OperatorNameLookup,
+) -> Result<(), CliError> {
     let stdout = std::io::stdout();
     // Establish a baseline: print the "tail" the user would see in
     // one-shot mode FIRST so they're not staring at an empty TTY
@@ -124,7 +142,7 @@ fn run_follow(audit_dir: &std::path::Path, opts: &LogOpts) -> Result<(), CliErro
             let now = unix_now_secs();
             let mut out = stdout.lock();
             for r in &tail {
-                render_one(&mut out, r, opts.json, now);
+                render_one(&mut out, r, opts.json, now, name_lookup);
             }
             let _ = out.flush();
             if let Some(last) = tail.last() {
@@ -166,7 +184,7 @@ fn run_follow(audit_dir: &std::path::Path, opts: &LogOpts) -> Result<(), CliErro
                 let mut out = stdout.lock();
                 new_records.sort_by_key(|r| r.seq);
                 for r in &new_records {
-                    render_one(&mut out, r, opts.json, now);
+                    render_one(&mut out, r, opts.json, now, name_lookup);
                     if (r.seq as i128) > last_seq_seen {
                         last_seq_seen = r.seq as i128;
                     }
@@ -262,7 +280,13 @@ fn matches_filter(r: &ChainRecord, opts: &LogOpts) -> bool {
 // Rendering
 // ────────────────────────────────────────────────────────────────────
 
-fn render_one<W: Write>(out: &mut W, r: &ChainRecord, json: bool, now_secs: u64) {
+fn render_one<W: Write>(
+    out:         &mut W,
+    r:           &ChainRecord,
+    json:        bool,
+    now_secs:    u64,
+    name_lookup: &OperatorNameLookup,
+) {
     if json {
         // Per spec: raw AuditEvent per line, identical to on-disk
         // JSONL. We emit `r.raw_line` (which we already parsed from
@@ -289,6 +313,22 @@ fn render_one<W: Write>(out: &mut W, r: &ChainRecord, json: bool, now_secs: u64)
     }
     if let Some(session) = &r.session_id {
         line.push_str(&format!(" session={}", short(session)));
+    }
+    // §2.5.2 "Operator display-name fields" — surface every
+    // operator-bearing field the event payload carries. Each is
+    // labelled by its role (approving_operator, granted_by, …)
+    // so a one-line render still tells the operator who did
+    // what. The fingerprint snapshot lives in the JSONL output
+    // (visible via `--json`); the human form is name+prefix.
+    if let Some(parsed) = r.parsed_value.as_ref() {
+        for op in extract_operators_from_event(parsed) {
+            let rendered = format_operator_with_lookup(
+                &op.fingerprint,
+                op.embedded_name.as_deref(),
+                name_lookup,
+            );
+            line.push_str(&format!(" {}={rendered}", op.role));
+        }
     }
     let _ = writeln!(out, "{line}");
 }
@@ -595,7 +635,7 @@ mod tests {
             None,
         );
         let mut buf: Vec<u8> = Vec::new();
-        render_one(&mut buf, &r, false, now);
+        render_one(&mut buf, &r, false, now, &OperatorNameLookup::empty());
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("[WitnessAccepted]"), "got: {s}");
         assert!(s.contains("init=init-x"), "got: {s}");
@@ -608,9 +648,77 @@ mod tests {
         let mut r = make_record(5, "K", None, None, None, None);
         r.raw_line = r#"{"seq":5,"event_kind":"K","prev_sha256":"00"}"#.to_owned();
         let mut buf: Vec<u8> = Vec::new();
-        render_one(&mut buf, &r, true, 0);
+        render_one(&mut buf, &r, true, 0, &OperatorNameLookup::empty());
         let s = String::from_utf8(buf).unwrap();
         assert_eq!(s.trim_end(), r.raw_line);
+    }
+
+    /// §2.5.2 "Operator display-name fields" — when an audit
+    /// event's payload carries an operator fingerprint AND an
+    /// embedded display-name snapshot, the human render MUST
+    /// surface the snapshot as `role=Name (fp_prefix)`, not just
+    /// the bare ids.
+    #[test]
+    fn render_one_human_surfaces_embedded_operator_display_name() {
+        let mut r = make_record(
+            7, "EscalationApproved",
+            Some(1_700_000_500),
+            None,
+            None,
+            None,
+        );
+        r.parsed_value = Some(serde_json::json!({
+            "seq": 7,
+            "event_kind": "EscalationApproved",
+            "payload": {
+                "kind":          "EscalationApproved",
+                "escalation_id": "esc-1",
+                "approved_by":   "abcd1234abcd1234abcd1234abcd1234",
+                "approved_by_display_name": "Chika",
+            }
+        }));
+        let mut buf: Vec<u8> = Vec::new();
+        render_one(&mut buf, &r, false, 1_700_001_000, &OperatorNameLookup::empty());
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("approved_by=Chika (abcd1234)"),
+            "operator render must show embedded name + fp prefix; got: {s}");
+        assert!(!s.contains("[historical cert"),
+            "no historical annotation when embedded name is present; got: {s}");
+    }
+
+    /// Legacy event without an embedded name: the renderer falls
+    /// back to the live `operator_certificates` lookup and MUST
+    /// annotate the rendered name as historical.
+    #[test]
+    fn render_one_human_falls_back_to_historical_lookup_for_legacy_events() {
+        // Hand-build a lookup so the test doesn't need a kernel.db.
+        let lookup = OperatorNameLookup::from_pairs([
+            ("deadbeefdeadbeefdeadbeefdeadbeef", "ChikaNow"),
+        ]);
+
+        let mut r = make_record(
+            8, "EscalationApproved",
+            Some(1_700_000_500),
+            None,
+            None,
+            None,
+        );
+        r.parsed_value = Some(serde_json::json!({
+            "seq": 8,
+            "event_kind": "EscalationApproved",
+            "payload": {
+                "kind":          "EscalationApproved",
+                "escalation_id": "esc-2",
+                "approved_by":   "deadbeefdeadbeefdeadbeefdeadbeef",
+            }
+        }));
+        let mut buf: Vec<u8> = Vec::new();
+        render_one(&mut buf, &r, false, 1_700_001_000, &lookup);
+        let s = String::from_utf8(buf).unwrap();
+        assert!(s.contains("approved_by=ChikaNow (deadbeef)"),
+            "legacy event must render via the live lookup: {s}");
+        assert!(s.contains("[historical cert"),
+            "legacy render MUST carry the historical annotation: {s}");
     }
 
     #[test]

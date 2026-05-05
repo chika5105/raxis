@@ -50,6 +50,7 @@ use raxis_store::open_ro;
 use raxis_store::views::policy_history;
 
 use crate::errors::CliError;
+use crate::operator_display::{format_operator_with_lookup, OperatorNameLookup};
 use crate::GlobalFlags;
 
 const POLICY_FILE_NAME: &str = "policy.toml";
@@ -107,6 +108,24 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // before booting the kernel).
     let history_summary = read_history(flags, opts.with_history).ok();
 
+    // Resolve fingerprints in the history rows to their current
+    // display names per `kernel-store.md` §2.5.2 "Operator
+    // display-name fields". `policy_epoch_history` only stores
+    // the fingerprint of the triggering operator (no embedded
+    // snapshot — pre-display-name plumbing); the renderer falls
+    // back to a live `operator_certificates` lookup with the
+    // historical-cert annotation when the row predates the
+    // operator's current entry, and to the unknown-operator
+    // annotation when the operator has been removed from policy
+    // entirely. Cheap to load even when `--history` is off — the
+    // empty-lookup branch returns immediately.
+    let name_lookup = if opts.with_history {
+        OperatorNameLookup::load_from_data_dir(flags.data_dir())
+            .unwrap_or_else(|_| OperatorNameLookup::empty())
+    } else {
+        OperatorNameLookup::empty()
+    };
+
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
@@ -120,6 +139,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             &on_disk_sha256,
             history_summary.as_ref(),
             opts.with_history,
+            &name_lookup,
         );
     }
     let _ = out.flush();
@@ -216,6 +236,7 @@ fn render_human<W: Write>(
     on_disk_sha:  &str,
     history:      Option<&HistorySummary>,
     with_history: bool,
+    name_lookup:  &OperatorNameLookup,
 ) {
     let _ = writeln!(out, "Active policy:");
     let _ = writeln!(out, "  source:           {}", policy_path.display());
@@ -256,7 +277,7 @@ fn render_human<W: Write>(
 
     if with_history {
         if let Some(h) = history {
-            render_section_history(out, &h.rows);
+            render_section_history(out, &h.rows, name_lookup);
         }
     }
 }
@@ -376,7 +397,11 @@ fn channel_kind_label(k: NotificationChannelKind) -> &'static str {
     }
 }
 
-fn render_section_history<W: Write>(out: &mut W, rows: &[policy_history::PolicyEpochRow]) {
+fn render_section_history<W: Write>(
+    out:         &mut W,
+    rows:        &[policy_history::PolicyEpochRow],
+    name_lookup: &OperatorNameLookup,
+) {
     let _ = writeln!(out, "\nPolicy epoch history ({n} rows, newest first):", n = rows.len());
     if rows.is_empty() {
         let _ = writeln!(out, "  (no rows)");
@@ -384,18 +409,31 @@ fn render_section_history<W: Write>(out: &mut W, rows: &[policy_history::PolicyE
     }
     let _ = writeln!(
         out,
-        "  {epoch:>5}  {sha:<16}  {by:<32}  advanced_at",
+        "  {epoch:>5}  {sha:<16}  advanced_at  triggered_by",
         epoch = "epoch",
         sha   = "sha256_prefix",
-        by    = "triggered_by",
     );
     for r in rows {
+        // §2.5.2 "Operator display-name fields" — the historical
+        // row stores only the fingerprint (no embedded snapshot
+        // because `policy_epoch_history` predates the
+        // display-name plumbing). Resolve via the live cert
+        // table; the renderer emits the historical-cert
+        // annotation when the operator's current display_name is
+        // shown for a row from a previous epoch (the cert may
+        // have been re-installed with a different name since),
+        // or the unknown-operator annotation when the operator
+        // has been removed from policy entirely.
+        let by = format_operator_with_lookup(
+            &r.triggered_by_operator,
+            None,
+            name_lookup,
+        );
         let _ = writeln!(
             out,
-            "  {epoch:>5}  {sha:<16}  {by:<32}  {at}",
+            "  {epoch:>5}  {sha:<16}  {at:>11}  {by}",
             epoch = r.epoch_id,
             sha   = truncate(&r.policy_sha256, 16),
-            by    = truncate(&r.triggered_by_operator, 32),
             at    = r.advanced_at,
         );
     }

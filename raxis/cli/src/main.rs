@@ -18,6 +18,7 @@ mod closeness;
 mod commands;
 mod conn;
 mod errors;
+mod operator_display;
 mod reveal;
 mod signing;
 
