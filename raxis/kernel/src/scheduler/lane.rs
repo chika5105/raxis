@@ -43,15 +43,38 @@ pub fn lane_config_for_row(lane_id: &str, policy: &PolicyBundle) -> Result<LaneC
 }
 
 /// Get current live status for a lane (active tasks + reserved cost).
+///
+/// Convenience wrapper around `get_lane_status_in_tx` that opens its own
+/// mutex acquisition and runs the two SELECTs auto-committed (read-only,
+/// so atomicity vs other writers is not required for callers that only
+/// need a snapshot for reporting). Write paths that gate on this status
+/// MUST use `get_lane_status_in_tx` inside a single transaction with the
+/// follow-up write — see `scheduler::budget::reserve_budget_in_tx` and
+/// `kernel-store.md` §2.5.1.1 Pattern A for why.
 pub fn get_lane_status(lane_id: &str, store: &Store) -> Result<LaneStatus, SchedulerError> {
-    // Build NOT IN from enum — no raw state strings.
+    let conn = store.lock_sync();
+    get_lane_status_in_tx(&conn, lane_id)
+}
+
+/// Compute lane status from inside an existing transaction.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern A):** any write that
+/// uses this status to make an admission decision MUST run both this read
+/// and the follow-up write inside the same transaction held under one
+/// mutex acquisition. The pre-fix code had a TOCTOU window where two
+/// concurrent intents could both pass `check_budget` before either ran
+/// `consume_budget`, over-committing the lane.
+pub fn get_lane_status_in_tx(
+    conn:    &rusqlite::Connection,
+    lane_id: &str,
+) -> Result<LaneStatus, SchedulerError> {
+    // Build NOT IN from enum — no raw state strings (INV-STORE-03).
     let terminal = [TaskState::Completed, TaskState::Failed, TaskState::Aborted, TaskState::Cancelled]
         .iter()
         .map(|s| format!("'{}'", s.as_sql_str()))
         .collect::<Vec<_>>()
         .join(", ");
 
-    let conn = store.lock_sync();
     let active_tasks: u32 = conn.query_row(
         &format!("SELECT COUNT(*) FROM {TASKS} WHERE lane_id=?1 AND state NOT IN ({terminal})"),
         rusqlite::params![lane_id],

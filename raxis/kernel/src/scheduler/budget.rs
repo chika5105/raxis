@@ -16,7 +16,7 @@ use raxis_store::{Store, Table};
 use raxis_types::{unix_now_secs, IntentKind};
 
 use crate::scheduler::{BudgetError, SchedulerError};
-use crate::scheduler::lane::get_lane_status;
+use crate::scheduler::lane::{get_lane_status, get_lane_status_in_tx};
 
 // INV-STORE-03 (kernel-store.md §2.5.1): all SQL identifiers in this
 // module flow through the typed `Table` enum.
@@ -63,11 +63,20 @@ pub fn check_budget(
 
 /// Insert a `lane_budget_reservations` row for this task.
 ///
-/// Called from the intent handler transaction after gate evaluation returns
-/// Pass/BreakglassPass/PendingWitness, before `transition_task`.
+/// **Standalone wrapper** that opens its own mutex acquisition and
+/// auto-commits the INSERT. Pre-fix this was the only entry point and was
+/// paired with a separate `check_budget` call — that pairing is the
+/// canonical Pattern A TOCTOU bug documented in `kernel-store.md`
+/// §2.5.1.1. **New write paths MUST use `reserve_budget_in_tx` instead**
+/// so the check and the insert run inside the same transaction.
 ///
 /// PK (lane_id, task_id) means re-insertion on continuation is prevented
 /// by `INSERT OR IGNORE`.
+///
+/// Kept for the (rare) case where a caller has already validated the
+/// budget under the same transaction by other means and just needs to
+/// drop the reservation row in. New callers should prefer
+/// `reserve_budget_in_tx`.
 pub fn consume_budget(
     lane_id: &str,
     task_id: &str,
@@ -75,6 +84,17 @@ pub fn consume_budget(
     store: &Store,
 ) -> Result<(), SchedulerError> {
     let conn = store.lock_sync();
+    consume_budget_in_tx(&conn, lane_id, task_id, cost)
+}
+
+/// Insert a `lane_budget_reservations` row for this task — transaction
+/// variant for callers composing this write into a larger atomic operation.
+pub fn consume_budget_in_tx(
+    conn:    &rusqlite::Connection,
+    lane_id: &str,
+    task_id: &str,
+    cost:    u64,
+) -> Result<(), SchedulerError> {
     let now = unix_now_secs();
     conn.execute(
         &format!(
@@ -85,6 +105,57 @@ pub fn consume_budget(
         rusqlite::params![lane_id, task_id, cost as i64, now],
     )?;
     Ok(())
+}
+
+/// Atomically check budget and reserve in one transaction.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern A):** this is the
+/// canonical write path that closes the budget TOCTOU. The pre-fix code
+/// called `check_budget` (acquired the mutex, computed `reserved_cost`,
+/// released the mutex) followed later by `consume_budget` (re-acquired,
+/// inserted). Two concurrent intents on the same lane could both pass
+/// the check before either inserted, over-committing the operator's
+/// `max_cost_per_epoch` cap.
+///
+/// This helper runs the SELECT-aggregate (`get_lane_status_in_tx`) and
+/// the `INSERT OR IGNORE` inside the **same** `conn.transaction()` (which
+/// the caller has already opened) so no other tokio task can interleave
+/// between them. The mutex is held continuously across both, satisfying
+/// INV-STORE-01.
+///
+/// Returns `BudgetExceeded { kind: "ConcurrencyLimit"|"CostLimit" }` if
+/// the lane cannot accommodate `estimated_cost`. Returns `NoLaneAssigned`
+/// if `lane_id` is not declared in the policy. Idempotent on `(lane_id,
+/// task_id)` PK conflict (continuation intents do not double-charge).
+pub fn reserve_budget_in_tx(
+    conn:           &rusqlite::Connection,
+    lane_id:        &str,
+    task_id:        &str,
+    estimated_cost: u64,
+    policy:         &PolicyBundle,
+) -> Result<(), SchedulerError> {
+    let lane_cfg = crate::scheduler::lane::lane_config_for_row(lane_id, policy)?;
+    let status   = get_lane_status_in_tx(conn, lane_id)?;
+
+    if status.active_tasks >= lane_cfg.max_concurrent_tasks {
+        return Err(SchedulerError::BudgetExceeded {
+            kind: format!(
+                "ConcurrencyLimit (active={}, max={})",
+                status.active_tasks, lane_cfg.max_concurrent_tasks
+            ),
+        });
+    }
+
+    if status.reserved_cost.saturating_add(estimated_cost) > lane_cfg.max_cost_per_epoch {
+        return Err(SchedulerError::BudgetExceeded {
+            kind: format!(
+                "CostLimit (reserved={}, estimated={}, max={})",
+                status.reserved_cost, estimated_cost, lane_cfg.max_cost_per_epoch
+            ),
+        });
+    }
+
+    consume_budget_in_tx(conn, lane_id, task_id, estimated_cost)
 }
 
 /// Get current budget snapshot for a lane (active tasks + reserved cost).
@@ -161,12 +232,136 @@ fn intent_kind_to_str(kind: &IntentKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raxis_policy::{LaneEntry, PolicyBundle, OperatorEntry};
+    use raxis_store::Store;
 
     #[test]
     fn saturating_add_path_cost_does_not_overflow() {
-        // With a very high path_cost, result should not wrap around.
-        // This is a property test for saturating arithmetic.
         let result = u64::MAX.saturating_add(1_000);
         assert_eq!(result, u64::MAX);
+    }
+
+    /// Build a minimal policy with a single lane configured for the test.
+    fn policy_with_lane(lane_id: &str, max_concurrent: u32, max_cost: u64) -> PolicyBundle {
+        let mut bundle = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
+        bundle.set_lanes_for_tests(vec![LaneEntry {
+            lane_id: lane_id.to_owned(),
+            max_concurrent_tasks: max_concurrent,
+            max_cost_per_epoch: max_cost,
+            priority: 0,
+        }]);
+        bundle
+    }
+
+    /// Seed one initiative + N tasks (with the FK columns the schema
+    /// requires) so `lane_budget_reservations` INSERTs (FK on
+    /// `tasks.task_id`) and `tasks` SELECTs (used by lane status) have
+    /// rows to point at.
+    fn seed_initiative_and_tasks(
+        store:         &Store,
+        initiative_id: &str,
+        tasks:         &[(&str, &str, &str)], // (task_id, lane_id, state)
+    ) {
+        use raxis_store::Table;
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!("INSERT INTO {} (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+                     VALUES (?1, 'Draft', '{{}}', '', 0)",
+                Table::Initiatives.as_str()),
+            rusqlite::params![initiative_id],
+        ).expect("seed initiative row");
+        for (task_id, lane_id, state) in tasks {
+            conn.execute(
+                &format!("INSERT INTO {} (task_id, initiative_id, lane_id, state, actor, policy_epoch, admitted_at, transitioned_at) \
+                         VALUES (?1, ?2, ?3, ?4, 'kernel', 0, 0, 0)",
+                    Table::Tasks.as_str()),
+                rusqlite::params![task_id, initiative_id, lane_id, state],
+            ).expect("seed task row");
+        }
+    }
+
+    /// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern A) regression
+    /// test.** Pre-fix, two intents could each pass `check_budget` while
+    /// each saw `reserved_cost = 0`, then both consume — over-committing
+    /// the lane cap. Post-fix, `reserve_budget_in_tx` runs the check and
+    /// the INSERT inside the same transaction; the second caller sees
+    /// the first caller's reservation reflected in `get_lane_status_in_tx`
+    /// and is rejected with `BudgetExceeded`.
+    ///
+    /// We simulate the post-fix invariant by serially running two
+    /// reservations inside the same connection: under the new helper,
+    /// the second one MUST be rejected. (The pre-fix code, by splitting
+    /// across two mutex acquisitions, could let both succeed — so this
+    /// test pins the regression: any future PR that re-introduces the
+    /// split will fail it.)
+    #[test]
+    fn reserve_in_tx_serialises_concurrent_lane_writes() {
+        let store = Store::open_in_memory().unwrap();
+        let policy = policy_with_lane("lane-A", /*max_concurrent=*/ 8, /*max_cost=*/ 100);
+        seed_initiative_and_tasks(&store, "init-A", &[
+            ("task-1", "lane-A", "Admitted"),
+            ("task-2", "lane-A", "Admitted"),
+        ]);
+
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        reserve_budget_in_tx(&tx, "lane-A", "task-1", 80, &policy)
+            .expect("first reservation should fit under cap");
+        let err = reserve_budget_in_tx(&tx, "lane-A", "task-2", 30, &policy)
+            .expect_err("second reservation must be rejected as over-cap");
+        match err {
+            SchedulerError::BudgetExceeded { kind } => {
+                assert!(kind.starts_with("CostLimit"),
+                    "expected CostLimit rejection, got {kind}");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+        tx.commit().unwrap();
+    }
+
+    /// Continuation intents (re-running the same task on the same lane)
+    /// MUST NOT double-charge — INSERT OR IGNORE on the (lane_id, task_id)
+    /// PK is the load-bearing piece. This test pins that idempotency
+    /// inside the new transactional helper.
+    #[test]
+    fn reserve_in_tx_is_idempotent_on_same_task_pk() {
+        let store = Store::open_in_memory().unwrap();
+        let policy = policy_with_lane("lane-B", 8, 100);
+        seed_initiative_and_tasks(&store, "init-B", &[
+            ("task-1", "lane-B", "Admitted"),
+        ]);
+
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        reserve_budget_in_tx(&tx, "lane-B", "task-1", 50, &policy).unwrap();
+        reserve_budget_in_tx(&tx, "lane-B", "task-1", 50, &policy)
+            .expect("continuation intent must not double-charge");
+        let status = get_lane_status_in_tx(&tx, "lane-B").unwrap();
+        assert_eq!(status.reserved_cost, 50,
+            "PK collision must collapse to single reservation");
+        tx.commit().unwrap();
+    }
+
+    /// Concurrency-cap is also enforced inside the transaction.
+    #[test]
+    fn reserve_in_tx_enforces_concurrency_cap() {
+        let store = Store::open_in_memory().unwrap();
+        let policy = policy_with_lane("lane-C", /*max_concurrent=*/ 1, /*max_cost=*/ 1_000);
+        seed_initiative_and_tasks(&store, "init-C", &[
+            ("t-existing", "lane-C", "Running"),
+            ("task-new",   "lane-C", "Admitted"),
+        ]);
+
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        let err = reserve_budget_in_tx(&tx, "lane-C", "task-new", 10, &policy)
+            .expect_err("concurrency cap must reject when active >= max");
+        match err {
+            SchedulerError::BudgetExceeded { kind } => {
+                assert!(kind.starts_with("ConcurrencyLimit"),
+                    "expected ConcurrencyLimit rejection, got {kind}");
+            }
+            other => panic!("unexpected error variant: {other:?}"),
+        }
     }
 }

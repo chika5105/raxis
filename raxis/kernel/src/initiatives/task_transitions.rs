@@ -27,12 +27,17 @@ pub enum TransitionActor {
 
 /// Perform an atomic task state transition.
 ///
+/// Standalone wrapper that opens its own mutex acquisition and runs the
+/// SELECT-then-UPDATE under one mutex hold. Suitable for one-shot
+/// transitions (operator abort, retry, etc.). Composing helpers — most
+/// notably `handlers/intent::run_phase_c` — MUST use
+/// `transition_task_in_tx` instead so the FSM update commits atomically
+/// with the surrounding writes (budget reservation, intent fields,
+/// intent range). See `kernel-store.md` §2.5.1.1 Pattern B.
+///
 /// Returns `Err(LifecycleError::TaskNotFound)` if no row for `task_id`.
 /// Returns `Err(LifecycleError::TaskNotAbortable)` if the transition is not
 /// legal from the current state.
-///
-/// The `block_reason` string is stored in `tasks.block_reason` when
-/// transitioning to `GatesPending`, `Failed`, or `BlockedRecoveryPending`.
 pub fn transition_task(
     task_id:      &str,
     new_state:    TaskState,
@@ -40,8 +45,32 @@ pub fn transition_task(
     actor:        TransitionActor,
     store:        &Store,
 ) -> Result<(), LifecycleError> {
-    let conn = store.lock_sync();
-    let now  = unix_now_secs();
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction()?;
+    transition_task_in_tx(&tx, task_id, new_state, block_reason, actor)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Atomic task state transition — transaction variant for callers
+/// composing the FSM update into a larger atomic operation.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern B):** the SELECT
+/// (current state) and the UPDATE (new state) MUST run inside the same
+/// transaction, and the caller is responsible for ensuring any
+/// surrounding writes (lane reservation, intent fields, intent range)
+/// also live inside the same transaction so they all commit or none do.
+///
+/// The `block_reason` string is stored in `tasks.block_reason` when
+/// transitioning to `GatesPending`, `Failed`, or `BlockedRecoveryPending`.
+pub fn transition_task_in_tx(
+    conn:         &rusqlite::Connection,
+    task_id:      &str,
+    new_state:    TaskState,
+    block_reason: Option<&str>,
+    actor:        TransitionActor,
+) -> Result<(), LifecycleError> {
+    let now = unix_now_secs();
 
     // Load current state string and parse it through the enum.
     let current_state_str: String = conn.query_row(
@@ -55,7 +84,6 @@ pub fn transition_task(
         other => LifecycleError::Sql(other),
     })?;
 
-    // Parse via the enum — rejects any unknown/corrupt DB value.
     let current_state = TaskState::from_sql_str(&current_state_str)
         .ok_or_else(|| LifecycleError::TaskNotAbortable {
             current_state: current_state_str.clone(),
@@ -67,7 +95,6 @@ pub fn transition_task(
         });
     }
 
-    // Type-safe new state string — never a raw literal.
     let new_state_str = new_state.as_sql_str();
     let actor_desc = match &actor {
         TransitionActor::Kernel => "kernel".to_owned(),

@@ -108,13 +108,46 @@ pub struct WitnessStartupReport {
 /// - Inserts SQL index row into `witness_records`.
 ///
 /// Returns `Ok(verifier_run_id)` on success.
+///
+/// **Standalone wrapper** that opens its own mutex acquisition for the SQL
+/// INSERT. New code paths that need to atomically commit the witness +
+/// consume the verifier token MUST use `write_blob_to_disk` followed by
+/// `insert_witness_index_in_tx` inside the same `conn.transaction()` —
+/// see `kernel-store.md` §2.5.1.1 Pattern C and INV-INIT-08 for why.
+/// Kept for callers (mostly tests) that don't need to compose with a
+/// token-consume in the same transaction.
 pub fn write(
     record: &WitnessRecord,
     blob: &[u8],
     witness_dir: &Path,
     store: &Store,
 ) -> Result<String, WitnessError> {
-    // Step 1: Verify blob hash.
+    write_blob_to_disk(record, blob, witness_dir)?;
+
+    let recorded_at = unix_now_secs();
+    let conn = store.lock_sync();
+    insert_witness_index_in_tx(&conn, record, recorded_at)?;
+
+    Ok(record.verifier_run_id.clone())
+}
+
+/// Write the witness blob to the content-addressed FS store.
+///
+/// Pure FS operation — no SQL, no mutex acquisition. Idempotent on
+/// `<witness_dir>/<blob_sha256>` (no overwrite). Verifies the
+/// claimed/computed blob hash before writing so a corrupted
+/// content-address can never collide with a real witness.
+///
+/// Splitting this off from the SQL portion lets the witness handler do
+/// (a) FS write outside the mutex, (b) SQL writes (witness index +
+/// token consume) inside one transaction — closing the
+/// validate-write-consume race documented in `kernel-store.md`
+/// §2.5.1.1 Pattern C.
+pub fn write_blob_to_disk(
+    record:      &WitnessRecord,
+    blob:        &[u8],
+    witness_dir: &Path,
+) -> Result<(), WitnessError> {
     let computed = sha256_hex(blob);
     if computed != record.blob_sha256 {
         return Err(WitnessError::BlobHashMismatch {
@@ -123,7 +156,6 @@ pub fn write(
         });
     }
 
-    // Step 2: Write blob to filesystem (filesystem first, SQL second).
     let blob_path = witness_dir.join(&record.blob_sha256);
     if !blob_path.exists() {
         std::fs::write(&blob_path, blob).map_err(|e| WitnessError::Io {
@@ -131,10 +163,28 @@ pub fn write(
             source: e,
         })?;
     }
+    Ok(())
+}
 
-    // Step 3: Insert SQL index row.
-    let recorded_at = unix_now_secs();
-    let conn = store.lock_sync();
+/// Insert the witness index row inside an existing transaction.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern C):** the canonical
+/// witness commit path runs `validate_verifier_token_in_tx` →
+/// `insert_witness_index_in_tx` → `consume_verifier_token_in_tx` all
+/// inside one `conn.transaction()`. If consume reports 0 rows (token
+/// expired by a concurrent reconcile, or already consumed by a
+/// duplicate verifier callback), the entire transaction rolls back
+/// including this INSERT — preventing the case where the gate
+/// evaluator sees a witness for a callback the kernel told its
+/// producer was rejected (INV-INIT-08).
+///
+/// `INSERT OR IGNORE` keeps duplicate `verifier_run_id` (PK) safe
+/// against the concurrent-double-callback case.
+pub fn insert_witness_index_in_tx(
+    conn:        &rusqlite::Connection,
+    record:      &WitnessRecord,
+    recorded_at: i64,
+) -> Result<(), WitnessError> {
     conn.execute(
         &format!(
             "INSERT OR IGNORE INTO {WR}
@@ -153,8 +203,7 @@ pub fn write(
             recorded_at,
         ],
     )?;
-
-    Ok(record.verifier_run_id.clone())
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

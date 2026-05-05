@@ -155,6 +155,274 @@ Audit emission **after** commit is mandatory: an audit record for an operation t
 
 ---
 
+#### §2.5.1.1 — Concurrency-bug catalogue (INV-STORE-02 enforcement scenarios)
+
+The two atomicity invariants above (INV-STORE-01, INV-STORE-02) are
+not self-enforcing — code can violate them silently. This sub-section
+enumerates every concurrency-bug **class** the kernel has had to
+defend against, with the canonical adversarial scenario for each so
+future PRs can be reviewed against a concrete failure mode rather
+than just an abstract rule. Each class is listed with: (a) the
+pattern, (b) the step-by-step interleaving that breaks an invariant,
+(c) the canonical fix, (d) the regression-test home.
+
+These scenarios are **mandatory reading** for any PR that touches a
+multi-write kernel path. Each enforcement-site listed below carries
+an `// INV-STORE-02 (§2.5.1.1)` crossref comment so a reviewer can
+trace from code back to this catalogue.
+
+##### Pattern A — Split mutex acquisition for a single logical write
+
+**Failure shape:** A function performs check (read) and mutate (write)
+under two separate `Store::lock_sync()` calls, releasing the mutex
+between them. A second tokio task can interleave between the two
+acquisitions.
+
+**Canonical scenario — budget TOCTOU (`scheduler::budget`):**
+
+1. **t=0:** Task A's intent handler runs `check_budget(lane=L,
+   cost=80, …)`. Inside, `get_lane_status` acquires the mutex,
+   computes `reserved_cost = 20` (under the lane cap of 100),
+   returns `Ok(())`. Mutex is **released**.
+2. **t=1:** Task B's intent handler — running in a different tokio
+   task on the same kernel — runs `check_budget(lane=L, cost=80,
+   …)`. It also sees `reserved_cost = 20` (A has not yet consumed),
+   passes the check, then runs `consume_budget` which inserts a
+   row of cost 80 → `reserved_cost = 100`. Mutex is released.
+3. **t=2:** Task A's handler resumes and calls `consume_budget(lane=L,
+   task=A, cost=80, …)`. The PK is `(lane_id, task_id)` so A's
+   `INSERT OR IGNORE` succeeds (different `task_id`) → `reserved_cost
+    = 180`, **80 units over the lane cap of 100**.
+4. **Result:** the lane is overcommitted in `lane_budget_reservations`.
+   Subsequent `check_budget` calls correctly reject new work, but the
+   damage is done — both A and B are accepted under a budget that
+   should only have admitted one. The kernel has executed work
+   beyond the operator-signed cap.
+
+**Invariant broken:** INV-STORE-02 (the `lane_budget_reservations`
+write must be inside the same transaction as the check that gates
+it); operator's `max_cost_per_epoch` policy guarantee.
+
+**Fix:** Replace the two-call pattern with a single transactional
+helper `reserve_budget_in_tx(tx, lane_id, task_id, cost, policy)`
+that runs the SELECT-aggregate (over `lane_budget_reservations` and
+`tasks`) and the `INSERT OR IGNORE` inside one `BEGIN`/`COMMIT`,
+both under one mutex acquisition. The intent handler's Phase C
+opens that transaction once and passes `&tx` to the helper.
+
+**Regression test home:** `scheduler::budget::tests::reserve_in_tx_serialises_concurrent_lane_writes`.
+
+##### Pattern B — Multi-call composition outside a transaction
+
+**Failure shape:** A high-level function calls multiple lower-level
+helpers, each of which acquires the mutex and runs its own
+auto-committed statement. A crash, or a concurrent operator IPC,
+between any two helper calls leaves the store in a state where
+some writes are visible and others are not.
+
+**Canonical scenario — intent acceptance (`handlers::intent::run_phase_c`):**
+
+The pre-fix code called five helpers in sequence, each opening its
+own mutex acquisition:
+
+1. `fsm_transition(task, GatesPending)` — auto-commits.
+2. `check_budget(lane, cost, policy)` — read-only, mutex acquired and released.
+3. `consume_budget(lane, task, cost)` — auto-commits the `INSERT`.
+4. `fsm_transition(task, Running)` — auto-commits.
+5. `update_task_intent_fields(task, head_sha, base_sha, …)` — auto-commits.
+6. `insert_task_intent_range(task, base, head)` — auto-commits.
+
+**Step-by-step interleaving:**
+
+1. **t=0:** Phase C runs steps 1–3 successfully. `tasks.state` is
+   now `Running` (oh wait — that's step 4; after step 3 the task
+   is still `Admitted` but `lane_budget_reservations` has an entry).
+2. **t=1:** Operator runs `task abort <task_id>`. The abort handler
+   transitions `Admitted → Aborted` via `transition_task` (which
+   succeeds because `Admitted → Aborted` is a legal edge per
+   `is_legal_transition`). The lane reservation row is **not**
+   released (release happens via `release_budget` only on the
+   normal terminal-state path, not on operator-driven abort).
+3. **t=2:** Phase C resumes step 4: `fsm_transition(task, Running)`.
+   `transition_task` re-reads `tasks.state`, sees `Aborted`, and
+   `is_legal_transition(Aborted, Running)` returns `false` →
+   returns `LifecycleError::TaskNotAbortable`. The intent handler
+   propagates this as `PlannerErrorCode::FailPolicyViolation`.
+4. **Result:** the lane carries a stranded reservation for an
+   `Aborted` task. The operator's `task abort` succeeded but did
+   not release the budget; over time the lane drifts toward
+   apparent capacity exhaustion even though no real work is
+   running.
+
+**Invariant broken:** INV-STORE-02 (intent acceptance is listed as
+a multi-table operation that must be one transaction); spec
+guarantee that "either the intent is fully accepted (FSM, budget,
+intent fields, intent range all written) or none of it is".
+
+**Fix:** Acquire the mutex once at the top of `run_phase_c`, open
+a single `conn.transaction()`, and run all five helpers as `_in_tx`
+variants that take `&Transaction` instead of `&Store`. If
+`fsm_transition_in_tx(task, Running)` returns an error, the entire
+transaction rolls back — the lane reservation row is never
+committed, and the task is left in whatever state the abort wrote.
+The operator's abort wins cleanly.
+
+**Regression test homes:**
+- `scheduler::budget::tests::reserve_in_tx_serialises_concurrent_lane_writes` (lane TOCTOU pin: pre-fix bug is exactly this scenario, post-fix the helper rejects the second over-cap reservation).
+- `scheduler::budget::tests::reserve_in_tx_is_idempotent_on_same_task_pk` (continuation-intent idempotency — `INSERT OR IGNORE` on the PK collapses retries).
+- `scheduler::budget::tests::reserve_in_tx_enforces_concurrency_cap` (concurrency cap is also enforced inside the same transaction).
+- The Phase B composition fix in `handlers::intent::run_phase_c` is end-to-end-covered by the existing `kernel/tests/mock_planner_end_to_end.rs` integration suite (which exercises the full Admitted→Running intent acceptance path against a real Store).
+
+##### Pattern C — Read in one tx, decide, write in another
+
+**Failure shape:** A function reads a state value to decide what to
+write, but the decision and the write are in different mutex
+acquisitions. Between the two, a concurrent task can change the
+state the decision was based on.
+
+**Canonical scenario — verifier-token consume race (`handlers::witness::handle`):**
+
+The pre-fix code had three `spawn_blocking` blocks, each acquiring
+the mutex:
+
+1. `validate_verifier_token(raw_token)` — SELECT row, check
+   `consumed=0` and `expires_at > now`, return `run_id`.
+2. `witness_index::write(record, blob, dir)` — write blob to FS,
+   then `INSERT OR IGNORE` into `witness_records`.
+3. `consume_verifier_token(raw_token)` — `UPDATE … SET consumed=1
+   WHERE token_hash=? AND consumed=0`.
+
+**Step-by-step interleaving (concurrent reconcile):**
+
+1. **t=0:** Verifier callback A presents its token. Step 1 runs,
+   sees `consumed=0`, returns `run_id_A`. Mutex released.
+2. **t=1:** A separate code path triggers `recovery::reconcile_tasks`
+   (e.g. via a manual reconcile RPC, or the kernel restart-after-crash
+   path running concurrently with a still-in-flight verifier). The
+   sweep transitions A's task to `BlockedRecoveryPending` and
+   `expire_orphan_verifier_tokens` UPDATEs A's token row to
+   `consumed=1`.
+3. **t=2:** Verifier A's step 2 runs. Witness blob is written to
+   FS; `INSERT OR IGNORE` into `witness_records` succeeds (no
+   unique conflict on `verifier_run_id`). Audit `WitnessAccepted`
+   is emitted to stderr. Mutex released.
+4. **t=3:** Verifier A's step 3 runs `consume_verifier_token`. The
+   UPDATE finds 0 rows (`consumed` is already 1) and returns
+   `AuthorityError::TokenConsumed`. The handler propagates
+   `HandlerError::Unauthorized`. The verifier subprocess receives
+   "your callback was rejected" — but the witness row is already in
+   the index, **and the gate evaluator will see it on the next
+   recompute even though the kernel told the verifier its work was
+   not accepted**.
+
+**Invariant broken:** INV-INIT-08 (witness records are the source
+of truth for "which gates are satisfied"; a witness that the kernel
+told its producer it rejected MUST NOT be visible to the gate
+evaluator); INV-STORE-02 (`witness_index::write` is listed as a
+multi-table operation: `witness_records` + `verifier_run_tokens`
+both written in one transaction).
+
+**Fix:** Move validate + write + consume into a single transaction.
+After the FS blob write (which is naturally outside SQL but is
+content-addressed and idempotent), the SQL portion runs as one
+`BEGIN`/`COMMIT`:
+
+1. `SELECT verifier_run_id, evaluation_sha, expires_at, consumed
+   FROM verifier_run_tokens WHERE token_hash=?` — returns the
+   `run_id` and validates `consumed=0`, `expires_at > now`.
+2. `INSERT OR IGNORE INTO witness_records (...)` — idempotent on
+   `verifier_run_id` PK.
+3. `UPDATE verifier_run_tokens SET consumed=1, consumed_at=?
+   WHERE token_hash=? AND consumed=0` — must report 1 row, else
+   the witness was concurrently expired and we must roll back.
+
+If step 3 reports 0 rows, the entire transaction rolls back: the
+witness INSERT is undone (atomic with the UPDATE) and the verifier
+gets the same `Unauthorized` reply it would have gotten under the
+pre-fix code, but **now the witness row is also rolled back** so
+the gate evaluator never sees the inconsistent record.
+
+**Regression test homes:**
+- `handlers::witness::tests::commit_witness_in_tx_happy_path_commits_all_three` (success-path atomicity).
+- `handlers::witness::tests::commit_witness_in_tx_rolls_back_when_token_concurrently_expired` (validate fails inside tx → no witness row leaks).
+- `handlers::witness::tests::commit_witness_in_tx_rolls_back_witness_when_consume_races` (consume race → witness INSERT rolled back).
+
+##### Pattern D — Multi-table writes with no explicit transaction
+
+**Failure shape:** A function performs two writes to different tables
+under one mutex hold, but does not open an explicit
+`conn.transaction()`. SQLite auto-commits each statement, so a
+process crash between them leaves the writes split.
+
+**Canonical scenarios:**
+
+- **`lifecycle::abort_initiative`** — UPDATE `tasks` (cancel all
+  non-terminal), UPDATE `initiatives` (set Aborted). Crash between
+  the two: tasks cancelled, initiative still in `Executing`. Next
+  startup runs `recovery::reconcile_tasks` which sweeps the
+  already-cancelled tasks to `BlockedRecoveryPending` (idempotent),
+  but the initiative remains stuck `Executing` forever — there is
+  no recovery sweep that re-derives initiative state from task
+  state at startup. The operator's `initiative abort` would have to
+  be re-run, except `abort_initiative` rejects already-aborted
+  initiatives — it would *not* reject one stuck in `Executing`,
+  so the second invocation succeeds and writes the `Aborted` state
+  the first time around should have written.
+- **`lifecycle::create_initiative`** — INSERT `initiatives`, INSERT
+  `signed_plan_artifacts`. Crash between: the initiative row exists
+  in `Draft` state but no plan artifact row. A subsequent
+  `approve_plan` call would fail at the `SELECT plan_bytes FROM
+  signed_plan_artifacts` step with `QueryReturnedNoRows` — leaving
+  the operator with an undeletable `Draft` initiative they can
+  never approve.
+
+**Invariant broken:** INV-STORE-02 (general principle: multi-table
+mutations for one logical operation must be one transaction).
+
+**Fix:** Wrap both writes in `let tx = conn.transaction()?;` …
+`tx.commit()?;` so the writes commit atomically. The audit event
+is still emitted **after** `tx.commit()` per §2.5.2 audit ordering.
+
+**Regression test homes:**
+- `initiatives::lifecycle::tests::abort_initiative_commits_tasks_and_initiative_atomically` (`tasks` + `initiatives` updates land together).
+- `initiatives::lifecycle::tests::create_initiative_rolls_back_initiative_row_on_signature_failure` (validation failure leaves zero rows).
+- `initiatives::lifecycle::tests::create_initiative_commits_both_rows_atomically_on_success` (success path commits BOTH `initiatives` and `signed_plan_artifacts`).
+
+##### Non-bugs (documented for completeness)
+
+The following patterns are **safe** under the current single-process
+single-connection-mutex architecture, but a reviewer who reads the
+code in isolation might worry about them:
+
+- **`transition_task`'s SELECT-then-UPDATE under one mutex hold,
+  no explicit `BEGIN`/`COMMIT`.** Safe because the mutex is held
+  across both statements (no other tokio task can interleave),
+  and a crash between SELECT and UPDATE has no consequence (the
+  SELECT is read-only). Will become a real bug if a future change
+  introduces a second writer connection — at that point an explicit
+  transaction with `BEGIN IMMEDIATE` should be added. Current code
+  is annotated `// INV-STORE-01: single-connection mutex hold;
+  upgrade to BEGIN IMMEDIATE if a second writer is added`.
+- **`retry_task`'s pattern of read-then-drop-mutex-then-call-`transition_task`.**
+  Safe because `transition_task` re-reads the state inside its own
+  mutex acquisition; if the task was concurrently moved out of
+  `Failed`, the inner re-read catches it and `transition_task`
+  returns `TaskNotAbortable` via `is_legal_transition`.
+- **Phase A of intent handler reading session-then-task-then-quarantine
+  across multiple mutex acquisitions.** The intermediate-state
+  reads are validated for staleness in Phase C's transaction by
+  re-reading the task row inside the tx. Quarantine is double-checked
+  there too. Phase A's reads exist only to compute the gate
+  evaluation argument set; the authoritative checks all live in
+  Phase C.
+
+Adding any of these to the buggy list (because the architecture
+has changed, or because new write paths render the assumptions
+invalid) requires updating both the code annotation and this
+catalogue.
+
+---
+
 #### SQL Type-Safety and Codebase Representation
 
 **Type-safety invariant (INV-STORE-03):** To prevent runtime SQL errors from typos or schema drift, **no Rust source file across the workspace — production *or* test code, in any crate that touches `kernel.db` (`raxis-kernel`, `raxis-store`, `raxis-cli`, `raxis-test-support`, and any future store consumer) — may contain a raw SQL table-name or state-value string literal**.

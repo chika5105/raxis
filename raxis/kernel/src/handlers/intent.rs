@@ -50,7 +50,9 @@ const TASK_EXPORTED_PATH_SNAPSHOTS:&str = Table::TaskExportedPathSnapshots.as_st
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
-use crate::initiatives::task_transitions::{transition_task as fsm_transition, TransitionActor};
+use crate::initiatives::task_transitions::{
+    transition_task as fsm_transition, transition_task_in_tx, TransitionActor,
+};
 use crate::ipc::context::HandlerContext;
 use crate::scheduler::budget;
 use crate::vcs;
@@ -571,47 +573,64 @@ fn run_phase_c(
     let policy = policy_snapshot.as_ref();
     let task_state = pre_state.task_state;
 
+    // ── INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern B): single-transaction
+    //    Phase C ──────────────────────────────────────────────────────────
+    //
+    // All Phase C writes — FSM transition (Admitted→GatesPending OR
+    // Admitted→Running), budget reservation, intent fields, intent range —
+    // commit atomically inside ONE `conn.transaction()` held under ONE
+    // `lock_sync` acquisition. Pre-fix, each helper acquired its own mutex
+    // and auto-committed. A concurrent `task abort` between any two helpers
+    // could leave a stranded `lane_budget_reservations` row for a
+    // now-Aborted task, drift the lane toward apparent capacity exhaustion,
+    // and cause the FSM transition step to fail with `TaskNotAbortable`
+    // (Aborted is terminal; no transition out). The transaction makes the
+    // failure mode binary: either every write commits or every write rolls
+    // back, leaving the operator's abort intact.
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction().map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+
     // ── PendingWitness branch: transition Admitted → GatesPending ────────
     //
     // Done before the budget consume so a task that is GatesPending due
     // to outstanding witnesses does not get charged a second time when
     // the witness eventually arrives and the same intent is re-submitted.
     if !pending_gates.is_empty() && task_state == TaskState::Admitted {
-        fsm_transition(
+        transition_task_in_tx(
+            &tx,
             task_id_owned.as_str(),
             TaskState::GatesPending,
             Some("gates pending: witnesses required"),
             TransitionActor::Kernel,
-            store,
         ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, TaskState::GatesPending))?;
     }
 
-    // ── Step 10: Budget check + consume (first intent, Admitted path only) ─
-    // Spec: "consume_budget must occur within the intent-handling transaction
-    // to prevent double-spending or over-scheduling."
-    // We only charge on the first time a task goes from Admitted → Running.
+    // ── Step 10: Atomic budget check + reserve (Pattern A fix) ───────────
+    //
+    // `reserve_budget_in_tx` runs the SELECT-aggregate over
+    // `lane_budget_reservations` and the `INSERT OR IGNORE` inside the
+    // same Phase C transaction, eliminating the pre-fix TOCTOU window
+    // where two concurrent intents could both pass `check_budget` before
+    // either ran `consume_budget`, over-committing the lane.
     if task_state == TaskState::Admitted && pending_gates.is_empty() {
-        budget::check_budget(&pre_state.task.lane_id, pre_state.estimated_cost, policy, store)
-            .map_err(|_| (PlannerErrorCode::FailBudgetExceeded, task_state))?;
-        budget::consume_budget(
+        budget::reserve_budget_in_tx(
+            &tx,
             &pre_state.task.lane_id,
             task_id_owned.as_str(),
             pre_state.estimated_cost,
-            store,
-        ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+            policy,
+        ).map_err(|_| (PlannerErrorCode::FailBudgetExceeded, task_state))?;
     }
 
     // ── Step 11: FSM transition via task_transitions (INV-INIT-04) ───────
-    // All state changes must go through the validated FSM transition function.
-    // Direct SQL UPDATE of state is forbidden in this file.
     if task_state == TaskState::Admitted && pending_gates.is_empty() {
         // Admitted + all gates pass → Running.
-        fsm_transition(
+        transition_task_in_tx(
+            &tx,
             task_id_owned.as_str(),
             TaskState::Running,
             None,
             TransitionActor::Kernel,
-            store,
         ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Running))?;
     }
     // Running + gate pass: no transition needed; task stays Running.
@@ -619,37 +638,27 @@ fn run_phase_c(
     // transition is for Admitted → GatesPending only in this handler).
 
     // ── Step 12: Update task intent fields ───────────────────────────────
-    // Persist evaluation_sha, base_sha, session_id on the task row so the
-    // witness handler can recover the original VCS context.
-    update_task_intent_fields(
+    update_task_intent_fields_in_tx(
+        &tx,
         task_id_owned.as_str(),
         pre_state.head_sha_raw.as_str(),
         pre_state.base_sha_raw.as_str(),
         session_id_str.as_str(),
-        store,
     ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
     // ── Step 12A: Record accepted intent range (INV-TASK-PATH-02 substrate)
-    //
-    // Spec: kernel-store.md §2.5.8 step 7A. Append one row per accepted
-    // intent to `task_intent_ranges`, which CompleteTask later reads to
-    // reconstruct the union of touched paths across all admitted ranges.
-    //
-    // PRIMARY KEY (task_id, head_sha) — duplicate `head_sha` for the same
-    // task collapses to an idempotent retry (per spec the kernel "treats
-    // this as an idempotent retry and returns the prior accepted response
-    // without re-processing"). The `INSERT OR IGNORE` here is the SQL
-    // implementation of that idempotency: the response shape returned at
-    // the end of the function is computed from the live state and is
-    // therefore identical for both the first call and the retry.
-    insert_task_intent_range(
+    insert_task_intent_range_in_tx(
+        &tx,
         task_id_owned.as_str(),
         pre_state.base_sha_raw.as_str(),
         pre_state.head_sha_raw.as_str(),
-        store,
     ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
+    tx.commit().map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+    drop(conn);
+
     // ── Step 13: Audit stub + Accepted response ───────────────────────────
+    // Audit emission is post-commit per kernel-store.md §2.5.2 ordering.
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"IntentAccepted\",\
          \"task_id\":\"{}\",\"kind\":\"{}\",\"evaluation_sha\":\"{}\",\"pending_gates\":{}}}",
@@ -1072,11 +1081,12 @@ fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
     ).map_err(|_| ())
 }
 
-/// Update intent-binding fields on the task row.
+/// Update intent-binding fields on the task row — standalone wrapper.
 ///
-/// Called in step 12 after state transition succeeds. Stores the evaluation_sha
-/// (= head_sha), base_sha, and session_id so the witness handler can
-/// re-derive touched_paths and call evaluate_claims with the correct context.
+/// Production callers (`run_phase_c`) use `update_task_intent_fields_in_tx`
+/// inside the Phase C transaction. This standalone variant exists for
+/// `#[cfg(test)]` fixtures that exercise the helper in isolation.
+#[cfg(test)]
 fn update_task_intent_fields(
     task_id:        &str,
     evaluation_sha: &str,
@@ -1084,7 +1094,29 @@ fn update_task_intent_fields(
     session_id:     &str,
     store:          &Store,
 ) -> Result<(), ()> {
-    let conn = store.lock_sync();
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction().map_err(|_| ())?;
+    update_task_intent_fields_in_tx(&tx, task_id, evaluation_sha, base_sha, session_id)?;
+    tx.commit().map_err(|_| ())?;
+    Ok(())
+}
+
+/// Update intent-binding fields on the task row — transaction variant.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern B):** intent acceptance
+/// composes FSM transition + budget reservation + intent fields update +
+/// intent range insert. All four MUST land in one transaction so a
+/// concurrent operator abort (or crash) cannot leave a stranded lane
+/// reservation, mismatched intent fields, or an intent_range row without
+/// a matching task state. This helper takes `&Connection` so the caller
+/// passes the open `Transaction` (which derefs to `Connection`).
+fn update_task_intent_fields_in_tx(
+    conn:           &rusqlite::Connection,
+    task_id:        &str,
+    evaluation_sha: &str,
+    base_sha:       &str,
+    session_id:     &str,
+) -> Result<(), ()> {
     conn.execute(
         &format!(
             "UPDATE {TASKS} SET evaluation_sha = ?1, base_sha = ?2, session_id = ?3
@@ -1095,21 +1127,38 @@ fn update_task_intent_fields(
     Ok(())
 }
 
-/// Append one row to `task_intent_ranges` per kernel-store.md §2.5.8 step 7A.
-///
-/// Uses `INSERT OR IGNORE` so a duplicate `(task_id, head_sha)` — which
-/// SQLite reports as `SQLITE_CONSTRAINT_PRIMARYKEY` on plain INSERT —
-/// silently no-ops, matching the spec's idempotent-retry semantics:
-/// "Submitting the same head_sha twice returns SQLITE_CONSTRAINT_PRIMARYKEY;
-///  the kernel treats this as an idempotent retry and returns the prior
-///  accepted response without re-processing."
+/// Append one row to `task_intent_ranges` — standalone wrapper for tests.
+#[cfg(test)]
 fn insert_task_intent_range(
     task_id:  &str,
     base_sha: &str,
     head_sha: &str,
     store:    &Store,
 ) -> Result<(), ()> {
-    let conn = store.lock_sync();
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction().map_err(|_| ())?;
+    insert_task_intent_range_in_tx(&tx, task_id, base_sha, head_sha)?;
+    tx.commit().map_err(|_| ())?;
+    Ok(())
+}
+
+/// Append one row to `task_intent_ranges` per kernel-store.md §2.5.8 step 7A —
+/// transaction variant.
+///
+/// Uses `INSERT OR IGNORE` so a duplicate `(task_id, head_sha)` — which
+/// SQLite reports as `SQLITE_CONSTRAINT_PRIMARYKEY` on plain INSERT —
+/// silently no-ops, matching the spec's idempotent-retry semantics:
+/// "Submitting the same head_sha twice returns SQLITE_CONSTRAINT_PRIMARYKEY;
+///  the kernel treats this as an idempotent retry and returns the prior
+///  accepted response without re-processing." Composed inside the Phase C
+/// transaction (`kernel-store.md` §2.5.1.1 Pattern B) so it commits or
+/// rolls back atomically with the FSM and budget writes.
+fn insert_task_intent_range_in_tx(
+    conn:     &rusqlite::Connection,
+    task_id:  &str,
+    base_sha: &str,
+    head_sha: &str,
+) -> Result<(), ()> {
     conn.execute(
         &format!(
             "INSERT OR IGNORE INTO {TASK_INTENT_RANGES}

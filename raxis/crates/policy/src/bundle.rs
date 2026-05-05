@@ -1439,6 +1439,19 @@ impl PolicyBundle {
         &self.lanes
     }
 
+    /// Replace the lane definitions on a test bundle.
+    ///
+    /// Gated on `debug_assertions || cfg(test)` — disappears in production
+    /// builds. Used by kernel-side tests (e.g.
+    /// `scheduler::budget::tests::reserve_in_tx_serialises_concurrent_lane_writes`)
+    /// that need to seed a non-empty lane table on top of the
+    /// `for_tests_with_operators` skeleton without going through a full
+    /// `policy.toml` round-trip.
+    #[cfg(any(debug_assertions, test))]
+    pub fn set_lanes_for_tests(&mut self, lanes: Vec<LaneEntry>) {
+        self.lanes = lanes;
+    }
+
     // ── Artifact metadata ───────────────────────────────────────────────────
 
     /// Set the SHA-256 of the raw policy.toml bytes. Called by the loader

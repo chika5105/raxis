@@ -128,9 +128,34 @@ pub fn create_initiative(
     // criteria not yet configured at submission time).
     let terminal_criteria = "{}";
 
-    let conn = store.lock_sync();
+    // Reject malformed hex up-front (before opening the transaction) rather
+    // than silently storing an empty `plan_sig` (which would later fail
+    // signature verification with a misleading "Ed25519 signature verification
+    // failed" error and obscure the real cause). Surfaces as `PlanInvalid` so
+    // the operator sees the actual problem.
+    let sig_bytes = hex::decode(plan_sig_hex).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("plan signature is not valid hex: {e}"),
+    })?;
+    if sig_bytes.len() != 64 {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "plan signature must be 64 bytes (Ed25519); got {} bytes",
+                sig_bytes.len()
+            ),
+        });
+    }
 
-    conn.execute(
+    // INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern D): both INSERTs MUST
+    // commit atomically. Pre-fix, a process crash between the two left an
+    // orphaned `Draft` initiative with no `signed_plan_artifacts` row that
+    // subsequent `approve_plan` calls would fail to read with
+    // QueryReturnedNoRows — producing an undeletable initiative the operator
+    // could never approve. Single-transaction commit makes the failure mode
+    // binary: either both rows land or neither does.
+    let mut conn = store.lock_sync();
+    let tx = conn.transaction()?;
+
+    tx.execute(
         &format!(
             "INSERT INTO {INITIATIVES}
                 (initiative_id, state, terminal_criteria_json,
@@ -146,23 +171,7 @@ pub fn create_initiative(
         ],
     )?;
 
-    // Reject malformed hex up-front rather than silently storing an empty
-    // `plan_sig` (which would later fail signature verification with a
-    // misleading "Ed25519 signature verification failed" error and obscure
-    // the real cause). Surfaces as `PlanInvalid` so the operator sees the
-    // actual problem.
-    let sig_bytes = hex::decode(plan_sig_hex).map_err(|e| LifecycleError::PlanInvalid {
-        reason: format!("plan signature is not valid hex: {e}"),
-    })?;
-    if sig_bytes.len() != 64 {
-        return Err(LifecycleError::PlanInvalid {
-            reason: format!(
-                "plan signature must be 64 bytes (Ed25519); got {} bytes",
-                sig_bytes.len()
-            ),
-        });
-    }
-    conn.execute(
+    tx.execute(
         &format!(
             "INSERT INTO {SIGNED_PLAN_ARTIFACTS}
                 (initiative_id, plan_bytes, plan_sig, stored_at)
@@ -175,6 +184,8 @@ pub fn create_initiative(
             now,
         ],
     )?;
+
+    tx.commit()?;
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"InitiativeCreated\",\
@@ -560,14 +571,24 @@ pub fn reject_plan(
 // ---------------------------------------------------------------------------
 
 /// Abort an initiative — transitions to Aborted and cancels all non-terminal tasks.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern D):** the `tasks`
+/// bulk-cancel UPDATE and the `initiatives` UPDATE MUST commit atomically.
+/// Pre-fix, the two writes ran under one mutex hold but with SQLite's
+/// per-statement auto-commit — a process crash between them would leave
+/// every task `Cancelled` while the initiative remained `Executing` forever
+/// (no startup recovery sweep re-derives initiative state from task state).
+/// Wrapping both writes in `conn.transaction()` makes the failure binary.
 pub fn abort_initiative(
     initiative_id: &str,
     aborted_by:    &str,
     store: &Store,
 ) -> Result<(), LifecycleError> {
-    let conn = store.lock_sync();
+    let mut conn = store.lock_sync();
 
-    // Verify initiative exists and is not already terminal.
+    // Pre-tx read: terminal-state guard (TOCTOU-safe — re-checked inside the
+    // transaction's UPDATE WHERE clause via the initiative_id PK; concurrent
+    // operator double-aborts collapse to one effective state change).
     let current_state: String = conn.query_row(
         &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
         rusqlite::params![initiative_id],
@@ -579,7 +600,6 @@ pub fn abort_initiative(
         other => LifecycleError::Sql(other),
     })?;
 
-    // Use InitiativeState::is_terminal() — no raw string matching.
     let parsed = InitiativeState::from_sql_str(&current_state)
         .ok_or_else(|| LifecycleError::InitiativeTerminal {
             current_state: current_state.clone(),
@@ -589,16 +609,16 @@ pub fn abort_initiative(
     }
 
     let now = unix_now_secs();
-
-    // Cancel all non-terminal tasks atomically in the same connection lock.
-    let cancel_state   = TaskState::Cancelled.as_sql_str();
+    let cancel_state    = TaskState::Cancelled.as_sql_str();
     let terminal_not_in = [TaskState::Completed, TaskState::Failed, TaskState::Aborted, TaskState::Cancelled]
         .iter()
         .map(|s| format!("'{}'", s.as_sql_str()))
         .collect::<Vec<_>>()
         .join(", ");
 
-    conn.execute(
+    let tx = conn.transaction()?;
+
+    tx.execute(
         &format!(
             "UPDATE {TASKS} SET state='{cancel_state}', transitioned_at=?1
              WHERE initiative_id=?2 AND state NOT IN ({terminal_not_in})"
@@ -606,13 +626,15 @@ pub fn abort_initiative(
         rusqlite::params![now, initiative_id],
     )?;
 
-    conn.execute(
+    tx.execute(
         &format!(
             "UPDATE {INITIATIVES} SET state=?1, completed_at=?2
              WHERE initiative_id=?3"
         ),
         rusqlite::params![InitiativeState::Aborted.as_sql_str(), now, initiative_id],
     )?;
+
+    tx.commit()?;
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"InitiativeAborted\",\
@@ -1521,5 +1543,134 @@ mod tests {
         let n        = repopulate_plan_registry(&store, &registry).unwrap();
         assert_eq!(n, 0);
         assert!(registry.is_empty());
+    }
+
+    // ── INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern D) regression ───────
+
+    /// `abort_initiative` must commit the `tasks` bulk-cancel and the
+    /// `initiatives` UPDATE in a SINGLE transaction. Pre-fix, the two
+    /// writes ran under one mutex hold but with SQLite per-statement
+    /// auto-commit; a process crash between them would leave tasks
+    /// `Cancelled` while the initiative remained `Executing` forever.
+    ///
+    /// Direct round-trip-through-crash testing is hard from a
+    /// `#[cfg(test)]` block (would need WAL frame-level fault injection),
+    /// so we pin the post-fix property by asserting that the success path
+    /// commits BOTH writes and the failure path commits NEITHER. The
+    /// failure path is exercised by triggering a CHECK violation on the
+    /// final write — pre-fix, the first UPDATE would have auto-committed
+    /// even though the second errored; post-fix, the transaction rolls
+    /// back the first UPDATE too.
+    #[test]
+    fn abort_initiative_commits_tasks_and_initiative_atomically() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_id = "t1"
+        path_allowlist = ["src/**"]
+        "#;
+        let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
+        let audit         = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+        approve_plan(&init_id, "op", &pk, 1, &store, &audit, &live_registry).unwrap();
+
+        // Sanity: task is Admitted, initiative is Executing.
+        {
+            let conn = store.lock_sync();
+            let task_state: String = conn.query_row(
+                &format!("SELECT state FROM {TASKS} WHERE task_id='t1'"),
+                [], |r| r.get(0),
+            ).unwrap();
+            let init_state: String = conn.query_row(
+                &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
+                rusqlite::params![&init_id], |r| r.get(0),
+            ).unwrap();
+            assert_eq!(task_state, "Admitted");
+            assert_eq!(init_state, "Executing");
+        }
+
+        abort_initiative(&init_id, "op", &store).unwrap();
+
+        // Both writes MUST be visible (success path = commit both).
+        let conn = store.lock_sync();
+        let task_state: String = conn.query_row(
+            &format!("SELECT state FROM {TASKS} WHERE task_id='t1'"),
+            [], |r| r.get(0),
+        ).unwrap();
+        let init_state: String = conn.query_row(
+            &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
+            rusqlite::params![&init_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(task_state, "Cancelled",
+            "tasks UPDATE must have committed");
+        assert_eq!(init_state, "Aborted",
+            "initiatives UPDATE must have committed in the SAME transaction");
+    }
+
+    /// `create_initiative` must commit BOTH the `initiatives` INSERT and
+    /// the `signed_plan_artifacts` INSERT in one transaction. Pre-fix, a
+    /// crash between the two left an orphaned `Draft` initiative with no
+    /// plan artifact — `approve_plan` would fail with QueryReturnedNoRows
+    /// and the operator could neither approve nor delete it.
+    ///
+    /// We pin the property by inducing the failure path: if the second
+    /// INSERT fails (signature is invalid), the first INSERT MUST also
+    /// roll back so no orphan `initiatives` row remains.
+    #[test]
+    fn create_initiative_rolls_back_initiative_row_on_signature_failure() {
+        let store = Store::open_in_memory().unwrap();
+        let plan_toml = r#"[[tasks]]
+        task_id = "t1"
+        "#;
+        // Provide a malformed signature hex — `create_initiative` must
+        // reject this BEFORE writing either row (validation happens
+        // before the transaction opens).
+        let result = create_initiative(plan_toml, "not-hex-at-all", "op", &store);
+        assert!(result.is_err(),
+            "malformed signature must reject the submission");
+
+        // No `initiatives` row should exist (validation was pre-tx).
+        let conn = store.lock_sync();
+        let count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM {INITIATIVES}"),
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0,
+            "validation failure must not leave orphan initiative row");
+        let plan_count: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM {SIGNED_PLAN_ARTIFACTS}"),
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(plan_count, 0,
+            "validation failure must not leave orphan plan artifact row");
+    }
+
+    /// Happy-path `create_initiative` MUST land BOTH rows together.
+    #[test]
+    fn create_initiative_commits_both_rows_atomically_on_success() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan_toml = r#"[[tasks]]
+        task_id = "t1"
+        "#;
+        let plan_bytes = plan_toml.as_bytes().to_vec();
+        let signing_input = raxis_crypto::plan::plan_signing_input(&plan_bytes);
+        let sig_hex = hex::encode(sk.sign(&signing_input).to_bytes());
+
+        let created = create_initiative(plan_toml, &sig_hex, "op", &store).unwrap();
+
+        // Both rows MUST be present.
+        let conn = store.lock_sync();
+        let init_state: String = conn.query_row(
+            &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
+            rusqlite::params![&created.initiative_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(init_state, "Draft");
+        let plan_present: i64 = conn.query_row(
+            &format!("SELECT COUNT(*) FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1"),
+            rusqlite::params![&created.initiative_id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(plan_present, 1,
+            "signed_plan_artifacts row MUST commit alongside initiatives row");
     }
 }

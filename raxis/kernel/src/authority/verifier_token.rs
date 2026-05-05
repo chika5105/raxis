@@ -68,11 +68,33 @@ pub fn issue_verifier_token(
 /// if the row exists but has passed `expires_at`, `TokenConsumed` if already
 /// consumed.
 ///
-/// Does NOT consume the token — call `consume_verifier_token` after the
-/// verifier call completes.
+/// **Standalone wrapper** — the canonical witness commit path uses
+/// `validate_verifier_token_in_tx` so the validate, witness write, and
+/// consume all run inside one transaction (`kernel-store.md`
+/// §2.5.1.1 Pattern C). Pre-fix, splitting validate and consume across
+/// two mutex acquisitions opened a window where a concurrent
+/// `recovery::reconcile_tasks` could expire the token between validate and
+/// consume, leaving a witness row that the kernel told its producer was
+/// rejected.
+///
+/// Does NOT consume the token — see `consume_verifier_token`.
 pub fn validate_verifier_token(
     raw_token: &str,
     store: &Store,
+) -> Result<String, AuthorityError> {
+    let conn = store.lock_sync();
+    validate_verifier_token_in_tx(&conn, raw_token)
+}
+
+/// Validate a raw token inside an existing transaction.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern C):** the witness
+/// handler runs validate → witness-write → consume in one
+/// `conn.transaction()` so the three steps are atomic against a
+/// concurrent token expiry sweep.
+pub fn validate_verifier_token_in_tx(
+    conn:      &rusqlite::Connection,
+    raw_token: &str,
 ) -> Result<String, AuthorityError> {
     // Reject malformed hex up-front rather than collapsing to an empty buffer
     // (which would let a presented token of "" hash to the SHA-256 of empty
@@ -82,7 +104,6 @@ pub fn validate_verifier_token(
     let token_hash = sha256_hex(&raw_bytes);
     let now = unix_now_secs();
 
-    let conn = store.lock_sync();
     let (run_id, expires_at, consumed): (String, i64, i64) = conn.query_row(
         &format!("SELECT verifier_run_id, expires_at, consumed FROM {VRT} WHERE token_hash=?1"),
         rusqlite::params![&token_hash],
@@ -106,14 +127,31 @@ pub fn validate_verifier_token(
 ///
 /// Once consumed, `validate_verifier_token` returns `TokenConsumed` for any
 /// subsequent presentation. Tokens are single-use.
+///
+/// **Standalone wrapper** — the canonical witness commit path uses
+/// `consume_verifier_token_in_tx` so consume composes atomically with
+/// validate and witness-write in one transaction.
 pub fn consume_verifier_token(raw_token: &str, store: &Store) -> Result<(), AuthorityError> {
-    // See `validate_verifier_token` for the rationale on rejecting malformed
-    // hex rather than silently degrading to SHA-256("").
+    let conn = store.lock_sync();
+    consume_verifier_token_in_tx(&conn, raw_token)
+}
+
+/// Consume a verifier token inside an existing transaction.
+///
+/// **INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern C):** if this returns
+/// `TokenConsumed` (UPDATE found 0 rows) the caller MUST roll back its
+/// transaction so the witness INSERT does not commit. The witness handler
+/// relies on this: a failed consume rolls back the entire `conn.transaction()`,
+/// undoing the just-inserted `witness_records` row so the gate evaluator
+/// never sees a witness whose producer received a rejection reply.
+pub fn consume_verifier_token_in_tx(
+    conn:      &rusqlite::Connection,
+    raw_token: &str,
+) -> Result<(), AuthorityError> {
     let raw_bytes = hex::decode(raw_token).map_err(|_| AuthorityError::TokenMismatch)?;
     let token_hash = sha256_hex(&raw_bytes);
     let now = unix_now_secs();
 
-    let conn = store.lock_sync();
     let rows = conn.execute(
         &format!("UPDATE {VRT} SET consumed=1, consumed_at=?1 WHERE token_hash=?2 AND consumed=0"),
         rusqlite::params![now, &token_hash],

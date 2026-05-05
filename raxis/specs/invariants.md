@@ -679,21 +679,44 @@ maintain a cross-table consistency relationship must execute
 every write in a single SQL transaction held under one
 INV-STORE-01 mutex acquisition. The exhaustive v1 list:
 `lifecycle::transition_task` + `evaluate_terminal_criteria`,
-`policy_manager::advance_epoch` Phase 1, `handlers/intent`
-acceptance, `recovery::reconcile_tasks` + `expire_orphan_verifier_tokens`.
+`lifecycle::approve_plan` + `scheduler::admit_in_tx`,
+`lifecycle::create_initiative` (initiatives + signed_plan_artifacts),
+`lifecycle::abort_initiative` (tasks bulk-cancel + initiatives),
+`policy_manager::advance_epoch` Phase 1,
+`handlers/intent::run_phase_c` (intent acceptance),
+`scheduler::budget::reserve_budget_in_tx` (check + INSERT),
+`handlers/witness::handle` SQL portion (validate + write +
+consume), `recovery::reconcile_tasks` +
+`expire_orphan_verifier_tokens`.
 
 **Justification.** A partial-write outcome would leave the store
 in an inconsistent state — e.g. a budget reservation without a
-matching task transition, or a swept policy without the
-`policy_epoch_history` row. These are unrecoverable: the kernel
-has no way to "undo" a half-applied multi-table change.
+matching task transition, a swept policy without the
+`policy_epoch_history` row, or a `Draft` initiative with no
+`signed_plan_artifacts` row that subsequent `approve_plan` calls
+will fail to read. These are unrecoverable: the kernel has no
+way to "undo" a half-applied multi-table change at startup
+(except for the tasks-sweep `recovery::reconcile_tasks` does for
+the specific `BlockedRecoveryPending` case).
 
 **Scenario.** An intent is accepted: handler writes to `tasks`
 (state + intent fields), `task_intent_ranges` (range row), and
-`lane_budget_reservations` (reservation row), and updates the
-audit-pointer — all in one transaction. If the transaction fails
-(disk full, constraint violation), nothing is committed; the
-intent is rejected wholesale.
+`lane_budget_reservations` (reservation row) — all in one
+transaction. If the transaction fails mid-way (FSM rejection
+because operator concurrently aborted, disk full, constraint
+violation), nothing is committed; the intent is rejected
+wholesale and the lane is not stranded with a phantom
+reservation.
+
+**Concurrency-bug catalogue.** The non-trivial enforcement
+scenarios — patterns A (split mutex acquisition / TOCTOU), B
+(multi-call composition outside tx), C (read in one tx then
+write in another), D (multi-table writes with no explicit
+transaction) — are documented step-by-step in
+`v1/kernel-store.md` §2.5.1.1 with concrete adversarial
+interleavings, the canonical fix for each, and the
+regression-test home that pins it. New PRs that touch a
+multi-write kernel path are required to read that section.
 
 ---
 
