@@ -216,6 +216,33 @@ raxis doctor     # full preflight: cert zones, audit chain, schema version
 `doctor` should print all-green; `status` should show kernel uptime and an
 empty initiative list.
 
+> **About `--operator-key`** — every command from here on that talks to
+> the kernel's operator socket (`plan submit`, `plan approve`,
+> `plan reject`, `session create`, `session revoke`, `initiative abort`,
+> `initiative quarantine`, `task abort/resume/retry`, `delegation grant`,
+> `escalation approve/deny`, `epoch advance`, `operator
+> quarantine-plans-by`, `cert install`) requires `--operator-key
+> <path>` as a **global flag** (it goes BEFORE the subcommand, not
+> after). The kernel uses it to perform an Ed25519 challenge-response
+> handshake on every connection. Read-only commands (`status`,
+> `inspect`, `doctor`, `audit verify`, `verify-chain`, `log`,
+> `inbox`, `sessions`, `escalations`, `verifiers`, `witnesses`,
+> `budget`) do NOT need it.
+>
+> To avoid retyping the path on every command, define a short alias
+> for the rest of this guide:
+>
+> ```bash
+> alias raxisop='raxis --operator-key "$HOME/raxis-keys/operator_private.pem"'
+> ```
+>
+> Every later command shown below uses `raxisop` for any
+> operator-socket call and bare `raxis` for read-only / signing
+> calls. If your shell does not preserve aliases across subshells
+> for `$()` command substitution, just inline the full
+> `raxis --operator-key "$HOME/raxis-keys/operator_private.pem"`
+> form instead.
+
 ---
 
 ## Step 8 — Sign the demo plan
@@ -238,14 +265,21 @@ The kernel always mints a fresh UUID v4 as the canonical `initiative_id`. The
 first argument to `plan submit` is a **free-form label** for log lines only
 — capture the UUID it echoes back, **not** the label:
 
+Both commands are operator-socket calls and need `--operator-key` (see
+the box at the end of Step 7 for the full rationale; the snippet below
+inlines the flag rather than relying on the alias so the command-
+substitution `$(...)` always sees it):
+
 ```bash
-SUBMIT_OUT="$(raxis plan submit demo "$PLAN_DIR")"
+SUBMIT_OUT="$(raxis --operator-key "$HOME/raxis-keys/operator_private.pem" \
+                plan submit demo "$PLAN_DIR")"
 printf '%s\n' "$SUBMIT_OUT"
 
 INIT_ID="$(printf '%s\n' "$SUBMIT_OUT" | awk '/^Initiative/ {print $2; exit}')"
 echo "INIT_ID=$INIT_ID"
 
-raxis plan approve "$INIT_ID"
+raxis --operator-key "$HOME/raxis-keys/operator_private.pem" \
+      plan approve "$INIT_ID"
 ```
 
 After `plan approve` the initiative transitions `Draft → ApprovedPlan`, and
@@ -285,13 +319,14 @@ mkdir -p "$(dirname "$WT")"
 
 git -C "$REPO_ROOT" worktree add "$WT" -b "agents/$LINEAGE_ID"
 
-raxis session create \
-  --role planner \
-  --worktree-root "$WT" \
-  --base-tracking-ref refs/heads/main \
-  --lineage-id "$LINEAGE_ID" \
-  --task task-alpha \
-  2> "$DEMO_ROOT/session-1.env"
+raxis --operator-key "$HOME/raxis-keys/operator_private.pem" \
+      session create \
+        --role planner \
+        --worktree-root "$WT" \
+        --base-tracking-ref refs/heads/main \
+        --lineage-id "$LINEAGE_ID" \
+        --task task-alpha \
+        2> "$DEMO_ROOT/session-1.env"
 ```
 
 The CLI prints the human-readable session info (session id, expires-at,
@@ -393,6 +428,7 @@ rm -rf "$RAXIS_DATA_DIR" "$DEMO_ROOT" /tmp/raxis-e2e-worktrees
 |---|---|---|
 | `Algorithm ed25519 not found` on `openssl genpkey` | macOS default LibreSSL | Install Homebrew `openssl@3` and put it on `$PATH` (Step 0) |
 | `unknown flag --operator-pubkey` from `raxis genesis` | Cert-mandatory release removed it | Use `--operator-key` (convenience) or `--operator-cert` (air-gapped) |
+| `--operator-key <path> is required for this command` on `plan submit` / `plan approve` / `session create` / etc. | Operator-socket commands need the key to perform the kernel's challenge-response handshake | Pass `--operator-key <path>` as a **global flag BEFORE the subcommand** (not after). See the box at the end of Step 7 for the full list of operator-socket commands |
 | `FAIL_WORKTREE_OUTSIDE_ALLOWED_ROOTS` on `session create` | Worktree path not under any `[sessions].allowed_worktree_roots` entry | Edit policy → re-sign → restart kernel (or `raxis epoch advance` if it's running) |
 | `FAIL_UNKNOWN_SIGNER` on `plan submit` | Plan signed with a key not in `policy.toml`'s operator entry | Re-sign the plan with the same `--key` you used for genesis |
 | `ERR_SCHEMA_MISMATCH` (exit 7) from any read-only command | CLI compiled against a different `SCHEMA_VERSION` than the kernel that wrote the DB | Rebuild + reinstall the CLI from the same workspace as the kernel |
