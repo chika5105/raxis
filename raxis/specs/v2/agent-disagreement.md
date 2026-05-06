@@ -527,6 +527,153 @@ This explicit decision is preferred over auto-purge because the forensic value o
 
 ---
 
+## 7b. Per-Session Escalation Rate Limiting (V2 addition)
+
+V1 ships with a per-**lineage** escalation rate limiter
+(`v1/kernel-store.md` §`lineage_rate_limits` table) that prevents
+a misbehaving agent instance from overwhelming the operator
+review queue across many short-lived sessions. That limiter is
+the right level for cross-session abuse.
+
+But V1 has no defense against the within-session burst pattern:
+a single misbehaving session that emits 100 distinct
+`EscalationRequest` intents within a few seconds (e.g., a
+malformed planner stuck in a tight retry loop, or a prompt
+injection that elicits repeated escalations). The
+per-lineage limiter eventually triggers the lineage quarantine,
+but only after the burst has filled the operator's escalation
+queue with junk and consumed cgroup budget on serializing the
+intents. V2 adds a complementary per-session limiter in front of
+the per-lineage limiter:
+
+```sql
+-- Migration N+1: per-session escalation rate-limit state.
+CREATE TABLE session_escalation_rate_limits (
+    session_id              TEXT    NOT NULL PRIMARY KEY
+        REFERENCES sessions(id) ON DELETE CASCADE,
+    window_start_ms         INTEGER NOT NULL,
+    escalation_count        INTEGER NOT NULL DEFAULT 0,
+    last_burst_warned_at_ms INTEGER             -- set after WARN_SESSION_ESCALATION_BURST
+);
+```
+
+The `policy.toml [escalation_rate_limit]` section gains two
+optional fields:
+
+```toml
+[escalation_rate_limit]
+# Per-lineage limits (V1; unchanged).
+window_seconds            = 3600       # 1 hour
+max_per_window            = 12
+quarantine_threshold      = 24
+
+# Per-session limits (V2 addition).
+session_window_seconds    = 60         # default 60 s
+session_max_per_window    = 3          # max distinct EscalationRequests per session per window
+session_burst_action      = "reject"   # "reject" | "fail_session"
+```
+
+`session_window_seconds` and `session_max_per_window` together
+define a sliding-window cap. The check is the same shape as the
+per-lineage check but uses millisecond resolution so short
+windows (e.g., 5 s) work correctly.
+
+#### Check flow
+
+`handlers/escalation.rs` runs the per-session check FIRST (before
+the per-lineage check) inside the same `BEGIN IMMEDIATE`
+transaction:
+
+1. INSERT-OR-IGNORE into `session_escalation_rate_limits`.
+2. SELECT the row.
+3. If `now_ms() >= window_start_ms + session_window_seconds *
+   1000`: reset `(window_start_ms, escalation_count) = (now_ms,
+   0)`.
+4. If `escalation_count + 1 > session_max_per_window`: reject
+   per `session_burst_action`:
+   - `"reject"` (default): return
+     `FAIL_SESSION_ESCALATION_RATE_LIMIT_EXCEEDED { current,
+     max, window_seconds, retry_after_ms }`. The session
+     remains `Active`. The agent receives the failure on its
+     `IntentResponse` and must back off. The session row is
+     unaffected; the per-lineage counter is NOT incremented
+     (the request never reached that layer).
+   - `"fail_session"`: transition the session to `Failed`
+     with `failure_reason = SessionEscalationBurst { count,
+     limit, window_seconds }`; emit `SessionTerminated` with
+     the same reason; cascade-cancel any in-flight verifier or
+     gateway invocations the session owns. Use this for high-
+     trust deployments where a within-session escalation
+     burst is treated as a strong signal of compromise.
+5. Otherwise: increment `escalation_count`; proceed to the
+   per-lineage check.
+6. On the FIRST rejection in any window, also emit
+   `WARN_SESSION_ESCALATION_BURST { session_id, count, limit,
+   first_burst_at_ms }` to the audit chain (idempotent within a
+   window via `last_burst_warned_at_ms`). Subsequent rejections
+   in the same window are recorded as
+   `EscalationRateLimitRejected` audits but do not re-emit the
+   warning.
+
+#### Garbage collection
+
+Rows in `session_escalation_rate_limits` are deleted by the
+session-cascade on session terminal state (foreign-key `ON
+DELETE CASCADE`). No standalone sweep is needed.
+
+#### Composition with per-lineage limit
+
+The per-session limit is **strictly additive**: it can only
+*reject* requests that the per-lineage limit would otherwise
+have accepted. A request that fails the per-session limit
+never reaches the per-lineage counter, so a session burst does
+NOT advance the per-lineage `escalation_count` toward the
+quarantine threshold. This is intentional: the per-session
+limit is a fast tripwire that fires before the per-lineage
+counter accumulates "evidence" of cross-session abuse. If the
+burst behavior persists across multiple sessions in the same
+lineage, the per-lineage counter accumulates from the survivors
+of the per-session limit and quarantines as before.
+
+#### Why per-session and per-lineage cannot be merged
+
+Different threat models:
+
+- **Per-lineage** defends against many-short-sessions abuse:
+  an attacker who controls one signing key opens a fresh
+  session for every escalation to evade per-session limits.
+  The lineage_id ties them together; per-lineage catches
+  this.
+- **Per-session** defends against tight-loop abuse: a single
+  session in a buggy or compromised state emits many
+  escalations before the per-lineage counter has time to
+  accumulate. Per-session catches this in a single window.
+
+A merged limiter would have to pick one threat model or the
+other, or fall back to a coarse "per-operator" cap that
+penalizes every legitimate user when one is misbehaving.
+Two layers, one mechanism each, no per-operator collateral.
+
+#### Defaults rationale
+
+`session_max_per_window = 3` per `session_window_seconds = 60`
+is chosen so that legitimate sessions almost never trip:
+
+- A typical Executor session emits zero or one escalations per
+  task lifetime; `3 / 60s` is a 60× safety margin.
+- Sessions that legitimately escalate frequently (e.g., a long-
+  running Orchestrator coordinating many sub-tasks) should be
+  authoring with `[orchestrator] expected_escalation_burst =
+  N` overrides per-plan, parallel to the existing
+  `expected_push_burst` mechanism (`kernel-push-protocol.md
+  §10.1`). V2 ships `expected_escalation_burst = 1` as the
+  default; operators raise it explicitly per plan if needed.
+
+The hard ceiling on `expected_escalation_burst` is `100`
+(plan-cannot-exceed-policy floor `INV-POLICY-01`).
+
+---
+
 ## 8. Invariants
 
 The mechanisms in §3–§7 are governed by the following invariants. These are added to `specs/invariants.md`.
@@ -542,6 +689,8 @@ The mechanisms in §3–§7 are governed by the following invariants. These are 
 **`INV-CONVERGENCE-05` — Abandoned Worktree Retention.** A task's worktree, after the task transitions to `Failed`, MUST be retained for at least `salvage_window` (allowing operator salvage) and SHOULD be retained for `abandoned_commits_retention` total (allowing forensic inspection). The disk watchdog MUST NOT auto-purge abandoned worktrees during the salvage window; operators must explicitly force purge if disk pressure requires it.
 
 **`INV-CONVERGENCE-06` — Routing Authority Preservation.** An escalation's effective resolution authority MUST trace through every routing level recorded in `routing_history`. An Orchestrator that resolves an escalation cannot grant authority that the operator's signed policy does not allow; an operator that resolves an escalation cannot grant authority exceeding their own role per `policy.toml`. The kernel re-validates the resolution authority at the moment of resolution admission, not at routing time.
+
+**`INV-CONVERGENCE-07` — Session escalation burst is bounded structurally (V2).** A single session MUST NOT submit more than `policy.escalation_rate_limit.session_max_per_window` distinct `EscalationRequest` intents within a single `session_window_seconds` window. The per-session check executes BEFORE the per-lineage check (`v1/kernel-store.md` `lineage_rate_limits`) inside the same `BEGIN IMMEDIATE` transaction; rejected requests do NOT advance the per-lineage counter. The configured `session_burst_action` determines whether the rejected session continues (`"reject"`) or is failed-closed (`"fail_session"`). Plans MAY raise the per-session cap via `[orchestrator] expected_escalation_burst = N` up to the policy floor (default `100`). See §7b for the full mechanism, including `WARN_SESSION_ESCALATION_BURST` emission idempotency and the GC story for `session_escalation_rate_limits` rows.
 
 ---
 
