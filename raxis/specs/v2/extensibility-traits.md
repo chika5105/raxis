@@ -63,101 +63,410 @@ V2 does **not** ship alternative impls (Vault, HSM, gRPC, vLLM). Those are V3+ o
 
 ---
 
-## §2 — `DomainAdapter` — Domain-Specific Authority Operations
+## §2 — `DomainAdapter` — The Domain-Agnostic Authority Boundary
 
-The reference implementation targets **autonomous software engineering**: planners read code, write code, run tests, integrate changes via `IntegrationMerge`. Other domains (trading, healthcare, robotics) need different intent kinds, different commit/merge semantics, different "deliverable" notions. The intent admission pipeline, escalation FSM, and audit chain are unchanged across domains; the *operations* the planner can request are not.
+### §2.0 The paradigm-vs-implementation distinction
 
-### §2.1 Trait definition
+The twelve `R-*` invariants — `R-1` (domain separation), `R-4` (authority derivation), `R-7` (cryptographic audit chain), `R-9` (attributable intent), `R-11` (mediated coordination), and the rest — never mention git, commits, branches, or worktrees. The reference implementation in this repository uses git because its target *domain* is autonomous software engineering. A different deployment of RAXIS — autonomous trading, clinical-decision support, robotics, claims adjudication — needs the same paradigm primitives but very different state-management primitives.
+
+```
+Paradigm        (R-11)      "State must be transferred via authority mediation."
+Implementation  (V2-SE)     "We use git bundles, transferred by the Kernel via VirtioFS."
+```
+
+The `DomainAdapter` trait is the single seam at which the implementation-layer choice (git, FHIR, FIX, ROS-Bag) plugs into the paradigm-layer Kernel. The Kernel binary is *compiled against the trait*; the concrete adapter is wired in at process boot. Switching domains is a re-link, not a fork.
+
+### §2.1 What Git does, structurally
+
+Inspecting the V1+V2 reference implementation (`kernel/src/vcs/`, `crates/store/`, `kernel/src/handlers/intent.rs`, `raxis/specs/v2/integration-merge.md`), git plays exactly four structural roles. Each one is a domain-agnostic primitive:
+
+| Git primitive (SE)                       | Structural role                                                   | Trading equivalent                                          | Healthcare equivalent                                                  |
+| ---------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
+| Worktree (VirtioFS-mounted ephemeral clone)        | Mutable state surface the agent operates on                       | Portfolio snapshot + order-staging directory                | Patient record (FHIR bundle) + proposed-action staging                 |
+| `git commit` (signed, content-addressed) | Content-addressed snapshot of the agent's proposed work           | Signed proposed-order manifest (instrument, side, qty, TIF) | Signed proposed-clinical-action (order set, codes, dose, justification) |
+| `git bundle create` (kernel-mediated)    | State transfer between two isolated agent VMs                     | Order-context bundle handed strategy → execution agent      | Diagnostic bundle handed triage → treatment agent                      |
+| `IntegrationMerge` (kernel-authorised cherry-pick into master worktree) | Authorised commit of approved work to canonical external state | Order execution against the exchange API                    | EHR write of approved clinical action                                  |
+
+Everything else in the reference implementation — the operator-socket handshake (`cli/src/conn.rs`), the SQLite session/task/escalation/audit state machine (`crates/store/`), the audit chain and Merkle tree (`crates/crypto/`), the 13-step intent admission pipeline (`kernel/src/scheduler/admit.rs`, `kernel/src/handlers/intent.rs`), the Credential Proxy invariant (`INV-VM-CAP-04`, `crates/raxis-cred-proxy/`), the escalation FSM (`kernel/src/escalation/`), the policy parser, the operator's challenge-response — is *paradigm-layer* and stays concrete. A `ProposedTrade` intent passes through identical admission gates as a `CompleteTask` intent.
+
+### §2.2 Trait definition
 
 **Canonical home:** `crates/raxis-domain/src/lib.rs` (NEW).
 
-```rust
-/// Pluggable seam for domain-specific authority operations.
-///
-/// The kernel's intent admission pipeline (the 13-step gate check) is
-/// concrete and stays the same across every domain. What changes per
-/// domain is *which intent kinds exist*, *what their payloads look
-/// like*, and *what "completing a task" means as a side-effect* (a git
-/// commit + cherry-pick for SE, an order placement for trading, a
-/// motion command for robotics).
-///
-/// Implementations:
-/// - [`SoftwareEngineeringAdapter`] (default in the reference impl) —
-///   git worktrees, ephemeral clones, `IntegrationMerge` via cherry-pick.
-/// - Future: `TradingAdapter`, `HealthcareAdapter`, `RoboticsAdapter`.
-pub trait DomainAdapter: Send + Sync + 'static {
-    /// Domain-specific intent payload types (the closed enumeration of
-    /// authority operations this domain admits). The kernel deserialises
-    /// these from the typed `IntentRequest` envelope; domain-agnostic
-    /// fields (`session_id`, `seq`, `nonce`) stay in the envelope.
-    type IntentKind: serde::Serialize + serde::de::DeserializeOwned + Send + Sync;
+The trait is split into three coherent surface areas:
 
-    /// Domain-specific terminal task artefact (the thing
-    /// `CompleteTask`'s witness binds against). For SE: a `CommitSha`.
-    /// For trading: an `OrderId + FillReceipt`. For robotics: a
-    /// `MotionId + ExecutionTrace`.
+1. **State-lifecycle methods** (the four primitives the user enumerated above): `provision_workspace`, `snapshot`, `transfer`, `commit`.
+2. **Admission-pipeline hooks** the kernel's gate-check uses on every intent: `touched_resources`, `escalation_classes`, plus the two associated types (`IntentKind`, `TerminalArtefact`) that bind a domain to its own intent vocabulary and terminal-task artefact shape.
+3. **Cleanup hooks** that drive the abandoned-state retention/purge loop the kernel runs at session-end (used by `agent-disagreement.md §7` and `kernel-lifecycle.md §6`): `teardown_workspace`, `purge_workspace`.
+
+```rust
+//! crates/raxis-domain/src/lib.rs
+//!
+//! The single seam between RAXIS's domain-agnostic Kernel core and the
+//! implementation-specific state primitives that vary per problem domain.
+//! The Kernel binary is compiled against this trait; concrete impls (e.g.
+//! `GitAdapter` for SE, `TradingAdapter`, `HealthcareAdapter`) are wired
+//! at process boot via `Arc<dyn DomainAdapter<...>>`.
+
+use raxis_types::{SessionId, IntentRequestId, AuditEventId, ContentHash};
+use std::path::PathBuf;
+
+/// The boundary between the domain-agnostic Kernel and domain-specific
+/// state management. Every method is invoked *only* from inside the
+/// Kernel after the relevant `R-*` admission gate has fired; the impl
+/// is not responsible for re-checking authority.
+pub trait DomainAdapter: Send + Sync + 'static {
+    // ── associated types ────────────────────────────────────────────
+
+    /// Closed enumeration of the authority operations this domain
+    /// admits. The kernel deserialises these out of the typed
+    /// `IntentRequest` envelope (domain-agnostic fields — `session_id`,
+    /// `seq`, `nonce`, `signature` — stay in the envelope, in
+    /// `raxis-types`). Examples:
+    ///   - SE:        CompleteTask | IntegrationMerge | SubmitReview | EscalationRequest | InferenceRequest | EgressRequest | FetchRequest
+    ///   - Trading:   ProposeOrder | CancelOrder | RebalancePortfolio | RequestQuote | EscalationRequest | InferenceRequest
+    ///   - Robotics:  PlanMotion  | ExecuteMotion | SampleSensors | EscalationRequest | InferenceRequest
+    type IntentKind:       serde::Serialize + serde::de::DeserializeOwned + Clone + Send + Sync;
+
+    /// The artefact a successful terminal-task `CompleteTask`-equivalent
+    /// witness binds to. Examples:
+    ///   - SE:        (CommitSha, head_tree_sha256)
+    ///   - Trading:   (OrderId,   FillReceipt)
+    ///   - Robotics:  (MotionId,  ExecutionTrace)
     type TerminalArtefact: Clone + Send + Sync;
 
-    /// Compute the deterministic touched-set of domain resources for a
-    /// given intent (the equivalent of `vcs::diff(base, head)` for SE).
-    /// MUST be derived from authoritative state, not from
-    /// planner-supplied manifests (`R-9` / `INV-07`).
+    // ── §2.2.A state-lifecycle primitives ───────────────────────────
+
+    /// Prepare the mutable state surface the agent will operate on
+    /// inside its isolated VM. The kernel calls this exactly once per
+    /// session, after the planner VM has been spawned but before
+    /// `KernelPush` is allowed to deliver any intent.
+    ///
+    /// SE impl:        `git clone --no-hardlinks` of master_repo into
+    ///                 `/var/raxis/sessions/<session_id>/work`,
+    ///                 returned as a VirtioFS host-path; mounted
+    ///                 read-write into the VM at `/work`.
+    /// Trading impl:   snapshot the current portfolio + open-order book
+    ///                 into a session-scoped staging directory; mount
+    ///                 read-write into the VM at `/portfolio`.
+    /// Healthcare:     export the patient's FHIR bundle into a
+    ///                 session-scoped staging dir; mount read-only at
+    ///                 `/patient`, read-write at `/proposed`.
+    ///
+    /// MUST be deterministic given `(session.id, session.parent_state_ref)`:
+    /// re-invocation MUST yield byte-identical contents at the returned
+    /// path (modulo timestamps that the impl SHOULD canonicalise).
+    fn provision_workspace(
+        &self,
+        session: &SessionContext<'_>,
+    ) -> Result<WorkspaceHandle, DomainError>;
+
+    /// Create a content-addressed snapshot of whatever the agent has
+    /// produced inside its workspace. Called when the planner submits
+    /// a `CompleteTask`-equivalent intent, *before* admission gates run
+    /// (because the touched-set has to be derived from the snapshot,
+    /// per `R-9`).
+    ///
+    /// SE impl:        `git add -A && git commit -m "<task_id>"` into
+    ///                 the session worktree, returning the commit SHA
+    ///                 and the head-tree sha256 (so the kernel can
+    ///                 verify Merkle-style equality on retry).
+    /// Trading impl:   canonicalise the proposed-order JSON, sha256 it,
+    ///                 and write `(snapshot_id, manifest_bytes,
+    ///                 manifest_signature)` into the staging dir.
+    /// Healthcare:     canonicalise the proposed clinical-action set,
+    ///                 sha256 it, sign with session-bound key.
+    ///
+    /// MUST be **idempotent**: calling twice on a workspace that has
+    /// not changed MUST return the same `Snapshot` (same `content_hash`).
+    fn snapshot(
+        &self,
+        session: &SessionContext<'_>,
+        workspace: &WorkspaceHandle,
+    ) -> Result<Snapshot, DomainError>;
+
+    /// Hand a snapshot from one isolated agent VM to another (the
+    /// multi-agent coordination primitive of `R-11`). The kernel
+    /// always mediates: the source VM cannot write directly into the
+    /// destination's workspace, and the destination cannot pull
+    /// directly from the source. This call materialises a transferable
+    /// `Bundle` in a kernel-controlled staging directory; the kernel
+    /// then mounts that directory read-only into the destination VM.
+    ///
+    /// SE impl:        `git bundle create` of the snapshot commit +
+    ///                 its base, dropped at
+    ///                 `/var/raxis/transfer/<bundle_id>.bundle`.
+    /// Trading impl:   serialise the order-context (manifest +
+    ///                 supporting market-data snapshot) into a
+    ///                 sealed JSON envelope.
+    /// Healthcare:     serialise the diagnostic bundle (FHIR
+    ///                 DiagnosticReport + supporting Observations).
+    ///
+    /// MUST be idempotent on `(snapshot.content_hash, dst.session_id)`.
+    fn transfer(
+        &self,
+        snapshot: &Snapshot,
+        src: &SessionContext<'_>,
+        dst: &SessionContext<'_>,
+    ) -> Result<Bundle, DomainError>;
+
+    /// Commit approved work to the canonical external system of
+    /// record. This is the *only* method that contacts the outside
+    /// world; it MUST go through the Credential Proxy (`INV-VM-CAP-04`)
+    /// when external credentials are required.
+    ///
+    /// SE impl:        cherry-pick `snapshot.commit_sha` into the
+    ///                 master worktree (the IntegrationMerge ceremony
+    ///                 of `integration-merge.md`); on protected paths
+    ///                 the kernel will have already routed through the
+    ///                 escalation FSM and this is the post-approval call.
+    /// Trading impl:   submit the order via the credential-proxy ↔
+    ///                 broker FIX connection.
+    /// Healthcare:     POST the approved clinical-action set to the
+    ///                 EHR's FHIR endpoint via the credential proxy.
+    ///
+    /// MUST be idempotent on `snapshot.content_hash`: a re-invocation
+    /// after a successful commit MUST return `Err(DomainError::AlreadyApplied
+    /// { receipt })` carrying the original receipt — the kernel relies
+    /// on this for crash recovery (`kernel-lifecycle.md §7`).
+    fn commit(
+        &self,
+        snapshot: &Snapshot,
+        cred_proxy: &dyn CredentialProxyHandle,
+        ctx: &CommitContext<'_>,
+    ) -> Result<DomainCommitReceipt, DomainError>;
+
+    // ── §2.2.B kernel admission-pipeline hooks ──────────────────────
+
+    /// Compute the deterministic touched-set of domain resources that
+    /// `intent` would mutate, derived **only** from authoritative state
+    /// (the workspace + the snapshot), never from planner-supplied
+    /// manifests. This is the domain-specific generalisation of
+    /// `kernel::vcs::diff(base, head)`; the kernel runs this *before*
+    /// the path-allowlist gate (`INV-TASK-PATH-01`, `R-9`).
+    ///
+    /// SE impl:        `gix::diff` on `base..head` → list of paths.
+    /// Trading impl:   list of `(account_id, instrument)` pairs the
+    ///                 order would touch.
+    /// Healthcare:     list of `(patient_id, FHIR-resource-type)` pairs.
     fn touched_resources(
         &self,
         intent: &Self::IntentKind,
-        ctx: &DomainContext<'_>,
+        ctx: &AdmissionContext<'_>,
     ) -> Result<TouchedResources, DomainError>;
 
-    /// Apply a `CompleteTask` artefact onto the master domain state
-    /// (e.g., merge the candidate commit into the master worktree, or
-    /// place the order on the broker, or commit the motion to the
-    /// motor controller). Called only after every gate has been
-    /// satisfied and the kernel has admitted the merge.
-    fn apply_terminal(
-        &self,
-        artefact: &Self::TerminalArtefact,
-        ctx: &DomainContext<'_>,
-    ) -> Result<DomainCommitReceipt, DomainError>;
-
-    /// Escalation classes specific to this domain (e.g., for SE:
-    /// `ProtectedPathMerge`, `ReviewLoopExceeded`; for trading:
-    /// `PositionLimitExceeded`, `MarketHaltDetected`).
+    /// Stable, sorted, deduplicated list of escalation class names the
+    /// kernel's escalation FSM should accept for this domain (e.g. SE:
+    /// `protected_path_merge`, `review_loop_exceeded`; Trading:
+    /// `position_limit_exceeded`, `market_halt_detected`). The kernel
+    /// rejects any escalation request whose `class` is not in this
+    /// list with `Err(EscalationError::UnknownClass)`.
     fn escalation_classes(&self) -> &'static [&'static str];
+
+    // ── §2.2.C cleanup primitives ───────────────────────────────────
+
+    /// Called when a session ends (terminal `CompleteTask`, abandoned
+    /// after agent-disagreement, or operator-killed). Releases
+    /// VM-mounted resources but does NOT delete the underlying state
+    /// — the audit-retention window of `agent-disagreement.md §7` may
+    /// require it for forensic replay.
+    fn teardown_workspace(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<(), DomainError>;
+
+    /// Called when the audit retention window closes (default 30 d,
+    /// configurable in `policy.toml`). Permanently purges the
+    /// underlying state. SE impl: `rm -rf` the ephemeral clone.
+    /// Trading impl: shred the staging dir, detach from cold-storage
+    /// snapshot. The kernel still retains the audit-chain entry; only
+    /// the bulk state goes.
+    fn purge_workspace(
+        &self,
+        workspace: &WorkspaceHandle,
+    ) -> Result<(), DomainError>;
 }
 ```
 
-### §2.2 Reference implementation: `SoftwareEngineeringAdapter`
+Supporting types (also `crates/raxis-domain/src/lib.rs`):
 
-**Home:** `crates/raxis-domain-se/src/lib.rs` (NEW; carved out of `kernel/src/handlers/intent.rs` and `kernel/src/vcs/`).
+```rust
+/// Opaque domain-allocated handle to a provisioned workspace.
+/// SE: wraps a host-path + a `gix::Repository`. The kernel only
+/// stores the `host_path` (for VirtioFS mount) and the
+/// `content_hash` (for crash-recovery binding).
+pub struct WorkspaceHandle {
+    pub host_path:     PathBuf,
+    pub content_hash:  ContentHash,
+    pub adapter_state: Box<dyn std::any::Any + Send + Sync>,
+}
 
-`SoftwareEngineeringAdapter::IntentKind` is the existing `raxis-types::IntentKind` (CompleteTask, IntegrationMerge, SubmitReview, EscalationRequest, InferenceRequest, EgressRequest, FetchRequest). `TerminalArtefact` is `(CommitSha, head_tree_sha256)`. `touched_resources` invokes `kernel/src/vcs::diff`. `apply_terminal` runs the existing `IntegrationMerge` cherry-pick path.
+/// Content-addressed snapshot of the agent's proposed work.
+pub struct Snapshot {
+    pub content_hash:  ContentHash,
+    pub parent_hash:   Option<ContentHash>,
+    pub adapter_state: Box<dyn std::any::Any + Send + Sync>,
+}
 
-### §2.3 Files to create
+/// Kernel-mediated transfer artefact. The host-path is the only field
+/// the kernel touches; the kernel mounts that path read-only into the
+/// destination VM.
+pub struct Bundle {
+    pub host_path:     PathBuf,
+    pub content_hash:  ContentHash,
+    pub byte_len:      u64,
+}
 
-- `crates/raxis-domain/Cargo.toml` (NEW; `[lib] name = "raxis-domain"`)
-- `crates/raxis-domain/src/lib.rs` — trait definition, `DomainContext`, `TouchedResources`, `DomainError`, `DomainCommitReceipt`
-- `crates/raxis-domain-se/Cargo.toml` (NEW; depends on `raxis-domain`, `raxis-types`, `git2`, existing `kernel/src/vcs/` extracted into a library)
-- `crates/raxis-domain-se/src/lib.rs` — `SoftwareEngineeringAdapter` impl, re-export `IntentKind`
-- `crates/raxis-domain-se/src/touched.rs` — `vcs::diff`-based `TouchedResources`
-- `crates/raxis-domain-se/src/terminal.rs` — `IntegrationMerge` cherry-pick logic moved out of `kernel/src/handlers/`
-- `crates/raxis-domain-se/tests/conformance.rs` — exercises the trait's contract using the V2 conformance fixtures (this fixture set is shared with future adapters via `crates/raxis-domain/tests/conformance_kit.rs`)
+/// Receipt of a successful `commit`. Hashed into the audit chain
+/// under the `IntegrationMerge`-equivalent event type.
+pub struct DomainCommitReceipt {
+    pub receipt_id:     String,        // adapter-defined unique id
+    pub external_ref:   Option<String>,// e.g. SE: master commit sha;
+                                       //      Trading: broker order id;
+                                       //      Healthcare: FHIR resource id
+    pub committed_at:   chrono::DateTime<chrono::Utc>,
+    pub adapter_state:  Box<dyn std::any::Any + Send + Sync>,
+}
 
-### §2.4 Files to change
+/// Domain-agnostic, structurally typed touched-set the kernel feeds
+/// into the path-allowlist / scope-allowlist gate.
+pub struct TouchedResources {
+    /// Each resource is a string of the form
+    /// `<scheme>://<authority>/<path>` (e.g. SE: `path:///src/foo.rs`;
+    /// Trading: `account://acct-42/AAPL`; Healthcare: `fhir://patient-12/Observation`).
+    pub resources: Vec<TouchedResource>,
+}
 
-- `kernel/Cargo.toml` — add `raxis-domain = { path = "../crates/raxis-domain" }` and `raxis-domain-se = { path = "../crates/raxis-domain-se" }`
-- `kernel/src/main.rs` — at boot, construct `Arc<dyn DomainAdapter>` from `SoftwareEngineeringAdapter::new(...)`; thread through `HandlerContext`
-- `kernel/src/handlers/intent.rs` — replace direct `vcs::diff` calls with `ctx.domain.touched_resources(...)`; replace direct `IntegrationMerge` cherry-pick with `ctx.domain.apply_terminal(...)`
-- `kernel/src/handlers/mod.rs` — `HandlerContext` gains `pub domain: Arc<dyn DomainAdapter<IntentKind=raxis_types::IntentKind, TerminalArtefact=(CommitSha, String)>>`
-- `crates/raxis-types/src/intent.rs` — no schema change; `IntentKind` stays the canonical SE enum but is now re-exported from `raxis-domain-se`
+pub struct TouchedResource {
+    pub uri:  String,
+    pub op:   ResourceOp,        // Create | Modify | Delete
+    pub size: Option<u64>,       // optional bytes-affected metric for budget gates
+}
 
-### §2.5 Conformance contract
+pub enum DomainError {
+    NotFound,
+    AlreadyApplied { receipt: DomainCommitReceipt },
+    PreconditionFailed(String),
+    CredentialProxyDenied(String),
+    Transient(String),
+    Permanent(String),
+}
+```
 
-A `DomainAdapter` impl is conformant iff it satisfies these properties (mechanically verifiable in `crates/raxis-domain/tests/conformance_kit.rs`):
+`CredentialProxyHandle` is the existing trait from `crates/raxis-cred-proxy/` (see `extensibility-traits.md §4`); the kernel passes the per-session handle in unchanged.
 
-1. `touched_resources` is **pure** for a fixed `(intent, ctx)` pair (same inputs → same outputs across calls). Tested by replaying recorded intents against the impl twice and asserting deep equality.
-2. `touched_resources` is **independent of planner-supplied manifests** — any field of `IntentKind` that originates from the planner MUST NOT appear in the returned `TouchedResources`. Tested via property-based fuzzing (mutate planner fields; assert output unchanged).
-3. `apply_terminal` is **idempotent** — calling it twice with the same artefact yields the same `DomainCommitReceipt` or returns `DomainError::AlreadyApplied`. Tested by invoking twice in a row.
-4. `escalation_classes()` returns a stable, sorted, deduplicated list. Tested by parsing the slice and asserting the equivalent of `Vec::is_sorted_by(|a, b| Ord::cmp(a, b))`.
+`SessionContext`, `AdmissionContext`, `CommitContext` are read-only views the kernel constructs; they expose the session id, parent state ref, policy epoch, and a scoped audit-event emitter, but no kernel internals.
+
+### §2.3 Reference implementation: `GitAdapter`
+
+**Home:** `crates/raxis-domain-git/src/lib.rs` (NEW; carved out of the existing `kernel/src/vcs/` module and the `IntegrationMerge` ceremony in `kernel/src/handlers/intent.rs`).
+
+| Trait method            | `GitAdapter` implementation                                                                                                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `provision_workspace`   | `git clone --no-hardlinks --no-checkout` master_repo → `/var/raxis/sessions/<sid>/work`; `git checkout -b session-<sid> <parent_state_ref>`; return host-path + tree sha256. |
+| `snapshot`              | `git add -A`; `git commit -m "session-<sid>:<intent_id>" --author="raxis-planner <planner@local>"`; capture `(commit_sha, head_tree_sha256)`.                              |
+| `transfer`              | `git bundle create /var/raxis/transfer/<bundle_id>.bundle <base>..<head>`; sha256 the bundle; return `Bundle { host_path, content_hash, byte_len }`.                            |
+| `commit`                | The full `IntegrationMerge` ceremony of `integration-merge.md §4`: lock master worktree → `git cherry-pick --no-commit <commit_sha>` → re-run touched-set diff → emit `IntegrationMergeApplied` event → push to upstream remote via credential proxy. |
+| `touched_resources`     | `gix::diff_tree_to_tree(parent_tree, head_tree)` → flatten to `path:///`-prefixed URIs. Identical algorithm to today's `kernel/src/vcs/diff.rs`, just relocated.                |
+| `escalation_classes`    | `&["protected_path_merge", "review_loop_exceeded", "merge_conflict_unresolvable", "policy_epoch_drift", "credential_proxy_denied"]`                                                             |
+| `teardown_workspace`    | Unmount VirtioFS; close `gix::Repository`; touch `.raxis-retain-until` with the audit-retention deadline.                                                                       |
+| `purge_workspace`       | `rm -rf` the session worktree; do NOT touch `master_repo` or the audit chain.                                                                                                   |
+
+`SoftwareEngineeringAdapter::IntentKind` is the existing `raxis-types::IntentKind`. `TerminalArtefact` is `(CommitSha, head_tree_sha256)`. The credential proxy parameter to `commit` is the existing `CredentialProxyHandle` for the per-session upstream-push credential leased under `INV-VM-CAP-04`.
+
+### §2.4 Hypothetical alternative implementations
+
+Documented here so reviewers can sanity-check that the seam is wide enough to admit them without growing more methods. **Not shipped in V2.**
+
+- **`TradingAdapter`**: `provision_workspace` snapshots the portfolio; `snapshot` canonicalises a `ProposedOrder` JSON manifest; `transfer` ships the order-context bundle to an execution agent; `commit` submits via FIX through the credential proxy (`INV-VM-CAP-04`). `IntentKind = ProposeOrder | CancelOrder | RebalancePortfolio | RequestQuote | EscalationRequest | InferenceRequest`. `TerminalArtefact = (OrderId, FillReceipt)`.
+- **`HealthcareAdapter`**: workspace = patient FHIR bundle + proposed-action staging; `snapshot` produces a signed `ClinicalActionSet`; `commit` POSTs to the EHR FHIR endpoint via cred-proxy.
+- **`RoboticsAdapter`**: workspace = sensor-snapshot + motion-plan staging; `snapshot` is `(motion_plan_id, plan_hash)`; `commit` is "release the motion to the motor controller through the safety interlock proxy".
+
+### §2.5 Files to create
+
+- `crates/raxis-domain/Cargo.toml` (NEW) — `[lib] name = "raxis-domain"`. Depends only on `raxis-types`, `serde`, `chrono`. No git, no DB, no network.
+- `crates/raxis-domain/src/lib.rs` — the trait, `WorkspaceHandle`, `Snapshot`, `Bundle`, `DomainCommitReceipt`, `TouchedResources`, `TouchedResource`, `ResourceOp`, `DomainError`, `SessionContext`, `AdmissionContext`, `CommitContext`, `CredentialProxyHandle` (re-exported from `raxis-cred-proxy`).
+- `crates/raxis-domain/tests/conformance_kit.rs` — generic property-based tests (idempotency, determinism, cleanup ordering) any adapter can plug its impl into via `pub fn run_conformance_suite<A: DomainAdapter>(adapter: A, fixtures: &Fixtures)`.
+- `crates/raxis-domain/tests/fixtures/` — domain-agnostic recorded `(intent, expected-touched, expected-snapshot-hash)` fixtures.
+- `crates/raxis-domain-git/Cargo.toml` (NEW) — depends on `raxis-domain`, `raxis-types`, `gix`, `git2` (for cherry-pick), `tokio`.
+- `crates/raxis-domain-git/src/lib.rs` — `pub struct GitAdapter { master_repo_path: PathBuf, sessions_root: PathBuf, transfer_root: PathBuf, audit_retention: Duration }` + `impl DomainAdapter for GitAdapter`.
+- `crates/raxis-domain-git/src/provision.rs` — `git clone --no-hardlinks` + checkout logic moved out of `kernel/src/handlers/session.rs`.
+- `crates/raxis-domain-git/src/snapshot.rs` — `git add -A && git commit` logic.
+- `crates/raxis-domain-git/src/transfer.rs` — `git bundle create` logic moved out of `kernel/src/handlers/intent.rs::handle_proposed_handoff`.
+- `crates/raxis-domain-git/src/commit.rs` — the full `IntegrationMerge` cherry-pick ceremony + master-worktree lock acquisition + upstream push.
+- `crates/raxis-domain-git/src/touched.rs` — `gix::diff_tree_to_tree` wrapper that returns `TouchedResources`. Functions: `pub fn diff_to_touched(parent_sha: &Oid, head_sha: &Oid, repo: &gix::Repository) -> Result<TouchedResources, DomainError>`.
+- `crates/raxis-domain-git/src/cleanup.rs` — `teardown_workspace` / `purge_workspace`.
+- `crates/raxis-domain-git/tests/conformance.rs` — runs `raxis_domain::tests::run_conformance_suite(GitAdapter::new(...), git_fixtures())`.
+- `crates/raxis-domain-git/tests/integration_merge.rs` — full V2 IntegrationMerge end-to-end test moved out of `kernel/tests/integration_merge_test.rs`.
+
+### §2.6 Files to change
+
+- `kernel/Cargo.toml` — add `raxis-domain = { path = "../crates/raxis-domain" }`, `raxis-domain-git = { path = "../crates/raxis-domain-git" }`. Remove `gix` and `git2` direct deps from `kernel/` (they move to `raxis-domain-git`).
+- `kernel/src/main.rs` — at boot, after policy load and before listener bind, construct:
+  ```rust
+  let domain: Arc<dyn DomainAdapter<
+      IntentKind = raxis_types::IntentKind,
+      TerminalArtefact = (CommitSha, String),
+  >> = Arc::new(GitAdapter::new(&policy.domain_git)?);
+  ```
+  Thread `domain` through `HandlerContext`. Boot-order: `audit_sink` → `credential_backend` → `isolation_backend` → **`domain`** → `inference_router` → `operator_transport` → admission scheduler.
+- `kernel/src/handlers/mod.rs` — `HandlerContext` gains `pub domain: Arc<dyn DomainAdapter<IntentKind=raxis_types::IntentKind, TerminalArtefact=(CommitSha, String)>>`.
+- `kernel/src/handlers/session.rs` — `start_session()` calls `ctx.domain.provision_workspace(&session_ctx)?` instead of running `git clone` directly. Persist the returned `WorkspaceHandle.host_path` + `content_hash` in the `sessions` table; the rest stays in-memory in the handler-local `WorkspaceCache`.
+- `kernel/src/handlers/intent.rs` — replace direct `vcs::diff` calls with `ctx.domain.touched_resources(intent, &admission_ctx)`; replace direct `IntegrationMerge` cherry-pick with `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)`. The 13-step gate sequence stays identical; only the implementation of two of the steps moves behind the trait.
+- `kernel/src/handlers/handoff.rs` (split out of `intent.rs` if not already) — `submit_handoff` calls `ctx.domain.snapshot(...)` then `ctx.domain.transfer(...)`; the kernel takes ownership of the returned `Bundle.host_path` and mounts it into the destination VM.
+- `kernel/src/scheduler/admit.rs` — gate-13 (touched-paths ⊆ allowlist) consumes `TouchedResources` rather than `Vec<PathBuf>`. The allowlist comparison becomes `policy.allowlist.matches(&resource.uri)` so SE keeps `path://`-prefix matching while non-SE domains use their own URI scheme.
+- `kernel/src/vcs/` — DELETED. All callers now go through `ctx.domain`. Audit chain emits `domain.commit_receipt` + `domain.snapshot.content_hash` instead of `commit_sha` + `tree_sha`.
+- `crates/store/migrations/0008_domain_handles.sql` (NEW) — adds `workspace_handles` table:
+  ```
+  workspace_handles(
+      session_id TEXT PRIMARY KEY,
+      host_path  TEXT NOT NULL,
+      content_hash BLOB NOT NULL,
+      provisioned_at TEXT NOT NULL,
+      torn_down_at TEXT,
+      purged_at TEXT
+  );
+  ```
+- `crates/raxis-types/src/intent.rs` — no schema change for V2; `IntentKind` stays the canonical SE enum but is now re-exported from `raxis-domain-git`. (Future domains will add their own `IntentKind`s; the wire envelope stays unchanged because the typed payload is serialised as `serde_json::Value`.)
+- `policy.toml` — operator declares the active domain. New stanza:
+  ```toml
+  [domain]
+  adapter = "git"               # one of: "git" (V2 only)
+  master_repo = "/var/raxis/master"
+  sessions_root = "/var/raxis/sessions"
+  transfer_root = "/var/raxis/transfer"
+  audit_retention = "30d"
+  ```
+- `raxis/specs/v2/integration-merge.md` — the IntegrationMerge ceremony stays the same end-to-end, but the **implementation step** that today reads "the kernel runs `git cherry-pick --no-commit ...`" is rewritten to "the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`; the SE adapter MUST internally execute the cherry-pick + push sequence under the master-worktree lock". The gate sequence and audit-chain emissions are unchanged.
+- `raxis/specs/v2/agent-disagreement.md §7` — the abandoned-worktree retention loop now drives `ctx.domain.teardown_workspace(...)` and (later) `ctx.domain.purge_workspace(...)`, not direct `rm -rf`.
+- `raxis/specs/v2/kernel-lifecycle.md §6` — the "session graceful teardown" step calls `ctx.domain.teardown_workspace(...)` immediately before unmount; the "audit-retention purge" step (run by a kernel-internal timer) drives `purge_workspace`.
+
+### §2.7 Conformance contract
+
+A `DomainAdapter` impl is conformant iff it satisfies these properties (all mechanically verified by `crates/raxis-domain/tests/conformance_kit.rs::run_conformance_suite`):
+
+1. **`provision_workspace` is deterministic** for a fixed `(session.id, session.parent_state_ref)`. Tested by provisioning twice and asserting `WorkspaceHandle.content_hash` is byte-equal both times.
+2. **`snapshot` is idempotent on an unchanged workspace**. Tested by `snapshot()`, mutate-nothing, `snapshot()` again, assert equal `content_hash`.
+3. **`snapshot.content_hash` covers the full workspace contents**, not a planner-influenced subset. Tested by mutating a single byte and asserting the hash changes.
+4. **`transfer` is idempotent on `(snapshot.content_hash, dst.session_id)`**. Tested by transferring twice and asserting same `Bundle.content_hash`.
+5. **`commit` is idempotent**: a re-invocation after success returns `Err(DomainError::AlreadyApplied { receipt })` carrying the original receipt. Tested by `commit()`, then `commit()` again on the same `snapshot`.
+6. **`touched_resources` is pure** for a fixed `(intent, ctx)` pair. Tested by replaying recorded intents and asserting deep equality.
+7. **`touched_resources` ignores planner-supplied manifest fields**. Tested via property-based fuzzing: for any planner-supplied field of `IntentKind`, mutating it MUST NOT change the returned `TouchedResources`. (This is the mechanical enforcement of `R-9`/`INV-07` at the trait boundary.)
+8. **`escalation_classes()` is stable, sorted, deduplicated**. Tested by parsing the slice and `assert!(slice.is_sorted() && slice.iter().tuple_windows().all(|(a,b)| a != b))`.
+9. **`teardown_workspace` is idempotent** and never blocks. Tested by calling twice; second call returns `Ok(())`.
+10. **`purge_workspace` requires prior `teardown_workspace`**. Calling `purge` on a not-yet-torn-down handle returns `Err(DomainError::PreconditionFailed)`. Tested by direct invocation.
+
+### §2.8 Migration plan (extracting Git from the kernel)
+
+V2 is the migration. Phases (each a separate commit, each compiling):
+
+- **Phase A** — Land `crates/raxis-domain` with the trait and supporting types. No callers yet. (~1 day; all type signatures stabilise here so reviewers can lock the API.)
+- **Phase B** — Land `crates/raxis-domain-git` with the trait impl, **delegating to copy-pasted code from `kernel/src/vcs/`** + handler files. Kernel still uses the old paths. The new crate gets its own conformance test green. (~2 days.)
+- **Phase C** — Switch the kernel to `Arc<dyn DomainAdapter<...>>` for `provision_workspace` + `touched_resources` only (the read-side of the trait). Adapter still copy-pasted, but the kernel now goes through it. End-to-end SE tests stay green. (~1 day.)
+- **Phase D** — Switch the kernel to `Arc<dyn DomainAdapter>` for `snapshot` + `transfer` + `commit` (the write-side). The `IntegrationMerge` ceremony in `kernel/src/handlers/intent.rs` shrinks to ≤ 30 lines (lock acquire → call `commit` → emit audit event → release lock). (~2 days.)
+- **Phase E** — Delete `kernel/src/vcs/` and the now-dead handler code. The kernel binary no longer compiles `gix` or `git2`. (~½ day.)
+
+Phase E is the green-flag for "the V2 paradigm-vs-implementation seam is honoured": after this commit, `cargo tree -p raxis-kernel` MUST contain neither `gix` nor `git2`.
 
 ---
 ## §3 — `IsolationBackend` — How Subprocess VMs Are Spawned
@@ -814,7 +1123,9 @@ The trait extraction touches the kernel boot site and every handler. Doing it as
 
 **Phase A — Trait crates exist.** Create `crates/raxis-domain`, `crates/raxis-isolation`, `crates/raxis-credentials`, `crates/raxis-operator-transport`, `crates/raxis-inference-router`. Each contains only the trait, error types, and conformance kit. No impls. The kernel does not depend on them yet. Mergeable in one PR per crate.
 
-**Phase B — Default impls in their own crates.** Create `crates/raxis-domain-se`, `crates/raxis-isolation-firecracker`, `crates/raxis-isolation-apple-vz`, `crates/raxis-credentials-file`, `crates/raxis-operator-transport-unix`, `crates/raxis-inference-router-https`. Each is a thin re-export of the existing concrete logic, refactored to implement the trait. The kernel still uses the old concrete types directly. Mergeable in one PR per impl.
+**Phase B — Default impls in their own crates.** Create `crates/raxis-domain-git` (the V2 reference `GitAdapter` impl of `DomainAdapter`), `crates/raxis-isolation-firecracker`, `crates/raxis-isolation-apple-vz`, `crates/raxis-credentials-file`, `crates/raxis-operator-transport-unix`, `crates/raxis-inference-router-https`. Each is a thin re-export of the existing concrete logic, refactored to implement the trait. The kernel still uses the old concrete types directly. Mergeable in one PR per impl.
+
+> Note. The `DomainAdapter` migration has its own internal sub-phases (A-E) inside `extensibility-traits.md §2.8` because it deletes `kernel/src/vcs/`, which is the largest single code-motion in V2. The other five trait extractions are smaller and each ship as a single Phase B PR.
 
 **Phase C — `AuditSink` already in `crates/audit/src/sink.rs` is broadened.** Add `read_range`, `sync`, `highest_durable_seq` to the existing trait; extend `FileAuditSink` and `FakeAuditSink`. The conformance test now runs against both. Single PR.
 
@@ -832,6 +1143,8 @@ These specs are updated to reference `extensibility-traits.md` at the relevant i
 
 | Spec | Trait it consumes | Reference to add |
 |---|---|---|
+| `v2/integration-merge.md` | `DomainAdapter` | §1 reframes IntegrationMerge as the SE-domain instantiation of `DomainAdapter::commit`; §4 (mechanics) replaces the inline `git cherry-pick` step with `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`; the gate sequence and audit emissions are unchanged |
+| `v2/agent-disagreement.md` | `DomainAdapter` | §7 (abandoned-worktree retention) drives `ctx.domain.teardown_workspace` immediately and `ctx.domain.purge_workspace` after the audit-retention deadline, rather than direct `rm -rf` |
 | `v2/credential-proxy.md` | `CredentialBackend` | §1 introduction notes "the resolution backend is pluggable per `extensibility-traits.md` §4"; checklist (§10) adds an item to refactor the credential reader to take `Arc<dyn CredentialBackend>` |
 | `v2/provider-failure-handling.md` | `InferenceRouter` | §1 introduction notes "the inference dispatch backend is pluggable per `extensibility-traits.md` §7"; the kernel↔gateway protocol becomes the implementation of `HttpsGatewayRouter`, not a kernel-baked concrete |
 | `v2/provider-model-selection.md` | `InferenceRouter` | §6 (resolution) clarifies that resolution returns a `ResolvedInferenceRequest` consumed by an `InferenceRouter` impl |
