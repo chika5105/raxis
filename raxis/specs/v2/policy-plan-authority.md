@@ -1252,6 +1252,40 @@ of which authoring source produced them.
 
 ---
 
+### Paired-audit failure codes (V2.1)
+
+The V2.1 paired-audit protocol (`audit-paired-writes.md`) introduces
+the following failure codes covering admission-pipeline crashes and
+the V2.0 → V2.1 schema-migration ceremony. These are emitted by the
+intent admission handler, by the `BEGIN IMMEDIATE` driver in
+`crates/store/src/store.rs`, and by the V2.1 first-boot migration
+host (`kernel/src/store/migrations/v21_backfill.rs`).
+
+| Code | Phase | One-line trigger | Canonical home |
+|---|---|---|---|
+| `FAIL_AUDIT_PENDING_FSYNC { intent_kind, io_error }` | Phase B0 (pre-tx audit) | The kernel could not durably write or `fsync` the `StateChangePending` event before `BEGIN IMMEDIATE`. SQLite is untouched; planner gets a structured rejection so it can retry. No state mutation, no chain entry, no recovery work needed. | `audit-paired-writes.md §7.9` |
+| `FAIL_AUDIT_CONFIRMED_FSYNC_EXHAUSTED { confirms_pending_seq, last_io_error, retry_count }` | Phase B2 (post-commit audit) | The augmented existing-kind event (`confirms_pending_seq` + `sqlite_commit_id` + `actual_post_state_digest`) failed to fsync after 3 retries with 100 ms backoff. SQLite already committed; `last_committing_event_seq = pending_seq` is durable on the affected rows. Kernel emits this code, attempts one final fsync, and exits with code 137. The next kernel start runs `reconcile_advisory` which observes the orphan via SQLite and synthesises the missing confirmed event. | `audit-paired-writes.md §7.8` |
+| `FAIL_AUDIT_PRE_STATE_DIGEST_MISMATCH { pending_seq, intended, actual }` | Phase B1 (state mutation) | Inside the transaction, the kernel re-hashed the read-set rows post-`BEGIN IMMEDIATE` and the result differs from the `pre_state_digest` recorded in the pending event — meaning another process (operator IPC, background sweep, or another admission acquired the lock first) mutated the rows the pending claimed it had read. The kernel rolls back, emits `StateChangeRolledBack { reason: KernelInitiatedAbort }`, and rejects with this code so the planner can re-derive and retry. | `audit-paired-writes.md §9.1` |
+| `FAIL_AUDIT_INTENDED_POST_STATE_DIGEST_MISMATCH { pending_seq, intended, actual }` | Phase B1 (state mutation) | Inside the transaction, post-write but pre-`COMMIT`, the kernel hashed the actual write-set and the result differs from the pending's `intended_post_state_digest`. Indicates a kernel bug — the announced and committed mutations diverge. The kernel aborts the transaction, emits `StateChangeRolledBack { reason: KernelInitiatedAbort }`, panics, and exits 138 (operator must investigate). | `audit-paired-writes.md §9.2` |
+| `FAIL_AUDIT_MIGRATION_INCONSISTENT_ROW { table, primary_key, expected_seq, observed }` | V2.1 first-boot ceremony | The migration backfill encountered a row whose chain references and SQLite state cannot be reconciled (e.g. SQLite has a row that the chain never mentions). Migration aborts; operator must run `recovery::reconcile` under V2.0 to repair, then re-attempt V2.1 boot. | `audit-paired-writes.md §10.2` |
+| `FAIL_AUDIT_MIGRATION_PARTIAL_BACKFILL { tables_completed, tables_remaining, last_error }` | V2.1 first-boot ceremony | Migration backfill crashed before completing all state-bearing tables. The migration is idempotent — restart resumes from the first incomplete table — but the kernel refuses to boot with a partial backfill. | `audit-paired-writes.md §10.2` |
+| `FAIL_BEGIN_IMMEDIATE_TIMEOUT { intent_kind, waited_ms, threshold_ms }` | Phase B1 (state mutation) | `BEGIN IMMEDIATE` could not acquire the SQLite write lock within the admission deadline. Kernel emits `StateChangeRolledBack { reason: LockTimeout }` referencing the pending and rejects to the planner. The pending remains in the chain; recovery has no work since no SQLite mutation occurred. | `audit-paired-writes.md §7.7` |
+| `FAIL_AUDIT_CRITICAL_FINDING { finding_kind, details }` | Boot — `recovery::reconcile_advisory` | The advisory verifier returned a critical finding (chain break, dangling confirmed/rollback, digest mismatch). Kernel refuses to start until the operator runs `raxis audit verify --acknowledge-critical` (signed override). | `audit-paired-writes.md §6.2` |
+| `WARN_AUDIT_ORPHAN_RESOLVED_BY_STATE { pending_seq, table, primary_key }` | Boot — `reconcile_advisory` | The chain has an orphan pending whose row in SQLite shows `last_committing_event_seq = pending_seq`. Recovery synthesises a confirmed event so future verifications don't need to consult SQLite. Non-fatal; informational. | `audit-paired-writes.md §6.2` |
+| `WARN_AUDIT_ORPHAN_ROLLBACK_INFERRED { pending_seq, table, primary_key }` | Boot — `reconcile_advisory` | The chain has an orphan pending whose row in SQLite has a different `last_committing_event_seq` (or no row at all). Recovery synthesises `StateChangeRolledBack { reason: CrashInferred }` to make the chain self-resolving. Non-fatal; informational. | `audit-paired-writes.md §6.2` |
+| `WARN_AUDIT_PRE_V21_ROW { table, primary_key }` | Boot — `reconcile_advisory` and `raxis audit verify` | Row has `last_committing_event_seq = 0` (predates the V2.1 backfill or the chain lost its history segment). Verifier falls back to V1 reconciliation semantics for the row. Non-fatal; per `INV-AUDIT-PAIRED-07`. | `audit-paired-writes.md §14.7` |
+
+**Why these are policy-/runtime-time, not policy-load-time.** The
+`FAIL_AUDIT_*` codes above fire at admission or boot, not on
+`PolicyBundle::validate`. The paired-audit protocol is a kernel
+invariant — it does not depend on any operator-controlled config —
+so there is no policy schema to validate. The codes are listed in
+this catalog because (a) operators need to recognise them in `raxis
+log` output, and (b) the spec-graph lint enforces uniqueness across
+the entire failure-code namespace, paired-audit included.
+
+---
+
 ### Provider-alias-defaults failure codes (V2)
 
 The defaultable per-role alias chains live in
