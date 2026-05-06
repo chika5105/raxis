@@ -105,6 +105,55 @@ pub enum CapabilityClass {
     /// Gate definitions, required witness types, verifier subprocess configs.
     /// Affects: what evidence is required for task completion.
     WitnessPolicy,
+
+    /// V2: VM image declarations and per-role default-image bindings.
+    /// Top-level sections: `[[vm_images]]`, `[default_executor_image]`,
+    /// `[default_verifier_images]`. Affects: which OCI digest a session
+    /// boots against. Image changes do NOT affect any in-flight VM (a VM
+    /// already boots from the digest pinned at session admission); they
+    /// affect the *next* session a delegation issues. Sessions whose
+    /// delegation includes image-pinning authority are marked stale so the
+    /// renewal pass re-resolves the digest before the next boot. Sessions
+    /// that hold no image-pinning capability (e.g., a Reviewer running on
+    /// the kernel-canonical image per `INV-PLANNER-HARNESS-02`) are not
+    /// affected.
+    VmImagePolicy,
+
+    /// V2: Environment-access-control gates and the credential→environment
+    /// binding map. Top-level section: `[[environment_gates]]`. Affects:
+    /// which URL prefixes count as "production" (and require approval),
+    /// which `[[permitted_credentials]]` entry binds to which environment
+    /// label, and the per-task environment-binding outcome enforced by
+    /// `INV-ENV-01`. Changing a gate's `write_requires_approval` or its
+    /// `url_prefixes` is functionally equivalent to changing the policy
+    /// floor for every session that touches the affected URLs, so all
+    /// such delegations are marked stale.
+    EnvironmentPolicy,
+
+    /// V2: Operator-ergonomics defaulting machinery.
+    /// Top-level sections: `[prepare]` (e.g., `auto_inject_symbol_index`),
+    /// `[orchestrator]` non-NNSP fields (e.g., default routing knobs).
+    /// The Orchestrator's NNSP itself is NOT in this class — it is
+    /// kernel-binary-pinned per `INV-PLANNER-HARNESS-06` and changes
+    /// require a kernel re-deploy, not an epoch advance. This class
+    /// captures the operator-authoring surface that affects how
+    /// `raxis-cli plan prepare` writes defaults; in-flight sessions are
+    /// not directly affected (the defaulted plan was bundle-sealed at
+    /// admission), but pending plan-prepare invocations and any session
+    /// holding a delegation that references the changed defaults
+    /// (an `auto_inject_symbol_index` toggle, for example) are marked
+    /// stale.
+    ErgonomicsPolicy,
+
+    /// V2: Custom-tool concurrency and resource caps.
+    /// Top-level sections: `[custom_tool_limits]`. Affects: per-VM caps
+    /// like `max_concurrent_custom_tool_invocations`,
+    /// `max_queued_custom_tool_invocations`, and (V2.x) per-tool
+    /// resource ceilings. Sessions whose delegations admit custom-tool
+    /// invocations are marked stale; sessions without custom-tool
+    /// authority (Reviewer per `INV-PLANNER-HARNESS-04`, Orchestrator
+    /// per `INV-PLANNER-HARNESS-06`) are not.
+    CustomToolPolicy,
 }
 ```
 
@@ -126,10 +175,90 @@ configurable by operators — it is part of the kernel binary.
 | `[auth]` | `AuthPolicy` |
 | `[witness_gates]` | `WitnessPolicy` |
 | `[verifiers]` | `WitnessPolicy` |
+| `[[vm_images]]` | `VmImagePolicy` |
+| `[default_executor_image]` | `VmImagePolicy` |
+| `[default_verifier_images]` | `VmImagePolicy` |
+| `[[environment_gates]]` | `EnvironmentPolicy` |
+| `[[permitted_credentials]]` | `EnvironmentPolicy` |
+| `[prepare]` | `ErgonomicsPolicy` |
+| `[orchestrator]` (non-NNSP fields only) | `ErgonomicsPolicy` |
+| `[custom_tool_limits]` | `CustomToolPolicy` |
+| `[plan_bundle_limits]` | `AuthPolicy` |
+| `[plan_signing]` | `AuthPolicy` |
+| `[[plan_signing_keys]]` | `AuthPolicy` |
+| `[verifier_credentials]` | `EnvironmentPolicy` |
+| `[[verifier_credentials.images]]` | `EnvironmentPolicy` |
 
 Any key not in this table is treated as `AuthPolicy` by default (the most conservative
 class — affects the highest-impact security properties). Unknown keys default to the
 strictest treatment, not the most lenient.
+
+> **`[orchestrator]` is split between two classes.** The Orchestrator's
+> NNSP is kernel-binary-pinned per `INV-PLANNER-HARNESS-06` and is NOT
+> a policy.toml field — operators cannot change it. The non-NNSP
+> Orchestrator knobs (default routing thresholds, conflict-resolution
+> policy hints) are `ErgonomicsPolicy`. If a future spec re-introduces
+> any operator-controlled NNSP-influencing fields under
+> `[orchestrator]`, that addition MUST also update this table and the
+> §2.3 lint (else the field falls through to `AuthPolicy`, which is
+> safe but defeats per-capability diffing).
+
+### 2.3 Section-Map Drift Lint
+
+The mapping table above is the kernel binary's source of truth for
+how a `policy.toml` top-level key maps to a `CapabilityClass`. As
+V2.x and beyond grow the policy schema, every new top-level key MUST
+be assigned a class explicitly. Falling through to the `AuthPolicy`
+default is **safe** (over-marks rather than under-marks), but it
+silently turns per-capability diffing back into V1-style blunt
+invalidation for the new key — defeating the operational improvement
+the spec was introduced for.
+
+The kernel ships with a static lint that fails CI when the policy
+schema introduces a top-level key that does not appear in the §2.2
+table:
+
+```rust
+// crates/policy/tests/section_map_completeness.rs
+
+#[test]
+fn every_policy_toml_top_level_key_has_a_capability_class() {
+    let schema_keys: HashSet<&'static str> =
+        raxis_policy::schema::TOP_LEVEL_KEYS.iter().copied().collect();
+    let mapped_keys: HashSet<&'static str> =
+        raxis_policy::epoch::SECTION_TO_CLASS
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+
+    let unmapped: Vec<&str> = schema_keys
+        .difference(&mapped_keys)
+        .copied()
+        .collect();
+
+    assert!(
+        unmapped.is_empty(),
+        "policy.toml schema introduces top-level keys without a \
+         CapabilityClass mapping in policy-epoch-diffing.md §2.2: {:?}. \
+         Add an explicit row to SECTION_TO_CLASS rather than relying on \
+         the AuthPolicy default — silent fallthrough defeats per-capability \
+         diffing for these keys.",
+        unmapped
+    );
+}
+```
+
+`raxis_policy::schema::TOP_LEVEL_KEYS` is the canonical list of
+top-level keys produced by parsing the policy.toml schema definition;
+`SECTION_TO_CLASS` is the in-binary materialization of the §2.2
+table. Any mismatch — schema introduces a new key, or the table is
+out-of-date relative to the schema — fails the test with the offending
+key list.
+
+The reverse direction (a key in `SECTION_TO_CLASS` that is no longer
+in the schema) is also checked, with a softer assertion: a stale
+mapping costs nothing at runtime, but flagging it during cleanup is
+useful when a policy section is removed in a future version.
 
 ---
 
@@ -346,12 +475,26 @@ computed by the kernel from the bundle content, not declared by the submitter.
 
 ## 8. Implementation Checklist
 
-- [ ] Add `CapabilityClass` enum to `crates/policy/src/lib.rs`
+- [ ] Add `CapabilityClass` enum (10 variants: the 6 V1.x classes plus
+      V2 `VmImagePolicy`, `EnvironmentPolicy`, `ErgonomicsPolicy`,
+      `CustomToolPolicy`) to `crates/policy/src/lib.rs`.
 - [ ] Add `PolicyDelta` struct to `crates/policy/src/lib.rs`
 - [ ] Implement `diff_bundles(old: &PolicyBundle, new: &PolicyBundle) -> PolicyDelta`
       in `crates/policy/src/epoch.rs` (new file)
+- [ ] Materialize the §2.2 table as
+      `crates/policy/src/epoch.rs::SECTION_TO_CLASS` —
+      a static `&[(&'static str, CapabilityClass)]` array. The diff
+      walker iterates this array; any top-level key not present
+      defaults to `AuthPolicy` AND emits a `PolicySchemaUnmapped` warn
+      log (operator-visible, not failure-class).
+- [ ] Add `crates/policy/tests/section_map_completeness.rs` per §2.3.
+      The test fails CI if the schema introduces a key not in
+      `SECTION_TO_CLASS`. New v2.x policy fields MUST add a row to
+      `SECTION_TO_CLASS` or explicitly opt into `AuthPolicy` fallthrough.
 - [ ] Add `capability_class` column to `delegations` table in DDL migration 2
-      (or migration 3 if migration 2 is already shipped)
+      (or migration 3 if migration 2 is already shipped). The new V2
+      classes are stored as their `serde::Serialize` representation
+      (string), forward-compatible with future class additions.
 - [ ] Update `policy_manager::advance_epoch` in `kernel/src/policy/manager.rs` to call
       `diff_bundles` and use targeted SQL UPDATE
 - [ ] Add fallback to blunt on `diff_bundles` error
@@ -360,5 +503,29 @@ computed by the kernel from the bundle content, not declared by the submitter.
 - [ ] Add `FAIL_EPOCH_RENEWAL_DENIED` to `kernel/src/errors.rs` if not present
 - [ ] Update `advance_epoch` to abort in-progress `approve_plan` transactions
       (check `initiatives` table for `state = 'Admitting'` before diff; abort if found)
-- [ ] Add tests: targeted staleness (only affected class marked), fallback test,
-      genesis-phase abort test, silent auto-renewal test
+- [ ] Add tests:
+      - Targeted staleness for each of the 10 classes
+        (one test per class — change a single section, verify only
+        that class is marked).
+      - **VmImagePolicy**: change `[default_executor_image].alias`;
+        a session with `capability_class = VmImagePolicy` is marked
+        stale; an unrelated `BudgetPolicy` session is not.
+      - **EnvironmentPolicy**: change
+        `[[environment_gates]].write_requires_approval`; sessions
+        whose delegations admit egress to the gate's URL prefixes
+        are marked stale.
+      - **ErgonomicsPolicy**: toggle
+        `[prepare].auto_inject_symbol_index`; sessions are marked
+        stale only if they hold a delegation that references
+        prepare-time defaulting (e.g., a session whose plan was
+        prepared against the old default and is still in-flight).
+      - **CustomToolPolicy**: lower
+        `[custom_tool_limits].max_concurrent_custom_tool_invocations`;
+        Executor sessions are marked stale; Reviewer / Orchestrator
+        sessions (no custom-tool authority) are not.
+      - Section-map drift lint: schema-only test ensures every
+        `policy.toml` top-level key is mapped.
+      - Fallback test: malformed bundle → blunt invalidation,
+        `fallback_to_blunt: true` audit field set.
+      - Genesis-phase abort test, silent auto-renewal test
+        (carried over from V1).
