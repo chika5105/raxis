@@ -1612,6 +1612,18 @@ In addition to the audit chain (the persistent record) and CLI render layers (th
 
 ### §2.5.3 — Plan Artifact Signing Contract
 
+> **V2 supersession notice.** The on-disk `<data_dir>/plans/<initiative_id>/`
+> layout, the `raxis-cli plan sign` command, and the `signed_plan_artifacts`
+> SQL table described below are the **V1** mechanism. V2 admissions go
+> through **Plan Bundle Sealing** (`v2/plan-bundle-sealing.md`): the CLI
+> performs an atomic in-memory parse + bundle + hash + sign + submit in a
+> single `raxis-cli submit plan <plan.toml>` invocation, sending the bundle
+> bytes directly to the kernel via IPC; the kernel seals into the V2
+> `plan_bundles` / `plan_bundle_artifacts` tables and never reads from
+> `<data_dir>/plans/`. This V1 section is retained for read-only audit
+> compatibility with pre-V2 initiatives and for forensic recovery of
+> historical state. New initiatives in V2 use the V2 path exclusively.
+
 #### On-disk layout
 
 ```
