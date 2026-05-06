@@ -25,7 +25,29 @@
 >   `INIT` (initiative & task FSM), `ESC` (escalation), `STORE`
 >   (kernel store / SQLite), `POLICY` (policy epochs), `SCHED`
 >   (scheduler), `TASK-PATH` (VCS path enforcement), `CERT`
->   (operator certificates).
+>   (operator certificates), `CONVERGENCE` (multi-agent
+>   non-convergence bounds — V2).
+>
+> **V2 invariant consolidation status.** This file currently
+> consolidates V1 invariants in full and is being incrementally
+> expanded to include V2 invariants. Mirrored so far:
+> `INV-CONVERGENCE-*` (§9), `INV-PLANNER-HARNESS-01..06` (§10),
+> `INV-VERIFIER-*` (§11). V2 invariants in their canonical homes
+> that have NOT yet been mirrored here include: `INV-VM-CAP-01..05`,
+> `INV-PUSH-01..05`, `INV-KEY-01..08`, `INV-MERGE-WORKTREE-RETAIN`,
+> `INV-MERGE-CONSISTENCY`, `INV-CAPACITY-01..06`,
+> `INV-PROVIDER-01..09`, `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`,
+> `INV-DELEGATE-01`, `INV-DISPATCH`, `INV-RUNTIME-CLASSIFICATION`
+> (§12 of this file per the V1 numbering, slated to become INV-09).
+>
+> **DEPRECATED in V2 (do NOT mirror; will be removed entirely in V3):**
+> `INV-EGRESS-01` (kernel-mediated egress allowlist; superseded by
+> two-tier model in `vm-network-isolation.md` + `credential-proxy.md`),
+> `INV-EGRESS-INTENT-01` (`require_intent` plan field; superseded by
+> credential-proxy declarations per §3.5 of `credential-proxy.md`).
+>
+> New PRs adding any of these to their canonical home should also
+> add an entry here following the pattern in §9–§11.
 
 ---
 
@@ -33,15 +55,19 @@
 
 | Domain | IDs | Count |
 |---|---|---|
-| Top-level (must-pass) | INV-01, INV-02A, INV-02B, INV-03, INV-04, INV-05, INV-06, INV-07, INV-08 | 9 |
-| Initiative & task FSM | INV-INIT-01..11 | 11 |
-| Escalation | INV-ESC-01..06 | 6 |
-| Kernel store | INV-STORE-01..03 | 3 |
-| Policy epochs | INV-POLICY-01 | 1 |
-| Scheduler | INV-SCHED-01 | 1 |
-| VCS path enforcement | INV-TASK-PATH-01, INV-TASK-PATH-02 | 2 |
-| Operator certificates | INV-CERT-01..05 | 5 |
-| **Total** | | **38** |
+| Top-level (must-pass) — V1 | INV-01, INV-02A, INV-02B, INV-03, INV-04, INV-05, INV-06, INV-07, INV-08 | 9 |
+| Initiative & task FSM — V1 | INV-INIT-01..11 | 11 |
+| Escalation — V1 | INV-ESC-01..06 | 6 |
+| Kernel store — V1 | INV-STORE-01..03 | 3 |
+| Policy epochs — V1 | INV-POLICY-01 | 1 |
+| Scheduler — V1 | INV-SCHED-01 | 1 |
+| VCS path enforcement — V1 | INV-TASK-PATH-01, INV-TASK-PATH-02 | 2 |
+| Operator certificates — V1 | INV-CERT-01..05 | 5 |
+| Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
+| Planner harness — V2 | INV-PLANNER-HARNESS-01..06 | 6 |
+| Verifier processes — V2 | INV-VERIFIER-01..13 | 13 |
+| Environment binding — V2 | INV-ENV-01 | 1 |
+| **Total** | | **64** |
 
 ---
 
@@ -385,17 +411,47 @@ back to `Running`.
 cannot be modified. Any change requires a new plan submission and
 a new `approve_plan` operation.
 
+**Post-admission read discipline (V2 strengthening).** Once an
+initiative has been admitted, the kernel reads plan-derived data
+**exclusively from its internal content-addressed store** (the
+`plan_bundles` and `plan_bundle_artifacts` tables in V2; the V1
+`signed_plan_artifacts` table for legacy initiatives). The host
+filesystem is **NEVER** consulted for plan files after admission —
+not by `approve_plan`, not by KSB rendering, not by crash recovery,
+and not by audit-chain replay. Mutating, renaming, or deleting the
+operator's on-disk plan working tree after submission has zero
+effect on kernel behaviour for any initiative derived from it.
+
 **Justification.** The operator's signature on the plan covers a
 specific snapshot of work. If the plan could be edited
 post-approval, the signature no longer authenticates the executing
 plan — the operator's authority would be retroactively transferred
-to whoever made the edit.
+to whoever made the edit. The post-admission read discipline above
+closes the residual TOCTOU window between admission and any later
+read: in V2, "admission" is the last moment the host filesystem
+matters for an initiative.
+
+**Technical enforcement mechanism (V2).** The strengthened post-
+admission read discipline is enforced by **Plan Bundle Sealing**
+(`v2/plan-bundle-sealing.md`). The CLI bundles `plan.toml` plus all
+transitively-referenced host-side artifacts into a canonical byte
+array, signs the bundle hash atomically with submission, and the
+kernel seals the bundle bytes into SQLite at admission time. The
+sole API by which initiative-execution code accesses plan-derived
+bytes is `raxis-kernel::store::plan_bundle::read_artifact`, which
+reads exclusively from the sealed store. Code paths that construct
+host paths from plan-derived data after admission are a spec
+violation.
 
 **Scenario.** A planner attempts to add a new task to an in-flight
 initiative by re-submitting the plan. The store rejects because
-`signed_plan_artifacts.plan_artifact_sha256` is set and never
-updated; the only way forward is `create_initiative` with a new
-`initiative_id`, then `approve_plan` against the new artifact.
+the initiative's `plan_bundle_sha256` is set and never updated; the
+only way forward is `create_initiative` with a new `initiative_id`,
+then `approve_plan` against the new bundle. Separately, an attacker
+who gains write access to the operator's plan directory after
+submission cannot influence the executing initiative — the kernel
+no longer reads from that directory and the bundle bytes in SQLite
+are signature-protected.
 
 ---
 
@@ -1032,7 +1088,986 @@ invisible to this walk.
 
 ---
 
-## §9 — How invariants combine (composition map)
+## §9 — Convergence (INV-CONVERGENCE-*)
+
+Canonical home: `v2/agent-disagreement.md` §8. These invariants bound
+multi-agent non-convergence — review-rejection loops, circular
+revision attempts, wall-clock runaway, and the abandoned-worktree
+lifecycle that follows a non-converging task. They were introduced
+because V2's hierarchical orchestration (Orchestrator / Executor /
+Reviewer) creates failure modes V1 did not have: agents that
+disagree without ever converging, consuming budget and disk until
+something coarse fires.
+
+### INV-CONVERGENCE-01 — Review round cap enforcement
+
+**Statement.** A task whose `review_rounds_consumed` equals or
+exceeds its configured `max_review_rounds` MUST NOT admit further
+`CompleteTask` intents from any Executor session for that task
+until the resulting escalation is resolved (by extending rounds,
+abandoning the task, or force-admitting the latest commit), the
+task fails (per `on_max_rounds = "fail_task"`), or the operator
+reopens the task with a fresh round count via `raxis task reopen`.
+
+**Justification.** Without a round cap, a Reviewer-rejection loop
+can run dozens of revisions before the per-task token budget
+exhausts — operators pay for many rounds of unproductive work and
+the audit log fills with repeated content. The round cap fires
+earlier in the loop's lifetime regardless of per-round cost.
+Token budgets bound "expected total work"; round caps bound
+"expected iteration depth." Both are needed because per-round cost
+varies wildly (a 50-token critique vs. a 20K-token full-rewrite are
+both "one round").
+
+**Scenario.** Plan declares `max_rounds = 3` and `on_max_rounds = "escalate"`
+for task T. Executor submits commits A, B, C; Reviewer rejects all
+three. On the Executor's attempt to submit commit D, the kernel
+rejects with `FAIL_REVIEW_LOOP_EXCEEDED` and auto-creates a
+`ReviewLoopExceeded` escalation. The Executor session blocks; the
+operator (or Orchestrator if `orchestrator_first` routing is in
+effect) decides whether to extend rounds, abandon, or force-admit.
+
+**Canonical home.** `v2/agent-disagreement.md` §3.
+
+---
+
+### INV-CONVERGENCE-02 — Circular revision rejection
+
+**Statement.** A `CompleteTask` whose computed `diff_hash =
+sha256(diff_bytes)` matches a row in `task_completed_diffs` for
+the same `task_id` with `outcome = 'Rejected'` MUST be rejected
+with `FAIL_CIRCULAR_REVISION` regardless of remaining budget,
+remaining review rounds, or other authority state. The rejection
+is non-negotiable; even an Orchestrator's `ResolveSubEscalation`
+cannot grant authority to bypass it. To bypass, the operator must
+explicitly remove the rejected diff hash via `raxis task
+clear-circular-history <task_id>`, which is itself audited.
+
+**Justification.** A pathological self-loop — Executor produces
+the same diff repeatedly expecting different acceptance — burns
+budget without progress. Exact-hash detection is cheap (sha256 of
+diff bytes is already computed for path-allowlist enforcement),
+unambiguous (no false positives), and auditable (the matching
+prior submission is identifiable). The non-bypassable nature is
+load-bearing: if Orchestrators could grant "permission to retry
+the same diff," circular detection would be defeated by the same
+LLM that produced the loop in the first place.
+
+**Scenario.** Executor submits `CompleteTask` with `head = X`;
+Reviewer rejects. Executor "fixes" by rewriting unchanged code
+and submits `CompleteTask` with `head = Y` whose diff against the
+task base is byte-identical to the diff for `X`. The kernel
+computes `diff_hash(Y) == diff_hash(X)`, finds the row marked
+`Rejected`, and rejects with `FAIL_CIRCULAR_REVISION` before the
+intent admits. Worktree is preserved for forensics; the configured
+`on_circular` behavior fires.
+
+**Canonical home.** `v2/agent-disagreement.md` §4.
+
+---
+
+### INV-CONVERGENCE-03 — Wall-clock enforcement
+
+**Statement.** A task whose `unblocked_elapsed_ms` equals or
+exceeds its configured `wall_clock_limit_ms` MUST trigger the
+configured `wall_clock_behavior` on the next intent admission
+attempt for that task. The kernel does NOT use real-time alarms;
+enforcement is on the next admission attempt, with granularity
+bounded by intent submission frequency. Time spent in `Blocked(*)`
+states does not count toward `unblocked_elapsed_ms` (escalation
+resolution latency is dominated by human response time and would
+auto-fail every escalating task otherwise).
+
+**Justification.** Wall-clock budgets are the operator's hedge
+against tasks that consume real-world time (e.g., slow external
+verifiers, accumulated 30-minute pauses) without advancing token
+budgets. Real-time alarms would require a separate kernel event
+loop interacting with task FSMs mid-flight, expanding the kernel's
+concurrency surface; admission-time enforcement is sufficient
+because tasks cannot make external state changes without admitted
+intents anyway.
+
+**Scenario.** Plan declares `wall_clock_limit = "2h"` for task T.
+Executor works for 1h45m of active time, hits an escalation that
+takes the operator 4h to respond to, then resumes. On the next
+intent admission, the kernel checks: `unblocked_elapsed_ms` =
+1h45m (escalation pause excluded) — still under limit. Executor
+works for another 30m of active time; on the next intent attempt,
+`unblocked_elapsed_ms` = 2h15m, exceeds limit; kernel rejects with
+`FAIL_WALL_CLOCK_LIMIT_EXCEEDED` and fires `wall_clock_behavior`.
+
+**Canonical home.** `v2/agent-disagreement.md` §5.
+
+---
+
+### INV-CONVERGENCE-04 — Orchestrator resolution bounded by authority
+
+**Statement.** An Orchestrator's `ResolveSubEscalation` intent MUST
+be admitted only if the proposed resolution falls within the
+Orchestrator's own delegated authority at admission time. The
+Orchestrator MUST NOT grant any authority it does not itself hold.
+Specifically: budget extensions cannot exceed the Orchestrator's
+remaining budget; wall-clock extensions cannot exceed the
+Orchestrator's remaining wall-clock budget; agent replacements
+require `can_replace_agents = true` in the Orchestrator's
+plan-declared scope.
+
+**Justification.** This preserves `R-4` (Authority Hierarchy):
+sub-artifacts can only narrow parent authority. Routing
+escalations to the Orchestrator first is an efficiency
+optimization, not an authority expansion — the Orchestrator's
+decisions remain bounded by the operator-signed plan. If an
+Orchestrator could grant escalation extensions exceeding its own
+budget, the operator's declared budgets become advisory rather
+than enforced.
+
+**Scenario.** Orchestrator O has a remaining token budget of
+50K. Executor E hits a per-task token limit and escalates;
+routing is `orchestrator_first`. Orchestrator submits
+`ResolveSubEscalation { resolution: ExtendBudget { additional_tokens: 100_000 } }`.
+Kernel rejects: 100K extension exceeds Orchestrator's own 50K
+remaining. Orchestrator must either grant ≤ 50K (which the
+kernel deducts from its own budget) or `EscalateUpward` for the
+operator to grant a larger amount.
+
+**Canonical home.** `v2/agent-disagreement.md` §6.3.
+
+---
+
+### INV-CONVERGENCE-05 — Abandoned worktree retention
+
+**Statement.** A task's worktree, after the task transitions to
+`Failed`, MUST be retained for at least `salvage_window` (allowing
+operator salvage) and SHOULD be retained for
+`abandoned_commits_retention` total (allowing forensic
+inspection). The disk watchdog (`host-capacity.md` §7) MUST NOT
+auto-purge abandoned worktrees during the salvage window; if disk
+pressure requires reclaiming abandoned-worktree space inside the
+window, the operator must explicitly force purge via `raxis
+worktree purge --force <task_id>`. Forced purge is audited.
+
+**Justification.** Abandoned commits are a forensic resource: they
+record the agent's last work product before non-convergence, often
+including partial fixes the operator can salvage. Auto-purging
+under disk pressure would silently destroy this record at the
+moment it is most likely to be needed (an active disagreement
+loop is exactly when the operator wants to inspect what happened).
+The interaction with `INV-CAPACITY-02` is intentional: the disk
+watchdog's `halt_admit` default fails closed on new intents
+rather than purging forensic data.
+
+**Scenario.** Task T fails after a wall-clock-limit escalation;
+worktree enters `AbandonedSalvageable` with a 7-day window. Disk
+fills four days later; watchdog fires `halt_admit`. Operator runs
+`raxis worktree abandoned`, sees T's worktree is 800MB of the
+remaining pressure, decides the abandoned commits are not worth
+preserving, runs `raxis worktree purge --force <T>`. The forced
+purge audits as `WorktreeForciblyPurgedDuringSalvage` so the
+forensic gap is explicit and attributable.
+
+**Canonical home.** `v2/agent-disagreement.md` §7.
+
+---
+
+### INV-CONVERGENCE-06 — Routing authority preservation
+
+**Statement.** An escalation's effective resolution authority MUST
+trace through every routing level recorded in `routing_history`.
+An Orchestrator that resolves an escalation cannot grant authority
+that the operator's signed policy does not allow; an operator that
+resolves an escalation cannot grant authority exceeding their own
+role per `policy.toml`. The kernel re-validates the resolution
+authority at the moment of resolution admission, not at routing
+time.
+
+**Justification.** Two-tier escalation routing introduces a window
+between routing-time and resolution-time during which the
+Orchestrator's or operator's authority may have changed (policy
+epoch advance, cert rotation, key revocation). Re-validation at
+resolution time guarantees the resolution reflects current
+authority, not stale authority captured at routing. This is the
+escalation-routing analogue of `INV-ESC-02` (epoch-mismatch
+rejection of approval tokens).
+
+**Scenario.** Orchestrator O is delegated 100K tokens at plan
+approval. An Executor escalates a budget extension; the kernel
+routes to O. Before O resolves, the operator advances the policy
+epoch, narrowing O's plan-declared authority to 20K. O submits
+`ResolveSubEscalation { ExtendBudget { 50_000 } }`. Kernel
+re-validates O's current authority (20K), finds the resolution
+exceeds it, and rejects. O must `EscalateUpward` for the operator
+to grant a larger extension. The new policy epoch is honored, not
+the stale routing-time snapshot.
+
+**Canonical home.** `v2/agent-disagreement.md` §6.3, §8.
+
+---
+
+## §10 — Planner Harness (INV-PLANNER-HARNESS-*)
+
+Canonical home: `v2/planner-harness.md` §4–§5, §13. These invariants
+constrain the planner's tool surface (per role), the source and
+integrity of the Reviewer's VM image, and the in-VM
+backgrounded-process containment substrate. They were introduced
+because V2 leverages claw-code-derived planner machinery (which
+is generic across roles) inside a kernel-mediated multi-role
+architecture (Orchestrator, Executor, Reviewer) that must
+structurally prevent the Reviewer role from executing code or
+running shells under any circumstances.
+
+### INV-PLANNER-HARNESS-01 — Reviewer code execution prohibition
+
+**Statement.** A Reviewer-role planner session MUST NOT have access to
+any code-execution primitive: no shell (`bash`, `sh`, `dash`, `zsh`,
+busybox sh), no language runtime (`node`, `python`, `ruby`, `perl`,
+`lua`), no compiler (`rustc`, `gcc`, `clang`, `tsc`, `go`), no LSP
+server (`rust-analyzer`, `pyright`, `tsserver`, etc.), no package
+manager (`npm`, `cargo`, `pip`, `gem`), no git binary, no network
+utility (`curl`, `wget`, `ssh`). Enforcement is three-layered:
+(a) Reviewer image content (the kernel-bundled `raxis-reviewer-core`
+contains none of these binaries — `raxis doctor` verifies absence
+on every install per `system-requirements.md §11`); (b) harness
+build (the Reviewer build target of `raxis-planner` excludes the
+`bash` claw-code module at link time); (c) kernel dispatch matrix
+(intents that would route to shell-execution paths are rejected
+when the session role is `Reviewer`).
+
+**Plan-side authoring corollary.** The Reviewer's tool-execution
+prohibition extends to the plan-side authoring surface: any plan
+field whose semantics presuppose a capability the Reviewer lacks is
+structurally meaningless on a Reviewer task and MUST be rejected at
+admission, never silently stripped. The V2 enumeration of forbidden
+fields on Reviewer tasks:
+
+- **`[plan.tasks.<id>] vm_image`** (and any image-specifying field) —
+  rejected with `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` per
+  `INV-PLANNER-HARNESS-02`.
+- **`[[profiles.<name>.custom_tool]]` blocks** on a Reviewer-rooted
+  profile-inheritance chain — rejected with
+  `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED` per `INV-PLANNER-HARNESS-04`.
+- **`[plan.tasks.<id>] path_allowlist`** (any value, including the
+  empty array `[]`) — the Reviewer's `/workspace` is mounted
+  read-only and the harness has no commit-pathway intent
+  (`SingleCommit`, `IntegrationMerge`, `edit_file`, `bash`); the
+  field is structurally meaningless. Rejected with
+  `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED` per
+  `policy-plan-authority.md §3b`. `raxis-cli plan prepare` surfaces
+  the same hard-refusal pre-signing per `operator-ergonomics.md
+  §4.5.5`.
+
+The kernel never silently mutates an operator-signed plan; the
+operator owns every byte they sign, including bytes that turn out to
+be structurally invalid. Future V2.x additions to this enumeration
+MUST follow the same discipline (document why the field is
+structurally meaningless on a Reviewer task; add the corresponding
+`FAIL_REVIEWER_*` admission code in `policy-plan-authority.md §3b`;
+extend `plan prepare`'s §4.5 surface in `operator-ergonomics.md` to
+surface the rejection pre-signing; update this corollary).
+
+**Justification.** A Reviewer that can execute code can be
+deterministically compromised by the code it is reviewing — a
+malicious `build.rs`, a malicious `setup.py`, a malicious LSP
+extension. The blast radius is bounded by the VM (no host
+escape), but the LLM-side impact is catastrophic: a compromised
+LSP can poison symbol-resolution responses, omit malicious
+caller references from `find_references`, etc., causing the
+Reviewer LLM to approve genuinely malicious changes. The
+defense is structural: remove the tools entirely so no tool
+can be compromised. Code-running verification of the changes
+under review is performed instead by Kernel-spawned verifier
+VMs (`INV-VERIFIER-*`), whose outputs reach the Reviewer via
+the audit-bound `verifier_witnesses` KSB block.
+
+The plan-side authoring corollary closes a parallel category of
+silent-failure modes: an operator who declares a `path_allowlist`
+on a Reviewer task is reasoning about a Reviewer that can write —
+which contradicts the runtime invariant. Failing admission loud is
+the structural feedback that the operator's mental model is wrong;
+silently stripping the field would let the operator continue
+reasoning incorrectly. Same logic applies to `vm_image` and custom
+tools.
+
+**Scenario.** A malicious Executor commits a Cargo crate with a
+`build.rs` that, when invoked by `rust-analyzer`, exfiltrates
+its arguments to a remote endpoint. Under V1, a Reviewer with
+LSP access would invoke `rust-analyzer` on the project as part
+of opening it, executing `build.rs`. Under V2, the Reviewer's
+image lacks `rust-analyzer`, lacks `cargo`, lacks any binary
+that would invoke `build.rs`. The malicious code never executes
+in the Reviewer's VM. Code-running verification is delegated to
+a verifier VM (operator-published) where the same malicious
+`build.rs` runs under cgroup containment with no access to
+Reviewer or other planner state.
+
+**Canonical home.** `v2/planner-harness.md` §4.4.
+
+---
+
+### INV-PLANNER-HARNESS-02 — Reviewer image is kernel-owned
+
+**Statement.** The VM image used for any Reviewer-role task is the
+kernel-bundled `raxis-reviewer-core` image. Operators MUST NOT
+specify the image in `plan.toml`; any `vm_image` (or equivalent)
+field on a Reviewer task is rejected at `approve_plan` with
+`FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`. The kernel-bundled image
+is a single OCI image bundle shipped at
+`$RAXIS_INSTALL_DIR/images/raxis-reviewer-core-<kernel_version>.img`;
+the kernel binary contains a compiled-in SHA-256 of the image bytes.
+At every Reviewer activation, the kernel re-computes the on-disk
+digest and refuses to boot the VM with `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`
+on any mismatch (with `SecurityViolationDetected` audit emission).
+
+**Justification.** Allowing operator-specified Reviewer images
+introduces supply-chain risk (a tampered image with a
+compromised `grep` or `libc` could selectively hide malicious
+strings from the Reviewer LLM's `grep_search`) AND mental burden
+(operators maintaining an image for a role that does not even
+use user-space tools beyond the planner binary). Kernel-bundled
++ digest-verified is the smallest possible trusted computing
+base for the ultimate security gate.
+
+**Scenario.** An attacker with operator-host filesystem write
+access (e.g., partial compromise of a CI runner that builds RAXIS
+images) replaces `raxis-reviewer-core-2.0.0.img` with a tampered
+build that includes a modified `ripgrep` whose output omits
+matches against pattern `password`. On the next Reviewer
+activation, the kernel re-computes SHA-256 of the on-disk file,
+finds it does not match the kernel-binary's compiled-in expected
+digest, and aborts activation with `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`
++ `SecurityViolationDetected { kind: "ReviewerImageDigestMismatch" }`.
+The compromised image never runs; the operator is paged to
+investigate.
+
+**Canonical home.** `v2/planner-harness.md` §4.5.
+
+---
+
+### INV-PLANNER-HARNESS-03 — In-VM process containment via cgroup v2
+
+**Statement.** Every planner VM (Orchestrator, Executor) AND every
+verifier VM (per `INV-VERIFIER-06`) MUST run a Linux 5.14+ guest
+kernel with cgroup v2 mounted and `cpu`, `memory`, `pids`
+controllers in `cgroup.subtree_control`. The harness's
+backgrounded-shell substrate places each background process in a
+named sub-cgroup (`/sys/fs/cgroup/raxis/bash-bg-<n>/`); termination
+uses `cgroup.kill` (atomic, race-free, reliable against
+double-forking daemons). VM stop is the universal reap point
+regardless of in-VM cleanup state.
+
+**Justification.** Without cgroup v2 + `cgroup.kill`, the in-VM
+backgrounded-shell substrate degrades to walking `/proc` and
+sending SIGKILL in a loop — racing against new forks, leaking
+double-forked daemons, and generally being unreliable. cgroup v2
+provides atomic, race-free termination guarantees that match the
+harness's contract with the planner LLM ("when you call `bash
+bg_kill`, the process tree IS dead by the time the call returns").
+Linux 5.14 (August 2021) is the first kernel version with
+`cgroup.kill`; earlier kernels are rejected as a baseline rather
+than supporting a fallback path that produces subtly different
+behavior.
+
+**Scenario.** A planner LLM invokes `bash run --background "node
+dev_server.js"`; node spawns 4 worker subprocesses via
+`cluster.fork()`. Later the LLM invokes `bash bg_kill bg_3`. The
+harness writes `1` to
+`/sys/fs/cgroup/raxis/bash-bg-3/cgroup.kill`; in a single atomic
+operation the parent and all 4 workers receive SIGKILL. The
+harness verifies by reading `cgroup.events` `populated=0`, then
+returns to the LLM. No worker survives, no race window, no
+process tree fragmentation.
+
+**Canonical home.** `v2/planner-harness.md` §5.3, §10.2.
+
+---
+
+### INV-PLANNER-HARNESS-04 — Reviewer Custom Tool Prohibition
+
+**Statement.** A profile whose effective role is `Reviewer` MUST NOT
+declare any `[[profiles.<name>.custom_tool]]` blocks (directly or via
+`inherits_from`-chain ancestor profiles). At plan admission, the
+admission stage walks the inheritance graph, computes the effective
+custom-tool set for each profile, and rejects with
+`FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED { profile, declaring_profiles:
+[...] }` if the effective role is `Reviewer` AND the effective
+custom-tool set is non-empty. Custom tools may be declared on any
+profile inheriting from `Executor` or `Orchestrator`; the structural
+ban applies to Reviewer-rooted inheritance chains only.
+
+**Justification.** A custom tool is, by definition, arbitrary code
+execution: a forked subprocess running operator-defined argv with
+operator-defined input. This is the exact attack surface that
+`INV-PLANNER-HARNESS-01` was designed to eliminate. The kernel-bundled
+`raxis-reviewer-core` image (`INV-PLANNER-HARNESS-02`) lacks the
+runtimes (no `python3`, `node`, shell, or compilers) that most
+operator scripts would require, so most violations would fail at
+runtime regardless — but relying on "fails at runtime" produces
+partial audit trails, leaks the misconfiguration into a live session,
+and surfaces the failure to the LLM mid-loop. Catching the
+declaration at admission, with a clear remediation message, is the
+correct fail-closed posture.
+
+**Scenario.** An operator authors a `Reviewer`-inheriting profile
+`security_reviewer` and adds a `[[profiles.security_reviewer.custom_tool]]`
+called `static_analyzer` that runs an internal SAST tool. Plan
+admission walks the inheritance chain, sees the effective role is
+`Reviewer` and the effective custom-tool set is non-empty, and
+rejects with `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`. The remediation
+message points the operator to either: (a) declare the analyzer as a
+verifier (`verifier-processes.md`), where its output reaches the
+Reviewer via `verifier_witnesses` in the KSB and properly gates
+review activation per `INV-VERIFIER-04`; or (b) move the tool to an
+Executor-inheriting profile if the use case is execution-time, not
+review-time.
+
+**Canonical home.** `v2/custom-tools.md` §10.
+
+---
+
+### INV-PLANNER-HARNESS-05 — Canonical Orchestrator Image
+
+**Statement.** A V2 Orchestrator session boots from a kernel-bundled,
+kernel-digest-verified image — `raxis-orchestrator-core` — distributed
+alongside the kernel binary at
+`$RAXIS_INSTALL_DIR/images/raxis-orchestrator-core-<kernel_version>.img`.
+The kernel binary contains a compiled-in
+`EXPECTED_ORCHESTRATOR_IMAGE_DIGEST: [u8; 32]` (SHA-256). At every
+Orchestrator activation, the kernel re-computes the on-disk SHA-256 and
+refuses to boot the VM with `FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH` on
+mismatch, emitting `SecurityViolationDetected { kind:
+"OrchestratorImageDigestMismatch" }`. Operator-supplied Orchestrator
+images are categorically prohibited; `policy.toml`'s `[[vm_images]]`
+table rejects any entry whose `role_restriction` contains
+`"Orchestrator"` at policy load with
+`FAIL_POLICY_INVALID_ROLE_RESTRICTION` (parallel to the Reviewer
+treatment in `INV-PLANNER-HARNESS-02`).
+
+**Justification.** The Orchestrator multiplexes the parallel branches
+of an initiative — activating ready sub-tasks, semantically resolving
+trivial git conflicts (so a forest of import collisions does not become
+an operator-escalation flood), and coordinating final merges. To do
+this safely, its image must be small, audited, and bound to the same
+trust root as the kernel: a `git` binary whose merge output the
+Orchestrator trusts, a `bash` whose semantics the harness understands,
+a `libc` whose path-handling has not been silently subverted. Allowing
+operator-supplied Orchestrator images reintroduces the entire
+supply-chain risk class that `INV-PLANNER-HARNESS-02` eliminated for
+the Reviewer.
+
+The image is large enough to perform 3-way semantic git merges with
+bash + git + edit_file, and nothing more (no language runtimes, no
+compilers, no package managers, no curl, no editors, no LSPs). See
+`v2/planner-harness.md §10.5` for the full image manifest.
+
+**Scenario.** An attacker with operator-host filesystem write access
+replaces `raxis-orchestrator-core-2.0.0.img` with a tampered build
+whose `git` binary silently inserts an attacker-controlled commit
+during `git merge`. On the next Orchestrator activation, the kernel
+re-computes the on-disk SHA-256, finds it does not match
+`EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`, and aborts activation with
+`FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH` +
+`SecurityViolationDetected { kind: "OrchestratorImageDigestMismatch" }`.
+The compromised image never runs; the operator is paged.
+
+**Canonical home.** `v2/planner-harness.md` §4.7.
+
+---
+
+### INV-PLANNER-HARNESS-06 — Orchestrator Is Not Operator-Configurable
+
+**Statement.** The Orchestrator role's complete behavior surface is
+kernel-owned and version-locked with the kernel binary. Specifically:
+
+1. **No operator-declared Orchestrator profiles.** `plan.toml` MUST
+   NOT contain a profile whose effective role is `Orchestrator` and
+   MUST NOT contain a task whose `role` is `"Orchestrator"`. Plan
+   admission rejects with `FAIL_ORCHESTRATOR_PROFILE_NOT_ALLOWED` or
+   `FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED`. The Orchestrator session is
+   auto-created by the kernel at initiative admission.
+2. **No `inherits_from = "Orchestrator"`.** Profile inheritance can
+   only target operator-extensible role roots, which in V2 is
+   exclusively `"Executor"`. Profiles attempting `inherits_from =
+   "Reviewer"` or `inherits_from = "Orchestrator"` are rejected at
+   admission with `FAIL_PROFILE_ROLE_NOT_CONFIGURABLE`.
+3. **No operator-modifiable NNSP.** The Orchestrator's NNSP is
+   compiled into the kernel binary as `ORCHESTRATOR_NNSP_BYTES` and is
+   version-locked with the Orchestrator image per
+   `INV-PLANNER-HARNESS-05`. Operators cannot edit it.
+4. **No operator-declared custom tools.** Structural consequence of
+   (1) — there is no operator-declared profile to attach custom tools
+   to.
+5. **No backgrounded `bash`.** The Orchestrator harness build excludes
+   `bash run --background` and the `bash bg_*` family; the
+   Orchestrator's `bash` is foreground-only.
+
+Operator policy MAY tune three orthogonal knobs in
+`policy.toml [orchestrator]`: `provider_alias`,
+`max_token_budget_per_initiative`, and `all_merges_require_approval`.
+There are no other Orchestrator-tunable controls in V2.
+
+**Justification — the "Invisible Infrastructure" framing.** The
+user-facing surface of RAXIS is Executors and tasks. The kernel runs an
+Orchestrator underneath to multiplex the DAG, semantically resolve
+trivial conflicts, and finalize merges. Operators do not think about
+the Orchestrator the same way Kubernetes operators do not think about
+the Kubelet — it is part of the runtime, not part of the workload
+definition. This produces three concrete properties an
+operator-configurable Orchestrator could not: configuration surface
+area for the Orchestrator is zero (operators cannot misconfigure what
+they cannot configure); behavior consistency across deployments
+(every RAXIS deployment running kernel version `X` has byte-identical
+Orchestrator behavior); upgrade atomicity (kernel upgrades ship a new
+Orchestrator image AND NNSP atomically).
+
+The trade-off operators accept is the loss of operator-specific
+prompt instructions, custom Orchestrator images, custom tools, and
+long-lived background processes in the Orchestrator session. In
+exchange, they get an Orchestrator that just works, plus three
+deployment-wide policy knobs for the genuine cases where
+deployment-wide constraints need to bind Orchestrator behavior.
+
+**Scenario.** An operator authoring their first plan declares
+`[profiles.coordinator]` with `role = "Orchestrator"` and adds custom
+fields, expecting V1-style operator-orchestrator tuning. Plan
+admission rejects with `FAIL_ORCHESTRATOR_PROFILE_NOT_ALLOWED` and a
+remediation message: "The Orchestrator is kernel-managed and not
+operator-configurable in V2. Remove the orchestrator profile.
+Per-initiative guidance can be added to the initiative description
+field, which the Orchestrator reads via its KSB. Deployment-wide
+controls are in `policy.toml [orchestrator]`. See
+`planner-harness.md §4.8`."
+
+**Canonical home.** `v2/planner-harness.md` §4.8.
+
+---
+
+## §11 — Verifier Processes (INV-VERIFIER-*)
+
+Canonical home: `v2/verifier-processes.md` §13. These invariants
+constrain the unified verifier subsystem (no V1/V2 split per
+`verifier-processes.md §7` — single `WitnessSubmission` frame,
+single `witness_records` schema, single `raxis-verifier` PID-1
+binary). Three authoring sources fan into the unified runtime:
+policy claim-based gates (`policy.toml [[gates]]`), per-task plan
+verifiers (`[[plan.tasks.X.verifiers]]`), and pre-`IntegrationMerge`
+plan verifiers (`[[plan.integration_merge_verifiers]]` and
+`policy.toml [[integration_merge_verifiers]]`). All three produce
+witnesses in the same `witness_records` table; the `hook_kind`
+column distinguishes the lifecycle hook at which each witness was
+produced.
+
+These invariants exist because the Pure-Static Reviewer decision
+(`INV-PLANNER-HARNESS-01`) requires code-running verification to
+happen outside the Reviewer's VM in a separate trust domain that
+produces structured witness data the Reviewer (or, for pre-merge
+verifiers, the Orchestrator and operator) consumes.
+
+### INV-VERIFIER-01 — Witness-only output channel
+
+**Statement.** A verifier VM cannot invoke any commit-pathway
+intent (`SingleCommit`, `CompleteTask`, `IntegrationMerge`,
+`ActivateSubTask`, `ApprovePlan`, `EgressRequest`). Verifier VMs
+have no planner harness, no LLM, no inference; their only
+kernel-bound communication is the `WitnessSubmission` frame
+(per `verifier-processes.md §7`). Verifier output enters the audit
+chain via `witness_records` only.
+
+**Canonical home.** `v2/verifier-processes.md` §13.
+
+---
+
+### INV-VERIFIER-02 — Verifier VM isolation from agent VMs
+
+**Statement.** Verifier VMs share no state with agent VMs
+(Orchestrator, Executor, Reviewer); no inter-VM IPC exists. The
+only path from verifier output to a Reviewer is the kernel's
+KSB injection at Reviewer activation time. The only path from
+pre-`IntegrationMerge` verifier output to the Orchestrator is the
+`FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` admission-failure return
+on the Orchestrator's `IntegrationMerge` request (per
+`integration-merge.md §4 Check 5d.4`). Verifier VMs cannot be
+observed by the Executor whose commit they evaluate, by sibling
+Reviewers, or by the Orchestrator (who sees only the failure code,
+not the verifier process state).
+
+**Canonical home.** `v2/verifier-processes.md` §13.
+
+---
+
+### INV-VERIFIER-03 — Reviewer activation gated on all per-task verifiers
+
+**Statement.** A Reviewer is activated for a given `evaluation_sha`
+ONLY after every plan-declared per-task verifier (per
+`verifier-processes.md §15.1` plan-author per-task source) AND every
+policy claim-based gate (per `verifier-processes.md §15.0`) for that
+task has written a witness with non-NULL `final_status` (`passed`,
+`failed`, `timed_out`, `crashed`, or `artifact_missing`). A Reviewer
+is NEVER activated with partial witness data. If any per-task
+verifier or claim-based gate is still `Pending`, the Reviewer waits.
+Pre-`IntegrationMerge` verifiers (per `INV-VERIFIER-13`) do NOT
+participate in this gate — they fire at a strictly later lifecycle
+hook and the Reviewer has no dependency on them.
+
+**Canonical home.** `v2/verifier-processes.md` §13, §5.2.
+
+---
+
+### INV-VERIFIER-04 — `block_review` failures fail the Executor's task
+
+**Statement.** A verifier with `on_failure = "block_review"`
+producing `final_status ≠ "passed"` causes the originating
+Executor's `CompleteTask` to be rolled into `Failed` per
+`agent-disagreement.md §3`. The Reviewer is not activated. The
+Executor receives `FAIL_VERIFIER_BLOCKED` on its next intent. The
+failure counts as a review round toward `INV-CONVERGENCE-01`.
+`block_review` is the only legal `on_failure` value for the
+`CompleteTask`-hooked verifiers (per-task plan verifiers and
+implicitly for policy claim-based gates); pre-`IntegrationMerge`
+verifiers cannot use `block_review` (per `INV-VERIFIER-13`).
+
+**Canonical home.** `v2/verifier-processes.md` §13, §5.2.
+
+---
+
+### INV-VERIFIER-05 — Declared artifact validation
+
+**Statement.** A verifier's `artifact` declaration MUST be
+validated post-success: file MUST exist, be non-empty, and not
+exceed `artifact_max_bytes`. Missing, empty, or oversize artifacts
+produce `final_status = "artifact_missing"` regardless of the
+command's exit code. The kernel does NOT partial-stage or
+truncate. This applies uniformly to all three authoring sources.
+
+**Canonical home.** `v2/verifier-processes.md` §13, §6.3.
+
+---
+
+### INV-VERIFIER-06 — Verifier image substrate matches planner
+
+**Statement.** Every verifier VM image MUST satisfy the same VM
+guest kernel and cgroup substrate requirements as planner images:
+Linux 5.14+ guest kernel; cgroup v2 mounted; `cpu`, `memory`,
+`pids` controllers in `cgroup.subtree_control`. `raxis doctor`'s
+`vm-images` category enforces this for every operator-published
+verifier image referenced by an installed `policy.toml`. The
+kernel-bundled verifier images (per `INV-VERIFIER-12` for the
+canonical symbol-index image; per `verifier-processes.md §14.5`
+for the four tiered language starters) are pre-validated at
+release-build time.
+
+**Canonical home.** `v2/verifier-processes.md` §13. Cross-references
+`INV-PLANNER-HARNESS-03`.
+
+---
+
+### INV-VERIFIER-07 — Verifier images are operator-published (with one exception)
+
+**Statement.** Verifier VM images are operator-published per
+`INV-VM-CAP-03` and policy-pinned by OCI digest, with **one
+exception**: the kernel-canonical `raxis-verifier-symbol-index`
+image (per `INV-VERIFIER-12`), which is kernel-bundled and
+kernel-digest-bound, mirroring the
+`INV-PLANNER-HARNESS-02`/`INV-PLANNER-HARNESS-05` exception model
+for canonical Reviewer/Orchestrator images. For all other verifier
+images — including the four kernel-bundled tiered language starters
+(`raxis-verifier-{rust,node,python,go}-starter`) — operators ship
+the image, the kernel verifies the on-disk digest matches the
+operator's policy-pinned `[[vm_images]] oci_digest`, and the trust
+boundary is operator-signed policy. The `role_restriction` field on
+`[[vm_images]]` MUST include `Verifier` for any image referenced by
+any verifier-source surface (`[[plan.tasks.X.verifiers]].image`,
+`[[plan.integration_merge_verifiers]].image`,
+`[[integration_merge_verifiers]].image`,
+`[default_verifier_images].<lang>`).
+
+**Canonical home.** `v2/verifier-processes.md` §13, §14.
+
+---
+
+### INV-VERIFIER-08 — Verifier VM has no LLM and no harness
+
+**Statement.** Verifier VMs run `raxis-verifier` (a small,
+single-purpose command runner) as PID 1. They have NO LLM, NO
+inference, NO planner harness, NO `IntentKind` dispatch. No
+claw-code module is linked into `raxis-verifier`.
+
+**Justification.** A verifier VM that crashes due to a
+programming error in the verifier command cannot escalate the
+failure mode — it just produces a `crashed` witness and the
+kernel handles per `on_failure`. A planner-harness-equipped
+"verifier" would invert this: a malicious or buggy verifier
+command could trigger novel intent paths, escalate authority,
+or otherwise increase the trust surface of code-running
+verification.
+
+**Canonical home.** `v2/verifier-processes.md` §13.
+
+---
+
+### INV-VERIFIER-09 — Verifier mutations do not persist
+
+**Statement.** Verifier VMs have read-write access to `/workspace`
+(mounted from a fresh clone of `evaluation_sha`) and `/raxis/`
+(for artifact output). All `/workspace` and `/raxis/` mutations
+are dropped at VM exit unless declared as `artifact` per §6 of
+`verifier-processes.md`. Verifier VMs cannot persist mutations
+to the `master_repo` or any session-shared storage.
+
+**Canonical home.** `v2/verifier-processes.md` §13.
+
+---
+
+### INV-VERIFIER-10 — Kernel-enforced timeout via `cgroup.kill`
+
+**Statement.** Verifier timeouts are kernel-enforced via
+`cgroup.kill` on the verifier-process cgroup at the declared
+`timeout` (or the per-verifier kernel hard cap, whichever is
+smaller). Timeout produces `VerifierTimedOut` audit and treats
+the verifier as failed per its `on_failure` rule. The kernel
+does NOT rely on the verifier's internal timeout handling for
+this guarantee.
+
+**Canonical home.** `v2/verifier-processes.md` §13. Cross-references
+`INV-PLANNER-HARNESS-03`.
+
+---
+
+### INV-VERIFIER-11 — No network by default
+
+**Statement.** Verifier VMs have NO network interface by default.
+Network egress requires explicit `allowed_egress` declaration on
+the verifier source (`[[plan.tasks.X.verifiers.allowed_egress]]`,
+`[[plan.integration_merge_verifiers.allowed_egress]]`, or
+`[[integration_merge_verifiers.allowed_egress]]`), mirroring the
+Executor / Orchestrator egress pattern. The default is air-gapped;
+verifiers that don't need network do not get one.
+
+**Justification.** Reduces blast radius of a supply-chain
+compromise of a verifier image: a compromised image cannot
+exfiltrate `evaluation_sha` contents (or, for pre-merge verifiers,
+candidate-merge-tree contents) without explicit egress declared.
+
+**Canonical home.** `v2/verifier-processes.md` §13.
+
+---
+
+### INV-VERIFIER-12 — Kernel-canonical symbol-index verifier image
+
+**Statement.** When `policy.toml [prepare] auto_inject_symbol_index
+= true` (V2 default per `policy-plan-authority.md §4 [prepare]`),
+the symbol-index verifier image auto-injected by `raxis-cli plan
+prepare` (per `operator-ergonomics.md §4.2`) MUST be the
+kernel-canonical `raxis-verifier-symbol-index` image. The image is
+kernel-built, distributed via the kernel release at
+`$RAXIS_INSTALL_DIR/images/raxis-verifier-symbol-index-<kernel_version>.img`,
+and digest-verified at every spawn against the kernel-binary's
+compiled-in `EXPECTED_SYMBOL_INDEX_VERIFIER_IMAGE_DIGEST` (per
+`verifier-processes.md §14.4`). The image alias
+`"raxis-verifier-symbol-index"` is **reserved at policy load** —
+any `[[vm_images]]` entry attempting to use the alias is rejected
+with `FAIL_POLICY_RESERVED_VM_IMAGE_NAME` (per
+`policy-plan-authority.md §3b`). The reserved alias guarantees
+plan-side references resolve unambiguously to the kernel-bundled
+image.
+
+**Justification.** The Pure-Static Reviewer (per
+`INV-PLANNER-HARNESS-01`) is structurally dependent on a
+symbol-index witness for full symbol-resolution fidelity. Operators
+forgetting to declare a symbol-index verifier silently degrade the
+Reviewer; auto-injection inverts the default. Auto-injection has
+authority — the operator's signed plan contains the injected entry
+verbatim — but it must reach for a trusted, kernel-bound image
+rather than an operator-published image (which would re-introduce
+the supply-chain trust gap auto-injection is supposed to close).
+The reserved alias prevents an operator from accidentally or
+maliciously shadowing the canonical image.
+
+**Operator override.** Operators who want a different
+symbol-extraction tool MUST set `policy.toml [prepare]
+auto_inject_symbol_index = false` AND declare their own verifier
+in their plan with their own image. Per-task suppression is also
+available via `[plan.tasks.<id>.review] symbol_index = "not_needed"`
+(per `planner-harness.md §4.1`).
+
+**Canonical home.** `v2/verifier-processes.md` §14.
+
+---
+
+### INV-VERIFIER-13 — Pre-IntegrationMerge verifier gating
+
+**Statement.** When the union of `[[plan.integration_merge_verifiers]]`
+(plan-side) and `policy.toml [[integration_merge_verifiers]]`
+(operator-side) declares at least one verifier whose `applies_to`
+filter matches an `IntegrationMerge` request, the kernel MUST
+materialize the candidate merged tree (per
+`integration-merge.md §11.10`), spawn all matching verifier VMs,
+wait for all to complete, and gate `IntegrationMerge` admission on
+the result per `integration-merge.md §4 Check 5d`. Master is
+advanced ONLY if every matching verifier with `on_failure =
+"block_merge"` reports `final_status = "passed"`. Pre-merge
+verifier failures with `block_merge` produce
+`FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` and the candidate merged
+tree is discarded.
+
+**Authority asymmetry.** Operator-side declarations
+(`[[integration_merge_verifiers]]` in `policy.toml`) MUST set
+`on_failure = "block_merge"` — operator-side gates cannot be
+downgraded to `warn_only` per `policy-plan-authority.md §4
+[[integration_merge_verifiers]]`. Plan-side declarations
+(`[[plan.integration_merge_verifiers]]`) MAY set `on_failure =
+"block_merge"` or `on_failure = "warn_only"`. `block_review` is
+NEVER legal for pre-merge verifiers (per
+`policy-plan-authority.md §5 step 3.7`).
+
+**Convergence accounting.** Pre-merge verifier failures do NOT
+count toward `INV-CONVERGENCE-01` (review-round cap), because they
+fire at `IntegrationMerge` admission — strictly after Reviewer
+activation has already accepted the constituent tasks. Operator
+escalation per `verifier-processes.md §16.6` is the resolution
+path.
+
+**Justification.** Per-task verifiers gate Reviewer activation but
+do not see cross-task interactions; pre-merge verifiers gate
+master advancement and run against the candidate merged tree, so
+they see the integration boundary that per-task verifiers cannot.
+This is the operator's mechanism for "regression gating" tests
+that should hold at the master frontier, not just at individual
+task boundaries. The strict `block_merge` discipline prevents
+silent regressions: if a pre-merge gate fails, master does not
+advance until either the gate passes or the operator explicitly
+escalates.
+
+**Canonical home.** `v2/verifier-processes.md` §15,
+`v2/integration-merge.md §4 Check 5d`, §11.10.
+
+---
+
+## §11.5 — Environment Binding (INV-ENV-*)
+
+Canonical home: `v2/environment-access-control.md` §11. These
+invariants constrain V2's optional environment-binding compliance
+layer. The whole subsystem is **opt-in**: a deployment whose
+`policy.toml` declares zero `[environments.<label>]` sections runs
+exactly as a V1 deployment does — none of the INV-ENV-* checks fire,
+and the rest of the kernel's authority chain operates unchanged. The
+invariants below activate the moment the operator's signed policy
+declares one or more environments.
+
+The motivation is structural: when a deployment manages multiple
+compliance boundaries (beta vs. production, customer-A vs. customer-B,
+tenant-X vs. tenant-Y), the kernel needs a mechanically-enforceable
+guarantee that no single agent execution context simultaneously holds
+credentials and reach across two boundaries. Without that guarantee,
+an operator's careful per-task egress allowlists and per-task
+credential bindings remain pure-convention — the agent inside the VM
+*could* mix credentials and URLs at runtime, and the audit chain
+would record the resulting cross-boundary activity as legitimate
+("the plan said so"). INV-ENV-01 elevates this from convention to
+admission-time invariant.
+
+### INV-ENV-01 — Task Environment Consistency
+
+**Statement.** When the loaded policy declares at least one
+`[environments.<label>]` section, every admitted task in every plan
+bundle binds to **at most one** environment. The set of environments
+a task binds to is computed by walking the task's environment-bound
+resources per the `environment-access-control.md §11.3` algorithm
+(environment-bound `[[plan.tasks.X.credentials]]` entries plus
+`allowed_egress` URLs that match `[[environment_gates]]` labels,
+excluding URLs whose conflated environments all declare
+`same_cluster_acknowledged = true`). Tasks whose computed set has
+more than one element are rejected at `approve_plan` with
+`FAIL_TASK_ENVIRONMENT_INCONSISTENT`. Tasks with cardinality 0 are
+recorded as environment-neutral and pass trivially. The
+`--no-strict` plan-submission flag does NOT downgrade this check;
+it is structural, not warning-class.
+
+**Justification.** Without this invariant, an operator could
+declare a single Executor task that holds both `registry-beta-read`
+(an env-bound credential) and `registry-prod-write` (a different
+env-bound credential), with `allowed_egress` covering both
+`api.beta.example.com` and `api.prod.example.com`. The kernel would
+inject both credentials into the same VM at boot. A confused (or
+compromised) agent process inside that VM could authenticate to
+either environment from the same execution context. The audit chain
+would record the resulting cross-environment activity as plan-sanctioned;
+nothing in the runtime would distinguish "agent intentionally promoted
+an artifact" from "agent leaked a beta credential into a prod-bound
+HTTP request". INV-ENV-01 makes the admission-time invariant
+structural — the kernel *cannot* be configured into a state where one
+session holds two environments' worth of authority simultaneously.
+
+**Scenario.** An operator wants to "promote a verified artifact from
+beta to production" and writes a single `promote_artifact` Executor
+task that lists both `registry-beta-read` and `registry-prod-write`
+as `[[plan.tasks.credentials]]`. At `approve_plan`, the per-task
+binding algorithm computes `task_envs = {"beta", "production"}` from
+the credential bindings and returns `FAIL_TASK_ENVIRONMENT_INCONSISTENT
+{ task: "promote_artifact", environments: ["beta", "production"],
+sources: [(Credential("registry-beta-read"), "beta"),
+(Credential("registry-prod-write"), "production")] }`. The CLI
+surfaces this with a remediation hint pointing at
+`environment-access-control.md §11.5` (the canonical DAG-split
+pattern). The operator refactors the plan into two tasks — one
+"beta"-bound `fetch_from_beta` and one "production"-bound
+`publish_to_prod` connected by `depends_on` — passing the artifact
+between them via the kernel's task-output store. Both new tasks pass
+INV-ENV-01 trivially (each binds to exactly one env), and the kernel
+mediates the artifact handoff with a SHA-256 record in the audit
+chain.
+
+**Role-implicit neutrality.** Reviewer and Orchestrator tasks have
+**cardinality 0** for environment-bound resources by structural
+prohibition rather than operator choice. Reviewer (per
+`INV-PLANNER-HARNESS-01` / `INV-PLANNER-HARNESS-04`: pure-static, no
+operator-egress, no operator-credentials) and Orchestrator (per
+`INV-PLANNER-HARNESS-06`: not declarable in `plan.toml`, no
+operator-controlled credentials, no operator-controlled egress) both
+admit zero environment-bound resources by definition. INV-ENV-01 is
+therefore a no-op for these roles — they always record as Neutral.
+This is the architecturally-correct outcome: the Reviewer is a
+pure-static analyzer acting on bytes (the environment binding has no
+meaning for it), and the Orchestrator is a kernel-owned actor that
+sequences the DAG without holding any environment's credentials.
+
+**Activation gate.** The invariant fires only when the loaded policy
+declares at least one `[environments.<label>]` (per
+`environment-access-control.md §1.5.2`). A V1-style deployment, a
+fresh V2 install, or any V2 deployment that has not opted into the
+environment model bypasses the check entirely — the binding algorithm
+computes an empty environment set for every task and INV-ENV-01 is
+trivially satisfied. This is what makes the entire subsystem opt-in
+without compromising existing deployments.
+
+**Alternatives rejected.**
+
+- **Per-session enforcement instead of per-task.** Would require
+  recomputing the binding on every session activation; admits a race
+  condition where a task could alternate between bindings across
+  retries. Per-task enforcement at admission is one-shot, cheap, and
+  durable for the initiative's lifetime.
+- **Warning-class with `--no-strict` downgrade.** Mirrors the
+  existing pattern for some warnings, but mixing environments is a
+  structural failure mode (one VM holding two boundaries' worth of
+  authority), not a hygiene issue. The operator's ergonomic remedy
+  is the §11.5 DAG-split pattern, not bypass.
+- **Implicit "shared" environment for tasks without bindings.**
+  Re-introduces a kernel opinion the operator may not want. Tasks
+  with cardinality 0 are explicitly Neutral; the audit chain records
+  them as such; future per-environment knobs simply don't apply to
+  them.
+- **Credential-name conventions (e.g., `*-prod` auto-binds to
+  "production").** Rejected: name-shape coupling makes rename
+  refactors a security risk. Binding is exclusively the
+  `environment` field on `[[permitted_credentials]]`.
+
+**Canonical home.** `v2/environment-access-control.md` §11
+(behavioral spec, including the §11.3 algorithm, §11.4 same-cluster
+interaction, §11.5 DAG-split pattern, and §11.6 role-implicit
+neutrality table).
+
+---
+
+## §12 — How invariants combine (composition map)
 
 Most security properties at the system level are emergent from
 **combinations** of invariants. The most consequential combinations:
@@ -1047,6 +2082,22 @@ Most security properties at the system level are emergent from
 | **Budget enforcement cannot be bypassed** | INV-02A (kernel-priced inference) + INV-02B (no direct egress) + INV-INIT-09 (no auto-deadline; budget bounds runtime) |
 | **Approval is real, scoped, single-use** | INV-06 (approval gate) + INV-ESC-01..05 (FSM, epoch, session, nonce, scope) |
 | **Policy advance never partial** | INV-POLICY-01 (advance phasing) + INV-STORE-01/02 (single-transaction multi-table) |
+| **Multi-agent loops bounded by structure, not budget alone** | INV-CONVERGENCE-01 (round caps) + INV-CONVERGENCE-02 (circular-revision rejection) + INV-CONVERGENCE-03 (wall-clock) + INV-04 (token budgets — backstop) |
+| **Two-tier escalation routing preserves authority hierarchy** | INV-CONVERGENCE-04 (Orchestrator bounded by own authority) + INV-CONVERGENCE-06 (re-validation at resolution time) + INV-ESC-02 (epoch-mismatch on approval tokens) + R-4 (paradigm) |
+| **Forensic record survives non-convergence** | INV-CONVERGENCE-05 (no auto-purge during salvage) + INV-04 (audit log integrity) + INV-CAPACITY-02 (halt-admit before purge) |
+| **Reviewer cannot be deceived by code under review** | INV-PLANNER-HARNESS-01 (no Reviewer code execution) + INV-PLANNER-HARNESS-02 (kernel-bundled image, digest-verified) + INV-PLANNER-HARNESS-04 (no Reviewer custom tools) + INV-VERIFIER-02 (verifier VM isolation) + INV-VERIFIER-08 (verifier has no LLM) |
+| **Reviewer pure-static guarantee survives operator extension surface** | INV-PLANNER-HARNESS-01 (harness build + plan-side authoring corollary covering vm_image, custom tools, path_allowlist) + INV-PLANNER-HARNESS-02 (image content) + INV-PLANNER-HARNESS-04 (admission gate against operator-declared tools) — admission rejects every plan field whose semantics presuppose a Reviewer capability that does not exist; the operator's mental model is corrected at the boundary, not patched into runtime quietly |
+| **Operator authoring discipline survives kernel-side defaulting machinery** | INV-PLANNER-HARNESS-01 (plan-side authoring corollary, structural rejection of meaningless fields) + INV-INIT-06 (plan immutable post-admission, no kernel-side mutation of operator-signed bytes) — the kernel never silently strips, mutates, or defaults a Reviewer-only-meaningful field; `raxis-cli plan prepare` surfaces hard refusals pre-signing so the operator catches the issue before bundle sealing; the kernel's admission gate is the defense-in-depth backstop. Together these keep operator authority unambiguous: every byte in the signed plan is the operator's deliberate choice |
+| **Only the Executor role has operator-controlled toolchain** | INV-PLANNER-HARNESS-02 (Reviewer image kernel-canonical) + INV-PLANNER-HARNESS-05 (Orchestrator image kernel-canonical) + INV-VM-CAP-03 (Executor image operator-published, OCI-pinned) |
+| **Orchestrator is invisible at the configuration layer** | INV-PLANNER-HARNESS-05 (kernel-canonical image) + INV-PLANNER-HARNESS-06 (no operator profile, no NNSP override, no custom tools, no background processes) — operators cannot misconfigure what they cannot configure |
+| **Trivial git conflicts do not flood operator escalations** | INV-PLANNER-HARNESS-05 (Orchestrator image includes git + bash + edit_file) + INV-PLANNER-HARNESS-06 (Orchestrator NNSP encodes semantic conflict resolution protocol) + INV-TASK-PATH-02 (hybrid_effective_allow bounds the Orchestrator's editing authority structurally) — the Orchestrator's semantic intelligence resolves routine conflicts; the FSM bounds its authority |
+| **Code-running verification is structurally separated from review** | INV-VERIFIER-01 (witness-only output) + INV-VERIFIER-02 (verifier VM isolation) + INV-VERIFIER-03 (Reviewer waits for all per-task witnesses) + INV-VERIFIER-04 (block_review fails the task) + INV-VERIFIER-13 (pre-merge verifiers gate IntegrationMerge separately from Reviewer) |
+| **In-VM background processes are reliably contained** | INV-PLANNER-HARNESS-03 (cgroup v2 + `cgroup.kill`) + INV-VERIFIER-10 (kernel-enforced verifier timeout) + INV-LIFECYCLE-* (VM stop is universal reap point) |
+| **Verifier supply chain bounded** | INV-VERIFIER-07 (operator-published with kernel-canonical exception per INV-VERIFIER-12) + INV-VERIFIER-11 (no network by default) + INV-VERIFIER-09 (mutations don't persist) + INV-VERIFIER-12 (symbol-index image is kernel-canonical, digest-bound, alias-reserved) |
+| **Symbol-index witness is structurally trustworthy under auto-injection** | INV-VERIFIER-12 (kernel-canonical image, kernel-bound digest, reserved alias) + INV-PLANNER-HARNESS-01 (Reviewer cannot bypass the witness with its own code execution) + INV-VERIFIER-01 (witness-only output channel) — the Pure-Static Reviewer's symbol-resolution gap is closed by an artifact whose producer is structurally trusted, structurally isolated, and structurally limited to a witness output |
+| **Master frontier regressions are gated mechanically, not just reviewed** | INV-VERIFIER-13 (pre-merge verifier gating) + INV-MERGE-CONSISTENCY (atomic SQLite-then-git ordering) + INV-TASK-PATH-02 (per-task path closure) — per-task review establishes per-task correctness; pre-merge verifiers establish integration-frontier correctness; the SQLite-first ordering ensures verifier failures cannot half-advance master |
+| **No single agent execution context spans two compliance boundaries** | INV-ENV-01 (per-task environment consistency) + INV-VM-CAP-04 (credentials/ never mounted) + INV-PLANNER-HARNESS-01/04/06 (Reviewer/Orchestrator structurally environment-neutral) — credentials are kernel-injected by name, the per-task binding constrains which set of names can be injected together, and the planner-harness invariants ensure only the Executor role even has the surface for binding to fail |
+| **Cross-environment data flows are auditable** | INV-ENV-01 (forces DAG split for cross-env work) + INV-04 (audit log integrity) + INV-VERIFIER-* (artifact mechanism mediates the kernel-store handoff) — every cross-environment byte transfer becomes two task IDs and a SHA-256 in the audit chain rather than a single VM with multiple credentials |
 
 When auditing a code path, look for which combination of invariants
 governs it; a single invariant in isolation rarely tells the full
@@ -1054,7 +2105,7 @@ story.
 
 ---
 
-## §10 — When this file is wrong
+## §13 — When this file is wrong
 
 This file is a navigational consolidation. The canonical homes
 (noted on each entry) are the normative authority. If this file
@@ -1069,7 +2120,7 @@ The agreed protocol when adding a new `INV-*`:
    domain-prefixed).
 2. Add an entry to this file with statement, justification,
    scenario, canonical-home crossref.
-3. Add the invariant ID to §1's table-of-contents row count and to
-   any relevant §9 composition row.
+3. Add the invariant ID to the table-of-contents row count and to
+   any relevant §12 composition row.
 4. If the invariant is enforced by code, leave a `// INV-XXX` or
    spec crossref comment at the enforcement site.
