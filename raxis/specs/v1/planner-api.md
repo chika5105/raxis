@@ -156,6 +156,125 @@ Wait. The kernel will notify you (or you will see the gate resolve on your next 
 
 ---
 
+### `FAIL_REVIEW_LOOP_EXCEEDED`
+
+> **Note (V2).** Returned only in V2 hierarchical-orchestration plans
+> that declare `[plan.tasks.X.review] max_rounds`. V1 single-agent
+> plans never see this code. Canonical home:
+> `specs/v2/agent-disagreement.md` §3; invariant
+> `INV-CONVERGENCE-01`.
+
+**Meaning:** This task has consumed its configured `max_review_rounds`
+(Reviewer-rejection cycles) without converging. Your `CompleteTask`
+intent was rejected because admitting it would exceed the round
+cap.
+
+**What to do:**
+1. Stop submitting `CompleteTask` for this task. Further attempts
+   under the same `task_id` will be rejected the same way.
+2. The kernel has either (a) auto-created an escalation that an
+   Orchestrator or operator must resolve before more rounds can
+   open, (b) transitioned the task to `Failed` (per
+   `on_max_rounds = "fail_task"`), or (c) force-admitted your
+   most recent submission (per `on_max_rounds = "force_admit"`).
+   Wait for the corresponding `KernelPush` (`EscalationResolved`,
+   `SessionFailed`, or `AllReviewersPassed`) before acting.
+3. Do not retry on the same `head_sha` — the round cap is a
+   per-task property, not a per-attempt one.
+
+---
+
+### `FAIL_CIRCULAR_REVISION`
+
+> **Note (V2).** Returned only in V2 plans whose
+> `[plan.tasks.X.revision] detect_circular = true`. Canonical home:
+> `specs/v2/agent-disagreement.md` §4; invariant
+> `INV-CONVERGENCE-02`.
+
+**Meaning:** The diff between `base_sha` and your submitted
+`head_sha` byte-equals a diff you previously submitted that was
+rejected by a Reviewer. The kernel detected the loop and refused
+admission.
+
+**What to do:**
+1. Recognize that resubmitting the same change verbatim will not
+   change the Reviewer's verdict. Read the prior critique
+   (delivered earlier via `KernelPush::ReviewRejected`) and
+   produce a substantively different revision.
+2. Per `INV-CONVERGENCE-02`, this rejection is non-bypassable
+   from the planner side. There is no `head_sha` you can submit
+   that re-attempts the same diff and admits.
+3. If you genuinely believe the prior rejection was wrong and the
+   diff should be admitted as-is, submit
+   `IntentKind::EscalationRequest` describing the reasoning. The
+   operator can clear circular-revision history with
+   `raxis task clear-circular-history` if they agree.
+4. The opaque code carries no information about which prior
+   submission matched, per INV-08.
+
+---
+
+### `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`
+
+> **Note (V2).** Returned only in V2 plans that declare a per-task
+> `wall_clock_limit` (or inherit one from `[plan.defaults]`).
+> Canonical home: `specs/v2/agent-disagreement.md` §5; invariant
+> `INV-CONVERGENCE-03`.
+
+**Meaning:** Cumulative active execution time on this task has
+reached or exceeded `wall_clock_limit_ms`. Time spent in
+`Blocked(*)` states (e.g., awaiting escalation resolution) does
+not count, but active execution between unblocked admissions
+does. Your latest intent was rejected because admitting it would
+operate against an out-of-budget task.
+
+**What to do:**
+1. If `wall_clock_behavior = "fail_task"` (the kernel will tell
+   you via `KernelPush::SessionFailed`): the task is terminal;
+   stop and report.
+2. If `wall_clock_behavior = "escalate"` (the default): an
+   escalation has been auto-created. Wait for
+   `KernelPush::EscalationResolved` before submitting more
+   intents on this task. If the operator (or routed Orchestrator)
+   extends the wall-clock budget, you may resume. If they
+   abandon, the task transitions to `Failed`.
+3. Do not retry the same intent before resolution — the budget is
+   exhausted regardless of intent shape.
+
+---
+
+### `FAIL_FORBIDDEN_ROUTING_OVERRIDE`
+
+> **Note (V2 — Orchestrator-only).** Returned only to Orchestrator
+> sessions that submit `IntentKind::ResolveSubEscalation` for an
+> escalation class the kernel hard-codes as `operator_only`.
+> Canonical home: `specs/v2/agent-disagreement.md` §6.5; invariant
+> `INV-CONVERGENCE-04`.
+
+**Meaning:** You attempted to resolve a sub-escalation whose class
+is structurally restricted to operator resolution
+(`KeyCompromised`, `ProtectedPathMerge`, `PolicyViolation`,
+`EgressDenied`, `OperatorIntervention`, or any future
+security-sensitive class). Plans cannot override these to
+`orchestrator_first`; the kernel enforces operator-only routing
+regardless of declared `[plan.escalation.routing]`.
+
+**What to do:**
+1. Submit `IntentKind::EscalateUpward { escalation_id,
+   orchestrator_notes }` instead. The escalation will route to
+   the operator with your notes attached. This is the only
+   admission path for security-sensitive classes.
+2. Do not retry `ResolveSubEscalation` on the same
+   `escalation_id` with a different resolution shape — the
+   rejection is on the escalation class, not the resolution
+   payload.
+3. If you genuinely believe an escalation class should be
+   Orchestrator-resolvable, the operator must amend the policy
+   (this is itself a policy-level decision; the kernel does not
+   accept Orchestrator input on which classes are operator-only).
+
+---
+
 ### `FAIL_INITIATIVE_QUARANTINED`
 
 **Meaning:** The initiative your task belongs to has been quarantined by an
