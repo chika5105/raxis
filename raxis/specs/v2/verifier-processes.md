@@ -1146,6 +1146,23 @@ verifier images are operator-trust domain. The kernel-canonical
 > renamed-and-pushed only on full pass and discarded on any
 > `block_merge` failure. Master is never partially advanced.
 
+> **`INV-VERIFIER-15` — Verifier authenticated egress requires
+> explicit per-image policy opt-in.** A verifier VM that declares
+> `allowed_egress` defaults to **audit-only** mode: outbound
+> requests are logged but unauthenticated, and credentials from
+> `[[providers.credentials]]` / `[[permitted_credentials]]` are NOT
+> injected by the egress proxy. Authenticated egress requires a
+> matching `[[verifier_credentials.images]]` entry with
+> `permit_authenticated = true` AND
+> `[verifier_credentials].emergency_audit_only = false`. The
+> per-image opt-in is the operator's deliberate decision point that
+> a specific verifier image's supply chain is trusted enough to
+> receive real credentials. The kill-switch
+> `emergency_audit_only` lets operators flip every verifier back to
+> audit-only during incident response without rewriting per-image
+> rows. (See §16.7 for the full schema, resolution chain, and
+> migration story from V2.0 default-authenticated.)
+
 ---
 
 ## §14 — Kernel-Bundled Verifier Images
@@ -1588,6 +1605,236 @@ rather than agent retry.
 
 ---
 
+## §16.7 — Verifier Credential Injection (audit-only by default)
+
+> **Status:** V2 normative.
+> **Cross-references:** `INV-VERIFIER-11` (default no network),
+> `credential-proxy.md` (credential injection mechanism for non-verifier
+> roles), `key-revocation.md §6` (provider-credential lifecycle that
+> applies to verifier credentials too).
+
+### §16.7.1 — Why a separate credential model for verifiers
+
+Verifier images are the **weakest link in the supply chain**. Unlike
+Executor images (kernel-provisioned from a known base image) and
+Reviewer / Orchestrator images (kernel-canonical, digest-bound per
+`INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`), verifier images
+may be:
+
+- Operator-authored against a starter (`raxis-verifier-rust-starter`,
+  etc., kernel-bundled but operator-extended).
+- Third-party-authored — e.g., a security firm publishes
+  `corp-verifier-sca:v3` for software-composition-analysis verification.
+- Community-maintained — e.g., a public registry `community-verifier-*`
+  series for common toolchains.
+
+The blast radius of a compromised verifier with authenticated egress
+is wider than a compromised Executor with authenticated egress:
+
+- The Executor touches **only its own task's worktree**; a leaked
+  Executor egress credential can exfiltrate that task's code (already
+  scoped to the task's path-allowlist) and consume that task's budget.
+- A verifier touches **every task's code** — it runs on
+  `evaluation_sha`, which is the candidate-merge tree of all
+  contributing tasks. A leaked verifier egress credential can
+  exfiltrate the entire integration delta. If the credential is
+  authenticated against a private registry, the verifier can
+  **publish** to that registry — every downstream consumer of that
+  registry is then compromised.
+
+V2 therefore makes the **default safe**: verifier VMs that declare
+`allowed_egress` get a proxy that LOGS every outbound request with
+full URL / headers / body-size telemetry, but NEVER injects real
+credentials. The verifier sees `HTTP 401 Unauthorized` from the
+upstream and logs it; the operator sees `VerifierEgressAttempted`
+audit events with the verifier image, the URL, and the unauthenticated
+status. This lets operators observe what a verifier *would* fetch
+without ever exposing real credentials to a potentially-compromised
+verifier image.
+
+For verifiers that genuinely need authenticated egress (e.g., a
+verifier that downloads a private NPM dependency manifest, or a
+verifier that hits a private security-scanning API), the operator
+**explicitly opts in** with a per-image `permit_authenticated` flag
+in `policy.toml`. This creates a deliberate decision point: the
+operator is saying "I trust this specific verifier image enough to
+give it real credentials."
+
+### §16.7.2 — `policy.toml [verifier_credentials]` schema
+
+```toml
+# policy.toml
+#
+# Top-level [verifier_credentials] = global defaults / kill-switch.
+# [[verifier_credentials.images]] = per-image opt-in to authenticated
+#                                   egress.
+#
+# Plan-side: verifiers declare allowed_egress (per existing schema).
+# What this section controls is whether that egress is authenticated
+# or audit-only.
+
+[verifier_credentials]
+# Global default. true  → authenticated by default for any verifier
+# image that has allowed_egress declared (legacy behavior; V2.0 implicit
+# default; not recommended for V2.1+).
+# false → audit-only by default; per-image permit_authenticated must be
+# set to true to enable real credential injection. (Recommended; V2.1
+# default.)
+default_authenticated = false
+
+# Optional global kill-switch. If true, NO verifier image gets
+# authenticated egress regardless of per-image permit_authenticated.
+# Operators flip this during incident response when supply-chain
+# integrity is in question.
+emergency_audit_only = false
+
+[[verifier_credentials.images]]
+# Per-image opt-in. Image MUST match a [[vm_images]] entry's `name`
+# (verifier-processes.md §12). The kernel rejects with
+# FAIL_VERIFIER_CREDENTIAL_UNKNOWN_IMAGE if image is not declared.
+image                  = "raxis-verifier-rust-starter:v2"
+permit_authenticated   = true
+# Optional: scope which credentials this image may receive. If absent,
+# the image may receive any credential listed in its declared
+# allowed_egress. Names match [[providers.credentials]].name and
+# [[permitted_credentials]].name.
+credentials            = ["npm-registry-token", "github-pat"]
+# Optional: explicit policy reference for the operator's audit trail
+# justifying the opt-in. Forensic-only.
+authorized_by          = "secops-2026-q2"
+authorization_reference = "TICKET-SEC-1729"
+
+[[verifier_credentials.images]]
+image                  = "community-verifier-python-linter:latest"
+permit_authenticated   = false   # default — explicit for clarity
+```
+
+### §16.7.3 — Effect on the `allowed_egress` resolution chain
+
+When a verifier VM is spawned with `allowed_egress` declarations,
+the kernel walks the §16.7.2 schema as follows (inside the same
+`approve_plan` shift-left chain that processes other plan validation):
+
+1. **No `allowed_egress` declared.** The VM has no network interface
+   per `INV-VERIFIER-11`; nothing to do; spawn proceeds.
+2. **`allowed_egress` declared.** The kernel determines the image's
+   credential mode:
+   - If `[verifier_credentials].emergency_audit_only == true` →
+     **audit-only** (override).
+   - Else if a `[[verifier_credentials.images]]` row matches the
+     image AND `permit_authenticated == true` → **authenticated**
+     (subject to the row's `credentials` filter, if present).
+   - Else if `[verifier_credentials].default_authenticated == true`
+     → **authenticated** (legacy V2.0 behavior; emits a
+     `WARN_VERIFIER_AUTHENTICATED_BY_GLOBAL_DEFAULT` at admission so
+     operators see the implicit grant).
+   - Else → **audit-only** (V2.1 default).
+3. The kernel sets the verifier VM's egress proxy mode accordingly.
+   In **audit-only** mode, the proxy:
+   - Strips any `Authorization`, `Cookie`, and operator-known
+     credential headers from outbound requests (defense-in-depth: even
+     if the verifier image's environment contains a stale token, it's
+     not forwarded).
+   - Does not inject credentials from `[[providers.credentials]]` or
+     `[[permitted_credentials]]`.
+   - Logs every outbound request as
+     `VerifierEgressAttempted { verifier_run_id, image, method,
+     scheme, host, path, query_keys, header_count, body_size_bytes,
+     unauthenticated_response_code }`.
+   - Forwards the request to the upstream WITHOUT authentication.
+     The upstream typically returns `401 Unauthorized` or `403
+     Forbidden`; the verifier observes this and decides how to
+     handle (typically: emit a `failed` witness with a clear error
+     message).
+4. In **authenticated** mode, the proxy follows the existing
+   `credential-proxy.md` injection model, scoped to the
+   credentials listed in the image's row (if any).
+
+### §16.7.4 — Audit events
+
+```rust
+AuditEventKind::VerifierCredentialModeResolved {
+    verifier_run_id:    Uuid,
+    task_id:            Option<TaskId>,        // None for pre-merge
+    integration_merge_id: Option<Uuid>,        // Some for pre-merge
+    image:              String,
+    mode:               VerifierCredentialMode, // AuditOnly | Authenticated
+    resolution_path:    String, // e.g., "emergency_audit_only" |
+                                //       "image_permit_authenticated" |
+                                //       "global_default_authenticated" |
+                                //       "global_default_audit_only"
+    emitted_at_ms:      u64,
+}
+
+AuditEventKind::VerifierEgressAttempted {
+    verifier_run_id:    Uuid,
+    image:              String,
+    method:             String,
+    scheme:             String,
+    host:               String,
+    path:               String,
+    query_keys:         Vec<String>,        // sorted; values redacted
+    header_count:       u32,
+    body_size_bytes:    u64,
+    upstream_status:    u16,                // 401, 403, etc., on audit-only
+    mode:               VerifierCredentialMode,
+    emitted_at_ms:      u64,
+}
+```
+
+`VerifierCredentialModeResolved` fires once per verifier-VM spawn
+that declares `allowed_egress`. `VerifierEgressAttempted` fires once
+per outbound request from a verifier VM.
+
+### §16.7.5 — Failure codes
+
+| Code | Trigger |
+|---|---|
+| `FAIL_VERIFIER_CREDENTIAL_UNKNOWN_IMAGE` | A `[[verifier_credentials.images]]` row references an image not declared in `[[vm_images]]`. Caught at policy load. |
+| `FAIL_VERIFIER_CREDENTIAL_UNKNOWN_CREDENTIAL` | A `[[verifier_credentials.images]].credentials` entry names a credential not declared in `[[providers.credentials]]` or `[[permitted_credentials]]`. Caught at policy load. |
+| `FAIL_VERIFIER_AUTHENTICATED_EGRESS_DENIED_BY_POLICY` | Plan declares `allowed_egress` AND policy resolution lands in `audit-only` AND the verifier (at runtime) attempts to use a credential that the operator's plan-side declaration assumed available. This is **not** the typical path — the verifier sees the unauthenticated 401 first; the FAIL_ code exists only for the structural-misuse case where the plan tried to inject an `RAXIS_*` credential variable that the kernel refused to populate. Surfaced as a verifier `crashed` witness with this reason in `error_text`. |
+
+### §16.7.6 — Migration from V2.0
+
+V2.0 deployments that did not have `[verifier_credentials]` declared
+behave identically to V2.0 (authenticated-by-default), because
+the absence of the section leaves `default_authenticated` unset; a
+forward-compatible parser treats that case as `true` for V2.0
+deployments and emits a one-shot
+`WARN_V2_0_VERIFIER_CREDENTIALS_DEFAULT_DEPRECATED` audit warning.
+V2.1 deployments that explicitly want the V2.0 behavior must opt in
+via `default_authenticated = true`. Operators upgrading to V2.1 MUST
+audit their verifier images and either:
+
+- Add `[[verifier_credentials.images]]` rows for the verifiers that
+  legitimately need authenticated egress, OR
+- Accept the V2.1 audit-only default and tolerate the `401`s in
+  verifier output (which usually surface as `failed` witnesses with
+  clear error messages, prompting the operator to add the
+  per-image opt-in).
+
+The migration bias is intentional: the operator must take a
+deliberate action to grant authenticated egress to a verifier image,
+making the decision visible in the operator's policy diff and the
+audit chain.
+
+### §16.7.7 — Composition with `INV-VERIFIER-11`
+
+`INV-VERIFIER-11` ("verifier VMs have no network by default") is
+unchanged: a verifier with NO `allowed_egress` declaration gets
+NO network interface, regardless of `[verifier_credentials]`. The
+new spec only governs what happens when `allowed_egress` IS
+declared:
+
+| `allowed_egress` declared? | `permit_authenticated`? | `emergency_audit_only`? | Outcome |
+|---|---|---|---|
+| No | (n/a) | (n/a) | No network interface (`INV-VERIFIER-11`). |
+| Yes | Yes | No | Authenticated egress (existing V2.0 behavior). |
+| Yes | No (or row absent) | No | Audit-only egress (V2.1 default). |
+| Yes | (any) | Yes | Audit-only egress (kill-switch override). |
+
+---
+
 ## §17 — Cross-Spec Impacts
 
 This spec implies amendments in adjacent specs:
@@ -1595,12 +1842,12 @@ This spec implies amendments in adjacent specs:
 | Spec | Change |
 |---|---|
 | `integration-merge.md` | Rename existing `[[integration_merge_gates]]` (protected-path approval) to `[[plan.protected_path_gates]]` for clarity. Add **Check 5d — Pre-Integration Merge Verifier Execution** between Check 5c and Check 6. Document candidate-merge-tree orphan-commit lifecycle. Add `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` to the failure-code list. Add `integration_merge_attempts` table with `candidate_merge_sha` and `discard_reason` columns. |
-| `policy-plan-authority.md` | New `[default_verifier_images]` policy section (§4). New `[[integration_merge_verifiers]]` policy section (§4). New `[prepare] auto_inject_symbol_index` knob (§4). Failure-code catalog (§3b) gains `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`, `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH`, `FAIL_VERIFIER_INVALID_ON_FAILURE`, `FAIL_VERIFIER_TASK_SET_EMPTY`, `FAIL_VERIFIER_TASK_SET_UNKNOWN_TASK`, `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`, `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED`. `approve_plan` shift-left checks gain validation of `[[plan.integration_merge_verifiers]]` declarations. Implementation checklist + tests extended. |
+| `policy-plan-authority.md` | New `[default_verifier_images]` policy section (§4). New `[[integration_merge_verifiers]]` policy section (§4). New `[prepare] auto_inject_symbol_index` knob (§4). New `[verifier_credentials]` and `[[verifier_credentials.images]]` policy sections (§16.7). Failure-code catalog (§3b) gains `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`, `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH`, `FAIL_VERIFIER_INVALID_ON_FAILURE`, `FAIL_VERIFIER_TASK_SET_EMPTY`, `FAIL_VERIFIER_TASK_SET_UNKNOWN_TASK`, `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`, `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED`, `FAIL_VERIFIER_CREDENTIAL_UNKNOWN_IMAGE`, `FAIL_VERIFIER_CREDENTIAL_UNKNOWN_CREDENTIAL`, `FAIL_VERIFIER_AUTHENTICATED_EGRESS_DENIED_BY_POLICY`. `approve_plan` shift-left checks gain validation of `[[plan.integration_merge_verifiers]]` declarations and `[verifier_credentials]` references. Implementation checklist + tests extended. |
 | `system-requirements.md` | §8.1 bundled artifacts gain `raxis-verifier-symbol-index-<kernel_version>.img` (canonical) and `raxis-verifier-{rust,node,python,go}-starter-<kernel_version>.img` (bundled). §11 `raxis doctor canonical-images` extended to verify the symbol-index image (fatal on mismatch); new `raxis doctor verifier-starters` category for the tiered starters (warning on mismatch). |
 | `operator-ergonomics.md` | §16.3 setup wizard adds a "language stacks" phase with master_repo detection (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`); selected stacks get their tiered starter registered in `[[vm_images]]`. §4.2 defaultable-fields table gains the symbol_index verifier auto-injection (gated on policy `[prepare] auto_inject_symbol_index`). §18 policy schema additions: `[default_verifier_images]`, `[prepare] auto_inject_symbol_index`. §20 failure codes cross-references new codes. §21 cross-spec impacts row updated. |
 | `planner-harness.md` | §4.1 operator note re symbol-index updates: noting that the auto-inject default fixes `WARN_REVIEWER_MISSING_SYMBOL_INDEX` by default. §8 verifier overview rewritten to reflect the unified runtime + the three authoring sources + the pre-merge hook. New §10.7 canonical Verifier symbol-index starter manifest, parallel to the existing canonical image manifests. |
 | `kernel-mechanics-prompt.md` | Reviewer KSB `verifier_witnesses` section schema documented per §8 (already pending application from prior cross-spec impacts). Orchestrator NNSP gains a new step for handling `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` (per §16.6). |
-| `invariants.md` | INV-VERIFIER-01..11 stripped of V1/V2 framing. New INV-VERIFIER-12 (kernel-canonical symbol-index image, exception to INV-VERIFIER-07). New INV-VERIFIER-13 (pre-merge verifier execution gates IntegrationMerge admission). Composition map gains entries for the unified runtime and the pre-merge gating. |
+| `invariants.md` | INV-VERIFIER-01..11 stripped of V1/V2 framing. New INV-VERIFIER-12 (kernel-canonical symbol-index image, exception to INV-VERIFIER-07). New INV-VERIFIER-13 (pre-merge verifier execution gates IntegrationMerge admission). New INV-VERIFIER-14 (symbol-index witness provenance: kernel-provisioned clone, never Executor-derived). New INV-VERIFIER-15 (verifier authenticated egress requires explicit per-image opt-in; audit-only default per §16.7). Composition map gains entries for the unified runtime, the pre-merge gating, and the verifier supply-chain credential bound. |
 | `paradigm.md` | §5.1 brief mention of the unified verifier runtime as a reference-implementation property — three authoring sources, one VM substrate, one `WitnessSubmission` frame. |
 
 ---
