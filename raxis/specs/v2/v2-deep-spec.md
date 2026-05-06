@@ -752,14 +752,42 @@ to enumerate every file in `src/api/` in the plan. This is operationally unworka
 any realistically-sized codebase.
 
 **Decision (Step 19):** Two and only two legal formats:
-1. **Exact filename:** `src/api/handler.rs` — matches exactly this file.
-2. **Directory prefix:** `src/api/` — matches any file whose path begins with `src/api/`.
+1. **Exact filename:** `src/api/handler.rs` — matches exactly this file (string equality).
+2. **Directory prefix:** `src/api/` — matches any file whose path begins with `src/api/`
+   (`starts_with`). The trailing `/` is preserved verbatim so `src/` does NOT spuriously
+   admit `srcfoo/x.rs`.
 
-Containment check: `file_path.starts_with(allowlist_entry)`. This is O(n) in path length,
-constant in allowlist size per entry. The full check is O(|allowlist| × |path|) — trivially
-fast. No NFA construction, no negation logic, no platform-specific behavior. Validate at
-`approve_plan` time: any entry that is neither an exact filename nor ends with `/` returns
-`INVALID_PLAN_SCHEMA` with rule name `path_format`.
+Containment check: `file_path == entry` for exact entries, `file_path.starts_with(entry)`
+for directory-prefix entries. This is O(n) in path length, constant in allowlist size per
+entry. The full check is O(|allowlist| × |path|) — trivially fast. No NFA construction,
+no negation logic, no platform-specific behavior. Validate at `approve_plan` time.
+
+**Canonical error code:** `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` (see
+`policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`). The reason field is one
+of five stable, wire-side strings (rejecting strictly more than the original spec wording —
+the empty-string and negation-marker cases were missing in earlier drafts and have been
+added so the validator's reason taxonomy is exhaustive over realistic operator typos):
+
+| `reason`                  | trigger                                              |
+|---------------------------|------------------------------------------------------|
+| `"empty_entry"`           | `entry == ""` — silently matches everything otherwise |
+| `"glob_character_in_path"`| any of `*`, `?`, `[`, `]`, `{`, `}`                  |
+| `"absolute_path"`         | starts with `/`                                      |
+| `"path_escape"`           | `..` as a path *segment* (`split('/')` semantics)    |
+| `"negation_marker"`       | starts with `!` (gitignore-style; not supported)     |
+
+**Implementation reference:** `kernel/src/initiatives/lifecycle.rs::validate_path_allowlist_v2_format`
+(admission gate, runs in `approve_plan` before `BEGIN TRANSACTION`) and
+`kernel/src/path_scope.rs::PathEntry` (runtime matcher, equality / `starts_with`).
+The runtime matcher does NOT fall back to glob semantics; the admission gate guarantees
+all registry entries are well-formed.
+
+**Recovery semantics:** `repopulate_plan_registry` deliberately does NOT re-validate
+already-approved plans. V1 plans signed before V2 syntax existed continue to load and
+match through the same `PathEntry` parser; entries that happened to use the V1 `**`
+syntax will simply not match anything (the operator's signature stays valid, but no
+path passes containment). This is fail-closed by design — the kernel never silently
+re-interprets a V1 glob as a V2 prefix.
 
 ---
 

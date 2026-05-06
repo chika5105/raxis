@@ -1,16 +1,22 @@
 // raxis-kernel::path_scope — VCS path-scope enforcement (INV-TASK-PATH-01/02).
 //
-// Normative reference: kernel-store.md §2.5.8 — "VCS Path Scope Enforcement"
-// (the *sole* normative source). This module is a 1:1 implementation of the
-// pseudocode in §2.5.8 `effective_allow(task_id)` and `check_paths(...)`,
-// composed against the in-memory `PlanRegistry` (signed-plan fields) and
-// `task_exported_path_snapshots` (predecessor exports persisted at
-// completion time).
+// Normative references:
+//   * V1: `kernel-store.md §2.5.8` — "VCS Path Scope Enforcement"
+//   * V2: `v2-deep-spec.md §6` table 4 (`Step 19`) — trailing-slash
+//     discipline for `path_allowlist`; replaces the V1 glob matcher with
+//     an exact / starts-with matcher on V2-syntax entries.
+//
+// This module is the 1:1 implementation of the §2.5.8 `effective_allow`
+// and `check_paths` pseudocode, refined for V2 path syntax. The TOML
+// parser lives in `initiatives/lifecycle.rs::parse_plan_tasks`; the V2
+// syntax validator (gate at `approve_plan`) lives in the same file as
+// `validate_path_allowlist_v2_format`.
 //
 // What this module is and is not
 // ------------------------------
 // IS:
-//   * The compound-allow-set type (`AllowSet` = glob patterns ∪ exact paths).
+//   * The compound-allow-set type (`AllowSet` = V2 path entries ∪
+//     exact predecessor exports), with `path_scope_override` short-circuit.
 //   * The `effective_allow(task_id, ...)` algorithm, with the two-layer
 //     semantics: task's own `path_allowlist` plus completed-direct-predecessor
 //     exports filtered by `path_export_to_successors`.
@@ -24,23 +30,33 @@
 //     (steps 3A and the CompleteTask branch).
 //   * The TOML parser for the four plan fields. That lives in
 //     `initiatives/lifecycle.rs::parse_plan_tasks`.
+//   * The V2 syntax validator. That lives in
+//     `initiatives/lifecycle.rs::validate_path_allowlist_v2_format` and
+//     runs at `approve_plan` time, before any task is admitted.
 //   * The exported-paths snapshot writer. That lives in
 //     `handlers/intent.rs` CompleteTask branch (under the same SQLite
 //     transaction as the `Running → Completed` UPDATE).
 //
-// Glob semantics
-// --------------
-// Per §2.5.8 "Glob rules: `*` does not cross `/`, `**` crosses directory
-// boundaries". The `glob` crate's `Pattern` matches this when called with
-// `MatchOptions { require_literal_separator: true, .. }`. Other wildcards
-// (`?`, character classes, negation) are still accepted by the parser
-// silently — the spec forbids them at sign time but the kernel does not
-// re-validate. This is intentional: the signing tool is the gate.
+// V2 path-allowlist semantics (Step 19 / `v2-deep-spec.md §6` table 4)
+// --------------------------------------------------------------------
+// A `path_allowlist` entry is one of two well-formed shapes:
+//
+//   * **Exact filename** — repo-relative path that does NOT end with `/`
+//     (e.g., `src/api/handler.rs`). Matches by string equality.
+//   * **Directory prefix** — repo-relative path that ends with `/`
+//     (e.g., `src/api/`). Matches by `starts_with`, so every path
+//     under that directory (recursively) is admitted.
+//
+// Glob characters (`*`, `?`, `[`, `]`, `{`, `}`), absolute paths, and
+// `..` segments are rejected at sign time by `plan prepare` and at
+// admission by `validate_path_allowlist_v2_format`. The kernel does
+// **not** invoke a glob library here — V2 path matching is a single
+// linear scan of (exact || prefix) checks, with no special characters
+// or escaping rules. This makes containment provably correct without
+// taking a position on POSIX vs gitignore vs Bash extglob semantics.
 
 use std::collections::BTreeSet;
-use std::path::Path;
 
-use glob::{MatchOptions, Pattern};
 use raxis_store::{Store, Table};
 
 use crate::initiatives::{PlanRegistry, TaskKey, TaskPlanFields};
@@ -57,30 +73,81 @@ const INITIATIVES:                  &str = Table::Initiatives.as_str();
 // AllowSet — glob patterns ∪ exact paths, with override flag
 // ---------------------------------------------------------------------------
 
-/// The compound allow-set for one task, as defined in §2.5.8:
+/// One V2 `path_allowlist` entry, parsed into its kernel-side shape.
+///
+/// Constructed by `PathEntry::parse`, which **assumes the input has
+/// already passed `validate_path_allowlist_v2_format`** (Step 19's
+/// admission gate). At runtime we trust that invariant: every entry
+/// reaching this module came from a signed-and-admitted plan.
+///
+/// The two shapes are disjoint by construction (a directory entry
+/// always has a trailing `/`; a filename never does), so containment
+/// is a single match-on-suffix per check.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathEntry {
+    /// Exact filename, e.g. `src/api/handler.rs`. Matched by `==`.
+    Exact(String),
+    /// Directory prefix including the trailing `/`, e.g. `src/api/`.
+    /// Matched by `starts_with`. The trailing `/` is preserved verbatim
+    /// so `src/`.starts_with(`src`) does NOT spuriously admit `srcfoo/x`.
+    DirectoryPrefix(String),
+}
+
+impl PathEntry {
+    /// Parse one V2 entry. Returns `None` only for the empty string —
+    /// `validate_path_allowlist_v2_format` rejects that case at admission,
+    /// so reaching `None` here would indicate registry corruption. We
+    /// fail-closed by returning `None` and letting the caller propagate
+    /// the surrounding error.
+    pub fn parse(entry: &str) -> Option<Self> {
+        if entry.is_empty() {
+            return None;
+        }
+        Some(if entry.ends_with('/') {
+            PathEntry::DirectoryPrefix(entry.to_owned())
+        } else {
+            PathEntry::Exact(entry.to_owned())
+        })
+    }
+
+    /// Test whether this entry admits `path`. The argument is a
+    /// `to_string_lossy`'d repo-relative path from the touched-paths
+    /// list (see `IntentExt::touched_paths` and the CompleteTask
+    /// branch in `handlers/intent.rs`).
+    pub fn matches(&self, path: &str) -> bool {
+        match self {
+            PathEntry::Exact(p)           => p == path,
+            PathEntry::DirectoryPrefix(p) => path.starts_with(p.as_str()),
+        }
+    }
+}
+
+/// The compound allow-set for one task, as defined in §2.5.8 (V1) and
+/// refined by V2 Step 19:
 ///
 /// ```text
 /// matches_allow(p, E) := E.universal
-///                    || E.glob_patterns.any(g -> glob_match(g, p))
-///                    || E.exact_paths.contains(p)
+///                     || E.path_entries.any(e -> e.matches(p))
+///                     || E.exact_paths.contains(p)
 /// ```
 ///
-/// Construction is fallible (an unparseable glob in the signed plan is a
-/// configuration error caught at sign time, but the kernel still has to
-/// handle it without panicking; we surface it as
-/// `PathScopeError::InvalidGlob`).
+/// Construction is fallible only if a registry row contains an
+/// unparseable entry — i.e., an empty string that somehow bypassed
+/// `validate_path_allowlist_v2_format`. We surface that as
+/// `PathScopeError::InvalidPathEntry` so the caller stays fail-closed.
 #[derive(Debug, Default)]
 pub struct AllowSet {
     /// `path_scope_override = true` short-circuits all checks. When set,
-    /// `glob_patterns` and `exact_paths` are ignored. `PathScopeOverrideApplied`
+    /// `path_entries` and `exact_paths` are ignored. `PathScopeOverrideApplied`
     /// has already been emitted at `approve_plan` time per §2.5.8.
-    pub universal:     bool,
-    /// Compiled glob patterns from the task's signed `path_allowlist`.
-    pub glob_patterns: Vec<Pattern>,
+    pub universal:    bool,
+    /// V2 path-allowlist entries from the task's signed plan
+    /// (Step 19: exact filename or trailing-slash directory).
+    pub path_entries: Vec<PathEntry>,
     /// Concrete literal paths inherited from completed-predecessor
-    /// exports. These are NOT compiled as globs — see §2.5.8 "Why the
-    /// compound type matters".
-    pub exact_paths:   BTreeSet<String>,
+    /// exports. These are NOT pattern-matched — see §2.5.8 "Why the
+    /// compound type matters". Equality only.
+    pub exact_paths:  BTreeSet<String>,
 }
 
 impl AllowSet {
@@ -91,19 +158,14 @@ impl AllowSet {
 
     /// Test whether one path is allowed.
     ///
-    /// Glob match uses `require_literal_separator = true` so `*` does not
-    /// cross `/` (matching the §2.5.8 normative glob rules).
+    /// V2 semantics (Step 19): each `path_entries` element matches by
+    /// either equality (exact filename) or `starts_with` (directory
+    /// prefix). No glob library is consulted; there are no wildcards.
     pub fn matches(&self, path: &str) -> bool {
         if self.universal {
             return true;
         }
-        let opts = MatchOptions {
-            case_sensitive:              true,
-            require_literal_separator:   true,
-            require_literal_leading_dot: false,
-        };
-        let p = Path::new(path);
-        if self.glob_patterns.iter().any(|g| g.matches_path_with(p, opts)) {
+        if self.path_entries.iter().any(|e| e.matches(path)) {
             return true;
         }
         self.exact_paths.contains(path)
@@ -124,11 +186,15 @@ pub enum PathScopeError {
     #[error("no plan-registry entry for task `{task_id}` (initiative `{initiative_id}`)")]
     NoPlanEntry { initiative_id: String, task_id: String },
 
-    /// A glob pattern in the signed plan failed to parse. The signing
-    /// tool is supposed to validate these; this is a defense-in-depth
-    /// branch.
-    #[error("invalid glob pattern in plan: `{pattern}`: {reason}")]
-    InvalidGlob { pattern: String, reason: String },
+    /// A V2 path-allowlist entry from the registry could not be parsed
+    /// into a `PathEntry`. Under the V2 admission gate
+    /// (`validate_path_allowlist_v2_format`) this should never happen
+    /// in practice — empty strings are rejected at sign time and at
+    /// approve time. This branch is defense-in-depth: if a row in the
+    /// registry IS empty, fail closed with this error rather than
+    /// silently treating it as "match everything".
+    #[error("invalid path-allowlist entry in plan registry: `{entry}`")]
+    InvalidPathEntry { entry: String },
 
     #[error("store error while computing effective_allow: {0}")]
     Store(#[from] rusqlite::Error),
@@ -153,7 +219,7 @@ pub struct PathPolicyViolation {
 /// 1. Load the task's signed plan fields from the registry. Missing →
 ///    `NoPlanEntry` (fail-closed).
 /// 2. If `path_scope_override` → return `AllowSet::universal()` and stop.
-/// 3. Compile the task's own `path_allowlist` into `glob_patterns`.
+/// 3. Parse the task's own `path_allowlist` into V2 `path_entries`.
 /// 4. For each direct DAG predecessor: if `Completed` AND
 ///    `path_export_to_successors`, fold its `task_exported_path_snapshots`
 ///    rows into `exact_paths`.
@@ -179,22 +245,21 @@ pub fn effective_allow(
         return Ok(AllowSet::universal());
     }
 
-    let glob_patterns = compile_globs(&fields.path_allowlist)?;
-    let exact_paths   = collect_predecessor_exports(initiative_id, task_id, registry, store)?;
+    let path_entries = parse_v2_entries(&fields.path_allowlist)?;
+    let exact_paths  = collect_predecessor_exports(initiative_id, task_id, registry, store)?;
 
-    Ok(AllowSet { universal: false, glob_patterns, exact_paths })
+    Ok(AllowSet { universal: false, path_entries, exact_paths })
 }
 
-/// Compile a list of glob strings into `glob::Pattern`s, surfacing the
-/// first parse failure as `InvalidGlob`.
-fn compile_globs(globs: &[String]) -> Result<Vec<Pattern>, PathScopeError> {
-    let mut out = Vec::with_capacity(globs.len());
-    for raw in globs {
-        let pat = Pattern::new(raw).map_err(|e| PathScopeError::InvalidGlob {
-            pattern: raw.clone(),
-            reason:  e.to_string(),
-        })?;
-        out.push(pat);
+/// Parse a list of V2-syntax `path_allowlist` entries into `PathEntry`s.
+/// The empty-string branch fails closed via `InvalidPathEntry` — see
+/// the type-level docstring on `PathEntry::parse`.
+fn parse_v2_entries(entries: &[String]) -> Result<Vec<PathEntry>, PathScopeError> {
+    let mut out = Vec::with_capacity(entries.len());
+    for raw in entries {
+        let entry = PathEntry::parse(raw)
+            .ok_or_else(|| PathScopeError::InvalidPathEntry { entry: raw.clone() })?;
+        out.push(entry);
     }
     Ok(out)
 }
@@ -320,8 +385,37 @@ mod tests {
 
     use std::path::PathBuf;
 
-    fn pat(s: &str) -> Pattern {
-        Pattern::new(s).unwrap_or_else(|e| panic!("test glob `{s}` failed: {e}"))
+    fn dir(s: &str) -> PathEntry {
+        PathEntry::parse(s).unwrap_or_else(|| panic!("test entry `{s}` parse failed"))
+    }
+
+    // ── PathEntry::parse — V2 syntax round-trip ───────────────────────────
+
+    #[test]
+    fn path_entry_parse_recognizes_directory_prefix_by_trailing_slash() {
+        // Step 19: "trailing `/` ⇒ directory prefix". The trailing slash
+        // is preserved verbatim so `starts_with` cannot bleed past a
+        // segment boundary (e.g., `srcfoo/` matching under `src`).
+        match PathEntry::parse("src/").unwrap() {
+            PathEntry::DirectoryPrefix(p) => assert_eq!(p, "src/"),
+            other => panic!("expected DirectoryPrefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_entry_parse_recognizes_exact_filename_when_no_trailing_slash() {
+        match PathEntry::parse("src/lib.rs").unwrap() {
+            PathEntry::Exact(p) => assert_eq!(p, "src/lib.rs"),
+            other => panic!("expected Exact, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_entry_parse_returns_none_on_empty_string() {
+        // Empty entry is the one fail-closed branch — never produced by
+        // a validated plan, but parser must not silently turn it into a
+        // "match-everything" prefix.
+        assert!(PathEntry::parse("").is_none());
     }
 
     // ── AllowSet::matches — pure semantics ────────────────────────────────
@@ -342,20 +436,12 @@ mod tests {
     }
 
     #[test]
-    fn single_star_does_not_cross_path_separator() {
-        // §2.5.8: "* does not cross /".
+    fn directory_prefix_admits_recursive_descent() {
+        // V2 directory prefix (`src/`) admits every path under `src/`,
+        // including arbitrarily deep nesting. This is the common-case
+        // ergonomic for a task that "owns the src/ subtree".
         let s = AllowSet {
-            glob_patterns: vec![pat("src/*")],
-            ..Default::default()
-        };
-        assert!(s.matches("src/lib.rs"));
-        assert!(!s.matches("src/sub/lib.rs"), "* must not cross /");
-    }
-
-    #[test]
-    fn double_star_crosses_path_separator() {
-        let s = AllowSet {
-            glob_patterns: vec![pat("src/**")],
+            path_entries: vec![dir("src/")],
             ..Default::default()
         };
         assert!(s.matches("src/lib.rs"));
@@ -365,41 +451,81 @@ mod tests {
     }
 
     #[test]
-    fn exact_paths_match_only_literally() {
+    fn directory_prefix_does_not_bleed_past_trailing_slash() {
+        // Pin the segment-boundary property: `src/` must NOT admit
+        // `srcfoo/x.rs`. The trailing-slash preservation in
+        // `PathEntry::DirectoryPrefix` is what guarantees this.
+        let s = AllowSet {
+            path_entries: vec![dir("src/")],
+            ..Default::default()
+        };
+        assert!(!s.matches("srcfoo/lib.rs"));
+        assert!(!s.matches("src.rs"));
+    }
+
+    #[test]
+    fn exact_filename_matches_only_literally() {
+        let s = AllowSet {
+            path_entries: vec![dir("README.md")],
+            ..Default::default()
+        };
+        assert!(s.matches("README.md"));
+        assert!(!s.matches("README.md.bak"));
+        assert!(!s.matches("docs/README.md"));
+    }
+
+    #[test]
+    fn exact_paths_inherited_from_predecessors_match_only_literally() {
         let mut exact = BTreeSet::new();
         exact.insert("src/ipc/handlers/new.rs".to_owned());
         let s = AllowSet { exact_paths: exact, ..Default::default() };
         assert!(s.matches("src/ipc/handlers/new.rs"));
         assert!(!s.matches("src/ipc/handlers/other.rs"));
-        // Glob-looking literal must NOT be interpreted as a glob —
+        // Glob-looking literal must NOT be interpreted as a pattern —
         // §2.5.8 explicitly warns against type confusion here.
         assert!(!s.matches("src/ipc/handlers/anything.rs"));
     }
 
     #[test]
-    fn glob_or_exact_either_path_passes() {
+    fn either_layer_admits_independently() {
         let mut exact = BTreeSet::new();
         exact.insert("README.md".to_owned());
         let s = AllowSet {
-            glob_patterns: vec![pat("src/**")],
-            exact_paths:   exact,
+            path_entries: vec![dir("src/")],
+            exact_paths:  exact,
             ..Default::default()
         };
-        assert!(s.matches("src/lib.rs"), "glob layer");
-        assert!(s.matches("README.md"), "exact layer");
+        assert!(s.matches("src/lib.rs"),     "directory-prefix layer");
+        assert!(s.matches("README.md"),      "exact-paths layer");
         assert!(!s.matches("docs/intro.md"), "neither layer");
     }
 
     #[test]
-    fn compile_globs_propagates_first_failure() {
-        let bad = vec!["src/**".to_owned(), "src/[unclosed".to_owned()];
-        let err = compile_globs(&bad).expect_err("bad glob must fail");
+    fn parse_v2_entries_propagates_empty_string_as_invalid() {
+        // Defense-in-depth branch: an empty entry slipping past the
+        // admission validator must be surfaced, not silently widened.
+        let bad = vec!["src/".to_owned(), String::new()];
+        let err = parse_v2_entries(&bad).expect_err("empty entry must fail");
         match err {
-            PathScopeError::InvalidGlob { pattern, .. } => {
-                assert_eq!(pattern, "src/[unclosed");
-            }
+            PathScopeError::InvalidPathEntry { entry } => assert_eq!(entry, ""),
             other => panic!("wrong error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_v2_entries_round_trips_exact_and_directory_shapes() {
+        let raw = vec![
+            "src/".to_owned(),
+            "README.md".to_owned(),
+            "tests/integration/".to_owned(),
+            ".github/workflows/ci.yml".to_owned(),
+        ];
+        let parsed = parse_v2_entries(&raw).unwrap();
+        assert_eq!(parsed.len(), 4);
+        assert!(matches!(parsed[0], PathEntry::DirectoryPrefix(ref p) if p == "src/"));
+        assert!(matches!(parsed[1], PathEntry::Exact(ref p)           if p == "README.md"));
+        assert!(matches!(parsed[2], PathEntry::DirectoryPrefix(ref p) if p == "tests/integration/"));
+        assert!(matches!(parsed[3], PathEntry::Exact(ref p)           if p == ".github/workflows/ci.yml"));
     }
 
     // ── effective_allow / check_paths against a real Store ────────────────
@@ -509,14 +635,16 @@ mod tests {
         let registry = registry_with(&[(
             "init-A", "t1",
             TaskPlanFields {
-                path_allowlist: vec!["src/**".into(), "README.md".into()],
+                // V2 syntax: directory prefix `src/` (recursive) plus
+                // exact filename `README.md`.
+                path_allowlist: vec!["src/".into(), "README.md".into()],
                 ..Default::default()
             },
         )]);
 
         let allow = effective_allow("init-A", "t1", &registry, &store).unwrap();
         assert!(allow.exact_paths.is_empty());
-        assert_eq!(allow.glob_patterns.len(), 2);
+        assert_eq!(allow.path_entries.len(), 2);
         assert!(allow.matches("src/lib.rs"));
         assert!(allow.matches("README.md"));
         assert!(!allow.matches("Cargo.toml"));
@@ -525,7 +653,8 @@ mod tests {
     #[test]
     fn completed_predecessor_with_export_widens_allow_set() {
         // pred (Completed, exports) → succ (Admitted)
-        // pred contributes exported_paths (exact); succ keeps its own globs.
+        // pred contributes exported_paths (exact); succ keeps its own
+        // V2 directory-prefix entries.
         let store = Store::open_in_memory().unwrap();
         seed_initiative(&store, "init-A");
         seed_task(&store, "init-A", "pred", raxis_types::TaskState::Completed);
@@ -539,7 +668,7 @@ mod tests {
                 ..Default::default()
             }),
             ("init-A", "succ", TaskPlanFields {
-                path_allowlist: vec!["docs/**".into()],
+                path_allowlist: vec!["docs/".into()],
                 ..Default::default()
             }),
         ]);
@@ -549,7 +678,7 @@ mod tests {
         assert!(allow.matches("src/predout/x.rs"));
         assert!(allow.matches("src/predout/y.rs"));
         assert!(allow.matches("docs/intro.md"));
-        assert!(!allow.matches("src/predout/z.rs"), "exact match only — not a glob");
+        assert!(!allow.matches("src/predout/z.rs"), "exact match only — not a prefix");
     }
 
     #[test]
@@ -566,7 +695,7 @@ mod tests {
                 ..Default::default()
             }),
             ("init-A", "succ", TaskPlanFields {
-                path_allowlist: vec!["docs/**".into()],
+                path_allowlist: vec!["docs/".into()],
                 ..Default::default()
             }),
         ]);
@@ -592,7 +721,7 @@ mod tests {
         let registry = registry_with(&[
             ("init-A", "pred", TaskPlanFields::default()),
             ("init-A", "succ", TaskPlanFields {
-                path_allowlist: vec!["docs/**".into()],
+                path_allowlist: vec!["docs/".into()],
                 ..Default::default()
             }),
         ]);
@@ -609,7 +738,7 @@ mod tests {
         let registry = registry_with(&[(
             "init-A", "t1",
             TaskPlanFields {
-                path_allowlist: vec!["src/**".into()],
+                path_allowlist: vec!["src/".into()],
                 ..Default::default()
             },
         )]);
@@ -627,7 +756,7 @@ mod tests {
         let registry = registry_with(&[(
             "init-A", "t1",
             TaskPlanFields {
-                path_allowlist: vec!["src/**".into()],
+                path_allowlist: vec!["src/".into()],
                 ..Default::default()
             },
         )]);

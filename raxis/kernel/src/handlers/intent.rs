@@ -1014,11 +1014,14 @@ fn read_completion_inputs(
 /// full touched set (coarse — operator's responsibility). If non-empty,
 /// emit only the subset matching at least one glob.
 ///
-/// Globs use the same `require_literal_separator = true` semantics as
-/// `path_scope::AllowSet::matches` so `*` doesn't cross `/`. Patterns
-/// that fail to compile are SKIPPED (not fatal) — same defense-in-depth
-/// posture as `path_scope::compile_globs`'s caller, since the signing
-/// tool is the gate.
+/// `path_export_globs` keeps glob semantics (V1) — it is a *filter* on
+/// outgoing exports, not a containment check, and operators benefit
+/// from `**`/`*` for ergonomic export shaping. Globs use
+/// `require_literal_separator = true` so `*` does not cross `/`.
+/// Patterns that fail to compile are SKIPPED (not fatal) as a
+/// defense-in-depth posture; the signing tool is the gate.
+/// (Contrast with `path_allowlist`, which V2 Step 19 restricts to
+/// exact-or-trailing-slash strings — see `path_scope::PathEntry`.)
 fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<String> {
     if export_globs.is_empty() {
         return touched.iter().map(|p| p.to_string_lossy().into_owned()).collect();

@@ -535,15 +535,37 @@ the no-write Executor.
 trailing-slash discipline canonical to `v2-deep-spec.md §6` table 4.
 Specific reasons:
 
-- `"glob_character_in_path"` — entry contains `*`, `?`, `[`, `]`, or
-  `{`; arbitrary glob syntax is not supported.
+- `"empty_entry"` — entry is the empty string. An empty
+  `path_allowlist` entry would silently match every relative path under
+  `starts_with` semantics — the most dangerous possible interpretation.
+  Rejected explicitly so operator typos producing `""` do not collapse
+  into a universal admit.
+- `"glob_character_in_path"` — entry contains `*`, `?`, `[`, `]`, `{`,
+  or `}`; arbitrary glob syntax is not supported.
 - `"absolute_path"` — entry begins with `/`; entries are repo-relative.
-- `"path_escape"` — entry contains `..` segments.
+- `"path_escape"` — entry contains `..` as a *segment* (split-on-`/`
+  semantics, NOT substring — `dist/foo..bar.txt` is accepted because
+  the segment `foo..bar` is a valid filename).
+- `"negation_marker"` — entry begins with `!` (gitignore-style negation).
+  V2 path matching is a single-pass starts_with / equality check, not
+  a multi-pass evaluator with allow/deny precedence; supporting
+  negation would require either ordered evaluation (operator-visible
+  semantics drift between matchers) or a two-set complement (cost
+  blow-up for large dir prefixes). Rejected.
 - `"missing_trailing_slash_for_directory"` — entry resolves to a known
   directory in the operator's worktree at policy-load time when the CLI
   has run `raxis-cli plan validate` (this check is best-effort and does
   not fire at kernel-side admission, which lacks operator-worktree
   visibility — included here for symmetry with the operator-side warning).
+
+**Implementation reference (kernel-side admission gate):**
+`kernel/src/initiatives/lifecycle.rs::validate_path_allowlist_v2_format`
+runs after `parse_plan_tasks` and before `BEGIN TRANSACTION` in
+`approve_plan`. The validator short-circuits on the first offending
+entry and returns `LifecycleError::PathAllowlistInvalidSyntax {
+task_id, entry, reason }`. The reason strings above are stable
+wire-side identifiers — DO NOT rename without updating both this spec
+section AND every operator-side warning that consumes them.
 
 **Kernel behavior:** Plan rejected. The kernel's path-matching is the
 prefix-or-exact discipline mandated by `INV-TASK-PATH-01`; admitting glob

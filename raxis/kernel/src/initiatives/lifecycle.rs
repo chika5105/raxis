@@ -65,6 +65,29 @@ pub enum LifecycleError {
     #[error("plan TOML invalid: {reason}")]
     PlanInvalid { reason: String },
 
+    /// **V2 (Step 19) — `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`.** A
+    /// `path_allowlist` entry violates the V2 trailing-slash discipline.
+    /// Surfaced by `validate_path_allowlist_v2_format` at `approve_plan`
+    /// time. The wire-side projection lives in
+    /// `policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`.
+    ///
+    /// `reason` is one of the four canonical strings spelled out in
+    /// `policy-plan-authority.md`:
+    ///   * `"glob_character_in_path"` — entry contains `*`, `?`, `[`,
+    ///     `]`, `{`, or `}`.
+    ///   * `"absolute_path"` — entry begins with `/`.
+    ///   * `"path_escape"` — entry contains a `..` segment.
+    ///   * `"empty_entry"` — entry is the empty string.
+    ///   * `"negation_marker"` — entry begins with `!` (gitignore-style
+    ///     negation; not supported because containment is starts_with /
+    ///     equality, not a multi-pass evaluator).
+    #[error("path_allowlist[{entry:?}] on task {task_id}: {reason}")]
+    PathAllowlistInvalidSyntax {
+        task_id: String,
+        entry:   String,
+        reason:  &'static str,
+    },
+
     #[error("scheduler error during admission: {0}")]
     Scheduler(#[from] SchedulerError),
 
@@ -275,6 +298,16 @@ pub fn approve_plan(
 
     let plan_toml_str = String::from_utf8_lossy(&plan_bytes);
     let plan_tasks    = parse_plan_tasks(&plan_toml_str)?;
+
+    // V2 Step 19 — `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` shift-left.
+    // Validates the syntax of every `path_allowlist` entry (no globs, no
+    // absolute paths, no `..` segments) BEFORE we open a transaction, so
+    // a malformed plan never mutates kernel state. Recovery via
+    // `repopulate_plan_registry` deliberately does NOT call this — it
+    // accepts already-approved V1 plans verbatim. Canonical reasons
+    // table lives at `policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`.
+    validate_path_allowlist_v2_format(&plan_tasks)?;
+
     let task_count    = plan_tasks.len();
     let now           = unix_now_secs();
 
@@ -835,6 +868,114 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
     Ok(tasks)
 }
 
+/// V2 Step 19 — validate every `path_allowlist` entry across `tasks` for
+/// the trailing-slash discipline mandated by `v2-deep-spec.md §6` table 4
+/// and `policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`.
+///
+/// The kernel's path-matching subsystem (`path_scope::AllowSet`) treats
+/// `path_allowlist` entries as either:
+///
+///   * **Exact filenames** — repo-relative, no trailing `/`
+///     (e.g., `src/api/handler.rs`); matched by string equality.
+///   * **Directory prefixes** — repo-relative, ending in `/`
+///     (e.g., `src/api/`); matched by prefix.
+///
+/// Glob characters, absolute paths, and path-escapes are rejected here.
+/// We deliberately fail-fast at `approve_plan` (not at `start_initiative`)
+/// because the operator's signature is over the plan bytes — a plan with
+/// invalid syntax never makes it to the registry, never admits tasks, and
+/// never affects already-running initiatives.
+///
+/// # Reason taxonomy (canonical strings)
+///
+/// Surfaces in `LifecycleError::PathAllowlistInvalidSyntax::reason`:
+///
+/// | reason                    | trigger                                        |
+/// |---------------------------|------------------------------------------------|
+/// | `"empty_entry"`           | `entry == ""`                                  |
+/// | `"glob_character_in_path"`| any of `*`, `?`, `[`, `]`, `{`, `}`            |
+/// | `"absolute_path"`         | starts with `/`                                |
+/// | `"path_escape"`           | contains a `..` segment                        |
+/// | `"negation_marker"`       | starts with `!` (gitignore-style negation)     |
+///
+/// # Pros / cons of the call site
+///
+/// **Chosen call site:** `approve_plan`, after `parse_plan_tasks`,
+/// **before** the `BEGIN TRANSACTION`.
+///
+/// * **Pro:** A bad plan is rejected before the kernel mutates any
+///   on-disk state — no rollback scar, no half-state.
+/// * **Pro:** Keeps `parse_plan_tasks` purely structural, so it can be
+///   reused at recovery (`repopulate_plan_registry`) for V1 plans whose
+///   bytes were approved before V2 syntax existed. Recovery uses
+///   `parse_plan_tasks` only, so legacy plans continue to round-trip.
+/// * **Con:** A V1 plan reapproved against a V2 kernel would fail.
+///   This is intentional and documented at
+///   `v2-deep-spec.md §Step 19` (the V2 wire is the canonical V2
+///   syntax — operators must `plan prepare && policy sign` again).
+///
+/// # Test obligation
+///
+/// Each branch of the `reason` taxonomy MUST be exercised by a unit
+/// test in this module. See `validate_path_allowlist_v2_format_*` tests.
+fn validate_path_allowlist_v2_format(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
+    for pt in tasks {
+        for entry in &pt.path_allowlist {
+            if let Some(reason) = path_allowlist_entry_violation(entry) {
+                return Err(LifecycleError::PathAllowlistInvalidSyntax {
+                    task_id: pt.task_id.clone(),
+                    entry:   entry.clone(),
+                    reason,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Returns `Some(reason)` if `entry` violates the V2 path-allowlist
+/// syntax discipline; `None` if the entry is acceptable. The reason
+/// strings are stable wire-side identifiers — DO NOT rename without
+/// updating `policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`
+/// AND every operator-side warning that consumes them
+/// (`operator-ergonomics.md §4.5.4`).
+fn path_allowlist_entry_violation(entry: &str) -> Option<&'static str> {
+    if entry.is_empty() {
+        return Some("empty_entry");
+    }
+    // Negation marker is a gitignore-ism we don't support: V2 path
+    // matching is a single-pass starts_with/equality check, not a
+    // multi-pass evaluator with allow/deny precedence. We reject this
+    // before the glob-character check so the operator sees the more
+    // actionable reason ("you wrote a negation"), not the catch-all
+    // ("you used a special character").
+    if entry.starts_with('!') {
+        return Some("negation_marker");
+    }
+    if entry.starts_with('/') {
+        return Some("absolute_path");
+    }
+    // `..` as a *path segment*. Substring check is too permissive
+    // (matches benign filenames like `foo..bar`); split-on-`/` is the
+    // right granularity. We also reject the bare `".."` entry.
+    if entry.split('/').any(|seg| seg == "..") {
+        return Some("path_escape");
+    }
+    // Glob characters per `policy-plan-authority.md` line 538: the
+    // five forbidden metacharacters. `?` is included because operators
+    // sometimes use it as a single-char wildcard in shell globs even
+    // though it has no place here. The closing `]` and `}` are flagged
+    // for symmetry — an entry like `src/[abc].rs` would otherwise pass
+    // the opening-only check on partially-malformed input.
+    if entry
+        .chars()
+        .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+    {
+        return Some("glob_character_in_path");
+    }
+    None
+}
+
 /// Read an optional TOML field as a `Vec<String>`. Missing field, wrong
 /// type, or non-string array entries all fall back to the empty vec —
 /// matching the original `predecessors` parsing semantics.
@@ -929,13 +1070,17 @@ mod tests {
 
     #[test]
     fn parse_plan_tasks_reads_path_allowlist_in_order() {
+        // Note: parse_plan_tasks itself is purely structural — it does
+        // not enforce V2 syntax. Glob-style entries here exercise the
+        // ordering invariant only; `validate_path_allowlist_v2_format`
+        // is the syntax gate (see tests below) and runs in approve_plan.
         let toml = r#"[[tasks]]
         task_id        = "t-globs"
-        path_allowlist = ["src/**", "tests/**", "README.md"]
+        path_allowlist = ["src/", "tests/", "README.md"]
         "#;
         let tasks = parse_plan_tasks(toml).unwrap();
         assert_eq!(tasks[0].path_allowlist,
-                   vec!["src/**", "tests/**", "README.md"]);
+                   vec!["src/", "tests/", "README.md"]);
     }
 
     #[test]
@@ -968,10 +1113,196 @@ mod tests {
         // `predecessors` behaviour.)
         let toml = r#"[[tasks]]
         task_id        = "t"
-        path_allowlist = ["src/**", 123, "ok.rs"]
+        path_allowlist = ["src/", 123, "ok.rs"]
         "#;
         let tasks = parse_plan_tasks(toml).unwrap();
-        assert_eq!(tasks[0].path_allowlist, vec!["src/**", "ok.rs"]);
+        assert_eq!(tasks[0].path_allowlist, vec!["src/", "ok.rs"]);
+    }
+
+    // ── V2 Step 19 — `path_allowlist` syntax validator ────────────────────
+    //
+    // Each `reason` in the canonical taxonomy MUST be exercised by at
+    // least one test. The tests intentionally pass the entry through
+    // `validate_path_allowlist_v2_format` (the public gate) rather than
+    // calling `path_allowlist_entry_violation` directly, so the wiring
+    // from validator → `LifecycleError::PathAllowlistInvalidSyntax` is
+    // also covered. See `policy-plan-authority.md
+    // §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` for the canonical reason
+    // strings.
+    fn make_task(task_id: &str, allow: &[&str]) -> PlanTask {
+        PlanTask {
+            task_id:                   task_id.to_owned(),
+            name:                      task_id.to_owned(),
+            lane_id:                   "default".to_owned(),
+            predecessors:              vec![],
+            path_allowlist:            allow.iter().map(|s| (*s).to_owned()).collect(),
+            path_export_to_successors: false,
+            path_export_globs:         vec![],
+            path_scope_override:       false,
+        }
+    }
+
+    fn assert_violation(task_id: &str, entries: &[&str], expected_reason: &'static str) {
+        let tasks = vec![make_task(task_id, entries)];
+        let err = validate_path_allowlist_v2_format(&tasks).unwrap_err();
+        match err {
+            LifecycleError::PathAllowlistInvalidSyntax { task_id: tid, entry: _, reason } => {
+                assert_eq!(tid, task_id);
+                assert_eq!(reason, expected_reason,
+                           "expected reason {expected_reason} but got {reason}");
+            }
+            other => panic!("expected PathAllowlistInvalidSyntax, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_v2_format_accepts_exact_filenames_and_directory_prefixes() {
+        let tasks = vec![make_task(
+            "t",
+            &[
+                "README.md",
+                "src/api/handler.rs",
+                "src/",
+                "tests/integration/",
+                "Cargo.toml",
+                ".github/workflows/ci.yml",
+            ],
+        )];
+        validate_path_allowlist_v2_format(&tasks).unwrap();
+    }
+
+    #[test]
+    fn validate_v2_format_accepts_empty_allowlist() {
+        // Empty allowlist is the locked-down default — denies everything,
+        // not a syntax violation. Caught by the read-path containment
+        // check, not by this admission-time validator.
+        let tasks = vec![make_task("t-empty", &[])];
+        validate_path_allowlist_v2_format(&tasks).unwrap();
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_empty_entry() {
+        // The bare empty string "" is meaningless and would silently
+        // match every relative path under starts_with semantics — the
+        // most dangerous possible interpretation. Rejected explicitly.
+        assert_violation("t", &[""], "empty_entry");
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_glob_star() {
+        assert_violation("t-star", &["src/**"], "glob_character_in_path");
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_glob_question_mark() {
+        assert_violation("t-q", &["src/file?.rs"], "glob_character_in_path");
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_glob_brackets() {
+        assert_violation("t-bracket", &["src/[abc].rs"], "glob_character_in_path");
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_glob_braces() {
+        assert_violation("t-brace", &["src/{a,b}.rs"], "glob_character_in_path");
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_absolute_path() {
+        assert_violation("t-abs", &["/etc/secrets/"], "absolute_path");
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_path_escape_segment() {
+        assert_violation("t-esc", &["../escape/"], "path_escape");
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_interior_path_escape_segment() {
+        // `..` as a *segment*, not a substring. `foo/../bar` escapes
+        // upward at evaluation time and must be rejected even though
+        // the surface form looks "structured".
+        assert_violation("t-int", &["src/../etc/"], "path_escape");
+    }
+
+    #[test]
+    fn validate_v2_format_accepts_dotdot_inside_filename_segment() {
+        // `foo..bar` is a valid filename in some repos (git stash names,
+        // version tags). The split-on-`/` segment check yields `["foo..bar"]`,
+        // which is neither `..` nor empty, so it's accepted. This pins
+        // the segment-vs-substring distinction.
+        let tasks = vec![make_task("t", &["dist/foo..bar.txt"])];
+        validate_path_allowlist_v2_format(&tasks).unwrap();
+    }
+
+    #[test]
+    fn validate_v2_format_rejects_negation_marker() {
+        assert_violation("t-neg", &["!secret/"], "negation_marker");
+    }
+
+    #[test]
+    fn validate_v2_format_reports_first_offender_with_task_id_and_entry() {
+        // Multi-task plan: t1 valid, t2's third entry is bogus. We must
+        // surface the offending entry verbatim and the originating task_id.
+        let tasks = vec![
+            make_task("t1", &["src/", "README.md"]),
+            make_task("t2", &["src/lib.rs", "tests/", "/etc/secrets/"]),
+        ];
+        let err = validate_path_allowlist_v2_format(&tasks).unwrap_err();
+        match err {
+            LifecycleError::PathAllowlistInvalidSyntax {
+                task_id, entry, reason,
+            } => {
+                assert_eq!(task_id, "t2");
+                assert_eq!(entry,   "/etc/secrets/");
+                assert_eq!(reason,  "absolute_path");
+            }
+            other => panic!("expected PathAllowlistInvalidSyntax, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_v2_format_short_circuits_on_first_violation() {
+        // The validator is an early-exit (Step 19 wants a deterministic,
+        // operator-friendly single-error response — not a list). Pin
+        // that contract so a future refactor does not silently switch
+        // to "report all violations" without a spec update.
+        let tasks = vec![make_task(
+            "t",
+            &[
+                "src/**",          // glob_character_in_path  ← reported
+                "/etc/secrets/",   // absolute_path           ← shadowed
+                "../escape/",      // path_escape             ← shadowed
+            ],
+        )];
+        let err = validate_path_allowlist_v2_format(&tasks).unwrap_err();
+        match err {
+            LifecycleError::PathAllowlistInvalidSyntax { entry, reason, .. } => {
+                assert_eq!(entry,  "src/**");
+                assert_eq!(reason, "glob_character_in_path");
+            }
+            other => panic!("expected PathAllowlistInvalidSyntax, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn path_allowlist_entry_violation_canonical_table() {
+        // Direct unit test of the helper — pins the (entry → reason)
+        // table that `policy-plan-authority.md
+        // §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` calls out.
+        assert_eq!(path_allowlist_entry_violation(""),
+                   Some("empty_entry"));
+        assert_eq!(path_allowlist_entry_violation("src/**"),
+                   Some("glob_character_in_path"));
+        assert_eq!(path_allowlist_entry_violation("/abs/"),
+                   Some("absolute_path"));
+        assert_eq!(path_allowlist_entry_violation("../up/"),
+                   Some("path_escape"));
+        assert_eq!(path_allowlist_entry_violation("!neg"),
+                   Some("negation_marker"));
+        assert_eq!(path_allowlist_entry_violation("src/api/handler.rs"), None);
+        assert_eq!(path_allowlist_entry_violation("src/"),               None);
     }
 
     #[test]
@@ -1351,13 +1682,16 @@ mod tests {
         let plan = r#"
             [[tasks]]
             task_id                   = "t1"
-            path_allowlist            = ["src/**", "README.md"]
+            # V2 Step 19: directory prefix `src/` (recursive) +
+            # exact filename `README.md`. `path_export_globs` keeps
+            # V1 glob syntax — it's a *filter*, not containment.
+            path_allowlist            = ["src/", "README.md"]
             path_export_to_successors = true
             path_export_globs         = ["src/ipc/**"]
 
             [[tasks]]
             task_id        = "t2"
-            path_allowlist = ["docs/**"]
+            path_allowlist = ["docs/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit    = FakeAuditSink::new();
@@ -1367,14 +1701,14 @@ mod tests {
 
         let f1 = registry.get(&TaskKey::new(&init_id, "t1"))
             .expect("registry must contain t1");
-        assert_eq!(f1.path_allowlist, vec!["src/**", "README.md"]);
+        assert_eq!(f1.path_allowlist, vec!["src/", "README.md"]);
         assert!(f1.path_export_to_successors);
         assert_eq!(f1.path_export_globs, vec!["src/ipc/**"]);
         assert!(!f1.path_scope_override);
 
         let f2 = registry.get(&TaskKey::new(&init_id, "t2"))
             .expect("registry must contain t2");
-        assert_eq!(f2.path_allowlist, vec!["docs/**"]);
+        assert_eq!(f2.path_allowlist, vec!["docs/"]);
         assert!(!f2.path_export_to_successors,
                 "t2 omits the field — must default to false");
     }
@@ -1395,7 +1729,7 @@ mod tests {
         let plan = r#"
             [[tasks]]
             task_id             = "t-normal"
-            path_allowlist      = ["src/**"]
+            path_allowlist      = ["src/"]
 
             [[tasks]]
             task_id             = "t-override-1"
@@ -1451,7 +1785,7 @@ mod tests {
         let plan = r#"
             [[tasks]]
             task_id        = "t1"
-            path_allowlist = ["src/**"]
+            path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit    = FakeAuditSink::new();
@@ -1477,7 +1811,7 @@ mod tests {
         let plan = r#"
             [[tasks]]
             task_id                   = "t1"
-            path_allowlist            = ["src/**"]
+            path_allowlist            = ["src/"]
             path_export_to_successors = true
             path_export_globs         = ["src/ipc/**"]
 
@@ -1500,7 +1834,7 @@ mod tests {
         assert_eq!(n, 2, "two tasks must be re-inserted from the plan");
 
         let f1 = restarted_registry.get(&TaskKey::new(&init_id, "t1")).unwrap();
-        assert_eq!(f1.path_allowlist, vec!["src/**"]);
+        assert_eq!(f1.path_allowlist, vec!["src/"]);
         assert!(f1.path_export_to_successors);
         assert_eq!(f1.path_export_globs, vec!["src/ipc/**"]);
         assert!(!f1.path_scope_override);
@@ -1519,7 +1853,7 @@ mod tests {
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
         task_id = "t1"
-        path_allowlist = ["src/**"]
+        path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
         let audit         = FakeAuditSink::new();
@@ -1546,7 +1880,7 @@ mod tests {
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
         task_id = "t1"
-        path_allowlist = ["src/**"]
+        path_allowlist = ["src/"]
         "#;
         let (_init_id, _pk) = seed_draft_initiative(&store, plan, &sk);
 
@@ -1588,7 +1922,7 @@ mod tests {
         let (sk, _) = fixture_keypair();
         let plan = r#"[[tasks]]
         task_id = "t1"
-        path_allowlist = ["src/**"]
+        path_allowlist = ["src/"]
         "#;
         let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
         let audit         = FakeAuditSink::new();
