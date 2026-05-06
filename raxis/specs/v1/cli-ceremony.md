@@ -12,6 +12,39 @@
 
 ## §4.1 — `raxis` Subcommands
 
+> **V2 supersession notice (authoring lifecycle).** The V2
+> operator-ergonomics layer (`v2/operator-ergonomics.md`) supersedes
+> the parts of this section that describe the **plan-authoring
+> lifecycle** — specifically:
+>
+> - `raxis plan sign` (V1) is removed in V2 in favour of atomic
+>   sign+submit via `raxis-cli submit plan` (`v2/plan-bundle-sealing.md
+>   §4`); see also the per-section V2 supersession notice on
+>   `plan submit` further down.
+> - V2 introduces a canonical authoring flow:
+>   `raxis-cli plan init → plan prepare → submit plan` documented in
+>   `v2/operator-ergonomics.md §5–§6`. The V1 expectation that the
+>   operator hand-authors a complete `plan.toml` and signs it with
+>   `plan sign` is no longer the canonical path.
+> - V2 adds new authoring CLI commands not described in this document:
+>   `plan validate`, `plan diff`, `plan explain`, `plan fmt`,
+>   `plan cost-estimate`, `submit plan --dry-run`, `initiative watch`,
+>   `initiative resume`, `initiative list`, `setup wizard`. Their
+>   canonical specifications live in `v2/operator-ergonomics.md
+>   §6–§17`.
+>
+> Mutating subcommands NOT in the operator-ergonomics surface
+> (`policy sign`, `plan approve`, `escalation approve`, `task abort`,
+> `session create`, `delegation grant`, `epoch advance`,
+> `audit verify`, `audit gaps`, plus `genesis`) remain canonical in
+> this document for both V1 and V2 deployments.
+>
+> The two surfaces (V1 mutating commands here, V2 ergonomics
+> commands in `operator-ergonomics.md`) are designed to coexist on
+> the same `raxis` binary; an operator on V2 uses V2 ergonomics for
+> authoring and the V1 surface in this spec for genesis, policy
+> management, approvals, and audit operations.
+
 `raxis` is the operator-facing binary. It has two distinct surfaces:
 
 1. **Mutating subcommands** (this document, §4.1) — every command that
@@ -240,6 +273,20 @@ Re-run genesis with one of:
 ---
 
 ### `plan submit`
+
+> **V2 supersession notice.** The two-argument form below
+> (`plan submit <initiative_id> <plan_dir>`) and the companion
+> `plan sign` step are the **V1** ceremony. V2 collapses these into a
+> single atomic command: `raxis-cli submit plan <plan.toml>` (file
+> argument, not directory; `--initiative-id` optional). The V2 CLI
+> reads `plan.toml`, bundles all referenced artifacts, hashes,
+> signs, and submits in one in-process operation — there is no
+> intermediate `plan.sig` file and no on-disk `plan_dir`. See
+> `v2/plan-bundle-sealing.md` for the V2 mechanism. The V2 CLI
+> rejects the V1 invocation form at argument parse time with a hint
+> pointing to the new command. This V1 section is retained for
+> users on pre-V2 deployments and for documentation of historical
+> behavior.
 
 **Purpose:** Submit a signed plan to the kernel to create a new initiative.
 
