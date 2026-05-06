@@ -78,10 +78,16 @@ invariant requirement. Dynamic delegation at runtime means:
 
 **Decision (Step 1):** The complete task decomposition — every sub-task, its `path_allowlist`,
 its `session_agent_type`, its retry budgets, and its dependency edges — is declared by the
-human operator in a `plan.toml` file before any computation begins. The operator signs this
-file with their Ed25519 key. The Kernel verifies the signature at `create_initiative` time and
-seals the raw bytes into `signed_plan_artifacts`. The plan is then immutable: neither the
-Orchestrator nor any sub-planner can modify it.
+human operator in a `plan.toml` file before any computation begins. The operator signs and
+submits this file in a single atomic `raxis-cli submit plan <plan.toml>` invocation
+(per `plan-bundle-sealing.md §4`). The CLI bundles `plan.toml` plus any transitively-
+referenced host-side artifacts into a canonical byte array, hashes it, signs the hash with
+the operator's Ed25519 key, and sends `(bundle_bytes, signature)` to the Kernel via IPC in
+a single operation. The Kernel verifies the signature at `create_initiative` time and seals
+the bundle bytes into the `plan_bundles` / `plan_bundle_artifacts` tables (per
+`plan-bundle-sealing.md §8.2`). The plan is then immutable: neither the Orchestrator nor any
+sub-planner can modify it, and the kernel never re-reads the plan from the host filesystem
+again (`INV-INIT-06` post-admission read discipline).
 
 The Orchestrator's role is reduced to a **scheduler**: it observes the kernel-pushed list of
 ready tasks and calls `ActivateSubTask { task_id }` for each one, in the order it chooses.
@@ -89,9 +95,9 @@ It cannot invent new tasks, modify path allowlists, or change dependency edges. 
 of every sub-task was committed by the operator's signature.
 
 **Why this works:** The authority chain is now cryptographically anchored. An auditor can
-verify `SHA-256(plan_bytes)` against `initiatives.plan_artifact_sha256`. The `plan.sig`
-proves that `plan_bytes` was accepted by the operator at a known policy epoch. Every
-sub-task's scope is traceable to a human decision, not an LLM inference.
+verify `SHA-256(canonical_input)` against `initiatives.plan_bundle_sha256`. The bundle
+signature proves that the bundle bytes were accepted by the operator at a known policy
+epoch. Every sub-task's scope is traceable to a human decision, not an LLM inference.
 
 **The cost:** The operator must think through the task decomposition upfront. This is
 intentional friction — RAXIS is not a "just let the AI figure it out" system. It is a
@@ -316,23 +322,29 @@ Rejected. `session_id` alone does not establish lineage. An auditor cannot deter
 `session_id = "abc"` which plan authorized it, who signed the plan, or at what epoch.
 
 **Alternative B — Store the full plan bytes in every audit event.**
-Rejected. Plan bytes are already sealed in `signed_plan_artifacts`. Repeating them in every
-audit event bloats the JSONL chain and violates the audit log's principle of recording
-decisions, not data.
+Rejected. Plan bytes are already sealed in the V2 `plan_bundles` table (per
+`plan-bundle-sealing.md §8.2`; the V1 `signed_plan_artifacts` table for legacy
+initiatives). Repeating them in every audit event bloats the JSONL chain and violates the
+audit log's principle of recording decisions, not data.
 
 **Decision (Step 7):** The `SessionCreated` audit event carries a 4-field attribution chain:
 ```
 {
-  session_id:           "...",   // this session
-  initiative_id:        "...",   // the initiative this session belongs to
-  plan_artifact_sha256: "...",   // SHA-256 of the operator-signed plan bytes
-  policy_epoch:         42       // kernel policy epoch at session creation time
+  session_id:         "...",   // this session
+  initiative_id:      "...",   // the initiative this session belongs to
+  plan_bundle_sha256: "...",   // SHA-256 of the canonical plan bundle (V2)
+                               //   — for legacy V1 initiatives, this field carries
+                               //     plan_artifact_sha256 instead and is documented as such
+  policy_epoch:       42       // kernel policy epoch at session creation time
 }
 ```
-An auditor reconstructing any commit's lineage: `commit SHA → CompleteTask audit event →
-session_id → SessionCreated event → plan_artifact_sha256 → signed_plan_artifacts →
-plan.sig → operator public key`. The chain is cryptographically complete and requires no
-out-of-band data.
+An auditor reconstructing any commit's lineage (V2): `commit SHA → CompleteTask audit
+event → session_id → SessionCreated event → plan_bundle_sha256 → plan_bundles row → bundle
+signature → operator public key (resolved via signed_by fingerprint in
+policy.operators)`. The chain is cryptographically complete and requires no out-of-band
+data. The legacy V1 chain (`plan_artifact_sha256 → signed_plan_artifacts → plan.sig →
+operator public key`) remains valid for pre-V2 initiatives and is preserved in the V1
+spec for forensic reproducibility.
 
 ---
 
@@ -963,49 +975,272 @@ Reviewer's activation row. The Reviewer VM boots with this SHA already injected 
 
 ---
 
-### Step 24: Reviewer Clone Provisioning — Re-Bundling vs. Alternatives
+### Step 24: Reviewer Clone Provisioning — Host-Side Pre-Population (V2)
 
-**Context:** The Reviewer needs a git worktree containing `evaluation_sha`. This SHA does not
-exist in the master repo. It exists in the Orchestrator's clone (where the bundle was fetched
-in Step 9). How does the Reviewer VM get access to it?
+> **V2 architectural amendment.** The original V1-flavored design described below
+> assumed the Reviewer VM contained `git` and could `fetch` + `checkout` from a
+> staged bundle. Under the V2 Pure-Static Reviewer (`planner-harness.md §4.2`)
+> and Canonical Reviewer Image (`planner-harness.md §4.5` /
+> `INV-PLANNER-HARNESS-02`) decisions, the Reviewer image (`raxis-reviewer-core`)
+> contains **no `git` binary**. All git work for the Reviewer must complete
+> **host-side before VM boot**. The Reviewer VM sees a checked-out worktree at
+> `evaluation_sha` plus pre-rendered artifacts; it never invokes git.
+
+**Context:** The Reviewer needs a worktree containing the bytes at `evaluation_sha`,
+plus pre-rendered diff and log so its NNSP-prescribed workflow (`kernel-mechanics-prompt.md
+§3.3`) can begin immediately with `read_file /raxis/diff.patch`. This SHA does not
+exist in the master repo. It exists in the Orchestrator's clone (where the bundle
+was fetched in Step 9). How does the Reviewer VM get access to it?
 
 **Alternative A — `git clone --local` from the Orchestrator's worktree.**
-Rejected. `--local` hardlinks the underlying object database between source and destination.
-A compromised Orchestrator VM can mutate its object store — and the hardlinked objects in the
-Reviewer's worktree are also mutated. This violates air-gapped isolation: each VM must have an
-independent, unalterable view of the evaluation SHA.
+Rejected (V1+V2 reasoning unchanged). `--local` hardlinks the underlying object
+database between source and destination. A compromised Orchestrator VM can mutate
+its object store — and the hardlinked objects in the Reviewer's worktree are also
+mutated. This violates air-gapped isolation: each VM must have an independent,
+unalterable view of the evaluation SHA.
 
 **Alternative B — Push `evaluation_sha` to the master repo as a temporary ref.**
-Rejected. Same objections as Step 9 Alternative A: pollutes the master repo's ref namespace,
-reveals in-progress work to any repository reader.
+Rejected (V1+V2 reasoning unchanged). Same objections as Step 9 Alternative A:
+pollutes the master repo's ref namespace, reveals in-progress work to any
+repository reader.
 
-**Decision (Step 24 — Re-bundling):** Kernel-mediated re-bundling from the Orchestrator's
-clone into the Reviewer's staged VirtioFS directory, host-side:
+**Alternative C (V1 design) — Re-bundle, ship into VM, let in-VM `git` fetch + checkout.**
+Rejected for V2. The Reviewer image has no `git` binary per `INV-PLANNER-HARNESS-02`;
+the in-VM bootstrap step is impossible. Even if `git` were added back to the
+Reviewer image, doing so would re-introduce the `build.rs` / hooks / sub-shell
+exposure surface that the Pure-Static Reviewer decision was specifically designed
+to eliminate.
+
+**Decision (Step 24 — Host-Side Pre-Population via `gix`):** The kernel performs
+all git work natively via the `gix` crate, host-side, before the Reviewer VM
+boots. No git CLI invocation; no in-VM git operations; no bundle shipping.
+
+The kernel:
+
+1. Allocates the Reviewer's worktree at `$RAXIS_DATA_DIR/worktrees/<reviewer_uuid>/`.
+2. Initializes a fresh `gix::Repository` at that path.
+3. Reads the git objects for `evaluation_sha` (and its ancestors back to
+   `master_base_sha`) from the Orchestrator's worktree's object store
+   (`gix::ObjectDatabase` opened in read-only mode against
+   `$RAXIS_DATA_DIR/worktrees/<orchestrator_uuid>/.git/objects/`).
+4. Copies (does NOT hardlink, does NOT clone-by-reference) every object reachable
+   from `evaluation_sha` into the Reviewer's object store, ending at
+   `master_base_sha` — the boundary commit, included.
+5. Creates a single ref `refs/raxis/evaluation` pointing at `evaluation_sha`,
+   sets `HEAD` to it, then performs a `gix::worktree::checkout` to materialize
+   the working tree files (the Reviewer's `read_file` of `/workspace/<path>`
+   reads these regular files, not git objects).
+6. Pre-renders artifacts under `$RAXIS_DATA_DIR/worktrees/<reviewer_uuid>/.raxis/`
+   (this directory is mounted into the Reviewer VM as `/raxis/`, read-only):
+   - `/raxis/diff.patch` — the unified diff `master_base_sha..evaluation_sha`
+     produced via `gix::diff` (or `gix::object::tree::diff`); a textual patch
+     ready for the Reviewer to `read_file`.
+   - `/raxis/log.txt` — `git log --oneline master_base_sha..evaluation_sha`
+     equivalent, produced via `gix::traverse`; one commit per line with
+     short SHA + commit message subject + author + timestamp.
+   - `/raxis/<verifier_name>/<artifact_basename>` — for each V2 task verifier
+     declared on the Executor's task that produced an `artifact` (per
+     `verifier-processes.md §6`), the staged artifact bytes are placed here
+     before VM boot.
+7. Sets the VirtioFS mount of `/workspace/` to **read-only** (Reviewer cannot
+   mutate worktree contents — the worktree is a static evidence base, not
+   something the Reviewer modifies).
+8. Sets the VirtioFS mount of `/raxis/` to **read-only** (Reviewer cannot
+   mutate or fabricate diff/log/artifact contents).
+9. Hands the prepared worktree off to the hypervisor at VM boot.
+
+The Reviewer VM, on boot, finds:
 
 ```
-git -C $RAXIS_DATA_DIR/worktrees/<orchestrator_uuid>/ bundle create \
-    $RAXIS_DATA_DIR/worktrees/<reviewer_uuid>/.raxis/bundles/<executor_task_id>.bundle \
-    <master_base_sha>..<evaluation_sha>
+/workspace/                    # read-only; checked-out worktree at evaluation_sha
+  src/...
+  Cargo.toml
+  ...
+/raxis/                        # read-only; kernel-staged artifacts
+  diff.patch
+  log.txt
+  symbol_index/
+    symbol_index.json          # if a symbol-index verifier ran successfully
+  test_report/
+    report.html                # if a test-report verifier ran successfully
+  system_prompt.txt            # NNSP per kernel-mechanics-prompt.md §3.3
 ```
 
-The Reviewer's VM boots with a fresh clone of master, then its `raxis-planner` bootstrap runs:
+The Reviewer's NNSP (per `kernel-mechanics-prompt.md §3.3`) directs it to begin
+with `read_file /raxis/diff.patch`. No bootstrap step; no git activity inside
+the VM.
+
+**SHA preservation (INV-03 unchanged):** `gix` writes objects with their original
+SHA addresses (it does not rewrite). The bytes the Reviewer sees at every path
+under `/workspace/` are byte-identical to what the Executor committed. Audit can
+re-derive `evaluation_sha` by running `gix::hash::tree` on the Reviewer's worktree
+and verifying it matches the SHA the kernel recorded in
+`subtask_activations.evaluation_sha`. INV-03 is preserved.
+
+**Isolation:** The object copy is host-side and uses `gix`'s `Object::write_to`
+or equivalent (no hardlinks, no symlinks, no shared memory mappings). The
+Reviewer's object database is fully independent of the Orchestrator's — a
+compromised Orchestrator that mutates its own object store after the copy
+completes cannot affect the Reviewer's view of `evaluation_sha`. The two
+worktrees on disk share zero file inodes after Step 24 completes.
+
+**Why pre-render diff and log host-side, not in the VM:** the Reviewer image
+has no `git`, no `diff`, no shell to invoke them. The kernel computes the diff
+once via `gix` at activation time and persists it. This also caches the diff
+across multiple inference calls within the same Reviewer session — the LLM
+re-reads `/raxis/diff.patch` cheaply on every call.
+
+**Failure modes:**
+
+- If `gix` cannot open the Orchestrator's object store (corruption, deleted on
+  disk): Reviewer activation aborts with `FAIL_REVIEWER_PROVISIONING_FAILED`;
+  task transitions to `Failed`. Operator investigates (the Orchestrator's
+  worktree is forensically retained per `INV-CONVERGENCE-05`).
+- If `gix` cannot copy objects (disk full): same handling per
+  `host-capacity.md §7` halt-admit policy; the activation queues until disk
+  recovers.
+- If `evaluation_sha` is not actually present in the Orchestrator's object
+  store (kernel bug; should never happen): same `FAIL_REVIEWER_PROVISIONING_FAILED`;
+  treated as a `SecurityViolationDetected { kind: "EvaluationShaNotInOrchestratorStore" }`
+  audit because it indicates corruption of the kernel's invariants around
+  Step 9 bundling.
+
+---
+
+### Step 24b: Orchestrator Workspace Provisioning — RW Clone at Initiative Boot (V2)
+
+> **V2 architectural amendment.** This step did not exist in the
+> original V1-flavored spec because the Orchestrator was implicitly
+> provisioned by the operator's `vm_image` declaration (`raxis/base`
+> in the prior example). Under V2's Canonical Orchestrator Image
+> (`planner-harness.md §4.7` / `INV-PLANNER-HARNESS-05`) and
+> Invisible Orchestrator (`planner-harness.md §4.8` /
+> `INV-PLANNER-HARNESS-06`) decisions, the kernel auto-creates the
+> Orchestrator session at initiative admission and provisions its
+> workspace from the initiative's base SHA without any operator
+> declaration.
+
+**Context:** The Orchestrator needs a writable git clone where it
+can `git fetch` Executor bundles (per Step 9), perform `git merge`
+(per Step 8), semantically resolve trivial conflicts via
+`bash`+`git`+`edit_file` (per `kernel-mechanics-prompt.md §3.2
+[KERNEL: CONFLICT RESOLUTION PROTOCOL]`), and submit
+`IntegrationMerge` with the resulting HEAD SHA. This workspace's
+provisioning shape is materially different from the Reviewer's
+(Step 24): the Orchestrator's workspace is **RW** (it accumulates
+merged commits across the initiative's lifetime), starts at the
+initiative's `base_sha` (not at any sub-task's `evaluation_sha`),
+and persists for the full initiative duration.
+
+**Decision (Step 24b):** Kernel-mediated host-side provisioning via
+`gix`, parallel to Step 24 but with three concrete differences:
+
+1. The kernel allocates the Orchestrator's worktree at
+   `$RAXIS_DATA_DIR/worktrees/<orchestrator_uuid>/`. Lifetime:
+   initiative duration, not session duration (the Orchestrator
+   session is initiative-scoped — one Orchestrator per initiative,
+   per `INV-PLANNER-HARNESS-06.1`).
+2. The kernel performs a `gix::clone` from the master repo at
+   `base_sha` (the initiative's base commit recorded at
+   `approve_plan` time). Object copy semantics are the same as
+   Step 24 (no hardlinks, independent object database) — the
+   Orchestrator's workspace is fully isolated from the master repo's
+   subsequent state.
+3. The VirtioFS mount of `/workspace/` is **read-write** (the
+   Orchestrator merges in commits over time, accumulating the
+   initiative's HEAD). The VirtioFS mount of `/raxis/` is **read-only**
+   (the kernel-staged session.env, system_prompt.txt, and incoming
+   bundles in `.raxis/bundles/` are kernel-controlled).
+
+The Orchestrator VM, on boot at initiative admission, finds:
+
 ```
-git fetch /workspace/.raxis/bundles/<executor_task_id>.bundle \
-    refs/raxis/evaluation:refs/raxis/evaluation
-git checkout refs/raxis/evaluation
+/workspace/                          # read-write; cloned from base_sha
+  src/...                            # initiative's base state
+  .git/                              # writable git directory; the Orchestrator's HEAD will advance
+  .raxis/
+    bundles/                         # read-only mount of kernel-staged Executor bundles
+      <task_a>.bundle               # populated by kernel as Executors complete (per Step 9)
+      <task_b>.bundle
+      ...
+/raxis/                              # read-only; kernel-staged session boot artifacts
+  session.env                        # session token + VSock parameters
+  system_prompt.txt                  # NNSP per kernel-mechanics-prompt.md §3.2 (kernel-pinned bytes)
 ```
 
-**SHA preservation:** `git bundle` captures exact git objects with their original SHA addresses.
-`git fetch` from a bundle does not rewrite objects. The `evaluation_sha` is identical in the
-Reviewer's worktree to what the Executor produced. INV-03 is preserved.
+**Image source.** Unlike Executor sessions (which boot
+operator-published `INV-VM-CAP-03` images), the Orchestrator boots
+the kernel-bundled `raxis-orchestrator-core-<kernel_version>.img` per
+`INV-PLANNER-HARNESS-05`. The kernel re-verifies the image SHA-256
+against `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` at every boot per
+§4.7; mismatch aborts initiative admission with
+`FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH` and emits
+`SecurityViolationDetected { kind: "OrchestratorImageDigestMismatch" }`.
 
-**Isolation:** The re-bundling operation is host-side. The Reviewer's object database is
-independent of the Orchestrator's — no hardlinks, no shared memory. A compromised Orchestrator
-cannot affect the Reviewer's view of the evaluation SHA after the bundle file is written.
+**Lifecycle integration.**
+
+- *Initiative admission:* Kernel allocates worktree, clones
+  `base_sha`, verifies and boots `raxis-orchestrator-core`, writes
+  the kernel-pinned NNSP into `/raxis/system_prompt.txt`. The
+  Orchestrator session enters `Active` immediately.
+- *Sub-task completion (Step 9):* Kernel writes
+  `<task_id>.bundle` to `/workspace/.raxis/bundles/`, sends
+  `KernelPush::SubTaskCompleted`. The Orchestrator's NNSP §3.2
+  workflow takes over.
+- *IntegrationMerge admission:* The Orchestrator submits
+  `IntegrationMerge { commit_sha: HEAD, merged_task_ids }`. The
+  kernel verifies the SHA exists in the Orchestrator's worktree
+  (host-side `gix::Repository::find_object` against
+  `<orchestrator_uuid>/.git/objects/`), runs the path-allowlist
+  check against `hybrid_effective_allow` (per Step 11), and on
+  success fast-forwards the master branch.
+- *Initiative completion:* The Orchestrator session is reaped; its
+  worktree is forensically retained per `INV-CONVERGENCE-05` until
+  the operator runs `raxis initiative gc` or the V3 audit-retention
+  GC (per `audit-retention.md`) reaps it.
+
+**Why RW for the Orchestrator vs. RO for the Reviewer.** The
+Reviewer is a *static evaluator* — its job is to read evidence
+(diff, log, artifacts) and emit a verdict. Mutating the worktree
+would break the audit invariant that `evaluation_sha` is exactly
+what the Executor produced (any in-VM modification would corrupt
+the SHA tree). The Orchestrator is a *coordinator and merger* — its
+job is to combine commits and produce a new HEAD. RW is structurally
+required; the path-allowlist check at IntegrationMerge admission
+(Step 11 / `hybrid_effective_allow`) bounds *which paths* the
+Orchestrator's edits may affect, even though it can write to the
+worktree freely during the merge process.
+
+**Composition with `INV-PLANNER-HARNESS-06.5`.** The Orchestrator
+harness build excludes `bash run --background` and the `bash bg_*`
+family — semantic merge work is synchronous, and a long-lived
+process inside the Orchestrator's RW workspace would create state
+that outlives the merge step (e.g., a daemon that sees mid-merge
+worktree contents). Foreground-only `bash` keeps the Orchestrator's
+state machine tractable: every merge step is one inference call →
+one foreground bash invocation → one tool result, all serialized.
 
 ---
 
 ### Step 29: Orchestrator Prompt — KernelPush Discovery and Merge Duty
+
+> **V2 amendment.** The Orchestrator NNSP is now **kernel-pinned and
+> version-locked with the kernel binary** per `INV-PLANNER-HARNESS-06.3`
+> — the canonical text lives in `kernel-mechanics-prompt.md §3.2` and
+> the binary embeds it as `ORCHESTRATOR_NNSP_BYTES`. The 4-step "MERGE
+> DUTY" prompt below has been superseded by the structured
+> `[KERNEL: INTEGRATION MERGE PROTOCOL]` + `[KERNEL: CONFLICT RESOLUTION
+> PROTOCOL]` blocks in §3.2, which add semantic conflict resolution
+> (the Orchestrator now uses `bash` + `git` + `edit_file` to
+> semantically merge trivial conflicts in `raxis-orchestrator-core`
+> per `INV-PLANNER-HARNESS-05`) and the `[KERNEL: INITIATIVE GUIDANCE]`
+> channel for operator-supplied per-initiative context. The
+> architectural reasoning in this Step 29 (LLMs cannot maintain DAG
+> state, kernel-computed `newly_activatable`, verbatim merge
+> instructions to defeat hallucinated workflows) remains correct and
+> applies to the new NNSP. The exact prompt text shown below is
+> historical illustration; `kernel-mechanics-prompt.md §3.2` is
+> normative.
 
 **Context:** The Orchestrator is an LLM. It must: (1) know which sub-tasks to activate and
 when, (2) know exactly how to perform git merges and submit attestations, (3) handle merge
@@ -1375,7 +1610,7 @@ binary is completely provider-agnostic.
 | `ConversationRuntime<C,T>` | `runtime/src/conversation.rs` | Core turn loop, tool-calling, iteration cap |
 | `compact` module | `runtime/src/compact.rs` | Message compaction (`preserve_recent = 4`, `max_estimated_tokens = 10000`) |
 | `file_ops` module | `runtime/src/file_ops.rs` | `read_file`, `write_file`, `edit_file`, `glob_search`, `grep_search` within VirtioFS-mounted worktree |
-| `bash` module | `runtime/src/bash.rs` | Shell execution via `sh -lc` with tokio async; git CLI operations |
+| `bash` module | `runtime/src/bash.rs` | Shell execution via `sh -lc` with tokio async; git CLI operations. **Linked into Executor and Orchestrator builds only; explicitly excluded from the Reviewer build per `INV-PLANNER-HARNESS-01`** — see *Decision — Pure-Static Reviewer* in the Integration & Harness Decisions section below. |
 | `usage` module | `runtime/src/usage.rs` | Per-turn token usage accumulation, `UsageSummary` |
 | `json` module | `runtime/src/json.rs` | Zero-dependency JSON parser; minimal footprint inside microVM |
 | `git_context` module | `runtime/src/git_context.rs` | `HEAD` SHA inspection, branch state, dirty-tree detection |
@@ -1385,10 +1620,25 @@ accumulate significant turn history. Without compaction, the context window fill
 `CompactionConfig { preserve_recent: 4, max_estimated_tokens: 10000 }` defaults are tuned for
 coding sessions — exactly the use case. No modification needed.
 
-**Why `bash` as-is:** The Orchestrator needs `git fetch`, `git merge`, `git status`. The
-Executor needs `git add`, `git commit`. Both run through `sh -lc` with tokio async. The AVF
-VM already provides the isolation boundary — no additional sandboxing inside the VM is needed
-(and would conflict with VirtioFS mounts).
+**Why `bash` as-is (for Executor and Orchestrator):** The Orchestrator needs `git fetch`,
+`git merge`, `git status`. The Executor needs `git add`, `git commit`, plus full
+build/test/lint shell access for code authoring. Both run through `sh -lc` with tokio
+async. The AVF VM already provides the isolation boundary — no additional sandboxing
+inside the VM is needed (and would conflict with VirtioFS mounts).
+
+**Why `bash` is excluded for the Reviewer:** The Reviewer is a pure read-only
+static-analysis role. It does not run tests (verifier VMs do that), does not run
+linters (verifier VMs do that), does not run builds (verifier VMs do that), and does
+not run `git` (worktree pre-population is host-side per §Step 24). With no legitimate
+consumer for shell execution, retaining the `bash` capability is pure attack surface:
+a deceived Reviewer LLM that the Executor socially-engineers into running
+`./reproduce.sh` would execute worktree code and could be misled by its output.
+Linking the `bash` module out of the Reviewer build target structurally eliminates
+the entire shell-execution attack class. See *Decision — Pure-Static Reviewer
+(Remove `bash` from Reviewer; Verifiers Are Out-of-VM)* in the Integration & Harness
+Decisions section below for the full analysis, the verifier-process architecture
+that obviates in-Reviewer shell execution, and the Reviewer image content
+specification.
 
 #### Borrowed With RAXIS Wrapper
 
@@ -1461,11 +1711,12 @@ design decision, not an oversight.
 | Write / create file | `file_ops::write_file` — direct VirtioFS write | No |
 | Edit file (patch) | `file_ops::edit_file` — read → patch → write | No |
 | Search files | `file_ops::glob_search`, `grep_search` | No |
-| Execute shell commands | `bash::run` → `sh -lc` via tokio | No |
-| Git add / git commit | `bash::run` → `git` CLI within worktree | No (until `SingleCommit`) |
+| Execute shell commands (Executor, Orchestrator only) | `bash::run` → `sh -lc` via tokio. **Excluded for Reviewer** per `INV-PLANNER-HARNESS-01`; see *Decision — Pure-Static Reviewer* in §Part 7. | No |
+| Git add / git commit (Executor, Orchestrator only) | `bash::run` → `git` CLI within worktree. Reviewer image contains no `git` binary; worktree pre-populated host-side. | No (until `SingleCommit`) |
 | Commit to RAXIS record | `IntentKind::SingleCommit { commit_sha }` | **Yes — full admission pipeline** |
 | Inference | `IntentKind::InferenceRequest` | **Yes** |
-| Web egress | `IntentKind::EgressRequest` | **Yes** |
+| Public egress (curl, npm, cargo, pip, git, …) | `bash::run` → standard tool → `raxis-tproxy` SNI allowlist | No per-request kernel intent (network-layer enforcement). See `vm-network-isolation.md` and the **Unified Egress** decision in §Part 7. |
+| Authenticated egress (APIs, k8s, cloud, DB) | Standard tool → per-session `localhost:<port>` Credential Proxy → URL+method allowlist | No per-request kernel intent (HTTP-layer enforcement at the localhost proxy). See `credential-proxy.md`. |
 
 #### Why the Kernel Does Not Review Every File Change
 
@@ -1577,13 +1828,34 @@ before the agent can do useful work.
 
 The VM image provides tools. The worktree provides the project. They are independent.
 
-**Plan configuration — `vm_image` per task:**
+**Plan configuration — `vm_image` per Executor task:**
+
+> **V2 amendment.** The example below originally included an
+> `orchestrator` task with `session_agent_type = "Orchestrator"` and a
+> `vm_image = "raxis/base"` field. Both are now prohibited per
+> `INV-PLANNER-HARNESS-06` (see `planner-harness.md §4.8` and
+> `policy-plan-authority.md FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED`).
+> Operators do not declare Orchestrator tasks in V2 — the kernel
+> auto-creates the Orchestrator session per initiative and boots it
+> on the kernel-canonical `raxis-orchestrator-core` image
+> (`INV-PLANNER-HARNESS-05`). Reviewer tasks similarly cannot supply
+> `vm_image` per `INV-PLANNER-HARNESS-02`. Therefore `vm_image` in
+> V2 applies exclusively to **Executor** tasks.
 
 ```toml
-# plan.toml
+# plan.toml — V2
 
 [plan]
-vm_image = "raxis/rust-node:1.87-20"   # default for all tasks
+vm_image = "raxis/rust-node:1.87-20"   # default for all Executor tasks
+
+[plan.initiative]
+description = """
+Add OAuth2 device-code flow support to the auth subsystem.
+Backwards-compatible with existing JWT cookie sessions.
+"""
+# This free-form text is the only operator-controlled instruction
+# surface for the kernel-managed Orchestrator session per
+# kernel-mechanics-prompt.md §3.2 [KERNEL: INITIATIVE GUIDANCE].
 
 [[tasks]]
 task_id            = "auth_implementer"
@@ -1596,35 +1868,54 @@ session_agent_type = "Executor"
 vm_image           = "raxis/node:20"   # per-task override
 
 [[tasks]]
-task_id            = "orchestrator"
-session_agent_type = "Orchestrator"
-vm_image           = "raxis/base"      # Orchestrator only needs git, not a full toolchain
+task_id            = "auth_reviewer"
+session_agent_type = "Reviewer"
+# vm_image MUST be omitted; the kernel boots the canonical
+# raxis-reviewer-core image per INV-PLANNER-HARNESS-02.
+
+# No [[tasks]] entry with session_agent_type = "Orchestrator".
+# The kernel auto-creates the Orchestrator session at
+# initiative admission and boots raxis-orchestrator-core.
 ```
 
-**Policy bundle — permitted images with OCI digest pinning:**
+**Policy bundle — permitted Executor images with OCI digest pinning:**
+
+> **V2 amendment.** The original list included `raxis/base` as an
+> Orchestrator image. The Orchestrator image is now kernel-canonical
+> per `INV-PLANNER-HARNESS-05`; `raxis/base` is no longer referenced
+> by any role and is removed from the example. Operator-published
+> images in V2 are exclusively for Executor and verifier roles.
+> `[[vm_images]]` entries whose `role_restriction` includes
+> `"Reviewer"` or `"Orchestrator"` are rejected at policy load with
+> `FAIL_POLICY_INVALID_ROLE_RESTRICTION` (per
+> `INV-PLANNER-HARNESS-02` and `INV-PLANNER-HARNESS-05` respectively).
 
 ```toml
 # policy.toml
 
 [[vm_images]]
-name        = "raxis/base"
-oci_digest  = "sha256:f3a4b5c6..."
-description = "Alpine base + bash + git + jq. No language toolchain."
+name             = "raxis/rust:1.87"
+oci_digest       = "sha256:a1b2c3d4..."
+role_restriction = ["Executor"]
+description      = "Rust 1.87 + cargo + clippy + rustfmt"
 
 [[vm_images]]
-name        = "raxis/rust:1.87"
-oci_digest  = "sha256:a1b2c3d4..."
-description = "Rust 1.87 + cargo + clippy + rustfmt"
+name             = "raxis/node:20"
+oci_digest       = "sha256:e5f6a7b8..."
+role_restriction = ["Executor"]
+description      = "Node.js 20 LTS + npm 10"
 
 [[vm_images]]
-name        = "raxis/node:20"
-oci_digest  = "sha256:e5f6a7b8..."
-description = "Node.js 20 LTS + npm 10"
+name             = "raxis/rust-node:1.87-20"
+oci_digest       = "sha256:c9d0e1f2..."
+role_restriction = ["Executor"]
+description      = "Rust 1.87 + Node.js 20 for full-stack projects"
 
 [[vm_images]]
-name        = "raxis/rust-node:1.87-20"
-oci_digest  = "sha256:c9d0e1f2..."
-description = "Rust 1.87 + Node.js 20 for full-stack projects"
+name             = "raxis/parsers:1"
+oci_digest       = "sha256:b7c8d9e0..."
+role_restriction = ["Verifier"]
+description      = "tree-sitter + ripgrep parsers for symbol-index verifier"
 ```
 
 **Why OCI digest pinning (not just tags):**
@@ -1757,14 +2048,15 @@ access, use the credential proxy.
 
 **Standard image naming convention:**
 
-| Image | Toolchain | Typical use |
-|---|---|---|
-| `raxis/base` | bash, git, jq only | Orchestrator sessions (merge only) |
-| `raxis/rust:<ver>` | rustc, cargo, clippy, rustfmt | Rust projects |
-| `raxis/node:<ver>` | node, npm, yarn | JS/TS projects |
-| `raxis/python:<ver>` | python, pip, venv | Python projects |
-| `raxis/go:<ver>` | go toolchain | Go projects |
-| `raxis/rust-node:<r>-<n>` | Rust + Node.js | Full-stack / WASM projects |
+| Image | Source | Toolchain | Typical use |
+|---|---|---|---|
+| `raxis-reviewer-core-<ver>` | **Kernel-bundled (`INV-PLANNER-HARNESS-02`)** | `raxis-planner` (no `bash`), `ripgrep` | Reviewer sessions; not operator-customizable |
+| `raxis-orchestrator-core-<ver>` | **Kernel-bundled (`INV-PLANNER-HARNESS-05`)** | `raxis-planner`, `bash` (foreground only), `git`, `ripgrep`, POSIX coreutils | Orchestrator sessions (DAG multiplexing + semantic merge); not operator-customizable |
+| `raxis/rust:<ver>` | Operator-published (`INV-VM-CAP-03`) | rustc, cargo, clippy, rustfmt | Rust Executor tasks |
+| `raxis/node:<ver>` | Operator-published | node, npm, yarn | JS/TS Executor tasks |
+| `raxis/python:<ver>` | Operator-published | python, pip, venv | Python Executor tasks |
+| `raxis/go:<ver>` | Operator-published | go toolchain | Go Executor tasks |
+| `raxis/rust-node:<r>-<n>` | Operator-published | Rust + Node.js | Full-stack / WASM Executor tasks |
 
 ---
 
@@ -1907,6 +2199,32 @@ task description and allowlist context. The raw plan never crosses the host→VM
 
 ---
 
+### Integration & Harness Decisions — see [`planner-harness.md`](planner-harness.md)
+
+The role-asymmetric tool surface, the LSP-exclusion / `bash`-exclusion /
+canonical-Reviewer-image / pure-static-Reviewer / unified-egress /
+`StructuredOutput`-exclusion / cgroup-contained-backgrounding decisions,
+the `INV-PLANNER-HARNESS-*` invariants (`-01` Reviewer Code Execution
+Prohibition, `-02` Reviewer Image Is Kernel-Owned, `-03` In-VM Process
+Containment via cgroup v2), the in-VM backgrounded-shell tool primitives
+(`bash run --background`, `bash bg_status`, `bash bg_logs`, `bash bg_kill`,
+`bash bg_acknowledge`), the per-role VM image specifications, and the KSB
+alert-class taxonomy all live in [`specs/v2/planner-harness.md`](planner-harness.md).
+
+That spec is normative for everything in its scope. The integration map
+tables above (Borrowed As-Is / Wrapped / Excluded) remain in this file
+because they pair with the `ApiClient` / `raxis-gateway` discussion;
+`planner-harness.md §3` adds the role-asymmetric tool-surface matrix on
+top of that map and `planner-harness.md §4–§5` is where every decision
+amending those tables is recorded.
+
+When this section and `planner-harness.md` disagree, `planner-harness.md`
+wins. Cross-references in other specs that point at Part 7 for
+planner-harness-specific material should be migrated to point to
+`planner-harness.md`.
+
+---
+
 ## Part 8 — Schema Addendum & INV-STORE-02 Amendment
 
 ### DDL Migration 2 — Complete Listing
@@ -1953,7 +2271,8 @@ CREATE TABLE IF NOT EXISTS subtask_activations (
 
 | Operation | Tables written atomically |
 |---|---|
-| `approve_plan` (V2) | `initiatives`, `tasks`, `task_dag_edges`, `signed_plan_artifacts`, `subtask_activations`, audit-pointer |
+| `create_initiative` (V2) | `initiatives`, `plan_bundles`, `plan_bundle_artifacts`, audit-pointer (per `plan-bundle-sealing.md §8.2`) |
+| `approve_plan` (V2) | `initiatives`, `tasks`, `task_dag_edges`, `subtask_activations`, audit-pointer (plan bundle bytes already sealed at `create_initiative` time and read read-only here) |
 | `handlers/activate_subtask` | `subtask_activations` (→ Active), `sessions` (insert), audit-pointer |
 | `handlers/complete_task` | `tasks` (completed_sha, state), `task_dag_edges` (release_successors), audit-pointer |
 | `handlers/submit_review` | `tasks` (last_critique aggregate, review_reject_count), `subtask_activations` (state), audit-pointer |
@@ -1976,7 +2295,7 @@ into a core orchestration subsystem that warrants its own detailed mechanical sp
 |---|---|---|
 | Per-capability policy epoch staleness diffing (A.18 promotion) | [`policy-epoch-diffing.md`](policy-epoch-diffing.md) | V2 Specified |
 | `IntegrationMerge` — complete intent spec, 8-check admission pipeline, multi-task sequencing, operator-approval gate for sensitive paths | [`integration-merge.md`](integration-merge.md) | V2 Specified |
-| Kernel-mediated egress — per-task web egress via `raxis-egress` proxy, two-level allowlist, `EgressRequest` intent, SSRF prevention, INV-EGRESS-01 | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | V2 Specified |
+| Kernel-mediated egress (DEPRECATED — superseded by unified egress decision in §Part 7) — original `raxis-egress` proxy + `IntentKind::EgressRequest` design. Functionality consolidated into `vm-network-isolation.md` (transport-layer SNI allowlist via `raxis-tproxy`) and `credential-proxy.md` (HTTP-layer URL+method allowlist on per-session localhost). `INV-EGRESS-01` and `INV-EGRESS-INTENT-01` deprecated. | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | **Deprecated** |
 | Policy-plan authority hierarchy — INV-POLICY-01, `approve_plan` warning system, `--strict` mode, warning catalog (4 warning types), `[push_policy]` and `[approve_policy]` policy bundle sections | [`policy-plan-authority.md`](policy-plan-authority.md) | V2 Specified |
 | Immutable artifact store — content-addressed storage for policy bundles, plans, and operator keys; `PolicyEpochAdvanced` extended with SHA-256 fields; full audit query model | [`immutable-artifact-store.md`](immutable-artifact-store.md) | V2 Specified |
 | Token limit enforcement — `InferenceCompleted` audit event, `TokenLimit::Uncapped/Count`, per-request and cumulative limits, `limit_behavior` modes, plan immutability tension, budget vs. token analysis, Kernel State Block (KSB), CLI commands, prompt engineering | [`token-limit-enforcement.md`](token-limit-enforcement.md) | V2 Specified |
@@ -1984,4 +2303,7 @@ into a core orchestration subsystem that warrants its own detailed mechanical sp
 | Environment-scoped access control — three-layer model (egress URL, credentials, policy environment gates), all tensions + resolutions, precedence rules, credential injection spec, approve_plan warnings | [`environment-access-control.md`](environment-access-control.md) | V2 Specified |
 | Credential proxy architecture — no credential values in VMs; per-session proxies for k8s, AWS, GCP, Azure, PostgreSQL, MySQL, MSSQL, MongoDB, Redis; deep database proxy analysis; rejected injection design with exfiltration examples | [`credential-proxy.md`](credential-proxy.md) | V2 Specified |
 | VM network isolation — iptables transparent proxy (raxis-tproxy), SNI extraction for HTTPS enforcement, DB bypass detection, method enforcement gap and require_intent resolution | [`vm-network-isolation.md`](vm-network-isolation.md) | V2 Specified |
+| Agent disagreement and non-convergence bounds — per-task `max_review_rounds`, circular-revision detection via diff hashing, per-task wall-clock budgets, two-tier escalation routing (`orchestrator_first` / `operator_only`) with new `IntentKind::ResolveSubEscalation` and `IntentKind::EscalateUpward`, abandoned-worktree lifecycle (`AbandonedSalvageable` → `AbandonedArchived` → `Purged`), `INV-CONVERGENCE-01..06` | [`agent-disagreement.md`](agent-disagreement.md) | V2 Specified |
+| Planner harness — claw-code integration verdicts, role-asymmetric tool surface (Orchestrator / Executor / Reviewer), LSP exclusion for Reviewer, `bash` exclusion for Reviewer (Pure-Static Reviewer), canonical kernel-owned Reviewer image, `StructuredOutput` exclusion, unified-egress alignment, in-VM backgrounded shell execution with cgroup v2 containment + CPU priority, KSB alert classes, per-role image specifications, `INV-PLANNER-HARNESS-01..03` | [`planner-harness.md`](planner-harness.md) | V2 Specified |
+| Verifier processes — V2 task-level verifiers (`[[plan.tasks.X.verifiers]]`) extending V1 `[[gates]]` foundation; VM-isolated `raxis-verifier` PID-1 binary; `WitnessSubmissionV2` frame; `on_failure: block_review \| warn_only` semantics; pre-staged `artifact` mechanism for Reviewer `/raxis/` mount; Reviewer KSB `verifier_witnesses` integration; `INV-VERIFIER-01..11`; cross-references for `kernel-mechanics-prompt.md` and `policy-plan-authority.md` amendments | [`verifier-processes.md`](verifier-processes.md) | V2 Specified |
 
