@@ -401,6 +401,12 @@ intermediary.
 The Executor's exact commit SHA is preserved through the bundle/fetch transfer (Step 3 /
 1.4). The master repo is untouched until `IntegrationMerge`.
 
+**The Economics of Ephemeral MicroVMs:**
+Destroying the Executor's VM (and booting a new one on rejection/retry) might seem computationally expensive, but RAXIS uses microVM hypervisors (Firecracker on Linux, Apple Virtualization Framework on macOS) specifically designed for sub-second boot times. This architecture offers three load-bearing benefits:
+1. **Zero Data-Copying:** Workspaces are mounted via VirtioFS directly from the host. The VM does not need to download or clone the repository over a network at boot; the data is instantly available.
+2. **Context Compaction:** If a Reviewer rejects an Executor's work, the "retry Executor" boots in a completely fresh VM. It wakes up to the current state of the code and the Reviewer's critique injected directly into the top of its context window. It carries zero conversational baggage or prompt-bloat from its previous attempt.
+3. **Hardware-Enforced State Clearing:** MicroVM destruction guarantees that no background processes, runaway test suites, or mutated global configurations survive between task states. Every execution tier is a mathematically clean slate.
+
 ---
 
 ### Step 10: VirtioFS Staging + VSock Push
