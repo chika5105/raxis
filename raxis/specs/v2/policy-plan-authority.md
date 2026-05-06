@@ -1228,6 +1228,23 @@ and re-pushes.
 | `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE { language, alias }` | Policy load | A `[default_verifier_images].<language>` value doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"`. | `policy-plan-authority.md §4 [default_verifier_images]` |
 | `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE { language }` | Policy load | `[default_verifier_images].<language>` declares a language other than the V2 recognized set (`rust`, `node`, `python`, `go`). Non-fatal; the `@<language>` shortcut for that language won't resolve. | `policy-plan-authority.md §4 [default_verifier_images]` |
 
+### Notification and SMTP-proxy failure codes (V2)
+
+The operator-notification subsystem (`email-and-notification-channels.md §2`) and the agent SMTP egress proxy (`email-and-notification-channels.md §3`) introduce the following failure codes. All `FAIL_NOTIFY_*` and `FAIL_SMTP_PROXY_*` codes are policy-load-time errors emitted by `PolicyBundle::validate`; they prevent the new bundle from becoming active and the previously-loaded policy continues serving in-flight initiatives.
+
+| Code | Phase | One-line trigger | Canonical home |
+|---|---|---|---|
+| `FAIL_NOTIFY_CHANNEL_INVALID { channel_id, reason }` | Policy load | An `[[notifications.channels]]` entry has a malformed kind, missing required field, or unparseable target (e.g. `kind = "Email"` without `smtp_relay`). | `email-and-notification-channels.md §2` |
+| `FAIL_NOTIFY_CRED_INVALID { cred_ref, reason }` | Policy load | A `[[notifications.credentials]]` entry references missing or wrong-shape on-disk credential material. | `email-and-notification-channels.md §2.1` |
+| `FAIL_NOTIFY_ROUTE_REFERENCES_UNKNOWN_CHANNEL { route_event_kind, unknown_channel_id }` | Policy load | A `[[notifications.routes]]` entry's `channels` list references a channel id not declared in `[[notifications.channels]]`. | `cli-readonly.md §5.6.2` |
+| `FAIL_NOTIFY_ROUTE_UNKNOWN_EVENT_KIND { event_kind }` | Policy load | A `[[notifications.routes]]` entry's `event_kind` is not a real `AuditEventKind` variant. | `cli-readonly.md §5.6.2` |
+| `WARN_NOTIFY_CHANNEL_PROBE_FAILED { channel_id, reason }` | Boot probe / `raxis notify channel probe` | The channel reachable check failed; channel marked Degraded but boot continues, deliveries still attempted. | `email-and-notification-channels.md §2.4` |
+| `FAIL_SMTP_PROXY_PLAINTEXT_REJECTED { credential_name, real_target }` | Policy load | A `[[permitted_credentials.smtp]]` entry has `require_starttls = false` AND `real_target` does not end in `:465`. Plaintext credentials on the wire are never permitted. | `email-and-notification-channels.md §3.2` |
+| `FAIL_SMTP_PROXY_RECIPIENT_ALLOWLIST_EMPTY { credential_name }` | Policy load | `[[permitted_credentials.smtp]]` declares `allowed_recipient_domains = []`. An open relay is not a valid configuration. | `email-and-notification-channels.md §3.2` |
+| `FAIL_SMTP_PROXY_FROM_ADDRESS_INVALID { credential_name, value }` | Policy load | `from_address` does not parse as RFC 5321 `addr-spec`. | `email-and-notification-channels.md §3.2` |
+| `FAIL_SMTP_PROXY_RECIPIENT_CAP_INVALID { credential_name, value }` | Policy load | `max_recipients_per_message` outside the range [1, 50]. | `email-and-notification-channels.md §3.2` |
+| `FAIL_SMTP_PROXY_RATE_LIMIT_INVALID { credential_name, scope, field, value }` | Policy load | `rate_limit_per_session.count`/`window_seconds` or `rate_limit_per_task.count`/`window_seconds` outside valid ranges (count ≥ 1, window_seconds ∈ [1, 86_400]). | `email-and-notification-channels.md §3.2` |
+
 The `WitnessSubmission` and `witness_records` schemas no longer
 carry V1/V2 discriminators (per `verifier-processes.md §7`); all
 witness rows for a given initiative use the same schema regardless

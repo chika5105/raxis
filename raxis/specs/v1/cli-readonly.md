@@ -849,6 +849,50 @@ the same human-readable formatting as `raxis log`. `raxis inbox --since 1h`
 shows the last hour. The notification channel system (§5.6) writes
 JSONL records here; this command is the operator's view into them.
 
+### §5.5.17 — `raxis notify channel list` (V2)
+
+**Purpose:** List configured operator-notification channels from the active
+`PolicyBundle`. Read-only — no operator-write ceremony, no signature handshake.
+
+**Usage:** `raxis notify channel list [--kind shell|file|email|webhook] [--json]`
+
+**Output (human):**
+
+```
+ID                 KIND      TARGET                                STATUS    LAST PROBE
+shell              Shell     <data_dir>/notifications/inbox.jsonl  Healthy   2026-05-06T13:02:11Z
+audit-mirror       File      /var/log/raxis-notifications.jsonl    Healthy   2026-05-06T13:02:11Z
+ops-email          Email     alerts@example.com                    Healthy   2026-05-06T13:02:14Z
+ops-webhook        Webhook   https://hooks.example.com/raxis       Degraded  2026-05-06T13:02:18Z
+```
+
+The `STATUS` and `LAST PROBE` columns are read from the
+`notification_channel_health` SQLite table (`email-and-notification-channels.md §6.1`).
+Probe results are written by the boot probe (`extensibility-traits.md §9.1` step 9b)
+and by `raxis notify channel probe` (`cli-ceremony.md §4.1`).
+
+`--json` output adds the full `OperatorNotificationChannel::probe()` `ProbeOutcome` shape: `{ id, kind, target, reachable, auth_ok, round_trip_ms, server_banner, last_probe_ms, last_error }`.
+
+### §5.5.18 — `raxis notify route list` (V2)
+
+**Purpose:** List configured `[[notifications.routes]]` entries from the active `PolicyBundle`. Read-only.
+
+**Usage:** `raxis notify route list [--event-kind <kind>] [--channel <channel-id>] [--json]`
+
+**Output (human):**
+
+```
+EVENT KIND                    CHANNELS
+EscalationSubmitted           shell, audit-mirror, ops-email
+EscalationApproved            shell
+PathScopeOverrideApplied      shell, audit-mirror, ops-email
+KeyRevocationApplied          shell, audit-mirror, ops-email, ops-webhook
+TaskStateChanged              (silenced)
+(default for unrouted kinds)  shell
+```
+
+The bottom row reflects the `[notifications].default_channels` configuration. `(silenced)` indicates an explicit empty `channels = []` route.
+
 ---
 
 ## §5.6 — Notification channels (replaces email-only)
@@ -995,13 +1039,32 @@ notifications into a sidecar (`tail -f /var/log/raxis-notifications.jsonl
 
 ### §5.6.6 — Forward compatibility
 
-A v2 patch landing the Email handler will:
-1. Drop the boot warning for `Email` channels.
-2. Add `notifications::handlers::email::dispatch(channel, event)`.
-3. Add an integration test under `kernel/tests/notifications_smtp.rs`
-   that runs against a local Maildrop fixture.
+V2 lands the Email and Webhook handlers behind the new
+`OperatorNotificationChannel` trait (the 7th extensibility seam, registered
+in `extensibility-traits.md §6A`; full subsystem in
+`email-and-notification-channels.md §2`). V2 ships:
 
-No policy.toml schema changes will be needed — the schema is the contract.
+1. `crates/raxis-notification/` — the trait + conformance kit.
+2. `crates/raxis-notification-shell/` and `-file/` — the v1 carryover impls,
+   refactored to implement the trait.
+3. `crates/raxis-notification-email/` — the new SMTP impl, depending on
+   `crates/raxis-smtp-client/` (shared with the agent SMTP credential
+   proxy in `credential-proxy.md §3.6`).
+4. `crates/raxis-notification-webhook/` — the new HTTPS POST + HMAC impl.
+5. The boot warning for unrecognised channel kinds is dropped; a kind
+   not in `Shell | File | Email | Webhook | Slack | PagerDuty | Teams`
+   becomes a hard `FAIL_NOTIFY_CHANNEL_INVALID`.
+6. New CLI surface `raxis notify channel/route/credential add|delete|list|
+   probe|test` per `cli-ceremony.md` and `cli-readonly.md §5.5.17/§5.5.18`.
+7. Integration tests under `kernel/tests/notifications_smtp_e2e.rs`
+   against a local Maildrop / `letterbox` fixture container, and
+   `kernel/tests/notifications_webhook_e2e.rs` against `httpbin.org`.
+
+The v1 schema in `§5.6.2` remains the contract — V2 extends it with new
+tables (`[[notifications.credentials]]`, `[[notifications.channels.email]]`,
+`[[notifications.channels.webhook]]`) but does not break v1 channel
+definitions. V3+ may add new `ChannelKind` variants (Slack, PagerDuty,
+Teams) without any v1 schema migration.
 
 ---
 

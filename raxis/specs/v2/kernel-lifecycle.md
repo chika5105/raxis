@@ -589,6 +589,13 @@ The kernel itself is always terminated `Graceful`. Per `key-revocation.md §7.2`
    §5.6 for the in-VM cleanup contract; see verifier-processes.md §4.4 for verifier
    VM teardown specifics.
 7. Flush any pending audit events to disk (fsync the audit log file).
+7a. **NotificationDispatcher drain (V2).** Stop accepting new
+   `dispatch()` calls. For each in-flight `Slow` channel delivery
+   (Email, Webhook), wait up to 30 s. Pending events that don't drain
+   emit `NotificationDeliveryFailed { reason: "KernelShutdownDrainTimeout" }`
+   and the corresponding row in `notification_dispatch` is updated to
+   `Failed`. `Fast` channels (Shell, File) drain instantly.
+   See `email-and-notification-channels.md §2.4`.
 8. Close SQLite connections cleanly (this commits the WAL checkpoint).
 9. Exit with status 0.
 
@@ -1043,6 +1050,39 @@ bytes); the only operational cost of a stale row is a slightly
 inflated `lane_reserved` total until reclaimed, which manifests as
 a transient `FAIL_BUDGET_CEILING_EXCEEDED` for new admits in the
 same lane.
+
+### 10.5.6a `notification_dispatch_gc` (V2)
+
+Cross-references `email-and-notification-channels.md §6.2`. Prunes
+`notification_dispatch` rows older than the operator-configured
+retention window (`policy.toml [notifications].retention_days`,
+default 90 days):
+
+```sql
+DELETE FROM notification_dispatch
+ WHERE last_attempt_ms < (now_ms() - retention_days * 86_400_000);
+```
+
+Cadence: hourly. The table is small per-event (~200 bytes/row) but
+grows linearly with audit-event volume, so leaving it unbounded
+would eventually impact dispatcher idempotency-check latency.
+Audit history (the canonical record of what was sent) lives in the
+audit chain, which is permanent — so this GC is purely a
+dispatcher-state-table reaper, not a data-loss event.
+
+### 10.5.6b `smtp_proxy_rate_buckets_gc` (V2)
+
+Reclaims sliding-window rate-limit buckets older than the longest
+configured window plus a 24 h grace:
+
+```sql
+DELETE FROM smtp_proxy_rate_buckets
+ WHERE window_start_ms < (now_ms() - max_window_ms - 86_400_000);
+```
+
+5-min cadence. Buckets are small (~30 bytes/row) but every active
+session contributes per-task and per-session rows; without GC the
+table would grow unbounded.
 
 ### 10.5.7 Failure handling
 

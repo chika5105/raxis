@@ -796,6 +796,96 @@ Default log path: `<data_dir>/audit/segment-000.jsonl` (the initial segment crea
 
 ---
 
+### `notify channel add | delete | probe | test` (V2)
+
+**Purpose:** Manage operator notification channels (`Email`, `Webhook`; v1 carryover `Shell`, `File`). The full subsystem is specified in `email-and-notification-channels.md`. These commands wrap edits to the `[[notifications.channels]]` section of `policy.toml` and call the existing `policy sign` ceremony — the signed bundle remains the source of truth.
+
+**Usage:**
+
+```bash
+# Add an Email channel (interactive; smtp_relay/auth/cred_ref prompted then re-signed)
+raxis-cli notify channel add ops-email \
+    --kind email \
+    --to alerts@example.com,oncall@example.com \
+    --from raxis@example.com \
+    --smtp-relay smtps://smtp.example.com:587 \
+    --auth-method plain \
+    --cred-ref smtp-ops-cred
+
+# Add a Webhook channel
+raxis-cli notify channel add ops-webhook \
+    --kind webhook \
+    --target https://hooks.example.com/raxis \
+    --cred-ref webhook-hmac-secret
+
+# Delete a channel (refused if any [[notifications.routes]] still references it)
+raxis-cli notify channel delete ops-email
+
+# Synchronous probe (same code path as boot probe)
+raxis-cli notify channel probe ops-email
+
+# Send a synthetic event; emits AuditEventKind::NotificationTestSent
+raxis-cli notify test --channel ops-email --severity Operational
+```
+
+**Behaviour:**
+
+1. CLI opens the operator socket; performs the challenge-response handshake.
+2. For `add`/`delete`: kernel parses the requested edit, applies it to a tentative `policy.toml`, runs `PolicyBundle::validate` (returns any `FAIL_NOTIFY_CHANNEL_*` / `FAIL_NOTIFY_ROUTE_*` failure code per `policy-plan-authority.md` failure-code catalog), prompts the operator to confirm and re-sign, then advances the policy epoch.
+3. For `probe`: kernel calls `OperatorNotificationChannel::probe()` directly; CLI prints `ProbeOutcome` (reachable, auth_ok, round_trip_ms, server_banner). Probe failure is non-fatal — channel marked Degraded but boot continues.
+4. For `test`: kernel emits a synthetic `AuditEventKind::NotificationTestSent { channel_id, actor, triggered_at_ms }` and routes it through the dispatcher. Outcome reaches the operator via the channel under test (closing the loop end-to-end). Audit record records both the test send and the dispatcher's eventual `NotificationDelivered` / `NotificationDeliveryFailed`.
+
+**Cross-reference:** Schema in `cli-readonly.md §5.6.2`; trait in `extensibility-traits.md §6A`; threat model in `email-and-notification-channels.md §1.2`.
+
+---
+
+### `notify route add | delete` (V2)
+
+**Purpose:** Manage `[[notifications.routes]]` mapping audit-event kinds to notification channel IDs. Same signing-ceremony as `notify channel add`.
+
+**Usage:**
+
+```bash
+raxis-cli notify route add \
+    --event-kind EscalationSubmitted \
+    --channel ops-email,audit-mirror
+
+raxis-cli notify route delete \
+    --event-kind EscalationSubmitted \
+    --channel ops-email
+```
+
+**Behaviour:** edits the `[[notifications.routes]]` block in `policy.toml`, validates that every `event_kind` is a real `AuditEventKind` variant and every channel id is declared in `[[notifications.channels]]`, prompts for re-sign, advances the epoch.
+
+---
+
+### `notify credential add | delete | rotate` (V2)
+
+**Purpose:** Manage credentials the **kernel itself** uses to talk to upstream notification channels (SMTP relay password, webhook HMAC secret, future Slack token). Distinct from `raxis credential add` which manages credentials the kernel proxies *for an agent*. Stored at `<data_dir>/credentials/<cred-ref>.notify-cred`, mode 0600, kernel-readable only.
+
+**Usage:**
+
+```bash
+# SMTP relay password (read from STDIN, never argv — no shell history leakage)
+raxis-cli notify credential add smtp-ops-cred \
+    --kind smtp-plain \
+    --username service@example.com \
+    --password-stdin
+
+# OAuth2 (Gmail / Office365)
+raxis-cli notify credential add smtp-oauth-cred \
+    --kind smtp-xoauth2 \
+    --username service@example.com \
+    --refresh-token-from-stdin
+
+raxis-cli notify credential delete <cred-ref>
+raxis-cli notify credential rotate <cred-ref>
+```
+
+**Why a separate `notify credential` namespace** (not reused `raxis credential`): the trust line is real. `raxis credential add ...` registers credentials the kernel proxies *for an agent*, referenced from `[[permitted_credentials]]` and bound to a `proxy_type`. `notify credential` registers credentials the kernel uses *itself* to reach an external operator-notification destination, referenced from `[[notifications.channels]]` and never injected into a VM. Mixing them would erase that trust line. See `email-and-notification-channels.md §4.1.3` for the full rationale.
+
+---
+
 ### `audit gaps`
 
 **Purpose:** Report reconciliation gaps — JSONL records marked `reconstructed: true` by `recovery::reconcile`.

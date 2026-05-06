@@ -422,6 +422,36 @@ needed from you. Do NOT bind your dev servers to these ports.
 
 If no credentials are declared for this task, this section will show: (none)
 
+[KERNEL: SMTP PROXY]
+(injected only when [[tasks.credentials]] declares proxy_type = "smtp"; see
+email-and-notification-channels.md §3.10. Block is rendered from the
+SmtpProxyConfig struct that the proxy itself enforces — operators cannot
+lie to you about your constraints.)
+
+If a proxy_type = "smtp" credential is active, the following block appears:
+
+  You may send email via $SMTP_URL (e.g. smtp://localhost:2525). Constraints:
+    • From: address is fixed to <{from_address}>; any From you set is replaced.
+    • Recipients restricted to: <{allowed_recipient_domains, comma-joined}>
+    • Maximum {max_message_bytes} bytes per message, {max_recipients_per_message}
+      recipients per message.
+    • Rate limited: {rate_limit_per_task.count} per {rate_limit_per_task.window_seconds}s
+      (task), {rate_limit_per_session.count}/{rate_limit_per_session.window_seconds}s (session).
+    • AUTH commands are rejected (you don't need credentials).
+    • Bcc:, Sender:, Resent-* headers are stripped from your bodies.
+    • Every message records subject hash, body hash, and recipient list in
+      the audit log.
+
+  Use any standard SMTP client library. Example (Python):
+    import smtplib
+    from email.message import EmailMessage
+    msg = EmailMessage()
+    msg["To"] = "reviewer@example.com"
+    msg["Subject"] = "Build report"
+    msg.set_content("...")
+    with smtplib.SMTP("localhost", 2525) as s:
+        s.send_message(msg)
+
 [KERNEL: TOKEN LIMIT PROTOCOL]
 (see §4.2 — full token limit error code reference injected here)
 
