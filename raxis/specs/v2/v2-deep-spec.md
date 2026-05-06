@@ -2291,6 +2291,133 @@ and final decisions. Provider-agnostic throughout. All V1 invariants preserved.*
 
 ---
 
+## Spec-Graph Lint (`xtask spec-graph`) — V2 build-time check
+
+V2 introduces enough cross-spec references (failure-code
+catalogs, capability classes, audit-event names, invariant IDs,
+section anchors) that bit-rot is the dominant medium-term risk.
+A reference to "see `kernel-mechanics-prompt.md §2`" that
+silently no-ops when §2 is renamed to §3 is the failure mode
+this lint exists to prevent. The lint is implemented as a
+`cargo xtask` target (`cargo xtask spec-graph`) and runs in CI
+on every PR that touches `raxis/specs/**`.
+
+#### What the lint enforces
+
+1. **Section anchor resolution.** Every cross-spec reference
+   matching the regex
+   `\b([a-z][a-z0-9_-]+\.md)\s+§([0-9]+(\.[0-9]+)*)`
+   resolves to an existing heading in the target file. The
+   lint parses the target file's headings (`^#+\s+`), strips
+   the leading section number from each heading, and checks
+   that the referenced section number appears in the resulting
+   set. Mismatches emit
+   `LINT_SPEC_GRAPH_DANGLING_SECTION_REF { source_file,
+   source_line, target_file, target_section }`.
+2. **Invariant ID resolution.** Every reference matching
+   `\bINV-[A-Z][A-Z0-9-]+\b` resolves to a defined invariant
+   in either `invariants.md` or the canonical-home spec named
+   in invariants.md's index table (§§4-6 of `invariants.md`).
+   Mismatches: `LINT_SPEC_GRAPH_DANGLING_INVARIANT_REF`.
+3. **Failure-code uniqueness.** Every code matching
+   `\bFAIL_[A-Z][A-Z0-9_]+\b` or `\bWARN_[A-Z][A-Z0-9_]+\b` is
+   defined in exactly one canonical location (the spec whose
+   §catalog or §failure-modes section enumerates it). Multiple
+   *references* are fine; multiple *definitions* are not.
+   Mismatches: `LINT_SPEC_GRAPH_DUPLICATE_FAILURE_CODE` (lists
+   every defining spec).
+4. **Audit-event-name uniqueness.** Same shape as #3 for
+   `\bAuditEventKind::[A-Z][A-Z0-9a-z]+\b` references; the
+   canonical home is the spec whose `AuditEventKind` Rust enum
+   defines the variant.
+5. **Capability-class completeness.** Every top-level
+   `policy.toml` key referenced in the policy-plan-authority
+   spec has a corresponding entry in
+   `policy-epoch-diffing.md §2.2` (the section map). This
+   lint complements (and is independent from) the runtime
+   crate-level test specified in
+   `policy-epoch-diffing.md §2.3 Section-Map Drift Lint`. The
+   xtask runs at the spec-text level; the crate test runs at
+   the Rust-source level. Both must pass; both must agree on
+   the section map.
+
+#### Implementation skeleton
+
+```rust
+// xtask/src/main.rs
+fn main() -> anyhow::Result<()> {
+    match std::env::args().nth(1).as_deref() {
+        Some("spec-graph") => spec_graph::run(),
+        Some("build-fixture-images") => fixtures::run(),
+        // … other xtask targets …
+        _ => anyhow::bail!("unknown xtask target"),
+    }
+}
+
+// xtask/src/spec_graph.rs
+pub fn run() -> anyhow::Result<()> {
+    let specs_root = workspace_root()?.join("raxis/specs");
+    let lint = SpecGraphLint::new(&specs_root)?;
+    let findings = lint.check_all()?;
+    if findings.is_empty() {
+        println!("spec-graph: ok ({n} files, {r} refs resolved)",
+            n = lint.file_count(), r = lint.ref_count());
+        return Ok(());
+    }
+    for f in &findings {
+        eprintln!("{} — {}:{}\n  {}", f.code, f.source_file.display(), f.source_line, f.detail);
+    }
+    anyhow::bail!("{} spec-graph findings", findings.len())
+}
+```
+
+#### CI integration
+
+```yaml
+# .github/workflows/spec-graph.yml
+on:
+  pull_request:
+    paths: ['raxis/specs/**']
+
+jobs:
+  spec-graph:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo xtask spec-graph
+```
+
+#### Suppression for intentional one-way references
+
+A lint pragma on the same line lets specs reference an
+external `[invariant]` or `[section]` that does not yet exist
+(e.g., a forward reference to a not-yet-merged spec):
+
+```markdown
+See `future-spec.md §4`. <!-- spec-graph-lint: allow-dangling -->
+```
+
+The pragma must be on the same line as the reference; it does
+NOT suppress *all* lints on the line, only the dangling-ref
+class.
+
+#### What this lint does NOT do
+
+- It does NOT verify the *content* of the referenced section
+  matches what the citing spec claims it says.
+- It does NOT detect circular dependencies between specs (V2
+  has none worth detecting; specs deliberately compose).
+- It does NOT check Rust-source references; that is the job
+  of the `cargo test` suite, the `compile_assert_all_variants_tested!`
+  macro on `KernelPush` / `AuditEventKind`, and the section-map
+  test in `policy-epoch-diffing.md §2.3`.
+
+The lint catches structural drift; semantic drift remains the
+reviewer's responsibility.
+
+---
+
 ## Related Specifications
 
 The following V2 deliverables are specified in standalone documents. The policy epoch
