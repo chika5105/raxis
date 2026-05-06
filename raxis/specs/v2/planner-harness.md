@@ -2419,9 +2419,12 @@ Three planner binaries:
 
 - New directory shipping `executor.nnsp`, `reviewer.nnsp`, `orchestrator.nnsp`, and `digests.toml`. The bytes are kernel-version-locked and changing them is a breaking-version event per `INV-PLANNER-HARNESS-06`.
 
-`raxis/crates/types/src/operator_wire.rs`:
+`raxis/crates/types/src/intent.rs` (the canonical home of `IntentKind`):
 
 - `enum IntentKind` — REMOVE the `EgressRequest` variant entirely (per §7 unified-egress); fetches go through the V2 unified `FetchRequest` path. Confirm no other spec carries forward an `EgressRequest` cross-reference (the `kernel-mediated-egress.md` file is already marked DEPRECATED per §11.1).
+
+`raxis/crates/types/src/operator_wire.rs`:
+
 - `enum PermissionPolicy` — `Reviewer` profile gains explicit `Bash → Deny`, `LSP → Deny`, `WebFetch → Deny`, `WebSearch → Deny`, `StructuredOutput → Deny`. (Per §11.2 follow-up amendment, now landed.)
 - `struct VmImage` — `role_restriction: Vec<Role>` becomes mandatory on Executor and Orchestrator entries; admission of an Executor task pointing at an image whose `role_restriction` excludes `Role::Executor` returns `FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`.
 

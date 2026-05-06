@@ -904,11 +904,14 @@ The `workspace_handles` table referenced in `workspace_handle_id` is already cre
 
 - Already calls `ctx.domain.teardown_workspace(...)` per the recent DomainAdapter wiring. After §7 lands, `end_session` for tasks transitioning to `Failed` ALSO writes the corresponding `abandoned_tasks` row (driven through `kernel::initiatives::abandoned::record_abandonment`).
 
-`raxis/crates/types/src/operator_wire.rs`:
+`raxis/crates/types/src/intent.rs` (the canonical home of `IntentKind`):
 
 - `enum IntentKind` — two new Orchestrator-resolution variants per §6.3 (the canonical names; do NOT introduce new aliases):
   - `ResolveSubEscalation { escalation_id, resolution: ResolveSubEscalationPayload }` where `ResolveSubEscalationPayload = ExtendBudget | ExtendWallClock | ExtendReviewRounds | AbandonTask | ReplaceAgent` per §6.3 admission constraints.
   - `EscalateUpward { escalation_id, orchestrator_notes, suggested_resolution: Option<...> }`.
+
+`raxis/crates/types/src/operator_wire.rs` (the operator-UDS wire schema):
+
 - `enum OperatorIntent` — `SalvageAbandoned { task_id, commits, target_branch }` and `PurgeAbandoned { task_id, force }`.
 - `enum FailResponse` — `FAIL_CIRCULAR_REVISION { task_id, matched_revision_n }`, `FAIL_REVIEW_LOOP_EXCEEDED { task_id, consumed, limit, on_max_rounds_action }`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED { task_id, elapsed_seconds, limit_seconds }`, `FAIL_FORBIDDEN_ROUTING_OVERRIDE { class, reason }`, `FAIL_SALVAGE_CONFLICT { task_id, conflicting_commit }`.
 - `enum OkResponse` — `OK_TASK_ABANDONED { task_id, reason, salvage_window_seconds }`.
