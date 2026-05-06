@@ -97,7 +97,7 @@ The trait is split into three coherent surface areas:
 
 1. **State-lifecycle methods** (the four primitives the user enumerated above): `provision_workspace`, `snapshot`, `transfer`, `commit`.
 2. **Admission-pipeline hooks** the kernel's gate-check uses on every intent: `touched_resources`, `escalation_classes`, plus the two associated types (`IntentKind`, `TerminalArtefact`) that bind a domain to its own intent vocabulary and terminal-task artefact shape.
-3. **Cleanup hooks** that drive the abandoned-state retention/purge loop the kernel runs at session-end (used by `agent-disagreement.md §7` and `kernel-lifecycle.md §6`): `teardown_workspace`, `purge_workspace`.
+3. **Cleanup hooks** that drive the abandoned-state retention/purge loop the kernel runs at session-end (the canonical SE consumer is `agent-disagreement.md §7`, the `AbandonedSalvageable → AbandonedArchived → Purged` lifecycle): `teardown_workspace`, `purge_workspace`.
 
 ```rust
 //! crates/raxis-domain/src/lib.rs
@@ -438,8 +438,7 @@ Documented here so reviewers can sanity-check that the seam is wide enough to ad
   audit_retention = "30d"
   ```
 - `raxis/specs/v2/integration-merge.md` — the IntegrationMerge ceremony stays the same end-to-end, but the **implementation step** that today reads "the kernel runs `git cherry-pick --no-commit ...`" is rewritten to "the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`; the SE adapter MUST internally execute the cherry-pick + push sequence under the master-worktree lock". The gate sequence and audit-chain emissions are unchanged.
-- `raxis/specs/v2/agent-disagreement.md §7` — the abandoned-worktree retention loop now drives `ctx.domain.teardown_workspace(...)` and (later) `ctx.domain.purge_workspace(...)`, not direct `rm -rf`.
-- `raxis/specs/v2/kernel-lifecycle.md §6` — the "session graceful teardown" step calls `ctx.domain.teardown_workspace(...)` immediately before unmount; the "audit-retention purge" step (run by a kernel-internal timer) drives `purge_workspace`.
+- `raxis/specs/v2/agent-disagreement.md §7` — the abandoned-worktree lifecycle's `AbandonedSalvageable` entry transition calls `ctx.domain.teardown_workspace(...)`; the daily kernel sweep at `abandoned_commits_retention` elapse calls `ctx.domain.purge_workspace(...)` instead of direct `rm -rf`. The same two hooks fire on a clean (non-abandoned) session-end path: `teardown_workspace` runs immediately on the terminal `CompleteTask` admission; `purge_workspace` runs once the configured audit-retention window has lapsed.
 
 ### §2.7 Conformance contract
 
