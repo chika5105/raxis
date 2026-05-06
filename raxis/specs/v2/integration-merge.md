@@ -12,6 +12,7 @@
 > - `kernel-mechanics-prompt.md §3.2` — **normative** Orchestrator NNSP including the `[KERNEL: INTEGRATION MERGE PROTOCOL]` and `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks  
 > - `policy-plan-authority.md §4.5 [orchestrator]` — operator-tunable policy knobs (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`)  
 > - `agent-disagreement.md` — sub-task `CompleteTask` admission gates (`FAIL_CIRCULAR_REVISION`, `FAIL_REVIEW_LOOP_EXCEEDED`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`) that fire **before** sub-tasks reach the merge pipeline. `IntegrationMerge` itself is unchanged by that spec; what changes is which sub-tasks ever satisfy Check 4's `state = 'Completed'` precondition.  
+> - `extensibility-traits.md §2` — `DomainAdapter` trait. **`IntegrationMerge` is the SE-domain instantiation of `DomainAdapter::commit`**. The admission pipeline (Checks 1–7), the audit emissions, and the SQLite/git transactional boundary specified here are *paradigm-layer* and stay in the kernel binary. The git-specific cherry-pick / fetch / update-ref / push sequence in Phase 2 of Check 8 (and the touched-paths derivation in Check 5) is *implementation-layer* and lives in `crates/raxis-domain-git`. Other domains (trading, healthcare) reuse this entire spec verbatim and just plug a different adapter into the same Phase 2 call site.  
 >
 > This document is the **complete mechanical specification** for the `IntegrationMerge`
 > intent: its struct, the full admission pipeline, the multi-task merge sequencing model,
@@ -38,6 +39,15 @@ After `IntegrationMerge` is admitted:
 - The Orchestrator's base SHA is advanced to `commit_sha`
 - The initiative logs `IntegrationMergeCompleted` in the audit chain
 - The Orchestrator may activate the next wave of sub-tasks (if the DAG has more)
+
+### 1.1 Paradigm-vs-implementation framing
+
+`IntegrationMerge` is the SE-domain instance of the *paradigm primitive* "authorised commit of agent-produced state to canonical external state" (`paradigm.md §2`, `R-11`). The trait that captures that paradigm primitive is `DomainAdapter::commit` (`extensibility-traits.md §2.2.A`). Concretely:
+
+- The intent struct (§2), the admission pipeline (§4), the multi-task wave model (§5), the audit chain emissions (§7), and the SQLite/git transactional boundary (§11) are *paradigm-layer* mechanisms that stay in the kernel binary unchanged. They apply to **any** domain.
+- The git-specific operations — `gix::diff_tree_to_tree` for the touched-set in Check 5, `git fetch && git update-ref` for the master fast-forward in Check 8 Phase 2, the optional `git push` to upstream in §14 — are *implementation-layer* and live entirely behind the `DomainAdapter` trait, in `crates/raxis-domain-git`. A `TradingAdapter::commit` plugged into the same Phase 2 call site instead submits an order via the credential proxy; an `HealthcareAdapter::commit` POSTs a FHIR resource. The kernel's `IntegrationMerge` handler is unchanged.
+
+Where this spec uses the word "git" in a normative paragraph, that paragraph describes the V2 reference adapter's behaviour; the underlying paradigm contract stays domain-agnostic.
 
 ---
 
@@ -146,10 +156,19 @@ spec, is expected to reissue or abandon the affected sub-tasks
 before constructing a merge.
 
 ### Check 5 — Diff Computation and Hybrid Allowlist Check
-The Kernel computes the full diff between `base_sha` and `commit_sha`:
+The Kernel derives the touched-set via the `DomainAdapter` trait (`extensibility-traits.md §2.2`), which for the SE adapter is a content diff between `base_sha` and `commit_sha`:
+```rust
+let touched: TouchedResources = ctx.domain.touched_resources(
+    &IntentKind::IntegrationMerge { commit_sha, base_sha, .. },
+    &admission_ctx,
+)?;
+let touched_paths: Vec<&str> = touched
+    .resources
+    .iter()
+    .filter_map(|r| r.uri.strip_prefix("path:///"))
+    .collect();
 ```
-git -C <worktree> diff --name-only <base_sha> <commit_sha>
-```
+The `GitAdapter` impl wraps `gix::diff_tree_to_tree(base_tree, head_tree)`, returning each touched path as a `path:///`-prefixed URI; the kernel strips the prefix here for the allowlist comparison so the rest of this Check stays SE-flavoured. Non-SE adapters return their own URI scheme and the allowlist matcher in `policy.toml` is reframed as URI-prefix matching (`extensibility-traits.md §2.6` files-to-change for `kernel/src/scheduler/admit.rs`).
 
 The set of touched paths is checked against the hybrid allowlist:
 ```
@@ -498,15 +517,27 @@ UPDATE subtask_activations
 **Phases 2 and 3** (dispatched after Phase 1 commits, NOT in this Check): see §11.2.
 
 ```
-# Phase 2 (idempotent git work)
-git -C <master_repo> fetch <orchestrator_worktree> <commit_sha>
-git -C <master_repo> update-ref refs/heads/master <commit_sha>
+# Phase 2 (idempotent domain commit — delegated to DomainAdapter)
+ctx.domain.commit(
+    &Snapshot { content_hash: commit_sha_to_content_hash(commit_sha), ... },
+    &cred_proxy,                  // from per-session credential lease
+    &CommitContext { initiative_id, master_repo: &master_repo_path, ... },
+)?;
 
 # Phase 3 (single SQLite UPDATE)
 UPDATE initiatives SET git_apply_pending = 0 WHERE id = :initiative_id;
 ```
 
+`GitAdapter::commit` (the V2 reference impl in `crates/raxis-domain-git/src/commit.rs`) executes:
+```
+git -C <master_repo> fetch <orchestrator_worktree> <commit_sha>
+git -C <master_repo> update-ref refs/heads/master <commit_sha>
+```
+under the master-worktree lock, plus (when `[git_push]` is configured per §14) an upstream push via the credential proxy. Other adapters (`TradingAdapter::commit`, `HealthcareAdapter::commit`) substitute their own canonical-state write here without touching the kernel handler.
+
 The handler dispatches Phase 2 + Phase 3 inline before returning the response to the Orchestrator. If the kernel crashes during Phase 2 or between Phase 2 and Phase 3, recovery on next startup re-runs the missing phases (§11.3).
+
+**Idempotency contract.** `DomainAdapter::commit` MUST return `Err(DomainError::AlreadyApplied { receipt })` if invoked a second time for the same `Snapshot.content_hash` (`extensibility-traits.md §2.7` conformance property #5). The recovery path of §11.3 relies on this: re-running Phase 2 after a crash either re-executes (idempotent fetch + update-ref) or short-circuits via `AlreadyApplied`, both of which leave master at `commit_sha`.
 
 ---
 
@@ -1194,18 +1225,46 @@ of `task_id`.
 
 ## 12. Implementation Checklist
 
+### 12.0 DomainAdapter integration (prerequisite)
+
+The IntegrationMerge handler is rewritten on top of the `DomainAdapter` trait
+(`extensibility-traits.md §2`). Land these before §12.1 starts:
+
+- [ ] Crate `crates/raxis-domain-git` exists and exports `GitAdapter` (per
+      `extensibility-traits.md §2.5`).
+- [ ] `kernel/src/handlers/merge.rs::handle_integration_merge` takes a
+      `&HandlerContext` whose `ctx.domain: Arc<dyn DomainAdapter<...>>` is wired
+      at boot (§9 of the traits spec).
+- [ ] Check 2 (reachability) calls `ctx.domain.snapshot_exists(commit_sha)?` —
+      a small helper added to `GitAdapter` that wraps `git cat-file -e`. (The
+      trait does not need a new method; this is a `GitAdapter`-private helper
+      callable through a domain-extension trait `SeDomainExt: DomainAdapter`.)
+- [ ] Check 3 (ancestry) similarly delegates to `ctx.domain` via
+      `SeDomainExt::is_ancestor(base_sha, commit_sha)`.
+- [ ] Check 5 (touched-set) calls `ctx.domain.touched_resources(...)` and uses
+      the returned `TouchedResources` (URI form) for the hybrid allowlist
+      comparison; the SE adapter returns `path:///`-prefixed URIs that the
+      kernel strips before matching.
+- [ ] Check 8 Phase 2 calls `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`
+      and treats `Err(DomainError::AlreadyApplied { receipt })` as the success
+      branch (§4 Check 8 idempotency contract above).
+
+### 12.1 Mechanism
+
 - [ ] Add `merged_task_ids: Vec<TaskId>` field to `IntegrationMerge` struct in
       `crates/types/src/operator_wire.rs`
 - [ ] Implement `handle_integration_merge` in `kernel/src/handlers/merge.rs` (new file)
       with all 8 checks in order
-- [ ] Add `git cat-file` reachability check (Check 2) using `gix` crate
-- [ ] Add `git merge-base --is-ancestor` ancestry check (Check 3)
+- [ ] Add reachability check (Check 2) via `SeDomainExt::snapshot_exists`
+- [ ] Add ancestry check (Check 3) via `SeDomainExt::is_ancestor`
 - [ ] Add `merged_task_ids` validation against `subtask_activations` (Check 4)
-- [ ] Implement hybrid allowlist computation (Check 5) reusing `vcs::diff` primitives
+- [ ] Implement hybrid allowlist computation (Check 5) consuming
+      `DomainAdapter::touched_resources` output
 - [ ] Add escalation verification branch (Check 6) in `handle_integration_merge`
 - [ ] Add idempotency guard (Check 7) with `OK_ALREADY_APPLIED` response variant
-- [ ] Implement atomic DB transaction (Check 8): `initiatives.current_sha` update +
-      `subtask_activations.merge_included` update + audit event, then git `update-ref`
+- [ ] Implement atomic DB transaction (Check 8) Phase 1: `initiatives.current_sha` update +
+      `subtask_activations.merge_included` update + audit event;
+      Phase 2 dispatches `ctx.domain.commit(...)`; Phase 3 clears `git_apply_pending`
 - [ ] Define `AuditEventKind::IntegrationMergeCompleted` with `hybrid_allow_computed`
 - [ ] Define `AuditEventKind::InitiativeCompleted` with aggregate stats
 - [ ] Add `OK_ALREADY_APPLIED` to `KernelResponse` enum in `crates/types/`
