@@ -196,6 +196,17 @@ Bundle staging is uncapped per-initiative but contributes to the aggregate disk 
 
 `state.db` itself grows with `pending_pushes`, `audit_events_index` (a queryability index, separate from the canonical audit-log files), `subtask_activations`, etc. SQLite VACUUM is run automatically when the WAL file exceeds `wal_checkpoint_threshold_mb` (default 64). VACUUM requires up to `state.db.size + state.db-wal.size` free space; the disk watchdog (§7) reserves headroom for this.
 
+### 6.7 Abandoned-worktree retention
+
+When a task transitions to `Failed` (per `agent-disagreement.md §7`), its worktree enters the abandoned-commits lifecycle and is retained on disk for forensic inspection and operator salvage. Sizing characteristics:
+
+- An abandoned worktree's size on disk equals the active worktree's size at the moment of failure (file copy; checkpoint of the failed state, not a live mount).
+- The `[worktree_lifecycle]` policy (`abandoned_commits_retention`, `salvage_window`) governs total retention duration. Defaults: 30 days total retention, 7 day salvage window.
+- Abandoned worktrees do NOT count against `worktree_quota_mb` (which is per-active-session); they accumulate as a separate pool tracked by `sessions.worktree_state = 'AbandonedSalvageable' | 'AbandonedArchived'` rows.
+- They DO count against the aggregate disk watchdog (§7) — abandoned worktrees consume `disk_root` space like any other on-disk artifact.
+
+Operators with tight disk budgets should shorten the retention defaults rather than relying on the watchdog to reclaim. Per `INV-CONVERGENCE-05`, the watchdog is forbidden from auto-purging abandoned worktrees inside `salvage_window`; the only path to in-window reclamation is the explicit, audited `raxis worktree purge --force <task_id>` operator command (§7.8).
+
 ---
 
 ## 7. Disk Full: Detection and Response
@@ -267,6 +278,24 @@ This is the most extreme failure mode in V2. INV-CAPACITY-04 makes it categorica
 When the watchdog detects `free_mb >= min_free_disk_mb` again (via the 5-second poll), it transitions back to `DiskHealthyState`. Pending intents in the admission queue are re-evaluated. An audit event `DiskHealthyAfterFull { previous_free_mb, current_free_mb, halt_duration_seconds }` is emitted.
 
 Recovery from `AuditWriteImpossible` requires kernel restart (operator must free space first); there is no auto-recovery from the within-process side because of §7.6.
+
+### 7.8 Interaction with abandoned-worktree retention (`INV-CONVERGENCE-05`)
+
+Per `agent-disagreement.md §7` and `INV-CONVERGENCE-05`, abandoned worktrees from `Failed` tasks consume `disk_root` space and may contribute to disk pressure. The disk watchdog and any `gc_then_retry` GC pass MUST NOT auto-purge abandoned worktrees that are still inside their `salvage_window` (default 7 days). This is a deliberate trade-off: the forensic record survives transient disk pressure; reclamation requires explicit operator action.
+
+The exact interactions:
+
+1. **`disk_full_behavior = "halt_admit"` (default).** The watchdog never deletes abandoned worktrees. `halt_admit` failed-closes admission instead of reclaiming forensic data. Operators inspecting the resulting halt receive `KernelPush::DiskFull { abandoned_worktree_pool_mb }` so they can decide whether to extend disk, purge in-window worktrees with `--force`, or wait for the salvage window to elapse and natural retention-window purge to run.
+
+2. **`disk_full_behavior = "gc_then_retry"`.** The GC pass collects from the immutable artifact store and runs SQLite VACUUM only. It does NOT touch abandoned worktrees inside `salvage_window` even though they would yield the largest reclamation. Worktrees past `abandoned_commits_retention` (i.e., already eligible for natural purge) are reclaimed by GC; the GC pass for those is functionally a "perform overdue scheduled purge now" and is audited as `WorktreeRetentionExpiredPurge`.
+
+3. **`disk_full_behavior = "halt_all"`.** Same as `halt_admit` for purge purposes — no abandoned-worktree purge under any disk-pressure condition.
+
+4. **Forced operator purge inside `salvage_window`.** The operator runs `raxis worktree purge --force <task_id>`. The kernel reclaims the worktree, audits `WorktreeForciblyPurgedDuringSalvage { task_id, salvage_remaining_seconds, operator_id, justification }`, and the salvage opportunity is permanently lost. The forced-purge command requires `--justification "<text>"` so the audit trail records why the operator chose forensic data destruction over service degradation.
+
+5. **Watchdog audit visibility.** When the watchdog declines to purge abandoned worktrees that would relieve pressure, it emits `DiskPressureWithAbandonedRetention { current_free_mb, abandoned_pool_mb, in_window_count, oldest_failure_age_hours }` so the operator dashboard surfaces the trade-off explicitly. This event is rate-limited to once per 5-minute window to avoid log flooding during sustained pressure.
+
+`INV-CONVERGENCE-05` and `INV-CAPACITY-02` are designed to compose: `halt_admit` fails closed at admission rather than destroying forensic data, and `INV-CONVERGENCE-05` ensures no automated path can reclaim that data behind the operator's back. The combined guarantee is "abandoned worktrees inside their salvage window survive any disk-pressure event short of explicit operator-forced purge."
 
 ---
 
@@ -575,6 +604,8 @@ When the disk-full watchdog (§7.1) detects `free_mb < min_free_disk_mb`, no wri
 **Where:** §7.1 watchdog; §7.2 behavior table; §7.3 write-class enumeration.
 
 **Scenario it prevents:** Disk fills during heavy admission; kernel keeps accepting intents; subsequent SQLite or git writes fail unpredictably; partial state accumulates. INV-CAPACITY-02 stops admission early enough that in-flight operations have headroom to finish cleanly.
+
+**Composition with `INV-CONVERGENCE-05`:** When the disk-pressure source is in-window abandoned worktrees, `INV-CAPACITY-02` halts new admission and `INV-CONVERGENCE-05` (canonical home: `agent-disagreement.md §7`) forbids the watchdog from auto-purging those worktrees. The operator must either provision more disk, wait for `salvage_window` to elapse, or explicitly run `raxis worktree purge --force` to reclaim forensic data. See §7.8 for the full interaction matrix.
 
 ### INV-CAPACITY-03 — No partial `IntegrationMerge` transactions under disk-full
 
