@@ -799,6 +799,82 @@ State per `(provider, model)` pair, stored in `provider_circuit_state`:
 - **HalfOpen → Open:** on the first failed attempt during HalfOpen. `consecutive_failures` is incremented; a fresh `open_expires_at_ms = now() + open_duration_ms` is stamped.
 - **HalfOpen concurrency (`half_open_max_inflight = 1`):** the `half_open_inflight` column is atomically CASed from 0 to 1 by the request that takes the probe slot. Other concurrent requests see `inflight = 1` and skip the model in their resolution (treating it as effectively `Open` for their purposes). The probe request CASes back to 0 on completion.
 
+**Atomic write commit (INV-PROVIDER-08).** Every `record_failure`,
+`record_success`, lazy `Open → HalfOpen` promotion, and HalfOpen-
+slot CAS executes inside a single SQLite `BEGIN IMMEDIATE`
+transaction that contains:
+
+1. The `UPDATE provider_circuit_state` (state machine mutation).
+2. The matching `INSERT INTO audit_events (kind =
+   'CircuitBreakerStateChanged', ...)` — when, and only when, the
+   transition is state-class (i.e., `from_state != to_state` OR
+   `consecutive_failures` crossed `trip_threshold`).
+3. (For attempt-driven transitions) The matching `INSERT INTO
+   inference_attempts` row recording the outcome that drove the
+   transition.
+
+```sql
+BEGIN IMMEDIATE;
+
+-- Read-modify-write the breaker row.
+UPDATE provider_circuit_state
+   SET consecutive_failures      = consecutive_failures + 1,
+       last_failure_at_ms        = :now,
+       last_failure_kind         = :kind,
+       last_failure_http_code    = :http_code,
+       state                     = CASE
+           WHEN consecutive_failures + 1 >= :trip_threshold
+                AND state = 'Closed'
+                THEN 'Open'
+           WHEN state = 'HalfOpen'
+                THEN 'Open'
+           ELSE state
+       END,
+       opened_at_ms              = CASE
+           WHEN consecutive_failures + 1 >= :trip_threshold
+                AND state IN ('Closed', 'HalfOpen')
+                THEN :now ELSE opened_at_ms
+       END,
+       open_expires_at_ms        = CASE
+           WHEN consecutive_failures + 1 >= :trip_threshold
+                AND state IN ('Closed', 'HalfOpen')
+                THEN :now + :open_duration_ms ELSE open_expires_at_ms
+       END,
+       last_state_change_at_ms   = CASE
+           WHEN <state changed> THEN :now ELSE last_state_change_at_ms
+       END
+ WHERE provider = :provider AND model = :model
+RETURNING state AS new_state, consecutive_failures, ...;
+
+-- Audit row (only when state-class transition).
+INSERT INTO audit_events (kind, ...)
+VALUES ('CircuitBreakerStateChanged', ...);
+
+-- Attempt row (one per attempt, regardless of state class).
+INSERT INTO inference_attempts (...)
+VALUES (...);
+
+COMMIT;
+```
+
+The single-transaction commit is the technical enforcement of
+`INV-PROVIDER-08` for breaker transitions: a kernel crash between
+the breaker UPDATE and the audit INSERT cannot leave the system
+with a moved breaker but no recording of the move. Either both
+land or neither does.
+
+The `record_success` path is symmetric (single transaction, no
+audit when the row is `Closed → Closed`, audit when `HalfOpen →
+Closed`). The lazy `Open → HalfOpen` promotion is one transaction
+covering the conditional UPDATE and the audit. The HalfOpen-slot
+CAS (`half_open_inflight: 0 → 1`) is a single UPDATE plus
+audit-on-success-or-failure of the probe at the end of the request
+loop.
+
+Test surface MUST include a kernel-crash injection between the
+UPDATE and the INSERT that asserts the commit either fully lands
+or fully rolls back; a half-committed state is a regression.
+
 ### 6.4 `provider_circuit_state` schema
 
 ```sql
