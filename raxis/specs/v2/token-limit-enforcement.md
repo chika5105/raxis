@@ -494,27 +494,116 @@ These are orthogonal. Not redundant.
 
 ### 10.5 — The Interaction Model
 
-With token-proportional budget lanes, the `admit_inference` path checks in order:
+With token-proportional budget lanes, the `admit_inference` path
+performs **all three pre-admission resource checks (budget lane,
+token limit, lane reservation) inside a single SQLite
+`BEGIN IMMEDIATE` transaction**. The transaction commits the lane
+reservation; if any check fails, the transaction rolls back and no
+state is mutated. This eliminates a race condition where two
+concurrent `admit_inference` calls in the same lane each see
+`lane_used + estimate ≤ lane_ceiling` (because neither has
+reserved yet), both pass, and the post-completion reconciliation
+permanently puts the lane over its ceiling.
 
 ```
-1. Budget lane check (policy-level, financial, pre-admission estimate):
-   estimated_units = estimate(prompt_length)  # char proxy
-   If lane_used + estimated_units > lane_ceiling:
-     → FAIL_BUDGET_CEILING_EXCEEDED
-     → No escalation (policy floor — operator set the ceiling deliberately)
+admit_inference(InferenceRequest, session, plan, policy):
+  estimated_units  = estimate_units(request, policy)
+  estimated_input  = estimate_input_tokens(request)
 
-2. Token limit check (plan-level, technical, pre-admission for cumulative):
-   If session_tokens_total + estimated_input >= max_tokens_total:
-     → Apply limit_behavior (fail_request | escalate | fail_session)
+  --- BEGIN IMMEDIATE on kernel.db ---
+  // Step 1: Budget lane check (policy-level, financial).
+  //         Reads provider_circuit_state's lane sibling and
+  //         lane_reservations. Atomic vs. concurrent admit_inference
+  //         in the same lane.
+  if lane_used + lane_reserved + estimated_units > lane_ceiling:
+      ROLLBACK; return FAIL_BUDGET_CEILING_EXCEEDED
+      // No escalation (policy floor — operator set the ceiling
+      // deliberately).
 
-3. Admit: send InferenceRequest to raxis-gateway
+  // Step 2: Token limit check (plan-level, technical).
+  //         Reads session_token_state. Atomic vs. concurrent
+  //         requests in the same session.
+  if session_tokens_total + estimated_input >= max_tokens_total:
+      ROLLBACK; return apply_limit_behavior(...)
+      // fail_request | escalate | fail_session per §5.
 
-4. Post-completion (gateway returns actual usage):
-   actual_units = (tokens_input × input_rate + tokens_output × output_rate) / unit_rate
-   Update lane_used with actual_units (reconciliation — may be less than estimate)
-   Update session_tokens_total with actual counts
-   Emit InferenceCompleted with both actual_units and token counts
-   Check post-completion per-request token limits (output, total)
+  // Step 3: Reserve the lane unit estimate. The reservation
+  //         survives transaction commit and is reconciled at
+  //         post-completion (see step 6).
+  INSERT INTO lane_reservations (
+      reservation_id, lane, session_id, request_id,
+      reserved_units, created_at_ms
+  ) VALUES (uuid_v7(), lane, session.id, request.id,
+            estimated_units, now());
+  COMMIT;
+  --- END BEGIN IMMEDIATE ---
+
+  // Step 4: Audit InferenceAttempt before dispatch
+  // (provider-failure-handling.md §6.1 / INV-PROVIDER-08).
+  audit InferenceAttempt { ... };
+
+  // Step 5: Dispatch to gateway.
+  result = gateway.invoke(...);
+
+  // Step 6: Post-completion reconciliation
+  //         (single BEGIN IMMEDIATE; commits before InferenceCompleted
+  //         audit emission).
+  --- BEGIN IMMEDIATE on kernel.db ---
+  actual_units = compute_actual_units(result.tokens, policy);
+  // Reconcile the reservation with actual_units (may be less than
+  // estimated):
+  DELETE FROM lane_reservations WHERE reservation_id = ?;
+  UPDATE lane_state
+     SET lane_used = lane_used + actual_units
+   WHERE lane = ?;
+  UPDATE session_token_state
+     SET tokens_input_total  = tokens_input_total  + result.tokens.input,
+         tokens_output_total = tokens_output_total + result.tokens.output
+   WHERE session_id = ?;
+  COMMIT;
+  --- END BEGIN IMMEDIATE ---
+
+  // Step 7: Emit InferenceCompleted, check post-completion per-request
+  // token limits (output, total).
+  audit InferenceCompleted { ... };
+  apply_post_completion_token_checks(...);
+```
+
+The `lane_reservations` table is the gate: a reservation row is
+held against `lane_used + lane_reserved` for the duration of the
+in-flight request. If the kernel crashes between step 3 and step 6,
+recovery (`kernel-lifecycle.md §10.5` maintenance loop's
+companion `lane_reservation_orphan_sweep` job, registered alongside
+the §10.5.2 built-ins) reclaims orphaned reservations whose
+`session_id` is no longer in `Active` state, restoring lane capacity
+without operator intervention.
+
+The `session_token_state` row is updated **only** in step 6,
+post-completion, with the actual provider-reported counts. No
+estimate is ever durably committed to `session_tokens_total` —
+estimates exist only as comparison values inside the BEGIN
+IMMEDIATE transaction.
+
+```sql
+-- New table backing step 3.
+CREATE TABLE lane_reservations (
+    reservation_id   BLOB PRIMARY KEY,    -- uuid_v7
+    lane             TEXT NOT NULL,
+    session_id       TEXT NOT NULL,
+    request_id       TEXT NOT NULL,
+    reserved_units   INTEGER NOT NULL,
+    created_at_ms    INTEGER NOT NULL
+);
+
+CREATE INDEX idx_lane_reservations_lane
+    ON lane_reservations(lane);
+
+CREATE INDEX idx_lane_reservations_session
+    ON lane_reservations(session_id);
+
+-- The lane "available capacity" is now lane_ceiling - lane_used
+-- - SUM(reserved_units WHERE lane = ?). Computed inline in the
+-- step 1 check.
 ```
 
 **Error code distinction:**
@@ -675,26 +764,23 @@ InferenceRequest  = { token_proportional = true,
 Other intent types keep their fixed weights. `InferenceRequest` becomes cost-aware.
 This is a non-breaking addition — existing deployments with fixed weights still work.
 
-**Admission flow with both systems active:**
+**Admission flow with both systems active.** See §10.5 for the
+canonical, race-free admission procedure: all three pre-admission
+checks (budget lane, token limit, lane reservation) execute inside
+**one** `BEGIN IMMEDIATE` transaction so concurrent
+`admit_inference` calls in the same lane cannot collectively over-
+admit past the lane ceiling. The post-completion update of
+`lane_used` and `session_tokens_total` is a separate
+`BEGIN IMMEDIATE` transaction that reconciles the reservation
+against actual provider-reported usage.
 
 ```
 InferenceRequest arrives at Kernel
 
-1. Budget lane check (policy-level, financial):
-   actual_units = f(tokens_estimate)
-   If lane_used + actual_units > lane_ceiling:
-     → FAIL_BUDGET_CEILING_EXCEEDED (policy floor, no override possible)
-
-2. Token limit check (plan-level, technical):
-   If session_tokens_so_far + estimated_input >= max_tokens_total:
-     → apply limit_behavior (fail_request | escalate | fail_session)
-
-3. Admit: send to gateway
-
-4. Post-completion:
-   Update lane_used with actual_units (tokens-proportional)
-   Update session_tokens_total with actual token counts
-   Emit InferenceCompleted with both actual_units and token counts
+  → see §10.5 for the canonical atomic procedure (single
+    BEGIN IMMEDIATE for budget lane check + token limit check + lane
+    reservation; separate BEGIN IMMEDIATE post-completion for
+    reconciliation).
 ```
 
 **Error code distinction:**

@@ -933,6 +933,7 @@ may register additional ones following the §10.5.1 trait.
 | `git_maintenance_master` | 6 h, OR opportunistic on `disk_pressure ≥ Warning` | `active_merges == 0 && active_sessions == 0` (or 6h elapsed regardless) | this spec §10.5.3 |
 | `git_maintenance_orchestrator_clones` | 1 h | `active_merges == 0` | this spec §10.5.4 |
 | `verifier_cgroup_orphan_sweep` | 5 min | always | `verifier-processes.md §4.4` |
+| `lane_reservation_orphan_sweep` | 5 min | always | `token-limit-enforcement.md §10.5` |
 
 The cadence values are configurable via
 `policy.toml [kernel_lifecycle]`:
@@ -1008,7 +1009,42 @@ Bounded to 5 min cadence because the typical verifier lifecycle is
 seconds-to-minutes; orphans appear only on hard crash mid-teardown
 and are cheap to detect.
 
-### 10.5.6 Failure handling
+### 10.5.6 `lane_reservation_orphan_sweep`
+
+Cross-references `token-limit-enforcement.md §10.5` (atomic
+admit_inference). Reclaims `lane_reservations` rows whose owning
+session has terminated without the post-completion reconciliation
+running:
+
+```sql
+DELETE FROM lane_reservations
+ WHERE session_id IN (
+   SELECT id FROM sessions
+    WHERE state NOT IN ('Active', 'Paused', 'AwaitingEscalation')
+ );
+```
+
+A reservation orphan exists for one of two reasons:
+
+- The kernel crashed between the reservation INSERT (admit-time
+  BEGIN IMMEDIATE) and the post-completion DELETE-and-debit
+  (post-completion BEGIN IMMEDIATE). Recovery is by-session: the
+  session terminates (per `kernel-lifecycle.md §7` recovery), and
+  this sweeper releases its reservations.
+- The post-completion reconciliation hit a SQLite error and the
+  request returned an internal error. In that case the session may
+  still be `Active`; the sweep skips it; the reservation will be
+  cleaned by the next session-state transition or by a periodic
+  per-session sweeper variant (V3 territory; V2 relies on the
+  session-termination predicate).
+
+5-min cadence is fine because reservation rows are small (~50
+bytes); the only operational cost of a stale row is a slightly
+inflated `lane_reserved` total until reclaimed, which manifests as
+a transient `FAIL_BUDGET_CEILING_EXCEEDED` for new admits in the
+same lane.
+
+### 10.5.7 Failure handling
 
 Any `MaintenanceJob::run` error is:
 
@@ -1029,7 +1065,7 @@ connection pool as the request path but always with `BEGIN IMMEDIATE`
 (no long-held read locks) and short-deadline timeouts (5 s default,
 configurable via `[kernel_lifecycle].maintenance_query_timeout_ms`).
 
-### 10.5.7 Audit events
+### 10.5.8 Audit events
 
 ```rust
 AuditEventKind::MaintenanceTickStarted {
