@@ -1,10 +1,16 @@
 # RAXIS V2 — VM Network Isolation Architecture
 
 > **Status:** V2 Specified
+> **Role in V2 unified egress:** This spec is the canonical home for **Tier 1 — Public / Unauthenticated egress**. Together with `credential-proxy.md` (Tier 2 — Authenticated egress), it replaces the previous `kernel-mediated-egress.md` (deprecated; preserved historically only).
+>
 > **Cross-references:**
 > - `credential-proxy.md §1b` — TCP vs HTTP proxy distinction
 > - `credential-proxy.md §13` — Intra-VM loopback and dev servers
-> - `environment-access-control.md §4` — EgressRequest admission order
+> - `credential-proxy.md` (full spec) — Tier-2 (authenticated) egress with HTTP-granular URL/method enforcement
+> - ~~`kernel-mediated-egress.md`~~ — DEPRECATED in V2 in favor of unified two-tier egress
+> - `environment-access-control.md §4` — *This section's `EgressRequest` admission order is V1-flavored; V2 uses two-tier network-layer enforcement and there is no `EgressRequest` intent. The spec needs a separate amendment to align.*
+> - `planner-harness.md §7` — V2 unified egress overview (this spec + `credential-proxy.md`)
+> - `custom-tools.md` — operator-defined custom tools. A custom-tool subprocess shares the planner VM's network namespace and is therefore subject to the same Tier 1 (tproxy SNI allowlist) and Tier 2 (credential proxy URL/method allowlist) enforcement as any other in-VM process. Custom tools introduce **no new authority surface** at the network layer; an HTTP call from a custom-tool script reaches the same tproxy / credential-proxy checks a `bash`-invoked HTTP call would.
 
 ---
 
@@ -48,6 +54,18 @@ network-level mechanism.
 **Mechanism:** `raxis-tproxy` — a transparent proxy process installed inside the VM
 by the Kernel at boot, combined with iptables rules that redirect all outbound
 TCP to it.
+
+> **Custom-tool subprocess interaction (cross-reference: `custom-tools.md`).**
+> Operator-defined custom tools (`[[profiles.<name>.custom_tool]]`) execute as
+> subprocesses of the planner harness and inherit the planner VM's network
+> namespace. Any HTTP / HTTPS / arbitrary-TCP call made by a custom-tool script
+> is intercepted by the same `iptables` redirect into `raxis-tproxy` that
+> intercepts a `bash`-invoked HTTP call, and is subject to the same Tier-1
+> SNI allowlist enforcement (§4) and Tier-2 credential-proxy URL/method
+> enforcement (per `credential-proxy.md`). Custom tools introduce **no new
+> authority surface** at the network layer — the per-task `allowed_egress`
+> declaration governs both direct `bash` egress and custom-tool-mediated
+> egress identically.
 
 ---
 
@@ -134,83 +152,119 @@ the traffic is end-to-end encrypted. The Kernel can only enforce by **hostname**
 
 ---
 
-## 4. The Method Enforcement Gap
+## 4. Tier 1 Enforcement Granularity (Hostname / SNI Only)
 
-This is a deliberate design tension that must be documented.
+> **V2 architectural amendment.** The original §4 documented a "method enforcement
+> gap" between an explicit `EgressRequest` intent path and the transparent proxy
+> path, including a `require_intent = true` opt-in that forced agents to use the
+> RAXIS SDK for strict-method hosts. This entire framing is V2-deprecated:
+> `IntentKind::EgressRequest` is removed (per `planner-harness.md §7`), the
+> `require_intent` plan field is deprecated and ignored, and `INV-EGRESS-INTENT-01`
+> is deprecated. V2's two-tier egress places method-level enforcement entirely
+> in the **Credential Proxy (Tier 2)** for authenticated endpoints; the
+> transparent proxy (Tier 1) enforces by **SNI hostname only**, which is
+> acceptable because anything requiring method-granular enforcement runs through
+> a credential proxy where HTTP-level enforcement is natural.
 
-### 4.1 — EgressRequest Intent Path (Full Enforcement)
+### 4.1 — Tier 1 (this spec): SNI-only enforcement, network layer
 
-When the agent uses the RAXIS SDK's `EgressRequest` intent explicitly, the Kernel
-receives the full request before it is sent:
-
-```rust
-// Agent code using RAXIS SDK:
-raxis::egress::post("https://api.stripe.com/v1/charges", body)
-// Kernel receives: { url, method: POST, headers, body }
-// Enforces: hostname in egress_hosts, url_prefix in allowed_egress, method in allowed_methods
-// Full enforcement: hostname + url_prefix + method + environment gate
-```
-
-### 4.2 — Transparent Proxy Path (Hostname-Only Enforcement)
-
-When the agent uses a standard HTTP client (httpx, requests, curl, fetch), the
-transparent proxy intercepts the raw TCP connection:
+`raxis-tproxy` intercepts every outbound TCP connection from the VM and:
 
 ```python
-# Agent code using standard HTTP client:
+# Agent code using standard HTTP client (no SDK; no special protocol):
 httpx.post("https://api.stripe.com/v1/charges", json=body)
 # raxis-tproxy receives: TCP connection to stripe.com:443
-# SNI extraction: "stripe.com"
-# Kernel enforces: hostname in egress_hosts only
-# CANNOT enforce: url_prefix, HTTP method, request body content
+# SNI extraction: "stripe.com" (parsed from TLS ClientHello)
+# Kernel enforces: hostname in policy egress_hosts AND in this task's allowed_egress
+# CANNOT enforce: url_prefix, HTTP method, request body content (TLS encrypts these)
 ```
 
-### 4.3 — Enforcement Gap Table
+This is intentional and sufficient for Tier 1 use cases (npm registry, crates.io,
+public GitHub HTML, package mirrors, public APIs that don't require credentials):
+the operator's allowlist controls *which* hosts agents can reach; method/path
+granularity is unnecessary for unauthenticated public traffic.
 
-| Enforcement point | EgressRequest intent | Transparent proxy |
+### 4.2 — Tier 2 (separate spec): HTTP-granular enforcement at Credential Proxy
+
+For any endpoint that requires authentication (Stripe, AWS, GCP, internal APIs),
+the architecture is:
+
+1. The operator declares the credential in `policy.toml`, including the URL
+   allowlist and method whitelist for that credential.
+2. The kernel boots a credential proxy on a localhost port inside the VM
+   (`localhost:9100`, etc.).
+3. The agent connects to `localhost:<port>` with no auth; the credential proxy
+   enforces URL prefix + method + body schema **at HTTP granularity** (it sees
+   plaintext HTTP because the agent talks to it over loopback) and forwards
+   the authenticated request to the real upstream.
+
+This places method-granular enforcement at the right layer. See
+[`credential-proxy.md`](credential-proxy.md) for the full Tier 2 spec.
+
+### 4.3 — Enforcement Surface Table (V2)
+
+| Enforcement point | Tier 1 (raxis-tproxy, this spec) | Tier 2 (credential proxy) |
 |---|---|---|
-| Hostname in `egress_hosts` | ✓ | ✓ |
-| URL prefix in `allowed_egress` | ✓ | ✗ (hostname only) |
-| HTTP method restriction | ✓ | ✗ |
-| Environment gate (`write_requires_approval`) | ✓ | ✗ |
-| Request body audit (SHA-256) | ✓ | ✗ |
-| Response body audit | ✓ | ✗ |
+| Hostname in `egress_hosts` | ✓ (via SNI on tproxy) | ✓ (URL parse on credential proxy) |
+| URL prefix in `allowed_egress` | ✗ (TLS encrypts URL) | ✓ |
+| HTTP method restriction | ✗ (TLS encrypts method) | ✓ |
+| Environment gate (`write_requires_approval`) | ✗ | ✓ (credential proxy delegates per-call) |
+| Request body audit (SHA-256) | ✗ | ✓ (request body audit by digest) |
+| Response body audit | ✗ | ✓ (response body audit by digest if `audit_response_body = true` in credential decl) |
+| TLS termination | None (CONNECT-tunneled) | At credential proxy (it speaks HTTP plaintext to the agent on loopback, HTTPS to upstream) |
 
-### 4.4 — Policy Decision: Which Path Is Authoritative?
+**Operator decision:** any endpoint that requires URL/method granularity MUST
+be declared as a credential (Tier 2). Endpoints that don't (public package
+mirrors, public docs, etc.) are fine on Tier 1.
 
-**For tasks that require strict method enforcement** (e.g., read-only access to an API),
-the plan should declare `allowed_egress` with restricted methods — but the transparent
-proxy cannot enforce this for raw HTTP client calls.
+### 4.4 — Deprecated: `require_intent` and `EgressRequest`
 
-**Resolution:** The plan's `allowed_egress` method restriction is enforced at the
-`EgressRequest` intent level. For transparent proxy traffic, only hostname is enforced.
-This is acceptable because:
+`require_intent = true` on `[[tasks.allowed_egress]]` and the `IntentKind::EgressRequest`
+intent are deprecated in V2 and have no effect. `INV-EGRESS-INTENT-01` is also
+deprecated.
 
-1. **The real defense is the credential proxy** — for authenticated APIs (AWS, GCP,
-   Azure, k8s), the credential proxy controls what the credential can do. A dev server
-   calling `DELETE /api/resource` with staging AWS credentials is limited by the staging
-   IAM role's permissions — not just the egress method filter.
+If a `plan.toml` includes `require_intent = true` on an `[[tasks.allowed_egress]]`
+entry under V2, the kernel:
 
-2. **For unauthenticated external calls** (e.g., calling a third-party API with no
-   RAXIS credential), method enforcement at the RAXIS level is advisory — the real
-   enforcement is the third-party API's own authorization.
+1. At `approve_plan` time emits a `WARN_DEPRECATED_REQUIRE_INTENT` warning
+   (suppressible via `--no-strict`; promoted to `FAIL_DEPRECATED_REQUIRE_INTENT`
+   under `--strict`) advising the operator to migrate the endpoint to a
+   credential proxy declaration.
+2. At runtime: the field is ignored. The endpoint is reachable via Tier 1
+   (SNI-allowlisted) regardless of the declared value.
 
-3. **Strict method enforcement** should use `EgressRequest` intent explicitly via the
-   RAXIS SDK — not a transparent proxy. Plans that require it can declare
-   `require_raxis_sdk = true` in `allowed_egress`, and the Kernel blocks the transparent
-   proxy path for that host entirely, requiring the agent to use the RAXIS SDK.
+There is no `IntentKind::EgressRequest` enum variant in V2. Any planner
+attempting to submit one receives `FAIL_INTENT_NOT_RECOGNIZED` (the kernel's
+generic handler for unknown intent variants).
+
+**Migration path for existing V1 plans using `require_intent = true`:** identify
+the endpoint and declare it as a credential in `policy.toml`. For example:
 
 ```toml
-# plan.toml — opt-in to strict enforcement for a specific host
+# Before (V1):
 [[tasks.allowed_egress]]
-url_prefix   = "https://api.stripe.com/"
-methods      = ["POST"]
-require_intent = true   # blocks transparent proxy for this host; agent must use RAXIS SDK
+url_prefix     = "https://api.stripe.com/"
+methods        = ["POST"]
+require_intent = true   # V2: deprecated; ignored
+
+# After (V2): declare as a credential proxy in policy.toml
+[[providers.credentials]]
+name             = "stripe-prod"
+proxy_type       = "http"
+proxy_port       = 9101
+real_url_prefix  = "https://api.stripe.com/v1/"
+allowed_methods  = ["POST"]
+auth             = "bearer:$STRIPE_SECRET_KEY_PATH"
+
+# Then in plan.toml, the task references the credential:
+[[tasks.credentials]]
+name      = "stripe-prod"
+proxy_port = 9101
+# Agent calls localhost:9101 with no auth; credential proxy forwards
+# with bearer token to api.stripe.com/v1/, enforcing method = POST.
 ```
 
-When `require_intent = true`, the TPROXY's `ProxyAdmission` for this host returns
-`FAIL_INTENT_REQUIRED` instead of admitting. The TPROXY closes the connection with
-`ECONNREFUSED`. The agent must use the RAXIS SDK intent path for this host.
+See `credential-proxy.md` for the full credential proxy declaration schema.
 
 ---
 
@@ -300,19 +354,30 @@ the routing transparently.
       - Port 5432/3306/1433/27017/6379 redirect for DB bypass detection
       - Accept loopback, drop everything else outbound
 - [ ] Kernel: handle ProxyAdmission vsock message:
-      - Hostname check against policy egress_hosts
+      - Hostname check against policy egress_hosts AND task's allowed_egress
       - If host matches credential proxy real_target → FAIL_PROXY_TARGET_BYPASS + SecurityViolationDetected
-      - If require_intent = true in allowed_egress → FAIL_INTENT_REQUIRED
       - Otherwise → Admit, establish outbound TCP/TLS connection on agent's behalf
       - Return connection handle via vsock
-- [ ] Add `require_intent` field to plan `[[tasks.allowed_egress]]`
-- [ ] Add `FAIL_INTENT_REQUIRED` to KernelError
 - [ ] Emit `TransparentProxyAdmitted` and `TransparentProxyDenied` audit events
-      with { session_id, host, port, protocol, snl_name }
+      with { session_id, host, port, protocol, sni_name }
+- [ ] V2 plan-admission additions for the deprecated `require_intent` field:
+      - Parser still accepts the field for V1 plan back-compat (no syntactic rejection)
+      - At `approve_plan`: emit `WARN_DEPRECATED_REQUIRE_INTENT` (warning by default;
+        promoted to `FAIL_DEPRECATED_REQUIRE_INTENT` under `--strict`)
+      - At runtime: field is ignored regardless of value
 - [ ] Tests:
       - HTTP call to allowed host → admitted, response returned
       - HTTP call to non-allowed host → ECONNREFUSED
       - HTTPS call to allowed host → SNI extracted, tunnel established
       - DB call to real target (not localhost) → FAIL_PROXY_TARGET_BYPASS
       - DB call to localhost:5432 → not redirected (loopback accepted)
-      - `require_intent = true` host → FAIL_INTENT_REQUIRED via transparent proxy
+      - V2: V1 plan with `require_intent = true` under `--no-strict` → admitted with WARN
+      - V2: same plan under `--strict` → rejected with `FAIL_DEPRECATED_REQUIRE_INTENT`
+      - V2: `IntentKind::EgressRequest` submission attempt → `FAIL_INTENT_NOT_RECOGNIZED`
+      - V2: tproxy admits Tier 1 traffic with NO method/path enforcement (TLS encrypts both)
+
+REMOVED (V2-deprecated; do NOT implement):
+- ~~Add `require_intent` field to plan `[[tasks.allowed_egress]]`~~ → field stays for back-compat
+  parsing only; ignored at runtime
+- ~~Add `FAIL_INTENT_REQUIRED` to KernelError~~ → not needed; deprecated path
+- ~~Implement `EgressRequest` intent admission~~ → variant removed from `IntentKind`
