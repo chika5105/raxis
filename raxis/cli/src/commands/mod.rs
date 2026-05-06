@@ -24,6 +24,7 @@ pub mod explain;
 pub mod genesis;
 pub mod inbox;
 pub mod initiative;
+pub mod initiatives;
 pub mod inspect;
 pub mod inspect_initiative;
 pub mod log;

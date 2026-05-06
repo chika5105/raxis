@@ -51,7 +51,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
 const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject"];
-const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "quarantine"];
+const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "list", "quarantine"];
 const OPERATOR_SUBCOMMANDS:    &[&str] = &["quarantine-plans-by"];
 const TASK_SUBCOMMANDS:        &[&str] = &["abort", "resume", "retry"];
 const SESSION_SUBCOMMANDS:     &[&str] = &["create", "revoke"];
@@ -185,6 +185,7 @@ fn run() -> Result<(), CliError> {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
                 "abort"      => commands::initiative::run_abort(&flags, &rest[1..]),
+                "list"       => commands::initiatives::run(&flags, &rest[1..]),
                 "quarantine" => commands::initiative::run_quarantine(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "initiative sub-command", sub2, INITIATIVE_SUBCOMMANDS,
@@ -380,6 +381,14 @@ SUBCOMMANDS:
 
     initiative abort <initiative_id>
         Force-terminate an initiative and bulk-cancel all non-terminal tasks.
+
+    initiative list [--state active|completed|quarantined|all] [--limit N] [--json]
+        Read-only bucketed listing of initiatives. Default bucket is
+        `active` (non-terminal states only). The `quarantined` bucket
+        is orthogonal to the FSM — it returns ANY initiative with a
+        row in `initiative_quarantines`, regardless of state. Each
+        row carries a `[Q]` marker (or `quarantined: true` in JSON)
+        when frozen. Reads kernel.db read-only; no kernel IPC.
 
     initiative quarantine <initiative_id> [--reason <text>]
         Freeze an initiative — every subsequent IntentRequest is
