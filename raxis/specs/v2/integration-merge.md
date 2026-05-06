@@ -1102,8 +1102,11 @@ fn discard_candidate_merge_tree(
     candidate_merge_sha: &str,
     reason: DiscardReason,
 ) {
+    let clone_dir = format!("{data_dir}/candidate_merges/{integration_merge_id}/");
+
     // 1. Delete the staging worktree.
-    fs::remove_dir_all(format!("{data_dir}/candidate_merges/{integration_merge_id}/")).ok();
+    fs::remove_dir_all(&clone_dir).ok();
+
     // 2. Mark the attempt finalized.
     sqlx::query(
         "UPDATE integration_merge_attempts
@@ -1117,21 +1120,74 @@ fn discard_candidate_merge_tree(
     .bind(now_epoch_ms())
     .bind(integration_merge_id)
     .execute(&db).await?;
-    // 3. Audit.
+
+    // 3. Targeted, immediate GC on master_repo (the parent that holds
+    //    the orphan commit_sha now unreachable from any ref). Bounded
+    //    in scope and runtime: --prune=now retires only the unreachable
+    //    objects, the lock collision window with a concurrent
+    //    IntegrationMerge phase 2 is detected and the call is skipped
+    //    in that case. The periodic git_maintenance_master sweep
+    //    (kernel-lifecycle.md §10.5.3) is the catch-all if this
+    //    targeted call is skipped or fails.
+    //
+    //    Without this immediate GC, the orphan commit pollutes
+    //    master_repo's loose-object area for up to 6h (the periodic
+    //    cadence) — long enough that a high-failure-rate burst of
+    //    pre-merge verifiers can fill the disk before the periodic
+    //    job runs. With it, the worst-case orphan-object retention
+    //    window collapses to a single discard latency.
+    if let Err(e) = git_gc_orphan(&master_repo_path()) {
+        // Best-effort: log and continue; the periodic sweep will
+        // catch it.
+        warn!(target: "integration_merge",
+              integration_merge_id = %integration_merge_id,
+              error = %e,
+              "git_gc_orphan failed; relying on periodic sweep");
+    }
+
+    // 4. Audit.
     emit AuditEventKind::CandidateMergeTreeDiscarded {
         integration_merge_id,
         candidate_merge_sha: candidate_merge_sha.to_string(),
         discard_reason: reason,
     };
-    // 4. The orphan commit becomes unreachable from any ref. The next
-    //    `git gc` cycle on the orchestrator's worktree garbage-collects
-    //    it. There is no master pollution.
+}
+
+/// Runs `git gc --prune=now --quiet` on a repository. Acquires the
+/// repository's advisory lock with a short timeout; returns Err if the
+/// lock is held by an in-flight phase-2 IntegrationMerge worker.
+fn git_gc_orphan(repo_path: &Path) -> Result<(), GitGcError> {
+    let lock = AdvisoryLock::acquire(repo_path, Duration::from_millis(250))
+        .map_err(GitGcError::LockContended)?;
+    let status = std::process::Command::new("git")
+        .arg("-C").arg(repo_path)
+        .args(["gc", "--prune=now", "--quiet"])
+        .status()
+        .map_err(GitGcError::Spawn)?;
+    drop(lock);
+    if !status.success() {
+        return Err(GitGcError::ExitStatus(status));
+    }
+    Ok(())
 }
 ```
 
 `DiscardReason` values: `"verifier_blocked"` |
 `"candidate_computation_failed"` | `"crash_recovery"` |
 `"merge_aborted_by_operator"`.
+
+The orphan commit on `master_repo` is reaped at one of three points,
+each with a bounded retention window:
+
+1. **Synchronous**: `git_gc_orphan` succeeds in step 3 above.
+   Retention: ~`git gc` runtime, typically <1 s.
+2. **Periodic**: `git_maintenance_master` runs (cadence: 6 h, or
+   opportunistic on disk pressure). Retention: up to one cadence.
+3. **Crash-induced**: `discard_candidate_merge_tree` was interrupted
+   between steps 1 and 3 (e.g., kernel killed mid-discard). The next
+   periodic sweep reaps the orphan; the SQLite row's `state` reflects
+   the partial discard so the recovery flow in §11.10.4 doesn't try
+   to salvage the candidate.
 
 #### 11.10.4 Crash-recovery cleanup at startup
 

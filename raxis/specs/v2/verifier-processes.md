@@ -1537,12 +1537,25 @@ aborted:
 2. Kernel marks `integration_merge_attempts` row with
    `discard_reason ∈ {"verifier_blocked", "crash_recovery",
    "merge_aborted"}`.
-3. Kernel emits `CandidateMergeTreeDiscarded { integration_merge_id,
+3. Kernel runs `git gc --prune=now` against `master_repo` (the
+   parent of the orphan candidate commit) under a short-timeout
+   advisory lock — see `integration-merge.md §11.10.3`'s
+   `git_gc_orphan` helper. Lock contention with an in-flight
+   IntegrationMerge phase 2 is a recognized skip case; the orphan
+   is then collected by the periodic `git_maintenance_master` job.
+4. Kernel emits `CandidateMergeTreeDiscarded { integration_merge_id,
    candidate_merge_sha, discard_reason }`.
 
-The orphan commit is unreachable from any branch and is
-garbage-collected by the next `git gc` per the standard kernel
-git maintenance cycle. There is no master pollution.
+The retention story for the orphan commit is the union of the
+synchronous step 3 above and the periodic
+`git_maintenance_master` job
+(`kernel-lifecycle.md §10.5.3`, cadence 6 h with opportunistic
+disk-pressure trigger). With both layers in place, a high
+failure-rate burst of pre-merge verifications can no longer fill the
+disk between cadence ticks: each failed attempt reaps its own orphan
+in step 3, and the periodic sweep is a backstop for cases where the
+synchronous reap could not acquire the repo lock. Master is never
+polluted.
 
 ### 16.6 Orchestrator failure handling
 

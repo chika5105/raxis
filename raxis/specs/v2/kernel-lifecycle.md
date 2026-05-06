@@ -848,6 +848,232 @@ AuditEventKind::ServiceUninstalled {
 
 ---
 
+## 10.5 Periodic Maintenance Loop
+
+Several subsystems generate state that needs background reaping
+("garbage", in the literal sense) but whose reaping is wrong to do
+synchronously on the request path:
+
+- **Git orphan objects** in `master_repo` and orchestrator clones,
+  produced when pre-`IntegrationMerge` verifiers fail and the kernel
+  discards the candidate merge tree (`verifier-processes.md §16.5`,
+  `integration-merge.md §11.10`).
+- **`plan_bundle_nonces_seen` rows** older than the freshness window
+  plus retention grace (`plan-bundle-sealing.md §8.4`).
+- **Verifier-VM cgroups** orphaned by an earlier crash mid-teardown
+  (`verifier-processes.md §4.4` references).
+- **Audit-segment rotation** (V3 audit-retention; called out here for
+  forward-compatibility — V2 retains indefinitely).
+
+V1 had no such loop; subsystems either skipped reaping (the orphan
+git objects) or relied on supervisor-level cron entries that were
+operationally fragile (every operator wrote their own). V2 makes the
+loop a first-class kernel responsibility so operator-side cron is
+never required for any subsystem RAXIS itself owns.
+
+### 10.5.1 Loop architecture
+
+The loop runs as a single tokio task spawned from the kernel's
+top-level entry point (`kernel/src/main.rs`) immediately after
+`accept_loop` is up and the system enters `Active` per §10. The task
+sleeps on a `tokio::time::interval` whose period is
+`[kernel_lifecycle].maintenance_period_secs` (default 3600 = 1 h) and,
+on each tick, drives a sequence of `MaintenanceJob` impls:
+
+```rust
+// kernel/src/lifecycle/maintenance.rs
+
+pub trait MaintenanceJob: Send + Sync + 'static {
+    /// Stable name for audit / metrics.
+    fn name(&self) -> &'static str;
+
+    /// True if the job should run on this tick. Lets jobs declare
+    /// their own cadence (e.g., "every 6 hours") on top of the
+    /// loop's base period without spawning extra tasks.
+    fn should_run(&self, ctx: &MaintenanceCtx<'_>) -> bool;
+
+    /// Run the job. MUST be best-effort: errors are logged and
+    /// audit-recorded but never escalate. The maintenance loop
+    /// continues with the next job regardless of outcome.
+    async fn run(&self, ctx: &MaintenanceCtx<'_>) -> MaintenanceOutcome;
+}
+
+pub struct MaintenanceCtx<'a> {
+    pub now_unix_secs:     u64,
+    pub data_dir:          &'a Path,
+    pub store:             &'a SqliteStore,
+    pub audit:             &'a Arc<dyn AuditSink>,
+    pub disk_pressure:     DiskPressureLevel,    // from host-capacity.md §7
+    pub active_sessions:   u32,                  // honoured by inactivity-gated jobs
+    pub active_merges:     u32,
+}
+
+pub struct MaintenanceOutcome {
+    pub items_reaped:      u64,
+    pub bytes_reclaimed:   u64,
+    pub elapsed_ms:        u64,
+    pub error:             Option<String>,
+}
+```
+
+Each tick, the loop iterates the registered jobs in declaration order
+and emits a single `MaintenanceTickCompleted` audit event summarizing
+which jobs ran and what each one reaped. Jobs that skipped because
+`should_run` returned `false` are recorded with a one-word reason
+(`"inactivity_gated"`, `"disk_pressure"`, `"cadence"`).
+
+### 10.5.2 Built-in jobs
+
+V2 ships four built-in jobs registered unconditionally; future specs
+may register additional ones following the §10.5.1 trait.
+
+| Name | Cadence | Trigger | Owner spec |
+|---|---|---|---|
+| `plan_bundle_nonce_sweep` | 1 h | always | `plan-bundle-sealing.md §8.4` |
+| `git_maintenance_master` | 6 h, OR opportunistic on `disk_pressure ≥ Warning` | `active_merges == 0 && active_sessions == 0` (or 6h elapsed regardless) | this spec §10.5.3 |
+| `git_maintenance_orchestrator_clones` | 1 h | `active_merges == 0` | this spec §10.5.4 |
+| `verifier_cgroup_orphan_sweep` | 5 min | always | `verifier-processes.md §4.4` |
+
+The cadence values are configurable via
+`policy.toml [kernel_lifecycle]`:
+
+```toml
+[kernel_lifecycle]
+maintenance_period_secs               = 3600       # base loop period (1 h)
+git_maintenance_master_period_secs    = 21_600     # 6 h
+git_maintenance_clones_period_secs    = 3600       # 1 h
+verifier_cgroup_sweep_period_secs     = 300        # 5 min
+plan_bundle_nonce_sweep_period_secs   = 3600       # 1 h (matches base)
+```
+
+Each per-job period MUST be a multiple of `maintenance_period_secs`
+(rejected at policy load with `FAIL_POLICY_MAINTENANCE_PERIOD_INVALID`
+otherwise) so the scheduler logic stays trivial: every tick, a job
+runs if `now - last_run >= job_period`.
+
+### 10.5.3 `git_maintenance_master`
+
+Drives `git gc --prune=<retention>` against `<data_dir>/master_repo`.
+
+```
+1. Acquire an advisory lock on master_repo (gix/git2 file-locking).
+   If contended (an in-flight IntegrationMerge phase 2 is running),
+   skip this tick — the next 6h tick or the next disk-pressure tick
+   will retry.
+2. Run `git gc --prune=now --quiet`. The --prune=now horizon is
+   safe because the loop's gating (active_merges == 0) ensures no
+   reachable-but-uncommitted refs exist; the retention floor for
+   forensic git data is `INV-CONVERGENCE-05` (abandoned worktrees),
+   which is enforced separately via worktree-retention rules — not
+   via loose-object retention in master_repo.
+3. Record bytes_reclaimed via `du` of master_repo before/after.
+4. Emit MaintenanceJobCompleted { name: "git_maintenance_master",
+   items_reaped: <objects_pruned>, bytes_reclaimed }.
+```
+
+Pre-`IntegrationMerge` verifier failures produce orphan candidate
+merge commits in master_repo (`verifier-processes.md §16.5`); this
+job is the canonical reaper for those orphans. The cadence is
+deliberately conservative (6 h) to amortize the GC cost; the
+opportunistic-on-disk-pressure trigger covers the case where many
+verifier failures land in a short window and pile up loose objects
+faster than 6h would tolerate.
+
+### 10.5.4 `git_maintenance_orchestrator_clones`
+
+The Orchestrator's per-merge clones at
+`<data_dir>/candidate_merges/<integration_merge_id>/` are removed
+synchronously by `discard_candidate_merge_tree`
+(`integration-merge.md §11.10`), which now also runs
+`git gc --prune=now` *on the orchestrator clone* in the same call —
+collapsing the orphan window for that specific candidate to the
+duration of one `git gc` invocation (typically <1 s on a small clone).
+
+This job is the cleanup pass for the rare case where
+`discard_candidate_merge_tree` was interrupted (kernel crash mid-discard)
+and a stale clone directory survived. It walks
+`<data_dir>/candidate_merges/`, identifies clones whose
+`integration_merge_attempts` row has `state = 'Discarded'` AND
+`finalized_at < now - 1h`, and removes any clone directory still
+present. The 1-h window ensures the loop never races with a discard
+that's actively running.
+
+### 10.5.5 `verifier_cgroup_orphan_sweep`
+
+Cross-references `verifier-processes.md §4.4` (Verifier-VM teardown).
+Walks `/sys/fs/cgroup/raxis-verifier-*` (Linux) and removes any
+cgroup whose `cgroup.procs` is empty AND whose corresponding
+`verifier_runs` row has `state IN ('Completed', 'Failed', 'Aborted')`.
+Bounded to 5 min cadence because the typical verifier lifecycle is
+seconds-to-minutes; orphans appear only on hard crash mid-teardown
+and are cheap to detect.
+
+### 10.5.6 Failure handling
+
+Any `MaintenanceJob::run` error is:
+
+1. Logged at `WARN` to platform logs (per §6 / §4.4 / §5.3).
+2. Audit-recorded as `MaintenanceJobFailed { name, error }`.
+3. Counted in a per-job rolling failure counter.
+
+If a single job fails 3 ticks in a row, the loop emits
+`OperatorAttentionRequired { kind: MaintenanceJobStuck { name } }`
+and disables the job until the next kernel restart. The disabled
+state is in-memory only — a fresh kernel boots with all jobs
+re-enabled. Operators can investigate the underlying cause without
+the failure cascading into the request path.
+
+The maintenance loop NEVER blocks the request path. Jobs run in the
+loop's own task; their SQL queries use the same `kernel.db`
+connection pool as the request path but always with `BEGIN IMMEDIATE`
+(no long-held read locks) and short-deadline timeouts (5 s default,
+configurable via `[kernel_lifecycle].maintenance_query_timeout_ms`).
+
+### 10.5.7 Audit events
+
+```rust
+AuditEventKind::MaintenanceTickStarted {
+    tick_at_ms:        u64,
+    jobs_planned:      u32,
+}
+
+AuditEventKind::MaintenanceJobCompleted {
+    name:              String,
+    items_reaped:      u64,
+    bytes_reclaimed:   u64,
+    elapsed_ms:        u64,
+    completed_at_ms:   u64,
+}
+
+AuditEventKind::MaintenanceJobSkipped {
+    name:              String,
+    reason:            String,    // "inactivity_gated" | "disk_pressure" | "cadence"
+    skipped_at_ms:     u64,
+}
+
+AuditEventKind::MaintenanceJobFailed {
+    name:              String,
+    error:             String,
+    consecutive_failures: u32,
+    failed_at_ms:      u64,
+}
+
+AuditEventKind::MaintenanceTickCompleted {
+    tick_at_ms:        u64,
+    jobs_run:          u32,
+    jobs_skipped:      u32,
+    jobs_failed:       u32,
+    total_bytes_reclaimed: u64,
+}
+```
+
+`MaintenanceJobCompleted` lets operators monitor reap rates and
+spot regressions (e.g., `bytes_reclaimed` dropping toward zero on
+`git_maintenance_master` may indicate refs piling up that GC can't
+prune).
+
+---
+
 ## 11. Operator Workflow Examples
 
 ### 11.1 First-time install on a developer workstation (Linux)
