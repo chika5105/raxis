@@ -10,6 +10,9 @@
 > - `specs/v2/kernel-push-protocol.md` — `KernelPush::ProviderStatusChanged` push frames (informational only in V2)
 > - `specs/v2/policy-plan-authority.md` — `INV-POLICY-01` (policy floor; plans cannot expand provider permissions)
 > - `specs/v2/token-limit.md` — budget lanes; per-model pricing; budget reservation arithmetic
+> - `specs/v2/extensibility-traits.md §7` — `InferenceRouter` trait, of which the kernel↔gateway HTTPS dispatch described in this spec is the V2 default impl (`HttpsGatewayRouter`); local-vLLM, on-prem TGI, and in-cluster gRPC routers are alternative impls that satisfy the same conformance contract.
+
+> **Trait boundary (V2):** Everything in this spec — circuit breakers, retry policy, attempt audit, budget reconciliation, atomic streaming — is **kernel-side** logic that runs *before* `InferenceRouter::complete(...)` is called and *after* it returns. The router itself is the seam at which the actual inference call leaves the kernel. The V2 default `HttpsGatewayRouter` (`crates/raxis-inference-router-https/`, see `extensibility-traits.md §7.2`) wraps the existing kernel↔gateway UDS dispatch. Future routers — `LocalVllmRouter` for trading deployments running on-host GPUs, `LocalTgiRouter` for HuggingFace TGI, `KubernetesInferenceRouter` for in-cluster gRPC inference — plug in here without changing any provider-failure-handling logic in this spec. The kernel still does worst-case budget reservation, attempt-by-attempt audit, circuit-breaker state, and atomic streaming reassembly; the router only does dispatch.
 
 ---
 
@@ -967,6 +970,16 @@ Errors categorized as `ContextExhausted`, `ContentFilter`, `ProviderAuth`, `Mode
 ---
 
 ## 11. Implementation Checklist
+
+### 11.0 Trait-boundary refactor (V2 prerequisite, per `extensibility-traits.md §7`)
+
+- [ ] **`crates/raxis-inference-router/`** (NEW) — defines `trait InferenceRouter`, `ResolvedInferenceRequest`, `InferenceResponse`, `InferenceStream`, `InferenceError`, `ProviderHealth`. Plus the conformance kit at `tests/conformance.rs`.
+- [ ] **`crates/raxis-inference-router-https/`** (NEW; the V2 default) — `HttpsGatewayRouter` wrapping the existing kernel↔gateway UDS dispatch this spec describes. The retry loop, circuit breaker, attempt audit, and worst-case-reservation logic in §6 / §8 stay in the kernel and run *around* `HttpsGatewayRouter::complete(...)`; the router's job is only the dispatch hop to the gateway worker.
+- [ ] **`kernel/src/main.rs`** — boot site reads `policy.toml [inference_router]` and constructs `Arc<dyn InferenceRouter>`; default `HttpsGateway`. Future variants (`LocalVllm`, `LocalTgi`, `KubernetesService`) plug in here without changing anything below.
+- [ ] **`kernel/src/handlers/inference.rs`** (NEW; carved from `kernel/src/inference/handler.rs` below) — calls `ctx.inference_router.complete(resolved)` after admission/budget/audit; reconciles `InferenceResponse::provider_observed_token_*` per §8.5.
+- [ ] **Conformance kit verifies** the kernel-side worst-case reservation, attempt audit, and circuit-breaker state are unchanged across router impls. The kit's mock router exercises every error category in §5.
+
+After this phase, the rest of this checklist still describes the V2 default `HttpsGatewayRouter` topology — the kernel↔gateway UDS dispatch, the per-provider HTTP→`ErrorCategory` mapping, the gateway worker pool. Alternative routers (e.g., `LocalVllmRouter`) bypass the gateway entirely; they implement `InferenceRouter` directly and never touch the items below 11.7.
 
 ### Schema (migration N)
 
