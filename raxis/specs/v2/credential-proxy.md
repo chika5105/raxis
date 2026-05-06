@@ -1,10 +1,15 @@
 # RAXIS V2 — Credential Proxy Architecture
 
 > **Status:** V2 Specified
+> **Role in V2 unified egress:** This spec is the canonical home for **Tier 2 — Authenticated egress**. Together with `vm-network-isolation.md` (Tier 1 — Public unauthenticated egress), it replaces the previous `kernel-mediated-egress.md` (deprecated; preserved historically). V2 also extends the credential proxy with an **audit-only mode** (§3.5 below) for endpoints that need HTTP-granular audit but no credentials.
+>
 > **Cross-references:**
 > - `environment-access-control.md §2` — Credential scoping (replaced by this spec)
 > - `kernel-mechanics-prompt.md §3` — NNSP templates (updated with proxy protocol)
 > - `v2-deep-spec.md §INV-VM-CAP-04` — credentials/ never mounted into VMs
+> - `vm-network-isolation.md` — Tier 1 (SNI-allowlist tproxy) for public unauthenticated egress
+> - ~~`kernel-mediated-egress.md`~~ — DEPRECATED in V2 in favor of unified two-tier egress
+> - `planner-harness.md §7` — V2 unified egress overview
 
 ---
 
@@ -313,6 +318,100 @@ allowed_resources = [
 ```
 
 **Azure SQL / PostgreSQL with Entra ID auth:** The database proxy (§4) uses the Azure credential proxy to obtain a token, then presents it as the database password (Azure AD token auth). The agent's DATABASE_URL has no password — the db proxy gets the token from the Azure proxy internally.
+
+---
+
+### 3.5 — HTTP Audit-Only Mode (No Credentials)
+
+V2 introduces an "audit-only" variant of the HTTP proxy for endpoints that
+require **HTTP-granular audit** (URL, method, request/response body digests)
+but do NOT require credentials. The use case: public APIs whose calls the
+operator wants visible at higher granularity than Tier 1's SNI-only audit
+permits.
+
+**Architectural placement.** This is still a Tier-2 (per-request, HTTP-level)
+proxy — same code path as the credential proxies in §3.1–§3.4 — but with no
+auth injection. Tier 1 (`vm-network-isolation.md`) remains the right tool when
+SNI-level audit is sufficient; audit-only mode exists for the cases where it
+isn't.
+
+**When to use audit-only vs Tier 1 (operator decision):**
+
+| Need | Use |
+|---|---|
+| Visibility into "an agent reached `npm-registry.example.com`" | Tier 1 (tproxy) — SNI is enough |
+| Visibility into "an agent ran `POST /api/v1/foo` with body SHA `abc...`" | Tier 2 audit-only — HTTP-granular audit |
+| Endpoint requires authentication | Tier 2 with credentials (§3.1–§3.4) |
+| Endpoint is fully public AND only host-level audit is required | Tier 1 |
+
+**Configuration in `policy.toml`:**
+
+```toml
+[[providers.audit_proxies]]                       # NEW: distinct from [[providers.credentials]]
+name             = "openapi-public-docs"
+proxy_type       = "http_audit_only"              # only valid value for this section
+proxy_port       = 9050                           # localhost port; allocated like credential proxies
+real_url_prefix  = "https://api.example-public.com/v1/"   # required; URL prefix enforcement
+allowed_methods  = ["GET", "POST"]                # required; method whitelist
+audit_request_body  = true                        # default true; SHA-256 of request body in audit
+audit_response_body = false                       # default false; if true, SHA-256 of response body
+max_response_bytes  = 1048576                     # default 1 MiB; cap on response size to prevent DoS
+```
+
+**Plan-level reference (`plan.toml`):**
+
+```toml
+[[tasks.audit_proxies]]
+name       = "openapi-public-docs"
+proxy_port = 9050
+```
+
+The plan-level `[[tasks.audit_proxies]]` references work like
+`[[tasks.credentials]]`: the kernel sets up the proxy on `localhost:<proxy_port>`
+inside the VM, the agent connects to it as if it were the real upstream
+(no auth, plain HTTP locally → HTTPS to upstream), and per-request audit events
+are emitted at HTTP granularity.
+
+**Audit events:**
+
+| Event | When emitted | Required fields |
+|---|---|---|
+| `AuditOnlyProxyAdmitted` | Per request that passes URL prefix + method check | `task_id`, `proxy_name`, `url`, `method`, `request_body_sha256` (if `audit_request_body`), `response_status` (after upstream), `response_body_sha256` (if `audit_response_body`), `response_bytes`, `latency_ms` |
+| `AuditOnlyProxyDenied` | Per request that fails URL prefix or method check | `task_id`, `proxy_name`, `url`, `method`, `denial_reason` (`url_prefix_mismatch` or `method_not_allowed`) |
+| `AuditOnlyProxyResponseTruncated` | Response exceeded `max_response_bytes` | `task_id`, `proxy_name`, `url`, `declared_max`, `observed_size_at_truncation` |
+
+These events join the audit chain in the same way as `CredentialProxyRequest`
+events from §5.
+
+**What audit-only mode does NOT do:**
+
+- It does NOT inject credentials. The upstream API sees the request as if it
+  came from an unauthenticated client. If the upstream requires auth, the
+  request will fail at the upstream (401/403), recorded in the audit but no
+  RAXIS-side block.
+- It does NOT modify the request body, headers (other than the standard
+  proxy-injected `X-RAXIS-Audit-Id` for trace correlation), or the response.
+- It does NOT enforce body content (the operator's audit consumes body
+  digests; semantic enforcement is the operator's responsibility downstream
+  of the audit log).
+
+**Migration from Tier 1 to audit-only:** if an operator decides an endpoint
+that was previously on Tier 1's SNI allowlist needs HTTP-granular audit,
+they:
+
+1. Add `[[providers.audit_proxies]]` entry to `policy.toml` with
+   `real_url_prefix` matching the endpoint's URL prefix.
+2. Re-sign and push policy via `raxis-cli policy sign` + `raxis-cli epoch advance`.
+3. Add `[[tasks.audit_proxies]]` to the relevant tasks in `plan.toml`.
+4. Remove the endpoint from the task's `[[tasks.allowed_egress]]` (so Tier 1
+   stops admitting it). Re-sign plan.
+
+After this migration, the agent must connect to `localhost:9050` (or whichever
+port) instead of the public host directly. The agent's code probably needs to
+be updated to parameterize the base URL — operator-side decision whether to
+make this transparent (e.g., via DNS injection in the VM, mapping
+`api.example-public.com` → `127.0.0.1:9050`) or explicit (env var with the
+local URL).
 
 ---
 
