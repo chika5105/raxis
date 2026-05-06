@@ -160,7 +160,7 @@ The startup sequence is a strict ordered pipeline. Each step must succeed before
 | 3 | Load and verify signed policy artifacts from `~/.raxis/policy/` using `raxis-policy::loader`. Verify signature against authority key. | `BOOT_ERR_POLICY_INVALID` |
 | 4 | Initialize key registry from loaded policy (`raxis-crypto::keyring`). Verify authority key, quality key, and verifier token key entries are all present and non-expired. | `BOOT_ERR_KEY_REGISTRY` |
 | 5 | Open kernel state store (`raxis-store::db`). Verify schema version matches binary. Apply any pending migrations. | `BOOT_ERR_STORE_SCHEMA` |
-| 6 | Run `recovery::reconcile(store, audit, witness_idx)` — single `main.rs` call that executes four ordered phases internally: **(6-chain)** verify audit chain (`verify_audit_chain`) — broken/missing chain is **fatal**; **(6-task)** reconcile in-flight tasks (`reconcile_tasks` — sweeps **all non-terminal** tasks: `Admitted` / `GatesPending` / `Running` / `BlockedRecoveryPending` → `BlockedRecoveryPending`) — recovery-pending found is **warn + continue**; **(6-orphan-token)** invalidate orphan verifier tokens for swept tasks (`expire_orphan_verifier_tokens`, called from inside `reconcile_tasks`'s recovery transaction — see §4.6) so zombie tokens cannot be honoured if a stray subprocess survives; **(6-witness)** check witness index for orphaned blobs (`witness_index::startup_check`) — discrepancies logged, non-fatal. `main.rs` calls `reconcile` once and checks the returned `ReconciliationResult` for fatal vs non-fatal outcomes. | `BOOT_ERR_AUDIT_CHAIN` (chain broken); warn + continue (tasks/witness orphans) |
+| 6 | Run `recovery::reconcile(store, audit, witness_idx)` — single `main.rs` call that executes four ordered phases internally: **(6-chain)** verify audit chain (`verify_audit_chain`) — broken/missing chain is **fatal**; **(6-task)** reconcile in-flight tasks (`reconcile_tasks` — sweeps **all non-terminal** tasks: `Admitted` / `GatesPending` / `Running` / `BlockedRecoveryPending` → `BlockedRecoveryPending`) — recovery-pending found is **warn + continue**; **(6-orphan-token)** invalidate orphan verifier tokens for swept tasks (`expire_orphan_verifier_tokens`, called from inside `reconcile_tasks`'s recovery transaction — see §4.6) so zombie tokens cannot be honoured if a stray subprocess survives; **(6-witness)** check witness index for orphaned blobs (`witness_index::startup_check`) — discrepancies logged, non-fatal. `main.rs` calls `reconcile` once and checks the returned `ReconciliationResult` for fatal vs non-fatal outcomes. **In V2.1+** the entry point is `recovery::reconcile_advisory`, the chain-verification phase calls the `crates/audit/src/verifier.rs` offline verifier (paired-class checks; orphan resolution against the SQLite snapshot per `v2/audit-paired-writes.md §5`), and the chain-repair phase synthesises missing `confirmed` / `StateChangeRolledBack { reason: CrashInferred }` events instead of V1 `ReconciliationGap` records. **Critical findings (chain break, dangling confirmed/rollback, digest mismatch) remain fatal** and require operator override (`raxis audit verify --acknowledge-critical`); chain-orphan resolution against SQLite is a non-fatal advisory pass per `INV-AUDIT-PAIRED-06`. | `BOOT_ERR_AUDIT_CHAIN` (chain broken or critical finding); warn + continue (tasks/witness orphans, advisory orphan resolution) |
 | 7 | Bind IPC listener sockets under `<data_dir>/sockets/`. Set directory permissions `0700`. The three socket file names, per-socket file modes, per-socket auth model, and listener binding order are specified in `kernel-store.md` §2.5.5 three-socket model — `planner.sock` (planner session token + verifier `verifier_run_token` for the `WitnessSubmission` variant), `gateway.sock` (gateway process token), `operator.sock` (challenge-response then operator session token, file mode 0600). There is no separate `witness.sock` file in v1 — verifier subprocesses connect to `planner.sock` (the path advertised in `RAXIS_KERNEL_SOCKET`) and the dispatcher routes by message variant. For v1, all three listeners are bound in this step before the IPC server loop begins. | `BOOT_ERR_SOCKET_BIND` |
 | 7a | Open the active audit segment (`<audit_dir>/segment-000.jsonl`) for append. **Chain-resume contract:** before opening, call `raxis_audit_tools::last_chain_state(path)` to scan the existing segment and recover `(next_seq, prev_sha256)`. Three outcomes: **(a) Ok(None)** — file missing or empty (genesis case): pass `starting_seq = 0`, `starting_prev_sha256 = None` to `AuditWriter::open` (uses the all-zero genesis sentinel); **(b) Ok(Some(info))** — chain intact: pass `info.next_seq` and `Some(info.prev_sha256)` so the next event continues the chain across the restart boundary; **(c) Err(...)** — sequence gap, prev_sha256 break, or malformed JSON: fail-closed with `BOOT_ERR_AUDIT_CHAIN`. **Why:** without this scan, every kernel restart would emit `KernelStarted` with `seq = 0`, which `recovery::verify_audit_chain` (step 6-chain) would then fail-close on at the *next* boot — i.e. the kernel would only survive its first start. The scan is O(file_size) but runs once per boot; v1 has no segment rotation so it always scans the active segment. Regression-pinned by `crates/audit/src/writer.rs::tests::resume_and_append_preserves_chain_integrity_end_to_end` plus six additional fail-closed tests. | `BOOT_ERR_AUDIT_CHAIN` |
 | 8 | Emit `KernelStarted` audit event (records binary version, policy epoch, recovery_pending task count). On failure: **dual-write to the emergency sink** (`~/.raxis/emergency.log`) then exit `BOOT_ERR_AUDIT_WRITE`. Rationale: if the chain cannot accept a start record, the kernel's audit integrity is already suspect and operating would worsen the problem. The emergency sink preserves the start event for operator inspection. | `BOOT_ERR_AUDIT_WRITE` |
@@ -293,6 +293,47 @@ The IPC server is the kernel's public surface — the only interface through whi
 ---
 
 ###### `src/ipc/handlers/intent.rs` — [NEW]
+
+> **V2.1 paired-audit ordering.** Under V2.1+ every state-mutating
+> branch of this handler routes through the three-phase paired-write
+> protocol defined in `v2/audit-paired-writes.md §2.3`:
+>
+> 1. **Phase B0 (pre-tx audit) — emit `StateChangePending` and fsync.**
+>    After Phase A gates pass and before `BEGIN IMMEDIATE`, the handler
+>    computes `pre_state_digest` over the read-set rows (the `tasks` row
+>    being bound, the affected `initiatives` row, the candidate
+>    `lane_budget_reservations` row, the relevant `delegations` rows for
+>    the claim set), `intended_writes` over the rows it intends to
+>    mutate (task transition, lane reservation insert, optional
+>    `tasks.session_id` UPDATE), and `intended_post_state_digest`. The
+>    pending event carries the planner's `idempotency_key` (the
+>    `IntentRequest` envelope nonce) so the operator UI can collapse
+>    retried-but-then-committed intents.
+> 2. **Phase B1 (state mutation) —** `BEGIN IMMEDIATE`, all writes
+>    (every mutation also sets
+>    `last_committing_event_seq = pending_seq` per §3.1 of
+>    audit-paired-writes), compute `actual_post_state_digest` over the
+>    write-set rows pre-`COMMIT`, then `COMMIT` and read
+>    `PRAGMA data_version` for `sqlite_commit_id`.
+> 3. **Phase B2 (post-commit audit) —** emit the existing-kind event
+>    (`TaskTransitioned`, `IntentReceived`, etc.) augmented with
+>    `confirms_pending_seq`, `sqlite_commit_id`, and
+>    `actual_post_state_digest`; fsync; only then return
+>    `IntentResponse::Accepted` to the planner.
+>
+> Deliberate rollbacks (constraint violation, lock timeout) emit
+> `StateChangeRolledBack { rolls_back_pending_seq, reason: ... }` in
+> Phase B2 instead, fsync, then return `IntentResponse::Rejected`.
+> Phase-A rejections (budget exhausted, gate denial, unauthorised
+> session) remain single-event under V1 semantics — they never reach
+> Phase B0 because no SQLite mutation occurs.
+>
+> The handler MUST NOT short-circuit pending fsync on the assumption
+> that Phase B1 will succeed. The pending event records "the kernel
+> attempted this transition under these preconditions" and is
+> chain-bound regardless of Phase B1 outcome. See `v2/audit-paired-
+> writes.md §7` for the per-crash-window resolution table and §9 for
+> the threat model that motivates the pre/post digest binding.
 
 **Purpose:** Handles `IntentRequest` from the planner. The intent handler is the entry point for all planner-initiated work: it validates the session's claim set and SHA range, binds the existing plan task to the current session, evaluates gate claims, reserves lane budget, and transitions the task to `Running` or `GatesPending`.
 
@@ -1779,10 +1820,54 @@ Re-exports the public initiative API: `create`, `approve_plan`, `reject_plan`, `
 
 #### `src/initiatives/recovery.rs` — [NEW]
 
-**What it contains:**
+> **V2.1 supersession notice — recovery becomes advisory.**
+>
+> The recovery orchestrator described below is the V1 / V2.0 mechanism.
+> Under the V1 ordering, `recovery::reconcile` is **mandatory** for chain
+> integrity: any (SQLite COMMIT, JSONL fsync) crash window leaves a chain
+> gap that only `reconcile` can repair. This is the strict-R-7 violation
+> documented in `v2/audit-paired-writes.md §1`.
+>
+> Under V2.1+ the orchestrator is renamed `reconcile_advisory` and its
+> role is downgraded:
+>
+> - **Chain integrity does NOT depend on it running.** The paired-write
+>   protocol (`StateChangePending` → `<existing kind>` →
+>   `StateChangeRolledBack`) makes every state-mutating crash window
+>   resolvable by an offline forensic verifier from a frozen SQLite
+>   snapshot alone — see `v2/audit-paired-writes.md §6` and
+>   `INV-AUDIT-PAIRED-06`.
+> - **What it does instead.** When recovery runs, it calls the offline
+>   verifier (`crates/audit/src/verifier.rs::verify`) over the on-disk
+>   chain + the live SQLite snapshot, and synthesises the missing
+>   `confirmed` (for committed orphans) and `StateChangeRolledBack {
+>   reason: CrashInferred }` (for inferred-rolled-back orphans) so the
+>   chain becomes self-resolving for future verifications. Recovery
+>   never modifies SQLite state on behalf of an orphan — the SQLite
+>   row IS the ground truth, the chain is what gets repaired.
+> - **Critical-finding handling.** If the verifier returns any
+>   `Finding::is_critical` — chain break, dangling confirmed,
+>   dangling rollback, digest mismatch — recovery refuses to proceed
+>   and the kernel refuses to start until an operator runs
+>   `raxis audit verify --acknowledge-critical` (signed) to override.
+>   Critical findings are operator-attention events, not auto-fixable.
+> - **Task FSM recovery is unchanged.** `reconcile_tasks` (the
+>   non-terminal-task → `BlockedRecoveryPending` sweep) and
+>   `expire_orphan_verifier_tokens` retain their V1 behaviour and
+>   are still called by `reconcile_advisory`. Their internal SQL
+>   transitions become paired-class events under V2.1 (each emits a
+>   `StateChangePending` before its own `BEGIN IMMEDIATE` and a
+>   confirmed `TaskTransitioned` after `COMMIT`), so the recovery sweep
+>   itself is structurally R-7-compliant.
+>
+> See `v2/audit-paired-writes.md §6` for the full advisory-recovery
+> contract, including the V2.1 verifier algorithm and the boot-time
+> integration with `raxis-kernel`.
+
+**What it contains (V1 / V2.0 mechanism, retained as advisory in V2.1):**
 
 - `pub fn reconcile_tasks(store: &Store, audit: &AuditTools) -> Result<ReconcileReport, RecoveryError>`
-  - Called by `recovery::reconcile` (Part 2.2 top-level recovery orchestrator) as its task-specific step — not invoked independently. `recovery::reconcile` orchestrates audit chain verification, witness orphan reconciliation, and then delegates task recovery to this function. There is one normative recovery entry point (`recovery::reconcile` in `main.rs`); `reconcile_tasks` is not called from `main.rs` directly.
+  - Called by `recovery::reconcile` (Part 2.2 top-level recovery orchestrator) as its task-specific step — not invoked independently. `recovery::reconcile` orchestrates audit chain verification, witness orphan reconciliation, and then delegates task recovery to this function. There is one normative recovery entry point (`recovery::reconcile` in `main.rs`); `reconcile_tasks` is not called from `main.rs` directly. **In V2.1+ the entry point is `recovery::reconcile_advisory` and its return on success is best-effort (advisory-recovery contract); the boot path proceeds whether or not `reconcile_advisory` repaired any orphans.**
   - Queries **all non-terminal tasks**: `state NOT IN (Completed, Failed, Aborted, Cancelled)`. This includes `Admitted`, `GatesPending`, `Running`, and (idempotently) any task already in `BlockedRecoveryPending` from a prior unfinished sweep. The broad sweep is normatively defined in Part 2.2 step 6 `reconcile_tasks` description and is **mandatory**: omitting `GatesPending` would leave tasks pointing at dead verifier subprocesses with no recovery path; omitting `Admitted` would leave tasks holding `lane_budget_reservations` from a prior `consume_budget` whose owning planner session is gone. **`Cancelled` is terminal** and must be in the exclusion set so bulk-cancelled tasks are never swept into `BlockedRecoveryPending`.
   - For each interrupted task: calls `transition_task(task_id, BlockedRecoveryPending, RecoveryPendingOperatorAction, RecoverySweep, ...)`. `transition_task` emits `AuditEventKind::TaskTransitioned` and calls `evaluate_terminal_criteria`, which detects the loss of `Running` / `Admitted` / `GatesPending` tasks and transitions affected initiatives from `Executing` to `Blocked`.
   - After each `transition_task` call, `reconcile_tasks` also emits `AuditEventKind::TaskNeedsRecovery { task_id, initiative_id, prior_state, interrupted_at }` as a separate, operator-visible event. `prior_state` is the pre-recovery `TaskState` (`Admitted` / `GatesPending` / `Running` / `BlockedRecoveryPending`) and is captured before the `transition_task` call so the operator can choose an appropriate recovery action — e.g., a task that was in `GatesPending` may need a fresh planner intent to re-trigger gate evaluation, while a task that was in `Running` may be safe to resume directly. `TaskNeedsRecovery` is not part of `TaskTransitioned`; it is a dedicated recovery-surface event emitted by `reconcile_tasks` itself.
