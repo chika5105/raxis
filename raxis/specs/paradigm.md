@@ -370,6 +370,28 @@ The paradigm is domain-agnostic. Different reference implementations apply it to
 
 **Domain-specific policy.** `policy.toml` declares allowed operators, allowed providers and pricing, allowed master-repo bindings with push credentials, allowed worktree roots, allowed egress hosts, host capacity caps, audit retention, etc. `plan.toml` declares per-initiative path allowlists, per-task token limits, per-task egress allowlists, agent role declarations (Orchestrator, Executor, Reviewer), `can_delegate` capabilities, and per-task reviewers.
 
+**Two-credential-system architecture.** The reference implementation makes paradigm invariant **R-2 — Mediated Access to External Resources** mechanically tractable by maintaining **two orthogonal credential stores** with non-overlapping access paths. Operators interact with both, but they live in different on-disk locations, are loaded by different processes, and defend against different threats:
+
+| Property | **Provider credentials** (System 1) | **Operator credentials** (System 2) |
+|---|---|---|
+| Used for | LLM inference calls (Anthropic, OpenAI, Google API keys) | Resources inside agent VMs (kubeconfig, AWS keys, registry tokens, etc.) |
+| On-disk path | `<data_dir>/providers/<provider>.toml` (chmod 0600, kernel-OS-user) | `<data_dir>/credentials/<name>.env` (chmod 0600, kernel-OS-user) |
+| Loaded by | The **gateway subprocess** at startup | The **kernel** at VM boot, for env-var injection per task |
+| Enters any agent VM? | **Never.** The gateway makes the outbound HTTPS call; the VM never sees the API key bytes. | Yes, as env vars per-task (`KUBECONFIG=<bytes>`, etc.). |
+| Declared in policy via | `[[providers.credentials]] provider_id key_ref` | `[[permitted_credentials]] name environment` |
+| Held in process memory by | Gateway subprocess only | Kernel briefly at injection; agent VM for the lifetime of the task |
+
+The separation is not redundant — it defends against two distinct attack surfaces:
+
+- **Provider credentials must never enter a VM** because a compromised planner can leak its own env vars into the next inference prompt, exfiltrating the API key to whichever model the next call targets. Confining provider keys to the gateway (which has no agent-controllable input path) makes this exfiltration physically impossible.
+- **Operator credentials must never reach the gateway** because the gateway is a network-egress process with broad outbound HTTPS reach; an exploited gateway should not have cluster-admin keys. Operator credentials live in a store the gateway has no path to.
+
+A reference implementation that conflated the two stores (e.g., one `<data_dir>/credentials/` directory used for both) would still satisfy R-2 in the abstract, but a single mistake in one credential's permissions would compromise the wrong threat surface. The two-store split makes "which store does this key belong in?" a typecheckable authoring question rather than a vigilance question.
+
+The full resolution chain — from operator-declared alias through gateway dispatch to outbound HTTPS — is canonical in `v2/provider-model-selection.md §8`.
+
+**Unified verifier runtime.** The reference implementation enforces paradigm invariant **R-2 — Mediated Access to External Resources** for *code-running verification* (tests, lint, type-check, structural analysis) via a **single unified mechanical-witness subsystem** with one runtime model, regardless of whether the verifier was authored as a policy claim-based gate, a per-task plan verifier, or a pre-`IntegrationMerge` plan verifier. One PID-1 binary (`raxis-verifier`), one wire frame (`WitnessSubmission`), one durable schema (`witness_records`). Three authoring sources fan into the single runtime; a `hook_kind` column distinguishes the lifecycle hook at which each witness was produced. The reference implementation owns the `raxis-verifier` binary, the canonical kernel-bound `raxis-verifier-symbol-index` image (per `INV-VERIFIER-12`, structurally required for the Pure-Static Reviewer's symbol-resolution fidelity), and four optional kernel-bundled tiered language starter images for common workflows. This unification is a reference-implementation property, not a paradigm requirement: the paradigm only requires that whatever mechanism a RAXIS implementation uses for code-running verification keeps the verifying code structurally separated from the agent under review (R-1 Domain Separation), produces witnesses that enter the audit chain (R-7), and gates authority decisions on those witnesses (R-3, R-5). A different RAXIS implementation could choose three separate verifier runtimes for the three lifecycle hooks; the reference implementation chose one because operating, debugging, and reasoning about a single uniform substrate at scale beats the alternative for an SE-domain workload. The full unified-runtime spec is canonical in `v2/verifier-processes.md §7`.
+
 ### 5.2 Possible — Autonomous Customer Support
 
 **Hypothetical reference implementation.** Not yet built; described here to make the paradigm/domain distinction concrete.
