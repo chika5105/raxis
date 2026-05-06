@@ -417,8 +417,50 @@ state RequestProcessing:
             started_at_ms: now(),
         }
 
-        # Dispatch to a worker.
-        worker  ← gateway_pool.acquire()      // least-loaded
+        # Acquire a worker. If the pool is saturated, gateway_pool
+        # queues the request for up to
+        # min(gateway_dispatch_queue_timeout_ms, deadline - now()) ms
+        # per §9.2. Queue-wait time is wall-clock budget — it
+        # counts against total_retry_budget_ms.
+        let queue_started_at = now()
+        let queue_budget_ms  = min(gateway_dispatch_queue_timeout_ms,
+                                   max(deadline - now(), 0))
+        if queue_budget_ms == 0:
+            # No remaining budget to even queue. Fail fast.
+            attempts.push(AttemptRecord {
+                model,
+                outcome: GatewayQueueBudgetExhausted,
+                tokens_billed_estimated: 0,
+                ...
+            })
+            return Final::Resolution(FAIL_GATEWAY_QUEUE_BUDGET_EXHAUSTED)
+
+        worker = gateway_pool.acquire(queue_budget_ms)?
+
+        let queue_wait_ms = now() - queue_started_at
+        if matches!(worker, Err(QueueTimeout)):
+            attempts.push(AttemptRecord {
+                model,
+                outcome: Unavailable,
+                tokens_billed_estimated: 0,
+                queue_wait_ms,
+                ...
+            })
+            # Queue saturation → don't trip the provider breaker
+            # (the failure was on our side, not the provider's).
+            continue loop
+
+        # Re-check deadline after the queue wait. The remainder of
+        # the loop iteration assumes deadline has not passed.
+        if now() > deadline:
+            attempts.push(AttemptRecord {
+                model, outcome: TimeoutExhausted,
+                tokens_billed_estimated: 0,
+                queue_wait_ms,
+                ...
+            })
+            return Final::Resolution(FAIL_PROVIDER_TIMEOUT_BUDGET_EXHAUSTED)
+
         result  ← worker.invoke(GatewayInvoke {
             attempt_id: new UUID,
             provider:   model.provider,
@@ -1168,7 +1210,34 @@ The kernel maintains an in-memory `gateway_pool: Vec<WorkerHandle>` indexed by `
 3. Acquire a fresh UDS connection from that worker's connection pool (or reuse an idle one).
 4. Send the `GatewayInvoke` over that connection; await `GatewayInvokeResult`.
 
-If all workers are at their per-worker concurrency cap (`max_concurrent_attempts_per_worker`, default 8), the kernel queues the dispatch internally for up to `gateway_dispatch_queue_timeout_ms` (default 5s) before failing the attempt with `Unavailable`.
+If all workers are at their per-worker concurrency cap (`max_concurrent_attempts_per_worker`, default 8), the kernel queues the dispatch internally before failing the attempt with `Unavailable`. The wait timeout is the **smaller of**:
+
+1. `gateway_dispatch_queue_timeout_ms` (default 5,000 ms; the
+   per-attempt cap so a flapping pool never strands a single
+   request on the queue forever).
+2. `deadline - now()`, where `deadline` is the request-level
+   `total_retry_budget_ms` deadline computed at request entry
+   (§6.1). If the queue-wait would consume the remainder of the
+   request's retry budget, the kernel returns `FAIL_GATEWAY_QUEUE_BUDGET_EXHAUSTED`
+   immediately rather than spending budget on a queue position
+   the request cannot afford to wait for.
+
+The kernel attributes queue-wait time to the request's
+`total_retry_budget_ms` (it is wall-clock time the request paid
+for), NOT to `worker_invoke_timeout_ms` (which fences the
+provider-side call latency only). Per-attempt backoff time is
+charged against the same budget; queue-wait sits adjacent to
+backoff in the budget bookkeeping.
+
+If the queue is sustained at saturation (i.e., at least one request
+has been in the queue for `gateway_dispatch_queue_timeout_ms`
+without being serviced) for `gateway_pool_pressure_seconds`
+(default 30s) of wall-clock time, the kernel emits
+`OperatorAttentionRequired { kind: GatewayPoolPressure {
+  observed_queue_depth, observed_queue_wait_p95_ms,
+  duration_seconds } }`. This pages the operator before the
+queue-wait failure pattern silently degrades request success
+rates.
 
 ### 9.3 Per-worker resource caps
 
