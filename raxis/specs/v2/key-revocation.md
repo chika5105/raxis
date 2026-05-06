@@ -3,11 +3,24 @@
 > **Status:** V2 Specified
 > **Cross-references:**
 > - `specs/v2/policy-plan-authority.md §3` — Policy is the security floor; plans cannot weaken it
-> - `specs/v2/immutable-artifact-store.md §2` — Plans are content-addressed and immutable; signatures bind to the plan SHA
+> - `specs/v2/plan-bundle-sealing.md` — V2 admission ceremony: atomic in-memory bundle + sign + submit; the bundle hash (rather than the bare `plan.toml` hash) is what the operator key signs
+> - `specs/v2/immutable-artifact-store.md §2` — Plans are content-addressed and immutable; signatures bind to the bundle hash
 > - `specs/v2/policy-epoch-diffing.md §4` — Per-capability staleness diffing; this spec extends the diffing rules to key revocations
 > - `specs/v2/kernel-push-protocol.md §9` — `KernelPush::SessionRevoked` envelope used here
 > - `specs/invariants.md` — `INV-CRED-KERNEL-01` (closed set of kernel credential reads); `INV-VM-CAP-04` (no credential value in VM)
 > - `kernel/src/handlers/intent.rs` — Existing approve_plan path; this spec extends it
+>
+> **V2 plan-hash field naming.** This spec was authored against the V1
+> `plan_artifact_sha256` column (the SHA-256 of `plan.toml` bytes). V2 ships
+> with **Plan Bundle Sealing**, which replaces that column with
+> `plan_bundle_sha256` (the SHA-256 of the canonical bundle encoding per
+> `plan-bundle-sealing.md §3.2`). Where this spec writes
+> `plan_artifact_sha256`, V2 deployments use `plan_bundle_sha256`; the
+> revocation logic, key-trust state machine, and audit attribution chain
+> are otherwise unchanged. The legacy spelling is preserved in the V1
+> column for forensic reproducibility of pre-V2 initiatives, and the kernel
+> resolves both columns at lookup time depending on the initiative's
+> generation.
 
 ---
 
