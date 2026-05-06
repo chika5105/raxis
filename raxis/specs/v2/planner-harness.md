@@ -2286,6 +2286,278 @@ elsewhere:
   Reviewer-specific exception.
 
 ---
+## §14 — Implementation Plan
+
+This section enumerates every crate, binary, source file, image artefact, and test surface required to ship the planner harness as specified in §3–§10. An implementer reading §14 alone (plus §3 for the role tool surface and §10 for image manifests) MUST have enough information to land V2 in their first pass without making architectural decisions.
+
+> **Trait-boundary preconditions.** `raxis-planner` is the agent-side binary that boots inside an isolated VM via `IsolationBackend::spawn` (`extensibility-traits.md §3`) and operates on a `WorkspaceMount` provisioned by `DomainAdapter::provision_workspace` (`extensibility-traits.md §2`). `§14.2`–`§14.3` therefore assume the V2 trait extraction in `extensibility-traits.md §10` Phase A and Phase B has landed; the planner harness changes themselves are scheduled in Phase D's per-handler PR sequence.
+
+### §14.1 Crate layout
+
+V2 introduces three planner role binaries built from one shared workspace, plus two new image-build helpers. Final `raxis/Cargo.toml` `[workspace] members` additions:
+
+| Crate path                                     | Kind          | Status         | Purpose                                                                                                                                       |
+| ---------------------------------------------- | ------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/raxis-planner-core/`                   | `[lib]`       | NEW            | Shared infrastructure: the claw-code execution loop, KSB renderer, alert pump, IPC framing on top of `IsolatedSession`, common tool registry. |
+| `crates/raxis-planner-tools/`                  | `[lib]`       | NEW            | Concrete tool implementations: `read_file`, `write_file` (Executor-only), `edit_file`, `grep_search`, `glob_search`, `bash` (Executor + Orchestrator only), background-process bookkeeping (`bg_start`, `bg_status`, `bg_kill`). One implementation per tool; the role-specific subsetting happens at link time per §14.3. |
+| `binaries/raxis-planner-executor/`             | `[bin]`       | NEW            | Executor role binary; depends on `raxis-planner-core` + `raxis-planner-tools` with feature `executor`. Runs PID 1 in the canonical Executor starter image (`§10.6`) or in an operator-pinned image (`INV-VM-CAP-03`). |
+| `binaries/raxis-planner-reviewer/`             | `[bin]`       | NEW            | Reviewer role binary; depends on `raxis-planner-core` only (`raxis-planner-tools` is excluded entirely at link time per `INV-PLANNER-HARNESS-01`). Bundled into `raxis-reviewer-core` (`§10.5`). |
+| `binaries/raxis-planner-orchestrator/`         | `[bin]`       | NEW            | Orchestrator role binary; depends on `raxis-planner-core` + `raxis-planner-tools` with feature `orchestrator` (which sets `bash`, `edit_file`, `grep_search`, `glob_search`, but NOT `write_file` — orchestrator manipulates files via `edit_file` and `git apply` per §4.7). Bundled into `raxis-orchestrator-core` (`§10.7`). |
+| `crates/raxis-image-builder/`                  | `[bin]`       | NEW            | Reproducible builder for the kernel-canonical Reviewer image (`raxis-reviewer-core`), the kernel-canonical Orchestrator image (`raxis-orchestrator-core`), and the opt-in Executor starter (`raxis-executor-starter`). Output is an OCI image + an EROFS rootfs blob; signed with the kernel signing key per `system-requirements.md §11.2`. |
+| `crates/raxis-image-manifest/`                 | `[lib]`       | NEW            | Typed `ImageManifest` struct + verifier (sha256 every file, recompute the bundle hash, signature-check). Used both by the kernel boot path (to admit a registered image) and by `cargo test` in CI to assert determinism of the canonical images. |
+
+Cross-cutting compile-time guard: `crates/raxis-planner-core/build.rs` emits a `compile_error!` if both the `executor` and `reviewer` features are enabled simultaneously, so a misconfigured downstream crate cannot accidentally link Bash into a Reviewer binary. Tested by a `trybuild` UI test in `crates/raxis-planner-core/tests/role_features.rs`.
+
+### §14.2 Files to create
+
+`crates/raxis-planner-core/`:
+
+- `crates/raxis-planner-core/Cargo.toml` — feature flags `executor`, `reviewer`, `orchestrator` (mutually exclusive; build.rs enforces this).
+- `crates/raxis-planner-core/src/lib.rs` — public re-exports + the `PlannerHarness` trait.
+- `crates/raxis-planner-core/src/loop_engine.rs` — the claw-code-style execution loop:
+  - `pub async fn run<H: PlannerHarness>(harness: H, transport: Box<dyn IsolatedSession>) -> ExitCode`
+  - Manages the `KernelPush → tool dispatch → IntentRequest` cycle, alert-class pre-emption, deterministic seed handling.
+- `crates/raxis-planner-core/src/ksb.rs` — KSB rendering envelope per `kernel-mechanics-prompt.md §4`:
+  - `pub struct KsbRenderer { template: KsbTemplate, sections: Vec<KsbSection> }`
+  - `pub fn render(&self, frame: &KernelPush, history: &SessionHistory) -> String`
+  - Renders sections in the canonical order (system prompt header → policy epoch banner → witness witnesses → alerts → conversation → cursor) defined in §9.
+- `crates/raxis-planner-core/src/alert_pump.rs` — async alert-class FIFO + pre-emption logic:
+  - Six alert classes from `§9` (`VsockSilent`, `BashCgroupKilled`, `BackgroundProcessExited`, `ToolBudgetExceeded`, `WallClockBudgetExceeded`, `PolicyEpochAdvanced`).
+  - `pub fn drain_pending(&mut self) -> Vec<RenderedAlert>` returns alerts that MUST appear at the top of the next KSB.
+- `crates/raxis-planner-core/src/transport.rs` — wraps the `IsolatedSession::push` / `recv_intent` traits from `extensibility-traits.md §3.3` with the planner-side framing (length-prefixed bincode `IpcMessage`).
+- `crates/raxis-planner-core/src/system_prompt.rs` — loads the role-specific NNSP from a kernel-pinned bytes blob (`include_bytes!`) per `INV-PLANNER-HARNESS-06`.
+- `crates/raxis-planner-core/src/role.rs` — `pub enum Role { Executor, Reviewer, Orchestrator }` + role-aware tool-registry construction (`pub fn tools_for(role: Role) -> ToolRegistry`).
+- `crates/raxis-planner-core/build.rs` — feature-mutex guard described in §14.1.
+- `crates/raxis-planner-core/tests/role_features.rs` — `trybuild` UI tests asserting `--features executor,reviewer` rejects compilation.
+- `crates/raxis-planner-core/tests/ksb_golden.rs` — table-driven golden test: 24 recorded `(KernelPush, history) → expected KSB string` pairs, byte-equal compare, regenerated under `cargo test --features regen-golden`.
+
+`crates/raxis-planner-tools/`:
+
+- `crates/raxis-planner-tools/Cargo.toml` — features `bash`, `edit_file`, `grep_search`, `glob_search`, `read_file`, `write_file`. `executor` enables all of them; `orchestrator` enables `bash`, `edit_file`, `grep_search`, `glob_search`, `read_file` (no `write_file` — see §4.7); the `reviewer` role does NOT depend on this crate at all.
+- `crates/raxis-planner-tools/src/lib.rs` — public `Tool` trait:
+  - `trait Tool: Send + Sync { fn name(&self) -> &'static str; fn schema(&self) -> ToolSchema; async fn invoke(&self, args: ToolArgs, ctx: &ToolCtx) -> ToolResult; }`
+- `crates/raxis-planner-tools/src/read_file.rs` — `read_file(path, offset, limit)` honoring path-allowlist semantics.
+- `crates/raxis-planner-tools/src/write_file.rs` — `write_file(path, contents)` (Executor only); refuses paths outside the workspace mount root.
+- `crates/raxis-planner-tools/src/edit_file.rs` — `edit_file(path, old, new, replace_all)`; rejects edits to files outside the workspace.
+- `crates/raxis-planner-tools/src/grep_search.rs` — wrapper around `ripgrep` invoked via `execvp` (no shell). Uniformly available to Executor/Orchestrator.
+- `crates/raxis-planner-tools/src/glob_search.rs` — wrapper around `globwalk`; no shell.
+- `crates/raxis-planner-tools/src/bash/mod.rs` — synchronous `bash(cmd)` tool gated by `[cfg(feature = "bash")]`.
+- `crates/raxis-planner-tools/src/bash/cgroup.rs` — `pub fn launch_in_cgroup(cmd: &str, cg_path: &Path) -> std::io::Result<Child>` per `INV-PLANNER-HARNESS-03`. Uses cgroup v2 `cgroup.threads`/`cgroup.procs` semantics; teardown via `echo 1 > cgroup.kill`.
+- `crates/raxis-planner-tools/src/bash/bg.rs` — `bg_start`, `bg_status`, `bg_kill` tools per §5. Maintains `BgRegistry` keyed by `bg_id` (a UUIDv7); on session-end the harness invokes `BgRegistry::shutdown_all` which writes `1` into every bg-cgroup's `cgroup.kill` and waits up to `bg_grace_period_seconds` (default 5s) for processes to exit.
+- `crates/raxis-planner-tools/tests/bash_cgroup.rs` — integration test using `tokio::process::Command` to spawn a child that double-forks; assert the cgroup teardown reaps the grandchild. (Skipped on macOS; cgroup v2 is Linux-only.)
+- `crates/raxis-planner-tools/tests/edit_file_safety.rs` — fuzz test asserting `edit_file` rejects all path traversal attempts (`../`, absolute paths, symlinks pointing outside root).
+
+Three planner binaries:
+
+- `binaries/raxis-planner-executor/Cargo.toml`, `src/main.rs` — ~30 LoC: load NNSP, construct `Role::Executor` registry, call `raxis_planner_core::loop_engine::run`.
+- `binaries/raxis-planner-reviewer/Cargo.toml`, `src/main.rs` — same shape but with `Role::Reviewer`. The dependency graph **excludes** `raxis-planner-tools` entirely; instead it depends on a much smaller `crates/raxis-planner-reviewer-tools/` crate that only provides `read_file`, `glob_search`, and `grep_search` (no `bash`, no `write_file`, no `edit_file` — Reviewer cannot mutate state per §4.4).
+- `binaries/raxis-planner-orchestrator/Cargo.toml`, `src/main.rs` — same shape as Executor, with `Role::Orchestrator`.
+
+`crates/raxis-planner-reviewer-tools/`:
+
+- `crates/raxis-planner-reviewer-tools/Cargo.toml` — minimal: `read_file`, `grep_search`, `glob_search` only. No `bash`, no `edit_file`, no `write_file`. Compile-time guard via `#![forbid(unsafe_code)]` plus a `cargo deny` rule that bans transitive deps containing the `nix::sys::wait::waitpid` symbol (heuristic for forking).
+- `crates/raxis-planner-reviewer-tools/src/lib.rs` — three tool impls + the `verifier_witnesses` consumer (the Reviewer's only authoritative source for code-running outcomes per §4.2).
+- `crates/raxis-planner-reviewer-tools/tests/no_exec.rs` — runtime test that scans the linker output of `raxis-planner-reviewer` for the symbols `execve`, `execvp`, `posix_spawn`, `system`, `popen` and asserts none are present in any reachable code path. Uses `nm` + `cargo-call-stack` style analysis; if either tool is unavailable the test is skipped with a warning logged into the test report.
+
+`crates/raxis-image-builder/`:
+
+- `crates/raxis-image-builder/Cargo.toml` — depends on `raxis-image-manifest`, `oci-spec`, `tar`, `zstd`.
+- `crates/raxis-image-builder/src/main.rs` — `raxis-image-builder build {reviewer|orchestrator|executor-starter}` — reads a manifest from `images/<role>/manifest.toml`, performs hermetic build (no network access; fails closed if attempted), produces:
+  - `out/<role>.oci/` — OCI image directory
+  - `out/<role>.erofs` — EROFS rootfs blob mounted into the VM
+  - `out/<role>.manifest.json` — typed `ImageManifest` (per-file sha256 + bundle hash + signing-key fingerprint).
+- `crates/raxis-image-builder/src/erofs.rs` — wraps `mkfs.erofs` invocations; pinned to the version in `images/<role>/manifest.toml [build] erofs_version`.
+- `crates/raxis-image-builder/src/sign.rs` — Ed25519 signature over the manifest's bundle hash using the kernel signing key loaded from `RAXIS_IMAGE_SIGNING_KEY` env var (refuses to sign if the key file is not chmod-0600).
+- `crates/raxis-image-builder/tests/determinism.rs` — runs the builder twice in parallel against the canonical Reviewer manifest and asserts byte-identical output (catches non-determinism in `mkfs.erofs`, tarball ordering, `SOURCE_DATE_EPOCH` propagation).
+- `crates/raxis-image-builder/tests/manifest_signing.rs` — round-trip: sign → verify with the matching public key.
+
+`crates/raxis-image-manifest/`:
+
+- `crates/raxis-image-manifest/Cargo.toml` — no_std-compatible; the kernel boot path uses this in a hot-path admission check.
+- `crates/raxis-image-manifest/src/lib.rs` — `pub struct ImageManifest { schema_version: u32, role: Role, bundle_hash: [u8;32], files: Vec<ManifestFile>, kernel_signing_key_fp: [u8;32], signature: [u8;64] }`.
+- `crates/raxis-image-manifest/src/verify.rs` — `pub fn verify(manifest: &ImageManifest, expected_signing_key: &[u8;32]) -> Result<(), VerifyError>`.
+
+### §14.3 Files to change
+
+`raxis/Cargo.toml`:
+
+- Add `binaries/raxis-planner-executor`, `binaries/raxis-planner-reviewer`, `binaries/raxis-planner-orchestrator`, `crates/raxis-planner-core`, `crates/raxis-planner-tools`, `crates/raxis-planner-reviewer-tools`, `crates/raxis-image-builder`, `crates/raxis-image-manifest` to `[workspace] members`.
+- Workspace lints: add `[workspace.lints.rust] non_exhaustive_omitted_patterns = "warn"` for the role enum.
+
+`raxis/kernel/Cargo.toml`:
+
+- Add dependency `raxis-image-manifest = { path = "../crates/raxis-image-manifest" }` (used by the boot-time image-admission check).
+
+`raxis/kernel/src/handlers/intent.rs`:
+
+- The intent dispatch matrix (the role × intent-kind table referenced from `INV-DISPATCH`) gains explicit row-level rejection for the seven Reviewer-disallowed intents per §6:
+  - `Reviewer + ProposedHandoff` → `FAIL_DISPATCH_DISALLOWED { reason: "ReviewerCannotHandoff" }`
+  - `Reviewer + IntegrationMerge` → `FAIL_DISPATCH_DISALLOWED { reason: "ReviewerCannotMerge" }`
+  - `Reviewer + EgressRequest` → unreachable (intent kind removed entirely from the wire schema; see `crates/raxis-types/src/intent.rs` change below).
+  - `Reviewer + FetchRequest` → `FAIL_DISPATCH_DISALLOWED { reason: "ReviewerCannotFetch" }`
+  - `Reviewer + InferenceRequest` with provider profile referencing `Bash` tool → `FAIL_DISPATCH_DISALLOWED { reason: "ReviewerCannotShell" }`.
+- Three new dispatch rows for the bg_* tools (Executor + Orchestrator only; in-VM, no kernel mediation): added not as new `IntentKind` variants but as recognised harness-local tools in the per-role tool registry described in §14.2.
+
+`raxis/kernel/src/handlers/session.rs`:
+
+- `start_planner_session()` (or the equivalent function in the V2 refactor) now does:
+  1. Resolves the role-appropriate image: kernel-canonical `raxis-reviewer-core` for Reviewer (refuses any operator-supplied image) and `raxis-orchestrator-core` for Orchestrator (same), per `INV-PLANNER-HARNESS-02` and `INV-PLANNER-HARNESS-05`. Executor uses operator-pinned image, falling back to `raxis-executor-starter` if the plan omitted `vm_image` and `policy.toml [prepare] starter_image_enabled = true`.
+  2. Calls `kernel-image-admit` (new helper in `kernel/src/initiatives/image_admission.rs`) which loads the image manifest via `raxis_image_manifest::verify`, checks `policy.toml [vm_images]` admit list for Executor/Orchestrator images, and emits `ImageAdmitted { image_digest, role, signing_key_fp, manifest_schema }` to the audit chain.
+  3. Calls `ctx.domain.provision_workspace(...)` per `extensibility-traits.md §2.2.A` to obtain a `WorkspaceMount`. Reviewer gets a read-only mount at `evaluation_sha`; Executor/Orchestrator get read-write mounts.
+  4. Calls `ctx.isolation.spawn(image, workspace, vm_spec)` per `extensibility-traits.md §3.3` and stores the returned `Box<dyn IsolatedSession>` in `SessionRuntime`.
+
+`raxis/kernel/src/initiatives/image_admission.rs` (NEW):
+
+- `pub fn admit_image(role: Role, image_id: ImageId, policy: &PolicyBundle, audit: &dyn AuditSink) -> Result<AdmittedImage, ImageAdmissionError>` — see step 2 above.
+
+`raxis/kernel/src/prompt/assembler.rs`:
+
+- The role-specific NNSP loader gains a hard-coded `match role { Role::Reviewer => include_bytes!("../../prompts/reviewer.nnsp"), Role::Orchestrator => include_bytes!("../../prompts/orchestrator.nnsp"), Role::Executor => include_bytes!("../../prompts/executor.nnsp") }`. Operator policy is NOT consulted for Reviewer or Orchestrator (per `INV-PLANNER-HARNESS-06`).
+- A unit test (`kernel/src/prompt/tests/nnsp_immutability.rs`) asserts the sha256 of each pinned NNSP matches the value in `kernel/prompts/digests.toml`. CI fails on any unintentional NNSP edit.
+
+`raxis/kernel/prompts/`:
+
+- New directory shipping `executor.nnsp`, `reviewer.nnsp`, `orchestrator.nnsp`, and `digests.toml`. The bytes are kernel-version-locked and changing them is a breaking-version event per `INV-PLANNER-HARNESS-06`.
+
+`raxis/crates/types/src/operator_wire.rs`:
+
+- `enum IntentKind` — REMOVE the `EgressRequest` variant entirely (per §7 unified-egress); fetches go through the V2 unified `FetchRequest` path. Confirm no other spec carries forward an `EgressRequest` cross-reference (the `kernel-mediated-egress.md` file is already marked DEPRECATED per §11.1).
+- `enum PermissionPolicy` — `Reviewer` profile gains explicit `Bash → Deny`, `LSP → Deny`, `WebFetch → Deny`, `WebSearch → Deny`, `StructuredOutput → Deny`. (Per §11.2 follow-up amendment, now landed.)
+- `struct VmImage` — `role_restriction: Vec<Role>` becomes mandatory on Executor and Orchestrator entries; admission of an Executor task pointing at an image whose `role_restriction` excludes `Role::Executor` returns `FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`.
+
+`raxis/crates/store/src/migration.rs`:
+
+- New migration `0009_planner_session_role.sql` adds:
+  ```sql
+  ALTER TABLE sessions ADD COLUMN planner_role TEXT NOT NULL DEFAULT 'Executor'
+      CHECK (planner_role IN ('Executor','Reviewer','Orchestrator'));
+  ALTER TABLE sessions ADD COLUMN admitted_image_digest BLOB;
+  ALTER TABLE sessions ADD COLUMN admitted_image_signing_key_fp BLOB;
+  CREATE INDEX idx_sessions_role ON sessions(planner_role);
+  ```
+  Default `'Executor'` is correct for backfill: V1 had no other role.
+
+`raxis/crates/audit/src/event.rs`:
+
+- New variant `AuditEventKind::ImageAdmitted { role, image_digest, signing_key_fp, manifest_schema_version }`.
+- New variant `AuditEventKind::ReviewerCustomToolRejected { plan_path, profile_name }` for plans declaring `[[profiles.<reviewer>.custom_tool]]` per `INV-PLANNER-HARNESS-04`.
+- New variant `AuditEventKind::BgProcessHarvest { session_id, bg_id, exit_status, killed_by }` per §5.6 — emitted by `kernel/src/handlers/session.rs::end_session` after `BgRegistry::shutdown_all` returns.
+
+`raxis/cli/src/commands/doctor.rs`:
+
+- New checks per §14.7 below.
+
+`raxis/specs/v1/planner-api.md`:
+
+- Add a footnote to the §3 error-code table noting the V2 additions (`FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`, `FAIL_VM_GUEST_KERNEL_TOO_OLD`, `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`, `FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`). The wire schema is not changed; the codes are added to the enum and surface through the existing rejection envelope.
+
+### §14.4 Image-build pipeline
+
+Three images live in-tree (built reproducibly by `crates/raxis-image-builder`):
+
+| Image                      | Source dir                  | Manifest file                       | Trust boundary                         | Distribution                                            |
+| -------------------------- | --------------------------- | ----------------------------------- | -------------------------------------- | ------------------------------------------------------- |
+| `raxis-reviewer-core`      | `images/reviewer-core/`     | `images/reviewer-core/manifest.toml` | Kernel-bundled, kernel-signed; `INV-PLANNER-HARNESS-02` | Embedded into the kernel binary as `include_bytes!`     |
+| `raxis-orchestrator-core`  | `images/orchestrator-core/` | `images/orchestrator-core/manifest.toml` | Kernel-bundled, kernel-signed; `INV-PLANNER-HARNESS-05` | Embedded into the kernel binary as `include_bytes!`     |
+| `raxis-executor-starter`   | `images/executor-starter/`  | `images/executor-starter/manifest.toml`  | Kernel-bundled but **operator opt-in** | Distributed alongside the kernel binary; not embedded   |
+
+Each `images/<role>/` directory contains:
+
+- `manifest.toml` — pinned versions of every package, the EROFS version, and the `SOURCE_DATE_EPOCH` value used for reproducibility.
+- `Containerfile` — the build recipe (BuildKit-style; no `latest` tags; every `RUN` ends with package-cache cleanup so the resulting layer is deterministic).
+- `assets/` — any static configuration files (passwd, nsswitch, ldconfig caches) needed for offline boot.
+- `verify.sh` — tooling-side smoke test the builder runs after image creation; checks that `/init`, `/usr/local/bin/raxis-planner-{role}`, and required tools are present and executable.
+
+The Reviewer image manifest (canonical home `§10.5`) lists exactly:
+- BusyBox 1.36 (no shell built-in usable from raxis-planner-reviewer per §4.4).
+- The `raxis-planner-reviewer` binary at `/usr/local/bin/raxis-planner-reviewer`.
+- An init wrapper at `/init` that mounts `/proc`, `/sys`, the workspace, then `execve`s the planner with no shell.
+- No `bash`, no `sh`, no compilers, no `git`, no `node`, no `python`, no LSP servers (per §6).
+
+The Orchestrator image manifest (canonical home `§10.7`) lists exactly:
+- BusyBox 1.36 + `bash` 5.2 + `git` 2.45 + `ripgrep` 14.1.
+- The `raxis-planner-orchestrator` binary at `/usr/local/bin/raxis-planner-orchestrator`.
+- The same init wrapper.
+- No compilers, no test runners, no LSP servers — Orchestrator does NOT run code; it only runs `git` and `ripgrep` per §4.7.
+
+The Executor starter manifest (canonical home `§10.6`) lists a generalist development environment: Node, Python, Rust, Go, plus Unix base. Operators in production typically pin their own image; the starter is the new-operator-onboarding default.
+
+Build-time CI:
+
+- A new GitHub Actions workflow `.github/workflows/build-images.yml` runs `cargo run -p raxis-image-builder -- build {reviewer,orchestrator,executor-starter}` on every PR. Output `out/<role>.manifest.json` files are compared against the previous main-branch artefacts; non-determinism (different bundle hash for unchanged inputs) fails CI.
+- A separate workflow `.github/workflows/release-sign-images.yml` runs only on tagged releases and uses the production kernel signing key (held in GitHub-managed-secrets-only) to sign the bundle hash.
+
+Kernel boot-time admission:
+
+- `kernel/src/main.rs` calls `raxis_image_manifest::verify(&embedded_reviewer_manifest, &kernel_signing_pubkey)?` and `verify(&embedded_orchestrator_manifest, ...)?` immediately after `IsolationBackend::verify_isolation_guarantee` (boot-order step 6a per `extensibility-traits.md §9.1`). A signature failure aborts boot with `BootError::ImageManifestSignatureMismatch { role }`.
+
+### §14.5 Test fixtures and test-support helpers
+
+`crates/test-support/src/planner_harness/` (NEW module):
+
+- `mod.rs` — re-exports.
+- `fake_planner.rs` — `pub struct FakePlanner { intents: VecDeque<IntentRequest>, expected_pushes: VecDeque<KernelPush> }` driven from a recorded session (`fixtures/planner-sessions/<test_name>.jsonl`). Used by kernel handler tests to replace a real `IsolatedSession` with a deterministic transcript player.
+- `mock_workspace.rs` — `pub struct MockWorkspace { tmp: TempDir, files: HashMap<PathBuf, Vec<u8>> }` provides a workspace-mount-shaped tempdir for integration tests; on `drop` snapshots the final state for fixture comparison.
+- `mock_isolation.rs` — re-exports `MockIsolation` from `crates/raxis-isolation/src/mock.rs` (per `extensibility-traits.md §3`); the test crate adds a higher-level builder `MockIsolationBuilder::with_planner(FakePlanner) -> Arc<MockIsolation>`.
+- `image_fixtures.rs` — small, hermetic image manifests (single-file rootfs) used by image-admission tests; signed by a fixture signing key in `crates/test-support/data/test-signing-key.bin`.
+- `ksb_fixture.rs` — tools to capture and replay `(KernelPush stream, expected response)` pairs.
+
+`crates/test-support/data/planner-sessions/`:
+
+- One `.jsonl` per scripted scenario: `executor_happy_path.jsonl`, `executor_circular_revision.jsonl`, `reviewer_blocks_merge.jsonl`, `orchestrator_resolves_conflict.jsonl`, `bg_double_fork_reaped.jsonl`, `policy_epoch_advance_alert.jsonl`, etc.
+
+`crates/raxis-planner-core/tests/fixtures/ksb-golden/`:
+
+- 24 KSB rendering golden files. File layout: `ksb-golden/<scenario>.input.json` + `ksb-golden/<scenario>.expected.txt`.
+
+### §14.6 Integration tests
+
+Per the level-of-detail benchmark from `raxis/specs/v1/cli-ceremony.md §13`, every behavioural commitment in §3–§9 needs an integration test, and the spec MUST name the test file. The matrix:
+
+| Test file (NEW)                                                                    | Asserts                                                                                                                                  | Spec section |
+| ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `raxis/kernel/tests/planner_harness/role_dispatch_matrix.rs`                       | Each role × intent-kind cell rejects or admits per §3 (16 admit cases, 12 reject cases, all named by reject-code).                       | §3, §6       |
+| `raxis/kernel/tests/planner_harness/reviewer_image_lockdown.rs`                    | A plan declaring `vm_image` on a Reviewer task is rejected at `approve_plan` with `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`.                   | §4.5         |
+| `raxis/kernel/tests/planner_harness/orchestrator_immutable.rs`                     | A plan declaring `[[profiles.Orchestrator]]` or `[[plan.tasks.<orch_id>]]` is rejected with `FAIL_ORCHESTRATOR_PROFILE_NOT_ALLOWED`.       | §4.8         |
+| `raxis/kernel/tests/planner_harness/reviewer_no_exec.rs`                           | The Reviewer binary contains no reachable `execve`/`posix_spawn`/`system`/`popen`/`fork` symbol; uses `nm` + `cargo-call-stack`.         | §4.4         |
+| `raxis/kernel/tests/planner_harness/reviewer_custom_tool_rejected.rs`              | A plan declaring a Reviewer-effective profile with `[[profiles.<n>.custom_tool]]` is rejected with `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`. | §4.6         |
+| `raxis/kernel/tests/planner_harness/bg_lifecycle.rs`                               | Spawn a backgrounded shell command via `bg_start`; confirm `bg_status` reports running; trigger session-end; assert `BgProcessHarvest` audit event recorded with `killed_by = "session_end"`. | §5           |
+| `raxis/kernel/tests/planner_harness/bg_double_fork_reaped.rs`                      | Spawn a backgrounded process that does POSIX double-fork; confirm cgroup teardown reaps the orphan grandchild within `bg_grace_period_seconds + 1s`.                                          | §5.3         |
+| `raxis/kernel/tests/planner_harness/ksb_alert_pump.rs`                             | All six alert classes (`§9`) appear in deterministic order at the top of the next KSB after their triggering condition; alerts are not duplicated.                                            | §9           |
+| `raxis/kernel/tests/planner_harness/policy_epoch_alert.rs`                         | A `PolicyEpochAdvanced` alert is delivered to active sessions on epoch rollover; a session that ignores it is killed at next intent admission with `FAIL_STALE_POLICY_EPOCH`.                | §9, `policy-epoch-diffing.md` |
+| `raxis/kernel/tests/planner_harness/image_admission_signature.rs`                  | A tampered Reviewer image manifest causes kernel boot to fail with `BootError::ImageManifestSignatureMismatch { role: Role::Reviewer }`.                                                       | §10, §14.4   |
+| `raxis/kernel/tests/planner_harness/image_role_restriction.rs`                     | An Executor task pointing at a `[[vm_images]]` entry whose `role_restriction = ["Reviewer"]` (which would never normally exist; constructed in test) is rejected with `FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`. | §14.3        |
+| `raxis/crates/raxis-image-builder/tests/determinism.rs`                            | Two parallel builds of the canonical Reviewer image produce byte-identical EROFS blobs.                                                  | §14.4        |
+| `raxis/binaries/raxis-planner-executor/tests/full_session_smoke.rs`                | End-to-end against `MockIsolation`: 5-turn agent session emits all expected `IntentRequest`s, observes all expected `KernelPush`es; asserts no symbols from §6 exclusion list are reachable. | §3, §6       |
+| `raxis/binaries/raxis-planner-orchestrator/tests/conflict_resolution_protocol.rs`  | The Orchestrator's pinned `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` NNSP block fires on a synthesized merge conflict; the Orchestrator emits `IntegrationMerge` with the expected resolved tree sha within `wall_clock_limit_seconds`.                                                                               | §4.7, `integration-merge.md §8` |
+
+All integration tests use `MockIsolation` + the `FakePlanner` harness so they run in CI without `/dev/kvm`. Real Firecracker tests live in `raxis/tests/e2e/firecracker_planner.rs` and run only on the `[ci-firecracker]` Linux runner.
+
+### §14.7 `raxis doctor` checks specific to the planner harness
+
+Per `system-requirements.md §11`, the doctor surfaces image-admission state. New checks added to `raxis/cli/src/commands/doctor.rs`:
+
+- `[CHECK] planner-harness.image.reviewer` — confirms the embedded Reviewer manifest's `bundle_hash` matches the live binary; `[FAIL]` on tamper.
+- `[CHECK] planner-harness.image.orchestrator` — same for the Orchestrator manifest.
+- `[CHECK] planner-harness.image.executor-starter` — `[INFO]` (not a hard fail) reporting whether the optional starter image is installed.
+- `[CHECK] planner-harness.guest-kernel` — for the candidate Executor image (if pinned), confirms guest kernel version is ≥ 5.14 per `INV-PLANNER-HARNESS-03`.
+- `[CHECK] planner-harness.cgroup-v2` — host capability check for cgroup v2 with `cpu`, `memory`, and `pids` controllers.
+
+Each check has a short `--explain` text linking back to `planner-harness.md §<section>` and the relevant invariant.
+
+### §14.8 Phased migration
+
+The work lands in five mergeable phases; each phase is a single PR.
+
+- **Phase 1 — Trait wiring (depends on `extensibility-traits.md §10` Phase A + B).** Add `Role` enum, `IsolatedSession`/`DomainAdapter` plumbing into `kernel/src/handlers/session.rs`. No image-build changes; canonical Reviewer/Orchestrator images replaced by zero-byte placeholders. Existing planner code compiles unchanged but now boots through the trait. ~3 days.
+- **Phase 2 — `raxis-planner-core` extraction.** Move the existing planner loop into `crates/raxis-planner-core/`. Existing `kernel/src/planner/*` is deleted in this PR. Featureless single-binary `raxis-planner-executor` produced; Reviewer + Orchestrator binaries land but are bit-for-bit copies of Executor (role-asymmetry comes in Phase 3). ~3 days.
+- **Phase 3 — Reviewer feature-cut + custom-tool rejection.** Land `crates/raxis-planner-reviewer-tools/`, the `executor`/`reviewer`/`orchestrator` mutex feature flags, and the `nm`-based no-exec test. `INV-PLANNER-HARNESS-04` admission rejection for Reviewer custom tools lands here. ~2 days.
+- **Phase 4 — Backgrounded shell + KSB alert pump.** Land `bash::bg`, the `BgRegistry`, the cgroup teardown, and all six `§9` alert classes. ~3 days.
+- **Phase 5 — Image build + signing pipeline.** Land `crates/raxis-image-builder/`, the canonical Reviewer + Orchestrator + opt-in Executor starter images, the `[CHECK] planner-harness.image.*` doctor checks, the kernel boot-time signature-verification step, and the CI workflows. After this PR, kernel boot refuses unsigned/tampered images. ~4 days.
+
+Total budget: ~15 engineer-days. Each phase ships independently; the kernel binary keeps compiling and the existing test suite keeps passing through every intermediate state.
+
+---
 
 *Spec complete. Per the standing rule for `INV-PLANNER-HARNESS-*`: when
 this file is wrong (i.e., when an implementation choice contradicts a
