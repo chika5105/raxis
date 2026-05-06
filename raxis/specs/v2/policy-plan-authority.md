@@ -1261,7 +1261,7 @@ intent admission handler, by the `BEGIN IMMEDIATE` driver in
 `crates/store/src/store.rs`, and by the V2.1 first-boot migration
 host (`kernel/src/store/migrations/v21_backfill.rs`).
 
-**Reporter taxonomy.** Each code is reported by exactly one of three
+**Reporter taxonomy.** Each code is reported by one of three
 binaries, and operators reading audit logs need to know which binary
 they're looking at the output of:
 
@@ -1271,14 +1271,23 @@ they're looking at the output of:
 - **Kernel** = `raxis-kernel` runtime emission (intent admission
   handler, recovery, migration). Requires the kernel to be running
   or to have run.
-- **CLI** = `raxis-cli` (kernel-linked convenience wrapper for the
-  standalone library; e.g. `raxis verify-chain`). Exists for
-  operator self-checks; not the R-7 artefact.
+- **CLI** = `raxis-cli` (kernel-linked convenience commands like
+  `raxis verify-chain`). Important: `raxis verify-chain` is a
+  **subprocess wrapper** around `raxis-audit-verify`
+  (per `audit-paired-writes.md §5.7`); it does NOT link the verifier
+  algorithm. So a code listed as a CLI reporter is in practice
+  emitted by a `raxis-audit-verify` subprocess that the CLI spawned,
+  with the CLI's exit code identical to the subprocess's. The CLI's
+  trust contribution is argument translation and output formatting
+  only — it cannot mask a critical finding.
 
-The `Reporter` column below names which binary reports each code.
-Codes that can surface in multiple binaries (because the same
-algorithm runs in three places per `audit-paired-writes.md §5.7`)
-list all of them.
+A code listed with multiple reporters (Standalone + Kernel + CLI)
+means the same underlying algorithm produces it; the only practical
+difference between Standalone and CLI is whether the operator
+invoked the binary directly or via the CLI wrapper. Standalone
+remains the canonical R-7 artefact (its dep boundary is the
+independence guarantee); CLI invocation simply adds a layer of
+operator ergonomics on top.
 
 | Code | Reporter | Phase | One-line trigger | Canonical home |
 |---|---|---|---|---|

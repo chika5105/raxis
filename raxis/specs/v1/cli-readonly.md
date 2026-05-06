@@ -730,41 +730,92 @@ doesn't appear as 12 changes. Critical at epoch advance review.
 
 ### §5.5.13 — `raxis verify-chain`
 
-**Purpose:** re-run the audit verifier from the CLI process — a
-**convenience wrapper**, not the R-7 independence artefact.
+**Purpose:** convenience wrapper for `raxis-audit-verify` (§5.5.20).
+The verification itself is performed by **spawning the standalone
+binary as a subprocess** — the CLI does NOT link the verifier
+algorithm. The verdict comes from the dep-bounded binary, end to
+end, even when operators use this convenience command.
 
-> **R-7 NOTE.** `raxis verify-chain` is part of `raxis-cli`, which links
-> the full kernel stack (`raxis-store`, `raxis-policy`, `raxis-types`).
-> Its verdict therefore only proves "the kernel-side tooling agrees with
-> itself" — meaningless under R-7's strict reading. **The R-7
-> independence artefact is the standalone `raxis-audit-verify` binary**
-> (see `audit-paired-writes.md §5.4` and §5.5.20 below). Auditors,
-> compliance reviewers, and forensic investigators MUST use
-> `raxis-audit-verify`. `raxis verify-chain` is intended for operator
-> day-to-day self-checks against a running kernel, where the kernel-
-> linked conveniences (live SQLite for orphan resolution, IPC
-> consistency checks) outweigh the lack of independence.
+> **R-7 NOTE.** `raxis verify-chain` is part of `raxis-cli`, which
+> links the full kernel stack (`raxis-store`, `raxis-policy`,
+> `raxis-types`). To prevent the CLI's larger trust base from
+> contaminating the verdict, the CLI does not import the verifier
+> library; it shells out. The CLI's role is reduced to:
+> 1. **Argument translation** — operator-facing conveniences
+>    (data-dir defaults, `--from`, `--quick`) are translated to
+>    standalone-binary flags (`--chain`, `--strict-monotonic`, etc.).
+> 2. **State export pipelining** — when the operator passes
+>    `--with-live-state`, the CLI first runs `raxis audit
+>    export-state-for-verifier` to a tempfile, then passes the path
+>    via `--state-export` to the spawned binary.
+> 3. **Output formatting** — the binary's stdout is re-rendered with
+>    CLI styling (colour, JSON, etc.) and a footer line
+>    `[verified by raxis-audit-verify v<X.Y.Z>]` so the operator can
+>    see which binary actually produced the verdict.
+> 4. **Verdict propagation** — the CLI's exit code IS the binary's
+>    exit code, byte-for-byte. The CLI cannot mask a critical
+>    finding; if the binary returns 3, the CLI returns 3.
+>
+> Auditors, compliance reviewers, and forensic investigators on
+> hosts where `raxis-cli` is not installed (or not trusted) should
+> invoke `raxis-audit-verify` directly. Operators on the kernel host
+> may use either; both paths bottom out at the same verdict.
 
 **Flags:**
-- `--from <seq>` — start from the given seq (default 0).
-- `--quick` — only check the first and last record (used by `raxis status`).
-- `--with-state-snapshot <path>` — orphan resolution against a live
-  SQLite snapshot (kernel-side only; the standalone binary uses
-  `--state-export` against a JSON export instead).
-- `--acknowledge-critical <signed-payload>` — signed override that clears
-  a kernel boot-block from `reconcile_advisory` critical findings (per
-  `audit-paired-writes.md §6.2`). The signed payload MUST embed the
-  hash of a `raxis-audit-verify` verdict over the same chain
-  (independence-bearing acknowledgement; the operator must run the
-  standalone binary first and embed its output, otherwise the kernel
-  refuses to clear the block).
+- `--from <seq>` — start verification from the given seq. Translated
+  to a chain-segment-glob filter passed to the binary's `--chain`.
+- `--quick` — only verify the first and last record. Translated to
+  `--head 1 --tail 1` (binary flag added in V2.1).
+- `--with-live-state` — opportunistic orphan resolution: the CLI
+  first runs `raxis audit export-state-for-verifier` to a tempfile,
+  then passes that file to the binary via `--state-export`. Useful
+  for operators who want a one-shot "verify and resolve" against a
+  live kernel.
+- `--state-export <PATH>` — pass-through to the binary's
+  `--state-export` (operator pre-supplies a JSON export from
+  `raxis audit export-state-for-verifier`).
+- `--json-output` — pass-through to the binary's `--json-output`.
+- `--acknowledge-critical [--reason <text>]` — clears a kernel boot
+  block from `reconcile_advisory`'s critical findings (per
+  `audit-paired-writes.md §6.2`). The CLI runs the binary, captures
+  its `--json-output` verdict, builds an
+  `AcknowledgeCriticalPayload` (verdict_hash + chain_head_digest +
+  verifier_version + reason + operator-signature), signs it with the
+  operator key, and writes
+  `<data_dir>/audit/critical_ack.signed`. The operator then
+  restarts the kernel. The kernel re-verifies the chain in
+  `reconcile_advisory` and honours the ack iff `chain_head_digest`
+  matches what the kernel observes right now (the ack is bound to
+  a specific chain byte-state; an attacker who swaps the chain
+  between ack-time and restart causes the kernel to reject the
+  ack).
 
-**Exit code:** `0` if intact, `3` if any break or gap is found.
+**Exit code:** identical to the spawned `raxis-audit-verify`'s exit
+code. `0` (INTACT), `2` (CLI/argument error), `3` (critical
+finding), `4` (internal error). The CLI does not transform exit
+codes; the only exception is exit `127` when the standalone binary
+cannot be located on `$PATH` (the CLI prints a clear "install
+`raxis-audit-verify` to use this command" message).
 
-**Data source:** `raxis_audit_verify::verify` — the same algorithm the
-standalone binary and the kernel's `reconcile_advisory` use. One
-algorithm, three call sites; only the standalone binary's call site
-satisfies R-7 independence (per `audit-paired-writes.md §5.7`).
+**Data source:** **subprocess invocation of `raxis-audit-verify`**
+(per `audit-paired-writes.md §5.7`). The CLI uses
+`std::process::Command::new("raxis-audit-verify")`, sets up the
+translated args, captures stdout/stderr, and returns the
+subprocess's exit code unchanged. The CLI does NOT depend on
+`raxis-audit-verify` (the leaf crate); it depends on the binary
+being on `$PATH`. This decoupling means patch upgrades to the
+verifier don't require recompiling `raxis-cli`, and a site that
+needs to pin a specific verifier version for compliance can do so
+without touching the kernel.
+
+**Failure modes:**
+
+| Condition | CLI behaviour |
+|---|---|
+| `raxis-audit-verify` not on `$PATH` | Exit `127`; print install hint and reference §5.5.20. |
+| Binary version older than CLI's expected minimum | Exit `2`; print "binary version <X.Y.Z> is older than expected (<min>); upgrade `raxis-audit-verify` to a matching release." Operators may bypass with `--accept-binary-version <X.Y.Z>` for non-routine forensic work. |
+| Binary's `--json-output` schema unknown | Exit `4`; print raw stdout for the operator. The CLI's `[verified by …]` footer line still includes the version so the failure is diagnosable. |
+| Subprocess killed by signal | Exit `137` (or signal+128); the CLI surfaces the signal name. |
 
 ### §5.5.14 — `raxis explain <task_id>`
 
