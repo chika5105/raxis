@@ -418,6 +418,102 @@ local URL).
 
 ---
 
+### 3.6 — SMTP
+
+**Protocol:** SMTP (RFC 5321) with mandatory STARTTLS or implicit TLS to upstream
+**Canonical home:** `email-and-notification-channels.md §3` (this section is the credential-proxy summary)
+
+**What the proxy does:**
+
+- Exposes a localhost TCP port (e.g. `localhost:2525`) that speaks SMTP to the agent.
+- Accepts the agent's `HELO`/`EHLO`, `MAIL FROM`, `RCPT TO`, `DATA`, `QUIT` — but **never advertises `AUTH`** to the agent.
+- Opens a separate connection to `real_target` (the upstream SMTP relay), negotiates STARTTLS (or uses implicit TLS on port 465), and authenticates upstream using `auth_method` ∈ `{plain, login, xoauth2}` with credentials resolved from the kernel's `CredentialBackend`.
+- **Substitutes `MAIL FROM`** with the policy-configured `from_address`. The agent's value is recorded in the audit record but discarded on the wire.
+- **Filters `RCPT TO`** against `allowed_recipient_domains` (case-insensitive suffix match) and `allowed_recipient_addresses` (if present); mismatches return `550 5.7.1` to the agent and emit `SmtpProxyMessageRejected { reason: RecipientDomainNotAllowed }`.
+- **Rewrites the DATA body headers**: replaces `From:`, drops `Sender:`, `Bcc:`, `Resent-From:`, `Return-Path:`, agent-injected `Received:`; replaces `Message-Id:` with `<{task_id}.{rng}@raxis-proxy>`.
+- **Hashes the body** for audit (SHA-256), enforces `max_message_bytes`, optionally archives the full body to the immutable artifact store when `audit_message_bodies = true`.
+- **Rate-limits** per-task and per-session in atomic SQLite transactions; `421 4.7.0` returned to the agent on burst.
+
+**Why this proxy_type vs. an HTTPS API:**
+
+- An operator whose only outbound email path is plain SMTP (corporate relay, internal mail server, on-prem deployment) MUST have a way to give agents email-send capability without granting SMTP credentials.
+- Operators who use Mailgun/SendGrid/SES via REST may instead use `proxy_type = "http_audit_only"` (§3.5) targeting the provider's API and skip this proxy entirely.
+
+**Configuration in `policy.toml`** (full schema in `email-and-notification-channels.md §3.3`):
+
+```toml
+[[permitted_credentials]]
+name           = "smtp-ops-relay"
+environment    = "ops-notifications"
+description    = "Agent SMTP relay; substitutes From, allowlists recipients"
+proxy_types    = ["smtp"]
+real_target    = "smtp.example.com:587"
+
+[permitted_credentials.smtp]
+auth_method                 = "plain"            # plain | login | xoauth2
+from_address                = "raxis-agent@example.com"
+require_starttls            = true               # default true; false only if real_target ends in :465
+allowed_recipient_domains   = ["example.com", "ops.example.com"]
+allowed_recipient_addresses = []                 # optional further restriction
+max_message_bytes           = 524288             # default 512 KiB
+max_recipients_per_message  = 5                  # default 5; max 50
+audit_message_bodies        = false              # default false (digest-only)
+rate_limit_per_session      = { count = 10, window_seconds = 3600 }
+rate_limit_per_task         = { count =  3, window_seconds =  600 }
+```
+
+**Plan-level reference (`plan.toml`):**
+
+```toml
+[[tasks.credentials]]
+name       = "smtp-ops-relay"
+proxy_type = "smtp"
+mount_as   = "SMTP_URL"        # → smtp://localhost:2525 (no auth)
+```
+
+**Generated env in VM (no credential values):**
+```
+SMTP_URL=smtp://localhost:2525
+```
+
+**Agent usage pattern (Python):**
+
+```python
+import smtplib
+from email.message import EmailMessage
+msg = EmailMessage()
+msg["To"]      = "reviewer@example.com"
+msg["Subject"] = "Build report for task 01J7..."
+msg.set_content("Tests passed. Diff in attachment.\n")
+with smtplib.SMTP("localhost", 2525) as s:
+    s.send_message(msg)        # `From:` is substituted by the proxy
+```
+
+The agent must NOT call `s.login()` — the proxy doesn't advertise AUTH and rejects it with `502 Command not implemented`. The agent must NOT include a `Bcc:` header — the proxy strips it. The agent's `MAIL FROM` is overridden; the kernel's `From: <from_address>` is what reaches recipients.
+
+**`PolicyBundle::validate` enforces** (per `email-and-notification-channels.md §3.2`):
+
+| Constraint | Failure code |
+| --- | --- |
+| `require_starttls = true` OR `real_target` ends in `:465` | `FAIL_SMTP_PROXY_PLAINTEXT_REJECTED` |
+| `allowed_recipient_domains` non-empty | `FAIL_SMTP_PROXY_RECIPIENT_ALLOWLIST_EMPTY` |
+| `from_address` parses as RFC 5321 `addr-spec` | `FAIL_SMTP_PROXY_FROM_ADDRESS_INVALID` |
+| `max_recipients_per_message ≤ 50` AND `≥ 1` | `FAIL_SMTP_PROXY_RECIPIENT_CAP_INVALID` |
+| `rate_limit_per_*.count ≥ 1` AND `window_seconds ∈ [1, 86_400]` | `FAIL_SMTP_PROXY_RATE_LIMIT_INVALID` |
+
+**Audit events** (full schema in `email-and-notification-channels.md §3.9`):
+
+- `SmtpProxyConnected` — agent opened the local SMTP socket
+- `SmtpProxyMessageSent` — upstream returned `2xx` to end-of-DATA
+- `SmtpProxyMessageRejected` — proxy refused before end-of-DATA (recipient, size, header-rewrite, etc.)
+- `SmtpProxyRateLimited` — per-task or per-session counter exceeded
+- `SmtpProxyUpstreamError` — upstream returned an unexpected error
+- `SmtpProxyDisconnected` — agent or proxy closed the session
+
+**See `email-and-notification-channels.md §3` for**: full wire flow, header rewrite rules, threat model, sliding-window rate limiter, NNSP additions, conformance tests, INV-SMTP-PROXY-01..05.
+
+---
+
 ## 4. Database Proxying — In Depth
 
 Database connections are fundamentally different from HTTP APIs. They use:
@@ -739,11 +835,13 @@ The KSB is extended with an `proxies` field listing active credential proxies:
 ```
 [RAXIS:KERNEL_STATE v=1]
 ...
-proxies  = k8s-staging:localhost:8001,postgres-staging:localhost:5432
+proxies  = k8s-staging:localhost:8001,postgres-staging:localhost:5432,smtp-ops-relay:localhost:2525
 [/RAXIS:KERNEL_STATE]
 ```
 
 The agent can see which proxies are active on this call. If a proxy it expects to use is not listed, it knows before attempting a connection that it won't work.
+
+For `proxy_type = "smtp"` (V2), an additional NNSP block is templated into the prompt with the proxy's constraints (sender substitution, recipient allowlist, rate limits, no AUTH). See `email-and-notification-channels.md §3.10` for the full template — operators cannot lie to the agent about its own constraints because the prompt is generated from the same `SmtpProxyConfig` that the proxy enforces.
 
 ---
 
@@ -1249,6 +1347,24 @@ azure_credential = "<name>"     # which Azure credential to use for token acquis
 role_arn  = "arn:aws:iam::..."  # IAM role to assume via STS
 region    = "us-east-1"
 ```
+
+**SMTP-specific config block (V2; `proxy_type = "smtp"` only):**
+
+```toml
+[permitted_credentials.smtp]
+auth_method                 = "plain"           # plain | login | xoauth2
+from_address                = "raxis-agent@example.com"
+require_starttls            = true              # see §3.6
+allowed_recipient_domains   = ["example.com"]
+allowed_recipient_addresses = []                # optional further restriction
+max_message_bytes           = 524288
+max_recipients_per_message  = 5
+audit_message_bodies        = false
+rate_limit_per_session      = { count = 10, window_seconds = 3600 }
+rate_limit_per_task         = { count =  3, window_seconds =  600 }
+```
+
+The full schema, validator rules, and audit events for `proxy_type = "smtp"` are documented in `email-and-notification-channels.md §3`.
 
 ---
 
@@ -2051,6 +2167,7 @@ well-known localhost ports. The agent must not bind to these ports.
 | 1433  | MSSQL credential proxy | `mssql` |
 | 27017 | MongoDB credential proxy | `mongodb` |
 | 6379  | Redis credential proxy | `redis` |
+| 2525  | SMTP credential proxy (V2) | `smtp` |
 | 8001  | Kubernetes credential proxy | `k8s` |
 | 9001  | AWS IMDS credential proxy | `aws` |
 | 9002  | GCP metadata credential proxy | `gcp` |
@@ -2326,6 +2443,16 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [ ] allow_read_only restriction enforcement
 - [ ] Implement `RedisProxy` (RESP: AUTH, command name extraction)
       - [ ] allow_read_commands_only restriction enforcement
+- [ ] Implement `SmtpProxy` (V2; full spec in `email-and-notification-channels.md §3`)
+      - [ ] SMTP-server side: HELO/EHLO/MAIL/RCPT/DATA/QUIT only; reject AUTH, VRFY, EXPN, STARTTLS
+      - [ ] Substitute `MAIL FROM` and `From:` header from policy `from_address`
+      - [ ] Strip `Bcc:`, `Sender:`, `Resent-From:`, agent-injected `Received:`; rewrite `Message-Id:`
+      - [ ] Recipient allowlist: `allowed_recipient_domains` (case-insensitive suffix) + optional `allowed_recipient_addresses`; reject with `550 5.7.1`
+      - [ ] STARTTLS or implicit TLS (port 465) to upstream; `auth_method` ∈ `{plain, login, xoauth2}`
+      - [ ] Per-task and per-session sliding-window rate limit in atomic `BEGIN IMMEDIATE` SQLite tx
+      - [ ] Body SHA-256 audit; opt-in body archive to immutable artifact store
+      - [ ] Emit `SmtpProxyConnected`, `SmtpProxyMessageSent`, `SmtpProxyMessageRejected`, `SmtpProxyRateLimited`, `SmtpProxyUpstreamError`, `SmtpProxyDisconnected`
+      - [ ] Reuse `crates/raxis-smtp-client/` (also used by `EmailChannel` notification impl)
 - [ ] Kernel: start all declared credential proxies before VM boot
 - [ ] Kernel: emit `CredentialProxyStarted` for each proxy
 - [ ] Kernel: send shutdown signal to proxies on session termination
