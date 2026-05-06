@@ -8,6 +8,7 @@
 > - `specs/v2/v2-deep-spec.md §raxis-gateway` — provider API egress prerequisites
 > - `specs/v2/credential-proxy.md` — `INV-VM-CAP-04`; constrains VM-side credential exposure but does not change host requirements
 > - `specs/v2/integration-merge.md` — git binary / `gix` requirements
+> - `specs/v2/planner-harness.md` — VM guest kernel ≥ 5.14 + cgroup v2 controllers (`INV-PLANNER-HARNESS-03`); kernel-bundled `raxis-reviewer-core` image (`INV-PLANNER-HARNESS-02`); kernel-bundled `raxis-orchestrator-core` image (`INV-PLANNER-HARNESS-05`); opt-in kernel-bundled `raxis-executor-starter` image (§10.6) consumed by `operator-ergonomics.md` defaulting
 
 ---
 
@@ -19,7 +20,9 @@ RAXIS V2 is a single-host control plane consisting of `raxis-kernel` (the truste
 
 | Concern | Requirement | Notes |
 |---|---|---|
-| **Operating system** | Linux 5.10+ OR macOS 13.0+ | Windows not supported |
+| **Host operating system** | Linux 5.10+ OR macOS 13.0+ | Windows not supported |
+| **VM guest OS kernel** | Linux **5.14+** for any operator-published planner image (Executor only in V2) | Required for atomic `cgroup.kill` per `INV-PLANNER-HARNESS-03`; `raxis doctor` validates published images. The kernel-bundled `raxis-reviewer-core` (`INV-PLANNER-HARNESS-02`) and `raxis-orchestrator-core` (`INV-PLANNER-HARNESS-05`) both ship with a RAXIS-pinned 5.14+ kernel by construction. See §2.5. |
+| **VM guest kernel features** | cgroup v2 mounted; `cpu`, `memory`, `pids` controllers in `cgroup.subtree_control` | Required for in-VM process containment / CPU priority per `planner-harness.md §10.1` |
 | **CPU architecture** | `x86_64` or `aarch64` | Both Linux and macOS supported on both archs |
 | **Hypervisor** | Linux: KVM (`/dev/kvm`)<br>macOS: Apple Virtualization.framework | Hard requirement; the kernel will not start without |
 | **Minimum memory** | 4 GB | Single small initiative; smallest viable deployment |
@@ -32,6 +35,7 @@ RAXIS V2 is a single-host control plane consisting of `raxis-kernel` (the truste
 | **Inbound network** | None | The kernel listens only on local UDS sockets |
 | **Daemon mode** | systemd (Linux) or launchd (macOS) | Required only if using `--daemon`; foreground mode has no supervisor requirement |
 | **External tooling** | `git` ≥ 2.30, SQLite ≥ 3.35 | `gix` for native operations; `git` shells out for fallback |
+| **Bundled with kernel release** | `raxis-reviewer-core-<kernel_version>.img`, `raxis-orchestrator-core-<kernel_version>.img`, and (opt-in) `raxis-executor-starter-<kernel_version>.img`, all at `$RAXIS_INSTALL_DIR/images/` | Kernel-built canonical Reviewer image (`INV-PLANNER-HARNESS-02`) and canonical Orchestrator image (`INV-PLANNER-HARNESS-05`); both digests hardcoded in the kernel binary; neither operator-customizable. The Executor starter image is opt-in (`planner-harness.md §10.6`): used only when `policy.toml [default_executor_image]` selects it; its digest is published in release notes and pinned in policy via `[[vm_images]] oci_digest`. See §8.1, §11. |
 
 ### 1.2 Validation: `raxis doctor`
 
@@ -102,7 +106,31 @@ Windows is not supported in V2 for the kernel or microVM hosting. The kernel's h
 
 The `raxis` CLI binary may be built for and run on Windows for the purpose of submitting intents to a remote Linux- or macOS-hosted kernel via SSH-tunneled UDS. This is operator-DIY in V2 and not first-class supported.
 
-### 2.4 Unsupported configurations explicitly documented
+### 2.5 VM guest kernel requirements
+
+The host kernel runs the kernel daemon and the hypervisor; the **VM guest kernel** runs inside each microVM and hosts the `raxis-planner` process. Host and VM kernel requirements are independent:
+
+| Concern | Host kernel | VM guest kernel |
+|---|---|---|
+| Minimum version | Linux 5.10+ (per §2.1) | **Linux 5.14+** (per `planner-harness.md §10.2`) |
+| Required features | KVM, VirtIO, VSOCK, cgroups v2 (host-side) | cgroup v2 mounted in-VM; `cpu`, `memory`, `pids` controllers in `cgroup.subtree_control` |
+| Source of the kernel | Operator's distribution (Ubuntu, Debian, etc.) | Bundled with the OCI image used to boot the VM |
+
+**Why 5.14+ for the VM guest kernel.** The harness's process-containment substrate (`INV-PLANNER-HARNESS-03`) requires `cgroup.kill` (Linux 5.14, August 2021) for atomic, race-free process-tree teardown. Earlier kernels could only iterate `cgroup.procs` and `kill(pid, SIGKILL)` in a loop, which races against new forks; that fallback was rejected during V2 design (`planner-harness.md §10.2`). 5.14+ is mandatory; the kernel refuses to activate planner sessions whose VM image ships an older kernel.
+
+**Per-role enforcement:**
+
+- **Executor images** are operator-published per `INV-VM-CAP-03`. Operators are responsible for shipping a kernel ≥ 5.14 and a properly-configured cgroup v2 hierarchy. `raxis doctor` (§11) inspects every operator-published image at first-use and reports failures before the image is allowed to boot.
+- **The Reviewer image** is the kernel-bundled `raxis-reviewer-core` (per `INV-PLANNER-HARNESS-02`). Its kernel version is fixed at RAXIS release time, always ≥ 5.14, and not operator-tunable. Operators have no Reviewer-image responsibilities.
+- **The Orchestrator image** is the kernel-bundled `raxis-orchestrator-core` (per `INV-PLANNER-HARNESS-05`). Its kernel version is fixed at RAXIS release time, always ≥ 5.14, and not operator-tunable. Operators have no Orchestrator-image responsibilities — and no Orchestrator declarations in `plan.toml` either, per `INV-PLANNER-HARNESS-06`.
+
+**Compatibility notes for operator-published images:**
+
+- Stable distribution kernels meeting 5.14+ as of 2024: Ubuntu 22.04+ (kernel 5.15+), Debian 12+ (kernel 6.1+), RHEL 9+ (kernel 5.14+), Alpine 3.18+, Fedora 36+, Amazon Linux 2023, Rocky/AlmaLinux 9+.
+- Distributions with kernels older than 5.14 (e.g., Ubuntu 20.04 with default 5.4 kernel, Debian 11 with 5.10) may still be used as the **userspace base** for an operator-published image, but the VM image must be assembled with a 5.14+ kernel (e.g., bootc / mkosi / distroless approach where the kernel is selected independently of the userspace).
+- Verifier-process images (per `verifier-processes.md`) inherit the same 5.14+ requirement; their cgroup substrate is used for verifier-internal process management and timeout enforcement.
+
+### 2.6 Unsupported configurations explicitly documented
 
 The following are known to NOT work:
 
@@ -416,11 +444,29 @@ This means: an exploited kernel cannot directly write `/etc/passwd`, modify `/pr
 | `git` | 2.30 | Fallback for complex git operations not yet supported by `gix` | OS package manager |
 | SQLite | 3.35 (for `RETURNING` clause) | Kernel state store | Linked statically into the kernel binary; no external dependency |
 | OpenSSL or rustls | rustls bundled | TLS for outbound HTTPS | Bundled with the binary |
+| `raxis-reviewer-core-<kernel_version>.img` | Matches kernel release | Canonical Reviewer VM image (per `INV-PLANNER-HARNESS-02`); booted unconditionally for Reviewer-role tasks. Operators do NOT customize this image; the kernel verifies its on-disk SHA-256 against a compiled-in expected digest at every Reviewer activation. | Bundled with the kernel release at `$RAXIS_INSTALL_DIR/images/`; never pulled from a registry. |
+| `raxis-orchestrator-core-<kernel_version>.img` | Matches kernel release | Canonical Orchestrator VM image (per `INV-PLANNER-HARNESS-05`); booted unconditionally for the auto-created Orchestrator session of every initiative. Operators do NOT customize this image; the kernel verifies its on-disk SHA-256 against a compiled-in expected digest at every Orchestrator activation. | Bundled with the kernel release at `$RAXIS_INSTALL_DIR/images/`; never pulled from a registry. |
+| `raxis-executor-starter-<kernel_version>.img` | Matches kernel release | **Strongly recommended; not strictly required.** Canonical Executor starter image (per `planner-harness.md §10.6`); used as the operator-ergonomics defaulting target when the deployment's `policy.toml [default_executor_image] alias` points at it (per `operator-ergonomics.md §3` D1, §18.1). Unlike the Reviewer and Orchestrator canonical images this one is **opt-in**: deployments whose plans always pin an explicit `vm_image` can omit this file with no functional impact. | Bundled with the kernel release at `$RAXIS_INSTALL_DIR/images/`; never pulled from a registry. |
+| `raxis-verifier-symbol-index-<kernel_version>.img` | Matches kernel release | **Kernel-canonical verifier image (per `INV-VERIFIER-12`).** Booted unconditionally for symbol-index verifier activations when `policy.toml [prepare] auto_inject_symbol_index = true` (default) and the plan's tasks touch source files. The kernel verifies its on-disk SHA-256 against a compiled-in expected digest at every symbol-index verifier spawn (`FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH` on mismatch). Operators do NOT customize this image. The alias `"raxis-verifier-symbol-index"` is reserved at policy load (`FAIL_POLICY_RESERVED_VM_IMAGE_NAME` on collision). | Bundled with the kernel release at `$RAXIS_INSTALL_DIR/images/`; never pulled from a registry. |
+| `raxis-verifier-rust-starter-<kernel_version>.img` | Matches kernel release | **Strongly recommended; not strictly required.** Tiered language starter (per `verifier-processes.md §14.5`); ships with `rustc`, `cargo`, and `cargo-nextest` for the common case of `cargo test` / `cargo clippy` verifiers. Auto-selected by `setup wizard` when the operator declares Rust as a target language. **Not** kernel-canonical: the kernel does NOT verify a compiled-in digest at runtime; supply-chain integrity rests on the operator's signed `[[vm_images]] oci_digest`. The alias `"raxis-verifier-rust-starter"` is the conventional reference but operators can override `policy.toml [default_verifier_images].rust` to point at a custom image. | Bundled with the kernel release at `$RAXIS_INSTALL_DIR/images/`; never pulled from a registry. |
+| `raxis-verifier-node-starter-<kernel_version>.img` | Matches kernel release | **Strongly recommended; not strictly required.** Tiered language starter for Node.js workloads (`node`, `npm`, `pnpm`); auto-selected by `setup wizard` when Node is a declared target language. Trust model and override mechanism mirror the Rust starter row above. | Bundled with the kernel release at `$RAXIS_INSTALL_DIR/images/`; never pulled from a registry. |
+| `raxis-verifier-python-starter-<kernel_version>.img` | Matches kernel release | **Strongly recommended; not strictly required.** Tiered language starter for Python workloads (`python3`, `uv`, `pytest`); auto-selected by `setup wizard` when Python is a declared target language. Trust model and override mechanism mirror the Rust starter row above. | Bundled with the kernel release at `$RAXIS_INSTALL_DIR/images/`; never pulled from a registry. |
+| `raxis-verifier-go-starter-<kernel_version>.img` | Matches kernel release | **Strongly recommended; not strictly required.** Tiered language starter for Go workloads (`go`, `golangci-lint`); auto-selected by `setup wizard` when Go is a declared target language. Trust model and override mechanism mirror the Rust starter row above. | Bundled with the kernel release at `$RAXIS_INSTALL_DIR/images/`; never pulled from a registry. |
 
 The kernel binary is statically-linked for SQLite, rustls, and most other dependencies — distribution is a single binary with minimal runtime dependencies. The only runtime executables RAXIS shells out to:
 
 - `git` (for the small set of git operations not yet in `gix`)
 - The hypervisor binary (Linux: bundled Firecracker; macOS: Apple Virtualization.framework via Swift bridge)
+
+**Canonical Reviewer image distribution.** The `raxis-reviewer-core` image is shipped as a single OCI image bundle at `$RAXIS_INSTALL_DIR/images/raxis-reviewer-core-<kernel_version>.img` (typical paths: `/usr/local/lib/raxis/images/` for system-mode installs, `~/.local/share/raxis/images/` for user-mode installs). The kernel binary contains a compiled-in SHA-256 of the image bytes; at every Reviewer-task activation the kernel re-computes the on-disk digest and refuses to boot the VM with `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH` on any mismatch. Air-gapped installs work without modification — the image is a local file, not a registry artifact. See `planner-harness.md §4.5` and `§10.4` for the full content specification.
+
+**Canonical Orchestrator image distribution.** Distributed in parallel with the Reviewer image at `$RAXIS_INSTALL_DIR/images/raxis-orchestrator-core-<kernel_version>.img`. The kernel binary contains a compiled-in SHA-256 of the image bytes (`EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`) and a compiled-in NNSP (`ORCHESTRATOR_NNSP_BYTES`) version-locked with the image. At every Orchestrator-session activation (one per initiative), the kernel re-computes the on-disk digest and refuses to boot the VM with `FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH` on any mismatch. The Orchestrator image is materially larger than the Reviewer image (~50 MiB vs ~15 MiB) because it includes `bash`, `git`, `ripgrep`, and POSIX coreutils for the semantic merge conflict resolution workflow specified in `kernel-mechanics-prompt.md §3.2 [KERNEL: CONFLICT RESOLUTION PROTOCOL]`. See `planner-harness.md §4.7` and `§10.5` for the full content specification.
+
+**Canonical Executor starter image distribution.** Distributed alongside the Reviewer and Orchestrator images at `$RAXIS_INSTALL_DIR/images/raxis-executor-starter-<kernel_version>.img`. **The starter image is opt-in**: nothing in the kernel's runtime depends on its presence; it is consumed only by `raxis-cli plan prepare` (`operator-ergonomics.md §5`) when the deployment's `policy.toml` declares `[default_executor_image] alias = "raxis-executor-starter"`. The image's SHA-256 digest is published in the RAXIS release notes; the policy bundle that selects this image MUST declare a `[[vm_images]]` entry with `oci_digest = "sha256:..."` matching the release-notes digest, and the kernel verifies the digest at every Executor session activation that uses this image (per the existing `vm_images.oci_digest` enforcement; no new invariant is required). The starter image is materially larger than the Reviewer and Orchestrator images (~2 GiB compressed) because it carries general-purpose dev tooling for four mainstream language ecosystems (Node, Python, Rust, Go), the build toolchain, common Unix tooling, and `git`/`gh`. Deployments with strict size constraints or strict supply-chain requirements typically omit the starter image and have all operators pin their own custom Executor images. See `planner-harness.md §10.6` for the full content specification.
+
+**Canonical Verifier symbol-index image distribution.** Distributed alongside the other canonical images at `$RAXIS_INSTALL_DIR/images/raxis-verifier-symbol-index-<kernel_version>.img`. **The symbol-index image is kernel-canonical** per `INV-VERIFIER-12` — the kernel binary contains a compiled-in SHA-256 (`EXPECTED_SYMBOL_INDEX_VERIFIER_IMAGE_DIGEST`) and refuses to spawn the verifier VM with `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH` on any mismatch. The image is intentionally minimal (~12 MiB compressed) — Alpine Linux base, `raxis-verifier` PID-1 binary, `ctags` (universal-ctags), and a small wrapper script that walks the workspace, invokes `ctags`, and emits a normalized JSON symbol index to `/raxis/symbol_index.json`. The image's command line is fixed; operators have no per-plan customization surface for it (matching the Reviewer/Orchestrator pattern). The image alias `"raxis-verifier-symbol-index"` is reserved at policy load — any `[[vm_images]]` entry attempting to use the alias is rejected with `FAIL_POLICY_RESERVED_VM_IMAGE_NAME` per `verifier-processes.md §14.3`. Air-gapped installs work without modification — the image is a local file. See `verifier-processes.md §14` for the full content specification and reserved-alias semantics.
+
+**Tiered language starter verifier image distribution.** Four optional images are bundled at `$RAXIS_INSTALL_DIR/images/raxis-verifier-{rust,node,python,go}-starter-<kernel_version>.img`. **These images are bundled but NOT kernel-canonical** — distinct from the symbol-index image and from the Reviewer/Orchestrator images, the kernel does not embed a compiled-in digest for them and does not enforce a runtime digest check beyond the standard `[[vm_images]] oci_digest` mechanism. The trust boundary is: **operator-published-target-equivalent** — the operator signs `policy.toml`, the policy declares `[[vm_images]]` entries with `oci_digest` matching the release-notes digest, and the kernel enforces the per-plan `oci_digest` at every verifier spawn (existing mechanism; no new code path). This intentional asymmetry reflects the design choice that language-stack tooling is operator-mutable (an operator may want a Rust starter with `cargo-tarpaulin` baked in, or a Python starter pinned to 3.12) while the symbol-index image is structural to the Pure-Static Reviewer's correctness and must be a kernel-bound contract. The `setup wizard` (`operator-ergonomics.md §16.3` phase 6) auto-populates `[default_verifier_images].<lang>` entries based on the operator's declared target languages and writes the corresponding `[[vm_images]] oci_digest` entries for each starter the operator chose to enable. Operators with strict size constraints or non-mainstream language targets can omit any subset of these starter files. See `verifier-processes.md §14.5` for the full content specification and `operator-ergonomics.md §16.3` for the wizard flow.
 
 ### 8.2 Required for daemon mode (per `kernel-lifecycle.md`)
 
@@ -572,6 +618,13 @@ Categories:
 - `daemon` — systemd or launchd availability, lingering state (Linux user mode)
 - `dependencies` — `git`, SQLite version, TLS roots
 - `permissions` — `/dev/kvm` access, group memberships, sudo for `--system` operations
+- `vm-images` — for every operator-published VM image referenced by an installed `policy.toml` (Executor and verifier images only in V2 — Reviewer and Orchestrator are kernel-canonical): VM guest kernel ≥ 5.14, cgroup v2 mounted, required cgroup controllers (`cpu`, `memory`, `pids`) in `cgroup.subtree_control`, `raxis-planner` binary present (for planner roles)
+- `canonical-images` — kernel-bundled canonical images at `$RAXIS_INSTALL_DIR/images/`:
+  - `raxis-reviewer-core-<kernel_version>.img` (per `INV-PLANNER-HARNESS-02`): presence, SHA-256 digest matches kernel-binary's compiled-in `EXPECTED_REVIEWER_IMAGE_DIGEST`, content sanity (`raxis-planner` and `ripgrep` present; `/bin/sh`, `/bin/bash`, language compilers and runtimes, `git`, network utilities, editors all absent per `planner-harness.md §10.4`)
+  - `raxis-orchestrator-core-<kernel_version>.img` (per `INV-PLANNER-HARNESS-05`): presence, SHA-256 digest matches kernel-binary's compiled-in `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`, content sanity (`raxis-planner`, `bash`, `git`, `ripgrep`, and POSIX coreutils present; `python3`, `node`, `rustc`, `gcc`, package managers, `curl`, `wget`, editors, LSPs all absent per `planner-harness.md §10.5`)
+  - `raxis-executor-starter-<kernel_version>.img` (per `planner-harness.md §10.6`; opt-in): presence (skipped if absent and the loaded `policy.toml` does NOT declare `[default_executor_image]` referencing this alias), SHA-256 digest matches the digest published in the RAXIS release notes (which is also the digest the policy's `[[vm_images]]` entry pins), content sanity (`raxis-planner`, `bash`, `node`/`npm`, `python3`/`pip`, `cargo`/`rustc`, `go`, `git`/`gh`, `rg`/`fd`/`jq`, build toolchain present per `planner-harness.md §10.6`); a digest mismatch with no in-flight initiative using the image is a non-fatal `WARN_DEFAULT_EXECUTOR_IMAGE_DIGEST_DRIFT`; a digest mismatch when an active initiative was activated under the now-mismatched image is `FAIL_DEFAULT_EXECUTOR_IMAGE_DIGEST_MISMATCH`
+  - `raxis-verifier-symbol-index-<kernel_version>.img` (per `INV-VERIFIER-12`; structural): presence — required when `policy.toml [prepare] auto_inject_symbol_index = true` (default) AND the policy bundle declares any plan that produces source-touching tasks; otherwise downgraded to a non-fatal `WARN_SYMBOL_INDEX_IMAGE_MISSING_AUTO_INJECT_DISABLED`. SHA-256 digest matches kernel-binary's compiled-in `EXPECTED_SYMBOL_INDEX_VERIFIER_IMAGE_DIGEST`. Content sanity (`raxis-planner` PID 1 present, `ctags` present and resolves to `universal-ctags`, no shells beyond `/bin/sh` for `command` execution, no network utilities, no language compilers per `verifier-processes.md §14`). A digest mismatch is `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH` and halts further symbol-index verifier spawns until `raxis doctor canonical-images` succeeds again.
+  - `raxis-verifier-{rust,node,python,go}-starter-<kernel_version>.img` (per `verifier-processes.md §14.5`; opt-in tiered language starters): presence (skipped if absent and the loaded `policy.toml [default_verifier_images]` does NOT reference the alias; skipped if `[default_verifier_images].<lang>` references a different alias), SHA-256 digest matches the digest published in the RAXIS release notes (which is also the digest pinned by the policy's `[[vm_images]] oci_digest` entry), content sanity per `verifier-processes.md §14.5` (Rust starter: `rustc`, `cargo`, `cargo-nextest` present; Node starter: `node`, `npm`, `pnpm` present; Python starter: `python3`, `uv`, `pytest` present; Go starter: `go`, `golangci-lint` present). A digest mismatch with no in-flight verifier using the image is a non-fatal `WARN_DEFAULT_VERIFIER_IMAGE_DIGEST_DRIFT { language }`; a digest mismatch when an active verifier session was activated under the now-mismatched image is `FAIL_DEFAULT_VERIFIER_IMAGE_DIGEST_MISMATCH { language }`. Tiered starters are NOT subject to the `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH` kernel-embedded-digest check (that check is symbol-index-only per `INV-VERIFIER-12`).
 
 ### 11.2 Sample output
 
@@ -625,6 +678,81 @@ External dependencies
   ✓ git 2.42.0 at /usr/bin/git
   ✓ SQLite 3.42.0 (linked statically; required: 3.35+)
 
+VM images (per planner-harness.md §10 — Executor and verifier images only;
+            Reviewer and Orchestrator are kernel-canonical, see below)
+  ✓ raxis/rust-node:1.87-20 (Executor): kernel 6.1.0, cgroup v2, cpu+memory+pids in subtree_control, raxis-planner present
+  ✓ raxis/parsers:1 (verifier): kernel 6.1.0, cgroup v2, cpu+memory+pids in subtree_control
+
+Canonical images (kernel-bundled; not operator-customizable)
+
+  Reviewer image (per planner-harness.md §4.5 / INV-PLANNER-HARNESS-02)
+    ✓ raxis-reviewer-core-2.0.0.img present at /usr/local/lib/raxis/images/
+    ✓ SHA-256 digest matches kernel's compiled-in EXPECTED_REVIEWER_IMAGE_DIGEST
+    ✓ Content sanity: raxis-planner present (PID 1)
+    ✓ Content sanity: ripgrep present
+    ✓ Content sanity: NO shells (/bin/sh, /bin/bash, busybox)
+    ✓ Content sanity: NO language toolchains (rustc, cargo, node, python, go, …)
+    ✓ Content sanity: NO git binary
+    ✓ Content sanity: NO network utilities (curl, wget, ssh)
+    ✓ Content sanity: NO editors
+
+  Orchestrator image (per planner-harness.md §4.7 / INV-PLANNER-HARNESS-05)
+    ✓ raxis-orchestrator-core-2.0.0.img present at /usr/local/lib/raxis/images/
+    ✓ SHA-256 digest matches kernel's compiled-in EXPECTED_ORCHESTRATOR_IMAGE_DIGEST
+    ✓ Content sanity: raxis-planner present (PID 1)
+    ✓ Content sanity: bash 5.1.4 present (foreground-only harness build)
+    ✓ Content sanity: git 2.39.2 present
+    ✓ Content sanity: ripgrep present
+    ✓ Content sanity: POSIX coreutils present (cat, head, tail, diff, patch, sed, awk, grep, …)
+    ✓ Content sanity: NO language toolchains (python3, node, rustc, gcc, …)
+    ✓ Content sanity: NO package managers (npm, cargo, pip, gem)
+    ✓ Content sanity: NO network utilities (curl, wget, ssh)
+    ✓ Content sanity: NO editors (vi, nano, emacs)
+    ✓ Content sanity: NO LSPs
+
+  Executor starter image (per planner-harness.md §10.6 — opt-in, used by `plan prepare` defaulting)
+    ✓ raxis-executor-starter-2.0.0.img present at /usr/local/lib/raxis/images/
+    ✓ SHA-256 digest matches release-notes digest AND policy [[vm_images]] oci_digest pin
+    ✓ Content sanity: raxis-planner present (PID 1)
+    ✓ Content sanity: bash 5.1.4 present (full Executor harness build)
+    ✓ Content sanity: node 20.11.1, npm 10.2.4 present
+    ✓ Content sanity: python 3.11.7, pip 23.3.2 present
+    ✓ Content sanity: rustc 1.76.0, cargo 1.76.0 present
+    ✓ Content sanity: go 1.22.0 present
+    ✓ Content sanity: git 2.43.0, gh 2.42.1 present
+    ✓ Content sanity: rg 14.1.0, fd 9.0.0, jq 1.7.1 present
+    ✓ Content sanity: build toolchain present (make, gcc, g++, clang, ld, ar)
+    ⓘ Selected as default by current policy.toml [default_executor_image] alias = "raxis-executor-starter"
+
+  Symbol-index verifier image (per verifier-processes.md §14 / INV-VERIFIER-12)
+    ✓ raxis-verifier-symbol-index-2.0.0.img present at /usr/local/lib/raxis/images/
+    ✓ SHA-256 digest matches kernel's compiled-in EXPECTED_SYMBOL_INDEX_VERIFIER_IMAGE_DIGEST
+    ✓ Content sanity: raxis-verifier present (PID 1; statically linked)
+    ✓ Content sanity: ctags present, resolves to 'Universal Ctags 6.0.0(p6.0.0-0-g7eed99af)'
+    ✓ Content sanity: /bin/sh present (minimal posix; for `command` execution)
+    ✓ Content sanity: NO additional shells (/bin/bash absent)
+    ✓ Content sanity: NO language toolchains (rustc, cargo, node, python, go, …)
+    ✓ Content sanity: NO network utilities (curl, wget, ssh)
+    ⓘ Image alias 'raxis-verifier-symbol-index' is RESERVED — operator [[vm_images]] aliases must not collide
+    ⓘ Auto-injection enabled by current policy.toml [prepare] auto_inject_symbol_index = true
+
+  Tiered language starter verifier images (per verifier-processes.md §14.5 — opt-in)
+    Rust starter (referenced by current policy [default_verifier_images].rust)
+      ✓ raxis-verifier-rust-starter-2.0.0.img present at /usr/local/lib/raxis/images/
+      ✓ SHA-256 digest matches release-notes digest AND policy [[vm_images]] oci_digest pin
+      ✓ Content sanity: raxis-verifier present (PID 1)
+      ✓ Content sanity: rustc 1.78.0, cargo 1.78.0, cargo-nextest 0.9.70 present
+    Node starter (referenced by current policy [default_verifier_images].node)
+      ✓ raxis-verifier-node-starter-2.0.0.img present at /usr/local/lib/raxis/images/
+      ✓ SHA-256 digest matches release-notes digest AND policy [[vm_images]] oci_digest pin
+      ✓ Content sanity: node 20.11.1, npm 10.2.4, pnpm 8.15.4 present
+    Python starter (NOT referenced by current policy; image absent — OK)
+      ⓘ raxis-verifier-python-starter-2.0.0.img absent at /usr/local/lib/raxis/images/
+      ⓘ Skipped: policy [default_verifier_images].python is not set; install if Python becomes a target
+    Go starter (NOT referenced by current policy; image absent — OK)
+      ⓘ raxis-verifier-go-starter-2.0.0.img absent at /usr/local/lib/raxis/images/
+      ⓘ Skipped: policy [default_verifier_images].go is not set; install if Go becomes a target
+
 Daemon mode (per kernel-lifecycle.md)
   ✓ systemd available; user services supported
   ⓘ Lingering not yet enabled (will be enabled at first --daemon install)
@@ -647,11 +775,133 @@ A failure (e.g., no `/dev/kvm`) produces:
     - On bare metal: enable VT-x or AMD-V in your firmware (BIOS/UEFI) settings
     - On a cloud VM: use an instance type that supports nested virtualization
       (AWS metal instances, GCP sole-tenant nodes); most managed VMs do NOT
-    - On WSL2: not supported per system-requirements.md §2.4
+    - On WSL2: not supported per system-requirements.md §2.6
   See: specs/v2/system-requirements.md §5.1
 
 Result: 1 WARNING, 1 FAILURE
 RAXIS cannot run on this host. Resolve the failure above.
+```
+
+Other planner-harness-specific failures and their actionable forms:
+
+```
+✗ raxis/legacy-rust:1 (Executor) ships Linux kernel 5.10.0 (required: 5.14+)
+  This image cannot host a planner VM because INV-PLANNER-HARNESS-03 (cgroup.kill
+  for atomic process-tree teardown) requires Linux 5.14+. Plans referencing this
+  image will be rejected at approve_plan with FAIL_VM_GUEST_KERNEL_TOO_OLD.
+  Mitigations:
+    - Rebuild the image with a kernel ≥ 5.14 (e.g., from Ubuntu 22.04+ base, or
+      bootc / mkosi with an explicit recent kernel selection)
+    - Switch to a stable base image known to ship 5.14+ (Ubuntu 22.04, Debian 12,
+      RHEL 9, Fedora 36+, Alpine 3.18+)
+  See: specs/v2/system-requirements.md §2.5; planner-harness.md §10.2
+```
+
+```
+✗ raxis-reviewer-core-2.0.0.img digest mismatch
+  Expected: sha256:e3b0c44298fc1c149afbf4c8996fb924...
+  Observed: sha256:c057a3e7ea75c2aef3c1cd95fa1aac84...
+  This indicates either (a) the kernel binary and the canonical Reviewer image
+  bundle are from different RAXIS releases, (b) the on-disk image has been
+  modified after install, or (c) the install was incomplete. Reviewer-role
+  tasks will be blocked until this is resolved (FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH
+  at every Reviewer activation; SecurityViolationDetected audit emitted).
+  Mitigations:
+    - Reinstall RAXIS from a verified source matching the running kernel version
+    - Verify the published release SHA-256 of raxis-reviewer-core-<version>.img
+      matches what is on disk
+    - Do NOT attempt to "fix" by replacing the image with a custom build —
+      operator-built Reviewer images are explicitly prohibited per
+      INV-PLANNER-HARNESS-02
+  See: specs/v2/planner-harness.md §4.5
+```
+
+```
+✗ raxis-reviewer-core-2.0.0.img content sanity: /bin/sh present
+  The canonical Reviewer image MUST NOT contain any shell (per INV-PLANNER-HARNESS-01,
+  three-layer image enforcement). Presence indicates either (a) the on-disk image
+  has been tampered with, or (b) the kernel and image bundle are mismatched
+  versions and the kernel's expected digest happens to match a different (broken)
+  image. The kernel will refuse to boot Reviewer VMs from this image.
+  Mitigations:
+    - Reinstall RAXIS from a verified source
+    - Verify the digest matches the published release manifest
+  See: specs/v2/planner-harness.md §4.5, §10.4
+```
+
+```
+✗ raxis-orchestrator-core-2.0.0.img digest mismatch
+  Expected: sha256:7c1b3e2f8a4d9c6e1b7a5f3d8c2e9a4b...
+  Observed: sha256:9d4a7c2e8f1b3d5a6c8e2f4b9d7a1c5e...
+  This indicates either (a) the kernel binary and the canonical Orchestrator image
+  bundle are from different RAXIS releases, (b) the on-disk image has been
+  modified after install, or (c) the install was incomplete. Initiative admission
+  will be blocked until this is resolved (FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH
+  at every Orchestrator activation; SecurityViolationDetected audit emitted).
+  Mitigations:
+    - Reinstall RAXIS from a verified source matching the running kernel version
+    - Verify the published release SHA-256 of raxis-orchestrator-core-<version>.img
+      matches what is on disk
+    - Do NOT attempt to "fix" by replacing the image with a custom build —
+      operator-built Orchestrator images are explicitly prohibited per
+      INV-PLANNER-HARNESS-05
+  See: specs/v2/planner-harness.md §4.7
+```
+
+```
+✗ raxis-orchestrator-core-2.0.0.img content sanity: /usr/bin/python3 present
+  The canonical Orchestrator image MUST NOT contain language runtimes (per
+  planner-harness.md §10.5). Presence indicates either (a) the on-disk image has
+  been tampered with, or (b) the kernel and image bundle are mismatched versions.
+  The kernel will refuse to boot Orchestrator VMs from this image, blocking all
+  initiative admission.
+  Mitigations:
+    - Reinstall RAXIS from a verified source
+    - Verify the digest matches the published release manifest
+  See: specs/v2/planner-harness.md §4.7, §10.5
+```
+
+```
+✗ raxis-verifier-symbol-index-2.0.0.img digest mismatch
+  Expected: sha256:4e8b1c7d3f9a2c5e8b1d4f7a9c2e5b8d...
+  Observed: sha256:1a2c5e8b9d4f7a2c1e5b8d3f4a9c1e2b...
+  This indicates either (a) the kernel binary and the canonical symbol-index
+  verifier image bundle are from different RAXIS releases, (b) the on-disk image
+  has been tampered with, or (c) the install was incomplete. Symbol-index verifier
+  spawns will be blocked until this is resolved (FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH
+  at every symbol-index verifier activation; SecurityViolationDetected audit
+  emitted; further verifier spawns of this image are halted until digest matches).
+  Knock-on effect: WARN_REVIEWER_MISSING_SYMBOL_INDEX will fire on every Reviewer
+  activation that depended on the auto-injected symbol-index verifier output, since
+  the verifier never produces /raxis/symbol_index.json.
+  Mitigations:
+    - Reinstall RAXIS from a verified source matching the running kernel version
+    - Verify the published release SHA-256 of raxis-verifier-symbol-index-<version>.img
+      matches what is on disk
+    - Do NOT attempt to replace with a custom build — the symbol-index image is
+      kernel-canonical per INV-VERIFIER-12; operator-built variants are prohibited
+    - Workaround during recovery: set policy.toml [prepare] auto_inject_symbol_index = false
+      (Reviewer continues to function; the WARN_REVIEWER_MISSING_SYMBOL_INDEX
+      warning becomes the operator's signal to install a custom symbol_index
+      verifier per planner-harness.md §4.1 if symbol-index data is required)
+  See: specs/v2/verifier-processes.md §14
+```
+
+```
+✗ raxis-verifier-rust-starter-2.0.0.img digest mismatch (during in-flight verifier session)
+  Expected (per policy [[vm_images]] oci_digest): sha256:8d3a5c7e1b9f2d4a6c8e1b3d5f7a9c2e...
+  Observed (on disk): sha256:2a4c6e8b1d3f5a7c9e1b2d4f6a8c1e3b...
+  An active verifier-VM session was spawned from this image at a moment when the
+  on-disk image matched the policy-pinned digest, but the on-disk image has since
+  changed. New verifier spawns will be rejected with FAIL_DEFAULT_VERIFIER_IMAGE_DIGEST_MISMATCH;
+  the in-flight session is allowed to complete (its image bytes were already loaded).
+  The image is OPERATOR-managed (not kernel-canonical per verifier-processes.md §14.5);
+  the trust boundary is the operator-signed [[vm_images]] oci_digest.
+  Mitigations:
+    - Restore the image to the policy-pinned digest (re-extract from the release archive
+      or re-pull the operator's published image)
+    - OR: rotate the policy to pin the new digest (requires operator signature)
+  See: specs/v2/verifier-processes.md §14.5
 ```
 
 ### 11.3 Integration with kernel startup
@@ -682,8 +932,8 @@ CI pipelines and infrastructure-as-code tools can parse JSON output to gate depl
 ### 12.1 OS / platform
 
 - **Windows hosting:** not supported (per §2.3). The CLI may run on Windows for remote intent submission via SSH tunnel; this is operator-DIY.
-- **WSL1, WSL2:** not supported (per §2.4); KVM availability is unreliable.
-- **Docker container hosting the kernel:** not supported (per §2.4); container isolation is incompatible with hypervisor access requirements.
+- **WSL1, WSL2:** not supported (per §2.6); KVM availability is unreliable.
+- **Docker container hosting the kernel:** not supported (per §2.6); container isolation is incompatible with hypervisor access requirements.
 - **Nested KVM on cloud VMs:** technically works on some providers; performance is significantly degraded. Use bare-metal cloud instances for production.
 
 ### 12.2 Filesystem
@@ -697,6 +947,19 @@ CI pipelines and infrastructure-as-code tools can parse JSON output to gate depl
 - **CPUs without hardware virtualization:** RAXIS cannot run; `/dev/kvm` will be missing on Linux, Virtualization.framework will refuse to start VMs on macOS.
 - **Apple Silicon Linux distributions** (Asahi Linux): not in tested matrix; KVM support varies by hardware revision.
 - **Older ARM64 (pre-ARMv8):** not supported; missing virtualization extensions and AES instructions.
+
+### 12.3.1 VM image
+
+- **Operator-published planner / verifier images with VM guest kernel < 5.14:** rejected at `approve_plan` with `FAIL_VM_GUEST_KERNEL_TOO_OLD` (per `INV-PLANNER-HARNESS-03`). Resolution: rebuild the image with a kernel ≥ 5.14, or switch base.
+- **Operator attempts to publish a custom Reviewer image:** any `vm_image` field on a Reviewer-role task in `plan.toml` is rejected at `approve_plan` with `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` (per `INV-PLANNER-HARNESS-02`). Operators do not (and cannot) ship Reviewer images; the kernel-bundled `raxis-reviewer-core` is the only Reviewer image.
+- **Tampered or version-mismatched canonical Reviewer image on disk:** `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH` at every Reviewer activation; `SecurityViolationDetected { kind: "ReviewerImageDigestMismatch" }` audit emitted. Resolution: reinstall from a verified source.
+- **Operator attempts to declare an Orchestrator profile or task:** rejected at `approve_plan` with `FAIL_ORCHESTRATOR_PROFILE_NOT_ALLOWED` or `FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED` (per `INV-PLANNER-HARNESS-06`). Operators do not declare Orchestrator profiles or tasks in V2; the kernel auto-creates the Orchestrator session per initiative.
+- **Operator attempts to publish a custom Orchestrator image:** any `[[vm_images]]` entry in `policy.toml` whose `role_restriction` includes `"Orchestrator"` is rejected at policy load with `FAIL_POLICY_INVALID_ROLE_RESTRICTION` / `FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED` (per `INV-PLANNER-HARNESS-05`). The kernel-bundled `raxis-orchestrator-core` is the only Orchestrator image.
+- **Tampered or version-mismatched canonical Orchestrator image on disk:** `FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH` at every Orchestrator activation; `SecurityViolationDetected { kind: "OrchestratorImageDigestMismatch" }` audit emitted. Resolution: reinstall from a verified source.
+- **Operator attempts to publish a `[[vm_images]]` entry with alias `"raxis-verifier-symbol-index"`:** rejected at policy load with `FAIL_POLICY_RESERVED_VM_IMAGE_NAME` (per `INV-VERIFIER-12`). The alias is reserved to disambiguate against the kernel-canonical symbol-index verifier image; operators wanting custom symbol-extraction tooling pick a different alias and set `policy.toml [prepare] auto_inject_symbol_index = false`.
+- **Tampered or version-mismatched canonical symbol-index verifier image on disk:** `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH` at every symbol-index verifier activation; `SecurityViolationDetected { kind: "SymbolIndexVerifierImageDigestMismatch" }` audit emitted; further symbol-index verifier spawns are halted until `raxis doctor canonical-images` succeeds. Reviewer activations that depended on the auto-injected symbol-index witness will see `WARN_REVIEWER_MISSING_SYMBOL_INDEX`. Resolution: reinstall from a verified source matching the kernel version, OR set `policy.toml [prepare] auto_inject_symbol_index = false` to disable auto-injection during recovery.
+- **Tampered or version-mismatched tiered language starter image on disk** (Rust / Node / Python / Go starters per `verifier-processes.md §14.5`): the trust boundary is the operator-signed `[[vm_images]] oci_digest`, NOT a kernel-embedded digest. A digest mismatch produces `WARN_DEFAULT_VERIFIER_IMAGE_DIGEST_DRIFT { language }` (no in-flight session) or `FAIL_DEFAULT_VERIFIER_IMAGE_DIGEST_MISMATCH { language }` (in-flight session was activated under the now-mismatched image). Resolution: restore the image to the policy-pinned digest, OR rotate the policy to pin the new digest (requires operator signature).
+- **Operator-published image without cgroup v2 mounted or required controllers (`cpu`, `memory`, `pids`) in `subtree_control`:** rejected by `raxis doctor` and at first activation. Resolution: rebuild the image with the cgroup v2 substrate per `planner-harness.md §10.1`.
 
 ### 12.4 Network
 
@@ -726,9 +989,10 @@ CI pipelines and infrastructure-as-code tools can parse JSON output to gate depl
 This document is the canonical source for "what does RAXIS need to run." When other V2 specs introduce new requirements (e.g., a future V2.x spec requires a specific filesystem feature), they MUST also update the relevant section here. Specifically:
 
 - New external runtime dependencies → §8
-- New OS feature requirements → §2 or §5
+- New OS feature requirements (host or VM-guest) → §2 (host §2.1–§2.2, VM-guest §2.5)
 - New disk or memory minimums → §3
 - New network egress requirements → §6
 - New `raxis doctor` checks → §11.1 and §11.2
+- New per-image conformance requirements → §2.5 + §11.1 `vm-images` / `canonical-images` categories
 
 V3 will produce its own `specs/v3/system-requirements.md` extending this one with V3-specific additions (archiver sidecar, optional external anchor backends, etc.).
