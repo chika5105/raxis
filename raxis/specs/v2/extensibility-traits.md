@@ -1052,10 +1052,106 @@ pub trait AuditSink: Send + Sync + 'static {
     /// V2 ADDITION: the highest `seq` durably persisted. Used by
     /// recovery to detect mid-emit crashes (`crates/audit/reader.rs`).
     fn highest_durable_seq(&self) -> Result<Option<u64>, AuditWriterError>;
+
+    // === V2.1 paired-write extensions ===
+    //
+    // The methods below extend the trait with the three-event paired
+    // protocol defined in `audit-paired-writes.md §2`. Phase B0 calls
+    // `emit_pending`; Phase B2 calls `emit_confirmed_for` (or
+    // `emit_rolled_back_for` on deliberate rollback). Recovery
+    // (`reconcile_advisory`) calls `emit_recovered_confirmed` /
+    // `emit_recovered_rollback` to make the chain self-resolving for
+    // future verifications. The conformance kit in
+    // `crates/audit/tests/conformance.rs` enforces the orderings and
+    // fsync semantics (per `audit-paired-writes.md §15`).
+    //
+    // Default-impl note. The trait provides default implementations
+    // for the V2.1 methods that route through `emit` so legacy sinks
+    // (`FakeAuditSink` in V1 tests, `FileAuditSink` for pre-V2.1
+    // chains) keep compiling. Production implementations override the
+    // defaults with backend-native semantics (e.g. an S3 sink may use
+    // a single multipart upload to land both pending and confirmed
+    // atomically against the same SQLite WAL frame).
+
+    /// Phase B0 — emit a `StateChangePending` event before
+    /// `BEGIN IMMEDIATE`. The sink MUST persist durably (fsync or
+    /// equivalent) before returning `Ok`. The kernel guarantees that
+    /// the returned `pending_seq` (== `event.seq`) will be referenced
+    /// by exactly one of `emit_confirmed_for` or
+    /// `emit_rolled_back_for` (or, in the crash case, by neither —
+    /// the offline verifier resolves crash-orphans via SQLite per
+    /// `INV-AUDIT-PAIRED-04`).
+    fn emit_pending(
+        &self,
+        operation: StateChangeOperation,
+        session_id: Option<&str>,
+        initiative_id: Option<&str>,
+        task_id: Option<&str>,
+        idempotency_key: Option<[u8; 32]>,
+        pre_state_digest: [u8; 32],
+        intended_writes: Vec<RowMutationDescriptor>,
+        intended_post_state_digest: [u8; 32],
+        pre_tx_claims: KernelClaims,
+    ) -> Result<AuditEvent, AuditWriterError>;
+
+    /// Phase B2 — emit the existing-kind event augmented with the
+    /// three confirmation fields (`confirms_pending_seq`,
+    /// `sqlite_commit_id`, `actual_post_state_digest`). The sink
+    /// MUST persist durably before returning. Failure to fsync after
+    /// 3 retries with 100 ms backoff is `FAIL_AUDIT_CONFIRMED_FSYNC_
+    /// EXHAUSTED` (per `policy-plan-authority.md` paired-audit
+    /// failure-code catalog) and the kernel exits 137; recovery on
+    /// next start synthesises the missing confirmed via
+    /// `emit_recovered_confirmed` against the SQLite snapshot.
+    fn emit_confirmed_for(
+        &self,
+        confirms_pending_seq: u64,
+        kind: AuditEventKind,
+        sqlite_commit_id: u64,
+        actual_post_state_digest: [u8; 32],
+        session_id: Option<&str>,
+        initiative_id: Option<&str>,
+        task_id: Option<&str>,
+    ) -> Result<AuditEvent, AuditWriterError>;
+
+    /// Phase B2 (alternate path) — emit `StateChangeRolledBack` on
+    /// deliberate kernel rollback (constraint violation, lock
+    /// timeout, kernel-initiated abort). Sink MUST fsync before
+    /// returning so the planner-facing rejection is durable.
+    fn emit_rolled_back_for(
+        &self,
+        rolls_back_pending_seq: u64,
+        reason: RollbackReason,
+        reason_detail: String,
+    ) -> Result<AuditEvent, AuditWriterError>;
+
+    /// Recovery-only — `reconcile_advisory` calls this when the
+    /// offline verifier finds an orphan whose row in SQLite shows
+    /// `last_committing_event_seq == pending_seq` (the orphan
+    /// committed). Synthesises the missing confirmed event so future
+    /// verifications don't need to consult SQLite for this orphan.
+    /// The synthesised event MUST tag `_recovery_synthesised: true`
+    /// in its JSON for forensic clarity.
+    fn emit_recovered_confirmed(
+        &self,
+        confirms_pending_seq: u64,
+        sqlite_commit_id: u64,
+        actual_post_state_digest: [u8; 32],
+    ) -> Result<AuditEvent, AuditWriterError>;
+
+    /// Recovery-only — counterpart to `emit_recovered_confirmed`
+    /// for orphans whose SQLite rows show no committing seq match
+    /// (the orphan was crash-rolled-back). Synthesises
+    /// `StateChangeRolledBack { reason: CrashInferred }`.
+    fn emit_recovered_rollback(
+        &self,
+        rolls_back_pending_seq: u64,
+        reason_detail: String,
+    ) -> Result<AuditEvent, AuditWriterError>;
 }
 ```
 
-The existing `FileAuditSink` and `FakeAuditSink` impls in `crates/audit/src/sink.rs` are extended with `read_range`, `sync`, and `highest_durable_seq`.
+The existing `FileAuditSink` and `FakeAuditSink` impls in `crates/audit/src/sink.rs` are extended with `read_range`, `sync`, `highest_durable_seq`, and the five V2.1 paired-write methods.
 
 ### §5.2 Why the chain stays kernel-side
 
@@ -1065,24 +1161,28 @@ This split is what lets RAXIS Cloud have an immutable cloud ledger while still s
 
 ### §5.3 Files to create
 
-- `crates/audit/tests/conformance.rs` (NEW) — exercises any backend's `emit`/`read_range`/`sync`/`highest_durable_seq` contract; current `FileAuditSink` and `FakeAuditSink` MUST pass
+- `crates/audit/tests/conformance.rs` (NEW) — exercises any backend's `emit`/`read_range`/`sync`/`highest_durable_seq` contract plus the V2.1 paired-write contract (`emit_pending`/`emit_confirmed_for`/`emit_rolled_back_for`/`emit_recovered_*`); current `FileAuditSink` and `FakeAuditSink` MUST pass
+- `crates/audit/src/verifier.rs` (NEW — per `audit-paired-writes.md §5`) — the offline verifier algorithm that the conformance kit uses to assert pairing integrity
+- `crates/audit/src/digest.rs` (NEW — per `audit-paired-writes.md §13.1`) — canonical row-encoding helpers (`hash_row`, `RowDigest`) so every sink computes `pre_state_digest` and `actual_post_state_digest` identically
 
 ### §5.4 Files to change
 
-- `crates/audit/src/sink.rs` — extend the `AuditSink` trait with `read_range`, `sync`, `highest_durable_seq` (existing trait keeps `emit` unchanged)
-- `crates/audit/src/sink.rs` — extend `FileAuditSink` with the new methods (reads back from segment files; `sync` fsyncs the segment writer; `highest_durable_seq` reads the audit pointer)
-- `crates/audit/src/sink.rs` — extend `FakeAuditSink` symmetrically (returns from in-memory vec)
-- `crates/audit/src/reader.rs` — `verify_chain_*` functions accept `&dyn AuditSink` instead of `&Path`, so RAXIS Cloud / Postgres backends can be verified without exporting to disk first
-- `kernel/src/main.rs` — boot site reads `policy.toml [audit_sink]` and constructs the corresponding sink; default is `FileAuditSink`
-- `cli/src/commands/audit.rs` — `raxis audit verify` reads via `ctx.audit_sink.read_range(...)` instead of opening `<data_dir>/audit/*.jsonl` directly
-- `cli/src/commands/doctor.rs` — `[CHECK] audit.sink_health` calls `sink.sync()` and `highest_durable_seq()` and reports
+- `crates/audit/src/sink.rs` — extend the `AuditSink` trait with `read_range`, `sync`, `highest_durable_seq` (existing trait keeps `emit` unchanged); add the five V2.1 paired-write methods (`emit_pending`, `emit_confirmed_for`, `emit_rolled_back_for`, `emit_recovered_confirmed`, `emit_recovered_rollback`)
+- `crates/audit/src/sink.rs` — extend `FileAuditSink` with the new methods (reads back from segment files; `sync` fsyncs the segment writer; `highest_durable_seq` reads the audit pointer; paired-write methods append a single JSONL line per call with their distinguishing payload)
+- `crates/audit/src/sink.rs` — extend `FakeAuditSink` symmetrically (returns from in-memory vec; the paired-write methods are first-class so test fixtures can drive every crash window in §15 of `audit-paired-writes.md`)
+- `crates/audit/src/event.rs` — add `StateChangePending`, `StateChangeRolledBack`, `RollbackReason`, `RowMutationDescriptor`, `KernelClaims`, `StateChangeOperation` (per `audit-paired-writes.md §2.1`); augment every paired-class variant with `confirms_pending_seq`, `sqlite_commit_id`, `actual_post_state_digest` (per `audit-paired-writes.md §2.2`)
+- `crates/audit/src/reader.rs` — `verify_chain_*` functions accept `&dyn AuditSink` instead of `&Path`, so RAXIS Cloud / Postgres backends can be verified without exporting to disk first; `verify_chain_strict` is now a thin shim over `crates/audit/src/verifier.rs::verify` per `audit-paired-writes.md §5`
+- `kernel/src/main.rs` — boot site reads `policy.toml [audit_sink]` and constructs the corresponding sink; default is `FileAuditSink`. Boot also runs the V2.1 first-time migration ceremony (`audit-paired-writes.md §10`) the first time a V2.1 binary opens a pre-V2.1 chain
+- `kernel/src/audit/paired.rs` (NEW — per `audit-paired-writes.md §13.1`) — `PairedAuditWriter` helper used by every paired-class handler: wraps `sink.emit_pending` + `sink.emit_confirmed_for`/`sink.emit_rolled_back_for` with the digest-computation, fsync-retry, and panic-on-exhaustion semantics from §7.8 and §7.9
+- `cli/src/commands/audit.rs` — `raxis audit verify` reads via `ctx.audit_sink.read_range(...)` instead of opening `<data_dir>/audit/*.jsonl` directly; gains `--with-state-snapshot <path>` flag per `audit-paired-writes.md §5.2` for orphan resolution; `--acknowledge-critical` flag per `audit-paired-writes.md §6.2` for boot override
+- `cli/src/commands/doctor.rs` — `[CHECK] audit.sink_health` calls `sink.sync()` and `highest_durable_seq()` and reports; also exercises a single paired-write round-trip (`emit_pending` + `emit_confirmed_for`) to confirm the V2.1 fsync semantics against the configured sink
 
 Future (V3+):
-- `crates/audit-postgres/` — `PostgresAuditSink` for enterprise
-- `crates/audit-s3/` — `S3AuditSink` with object-lock
-- `crates/audit-rekor/` — `RekorTransparencyLogSink` mirror
+- `crates/audit-postgres/` — `PostgresAuditSink` for enterprise (paired-write methods MAY use a single transaction to land pending + confirmed atomically against a Postgres LSN, satisfying paired-class conformance via single-store atomicity instead of two fsyncs)
+- `crates/audit-s3/` — `S3AuditSink` with object-lock (paired-write methods serialise pending + confirmed into adjacent object-lock keys; fsync semantics map to "completed multipart upload + verified ETag")
+- `crates/audit-rekor/` — `RekorTransparencyLogSink` mirror (paired writes mirror to Rekor; durability comes from transparency log inclusion proofs)
 
-### §5.5 Conformance contract
+### §5.5 Conformance contract (V2 baseline)
 
 An `AuditSink` is conformant iff:
 
@@ -1091,6 +1191,24 @@ An `AuditSink` is conformant iff:
 3. `highest_durable_seq()` increments monotonically across the lifetime of the deployment. Tested by emitting 100 events and asserting `highest_durable_seq() == 99` after each batch of 10.
 4. The sink MUST NOT mutate event bytes — the `prev_sha256` field of event N+1 MUST hash-validate against the canonical bytes of event N as returned by `read_range`. Tested by reading back a chain and running `verify_chain_strict`.
 5. `INV-STORE-02` ordering: the kernel's contract that `audit.emit(...)` is called only AFTER the matching `tx.commit()` returned `Ok` is preserved (the trait does not enforce this; the conformance kit calls out that the contract lives in the kernel review process per `kernel-store.md §2.5.2`).
+
+### §5.6 Conformance contract (V2.1 paired-write addendum)
+
+An `AuditSink` is **paired-write conformant** iff, in addition to §5.5:
+
+6. **Pending durability.** `emit_pending(...)` MUST not return `Ok` until the event's bytes are durably persisted (fsync semantics or backend-equivalent — multipart upload completed, transparency-log inclusion proof received, etc.). The conformance kit asserts this by killing the test process between `emit_pending` and `emit_confirmed_for`, restarting, and verifying the pending is in `read_range`. Per `INV-AUDIT-PAIRED-01`.
+
+7. **Confirmation chaining.** When `emit_confirmed_for(confirms_pending_seq: P, ...)` returns `Ok`, the resulting event MUST hash-link to the chain (its `prev_sha256` matches the predecessor's bytes, i.e., the sink does NOT permit out-of-order writes that break chain integrity). The conformance kit asserts via `verify_chain_strict` after the call. Per `INV-AUDIT-PAIRED-02`.
+
+8. **Rollback semantics.** `emit_rolled_back_for(rolls_back_pending_seq: P, ...)` for a `pending_seq` that has no prior `emit_confirmed_for` MUST succeed and emit a single `StateChangeRolledBack` event. Calling it for a pending that already has a confirmed MUST fail with `AuditWriterError::PairAlreadyClosed { confirms_pending_seq: P }`. Tested via the conformance kit's `dangling_rollback_rejected` case.
+
+9. **Recovery emission.** `emit_recovered_confirmed` / `emit_recovered_rollback` MUST tag the resulting event with a `_recovery_synthesised: true` field in the canonical JSON encoding so forensic queries can filter recovery-derived from runtime-derived events. The conformance kit asserts this via JSON inspection.
+
+10. **Verifier compatibility.** A chain produced by any combination of `emit_pending` / `emit_confirmed_for` / `emit_rolled_back_for` calls — including arbitrary interleaving with non-paired `emit(...)` calls — MUST be acceptable input to `crates/audit/src/verifier.rs::verify` (no parse errors, no chain breaks, no spurious findings). Per `INV-AUDIT-PAIRED-05`.
+
+11. **Atomicity is opt-in.** Backends that can land pending + confirmed atomically (single transaction, single multipart upload) MAY do so as a performance optimisation; backends that can't (V2.1 `FileAuditSink` writing JSONL line-by-line) MUST fsync each independently. Both shapes MUST satisfy the paired-write conformance kit. Per `audit-paired-writes.md §8.3`.
+
+A sink that satisfies §5.5 but not §5.6 MAY still be used in V2.0 deployments. From V2.1 forward, the kernel boot path refuses to start with a sink that fails the paired-write conformance kit (`raxis doctor` reports `BOOT_ERR_AUDIT_SINK_NON_PAIRED`).
 
 ---
 ## §6 — `OperatorTransport` — How the Operator CLI Reaches the Kernel
@@ -1630,11 +1748,15 @@ The kit returns a `ConformanceReport { passed: u32, failed: Vec<Failure> }`. CI 
 
 ### §13.3 Why `AuditSink` extends in place rather than getting a new trait
 
-**Decision.** The existing `AuditSink` trait in `crates/audit/src/sink.rs` is broadened (add `read_range`, `sync`, `highest_durable_seq`) rather than replaced.
+**Decision.** The existing `AuditSink` trait in `crates/audit/src/sink.rs` is broadened (add `read_range`, `sync`, `highest_durable_seq`, plus the V2.1 paired-write methods `emit_pending`, `emit_confirmed_for`, `emit_rolled_back_for`, `emit_recovered_confirmed`, `emit_recovered_rollback`) rather than replaced.
 
 **Rationale.** The trait already exists, ships, and is used throughout the kernel. Replacing it would force a lockstep migration of every `Arc<dyn AuditSink>` field. Adding methods (with default impls returning `Err(NotSupported)` initially, then upgraded to real impls in `FileAuditSink` and `FakeAuditSink`) lets the migration land incrementally.
 
+The V2.1 paired-write methods are a strict superset of `emit` — every backend that already supports `emit` can implement the paired methods by routing to `emit` with appropriate event-kind construction. Backends that can offer atomic pending+confirmed (Postgres, S3 multipart) override the defaults for performance; backends that can't (V2.1 file-system JSONL) inherit the per-call-fsync defaults. This keeps the trait surface coherent across deployment models while letting each model take advantage of its native durability primitives. Per `audit-paired-writes.md §8.3` and §11.
+
 **Rejected alternative** — introduce `AuditPersistence` as a fresh trait, deprecate the existing `AuditSink`. Rejected: doubles the API surface for no semantic gain.
+
+**Rejected alternative** — split paired-write methods into a separate `PairedAuditSink` trait. Rejected: V2.1+ deployments universally require the paired-write protocol per `INV-AUDIT-PAIRED-01..07`; splitting the trait creates a permanent V1/V2.1 fork in the type system that the boot path would have to disambiguate. Single trait with paired methods + a boot-time conformance check (per §5.6) is simpler and matches the kernel's actual deployment posture.
 
 ### §13.4 Why `MockIsolation` knowingly violates `R-1`
 
