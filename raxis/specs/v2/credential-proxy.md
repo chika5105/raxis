@@ -10,6 +10,9 @@
 > - `vm-network-isolation.md` — Tier 1 (SNI-allowlist tproxy) for public unauthenticated egress
 > - ~~`kernel-mediated-egress.md`~~ — DEPRECATED in V2 in favor of unified two-tier egress
 > - `planner-harness.md §7` — V2 unified egress overview
+> - `extensibility-traits.md §4` — `CredentialBackend` trait, of which the V2 file-based reader (this spec's §11) is one impl; alternative impls (Vault, AWS Secrets Manager, Azure Key Vault, PKCS#11 HSM) plug in unchanged behind the proxy layer this spec describes.
+
+> **Trait boundary (V2):** The `CredentialBackend` trait — defined in `extensibility-traits.md §4` — is the seam at which the *resolution* of a credential name to a credential value happens. Everything in §3 (proxy types), §5 (audit), §6 (prompt engineering), §8 (rejected env-var design), §11 (operator config), and §12 (management CLI) is **independent of which `CredentialBackend` impl** the kernel was booted with: the proxy layer asks `Arc<dyn CredentialBackend>::resolve(...)` and never sees the underlying file/Vault/HSM detail. This means a deployment can swap from `FileCredentialBackend` (V2 default) to `VaultCredentialBackend` or `Pkcs11HsmBackend` without any change to the proxy types or the operator config in this spec — only the boot-site `policy.toml [credential_backend]` field changes.
 
 ---
 
@@ -2289,6 +2292,20 @@ Docker-in-VM: only available if explicitly enabled in the VM image and policy.
 ---
 
 ## 10. Implementation Checklist
+
+### 10.0 Trait-boundary refactor (V2 prerequisite)
+
+This spec's proxy types resolve credential names to credential values via the `CredentialBackend` trait defined in `extensibility-traits.md §4`. The proxy layer NEVER opens `<data_dir>/credentials/<name>.env` directly — it always goes through `Arc<dyn CredentialBackend>`. Concretely:
+
+- [ ] **`crates/raxis-credentials/`** (NEW; per `extensibility-traits.md §4.3`) — defines `trait CredentialBackend`, `CredentialName`, `CredentialValue` (newtyped `Secret<Vec<u8>>`), `CredentialError`, `Lease`, `ConsumerIdentity`. Re-exported from `kernel`, `gateway`, and the proxy crates below.
+- [ ] **`crates/raxis-credentials-file/`** (NEW; the V2 default) — `FileCredentialBackend` reads `<data_dir>/credentials/<name>.<ext>` with mode 0600 + uid validation; current readers in `gateway/src/policy_view.rs::load_credentials` and the planned in-VM credential reader move here unchanged.
+- [ ] **`kernel/src/main.rs`** — boot site constructs `Arc<dyn CredentialBackend>` from `policy.toml [credential_backend]`; default `File`. Future variants `Vault`, `AwsSecretsManager`, `AzureKeyVault`, `Pkcs11Hsm` plug in here without touching anything below.
+- [ ] **All `CredentialProxy` impls below** — receive `Arc<dyn CredentialBackend>` (not a path) at construction; resolve credentials via `backend.resolve(name, ConsumerIdentity::CredentialProxy { proxy_type, session_id })`; the `CredentialAccessed` audit event is emitted by `CredentialBackend::resolve` itself, NOT by the proxy.
+- [ ] **`crates/raxis-credentials/tests/conformance.rs`** — `FileCredentialBackend` MUST pass; the same kit will gate every future Vault/HSM impl.
+
+After this phase, every proxy type below operates against any conformant `CredentialBackend` impl. Replacing the V2 `FileCredentialBackend` with a Vault/HSM/cloud-secrets impl is a `policy.toml` change + a kernel restart — the proxy types in §3 do not change.
+
+### 10.1 Proxy types and runtime
 
 - [ ] Design credential proxy trait: `trait CredentialProxy { fn start(&self, ...) -> ProxyHandle; }`
 - [ ] Implement `KubernetesProxy` (HTTPS, Authorization header injection)
