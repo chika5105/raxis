@@ -1223,6 +1223,8 @@ mod planner_dispatch_log_tests {
             justification:    None,
             idempotency_key:  None,
             approval_token:   None,
+            approved:         None,
+            critique:         None,
         }
     }
 

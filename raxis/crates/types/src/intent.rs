@@ -21,6 +21,7 @@ use uuid::Uuid;
 /// The kind of action the planner is asserting with an IntentRequest.
 ///
 /// v1 values — the kernel rejects any other string with FAIL_POLICY_VIOLATION.
+/// V2 values — gated by the static dispatch matrix (v2-deep-spec.md §Step 20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum IntentKind {
     /// Exactly one committed change on top of `base_sha`.
@@ -38,28 +39,121 @@ pub enum IntentKind {
     /// Planner self-reports inability to complete the task.
     /// Transitions Running → Failed. Requires `justification`.
     ReportFailure,
+
+    // ── V2 hierarchical orchestration (v2-deep-spec.md §1.2) ──────────────
+
+    /// **V2.** Orchestrator-only. Requests that the Kernel admit and spawn
+    /// the sub-task identified by `task_id` (an Executor or Reviewer
+    /// sub-task declared in the operator-signed plan).
+    ///
+    /// Authorization: gated by the static dispatch matrix
+    /// (v2-deep-spec.md §Step 20) AND the `can_delegate` boolean on the
+    /// session row (INV-DELEGATE-01). `can_delegate = 1` ⇔
+    /// `session_agent_type = Orchestrator`.
+    ///
+    /// Wire fields used: `task_id` only (every other field is unused).
+    /// Rejection codes:
+    ///   * `FAIL_POLICY_VIOLATION` if dispatch matrix says the session
+    ///     is not authorized.
+    ///   * `DEPENDENCY_NOT_MET` if the requested sub-task's
+    ///     `task_dag_edges` predecessors are not all `Completed`. This
+    ///     is a TIMING error, not an authority error
+    ///     (v2-deep-spec.md §Step 21) — the Orchestrator may retry
+    ///     after the next `KernelPush::SubTaskCompleted`.
+    ActivateSubTask,
+
+    /// **V2.** Orchestrator-only. Requests that a previously-failed
+    /// sub-task be re-activated, subject to the dual retry counters
+    /// (v2-deep-spec.md §Step 12). The Kernel inserts a NEW
+    /// `subtask_activations` row (PendingActivation), increments the
+    /// appropriate counter (`crash_retry_count` for VM-crash failures,
+    /// `review_reject_count` for Reviewer rejections), and returns
+    /// `FAIL_INVALID_REQUEST` if either ceiling is exceeded.
+    ///
+    /// Wire fields used: `task_id` only.
+    RetrySubTask,
+
+    /// **V2.** Reviewer-only. Reports the Reviewer's verdict on the
+    /// Executor's `evaluation_sha` set into the Reviewer's session by
+    /// the Kernel at activation time.
+    ///
+    /// Wire fields used:
+    ///   * `task_id` — the Reviewer's own task_id (NOT the Executor's;
+    ///     the Kernel reverse-joins via `task_dag_edges` to the
+    ///     predecessor Executor).
+    ///   * `approved` — required, NOT NULL (`Some(true)` or
+    ///     `Some(false)`). NULL ⇒ `FAIL_INVALID_REQUEST`.
+    ///   * `critique` — required when `approved = false`; max 32 KiB.
+    ///     Empty when `approved = true` (the Kernel ignores any text;
+    ///     `Some("...")` with `approved = true` is silently
+    ///     dropped — the critique field has no meaning in the success
+    ///     path). Oversized critique ⇒ `FAIL_INVALID_ARGUMENT`.
+    SubmitReview,
 }
 
 impl IntentKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::SingleCommit => "SingleCommit",
+            Self::SingleCommit     => "SingleCommit",
             Self::IntegrationMerge => "IntegrationMerge",
-            Self::CompleteTask => "CompleteTask",
-            Self::ReportFailure => "ReportFailure",
+            Self::CompleteTask     => "CompleteTask",
+            Self::ReportFailure    => "ReportFailure",
+            Self::ActivateSubTask  => "ActivateSubTask",
+            Self::RetrySubTask     => "RetrySubTask",
+            Self::SubmitReview     => "SubmitReview",
         }
     }
 
     /// Whether this intent kind requires `base_sha` and `head_sha`.
-    /// peripherals.md §3.1: "required for all kinds except ReportFailure".
+    ///
+    /// V1: required for all kinds except `ReportFailure` (peripherals.md
+    /// §3.1).
+    ///
+    /// V2: `ActivateSubTask`, `RetrySubTask`, and `SubmitReview` operate
+    /// at the sub-task lifecycle layer, NOT the commit layer; they
+    /// carry no SHA range. The Kernel ignores `base_sha` / `head_sha`
+    /// entirely on these kinds (it does not even read them, so a
+    /// truncated planner that passes garbage Some-values is harmless).
     pub fn requires_sha_range(self) -> bool {
-        !matches!(self, Self::ReportFailure)
+        matches!(
+            self,
+            Self::SingleCommit | Self::IntegrationMerge | Self::CompleteTask
+        )
     }
 
     /// Whether this intent kind requires a non-empty `justification` field.
     pub fn requires_justification(self) -> bool {
         matches!(self, Self::ReportFailure)
     }
+
+    /// V2: whether this intent kind is one of the V2-only sub-task
+    /// lifecycle kinds. Useful at the dispatch matrix boundary as a
+    /// fast guard before consulting the per-(kind, agent_type) matrix.
+    pub fn is_v2_subtask_kind(self) -> bool {
+        matches!(
+            self,
+            Self::ActivateSubTask | Self::RetrySubTask | Self::SubmitReview
+        )
+    }
+
+    /// V2: whether this intent kind requires the `approved` field
+    /// to be `Some(_)`. Currently only `SubmitReview` does.
+    pub fn requires_approved(self) -> bool {
+        matches!(self, Self::SubmitReview)
+    }
+
+    /// All variants. Used by the static-dispatch-matrix exhaustiveness
+    /// guard (v2-deep-spec.md §Step 20) so a future added variant
+    /// automatically fails the matrix-build test until a row is added.
+    pub const ALL: [Self; 7] = [
+        Self::SingleCommit,
+        Self::IntegrationMerge,
+        Self::CompleteTask,
+        Self::ReportFailure,
+        Self::ActivateSubTask,
+        Self::RetrySubTask,
+        Self::SubmitReview,
+    ];
 }
 
 // ---------------------------------------------------------------------------
@@ -149,7 +243,71 @@ pub struct IntentRequest {
     /// Optional: approval token from an approved escalation.
     /// planner-api.md §"After the operator approves".
     pub approval_token: Option<ApprovalToken>,
+
+    // ── V2 SubmitReview payload (v2-deep-spec.md §Step 22) ────────────────
+
+    /// **V2 SubmitReview only.** The Reviewer's verdict on the
+    /// Executor's `evaluation_sha`. Required when `intent_kind =
+    /// SubmitReview`; ignored for every other kind.
+    ///
+    /// `Some(true)` — Reviewer approves the Executor's commits. The
+    /// Kernel marks this Reviewer's `subtask_activations` row
+    /// `Completed` and runs the reverse-DAG query to check whether
+    /// every Reviewer of the predecessor Executor has now approved
+    /// (Logical AND verdict; v2-deep-spec.md §Step 25). On the last
+    /// Reviewer approving, the Kernel sends
+    /// `KernelPush::AllReviewersPassed` to the Orchestrator.
+    ///
+    /// `Some(false)` — Reviewer rejects the Executor's commits.
+    /// `critique` MUST be non-empty (kernel returns
+    /// `FAIL_INVALID_ARGUMENT` if absent). The kernel writes the
+    /// critique to the Executor's `tasks.last_critique`, increments
+    /// `subtask_activations.review_reject_count`, and pushes
+    /// `KernelPush::ReviewFailed` to the Orchestrator.
+    ///
+    /// `None` for any non-`SubmitReview` kind. `None` on `SubmitReview`
+    /// returns `FAIL_INVALID_REQUEST`.
+    ///
+    /// **Wire encoding note:** this field is NOT marked
+    /// `#[serde(skip_serializing_if = "Option::is_none")]` because the
+    /// canonical wire format is bincode 2.0.1 in `bincode::serde` mode,
+    /// which honours `skip_serializing_if` on the encode side but ALWAYS
+    /// reads all fields on the decode side. A skipped Option would
+    /// deserialise as `UnexpectedEnd { additional: 1 }` and the kernel
+    /// would drop the connection on every V2-aware planner frame
+    /// (regression caught by `kernel_full_lifecycle_e2e` against a
+    /// previous draft). The JSON projection still elides `null`s
+    /// because `serde_json` does not pre-allocate field counts; any
+    /// future operator UI consuming JSON keeps the same shape.
+    #[serde(default)]
+    pub approved: Option<bool>,
+
+    /// **V2 SubmitReview only.** The Reviewer's critique text on
+    /// rejection. Capped at 32,768 bytes (`MAX_CRITIQUE_BYTES`); larger
+    /// payloads are rejected with `FAIL_INVALID_ARGUMENT` and NOT
+    /// stored. Why 32 KiB: long critiques (including full file diffs)
+    /// would exhaust the retry Executor's context window before it
+    /// processes a single turn (v2-deep-spec.md §Step 22). 32 KiB is
+    /// generous for actionable feedback while preventing context-
+    /// flooding DoS.
+    ///
+    /// Required to be `Some(non-empty)` when `approved = false`;
+    /// ignored when `approved = true` (kernel does not store the text);
+    /// must be `None` for every non-`SubmitReview` intent kind.
+    ///
+    /// **Wire encoding note:** see the analogous comment on `approved`
+    /// — `skip_serializing_if` is intentionally absent here for bincode
+    /// round-trip compatibility.
+    #[serde(default)]
+    pub critique: Option<String>,
 }
+
+/// V2 hard cap on `IntentRequest.critique` byte length
+/// (v2-deep-spec.md §Step 22). Kernel-side size check returns
+/// `FAIL_INVALID_ARGUMENT` if exceeded; the critique is NOT stored
+/// (so an attacker cannot use oversized critique submissions to
+/// flood `tasks.last_critique`).
+pub const MAX_CRITIQUE_BYTES: usize = 32 * 1024;
 
 // ---------------------------------------------------------------------------
 // BudgetSnapshot
@@ -259,3 +417,202 @@ impl IntentResponse {
 // row; the token is 32 CSPRNG bytes as 64-char hex. Both are strings on the
 // wire; we keep them as String here to match the wire shape exactly.
 // See kernel-store.md §2.5.1 Table 4 for the column distinction.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// V2 added 3 sub-task lifecycle kinds; the variant array must
+    /// stay in sync. The pinned-count test surfaces accidental adds
+    /// at the test layer before any dispatch matrix or store mapping
+    /// regresses.
+    #[test]
+    fn intent_kind_variant_count_is_pinned_to_v2() {
+        assert_eq!(IntentKind::ALL.len(), 7,
+            "V2 has exactly 7 IntentKind variants \
+             (4 V1: SingleCommit, IntegrationMerge, CompleteTask, \
+             ReportFailure; 3 V2: ActivateSubTask, RetrySubTask, \
+             SubmitReview). Bumping this requires the static \
+             dispatch matrix (v2-deep-spec.md §Step 20) to gain a \
+             matching row.");
+    }
+
+    /// `as_str` round-trip: every variant maps to a non-empty
+    /// PascalCase string and the strings are pairwise distinct.
+    /// Pinning prevents an accidental rename from silently breaking
+    /// audit-replay tooling that matches on the discriminator.
+    #[test]
+    fn intent_kind_as_str_is_pairwise_distinct() {
+        use std::collections::HashSet;
+        let mut seen = HashSet::new();
+        for &k in &IntentKind::ALL {
+            let s = k.as_str();
+            assert!(!s.is_empty());
+            assert!(seen.insert(s),
+                "IntentKind::as_str collision detected at {k:?}: {s}");
+        }
+        // Pin the exact strings — these are wire-stable.
+        assert_eq!(IntentKind::SingleCommit.as_str(),     "SingleCommit");
+        assert_eq!(IntentKind::IntegrationMerge.as_str(), "IntegrationMerge");
+        assert_eq!(IntentKind::CompleteTask.as_str(),     "CompleteTask");
+        assert_eq!(IntentKind::ReportFailure.as_str(),    "ReportFailure");
+        assert_eq!(IntentKind::ActivateSubTask.as_str(),  "ActivateSubTask");
+        assert_eq!(IntentKind::RetrySubTask.as_str(),     "RetrySubTask");
+        assert_eq!(IntentKind::SubmitReview.as_str(),     "SubmitReview");
+    }
+
+    /// V2 sub-task kinds do NOT carry a SHA range. The kernel
+    /// admission pipeline must short-circuit ancestry / topology
+    /// checks for them.
+    #[test]
+    fn requires_sha_range_only_for_commit_kinds() {
+        // V1 kinds (except ReportFailure).
+        assert!(IntentKind::SingleCommit.requires_sha_range());
+        assert!(IntentKind::IntegrationMerge.requires_sha_range());
+        assert!(IntentKind::CompleteTask.requires_sha_range());
+        // V1 ReportFailure.
+        assert!(!IntentKind::ReportFailure.requires_sha_range());
+        // V2 sub-task kinds — no SHA range.
+        assert!(!IntentKind::ActivateSubTask.requires_sha_range());
+        assert!(!IntentKind::RetrySubTask.requires_sha_range());
+        assert!(!IntentKind::SubmitReview.requires_sha_range());
+    }
+
+    /// `is_v2_subtask_kind` is the fast-path guard for the static
+    /// dispatch matrix entry point. Pin the predicate so it cannot
+    /// silently widen.
+    #[test]
+    fn is_v2_subtask_kind_excludes_v1_kinds() {
+        // V2 kinds.
+        assert!(IntentKind::ActivateSubTask.is_v2_subtask_kind());
+        assert!(IntentKind::RetrySubTask.is_v2_subtask_kind());
+        assert!(IntentKind::SubmitReview.is_v2_subtask_kind());
+        // V1 kinds — must NOT be misclassified as V2.
+        for k in [
+            IntentKind::SingleCommit,
+            IntentKind::IntegrationMerge,
+            IntentKind::CompleteTask,
+            IntentKind::ReportFailure,
+        ] {
+            assert!(!k.is_v2_subtask_kind(),
+                "V1 kind {k:?} must NOT be a V2 sub-task kind");
+        }
+    }
+
+    /// Only `SubmitReview` requires the `approved` field. Other V2
+    /// kinds do not consult it; V1 kinds never do.
+    #[test]
+    fn requires_approved_only_for_submit_review() {
+        assert!(IntentKind::SubmitReview.requires_approved());
+        for k in [
+            IntentKind::SingleCommit,
+            IntentKind::IntegrationMerge,
+            IntentKind::CompleteTask,
+            IntentKind::ReportFailure,
+            IntentKind::ActivateSubTask,
+            IntentKind::RetrySubTask,
+        ] {
+            assert!(!k.requires_approved(),
+                "{k:?} must NOT require the `approved` field");
+        }
+    }
+
+    /// V1 backward compat at the bincode wire layer. The canonical wire
+    /// format for `IntentRequest` is `bincode::serde` (peripherals.md
+    /// §3.1, raxis-ipc::frame); the JSON projection is documentation
+    /// only. We pin behaviour at THAT layer:
+    ///
+    ///   1. A V2 codebase serialising an "old shape" intent (V2 fields
+    ///      `None`) round-trips byte-for-byte through bincode.
+    ///   2. The JSON projection includes the new fields explicitly as
+    ///      `null` — this is intentional. We did NOT use
+    ///      `skip_serializing_if = "Option::is_none"` because
+    ///      `bincode::serde` honours skip on encode but reads all
+    ///      fields on decode, which would surface as
+    ///      `UnexpectedEnd { additional: 1 }` and drop the planner
+    ///      connection on every frame
+    ///      (regression caught by the kernel full-lifecycle E2E suite).
+    #[test]
+    fn v1_intent_request_under_v2_codebase_round_trips_through_bincode() {
+        use uuid::Uuid;
+        use crate::TaskId;
+
+        let req = IntentRequest {
+            session_token:   "tok".into(),
+            sequence_number: 1,
+            envelope_nonce:  "0".repeat(32),
+            intent_kind:     IntentKind::SingleCommit,
+            task_id:         TaskId::parse("t-1").unwrap(),
+            base_sha:        None,
+            head_sha:        None,
+            submitted_claims: vec![],
+            justification:   None,
+            idempotency_key: Some(Uuid::nil()),
+            approval_token:  None,
+            approved:        None,
+            critique:        None,
+        };
+
+        // 1. bincode round-trip on the canonical wire shape.
+        let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard())
+            .expect("bincode encode");
+        let (back, _): (IntentRequest, _) = bincode::serde::decode_from_slice(
+            &bytes, bincode::config::standard(),
+        ).expect("bincode decode");
+        assert_eq!(back.intent_kind, IntentKind::SingleCommit);
+        assert!(back.approved.is_none());
+        assert!(back.critique.is_none());
+
+        // 2. JSON projection: V2 fields appear as `null`. Operator UIs
+        //    that read JSON should match on `obj["approved"] == null`,
+        //    not on absence-of-key.
+        let v = serde_json::to_value(&req).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("approved"),
+            "approved present (as null) in JSON projection");
+        assert!(obj.get("approved").unwrap().is_null());
+        assert!(obj.contains_key("critique"));
+        assert!(obj.get("critique").unwrap().is_null());
+    }
+
+    /// V2 SubmitReview wire shape includes `approved` and (on
+    /// rejection) `critique`. Round-trip through JSON must preserve
+    /// every field.
+    #[test]
+    fn v2_submit_review_round_trips_with_approved_and_critique() {
+        use uuid::Uuid;
+        use crate::TaskId;
+
+        let req = IntentRequest {
+            session_token:   "tok".into(),
+            sequence_number: 1,
+            envelope_nonce:  "1".repeat(32),
+            intent_kind:     IntentKind::SubmitReview,
+            task_id:         TaskId::parse("rev-task-1").unwrap(),
+            base_sha:        None,
+            head_sha:        None,
+            submitted_claims: vec![],
+            justification:   None,
+            idempotency_key: None,
+            approval_token:  None,
+            approved:        Some(false),
+            critique:        Some("the auth check is missing".to_owned()),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        let back: IntentRequest = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.approved, Some(false));
+        assert_eq!(back.critique.as_deref(),
+            Some("the auth check is missing"));
+        assert_eq!(back.intent_kind, IntentKind::SubmitReview);
+    }
+
+    /// MAX_CRITIQUE_BYTES pinned at 32 KiB per v2-deep-spec.md §Step 22.
+    /// Bumping this requires a spec amendment AND a dispatch-matrix
+    /// review to reconfirm the context-flooding-DoS analysis.
+    #[test]
+    fn max_critique_bytes_is_pinned_at_32_kib() {
+        assert_eq!(MAX_CRITIQUE_BYTES, 32 * 1024,
+            "MAX_CRITIQUE_BYTES is wire-load-bearing per \
+             v2-deep-spec.md §Step 22; bumping requires a spec amend.");
+    }
+}

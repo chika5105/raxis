@@ -151,6 +151,8 @@ impl MockPlanner {
                 .then(|| "mock-planner end-to-end test".to_owned()),
             idempotency_key: None,
             approval_token: None,
+            approved: None,
+            critique: None,
         }
     }
 

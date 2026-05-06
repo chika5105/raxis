@@ -216,13 +216,16 @@ pub fn compute_admission_cost(
 }
 
 /// Map an IntentKind variant to the TOML key string used in the policy table.
+///
+/// V2 sub-task lifecycle kinds (`ActivateSubTask`, `RetrySubTask`,
+/// `SubmitReview`) reuse the same `IntentKind::as_str` projection so
+/// operators can configure per-kind costs in `[lanes.<name>.intent_costs]`
+/// the same way as V1 kinds. The static dispatch matrix
+/// (v2-deep-spec.md §Step 20) is the authority on whether a session may
+/// submit each kind; the budget mapper just charges the configured cost
+/// once admission succeeds.
 fn intent_kind_to_str(kind: &IntentKind) -> &'static str {
-    match kind {
-        IntentKind::SingleCommit => "SingleCommit",
-        IntentKind::IntegrationMerge => "IntegrationMerge",
-        IntentKind::CompleteTask => "CompleteTask",
-        IntentKind::ReportFailure => "ReportFailure",
-    }
+    kind.as_str()
 }
 
 // ---------------------------------------------------------------------------

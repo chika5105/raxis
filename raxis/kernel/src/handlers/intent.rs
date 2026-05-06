@@ -416,6 +416,15 @@ fn run_phase_a(
     // gate evaluation. Run them inline inside Phase A and surface the
     // result through `EarlyResponse`. SingleCommit / IntegrationMerge
     // fall through to Steps 4-8 below and continue into Phase B.
+    //
+    // V2 sub-task lifecycle kinds (`ActivateSubTask`, `RetrySubTask`,
+    // `SubmitReview`) are NOT yet routed by this handler — they are
+    // addressed by the static dispatch matrix introduced in
+    // v2-deep-spec.md §Step 20, which will live BEFORE this entry point
+    // (frame parse → matrix → handler). Until that matrix lands, any
+    // V2 kind reaching this handler indicates an authority bypass; we
+    // fail-closed with `FAIL_POLICY_VIOLATION` (INV-08 coarse codes —
+    // no template detail leaked).
     match req.intent_kind {
         IntentKind::ReportFailure => {
             return match handle_report_failure(req, task_state, &session_id, seq, store, policy) {
@@ -430,6 +439,15 @@ fn run_phase_a(
             };
         }
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
+        IntentKind::ActivateSubTask
+        | IntentKind::RetrySubTask
+        | IntentKind::SubmitReview => {
+            // Will be handled by the static dispatch matrix
+            // (v2-deep-spec.md §Step 20) once it lands. Until then,
+            // fail-closed.
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailPolicyViolation, task_state);
+        }
     }
 
     // ── Step 4: Validate worktree_root against policy ─────────────────────

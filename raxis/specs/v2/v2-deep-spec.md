@@ -944,6 +944,22 @@ that all inter-agent communication passes through the Kernel.
    `.raxis/system_prompt.txt` before VM boot. The critique arrives inside the non-negotiable
    system prompt — the LLM cannot ignore or override it.
 
+**Wire encoding addendum (implementation note, derived from Step 22):** The `approved` and
+`critique` fields on `IntentRequest` are `Option<bool>` and `Option<String>` respectively at
+the Rust type level. They are NOT marked `#[serde(skip_serializing_if = "Option::is_none")]`
+because the canonical wire format for `IntentRequest` is `bincode::serde` (peripherals.md
+§3.1). `bincode::serde` honours `skip_serializing_if` on the encode side but always reads a
+fixed-arity field tuple on the decode side — a skipped Option surfaces as
+`UnexpectedEnd { additional: 1 }` and the Kernel drops the planner connection on every V2
+frame. The fields are therefore always present on the wire (`None` encodes as a single
+`0x00` discriminator byte). The JSON projection retains explicit `null` for the same reason
+(symmetry with the bincode shape). Field order at the end of the struct is wire-stable; future V2 field additions land at the
+tail (after `critique`) and require a coordinated planner+Kernel rebuild — `bincode` is a
+fixed-shape codec, not a forward-compatible one, so an N-field decoder reading an
+N+1-field message will see leftover bytes inside the framed payload and reject them.
+Cross-version compatibility is handled by the workspace pinning all `IntentRequest`
+producers and consumers to the same `raxis-types` revision, not by codec leniency.
+
 ---
 
 ### Step 23: Sequential Reviewer Activation — Option A vs. Option B
