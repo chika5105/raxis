@@ -82,7 +82,9 @@ pub mod witnesses;
 pub use budget::{LaneBudgetRow, ReservationRow};
 pub use escalations::{EscalationRow, EscalationStatusFilter};
 pub use initiative_quarantines::{InitiativeQuarantineRow, QuarantineViewError};
-pub use initiatives::{InitiativeRow, InitiativeStateCounts};
+pub use initiatives::{
+    InitiativeListFilter, InitiativeListRow, InitiativeRow, InitiativeStateCounts,
+};
 pub use kernel_meta::{KernelMeta, KernelMetaError};
 pub use operator_certificates::{OperatorCertRow, OperatorCertViewError};
 pub use plan_fields::{reveal_for_task as reveal_plan_fields_for_task, PlanFieldsError, PlanPathFields};

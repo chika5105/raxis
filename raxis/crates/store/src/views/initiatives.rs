@@ -3,8 +3,14 @@
 //!
 //! Surface:
 //!   * [`counts_by_state`] — the second block of `raxis status`.
-//!   * [`by_id`] — `raxis inspect <initiative_id>`.
-//!   * [`list`] — paged list with optional state filter.
+//!   * [`by_id`] — `raxis inspect-initiative <initiative_id>`.
+//!   * [`list`] — paged list with optional exact-state SQL filter.
+//!   * [`list_filtered`] — the bucketed list backing
+//!     `raxis initiative list` (cli-readonly.md §5.5.6b). Joins
+//!     `initiative_quarantines` so each row carries a `quarantined`
+//!     flag without a per-row follow-up query.
+//!   * [`InitiativeListFilter`] — typed bucket used by §5.5.6b's
+//!     `--state` flag (`active|completed|quarantined|all`).
 
 use rusqlite::OptionalExtension;
 use thiserror::Error;
@@ -140,6 +146,127 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeRow> {
     })
 }
 
+// ────────────────────────────────────────────────────────────────────
+// `raxis initiative list` — bucketed list with quarantine join.
+//
+// Backs cli-readonly.md §5.5.6b. The semantics of each bucket are
+// chosen for the operator's recurring at-a-glance question:
+//
+//   * Active     — "what is currently being worked on?" =
+//                  non-terminal states (Draft | ApprovedPlan |
+//                  Executing | Blocked) per kernel-store.md §2.5.1
+//                  Table 2 (the FSM diagram).
+//   * Completed  — "what shipped?" = the Completed terminal state
+//                  ONLY. Failed / Aborted are deliberately omitted
+//                  because the operator's natural follow-up after
+//                  "completed" is "tag and announce", which is wrong
+//                  for the failure terminals. Power users reach
+//                  Failed / Aborted via `--state all` + grep, or
+//                  via the forensic `raxis inspect-initiative`.
+//   * Quarantined — "what is frozen for security?" = any initiative
+//                  with a row in `initiative_quarantines`,
+//                  regardless of FSM state. This bucket overlaps
+//                  with Active and Completed; it answers an
+//                  orthogonal question and must therefore be a
+//                  first-class filter.
+//   * All        — no WHERE predicate. Newest-first, capped by
+//                  `limit`.
+//
+// EVERY row, regardless of bucket, carries the `quarantined` flag so
+// operators reading the Active or All buckets can spot frozen rows
+// at a glance.
+// ────────────────────────────────────────────────────────────────────
+
+/// Operator-facing bucket for `raxis initiative list --state ...`.
+///
+/// Modelled as a Rust enum (not a free-form string) so the CLI parser
+/// fails-closed on typos and the SQL planner sees a stable predicate
+/// shape per bucket. Mirrors `views::escalations::EscalationStatusFilter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InitiativeListFilter {
+    /// Every initiative; no `WHERE` predicate.
+    All,
+    /// Non-terminal states: `Draft | ApprovedPlan | Executing | Blocked`.
+    Active,
+    /// `state = 'Completed'` only — the successful terminal.
+    Completed,
+    /// Any initiative with a row in `initiative_quarantines`.
+    Quarantined,
+}
+
+/// The bucketed-list row shape. Wraps [`InitiativeRow`] with the
+/// joined `quarantined` flag so a single SQL round-trip answers both
+/// "what initiatives match the filter?" and "is each one frozen?".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitiativeListRow {
+    pub initiative:  InitiativeRow,
+    /// `true` iff a row exists in `initiative_quarantines` for this
+    /// `initiative_id`. The CLI surfaces this as a `[Q]` marker (or
+    /// `quarantined: true` in JSON) on every row.
+    pub quarantined: bool,
+}
+
+/// List initiatives matching the given operator-facing bucket,
+/// newest-first by `created_at`. Capped at `limit` rows.
+///
+/// The query LEFT-JOINs `initiative_quarantines` to surface the
+/// quarantine flag in a single round-trip. The optional bucket
+/// predicate is appended to the same statement so the SQL planner
+/// always uses the `idx_initiatives_state` covering index when the
+/// filter is `Active` / `Completed`, and the `initiative_quarantines`
+/// PRIMARY KEY when the filter is `Quarantined`.
+pub fn list_filtered(
+    conn:   &RoConn,
+    filter: InitiativeListFilter,
+    limit:  usize,
+) -> Result<Vec<InitiativeListRow>, InitiativeViewError> {
+    let initiatives = Table::Initiatives.as_str();
+    let quarantines = Table::InitiativeQuarantines.as_str();
+
+    let where_clause = match filter {
+        InitiativeListFilter::All         => String::new(),
+        InitiativeListFilter::Active      => " WHERE i.state IN \
+            ('Draft', 'ApprovedPlan', 'Executing', 'Blocked')".to_owned(),
+        InitiativeListFilter::Completed   => " WHERE i.state = 'Completed'".to_owned(),
+        InitiativeListFilter::Quarantined => " WHERE q.initiative_id IS NOT NULL".to_owned(),
+    };
+
+    let sql = format!(
+        "SELECT i.initiative_id, i.state, i.plan_artifact_sha256, \
+                i.created_at, i.approved_at, i.completed_at, \
+                CASE WHEN q.initiative_id IS NOT NULL THEN 1 ELSE 0 END AS quarantined \
+         FROM {initiatives} AS i \
+         LEFT JOIN {quarantines} AS q \
+                ON q.initiative_id = i.initiative_id\
+         {where_clause} \
+         ORDER BY i.created_at DESC \
+         LIMIT ?1"
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let limit_i = limit as i64;
+    let rows = stmt
+        .query_map(rusqlite::params![limit_i], map_list_row)?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn map_list_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeListRow> {
+    let initiative = InitiativeRow {
+        initiative_id:        r.get(0)?,
+        state:                r.get(1)?,
+        plan_artifact_sha256: r.get(2)?,
+        created_at:           r.get::<_, i64>(3)?.max(0) as u64,
+        approved_at:          r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
+        completed_at:         r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
+    };
+    let quarantined: i64 = r.get(6)?;
+    Ok(InitiativeListRow {
+        initiative,
+        quarantined: quarantined != 0,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +293,35 @@ mod tests {
                      VALUES (?1, ?2, '{{}}', 'sha-' || ?1, ?3)"
                 ),
                 rusqlite::params![id, state, created],
+            ).unwrap();
+        }
+        tmp
+    }
+
+    /// Like `fresh_store_with_seed` but also seeds two
+    /// `initiative_quarantines` rows so the bucketed-list join paths
+    /// (`Quarantined`, plus the per-row `quarantined` flag) are
+    /// exercised. We pick `init-fresh` (active) and `init-old`
+    /// (terminal) so the Active and Completed buckets each surface
+    /// at least one quarantined row, plus the Quarantined bucket
+    /// returns exactly the expected two rows.
+    fn fresh_store_with_seed_and_quarantines() -> TempDir {
+        let tmp = fresh_store_with_seed();
+        let db = tmp.path().join("kernel.db");
+        let store = Store::open(&db).unwrap();
+        let guard = store.lock_sync();
+        const QUARANTINES: &str = Table::InitiativeQuarantines.as_str();
+        for (id, qa) in [
+            ("init-fresh", 310_i64),
+            ("init-old",   105),
+        ] {
+            guard.execute(
+                &format!(
+                    "INSERT INTO {QUARANTINES} \
+                     (initiative_id, quarantined_at, quarantined_by, reason) \
+                     VALUES (?1, ?2, '00112233445566778899aabbccddeeff', 'test')"
+                ),
+                rusqlite::params![id, qa],
             ).unwrap();
         }
         tmp
@@ -219,5 +375,88 @@ mod tests {
         // Newest-first inside the filter too.
         assert_eq!(rows[0].initiative_id, "init-other");
         assert_eq!(rows[1].initiative_id, "init-mid");
+    }
+
+    // ── list_filtered: bucketed list backing `raxis initiative list` ────
+
+    #[test]
+    fn list_filtered_all_returns_every_row_newest_first() {
+        let tmp = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_filtered(&conn, InitiativeListFilter::All, 10).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.initiative.initiative_id.as_str()).collect();
+        assert_eq!(ids, vec!["init-fresh", "init-other", "init-mid", "init-fail", "init-old"]);
+        assert!(rows.iter().all(|r| !r.quarantined),
+            "no quarantine rows seeded => every row.quarantined must be false");
+    }
+
+    #[test]
+    fn list_filtered_active_omits_terminal_states() {
+        let tmp = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_filtered(&conn, InitiativeListFilter::Active, 10).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.initiative.initiative_id.as_str()).collect();
+        // Active = Draft + ApprovedPlan + Executing + Blocked. Seed has
+        // one Draft (init-fresh) and two Executing (init-other, init-mid),
+        // plus terminal Completed (init-old) and Failed (init-fail).
+        assert_eq!(ids, vec!["init-fresh", "init-other", "init-mid"]);
+    }
+
+    #[test]
+    fn list_filtered_completed_only_returns_the_completed_terminal() {
+        let tmp = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_filtered(&conn, InitiativeListFilter::Completed, 10).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.initiative.initiative_id.as_str()).collect();
+        // `Failed` and `Aborted` MUST NOT leak into the Completed bucket.
+        // The semantic is "what shipped", not "what ended".
+        assert_eq!(ids, vec!["init-old"]);
+    }
+
+    #[test]
+    fn list_filtered_quarantined_returns_only_quarantined_rows() {
+        let tmp  = fresh_store_with_seed_and_quarantines();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_filtered(&conn, InitiativeListFilter::Quarantined, 10).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r.initiative.initiative_id.as_str()).collect();
+        assert_eq!(ids, vec!["init-fresh", "init-old"]);
+        assert!(rows.iter().all(|r| r.quarantined),
+            "every row of the Quarantined bucket MUST carry quarantined=true");
+    }
+
+    #[test]
+    fn list_filtered_active_surfaces_quarantine_flag_on_overlap() {
+        // `init-fresh` is Draft (active) AND quarantined — the bucket
+        // is "active", but the per-row flag MUST be true so the CLI
+        // can render `[Q]` on the row.
+        let tmp  = fresh_store_with_seed_and_quarantines();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_filtered(&conn, InitiativeListFilter::Active, 10).unwrap();
+        let fresh = rows.iter().find(|r| r.initiative.initiative_id == "init-fresh")
+            .expect("init-fresh must appear in the Active bucket");
+        assert!(fresh.quarantined, "Active row MUST surface quarantined=true when overlap holds");
+        let mid = rows.iter().find(|r| r.initiative.initiative_id == "init-mid")
+            .expect("init-mid must appear in the Active bucket");
+        assert!(!mid.quarantined, "non-quarantined Active row MUST surface quarantined=false");
+    }
+
+    #[test]
+    fn list_filtered_respects_limit() {
+        let tmp  = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        let rows = list_filtered(&conn, InitiativeListFilter::All, 2).unwrap();
+        assert_eq!(rows.len(), 2);
+        // Newest-first ordering MUST hold under LIMIT — never random.
+        assert_eq!(rows[0].initiative.initiative_id, "init-fresh");
+        assert_eq!(rows[1].initiative.initiative_id, "init-other");
+    }
+
+    #[test]
+    fn list_filtered_returns_empty_when_no_match() {
+        let tmp  = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        // No quarantine rows seeded => Quarantined bucket is empty.
+        let rows = list_filtered(&conn, InitiativeListFilter::Quarantined, 10).unwrap();
+        assert!(rows.is_empty(), "Quarantined bucket MUST be empty when no rows; got {rows:?}");
     }
 }
