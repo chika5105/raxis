@@ -3,13 +3,14 @@
 > **Status:** V2 Specified
 > **Role:** Canonical home for two related but separately-bounded subsystems:
 >
-> 1. **`OperatorNotificationChannel`** — the kernel→operator outbound transport seam (Shell, File, Email, Webhook today; Slack/PagerDuty/Teams future). The 7th extensibility trait per `extensibility-traits.md §1.2`. Implements forward-compat from `cli-readonly.md §5.6.6`.
+> 1. **`OperatorNotificationChannel`** — the kernel→operator outbound transport seam (Shell, File, Email, Webhook today; Slack/PagerDuty/Teams future). The 7th extensibility trait per `extensibility-traits.md §6A`. Implements forward-compat from `cli-readonly.md §5.6.6`.
 > 2. **`SmtpCredentialProxy`** — agent→external SMTP relay, the 6th `proxy_type` per `credential-proxy.md §3.6`. Lets agents send email as part of their work without ever holding the SMTP password.
 >
 > The two subsystems share the SMTP transport library (`crates/raxis-smtp-client/`) but are not the same code path. Mixing them would erase the `R-9` attribution boundary (an operator-attributed channel triggerable from agent intent would let the agent forge operator-attributed email).
 >
 > **Cross-references:**
-> - `extensibility-traits.md §6.5` (NEW) — `OperatorNotificationChannel` trait definition + conformance kit
+> - `extensibility-traits.md §6A` (NEW) — `OperatorNotificationChannel` trait registration + V2 ship list + conformance kit
+> - `extensibility-traits.md §1.1` — The §1.1 rule and the seventh trait row
 > - `extensibility-traits.md §13.1` — Why seven traits, not six (decision rationale)
 > - `credential-proxy.md §3.6` (NEW) — SMTP `proxy_type` reference
 > - `cli-ceremony.md §4.1` — `raxis notify channel | route | credential` operator-write commands

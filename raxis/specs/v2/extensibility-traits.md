@@ -15,7 +15,7 @@
 
 ---
 
-## §1 — Why Trait Boundaries (And Why Only Six)
+## §1 — Why Trait Boundaries (And Why Seven)
 
 The RAXIS reference implementation in this repository targets **autonomous software engineering on a single host** with a specific stack: Firecracker on Linux + Apple Virtualization on macOS, plaintext credential files under `<data_dir>/credentials/`, append-only JSONL audit segments, a Unix Domain Socket for the operator CLI, and a kernel-owned HTTPS gateway routing to public LLM providers.
 
@@ -34,7 +34,7 @@ Hard-coding the reference choices into the kernel makes the kernel non-portable.
 
 Equivalently: a subsystem stays concrete if and only if it **enforces** an `R-*` invariant (substituting it would let an implementation claim RAXIS conformance while violating the paradigm).
 
-Applying this rule yields six trait boundaries and a fixed concrete kernel:
+Applying this rule yields seven trait boundaries and a fixed concrete kernel:
 
 | Subsystem | Trait? | Justification |
 |---|---|---|
@@ -44,6 +44,7 @@ Applying this rule yields six trait boundaries and a fixed concrete kernel:
 | Sealed-event persistence (SQLite / PostgreSQL / S3 / Rekor) | ✅ `AuditSink` | `R-7` requires tamper-evidence verifiable with public keys; chain math stays kernel-side, persistence is a deployment choice. |
 | Operator CLI transport (UDS / mTLS gRPC / HTTPS) | ✅ `OperatorTransport` | `R-9` and `R-12` require the channel to be unforgeable by intelligence and authenticated to a human principal; the wire is replaceable. |
 | Inference provider routing (HTTPS / gRPC / local vLLM / TGI) | ✅ `InferenceRouter` | `R-2` mediation is satisfied by *any* router that strips planner authority over destination + meters tokens; specific providers are deployment choices. |
+| Operator notification transport (Shell / File / Email / Webhook / Slack / PagerDuty) | ✅ `OperatorNotificationChannel` | The dispatcher (idempotency, post-commit ordering, audit emission, drain-on-shutdown) enforces every `R-*`-bearing property; the wire to the operator is a transport choice. See `email-and-notification-channels.md` for the full spec. |
 | Intent admission pipeline (the 13-step gate check) | ❌ Concrete | This **is** the kernel. Abstracting it would hollow out the product and make `R-3`/`R-4`/`R-5`/`R-6` unverifiable. |
 | Policy parser (`policy.toml`/`plan.toml`) | ❌ Concrete | The signed-TOML schema is the RAXIS protocol; conformance test suites verify it. New domains add new fields, not new parsers. |
 | Escalation FSM | ❌ Concrete | The `Pending → Approved → Consumed` transitions are paradigm-level (`R-12`). Domain-specific escalation classes are enum variants, not trait swaps. |
@@ -59,7 +60,9 @@ V2 ships:
 3. Wiring at the kernel boot site (`kernel/src/main.rs` + `bootstrap.rs`) so each subsystem is held as `Arc<dyn Trait>` — not as a concrete type — anywhere admission code reads it.
 4. A **conformance test fixture** per trait that exercises the trait's contract against any alternative impl in any future workspace member.
 
-V2 does **not** ship alternative impls (Vault, HSM, gRPC, vLLM). Those are V3+ or out-of-tree. V2 only proves the seams exist and are testable.
+For `OperatorNotificationChannel`, V2 ships **four** default impls (`ShellChannel`, `FileChannel` — refactored from v1 — plus `EmailChannel` and `WebhookChannel` — new). The full surface is specified in `email-and-notification-channels.md`; the trait definition itself is in §6.5 of this document.
+
+V2 does **not** ship alternative impls in the other six trait families (Vault, HSM, gRPC, vLLM). Those are V3+ or out-of-tree. V2 only proves the seams exist and are testable.
 
 ---
 
@@ -1200,6 +1203,102 @@ An `OperatorTransport` is conformant iff:
 5. The transport MUST NOT introduce a path by which a planner VM can dial the operator endpoint. UDS impl is fine because the planner has no host filesystem path; gRPC impl MUST live on a network namespace the planner VM cannot reach. Tested by attempting `transport.dial(...)` from inside a `MockIsolation` VM and asserting failure.
 
 ---
+## §6A — `OperatorNotificationChannel` — How the Kernel Reaches the Operator (Outbound)
+
+### §6A.0 Why notification needs a trait boundary
+
+The reference implementation v1 ships two notification channels (`Shell` writing to `<data_dir>/notifications/inbox.jsonl`, `File` writing to an operator-supplied path). The v1 spec (`cli-readonly.md §5.6.6`) explicitly defers `Email` and `Webhook` handlers to v2 with the schema reserved.
+
+This is correct for the SE reference deployment but wrong for:
+
+- **Production operations teams** — operators want escalations in their email or PagerDuty queue, not a tail-watcher on a JSONL file.
+- **Distributed operator teams** — notifications need to reach a Slack channel or Microsoft Teams room.
+- **Compliance-driven deployments** — every audit-relevant event must be mirrored to a SIEM via webhook.
+- **Edge deployments without persistent operator humans** — notifications go to a webhook that triggers automated remediation.
+
+What is unchanged across these scenarios (and what therefore stays kernel-side per the §1.1 rule):
+
+- **Idempotency on `(event_seq, channel_id)`** — the dispatcher writes to `notification_dispatch` SQLite table before calling the channel; retry semantics are kernel-enforced.
+- **Post-commit ordering** — notifications fire AFTER the parent SQLite transaction commits, NEVER inside it (`kernel-store.md §2.5.2`).
+- **Audit emission** — `NotificationDelivered` / `NotificationDeliveryFailed` chain into the audit log uniformly regardless of channel kind.
+- **Bounded concurrency** — `Slow` channels share a 4-worker pool per channel-id; `Fast` channels run unbounded.
+- **Drain-on-shutdown** — `SIGTERM` waits up to 30 s for in-flight `Slow` deliveries before forced exit.
+
+What changes: the bytes that leave the kernel for the operator's destination. That's the trait surface.
+
+### §6A.1 Trait definition
+
+**Canonical home:** `crates/raxis-notification/src/lib.rs` (NEW).
+
+The trait, error types, payload struct, and conformance kit are defined in detail in `email-and-notification-channels.md §2.2`. Reproduced here in summary:
+
+```rust
+#[async_trait::async_trait]
+pub trait OperatorNotificationChannel: Send + Sync + 'static {
+    fn id(&self) -> &str;
+    fn kind(&self) -> ChannelKind;
+    async fn deliver(&self, payload: &NotificationPayload)
+        -> Result<DeliveryReceipt, ChannelError>;
+    async fn probe(&self) -> Result<ProbeOutcome, ChannelError>;
+    fn dispatch_class(&self) -> DispatchClass;
+    fn max_payload_bytes(&self) -> usize;
+}
+```
+
+`ChannelKind` is a closed enumeration: `Shell | File | Email | Webhook | Slack | PagerDuty | Teams`. Adding a kind requires a kernel change (per `INV-NOTIFY-05`), preventing operators from injecting ad-hoc transports via policy.
+
+### §6A.2 Reference implementations (V2)
+
+| Crate | Impl | Wire | Cred source |
+| --- | --- | --- | --- |
+| `crates/raxis-notification-shell/` | `ShellChannel` | File append (`O_APPEND \| O_CREAT`, `0644`) | None |
+| `crates/raxis-notification-file/` | `FileChannel` | File append, operator-chosen path | None |
+| `crates/raxis-notification-email/` | `EmailChannel` | SMTP (STARTTLS or implicit TLS), session-AUTH | `Arc<dyn CredentialBackend>` resolves SMTP cred |
+| `crates/raxis-notification-webhook/` | `WebhookChannel` | HTTPS POST with `X-RAXIS-Signature: t=ts,v1=hex(HMAC-SHA256(ts:body))` | `Arc<dyn CredentialBackend>` resolves HMAC secret |
+
+V3+ candidates (out of V2 scope, listed for design clarity):
+
+| Future crate | Impl |
+| --- | --- |
+| `crates/raxis-notification-slack/` | Slack incoming webhook + chat.postMessage API |
+| `crates/raxis-notification-pagerduty/` | PagerDuty Events API v2 |
+| `crates/raxis-notification-teams/` | Microsoft Teams incoming webhook |
+| `crates/raxis-notification-opsgenie/` | OpsGenie alerts API |
+
+### §6A.3 Files to create
+
+Per `email-and-notification-channels.md §8`. Summary list:
+
+- `crates/raxis-notification/src/lib.rs` — trait + error types + `NotificationPayload`
+- `crates/raxis-notification/src/conformance.rs` — generic conformance kit
+- `crates/raxis-notification-{shell,file,email,webhook}/src/lib.rs` — four impls
+- `crates/raxis-smtp-client/` — shared SMTP client (used by `EmailChannel` AND the agent-side SMTP credential proxy in `credential-proxy.md §3.6`)
+
+### §6A.4 Files to change
+
+- `kernel/src/notifications/dispatch.rs` — replace v1 channel-kind switch with a `HashMap<String, Arc<dyn OperatorNotificationChannel>>` lookup
+- `kernel/src/handlers/mod.rs` — add `notifications: Arc<NotificationDispatcher>` field to `HandlerContext`
+- `kernel/src/main.rs` — boot step 9 of §9.1 (NEW): build the channel set from `[[notifications.channels]]`, register with the dispatcher, run probes
+- `kernel/src/policy_manager.rs` — on policy reload, call `dispatcher.reconcile_with_policy()` to rebuild the channel set + routes
+- `crates/policy/src/notifications.rs` (NEW) — deserialiser + validator for `[[notifications.channels.email]]`, `[[notifications.channels.webhook]]`, `[[notifications.credentials]]`
+
+### §6A.5 Conformance contract
+
+An `OperatorNotificationChannel` impl is conformant iff:
+
+1. `id()` returns the same value across calls; matches the `[[notifications.channels]].id` it was constructed with. Tested by `make_channel(); make_channel().id() == "..."`.
+2. `kind()` is consistent with `id()` per the policy bundle and never varies during the impl's lifetime.
+3. `probe()` succeeds against the conformance fixture (e.g., `letterbox` SMTP for Email, `httpbin.org/post` for Webhook). Failure does NOT panic — it returns `Err(ChannelError::Unreachable)`.
+4. `deliver()` is idempotent on `(payload.event_seq, channel_id)` — calling twice with the same payload returns `DeliveryReceipt::Delivered` once and `DeliveryReceipt::AlreadyDelivered` thereafter; the upstream sees exactly one message.
+5. `deliver()` returns `Err(ChannelError::PayloadTooLarge)` when payload exceeds `max_payload_bytes()`.
+6. `deliver()` honours the dispatcher's `tokio::time::timeout` cancellation; the impl MUST NOT spawn detached background tasks that outlive the cancelled future.
+7. The impl MUST NOT depend on any `R-*`-bearing kernel primitive being mutable from inside `deliver()`. (Channels never write to `audit_sink` or `store` directly — those happen in the dispatcher.)
+8. For impls that hold a network connection: a TCP RST mid-`deliver()` returns `Err(ChannelError::Unreachable)` within `max_latency` (60 s) and does NOT deadlock.
+
+The conformance kit `crates/raxis-notification/src/conformance.rs::run_conformance_kit` runs all eight tests against any user-supplied factory `F: Fn() -> Box<dyn OperatorNotificationChannel>`.
+
+---
+
 ## §7 — `InferenceRouter` — How LLM Inference Is Routed and Metered
 
 The reference implementation ships a `raxis-gateway` worker pool that forwards `InferenceRequest` IPC messages over HTTPS to public LLM providers (Anthropic, OpenAI, Google Gemini), with the kernel computing token cost and consuming budget before forwarding (`provider-failure-handling.md` §4, `provider-model-selection.md` §6).
@@ -1345,29 +1444,36 @@ The **shape** of the rule: if substituting the subsystem could let an impl satis
 
 ---
 
-## §9 — Wiring at Boot: How the Six Traits Compose
+## §9 — Wiring at Boot: How the Seven Traits Compose
 
-The kernel has exactly **one** boot site that constructs every trait impl: `kernel/src/main.rs::main`. Per §1.2, V2 ships only the default impl of each trait, but the wiring is structured so future impls can plug in without touching admission code.
+The kernel has exactly **one** boot site that constructs every trait impl: `kernel/src/main.rs::main`. Per §1.2, V2 ships only the default impl of each trait (with four ship-impls of `OperatorNotificationChannel`), but the wiring is structured so future impls can plug in without touching admission code.
 
 ### §9.1 Construction order (matters)
 
 ```
 1. Load policy.toml + verify operator signature (concrete)
 2. Open store (kernel.db) (concrete)
-3. Construct AuditSink (§5)              ← needed by every later step
-4. Construct CredentialBackend (§4)      ← uses AuditSink for emit
-5. Construct InferenceRouter (§7)        ← uses CredentialBackend for provider keys
-6. Construct IsolationBackend (§3)       ← uses CredentialBackend for VM kernel signing
+3. Construct AuditSink (§5)                              ← needed by every later step
+4. Construct CredentialBackend (§4)                      ← uses AuditSink for emit
+5. Construct InferenceRouter (§7)                        ← uses CredentialBackend for provider keys
+6. Construct IsolationBackend (§3)                       ← uses CredentialBackend for VM kernel signing
 6a. isolation.verify_isolation_guarantee()? → admit only if R1Conformant /
     R1Conformant_Strong, OR WasmSandbox + policy.allow_wasm_for_low_stakes_verifiers,
     OR FallbackOnly + cli --unsafe-fallback-isolation (then audit
     IsolationFallbackBypass), OR fail boot. (See §3.8 main.rs sketch.)
-7. Construct DomainAdapter (§2)          ← uses IsolationBackend to spawn verifier VMs
-8. Construct OperatorTransport (§6)      ← bound last; once accepting, kernel is "open"
-9. Run intent admission loop (concrete; depends on every trait above via HandlerContext)
+7. Construct DomainAdapter (§2)                          ← uses IsolationBackend to spawn verifier VMs
+8. Construct OperatorTransport (§6)                      ← bound; once accepting, kernel is "open" to operator IPC
+9. Construct OperatorNotificationChannel set (§6A)       ← uses CredentialBackend (SMTP/HMAC) + AuditSink (delivery records)
+9a. dispatcher.reconcile_with_policy()? → build channel map from
+    [[notifications.channels]], register routes, spawn per-channel-id
+    worker pools per dispatch_class.
+9b. dispatcher.probe_all() → run probe() on every channel in parallel,
+    timeout-bound 10 s each. Probe failure ⇒ NotificationChannelDegraded
+    audit; channel still receives deliveries (best-effort).
+10. Run intent admission loop (concrete; depends on every trait above via HandlerContext)
 ```
 
-Order is load-bearing: step 5 needs step 4 to fetch provider creds; step 6 needs step 4 because Apple Virtualization wants signed kernel images; step 6a is a boot-time admission gate that refuses to start a release kernel against a non-conformant isolation backend; step 9's `HandlerContext` carries `Arc<dyn Trait>` references to all six.
+Order is load-bearing: step 5 needs step 4 to fetch provider creds; step 6 needs step 4 because Apple Virtualization wants signed kernel images; step 6a is a boot-time admission gate that refuses to start a release kernel against a non-conformant isolation backend; step 9 needs steps 3 and 4 (channels resolve creds at deliver-time, audit emits delivery outcome); step 9 happens AFTER step 8 so any escalation submitted in the first second of operation has a working dispatcher; step 10's `HandlerContext` carries `Arc<dyn Trait>` references to all seven seams plus `Arc<NotificationDispatcher>`.
 
 ### §9.2 `HandlerContext` shape
 
@@ -1386,6 +1492,10 @@ pub struct HandlerContext {
     pub isolation: Arc<dyn IsolationBackend>,
     pub domain: Arc<dyn DomainAdapter<IntentKind = IntentKind, TerminalArtefact = (CommitSha, String)>>,
     pub operator_transport: Arc<dyn OperatorTransport>,
+    // Concrete dispatcher (the trait set is held inside the dispatcher).
+    // Wraps Vec<Arc<dyn OperatorNotificationChannel>>; handlers call
+    // ctx.notifications.dispatch(payload) AFTER the parent SQLite commit.
+    pub notifications: Arc<NotificationDispatcher>,
 }
 ```
 
@@ -1425,11 +1535,11 @@ Existing kernel tests (`kernel/tests/mock_planner_end_to_end.rs`, `kernel/tests/
 
 The trait extraction touches the kernel boot site and every handler. Doing it as one PR is unreviewable. The migration is structured as five phases, each independently shippable:
 
-**Phase A — Trait crates exist.** Create `crates/raxis-domain`, `crates/raxis-isolation`, `crates/raxis-credentials`, `crates/raxis-operator-transport`, `crates/raxis-inference-router`. Each contains only the trait, error types, and conformance kit. No impls. The kernel does not depend on them yet. Mergeable in one PR per crate.
+**Phase A — Trait crates exist.** Create `crates/raxis-domain`, `crates/raxis-isolation`, `crates/raxis-credentials`, `crates/raxis-operator-transport`, `crates/raxis-inference-router`, `crates/raxis-notification`. Each contains only the trait, error types, and conformance kit. No impls. The kernel does not depend on them yet. Mergeable in one PR per crate.
 
-**Phase B — Default impls in their own crates.** Create `crates/raxis-domain-git` (the V2 reference `GitAdapter` impl of `DomainAdapter`), `crates/raxis-isolation-firecracker`, `crates/raxis-isolation-apple-vz`, `crates/raxis-isolation-namespace` (the documented `FallbackOnly` non-conformant tier), `crates/raxis-credentials-file`, `crates/raxis-operator-transport-unix`, `crates/raxis-inference-router-https`. Each is a thin re-export of the existing concrete logic, refactored to implement the trait. The kernel still uses the old concrete types directly. Mergeable in one PR per impl.
+**Phase B — Default impls in their own crates.** Create `crates/raxis-domain-git` (the V2 reference `GitAdapter` impl of `DomainAdapter`), `crates/raxis-isolation-firecracker`, `crates/raxis-isolation-apple-vz`, `crates/raxis-isolation-namespace` (the documented `FallbackOnly` non-conformant tier), `crates/raxis-credentials-file`, `crates/raxis-operator-transport-unix`, `crates/raxis-inference-router-https`, and the four V2 notification impls `crates/raxis-notification-{shell,file,email,webhook}`. Each is a thin re-export of the existing concrete logic (Shell+File from v1) or a fresh impl (Email, Webhook), refactored to implement the trait. The kernel still uses the old concrete types directly. Mergeable in one PR per impl.
 
-> Note. The `DomainAdapter` migration has its own internal sub-phases (A-E) inside `extensibility-traits.md §2.8` because it deletes `kernel/src/vcs/`, which is the largest single code-motion in V2. The other five trait extractions are smaller and each ship as a single Phase B PR.
+> Note. The `DomainAdapter` migration has its own internal sub-phases (A-E) inside `extensibility-traits.md §2.8` because it deletes `kernel/src/vcs/`, which is the largest single code-motion in V2. The other six trait extractions (`IsolationBackend`, `CredentialBackend`, `AuditSink`, `OperatorTransport`, `InferenceRouter`, `OperatorNotificationChannel`) are smaller and each ship as a single Phase B PR. `OperatorNotificationChannel` has its own implementation phasing in `email-and-notification-channels.md §7`.
 
 **Phase C — `AuditSink` already in `crates/audit/src/sink.rs` is broadened.** Add `read_range`, `sync`, `highest_durable_seq` to the existing trait; extend `FileAuditSink` and `FakeAuditSink`. The conformance test now runs against both. Single PR.
 
@@ -1455,10 +1565,14 @@ These specs are updated to reference `extensibility-traits.md` at the relevant i
 | `v2/system-requirements.md` | `IsolationBackend` | §5 (Hypervisor) reframes Firecracker / Apple-VZ / Namespace as the V2-shipped impls of `IsolationBackend`; raxis doctor §11 adds `[CHECK] isolation.tier` referencing `extensibility-traits.md` §3.5 |
 | `v2/vm-network-isolation.md` | `IsolationBackend` | §3 (boot path) clarifies the spec describes the V2 default `FirecrackerIsolation` Tier-1 networking; alternative isolation backends MUST satisfy the same Tier-1 contract per §3.9 conformance |
 | `v2/kernel-lifecycle.md` | `OperatorTransport` | §3 (kernel start) and §13 implementation checklist note the operator socket bind delegates to `Arc<dyn OperatorTransport>::bind` |
-| `v2/v2-deep-spec.md` | All six | "Related Specifications" appendix gains a row for `extensibility-traits.md`; Part 2 (Authorization) gains a forward-pointer to the trait map |
+| `v2/email-and-notification-channels.md` | `OperatorNotificationChannel` | §2.2 (canonical trait definition + four V2 ship impls), §3.6 cross-link to `credential-proxy.md` for SMTP `proxy_type` (Goal B is structurally orthogonal — agent SMTP egress is a credential proxy, not a notification channel — but they share `crates/raxis-smtp-client/`) |
+| `v1/cli-readonly.md` | `OperatorNotificationChannel` | §5.6.6 "Forward compatibility" updated to reflect that V2 ships Email + Webhook handlers behind the trait; the schema in §5.6.2 (channel kinds, routes, default_channels) is the contract the trait honours |
+| `v1/cli-ceremony.md` | `OperatorNotificationChannel` | New `raxis notify channel/route/credential` commands per `email-and-notification-channels.md §4.1`; commands wrap edits to `policy.toml` and call existing `policy sign` ceremony |
+| `v2/policy-plan-authority.md` | `OperatorNotificationChannel` | Schema additions for `[[notifications.credentials]]`, `[[notifications.channels.email]]`, `[[notifications.channels.webhook]]`, and (for Goal B agent SMTP egress) `[[permitted_credentials.smtp]]` per `email-and-notification-channels.md §3.2`; new failure codes `FAIL_NOTIFY_*` and `FAIL_SMTP_PROXY_*` |
+| `v2/v2-deep-spec.md` | All seven | "Related Specifications" appendix gains a row for `extensibility-traits.md` and `email-and-notification-channels.md`; Part 2 (Authorization) gains a forward-pointer to the trait map; new invariants `INV-NOTIFY-01..06` and `INV-SMTP-PROXY-01..05` registered |
 | `v1/kernel-store.md` | `AuditSink` | §2.5.2 footnote adds "the AuditSink trait is V2-extensibility-pluggable per `v2/extensibility-traits.md` §5; the chain math stays in the writer" |
-| `paradigm.md` | All six | §6 (Mapping) gains a sentence noting the reference implementation exposes six trait boundaries; §5.1 (current reference impl) adds a one-line pointer |
-| `invariants.md` | n/a | New `INV-EXT-*` (extensibility) section optional for V2; for now, the conformance kit IS the enforcement |
+| `paradigm.md` | All seven | §6 (Mapping) gains a sentence noting the reference implementation exposes seven trait boundaries; §5.1 (current reference impl) adds a one-line pointer |
+| `invariants.md` | n/a | New `INV-EXT-*` (extensibility) section optional for V2; for now, the conformance kit IS the enforcement. `INV-NOTIFY-*` and `INV-SMTP-PROXY-*` are canonical in `email-and-notification-channels.md §10` |
 
 ---
 
@@ -1490,15 +1604,21 @@ The kit returns a `ConformanceReport { passed: u32, failed: Vec<Failure> }`. CI 
 
 ## §13 — Foundational Design Decisions
 
-### §13.1 Why six, not five, and not seven
+### §13.1 Why seven, not six, and not eight
 
-**Decision.** Exactly six traits: `DomainAdapter`, `IsolationBackend`, `CredentialBackend`, `AuditSink`, `OperatorTransport`, `InferenceRouter`.
+**Decision.** Exactly seven traits: `DomainAdapter`, `IsolationBackend`, `CredentialBackend`, `AuditSink`, `OperatorTransport`, `InferenceRouter`, `OperatorNotificationChannel`.
 
-**Considered alternative — five traits (collapse `OperatorTransport` into `IsolationBackend`).** Rejected: the operator transport's auth ceremony (Ed25519 challenge-response) is independent of the agent isolation primitive. RAXIS Cloud runs the kernel on Linux Firecracker hosts AND operates over mTLS gRPC. The two seams are orthogonal.
+**History.** V2 originally specified six traits; the seventh (`OperatorNotificationChannel`) was added when it became clear that operator notification has the same shape as `OperatorTransport` (replaceable wire to a human principal) but in the inverse direction (kernel → operator instead of operator → kernel). The §1.1 rule resolves the question: substituting the channel preserves every `R-*` because the dispatcher (idempotency, post-commit ordering, audit emission) is kernel-side.
 
-**Considered alternative — seven traits (split `InferenceRouter` into `Provider` and `Router`).** Rejected: provider integration (auth, retry, parsing) is internal to the router impl. Operators don't swap providers; they swap routers (the entire dispatch path). Adding a provider trait creates a configuration surface (which router uses which providers) that benefits no real deployment.
+**Considered alternative — six traits (notification kinds as concrete kernel modules).** Rejected: adding Slack, PagerDuty, Teams etc. without a trait means re-touching the kernel for every transport. With the trait, future channels are out-of-tree crates that pass the conformance kit and get registered at boot.
 
-**Considered alternative — eight traits (add `PolicyParser`, `EscalationFsm`).** Rejected: those are paradigm-level (`R-3`, `R-12`). Substituting them would let an impl claim RAXIS conformance while not enforcing the paradigm.
+**Considered alternative — six traits (collapse `OperatorTransport` into `IsolationBackend`).** Rejected: the operator transport's auth ceremony (Ed25519 challenge-response) is independent of the agent isolation primitive. RAXIS Cloud runs the kernel on Linux Firecracker hosts AND operates over mTLS gRPC. The two seams are orthogonal.
+
+**Considered alternative — eight traits (split `InferenceRouter` into `Provider` and `Router`).** Rejected: provider integration (auth, retry, parsing) is internal to the router impl. Operators don't swap providers; they swap routers (the entire dispatch path). Adding a provider trait creates a configuration surface (which router uses which providers) that benefits no real deployment.
+
+**Considered alternative — eight traits (collapse Goal A into a single `NotificationTransport` shared with agent SMTP egress).** Rejected: this would erase the `R-9` attribution boundary. An operator-attributed channel triggerable from agent intent would let the agent forge audit-bound operator messages. Agent SMTP egress is a `proxy_type` (`credential-proxy.md §3.6`), not an `OperatorNotificationChannel` impl — they share an SMTP client crate but distinct trait surfaces. See `email-and-notification-channels.md §1.2`.
+
+**Considered alternative — nine traits (add `PolicyParser`, `EscalationFsm`).** Rejected: those are paradigm-level (`R-3`, `R-12`). Substituting them would let an impl claim RAXIS conformance while not enforcing the paradigm.
 
 **Scenario it prevents.** A future PR proposes adding a `BudgetCalculator` trait so different deployments can use different cost models. The §1.1 rule (does substitution weaken any `R-*`?) immediately catches that worst-case-reservation per `INV-PROVIDER-05` is paradigm-load-bearing — substituting the calculator would let a buggy impl undercount and bypass `R-5`. The PR is rejected; a configurable cost *model* (data, not code) inside the existing concrete `compute_admission_cost` is the right answer.
 
