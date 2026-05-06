@@ -2340,6 +2340,17 @@ on every PR that touches `raxis/specs/**`.
    xtask runs at the spec-text level; the crate test runs at
    the Rust-source level. Both must pass; both must agree on
    the section map.
+6. **Audit-event paired/single classification.** Every
+   variant in the `AuditEventKind` enum (the canonical
+   inventory lives in `crates/audit/src/event.rs`) MUST
+   appear in exactly one of the two classification lists in
+   `audit-paired-writes.md §4` (paired class — §4.1; single
+   class — §4 table). A variant in neither, in both, or
+   missing from the spec entirely emits
+   `LINT_SPEC_GRAPH_AUDIT_CLASSIFICATION_MISSING { variant,
+   present_in: [..]}`. This lint enforces `INV-AUDIT-PAIRED-01`
+   at the spec level: a state-mutating event kind that an
+   implementer adds without classifying it cannot ship.
 
 #### Implementation skeleton
 
@@ -2451,4 +2462,5 @@ into a core orchestration subsystem that warrants its own detailed mechanical sp
 | System requirements — supported OS / hardware / hypervisor matrix, network requirements, account model, dependencies, `raxis doctor` preflight | [`system-requirements.md`](system-requirements.md) | V2 Specified |
 | **Extensibility traits** — seven pluggable trait boundaries (`DomainAdapter`, `IsolationBackend`, `CredentialBackend`, `AuditSink`, `OperatorTransport`, `InferenceRouter`, `OperatorNotificationChannel`); the rule that decides what gets a trait; per-trait file enumeration; conformance contracts; phased migration plan | [`extensibility-traits.md`](extensibility-traits.md) | V2 Specified |
 | **Email & operator notification channels** — `OperatorNotificationChannel` trait (the 7th seam) with V2 ship impls (Shell, File, Email, Webhook); concrete `NotificationDispatcher` (idempotency on `(event_seq, channel_id)`, post-commit ordering, drain-on-shutdown); SMTP credential proxy (`proxy_type = "smtp"`) for agent-side egress with structural defenses (From substitution, recipient allowlist, header-rewrite, atomic SQLite-tx rate limits); shared `crates/raxis-smtp-client/`; `INV-NOTIFY-01..06` and `INV-SMTP-PROXY-01..05`; full §7 implementation phase plan | [`email-and-notification-channels.md`](email-and-notification-channels.md) | V2 Specified |
+| **Paired audit writes (R-7 strict satisfaction)** — `StateChangePending` → `<existing kind>` (with `confirms_pending_seq`, `sqlite_commit_id`, `actual_post_state_digest`) → `StateChangeRolledBack` three-event protocol; per-row `last_committing_event_seq` SQLite column on every state-bearing table; offline forensic verifier algorithm; recovery downgraded to advisory (`reconcile_advisory`); `pre_state_digest` / `intended_post_state_digest` / `idempotency_key` / `KernelClaims` binding; full §11 alternatives table (A–H, with rejection rationale); §7 failure-mode handling for every crash window; V2.0 → V2.1 migration ceremony; `INV-AUDIT-PAIRED-01..07` | [`audit-paired-writes.md`](audit-paired-writes.md) | V2 Specified |
 

@@ -32,13 +32,15 @@
 > consolidates V1 invariants in full and is being incrementally
 > expanded to include V2 invariants. Mirrored so far:
 > `INV-CONVERGENCE-*` (§9), `INV-PLANNER-HARNESS-01..06` (§10),
-> `INV-VERIFIER-*` (§11). V2 invariants in their canonical homes
-> that have NOT yet been mirrored here include: `INV-VM-CAP-01..05`,
-> `INV-PUSH-01..05`, `INV-KEY-01..08`, `INV-MERGE-WORKTREE-RETAIN`,
-> `INV-MERGE-CONSISTENCY`, `INV-CAPACITY-01..06`,
-> `INV-PROVIDER-01..10`, `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`,
-> `INV-DELEGATE-01`, `INV-DISPATCH`, `INV-RUNTIME-CLASSIFICATION`
-> (§12 of this file per the V1 numbering, slated to become INV-09).
+> `INV-VERIFIER-*` (§11), `INV-ENV-01` (§11.5),
+> `INV-AUDIT-PAIRED-01..07` (§11.6). V2 invariants in their canonical
+> homes that have NOT yet been mirrored here include:
+> `INV-VM-CAP-01..05`, `INV-PUSH-01..05`, `INV-KEY-01..08`,
+> `INV-MERGE-WORKTREE-RETAIN`, `INV-MERGE-CONSISTENCY`,
+> `INV-CAPACITY-01..06`, `INV-PROVIDER-01..10`,
+> `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`, `INV-DELEGATE-01`,
+> `INV-DISPATCH`, `INV-RUNTIME-CLASSIFICATION` (§12 of this file per
+> the V1 numbering, slated to become INV-09).
 >
 > **DEPRECATED in V2 (do NOT mirror; will be removed entirely in V3):**
 > `INV-EGRESS-01` (kernel-mediated egress allowlist; superseded by
@@ -67,7 +69,8 @@
 | Planner harness — V2 | INV-PLANNER-HARNESS-01..06 | 6 |
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
-| **Total** | | **64** |
+| Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
+| **Total** | | **71** |
 
 ---
 
@@ -2204,6 +2207,172 @@ neutrality table).
 
 ---
 
+## §11.6 — Paired audit writes (INV-AUDIT-PAIRED-*)
+
+The seven invariants below are the canonical R-7-bearing properties of
+the V2.1 paired-audit protocol. They make the V1 probabilistic R-7
+gap (chain integrity conditional on `recovery::reconcile` running on
+the next kernel start) into a structural guarantee: an offline
+forensic verifier resolves every chain orphan from a frozen SQLite
+snapshot alone, with no kernel runtime dependency.
+
+**Canonical home.** `v2/audit-paired-writes.md` §14 (full statements,
+verification tests, and rationale per invariant).
+
+### INV-AUDIT-PAIRED-01 — Every state-mutating event is preceded by a pending
+
+**Statement.** For every `AuditEventKind` variant in the paired class
+(`v2/audit-paired-writes.md §4.1`), the kernel writes and durably
+fsyncs a `StateChangePending` event before issuing `BEGIN IMMEDIATE`.
+No path through the kernel mutates SQLite without a preceding
+fsync'd pending.
+
+**Justification.** Floor of strict R-7 satisfaction. Without it, a
+crash mid-COMMIT leaves the chain silent on a state change.
+
+**Scenario.** An attacker triggers a kernel panic between Phase B0 and
+Phase B1; recovery never runs (host decommissioned). Without this
+invariant the chain is silent on the attempted mutation; with it, a
+`StateChangePending` survives the crash for the offline verifier to
+resolve.
+
+**Canonical home.** `v2/audit-paired-writes.md` §14.1.
+
+---
+
+### INV-AUDIT-PAIRED-02 — Every confirmed references a real pending with matching digests
+
+**Statement.** For every paired-class confirmed event in the chain,
+the cited `confirms_pending_seq` MUST refer to a `StateChangePending`
+event earlier in the chain, AND the confirmed's
+`actual_post_state_digest` MUST equal that pending's
+`intended_post_state_digest`.
+
+**Justification.** Closes the kernel-buggery / kernel-compromise
+vector where the kernel announces one mutation and commits a
+different one. The digest binding is the structural defence the
+threat model in `v2/audit-paired-writes.md §9` enumerates.
+
+**Scenario.** A buggy or compromised kernel announces `Admitted →
+Active` in the pending and commits `Admitted → Failed`. The verifier
+flags `Finding::DigestMismatch` as a critical finding.
+
+**Canonical home.** `v2/audit-paired-writes.md` §14.2.
+
+---
+
+### INV-AUDIT-PAIRED-03 — Every rollback references a real pending
+
+**Statement.** For every `StateChangeRolledBack` in the chain, the
+cited `rolls_back_pending_seq` MUST refer to a `StateChangePending`
+earlier in the chain. Pending and rollback together form a complete
+pair; no SQLite mutation occurred under that pending's claim.
+
+**Justification.** Symmetric to `INV-AUDIT-PAIRED-02`. A dangling
+rollback (rollback referencing nothing) is a critical R-7 finding —
+it implies chain truncation or fabrication.
+
+**Scenario.** Operator notices an unexpected `StateChangeRolledBack
+{ rolls_back_pending_seq: 9001 }` but the chain has no event at
+seq 9001. Verifier flags `Finding::RolledBackWithoutPending` as
+critical.
+
+**Canonical home.** `v2/audit-paired-writes.md` §14.3.
+
+---
+
+### INV-AUDIT-PAIRED-04 — `last_committing_event_seq` reflects the most recent pending
+
+**Statement.** For every state-bearing SQLite row, the
+`last_committing_event_seq` column records the seq of the most
+recent pending whose Phase B1 successfully committed a mutation to
+that row. The kernel writes this column inside the same transaction
+as the row mutation; no path exists by which a row mutates without
+`last_committing_event_seq` being updated.
+
+**Justification.** SQLite half of offline-verifier resolution
+(`v2/audit-paired-writes.md §5.1` Phase 3). Without it, the verifier
+cannot distinguish a committed orphan from a rolled-back orphan.
+
+**Scenario.** Crash window §7.4 (COMMIT succeeded, confirmed fsync
+never ran). Verifier sees orphan pending(X) and confirms it
+committed by reading `last_committing_event_seq = X` on the affected
+row.
+
+**Canonical home.** `v2/audit-paired-writes.md` §14.4.
+
+---
+
+### INV-AUDIT-PAIRED-05 — Audit chain is offline-verifiable without the kernel
+
+**Statement.** Given (a) the JSONL chain segments and (b) a SQLite
+snapshot at any point-in-time after the chain, the verifier algorithm
+in `v2/audit-paired-writes.md §5` MUST resolve every orphan to either
+`OrphanResolvedByStateSnapshot` or `OrphanRolledBackInferred`. The
+verifier MUST NOT require the kernel to be running, MUST NOT require
+any kernel-side recovery process to have run, and MUST produce the
+same set of findings on the same inputs regardless of whether the
+host kernel is currently up.
+
+**Justification.** This is the literal statement of R-7. Closes the
+strict-reading gap in V1.
+
+**Scenario.** A host is decommissioned years after the kernel last
+ran. A compliance auditor receives the data directory and
+reconstructs the full chain integrity story without the kernel
+binary.
+
+**Canonical home.** `v2/audit-paired-writes.md` §14.5.
+
+---
+
+### INV-AUDIT-PAIRED-06 — Recovery is advisory, not required for chain integrity
+
+**Statement.** `kernel/src/recovery.rs::reconcile_advisory` MAY
+synthesise missing `confirmed` and `StateChangeRolledBack` events on
+kernel start, but the chain's R-7 verifiability MUST NOT depend on
+this synthesis having run. A chain that has never been touched by
+recovery MUST produce the same offline-verifier output (modulo
+`Finding::OrphanResolvedByStateSnapshot` vs
+"confirmed-event-present") as one that has.
+
+**Justification.** Closes the V1 R-7 conditional-on-restart violation
+explicitly. Recovery becomes a chain-readability optimisation, not a
+correctness requirement.
+
+**Scenario.** A V2.1 kernel crashes mid-write; the operator runs the
+offline verifier from a snapshot before any kernel restart. Findings
+include `OrphanResolvedByStateSnapshot` (or `OrphanRolledBackInferred`)
+for each orphan, with no critical findings — full chain
+verifiability without `reconcile_advisory` having run.
+
+**Canonical home.** `v2/audit-paired-writes.md` §14.6.
+
+---
+
+### INV-AUDIT-PAIRED-07 — Pre-V2.1 rows fall back gracefully
+
+**Statement.** For SQLite rows with `last_committing_event_seq = 0`
+(rows the V2.1 migration could not backfill), the offline verifier
+flags `Finding::PreV21Row` (non-critical) and applies V1
+reconciliation semantics for those rows' history. The V1 fallback is
+bounded: no V2.1+ paired event can resolve to a `PreV21Row` (the
+kernel sets `last_committing_event_seq` on every mutation
+post-migration).
+
+**Justification.** Migration-cycle safety — the protocol must handle
+deployments that have years of pre-V2.1 chain.
+
+**Scenario.** A long-running V1 deployment migrates to V2.1. The
+backfill cannot resolve a row that was deleted from the chain by
+prior segment rotation. The verifier flags it as `PreV21Row`, falls
+back to V1 reconciliation for that row's narrative, and continues
+without raising a critical finding.
+
+**Canonical home.** `v2/audit-paired-writes.md` §14.7.
+
+---
+
 ## §12 — How invariants combine (composition map)
 
 Most security properties at the system level are emergent from
@@ -2237,6 +2406,8 @@ Most security properties at the system level are emergent from
 | **Master frontier regressions are gated mechanically, not just reviewed** | INV-VERIFIER-13 (pre-merge verifier gating) + INV-MERGE-CONSISTENCY (atomic SQLite-then-git ordering) + INV-TASK-PATH-02 (per-task path closure) — per-task review establishes per-task correctness; pre-merge verifiers establish integration-frontier correctness; the SQLite-first ordering ensures verifier failures cannot half-advance master |
 | **No single agent execution context spans two compliance boundaries** | INV-ENV-01 (per-task environment consistency) + INV-VM-CAP-04 (credentials/ never mounted) + INV-PLANNER-HARNESS-01/04/06 (Reviewer/Orchestrator structurally environment-neutral) — credentials are kernel-injected by name, the per-task binding constrains which set of names can be injected together, and the planner-harness invariants ensure only the Executor role even has the surface for binding to fail |
 | **Cross-environment data flows are auditable** | INV-ENV-01 (forces DAG split for cross-env work) + INV-04 (audit log integrity) + INV-VERIFIER-* (artifact mechanism mediates the kernel-store handoff) — every cross-environment byte transfer becomes two task IDs and a SHA-256 in the audit chain rather than a single VM with multiple credentials |
+| **Audit chain is verifiable without the kernel running** | INV-AUDIT-PAIRED-01 (every state change has a pending) + INV-AUDIT-PAIRED-02/03 (pairing integrity) + INV-AUDIT-PAIRED-04 (`last_committing_event_seq` disambiguates orphans) + INV-AUDIT-PAIRED-05 (offline verifier algorithm) + INV-AUDIT-PAIRED-06 (recovery is advisory) + INV-04 (chain hash linkage) — together these turn R-7 from a probabilistic "if recovery runs" guarantee into a structural "verifiable from frozen state alone" guarantee |
+| **Kernel cannot announce one mutation and commit another** | INV-AUDIT-PAIRED-02 (digest equality between pending's `intended_post_state_digest` and confirmed's `actual_post_state_digest`) + INV-04 (chain hash linkage prevents post-hoc edit) + INV-CERT-* (event signing prevents forgery) — a buggy or compromised kernel that diverges intent from effect is flagged as `Finding::DigestMismatch` by the offline verifier, with no kernel cooperation required |
 
 When auditing a code path, look for which combination of invariants
 governs it; a single invariant in isolation rarely tells the full
