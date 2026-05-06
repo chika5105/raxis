@@ -59,6 +59,83 @@ pub struct AuditEvent {
 }
 
 // ---------------------------------------------------------------------------
+// SecurityViolationClass — V2 adversarial-input taxonomy.
+// v2-deep-spec.md §Step 13 ("Separating Adversarial Input from Alignment
+// Failures").
+//
+// The discriminator is serialised by `#[serde(tag = "kind")]` on
+// `AuditEventKind::SecurityViolation` (via the inner enum's PascalCase
+// rename), giving the on-wire shape:
+//
+//     {
+//       "kind": "SecurityViolation",
+//       "session_id": "...",
+//       "violation_class": "FrameMalformation" | "AuthorityProbe" | "Replay",
+//       ...
+//     }
+//
+// Forensic tools and the notification router match on `violation_class`
+// directly to decide severity (e.g. AuthorityProbe is a higher-priority
+// page than FrameMalformation, because it implies the attacker has a
+// valid session token).
+// ---------------------------------------------------------------------------
+
+/// Adversarial-input class for `AuditEventKind::SecurityViolation`.
+///
+/// **Spec drift contract.** Adding a new variant requires the static
+/// dispatch matrix or pre-auth blocklist (v2-deep-spec.md §Step 15)
+/// to be updated in lock-step. The pinned-count test below catches
+/// silent additions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum SecurityViolationClass {
+    /// Class 1 — the received bytes are not valid bincode for any known
+    /// `IntentRequest` variant. The frame is rejected before
+    /// deserialization completes. `session_id` is `None` because the
+    /// frame did not parse far enough to identify a session.
+    FrameMalformation,
+    /// Class 2 — a session with a valid session token submits an intent
+    /// its `session_agent_type` is not authorized to send (e.g. an
+    /// Executor sending `ActivateSubTask`). The static dispatch matrix
+    /// catches this before any handler runs (v2-deep-spec.md §Step 20).
+    AuthorityProbe,
+    /// Class 3 — an envelope_nonce already seen, OR a sequence_number
+    /// ≤ the session's stored sequence_number, where the kernel has
+    /// cryptographic evidence the frame is a hostile replay rather
+    /// than a benign retry of an in-flight request. (Benign retries
+    /// route to `ReplayRejected`, not here.)
+    Replay,
+}
+
+impl SecurityViolationClass {
+    /// All variants — pinned-count regression target. See the test
+    /// `security_violation_class_variant_count_is_pinned` for the
+    /// drift contract.
+    pub const ALL: [Self; 3] = [
+        Self::FrameMalformation,
+        Self::AuthorityProbe,
+        Self::Replay,
+    ];
+
+    /// Stable on-wire string name (matches the PascalCase serde
+    /// projection). Useful for log aggregation pipelines that match
+    /// on string discriminators rather than parsing JSON.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FrameMalformation => "FrameMalformation",
+            Self::AuthorityProbe    => "AuthorityProbe",
+            Self::Replay            => "Replay",
+        }
+    }
+}
+
+impl std::fmt::Display for SecurityViolationClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AuditEventKind — structured payload constructors for every event type.
 //
 // These are the normative event kinds referenced throughout kernel-core.md
@@ -179,11 +256,59 @@ pub enum AuditEventKind {
     },
 
     // --- Session management ---
+    /// Emitted when the kernel creates a new planner session row.
+    ///
+    /// **V2 attribution chain (v2-deep-spec.md §Step 7).** A V2 session
+    /// carries four fields that uniquely tie its work back to a
+    /// human-signed plan at a known policy epoch:
+    ///
+    ///   * `session_id`         — this session row.
+    ///   * `initiative_id`      — the initiative this session belongs to
+    ///                            (None for legacy V1 free-running sessions
+    ///                            that predate hierarchical orchestration).
+    ///   * `plan_bundle_sha256` — SHA-256 of the canonical V2 plan bundle
+    ///                            (`plan-bundle-sealing.md §8.2`). For
+    ///                            legacy V1 initiatives this carries
+    ///                            `plan_artifact_sha256` and the V1 chain
+    ///                            (`plan_artifact_sha256 →
+    ///                            signed_plan_artifacts → plan.sig →
+    ///                            operator pubkey`) remains valid for
+    ///                            forensic reproducibility. The CLI render
+    ///                            layer disambiguates by joining against
+    ///                            the table that currently holds the
+    ///                            artifact.
+    ///   * `policy_epoch`       — kernel policy epoch at session-creation
+    ///                            time (None for legacy V1 segments that
+    ///                            predate the field).
+    ///   * `session_agent_type` — V2 agent kind ("Orchestrator" |
+    ///                            "Executor" | "Reviewer"), None for V1.
+    ///
+    /// Reconstruction (V2): commit SHA → CompleteTask audit event →
+    /// session_id → SessionCreated event → plan_bundle_sha256 →
+    /// plan_bundles row → bundle signature → operator public key. The
+    /// chain is cryptographically complete and requires no out-of-band
+    /// data. (V1: same, but through `signed_plan_artifacts` /
+    /// `plan_artifact_sha256` per the legacy chain.)
+    ///
+    /// **Forward compat.** All four V2 fields are `Option`-typed with
+    /// `default` and `skip_serializing_if = "Option::is_none"` so legacy
+    /// segments that wrote SessionCreated without them still
+    /// deserialise cleanly under the new struct shape (see the
+    /// `legacy_session_created_without_v2_fields_still_deserializes`
+    /// test below).
     SessionCreated {
         session_id: String,
         role: String,
         lineage_id: String,
         worktree_root: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        initiative_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan_bundle_sha256: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        policy_epoch: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_agent_type: Option<String>,
     },
     /// `revoked_by_display_name` follows the cross-variant
     /// convention in `kernel-store.md` §2.5.2 "Operator display-name
@@ -322,6 +447,62 @@ pub enum AuditEventKind {
         session_id: String,
         sequence_num: u64,
         reason: String,
+    },
+
+    // --- V2 security: adversarial-input separation (v2-deep-spec.md §Step 13)
+    /// Emitted when the kernel detects genuine adversarial input on the
+    /// VSock IPC channel — distinct from `IntentRejected` (alignment
+    /// failures by an honest planner). The separation matters because
+    /// adversarial events represent compromised-binary or hostile-process
+    /// signals that warrant terminal connection actions
+    /// (v2-deep-spec.md §Step 14: SecurityViolation closes the connection
+    /// and revokes the session token), while `IntentRejected` is a
+    /// routine LLM-misalignment event a well-functioning planner emits.
+    ///
+    /// Three classes route here (`SecurityViolationClass`):
+    ///
+    ///   1. `FrameMalformation` — the received bytes are not valid
+    ///      bincode for any known IntentRequest variant; the frame is
+    ///      rejected before deserialization completes. Triggered by a
+    ///      compromised planner binary or a hostile process injecting
+    ///      raw bytes onto the VSock channel.
+    ///   2. `AuthorityProbe` — a session with a valid session token
+    ///      submits an intent its `session_agent_type` is not authorized
+    ///      to send (e.g. an Executor sending `ActivateSubTask`). The
+    ///      static dispatch matrix (v2-deep-spec.md §Step 20) catches
+    ///      this before any handler runs.
+    ///   3. `Replay` — an envelope_nonce already seen, OR a
+    ///      sequence_number ≤ the session's stored sequence_number.
+    ///      Distinct from `ReplayRejected` (alignment), which fires
+    ///      when an honest planner retries an in-flight intent: the
+    ///      `Replay` SecurityViolation class is reserved for cases
+    ///      where the kernel has cryptographic evidence of a hostile
+    ///      replay (e.g. the same nonce reused from a different
+    ///      sequence number, indicating a captured-and-replayed frame
+    ///      not a benign retry).
+    ///
+    /// `raw_frame_sha256` is SHA-256 of the raw on-wire bytes of the
+    /// rejected frame. The raw bytes are NOT stored (they may contain
+    /// untrusted attacker-controlled data); the hash enables forensic
+    /// correlation with packet captures or other side-channel evidence.
+    /// `frame_size` is included for triage filtering.
+    ///
+    /// CLI surface: `raxis audit query --event-type SecurityViolation`.
+    SecurityViolation {
+        /// `Some(...)` for class 2 + 3 (the kernel had a session row to
+        /// match against). `None` for class 1 (the frame did not even
+        /// parse far enough to identify a session).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        violation_class: SecurityViolationClass,
+        raw_frame_sha256: String,
+        frame_size: u32,
+        /// VSock CID of the peer that submitted the offending frame.
+        /// Populated for every class so the operator can correlate to a
+        /// specific VM or host process. `None` only for the legacy UDS
+        /// path (V1 sessions; pre-VSock frames carry no CID).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        peer_cid: Option<u32>,
     },
 
     // --- Recovery ---
@@ -689,6 +870,7 @@ impl AuditEventKind {
             Self::PathReadAccessed { .. } => "PathReadAccessed",
             Self::InitiativeQuarantined { .. } => "InitiativeQuarantined",
             Self::OperatorQuarantineSwept { .. } => "OperatorQuarantineSwept",
+            Self::SecurityViolation { .. } => "SecurityViolation",
         }
     }
 }
@@ -1013,5 +1195,221 @@ mod path_read_accessed_tests {
             }
             other => panic!("expected PathReadAccessed; got {other:?}"),
         }
+    }
+
+    // ── V2 SecurityViolation (v2-deep-spec.md §Step 13) ─────────────────────
+
+    /// Pinned variant count for the adversarial-input class taxonomy.
+    /// Adding a new class requires the static dispatch matrix
+    /// (v2-deep-spec.md §Step 20) AND the pre-auth blocklist
+    /// (v2-deep-spec.md §Step 15) to be updated in lock-step. The pin
+    /// surfaces drift at the test level before any handler regresses.
+    #[test]
+    fn security_violation_class_variant_count_is_pinned() {
+        assert_eq!(SecurityViolationClass::ALL.len(), 3,
+            "V2 has exactly 3 SecurityViolationClass variants \
+             (FrameMalformation, AuthorityProbe, Replay); bumping this \
+             requires dispatch-matrix + pre-auth blocklist updates.");
+    }
+
+    /// Each class round-trips through JSON with the exact PascalCase
+    /// string the audit-replay tooling matches against.
+    #[test]
+    fn security_violation_class_serde_round_trip() {
+        for &c in &SecurityViolationClass::ALL {
+            let s = serde_json::to_string(&c).unwrap();
+            let back: SecurityViolationClass = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, c, "round-trip failed for {c:?}: {s}");
+            assert_eq!(c.as_str(), s.trim_matches('"'),
+                "as_str must equal the JSON-projected discriminator");
+            assert_eq!(c.to_string(), c.as_str(),
+                "Display impl must equal as_str");
+        }
+    }
+
+    /// Pin the on-wire shape of a class-1 (FrameMalformation)
+    /// SecurityViolation: no session_id, no peer_cid (UDS path),
+    /// raw_frame_sha256 captured for forensic correlation.
+    #[test]
+    fn security_violation_class_1_serialises_without_session_id() {
+        let kind = AuditEventKind::SecurityViolation {
+            session_id:       None,
+            violation_class:  SecurityViolationClass::FrameMalformation,
+            raw_frame_sha256: "deadbeef".repeat(8), // 64-char hex
+            frame_size:       42,
+            peer_cid:         Some(123),
+        };
+        let v = serde_json::to_value(&kind).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("SecurityViolation"));
+        assert_eq!(v["violation_class"], serde_json::json!("FrameMalformation"));
+        assert_eq!(v["frame_size"], serde_json::json!(42));
+        assert_eq!(v["peer_cid"], serde_json::json!(123));
+        // None fields are skipped by `skip_serializing_if = Option::is_none`.
+        assert!(!v.as_object().unwrap().contains_key("session_id"),
+            "session_id must be elided from class-1 wire shape");
+    }
+
+    /// Pin the on-wire shape of a class-2 (AuthorityProbe)
+    /// SecurityViolation: session_id IS present (the kernel had a
+    /// session to match against). This is the case the static dispatch
+    /// matrix produces.
+    #[test]
+    fn security_violation_class_2_serialises_with_session_id() {
+        let kind = AuditEventKind::SecurityViolation {
+            session_id:       Some("s-abc".to_owned()),
+            violation_class:  SecurityViolationClass::AuthorityProbe,
+            raw_frame_sha256: "f".repeat(64),
+            frame_size:       128,
+            peer_cid:         Some(7),
+        };
+        let v = serde_json::to_value(&kind).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("SecurityViolation"));
+        assert_eq!(v["violation_class"], serde_json::json!("AuthorityProbe"));
+        assert_eq!(v["session_id"], serde_json::json!("s-abc"));
+    }
+
+    /// Round-trip through JSON for the Replay class. The replay
+    /// SecurityViolation is the highest-stakes variant — false
+    /// positives revoke the session token, so wire-shape stability is
+    /// load-bearing for the replay-detection unit tests in the IPC
+    /// layer.
+    #[test]
+    fn security_violation_replay_round_trips() {
+        let kind = AuditEventKind::SecurityViolation {
+            session_id:       Some("s-replay".to_owned()),
+            violation_class:  SecurityViolationClass::Replay,
+            raw_frame_sha256: "ab".repeat(32),
+            frame_size:       1024,
+            peer_cid:         None,
+        };
+        let s = serde_json::to_string(&kind).unwrap();
+        let back: AuditEventKind = serde_json::from_str(&s).unwrap();
+        match back {
+            AuditEventKind::SecurityViolation {
+                session_id, violation_class, raw_frame_sha256, frame_size, peer_cid,
+            } => {
+                assert_eq!(session_id.as_deref(), Some("s-replay"));
+                assert_eq!(violation_class, SecurityViolationClass::Replay);
+                assert_eq!(raw_frame_sha256.len(), 64);
+                assert_eq!(frame_size, 1024);
+                assert!(peer_cid.is_none(),
+                    "peer_cid is None on the legacy UDS path");
+            }
+            other => panic!("expected SecurityViolation; got {other:?}"),
+        }
+    }
+
+    /// `SecurityViolation` discriminator is wire-stable. Forensic
+    /// queries (`raxis audit query --event-type SecurityViolation`)
+    /// match on this exact string.
+    #[test]
+    fn security_violation_kind_string_is_pinned() {
+        let kind = AuditEventKind::SecurityViolation {
+            session_id:       None,
+            violation_class:  SecurityViolationClass::FrameMalformation,
+            raw_frame_sha256: "0".repeat(64),
+            frame_size:       0,
+            peer_cid:         None,
+        };
+        assert_eq!(kind.as_str(), "SecurityViolation");
+    }
+
+    // ── V2 SessionCreated attribution chain (v2-deep-spec.md §Step 7) ────────
+
+    /// V2 sessions carry the 4-field attribution chain:
+    /// `(session_id, initiative_id, plan_bundle_sha256, policy_epoch)`
+    /// plus `session_agent_type`. All five fields round-trip through
+    /// JSON without information loss.
+    #[test]
+    fn v2_session_created_attribution_chain_round_trips() {
+        let kind = AuditEventKind::SessionCreated {
+            session_id:        "s-1".to_owned(),
+            role:              "planner".to_owned(),
+            lineage_id:        "l-1".to_owned(),
+            worktree_root:     Some("/work/orch".to_owned()),
+            initiative_id:     Some("init-7".to_owned()),
+            plan_bundle_sha256: Some("a".repeat(64)),
+            policy_epoch:      Some(42),
+            session_agent_type: Some("Orchestrator".to_owned()),
+        };
+        let s = serde_json::to_string(&kind).unwrap();
+        let back: AuditEventKind = serde_json::from_str(&s).unwrap();
+        match back {
+            AuditEventKind::SessionCreated {
+                session_id, role, lineage_id, worktree_root,
+                initiative_id, plan_bundle_sha256, policy_epoch, session_agent_type,
+            } => {
+                assert_eq!(session_id, "s-1");
+                assert_eq!(role,       "planner");
+                assert_eq!(lineage_id, "l-1");
+                assert_eq!(worktree_root.as_deref(), Some("/work/orch"));
+                assert_eq!(initiative_id.as_deref(), Some("init-7"));
+                assert_eq!(plan_bundle_sha256.as_ref().map(|s| s.len()), Some(64));
+                assert_eq!(policy_epoch, Some(42));
+                assert_eq!(session_agent_type.as_deref(), Some("Orchestrator"));
+            }
+            other => panic!("expected SessionCreated; got {other:?}"),
+        }
+    }
+
+    /// Forward-compat: a legacy V1 SessionCreated record (no V2 fields)
+    /// MUST still deserialise under the new struct shape. This pins
+    /// the `#[serde(default)] + skip_serializing_if = Option::is_none`
+    /// contract for every V2 attribution field.
+    #[test]
+    fn legacy_session_created_without_v2_fields_still_deserializes() {
+        let legacy = serde_json::json!({
+            "kind":          "SessionCreated",
+            "session_id":    "s-legacy",
+            "role":          "planner",
+            "lineage_id":    "l-1",
+            "worktree_root": null,
+        });
+        let parsed: AuditEventKind = serde_json::from_value(legacy).unwrap();
+        match parsed {
+            AuditEventKind::SessionCreated {
+                initiative_id, plan_bundle_sha256, policy_epoch,
+                session_agent_type, ..
+            } => {
+                assert!(initiative_id.is_none(),
+                    "missing initiative_id must default to None");
+                assert!(plan_bundle_sha256.is_none(),
+                    "missing plan_bundle_sha256 must default to None");
+                assert!(policy_epoch.is_none(),
+                    "missing policy_epoch must default to None");
+                assert!(session_agent_type.is_none(),
+                    "missing session_agent_type must default to None");
+            }
+            other => panic!("expected SessionCreated; got {other:?}"),
+        }
+    }
+
+    /// V2 attribution fields are elided from the JSON when None — a
+    /// V1 session emitted under the V2 codebase must produce wire
+    /// bytes byte-identical to a legacy V1 emit (modulo audit chain
+    /// hash inputs that are unchanged anyway). This is the
+    /// `skip_serializing_if = Option::is_none` contract.
+    #[test]
+    fn v1_session_created_under_v2_codebase_omits_v2_fields_on_wire() {
+        let kind = AuditEventKind::SessionCreated {
+            session_id:        "s-v1".to_owned(),
+            role:              "planner".to_owned(),
+            lineage_id:        "l-1".to_owned(),
+            worktree_root:     None,
+            initiative_id:     None,
+            plan_bundle_sha256: None,
+            policy_epoch:      None,
+            session_agent_type: None,
+        };
+        let v = serde_json::to_value(&kind).unwrap();
+        let obj = v.as_object().unwrap();
+        // Only V1 fields plus the discriminator + null worktree_root
+        // (which is part of the V1 shape) appear on the wire.
+        assert!(!obj.contains_key("initiative_id"));
+        assert!(!obj.contains_key("plan_bundle_sha256"));
+        assert!(!obj.contains_key("policy_epoch"));
+        assert!(!obj.contains_key("session_agent_type"));
+        assert_eq!(obj["kind"], serde_json::json!("SessionCreated"));
+        assert_eq!(obj["session_id"], serde_json::json!("s-v1"));
     }
 }
