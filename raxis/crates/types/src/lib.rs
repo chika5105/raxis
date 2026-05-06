@@ -30,7 +30,10 @@ pub use escalation::{
     EscalationClass, EscalationRejectionReason, EscalationRequest, EscalationResponse,
     EscalationStatus, RequestedEscalationScope,
 };
-pub use fsm::{InitiativeState, TaskState, BlockReason, TerminalCriteria};
+pub use fsm::{
+    BlockReason, InitiativeState, SessionAgentType, SubtaskActivationState, TaskState,
+    TerminalCriteria,
+};
 pub use id::{
     CommitSha, CommitShaError, DelegationId, EscalationId, GateType, GateTypeError,
     InitiativeId, LineageId, SessionId, TaskId, TaskIdError, VerifierRunId,
