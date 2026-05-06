@@ -372,7 +372,7 @@ pub enum DomainError {
 | `teardown_workspace`    | Unmount VirtioFS; close `gix::Repository`; touch `.raxis-retain-until` with the audit-retention deadline.                                                                       |
 | `purge_workspace`       | `rm -rf` the session worktree; do NOT touch `master_repo` or the audit chain.                                                                                                   |
 
-`SoftwareEngineeringAdapter::IntentKind` is the existing `raxis-types::IntentKind`. `TerminalArtefact` is `(CommitSha, head_tree_sha256)`. The credential proxy parameter to `commit` is the existing `CredentialProxyHandle` for the per-session upstream-push credential leased under `INV-VM-CAP-04`.
+`GitAdapter::IntentKind` is the existing `raxis-types::IntentKind`. `TerminalArtefact` is `(CommitSha, head_tree_sha256)`. The credential proxy parameter to `commit` is the existing `CredentialProxyHandle` for the per-session upstream-push credential leased under `INV-VM-CAP-04`.
 
 ### §2.4 Hypothetical alternative implementations
 
@@ -468,113 +468,414 @@ V2 is the migration. Phases (each a separate commit, each compiling):
 Phase E is the green-flag for "the V2 paradigm-vs-implementation seam is honoured": after this commit, `cargo tree -p raxis-kernel` MUST contain neither `gix` nor `git2`.
 
 ---
-## §3 — `IsolationBackend` — How Subprocess VMs Are Spawned
+## §3 — `IsolationBackend` & `IsolatedSession` — How Subprocesses Are Isolated
 
-The reference implementation runs every planner, verifier, and gateway subprocess inside a hardware-virtualised microVM (Firecracker on Linux, Apple Virtualization.framework on macOS). `R-1` only requires that the isolation primitive is "at least equivalent to a hardware-virtualized microVM, hardware enclave, or formally verified microkernel partition" — it does NOT mandate microVMs specifically. Future deployments may want enclaves (Intel TDX, AMD SEV-SNP, AWS Nitro Enclaves), Wasm sandboxes (for low-stakes verifiers), or even mock backends in test environments.
+### §3.0 Why isolation needs a trait boundary
 
-### §3.1 Trait definition
+`R-1 Domain Separation` (paradigm.md §3) defines the isolation guarantee as:
 
-**Canonical home:** `crates/raxis-isolation/src/lib.rs` (NEW; consolidates the `SpawnBackend` design described in `system-requirements.md` §5 and `vm-network-isolation.md` §3 into a single trait).
+> "at least equivalent to a hardware-virtualized microVM, a hardware enclave, or a formally verified microkernel partition"
+
+Three different isolation primitives, in a single invariant. The paradigm itself anticipates that microVMs are not the only conformant choice. And practically, the V2 reference implementation already has two hypervisor backends (Firecracker on Linux, Apple Virtualization.framework on macOS) plus a non-conformant fallback (`NamespaceIsolation`) — so an implicit abstraction boundary already exists. V2 makes it explicit.
+
+The trait seam buys us four concrete things:
+
+1. **Domain-appropriate isolation.** Trading wants `SgxEnclaveIsolation` for IP-protection attestation; healthcare wants `SevSnpIsolation` for HIPAA in-use encryption; edge/IoT wants `WasmIsolation` to fit on a resource-constrained device; integration tests want `MockIsolation` to run without KVM. Hard-coding Firecracker breaks all four.
+2. **Test ergonomics.** Today, `kernel/tests/handlers/*.rs` either spin up real Firecracker microVMs (slow, flaky in CI without `/dev/kvm`) or mock at a higher level (less faithful). A `#[cfg(test)] MockIsolation` behind the same trait gives the kernel test suite a fast, faithful spawn surface that exercises real handler code without a hypervisor.
+3. **Mechanical R-1 conformance check.** A trait with an explicit `verify_isolation_guarantee` method that returns a typed `IsolationLevel` lets `raxis doctor` (`system-requirements.md §11`) refuse to start the kernel against a backend whose `IsolationLevel < R1Conformant`, except via a single, audited `--unsafe-fallback-isolation` flag. Today the equivalent check is scattered across `kernel/src/main.rs`, the Firecracker boot probe, and the operator's manual reading of `raxis doctor` output.
+4. **Future-proofing the IPC layer.** The current IPC is `AF_VSOCK` + `bincode` framing. SGX uses a shared-memory ring buffer; Wasm uses host-function imports (no socket); a mock backend wants an in-process channel. Splitting the trait into `IsolationBackend` (the spawner) + `IsolatedSession` (the running handle) hides the transport behind `push(&KernelPush)` / `recv_intent() -> IntentFrame` so the kernel intent admission pipeline never observes which transport carried the bytes.
+
+### §3.1 What the isolation layer actually does (the five jobs)
+
+Read the V2 implementation of `kernel/src/handlers/session.rs::spawn_planner_vm` and the existing Firecracker driver in `kernel/src/spawner/firecracker.rs` (or its Apple-VZ counterpart). The isolation layer is responsible for **exactly five** things and nothing else:
+
+| # | Job | What "abstraction" means here                                                                                |
+| - | --- | ------------------------------------------------------------------------------------------------------------ |
+| 1 | **Boot** an isolated execution environment from a verified image with a workspace mounted. | The trait does not expose Firecracker JSON, kernel-cmdline, or `vhost-vsock` knobs — it takes a typed `VmSpec`. |
+| 2 | **Send** a `KernelPush` message to the running guest.                                              | Hides transport (VSock vs. ring buffer vs. host call).                                                       |
+| 3 | **Receive** the next `IntentFrame` from the guest (blocking).                                       | Same; the kernel deserialises the same wire shape regardless of transport.                                   |
+| 4 | **Terminate** (security kill — immediate) the running guest.                                       | One-shot, idempotent, no SIGTERM dance.                                                                       |
+| 5 | **Shutdown** (graceful — SIGTERM + grace period → forced kill on timeout) the running guest.       | Returns a typed `ExitStatus` the kernel records to the audit chain.                                           |
+
+Anything else — capability probing for `raxis doctor`, attestation verification, isolation-level reporting — sits next to those five jobs in the trait but is not a *new* job; it's metadata exposed to the kernel for boot-time admission of the backend itself.
+
+### §3.2 Why each domain might want a different backend
+
+| Domain                       | Preferred isolation                  | Reason                                                                                                                                                                       |
+| ---------------------------- | ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Software engineering (V2)    | MicroVM (Firecracker / Apple-VZ)     | Agents need full POSIX toolchains (`rustc`, `npm`, `git`, `bash`). Only a full VM provides that without surrendering kernel-level isolation.                                 |
+| Trading                      | Hardware enclave (Intel SGX / TDX)   | The agent's strategy is proprietary IP. Enclave attestation proves even the operator-host's kernel cannot read agent memory; regulators (SEC, FCA) accept this as evidence. |
+| Healthcare                   | Confidential VM (AMD SEV-SNP / TDX)  | HIPAA + GDPR require data-at-rest *and* data-in-use protection. SEV-SNP encrypts guest RAM so a compromised host kernel cannot exfiltrate PHI.                              |
+| Edge / IoT                   | WebAssembly (Wasm + WASI)             | On a 256 MiB Cortex-A device, a full microVM is unaffordable; a Wasm sandbox satisfies `R-1`'s "address space distinct from authority's" requirement at a tiny RAM cost.   |
+| Integration testing          | Mock / process-level                 | The kernel's handler test suite must run on dev laptops without `/dev/kvm` and in CI containers; an in-process or child-process mock is sufficient and ~100× faster.        |
+
+The trait seam is what makes all five of these `cargo build --features <backend>` choices instead of forks.
+
+### §3.3 Trait definitions
+
+**Canonical home:** `crates/raxis-isolation/src/lib.rs` (NEW; consolidates the `SpawnBackend` design described in `system-requirements.md §5` and `vm-network-isolation.md §3` into a pair of cooperating traits).
+
+The trait is split into two:
+
+- `IsolationBackend` — the **factory** that spawns an isolated execution environment from a verified image. Stateless or near-stateless (config + handles to host-side resources). Implements jobs **1** + boot-time metadata.
+- `IsolatedSession` — the **handle** to a running isolated guest. Stateful (owns the live VSock connection or ring buffer or pipe). Implements jobs **2–5**.
+
+This split mirrors the lifecycle. The kernel calls `IsolationBackend::spawn` once per session, holds the returned `Box<dyn IsolatedSession>` for the duration, and drops it on session-end. Mixing spawn and per-session state into a single trait would force every method to receive a `&VmHandle` parameter and would let an impl that mis-tracks handles silently mis-route messages to the wrong VM.
 
 ```rust
-/// Pluggable seam for the isolation primitive a subprocess runs inside.
+//! crates/raxis-isolation/src/lib.rs
+//!
+//! The single seam for `R-1 Domain Separation`'s implementation choice.
+//! The kernel binary is compiled against these two traits; concrete
+//! backends (Firecracker, Apple-VZ, SGX, SEV-SNP, Wasm, Mock) are
+//! wired at process boot via `Arc<dyn IsolationBackend>`.
+
+use raxis_types::{IpcMessage, KernelPush, IntentFrame};
+use std::time::Duration;
+
+/// The factory that boots an isolated execution environment.
 ///
-/// `R-1 Domain Separation` requires intelligence to run in a domain
-/// distinct from authority's address space, with the isolation
-/// guarantee "at least equivalent to" a hardware-virtualised microVM.
-/// Stronger primitives (enclaves) and weaker primitives (Wasm, mock)
-/// are in scope as long as conformance verification confirms the
-/// equivalence (or, for `MockIsolation`, asserts the impl is gated to
-/// `#[cfg(test)]`).
-///
-/// Implementations:
-/// - [`FirecrackerIsolation`] — Linux microVM via Firecracker VMM API.
-/// - [`AppleVirtualizationIsolation`] — macOS native VM via Apple
-///   Virtualization.framework.
-/// - [`NamespaceIsolation`] — Linux namespaces + seccomp (V2 fallback
-///   tier for hosts without KVM; documented as **weaker** than
-///   `R-1`-conformant — disallowed in production).
-/// - [`MockIsolation`] (`#[cfg(test)]` only) — in-process pseudo-VM
-///   for kernel handler tests; never compiled into a release artefact.
+/// `R-1` requires distinct address spaces, no shared memory, and
+/// authority-mediated I/O only. An impl is conformant iff
+/// `verify_isolation_guarantee()` returns
+/// `Ok(IsolationLevel::R1Conformant)` AND the conformance kit
+/// (`§3.9`) passes.
 pub trait IsolationBackend: Send + Sync + 'static {
-    /// Spawn a new subprocess VM with the given image and resource
-    /// envelope. Returns a `VmHandle` that can later be torn down.
-    /// MUST NOT return until the VM has booted and is reachable on
-    /// the listed VSock CIDs.
+    /// Boot an isolated execution environment with the given verified
+    /// image and workspace mount. Returns a live session handle.
+    ///
+    /// MUST NOT return until the guest is reachable on its primary
+    /// IPC transport (VSock CID, ring buffer, host-call channel,
+    /// pipe — whichever the impl uses).
+    ///
+    /// MUST refuse a spawn if `image.verify_signature()` is not
+    /// already `Ok` — the image-verification responsibility lives in
+    /// the kernel's image-resolver, but the backend re-checks at
+    /// spawn time as defence-in-depth.
     fn spawn(
         &self,
-        spec: &VmSpec,
-    ) -> Result<VmHandle, IsolationError>;
+        image: &VerifiedImage,
+        workspace: &WorkspaceMount,
+        config: &VmSpec,
+    ) -> Result<Box<dyn IsolatedSession>, IsolationError>;
 
-    /// Connect to the kernel's VSock listener from the spawning host.
-    /// The handle returned implements `AsyncRead + AsyncWrite` so
-    /// `raxis-ipc::read_frame` works unchanged across primitives.
-    fn connect_vsock(
-        &self,
-        vm: &VmHandle,
-        port: u32,
-    ) -> Result<Box<dyn DuplexStream>, IsolationError>;
-
-    /// Stop the VM, optionally signalling SIGTERM with a graceful
-    /// `grace_window` first; falls back to forced stop on timeout.
-    /// MUST be idempotent (calling twice on the same handle is a
-    /// no-op after the first success).
-    fn stop(
-        &self,
-        vm: &VmHandle,
-        grace_window: Option<Duration>,
-    ) -> Result<StopReceipt, IsolationError>;
+    /// Verify that this backend satisfies `R-1` at the host-hardware
+    /// level. Called once at kernel startup by `raxis doctor`
+    /// (`system-requirements.md §11`).
+    ///
+    /// Returns:
+    ///   - `IsolationLevel::R1Conformant`         — full hw isolation
+    ///   - `IsolationLevel::R1Conformant_Strong`  — enclave/SEV-SNP +
+    ///                                              attestation
+    ///   - `IsolationLevel::FallbackOnly`         — namespace/seccomp;
+    ///                                              kernel refuses to
+    ///                                              admit unless
+    ///                                              `--unsafe-fallback-
+    ///                                              isolation` flag set
+    ///   - `IsolationLevel::TestOnly`             — `MockIsolation`
+    ///                                              gated to `#[cfg(test)]`
+    fn verify_isolation_guarantee(&self) -> Result<IsolationLevel, IsolationError>;
 
     /// Probe a backend property at runtime (used by `raxis doctor`):
-    /// e.g., does the host have KVM? what's the boot-latency tier?
+    /// e.g. boot-latency tier, KVM availability, attestation support.
+    /// Stable enum; new variants are additive.
     fn capability(&self, kind: CapabilityKind) -> CapabilityValue;
+
+    /// Stable identifier for this backend impl. Logged into the
+    /// kernel boot audit event, surfaced in `raxis doctor`. Examples:
+    /// "firecracker-1.7", "apple-vz-14.5", "sgx-2.21", "wasm-wasi-0.2".
+    fn backend_id(&self) -> &'static str;
+}
+
+/// A live isolated guest. The kernel holds exactly one of these per
+/// active session; dropping the handle MUST tear down the guest
+/// (Drop impls of every concrete IsolatedSession run `terminate()`).
+pub trait IsolatedSession: Send + 'static {
+    /// Send a `KernelPush` message to the agent. The wire encoding
+    /// is the impl's responsibility (VSock + bincode for microVMs;
+    /// shared-memory enqueue for SGX; host-import call for Wasm).
+    /// MUST be cancel-safe: a dropped future MUST NOT leave a
+    /// half-written frame in the transport.
+    fn push(&self, msg: &KernelPush) -> Result<(), IsolationError>;
+
+    /// Block until the next `IntentFrame` arrives from the guest.
+    /// Returns `Err(IsolationError::PeerClosed)` when the guest exits.
+    /// MUST be cancel-safe.
+    fn recv_intent(&mut self) -> Result<IntentFrame, IsolationError>;
+
+    /// Immediate termination (security kill). MUST NOT signal SIGTERM
+    /// or wait for graceful shutdown. Used when the kernel detects an
+    /// invariant violation (`R-6` fail-closed default).
+    /// MUST be idempotent.
+    fn terminate(&mut self) -> Result<(), IsolationError>;
+
+    /// Graceful shutdown: signal the guest to exit, wait at most
+    /// `grace`, then forcibly kill on timeout. Returns the typed
+    /// `ExitStatus` the kernel records to the audit chain
+    /// (`SessionVmExited { backend_id, exit_status, elapsed_ms }`).
+    /// MUST be idempotent.
+    fn shutdown(&mut self, grace: Duration) -> Result<ExitStatus, IsolationError>;
+
+    /// Transport-level identity of this session for diagnostic logs:
+    ///   - microVM:   `SessionTransportId::Vsock { cid: u32 }`
+    ///   - SGX:       `SessionTransportId::EnclaveId([u8; 64])`
+    ///   - Wasm:      `SessionTransportId::WasmInstance(u64)`
+    ///   - Mock:      `SessionTransportId::Process { pid: u32 }`
+    /// MUST be stable for the lifetime of the session.
+    fn session_identity(&self) -> SessionTransportId;
 }
 ```
 
-`VmSpec` carries: `rootfs_image_id`, `kernel_image_id`, `vcpu_count`, `mem_mib`, `vsock_cid`, `virtio_fs_mounts`, `egress_tier` (`None` | `Tier1WithTproxy` | `Tier2WithCredentialProxy`), `cgroup_quota`, `boot_args`, `entrypoint_argv`. The trait MUST NOT accept any field that lets a planner control its own isolation envelope.
+Supporting types (also `crates/raxis-isolation/src/lib.rs`):
 
-### §3.2 Reference implementations
+```rust
+/// The image to boot. Verified upstream by the kernel's image
+/// resolver; the backend re-checks the signature at spawn.
+pub struct VerifiedImage {
+    pub kind:           ImageKind,         // RootfsErofs | EnclaveSigStruct | WasmModule | MockProcess
+    pub bytes_or_path:  ImageBody,         // inline bytes or a file path the host can mmap
+    pub signature:      raxis_crypto::Sig, // ed25519 over (kind || sha256(bytes))
+}
 
-- **`FirecrackerIsolation`** (`crates/raxis-isolation-firecracker/`, NEW) — talks directly to the Firecracker VMM API over its UDS; uses `KVM_RUN` ioctls; ~125ms boot, ~5MB RAM overhead. Implements `R-1` per `system-requirements.md` §5.1.
-- **`AppleVirtualizationIsolation`** (`crates/raxis-isolation-apple-vz/`, NEW) — links against `Virtualization.framework` via `objc2-virtualization`; ~200ms boot, native Apple Silicon. Implements `R-1` per `system-requirements.md` §5.2.
-- **`NamespaceIsolation`** (`crates/raxis-isolation-namespace/`, NEW; **non-conformant fallback**) — `unshare(2)` + `seccomp` filters + bind-mount-only filesystem. Documented as **weaker than R-1**: usable for evaluators who do not have KVM, **disallowed in production deployments** by `raxis doctor` (emits `[FAIL]` unless `--unsafe-fallback-isolation` was passed at startup, which records `IsolationFallbackBypass` to the audit chain).
-- **`MockIsolation`** (test-only, in `crates/raxis-isolation/src/mock.rs`) — gated `#[cfg(test)]`; runs the subprocess as an OS thread inside the kernel address space (knowingly violates `R-1`); used by `kernel/tests/handlers/*.rs` to exercise admission logic without spawning real VMs.
+/// Workspace the kernel wants mounted into the guest. The backend
+/// translates this into the impl-appropriate mount mechanism
+/// (VirtioFS for microVMs, shared-page for SGX, Wasm preopen-dir,
+/// bind-mount for the test mock).
+pub struct WorkspaceMount {
+    pub host_path:     PathBuf,
+    pub guest_path:    String,             // e.g. "/work" for SE
+    pub mode:          MountMode,          // ReadOnly | ReadWrite
+    pub content_hash:  raxis_crypto::ContentHash,
+}
 
-### §3.3 Files to create
+/// Resource envelope the impl is asked to enforce. Fields the kernel
+/// must NOT let a planner control (vCPUs, MEM, network tier).
+pub struct VmSpec {
+    pub vcpu_count:        u32,
+    pub mem_mib:           u32,
+    pub egress_tier:       EgressTier,     // None | Tier1Tproxy | Tier2CredProxy
+    pub cgroup_quota:      Option<CgroupQuota>,
+    pub boot_args:         Vec<String>,
+    pub entrypoint_argv:   Vec<String>,
+    pub session_token:     SessionToken,   // injected by kernel; the only secret in flight
+    pub vsock_cid:         Option<u32>,    // microVM-only; backends ignore if not relevant
+    pub virtio_fs_mounts:  Vec<WorkspaceMount>, // microVM-only; SGX/Wasm map elsewhere
+}
 
-- `crates/raxis-isolation/Cargo.toml`
-- `crates/raxis-isolation/src/lib.rs` — trait, `VmSpec`, `VmHandle`, `IsolationError`, `StopReceipt`, `CapabilityKind/Value`
-- `crates/raxis-isolation/src/duplex.rs` — `trait DuplexStream: AsyncRead + AsyncWrite + Unpin + Send` (the VSock connection abstraction)
-- `crates/raxis-isolation/src/mock.rs` — `MockIsolation` (cfg-test)
-- `crates/raxis-isolation/tests/conformance.rs` — spawn/stop/connect parity test (any backend MUST pass)
-- `crates/raxis-isolation-firecracker/Cargo.toml`
-- `crates/raxis-isolation-firecracker/src/lib.rs` — VMM API wrapper, drive registration, network-namespace setup (per `vm-network-isolation.md`)
-- `crates/raxis-isolation-firecracker/src/api.rs` — Firecracker UDS client
-- `crates/raxis-isolation-firecracker/src/vsock.rs` — `vhost-vsock` wiring
-- `crates/raxis-isolation-apple-vz/Cargo.toml`
-- `crates/raxis-isolation-apple-vz/src/lib.rs` — `VZVirtualMachine` driver, `VZVirtioSocketDevice`
-- `crates/raxis-isolation-apple-vz/build.rs` — links `Virtualization.framework`
-- `crates/raxis-isolation-namespace/Cargo.toml`
-- `crates/raxis-isolation-namespace/src/lib.rs` — `unshare`/`pivot_root`/`seccomp-bpf` fallback
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum IsolationLevel {
+    /// Strong attestable isolation (SGX, TDX, SEV-SNP +
+    /// remote-attestation). May satisfy regulatory requirements
+    /// stricter than R-1.
+    R1Conformant_Strong,
+    /// Hardware-virtualised microVM (Firecracker, Apple-VZ).
+    /// Satisfies R-1.
+    R1Conformant,
+    /// Wasm-sandboxed (WASI capability-restricted). Satisfies R-1
+    /// for capability-based authority isolation; weaker than microVM
+    /// for confidentiality. Acceptable for low-stakes verifiers.
+    WasmSandbox,
+    /// Linux namespaces + seccomp. Does NOT satisfy R-1
+    /// (kernel-shared address space). Disallowed in production
+    /// without `--unsafe-fallback-isolation`.
+    FallbackOnly,
+    /// `#[cfg(test)]` mock — runs guest as in-process thread.
+    /// Knowingly violates R-1; never compiled into release.
+    TestOnly,
+}
 
-### §3.4 Files to change
+pub enum SessionTransportId {
+    Vsock        { cid: u32 },
+    EnclaveId    ([u8; 64]),
+    WasmInstance (u64),
+    Process      { pid: u32 },
+}
 
-- `kernel/Cargo.toml` — add the isolation crate(s); guard apple-vz behind `#[cfg(target_os = "macos")]`, firecracker behind `#[cfg(target_os = "linux")]`
-- `kernel/src/main.rs` — at boot, call `select_isolation_backend()` which checks `policy.toml [isolation]` + host capability and returns `Arc<dyn IsolationBackend>`
-- `kernel/src/handlers/session.rs` — `Session::spawn_vm` switches from direct Firecracker calls to `ctx.isolation.spawn(&spec)`
-- `kernel/src/runtime/heartbeat.rs` — collects `isolation.capability(CapabilityKind::BootLatencyMs)` for the `raxis doctor` snapshot
-- `cli/src/commands/doctor.rs` — adds `[CHECK] isolation.tier` reporting per-host whether the active backend is `R-1`-conformant or fallback
-- `crates/runtime/src/heartbeat.rs` — `Snapshot` struct gains `isolation_tier: IsolationTier` field
+pub enum CapabilityKind {
+    KvmAvailable,
+    AttestationSupported,
+    BootLatencyMs,
+    MaxConcurrentVms,
+    MemoryEncryption,
+}
 
-### §3.5 Conformance contract
+pub enum CapabilityValue {
+    Bool(bool),
+    Int(u64),
+    Str(&'static str),
+    Tier(IsolationLevel),
+}
 
-A `IsolationBackend` is conformant iff:
+pub enum ExitStatus {
+    GracefulExit { code: i32 },
+    SignalKilled { signum: i32 },
+    Timeout,
+    BackendError(String),
+}
 
-1. `spawn` returns a handle whose `VmHandle::cid` is unique across all live spawns. Tested by spawning N=64 VMs concurrently and asserting CIDs form a set of size 64.
-2. `stop(vm, Some(grace))` waits at most `grace` before resorting to forced kill. Tested with a guest that ignores SIGTERM.
-3. `connect_vsock(vm, port)` round-trips a `bincode`-framed `IpcMessage` byte-identical to a UDS round-trip. Tested by replaying a recorded planner session over both transports and diffing.
-4. `capability(KvmAvailable)` returns `false` when `/dev/kvm` is unreadable. Tested by chmod-ing the device in a sandboxed container.
-5. The implementation is `Send + Sync + 'static` (compile-time check in `crates/raxis-isolation/tests/conformance.rs`).
+pub enum IsolationError {
+    SpawnFailed(String),
+    PeerClosed,
+    TransportFault(String),
+    SignatureMismatch,
+    ResourceLimit(String),
+    BackendInternal(String),
+}
+```
+
+### §3.4 IPC abstraction (the transport mapping)
+
+The kernel sends `KernelPush` and receives `IntentFrame`; it does not observe the transport. Each backend maps those two operations onto its native IPC primitive:
+
+| Backend                  | Wire transport                                       | `push(&KernelPush)` impl                                | `recv_intent()` impl                                    |
+| ------------------------ | ---------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------- |
+| `FirecrackerIsolation`   | `AF_VSOCK` (vhost-vsock, CID-based)                  | `bincode::serialize_into(socket, msg)`                  | `bincode::deserialize_from(socket)`                     |
+| `AppleVirtualizationIsolation` | `VZVirtioSocketDevice` (VSock equivalent)      | same                                                    | same                                                    |
+| `SgxEnclaveIsolation`    | Shared-memory ring buffer + ECall/OCall              | enqueue serialised bytes + `OCall::wake()`              | dequeue + `bincode::deserialize`                        |
+| `SevSnpIsolation`        | `vhost-vsock` over the encrypted VM (same as Firecracker, but the pages between host and guest are CPU-encrypted) | same as Firecracker                                     | same as Firecracker                                     |
+| `WasmIsolation`          | Host-function imports (synchronous call boundary)    | `instance.exports.kernel_push(serialized_ptr, len)`     | `instance.exports.recv_intent_blocking()` poll-loop     |
+| `NamespaceIsolation`     | Unix domain socket through bind-mount (no R-1)       | `bincode::serialize_into(uds, msg)`                     | `bincode::deserialize_from(uds)`                        |
+| `MockIsolation` (test)   | `tokio::sync::mpsc` channel pair                     | `tx.try_send(msg.clone()).map_err(...)`                 | `rx.recv().ok_or(PeerClosed)`                           |
+
+The framing is **identical** in every row above (bincode-encoded `IpcMessage` per `kernel-mechanics-prompt.md §4`). What changes is the byte conduit. The conformance kit (`§3.9`) records a recorded planner session against `MockIsolation` and replays it byte-identically against every other backend; any divergence is a contract violation.
+
+### §3.5 Reference implementations
+
+| Impl                              | Crate                                          | Status in V2                            | `IsolationLevel`              |
+| --------------------------------- | ---------------------------------------------- | --------------------------------------- | ----------------------------- |
+| `FirecrackerIsolation`            | `crates/raxis-isolation-firecracker/`          | Default on Linux                        | `R1Conformant`                |
+| `AppleVirtualizationIsolation`    | `crates/raxis-isolation-apple-vz/`             | Default on macOS                        | `R1Conformant`                |
+| `NamespaceIsolation`              | `crates/raxis-isolation-namespace/`            | Fallback only; refused in production    | `FallbackOnly`                |
+| `MockIsolation`                   | `crates/raxis-isolation/src/mock.rs` (cfg-test) | Test-only; never released               | `TestOnly`                    |
+| `SgxEnclaveIsolation`             | (V3+, out-of-tree)                              | Documented in §3.0; not shipped         | `R1Conformant_Strong`         |
+| `SevSnpIsolation`                 | (V3+, out-of-tree)                              | Documented in §3.0; not shipped         | `R1Conformant_Strong`         |
+| `WasmIsolation`                   | (V3+, out-of-tree)                              | Documented in §3.0; not shipped         | `WasmSandbox`                 |
+
+`FirecrackerIsolation` (`crates/raxis-isolation-firecracker/`):
+- Talks directly to the Firecracker VMM API over its UDS; uses `KVM_RUN` ioctls.
+- ~125 ms boot, ~5 MiB RAM overhead per VM.
+- Network and Tier-1 tproxy wiring per `vm-network-isolation.md §3`.
+- `IsolatedSession` impl owns the `vhost-vsock` connection + the cleanup `Drop` impl that issues `terminate()` on unexpected drop.
+
+`AppleVirtualizationIsolation` (`crates/raxis-isolation-apple-vz/`):
+- Links against `Virtualization.framework` via `objc2-virtualization`.
+- ~200 ms boot, native Apple Silicon.
+- `VZVirtioSocketDevice` for IPC (semantically identical to `vhost-vsock`).
+
+`NamespaceIsolation` (`crates/raxis-isolation-namespace/`):
+- `unshare(2)` + `seccomp-bpf` filters + bind-mount-only filesystem.
+- Documented as **weaker than `R-1`**: usable for evaluators without KVM.
+- Disallowed in production by `raxis doctor` (emits `[FAIL]` unless `--unsafe-fallback-isolation` is passed at startup, which records `IsolationFallbackBypass { reason, operator_id }` to the audit chain).
+
+`MockIsolation` (test-only, `crates/raxis-isolation/src/mock.rs`):
+- Gated `#[cfg(test)]`; runs the "guest" as a `tokio` task inside the kernel address space (knowingly violates `R-1`).
+- Used by `kernel/tests/handlers/*.rs` to exercise admission logic without spawning real VMs.
+- The test process MUST set `RAXIS_TEST_HARNESS=1`; otherwise the constructor returns `IsolationError::BackendInternal("MockIsolation requires RAXIS_TEST_HARNESS=1")`. This prevents accidental release-build linkage.
+
+### §3.6 Orthogonality with `DomainAdapter`
+
+`DomainAdapter` (§2) and `IsolationBackend` (§3) are **orthogonal axes**. The kernel composes them at boot independently:
+
+```
+                ┌─── domain axis ────────────────────────────────┐
+                │ GitAdapter   TradingAdapter   HealthcareAdapter │
+                ├────────────────────────────────────────────────┤
+isolation axis  │
+                │
+FirecrackerIso  │ V2 default       (custom)          (custom)
+Apple-VZ        │ V2 default       (custom)          (custom)
+SgxEnclave      │ (custom)         attested IP        (custom)
+SevSnp          │ (custom)         (custom)           HIPAA-grade
+Wasm            │ (lightweight)    edge agents        (rare)
+Mock            │ kernel tests     test fixtures      test fixtures
+```
+
+Any cell in this matrix is a valid V2-or-future deployment. The kernel binary does not change between cells; only the two `Arc<dyn Trait>` injections at boot do. A trading firm running on AWS Nitro might pick `TradingAdapter + SgxEnclaveIsolation`; a hospital might pick `HealthcareAdapter + SevSnpIsolation`; the V2 reference target picks `GitAdapter + FirecrackerIsolation` (Linux) or `GitAdapter + AppleVirtualizationIsolation` (macOS).
+
+### §3.7 Files to create
+
+- `crates/raxis-isolation/Cargo.toml` (NEW)
+- `crates/raxis-isolation/src/lib.rs` — `IsolationBackend`, `IsolatedSession`, supporting types listed in §3.3.
+- `crates/raxis-isolation/src/mock.rs` (cfg-test only) — `MockIsolation` + `MockSession`.
+- `crates/raxis-isolation/src/conformance.rs` — reusable `pub fn run_isolation_conformance_suite<B: IsolationBackend>(backend: &B, fixtures: &Fixtures)`.
+- `crates/raxis-isolation/tests/conformance.rs` — runs the suite against `MockIsolation` (always) and `FirecrackerIsolation` / `AppleVirtualizationIsolation` (when the host advertises the matching capability).
+- `crates/raxis-isolation/tests/fixtures/` — recorded `(KernelPush stream, expected IntentFrame stream)` pair, byte-identical regardless of backend.
+- `crates/raxis-isolation-firecracker/Cargo.toml` (NEW)
+- `crates/raxis-isolation-firecracker/src/lib.rs` — `pub struct FirecrackerIsolation { vmm_uds: PathBuf, kernel_image_id: ImageId, ... }` + `impl IsolationBackend`.
+- `crates/raxis-isolation-firecracker/src/api.rs` — Firecracker UDS client.
+- `crates/raxis-isolation-firecracker/src/vsock.rs` — `vhost-vsock` wiring; the `FirecrackerSession` `IsolatedSession` impl lives here.
+- `crates/raxis-isolation-firecracker/src/network.rs` — Tier-1 tproxy + tap-device setup per `vm-network-isolation.md §3`.
+- `crates/raxis-isolation-apple-vz/Cargo.toml` (NEW)
+- `crates/raxis-isolation-apple-vz/src/lib.rs` — `VZVirtualMachine` driver.
+- `crates/raxis-isolation-apple-vz/src/vsock.rs` — `VZVirtioSocketDevice`-based `AppleVzSession`.
+- `crates/raxis-isolation-apple-vz/build.rs` — links `Virtualization.framework`; `#[cfg(target_os = "macos")]` only.
+- `crates/raxis-isolation-namespace/Cargo.toml` (NEW)
+- `crates/raxis-isolation-namespace/src/lib.rs` — `unshare`/`pivot_root`/`seccomp-bpf` + UDS-based `IsolatedSession`.
+
+### §3.8 Files to change
+
+- `kernel/Cargo.toml` — add `raxis-isolation = { path = "../crates/raxis-isolation" }`. Pull in `raxis-isolation-firecracker` behind `#[cfg(target_os = "linux")]` and `raxis-isolation-apple-vz` behind `#[cfg(target_os = "macos")]`. Remove direct `firecracker-rs` and `objc2-virtualization` deps from `kernel/`.
+- `kernel/src/main.rs` — at boot, after policy load and **before** the operator listener bind:
+  ```rust
+  let isolation: Arc<dyn IsolationBackend> = select_isolation_backend(&policy)?;
+  let level = isolation.verify_isolation_guarantee()?;
+  match level {
+      IsolationLevel::R1Conformant | IsolationLevel::R1Conformant_Strong => {}
+      IsolationLevel::WasmSandbox => {
+          if !policy.isolation.allow_wasm_for_low_stakes_verifiers {
+              return Err(BootError::IsolationLevelInsufficient(level));
+          }
+      }
+      IsolationLevel::FallbackOnly => {
+          if !cli_args.unsafe_fallback_isolation {
+              return Err(BootError::FallbackIsolationRefused);
+          }
+          audit_sink.append(IsolationFallbackBypass { reason: cli_args.unsafe_fallback_isolation_reason.clone(), operator_id: ... })?;
+      }
+      IsolationLevel::TestOnly => return Err(BootError::TestOnlyIsolationInRelease),
+  }
+  ```
+  Thread `isolation` through `HandlerContext`. Boot-order: `audit_sink` → `credential_backend` → **`isolation`** (with R-1 admission check) → `domain` → `inference_router` → `operator_transport` → admission scheduler.
+- `kernel/src/handlers/mod.rs` — `HandlerContext` gains `pub isolation: Arc<dyn IsolationBackend>`.
+- `kernel/src/handlers/session.rs` — `start_session()` calls `ctx.isolation.spawn(&image, &workspace, &spec)?` and stores the returned `Box<dyn IsolatedSession>` in the per-session `SessionRuntime`. Replaces ~600 lines of Firecracker-specific code with ~12 lines of trait dispatch.
+- `kernel/src/handlers/intent.rs` (and any other handler that pushes a `KernelPush`) — replaces direct VSock writes with `session.push(&msg)?`.
+- `kernel/src/runtime/recv_loop.rs` — replaces direct VSock reads with `session.recv_intent()?`.
+- `kernel/src/spawner/firecracker.rs` and `kernel/src/spawner/apple_vz.rs` — DELETED. All callers go through `ctx.isolation`.
+- `kernel/src/runtime/heartbeat.rs` — collects `isolation.capability(BootLatencyMs)` and `isolation.backend_id()` for the `raxis doctor` snapshot.
+- `cli/src/commands/doctor.rs` — adds `[CHECK] isolation.tier` reporting per-host whether the active backend is `R1Conformant`/`R1Conformant_Strong`/`WasmSandbox`/`FallbackOnly`. References `extensibility-traits.md §3.5` in the `--explain` output.
+- `policy.toml` — operator declares the active backend. New stanza:
+  ```toml
+  [isolation]
+  backend = "auto"          # one of: "auto" | "firecracker" | "apple-vz" | "namespace"
+  allow_wasm_for_low_stakes_verifiers = false
+  default_vcpu = 1
+  default_mem_mib = 256
+  ```
+  `auto` selects `firecracker` on Linux + KVM, `apple-vz` on macOS, returns an error otherwise.
+- `crates/raxis-types/src/operator_wire.rs` — the operator's `KernelStatus` payload gains `isolation: { backend_id, tier }`.
+
+### §3.9 Conformance contract
+
+A backend is conformant iff it satisfies these properties (mechanically verified by `crates/raxis-isolation/tests/conformance.rs::run_isolation_conformance_suite`):
+
+1. **Spawn isolation.** Spawning two sessions concurrently and writing distinct messages into each MUST yield disjoint `recv_intent()` streams. Tested with N=64 concurrent spawns and a fixture that emits a session-stamped echo. CIDs (or session-identity-equivalent) MUST form a set of size 64.
+2. **Wire-byte parity.** The byte sequence emitted by `push(&msg)` and consumed by `recv_intent()` MUST be the same `bincode`-framed `IpcMessage` regardless of backend. Tested by replaying a recorded session against `MockIsolation` and against the candidate backend, then asserting the kernel-level deserialised stream is byte-identical.
+3. **Cancel safety.** Dropping the future returned by `push()` mid-write MUST NOT leave a half-written frame. Tested by injecting a deterministic abort point during serialisation and asserting the next `recv_intent()` either returns the previous complete frame or `Err(PeerClosed)`.
+4. **Idempotent terminate / shutdown.** Calling `terminate()` twice on the same session returns `Ok(())` both times. Calling `shutdown(grace)` after `terminate()` returns `Ok(ExitStatus::SignalKilled)` immediately, without waiting for `grace`.
+5. **Grace honoured.** `shutdown(grace)` with a guest that ignores SIGTERM MUST forcibly kill the guest at most `grace + 100ms` after the call. Tested with a fixture guest that traps SIGTERM and sleeps.
+6. **`Drop` cleans up.** Dropping an `IsolatedSession` without calling `shutdown` or `terminate` MUST call `terminate()` from the `Drop` impl. Tested by spawning + dropping + asserting the OS view shows the guest gone within 100 ms.
+7. **`verify_isolation_guarantee` matches host hardware.** Returning `R1Conformant` MUST imply the spawn path uses an actual hypervisor capable of trapping privileged instructions. Tested by attempting a known-privileged instruction inside the guest (`hlt` on x86) and asserting the host kernel does not crash.
+8. **No host filesystem leak.** `terminate()` MUST NOT leave the workspace mount visible from any other guest of the same backend. Tested by spawning two sessions, having session A drop a sentinel file under its workspace, terminating session A, then asserting session B cannot read the sentinel.
+9. **`Send + Sync + 'static`.** The impl satisfies the trait bounds (compile-time check in the conformance crate).
+
+### §3.10 What stays in the kernel (NOT abstracted behind this trait)
+
+- Image verification (the kernel resolves and signature-checks the image *before* calling `spawn`; `R-3` Signed Capability Declaration).
+- Workspace-mount path computation (the `WorkspaceMount` argument is filled by `DomainAdapter::provision_workspace`, NOT by the isolation backend).
+- Resource budget enforcement (`vcpu_count`, `mem_mib` are kernel-controlled in `VmSpec`; the backend is not allowed to up-rev them).
+- The kernel-side network policy (Tier-0 / Tier-1 tproxy / Tier-2 cred-proxy routing decisions live in `kernel-mediated-egress.md`; the backend just instantiates the network namespace the kernel hands it).
+- Audit-chain emission of `SessionVmSpawned` / `SessionVmExited` events (kernel-side, after the backend returns).
+- The `R-1` admission check itself (the kernel refuses to start against a non-conformant backend; the backend just truthfully reports its level).
 
 ---
 ## §4 — `CredentialBackend` — Where Secrets Live
@@ -1057,12 +1358,16 @@ The kernel has exactly **one** boot site that constructs every trait impl: `kern
 4. Construct CredentialBackend (§4)      ← uses AuditSink for emit
 5. Construct InferenceRouter (§7)        ← uses CredentialBackend for provider keys
 6. Construct IsolationBackend (§3)       ← uses CredentialBackend for VM kernel signing
+6a. isolation.verify_isolation_guarantee()? → admit only if R1Conformant /
+    R1Conformant_Strong, OR WasmSandbox + policy.allow_wasm_for_low_stakes_verifiers,
+    OR FallbackOnly + cli --unsafe-fallback-isolation (then audit
+    IsolationFallbackBypass), OR fail boot. (See §3.8 main.rs sketch.)
 7. Construct DomainAdapter (§2)          ← uses IsolationBackend to spawn verifier VMs
 8. Construct OperatorTransport (§6)      ← bound last; once accepting, kernel is "open"
 9. Run intent admission loop (concrete; depends on every trait above via HandlerContext)
 ```
 
-Order is load-bearing: step 5 needs step 4 to fetch provider creds; step 6 needs step 4 because Apple Virtualization wants signed kernel images; step 9's `HandlerContext` carries `Arc<dyn Trait>` references to all six.
+Order is load-bearing: step 5 needs step 4 to fetch provider creds; step 6 needs step 4 because Apple Virtualization wants signed kernel images; step 6a is a boot-time admission gate that refuses to start a release kernel against a non-conformant isolation backend; step 9's `HandlerContext` carries `Arc<dyn Trait>` references to all six.
 
 ### §9.2 `HandlerContext` shape
 
@@ -1106,7 +1411,7 @@ pub struct TestKernelContext {
     pub credentials: Arc<MockCredentialBackend>,
     pub inference: Arc<MockInferenceRouter>,
     pub isolation: Arc<MockIsolation>,
-    pub domain: Arc<SoftwareEngineeringAdapter>,
+    pub domain: Arc<GitAdapter>,
     pub transport: Arc<UnixSocketTransport>,
     // ...
 }
@@ -1122,7 +1427,7 @@ The trait extraction touches the kernel boot site and every handler. Doing it as
 
 **Phase A — Trait crates exist.** Create `crates/raxis-domain`, `crates/raxis-isolation`, `crates/raxis-credentials`, `crates/raxis-operator-transport`, `crates/raxis-inference-router`. Each contains only the trait, error types, and conformance kit. No impls. The kernel does not depend on them yet. Mergeable in one PR per crate.
 
-**Phase B — Default impls in their own crates.** Create `crates/raxis-domain-git` (the V2 reference `GitAdapter` impl of `DomainAdapter`), `crates/raxis-isolation-firecracker`, `crates/raxis-isolation-apple-vz`, `crates/raxis-credentials-file`, `crates/raxis-operator-transport-unix`, `crates/raxis-inference-router-https`. Each is a thin re-export of the existing concrete logic, refactored to implement the trait. The kernel still uses the old concrete types directly. Mergeable in one PR per impl.
+**Phase B — Default impls in their own crates.** Create `crates/raxis-domain-git` (the V2 reference `GitAdapter` impl of `DomainAdapter`), `crates/raxis-isolation-firecracker`, `crates/raxis-isolation-apple-vz`, `crates/raxis-isolation-namespace` (the documented `FallbackOnly` non-conformant tier), `crates/raxis-credentials-file`, `crates/raxis-operator-transport-unix`, `crates/raxis-inference-router-https`. Each is a thin re-export of the existing concrete logic, refactored to implement the trait. The kernel still uses the old concrete types directly. Mergeable in one PR per impl.
 
 > Note. The `DomainAdapter` migration has its own internal sub-phases (A-E) inside `extensibility-traits.md §2.8` because it deletes `kernel/src/vcs/`, which is the largest single code-motion in V2. The other five trait extractions are smaller and each ship as a single Phase B PR.
 
@@ -1148,7 +1453,7 @@ These specs are updated to reference `extensibility-traits.md` at the relevant i
 | `v2/provider-failure-handling.md` | `InferenceRouter` | §1 introduction notes "the inference dispatch backend is pluggable per `extensibility-traits.md` §7"; the kernel↔gateway protocol becomes the implementation of `HttpsGatewayRouter`, not a kernel-baked concrete |
 | `v2/provider-model-selection.md` | `InferenceRouter` | §6 (resolution) clarifies that resolution returns a `ResolvedInferenceRequest` consumed by an `InferenceRouter` impl |
 | `v2/system-requirements.md` | `IsolationBackend` | §5 (Hypervisor) reframes Firecracker / Apple-VZ / Namespace as the V2-shipped impls of `IsolationBackend`; raxis doctor §11 adds `[CHECK] isolation.tier` referencing `extensibility-traits.md` §3.5 |
-| `v2/vm-network-isolation.md` | `IsolationBackend` | §3 (boot path) clarifies the spec describes the V2 default `FirecrackerIsolation` Tier-1 networking; alternative isolation backends MUST satisfy the same Tier-1 contract per §3.5 conformance |
+| `v2/vm-network-isolation.md` | `IsolationBackend` | §3 (boot path) clarifies the spec describes the V2 default `FirecrackerIsolation` Tier-1 networking; alternative isolation backends MUST satisfy the same Tier-1 contract per §3.9 conformance |
 | `v2/kernel-lifecycle.md` | `OperatorTransport` | §3 (kernel start) and §13 implementation checklist note the operator socket bind delegates to `Arc<dyn OperatorTransport>::bind` |
 | `v2/v2-deep-spec.md` | All six | "Related Specifications" appendix gains a row for `extensibility-traits.md`; Part 2 (Authorization) gains a forward-pointer to the trait map |
 | `v1/kernel-store.md` | `AuditSink` | §2.5.2 footnote adds "the AuditSink trait is V2-extensibility-pluggable per `v2/extensibility-traits.md` §5; the chain math stays in the writer" |
