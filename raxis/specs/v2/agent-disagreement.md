@@ -409,6 +409,13 @@ V3 may introduce multi-level orchestration hierarchies (Orchestrator-of-Orchestr
 
 When a task fails after disagreement, the Executor's accumulated commits sit in the worktree. There is no current spec for what happens to them. This section defines a lifecycle: retain for forensic review, allow operator salvage during a window, archive read-only, eventually purge.
 
+> **DomainAdapter integration (`extensibility-traits.md §2.2.C`).** This entire lifecycle is the SE-domain instantiation of the trait's two cleanup primitives:
+>
+> - `DomainAdapter::teardown_workspace(handle)` is called the moment a task transitions to `Failed` (the `AbandonedSalvageable` entry transition below). It releases VirtioFS mounts and closes the per-session `gix::Repository`, but does **NOT** delete the underlying state — the audit-retention window requires it for forensic replay.
+> - `DomainAdapter::purge_workspace(handle)` is called by the daily kernel sweep when `abandoned_commits_retention` elapses (the `Purged` transition below). It permanently deletes the underlying state.
+>
+> The CLI surface (`raxis worktree salvage`, `raxis worktree purge --force`), the audit events, and the lifecycle states themselves are paradigm-layer mechanisms that stay in the kernel. The git-specific cherry-pick in §7.4 step 2 and the `rm -rf` in §7.6 `AbandonedWorktreePurged` are implementation-layer and live in `crates/raxis-domain-git/src/cleanup.rs`. Other domains substitute their own (Trading: shred staging dir + detach cold-storage snapshot; Healthcare: revoke patient-bundle export + zeroise PHI staging) without touching the kernel handler.
+
 ### 7.1 Schema
 
 `policy.toml`:
@@ -490,9 +497,9 @@ raxis worktree purge <task_id> --force
 `raxis worktree salvage` performs:
 
 1. Validates the task is in `AbandonedSalvageable` state and the requested SHAs exist in the worktree.
-2. For each requested commit SHA, runs `git cherry-pick --no-commit <sha>` against the master repo on a new branch `agents/salvaged/<task_id>`.
-3. The cherry-pick is performed by the kernel (it has the commit-credential per `INV-CRED-KERNEL-01`); the abandoned-worktree Executor session is not resurrected.
-4. If any cherry-pick conflicts, the salvage fails with `FAIL_SALVAGE_CONFLICT`; the new branch is rolled back to its pre-salvage state. Operator must resolve the conflict manually or salvage a different subset.
+2. For each requested commit SHA, the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &CommitContext { mode: SalvageToBranch { target: "agents/salvaged/<task_id>" }, .. })?` — the SE adapter (`crates/raxis-domain-git`) implements this branch by running `git cherry-pick --no-commit <sha>` against the master repo on the named target branch. Other adapters define their own salvage semantics (Trading: re-stage the order in a frozen staging account; Healthcare: revoke + re-author the proposed clinical-action set on a salvage workspace) or return `DomainError::PreconditionFailed("salvage_unsupported")` if the domain has no meaningful salvage notion.
+3. The commit step is performed under the kernel's commit-credential lease (`INV-CRED-KERNEL-01`); the abandoned-worktree Executor session is not resurrected.
+4. If any cherry-pick conflicts (or the adapter returns `DomainError::PreconditionFailed`), the salvage fails with `FAIL_SALVAGE_CONFLICT`; the new branch is rolled back to its pre-salvage state. Operator must resolve the conflict manually or salvage a different subset.
 5. On success, audits `AbandonedWorktreeSalvaged { task_id, salvaged_commits, target_branch, operator_id }`.
 6. The salvaged branch is now a normal git branch; the operator pushes/merges it through their normal process.
 
@@ -647,6 +654,7 @@ This spec interacts with several other V2 specs. Each of those specs SHOULD be u
 | `specs/invariants.md` | Invariant consolidation | Add a new `§9 — Convergence (INV-CONVERGENCE-*)` section with `INV-CONVERGENCE-01` through `INV-CONVERGENCE-06`; renumber subsequent sections |
 | `specs/v1/planner-api.md` | Error code enumeration | Add the four planner-facing codes: `FAIL_CIRCULAR_REVISION`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`, `FAIL_REVIEW_LOOP_EXCEEDED`, `FAIL_FORBIDDEN_ROUTING_OVERRIDE`. (`FAIL_SALVAGE_CONFLICT` is returned by the operator-facing `raxis worktree salvage` CLI and does not appear on the planner IPC surface — see `cli-readonly.md` / future `cli-worktree.md` instead.) |
 | `crates/audit/src/event.rs` | `AuditEventKind` enum | (Implementation, deferred) Add new event kinds enumerated in §3.4, §4.5, §5.5, §6.7, §7.6 when implementing this spec |
+| `specs/v2/extensibility-traits.md` | `DomainAdapter::teardown_workspace` / `purge_workspace` | The §7 abandoned-worktree lifecycle is the canonical SE-domain consumer of the trait's two cleanup primitives. Cross-reference is two-way: that spec's §11 cross-spec-impacts table already lists this row |
 
 These updates are not part of this spec; they are tracked for the follow-up commit cycle.
 
