@@ -168,6 +168,7 @@ models            = [
     "anthropic:claude-sonnet-4.6",
 ]
 fallback_behavior = "attempt_in_order"      # only valid value in V2; reserved for future strategies
+session_affinity  = false                    # default; see §4.1.1 below
 
 [provider_aliases.executor]
 models            = [
@@ -181,6 +182,10 @@ models            = [
     "anthropic:claude-sonnet-4.6",
 ]
 fallback_behavior = "attempt_in_order"
+# Reviewer sessions benefit from staying on the same model
+# across the review loop so the reasoning style and provider-
+# side prompt-prefix cache stay consistent; opt in per §4.1.1.
+session_affinity  = true
 ```
 
 A single-model alias (like `executor` above) is the canonical way to express "no fallback." Direct model references in `InferenceRequest` (e.g., `model: "anthropic:claude-opus-4.7"` without the `alias:` prefix) are syntactic sugar for an implicit length-1 alias and resolve via the same code path; this unifies all inference requests under one resolution algorithm.
@@ -253,6 +258,158 @@ AuditEventKind::AliasResolved {
 ```
 
 `SkippedEntry` carries `(idx, model, reason ∈ {CredentialRevoked, CircuitBreakerOpen, CircuitBreakerProbing})`. This makes "why did Sonnet get picked over Opus at 14:32?" a SQL query, not an inference from log timestamps.
+
+### 4.1.1 `session_affinity` — opt-in cross-call stickiness within a session
+
+The §4.1 resolver picks the first eligible chain entry on every
+call. That is the right default: it means routing decisions are
+deterministic per request (no session-scoped routing state hidden
+in process memory) and the §12.1 / Alt L decision — the
+`ProviderStatusChanged` push is advisory, not normative — keeps
+its bite. But there are two cases where per-call resolution
+produces visibly worse outcomes than per-session stickiness:
+
+1. **LLM reasoning-style consistency across a session.** A
+   Reviewer session that switches from Opus to Sonnet between
+   review round 1 and round 2 sees the reasoning style change
+   abruptly. The session's transcript becomes a stitched-together
+   conversation between two models. For a long-running review
+   loop, this degrades quality more than the brief use of a
+   fallback model would have.
+2. **Provider-side prompt-prefix cache reuse.** Anthropic and
+   OpenAI both cache long input prefixes between sequential calls
+   from the same API key against the same model. A session that
+   sticks to one model amortizes its system prompt + KSB across
+   every call; a session that flutters between models pays the
+   full input-token cost on every model switch (and burns
+   pricing-tier discounts).
+
+`session_affinity` is an opt-in per-alias toggle that introduces
+session-scoped pinning:
+
+```toml
+[provider_aliases.<name>]
+session_affinity  = false   # default — pure per-call resolution (§4.1)
+session_affinity  = true    # pin to first-successful model within a session
+```
+
+#### Mechanics when `session_affinity = true`
+
+1. **No pin yet** (or pin invalidated, see below): the resolver
+   walks the chain per §4.1 unchanged. On the first
+   `Final::Success` for this `(session_id, alias_name)` pair, the
+   kernel records the selected model as the **pin**:
+   `session_alias_pins[(session_id, alias_name)] = selected_model`.
+   This happens AFTER the success is committed (so failed probes
+   never establish a pin).
+2. **Pin present**: the resolver checks the pinned model's
+   eligibility *first*, ahead of the chain. If the pinned model
+   is `Closed` or `HalfOpen { inflight: 0 }`, it is selected and
+   the chain is not walked. The audit event records
+   `selected_via_pin: true` and `pin_origin: PinFromSessionAffinity`
+   so forensics can see when the pin influenced selection.
+3. **Pin model becomes ineligible** (breaker `Open`, credential
+   `Compromised`, or model removed from the chain via plan
+   epoch): the pin is treated as absent for this resolution.
+   The resolver walks the chain per §4.1 normally. On the next
+   `Final::Success` against a different model, the pin is
+   **re-stamped** to the new model. The previous pin is NOT
+   reverted later if its original model recovers — recovery
+   would otherwise make the affinity flap, which is the failure
+   mode this feature exists to prevent.
+4. **Pin scope.** The pin is a `(session_id, alias_name)` key,
+   not a `(session_id)` key. A session that uses both
+   `alias:reviewer` and `alias:tools_caller` pins each
+   independently. The pin is cleared atomically with session
+   terminal state (`Completed`, `Failed`, `Aborted`,
+   `Cancelled`) — the eviction is part of the same FSM
+   transition that sets `sessions.terminal_at`.
+
+#### Storage and crash semantics
+
+Pins are in-memory only:
+
+```rust
+struct AliasPinTable {
+    inner: BTreeMap<(SessionId, AliasName), PinnedModel>,
+}
+
+struct PinnedModel {
+    model:        ProviderModelKey,
+    pinned_at_ms: i64,
+    pinned_request_id: RequestId,   // the InferenceAttempt that established the pin
+}
+```
+
+There is no SQLite persistence. If the kernel restarts:
+
+- All pins are lost.
+- The first post-restart `InferenceRequest` against a previously-
+  pinned alias re-walks the chain per §4.1 and may pick a
+  different model. The next success re-establishes a pin.
+- This is a *correctness-preserving degradation*: the worst case
+  is one extra model-switch in a long-lived session that
+  survived a kernel restart. No data is lost; no audit gap is
+  introduced (every selection emits `AliasResolved` regardless
+  of pin state).
+
+Persisting pins to SQLite was considered and rejected: the
+storage cost (one row per `(session, alias)` pair, with churn on
+every pin re-stamp) exceeds the benefit (eliminating one
+post-restart model switch in a feature that exists for cosmetic
+reasoning-consistency reasons). If a deployment needs strong
+cross-restart affinity, the right answer is to use a single-model
+alias chain in the first place.
+
+#### Audit changes
+
+`AliasResolved` gains two fields when `session_affinity = true`:
+
+```rust
+AuditEventKind::AliasResolved {
+    // … existing fields …
+    selected_via_pin:    bool,                  // true if the pinned model was selected
+    pin_origin:          Option<PinOrigin>,     // PinFromSessionAffinity | PinReestablished | None
+    pinned_at_ms:        Option<i64>,           // when the pin was established (UTC ms)
+}
+```
+
+Operators querying `AliasResolved` events can answer "for
+session S using alias A, when did the model switch and why?"
+purely from the audit chain.
+
+#### Interaction with `KernelPush::ProviderStatusChanged`
+
+The advisory push (§4.3, §12.1 / Alt L) remains advisory. A
+`ProviderStatusChanged { new_state: HalfOpen }` does NOT cause
+the kernel to invalidate a pin or re-walk the chain. The pin's
+correctness is checked at *resolution time* against the breaker
+state, not at push time. This preserves the §12.1 invariant that
+no routing decision is ever driven by a push.
+
+#### Why per-alias instead of global
+
+A single global `session_affinity` flag would force all aliases
+in a deployment to behave the same way. But the right answer
+depends on the alias's purpose:
+
+- A Reviewer alias (consistency across rounds) benefits from
+  affinity.
+- A "fast-fallback" alias used only for non-critical telemetry
+  calls does NOT — the operator prefers the cheapest currently-
+  available model on every call.
+- A custom-tool LLM alias might toggle either way depending on
+  whether the tool is conversational or one-shot.
+
+Per-alias keeps the choice local to where it's authored, and
+it's a one-line opt-in.
+
+#### Migration
+
+V2.0 shipped without `session_affinity` (equivalent to
+`session_affinity = false` everywhere). Existing plans continue
+to behave identically. Operators who want stickiness add the
+flag explicitly. There is no implicit upgrade.
 
 ### 4.2 Credential availability
 
@@ -1537,14 +1694,16 @@ After this phase, the rest of this checklist still describes the V2 default `Htt
 ### `plan.toml` parser (in `crates/types/src/plan.rs`)
 
 - [ ] Parse `[provider_aliases.<name>]` blocks with `models: Vec<ProviderModelKey>` and `fallback_behavior`
+- [ ] Parse the optional `session_affinity: bool` field on every `[provider_aliases.<name>]` block (§4.1.1); default `false`; also parsed on `[provider_aliases_defaults.<role>]` so the policy default propagates through `plan prepare`
 - [ ] Validate `fallback_behavior == "attempt_in_order"` (only V2 value)
 - [ ] Validate every `models` entry is in `policy.permitted_models` at `approve_plan`
 - [ ] Reject duplicate alias names in the same plan
 - [ ] Reject empty alias chains (`models = []`)
+- [ ] Reject `session_affinity = true` on a length-1 alias with `WARN_PROVIDER_ALIAS_SESSION_AFFINITY_NO_OP { alias }` (the affinity flag has no observable effect when the chain has one entry)
 
 ### `kernel/src/inference/`
 
-- [ ] `kernel/src/inference/resolve.rs`: alias resolution algorithm per §4.1; consults breaker state; emits `AliasResolved` audit
+- [ ] `kernel/src/inference/resolve.rs`: alias resolution algorithm per §4.1; consults breaker state; emits `AliasResolved` audit; honors `session_affinity` per §4.1.1 (in-memory `BTreeMap<(SessionId, AliasName), PinnedModel>`; pin established on first `Final::Success`; pin re-stamped on success against a different model after the previous pin became ineligible; pins evicted atomically with session terminal state)
 - [ ] `kernel/src/inference/breaker.rs`: state machine per §6.3; SQLite-backed; CAS on `half_open_inflight`
 - [ ] `kernel/src/inference/retry.rs`: the retry loop per §6.1; backoff math per §6.2; budget reservation reconciliation
 - [ ] `kernel/src/inference/budget.rs`: worst-case reservation arithmetic per §8.1; per-attempt debit accumulation; final transactional debit per §8.5

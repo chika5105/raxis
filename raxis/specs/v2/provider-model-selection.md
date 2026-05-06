@@ -522,6 +522,7 @@ fallback_behavior = "attempt_in_order"
 |---|---|---|---|
 | `[provider_aliases_defaults.<role>] chain` | `Vec<ProviderModelKey>` | (none; absence disables defaulting for that role) | The fallback chain `plan prepare` fills into `plan.toml [provider_aliases.<role>]` when the operator's plan omits the section. |
 | `[provider_aliases_defaults.<role>] fallback_behavior` | string | `"attempt_in_order"` | Same semantics as `plan.toml [provider_aliases.<name>] fallback_behavior` per `provider-failure-handling.md §3.2`. |
+| `[provider_aliases_defaults.<role>] session_affinity` | bool | `false` for `executor`, `true` for `reviewer` (rationale below) | Whether `plan prepare` adds `session_affinity = <value>` to the materialized `plan.toml [provider_aliases.<role>]`. See `provider-failure-handling.md §4.1.1` for cross-call pinning semantics. The Reviewer default is `true` because Reviewer sessions accumulate review history across rounds and benefit measurably from reasoning-style and prompt-prefix-cache stability; the Executor default is `false` because Executor work is typically a single short transcript per task and the modest per-call resolution preserves the §12.1 "no session-state in routing" property by default. Operators MAY override per-plan. |
 
 **Recognized roles.** V2 ships defaults for two role names:
 - `reviewer` — used by Reviewer-rooted profiles.
