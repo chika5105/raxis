@@ -50,7 +50,7 @@ A crash in the `(Phase B COMMIT, Phase C fsync)` window produces:
 
 Two failure modes are not covered by `recovery::reconcile`:
 
-1. **The kernel is decommissioned without ever restarting.** The host is decommissioned, the data directory is moved to long-term archival storage, and a forensic team is asked years later to verify the audit chain. They have the JSONL and a SQLite snapshot. They run the V1 verifier (`raxis-audit-tools verify-chain`) — the chain is internally consistent (every link's hash matches), but no signal in the chain indicates that any state changes are *missing*. They cannot tell whether the chain is complete.
+1. **The kernel is decommissioned without ever restarting.** The host is decommissioned, the data directory is moved to long-term archival storage, and a forensic team is asked years later to verify the audit chain. They have the JSONL and a SQLite snapshot. They run the V1 verifier (V1's `raxis-cli verify-chain`) — the chain is internally consistent (every link's hash matches), but no signal in the chain indicates that any state changes are *missing*. They cannot tell whether the chain is complete.
 
 2. **The kernel restarts on a different code version that lacks `recovery::reconcile` semantics.** The reconciliation logic is not part of the audit protocol — it is an implementation detail of one kernel version. A kernel that boots with a different reconciliation policy (or no reconciliation at all) leaves gaps unresolved.
 
@@ -464,18 +464,98 @@ Provider model selection (v2):
 
 ---
 
-## §5 — Offline verifier algorithm
+## §5 — Offline verifier (independence-bearing standalone binary)
 
-The offline verifier — embodied in `crates/audit/src/verifier.rs::verify` and exposed via `raxis-audit-tools verify-chain --with-state-snapshot <path>` — is the canonical R-7 satisfaction proof. Its inputs are **only** (a) the JSONL chain segments and (b) optionally a SQLite snapshot. Its output is a list of `Finding`s.
+The offline verifier is the canonical `R-7` satisfaction artefact: an
+auditor, compliance reviewer, or post-incident forensic investigator
+holding only the JSONL chain segments and the operator's public key
+must be able to verify chain integrity without a running RAXIS kernel
+and without linking any kernel-side crate. **`R-7` requires
+*independence*, and independence is enforced as a dependency
+boundary** — the verifier ships as a standalone binary
+(`raxis-audit-verify`) built from a leaf crate (`crates/audit-verify/`)
+whose Cargo.toml dependency graph contains **no** kernel crate
+(`raxis-store`, `raxis-policy`, `raxis-ipc`, `raxis-audit-tools`,
+`raxis-types`).
 
-### §5.1 The algorithm
+The binary is **one-shot, not a daemon.** A background verifier that
+emits "chain OK every 60 seconds" creates false confidence: the green
+light means nothing if the daemon itself is compromised, stale, or
+absent. The `R-7` property is a *point-in-time assertion by an
+independent party*, not continuous self-attestation. Continuous
+verification by the same kernel that produces the chain conflates
+producer and verifier.
+
+### §5.1 What the binary proves (independence-bound)
+
+Given only `--chain <path glob>` and `--pubkey <operator-public.pem>`
+(no SQLite snapshot, no kernel crate, no IPC), the standalone binary
+provably establishes:
+
+1. **Chain hash linkage.** Every event's `prev_sha256` matches the
+   SHA-256 of the prior event's canonical bytes. A break is a critical
+   `R-7` violation.
+2. **Signature validity.** Every event's signature verifies against
+   the operator pubkey supplied via `--pubkey`. (Multi-key chains
+   accept a `--keyring` directory containing all valid pubkeys for the
+   chain's lifetime.)
+3. **Pairing integrity.** Every paired-class confirmed event references
+   a real preceding `StateChangePending`; every `StateChangeRolledBack`
+   references a real preceding pending; no pending references a
+   different `intended_post_state_digest` than its confirmed's
+   `actual_post_state_digest` claim. (`INV-AUDIT-PAIRED-02/03`.)
+4. **Sequence monotonicity.** `seq` is contiguous across the supplied
+   segments (gaps at segment boundaries permitted only at known
+   rotation points marked by `AuditSegmentRotated`).
+5. **Genesis anchoring.** The first event in the earliest segment is
+   either `GenesisRecord` (with `prev_sha256 = 64 × 0x00`) or
+   continues from a prior segment whose last event's hash matches.
+
+What the standalone binary **cannot** prove without an additional
+input:
+
+- **Crash-orphan resolution.** Pending events without confirmed/
+  rolled-back companions are reported as
+  `Finding::OrphanIndeterminate`. The standalone binary does not link
+  SQLite (per the dep boundary). Resolving orphans into
+  `OrphanResolvedByStateSnapshot` vs `OrphanRolledBackInferred`
+  requires SQLite consultation, which is delegated to either:
+
+  - the kernel-side `recovery::reconcile_advisory` (which has direct
+    SQLite access and runs at boot), OR
+  - a forensic auditor passing `--state-export <json>` containing the
+    relevant rows' `last_committing_event_seq` values, exported by
+    `raxis audit export-state-for-verifier` (see `v1/cli-readonly.md`).
+
+  The standalone binary's exit semantics are identical with or
+  without the export: the chain-integrity properties (1)–(5) above are
+  the `R-7` artefact; orphan resolution is a forensic refinement.
+
+### §5.2 The algorithm
 
 ```rust
-//! crates/audit/src/verifier.rs — reference implementation
+//! crates/audit-verify/src/lib.rs — reference implementation
+//! Dependencies: sha2, ed25519-dalek, serde_json, serde, hex.
+//! NO raxis-store, NO raxis-policy, NO raxis-ipc, NO raxis-types.
+
+/// Resolve orphans against a state snapshot. The snapshot trait is
+/// abstract over the concrete source so the kernel-side
+/// `reconcile_advisory` (live SQLite) and the standalone binary
+/// (JSON state-export from `raxis audit export-state-for-verifier`)
+/// implement it differently. Crucially, the trait lives in this leaf
+/// crate, so the standalone binary's dep boundary stays clean.
+pub trait StateSnapshot {
+    fn lookup_last_committing_event_seq(
+        &self,
+        table: &str,
+        primary_key: &serde_json::Value,
+    ) -> Option<u64>;
+}
 
 pub fn verify(
     jsonl: &[AuditEvent],
-    sqlite: Option<&SqliteSnapshot>,
+    pubkeys: &Keyring,                       // Ed25519 pubkeys keyed by fingerprint
+    state: Option<&dyn StateSnapshot>,       // None = chain-only mode (default)
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
 
@@ -490,6 +570,18 @@ pub fn verify(
             });
         }
         prev_hash = sha256_of_line(ev);
+    }
+
+    // Phase 1b — signature verification (always runs).
+    for ev in jsonl {
+        match pubkeys.verify(&ev.signer_fingerprint, &ev.canonical_bytes(), &ev.signature) {
+            Ok(()) => { /* signature valid */ }
+            Err(e) => findings.push(Finding::SignatureInvalid {
+                seq:                 ev.seq,
+                signer_fingerprint:  ev.signer_fingerprint,
+                reason:              e.to_string(),
+            }),
+        }
     }
 
     // Phase 2 — pending/confirmed pairing.
@@ -552,18 +644,23 @@ pub fn verify(
     }
 
     // Phase 3 — orphan resolution. Anything still in pending_by_seq is
-    // an unresolved orphan. Resolution requires the SQLite snapshot.
+    // an unresolved orphan. Without a state snapshot the verifier
+    // reports OrphanIndeterminate (non-critical; the chain itself is
+    // intact). With a snapshot the verifier disambiguates committed
+    // vs crash-rolled-back. The standalone binary defaults to
+    // chain-only (no snapshot); --state-export switches to resolution
+    // mode using a JSON export from raxis audit export-state-for-verifier.
     for (pending_seq, pending) in pending_by_seq {
         let row_keys = match &pending.kind {
             AuditEventKind::StateChangePending { intended_writes, .. } => intended_writes,
             _ => unreachable!(),
         };
 
-        match sqlite {
+        match state {
             None => {
-                findings.push(Finding::OrphanUnresolvable {
+                findings.push(Finding::OrphanIndeterminate {
                     pending_seq,
-                    reason: "no SQLite snapshot supplied",
+                    note: "chain-only verification; pass --state-export for resolution",
                 });
             }
             Some(snap) => {
@@ -590,12 +687,20 @@ pub fn verify(
 }
 ```
 
-### §5.2 Finding classification
+### §5.3 Finding classification
 
 ```rust
 pub enum Finding {
     /// Hash chain link broken. R-7 critical failure.
     ChainBreak { seq: u64, expected: [u8; 32], got: [u8; 32] },
+
+    /// Event signature did not verify against the supplied keyring.
+    /// R-7 critical: chain provenance is broken.
+    SignatureInvalid {
+        seq:                u64,
+        signer_fingerprint: [u8; 32],
+        reason:             String,
+    },
 
     /// Confirmed event references a pending that doesn't exist.
     /// R-7 critical: the chain has a confirmed without pre-announcement.
@@ -616,22 +721,25 @@ pub enum Finding {
         actual:        [u8; 32],
     },
 
-    /// Pending committed (verified by SQLite snapshot's
+    /// Pending committed (verified by state snapshot's
     /// last_committing_event_seq). The chain is missing the
     /// confirmed event, but the state change is real and recorded.
-    /// Recovery should write a synthetic confirmed event.
+    /// Recovery (advisory) should write a synthetic confirmed event.
     OrphanResolvedByStateSnapshot { pending_seq: u64 },
 
-    /// Pending did NOT commit (SQLite shows the row was never
+    /// Pending did NOT commit (state snapshot shows the row was never
     /// updated to the pending's seq, OR was updated to a different
     /// seq, OR the row doesn't exist). The pending was crash-rolled-back.
     /// Operator UI should display this as "attempted, did not commit."
     OrphanRolledBackInferred { pending_seq: u64 },
 
-    /// Orphan exists but no SQLite snapshot was supplied.
-    /// The verifier cannot determine whether it committed.
-    /// Operator must supply a snapshot for resolution.
-    OrphanUnresolvable { pending_seq: u64, reason: &'static str },
+    /// Orphan exists; no state snapshot was supplied. Chain integrity
+    /// is intact (the orphan is a known, named pending in the chain),
+    /// but the standalone binary cannot determine commit vs rollback
+    /// without a state snapshot. Non-critical: report and continue.
+    /// To resolve, run `raxis audit export-state-for-verifier` and
+    /// pass the resulting JSON via --state-export.
+    OrphanIndeterminate { pending_seq: u64, note: &'static str },
 
     /// Row in SQLite has last_committing_event_seq = 0 — predates
     /// the V2.1 paired protocol. Verifier falls back to V1 semantics
@@ -643,6 +751,7 @@ impl Finding {
     pub fn is_critical(&self) -> bool {
         matches!(self,
             Finding::ChainBreak { .. } |
+            Finding::SignatureInvalid { .. } |
             Finding::ConfirmedWithoutPending { .. } |
             Finding::RolledBackWithoutPending { .. } |
             Finding::DigestMismatch { .. }
@@ -651,19 +760,205 @@ impl Finding {
 }
 ```
 
-`raxis-audit-tools verify-chain` exits with code `0` if no critical findings, `2` if critical findings exist. `OrphanUnresolvable` and `OrphanRolledBackInferred` and `PreV21Row` are non-critical; they get reported but do not fail the verifier.
+### §5.4 Standalone binary (`raxis-audit-verify`) — independence boundary
 
-### §5.3 Honesty about what offline verification can prove
+The standalone binary lives in a leaf crate with strict dep limits.
+The dep boundary **is** the independence guarantee — any crate that
+the verifier transitively links is part of the trust base for the
+verification result. Linking the kernel's storage or IPC code would
+make the verdict trivially compromisable by a tampered kernel.
 
-The offline verifier proves three properties **without depending on the kernel**:
+#### §5.4.1 Crate manifest
+
+```toml
+# crates/audit-verify/Cargo.toml
+[package]
+name        = "raxis-audit-verify"
+version     = "0.1.0"
+edition     = "2021"
+description = "Independent R-7 verifier for the RAXIS audit chain"
+license     = "Apache-2.0"
+
+[lib]
+name = "raxis_audit_verify"
+path = "src/lib.rs"
+
+[[bin]]
+name = "raxis-audit-verify"
+path = "src/bin/raxis-audit-verify.rs"
+
+[dependencies]
+sha2          = { version = "0.10", default-features = false }
+ed25519-dalek = { version = "2",    default-features = false, features = ["pem"] }
+serde         = { version = "1",    default-features = false, features = ["derive"] }
+serde_json    = { version = "1",    default-features = false, features = ["std"] }
+hex           = { version = "0.4",  default-features = false, features = ["std"] }
+clap          = { version = "4",    default-features = false, features = ["std", "derive"] }
+glob          = "0.3"
+
+# DELIBERATELY ABSENT (load-bearing for INV-AUDIT-PAIRED-05):
+#   raxis-store, raxis-policy, raxis-ipc, raxis-types, raxis-audit-tools,
+#   raxis-kernel, rusqlite, tokio, anyhow, thiserror.
+```
+
+A CI lint (`xtask audit-verify-deps`, see §13.3) parses `cargo metadata`
+output for `raxis-audit-verify` and fails if any crate name in the
+transitive dependency closure begins with `raxis-` other than
+`raxis-audit-verify` itself, or matches `rusqlite`, `tokio`, or
+`reqwest`. This is the dep boundary check that makes
+`INV-AUDIT-PAIRED-05` operational at build time, not just contractual.
+
+#### §5.4.2 CLI surface
+
+```
+raxis-audit-verify
+    --chain   <PATH-OR-GLOB>...     One or more JSONL segment files.
+                                    Glob patterns expanded; multiple
+                                    --chain flags accumulate.
+    --pubkey  <PEM-PATH>            Operator Ed25519 public key.
+                                    For multi-key chains, see --keyring.
+    --keyring <DIR-PATH>            Directory of operator pubkeys; one
+                                    file per signer, named after the
+                                    signer's fingerprint hex prefix.
+                                    Required for chains spanning a
+                                    key rotation.
+    --state-export <JSON-PATH>      Optional state-snapshot JSON
+                                    exported by `raxis audit
+                                    export-state-for-verifier`.
+                                    Enables orphan resolution; absent
+                                    means chain-only mode.
+    --json-output                   Emit machine-readable findings
+                                    JSON in addition to the human
+                                    summary.
+    --quiet                         Suppress the verbose progress
+                                    summary; print only verdict.
+    --strict-monotonic              Treat any seq gap (including across
+                                    segment boundaries without an
+                                    AuditSegmentRotated marker) as a
+                                    chain break.
+```
+
+Example invocation matching the user-facing example:
+
+```text
+$ raxis-audit-verify \
+      --chain  /var/lib/raxis/audit/segment-*.jsonl \
+      --pubkey /etc/raxis/operator-public.pem
+
+raxis-audit-verify v0.1.0 — R-7 chain integrity check
+Chain        : 12,847 records, segments 000-002 (1.4 MiB)
+Sequence     : monotonic, no gaps
+Linkage      : SHA-256 chain intact (12,846 links verified)
+Signatures   : 12,847/12,847 verified against operator key fp:7d2c…
+Pairing      : 4,219 paired (StateChangePending → confirmed)
+               7 pending without confirmed (chain-only mode; see below)
+               0 dangling confirmed
+               0 dangling rolled-back
+               0 digest mismatches
+Orphans      : 7 indeterminate — pass --state-export to resolve
+
+Verdict      : INTACT
+```
+
+#### §5.4.3 Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0`  | Verdict `INTACT`. No critical findings. Orphans may exist; chain integrity is provable from the JSONL alone. |
+| `2`  | Operator/CLI error (missing files, malformed pubkey, glob expanded to zero files). |
+| `3`  | Critical finding — chain break, signature invalid, dangling confirmed, dangling rollback, or digest mismatch. The chain itself is corrupted; forensic investigation required. |
+| `4`  | Internal error (panic, OOM, JSON parse failure on supposedly valid event). Tooling bug; not a verdict. |
+
+Exit code 3 is the strict-`R-7` signal: any external auditor invoking
+the binary against the chain files alone can take a 3 as proof of
+chain corruption. The binary never emits exit code 3 on
+`OrphanIndeterminate` or `OrphanRolledBackInferred` —  those are
+chain-intact outcomes by design.
+
+#### §5.4.4 Why one-shot, not a daemon
+
+Three reasons, formalised:
+
+1. **`R-7` requires independence, not continuous attestation.** A
+   running daemon is part of the system; an auditor running the binary
+   against archived chain files is not. The whole point of the
+   property is "any party with the files can verify" — a daemon
+   centralises trust on the running daemon. (`v2/audit-paired-writes.md`
+   §1.1 strict reading.)
+
+2. **Continuous green lights are noise.** A daemon emitting "chain OK"
+   every minute trains operators to ignore the signal. The verifier's
+   value is its discreteness: it answers a specific question (`is the
+   chain intact at this point in time`) at a specific moment chosen
+   by an operator or auditor.
+
+3. **Daemon attack surface adds nothing.** A continuous verifier has
+   IPC, scheduling, and authentication concerns the one-shot doesn't.
+   Operationally, periodic verification is `cron` or systemd timer
+   pointing at `raxis-audit-verify`; if that's the operational pattern,
+   a separate daemon adds zero value over the timer.
+
+#### §5.4.5 Companion CLI command (kernel-linked)
+
+The standalone binary's chain-only mode is sufficient for `R-7`. For
+operators who want orphan resolution from a running deployment, a
+companion `raxis audit export-state-for-verifier` command (defined in
+`v1/cli-readonly.md §5.5.19`) exports the
+`last_committing_event_seq` column for every state-bearing row into
+a JSON file the standalone binary consumes via `--state-export`.
+
+The export command is part of `raxis-cli` (it links `raxis-store` to
+read SQLite). The export's output **is** consumable by the
+dependency-bounded standalone binary, which keeps the trust boundary
+intact:
+
+```text
+operator-host           forensic-host (independent)
++--------------+         +-------------------------+
+| raxis-cli    |         | raxis-audit-verify      |
+| └─ export-   |  JSON   | └─ reads JSON +         |
+|    state     ├────────►|    JSONL chain +        |
+|              |  files  |    operator pubkey      |
++--------------+         +-------------------------+
+                                    │
+                                    ▼
+                          chain INTACT/CORRUPTED
+                          (kernel not involved)
+```
+
+The forensic host trusts the JSON export only insofar as the operator
+host trusts its own SQLite — the export itself is content-addressed
+(SHA-256 of the canonical JSON is part of the verdict output) and
+signed by the kernel at export time. A tampered export would
+mis-resolve orphans into the wrong category but cannot fabricate
+chain breaks or signature failures (those are computed from the
+chain file alone).
+
+### §5.6 Honesty about what offline verification can prove
+
+The standalone binary in chain-only mode (default; no `--state-export`)
+proves the following properties **without depending on the kernel**:
 
 1. **Chain integrity.** Hash links are intact end-to-end.
-2. **Pairing integrity.** Every confirmed/rolled-back has a preceding pending; every pending has a confirmed, a rolled-back, or a SQLite-resolvable orphan annotation.
-3. **Digest integrity.** Every confirmed event's `actual_post_state_digest` matches its pending's `intended_post_state_digest`.
+2. **Signature integrity.** Every event was signed by a key in the
+   supplied `--pubkey` / `--keyring`.
+3. **Pairing integrity.** Every confirmed/rolled-back has a preceding
+   pending; every pending has a confirmed, a rolled-back, or is
+   reported as `OrphanIndeterminate`.
+4. **Digest integrity.** Every confirmed event's `actual_post_state_digest` matches its pending's `intended_post_state_digest`.
 
-The offline verifier proves one further property **with a SQLite snapshot**:
+These four are the canonical R-7 satisfaction set. The chain-only mode
+exit code 0 is the strict-`R-7` evidence an external auditor needs.
 
-4. **Orphan resolution.** Every unresolved orphan is annotated as `OrphanResolvedByStateSnapshot` (committed) or `OrphanRolledBackInferred` (rolled back).
+The standalone binary in resolution mode (`--state-export <path>`)
+additionally proves:
+
+5. **Orphan resolution.** Every unresolved orphan is annotated as
+   `OrphanResolvedByStateSnapshot` (committed) or
+   `OrphanRolledBackInferred` (rolled back). The state-export file is
+   produced by `raxis audit export-state-for-verifier` (kernel-linked
+   tooling, but its output is consumable by the dep-bounded standalone
+   binary).
 
 What the verifier **cannot** prove:
 
@@ -671,6 +966,47 @@ What the verifier **cannot** prove:
 - That no row mutated *outside* of a paired transaction. (A buggy kernel that wrote to SQLite without writing a pending event would leave audit-silent rows. The `last_committing_event_seq = 0` sentinel detects this for new rows; the migration's NOT-NULL DEFAULT 0 makes the silence visible. Existing rows touched without a pending fall back to `PreV21Row`.)
 
 These limitations are explicit and intentional. V2.1 closes the strict R-7 gap for the *transition events*; V2.2 will close it for the *post-state content*.
+
+### §5.7 Relationship to `raxis verify-chain` (kernel-linked)
+
+The existing `raxis verify-chain` CLI subcommand
+(`v1/cli-readonly.md §5.5.13`, part of `raxis-cli`) is a convenience
+wrapper that calls into `crates/audit-verify` for the algorithm but
+links the full kernel stack (`raxis-store`, `raxis-policy`,
+`raxis-types`). It is therefore **NOT** the `R-7` independence
+artefact — its verdict only proves "the kernel-side tooling agrees
+with itself", which is meaningless under R-7's strict reading.
+
+`raxis verify-chain` IS valuable for operators who:
+
+- Want to verify with kernel-side conveniences (live SQLite for
+  orphan resolution without a separate export step).
+- Are running on the same host as the kernel and want a single
+  command for routine self-checks.
+- Want to exercise the audit chain via `raxis-cli` IPC against a live
+  kernel that may be holding additional in-flight events not yet
+  visible on disk.
+
+Operators wanting a strict-`R-7` verdict MUST use `raxis-audit-verify`.
+Operators wanting day-to-day self-checks against a running kernel MAY
+use `raxis verify-chain`. The two binaries share the algorithm
+(`crates/audit-verify::verify`) but exist in different trust regimes.
+Both are documented; only one satisfies the R-7 independence
+property; the spec is explicit about which.
+
+The kernel itself uses the same library at boot for
+`recovery::reconcile_advisory` (`§6.2`), giving three distinct call
+sites for one algorithm:
+
+| Caller | Crate it links | Purpose | R-7-bearing? |
+| --- | --- | --- | --- |
+| `raxis-audit-verify` (standalone bin) | `crates/audit-verify` only | Independent forensic verification | **Yes** |
+| `raxis verify-chain` (raxis-cli sub) | full kernel stack | Operator self-check on live host | No (convenience) |
+| `recovery::reconcile_advisory` (kernel boot) | full kernel stack | Auto-synthesise missing confirmations on next boot | No (advisory) |
+
+This is the design principle: **one algorithm, one library, three
+call sites, one R-7 artefact**. The independence property is the dep
+boundary on the binary, not the algorithm.
 
 ---
 
@@ -686,14 +1022,36 @@ In V2.1, recovery is **advisory**. Its only job is to keep the chain self-resolv
 
 ```rust
 //! kernel/src/recovery.rs (revised)
+//!
+//! Recovery imports the algorithm from the leaf crate
+//! `crates/audit-verify` (no kernel deps). It supplies a live
+//! SQLite-backed `StateSnapshot` impl since recovery runs inside
+//! the kernel process and has direct store access. The standalone
+//! binary uses a different `StateSnapshot` impl backed by a JSON
+//! state-export — same algorithm, two snapshot sources.
+
+use raxis_audit_verify::{verify, Finding, StateSnapshot};
+
+struct LiveSqliteSnapshot<'a>(&'a Store);
+
+impl<'a> StateSnapshot for LiveSqliteSnapshot<'a> {
+    fn lookup_last_committing_event_seq(
+        &self,
+        table: &str,
+        primary_key: &serde_json::Value,
+    ) -> Option<u64> {
+        self.0.lookup_last_committing_event_seq(table, primary_key)
+    }
+}
 
 pub async fn reconcile_advisory(
     audit: Arc<dyn AuditSink>,
     store: Arc<Store>,
+    keyring: &Keyring,
 ) -> Result<RecoveryReport, RecoveryError> {
-    let snap = store.snapshot()?;
     let chain = audit.read_range(0..u64::MAX).await?;
-    let findings = audit::verifier::verify(&chain, Some(&snap));
+    let snap  = LiveSqliteSnapshot(&store);
+    let findings = verify(&chain, keyring, Some(&snap));
 
     let mut report = RecoveryReport::default();
     for finding in findings {
@@ -713,7 +1071,7 @@ pub async fn reconcile_advisory(
                 audit.emit_recovered_rollback(rb).await?;
                 report.synthesised_rollback += 1;
             }
-            Finding::OrphanUnresolvable { .. } => unreachable!("snapshot was supplied"),
+            Finding::OrphanIndeterminate { .. } => unreachable!("live snapshot supplied"),
             Finding::PreV21Row { .. } => { /* expected; ignore */ }
             crit if crit.is_critical() => {
                 report.critical.push(crit);
@@ -723,10 +1081,12 @@ pub async fn reconcile_advisory(
     }
 
     if !report.critical.is_empty() {
-        // Critical findings during recovery (chain break, digest mismatch)
-        // are operator-attention events, not auto-fixable. The kernel
-        // refuses to start until the operator runs `raxis audit verify`
-        // and acknowledges via a signed override.
+        // Critical findings during recovery (chain break, signature
+        // invalid, digest mismatch) are operator-attention events,
+        // not auto-fixable. The kernel refuses to start until the
+        // operator runs `raxis-audit-verify` independently and then
+        // acknowledges via the signed override on `raxis verify-chain
+        // --acknowledge-critical`.
         return Err(RecoveryError::CriticalFindings(report));
     }
 
@@ -1015,11 +1375,15 @@ Phases are ordered to be mergeable independently, each independently shippable, 
 - `Confirmable` trait (impl on every paired-class variant) returning the three fields generically.
 - One PR per variant cluster (session, initiative, task, escalation, …) for review surface bound.
 
-**Phase C — Verifier algorithm.**
-- `crates/audit/src/verifier.rs::verify` implementation (per §5).
-- `crates/audit/src/verifier/conformance.rs` test fixtures: synthetic chains with every crash-window pattern, every Finding shape.
-- `raxis-audit-tools verify-chain --with-state-snapshot` CLI flag.
-- One PR.
+**Phase C — Verifier crate (independence-bearing).**
+- New leaf crate `crates/audit-verify/` with strict dep boundary (per §5.4.1): `sha2`, `ed25519-dalek`, `serde`, `serde_json`, `hex`, `clap`, `glob`. NO kernel crates.
+- `crates/audit-verify/src/lib.rs::verify` implementation (per §5.2). Public types: `Finding`, `StateSnapshot` trait, `Keyring`, `AuditEvent` (untyped JSONL parse — see §5.4.1 design note about avoiding `AuditEventKind` enum dependency).
+- `crates/audit-verify/src/digest.rs` — canonical row-encoding helpers used by both the standalone binary (parsing pending events) and the kernel's `PairedAuditWriter` (computing pre/post digests). Pure functions; no kernel state.
+- `crates/audit-verify/src/state_export.rs` — JSON export schema (`raxis-audit-verify-state-export-v1`) consumed by `--state-export` and produced by `raxis audit export-state-for-verifier`.
+- `crates/audit-verify/src/bin/raxis-audit-verify.rs` — the standalone binary (per §5.4.2 CLI surface, §5.4.3 exit codes).
+- `crates/audit-verify/tests/conformance.rs` — synthetic chains exercising every crash-window pattern, every Finding shape (including chain-only mode for `OrphanIndeterminate`).
+- `xtask/src/audit_verify_deps.rs` — the dep-boundary lint (§13.3 of this spec): runs `cargo metadata --filter-platform`, walks the dep graph rooted at `raxis-audit-verify`, and fails CI if any of `raxis-store`, `raxis-policy`, `raxis-ipc`, `raxis-types`, `raxis-audit-tools`, `raxis-kernel`, `rusqlite`, `tokio`, or `reqwest` appear in the closure.
+- One PR for the crate; one follow-up PR for the dep-boundary CI gate.
 
 **Phase D — Kernel emits pending → confirmed.**
 - Refactor `kernel/src/handlers/intent.rs` admission pipeline: insert Phase B0 (compute digests, emit pending, fsync) and Phase B2 (emit confirmed inside the wrapped existing emission). Per-handler PRs:
@@ -1039,7 +1403,7 @@ Phases are ordered to be mergeable independently, each independently shippable, 
 - Refactor `kernel/src/recovery.rs::reconcile` → `reconcile_advisory` (per §6.2).
 - Add `RollbackReason::CrashInferred`.
 - Recovery-induced events tag a flag `_recovery_synthesised: true` in their JSON for forensic clarity.
-- Kernel refuses to start if `reconcile_advisory` returns critical findings; operator runs `raxis audit verify --acknowledge-critical` (signed) to override.
+- Kernel refuses to start if `reconcile_advisory` returns critical findings; operator first runs the standalone `raxis-audit-verify` to confirm the finding is real (independence-bearing verdict), then clears the boot block with `raxis verify-chain --acknowledge-critical` (signed override; the convenience wrapper accepts a signed acknowledgement payload that includes the standalone binary's verdict hash).
 
 **Phase F — Migration ceremony at first V2.1 boot.**
 - `kernel/src/main.rs` boot site: detect pre-V2.1 chain (no `AuditSchemaMigration` event found); run §10.1 ceremony.
@@ -1051,7 +1415,7 @@ Phases are ordered to be mergeable independently, each independently shippable, 
 
 **Phase H — Conformance tests (CI gate).**
 - `kernel/tests/audit_paired_writes_e2e.rs` — every crash window per §7 exercised against a real kernel via panics-on-demand.
-- `crates/audit/tests/verifier_conformance.rs` — synthetic chains.
+- `crates/audit-verify/tests/conformance.rs` — synthetic chains, exercised against the leaf crate's `verify()` (no kernel needed).
 - `kernel/tests/recovery_advisory_optional.rs` — verifier resolves orphans correctly even when `reconcile_advisory` is bypassed.
 
 Total surface: ~6–8 weeks of engineering for the full migration; first user-visible wins after Phase D.4 (most observable hot-path covered).
@@ -1062,40 +1426,122 @@ Total surface: ~6–8 weeks of engineering for the full migration; first user-vi
 
 ### §13.1 Files to create
 
+#### Independence-bearing crate (`crates/audit-verify/`)
+
+This crate is the R-7 artefact. Its dep graph must NOT transitively
+include any kernel crate. The `xtask audit-verify-deps` lint
+(§13.3) enforces this in CI.
+
 | Path | Role |
 | --- | --- |
-| `crates/audit/src/verifier.rs` | NEW — the offline verifier algorithm (per §5) |
-| `crates/audit/src/verifier/conformance.rs` | NEW — synthetic chain fixtures + Finding-shape assertions |
-| `crates/audit/src/digest.rs` | NEW — canonical row-encoding hashing helpers (`hash_row`, `hash_writes_set`, `RowDigest`) |
-| `crates/audit/tests/verifier_conformance.rs` | NEW — chain pattern coverage tests |
+| `crates/audit-verify/Cargo.toml` | NEW — manifest with strict dep boundary (per §5.4.1) |
+| `crates/audit-verify/src/lib.rs` | NEW — public `verify()` entry point + `Finding` enum + `StateSnapshot` trait + `Keyring` (per §5.2) |
+| `crates/audit-verify/src/event.rs` | NEW — JSONL event parser. Reads events as `serde_json::Value` and exposes a small typed view (`AuditEventView { seq, prev_sha256, signature, kind: EventKind, payload: Value }`) just rich enough for the verifier. Crucially does NOT depend on the kernel's full `AuditEventKind` enum, so adding new variants in the kernel does not require recompiling the standalone binary. |
+| `crates/audit-verify/src/digest.rs` | NEW — canonical row-encoding helpers (`hash_row`, `hash_writes_set`, `canonical_event_bytes`). Pure functions; the kernel's `crates/audit-tools` re-exports these, so producer and verifier agree on byte representation. |
+| `crates/audit-verify/src/state_export.rs` | NEW — JSON state-export schema (`raxis-audit-verify-state-export-v1`) consumed by `--state-export` and produced by `raxis audit export-state-for-verifier`. |
+| `crates/audit-verify/src/keyring.rs` | NEW — Ed25519 pubkey loader. Reads PEM (single key) or directory (multi-key, fingerprint-named) per §5.4.2. |
+| `crates/audit-verify/src/bin/raxis-audit-verify.rs` | NEW — the standalone binary entry point (clap CLI per §5.4.2; verdict formatter per §5.4.3). |
+| `crates/audit-verify/tests/conformance.rs` | NEW — synthetic chain fixtures + Finding-shape assertions, exercised against the leaf `verify()` library. |
+| `crates/audit-verify/tests/dep_boundary.rs` | NEW — meta-test that parses `Cargo.toml` and asserts the dependency list matches §5.4.1 exactly. Defence in depth alongside the xtask lint. |
+
+#### Kernel-side files (depend on `crates/audit-verify`)
+
+| Path | Role |
+| --- | --- |
 | `crates/store/migrations/V21__paired_audit.sql` | NEW — schema migration (per §3.3) |
 | `kernel/src/store/migrations/v21_backfill.rs` | NEW — backfill pass implementation |
 | `kernel/src/audit/paired.rs` | NEW — `PairedAuditWriter` helper used by every handler in Phase D |
 | `kernel/tests/audit_paired_writes_e2e.rs` | NEW — every §7 crash window |
 | `kernel/tests/recovery_advisory_optional.rs` | NEW — verifier-without-recovery tests |
+| `xtask/src/audit_verify_deps.rs` | NEW — dep-boundary CI lint (§13.3 of this spec) |
 
 ### §13.2 Files to change
 
 | Path | Change |
 | --- | --- |
-| `crates/audit/src/event.rs` | Add `StateChangePending`, `StateChangeRolledBack`, `RollbackReason`, `RowMutationDescriptor`, `KernelClaims`, `StateChangeOperation` enums. Augment every paired-class variant with three new fields (Phase B). Define `Confirmable` trait |
+| `crates/audit/src/event.rs` | Add `StateChangePending`, `StateChangeRolledBack`, `RollbackReason`, `RowMutationDescriptor`, `KernelClaims`, `StateChangeOperation` enums. Augment every paired-class variant with three new fields (Phase B). Define `Confirmable` trait. **Imports `crates/audit-verify::digest` for canonical encoding helpers** so producer and verifier are byte-identical. |
 | `crates/audit/src/sink.rs` | Extend `AuditSink` trait per `extensibility-traits.md §5` with `emit_pending`, `emit_confirmed_for`, `emit_rolled_back_for`, `emit_recovered_confirmed`, `emit_recovered_rollback` |
 | `kernel/src/handlers/intent.rs` | Insert Phase B0 + B2 admission stages; route through `PairedAuditWriter` |
 | `kernel/src/handlers/escalation.rs` | Phase D.1 — paired emission for `EscalationSubmitted`, `EscalationApproved`, `EscalationDenied`, `EscalationConsumed`, `ApprovalToken*` |
 | `kernel/src/handlers/{task,initiative,merge,verifier,operator}.rs` | Phase D.2–D.6 |
-| `kernel/src/recovery.rs` | `reconcile` → `reconcile_advisory` (per §6.2) |
-| `kernel/src/main.rs` | First-boot migration ceremony (per §10) |
+| `kernel/src/recovery.rs` | `reconcile` → `reconcile_advisory` (per §6.2). **Imports `raxis_audit_verify::verify` for the algorithm** with a kernel-local `LiveSqliteSnapshot` impl of `StateSnapshot` (per §6.2 code listing). One algorithm, two snapshot sources. |
+| `kernel/src/main.rs` | First-boot migration ceremony (per §10). On critical findings from `reconcile_advisory`, instructs operator to run the **standalone** `raxis-audit-verify` binary (independence-bearing) before clearing with `raxis verify-chain --acknowledge-critical`. |
 | `kernel/src/store/migrations.rs` | Wire `V21__paired_audit.sql` + backfill pass |
-| `crates/store/src/sessions.rs`, `tasks.rs`, `initiatives.rs`, `escalations.rs`, `delegations.rs`, …  | Each state-bearing module: every `transition_*` SQL site adds `last_committing_event_seq = ?` to its UPDATE/INSERT |
-| `crates/raxis-audit-tools/src/main.rs` | Add `--with-state-snapshot <path>` flag to `verify-chain` |
-| `crates/raxis-audit-tools/src/verify.rs` | Switch from V1 chain-link-only verification to the §5 algorithm |
+| `crates/store/src/sessions.rs`, `tasks.rs`, `initiatives.rs`, `escalations.rs`, `delegations.rs`, …  | Each state-bearing module: every `transition_*` SQL site adds `last_committing_event_seq = ?` to its UPDATE/INSERT. Add `lookup_last_committing_event_seq(table, primary_key) -> Option<u64>` helper used by `LiveSqliteSnapshot`. |
+| `crates/raxis-audit-tools/src/main.rs` | DOES NOT gain a `verify-chain` subcommand. The independence-bearing tool is `raxis-audit-verify` in `crates/audit-verify/`. `raxis-audit-tools` retains its existing role as the kernel-side audit writer/library. |
+| `cli/src/commands/audit.rs` | Add `raxis verify-chain` (kernel-linked convenience wrapper using `raxis_audit_verify::verify`) and `raxis audit export-state-for-verifier` (writes JSON consumable by `raxis-audit-verify --state-export`). The `raxis verify-chain --acknowledge-critical` flag is the boot-override per §6.2. |
 | `xtask/src/spec_graph.rs` | Add §4.2 paired/single classification check |
 | `raxis/specs/v1/kernel-store.md` | §2.5.2 AuditSink ordering rewritten as the V2.1 paired ordering; cross-reference this spec; add `last_committing_event_seq` column to schema docs |
 | `raxis/specs/v1/kernel-core.md` | Intent admission pipeline — Phase B insertion; `recovery::reconcile` → `reconcile_advisory`; cross-reference this spec |
-| `raxis/specs/v2/extensibility-traits.md` | §5 (`AuditSink`) extended with paired-write methods |
+| `raxis/specs/v1/cli-readonly.md` | New §5.5.19 `raxis audit export-state-for-verifier` (kernel-linked exporter for the standalone binary's `--state-export` mode) |
+| `raxis/specs/v2/extensibility-traits.md` | §5 (`AuditSink`) extended with paired-write methods; §5.3/§5.4 file lists realigned to point at `crates/audit-verify/` (leaf crate) for the verifier algorithm |
 | `raxis/specs/v2/policy-plan-authority.md` | New `FAIL_AUDIT_*` failure codes |
 | `raxis/specs/invariants.md` | New `INV-AUDIT-PAIRED-01..07` |
 | `raxis/specs/v2/v2-deep-spec.md` | Register this spec in Related Specifications; spec-graph lint extension |
+
+### §13.3 The dep-boundary CI lint
+
+**Why a lint at all.** §5.4.1 specifies a strict dependency list for
+`crates/audit-verify`. Without enforcement, a future PR could add
+`raxis-store = "*"` "just for one helper" and silently destroy the
+independence property. The lint is not optional — it is the
+operational substantiation of `INV-AUDIT-PAIRED-05`.
+
+**What it does.**
+
+```rust
+// xtask/src/audit_verify_deps.rs
+const BANNED: &[&str] = &[
+    "raxis-store",
+    "raxis-policy",
+    "raxis-ipc",
+    "raxis-types",
+    "raxis-audit-tools",
+    "raxis-kernel",
+    "raxis-cli",
+    "rusqlite",
+    "tokio",
+    "reqwest",
+    "hyper",
+    // any other crate that pulls in IO/storage/network
+];
+
+pub fn run() -> anyhow::Result<()> {
+    let metadata = cargo_metadata::MetadataCommand::new().exec()?;
+    let root = metadata.packages.iter()
+        .find(|p| p.name == "raxis-audit-verify")
+        .expect("crates/audit-verify/ must exist");
+    let mut closure = HashSet::new();
+    walk_deps(&metadata, root, &mut closure);
+    let violations: Vec<_> = closure.iter()
+        .filter(|name| BANNED.contains(&name.as_str()))
+        .collect();
+    if !violations.is_empty() {
+        anyhow::bail!(
+            "raxis-audit-verify dep boundary violated: {:?} present in transitive closure",
+            violations
+        );
+    }
+    Ok(())
+}
+```
+
+**When it runs.** Every PR that touches `crates/audit-verify/**` or
+the workspace `Cargo.lock`. Required CI gate; cannot be bypassed.
+
+**Why not just trust review.** Reviewers miss transitive deps —
+`anyhow` pulls in `backtrace`, which on some platforms pulls in
+`addr2line`, which… The closure check is exhaustive in a way humans
+aren't. Plus the closure naturally evolves as upstream crates add
+features; the lint catches a future `serde_json` minor that suddenly
+needs `tokio-util` for something.
+
+**Why xtask, not a build script.** Build scripts run during compile;
+the lint runs during `cargo xtask audit-verify-deps`. The latter is
+explicitly invoked in CI and prints actionable diagnostics. A
+build-script failure would be confusing ("why won't my crate compile
+in someone else's PR?"); an xtask failure is a clear "the lint says
+these crates can't be in the closure."
 
 ---
 
@@ -1117,7 +1563,7 @@ The seven invariants below are the canonical R-7-bearing properties of the V2.1 
 
 **Justification.** Closes the kernel-buggery / kernel-compromise vector where the kernel announces one mutation and commits another (§9.2).
 
-**Verification.** `crates/audit/tests/verifier_conformance.rs::digest_mismatch_flagged`.
+**Verification.** `crates/audit-verify/tests/conformance.rs::digest_mismatch_flagged`.
 
 ### §14.3 `INV-AUDIT-PAIRED-03` — Every rollback references a real pending
 
@@ -1125,7 +1571,7 @@ The seven invariants below are the canonical R-7-bearing properties of the V2.1 
 
 **Justification.** Symmetric to `INV-AUDIT-PAIRED-02`.
 
-**Verification.** `crates/audit/tests/verifier_conformance.rs::dangling_rollback_flagged`.
+**Verification.** `crates/audit-verify/tests/conformance.rs::dangling_rollback_flagged`.
 
 ### §14.4 `INV-AUDIT-PAIRED-04` — `last_committing_event_seq` reflects the most recent pending
 
@@ -1165,7 +1611,7 @@ The seven invariants below are the canonical R-7-bearing properties of the V2.1 
 
 ### §15.1 What the kit verifies
 
-The conformance kit (`crates/audit/src/verifier/conformance.rs` + `kernel/tests/audit_paired_writes_e2e.rs`) is the executable specification of `INV-AUDIT-PAIRED-01..07`. Any implementation of `AuditSink` that ships paired-write semantics MUST pass the kit. The kit is parametric over `AuditSink` impls so future implementations (`PostgresAuditSink`, `S3AuditSink`, `RekorAuditSink`) inherit the same gate.
+The conformance kit (`crates/audit-verify/tests/conformance.rs` for the algorithm-level checks; `kernel/tests/audit_paired_writes_e2e.rs` for the kernel-side crash-window checks) is the executable specification of `INV-AUDIT-PAIRED-01..07`. Any implementation of `AuditSink` that ships paired-write semantics MUST pass the kit. The kit is parametric over `AuditSink` impls so future implementations (`PostgresAuditSink`, `S3AuditSink`, `RekorAuditSink`) inherit the same gate. The algorithm-level half lives in the leaf crate so it runs without the kernel — exactly the property `INV-AUDIT-PAIRED-05` requires.
 
 ### §15.2 Test patterns
 
@@ -1190,17 +1636,18 @@ The kit includes a mutation-testing harness: it permutes every paired-class tran
 
 | Spec | Impact |
 | --- | --- |
-| `paradigm.md §3 R-7` | Reframed: V2.1 paired-audit is the canonical reference implementation that satisfies the strict reading of R-7. Footnote pointer added. |
-| `invariants.md §audit` | New `INV-AUDIT-PAIRED-01..07` rows. |
-| `v1/kernel-store.md §2.5.2` | AuditSink ordering rewritten as V2.1 paired ordering (Phase B0 → B1 → B2). New `last_committing_event_seq` column on every state-bearing schema. The V1 ordering is documented as historical and applies only to pre-`AuditSchemaMigration` chain entries. |
-| `v1/kernel-core.md §2.3` | Intent admission pipeline — Phase B is now three sub-phases (B0, B1, B2) with an explicit "compute pre/post digests" step. `recovery::reconcile` is renamed `reconcile_advisory` and its role downgraded from "required for correctness" to "best-effort advisory; chain is verifiable without it." |
-| `v2/extensibility-traits.md §5` | `AuditSink` trait extended with `emit_pending`, `emit_confirmed_for`, `emit_rolled_back_for`, `emit_recovered_confirmed`, `emit_recovered_rollback`. Conformance contract gains the §15 kit. |
-| `v2/policy-plan-authority.md` failure-code catalog | New: `FAIL_AUDIT_PENDING_FSYNC`, `FAIL_AUDIT_CONFIRMED_FSYNC_EXHAUSTED`, `FAIL_AUDIT_PRE_STATE_DIGEST_MISMATCH`, `FAIL_AUDIT_MIGRATION_INCONSISTENT_ROW`, `FAIL_BEGIN_IMMEDIATE_TIMEOUT`. |
+| `paradigm.md §3 R-7` | Reframed: V2.1 paired-audit is the canonical reference implementation that satisfies the strict reading of R-7. The independence property is operationalised by the `crates/audit-verify/` leaf crate's strict dep boundary (per §5.4.1) plus the `xtask audit-verify-deps` CI lint (per §13.3). Footnote pointer added. |
+| `invariants.md §audit` | New `INV-AUDIT-PAIRED-01..07` rows. `INV-AUDIT-PAIRED-05` (offline verifiability) is the strict-`R-7` invariant, structurally satisfied by the standalone `raxis-audit-verify` binary's dep boundary. |
+| `v1/kernel-store.md §2.5.2` | AuditSink ordering rewritten as V2.1 paired ordering (Phase B0 → B1 → B2). New `last_committing_event_seq` column on every state-bearing schema. The V1 ordering is documented as historical and applies only to pre-`AuditSchemaMigration` chain entries. New `lookup_last_committing_event_seq(table, primary_key) -> Option<u64>` helper used by `LiveSqliteSnapshot` impl of `audit-verify::StateSnapshot`. |
+| `v1/kernel-core.md §2.3` | Intent admission pipeline — Phase B is now three sub-phases (B0, B1, B2) with an explicit "compute pre/post digests" step. `recovery::reconcile` is renamed `reconcile_advisory` and its role downgraded from "required for correctness" to "best-effort advisory; chain is verifiable without it." Recovery imports `raxis_audit_verify::verify` for the algorithm (single-source-of-truth) and supplies a kernel-local `LiveSqliteSnapshot` impl. |
+| `v1/cli-readonly.md` | New §5.5.13 `raxis verify-chain` clarification: kernel-linked convenience wrapper, NOT R-7 independence-bearing (that role belongs to `raxis-audit-verify`). New §5.5.19 `raxis audit export-state-for-verifier` (kernel-linked exporter producing JSON consumable by the standalone binary's `--state-export` flag). New §5.5.20 documenting that `raxis-audit-verify` exists as a separate binary with separate man page and is the only command that satisfies the R-7 independence property. `raxis log` output gains `confirms_pending_seq` and `sqlite_commit_id` fields when displaying paired-class events; the UI collapses pending + confirmed into a single line by default; `--show-pending` flag exposes the underlying pair. |
+| `v2/extensibility-traits.md §5` | `AuditSink` trait extended with `emit_pending`, `emit_confirmed_for`, `emit_rolled_back_for`, `emit_recovered_confirmed`, `emit_recovered_rollback`. The verifier algorithm and `Finding` enum live in the leaf crate `crates/audit-verify/`, NOT in `crates/audit/` (which is kernel-linked). The conformance kit (§15 of this spec) lives in the leaf crate so any sink shipping V2.1+ inherits the gate. |
+| `v2/policy-plan-authority.md` failure-code catalog | New: `FAIL_AUDIT_PENDING_FSYNC`, `FAIL_AUDIT_CONFIRMED_FSYNC_EXHAUSTED`, `FAIL_AUDIT_PRE_STATE_DIGEST_MISMATCH`, `FAIL_AUDIT_INTENDED_POST_STATE_DIGEST_MISMATCH`, `FAIL_AUDIT_MIGRATION_INCONSISTENT_ROW`, `FAIL_AUDIT_MIGRATION_PARTIAL_BACKFILL`, `FAIL_BEGIN_IMMEDIATE_TIMEOUT`, `FAIL_AUDIT_CRITICAL_FINDING`, plus the informational `WARN_AUDIT_*` set. The catalog notes which are reported by the standalone binary (`FAIL_AUDIT_CRITICAL_FINDING` only — exit code 3) vs which are kernel-runtime errors only (`FAIL_AUDIT_PENDING_FSYNC` and friends). |
 | `v2/v2-deep-spec.md` Related Specifications | New row registering this spec; "Spec-Graph Lint" section gains §4.2 enforcement. |
 | `v2/email-and-notification-channels.md` | `notification_dispatch` table gains `last_committing_event_seq` column; `NotificationDispatchClaimed` event becomes paired-class; `NotificationDelivered`/`NotificationDeliveryFailed` remain single (post-commit observation events). No spec text changes — the dispatcher already emits in the right order. |
 | `v2/integration-merge.md` | `IntegrationMergeApplied` becomes paired-class; the existing two-phase commit (Phase 1 audit + Phase 2 git apply) maps to (Phase 1 = paired audit; Phase 2 = git apply, which is *not* paired because it doesn't mutate SQLite). Cross-reference added. |
 | `v2/credential-proxy.md` | `SmtpProxyMessageSent`, `SmtpProxyConnected`, etc. gain paired-class status (they write rate-limit-bucket rows). NNSP unchanged. |
-| `v1/cli-readonly.md §raxis log` | Output format gains `confirms_pending_seq` and `sqlite_commit_id` fields when displaying paired-class events. The `raxis log` UI collapses `pending` + `confirmed` into a single line by default; `--show-pending` flag exposes the underlying pair. |
+| `crates/audit-verify/` (NEW workspace member) | New top-level workspace member; build dep boundary enforced by `xtask audit-verify-deps` (§13.3). The binary `raxis-audit-verify` ships in the same release artefacts as `raxis-cli` and `raxis-kernel` but is independently runnable with no kernel data directory or running daemon. |
 
 ---
 
