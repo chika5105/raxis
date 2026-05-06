@@ -626,6 +626,28 @@ assigned at VM creation time.
 — they are not attacker-controlled values that can trigger HashDoS collisions. See
 `kernel-store.md §2.5.1 "Hash table strategy"`.
 
+**Implementation reference:** `kernel/src/ipc/cid_blocklist.rs::CidBlocklist`. The
+typed wrapper exposes `insert`, `remove`, `contains`, `len`, `is_empty`, and `clear`,
+all behind an internal `RwLock<FxHashSet<u32>>` (the accept loop is the hot reader,
+insertions are rare). Three Linux-reserved CIDs are *defensively rejected* by `insert`
+to prevent the operator from accidentally locking the host out of its own kernel:
+
+| CID                | constant            | rationale                                     |
+|--------------------|---------------------|-----------------------------------------------|
+| `1`                | `VMADDR_CID_LOCAL`  | local-loopback endpoint; blocking it would drop the kernel's own self-connections. |
+| `2`                | `VMADDR_CID_HOST`   | host-side endpoint; blocking it would partition every host-resident planner. |
+| `0xFFFFFFFF`       | `VMADDR_CID_ANY`    | wildcard meaning "any CID"; inserting it would block every future connection. |
+
+Rejection returns `BlocklistInsertError::ReservedCid(cid)` and leaves the underlying
+set unchanged (fail-closed). Hypervisor CID 0 is *not* reserved by the spec — pinned
+explicitly in the unit tests so a future tightening is a deliberate spec change, not
+a silent drift.
+
+The accept-layer integration (consult `CidBlocklist::contains(peer_cid)` before any
+`recv()`) lands alongside the V2 VSock listener bring-up; the typed wrapper is
+ready ahead of that work so the integration is a pure call-site edit. V1 deployments
+on UDS continue to bypass the blocklist (UDS has no peer CID concept).
+
 ---
 
 ### Step 16: VSock CID Persistence — Surviving Kernel Hot-Restarts
