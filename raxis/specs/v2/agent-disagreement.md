@@ -778,3 +778,228 @@ Changes to this spec affect how operators reason about agent behavior in failure
 - Tightening the kernel defaults for `max_review_rounds` or `wall_clock_limit` is a breaking change for existing plans that don't set explicit values; coordinate with the version-bump policy.
 
 This spec is the canonical source for non-convergence handling. When other V2 specs introduce mechanisms that interact with task termination (new failure modes, new escalation classes, new resource bounds), they MUST update either this spec or its cross-spec impacts table (§10).
+---
+
+## 14. Implementation Plan
+
+This section enumerates every file, schema migration, audit event, CLI command, and test surface required to ship the convergence-bound mechanisms in §3–§7. An implementer reading §14 plus the spec body (§3–§7) MUST have enough information to land V2 in their first pass.
+
+> **Trait-boundary preconditions.** §7's abandoned-worktree lifecycle drives `DomainAdapter::teardown_workspace` and `DomainAdapter::purge_workspace` (`extensibility-traits.md §2.2.C`); the salvage path of §7.4 routes through `DomainAdapter::commit` with `CommitContext { mode: SalvageToBranch { target } }`. §14 therefore assumes the V2 trait extraction in `extensibility-traits.md §10` Phase A+B has landed.
+
+### 14.1 Crate layout
+
+No new crates. The mechanisms are kernel-internal and live in:
+
+- `kernel/src/handlers/intent.rs` — admission gates for `CompleteTask` (rounds, circular, wall-clock).
+- `kernel/src/handlers/escalation.rs` — two-tier routing (orchestrator-first vs operator-only).
+- `kernel/src/initiatives/abandoned.rs` (NEW file) — abandoned-worktree state machine, daily sweep timer, salvage flow.
+- `kernel/src/scheduler/wall_clock.rs` (NEW file) — per-task wall-clock budget tracker, pause-during-escalation logic (§5.2).
+- `cli/src/commands/worktree.rs` (NEW file) — `raxis worktree abandoned|inspect|salvage|purge` subcommands.
+- `crates/store/migrations/0011_convergence_bounds.sql` (NEW migration) — schema additions for all four mechanisms.
+
+### 14.2 Files to create
+
+`kernel/src/initiatives/abandoned.rs` (NEW):
+
+- `pub struct AbandonedTask { task_id, executor_session_id, transitioned_at, state: AbandonedState, retention_deadline, salvage_window_deadline }`.
+- `pub enum AbandonedState { AbandonedSalvageable, AbandonedArchived, Purged }`.
+- `pub async fn record_abandonment(store: &Store, audit: &dyn AuditSink, task_id: TaskId, reason: AbandonmentReason) -> Result<(), AbandonError>` — called from the four entry points (max-rounds reached, circular detected, wall-clock exceeded, operator abandon). Writes a row to `abandoned_tasks`, emits `WorktreeAbandonedSalvageWindowOpened`, calls `ctx.domain.teardown_workspace(handle)?`.
+- `pub async fn daily_sweep(ctx: &HandlerContext) -> Result<DailySweepReport, SweepError>` — scheduled by `kernel/src/runtime/heartbeat.rs::spawn_periodic_jobs` with a 24h ticker. Iterates `abandoned_tasks WHERE state IN ('AbandonedSalvageable','AbandonedArchived')`, transitions states whose deadlines have elapsed, and on `AbandonedArchived → Purged` calls `ctx.domain.purge_workspace(handle)?`.
+- `pub async fn salvage(ctx: &HandlerContext, task_id: TaskId, commits: Vec<ContentHash>, target_branch: String, operator_id: OperatorId) -> Result<SalvageReceipt, SalvageError>` — implements §7.4 step 2 by calling `ctx.domain.commit(snapshot, &cred_proxy, &CommitContext { mode: SalvageToBranch { target: target_branch }, .. })?` for each requested commit.
+- `pub async fn force_purge(ctx: &HandlerContext, task_id: TaskId, operator_id: OperatorId) -> Result<(), PurgeError>` — operator-driven early purge (`raxis worktree purge --force`); requires the audit-retention bypass which records `AbandonedWorktreePurged { was_force_purged: true, .. }`.
+
+`kernel/src/scheduler/wall_clock.rs` (NEW):
+
+- `pub struct WallClockTracker { task_id: TaskId, deadline_at: Instant, paused_at: Option<Instant>, accumulated_pause: Duration }`.
+- `pub fn start(...)`, `pub fn pause_for_escalation(...)`, `pub fn resume_after_escalation(...)`, `pub fn check_expired(...) -> Option<DeadlineExpired>`. Pause/resume implements §5.2 — the timer ticks while the agent is working, freezes during escalation, and resumes on resolution.
+- `pub async fn supervise(tracker: Arc<WallClockTracker>, store: Arc<Store>, audit: Arc<dyn AuditSink>)` — async task spawned per active session that wakes on the deadline and triggers `record_abandonment(... reason: AbandonmentReason::WallClockExceeded)`.
+
+`cli/src/commands/worktree.rs` (NEW):
+
+- `pub fn cmd_abandoned(args: &Args) -> Result<()>` — `raxis worktree abandoned`, lists `abandoned_tasks` rows with state + remaining-retention; uses the V2 read-only operator socket per `cli-readonly.md`.
+- `pub fn cmd_inspect(task_id: TaskId, args: &Args) -> Result<()>` — `raxis worktree inspect <task_id>`, dumps commit history with diffs + rejection reasons + tokens consumed + wall-clock elapsed.
+- `pub fn cmd_salvage(task_id: TaskId, commits: Vec<String>, target_branch: String, args: &Args) -> Result<()>` — `raxis worktree salvage`; sends an `OperatorIntent::SalvageAbandoned` envelope to the kernel (new operator-wire variant).
+- `pub fn cmd_purge(task_id: TaskId, force: bool, args: &Args) -> Result<()>` — `raxis worktree purge`; refuses without `--force` if `salvage_window_deadline` has not elapsed.
+
+`crates/store/migrations/0011_convergence_bounds.sql` (NEW migration):
+
+```sql
+-- §3 max_review_rounds + §4 circular detection
+ALTER TABLE subtask_activations ADD COLUMN review_rounds_consumed INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE subtask_activations ADD COLUMN max_review_rounds INTEGER;  -- NULL = inherit from policy default
+
+CREATE TABLE recent_diffs (
+    task_id        TEXT NOT NULL,
+    revision_n     INTEGER NOT NULL,
+    diff_sha256    BLOB NOT NULL,
+    submitted_at   TEXT NOT NULL,
+    PRIMARY KEY (task_id, revision_n)
+);
+CREATE INDEX idx_recent_diffs_task ON recent_diffs(task_id);
+
+-- §5 wall-clock budget
+ALTER TABLE subtask_activations ADD COLUMN wall_clock_started_at TEXT;
+ALTER TABLE subtask_activations ADD COLUMN wall_clock_limit_seconds INTEGER;  -- NULL = no limit
+ALTER TABLE subtask_activations ADD COLUMN wall_clock_paused_at TEXT;
+ALTER TABLE subtask_activations ADD COLUMN wall_clock_accumulated_pause_ms INTEGER NOT NULL DEFAULT 0;
+
+-- §6 escalation routing
+ALTER TABLE escalations ADD COLUMN routing_mode TEXT NOT NULL DEFAULT 'operator_only'
+    CHECK (routing_mode IN ('orchestrator_first','operator_only'));
+ALTER TABLE escalations ADD COLUMN orchestrator_resolution_deadline TEXT;
+ALTER TABLE escalations ADD COLUMN orchestrator_resolution_outcome TEXT
+    CHECK (orchestrator_resolution_outcome IN ('resolved','rejected','timed_out') OR orchestrator_resolution_outcome IS NULL);
+
+-- §7 abandoned worktree lifecycle
+CREATE TABLE abandoned_tasks (
+    task_id                       TEXT PRIMARY KEY,
+    executor_session_id           TEXT NOT NULL,
+    transitioned_at               TEXT NOT NULL,
+    reason                        TEXT NOT NULL CHECK (reason IN ('max_rounds','circular','wall_clock','disagreement','operator_abandon')),
+    state                         TEXT NOT NULL CHECK (state IN ('AbandonedSalvageable','AbandonedArchived','Purged')),
+    salvage_window_deadline       TEXT NOT NULL,
+    retention_deadline            TEXT NOT NULL,
+    workspace_handle_id           INTEGER REFERENCES workspace_handles(rowid),
+    purged_at                     TEXT,
+    last_inspected_at             TEXT,
+    last_inspected_by             TEXT
+);
+CREATE INDEX idx_abandoned_tasks_state ON abandoned_tasks(state);
+CREATE INDEX idx_abandoned_tasks_retention ON abandoned_tasks(retention_deadline) WHERE state != 'Purged';
+```
+
+The `workspace_handles` table referenced in `workspace_handle_id` is already created by `0008_domain_handles.sql` (per `extensibility-traits.md §2.6`); this migration depends on its having landed.
+
+### 14.3 Files to change
+
+`raxis/kernel/src/handlers/intent.rs`:
+
+- `handle_complete_task()` picks up four new admission gates, in this order, BEFORE the existing path-allowlist check:
+  1. **Round-cap gate (§3).** Read `subtask_activations.review_rounds_consumed` + `max_review_rounds` (with policy fallback). If consumed ≥ limit, the handler returns `FAIL_REVIEW_LOOP_EXCEEDED { task_id, consumed, limit, on_max_rounds_action }`. If `on_max_rounds = "fail_task"`, also calls `record_abandonment(... reason: MaxRounds)`. If `on_max_rounds = "escalate"`, opens an escalation per §6 with class `review_loop_exceeded`. If `on_max_rounds = "force_admit"`, increments a counter and admits with audit-event `ReviewLoopForceAdmitted`.
+  2. **Circular-detection gate (§4).** Compute the diff between `previous_evaluation_sha` and the new `commit_sha`, sha256 the diff bytes, and check against `recent_diffs WHERE task_id = ? ORDER BY revision_n DESC LIMIT N` (default N = 4 per §4.1). On match, return `FAIL_CIRCULAR_REVISION { task_id, matched_revision_n }` and call `record_abandonment(... reason: Circular)`. On miss, write the new `(task_id, revision_n, diff_sha256, now)` row.
+  3. **Wall-clock gate (§5).** Read the per-task `WallClockTracker` from `kernel/src/scheduler/wall_clock.rs`. If `tracker.is_expired()`, return `FAIL_WALL_CLOCK_LIMIT_EXCEEDED { task_id, elapsed_seconds, limit_seconds }` and call `record_abandonment(... reason: WallClock)`.
+  4. **Effect on existing path-allowlist check.** Existing code path is unchanged; the four new gates fire BEFORE it so the more expensive operations (diff computation against the master tree) only run on tasks that pass the cheap convergence gates first.
+
+`raxis/kernel/src/handlers/escalation.rs`:
+
+- `handle_escalation_request()` learns the §6 two-tier routing:
+  - Look up `policy.toml [plan.escalation.routing.<class>]` (or `policy.toml [escalation.routing.<class>]` if the plan didn't set one). The default for any class not listed is `operator_only`.
+  - If `routing_mode = "operator_only"`, the existing flow (operator notification + Resolved/Rejected/TimedOut FSM) runs unchanged.
+  - If `routing_mode = "orchestrator_first"`, the kernel sends a new `KernelPush::SubEscalationResolutionRequired` payload (variant added per §10's `kernel-push-protocol.md` cross-spec impact) to the Orchestrator session and awaits resolution within `orchestrator_resolution_deadline_seconds` (default 600s).
+  - The Orchestrator may submit one of three new `IntentKind`s (`OrchestratorEscalationResolved`, `OrchestratorEscalationRejected`, `OrchestratorEscalationDeferToOperator`); the first two close the escalation; the third bumps it to `operator_only` per §6.4.
+  - If the Orchestrator times out, the escalation auto-bumps to `operator_only` and the original deadline is restarted. Audit-event `OrchestratorEscalationTimedOut` is emitted.
+- `handle_orchestrator_resolution()` (NEW handler function): validates the resolving Orchestrator owns the source task's initiative, applies the resolution outcome, and writes `escalations.orchestrator_resolution_outcome`.
+- The §6.6 invariant (Orchestrator's own escalations always go to operator) is enforced here: if the source-session's `planner_role = 'Orchestrator'`, the routing-mode lookup is short-circuited to `operator_only` regardless of policy.
+
+`raxis/kernel/src/handlers/intent.rs::handle_witness_submission` (Reviewer path):
+
+- A Reviewer that returns `Rejected` increments `subtask_activations.review_rounds_consumed += 1` (the round-counter increment lives here, not in `handle_complete_task`, so a re-submission that doesn't lead to a Reviewer cycle doesn't wrongly increment). The rationale is documented in §3.2.
+
+`raxis/kernel/src/runtime/heartbeat.rs`:
+
+- `spawn_periodic_jobs()` gains a new 24h ticker that calls `kernel::initiatives::abandoned::daily_sweep(&ctx)`.
+- `Snapshot` struct gains `abandoned_count: u64`, `abandoned_total_mb: u64`, `abandoned_oldest_age_hours: u64` fields populated from the `abandoned_tasks` table (used by `host-capacity.md §7` `DiskPressureWithAbandonedRetention` event).
+
+`raxis/kernel/src/handlers/session.rs::end_session`:
+
+- Already calls `ctx.domain.teardown_workspace(...)` per the recent DomainAdapter wiring. After §7 lands, `end_session` for tasks transitioning to `Failed` ALSO writes the corresponding `abandoned_tasks` row (driven through `kernel::initiatives::abandoned::record_abandonment`).
+
+`raxis/crates/types/src/operator_wire.rs`:
+
+- `enum IntentKind` — three new Orchestrator-resolution variants per §6.3:
+  - `OrchestratorEscalationResolved { escalation_id, resolution_payload }`.
+  - `OrchestratorEscalationRejected { escalation_id, rejection_reason }`.
+  - `OrchestratorEscalationDeferToOperator { escalation_id, deferral_reason }`.
+- `enum OperatorIntent` — `SalvageAbandoned { task_id, commits, target_branch }` and `PurgeAbandoned { task_id, force }`.
+- `enum FailResponse` — `FAIL_CIRCULAR_REVISION { task_id, matched_revision_n }`, `FAIL_REVIEW_LOOP_EXCEEDED { task_id, consumed, limit, on_max_rounds_action }`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED { task_id, elapsed_seconds, limit_seconds }`, `FAIL_FORBIDDEN_ROUTING_OVERRIDE { class, reason }`, `FAIL_SALVAGE_CONFLICT { task_id, conflicting_commit }`.
+- `enum OkResponse` — `OK_TASK_ABANDONED { task_id, reason, salvage_window_seconds }`.
+
+`raxis/crates/audit/src/event.rs`:
+
+- Per §3.4 / §4.5 / §5.5 / §6.7 / §7.6, add eleven new variants:
+  - `ReviewLoopExceeded { task_id, consumed, limit, action }`.
+  - `ReviewLoopForceAdmitted { task_id, consumed }`.
+  - `CircularRevisionDetected { task_id, matched_revision_n, diff_sha256 }`.
+  - `WallClockLimitExceeded { task_id, elapsed_seconds, limit_seconds }`.
+  - `OrchestratorEscalationOpened { escalation_id, source_task_id, deadline_at }`.
+  - `OrchestratorEscalationResolved { escalation_id, outcome }`.
+  - `OrchestratorEscalationRejected { escalation_id, rejection_reason }`.
+  - `OrchestratorEscalationDeferredToOperator { escalation_id, deferral_reason }`.
+  - `OrchestratorEscalationTimedOut { escalation_id }`.
+  - `WorktreeAbandonedSalvageWindowOpened { task_id, executor_session_id, commit_count, total_size_mb, salvage_window_seconds }`.
+  - `AbandonedWorktreeSalvaged { task_id, salvaged_commits, target_branch, operator_id }`.
+  - `AbandonedWorktreeArchived { task_id, retention_remaining_seconds }`.
+  - `AbandonedWorktreePurged { task_id, was_force_purged, freed_mb }`.
+  - `DiskPressureWithAbandonedRetention { abandoned_count, abandoned_total_mb, free_mb }`.
+
+`raxis/crates/runtime/src/heartbeat.rs`:
+
+- Snapshot serialisation picks up the three new abandoned-tasks fields above.
+
+`raxis/cli/src/main.rs`:
+
+- Wire the four new `worktree` subcommands.
+
+`raxis/specs/v1/planner-api.md`:
+
+- Add the four new `FAIL_*` codes to the §3 error-code table footnote (same edit pattern as `planner-harness.md §14.3` adds for that spec's V2 codes).
+
+### 14.4 Test fixtures and helpers
+
+`crates/test-support/src/convergence/` (NEW module):
+
+- `mod.rs` — re-exports.
+- `recorded_review_loops.rs` — `pub fn make_review_loop(rounds: u32, identical_diffs: bool) -> Vec<RecordedSession>` produces deterministic sequences of Executor `CompleteTask` + Reviewer `Rejected` pairs for tests that exercise the round-cap and circular gates.
+- `mock_clock.rs` — re-exports the existing `crates/test-support/src/clock.rs::MockClock` plus a helper `pub fn advance_until_wall_clock_expiry(clock: &MockClock, tracker: &WallClockTracker)`.
+- `escalation_routing.rs` — table of `(class, plan_setting, policy_setting, expected_routing_mode)` tuples used by the routing-priority test below.
+- `salvage_fixtures.rs` — fixtures of multi-commit abandoned worktrees that include cherry-pick conflicts and clean cherry-picks.
+
+### 14.5 Integration tests
+
+Per the v1 level-of-detail benchmark, every behavioural commitment in §3–§7 has a named test file:
+
+| Test file (NEW)                                                    | Asserts                                                                                                                                                                                       | Spec section |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
+| `kernel/tests/convergence/round_cap_fail_task.rs`                  | `on_max_rounds = "fail_task"`: round consumption N+1 returns `FAIL_REVIEW_LOOP_EXCEEDED`; the task transitions to `Failed`; `record_abandonment` writes an `abandoned_tasks` row with `reason = "max_rounds"`. | §3.3, §7      |
+| `kernel/tests/convergence/round_cap_escalate.rs`                   | `on_max_rounds = "escalate"`: an escalation is opened with class `review_loop_exceeded`; routing follows §6.                                                                                  | §3.3, §6      |
+| `kernel/tests/convergence/round_cap_force_admit.rs`                | `on_max_rounds = "force_admit"`: the N+1 submission admits despite limit; `ReviewLoopForceAdmitted` audit event fires. The test also asserts `[protected_paths]` paths are NOT eligible for force_admit (kernel rejects with `FAIL_FORBIDDEN_FORCE_ADMIT_PROTECTED_PATH`).                                                       | §3.3, §9.9    |
+| `kernel/tests/convergence/circular_detection_basic.rs`             | Submit two `CompleteTask`s with identical diffs separated by one Reviewer rejection; second one returns `FAIL_CIRCULAR_REVISION`.                                                            | §4.2          |
+| `kernel/tests/convergence/circular_detection_window_size.rs`       | `recent_diffs_window_size = 6`; submit six unique diffs followed by a re-submission of the first; assert detection.                                                                          | §4.1          |
+| `kernel/tests/convergence/circular_detection_does_not_block_progress.rs` | A genuinely-progressing Executor that occasionally produces small touchups whose diffs sha256-collide does NOT trigger circular detection (the diffs differ structurally). Uses a property test with 1000 random progressions.                                                                                          | §4.3          |
+| `kernel/tests/convergence/wall_clock_basic.rs`                     | `wall_clock_limit_seconds = 600`; `MockClock` advances 601s while the agent works; the next intent admission returns `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`.                                       | §5.4          |
+| `kernel/tests/convergence/wall_clock_pause_during_escalation.rs`   | The wall-clock timer is paused when the agent is in escalation per §5.2; an escalation that takes 700s while a 600s budget runs does NOT cause expiry; resumption ticks correctly.            | §5.2          |
+| `kernel/tests/convergence/escalation_routing_priority.rs`          | The routing precedence (operator-only-locked classes > plan setting > policy setting > kernel default) holds for all combinations in `crates/test-support/src/convergence/escalation_routing.rs`. Operator-only-locked classes (`force_admit_protected_path`, etc.) reject any plan/policy override with `FAIL_FORBIDDEN_ROUTING_OVERRIDE`.                                                                                          | §6.2, §6.6    |
+| `kernel/tests/convergence/orchestrator_resolution_resolved.rs`     | Class `review_loop_exceeded` with `routing_mode = "orchestrator_first"`: kernel sends `KernelPush::SubEscalationResolutionRequired`; Orchestrator submits `OrchestratorEscalationResolved`; the source Executor receives `EscalationResolved` and continues.                                                                                                                                                                  | §6.3          |
+| `kernel/tests/convergence/orchestrator_resolution_timeout.rs`      | Class `review_loop_exceeded` with `routing_mode = "orchestrator_first"`: the Orchestrator does not respond within `orchestrator_resolution_deadline_seconds`; the kernel auto-bumps to `operator_only` and emits `OrchestratorEscalationTimedOut`.                                                                                                                                                                            | §6.4          |
+| `kernel/tests/convergence/orchestrator_self_escalation_to_operator.rs` | The Orchestrator session itself opens an escalation; routing-mode lookup is short-circuited to `operator_only` regardless of `[plan.escalation.routing.<class>]` per §6.6.                                                                                                                                                                                                                                  | §6.6          |
+| `kernel/tests/convergence/abandoned_lifecycle_state_transitions.rs` | A task transitions Failed → AbandonedSalvageable; `MockClock` advances past `salvage_window`; daily sweep transitions to `AbandonedArchived`; advances past `retention`; sweep transitions to `Purged` and `ctx.domain.purge_workspace` is called once.                                                                                                                                                                  | §7.2          |
+| `kernel/tests/convergence/abandoned_salvage_clean.rs`               | `raxis worktree salvage` on a clean cherry-pick succeeds; the kernel calls `ctx.domain.commit(... mode: SalvageToBranch ..)` once per requested commit; new branch `agents/salvaged/<task_id>` exists with the salvaged commits; `AbandonedWorktreeSalvaged` audit event written. Task remains `Failed` (salvage does not re-open).                                                                                                                                                                                                  | §7.4          |
+| `kernel/tests/convergence/abandoned_salvage_conflict.rs`           | A cherry-pick conflict during salvage causes `FAIL_SALVAGE_CONFLICT`; the new branch is rolled back; original `abandoned_tasks` row state is unchanged.                                       | §7.4          |
+| `kernel/tests/convergence/abandoned_force_purge_audit.rs`          | `raxis worktree purge --force` before `salvage_window` elapses transitions to `Purged` immediately; `AbandonedWorktreePurged { was_force_purged: true, .. }` is recorded; `ctx.domain.purge_workspace` is called once.                                                                                                                                                                                              | §7.3          |
+| `kernel/tests/convergence/disk_pressure_no_auto_purge.rs`          | Disk watchdog fires `DiskPressure` while abandoned worktrees are within retention; the watchdog DOES NOT auto-purge; instead emits `DiskPressureWithAbandonedRetention` and transitions kernel to `halt_admit`. Asserts `INV-CONVERGENCE-05` end-to-end.                                                                                                                                                                              | §7.5         |
+| `kernel/tests/convergence/host_capacity_quota_with_abandoned.rs`   | A new initiative is rejected at admission because `worktree_quota_mb` is consumed by abandoned worktrees; the rejection message lists the offending task IDs so the operator can decide what to purge.                                                                                                                                                                                                                                | §7.5          |
+
+All tests use the `MockClock` fixture so the daily-sweep timer can be advanced deterministically; none require real wall-clock waits.
+
+### 14.6 `raxis doctor` checks
+
+Two new entries:
+
+- `[CHECK] convergence.daily-sweep` — the heartbeat snapshot exposes the timestamp of the last successful `daily_sweep`. `[FAIL]` if more than 36h have elapsed (suggests the kernel restarted with the periodic-job spawner mis-wired).
+- `[CHECK] convergence.abandoned-disk` — reports `abandoned_count`, `abandoned_total_mb`, `abandoned_oldest_age_hours`. `[WARN]` if `abandoned_total_mb > 0.5 * worktree_quota_mb` (operator should consider salvage-or-purge before disk pressure).
+
+### 14.7 Cross-references picked up automatically by the §10 follow-up cycle
+
+The §10 cross-spec impacts table already enumerates the six adjacent specs that pick up references to this spec when the V2 commit cycle lands. §14 above does NOT duplicate that list; it specifies the *implementation* of the mechanisms §10 describes externally.
+
+### 14.8 Phased migration
+
+Four sequential PRs:
+
+- **Phase 1 — Schema + audit events.** Land migration `0011_convergence_bounds.sql`, the eleven new audit-event variants, and the seven new wire variants. No handler changes yet. ~2 days.
+- **Phase 2 — Round cap + circular detection.** Land the two §3/§4 admission gates in `kernel/src/handlers/intent.rs` and the corresponding tests. ~2 days.
+- **Phase 3 — Wall-clock budget.** Land `kernel/src/scheduler/wall_clock.rs`, the supervise-task spawn in session start, and the pause/resume hook in escalation. ~2 days.
+- **Phase 4 — Two-tier routing + abandoned lifecycle + CLI.** Land `kernel/src/initiatives/abandoned.rs`, the §6 routing in `kernel/src/handlers/escalation.rs`, the daily-sweep ticker in heartbeat, and `cli/src/commands/worktree.rs`. ~3 days.
+
+Total budget: ~9 engineer-days. Each phase ships independently and the kernel binary remains usable through every intermediate state.
+
