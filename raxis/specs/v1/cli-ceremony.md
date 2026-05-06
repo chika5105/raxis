@@ -354,6 +354,116 @@ Re-run genesis with one of:
 
 ---
 
+### `initiative cancel` (V2)
+
+**Purpose:** Graceful operator-initiated cancellation of an
+initiative. Distinct from `abort` (which is destructive — immediate
+task termination, no grace) and `quarantine` (which freezes new
+intent admission but leaves existing tasks running indefinitely).
+`cancel` admits no new tasks AND signals existing tasks to wind down
+within a bounded grace window, then transitions the initiative to a
+terminal `Cancelled` state.
+
+The semantic distinction lets operators express *intent*:
+
+- `abort` → "this initiative is broken or harmful; kill it now."
+- `quarantine` → "this initiative is suspicious; freeze it for
+  forensic review without destroying state."
+- `cancel` → "I no longer want this initiative's work, but I want
+  the in-flight pieces to finish (or fail with an audit-clear
+  reason) so the audit chain reflects intent rather than abandonment."
+
+**Usage:**
+```
+raxis-cli initiative cancel <initiative_id>
+    [--reason <text>]
+    [--grace-seconds <N>]      # default 600 (10 min)
+    [--force-after-grace]      # default true
+```
+
+**Behaviour:**
+1. Opens operator socket; performs challenge-response handshake.
+2. Sends `CancelInitiative { initiative_id, reason,
+   grace_seconds, force_after_grace }`. `reason` is capped server-
+   side at 512 bytes (truncated, not rejected).
+3. Kernel transitions the initiative to a new transient state
+   `CancelPending` (added to the initiative FSM in `kernel-store.md`'s
+   V2 migration). In `CancelPending`:
+   - **No new task admissions.** `ActivateSubTask` and
+     `IntegrationMerge` intents from this initiative's sessions
+     return `FAIL_INITIATIVE_CANCEL_PENDING`. The error code is
+     distinct from `FAIL_INITIATIVE_QUARANTINED` so planners can
+     drain rather than escalate.
+   - **In-flight tasks continue.** Existing `Active` / `Reviewing`
+     tasks complete normally. Their `CompleteTask` /
+     `SubmitReview` / `IntegrationMerge` intents on already-active
+     sessions admit as usual; only NEW task admissions are blocked.
+   - **Orchestrator receives a kernel push.** The kernel enqueues
+     `KernelPush::InitiativeCancelPending { initiative_id, reason,
+     grace_deadline_ms, force_after_grace }` to the Orchestrator
+     session (per `kernel-push-protocol.md §10.3`). The Orchestrator's
+     NNSP routes this as "wind-down mode" — finalize current tasks,
+     do not schedule new ones, then submit a single
+     `IntegrationMerge` for whatever has reached `Reviewed` if the
+     plan permits partial-merge.
+4. At `grace_deadline_ms = now + grace_seconds`:
+   - If all child sessions have reached terminal state
+     (`Completed` / `Failed` / `Cancelled` / `Aborted`): the kernel
+     atomically transitions the initiative `CancelPending →
+     Cancelled` and emits `InitiativeCancelled { initiative_id,
+     cancelled_by, reason, grace_used_seconds, finalized_naturally:
+     true }`.
+   - Else if `force_after_grace = true` (default): the kernel
+     bulk-cancels remaining non-terminal tasks (using the same
+     `lifecycle::abort_initiative` underlying machinery used for
+     `abort`, but with `cancellation_class = OperatorCancel`); the
+     initiative transitions `CancelPending → Cancelled` and emits
+     `InitiativeCancelled { ..., finalized_naturally: false,
+     forced_task_count: N }`.
+   - Else (`force_after_grace = false`): the initiative remains in
+     `CancelPending` indefinitely. Operators using this mode are
+     responsible for monitoring and re-issuing `cancel
+     --force-after-grace` or `abort` if they want a terminal state.
+5. After the initiative reaches `Cancelled`, all subsequent intents
+   for any of its sessions return `FAIL_INITIATIVE_CANCELLED`. This
+   is a terminal state — there is no `un-cancel`. (Operators who
+   want to revisit the work submit a new initiative referencing the
+   cancelled one in their plan's `notes` field.)
+6. Requires `CancelInitiative ∈ permitted_ops`. The new permitted-op
+   variant is added to `policy.toml [[operators.entries]].permitted_ops`
+   in V2; pre-V2 operators MUST add it to their cert's `permitted_ops`
+   list to use the new command. (Existing `AbortInitiative` does NOT
+   imply `CancelInitiative` — they are distinct authorities so an
+   operator can be granted graceful cancel without the destructive
+   abort hammer.)
+7. Audit events (in order):
+   - `InitiativeCancelPending { initiative_id, cancelled_by, reason,
+     grace_seconds, force_after_grace, deadline_ms }` — emitted at
+     step 3.
+   - `InitiativeCancelled { ... }` — emitted at step 4 (one of the
+     two outcomes above).
+   - On `force_after_grace` path: one `TaskCancelled { task_id,
+     reason: GraceExceeded }` per task forced to terminate.
+
+**Idempotency.** Re-issuing `cancel` against an initiative already
+in `CancelPending` returns `was_already_cancel_pending: true` with
+the existing `grace_deadline_ms`; flags from the second call are
+silently ignored. Re-issuing against an initiative in `Cancelled`
+returns `FAIL_INITIATIVE_CANCELLED` (the operation has already
+completed). Re-issuing against `Aborted` or `Quarantined` returns
+`FAIL_INITIATIVE_NOT_CANCELLABLE` with the existing terminal state
+in the failure detail.
+
+**Composition with `abort` and `quarantine`.** An operator who
+issued `cancel` and decides to escalate to `abort` mid-grace can do
+so directly — `abort` works against any non-terminal state. An
+operator who wants to halt cancellation pre-grace cannot: there is
+no `cancel --revoke`. This is intentional; revocability of a
+graceful cancel creates ambiguous audit semantics for in-flight
+work. If reversal is needed, the operator submits a new initiative.
+
+---
+
 ### `initiative quarantine`
 
 **Purpose:** Freeze an initiative without aborting it. Every subsequent
