@@ -453,6 +453,60 @@ submission cannot influence the executing initiative — the kernel
 no longer reads from that directory and the bundle bytes in SQLite
 are signature-protected.
 
+**Canonical home.** `v2/plan-bundle-sealing.md`.
+
+---
+
+### INV-PLAN-BUNDLE-FRESH — Signed plan bundles are admitted at most once and only inside their freshness window
+
+**Statement.** A plan bundle whose `bundle_nonce` already appears in
+`plan_bundle_nonces_seen` with `outcome ∈ {Admitted,
+TerminallyRejected}` MUST be rejected with `FAIL_PLAN_BUNDLE_REPLAY`
+regardless of signature validity, key trust state, or policy
+admissibility. A plan bundle whose `signed_at_unix_secs` falls
+outside `[now() - max_plan_bundle_age_secs, now() +
+max_clock_skew_secs]` MUST be rejected with `FAIL_PLAN_BUNDLE_EXPIRED`
+or `FAIL_PLAN_BUNDLE_FROM_FUTURE` respectively, before the kernel
+runs the policy admission chain. The freshness window and the nonce
+fence operate as floors that compose with — but do not depend on —
+key revocation. The replay/freshness check executes inside the same
+`BEGIN IMMEDIATE` transaction as the admission decision and the
+nonce-row INSERT, so concurrent re-submission of the same signed
+bytes cannot race past the check.
+
+**Justification.** Before V2.1, the only protection against an
+adversary replaying a previously-signed plan bundle was the eventual
+revocation of the operator's signing key. That window can be
+arbitrarily long: an attacker who exfiltrates a signed bundle (from
+`<data_dir>/plan_bundles/`, a CI cache, a forensic image, a
+supply-chain compromise of the operator's local toolchain) can
+re-submit it at any later moment under the still-valid signing key
+and obtain a fresh `initiative_id` for replayed work. Compromise-class
+key revocation (`key-revocation.md §6`) closes this once detected,
+but until detection the attacker has unlimited admit attempts. A
+signed-into-the-envelope timestamp + nonce closes the window before
+detection: the operator's signature commits to both, so an adversary
+cannot re-stamp the bundle forward without the private key. The
+storage cost of nonce state is bounded by the freshness window plus
+a sweep grace; nonces older than this are inert and can be reaped
+because the freshness check rejects them on its own.
+
+**Scenario.** Operator signs plan P at 09:00 with
+`max_plan_bundle_age_secs = 86_400`. P is admitted, runs, completes
+at 11:00. An attacker exfiltrates the signed bundle bytes that
+afternoon and resubmits them at 09:30 the next morning (24h30m after
+signing). Step 10a fires: `now() - signed_at_unix_secs = 88_200 >
+86_400`; rejected with `FAIL_PLAN_BUNDLE_EXPIRED`. Even if the
+attacker had submitted at 14:00 the same day (still within the
+window), step 10b finds the nonce already in
+`plan_bundle_nonces_seen` with `outcome = 'Admitted'` and rejects
+with `FAIL_PLAN_BUNDLE_REPLAY`, attaching the prior `initiative_id`
+to the failure detail so the operator can immediately distinguish
+the replay from a benign re-submission after a lost CLI ack.
+
+**Canonical home.** `v2/plan-bundle-sealing.md` §3.5, §8.1
+step 10a/10b.
+
 ---
 
 ### INV-INIT-07 — `RetryTask` accepts only `Failed`
@@ -2077,6 +2131,7 @@ Most security properties at the system level are emergent from
 | **Operator authority is forensically traceable** | INV-04 (audit log integrity) + INV-CERT-05 (per-event cert chain) + INV-CERT-04 (rotation pubkey continuity) |
 | **Operator authority is cryptographically anchored** | INV-CERT-01 (cert mandatory) + INV-CERT-02 (self-signature unbypassable) + INV-CERT-03 (private key not persisted) |
 | **Planner cannot influence its own scope** | INV-INIT-01 (no task creation) + INV-INIT-06 (plan immutable) + INV-07 (kernel-derived claims) + INV-SCHED-01 (admit only at approval) |
+| **Signed plan bytes cannot be replayed by an attacker** | INV-PLAN-BUNDLE-FRESH (per-bundle nonce + freshness window) + INV-INIT-06 (post-admission immutability) + INV-04 (audit-chain integrity records every admission) + INV-CERT-* (operator key custody) — the nonce closes same-window replay; the freshness window closes long-tail replay; key revocation closes detected-key-compromise; the three layers compose so an attacker who exfiltrates a signed bundle gets at most one admission attempt inside a bounded window |
 | **Path scope is enforced at every step** | INV-TASK-PATH-01 (admission) + INV-TASK-PATH-02 (completion) + INV-07 (claim derivation) |
 | **Recovery is deterministic from durable state** | INV-05 (reproducibility) + INV-INIT-08 (gate progress recoverable) + INV-INIT-05 (BlockedRecoveryPending requires operator) + INV-STORE-01/02 (atomic transactions) |
 | **Budget enforcement cannot be bypassed** | INV-02A (kernel-priced inference) + INV-02B (no direct egress) + INV-INIT-09 (no auto-deadline; budget bounds runtime) |
