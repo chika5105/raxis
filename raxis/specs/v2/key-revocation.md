@@ -204,9 +204,32 @@ Within the same `BEGIN IMMEDIATE` transaction that commits the new policy:
    - INSERT `audit_events (kind = 'SessionTerminated', reason = 'KeyCompromised', session_id, signing_key_id, revocation_reference)`.
    - INSERT into `pending_pushes` a `KernelPush::SessionRevoked { reason: KeyCompromised, key_id, revocation_reference }` (per `kernel-push-protocol.md §10.3`). The push is mostly for audit completeness — for `KeyCompromised`, signal handling is **Immediate** per §7.1 and the planner will be killed by hypervisor stop before it can read the push. The enqueue is correct per INV-PUSH-01 atomicity regardless.
    - Stash the session row for post-commit teardown.
+4a. For each key in `compromised_keys` whose role is provider-credential
+   (i.e., the key is referenced from `policy.toml [[providers.credentials]]`),
+   AND for each key in `compromised_keys` whose role is plan-signing (the
+   sessions stashed in step 4 may have outstanding gateway invocations):
+   - Stash the `compromised_key_ref` for the post-commit half-close
+     pass in step 7a. This list is included in the §5.3 reconciliation
+     temp table so a kernel restart between step 6 and step 7a still
+     converges to the half-close — the same idempotency property that
+     §5.2 step 7 relies on.
 5. For each key in `rotated_keys`: do nothing. Rotation has no retroactive effect.
 6. Commit.
 7. Post-commit (outside transaction): for each stashed session, dispatch teardown per §7.3 step 3. For `KeyCompromised`, this is hypervisor stop with no SIGTERM grace (Immediate, INV-KEY-08). For other reasons (none in this path, but the helper is generic), the helper consults `reason.signal_handling()`.
+7a. Post-commit (in parallel with step 7): for each stashed
+   `compromised_key_ref` from step 4a, call
+   `half_close_invocations_using(gateway_pool, key_ref,
+   revocation_reference)` per `provider-failure-handling.md §6.1.1`.
+   This half-closes the kernel's write end of every UDS connection
+   currently dispatched to a gateway worker for an attempt using the
+   compromised credential. The worker reads EOF, drops its upstream
+   HTTPS call, and returns `Aborted{KeyCompromised}`; the resulting
+   audit row records `outcome = ProviderAuth, abort_reason =
+   KeyCompromised`. The half-close is best-effort — the authoritative
+   containment boundary is the §7.3 step 3 hypervisor stop dispatched
+   in step 7. The half-close just collapses the post-revocation
+   credential-exposure window from "session-teardown latency" to
+   "worker-side EOF-detection latency".
 
 The post-commit teardown is intentionally outside the transaction. We don't want signal delivery or hypervisor stops blocking the database write. The state transition already committed; the session is `Failed` regardless of teardown progress. Even if the kernel crashes between step 6 and step 7, restart reconciliation (§5.3) re-runs teardown on any session in `state = Failed` whose VM PID is still alive (using the same §7.3 dispatch on `failure_reason.signal_handling()`).
 
@@ -262,6 +285,14 @@ Sequence:
    Specifically:
    - If `session.state` is already `'Failed'` and `failure_reason = 'KeyCompromised'` (or `EmergencyKeyCompromised`), the database transition already happened; just re-run teardown per §7.3 step 3 (Immediate for both these reasons).
    - If `session.state` is `Active` / `Paused` / `AwaitingEscalation`, run the full §5.2 step 4 path: UPDATE → audit → enqueue push → teardown via §7.3 (Immediate for KeyCompromised).
+   - In both sub-cases, after the teardown is dispatched, call
+     `half_close_invocations_using(gateway_pool, compromised_key_ref,
+     revocation_reference)` per §5.2 step 7a. On a fresh boot the
+     gateway pool is empty (no in-flight invocations carry over a
+     restart per `INV-PROVIDER-07`), so the call is a no-op; the
+     line is here for symmetry with §5.2 and to make the
+     reconciliation path identical regardless of whether the
+     compromise was processed live or on restart (INV-KEY-05).
 
 5. Mark reconciliation complete: `INSERT INTO startup_runs (started_at, completed_at, sessions_reviewed, sessions_terminated_count)`.
 

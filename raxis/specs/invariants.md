@@ -36,7 +36,7 @@
 > that have NOT yet been mirrored here include: `INV-VM-CAP-01..05`,
 > `INV-PUSH-01..05`, `INV-KEY-01..08`, `INV-MERGE-WORKTREE-RETAIN`,
 > `INV-MERGE-CONSISTENCY`, `INV-CAPACITY-01..06`,
-> `INV-PROVIDER-01..09`, `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`,
+> `INV-PROVIDER-01..10`, `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`,
 > `INV-DELEGATE-01`, `INV-DISPATCH`, `INV-RUNTIME-CLASSIFICATION`
 > (§12 of this file per the V1 numbering, slated to become INV-09).
 >
@@ -2132,6 +2132,7 @@ Most security properties at the system level are emergent from
 | **Operator authority is cryptographically anchored** | INV-CERT-01 (cert mandatory) + INV-CERT-02 (self-signature unbypassable) + INV-CERT-03 (private key not persisted) |
 | **Planner cannot influence its own scope** | INV-INIT-01 (no task creation) + INV-INIT-06 (plan immutable) + INV-07 (kernel-derived claims) + INV-SCHED-01 (admit only at approval) |
 | **Signed plan bytes cannot be replayed by an attacker** | INV-PLAN-BUNDLE-FRESH (per-bundle nonce + freshness window) + INV-INIT-06 (post-admission immutability) + INV-04 (audit-chain integrity records every admission) + INV-CERT-* (operator key custody) — the nonce closes same-window replay; the freshness window closes long-tail replay; key revocation closes detected-key-compromise; the three layers compose so an attacker who exfiltrates a signed bundle gets at most one admission attempt inside a bounded window |
+| **Provider-credential compromise has bounded post-revocation exposure** | INV-PROVIDER-10 (synchronous re-check at dispatch + UDS half-close on in-flight) + INV-KEY-08 (immediate session termination on compromise) + INV-PROVIDER-08 (per-attempt audit immediacy) + INV-VM-CAP-04 (no credential value in VM) — the re-check eliminates the alias-resolution → dispatch TOCTOU; the half-close drops in-flight HTTPS within a worker-side EOF latency; session termination removes the parent context; per-attempt audit makes every aborted call forensically visible |
 | **Path scope is enforced at every step** | INV-TASK-PATH-01 (admission) + INV-TASK-PATH-02 (completion) + INV-07 (claim derivation) |
 | **Recovery is deterministic from durable state** | INV-05 (reproducibility) + INV-INIT-08 (gate progress recoverable) + INV-INIT-05 (BlockedRecoveryPending requires operator) + INV-STORE-01/02 (atomic transactions) |
 | **Budget enforcement cannot be bypassed** | INV-02A (kernel-priced inference) + INV-02B (no direct egress) + INV-INIT-09 (no auto-deadline; budget bounds runtime) |

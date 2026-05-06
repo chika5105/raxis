@@ -375,6 +375,42 @@ state RequestProcessing:
             mark this model "exhausted for this request"; goto loop
               # next iteration will skip this model in resolve_alias_with_skips
 
+        # Synchronous credential re-check (INV-PROVIDER-09 — closes the
+        # alias-resolution → dispatch TOCTOU window). The breaker check
+        # in resolve_alias_with_skips above queries key_trust_state; in
+        # the time between that query and this dispatch, an operator
+        # could have pushed a compromise revocation against the same
+        # credential. We re-query under BEGIN IMMEDIATE so the
+        # post-revocation state is observed atomically.
+        creds_state ← BEGIN IMMEDIATE
+                        SELECT trust_state, revoked_at
+                          FROM key_trust_state
+                         WHERE policy_epoch = current_policy_epoch
+                           AND key_id = model.credential.key_ref;
+                      COMMIT
+        if creds_state.trust_state == Compromised:
+            # Operator pushed a compromise revocation between alias
+            # resolution and this point. Treat as fatal-to-request
+            # (NOT retriable on a different model — INV-KEY-08 demands
+            # immediate session termination, which the
+            # session-termination path triggered by the policy push will
+            # have already enqueued).
+            attempts.push(AttemptRecord {
+                model, outcome: ProviderAuth,
+                http_code: None, tokens_billed_estimated: 0,
+                ...
+            })
+            audit InferenceAttempt {
+                request_id, attempt_idx, alias, resolved_model: model,
+                started_at_ms: now(),
+                aborted_pre_dispatch: true,
+                abort_reason: ProviderCredentialCompromised {
+                    key_ref: model.credential.key_ref,
+                    revoked_at: creds_state.revoked_at,
+                },
+            }
+            return Final::Resolution(FAIL_PROVIDER_AUTH_REVOKED)
+
         # Audit BEFORE dispatch (INV-PROVIDER-08).
         audit InferenceAttempt {
             request_id, attempt_idx, alias, resolved_model: model,
@@ -458,8 +494,168 @@ state RequestProcessing:
 
 - Every attempt is audited before the next is dispatched (`INV-PROVIDER-08`). A kernel crash mid-loop loses no audit visibility for completed attempts.
 - Operator session abort (`raxis session abort`) is checked at every loop iteration via the session state lookup that's already part of resolve_alias. Cancellation is observed within at most one in-flight attempt's worker_invoke_timeout_ms.
-- Policy push mid-loop (changes to alias chains, breaker tunables, retry budgets) takes effect on the next iteration. In-flight HTTP calls are not interrupted, but the next decision uses the new policy.
+- Policy push mid-loop (changes to alias chains, breaker tunables, retry budgets) takes effect on the next iteration. In-flight HTTP calls are not interrupted **except for the credential-compromise case** (§6.1.1): a compromise revocation half-closes the worker UDS for every affected in-flight invocation so the worker drops its upstream HTTPS call within milliseconds.
 - All sleep happens in the kernel's tokio runtime, not in the Gateway. Gateway workers do nothing during a backoff.
+
+### 6.1.1 Credential compromise during in-flight invocations (`INV-PROVIDER-09`)
+
+The §6.1 retry loop's synchronous re-check covers the
+alias-resolution → dispatch TOCTOU window, but does NOT cover an
+invocation that has *already been dispatched* to a worker when the
+operator pushes a compromise revocation. That worker is mid-handshake
+or mid-HTTP-call against the provider, holding the now-compromised
+credential bytes in its address space. Without an explicit abort
+mechanism, the in-flight call continues until it returns naturally
+(potentially minutes for a streaming response) — exposing the
+revoked credential to the provider in the meantime.
+
+The fix uses a Unix-domain-socket primitive that's already on the
+critical path: `shutdown(fd, SHUT_WR)`.
+
+```
+Normal in-flight:
+  Kernel ──── GatewayInvoke ────►  Worker ──── HTTP request ────►  Provider
+  Kernel ◄─── GatewayInvokeResult  Worker ◄─── HTTP response  ◄── Provider
+
+On compromise revocation observed by the kernel:
+  Kernel: shutdown(uds_fd, SHUT_WR)   // closes WRITE side of kernel→worker
+                                      //  socket; READ side stays open
+
+  Worker: tokio::io::AsyncReadExt::read returns Ok(0) (EOF on its
+          receive side).
+  Worker: matches read EOF → Aborted
+          {
+              category: ProviderAuth,
+              reason:   KeyCompromised,
+              tokens_billed_estimated: <input_estimate>,
+          }
+  Worker: drops upstream HTTPS connection (TCP RST to the provider).
+  Worker: writes Aborted{...} to its UDS write side. Kernel's read
+          side is still open, so this delivery succeeds.
+  Worker: closes its UDS connection cleanly.
+
+  Kernel: receives Aborted{KeyCompromised}; records the audit attempt
+          row with `outcome = ProviderAuth`,
+          `abort_reason = KeyCompromised`,
+          `tokens_billed_source = Estimated`. The session-termination
+          path triggered by the same revocation push has already
+          enqueued teardown for the parent session per
+          `INV-KEY-08`/`key-revocation.md §5.2`, so this audit
+          attempt is the last gateway-side artifact recorded for that
+          session.
+```
+
+Why **half**-close (`SHUT_WR`) and not full close (`close(fd)`):
+
+If the kernel `close()`d the FD outright, the worker's outbound write
+of `Aborted{...}` would race against `EPIPE`: the kernel's read side
+is closed, the worker writes, the kernel returns RST, the worker
+either swallows the error or panics depending on its tokio handler.
+Either way, the kernel never gets a structured `Aborted` audit
+record — it sees a generic `WorkerUdsDisconnected` (which §6.1
+already handles, but with a less specific reason). Half-close lets
+the worker's audit-bearing response come back cleanly, so the
+forensic chain captures the exact reason the call was aborted.
+
+#### Mechanics: which UDS FDs to half-close
+
+The kernel's gateway pool tracks every in-flight `GatewayInvoke` by
+`(worker_id, attempt_id, session_id, key_ref)`. When a compromise
+revocation is observed:
+
+```rust
+// kernel/src/key_revocation/in_flight.rs
+
+pub async fn half_close_invocations_using(
+    pool: &GatewayPool,
+    compromised_key_ref: &KeyRef,
+    revocation_reference: &RevocationReference,
+) -> Result<(), HalfCloseError> {
+    let affected: Vec<InflightInvocation> = pool
+        .inflight()
+        .filter(|inv| inv.key_ref == *compromised_key_ref)
+        .collect();
+
+    for inv in affected {
+        // Half-close the kernel's write end of the UDS. The worker
+        // sees EOF on its read side and aborts the HTTPS call.
+        // Any error here is logged but never propagated upward —
+        // the kernel-side teardown of the parent session
+        // (INV-KEY-08) is the strict containment boundary; the
+        // half-close is an optimization that collapses the
+        // exposure window from "session teardown latency" to
+        // "<worker abort latency>".
+        if let Err(e) = inv.uds.shutdown(Shutdown::Write).await {
+            tracing::warn!(
+                worker_id = %inv.worker_id,
+                attempt_id = %inv.attempt_id,
+                error = %e,
+                "uds half-close failed; falling back to session-teardown"
+            );
+        }
+        // The kernel's RequestProcessing task is already awaiting
+        // `worker.invoke(...).await` for this attempt. The half-close
+        // causes the worker's response stream to terminate (with
+        // either Aborted{...} or a clean EOF on the response side
+        // depending on whether the worker's audit write got through);
+        // the kernel records the result in §6.1 step 4-5 as usual.
+    }
+    Ok(())
+}
+```
+
+The function is invoked by `key-revocation.md §5.2 step 4` (live
+compromise) and `§5.3 step 4d` (startup reconciliation) immediately
+after the parent `sessions` table is updated. It is best-effort: the
+authoritative containment boundary is still the
+`SessionTerminated{reason: KeyCompromised}` event and its associated
+hypervisor stop. Half-close just makes the in-flight HTTPS call drop
+within tens of milliseconds rather than waiting for the kernel's
+session teardown to chase down the worker's UDS handle indirectly.
+
+#### Why no `RevocationBroadcast` IPC message
+
+An alternative design would add a new `KernelToGateway` message
+type — `RevocationBroadcast { key_ref, ... }` — that every worker
+receives and uses to filter its in-flight requests. The
+`shutdown(SHUT_WR)` design rejects this for three reasons:
+
+1. **Zero new protocol surface.** The kernel and worker already
+   speak `GatewayInvoke` / `GatewayInvokeResult` over the UDS. The
+   half-close is a stdlib syscall on the existing FD; no new
+   protocol versioning, no new wire frames.
+2. **No worker-side state needed.** A broadcast design would require
+   each worker to maintain a session-id lookup table for in-flight
+   requests so it could match the broadcast against the right TCP
+   connection. With half-close, the worker just reacts to its read
+   EOF — no table, no session-id awareness in the worker.
+3. **1:1 connection semantics make it sufficient.** Per
+   `credential-proxy.md §1b` and §9.1 above, every `GatewayInvoke`
+   gets its own UDS connection. Closing one FD is O(1) and affects
+   exactly one in-flight invocation. Multiplexed transports would
+   require a broadcast, but RAXIS's gateway pool is intentionally
+   not multiplexed.
+
+If a future router transport (e.g., gRPC over a shared HTTP/2
+connection per `extensibility-traits.md §7`) DOES multiplex multiple
+attempts on one stream, the `IsolatedSession`-style trait method
+`abort_invocation(attempt_id, reason)` is the right substitute. The
+V2 `HttpsGatewayRouter` keeps half-close as its in-flight-revocation
+primitive.
+
+#### Error-categorization extension
+
+`provider-failure-handling.md §5` (error categories) is extended:
+
+| Category | Provider classification | Retriable? | Cross-provider? | Public failure code | Description |
+|---|---|---|---|---|---|
+| `ProviderAuth` (existing) | yes | no | no | `FAIL_PROVIDER_AUTH` | HTTP 401/403. Operator's credential is invalid or revoked **at the provider**. (Unchanged.) |
+| `ProviderAuth` with `abort_reason = KeyCompromised` (new) | no (no HTTP exchange) | no | no | `FAIL_PROVIDER_AUTH_REVOKED` | Kernel-side abort: a compromise revocation arrived while the invocation was in flight. The worker dropped the HTTPS call before it could complete; the operator's session is already being torn down per `INV-KEY-08`. |
+
+The kernel-internal `AttemptRecord.abort_reason` field captures the
+distinction so audit replay can tell "provider returned 401" from
+"kernel half-closed because the credential was revoked
+mid-invocation."
 
 ### 6.2 Backoff math
 
@@ -966,6 +1162,51 @@ Errors categorized as `ContextExhausted`, `ContentFilter`, `ProviderAuth`, `Mode
 **Where:** §5.1 error categorization; §6.1 retry loop.
 
 **Scenario it prevents:** A plan declares `alias = [opus, sonnet]`. Opus returns `ContentFilter` (the prompt tripped Anthropic's safety filter). Without INV-PROVIDER-09, the kernel falls through to Sonnet, which is the same provider with the same safety filter, and returns the same `ContentFilter`. The operator paid for two attempts and got the same answer. Worse, with cross-provider chains, fatal errors should never silently switch providers — `ContextExhausted` from one model means the prompt is too large for that model's context window, but it might fit in the next; the planner should make that decision deliberately, not have it made implicitly by alias resolution. INV-PROVIDER-09 keeps fatal errors on the planner's plate.
+
+### INV-PROVIDER-10 — Provider-credential compromise interrupts in-flight invocations
+
+When the kernel observes a compromise revocation against a provider
+credential (per `key-revocation.md §5.2`/`§5.3`), the kernel:
+
+1. Performs a synchronous `key_trust_state` re-check immediately
+   before every `GatewayInvoke` dispatch, inside `BEGIN IMMEDIATE`,
+   and aborts dispatch with `FAIL_PROVIDER_AUTH_REVOKED` if the
+   credential's state is now `Compromised` (§6.1 retry-loop step
+   "Synchronous credential re-check"). This closes the
+   alias-resolution → dispatch TOCTOU window.
+2. For every `GatewayInvoke` already dispatched and still
+   in-flight against the compromised credential, half-closes
+   (`shutdown(fd, SHUT_WR)`) the kernel's write end of the
+   gateway-worker UDS connection (§6.1.1
+   `half_close_invocations_using`). The worker reads EOF, drops its
+   upstream HTTPS call, and returns `Aborted{KeyCompromised}` over
+   the still-open read side; the kernel records this as the
+   attempt's terminal `InferenceAttempt` audit row with
+   `outcome = ProviderAuth`, `abort_reason = KeyCompromised`.
+
+The two layers compose: the synchronous re-check eliminates the
+admit-time race; the half-close eliminates the in-flight exposure
+window. Together they bound the post-revocation credential exposure
+window to approximately one worker-side EOF-detection latency
+(milliseconds), regardless of the in-flight call's natural duration.
+
+**Where:** §6.1 retry-loop synchronous re-check; §6.1.1 half-close
+mechanics; `key-revocation.md §5.2` / `§5.3` (the revocation paths
+that invoke `half_close_invocations_using`).
+
+**Scenario it prevents:** Operator pushes a compromise revocation on
+`anthropic-api-key-q4`. Three workers are mid-streaming responses
+that started 30 seconds ago and have an estimated 5 minutes
+remaining. Without INV-PROVIDER-10, all three calls run to
+completion, exposing the compromised credential to Anthropic for the
+full 5 minutes (and producing further audit-chain entries against a
+credential the operator has just declared untrustworthy). With
+INV-PROVIDER-10, all three workers receive UDS EOF within
+milliseconds of the revocation push, drop their HTTPS connections,
+and emit `Aborted{KeyCompromised}` audit rows. The
+`SessionTerminated{KeyCompromised}` events fire in parallel; the
+session's VM is hypervisor-stopped per `INV-KEY-08`. Total exposure
+window: well under one second.
 
 ---
 
