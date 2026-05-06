@@ -67,6 +67,34 @@ pub enum Table {
     /// via `raxis initiative abort` and creates a fresh one if the
     /// underlying compromise is resolved.
     InitiativeQuarantines,
+
+    // ── v2: Hierarchical orchestration (v2-deep-spec.md §Step 5) ─────────
+    /// Per-(initiative, sub-task) activation FSM rows. One row per
+    /// activation attempt — a retry inserts a NEW row, never updates
+    /// the prior one. State machine: `PendingActivation → Active →
+    /// Completed | Failed`.
+    ///
+    /// **Why a separate table from `tasks`.** `tasks.state` is the V1
+    /// operational FSM (Admitted → Running → ...). V2 adds a
+    /// pre-activation state ("declared in plan, no VM yet") whose
+    /// presence in the V1 FSM would force every V1 state-machine
+    /// handler — including `recovery::reconcile_tasks` — to be aware
+    /// of a state with no VM, no session token, and no scheduling row.
+    /// The separate table lets the V2 sub-task layer carry its own
+    /// retry counters (`crash_retry_count`, `review_reject_count`),
+    /// VirtioFS staging refs, and `evaluation_sha` (Reviewer activations)
+    /// without polluting the V1 contract.
+    ///
+    /// **Atomicity.** Inserted by `approve_plan → admit_in_tx` in the
+    /// SAME transaction that inserts the `tasks` row (INV-STORE-02).
+    /// This guarantees that an initiative cannot exist in a state where
+    /// the operator-signed plan has a sub-task but the activation row
+    /// is missing.
+    ///
+    /// Only Executor and Reviewer tasks have rows here; the Orchestrator
+    /// task is activated by the Kernel itself at initiative start
+    /// (no `subtask_activations` row for it).
+    SubtaskActivations,
 }
 
 impl Table {
@@ -105,6 +133,7 @@ impl Table {
             Self::PolicyEpochHistory        => "policy_epoch_history",
             Self::OperatorCertificates      => "operator_certificates",
             Self::InitiativeQuarantines     => "initiative_quarantines",
+            Self::SubtaskActivations        => "subtask_activations",
         }
     }
 }
@@ -129,10 +158,19 @@ mod tests {
             Table::WitnessRecords, Table::LaneBudgetReservations, Table::LineageRateLimits,
             Table::TaskIntentRanges, Table::TaskExportedPathSnapshots, Table::PolicyEpochHistory,
             Table::OperatorCertificates, Table::InitiativeQuarantines,
+            Table::SubtaskActivations,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
         }
+    }
+
+    /// V2 sub-task activation table name is wire-stable (it is queried
+    /// directly by audit/forensic tools after kernel restart). Pinning
+    /// the literal here surfaces any rename in code review.
+    #[test]
+    fn subtask_activations_table_name_is_pinned() {
+        assert_eq!(Table::SubtaskActivations.as_str(), "subtask_activations");
     }
 
     #[test]

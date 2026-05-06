@@ -34,7 +34,8 @@
 use crate::table::Table;
 use crate::StoreError;
 use raxis_types::{
-    DelegationStatus, EscalationStatus, InitiativeState, TaskState, WitnessResultClass,
+    DelegationStatus, EscalationStatus, InitiativeState, SessionAgentType,
+    SubtaskActivationState, TaskState, WitnessResultClass,
 };
 use rusqlite::Connection;
 
@@ -53,7 +54,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -80,6 +81,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 4 {
         apply_migration_4(conn)?;
+    }
+    if current_version < 5 {
+        apply_migration_5(conn)?;
     }
 
     Ok(())
@@ -869,6 +873,213 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 5 — V2 hierarchical orchestration substrate.
+// v2-deep-spec.md §1.2 (Steps 5, 6, 12, 16) and INV-DELEGATE-01.
+//
+// This single migration covers four V2 schema additions that arrive as
+// one atomic step because they collectively unlock the V2 sub-task
+// authority chain — partial application would leave the kernel
+// rejecting V2 plans at approve_plan time anyway:
+//
+//   1. `sessions.session_agent_type TEXT` — Orchestrator | Executor |
+//      Reviewer; NULL for V1-style legacy sessions (V1 path stays
+//      working).
+//   2. `sessions.can_delegate INTEGER NOT NULL DEFAULT 0` — INV-DELEGATE-01
+//      gate (only Orchestrator may submit ActivateSubTask). The CHECK
+//      constraint at the column level forbids stray non-{0,1} values
+//      from a SQL-level write, while a row-level CHECK enforces
+//      INV-DELEGATE-01 directly: can_delegate=1 ⇒ session_agent_type=
+//      'Orchestrator'.
+//   3. `sessions.vsock_cid INTEGER` — VSock context id for the planner
+//      VM. NULL for V1 UDS sessions; populated by V2 create_session
+//      when the kernel spawns the microVM. Read on hot-restart to
+//      rebuild the in-memory CID allowlist (v2-deep-spec.md §Step 16).
+//   4. `subtask_activations` table — separate FSM from `tasks.state`
+//      so V2 pre-activation rows do not pollute the V1 operational FSM
+//      and the recovery::reconcile_tasks sweep
+//      (v2-deep-spec.md §Step 5). Carries `crash_retry_count` and
+//      `review_reject_count` per v2-deep-spec.md §Step 12 (dual retry
+//      counters), plus `evaluation_sha` for Reviewer activations.
+//
+// **V1 backward compatibility.** Every column added to `sessions` is
+// either NULLable or has a default; existing V1 rows survive without
+// modification and existing V1 handlers continue to read the row
+// without observing any new fields. The new `subtask_activations`
+// table is created empty; V1 initiatives never insert into it.
+//
+// Why a single migration rather than four: each piece is
+// individually trivial and they share the same review cycle. Splitting
+// them would force four separate hash pins on the rendered DDL with
+// no operational benefit.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_5(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_5_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 5 failed: {e}"))
+    })
+}
+
+/// The complete migration-5 DDL. Same INV-STORE-03 contract as earlier
+/// migrations: every table identifier is rendered through `Table::...
+/// .as_str()` and every CHECK-constraint enum list is rendered through
+/// `check_in_clause` over the corresponding `raxis_types` enum.
+fn render_migration_5_ddl() -> String {
+    let sessions             = Table::Sessions.as_str();
+    let tasks                = Table::Tasks.as_str();
+    let initiatives          = Table::Initiatives.as_str();
+    let subtask_activations  = Table::SubtaskActivations.as_str();
+    let schema_version       = Table::SchemaVersion.as_str();
+
+    let session_agent_type_check =
+        check_in_clause(&SessionAgentType::ALL, SessionAgentType::as_sql_str);
+    let activation_state_check =
+        check_in_clause(&SubtaskActivationState::ALL, SubtaskActivationState::as_sql_str);
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── sessions: V2 hierarchical orchestration columns ─────────────────────────
+-- session_agent_type: NULL for V1 sessions, NOT NULL on every V2 row
+-- (enforced at the application layer in create_session — column level
+-- stays NULLable for V1 backward compatibility). The CHECK constraint
+-- pins the universe of legal V2 values.
+ALTER TABLE {sessions}
+    ADD COLUMN session_agent_type TEXT
+        CHECK (session_agent_type IS NULL
+               OR session_agent_type IN {session_agent_type_check});
+
+-- can_delegate: gate for ActivateSubTask. Defaults to 0 so V1 rows are
+-- unaffected. The row-level CHECK enforces INV-DELEGATE-01 directly:
+-- can_delegate=1 implies session_agent_type='Orchestrator'. The
+-- bidirectional guarantee (Orchestrator ⇒ can_delegate=1) is enforced
+-- at the application layer in create_session because a SQL CHECK
+-- cannot reference a default-derivation rule.
+ALTER TABLE {sessions}
+    ADD COLUMN can_delegate INTEGER NOT NULL DEFAULT 0
+        CHECK (can_delegate IN (0, 1)
+               AND (can_delegate = 0 OR session_agent_type = 'Orchestrator'));
+
+-- vsock_cid: context id for the planner microVM. NULL for V1 UDS
+-- sessions and for V2 sessions before the VM is spawned (the kernel
+-- writes it AFTER the hypervisor returns the assigned CID). Read on
+-- hot-restart by bootstrap.rs to rebuild the in-memory CID allowlist
+-- BEFORE opening the VSock listener.
+ALTER TABLE {sessions}
+    ADD COLUMN vsock_cid INTEGER;
+
+-- Lookup: bootstrap.rs hot-restart query — rebuild the CID allowlist
+-- in O(active V2 sessions). V1 sessions (vsock_cid IS NULL) are not
+-- in this index thanks to the partial-index predicate.
+CREATE INDEX IF NOT EXISTS idx_sessions_vsock_cid
+    ON {sessions} (vsock_cid)
+    WHERE vsock_cid IS NOT NULL AND revoked = 0;
+
+-- ── Table 22: subtask_activations ───────────────────────────────────────────
+-- Per-(initiative, sub-task) activation FSM. One row per activation
+-- attempt — a retry inserts a NEW row, never updates the prior one.
+-- Inserted by approve_plan → admit_in_tx in the same transaction
+-- that inserts the corresponding `tasks` row (INV-STORE-02).
+--
+-- Columns:
+--   activation_id       — UUID; PK. New uuid per (re)activation.
+--   task_id             — FK to tasks.task_id. The (V2 Executor or
+--                         Reviewer) sub-task this activation is for.
+--   initiative_id       — denormalised FK for fast per-initiative
+--                         queries on the recovery sweep.
+--   activation_state    — PendingActivation | Active | Completed |
+--                         Failed (CHECK constraint, drift-pinned in
+--                         tests below).
+--   session_id          — FK to sessions.session_id once a VM is
+--                         spawned and the session row is bound. NULL
+--                         while activation_state = 'PendingActivation'.
+--   evaluation_sha      — for Reviewer activations: the Executor's
+--                         CompleteTask head_sha captured at admission
+--                         time. NULL for Executor activations and for
+--                         Reviewer rows in PendingActivation (it is
+--                         filled by the Kernel when the predecessor
+--                         Executor's CompleteTask is admitted).
+--   crash_retry_count   — incremented by the Kernel on OS-level VM
+--                         death (SIGCHLD / non-zero exit). Ceiling:
+--                         `max_crash_retries` from the signed plan.
+--                         Per v2-deep-spec.md §Step 12.
+--   review_reject_count — incremented by the Kernel when a Reviewer
+--                         submits `approved: false` for this sub-task.
+--                         Ceiling: `max_review_rejections` from the
+--                         signed plan. Per v2-deep-spec.md §Step 12.
+--   created_at          — Unix seconds, clock-injected at insert.
+--   activated_at        — set when state transitions to Active.
+--   terminated_at       — set when state transitions to terminal
+--                         (Completed | Failed).
+--
+-- The dual retry counters are deliberately separate: a VM that
+-- OOM-crashes shares NO counter with a sub-task whose code review
+-- failed, because the two failure modes have different remediation
+-- strategies (crash → just retry, review-fail → planner is
+-- consistently producing wrong code → human escalation).
+CREATE TABLE IF NOT EXISTS {subtask_activations} (
+    activation_id        TEXT    NOT NULL PRIMARY KEY,
+    task_id              TEXT    NOT NULL
+        REFERENCES {tasks}(task_id),
+    initiative_id        TEXT    NOT NULL
+        REFERENCES {initiatives}(initiative_id),
+    activation_state     TEXT    NOT NULL
+        CHECK (activation_state IN {activation_state_check}),
+    session_id           TEXT
+        REFERENCES {sessions}(session_id),
+    evaluation_sha       TEXT,
+    crash_retry_count    INTEGER NOT NULL DEFAULT 0
+        CHECK (crash_retry_count >= 0),
+    review_reject_count  INTEGER NOT NULL DEFAULT 0
+        CHECK (review_reject_count >= 0),
+    created_at           INTEGER NOT NULL,
+    activated_at         INTEGER,
+    terminated_at        INTEGER,
+    -- Cross-column invariants:
+    --   * Active rows always have a session_id.
+    --   * Terminal rows always have a terminated_at.
+    --   * activated_at is set ⇔ state has reached Active or beyond.
+    CHECK (
+        (activation_state = 'PendingActivation' AND session_id IS NULL
+         AND activated_at IS NULL AND terminated_at IS NULL)
+        OR (activation_state = 'Active' AND session_id IS NOT NULL
+            AND activated_at IS NOT NULL AND terminated_at IS NULL)
+        OR (activation_state IN ('Completed', 'Failed')
+            AND activated_at IS NOT NULL AND terminated_at IS NOT NULL)
+    )
+);
+
+-- Lookup: \"all activations for this task\" — used by RetrySubTask to
+-- find the most-recent terminal row, and by audit replay tools.
+CREATE INDEX IF NOT EXISTS idx_subtask_activations_task_id
+    ON {subtask_activations} (task_id, created_at DESC);
+
+-- Lookup: \"all V2 sub-tasks pending activation in this initiative\" —
+-- the Orchestrator prompt assembler (Layer 2 prompt-hiding) consults
+-- this on every InferenceRequest to filter the visible activatable
+-- list.
+CREATE INDEX IF NOT EXISTS idx_subtask_activations_pending
+    ON {subtask_activations} (initiative_id, activation_state)
+    WHERE activation_state = 'PendingActivation';
+
+-- Lookup: \"every active V2 session\" — used by recovery::reconcile_tasks
+-- to find activations whose underlying VM died with the kernel and
+-- need crash_retry_count incremented during boot.
+CREATE INDEX IF NOT EXISTS idx_subtask_activations_active
+    ON {subtask_activations} (initiative_id, activation_state)
+    WHERE activation_state = 'Active';
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (5, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1126,6 +1337,8 @@ mod tests {
             Table::OperatorCertificates,
             // Migration 3 — v1.x: initiative quarantines
             Table::InitiativeQuarantines,
+            // Migration 5 — v2: hierarchical orchestration
+            Table::SubtaskActivations,
         ]
         .iter()
         .map(|t| t.as_str().to_owned())
@@ -1348,15 +1561,15 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
 
         // Simulate a database that completed migration 3. We get
-        // there by running `apply_pending` and then deleting the
-        // migration_4 artifacts (the index + the v=4 schema_version
-        // row). This is a closer simulation of an upgraded install
-        // than running just migrations 1–3 by hand.
-        apply_pending(&conn).unwrap();
-        conn.execute_batch(
-            "DROP INDEX IF EXISTS idx_initiative_quarantines_quarantined_at;
-             DELETE FROM schema_version WHERE version = 4;"
-        ).unwrap();
+        // there by running migrations 1..=3 directly so that no
+        // higher migration's artifacts pollute the test fixture.
+        // (The original test ran the full `apply_pending` and then
+        // deleted just the v=4 row; that broke when migration 5
+        // shipped because the v=5 row remained, leaving
+        // `read_current_version` reading as 5.)
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
         assert_eq!(read_current_version(&conn).unwrap(), 3,
             "test pre-condition: database must be at version 3");
         let n_before: i64 = conn
@@ -1518,5 +1731,338 @@ mod tests {
             "WitnessResultClass v1 has 3 variants; bumping this requires migration_2");
         assert_eq!(DelegationStatus::STORED.len(), 3,
             "DelegationStatus v1 STORED has 3 variants; bumping this requires migration_2");
+    }
+
+    /// V2 enum-shape pin. Bumping any of these requires a NEW migration
+    /// (after migration 5) that ALTERs the corresponding CHECK
+    /// constraint on already-installed databases. The store
+    /// `apply_pending` machinery treats migration 5 as historical the
+    /// moment a v2-installed database has it applied; subsequent
+    /// schema changes must arrive as migration 6+, not as edits to
+    /// migration 5's rendered DDL.
+    #[test]
+    fn v2_enum_variant_counts_are_pinned_to_migration_5() {
+        assert_eq!(SessionAgentType::ALL.len(), 3,
+            "SessionAgentType v2 has 3 variants (Orchestrator, Executor, \
+             Reviewer); bumping this requires a new migration");
+        assert_eq!(SubtaskActivationState::ALL.len(), 4,
+            "SubtaskActivationState v2 has 4 variants; bumping this \
+             requires a new migration");
+    }
+
+    // ── Migration 5 — V2 hierarchical orchestration ────────────────────────
+
+    /// Every column added to `sessions` by migration 5 is materialised
+    /// in the live schema, with the right type and NULL-ability.
+    /// A future refactor that drops a column or changes its type
+    /// silently would surface here before any V2 handler hits the row.
+    #[test]
+    fn migration_5_adds_v2_columns_to_sessions() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        // sqlite `pragma table_info` returns one row per column with
+        // (cid, name, type, notnull, dflt_value, pk).
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT name, type, [notnull], dflt_value \
+                 FROM pragma_table_info('{}')",
+                Table::Sessions.as_str()
+            ))
+            .unwrap();
+        let cols: std::collections::HashMap<String, (String, i64, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    (
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ),
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        // session_agent_type: TEXT, NULLable (V1 backward compat).
+        let (ty, notnull, _dflt) = cols
+            .get("session_agent_type")
+            .expect("sessions.session_agent_type must exist after migration 5");
+        assert_eq!(ty, "TEXT", "session_agent_type must be TEXT");
+        assert_eq!(*notnull, 0, "session_agent_type must be NULLable for V1");
+
+        // can_delegate: INTEGER NOT NULL DEFAULT 0.
+        let (ty, notnull, dflt) = cols
+            .get("can_delegate")
+            .expect("sessions.can_delegate must exist after migration 5");
+        assert_eq!(ty, "INTEGER");
+        assert_eq!(*notnull, 1, "can_delegate must be NOT NULL");
+        assert_eq!(dflt.as_deref(), Some("0"),
+            "can_delegate must default to 0 so V1 rows survive ALTER");
+
+        // vsock_cid: INTEGER, NULLable.
+        let (ty, notnull, _) = cols
+            .get("vsock_cid")
+            .expect("sessions.vsock_cid must exist after migration 5");
+        assert_eq!(ty, "INTEGER");
+        assert_eq!(*notnull, 0, "vsock_cid must be NULLable for V1");
+    }
+
+    /// INV-DELEGATE-01 enforced at the SQL layer (defense in depth):
+    /// a row with can_delegate=1 AND session_agent_type ≠ 'Orchestrator'
+    /// must be rejected by the row-level CHECK.
+    ///
+    /// The application-layer create_session is the primary gate; this
+    /// test pins the secondary database-level guard so that even a
+    /// raw SQL writer (e.g. an admin debugging through `sqlite3`) cannot
+    /// produce a row that violates the invariant.
+    #[test]
+    fn inv_delegate_01_check_rejects_non_orchestrator_with_can_delegate() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        // Seed a parent FK target so the test isolates the CHECK fault
+        // (otherwise the FK on tasks would also raise).
+        let sessions = Table::Sessions.as_str();
+
+        // Reviewer + can_delegate=1 must FAIL the CHECK.
+        let bad = conn.execute(
+            &format!(
+                "INSERT INTO {sessions}\
+                  (session_id, role_id, session_token, lineage_id, fetch_quota,\
+                   created_at, expires_at,\
+                   session_agent_type, can_delegate)\
+                 VALUES ('s1','r','t1','l',0,1,2,'Reviewer',1)"
+            ),
+            [],
+        );
+        assert!(bad.is_err(),
+            "INV-DELEGATE-01 row-level CHECK must reject \
+             can_delegate=1 with session_agent_type='Reviewer'");
+
+        // Orchestrator + can_delegate=1 must SUCCEED.
+        let good = conn.execute(
+            &format!(
+                "INSERT INTO {sessions}\
+                  (session_id, role_id, session_token, lineage_id, fetch_quota,\
+                   created_at, expires_at,\
+                   session_agent_type, can_delegate)\
+                 VALUES ('s2','r','t2','l',0,1,2,'Orchestrator',1)"
+            ),
+            [],
+        );
+        assert!(good.is_ok(),
+            "Orchestrator + can_delegate=1 must satisfy INV-DELEGATE-01");
+    }
+
+    /// V1 backward compat: a row with no V2 fields populated must
+    /// continue to insert. The default for can_delegate is 0; the
+    /// CHECK constraint allows can_delegate=0 with NULL agent type.
+    #[test]
+    fn v1_session_row_unchanged_after_migration_5() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let sessions = Table::Sessions.as_str();
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {sessions}\
+                  (session_id, role_id, session_token, lineage_id, fetch_quota,\
+                   created_at, expires_at)\
+                 VALUES ('v1-row','planner','tok','lin',0,1,9999999999)"
+            ),
+            [],
+        );
+        assert!(r.is_ok(), "V1-shape session row must still INSERT");
+
+        // Confirm the V2 defaults landed correctly.
+        let (sat, cd, vc): (Option<String>, i64, Option<i64>) = conn
+            .query_row(
+                &format!(
+                    "SELECT session_agent_type, can_delegate, vsock_cid \
+                     FROM {sessions} WHERE session_id = 'v1-row'"
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(sat, None, "V1 row must have NULL session_agent_type");
+        assert_eq!(cd, 0, "V1 row must have can_delegate=0 (default)");
+        assert_eq!(vc, None, "V1 row must have NULL vsock_cid");
+    }
+
+    /// `subtask_activations` exists post-migration and rejects bad
+    /// activation_state values via the enum-driven CHECK.
+    #[test]
+    fn migration_5_creates_subtask_activations_with_check() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        apply_pending(&conn).unwrap();
+
+        // Seed the FK targets.
+        let initiatives_t = Table::Initiatives.as_str();
+        let tasks_t       = Table::Tasks.as_str();
+        let activ_t       = Table::SubtaskActivations.as_str();
+        let draft         = InitiativeState::Draft.as_sql_str();
+        let admitted      = TaskState::Admitted.as_sql_str();
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives_t} (initiative_id, state, terminal_criteria_json, \
+                                          plan_artifact_sha256, created_at) \
+             VALUES ('init-1', '{draft}', '{{}}', 'deadbeef', 0); \
+             INSERT INTO {tasks_t} (task_id, initiative_id, lane_id, state, actor, \
+                                     policy_epoch, admitted_at, transitioned_at) \
+             VALUES ('task-1', 'init-1', 'default', '{admitted}', 'planner', \
+                     1, 0, 0);"
+        )).unwrap();
+
+        // Legal: PendingActivation row with no session and no timestamps.
+        let pending = SubtaskActivationState::PendingActivation.as_sql_str();
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {activ_t}\
+                  (activation_id, task_id, initiative_id, activation_state, created_at)\
+                 VALUES ('a1','task-1','init-1','{pending}', 100)"
+            ),
+            [],
+        );
+        assert!(r.is_ok(), "PendingActivation insert must succeed: {r:?}");
+
+        // Illegal: bogus activation_state — CHECK constraint fires.
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {activ_t}\
+                  (activation_id, task_id, initiative_id, activation_state, created_at)\
+                 VALUES ('a2','task-1','init-1','BogusState', 100)"
+            ),
+            [],
+        );
+        assert!(r.is_err(), "Unknown activation_state must trip the CHECK");
+
+        // Illegal: PendingActivation with a timestamp set — cross-
+        // column CHECK fires.
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {activ_t}\
+                  (activation_id, task_id, initiative_id, activation_state, \
+                   created_at, activated_at)\
+                 VALUES ('a3','task-1','init-1','{pending}', 100, 200)"
+            ),
+            [],
+        );
+        assert!(r.is_err(),
+            "PendingActivation with non-NULL activated_at must trip the cross-CHECK");
+
+        // Illegal: Completed without timestamps.
+        let completed = SubtaskActivationState::Completed.as_sql_str();
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {activ_t}\
+                  (activation_id, task_id, initiative_id, activation_state, created_at)\
+                 VALUES ('a4','task-1','init-1','{completed}', 100)"
+            ),
+            [],
+        );
+        assert!(r.is_err(),
+            "Completed without activated_at/terminated_at must trip the cross-CHECK");
+    }
+
+    /// Migration 5 is idempotent: re-running `apply_pending` after a
+    /// successful apply must NOT produce duplicate `subtask_activations`
+    /// tables, fail to re-add ALTERed columns, or trigger a duplicate
+    /// index error. A typical accidental-call scenario (kernel restart
+    /// hot-loop with a transient I/O error) must be a no-op.
+    #[test]
+    fn migration_5_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        // Exactly one subtask_activations row in sqlite_master.
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = ?1",
+                [Table::SubtaskActivations.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "exactly one subtask_activations table row expected");
+
+        // schema_version has exactly SCHEMA_VERSION rows (one per applied
+        // migration) — no duplicates from the second apply_pending.
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, SCHEMA_VERSION as i64);
+    }
+
+    /// Upgrade scenario: a database that completed migrations 1–4 but
+    /// not 5 (i.e. installed under a v1.x build) must pick up
+    /// migration 5 when `apply_pending` runs. Pinning this guards
+    /// against the class of bug where a future `apply_pending` refactor
+    /// short-circuits the `current_version < 5` gate. We get to a
+    /// "version 4" state by running migrations 1–4 directly (skipping
+    /// migration 5).
+    #[test]
+    fn migration_5_applies_to_a_v4_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 4);
+
+        // Pre-condition: subtask_activations table is absent at v=4.
+        let n_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = ?1",
+                [Table::SubtaskActivations.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n_before, 0, "subtask_activations must not yet exist at v=4");
+
+        // Run apply_pending — it must apply ONLY migration 5
+        // (the gate `current_version < 5` should skip 1–4).
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        // Subtask_activations is created.
+        let n_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = ?1",
+                [Table::SubtaskActivations.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n_after, 1, "migration 5 must add subtask_activations");
+    }
+
+    /// Migration 5 wraps all four DDL pieces in a single
+    /// `BEGIN EXCLUSIVE; ... COMMIT;` so a crash mid-migration leaves
+    /// the DB at v=4. We pin this contract by inspecting the rendered
+    /// DDL text — the implementation could otherwise drift to multiple
+    /// transactions which would break the partial-failure invariant.
+    #[test]
+    fn migration_5_is_a_single_transaction() {
+        let ddl = render_migration_5_ddl();
+        // The DDL must contain exactly one BEGIN and one COMMIT, in
+        // that order, and no nested transactions.
+        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
+            "migration 5 must open exactly one transaction (BEGIN EXCLUSIVE)");
+        assert_eq!(ddl.matches("COMMIT").count(), 1,
+            "migration 5 must commit exactly once");
+        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
+                < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT");
     }
 }
