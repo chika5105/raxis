@@ -1351,6 +1351,12 @@ custom tools surface (canonical home `custom-tools.md`).
 max_custom_tool_timeout_seconds  = 300       # default; ceiling on per-tool timeout_seconds
 max_concurrent_custom_tool_invocations = 4   # per planner VM
 max_queued_custom_tool_invocations     = 8   # per planner VM
+# Wall-clock cap on how long a queued invocation may wait before
+# the harness gives up and surfaces `CustomToolQueueTimeout` to
+# the LLM (distinct from `Timeout` and `ConcurrencyExhausted`).
+# See custom-tools.md §7.3 for mechanism and audit semantics.
+# Validation: must be in [1_000, max_custom_tool_timeout_seconds * 1000].
+max_queue_wait_ms                = 30000     # default 30 s
 schema_budget_warn_share         = 0.10      # WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH threshold
 schema_budget_fail_share         = 0.25      # FAIL_CUSTOM_TOOL_SCHEMA_BUDGET_EXCEEDED threshold
 ```

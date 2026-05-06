@@ -462,6 +462,7 @@ collide with kernel-supplied keys → admission rejection
 | `1`–`255` | `tool_result` with `is_error: true`, content = stdout + brief footer naming the exit code | `NonZeroExit { code }` |
 | Killed by timeout (cgroup.kill) | `tool_result` with `is_error: true`, content = `[CUSTOM_TOOL_TIMEOUT after Ns]` + stdout-so-far | `Timeout` |
 | Killed by session teardown | (no result returned to LLM; the LLM session is being torn down) | `KilledOnTeardown` |
+| Queued but `max_queue_wait_ms` elapsed before a concurrency slot freed (per §7.3) | `tool_result` with `is_error: true`, content = `[CUSTOM_TOOL_QUEUE_TIMEOUT after Nms; concurrency limit was busy for the entire wait window]`. The LLM-facing failure reason is **`CustomToolQueueTimeout`** — distinct from `Timeout` (which means the script ran but exceeded `timeout_seconds`) and from `CustomToolConcurrencyExhausted` (which means the queue itself was full at admission and the request was never queued). | `QueueTimeout { queued_for_ms }` |
 | Stdin too large at admission | `tool_result` with `is_error: true`, structured error | `StdinTooLarge` |
 | Stdout truncated at cap | `tool_result` reflects truncated stdout; `is_error` matches exit code | `Success` or `NonZeroExit` with `stdout_truncated: true` flag |
 
@@ -511,6 +512,84 @@ across a single VM (default `4`). Excess concurrent invocations queue
 in the harness; queue depth is bounded by `max_queued_custom_tool_invocations`
 (default `8`). Queue overflow → the LLM receives a `tool_result` error
 `CustomToolConcurrencyExhausted` and may retry.
+
+#### Queue-wait deadline (`max_queue_wait_ms`)
+
+Queueing without a wait cap is a denial-of-service waiting to
+happen: a long-running tool A holding the only concurrency slot
+can starve any subsequent invocation indefinitely, but the LLM
+sees nothing — its `tool_use` block hangs until `timeout_seconds`
+or the session is torn down.  Worse, when the tool finally runs,
+the run-time deadline (`timeout_seconds`) starts ticking from
+*dequeue*, so the LLM has effectively waited `queue_wait +
+timeout_seconds` for an outcome.
+
+`policy.toml` declares a global queue-wait deadline:
+
+```toml
+[custom_tools]
+# Maximum wall-clock time an invocation may sit in the harness
+# concurrency queue before the harness gives up and surfaces a
+# distinct error to the LLM.  Default: 30_000 ms (30 s).  Hard
+# floor: 1_000 ms (anything tighter than 1 s is operationally
+# indistinguishable from immediate rejection — use
+# max_queued_custom_tool_invocations = 0 if that is the goal).
+# Hard ceiling: max_custom_tool_timeout_seconds * 1000 (a queue
+# wait longer than the longest legal execution is always wrong).
+max_queue_wait_ms = 30000
+```
+
+Per-tool override is **not** supported: the queue is a global
+harness resource; allowing one tool to declare a 5-minute queue
+wait while another declares 1 s would let a noisy tool starve a
+quiet one. The deadline applies uniformly to every queued
+invocation in a single VM.
+
+**Mechanism.**
+
+1. When the harness receives an invocation request and the
+   concurrency limit is hit, it stamps `queued_at_ms = now_ms()`
+   on the queue entry.
+2. A single dedicated `tokio::time::sleep_until(queued_at_ms +
+   max_queue_wait_ms)` task races the entry's
+   `concurrency_slot_available` notify channel.
+3. If the timer fires first: the harness removes the entry from
+   the queue, emits a `CustomToolInvoked` audit event with
+   `outcome = QueueTimeout { queued_for_ms }`, and returns to the
+   LLM a `tool_result` with `is_error: true`, content =
+   `[CUSTOM_TOOL_QUEUE_TIMEOUT after Nms; concurrency limit was
+   busy for the entire wait window]`. The LLM-facing failure
+   reason is **`CustomToolQueueTimeout`** (distinct from
+   `CustomToolTimeout` and from `CustomToolConcurrencyExhausted`
+   — see §6.7).
+4. If the slot becomes available first: the timer is cancelled,
+   the entry is dequeued, and the harness invokes the tool
+   normally. `timeout_seconds` is timed from dequeue, NOT from
+   `queued_at_ms`. This is intentional: queue-wait time is the
+   harness's responsibility and is bounded by `max_queue_wait_ms`;
+   execution-time is the script's responsibility and is bounded
+   by `timeout_seconds`. Conflating them would mean a tool that
+   was queued for 25 s with a 60 s timeout has only 35 s left to
+   actually run — surprising and operationally confusing.
+
+**Distinction from `CustomToolConcurrencyExhausted`.**
+`CustomToolConcurrencyExhausted` fires at *admission* — the queue
+is full when the request arrives, so the request is never
+queued. `CustomToolQueueTimeout` fires for a request that was
+*successfully queued* but waited too long for a concurrency
+slot. Both surface as distinct LLM-facing errors so the LLM (and
+the audit consumer) can disambiguate "this VM is too busy to
+even queue my call" from "this VM accepted my call but never
+freed up a slot."
+
+**Audit guarantees.** A queued-and-timed-out invocation produces
+exactly one `CustomToolInvoked` audit row with `outcome =
+QueueTimeout { queued_for_ms }`. A queued-and-eventually-run
+invocation produces exactly one row with `outcome = Success` /
+`NonZeroExit` / `Timeout` (the queue-wait time is recorded in a
+separate `queued_for_ms` field on the row, distinct from the
+execution `duration_ms`, so operators can trace queue pressure
+without reading every audit row).
 
 ### 7.4 Filesystem mounts
 
@@ -819,7 +898,8 @@ pub enum AuditEventKind {
         stderr_truncated:  bool,
         stderr_exposed_to_llm: bool,              // expose_stderr flag
         exit_code:         i32,                   // -1 if killed before exit
-        duration_ms:       u64,
+        duration_ms:       u64,                   // execution time only (dequeue → exit); excludes queue wait
+        queued_for_ms:     u64,                   // time spent in the harness concurrency queue (0 if not queued); see §7.3
         outcome:           CustomToolOutcome,
         cgroup_path:       String,                // /sys/fs/cgroup/raxis/customtool-<seq>/
     },
@@ -829,9 +909,16 @@ pub enum CustomToolOutcome {
     Success,
     NonZeroExit { code: i32 },
     Timeout,
+    /// Queued but `max_queue_wait_ms` elapsed before a concurrency
+    /// slot freed (§7.3). `queued_for_ms` on the parent event
+    /// equals `max_queue_wait_ms` at the boundary.
+    QueueTimeout { queued_for_ms: u64 },
     KilledOnTeardown,
     StdinTooLarge { input_bytes: u32, limit: u32 },
     InputSchemaValidationFailed { error_summary: String },
+    /// Queue full at admission — request was never queued.
+    /// Distinct from `QueueTimeout`, which fires for a request
+    /// that *was* queued but waited too long. See §6.7 / §7.3.
     ConcurrencyExhausted,
     SubprocessSpawnFailed { errno: i32 },
 }
@@ -921,6 +1008,8 @@ truncation state, and the resolved command line.
 - [ ] Token-budget projector pulls tokenizer from `raxis-gateway`'s `tokenize(model, text)` admin interface; computes `custom_tool_share` per §9.2.
 - [ ] Harness side: schema-validates LLM input before script invocation; constructs canonical-JSON stdin; forks into per-invocation cgroup; enforces stdin/stdout/stderr caps and timeout via `cgroup.kill`.
 - [ ] Harness side: builds `tool_result` per §6.4 (truncation sentinel) and §6.5 (stderr exposure rules).
+- [ ] Harness side: implements the queue-wait deadline per §7.3 (`max_queue_wait_ms`). Each queued invocation stamps `queued_at_ms`; a `tokio::time::sleep_until` task races the `concurrency_slot_available` notify channel; on timeout, surfaces `CustomToolQueueTimeout` distinct from `Timeout` and `CustomToolConcurrencyExhausted`.
+- [ ] Policy admission validates `max_queue_wait_ms ∈ [1_000, max_custom_tool_timeout_seconds * 1000]`; out-of-range emits `FAIL_POLICY_CUSTOM_TOOL_QUEUE_WAIT_EXCEEDS_TIMEOUT` / `FAIL_POLICY_CUSTOM_TOOL_QUEUE_WAIT_TOO_SMALL`.
 - [ ] Audit event `CustomToolInvoked` per §12.1; emits regardless of outcome.
 - [ ] Optional full-payload archival per §12.2 (gated on `[audit.custom_tools] archive_full_payloads`).
 - [ ] `raxis log` CLI gains the custom-tool view per §12.3.
@@ -945,7 +1034,10 @@ truncation state, and the resolved command line.
       - Custom tool double-fork daemonization → cgroup.kill catches both processes on timeout.
       - Custom tool with operator `env` collision against `RAXIS_*` → `FAIL_CUSTOM_TOOL_ENV_RESERVED_KEY`.
       - Profile inheritance cycle → `FAIL_PLAN_PROFILE_INHERITANCE_CYCLE`.
-      - 5 concurrent invocations against `max_concurrent_custom_tool_invocations = 4` → 5th gets `CustomToolConcurrencyExhausted`.
+      - 5 concurrent invocations against `max_concurrent_custom_tool_invocations = 4` → 5th gets `CustomToolConcurrencyExhausted`. (Queue still has slots, but the 5th *also* exceeds queue depth — `max_queued_custom_tool_invocations = 0`.)
+      - 5 concurrent invocations against `max_concurrent_custom_tool_invocations = 4`, `max_queued_custom_tool_invocations = 4`, `max_queue_wait_ms = 200` with the running tools holding their slots for 30 s → 5th invocation queues, waits 200 ms, surfaces `CustomToolQueueTimeout` (NOT `CustomToolConcurrencyExhausted`); audit row records `outcome = QueueTimeout { queued_for_ms: 200 }` and `duration_ms = 0`.
+      - Same setup but the running tool finishes after 100 ms → 5th invocation dequeues at 100 ms, runs to completion; audit row records `queued_for_ms = 100`, `duration_ms` = actual execution time, `outcome = Success`. Verifies queue-wait time does NOT consume `timeout_seconds`.
+      - `max_queue_wait_ms` set above `max_custom_tool_timeout_seconds * 1000` → policy admission rejects (`FAIL_POLICY_CUSTOM_TOOL_QUEUE_WAIT_EXCEEDS_TIMEOUT`).
       - Custom tool inside Executor performing HTTP via `urllib` → blocked by tproxy SNI allowlist exactly as bash-invoked HTTP would be.
 
 ---
