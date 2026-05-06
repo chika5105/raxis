@@ -29,9 +29,16 @@
 > - V2 adds new authoring CLI commands not described in this document:
 >   `plan validate`, `plan diff`, `plan explain`, `plan fmt`,
 >   `plan cost-estimate`, `submit plan --dry-run`, `initiative watch`,
->   `initiative resume`, `initiative list`, `setup wizard`. Their
+>   `initiative resume`, `setup wizard`. Their
 >   canonical specifications live in `v2/operator-ergonomics.md
 >   §6–§17`.
+> - `raxis initiative list` (read-only bucketed listing) is **NOT
+>   deferred to V2** — it ships in V1 as a read-only observation
+>   surface alongside `raxis sessions` / `raxis escalations`. Spec'd
+>   in `cli-readonly.md` §5.5.6b. The richer v2 form (with `--mine`,
+>   `--since`, per-row task progress) is documented in
+>   `v2/operator-ergonomics.md §15` and strictly extends the v1
+>   baseline.
 >
 > Mutating subcommands NOT in the operator-ergonomics surface
 > (`policy sign`, `plan approve`, `escalation approve`, `task abort`,

@@ -61,7 +61,7 @@ If you want zero defaulting, write a fully-explicit plan and skip `plan prepare`
 
 - The default-resolution model: what fields are defaultable, how defaults are resolved against the loaded policy, the operator-signs-everything posture, the annotation-as-operator-metadata convention (§3, §4).
 - The `raxis-cli plan prepare` command: the canonical pre-submit step that fills defaults into the operator's plan.toml (§5).
-- The full V2 operator CLI surface: `plan init`, `plan validate`, `plan diff`, `plan explain`, `plan fmt`, `plan cost-estimate`, `submit plan --dry-run`, `initiative watch`, `initiative resume`, `initiative list`, `setup wizard`, `doctor` extensions (§6 – §17).
+- The full V2 operator CLI surface: `plan init`, `plan validate`, `plan diff`, `plan explain`, `plan fmt`, `plan cost-estimate`, `submit plan --dry-run`, `initiative watch`, `initiative resume`, `setup wizard`, `doctor` extensions (§6 – §17). **Note:** `initiative list` is an exception — its v1 baseline already ships in `cli-readonly.md §5.5.6b`; §15 below documents only the v2 *extensions* on top of that baseline.
 - Policy schema additions: `[token_policy_defaults]`, `[default_protected_paths]`, `[default_executor_image]`, `[prepare]` (§18).
 - IPC schema additions: read-only `ProposeDefaults` operator-socket request, `DryRunAdmit`, etc. (§19).
 - Failure codes: `FAIL_PLAN_REQUIRES_PREPARE`, `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED`, `FAIL_PLAN_INIT_TEMPLATE_NOT_FOUND` (§20).
@@ -1065,23 +1065,36 @@ Today an operator faced with a paused initiative must look up the pause cause, f
 
 ### 15.1 Purpose
 
-Operator overview of in-flight and recent work.
+Operator overview of in-flight and recent work. The **v1 baseline** ships a four-bucket read-only listing — see `cli-readonly.md §5.5.6b` for the canonical v1 spec. **V2 strictly extends** the v1 surface: it adds flags (`--mine`, `--since`, `--format`), adds per-row columns (operator, task progress, description), and accepts a richer set of `--state` values (canonical FSM states + `paused` once `initiative resume` is wired in §14). It NEVER removes or changes the meaning of any v1 flag — a v1-style invocation `raxis initiative list --state active` continues to work unchanged on a v2 deployment.
 
 ### 15.2 Invocation
 
 ```
-raxis-cli initiative list [--state <s>] [--mine] [--limit <n>] [--since <duration>] [--format table|json]
+raxis-cli initiative list [--state <s>] [--mine] [--limit <n>] [--since <duration>] [--format table|json] [--json]
 ```
 
-| Flag | Default | Effect |
-|---|---|---|
-| `--state` | (all) | Filter by initiative state: `Draft`, `Executing`, `Paused`, `Completed`, `Failed`, `Aborted`. Multiple values comma-separated. |
-| `--mine` | off | Filter to initiatives whose submitting operator's fingerprint matches the currently-loaded operator key. |
-| `--limit` | 20 | Maximum rows to return. |
-| `--since` | (none) | Filter to initiatives created since the given duration (e.g., `24h`, `7d`). |
-| `--format` | `table` | `table` for human reading; `json` for tooling. |
+| Flag | Default | Effect | Origin |
+|---|---|---|---|
+| `--state` | `active` (v1 default; v2 keeps it) | v1 buckets: `active`, `completed`, `quarantined`, `all`. **v2 additions**: also accept the canonical FSM states `Draft`, `ApprovedPlan`, `Executing`, `Blocked`, `Paused`, `Completed`, `Failed`, `Aborted`, comma-separated. The four v1 buckets are sugar that expands to the underlying state set. | v1 + v2 ext. |
+| `--limit` | `50` (v1) / `20` (v2 default after §15.4 migration) | Maximum rows. v2 lowers the default after the description column lands so the table fits one screen. | v1 + v2 tweak |
+| `--json` | off | Emit one JSON object instead of the human table. v1 alias for `--format json`. | v1 |
+| `--mine` | off | **v2 only.** Filter to initiatives whose plan was signed by the currently-loaded operator key (`signed_plan_artifacts.signed_by_fingerprint == <my fingerprint>`). | v2 |
+| `--since` | (none) | **v2 only.** Filter to initiatives created since the given duration (e.g. `24h`, `7d`). Parsed via the v1 duration grammar in `cli-readonly.md §5.5.4 (raxis log)`. | v2 |
+| `--format` | `table` | **v2 only.** `table` for human reading, `json` for tooling. Mutually exclusive with `--json`; combining the two is a usage error. `--json` remains supported for v1-script compatibility. | v2 |
 
 ### 15.3 Output
+
+**v1 baseline** (the `cli-readonly.md §5.5.6b` table; ships today):
+
+```
+Initiatives (state=active, 3 rows):
+  initiative_id              state          [Q]  created (rel) plan_sha256
+  01J8…init-x                Executing           12m           abc123…
+  01J8…init-y                Blocked        [Q]  1h            def456…
+  01J8…init-z                Draft               2h            beef00…
+```
+
+**v2 extension** (adds `OPERATOR`, `TASKS`, `DESCRIPTION` columns; the `[Q]` flag remains):
 
 ```
 ID                                    STATE       OPERATOR        AGE     TASKS    DESCRIPTION
@@ -1089,6 +1102,19 @@ ID                                    STATE       OPERATOR        AGE     TASKS 
 01H8P4R3M1...                         Completed   bob:91cd...     2h      4/4      Bump axum to 0.7
 01H8M2X8N5...                         Paused      alice:f3a2...   1d      1/3      Refactor auth flow (escalation pending)
 ```
+
+The v2 columns require:
+
+- **OPERATOR** column → `signed_plan_artifacts::header_by_initiative` joined into the listing query, then routed through `cli/src/operator_display::format_operator_with_lookup` (same convention as `raxis inspect-initiative`, `raxis log`, `raxis inbox`).
+- **TASKS** column → a `views::tasks::counts_by_initiative(initiative_id) -> (terminal: u32, total: u32)` per-row aggregate. The aggregate must be a single SQL query over the row set (a `GROUP BY initiative_id` against `tasks`), NOT a per-row `COUNT(*)`, so the listing remains O(1) DB round-trips.
+- **DESCRIPTION** column → reads `signed_plan_artifacts.plan_bytes`, parses the TOML, and surfaces the top-level `description = "..."` field. Truncated to 80 chars in the human render. Behind a TODO until `plan prepare` writes a canonical `description` field per §5.
+
+### 15.4 Implementation plan (v2)
+
+1. **Reuse the v1 store seam.** `views::initiatives::list_filtered` already accepts the v1 `InitiativeListFilter`. Add a richer `InitiativeListFilterV2` enum (or extend the existing one with a `Custom { states: Vec<&'static str> }` variant) that supports comma-separated FSM-state values and the v2 `--since` predicate. The v1 buckets desugar to v2 state sets so the v1 path stays unchanged.
+2. **Extend the row shape.** Add `InitiativeListRowV2 { v1: InitiativeListRow, signed_by: Option<OperatorFingerprint>, task_counts: TaskCounts, description: Option<String> }` so the new render columns are populated by a single round-trip. Keep `InitiativeListRow` (v1) as the narrower projection — the v1 CLI never pays for the v2 joins.
+3. **Wire the new flags.** `cli/src/commands/initiatives.rs` gains a `parse_args_v2` path that accepts the v2 flag set, with a mutual-exclusion check between `--json` and `--format json`. Keep the v1 parser as the authoritative one for the v1 binary; v2 is a shim that delegates back when only v1-known flags are present.
+4. **Tests.** Mirror `cli-readonly.md §5.9` — one golden fixture per render variant (table v2, JSON v2), plus a "v1 invocation on v2 binary" round-trip that pins forward compatibility.
 
 ---
 
@@ -1575,7 +1601,8 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 - [ ] `raxis-cli submit plan --dry-run` per §12 (extends the existing `submit plan` command).
 - [ ] `raxis-cli initiative watch <id> [--follow] [--task]` per §13.
 - [ ] `raxis-cli initiative resume <id>` per §14.
-- [ ] `raxis-cli initiative list [--state] [--mine] [--limit] [--since]` per §15.
+- [x] `raxis-cli initiative list [--state] [--limit] [--json]` v1 baseline per `cli-readonly.md §5.5.6b` — landed in v1, not deferred to v2.
+- [ ] `raxis-cli initiative list [--mine] [--since] [--format table|json]` v2 extensions per §15 — strictly extend the v1 baseline (added flags + columns; never removes a v1 flag).
 - [ ] `raxis-cli setup wizard [--non-interactive --config <path>]` per §16.
 - [ ] `raxis-cli doctor [policy|providers|host|network|keys|bundles|all]` per §17.
 - [ ] CLI's TOML formatter produces canonical output per §10.3; `plan prepare` invokes it as final phase.

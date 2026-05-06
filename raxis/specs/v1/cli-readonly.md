@@ -545,6 +545,79 @@ When the initiative is quarantined, the `Quarantine: YES` block expands inline w
 
 **Exit codes:** `0` on success; `1` on `INITIATIVE_NOT_FOUND` (the only command-specific error — the renderer cannot tell `--task-limit 0` from "no tasks", so an empty task list is rendered explicitly rather than treated as an error).
 
+### §5.5.6b — `raxis initiative list`
+
+**Purpose:** the read-only bucketed listing that sits alongside `raxis sessions` and `raxis escalations`. Answers the operator's recurring at-a-glance question "what initiatives are in flight, what shipped, and which are frozen?" in a single command. Companion to (not replacement for) the per-row deep-dive `raxis inspect-initiative` (§5.5.6a).
+
+**Why this command exists separately from `raxis initiative abort` / `raxis initiative quarantine`:** the singular-noun sub-actions are *mutating* operator commands (live in `cli/src/commands/initiative.rs` per `cli-ceremony.md` §4.6). This command is the listing companion (lives in `cli/src/commands/initiatives.rs`) and never opens `operator.sock` — same `escalation.rs` (mutating) vs. `escalations.rs` (read-only) split as §5.5.6.
+
+**Invocation:**
+
+```
+raxis initiative list [--state active|completed|quarantined|all] [--limit N] [--json]
+```
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--state` | `active` | Bucket filter — see "Bucket semantics" below. Case-insensitive (`active` and `Active` are equivalent). |
+| `--limit` | `50` | Maximum rows. Must be `> 0`. Caps an accidental `--state all` from flooding the TTY on long-running hosts. |
+| `--json` | off | Emit one JSON object instead of the human table. |
+
+**Bucket semantics** (deliberate, operator-friendly):
+
+| Bucket | Predicate (in `views::initiatives::list_filtered`) | Why |
+|---|---|---|
+| `active` | `state IN ('Draft', 'ApprovedPlan', 'Executing', 'Blocked')` | Non-terminal states only — answers "what is currently being worked on?". This is the default because it's the operator's most-frequent question. |
+| `completed` | `state = 'Completed'` | The successful terminal ONLY. `Failed` and `Aborted` are deliberately omitted because the operator's natural follow-up after "completed" is "tag and announce", which is wrong for the failure terminals. Power users reach `Failed` / `Aborted` via `--state all` or `raxis inspect-initiative`. |
+| `quarantined` | `EXISTS (SELECT 1 FROM initiative_quarantines q WHERE q.initiative_id = i.initiative_id)` | Orthogonal to the FSM. Returns ANY initiative with a quarantine row regardless of state — overlaps with `active` and `completed`. Modelled as a first-class bucket because "what is frozen for security right now?" is a distinct question. |
+| `all` | (no `WHERE` predicate) | Everything. Newest-first by `created_at`, capped by `--limit`. |
+
+**Output (human):**
+
+```
+Initiatives (state=active, 3 rows):
+  initiative_id              state          [Q]  created (rel) plan_sha256
+  01J8…init-x                Executing           12m           abc123…
+  01J8…init-y                Blocked        [Q]  1h            def456…
+  01J8…init-z                Draft               2h            beef00…
+  ([Q] = quarantined; see `raxis inspect-initiative <id>` for details.)
+```
+
+The `[Q]` column surfaces the joined quarantine flag on **every** row (regardless of bucket) so an operator scanning the `active` table can spot frozen-but-still-running initiatives without an explicit `--state quarantined` query. The footer legend renders only when at least one row is quarantined — keeps the steady-state output noise-free.
+
+**Output (`--json`):**
+
+```json
+{
+  "filter": "active",
+  "count": 3,
+  "rows": [
+    {
+      "initiative_id":        "01J8...init-x",
+      "state":                "Executing",
+      "plan_artifact_sha256": "abc123...",
+      "created_at":           1700000000,
+      "approved_at":          1700000010,
+      "completed_at":         null,
+      "quarantined":          false
+    }
+  ]
+}
+```
+
+`filter` is one of `active|completed|quarantined|all` (lowercase, mirrors the flag value). `rows` is always an array (possibly empty). Every row carries the `quarantined: bool` field. Operator-bearing fields (`signed_by`, `quarantined_by`) are NOT included — operators inspect those via `raxis inspect-initiative <id>`. Including them here would force this command to load the operator-name lookup, which would push the steady-state cost above what a one-second listing should pay.
+
+**Data sources:**
+
+- `<data_dir>/kernel.db` opened READ-ONLY via `raxis_store::open_ro`.
+  - `views::initiatives::list_filtered(conn, filter, limit) -> Vec<InitiativeListRow>` — the bucketed list with a `LEFT JOIN initiative_quarantines` so the per-row `quarantined` flag is one round-trip away from the row data.
+
+**Wire shape:** none. This command never opens `operator.sock`; the `--data-dir` global flag is the only addressing input. Mirrors `raxis sessions` (§5.5.8) and `raxis escalations` (§5.5.7).
+
+**Exit codes:** `0` on success (including the empty-result case — an empty bucket is rendered explicitly with `(no initiatives)` rather than treated as an error). `1` only on a `Policy(...)` error from the underlying view (e.g. corrupted `kernel.db`).
+
+**v2 extensions** (deferred to `v2/operator-ergonomics.md` §15): `--mine` to filter to the loaded operator's fingerprint, `--since <duration>` time-windowing, `--format table|json` (a richer alias for `--json`), and per-row task progress (`tasks` column). The v2 surface strictly extends this v1 baseline — it adds flags, never removes them, and the four-bucket `--state` set documented here remains valid.
+
 ### §5.5.7 — `raxis escalations`
 
 **Purpose:** the operator's inbox.
