@@ -261,6 +261,30 @@ Halt applies at admission only — operations already past admission continue. T
 
 Audit writes are reserved against a separate budget: `audit_reserved_mb` (default 1024, fenced inside the `min_free_disk_mb` headroom). Even when the rest of the system is in `DiskFullHalt`, audit writes succeed against this reserve. The kernel cannot continue without the ability to write audit events (INV-05); if even the audit reserve is exhausted, the kernel halts entirely (§7.6).
 
+#### 7.5.1 Disk-pressure abort audits
+
+Subsystems that abort an in-flight operation because of disk
+pressure MUST emit a structured audit event against the audit
+reserve before the abort returns to its caller. This preserves
+forensic completeness through the entire pressure window — every
+aborted operation appears in the chain, indistinguishable in
+discoverability from a successful operation.
+
+The canonical disk-pressure abort audits in V2:
+
+| Subsystem | Audit event | Canonical home |
+|---|---|---|
+| Gateway streaming spill (`max_response_buffer_mb`) breached | `InferenceAttemptAborted { abort_reason: DiskPressure }` | `provider-failure-handling.md §7.4.1` |
+| Verifier-VM staging area cap breached | `VerifierAbortedByDiskPressure` | `verifier-processes.md §10` (extension) |
+| Plan-bundle staging during admission | `PlanBundleAdmissionAbortedByDiskPressure` | `plan-bundle-sealing.md §8.1` (admission step 3a, future extension) |
+
+A subsystem that aborts on disk pressure WITHOUT writing one of
+these audit events is a spec violation. Test surfaces in each
+subsystem's spec MUST include a disk-pressure abort case that
+asserts the audit event is committed before the abort path returns
+to its caller. See `provider-failure-handling.md §7.4.2` for the
+detailed rationale (forensic missing-half pattern).
+
 ### 7.6 Audit reserve exhausted: total halt
 
 The total-halt response is categorical: the kernel does not log-and-continue on audit failure. See §15.2 for the design rationale (an un-audited state change is indistinguishable from forgery to a future auditor; INV-05 cannot tolerate gaps in the chain).

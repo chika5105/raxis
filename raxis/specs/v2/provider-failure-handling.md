@@ -488,6 +488,37 @@ state RequestProcessing:
                 })
                 update breaker.record_failure(model)
                 continue loop
+
+            Ok(GatewayInvokeResult { AbortedByDiskPressure,
+                                       bytes_received,
+                                       estimated_input_tokens,
+                                       spill_bytes_freed }) →
+                # Worker aborted because min_free_disk_mb was breached
+                # during spilling (§7.4). Audit MUST emit against the
+                # audit reserve (§7.4.1) so the abort is forensically
+                # visible even under disk-pressure halt.
+                audit InferenceAttemptAborted {
+                    request_id, attempt_id,
+                    attempt_idx,
+                    alias, resolved_model: model,
+                    abort_reason: DiskPressure {
+                        free_mb_at_abort,
+                        min_free_disk_mb,
+                    },
+                    bytes_received,
+                    estimated_input_tokens,
+                    estimated_output_tokens: None,
+                    spill_bytes_freed,
+                    aborted_at_ms: now(),
+                }
+                attempts.push(AttemptRecord {
+                    model, outcome: Unavailable,
+                    tokens_billed_estimated: estimated_input_tokens,
+                    ...
+                })
+                # Disk pressure is a host condition, not a model
+                # condition — do NOT trip the provider breaker.
+                continue loop
 ```
 
 **Properties of this loop:**
@@ -890,7 +921,95 @@ When buffered bytes exceed `max_response_buffer_mb` (default 64), the Gateway sp
 - Deleted when the attempt completes (success or failure).
 - Cleaned by the Gateway supervisor at startup (any leftover spill from previous worker crashes is garbage).
 
-If `min_free_disk_mb` is breached during spilling (per `host-capacity.md §7`), the Gateway worker aborts the in-flight read, returns `Unavailable` (treated as a retriable failure), and the Kernel applies retry policy. The kernel does NOT auto-spawn a new attempt with a higher disk budget — the retry uses the same buffer/spill caps.
+If `min_free_disk_mb` is breached during spilling (per
+`host-capacity.md §7`), the Gateway worker aborts the in-flight
+read, returns a `GatewayInvokeResult::AbortedByDiskPressure`
+variant carrying the bytes-received-so-far counter and the
+gateway-side input-token estimate, and the Kernel applies retry
+policy. The kernel does NOT auto-spawn a new attempt with a higher
+disk budget — the retry uses the same buffer/spill caps.
+
+#### 7.4.1 Mandatory audit emission on disk-pressure abort
+
+The kernel writes an `InferenceAttemptAborted` audit event before
+the retry-loop iteration continues. The write goes against the
+**audit reserve** (`host-capacity.md §7.5`,
+`audit_reserved_mb = 1024` by default), so it succeeds even when
+the rest of the system is in `DiskFullHalt`:
+
+```rust
+AuditEventKind::InferenceAttemptAborted {
+    request_id:                Uuid,
+    attempt_id:                Uuid,
+    attempt_idx:               u32,
+    alias:                     String,
+    resolved_model:            ResolvedModel,
+    abort_reason:              InferenceAttemptAbortReason,
+    bytes_received:            u64,                    // bytes received from upstream before abort
+    estimated_input_tokens:    u32,                    // gateway-side per-provider estimator
+    estimated_output_tokens:   Option<u32>,            // None if no end-of-stream observed
+    spill_bytes_freed:         u64,                    // bytes reclaimed when the spill file was deleted
+    aborted_at_ms:             u64,
+}
+
+enum InferenceAttemptAbortReason {
+    DiskPressure {
+        free_mb_at_abort:      u64,
+        min_free_disk_mb:      u64,
+    },
+    KeyCompromised {                                    // §6.1.1 / INV-PROVIDER-10
+        key_ref:               KeyRef,
+        revocation_reference:  RevocationReference,
+    },
+    OperatorAbort {                                     // raxis session abort mid-stream
+        operator_id:           OperatorId,
+    },
+}
+```
+
+The event is structurally distinct from `InferenceAttempt` (which
+records dispatch) and `InferenceCompleted` (which records the
+provider's final accounting): both `InferenceAttempt` and
+`InferenceAttemptAborted` are written for the same `attempt_id`
+when an abort fires, leaving an audit-chain pair that pinpoints
+exactly which dispatched attempts were terminated by which abort
+class. The retry loop's `attempts.push(AttemptRecord { ... })`
+records the same outcome as the audit event for the per-request
+audit summary at `InferenceCompleted` / `InferenceFailed` time.
+
+`spill_bytes_freed` is provided so observability dashboards can
+graph "audit-recorded disk reclamation under pressure" against
+`free_mb` to validate the abort path actually relieves pressure.
+A non-zero value confirms the spill file existed and was deleted as
+part of the abort; a zero value indicates the abort fired before
+spilling began (i.e., during in-memory buffering).
+
+The token-estimate fields use the gateway worker's per-provider
+input-token estimator (already present per §8.3) so the operator's
+budget reconciliation captures the worst-case spend even on aborted
+attempts. The provider's actual billing for the partial call is
+unknowable; the estimator overshoots conservatively, which is
+correct under `INV-PROVIDER-06` (every attempt that consumed
+provider tokens MUST be debited).
+
+The audit-reserve write path is the standard
+`AuditSink::emit_within_reserve` per `host-capacity.md §7.5`; if
+that path is unable to write (i.e., the audit reserve itself is
+exhausted), the kernel transitions to `AuditWriteImpossible` per
+§7.6 and halts. The retry-loop continuation never observes a
+silently-skipped abort audit.
+
+#### 7.4.2 Why audit-on-abort matters
+
+Without the §7.4.1 emission, a sustained disk-pressure event would
+abort streaming responses with no audit-chain trace. Forensic
+review of the period would show `InferenceAttempt` rows with no
+matching `InferenceCompleted` or `InferenceFailed` row — a
+"missing-half" pattern indistinguishable from a kernel crash mid-
+attempt or an audit gap. With the emission, every aborted attempt
+appears explicitly in the chain alongside its abort reason,
+preserving forensic completeness through the entire pressure
+window.
 
 ### 7.5 V2 does NOT support resumable streams
 
