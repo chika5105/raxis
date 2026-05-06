@@ -9,6 +9,8 @@
 > - `specs/v2/planner-harness.md §5.6` — In-VM background-process cleanup sweep on `SessionPausing` (referenced by §7.1 below)
 > - `specs/v2/planner-harness.md §10.2` — Linux 5.14+ VM guest kernel requirement (provides `cgroup.kill` for the universal reap at hypervisor stop)
 > - `specs/v2/verifier-processes.md §4.4` — Verifier-VM teardown sequence (host-side cgroup cleanup; verifier-cgroup orphan sweep on kernel restart per §10.2)
+> - `specs/v2/extensibility-traits.md §6` — `OperatorTransport` trait; the operator-socket bind described in §3 (kernel start) and the implementation checklist in §13 delegate to `Arc<dyn OperatorTransport>::bind` (V2 default `UnixSocketTransport`). Future transports (mTLS gRPC for RAXIS Cloud, serial relay for air-gapped) plug in here without changing the lifecycle states/signals/recovery flows in this spec.
+> - `specs/v2/extensibility-traits.md §9` — boot composition order; the kernel's `main.rs` constructs `AuditSink → CredentialBackend → InferenceRouter → IsolationBackend → DomainAdapter → OperatorTransport` in that exact order before entering `accept_loop`.
 
 ---
 

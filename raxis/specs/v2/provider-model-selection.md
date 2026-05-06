@@ -21,6 +21,13 @@
 >   `override_reviewer_alias` field for V2.x per-environment overrides
 > - `invariants.md INV-02A`, `INV-02B`, `INV-PROVIDER-01` — the
 >   mediation and credential-isolation guarantees this spec rests on
+> - `extensibility-traits.md §7` — `InferenceRouter` trait; the
+>   resolved `(provider_id, model_id)` this spec produces is consumed
+>   by an `InferenceRouter` impl (V2 default = `HttpsGatewayRouter`).
+>   Operators on a `LocalVllmRouter` deployment configure
+>   `[provider_aliases_defaults]` exactly the same way — the policy
+>   schema is unchanged across routers; only the boot-site router
+>   selection differs.
 
 ---
 

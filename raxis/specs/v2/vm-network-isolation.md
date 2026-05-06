@@ -11,6 +11,7 @@
 > - `environment-access-control.md §4` — *This section's `EgressRequest` admission order is V1-flavored; V2 uses two-tier network-layer enforcement and there is no `EgressRequest` intent. The spec needs a separate amendment to align.*
 > - `planner-harness.md §7` — V2 unified egress overview (this spec + `credential-proxy.md`)
 > - `custom-tools.md` — operator-defined custom tools. A custom-tool subprocess shares the planner VM's network namespace and is therefore subject to the same Tier 1 (tproxy SNI allowlist) and Tier 2 (credential proxy URL/method allowlist) enforcement as any other in-VM process. Custom tools introduce **no new authority surface** at the network layer; an HTTP call from a custom-tool script reaches the same tproxy / credential-proxy checks a `bash`-invoked HTTP call would.
+> - `extensibility-traits.md §3` — `IsolationBackend` trait. This spec describes the Tier-1 networking contract every conformant isolation backend MUST satisfy: VM with no virtio-net interface to the host, all egress routed through `raxis-tproxy` running on a kernel-side network namespace, SNI inspection enforced. The V2 default `FirecrackerIsolation` and `AppleVirtualizationIsolation` impls both meet this; future enclave-based isolation impls (TDX/SEV-SNP) MUST too, verified by the `IsolationBackend` conformance kit's network-isolation test fixture.
 
 ---
 

@@ -9,6 +9,7 @@
 > - `specs/v2/credential-proxy.md` — `INV-VM-CAP-04`; constrains VM-side credential exposure but does not change host requirements
 > - `specs/v2/integration-merge.md` — git binary / `gix` requirements
 > - `specs/v2/planner-harness.md` — VM guest kernel ≥ 5.14 + cgroup v2 controllers (`INV-PLANNER-HARNESS-03`); kernel-bundled `raxis-reviewer-core` image (`INV-PLANNER-HARNESS-02`); kernel-bundled `raxis-orchestrator-core` image (`INV-PLANNER-HARNESS-05`); opt-in kernel-bundled `raxis-executor-starter` image (§10.6) consumed by `operator-ergonomics.md` defaulting
+> - `specs/v2/extensibility-traits.md §3` — `IsolationBackend` trait; this spec's §5 (Hypervisor) describes the V2-shipped impls (`FirecrackerIsolation`, `AppleVirtualizationIsolation`, `NamespaceIsolation` fallback). Future impls (Intel TDX/AMD SEV-SNP enclaves) plug in here without changing the rest of this requirements catalog. The §11 `raxis doctor` check matrix gains an explicit `[CHECK] isolation.tier` per the trait's conformance contract.
 
 ---
 
