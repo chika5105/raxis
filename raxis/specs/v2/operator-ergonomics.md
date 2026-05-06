@@ -489,6 +489,7 @@ raxis-cli plan prepare <plan.toml> [--upgrade-defaults] [--keep-original]
 | `--dry-run` | off | Compute the augmented plan in memory; print the diff to stdout; do NOT write to disk. Equivalent to `raxis-cli plan diff <plan.toml>` (§8) but with the diff computation done by the kernel rather than locally. |
 | `--suggest-from <path>` | auto-detect from `$PWD` via `git rev-parse --show-toplevel` | Override the worktree root used for path-allowlist top-level-directory suggestions per §4.5.6. Useful when editing `plan.toml` from a different directory than the target worktree. Pass an absolute path; the CLI validates it is a git worktree (running `git -C <path> rev-parse --git-dir`) and aborts with a clear error if not. |
 | `--no-suggest` | off | Disable path-allowlist directory suggestions entirely; insert the bare §4.5.3 template with no detected-at-HEAD comments. Useful in CI environments where `$PWD` happens to be a git worktree but is not the target worktree, AND the operator does not want to pass `--suggest-from`. Has no effect on tasks whose `path_allowlist` is already declared. |
+| `--offline` | off | Skip phase 3+ (IPC + defaultable-field resolution); run phase 2 (§4.5 template insertions) only and persist the result to `plan.toml` with a `# @raxis-prepare-partial offline=true …` marker prepended (§5.4.2). Exit code `4`. Useful for laptop editing when the kernel daemon is unreachable. Without `--offline`, phase 3 failure produces exit code `4` but does NOT write phase-2 changes to disk (refuses the half-prepared state). See §5.7 for the full offline-mode semantics. |
 
 ### 5.2 Phases
 
@@ -637,6 +638,62 @@ The response is always pure-function-of-inputs: same `(plan_bytes, current_polic
 | `FAIL_PLAN_PARSE_ERROR { detail }` | The provided `plan.toml` is not valid TOML, or violates plan schema. | Fix the TOML error. |
 | `FAIL_PLAN_FIELD_NOT_DEFAULTABLE { field }` | The operator placed a `# @raxis-default` annotation on a field NOT in §4.2. | Remove the annotation; the field is operator-owned. |
 | `FAIL_POLICY_DEFAULT_UNRESOLVABLE { field }` | A defaultable field requires a policy value (e.g., `[default_executor_image] alias` for `vm_image`) but the policy does not declare one. | Add the missing policy entry; re-push the policy bundle. |
+| `FAIL_PREPARE_KERNEL_UNREACHABLE { socket_path, errno }` | Phase 3 (IPC) could not establish a connection to the operator socket: socket file does not exist, connection refused, permission denied, or the handshake timed out. Phase 2 (local-pre) MAY have already written §4.5 template insertions to disk per `--offline` semantics below. | Start the kernel daemon; or pass `--offline` to suppress phase 3+ entirely (see §5.7). |
+
+#### 5.4.1 Distinct exit codes
+
+`plan prepare` distinguishes seven outcomes via POSIX exit code so
+shell pipelines and CI scripts can react precisely without
+parsing stdout:
+
+| Exit code | Meaning | Phase 2 disk write | Phase 4 defaults filled |
+|---|---|---|---|
+| `0` | Full success: phase 2 ran, phase 3 + 4 + 5 succeeded, the augmented plan was written to disk. | yes | yes |
+| `2` | Local-pre warnings only: phase 2 emitted non-fatal warnings (e.g. §4.5.3 template insertion, unused-acknowledgement notice), phase 3-5 succeeded; the augmented plan was written. Distinct from `0` so CI can detect "review the warnings" without conflating them with hard failures. | yes | yes |
+| `3` | Phase 2 hard refusal (e.g. §4.5.5 Reviewer-path-allowlist abort): the CLI refuses to proceed; no disk write; the original `plan.toml` is untouched. | no | no |
+| `4` | Phase 2 success, **kernel unreachable** (`FAIL_PREPARE_KERNEL_UNREACHABLE`): phase 2's §4.5 template insertions ARE persisted IF AND ONLY IF the operator passed `--offline` (see §5.7). Without `--offline`, the CLI does NOT write phase-2 changes — refusing to leave a file in a half-prepared state where defaultable fields are missing. | only with `--offline` | no |
+| `5` | Phase 4-5 IPC error from the kernel (`FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED`, `FAIL_POLICY_DEFAULT_UNRESOLVABLE`, `FAIL_PLAN_FIELD_NOT_DEFAULTABLE`, `FAIL_PLAN_PARSE_ERROR` from the kernel-side parser): the kernel rejected the prepare. No disk write. | no | no |
+| `64` | CLI usage error (invalid flag combination, e.g. `--suggest-from <path>` where `<path>` is not a git worktree, or unknown flag). | no | no |
+| `1` | Catch-all for unexpected internal errors (panic, I/O error reading `plan.toml`, etc.). | no | no |
+
+The choice of `64` for usage error matches BSD `sysexits.h` so
+RAXIS-CLI integrates with standard Unix error-handling conventions.
+Operators implementing wrappers should treat anything `>= 64` as an
+unrecoverable usage problem, `0..=2` as success-like, and
+`3..=5` as actionable failure paths.
+
+#### 5.4.2 Marker comment for partial preparation
+
+When phase 2 successfully writes §4.5 template insertions to
+disk but phase 3+ did not run (`--offline` mode, exit code `4`),
+the CLI prepends an OFFLINE marker to `plan.toml` so a subsequent
+`submit plan` invocation can detect the half-prepared state and
+fail loudly rather than silently submitting a plan with missing
+defaultable fields:
+
+```toml
+# @raxis-prepare-partial offline=true cli_version="<semver>" prepared_at="<RFC3339-utc>"
+# This plan was prepared with `raxis-cli plan prepare --offline` and
+# has had local §4.5 templates inserted, but defaultable fields
+# (per operator-ergonomics.md §4.2) were NOT filled because the
+# kernel daemon was unreachable. Re-run `raxis-cli plan prepare`
+# (without --offline) before signing and submitting.
+
+# (rest of plan.toml follows)
+```
+
+`submit plan` parses this marker BEFORE TOML parsing (line-prefix
+match for `# @raxis-prepare-partial offline=true`) and fails with
+`FAIL_PLAN_PARTIAL_PREPARE_DETECTED { prepared_at, cli_version }`.
+The operator must re-run `plan prepare` (which detects and removes
+the marker after a successful full run, per §5.6 idempotency) or
+explicitly delete the marker line if they intend to submit
+without further preparation.
+
+The marker is plain comment lines so existing TOML parsers
+(including operator hand-edits) ignore it. The CLI's marker writer
+uses byte-exact strings so the parser can scan for the prefix
+without invoking a TOML parser.
 
 ### 5.5 Audit
 
@@ -660,6 +717,94 @@ The audit event is rate-limited per operator fingerprint to prevent DoS via repe
 ### 5.6 Idempotency guarantee
 
 Two consecutive `plan prepare` invocations on the same input plan, against the same policy epoch and same CLI version, produce byte-identical output plans. The CLI uses this to detect "no-op prepare" runs and exit with a one-line `plan already prepared; no changes` message rather than rewriting the file with identical bytes (which would dirty the operator's git index).
+
+### 5.7 Offline mode (`--offline`)
+
+Phase 2 of `plan prepare` is structurally local-only (§5.2 phase 2
+rationale): template insertions, marker-block detection, annotation
+parsing, and worktree directory listing all operate on the
+operator's own bytes and filesystem. Phase 3+ requires the kernel
+to be reachable via the operator socket.
+
+Two distinct disconnection scenarios deserve different handling:
+
+1. **The operator intentionally edits offline** (e.g., on a laptop
+   on a plane, or in an air-gapped network segment). They want
+   the §4.5 ergonomics work persisted now, plan to re-run
+   `plan prepare` later when the kernel is reachable, and
+   accept that the file is *partially* prepared in the
+   meantime. They pass `--offline`.
+2. **The operator did NOT realize the kernel is down.** They
+   expect a full prepare; phase 3 unexpectedly fails. Persisting
+   phase-2 changes silently in this case would leave the
+   operator with a half-prepared `plan.toml` that fails at
+   `submit plan` later in a confusing way ("but I just ran
+   prepare!"). Better: refuse the disk write, surface the kernel
+   unreachability clearly, and leave the original file untouched.
+
+The default (no `--offline`) implements scenario 2: phase 3 IPC
+failure produces `FAIL_PREPARE_KERNEL_UNREACHABLE`, exit code 4,
+and the original `plan.toml` is preserved. The CLI's stderr
+message is:
+
+```
+error: kernel daemon unreachable on socket /var/run/raxis/operator.sock
+       (connection refused: errno=111)
+
+       phase 2 of `plan prepare` ran successfully but its changes
+       were NOT persisted, because phase 3 (defaults resolution)
+       could not run.
+
+       to start the daemon: raxis daemon start
+       to persist phase 2's §4.5 template insertions despite
+       the kernel being unreachable, re-run with --offline.
+```
+
+`--offline` implements scenario 1: phase 2 runs, the augmented
+bytes are written to disk WITH the §5.4.2 marker prepended, and
+the CLI exits with code 4 (so script callers know the plan is
+NOT fully prepared). The marker MUST be the very first line of
+the file (or, if a `# @plan-toml` magic-line marker is present,
+the line immediately after it — preserving the convention where
+the magic line is always line 1).
+
+#### Re-running prepare after offline
+
+A subsequent `raxis-cli plan prepare` (without `--offline`) on a
+file carrying the `# @raxis-prepare-partial offline=true` marker:
+
+1. Phase 2 re-runs: idempotent per §5.6 (template marker blocks
+   are detected and not duplicated).
+2. Phase 3 IPC connects.
+3. Phase 4-5 fill defaultable fields per §4.2.
+4. Phase 6 (write) **removes** the partial-prepare marker as
+   part of the write — the augmented bytes no longer have the
+   half-prepared property, so the marker is no longer
+   accurate. The CLI's report (phase 7) explicitly notes the
+   marker removal: `[plan prepare] removed offline marker
+   (file is now fully prepared as of <RFC3339>)`.
+
+Re-running `plan prepare --offline` on an already-marked file is
+idempotent: phase 2 re-runs (no-op for already-templated tasks);
+the marker is rewritten with the latest CLI version and timestamp.
+
+#### Operator-side warning when re-running --offline on a fully prepared plan
+
+If `--offline` is passed against a `plan.toml` that has NO
+partial-prepare marker AND no §4.5 template insertions are
+needed (phase 2 produces no changes), the CLI emits:
+
+```
+warning: --offline was passed but plan.toml has no pending
+         §4.5 template work; phase 2 is a no-op. The kernel
+         was NOT contacted; defaultable fields per §4.2 were
+         NOT verified. Re-run without --offline to fully
+         prepare.
+```
+
+Exit code `2` (warning, not failure). This catches the case
+where an operator habitually passes `--offline` and forgets
+that defaults still need a kernel round-trip.
 
 ---
 
@@ -1714,6 +1859,11 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 - [ ] `submit plan` on an Executor task with `path_allowlist = ["/etc/secrets/"]` → `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX { reason: "absolute_path" }`.
 - [ ] `submit plan` on an Executor task with `path_allowlist = ["../escape/"]` → `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX { reason: "path_escape" }`.
 - [ ] `plan prepare` warns about `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` reasons pre-signing per phase 2.f; warning is non-fatal at `plan prepare` (operator may still want to write the bytes for a different deployment); `submit plan` is the hard gate.
-- [ ] `plan prepare` runs successfully when the kernel daemon is DOWN (per §5.2 phase 2 design): phase 2 (local-pre) completes; phase 3 (IPC) fails with a clear "kernel unreachable" error; the §4.5 template insertions ARE persisted to `plan.toml`. Operators editing offline get the path-allowlist ergonomics work even when not connected.
+- [ ] `plan prepare` (no `--offline`, kernel down): phase 2 (local-pre) completes IN MEMORY; phase 3 (IPC) fails with `FAIL_PREPARE_KERNEL_UNREACHABLE`; CLI exits `4`; the original `plan.toml` is left untouched (no disk write — the operator did not opt in to the half-prepared state).
+- [ ] `plan prepare --offline` (kernel down): phase 2 runs and writes augmented bytes to `plan.toml` with the `# @raxis-prepare-partial offline=true cli_version=… prepared_at=…` marker prepended (§5.4.2); CLI exits `4`; subsequent `submit plan` on the same file fails fast with `FAIL_PLAN_PARTIAL_PREPARE_DETECTED` BEFORE invoking the TOML parser (line-prefix scan).
+- [ ] `plan prepare` (no `--offline`, kernel UP) on a `plan.toml` carrying the partial-prepare marker: phase 2 idempotently re-runs (no template duplication per §5.6); phase 3-5 succeed; phase 6 writes augmented bytes WITHOUT the marker (full prepare); phase 7 reports `removed offline marker`. Re-running once more is a no-op (§5.6).
+- [ ] `plan prepare --offline` on a `plan.toml` already fully prepared (no §4.5 work pending, no marker): phase 2 produces no changes; CLI emits the §5.7 warning ("--offline was passed but no §4.5 template work pending") and exits `2`. The file is unchanged on disk (no marker added if no changes were made).
+- [ ] Distinct exit codes per §5.4.1: `0` (full success), `2` (warnings), `3` (phase-2 hard refusal e.g. §4.5.5), `4` (kernel unreachable, with or without `--offline`), `5` (phase 4-5 IPC error), `64` (CLI usage error), `1` (catch-all). Each path has a dedicated CLI test asserting the exit code.
+- [ ] `submit plan` parses the partial-prepare marker BEFORE TOML parsing (line-prefix match, no TOML invocation) so a malformed plan with the marker still emits the partial-prepare error rather than the parse error.
 - [ ] `TaskWriteScope::Bound { paths }` audit: paths array is the operator's declared `path_allowlist` verbatim (not a normalized form); auditors see the operator's exact intent.
 - [ ] `TaskWriteScope::NotApplicable` audit fires for every Reviewer and Orchestrator task in the plan; auditors can grep `task_write_scopes` and see at a glance which tasks have write authority.

@@ -1191,6 +1191,8 @@ is the failure-code index.
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
 | `FAIL_PLAN_REQUIRES_PREPARE { missing_fields }` | `submit plan` admission | The plan omits at least one defaultable field whose policy default is set; the operator did not run `plan prepare` first. | `operator-ergonomics.md §20` |
+| `FAIL_PLAN_PARTIAL_PREPARE_DETECTED { prepared_at, cli_version }` | `submit plan` (pre-TOML-parse line-prefix scan) | The plan carries a `# @raxis-prepare-partial offline=true …` marker (`operator-ergonomics.md §5.4.2`) indicating the operator ran `plan prepare --offline` (kernel was unreachable) and never re-ran prepare against a live kernel. Defaultable fields per §4.2 may be missing. | `operator-ergonomics.md §5.7` |
+| `FAIL_PREPARE_KERNEL_UNREACHABLE { socket_path, errno }` | `plan prepare` phase 3 (IPC) | The CLI could not reach the kernel daemon on the operator socket. Without `--offline`, no disk write occurs and the original plan is preserved; with `--offline`, phase 2 changes are persisted with a partial-prepare marker. | `operator-ergonomics.md §5.4` |
 | `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED { fields }` | `plan prepare` IPC | At least one annotated field's policy-default value has drifted; `--upgrade-defaults` not passed. | `operator-ergonomics.md §5.4` |
 | `FAIL_PLAN_FIELD_NOT_DEFAULTABLE { field }` | `plan prepare` IPC | The operator placed a `# @raxis-default` annotation on a field NOT in the defaultable set. | `operator-ergonomics.md §4.2` |
 | `FAIL_POLICY_DEFAULT_UNRESOLVABLE { field }` | `plan prepare` IPC | A defaultable field requires a policy value the policy doesn't declare. | `operator-ergonomics.md §5.4` |
