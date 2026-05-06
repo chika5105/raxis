@@ -20,6 +20,7 @@ pub mod operator;
 pub mod operator_cert;
 pub mod operator_wire;
 pub mod policy;
+pub mod push;
 pub mod witness;
 
 // Convenient flat re-exports for the most-used types.
@@ -45,4 +46,5 @@ pub use intent::{
 pub use operator::{ApprovalScope, OperatorErrorDetail, OperatorRequest, OperatorResponse};
 pub use operator_cert::{CertKind, OperatorCert};
 pub use policy::Role;
+pub use push::{KernelPush, KernelPushFrame};
 pub use witness::{WitnessResultClass, WitnessSubmission};

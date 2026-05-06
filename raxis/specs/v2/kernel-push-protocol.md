@@ -434,10 +434,17 @@ Authoritative enumeration for V2.0:
 ```rust
 pub enum KernelPush {
     // ── DAG progression ──
-    SubTaskActivated   { task_id: TaskId, base_sha: String },
-    SubTaskCompleted   { task_id: TaskId, completed_sha: String, newly_activatable: Vec<TaskId> },
-    AllReviewersPassed { task_id: TaskId },
-    ReviewRejected     { task_id: TaskId, critique: String, reviewer_session_id: Uuid },
+    SubTaskActivated         { task_id: TaskId, base_sha: String },
+    SubTaskCompleted         { task_id: TaskId, completed_sha: String, newly_activatable: Vec<TaskId> },
+    AllReviewersPassed       { task_id: TaskId },
+    ReviewRejected           { task_id: TaskId, critique: String, reviewer_session_id: Uuid },
+    /// **V2 amendment.** Required by `v2-deep-spec.md §14` line 588 —
+    /// emitted to the Orchestrator when a sub-planner session is
+    /// revoked due to a `SecurityViolation` event. This variant was
+    /// missing from earlier drafts of §9; the canonical Rust type is
+    /// now `raxis_types::push::KernelPush::SubTaskSecurityViolation`.
+    /// The parameter set (`task_id` only) matches §14 verbatim.
+    SubTaskSecurityViolation { task_id: TaskId },
 
     // ── Escalation FSM ──
     EscalationResolved   { escalation_id: EscalationId, class: EscalationClass, resolved_by: String },
