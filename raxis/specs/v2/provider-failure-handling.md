@@ -276,7 +276,39 @@ When resolution returns a non-`UseModel` result:
 
 `FAIL_PROVIDER_AUTH_REVOKED` is fatal to the request but does NOT terminate the session. The planner's response is to escalate (`EscalationRequest { class: OperatorIntervention, reason: ProviderCredentialsRevoked }`) so the operator can rotate keys. The agent does not retry — there is no automatic recovery path for credential revocation; that's an operator action.
 
-`FAIL_PROVIDER_UNAVAILABLE_ALL_DEGRADED` is also fatal-to-request but recoverable: when at least one breaker transitions to `HalfOpen`, the next request from the planner will re-resolve and may succeed. The kernel emits `KernelPush::ProviderStatusChanged { provider, model, new_state: HalfOpen }` informationally; the planner can choose to retry the request or wait. (Per §12.7, V2 does NOT rely on this push for correctness — it's purely advisory.)
+`FAIL_PROVIDER_UNAVAILABLE_ALL_DEGRADED` is also fatal-to-request but recoverable: when at least one breaker transitions to `HalfOpen`, the next request from the planner will re-resolve and may succeed. The kernel emits `KernelPush::ProviderStatusChanged { provider, model, previous_state: Open, new_state: HalfOpen, reason: OpenWindowElapsed, observed_at_ms }` informationally to every active planner session that has at least one active alias whose chain references this `(provider, model)`; the planner can choose to retry the request or wait. The full push schema (including `previous_state`, `reason`, and `observed_at_ms`) is normative in `kernel-push-protocol.md §9`. (Per §12.1 / Alt L, V2 does NOT rely on this push for correctness — it's purely advisory; routing decisions are recomputed deterministically at the next alias-resolution call.)
+
+#### Emission point and recipient set
+
+The push is emitted from the same `BEGIN IMMEDIATE` transaction
+that commits the `provider_circuit_state` UPDATE and the
+`CircuitBreakerStateChanged` audit event (§6.3 / INV-PROVIDER-08).
+Concretely, after the SQL `UPDATE provider_circuit_state ...
+RETURNING previous_state, new_state` returns the canonical state
+transition, the kernel:
+
+1. Emits the audit event (`AuditEventKind::CircuitBreakerStateChanged`).
+2. Computes the recipient set by scanning the
+   `[provider_aliases]` table (resolved against the active policy
+   epoch) for every alias whose chain includes the affected
+   `(provider, model)`.
+3. For each currently-active session (`sessions WHERE state IN
+   ('Active', 'EscalationPending')`) that has at least one
+   delegation referencing one of those aliases, the kernel
+   enqueues one `KernelPush::ProviderStatusChanged` row in
+   `pending_pushes`.
+
+If the recipient set is empty (no live session uses the affected
+alias), no push is enqueued — the audit event still records the
+state change. This avoids waking sessions that don't care about
+the model.
+
+The push respects `push_queue_cap` per `kernel-push-protocol.md
+§10`: enqueue happens after the cap check; on overflow the
+recipient session takes the standard overflow path and `→
+Failed`. The breaker state UPDATE itself is NEVER reverted by a
+recipient overflow — the state transition and the audit event are
+authoritative; the push delivery is best-effort advisory.
 
 ### 4.4 Wildcard and pattern matching: rejected
 

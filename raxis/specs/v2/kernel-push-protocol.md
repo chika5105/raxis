@@ -411,6 +411,9 @@ For RAXIS's push types this is structurally guaranteed by the form of the push h
 | `SessionFailed` | Trigger graceful shutdown | Already-shutting-down is a no-op |
 | `SessionRevoked` | Same | Same |
 | `HostCapacityFreed` | Append to context for Orchestrator | Re-appending harmless |
+| `QueuePressure` | Update KSB `queue_depth_pct` overwrite; surface advisory line in next prompt | Idempotent overwrite (current/cap/severity is the latest snapshot — overwriting with an older duplicate yields the same observable state once the next push catches up) |
+| `ProviderStatusChanged` | Update KSB `provider_status[(provider, model)] = new_state` (overwrite); optionally append a one-line note ("opus: HalfOpen → Closed (probe succeeded)") to LLM context | Idempotent overwrite — the (provider, model) keypair has at most one active state in the planner's local cache; re-applying the same `new_state` is a no-op. The advisory log line is append-only but the planner SHOULD deduplicate by `(provider, model, new_state, observed_at_ms)` to avoid re-narrating identical changes after reconnect-replay. **Critically: this push has NO routing effect.** Per `provider-failure-handling.md §12.1 / Alt L`, the planner MUST NOT use this push to decide which model to call — alias resolution at the next inference is the canonical routing decision. |
+| `InitiativeCancelPending` | Set Orchestrator/Executor session local flag `wind_down: true` (scheduler suppresses new sub-task admission); append "operator cancelled initiative `<id>` — wind down by `<deadline>`" to LLM context | Idempotent overwrite — `wind_down` is a sticky boolean (once true, stays true until session terminal). Re-receiving the push (same `initiative_id`, same `grace_deadline_ms`) is a no-op. If the kernel reissues the push with a *later* `grace_deadline_ms` (operator extended grace via re-issuing cancel — currently NOT supported per `cli-ceremony.md` idempotency rule, but reserved for future), the planner takes `max(existing, new)`. |
 
 **Rule:** every `KernelPush` variant added in the future MUST document its idempotency mechanism in this table. The table is documentation; **enforcement is in `tests/push_idempotency.rs`**, a property-based test that enumerates every variant of the `KernelPush` enum and, for each, verifies:
 
@@ -466,9 +469,65 @@ pub enum KernelPush {
     HostCapacityFreed     { newly_activatable: Vec<TaskId> },
     QueuePressure         { current: u32, cap: u32, severity: QueuePressureSeverity },
 
+    // ── Provider routing health (advisory only — see §9.1) ──
+    // Cross-ref: `provider-failure-handling.md §6.3` (state machine), §12.1 / Alt L
+    // (decision rationale: this push is informational, NEVER normative).
+    ProviderStatusChanged {
+        provider:     String,           // e.g. "anthropic"
+        model:        String,            // e.g. "claude-3-5-sonnet-20241022"
+        previous_state: BreakerState,    // Closed | Open | HalfOpen
+        new_state:    BreakerState,
+        reason:       BreakerStateChangeReason,
+        // Wall-clock at which the kernel committed the state change
+        // (NOT the push enqueue time — already in KernelPushFrame.enqueued_at).
+        // Lets the planner contextualize stale pushes after reconnect:
+        // "this status changed 14 minutes ago while we were disconnected."
+        observed_at_ms: i64,
+    },
+
+    // ── Initiative lifecycle (V2.1 — graceful cancel) ──
+    // Cross-ref: `cli-ceremony.md` (initiative cancel) and
+    // `kernel-store.md §2.5.5 V2 IPC` (CancelInitiative).
+    // Delivered to ALL of the initiative's planner sessions
+    // (Orchestrator + each Executor / Reviewer) so they can drain
+    // gracefully rather than discover the cancel mid-IntentResponse.
+    InitiativeCancelPending {
+        initiative_id:        InitiativeId,
+        reason:               String,            // capped at 512 bytes (truncated at the kernel)
+        grace_deadline_ms:    i64,                // Unix ms after which the kernel may force-terminate
+        force_after_grace:    bool,
+    },
+
     // ── Session terminal events ──
     SessionFailed   { reason: SessionFailReason },
     SessionRevoked  { reason: RevocationReason },
+}
+
+/// Mirrors `BreakerState` in `provider-failure-handling.md §6.3`.
+/// The wire form omits the in-memory `inflight` counter — the planner
+/// has no use for it. `HalfOpen` here is a coarse marker meaning
+/// "the kernel is currently probing this model"; the planner
+/// receives no signal about which probe attempt is in flight.
+pub enum BreakerState { Closed, Open, HalfOpen }
+
+/// Why the kernel transitioned the breaker.  Useful for
+/// observability surfaces (operator UI, agent KSB) and for the
+/// planner to decide whether the change matters.
+pub enum BreakerStateChangeReason {
+    /// `consecutive_failures >= trip_threshold` per
+    /// `provider-failure-handling.md §6.3`.
+    TripThresholdExceeded { consecutive_failures: u32 },
+    /// Lazy `Open → HalfOpen` promotion observed by the resolver
+    /// when `now() >= open_expires_at_ms`.
+    OpenWindowElapsed,
+    /// Successful probe during `HalfOpen` — the model is healthy
+    /// again.  This is the only `Closed` transition the planner
+    /// sees as a positive signal (e.g. surface "Opus is back" in
+    /// the KSB).
+    ProbeSucceeded,
+    /// Failed probe during `HalfOpen` — the breaker reopens with
+    /// a fresh `open_expires_at_ms`.
+    ProbeFailed,
 }
 ```
 
