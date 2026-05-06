@@ -6,6 +6,9 @@
 > - `specs/v2/key-revocation.md §7` — termination signal categories (`Immediate` vs `Graceful`); the kernel itself is always `Graceful` (operators never `KeyCompromised` the kernel host)
 > - `specs/v2/host-capacity.md §7.6` — `AuditWriteImpossible` halt behavior; this spec specifies how that halt is surfaced to operators when the kernel runs detached from a terminal
 > - `specs/v2/integration-merge.md §11` — three-phase transactional pattern; daemonized kernel restarts must complete the same recovery protocol on startup
+> - `specs/v2/planner-harness.md §5.6` — In-VM background-process cleanup sweep on `SessionPausing` (referenced by §7.1 below)
+> - `specs/v2/planner-harness.md §10.2` — Linux 5.14+ VM guest kernel requirement (provides `cgroup.kill` for the universal reap at hypervisor stop)
+> - `specs/v2/verifier-processes.md §4.4` — Verifier-VM teardown sequence (host-side cgroup cleanup; verifier-cgroup orphan sweep on kernel restart per §10.2)
 
 ---
 
@@ -557,6 +560,16 @@ The kernel itself is always terminated `Graceful`. Per `key-revocation.md §7.2`
 2. Reject new IPC connections (operator and gateway both); existing in-flight intents continue.
 3. For each Active session, send KernelPush::SessionPausing { reason: KernelShutdown };
    wait for ACK or 5s timeout.
+   The planner inside each VM, on receiving SessionPausing, performs the in-VM
+   background-process cleanup sweep per planner-harness.md §5.6:
+     - Iterate /sys/fs/cgroup/raxis/bash-bg-*/ cgroups in the VM
+     - Send SIGTERM to cgroup.procs, wait grace_seconds (default 5; configurable via
+       plan.toml [tasks.shell] bg_shutdown_grace_seconds; max 30)
+     - Issue cgroup.kill for any cgroup still populated
+     - Submit a final BackgroundProcessExited summary in the SessionPausing ACK so
+       the audit log records the final state of each bg process
+   This is best-effort: even if the planner does not ACK or does not perform the
+   sweep, step 6 below will universally reap all in-VM processes at VM stop time.
 4. Drain admission queue: each queued intent receives FAIL_KERNEL_SHUTTING_DOWN immediately.
 5. For each in-flight `IntegrationMerge`:
      - If Phase 1 not yet committed: rollback (BEGIN IMMEDIATE was never issued).
@@ -566,6 +579,13 @@ The kernel itself is always terminated `Graceful`. Per `key-revocation.md §7.2`
        leave the partial git work in place; startup recovery (Case A) will resume on next start.
 6. For each remaining active session, terminate its VM via the hypervisor's clean-stop path
    (Apple Virtualization.framework: `stop(completionHandler:)`; Firecracker: shutdown action).
+   Hypervisor stop is the universal reap point: all in-VM processes (planner harness,
+   any bash-bg-* cgroup, any verifier sub-cgroup) are destroyed regardless of whether
+   the in-VM cleanup sweep completed. This guarantee is what makes the in-VM sweep
+   in step 3 a best-effort optimization rather than a correctness requirement —
+   no in-VM process can survive its hosting VM's stop. See planner-harness.md
+   §5.6 for the in-VM cleanup contract; see verifier-processes.md §4.4 for verifier
+   VM teardown specifics.
 7. Flush any pending audit events to disk (fsync the audit log file).
 8. Close SQLite connections cleanly (this commits the WAL checkpoint).
 9. Exit with status 0.
@@ -573,6 +593,10 @@ The kernel itself is always terminated `Graceful`. Per `key-revocation.md §7.2`
 If steps 2-8 are not complete within `TimeoutStopSec` (default 30s), the supervisor sends SIGKILL.
 On SIGKILL: the kernel dies abruptly. Startup recovery on the next boot handles
 any uncommitted state per the integration-merge.md §11.3 and audit/v3 §4.4 protocols.
+The next-boot startup recovery also includes a verifier-VM orphan sweep
+(per verifier-processes.md §10.2): any cgroup matching /sys/fs/cgroup/raxis/verifier-*/
+on the host that is not associated with a known-running session is killed via
+cgroup.kill and synthesized as a `crashed` witness for its task.
 ```
 
 ### 7.2 SIGHUP for policy reload
