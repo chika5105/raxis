@@ -88,6 +88,41 @@ pub enum LifecycleError {
         reason:  &'static str,
     },
 
+    /// **V2 (Step 17) — `INVALID_PLAN_SCHEMA` shift-left, DAG family.**
+    /// A `[[tasks]]` block declares a structurally invalid dependency
+    /// graph. Surfaced by `validate_plan_dag` at `approve_plan` time,
+    /// **before** `BEGIN TRANSACTION`, so a malformed plan never
+    /// allocates a row.
+    ///
+    /// `rule` is one of the four canonical Step 17 DAG rules:
+    ///   * `"duplicate_task_id"` — two tasks share the same `task_id`.
+    ///   * `"self_loop"`         — `task.predecessors` lists `task`.
+    ///   * `"dangling_dependency"` — predecessor not declared in plan.
+    ///   * `"cyclic_dependency"` — directed cycle through `predecessors`.
+    ///
+    /// `offending_task` names the task whose entry triggered the rule
+    /// (for cycles, an arbitrary task on the cycle — sufficient for
+    /// the operator to grep the plan).
+    /// `suggestion` is the actionable remediation hint required by
+    /// `v2-deep-spec.md §Step 17` ("must always include a concrete
+    /// remediation suggestion, not just the violation").
+    ///
+    /// **Note on shift-left vs in-tx:** the in-transaction
+    /// `scheduler::admit_in_tx` still calls `detect_cycle_in` as a
+    /// defense-in-depth backstop. It should never fire for a plan that
+    /// passed shift-left, but if a future refactor accidentally
+    /// bypasses the shift-left validator, the tx-level check catches
+    /// the cycle and rolls back. A plan that fails *only* the
+    /// in-tx check (theoretically impossible) surfaces as
+    /// `Scheduler(SchedulerError::CyclicDependency)`, distinct from
+    /// this variant.
+    #[error("plan DAG invalid (rule={rule}, task={offending_task}): {suggestion}")]
+    PlanDagInvalid {
+        rule:           &'static str,
+        offending_task: String,
+        suggestion:     String,
+    },
+
     #[error("scheduler error during admission: {0}")]
     Scheduler(#[from] SchedulerError),
 
@@ -299,13 +334,23 @@ pub fn approve_plan(
     let plan_toml_str = String::from_utf8_lossy(&plan_bytes);
     let plan_tasks    = parse_plan_tasks(&plan_toml_str)?;
 
-    // V2 Step 19 — `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` shift-left.
-    // Validates the syntax of every `path_allowlist` entry (no globs, no
-    // absolute paths, no `..` segments) BEFORE we open a transaction, so
-    // a malformed plan never mutates kernel state. Recovery via
-    // `repopulate_plan_registry` deliberately does NOT call this — it
-    // accepts already-approved V1 plans verbatim. Canonical reasons
-    // table lives at `policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`.
+    // V2 Step 17 — shift-left plan validation. Each helper runs BEFORE
+    // `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
+    // state. We run the DAG check first because a structurally broken
+    // plan can confuse later validators (e.g. a path-allowlist entry
+    // on a duplicate task_id), and the path-format check second because
+    // it is purely syntactic and cannot depend on graph well-formedness.
+    //
+    // The other Step 17 checks (referential integrity over `[[subtasks]]`,
+    // meta-authority of the unique Orchestrator, path-subset containment,
+    // sparse-Orchestrator exclusion, single-lane propagation) require V2
+    // schema fields (`session_agent_type`, `clone_strategy`,
+    // `[plan.orchestrator]`) that are not yet parsed by `parse_plan_tasks`.
+    // Those checks land alongside the V2 plan-bundle schema work
+    // (see `plan-bundle-sealing.md §8.2`); the DAG and path-format
+    // validators run today and are forward-compatible (they operate on
+    // `predecessors` / `path_allowlist`, both already in the V1 schema).
+    validate_plan_dag(&plan_tasks)?;
     validate_path_allowlist_v2_format(&plan_tasks)?;
 
     let task_count    = plan_tasks.len();
@@ -868,6 +913,188 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
     Ok(tasks)
 }
 
+/// V2 Step 17 — DAG family of the seven shift-left checks
+/// (`v2-deep-spec.md §Step 17`, rule 5: "DAG acyclicity").
+///
+/// Runs after `parse_plan_tasks` and before `BEGIN TRANSACTION` in
+/// `approve_plan`. Validates the four structural properties of the
+/// proposed task graph that can be decided purely from the plan TOML
+/// (no `tasks` rows yet), in deterministic order so the operator
+/// always sees the *first* offending rule rather than a confusing
+/// cascade:
+///
+///   1. **`duplicate_task_id`** — two `[[tasks]]` blocks share the same
+///      `task_id`. SQLite's `tasks.task_id PRIMARY KEY` would catch
+///      this in the tx, but the FK error is opaque ("constraint failed");
+///      the shift-left rule produces a structured diagnostic naming
+///      the duplicate.
+///
+///   2. **`self_loop`** — `task.predecessors` lists the task itself.
+///      A task can never be its own predecessor; this is a degenerate
+///      cycle case that we surface separately for clearer operator
+///      diagnostics ("did you mean to depend on a sibling?").
+///
+///   3. **`dangling_dependency`** — `task.predecessors` lists a
+///      `task_id` that is not declared anywhere in the plan. SQLite's
+///      `task_dag_edges.predecessor_task_id REFERENCES tasks(task_id)`
+///      with `defer_foreign_keys = 1` would catch this at COMMIT,
+///      but again the FK message is opaque.
+///
+///   4. **`cyclic_dependency`** — directed cycle in the proposed
+///      `predecessors` graph. Implemented as iterative DFS over the
+///      in-memory plan (Kahn's algorithm would also work; DFS gives
+///      us "an arbitrary task on the cycle" for the diagnostic).
+///      The in-tx `scheduler::dag::detect_cycle_in` is retained as a
+///      defense-in-depth backstop — see `LifecycleError::PlanDagInvalid`.
+///
+/// All four rules emit `LifecycleError::PlanDagInvalid { rule,
+/// offending_task, suggestion }`. The `suggestion` field is mandatory
+/// per the spec; it is a concrete fix the operator can apply, not a
+/// generic restatement of the rule name.
+///
+/// # Why DFS, not the SQLite cycle check
+///
+/// Pros of DFS-on-the-plan:
+///   * Runs before tx → no rollback scar, no half-state.
+///   * Operates on the full plan in one pass → can find a cycle that
+///     only manifests when ALL edges are considered together. The in-tx
+///     `detect_cycle_in` is incremental (one task at a time) — it would
+///     correctly catch any single-task cycle but produces a less
+///     actionable diagnostic ("task t3 introduces a cycle") because by
+///     the time t3 is admitted, the t1↔t2 cycle is already half-built.
+///   * Produces a structured `(rule, offending_task, suggestion)`
+///     triple instead of an opaque SQLite error.
+///
+/// Cons:
+///   * One additional graph traversal at approve time (O(V+E)).
+///     Negligible for plan sizes of practical interest.
+fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
+    use std::collections::{HashMap, HashSet};
+
+    // ── Rule 1: duplicate_task_id ────────────────────────────────────
+    let mut seen = HashSet::with_capacity(tasks.len());
+    for pt in tasks {
+        if !seen.insert(pt.task_id.as_str()) {
+            return Err(LifecycleError::PlanDagInvalid {
+                rule:           "duplicate_task_id",
+                offending_task: pt.task_id.clone(),
+                suggestion:     format!(
+                    "Two `[[tasks]]` blocks declare task_id = {:?}. \
+                     Pick a unique identifier for each task.",
+                    pt.task_id,
+                ),
+            });
+        }
+    }
+
+    // ── Rule 2: self_loop ────────────────────────────────────────────
+    //
+    // Cheaper than full cycle detection; surface it first so the
+    // operator gets the most specific diagnostic.
+    for pt in tasks {
+        if pt.predecessors.iter().any(|d| d == &pt.task_id) {
+            return Err(LifecycleError::PlanDagInvalid {
+                rule:           "self_loop",
+                offending_task: pt.task_id.clone(),
+                suggestion:     format!(
+                    "Task {:?} lists itself in `predecessors`. \
+                     A task cannot depend on itself; remove that entry.",
+                    pt.task_id,
+                ),
+            });
+        }
+    }
+
+    // Build a lookup table for the dangling-ref check and the DFS.
+    let task_index: HashMap<&str, &PlanTask> =
+        tasks.iter().map(|pt| (pt.task_id.as_str(), pt)).collect();
+
+    // ── Rule 3: dangling_dependency ──────────────────────────────────
+    for pt in tasks {
+        for dep in &pt.predecessors {
+            if !task_index.contains_key(dep.as_str()) {
+                return Err(LifecycleError::PlanDagInvalid {
+                    rule:           "dangling_dependency",
+                    offending_task: pt.task_id.clone(),
+                    suggestion:     format!(
+                        "Task {:?} declares `predecessors = [..., {:?}, ...]`, \
+                         but no `[[tasks]]` block defines a task with that id. \
+                         Either add the missing task or fix the typo in \
+                         `predecessors`.",
+                        pt.task_id, dep,
+                    ),
+                });
+            }
+        }
+    }
+
+    // ── Rule 4: cyclic_dependency ────────────────────────────────────
+    //
+    // Iterative DFS with the standard three-color visit pattern:
+    //   * `White` — never visited
+    //   * `Gray`  — on the current DFS stack (cycle witness)
+    //   * `Black` — fully explored
+    //
+    // Edges go predecessor → successor (i.e., reverse of the
+    // `predecessors` field). For each unvisited task we do a stack-
+    // based DFS over its predecessors; encountering a Gray node means
+    // the current path closes a cycle.
+    #[derive(Copy, Clone, PartialEq, Eq)]
+    enum Color { White, Gray, Black }
+    let mut color: HashMap<&str, Color> =
+        tasks.iter().map(|pt| (pt.task_id.as_str(), Color::White)).collect();
+
+    // Each DFS frame remembers the task and the next predecessor index
+    // to inspect, so we can resume after recursing without using the
+    // call stack (avoids `MAX_DAG_DEPTH` issues for large plans).
+    for start in tasks {
+        if color[start.task_id.as_str()] != Color::White {
+            continue;
+        }
+        let mut stack: Vec<(&str, usize)> = vec![(start.task_id.as_str(), 0)];
+        color.insert(start.task_id.as_str(), Color::Gray);
+
+        while let Some((node_id, idx)) = stack.pop() {
+            let preds = &task_index[node_id].predecessors;
+            if idx < preds.len() {
+                let dep = preds[idx].as_str();
+                stack.push((node_id, idx + 1));
+
+                match color[dep] {
+                    Color::White => {
+                        color.insert(dep, Color::Gray);
+                        stack.push((dep, 0));
+                    }
+                    Color::Gray => {
+                        // `dep` is on the current DFS path → cycle.
+                        // Report `node_id` as the offending task —
+                        // it's the task whose `predecessors` array
+                        // closes the cycle, which is the most
+                        // actionable arrow for the operator to follow.
+                        return Err(LifecycleError::PlanDagInvalid {
+                            rule:           "cyclic_dependency",
+                            offending_task: node_id.to_owned(),
+                            suggestion:     format!(
+                                "Task {:?} has a cyclic dependency through {:?}. \
+                                 Break the cycle by removing one of the edges \
+                                 along the chain.",
+                                node_id, dep,
+                            ),
+                        });
+                    }
+                    Color::Black => {
+                        // Already explored — no cycle through this path.
+                    }
+                }
+            } else {
+                color.insert(node_id, Color::Black);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// V2 Step 19 — validate every `path_allowlist` entry across `tasks` for
 /// the trailing-slash discipline mandated by `v2-deep-spec.md §6` table 4
 /// and `policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`.
@@ -1286,6 +1513,196 @@ mod tests {
         }
     }
 
+    // ── V2 Step 17 — `validate_plan_dag` shift-left DAG checks ────────────
+    //
+    // Each of the four canonical rules (`duplicate_task_id`,
+    // `self_loop`, `dangling_dependency`, `cyclic_dependency`) MUST
+    // be exercised. We additionally pin the *deterministic ordering*
+    // of detection — the operator must always see the most-specific
+    // rule first when multiple are violated — and the structural
+    // properties (`offending_task` is named verbatim, `suggestion`
+    // is non-empty and references a concrete fix).
+
+    fn dag_task(id: &str, deps: &[&str]) -> PlanTask {
+        PlanTask {
+            task_id:                   id.to_owned(),
+            name:                      id.to_owned(),
+            lane_id:                   "default".to_owned(),
+            predecessors:              deps.iter().map(|s| (*s).to_owned()).collect(),
+            path_allowlist:            vec![],
+            path_export_to_successors: false,
+            path_export_globs:         vec![],
+            path_scope_override:       false,
+        }
+    }
+
+    fn assert_dag_invalid(
+        plan:                  Vec<PlanTask>,
+        expected_rule:         &'static str,
+        expected_offender:     &str,
+        suggestion_must_match: &str,
+    ) {
+        let err = validate_plan_dag(&plan).unwrap_err();
+        match err {
+            LifecycleError::PlanDagInvalid { rule, offending_task, suggestion } => {
+                assert_eq!(rule, expected_rule,
+                           "expected rule {expected_rule}, got {rule}");
+                assert_eq!(offending_task, expected_offender,
+                           "expected offender {expected_offender}, got {offending_task}");
+                assert!(suggestion.contains(suggestion_must_match),
+                        "suggestion missing required fragment {suggestion_must_match:?}: \
+                         {suggestion:?}");
+            }
+            other => panic!("expected PlanDagInvalid({expected_rule}), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_dag_accepts_empty_plan() {
+        validate_plan_dag(&[]).unwrap();
+    }
+
+    #[test]
+    fn validate_plan_dag_accepts_single_task_with_no_deps() {
+        validate_plan_dag(&[dag_task("solo", &[])]).unwrap();
+    }
+
+    #[test]
+    fn validate_plan_dag_accepts_diamond_dag() {
+        // a → b, a → c, b → d, c → d  — classic diamond, no cycle.
+        let plan = vec![
+            dag_task("a", &[]),
+            dag_task("b", &["a"]),
+            dag_task("c", &["a"]),
+            dag_task("d", &["b", "c"]),
+        ];
+        validate_plan_dag(&plan).unwrap();
+    }
+
+    #[test]
+    fn validate_plan_dag_accepts_chain_of_arbitrary_length() {
+        // Pin that the iterative DFS does not overflow on a long chain
+        // (a → b → c → ... → z). 26 tasks is far below
+        // `MAX_DAG_DEPTH`, but the iterative implementation is
+        // depth-independent; this test documents that property.
+        let mut plan = Vec::with_capacity(26);
+        let mut prev: Option<String> = None;
+        for ch in 'a'..='z' {
+            let id = ch.to_string();
+            let preds: Vec<&str> = prev.iter().map(|s| s.as_str()).collect();
+            plan.push(dag_task(&id, &preds));
+            prev = Some(id);
+        }
+        validate_plan_dag(&plan).unwrap();
+    }
+
+    #[test]
+    fn validate_plan_dag_rejects_duplicate_task_id() {
+        let plan = vec![dag_task("t", &[]), dag_task("t", &[])];
+        assert_dag_invalid(plan, "duplicate_task_id", "t", "Pick a unique");
+    }
+
+    #[test]
+    fn validate_plan_dag_rejects_self_loop() {
+        let plan = vec![dag_task("solo", &["solo"])];
+        assert_dag_invalid(plan, "self_loop", "solo", "cannot depend on itself");
+    }
+
+    #[test]
+    fn validate_plan_dag_rejects_dangling_dependency() {
+        // `t2` references a missing predecessor. The diagnostic must
+        // point at `t2` (the task that DECLARED the bad reference),
+        // not at the missing `phantom`.
+        let plan = vec![
+            dag_task("t1", &[]),
+            dag_task("t2", &["phantom"]),
+        ];
+        assert_dag_invalid(plan, "dangling_dependency", "t2", "phantom");
+    }
+
+    #[test]
+    fn validate_plan_dag_rejects_two_node_cycle() {
+        let plan = vec![
+            dag_task("t1", &["t2"]),
+            dag_task("t2", &["t1"]),
+        ];
+        let err = validate_plan_dag(&plan).unwrap_err();
+        match err {
+            LifecycleError::PlanDagInvalid { rule, suggestion, .. } => {
+                assert_eq!(rule, "cyclic_dependency");
+                assert!(suggestion.contains("Break the cycle"),
+                        "suggestion must include the canonical fix phrase: {suggestion:?}");
+            }
+            other => panic!("expected PlanDagInvalid(cyclic_dependency), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_dag_rejects_three_node_cycle() {
+        // Triangle: t1 → t2 → t3 → t1. The cycle witness must reference
+        // a task that is actually on the cycle (any of t1/t2/t3).
+        let plan = vec![
+            dag_task("t1", &["t3"]),
+            dag_task("t2", &["t1"]),
+            dag_task("t3", &["t2"]),
+        ];
+        let err = validate_plan_dag(&plan).unwrap_err();
+        match err {
+            LifecycleError::PlanDagInvalid { rule, offending_task, .. } => {
+                assert_eq!(rule, "cyclic_dependency");
+                assert!(["t1", "t2", "t3"].contains(&offending_task.as_str()),
+                        "offending task must be on the cycle: got {offending_task}");
+            }
+            other => panic!("expected PlanDagInvalid(cyclic_dependency), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_dag_rule_priority_duplicate_before_self_loop() {
+        // Both rules fire; pin that `duplicate_task_id` wins, because
+        // until duplicates are resolved we cannot reliably attribute
+        // the self-loop to a specific task instance.
+        let plan = vec![
+            dag_task("dup", &[]),
+            dag_task("dup", &["dup"]),  // would also be a self_loop
+        ];
+        assert_dag_invalid(plan, "duplicate_task_id", "dup", "Pick a unique");
+    }
+
+    #[test]
+    fn validate_plan_dag_rule_priority_self_loop_before_dangling() {
+        // Both rules fire on the same task; `self_loop` is the more
+        // specific (and more common typo), so it wins.
+        let plan = vec![
+            dag_task("a", &["a", "missing"]),
+        ];
+        assert_dag_invalid(plan, "self_loop", "a", "cannot depend on itself");
+    }
+
+    #[test]
+    fn validate_plan_dag_rule_priority_dangling_before_cycle() {
+        // A plan with both a dangling ref and a cycle must report the
+        // dangling ref first — it is the structural rule, evaluable
+        // without DFS, and operators usually fix it before re-validating.
+        let plan = vec![
+            dag_task("t1", &["t2"]),
+            dag_task("t2", &["t1", "ghost"]),
+        ];
+        assert_dag_invalid(plan, "dangling_dependency", "t2", "ghost");
+    }
+
+    #[test]
+    fn validate_plan_dag_accepts_disconnected_dags() {
+        // Two independent trees in one plan must both validate.
+        let plan = vec![
+            dag_task("a1", &[]),
+            dag_task("a2", &["a1"]),
+            dag_task("b1", &[]),
+            dag_task("b2", &["b1"]),
+        ];
+        validate_plan_dag(&plan).unwrap();
+    }
+
     #[test]
     fn path_allowlist_entry_violation_canonical_table() {
         // Direct unit test of the helper — pins the (entry → reason)
@@ -1479,9 +1896,13 @@ mod tests {
 
     #[test]
     fn approve_plan_rolls_back_on_cyclic_dependency() {
-        // Cycle: t1 depends on t2, t2 depends on t1. detect_cycle_in must
-        // reject this and the entire transaction must roll back: the
-        // initiative stays Draft and no tasks/edges are persisted.
+        // Cycle: t1 depends on t2, t2 depends on t1. The V2 Step 17
+        // shift-left validator (`validate_plan_dag`) must catch this
+        // BEFORE the transaction begins, so the initiative stays Draft
+        // and no tasks/edges are persisted. The diagnostic must be the
+        // structured `PlanDagInvalid { rule: "cyclic_dependency", ... }`
+        // rather than the old in-tx `Scheduler(CyclicDependency)`,
+        // which is now only the defense-in-depth backstop.
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
 
@@ -1504,10 +1925,15 @@ mod tests {
         let err = approve_plan(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
-        assert!(
-            matches!(err, LifecycleError::Scheduler(SchedulerError::CyclicDependency)),
-            "expected CyclicDependency, got {err:?}",
-        );
+        match &err {
+            LifecycleError::PlanDagInvalid { rule, suggestion, .. } => {
+                assert_eq!(*rule, "cyclic_dependency",
+                           "shift-left validator must surface the cycle rule");
+                assert!(!suggestion.is_empty(),
+                        "Step 17 mandates a non-empty remediation suggestion");
+            }
+            other => panic!("expected PlanDagInvalid(cyclic_dependency), got {other:?}"),
+        }
         // Registry must remain empty too — partial population on a
         // rolled-back tx would let stale glob entries leak into later
         // intent checks. We populate AFTER tx.commit(), so this MUST hold.
@@ -1532,6 +1958,74 @@ mod tests {
         // produce a PlanApproved record.
         assert!(audit.events().is_empty(),
                 "no audit events may be emitted when the tx rolls back");
+    }
+
+    /// **V2 Step 17 end-to-end** — each shift-left DAG rule must abort
+    /// `approve_plan` BEFORE any tx state mutation. We pin the
+    /// "no rows written" property for all four rules so a future
+    /// regression that, say, runs the path-format check before the
+    /// DAG check (and therefore opens a tx) is caught.
+    fn assert_dag_rule_blocks_approve_plan(plan: &str, expected_rule: &'static str) {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanDagInvalid { rule, .. } => {
+                assert_eq!(rule, expected_rule,
+                           "expected rule {expected_rule}, got {rule}");
+            }
+            other => panic!("expected PlanDagInvalid({expected_rule}), got {other:?}"),
+        }
+
+        // INV-STORE-02 atomicity: shift-left rejection MUST NOT touch
+        // initiatives, tasks, edges, or audit.
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft",
+                   "initiative must remain Draft after shift-left rejection");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
+        assert_eq!(count_edges_for_initiative(&store, &init_id), 0);
+        assert!(audit.events().is_empty(),
+                "shift-left rejection must emit no audit events");
+        assert!(registry.is_empty(),
+                "shift-left rejection must not populate the plan registry");
+    }
+
+    #[test]
+    fn approve_plan_rejects_duplicate_task_id_shift_left() {
+        let plan = r#"
+            [[tasks]]
+            task_id = "dup"
+            [[tasks]]
+            task_id = "dup"
+        "#;
+        assert_dag_rule_blocks_approve_plan(plan, "duplicate_task_id");
+    }
+
+    #[test]
+    fn approve_plan_rejects_self_loop_shift_left() {
+        let plan = r#"
+            [[tasks]]
+            task_id      = "solo"
+            predecessors = ["solo"]
+        "#;
+        assert_dag_rule_blocks_approve_plan(plan, "self_loop");
+    }
+
+    #[test]
+    fn approve_plan_rejects_dangling_dependency_shift_left() {
+        let plan = r#"
+            [[tasks]]
+            task_id      = "t1"
+            [[tasks]]
+            task_id      = "t2"
+            predecessors = ["phantom"]
+        "#;
+        assert_dag_rule_blocks_approve_plan(plan, "dangling_dependency");
     }
 
     #[test]

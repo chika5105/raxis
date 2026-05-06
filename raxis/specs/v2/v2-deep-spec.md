@@ -700,9 +700,37 @@ The diagnostic must always include a concrete remediation suggestion, not just t
 | 2 | Meta-authority | Exactly one task has `session_agent_type = Orchestrator` and `can_delegate = true`. Zero or multiple Orchestrators are rejected. |
 | 3 | Path subset | `UNION(subtask.path_allowlists) ⊆ orchestrator.path_allowlist`. No sub-task touches paths the Orchestrator cannot integrate. |
 | 4 | Path format | Every `path_allowlist` entry is either an exact filename (no `/` suffix) or a directory prefix with a trailing `/`. No arbitrary globs. |
-| 5 | DAG acyclicity | Topological sort on `depends_on` arrays. Reject on: cycle, dangling reference (task_id in `depends_on` not in plan), Orchestrator listed as a dependency of any sub-task. |
+| 5 | DAG acyclicity | Topological sort on `depends_on` arrays. Reject on: cycle, dangling reference (task_id in `depends_on` not in plan), Orchestrator listed as a dependency of any sub-task, duplicate `task_id`, or a task listing itself as a dependency. |
 | 6 | Sparse-Orchestrator exclusion | `clone_strategy = sparse` is rejected if `session_agent_type = Orchestrator`. |
 | 7 | Single lane propagation | No `[[subtasks]]` block declares its own `lane_id`. Only the plan root declares `lane_id`. |
+
+**Implementation reference and rollout:**
+
+| # | Rule | Status | Implementation |
+|---|------|--------|----------------|
+| 4 | Path format         | **Live** (kernel) | `kernel/src/initiatives/lifecycle.rs::validate_path_allowlist_v2_format` (Step 19). |
+| 5 | DAG acyclicity      | **Live** (kernel) | `kernel/src/initiatives/lifecycle.rs::validate_plan_dag` — covers `duplicate_task_id`, `self_loop`, `dangling_dependency`, and `cyclic_dependency` over the V1-compatible `predecessors` field. The Orchestrator-listed-as-dep sub-rule activates once `session_agent_type` reaches the parser (rule 2 / V2 schema work). |
+| 1, 2, 3, 6, 7 | V2-schema-dependent rules | **Pending** | Land alongside `plan-bundle-sealing.md §8.2` once `parse_plan_tasks` learns to read `session_agent_type`, `clone_strategy`, `[plan.orchestrator]`, and `[[subtasks]]`. |
+
+The `validate_plan_dag` and `validate_path_allowlist_v2_format` validators run BEFORE
+`BEGIN TRANSACTION` in `approve_plan`. Order is: DAG validation first (a malformed
+graph can confuse downstream validators), then path-format validation (purely
+syntactic, no graph dependency). Each validator is short-circuit: the operator
+sees the *first* offending rule, never a cascade. Within a rule, ties are
+broken by plan declaration order so the diagnostic is deterministic.
+
+Both shift-left validators emit a structured `LifecycleError::PlanDagInvalid` /
+`LifecycleError::PathAllowlistInvalidSyntax`. The wire-side projection to
+`INVALID_PLAN_SCHEMA` happens at the handler boundary; this spec section is the
+canonical home for the rule names and suggestion phrasing.
+
+**Defense-in-depth:** the in-transaction `scheduler::dag::detect_cycle_in`
+remains in place as a backstop. It should never fire for a plan that passed
+`validate_plan_dag`, but if a future refactor accidentally bypasses the
+shift-left validator, the tx-level check still catches the cycle and rolls
+back. A plan that fails *only* the in-tx check (theoretically impossible)
+surfaces as `LifecycleError::Scheduler(SchedulerError::CyclicDependency)`,
+distinct from the shift-left `PlanDagInvalid` variant.
 
 ---
 
