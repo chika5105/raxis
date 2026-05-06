@@ -406,6 +406,7 @@ For RAXIS's push types this is structurally guaranteed by the form of the push h
 | `PushApprovalRequired` | Same shape | Same |
 | `EgressApprovalRequired` | Same shape | Same |
 | `EgressApprovalRejected` | Append rejection to context | Re-appending harmless |
+| `SubEscalationResolutionRequired` | Append "sub-escalation `<id>` from task `<t>` requires your resolution by `<deadline>`" to Orchestrator context; record `(escalation_id, source_task_id)` in Orchestrator's pending-resolutions list | Re-appending harmless; pending-resolutions list keyed on `escalation_id` so duplicates collapse |
 | `TokenLimitApproaching` | Update KSB local cache; LLM sees on next inference | Idempotent overwrite |
 | `SessionFailed` | Trigger graceful shutdown | Already-shutting-down is a no-op |
 | `SessionRevoked` | Same | Same |
@@ -446,6 +447,19 @@ pub enum KernelPush {
     PushApprovalRequired    { escalation_id: EscalationId, commit_sha: String, remote: String, ref_spec: String },
     EgressApprovalRequired  { escalation_id: EscalationId, url: String, method: String, environment: String },
     EgressApprovalRejected  { escalation_id: EscalationId, url: String, method: String },
+
+    // ── Two-tier escalation routing (delivered to Orchestrator) ──
+    // See `agent-disagreement.md §6` for routing semantics.
+    // Resolution outcomes are delivered to the source Executor via the existing
+    // `EscalationResolved` / `EscalationRejected` / `EscalationTimedOut` variants
+    // above, regardless of whether the resolver was the Orchestrator or the operator.
+    SubEscalationResolutionRequired {
+        escalation_id:           EscalationId,
+        escalation_kind:         EscalationClass,
+        source_task_id:          TaskId,
+        source_session_id:       Uuid,
+        resolution_deadline_at:  i64,         // Unix timestamp = orchestrator_routed_at + orchestrator_timeout
+    },
 
     // ── Resource pressure ──
     TokenLimitApproaching { limit_type: String, current: u64, limit: u64, pct_used: u8 },
