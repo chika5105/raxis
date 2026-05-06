@@ -1858,6 +1858,8 @@ declared:
 | Yes | No (or row absent) | No | Audit-only egress (V2.1 default). |
 | Yes | (any) | Yes | Audit-only egress (kill-switch override). |
 
+**"Audit-only"** means the request is forwarded to the upstream without credential injection; the verifier receives the upstream's unauthenticated response (typically `HTTP 401`). Public endpoints that require no authentication will succeed normally. Every request is logged as a `VerifierEgressAttempted` audit event regardless of outcome.
+
 ---
 
 ## §17 — Cross-Spec Impacts
