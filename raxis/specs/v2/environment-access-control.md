@@ -230,6 +230,11 @@ url_prefixes = [
 block_all                = false   # if true: no egress ever, regardless of plan
 write_requires_approval  = true    # POST/PUT/PATCH/DELETE require ProtectedEgressApproval
 read_methods             = ["GET", "HEAD"]   # these are always permitted if in plan allowlist
+# How strictly the kernel canonicalizes the URL when comparing the
+# in-flight EgressRequest against a previously approved escalation
+# (`ProtectedEgressApproval`).  See §6.1 for the full canonicalization
+# pipeline and the rationale for `keys` as the default.
+approval_match_mode      = "keys"  # one of: path_only | keys | exact (default: keys)
 ```
 
 **What this protects against:** Plan misconfiguration. An incorrectly written plan that
@@ -695,8 +700,127 @@ When `write_requires_approval = true` fires (Step 4 of admission):
 ```
 
 **Approval is URL-and-method specific** (same SHA-specificity as ProtectedPathMerge):
-The approval records the exact URL. If the agent tries to reuse `esc-77` for a different
-URL or a different method, `FAIL_APPROVAL_URL_MISMATCH` is returned.
+The approval records a canonicalized form of the URL (per §6.1) along with the method.
+If the agent tries to reuse `esc-77` for a different URL canonicalization or a different
+method, `FAIL_APPROVAL_URL_MISMATCH` is returned.
+
+---
+
+### 6.1 URL canonicalization for approval comparison (`approval_match_mode`)
+
+The naive choice — "compare the full URL string byte-for-byte" — is
+hostile to every realistic write API:
+
+- **Idempotency tokens vary per request.** Kubernetes appends
+  `?fieldManager=raxis&resourceVersion=12345`. The
+  `resourceVersion` value is different on every call. Byte-exact
+  matching forces the operator to re-approve every single write,
+  defeating the purpose of pre-approval.
+- **Pagination is value-variant.** `?page=1` vs `?page=2` are the
+  same semantic operation. An operator who approved
+  "list deployments" should not have to re-approve every page.
+- **The security-relevant signal is the key SET, not the values.**
+  An endpoint whose semantics change with `?action=delete` vs
+  `?action=list` is poorly designed — the operation belongs in
+  the path or HTTP method. Well-designed APIs encode operation
+  in the path; query parameters are *modifiers*. Matching on the
+  key set catches "this request uses a parameter I didn't expect"
+  without over-restricting.
+
+But not every API is well-designed. A URL like
+`https://legacy.example.com/cmd?do=destroy_database` does carry
+operational meaning in a query *value*. The kernel must offer an
+opt-in for this case.
+
+**Three modes are supported, declared per environment-gate:**
+
+```toml
+# policy.toml
+[[environment_gates]]
+label   = "production"
+# … other fields …
+approval_match_mode = "keys"   # default; see table below
+```
+
+| Mode | What is canonicalized into the comparison key | Use when |
+|---|---|---|
+| `path_only` | `scheme + lowercased host + normalized path` (query and fragment dropped entirely) | The operator wants to approve an API endpoint *as a unit* and accept any query parameters as effectively-equivalent. Common for read endpoints with extensive optional filters. |
+| `keys` (DEFAULT) | `scheme + lowercased host + normalized path + sorted query KEY set` (values dropped; duplicate keys collapsed) | Most write APIs: the operator wants to detect "this request uses a parameter the approval did not contemplate" without re-approving on every request. |
+| `exact` | `scheme + lowercased host + normalized path + full sorted query string with values` (RFC 3986 percent-encoding normalized) | Poorly-designed APIs whose query *values* carry operation semantics. Opt-in only. |
+
+**Path normalization (all three modes).** RFC 3986 normalization:
+collapse repeated slashes (`//` → `/`), resolve `.` and `..`
+segments lexically, lowercase the scheme and host, drop default
+ports (`https:443`, `http:80`). Fragments (`#…`) are ALWAYS
+dropped — fragments are client-side and never traverse the wire.
+
+**Query normalization (`keys` mode).** Parse the query string
+with `application/x-www-form-urlencoded` rules (per the
+URL Standard). Percent-decode keys. Sort keys lexicographically.
+Collapse duplicate keys to a single entry (the comparison
+ignores how many times a key appears — `?a&a&b` and `?a&b`
+canonicalize identically). Discard all values.
+
+**Query normalization (`exact` mode).** Same parse, same sort.
+Re-encode keys *and* values with the URL-standard
+percent-encoding (the canonical 2-uppercase-hex form: `%2f` →
+`%2F`). Duplicate keys are NOT collapsed in `exact` mode — they
+are sorted lexicographically by `(key, value)` together. Order
+within a duplicate-key cluster is determined by sorted values.
+Empty values are kept (`?a=` is distinct from `?a` in `exact`
+mode — the former has an explicit empty string, the latter
+elides the `=`).
+
+**The canonicalized key is what the kernel hashes** and stores
+on the `escalations` row at `EgressApprovalRequired` enqueue
+time, and what it re-derives from the agent's follow-up
+`EgressRequest` to compare. The hash function is SHA-256 over
+the UTF-8 bytes of the canonicalized form; the digest is the
+column the kernel matches.
+
+#### Audit and operator UX
+
+- The `EgressApprovalRequired` audit event records BOTH the raw
+  URL the agent submitted AND the canonicalized form, so an
+  auditor can see exactly what the operator approved.
+- The operator's `raxis egress diff <esc-id>` CLI surfaces
+  `match_mode = keys`, the raw URL, and the canonicalized key.
+  This makes the matching strictness visible to the human in the
+  loop.
+- A mismatch on follow-up emits `FAIL_APPROVAL_URL_MISMATCH`
+  with both the canonicalized-approved key and the
+  canonicalized-attempted key in the structured failure detail
+  (helpful when an operator wonders why a "matching" URL was
+  rejected — usually a mode mismatch between operator
+  expectation and policy default).
+
+#### Validation at policy load
+
+- `approval_match_mode` must be one of `path_only`, `keys`,
+  `exact`. Otherwise: `FAIL_POLICY_APPROVAL_MATCH_MODE_INVALID`.
+- A gate with `block_all = true` MUST NOT declare
+  `approval_match_mode` (block-all gates never produce
+  approvals; declaring a match mode would be misleading);
+  emits `WARN_POLICY_APPROVAL_MATCH_MODE_IGNORED_ON_BLOCK_ALL`.
+- A gate with `write_requires_approval = false` AND no
+  `block_all = true` (i.e. an environment that exists for
+  binding purposes but never produces approvals) similarly
+  emits `WARN_POLICY_APPROVAL_MATCH_MODE_IGNORED_ON_NO_APPROVAL`
+  if `approval_match_mode` is set.
+
+#### Migration
+
+V2.0 shipped with implicit `exact` matching (full byte
+comparison after lowercasing). V2.1 changes the default to
+`keys`. Operators who depended on the V2.0 byte-exact behavior
+must explicitly set `approval_match_mode = "exact"` on the
+relevant `[[environment_gates]]`. The new default is logged at
+policy-load time as a single `PolicyMigration { from:
+"V2.0_implicit_exact", to: "V2.1_default_keys", affected_gates:
+[…] }` audit event, listing every gate whose match mode was
+upgraded by the default change. Operators reviewing the audit
+chain will see exactly which gates they are using the new
+default for.
 
 ---
 
@@ -980,6 +1104,12 @@ An attacker needs to compromise multiple independent layers simultaneously.
 - [ ] Add `FAIL_CREDENTIAL_NOT_PERMITTED` to `KernelError`
 - [ ] Add `FAIL_ENVIRONMENT_WRITE_REQUIRES_APPROVAL` to `KernelError`
 - [ ] Add `FAIL_APPROVAL_URL_MISMATCH` to `KernelError`
+- [ ] Add `FAIL_POLICY_APPROVAL_MATCH_MODE_INVALID` to `KernelError` (policy load)
+- [ ] Add `WARN_POLICY_APPROVAL_MATCH_MODE_IGNORED_ON_BLOCK_ALL` and `WARN_POLICY_APPROVAL_MATCH_MODE_IGNORED_ON_NO_APPROVAL` warnings (policy load)
+- [ ] Implement URL canonicalizer per §6.1 with three modes (`path_only` | `keys` | `exact`); unit-test each mode against the URL-Standard test corpus
+- [ ] Store canonicalized-key SHA-256 on `escalations` row at `EgressApprovalRequired` enqueue; re-derive from follow-up `EgressRequest` for comparison
+- [ ] Persist `approval_match_mode` field on the resolved environment-gate for forensics; surface it in `raxis egress diff <esc-id>`
+- [ ] Emit `PolicyMigration { from: "V2.0_implicit_exact", to: "V2.1_default_keys", affected_gates }` exactly once at the first policy-load event after upgrade
 - [ ] Add `KernelPush::EgressApprovalRequired` and `EgressApprovalRejected` variants
 - [ ] Implement `WARN_ENVIRONMENT_GATE_WRITE_REQUIRES_APPROVAL` at `approve_plan`
 - [ ] Implement `WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT` at `approve_plan`
@@ -993,6 +1123,16 @@ An attacker needs to compromise multiple independent layers simultaneously.
       - Write_requires_approval: POST to prod URL → escalation created
       - Write approval: consumed approval → request admitted
       - Write approval: wrong URL → FAIL_APPROVAL_URL_MISMATCH
+      - **`approval_match_mode = "keys"` (default):** approve `https://api/x?a=1&b=2`; agent re-issues `https://api/x?a=99&b=99` → admitted (key set `{a, b}` matches; values ignored). Agent re-issues `https://api/x?a=1&c=3` → `FAIL_APPROVAL_URL_MISMATCH` (key `c` was not in the approval).
+      - **`approval_match_mode = "keys"`:** duplicate key collapsing — approve `https://api/x?a=1&a=2`; agent re-issues `https://api/x?a=99` → admitted (both canonicalize to key set `{a}`).
+      - **`approval_match_mode = "path_only"`:** approve `https://api/x?secret=abc`; agent re-issues `https://api/x?totally=different` → admitted (query dropped from canonical key entirely).
+      - **`approval_match_mode = "exact"`:** approve `https://api/x?a=1&b=2`; agent re-issues `https://api/x?a=99&b=2` → `FAIL_APPROVAL_URL_MISMATCH` (value of `a` differs).
+      - **`approval_match_mode = "exact"`:** percent-encoding normalization — approve `https://api/x?q=hello%20world`; agent re-issues `https://api/x?q=hello+world` → admitted (both canonicalize to the same RFC-3986 form). `%2f` and `%2F` canonicalize identically. Empty value preservation: approve `https://api/x?a=`; agent re-issues `https://api/x?a` → `FAIL_APPROVAL_URL_MISMATCH` (`exact` mode preserves the explicit-empty distinction).
+      - **Path normalization (all modes):** approve `https://api/x/`; agent re-issues `https://api/x///./y/../` → admitted (RFC 3986 normalization collapses to the same path). Default-port stripping: approve `https://api:443/x`; agent re-issues `https://api/x` → admitted.
+      - **`approval_match_mode = "exact"` opt-in for poorly-designed APIs:** policy declares `[[environment_gates]] approval_match_mode = "exact"`; agent submits `https://legacy/cmd?do=destroy_database` → operator approves; agent re-issues `https://legacy/cmd?do=list_databases` → `FAIL_APPROVAL_URL_MISMATCH` (value-sensitive matching catches the operation change).
+      - **Mode-mismatch invalid value:** policy declares `approval_match_mode = "fuzzy"` → policy load fails `FAIL_POLICY_APPROVAL_MATCH_MODE_INVALID`.
+      - **Mode set on `block_all = true` gate:** policy declares both `block_all = true` and `approval_match_mode = "exact"` → policy load emits `WARN_POLICY_APPROVAL_MATCH_MODE_IGNORED_ON_BLOCK_ALL` once.
+      - **V2.0 → V2.1 migration:** policy.toml from V2.0 with `write_requires_approval = true` and no `approval_match_mode` field → policy-load audit chain has exactly one `PolicyMigration { from: "V2.0_implicit_exact", to: "V2.1_default_keys", affected_gates: [...] }` event listing every upgraded gate; subsequent admissions match per `keys` semantics.
       - Credential injection: staging task gets staging kubeconfig only
       - Undeclared credential: FAIL_CREDENTIAL_NOT_PERMITTED at approve_plan
       - Unreachable credential: WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT at approve_plan
