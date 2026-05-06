@@ -5,7 +5,13 @@
 > - `v2-deep-spec.md §Step 8` — Orchestrator Owns IntegrationMerge (decision + rationale)  
 > - `v2-deep-spec.md §Step 9` — Bundle Routing (how Executor commits reach the Orchestrator)  
 > - `v2-deep-spec.md §Step 11` — Hybrid Allowlist computation  
+> - `v2-deep-spec.md §Step 24b` — Orchestrator Workspace Provisioning (RW clone from base SHA at initiative boot; the workspace this spec's merges happen in)  
 > - `v2-deep-spec.md §Step 30` — Audit Attribution for Operator-Assisted Commits  
+> - `planner-harness.md §4.7` — Canonical Orchestrator Image (`INV-PLANNER-HARNESS-05`); the source of `bash`, `git`, `ripgrep`, and `edit_file` for V2 semantic conflict resolution  
+> - `planner-harness.md §4.8` — Orchestrator Not Operator-Configurable (`INV-PLANNER-HARNESS-06`); explains why §8's workflow lives in kernel-pinned NNSP bytes rather than operator configuration  
+> - `kernel-mechanics-prompt.md §3.2` — **normative** Orchestrator NNSP including the `[KERNEL: INTEGRATION MERGE PROTOCOL]` and `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks  
+> - `policy-plan-authority.md §4.5 [orchestrator]` — operator-tunable policy knobs (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`)  
+> - `agent-disagreement.md` — sub-task `CompleteTask` admission gates (`FAIL_CIRCULAR_REVISION`, `FAIL_REVIEW_LOOP_EXCEEDED`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`) that fire **before** sub-tasks reach the merge pipeline. `IntegrationMerge` itself is unchanged by that spec; what changes is which sub-tasks ever satisfy Check 4's `state = 'Completed'` precondition.  
 >
 > This document is the **complete mechanical specification** for the `IntegrationMerge`
 > intent: its struct, the full admission pipeline, the multi-task merge sequencing model,
@@ -127,6 +133,18 @@ Every `task_id` in `merged_task_ids`:
 
 Failure for any of these: `FAIL_TASK_NOT_COMPLETED` with the offending task_id.
 
+**Interaction with `agent-disagreement.md`.** A sub-task only reaches
+`state = 'Completed'` after its `CompleteTask` intent admits cleanly.
+Per `agent-disagreement.md`, that admission can be rejected by
+`FAIL_CIRCULAR_REVISION` (§4) or `FAIL_REVIEW_LOOP_EXCEEDED` (§3)
+or terminated by `FAIL_WALL_CLOCK_LIMIT_EXCEEDED` (§5) — in which
+case the sub-task transitions to `Failed`, never to `Completed`,
+and Check 4 here rejects any `IntegrationMerge` that names it. The
+Orchestrator, on receipt of the `EscalationResolved` /
+`SubEscalationResolutionRequired` notifications described in that
+spec, is expected to reissue or abandon the affected sub-tasks
+before constructing a merge.
+
 ### Check 5 — Diff Computation and Hybrid Allowlist Check
 The Kernel computes the full diff between `base_sha` and `commit_sha`:
 ```
@@ -185,18 +203,247 @@ re-submits `IntegrationMerge` with `operator_approval_id: Some(escalation_id)`.
 Proceed to Check 6a (verify the approval) instead of creating a new escalation.
 
 **If `protected_hits` is empty:**
-Check 5b is a no-op. Proceed to Check 6.
+Check 5b is a no-op. Proceed to Check 5c.
+
+---
+
+### Check 5c — Universal Merge Approval Gate (conditional, V2 addition)
+
+Runs **immediately after Check 5b** when the policy bundle's
+`[orchestrator]` section sets `all_merges_require_approval = true`
+(per `policy-plan-authority.md §4.5 [orchestrator]`,
+`INV-PLANNER-HARNESS-06`).
+
+When `all_merges_require_approval = true` AND `operator_approval_id`
+is `None`, the kernel auto-creates a `MergeAuthorization` escalation
+in `Pending` state (parallel to Check 5b's `ProtectedPathMerge`):
+
+```sql
+INSERT INTO escalations (id, class, state, session_id, initiative_id,
+                         commit_sha)
+VALUES (new_uuid, 'MergeAuthorization', 'Pending',
+        :orchestrator_session_id, :initiative_id, :commit_sha)
+```
+
+Emits `AuditEventKind::MergeApprovalRequired { escalation_id, kind:
+"all_merges_policy", commit_sha }`. Returns
+`FAIL_PROTECTED_PATH_APPROVAL_REQUIRED { escalation_id }` to the
+Orchestrator (the same fail code as Check 5b, semantically
+"approval needed" — the Orchestrator's NNSP §3.2 step 6 already
+handles this branch). Sends
+`KernelPush::MergeApprovalRequired { escalation_id, kind: "all_merges_policy" }`
+to the Orchestrator.
+
+The Orchestrator waits for `KernelPush::EscalationResolved`, then
+re-submits `IntegrationMerge` with `operator_approval_id: Some(id)`.
+On re-submission, Check 5c is satisfied by the verification step in
+Check 6a (which is extended to also accept
+`escalations.class = 'MergeAuthorization'`).
+
+**If `all_merges_require_approval = false` (default):**
+Check 5c is a no-op. Proceed to Check 5d.
+
+**Composition with Check 5b.** Both gates can fire on the same merge
+(a touch of a protected path AND `all_merges_require_approval = true`).
+The kernel collapses these into a single `ProtectedPathMerge`
+escalation when `protected_hits` is non-empty (the operator's protected
+path approval is a strict superset of the universal approval); the
+universal-approval gate adds nothing in that case. The
+`MergeAuthorization` class fires only when `protected_hits` is empty
+AND `all_merges_require_approval = true`. The Orchestrator's NNSP §3.2
+treats both classes identically at step 6 (`FAIL_PROTECTED_PATH_APPROVAL_REQUIRED:
+await KernelPush::EscalationResolved; re-submit with operator_approval_id`).
+
+---
+
+### Check 5d — Pre-Integration Merge Verifier Execution (conditional, V2 addition)
+
+Runs **immediately after Check 5c** when at least one of the following
+declares pre-merge verifiers (per `verifier-processes.md §15`):
+
+- `plan.toml [[plan.integration_merge_verifiers]]` — plan-author surface
+- `policy.toml [[integration_merge_verifiers]]` — operator-global surface
+
+When neither source declares any pre-merge verifier (the common case
+for simple deployments), Check 5d is a no-op and admission proceeds
+to Check 6a. When either source declares verifiers, Check 5d gates
+master advancement on the candidate merged tree's verifier verdicts.
+
+**Authority composition.** Pre-merge verifiers from both sources fire
+on the same merge attempt. Operator-side declarations cannot be
+downgraded to `warn_only` by any plan; plan-side declarations may
+freely choose `block_merge` or `warn_only`. Both sources are subject
+to the `applies_to` filter (per `verifier-processes.md §16.3`):
+`"all"` (default) | `"task_set"` | `"last"`. Operator-side
+declarations additionally honor `required_for_environments` to bind
+to the environment-access-control framework
+(`environment-access-control.md INV-ENV-01`).
+
+#### Check 5d.1 — Determine matching verifiers
+
+```rust
+let matching: Vec<&PreMergeVerifier> = plan.integration_merge_verifiers
+    .iter()
+    .chain(policy.integration_merge_verifiers.iter())
+    .filter(|v| applies_to_matches(v, current_merge))
+    .filter(|v| environment_filter_matches(v, current_merge))   // operator-only required_for_environments
+    .collect();
+
+if matching.is_empty() {
+    // No pre-merge verifiers fire on this merge. No-op.
+    proceed_to_check_6a();
+    return;
+}
+```
+
+`applies_to_matches` and `environment_filter_matches` are specified
+in `verifier-processes.md §16.3`.
+
+#### Check 5d.2 — Compute the candidate merged tree
+
+The kernel computes the merge commit that *would* result from
+`IntegrationMerge { commit_sha, merged_task_ids }` — using the same
+git operations the Orchestrator's `git merge` invocation would use,
+but produced as an **orphan commit** in the kernel's
+verifier-staging area at:
+
+```
+$RAXIS_DATA_DIR/candidate_merges/<integration_merge_id>/
+```
+
+This is a separate worktree, NOT on master, NOT on any task branch.
+The candidate is reachable only by its SHA — it is not pointed to by
+any ref.
+
+```sql
+-- Record candidate-merge-tree creation for crash recovery (§11 extended).
+INSERT INTO integration_merge_attempts (
+    id, initiative_id, orchestrator_session_id,
+    requested_commit_sha, candidate_merge_sha,
+    state, created_at
+)
+VALUES (
+    :integration_merge_id, :initiative_id, :orchestrator_session_id,
+    :commit_sha, :candidate_merge_sha,
+    'AwaitingPreMergeVerifiers', :now
+);
+```
+
+Emits `CandidateMergeTreeCreated { integration_merge_id,
+candidate_merge_sha, merged_task_ids }` audit event.
+
+If candidate-merge-tree computation fails (e.g., the Orchestrator
+submitted a malformed `commit_sha` that the kernel can't merge with
+master cleanly), Check 5d returns
+`FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED { reason }` and discards
+any partially-created worktree. The Orchestrator typically resolves
+this by re-doing its merge work and re-submitting.
+
+#### Check 5d.3 — Spawn pre-merge verifier VMs
+
+For each verifier in `matching`, the kernel allocates a verifier-VM
+slot (against `[host_capacity] max_concurrent_verifier_vms`) and
+spawns the VM per `verifier-processes.md §4.2`. The
+spawn-envelope `RAXIS_VERIFIER_HOOK_KIND = "pre_merge"`,
+`RAXIS_INTEGRATION_MERGE_ID` is set, and `/workspace` is mounted
+from the candidate merged tree (NOT from any individual task branch
+and NOT from current master).
+
+Verifiers run in parallel subject to capacity caps; the kernel waits
+for all matching verifiers to complete (`final_status` set on every
+matching verifier's witness row) before proceeding.
+
+#### Check 5d.4 — Gating and disposition
+
+Per `verifier-processes.md §5.3`:
+
+```rust
+let block_merge_failures = matching.iter()
+    .filter(|v| v.on_failure == "block_merge" && v.final_status() != "passed")
+    .collect::<Vec<_>>();
+
+if !block_merge_failures.is_empty() {
+    // Discard the candidate merged tree (§11.10).
+    discard_candidate_merge_tree(integration_merge_id, candidate_merge_sha,
+                                  reason: "verifier_blocked");
+
+    // Mark the attempt and emit audit.
+    UPDATE integration_merge_attempts
+       SET state = 'BlockedByPreMergeVerifier',
+           discard_reason = 'verifier_blocked'
+     WHERE id = :integration_merge_id;
+    emit AuditEventKind::VerifierBlockedMerge { integration_merge_id,
+                                                 candidate_merge_sha,
+                                                 verifier_names,
+                                                 primary_witness_summary };
+
+    // Return failure to Orchestrator.
+    return FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED {
+        verifier_names: block_merge_failures.iter().map(|v| v.name.clone()).collect(),
+        primary_witness_summary: block_merge_failures[0].summary(),
+        candidate_merge_sha,
+    };
+} else {
+    // All block_merge verifiers passed (warn_only failures don't gate the merge).
+    UPDATE integration_merge_attempts
+       SET state = 'PreMergeVerifiersPassed'
+     WHERE id = :integration_merge_id;
+    proceed_to_check_6a();
+}
+```
+
+When the Orchestrator receives `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`,
+it routes per `verifier-processes.md §16.6` — typically as an
+operator escalation `EscalationRequest { class:
+IntegrationMergeRegression, ... }`, since pre-merge regressions are
+post-Reviewer and require operator judgment rather than agent retry.
+**Pre-merge verifier failures do NOT count toward `INV-CONVERGENCE-01`**
+because they are not review rounds.
+
+#### Check 5d.5 — Cost discipline
+
+Pre-merge verifiers run only on merges that have already passed:
+
+- Check 1 (Dispatch matrix — Orchestrator-only)
+- Check 2 (commit_sha reachability)
+- Check 3 (Ancestry verification)
+- Check 4 (merged_task_ids validation — all tasks Completed)
+- Check 5 (Diff computation + hybrid allowlist)
+- Check 5b (Protected path approval gate)
+- Check 5c (Universal merge approval gate)
+
+This ordering ensures pre-merge verifiers (which cost real
+resources) are not consumed by structurally malformed merges or by
+merges that the operator hasn't approved at the human-gate layer.
+
+#### Check 5d.6 — Failure codes
+
+| Code | Trigger |
+|---|---|
+| `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary, candidate_merge_sha }` | Any `block_merge` pre-merge verifier reported `final_status ≠ "passed"`. Candidate is discarded; master is NOT advanced. |
+| `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED { reason }` | The candidate merged tree could not be computed (malformed `commit_sha`, merge conflict the kernel can't represent as an orphan, disk-full at staging area, etc.). |
+
+Both codes return to the Orchestrator. Neither is retryable
+without operator action (the Orchestrator escalates per
+`agent-disagreement.md §6`).
 
 ---
 
 ### Check 6a — Protected Path Approval Verification (conditional)
-Only runs if `operator_approval_id: Some(id)` AND `protected_hits` is non-empty:
+Only runs if `operator_approval_id: Some(id)` AND **either** `protected_hits` is non-empty
+**or** `[orchestrator] all_merges_require_approval = true` (V2 — Check 5c):
+
 - `escalations.id = id` must exist
 - `escalations.state = 'Consumed'`
-- `escalations.class = 'ProtectedPathMerge'`
+- `escalations.class ∈ { 'ProtectedPathMerge', 'MergeAuthorization' }` (the latter
+  is the V2 universal-approval class introduced by Check 5c)
 - `escalations.session_id = current_orchestrator_session_id`
 - `escalations.commit_sha = commit_sha` (approvals are commit-SHA-specific — an approval
   for one merge commit cannot be reused for a different commit SHA)
+
+Additionally, when `protected_hits` is non-empty, the consumed escalation MUST be of
+class `'ProtectedPathMerge'` (a `MergeAuthorization` approval does not satisfy a
+protected-path requirement; the operator must explicitly approve the protected paths).
 
 Failure: `FAIL_ESCALATION_NOT_CONSUMED`, `FAIL_ESCALATION_CLASS_MISMATCH`, or
 `FAIL_APPROVAL_SHA_MISMATCH`.
@@ -360,7 +607,7 @@ AuditEventKind::IntegrationMergeCompleted {
     operator_assisted:      bool,       // true if resolved_via_escalation is Some
     escalation_id:          Option<EscalationId>,
     hybrid_allow_computed:  Vec<String>, // the effective allowlist used for Check 5
-    plan_artifact_sha256:   String,     // links to signed plan (INV-05)
+    plan_bundle_sha256:     String,     // links to the signed plan bundle (INV-05; per plan-bundle-sealing.md §8.2). For legacy V1 initiatives this field carries plan_artifact_sha256 (the SHA-256 of plan.toml bytes); for V2 initiatives it is the canonical bundle hash.
     policy_epoch:           u64,
 }
 ```
@@ -388,6 +635,24 @@ AuditEventKind::InitiativeCompleted {
 
 ## 8. Orchestrator's Merge Workflow (Step-by-Step)
 
+> **V2 amendment.** The Orchestrator NNSP is **kernel-pinned bytes**
+> per `INV-PLANNER-HARNESS-06.3` (`planner-harness.md §4.8`); the
+> normative source for the Orchestrator's merge workflow is
+> `kernel-mechanics-prompt.md §3.2`'s
+> `[KERNEL: INTEGRATION MERGE PROTOCOL]` and
+> `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks, which the kernel
+> binary embeds as `ORCHESTRATOR_NNSP_BYTES`. The text below is
+> retained for historical context and accurately summarizes the
+> *bypass-and-escalate* pre-V2 conflict path; the V2 NNSP additionally
+> permits **in-Orchestrator semantic resolution** of trivial conflicts
+> (criteria T1–T4 in `kernel-mechanics-prompt.md §3.2`) using `bash`,
+> `git`, and `edit_file` from the kernel-canonical
+> `raxis-orchestrator-core` image (`INV-PLANNER-HARNESS-05`). The
+> path-allowlist constraints in §4 (Check 5 / `hybrid_effective_allow`)
+> apply to the Orchestrator's edits unchanged — semantic resolution
+> changes the *triviality threshold* for escalation, not the
+> *kernel admission gate* on what may land in the merge commit.
+
 The Orchestrator's non-negotiable system prompt includes this procedure verbatim. It is
 the mechanical sequence the Orchestrator must follow when it receives
 `KernelPush::AllReviewersPassed { task_id }`:
@@ -402,9 +667,21 @@ the mechanical sequence the Orchestrator must follow when it receives
    c. If MERGE_HEAD exists after merge (merge commit):
       - Write a descriptive merge commit message: "Merge <task_id>: <brief description>"
    d. If git merge exits with conflicts:
-      - Run: git merge --abort
-      - Submit EscalationRequest { class: MergeConflict, context: <conflict_description> }
-      - STOP. Wait for KernelPush::EscalationResolved before retrying.
+      - V2 update: Apply triviality criteria T1–T4 from
+        kernel-mechanics-prompt.md §3.2 [KERNEL: CONFLICT RESOLUTION PROTOCOL].
+        - If trivial (e.g., additive import / use / require collisions, struct field
+          reordering, function signature reordering, syntactic-only conflicts where
+          both sides' additions can be retained verbatim and the merged result
+          parses cleanly):
+          - For each conflict file: read the file, edit_file to replace conflict
+            marker blocks with the merged text, git add the file.
+          - git commit (message: "Orchestrator: trivial merge of <task_a> + <task_b> ...")
+          - Continue the wave merge (return to step 2 for the next sub-task).
+        - If non-trivial (logical contradiction, deleted-vs-modified, adjacent
+          edits to the same expression, ambiguous semantic intent):
+          - Run: git merge --abort
+          - Submit EscalationRequest { class: MergeConflict, context: <conflict_description> }
+          - STOP. Wait for KernelPush::EscalationResolved before retrying.
 
 3. After all sub-tasks merged:
    a. Run: git log --oneline <base_sha>..HEAD  (verify the merge chain looks correct)
@@ -420,19 +697,36 @@ the mechanical sequence the Orchestrator must follow when it receives
    - Retry from step 2 with the updated base.
 
 5. On FAIL_PATH_POLICY_VIOLATION { path }:
-   - This is a plan error — a sub-task modified files outside its allowlist.
-   - The sub-task's SingleCommit was admitted but the aggregate merge contains unexpected paths.
+   - This is a plan error — a sub-task modified files outside its allowlist,
+     OR (V2) the Orchestrator's own conflict-resolution edits in step 2d landed
+     a path outside the IntegrationMerge's hybrid_effective_allow.
    - Submit: EscalationRequest { class: PlanViolation, context: "path <path> found in merge
      commit is outside declared allowlist" }
    - STOP. Do not retry without operator guidance.
 ```
 
 **Note on step 2d — conflict detection:** `git merge` exits with status 1 when there are
-conflicts. The Orchestrator must detect this and abort rather than attempting to produce a
-commit with conflict markers. A commit containing `<<<<<<<` conflict markers is a valid
-git commit — but the path allowlist check at Kernel admission will pass it (the paths may
-be within scope), and the resulting code will be broken. The Orchestrator must abort and
-escalate before committing, not after.
+conflicts. The Orchestrator must detect this and either (V2) semantically resolve trivial
+conflicts in-place per the criteria above, or abort and escalate. **In no case** may the
+Orchestrator commit a file containing `<<<<<<<` / `=======` / `>>>>>>>` conflict markers —
+such a commit is syntactically a valid git commit, but the resulting code is broken and
+the path allowlist check (Check 5) cannot detect the marker contents. The Orchestrator's
+NNSP §3.2 explicitly forbids committing conflict-marked files.
+
+**Note on V2 semantic resolution and the path-allowlist gate.** The Orchestrator's
+in-VM `edit_file` invocations during conflict resolution are **not** themselves
+kernel-mediated — they are tool calls inside the Orchestrator's RW workspace per
+Step 24b of `v2-deep-spec.md`. The kernel's enforcement happens at IntegrationMerge
+admission (Check 5): the diff between `base_sha` and `commit_sha` is computed
+host-side, and every touched path is checked against `hybrid_effective_allow`. If the
+Orchestrator semantically resolved a conflict by editing a file that is *not* in any
+sub-task's allowlist and not in the `[orchestrator] integration_paths` set, the
+resulting merge commit will be rejected at Check 5 with `FAIL_PATH_POLICY_VIOLATION`,
+even though the in-VM edits succeeded. This is intentional: the FSM bounds the
+Orchestrator's authority, not its in-VM intelligence. Operators who want the
+Orchestrator to be able to semantically resolve conflicts touching cross-cutting paths
+(e.g., a generated file that multiple sub-tasks touch) must declare those paths in
+`plan.toml [orchestrator] integration_paths`.
 
 ---
 
@@ -701,6 +995,201 @@ SecurityViolationKind::GitStateInconsistent {
 
 These three events are the only places where the SQLite ↔ git boundary surfaces in the audit log. Their presence indicates a crash recovery occurred (which is operationally interesting but not necessarily a security incident); GitStateInconsistent specifically indicates an unrecoverable inconsistency requiring operator action.
 
+### 11.10 Candidate Merged Tree Lifecycle (V2 — Pre-Merge Verifiers)
+
+When Check 5d (per `verifier-processes.md §15`) fires, the kernel
+materializes a **candidate merged tree** as an orphan commit before
+verifier-VM activation. Its lifecycle is bounded by Check 5d: it
+exists only between `Check 5d.2` (creation) and either Check 5d.4
+(verification verdict) or §11.10.4 (crash-recovery cleanup) — never
+longer.
+
+#### 11.10.1 New SQLite table: `integration_merge_attempts`
+
+```sql
+CREATE TABLE integration_merge_attempts (
+    id                       TEXT PRIMARY KEY,            -- uuid; matches the IntegrationMerge intent's request_id
+    initiative_id            TEXT NOT NULL REFERENCES initiatives(id),
+    orchestrator_session_id  TEXT NOT NULL,
+    requested_commit_sha     TEXT NOT NULL,
+    candidate_merge_sha      TEXT,                        -- NULL until Check 5d.2 succeeds
+    state                    TEXT NOT NULL,
+    -- 'AwaitingPreMergeVerifiers' | 'PreMergeVerifiersPassed'
+    -- | 'BlockedByPreMergeVerifier' | 'CompletedAdvanceApplied'
+    -- | 'DiscardedCandidateOnly' (Check 5d.2 failed) | 'DiscardedCrashRecovery'
+    discard_reason           TEXT,                        -- NULL unless discarded; see §11.10.4
+    created_at               INTEGER NOT NULL,            -- epoch ms
+    finalized_at             INTEGER                      -- epoch ms; set on terminal state transition
+);
+
+CREATE INDEX idx_imerge_attempts_initiative ON integration_merge_attempts(initiative_id);
+CREATE INDEX idx_imerge_attempts_open ON integration_merge_attempts(initiative_id)
+    WHERE state IN ('AwaitingPreMergeVerifiers', 'PreMergeVerifiersPassed');
+```
+
+This table is **distinct** from `initiatives.git_apply_pending`. The
+existing flag governs the SQLite-intent → git-apply boundary for
+the eventual master advance (§11.1); this table governs the
+candidate-merge-tree → pre-merge-verifier boundary, which is a
+strictly earlier phase of the pipeline.
+
+#### 11.10.2 Ordering relative to §11.1
+
+```
+Phase 0 (V2 — Check 5d):
+  - INSERT into integration_merge_attempts (state = 'AwaitingPreMergeVerifiers',
+                                             candidate_merge_sha = <orphan>)
+  - Spawn pre-merge verifier VMs (per verifier-processes.md §4.2 with
+    /workspace mounted from candidate_merge_sha)
+  - Wait for all to complete
+  - On block_merge failure: §11.10.3 discard; return failure
+  - On all-pass: UPDATE state = 'PreMergeVerifiersPassed'; proceed to Check 6a
+
+Phase 1 (Check 8 / §11.1 unchanged):
+  - SQLite intent: BEGIN IMMEDIATE; INSERT initiative_merges row;
+                                     UPDATE initiatives SET git_apply_pending = 1; COMMIT
+Phase 2 (§11.1 unchanged):
+  - git work: update master ref to candidate_merge_sha
+Phase 3 (§11.1 unchanged):
+  - SQLite finalize: UPDATE initiatives SET current_sha = ..., git_apply_pending = 0
+  - UPDATE integration_merge_attempts SET state = 'CompletedAdvanceApplied',
+                                          finalized_at = :now
+                                      WHERE id = :integration_merge_id
+```
+
+The candidate merged tree is the **input** to phase 1; once phase
+3 finalizes, it becomes reachable from `refs/heads/master` and is
+no longer an orphan. Until phase 3 finalizes, the candidate is
+discarded on any failure path (verifier failure, candidate-merge
+computation failure, or crash recovery per §11.10.4).
+
+#### 11.10.3 Discard procedure
+
+```rust
+fn discard_candidate_merge_tree(
+    integration_merge_id: Uuid,
+    candidate_merge_sha: &str,
+    reason: DiscardReason,
+) {
+    // 1. Delete the staging worktree.
+    fs::remove_dir_all(format!("{data_dir}/candidate_merges/{integration_merge_id}/")).ok();
+    // 2. Mark the attempt finalized.
+    sqlx::query(
+        "UPDATE integration_merge_attempts
+            SET state = ?,
+                discard_reason = ?,
+                finalized_at = ?
+          WHERE id = ?"
+    )
+    .bind(reason.terminal_state())          // 'BlockedByPreMergeVerifier' | 'DiscardedCandidateOnly' | 'DiscardedCrashRecovery'
+    .bind(reason.as_str())
+    .bind(now_epoch_ms())
+    .bind(integration_merge_id)
+    .execute(&db).await?;
+    // 3. Audit.
+    emit AuditEventKind::CandidateMergeTreeDiscarded {
+        integration_merge_id,
+        candidate_merge_sha: candidate_merge_sha.to_string(),
+        discard_reason: reason,
+    };
+    // 4. The orphan commit becomes unreachable from any ref. The next
+    //    `git gc` cycle on the orchestrator's worktree garbage-collects
+    //    it. There is no master pollution.
+}
+```
+
+`DiscardReason` values: `"verifier_blocked"` |
+`"candidate_computation_failed"` | `"crash_recovery"` |
+`"merge_aborted_by_operator"`.
+
+#### 11.10.4 Crash-recovery cleanup at startup
+
+Recovery from `kernel-lifecycle.md §7` is extended to handle
+in-flight pre-merge verifier runs. After the existing §11.3
+recovery completes, the kernel:
+
+```sql
+-- Find every attempt left in a non-terminal state.
+SELECT id, initiative_id, candidate_merge_sha
+  FROM integration_merge_attempts
+ WHERE state IN ('AwaitingPreMergeVerifiers', 'PreMergeVerifiersPassed')
+   AND finalized_at IS NULL;
+```
+
+For each row:
+
+1. Cross-reference against the verifier-VM cgroup scan from
+   `kernel-lifecycle.md §7` orphan-VM cleanup. Any pre-merge
+   verifier VM whose `RAXIS_INTEGRATION_MERGE_ID` matches this
+   attempt is killed via `cgroup.kill` (already handled by the
+   generic verifier-VM orphan cleanup; the pre-merge case requires
+   no special handling at the VM layer).
+2. If the candidate worktree at
+   `candidate_merges/<integration_merge_id>/` still exists AND the
+   attempt's state was `'PreMergeVerifiersPassed'`: the candidate
+   is salvageable. The next admission of the same `IntegrationMerge`
+   intent (idempotent per Check 7) will short-circuit at the
+   `current_sha` check or rerun verifiers (the kernel re-runs
+   verifiers conservatively, since the witness rows survived but
+   the verifier-VM-side artifacts may not have been staged
+   atomically).
+3. Otherwise (state was `'AwaitingPreMergeVerifiers'` OR worktree
+   is missing): discard the attempt with reason `"crash_recovery"`
+   per §11.10.3. The Orchestrator's eventual re-submission of the
+   `IntegrationMerge` intent will produce a fresh
+   `integration_merge_id` and a fresh candidate merged tree.
+
+This recovery procedure is idempotent — running it multiple times
+on the same restart sequence converges to the same terminal states.
+
+#### 11.10.5 Why a separate phase 0, not folded into Check 5b/5c
+
+Pre-merge verifiers are **distinct in cost and authority** from
+the human-approval gates at Checks 5b/5c:
+
+- Human-approval gates resolve via operator IPC (low per-attempt
+  cost; bounded by operator latency).
+- Pre-merge verifiers resolve via VM execution (high per-attempt
+  cost; bounded by verifier `timeout`).
+
+Folding them into the same phase would allow expensive verifiers
+to run on merges that the operator hasn't yet approved at the
+human-gate layer — wasting cycles on merges that may be rejected
+on grounds unrelated to verification. The strict ordering
+`5b → 5c → 5d` ensures pre-merge verifiers consume resources only
+on merges that the operator has already approved at the human
+layer.
+
+#### 11.10.6 Audit events added
+
+```rust
+AuditEventKind::CandidateMergeTreeCreated {
+    integration_merge_id:  Uuid,
+    candidate_merge_sha:   String,
+    merged_task_ids:       Vec<TaskId>,
+    matching_verifier_count: u32,
+}
+
+AuditEventKind::CandidateMergeTreeDiscarded {
+    integration_merge_id:  Uuid,
+    candidate_merge_sha:   String,                   // the SHA that was created and is now unreachable
+    discard_reason:        DiscardReason,            // see §11.10.3
+}
+
+AuditEventKind::VerifierBlockedMerge {
+    integration_merge_id:  Uuid,
+    candidate_merge_sha:   String,
+    verifier_names:        Vec<String>,
+    primary_witness_summary: String,
+}
+```
+
+`VerifierActivated` and `VerifierCompleted` (per
+`verifier-processes.md §11`) also fire for pre-merge verifier
+spawns; these are the standard verifier audit events with
+`hook_kind = "pre_merge"` and `integration_merge_id` set in place
+of `task_id`.
+
 ---
 
 ## 12. Implementation Checklist
@@ -729,6 +1218,60 @@ These three events are the only places where the SQLite ↔ git boundary surface
       - Conflict → escalation → resolution → merge
       - Crash recovery (double-submission idempotency)
       - Partial wave (failed sub-task, partial IntegrationMerge)
+
+### Pre-IntegrationMerge Verifier Execution (Check 5d, V2)
+
+- [ ] Implement Check 5d in `handle_integration_merge` between Check 5c and Check 6a
+      per §4 Check 5d.1–5d.6
+- [ ] Add `integration_merge_attempts` SQLite table per §11.10.1; DDL migration
+- [ ] Implement `compute_candidate_merge_tree(initiative_id, commit_sha, merged_task_ids)
+      → Result<CandidateMergeSha, FailReason>` producing an orphan commit at
+      `$RAXIS_DATA_DIR/candidate_merges/<integration_merge_id>/`
+- [ ] Implement `applies_to_matches` and `environment_filter_matches` per
+      `verifier-processes.md §16.3` (cross-spec; lives in the verifier module)
+- [ ] Spawn pre-merge verifier VMs with `RAXIS_VERIFIER_HOOK_KIND = "pre_merge"`,
+      `RAXIS_INTEGRATION_MERGE_ID` set, `/workspace` mounted from candidate merged tree
+- [ ] Implement gating algorithm per §4 Check 5d.4; emit `VerifierBlockedMerge` or
+      proceed to Check 6a based on outcome
+- [ ] Implement `discard_candidate_merge_tree` per §11.10.3 (worktree removal,
+      SQLite update, audit emission)
+- [ ] Extend startup recovery (`kernel-lifecycle.md §7`) per §11.10.4 — handle
+      attempts in `'AwaitingPreMergeVerifiers'` and `'PreMergeVerifiersPassed'`
+      states; reconcile with verifier-VM cgroup orphan cleanup
+- [ ] Add audit events `CandidateMergeTreeCreated`, `CandidateMergeTreeDiscarded`,
+      `VerifierBlockedMerge` per §11.10.6
+- [ ] Add `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` and
+      `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED` to `raxis-types::PlannerErrorCode`
+- [ ] Tests:
+      - Plan with no `[[plan.integration_merge_verifiers]]` and policy with no
+        `[[integration_merge_verifiers]]` → Check 5d is no-op; merge proceeds to Check 6a
+      - Plan with one `block_merge` verifier that passes → Check 5d.4 advances; master updated
+      - Plan with one `block_merge` verifier that fails → `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`;
+        candidate worktree removed; master NOT updated; no `initiative_merges` row written
+      - Plan with one `warn_only` verifier that fails → merge proceeds; audit shows
+        warning witness in the attempt's `verifier_witnesses`
+      - Operator policy `[[integration_merge_verifiers]]` with `on_failure = "warn_only"`
+        → admission rejected at policy load (operator declarations cannot downgrade)
+      - Per-task verifier with `on_failure = "block_merge"` → `approve_plan` rejects with
+        `FAIL_VERIFIER_INVALID_ON_FAILURE`
+      - Pre-merge verifier with `on_failure = "block_review"` → `approve_plan` rejects
+        with `FAIL_VERIFIER_INVALID_ON_FAILURE`
+      - `applies_to = "task_set"` with intersection: spawns; without intersection: skipped
+      - `applies_to = "last"` on intermediate merge: skipped; on final merge: spawns
+      - `applies_to = "last"` with parallel branches: only the merge that drains the
+        final remaining `Completed` task fires the verifier
+      - Operator gate with `required_for_environments = ["production"]`: fires on
+        production-bound merge; skipped on beta-bound merge
+      - Crash recovery: kernel killed during pre-merge verifier execution → on restart,
+        candidate worktree discarded with reason `"crash_recovery"`; orchestrator's
+        re-submission produces fresh attempt
+      - Crash recovery: kernel killed between `'PreMergeVerifiersPassed'` and Check 6a
+        → on restart, attempt is salvageable; same `IntegrationMerge` re-submission
+        re-runs Check 5d conservatively
+      - Candidate merge computation fails (malformed `commit_sha`) → `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED`;
+        no worktree left behind
+      - Pre-merge verifier failure does NOT increment any task's review-round counter
+        (no `INV-CONVERGENCE-01` interaction)
 
 ### Transactional Boundary (§11)
 
@@ -954,26 +1497,36 @@ re-attempt with approval) is the correct flow.
 - [ ] Tests: protected path fires + approved, protected path fires + rejected,
       SHA mismatch rejection, policy bundle with no protected paths (no-op),
       simultaneous MergeConflict + ProtectedPathMerge escalations
-### §13.b — Plan-Level Integration Merge Gates (Additive-Only)
+### §13.b — Plan-Level Protected Path Gates (Additive-Only)
 
 Operators may declare additional protected path gates in `plan.toml` that are specific to
 a single initiative. These are **additive only** — they can add paths that require approval
 beyond what the policy bundle declares. They cannot remove or weaken policy-level gates.
 
+> **Naming note (V2).** This block was previously named
+> `[[integration_merge_gates]]`. It was renamed to
+> `[[plan.protected_path_gates]]` in V2 because that name collides with the
+> new `[[plan.integration_merge_verifiers]]` and policy-level
+> `[[integration_merge_verifiers]]` mechanisms (per `verifier-processes.md
+> §15`), which gate IntegrationMerge admission via mechanical witness
+> verification — a different concept from the human-approval gating
+> documented here. Since RAXIS has no released production deployment, the
+> rename is a clean break with no backward-compatibility shim.
+
 ```toml
 # plan.toml
 
-[[integration_merge_gates]]
+[[plan.protected_path_gates]]
 path_prefix = "src/experimental-billing/"   # not in policy.toml, but sensitive for this initiative
 # default: require_approval = false
 require_approval = true
 
-[[integration_merge_gates]]
+[[plan.protected_path_gates]]
 path_prefix = "src/new-auth-provider/"
 require_approval = true
 ```
 
-**Default:** `require_approval = false`. An `[[integration_merge_gates]]` entry with
+**Default:** `require_approval = false`. A `[[plan.protected_path_gates]]` entry with
 `require_approval = false` is a no-op and may be omitted.
 
 **How the Kernel computes the effective protected set (Check 5b):**
@@ -985,7 +1538,7 @@ let effective_protected: Vec<&str> = policy
     .iter()
     .filter(|p| p.require_approval_for.contains(&IntentClass::IntegrationMerge))
     .chain(
-        plan.integration_merge_gates          // initiative-level additive gates
+        plan.protected_path_gates             // initiative-level additive gates
             .iter()
             .filter(|g| g.require_approval)
     )
@@ -998,7 +1551,7 @@ union — it cannot remove entries contributed by the policy bundle.
 
 **Why additive plan-level gates are safe:**
 The plan is operator-signed (Ed25519). Adding a gate requires the operator to sign a plan
-that includes the `[[integration_merge_gates]]` entry. This is equivalent to the operator
+that includes the `[[plan.protected_path_gates]]` entry. This is equivalent to the operator
 declaring "I want human sign-off on this path for this initiative." The security model is
 not weakened — it is strengthened at the initiative level. The policy bundle floor is
 always enforced regardless of what the plan declares.
