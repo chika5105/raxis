@@ -192,6 +192,30 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
         return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
     }
 
+    // ── Step 1B: Static dispatch matrix (v2-deep-spec.md §Step 20) ────────
+    //
+    // INV-DISPATCH: the (intent_kind, session_agent_type) authority
+    // matrix is the SOLE place in the Kernel that maps intent kinds
+    // to agent-type membership. Evaluated immediately after session
+    // load and BEFORE any handler-side check so an Unauthorized cell
+    // short-circuits with `FailPolicyViolation` (INV-08 — coarse code,
+    // no detail leaked) without touching the rest of the pipeline.
+    //
+    // V1 backward compat: pre-Migration-5 sessions carry
+    // `session_agent_type = NULL`, which the matrix authorizes for
+    // the four V1 intent kinds and unauthorizes for every V2
+    // sub-task kind.
+    let dispatch_verdict =
+        crate::authority::evaluate_dispatch(req.intent_kind, session.session_agent_type);
+    if !dispatch_verdict.is_authorized() {
+        // We deliberately do NOT log the intent body or the matrix
+        // cell that fired — the planner sees only the coarse code.
+        // A future audit-side detail emit can hang off this branch
+        // (the audit chain has the structured projection); the wire
+        // surface stays opaque per INV-08.
+        return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+    }
+
     // ── Phase A (spawn_blocking) — Steps 2-8 + dispatch ───────────────────
     //
     // Everything from here through Step 8 (estimated_cost) is sync and

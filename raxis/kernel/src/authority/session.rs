@@ -53,6 +53,20 @@ pub struct SessionRow {
     pub lineage_id: String,
     pub revoked_at: Option<i64>,
     pub expires_at: i64,
+
+    // ── V2 fields (Migration 5; kernel-store.md / v2-deep-spec.md §Step 6) ──
+    /// **V2.** `Some(SessionAgentType)` when the session was created
+    /// for a V2 hierarchical-orchestration role; `None` for V1
+    /// sessions that pre-date Migration 5 (column nullable for
+    /// backward compat). Drives the static dispatch matrix
+    /// (v2-deep-spec.md §Step 20).
+    pub session_agent_type: Option<raxis_types::SessionAgentType>,
+
+    /// **V2.** Boolean gate on `ActivateSubTask` and `RetrySubTask`.
+    /// INV-DELEGATE-01 enforces `can_delegate = 1` ⇔
+    /// `session_agent_type = Orchestrator` at the DB layer. Decoded
+    /// here as `bool` for ergonomic handler use.
+    pub can_delegate: bool,
 }
 
 /// Configuration for session creation (fetch_quota, default_ttl, etc.).
@@ -145,11 +159,14 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
         &format!(
             "SELECT session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
-                    lineage_id, revoked_at, expires_at
+                    lineage_id, revoked_at, expires_at,
+                    session_agent_type, can_delegate
              FROM {SESSIONS} WHERE session_id = ?1"
         ),
         rusqlite::params![session_id.as_str()],
         |row| {
+            let agent_type_sql: Option<String> = row.get(10)?;
+            let can_delegate_int: i64 = row.get(11)?;
             Ok(SessionRow {
                 session_id:        row.get(0)?,
                 role:              row.get(1)?,  // mapped from role_id column
@@ -161,6 +178,10 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
                 lineage_id:        row.get(7)?,
                 revoked_at:        row.get(8)?,
                 expires_at:        row.get(9)?,
+                session_agent_type: agent_type_sql
+                    .as_deref()
+                    .and_then(raxis_types::SessionAgentType::from_sql_str),
+                can_delegate:      can_delegate_int != 0,
             })
         },
     ).map_err(|e| match e {
@@ -194,22 +215,31 @@ pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<Sessio
         &format!(
             "SELECT session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
-                    lineage_id, revoked_at, expires_at
+                    lineage_id, revoked_at, expires_at,
+                    session_agent_type, can_delegate
              FROM {SESSIONS} WHERE session_token = ?1"
         ),
         rusqlite::params![session_token],
-        |row| Ok(SessionRow {
-            session_id:        row.get(0)?,
-            role:              row.get(1)?,  // mapped from role_id column
-            session_token:     row.get(2)?,
-            sequence_number:   row.get(3)?,
-            worktree_root:     row.get(4)?,
-            base_sha:          row.get(5)?,
-            base_tracking_ref: row.get(6)?,
-            lineage_id:        row.get(7)?,
-            revoked_at:        row.get(8)?,
-            expires_at:        row.get(9)?,
-        }),
+        |row| {
+            let agent_type_sql: Option<String> = row.get(10)?;
+            let can_delegate_int: i64 = row.get(11)?;
+            Ok(SessionRow {
+                session_id:        row.get(0)?,
+                role:              row.get(1)?,
+                session_token:     row.get(2)?,
+                sequence_number:   row.get(3)?,
+                worktree_root:     row.get(4)?,
+                base_sha:          row.get(5)?,
+                base_tracking_ref: row.get(6)?,
+                lineage_id:        row.get(7)?,
+                revoked_at:        row.get(8)?,
+                expires_at:        row.get(9)?,
+                session_agent_type: agent_type_sql
+                    .as_deref()
+                    .and_then(raxis_types::SessionAgentType::from_sql_str),
+                can_delegate:      can_delegate_int != 0,
+            })
+        },
     ).map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => AuthorityError::SessionNotFound,
         other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
@@ -544,6 +574,111 @@ mod tests {
             )
             .unwrap();
         assert_eq!(s, 0);
+    }
+
+    // ── V2 SessionRow read-path coverage (Migration 5) ────────────────────
+    //
+    // After Migration 5, `sessions` carries `session_agent_type TEXT NULL`
+    // and `can_delegate INTEGER NOT NULL DEFAULT 0`. The `SessionRow`
+    // surface must round-trip both columns so the dispatch matrix
+    // (v2-deep-spec.md §Step 20) and the `ActivateSubTask` /
+    // `RetrySubTask` boolean-field gate (INV-DELEGATE-01) read consistent
+    // values.
+
+    #[test]
+    fn v1_session_row_reads_null_agent_type_as_none() {
+        // `store_with_session` inserts without setting the V2 columns —
+        // simulates a pre-Migration-5 row that survived the upgrade.
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+
+        let row = get_session(&sid, &store).expect("session must read");
+        assert!(row.session_agent_type.is_none(),
+            "V1 row ⇒ NULL agent_type ⇒ Rust None");
+        assert!(!row.can_delegate,
+            "V1 row default DDL: can_delegate = 0");
+    }
+
+    #[test]
+    fn v2_orchestrator_session_row_reads_can_delegate_one() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+        // Promote the V1 row to a V2 Orchestrator row in-place.
+        // The cross-column CHECK on `sessions` (Migration 5) requires
+        // can_delegate = 1 ⇔ session_agent_type = Orchestrator, so we
+        // set both atomically in a single UPDATE.
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {SESSIONS} SET session_agent_type = ?1, can_delegate = 1
+                     WHERE session_id = ?2"
+                ),
+                rusqlite::params![
+                    raxis_types::SessionAgentType::Orchestrator.as_sql_str(),
+                    sid.as_str(),
+                ],
+            ).unwrap();
+        }
+
+        let row = get_session(&sid, &store).expect("session must read");
+        assert_eq!(row.session_agent_type,
+            Some(raxis_types::SessionAgentType::Orchestrator));
+        assert!(row.can_delegate,
+            "Orchestrator session must round-trip can_delegate=1");
+    }
+
+    #[test]
+    fn v2_executor_session_row_reads_can_delegate_zero() {
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {SESSIONS} SET session_agent_type = ?1, can_delegate = 0
+                     WHERE session_id = ?2"
+                ),
+                rusqlite::params![
+                    raxis_types::SessionAgentType::Executor.as_sql_str(),
+                    sid.as_str(),
+                ],
+            ).unwrap();
+        }
+
+        let row = get_session(&sid, &store).expect("session must read");
+        assert_eq!(row.session_agent_type,
+            Some(raxis_types::SessionAgentType::Executor));
+        assert!(!row.can_delegate,
+            "Executor session must NOT have can_delegate=1 \
+             (INV-DELEGATE-01)");
+    }
+
+    #[test]
+    fn v2_session_row_lookup_by_token_round_trips_v2_fields() {
+        // Same coverage but through the planner-IPC entry point
+        // (`get_session_by_token`) rather than `get_session`.
+        let sid = SessionId::new_v4();
+        let store = store_with_session(&sid);
+        {
+            let conn = store.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {SESSIONS} SET session_agent_type = ?1, can_delegate = 0
+                     WHERE session_id = ?2"
+                ),
+                rusqlite::params![
+                    raxis_types::SessionAgentType::Reviewer.as_sql_str(),
+                    sid.as_str(),
+                ],
+            ).unwrap();
+        }
+
+        let row = get_session_by_token("tok", &store)
+            .expect("session must be readable by token");
+        assert_eq!(row.session_agent_type,
+            Some(raxis_types::SessionAgentType::Reviewer));
+        assert!(!row.can_delegate);
     }
 
     #[test]

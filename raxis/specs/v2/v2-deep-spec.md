@@ -786,12 +786,50 @@ from the Kernel's own session state, not from a field in the planner's message.
 evaluated immediately after bincode deserialization and before any handler function is called.
 The matrix is a compile-time constant — a `match (intent_kind, session_agent_type)` expression
 that returns `Authorized` or `Unauthorized`. `Unauthorized` immediately returns
-`FAIL_POLICY_VIOLATION` without logging the intent body (INV-08 coarse codes). The matrix
-is reproduced in full in Part 2, Section 2.4.
+`FAIL_POLICY_VIOLATION` without logging the intent body (INV-08 coarse codes).
+
+**Implementation reference:** `kernel/src/authority/dispatch_matrix.rs::evaluate_dispatch`.
+The matrix is exhaustive over `(IntentKind × Option<SessionAgentType>)` (the `Option` carries
+the V1 backward-compat row — pre-Migration-5 sessions are `None` and authorise only the four
+V1 intent kinds). The full cell table:
+
+| `IntentKind`        | `None` (V1)  | Orchestrator | Executor     | Reviewer     |
+|---------------------|--------------|--------------|--------------|--------------|
+| `SingleCommit`      | Authorized   | Unauthorized | Authorized   | Unauthorized |
+| `IntegrationMerge`  | Authorized   | Authorized   | Unauthorized | Unauthorized |
+| `CompleteTask`      | Authorized   | Authorized   | Authorized   | Unauthorized |
+| `ReportFailure`     | Authorized   | Authorized   | Authorized   | Unauthorized |
+| `ActivateSubTask`   | Unauthorized | Authorized   | Unauthorized | Unauthorized |
+| `RetrySubTask`      | Unauthorized | Authorized   | Unauthorized | Unauthorized |
+| `SubmitReview`      | Unauthorized | Unauthorized | Unauthorized | Authorized   |
+
+**Best-judgment cells (flagged here so the spec and the implementation stay in lock-step):**
+
+* `Orchestrator + SingleCommit = Unauthorized` — the Orchestrator is the merger, not a
+  code author (Step 8). It only ever submits `IntegrationMerge` to land work; per-Executor
+  diffs are produced by Executors. A future "Orchestrator may also write" mode would be a
+  separate spec amendment, not a silent matrix edit.
+* `Orchestrator + CompleteTask = Authorized` — the Orchestrator owns its top-level
+  initiative-orchestration task; once every reachable sub-task is `Completed` and the
+  final `IntegrationMerge` lands, the Orchestrator submits `CompleteTask` against its own
+  task row to drive the initiative-level FSM (`Executing → Completed`). Without this cell
+  the Orchestrator would have no way to terminate the initiative on the success path.
+* `Reviewer + ReportFailure = Unauthorized` — the Reviewer's only authorized output is
+  `SubmitReview`. The "I cannot review this" path is `SubmitReview { approved: false,
+  critique: "..." }`, NOT a V1-style failure self-report. Reviewer crash recovery is
+  governed by `subtask_activations.crash_retry_count` (Step 12), not by planner-initiated
+  `ReportFailure`. Allowing `ReportFailure` would create an alternate completion path that
+  bypasses the Logical-AND verdict gate (Step 25).
+* `Executor + IntegrationMerge = Unauthorized` — Step 8 makes this the Orchestrator's
+  exclusive intent (semantic merge requires LLM authority over conflict resolution; the
+  Executor's per-task scope is a single non-merge commit train).
 
 **Key property:** The matrix is the *sole* place in the Kernel that maps intent kinds to agent
 types. No handler checks `session_agent_type` for authorization. Handlers check `can_delegate`
-for the specific case of `ActivateSubTask`, which is the only intent with a boolean-field gate.
+for the specific case of `ActivateSubTask` / `RetrySubTask`, which is the boolean-field gate
+the matrix complements (INV-DELEGATE-01 enforces `can_delegate = 1 ⇔ session_agent_type =
+Orchestrator` at the DB CHECK constraint, so the boolean is redundant for matrix-decided
+authority but load-bearing for the operator-debugging surface).
 
 ---
 

@@ -31,6 +31,7 @@ pub mod verifier_token;
 pub mod approval;
 pub mod escalation;
 pub mod cert_check;
+pub mod dispatch_matrix;
 
 // Re-export the public API surface per kernel-core.md §2.3 authority/mod.rs.
 pub use delegation::{
@@ -45,3 +46,4 @@ pub use verifier_token::{issue_verifier_token, validate_verifier_token, consume_
 pub use keys::{verify_hmac, sign_audit_record, authority_pubkey_fingerprint, KeyRegistry, load_key_registry};
 pub use approval::{validate_approval_token, revoke_approval};
 pub use cert_check::{CertEnforcer, CertGuard};
+pub use dispatch_matrix::{evaluate_dispatch, DispatchVerdict};
