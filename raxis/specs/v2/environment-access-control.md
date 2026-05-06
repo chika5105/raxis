@@ -6,6 +6,8 @@
 > - `v2-deep-spec.md §INV-VM-CAP-04` — VirtioFS mounts hardcoded; credentials/ never mounted
 > - `integration-merge.md §12` — Escalation-as-amendment pattern
 > - `kernel-mediated-egress.md` — Two-level egress allowlist baseline
+> - `invariants.md §Environment` — `INV-ENV-01` Task Environment Consistency
+> - `operator-ergonomics.md` — environments are an opt-in compliance feature; default deployments do not declare any
 
 ---
 
@@ -20,6 +22,135 @@ This single requirement cuts across three independent control layers in RAXIS:
 
 Each layer protects against a different failure mode. No single layer is sufficient alone.
 This document specifies all three layers, the tensions between them, and how they are resolved.
+
+---
+
+## 1.5 Opt-In Activation Model
+
+### 1.5.1 Default: no environments declared, no environment binding
+
+A fresh-install `policy.toml` ships with **zero** `[environments.<label>]`
+declarations, **zero** `[[environment_gates]]`, and **zero**
+`environment` fields on any `[[permitted_credentials]]` entry. In this
+configuration:
+
+- The Layer-1 plan-level egress allowlist (`§2 Layer 1`) operates exactly
+  as it does in V1.
+- Layer 2 credential injection (`§2 Layer 2`) operates exactly as it
+  does in V1; the `environment` field on `[[permitted_credentials]]`
+  is absent and not consulted.
+- Layer 3 environment gates (`§2 Layer 3`) and the per-task consistency
+  check (`§11 INV-ENV-01`) are inert — they fire on zero plan tasks
+  because there is no environment to bind to.
+
+A solo developer running RAXIS for personal coding tasks, a small team
+prototyping the system, or any deployment that does not need
+multi-environment compliance separation can use the system without
+ever encountering the environment model.
+
+### 1.5.2 Activation trigger
+
+The environment model becomes **active** the moment the operator's
+signed `policy.toml` declares **at least one** `[environments.<label>]`
+section. From that policy epoch forward:
+
+1. Every `[[environment_gates]]` `label` field MUST resolve to a
+   declared `[environments.<label>]` (per `§5b §11.2`); typos that
+   silently mis-bind a credential are caught at policy load with
+   `FAIL_POLICY_ENV_LABEL_UNDECLARED`.
+2. Every `[[permitted_credentials]]` `environment` field (when present)
+   MUST resolve similarly.
+3. The per-task environment-consistency check (`§11 INV-ENV-01`) runs
+   at `approve_plan` for every admitted plan; tasks whose
+   environment-bound resources resolve to more than one label are
+   rejected with `FAIL_TASK_ENVIRONMENT_INCONSISTENT`.
+
+### 1.5.3 Why opt-in, not opt-out
+
+Environments are a **compliance feature**, not a baseline security
+gate. The baseline security gates (kernel-mediated egress, credential
+injection by name, `INV-VM-CAP-04` no-credentials-mount, the planner
+harness `INV-PLANNER-HARNESS-*` family, the Plan Bundle Sealing
+chain) protect every operator regardless of whether they think in
+environments. Environments add a *labelling* layer on top so that the
+kernel can mechanically enforce "no single agent simultaneously holds
+beta and prod credentials" — but most deployments don't have that
+problem because they have only one environment, or because they
+decompose work across operators rather than across environment labels.
+
+**Alternatives considered and rejected:**
+
+- **Opt-out (environments on by default; declare an empty policy to
+  disable):** Forces every new operator to learn the environment model
+  during their first 10 minutes with the system, in direct conflict
+  with the operator-ergonomics goal. Adds a "what does the empty
+  default mean?" cliff to the schema.
+- **Always-on with a single implicit "default" environment:** Saves
+  one declaration but injects an opinion (every credential is
+  implicitly `environment = "default"`) that compounds with future
+  per-environment policy knobs (audit retention, blast radius). The
+  operator either has to override the implicit `default` everywhere
+  or accept the kernel making compliance decisions on their behalf.
+  Both outcomes are worse than keeping the model entirely silent
+  until the operator opts in.
+- **Opt-in via a separate `[features] environments_enabled = true`
+  flag:** Adds a redundant gate. The presence of any
+  `[environments.<label>]` declaration is itself unambiguous opt-in
+  signal; a separate boolean flag is one more thing to forget to set
+  and one more failure mode (declared envs but feature flag off →
+  silent ignore? hard error?).
+
+### 1.5.4 Partial adoption: neutral credentials and neutral egress
+
+Once the environment model is active, operators are NOT required to
+bind every credential or every egress URL to an environment. A
+credential or gate that omits its environment field is **neutral** —
+usable from any task regardless of the task's environment binding,
+and contributing zero environment labels to the per-task consistency
+check.
+
+The neutral-credential pattern handles the real-world cases that
+don't fit a clean environment taxonomy:
+
+- **Public package registries** (`registry.npmjs.org`, `pypi.org`,
+  `crates.io`) — same registry serves beta and prod tasks; binding
+  to a single environment forces operators to either duplicate the
+  credential per environment or invent a fake "shared" environment.
+- **Read-only public APIs** (`api.github.com` for repository
+  metadata) — used by tasks across all environments without
+  environment-specific scoping.
+- **Internal observability endpoints** (metrics, error reporting)
+  — same endpoint receives data from all environments.
+
+**The full rule:**
+
+| Resource declaration | Treated as |
+|---|---|
+| `[[permitted_credentials]]` with `environment = "beta"` | Bound to `beta`. Contributes `beta` to any using task's env set. |
+| `[[permitted_credentials]]` with no `environment` field | **Neutral.** Usable from any task. Contributes nothing to env set. |
+| `[[environment_gates]]` with `label = "beta"` (URL gate) | Bound to `beta`. Tasks whose `allowed_egress` matches this URL contribute `beta` to their env set. |
+| `allowed_egress` URL not matching ANY environment gate | **Neutral.** Contributes nothing to env set. |
+
+Tasks with cardinality-zero environment binding (no
+environment-bound credentials, no environment-bound egress matches)
+are **environment-neutral by default** and pass `INV-ENV-01`
+trivially.
+
+**Alternatives considered and rejected:**
+
+- **Require every credential / gate to declare an environment when
+  any environment exists:** Forces operators to invent a fake
+  "shared" or "neutral" environment label and remember to bind
+  every npm-registry-style credential to it. Adds schema bloat and
+  invites typos. Doesn't actually improve safety because the
+  "shared" label would be granted to every task, defeating the
+  purpose of the environment binding for the intentionally-shared
+  resource.
+- **Implicit "shared" label assigned by the kernel when env field
+  is omitted:** Re-introduces a kernel-side opinion the operator
+  may not want. Saves one keyword (`environment = "shared"` or
+  similar) at the cost of obscuring what's bound where in the
+  audit log.
 
 ---
 
@@ -129,7 +260,7 @@ A `url_prefix`-only allowlist cannot distinguish them.
 
 **Resolution:** RAXIS's strong recommendation is **cluster-level isolation** — staging and prod should be on separate clusters with separate API server URLs. This is the architectural norm in production k8s deployments. When same-cluster multi-tenancy is used, RAXIS provides defense-in-depth through credential scoping (staging service account has RBAC permissions only in the staging namespace) but cannot enforce namespace separation at the URL level alone.
 
-This is documented as a known limitation. `WARN_SAME_CLUSTER_NAMESPACE_ISOLATION` is emitted at `approve_plan` when a task declares a url_prefix that matches both a staging and prod environment gate prefix on the same hostname.
+This is documented as a known limitation. `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` (V2; promoted from `WARN_SAME_CLUSTER_NAMESPACE_ISOLATION`) is emitted at `approve_plan` when a task declares a url_prefix that matches two or more environment gate labels on the same hostname. The only escape hatch is `[environments.<label>] same_cluster_acknowledged = true` on every conflated environment (§5b.2, §11.4); see §7 for the full failure-code spec.
 
 ---
 
@@ -395,6 +526,138 @@ a worse security outcome than not auditing the value.
 
 ---
 
+## 5b. Environment Declaration Schema
+
+### 5b.1 The `[environments.<label>]` table
+
+Environment definitions live under `[environments.<label>]` in
+`policy.toml`. The label is the canonical identifier referenced by
+`[[environment_gates]] label`, `[[permitted_credentials]] environment`,
+and (in V2.x and beyond) any per-environment policy knob.
+
+```toml
+# policy.toml — V2 schema for environment declarations
+
+[environments.beta]
+description               = "Beta cluster — non-customer-facing"
+same_cluster_acknowledged = false   # default; declaring `true` opts the operator
+                                    # into the same-cluster pattern (§7
+                                    # FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION)
+
+# Reserved for V2.x — inert in this release. Listed here so operators
+# can see the future schema growth and so the kernel parser can
+# tolerate (and warn on) their presence in older releases. Setting any
+# of these in V2.0 has zero effect; the kernel emits one
+# WARN_ENVIRONMENT_RESERVED_FIELD_SET per declaration at policy load.
+
+# require_review_signoff   = false                          # Reserved for V2.x — per-env Reviewer mandate
+# blast_radius             = "low"                           # Reserved for V2.x — per-env risk classification (low|medium|high)
+# audit_retention_days     = 365                             # Reserved for V2.x — per-env retention override
+# require_two_party_sign   = false                           # Reserved for V2.x — per-env operator co-signing requirement
+# escalation_default_class = "..."                           # Reserved for V2.x — per-env escalation class default
+# override_reviewer_alias  = "reviewer_production_strict"    # Reserved for V2.x — per-env Reviewer model override
+
+[environments.production]
+description               = "Production cluster — customer-facing"
+same_cluster_acknowledged = false
+```
+
+### 5b.2 Field reference
+
+| Field | Type | Default | Purpose |
+|---|---|---|---|
+| `description` | string | required | Human-readable description; surfaced in `raxis-cli plan explain` and audit-log inspectors. |
+| `same_cluster_acknowledged` | bool | `false` | Operator opt-in for the `§7 FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` case where multiple environments share a hostname. When `true`, URL gates whose conflation involves THIS environment do not contribute environment labels to the per-task consistency check (`§11 INV-ENV-01`); the operator is taking responsibility for namespace separation via credential/RBAC scoping rather than URL-level isolation. |
+| `# require_review_signoff` etc. | reserved | n/a | Reserved for V2.x. See §5b.4. |
+
+### 5b.3 Validation at policy load
+
+When the policy bundle is admitted (`policy-plan-authority.md §INV-POLICY-01`):
+
+1. Each `[environments.<label>]` table parses with the schema above.
+   Unknown fields fail with `FAIL_POLICY_ENV_UNKNOWN_FIELD` unless they
+   match one of the V2.x reserved field names listed in §5b.4 (which
+   produce `WARN_ENVIRONMENT_RESERVED_FIELD_SET`).
+2. Every `label` field on every `[[environment_gates]]` MUST resolve
+   to a declared `[environments.<label>]`. Otherwise:
+   `FAIL_POLICY_ENV_LABEL_UNDECLARED { label, source: "environment_gates" }`.
+3. Every non-empty `environment` field on every `[[permitted_credentials]]`
+   MUST similarly resolve. Otherwise:
+   `FAIL_POLICY_ENV_LABEL_UNDECLARED { label, source: "permitted_credentials" }`.
+4. Environment label syntax: lowercase ASCII letters, digits, hyphens,
+   underscores; 1–32 characters; matches `^[a-z][a-z0-9_-]{0,31}$`.
+   Otherwise: `FAIL_POLICY_ENV_LABEL_INVALID`.
+
+These validations make typos surface at policy push (signed, deliberate,
+audited) rather than silently mis-binding a credential at plan
+submission (where the operator would never notice the binding fell
+through).
+
+### 5b.4 Reserved fields (V2.x)
+
+The fields commented out in §5b.1 are **reserved** for future V2.x
+releases. Listing them in V2.0 documentation serves three purposes:
+
+1. **Operator forward-compat awareness.** Operators reading the schema
+   today see what's coming and can structure their policy templates
+   accordingly.
+2. **Schema-fight prevention.** A future RAXIS release that adds
+   `blast_radius` does not collide with operator extensions or
+   forks that may have used the same name for unrelated semantics.
+3. **Parser tolerance.** The V2.0 parser emits one
+   `WARN_ENVIRONMENT_RESERVED_FIELD_SET` per reserved field that an
+   operator sets, rather than a hard `FAIL_POLICY_ENV_UNKNOWN_FIELD`.
+   This lets operators experiment with their own templates; the
+   warning makes it explicit that the field has no kernel-side
+   effect in this release.
+
+The canonical list of reserved field names in V2.0:
+
+| Reserved field | Anticipated V2.x semantics |
+|---|---|
+| `require_review_signoff` | Per-environment Reviewer mandate; tasks bound to this env are silently upgraded to require Reviewer approval before merge. |
+| `blast_radius` | Per-environment risk classification (`low` / `medium` / `high`); future scheduler / token-budget knobs key off this. |
+| `audit_retention_days` | Per-environment audit-retention override; satisfies regulated-environment retention windows (HIPAA, SOC 2). |
+| `require_two_party_sign` | Per-environment two-operator co-signing requirement on submitted plans. |
+| `escalation_default_class` | Per-environment default escalation class for ambiguous escalations. |
+| `override_reviewer_alias` | Per-environment Reviewer model override. When a task's binding (per `§11 INV-ENV-01`) resolves to this environment, the Reviewer activated for that task uses this `[provider_aliases.<alias>]` chain instead of the plan's `[provider_aliases.reviewer]`. Lets operators upgrade Reviewer reasoning specifically for production-bound tasks (e.g., `claude-opus-4.7-thinking-high`) without inflating cost on beta-bound tasks (`provider-model-selection.md §6.1`). The alias name on the right MUST resolve to a `[provider_aliases.<alias>]` block in the plan or the deployment-wide policy; resolution failures will be caught at admission once V2.x lands the field. |
+
+V2.0 implementations MUST treat any of these names in a
+`[environments.<label>]` table as parseable but inert, with a
+`WARN_ENVIRONMENT_RESERVED_FIELD_SET` per occurrence. Future RAXIS
+releases will move individual fields out of "reserved" and into
+"normative"; operators upgrading across those releases are responsible
+for verifying the values they set match the new normative semantics
+before re-pushing the policy bundle.
+
+### 5b.5 Permitted-credentials neutrality
+
+Per `§1.5.4`, the `environment` field on `[[permitted_credentials]]` is
+**optional**. A credential without it is **neutral** and contributes
+nothing to the per-task environment-consistency check. The schema
+makes this explicit:
+
+```toml
+# Neutral credential (used by tasks of any environment binding)
+[[permitted_credentials]]
+name        = "npm-registry"
+description = "Read-only npm registry token; same registry serves all envs"
+# No `environment` field → neutral.
+
+# Environment-bound credential
+[[permitted_credentials]]
+name        = "k8s-prod"
+environment = "production"
+description = "Production k8s service account kubeconfig"
+```
+
+The kernel does not infer environment binding from the credential's
+name (e.g., `k8s-prod` does NOT auto-bind to `"production"`). Binding
+is exclusively the `environment` field. This avoids name-shape coupling
+that would make rename refactors a security risk.
+
+---
+
 ## 6. Environment Gate — Write Approval Escalation Flow
 
 When `write_requires_approval = true` fires (Step 4 of admission):
@@ -503,24 +766,110 @@ hygiene violation — the agent shouldn't hold keys it cannot use.
 
 ---
 
-### WARN_SAME_CLUSTER_NAMESPACE_ISOLATION
+### FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION
 
-**Trigger:** A task declares `allowed_egress` for a URL that matches the same hostname
-as a policy `[[environment_gates]]` label, but the URL prefix cannot distinguish between
-namespaces on that cluster (same hostname covers both staging and prod namespaces).
+> **V2 status:** Promoted from `WARN_SAME_CLUSTER_NAMESPACE_ISOLATION`
+> (V1 / pre-INV-ENV-01) to a hard failure. Mirrors the `INV-ENV-01`
+> "fail loud" posture for environment binding inconsistencies. The
+> only escape hatch is per-environment opt-in via
+> `[environments.<label>] same_cluster_acknowledged = true` (§5b.2,
+> §11.4).
 
-**Example:** Policy has environment gate for `https://k8s-api.company.com/` labeled
-"production". Task declares `url_prefix = "https://k8s-api.company.com/"` — this URL
-covers both staging and production namespaces on the same cluster.
+**Trigger:** A task's `allowed_egress` URL prefix matches **two or
+more** `[[environment_gates]]` entries from distinct environment
+labels (the canonical case: same hostname covers both staging and
+production namespaces on a shared cluster). The matching algorithm
+is the URL/gate matcher used by `handle_egress_request` (per §4
+Step 2).
 
-**Kernel behavior:** Environment gate fires based on URL prefix match. All write methods
-to this URL require approval (if `write_requires_approval = true`), including staging
-namespace writes. The agent cannot distinguish namespaces at the egress layer alone.
+**Example:** Policy declares `[environments.beta]` and
+`[environments.production]`, with gates:
 
-**Fix (recommended):** Use separate clusters for staging and prod with distinct hostnames.
-This eliminates the namespace-level ambiguity at the network layer.
+```toml
+[[environment_gates]]
+label        = "beta"
+url_prefixes = ["https://k8s-api.company.com/"]
 
-**With `--strict` (default):** Plan rejected.
+[[environment_gates]]
+label        = "production"
+url_prefixes = ["https://k8s-api.company.com/"]
+```
+
+A task that declares
+`url_prefix = "https://k8s-api.company.com/"` in its `allowed_egress`
+hits both gates. The URL prefix cannot mechanically distinguish the
+namespace.
+
+**Behavior (default — neither environment acknowledges):**
+
+- `approve_plan` returns
+  `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION { task, url_prefix,
+  conflated_environments: ["beta", "production"], unacknowledged:
+  ["beta", "production"] }`.
+- The plan is **rejected regardless of `--no-strict`**. This is a
+  structural protection like `FAIL_ENVIRONMENT_BLOCKED`; it cannot
+  be downgraded by a CLI flag.
+- The kernel emits no audit-chain side effect (the rejection is
+  pre-admission).
+
+**Behavior (escape hatch — every conflated environment acknowledges):**
+
+- Operator updates `policy.toml` to set
+  `same_cluster_acknowledged = true` on every conflated environment
+  (per §11.4 — "all conflated envs", not "any single env"):
+
+  ```toml
+  [environments.beta]
+  description               = "Beta cluster — non-customer-facing"
+  same_cluster_acknowledged = true   # ack: shares hostname with production
+
+  [environments.production]
+  description               = "Production cluster — customer-facing"
+  same_cluster_acknowledged = true   # ack: shares hostname with beta
+  ```
+
+- Operator re-signs and pushes the policy bundle (`raxis policy push`,
+  new epoch).
+- On the next `approve_plan` for this task, the same-cluster handler
+  (§11.4) returns `TaskEnvBinding::SameClusterAcknowledged`; the URL
+  contributes ZERO labels to the task's environment set.
+- The task's environment binding is then determined purely by its
+  credentials. If the credentials still resolve to two environments,
+  `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (per §11.7) fires next; the
+  acknowledgment does not help with credential-level mixing.
+- Acknowledgment is recorded in the policy bundle (which is signed
+  and indefinitely retained per `audit-retention.md`); a forensic
+  auditor can reconstruct exactly when the operator opted into the
+  same-cluster pattern and which environments it covered.
+
+**Why "all conflated envs must acknowledge":** see §11.4 for the
+rationale. The short version: requiring acknowledgment on each
+environment definition forces operators to mark each side
+deliberately and surfaces the same-cluster pattern in policy diffs
+and `raxis-cli plan explain` output.
+
+**Recommended fix (preferred over acknowledgment):** Use separate
+clusters with distinct hostnames for each environment. This
+eliminates the namespace-level ambiguity at the network layer and
+keeps Layer 1 / Layer 3 enforcement crisp. Acknowledgment is the
+"I know what I'm doing" path for deployments where separating
+clusters is operationally infeasible.
+
+**Alternatives considered and rejected (for the WARN → FAIL
+promotion itself):**
+
+- **Keep as WARN with policy-level "treat as error" knob:** Adds
+  a knob (`policy.toml [strict_modes] same_cluster = "fail"`) that
+  effectively duplicates the user's "fail loud" posture as an
+  optional setting. Operators who need the WARN behavior get it
+  via `same_cluster_acknowledged = true`, which is more explicit
+  about *what* is being acknowledged.
+- **Promote to FAIL but allow `--no-strict` to downgrade:** Mirrors
+  the existing pattern for some warnings, but conflates two ideas:
+  `--no-strict` is for "I accept the risk on this specific plan";
+  same-cluster acknowledgment is "this deployment topology is what
+  it is, for every plan." The acknowledgment belongs in policy,
+  not in a CLI flag.
 
 ---
 
@@ -537,12 +886,25 @@ This eliminates the namespace-level ambiguity at the network layer.
       - methods within policy egress_hosts methods? → WARN_EGRESS_METHOD_RESTRICTED
       - URL matches environment_gate with write_requires_approval?
         AND write methods declared? → WARN_ENVIRONMENT_GATE_WRITE_REQUIRES_APPROVAL
-      - URL matches environment_gate label (same hostname, namespace ambiguity)?
-        → WARN_SAME_CLUSTER_NAMESPACE_ISOLATION
+      - URL matches ≥ 2 distinct environment_gate labels (same-cluster
+        conflation per §11.4)?
+        → handle_same_cluster_conflation():
+            all conflated envs declare same_cluster_acknowledged = true?
+              YES → URL contributes 0 labels; continue
+              NO  → FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION (hard;
+                    not bypassable by --no-strict; per §11.4)
    c. For each credentials entry:
       - name in policy permitted_credentials? → FAIL_CREDENTIAL_NOT_PERMITTED (hard)
       - credential environment matches any allowed_egress environment? If no match
         → WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT
+   d. (only when at least one [environments.<label>] is declared per §1.5.2)
+      Per-task environment consistency (§11.3 algorithm):
+      - Compute task_envs = SET of labels contributed by env-bound creds
+        and env-bound gate matches (excluding same-cluster-acknowledged URLs).
+      - task_envs.len() ≤ 1 ?
+          YES → record TaskEnvironmentBinding (Neutral / Bound(label))
+          NO  → FAIL_TASK_ENVIRONMENT_INCONSISTENT (hard; not bypassable
+                by --no-strict; per §11.7)
 4. integration_merge_gates checks → WARN_PROTECTION_OVERRIDDEN etc.
 5. require_push_approval vs. policy minimum → WARN_PUSH_APPROVAL_DOWNGRADED
 6. token_policy uncapped fields → WARN_UNCAPPED_TOKEN_LIMIT
@@ -550,6 +912,18 @@ This eliminates the namespace-level ambiguity at the network layer.
 8. Collect all warnings
 9. If strict → reject on any warning; else approve with warnings in audit event
 ```
+
+**Note on step 3d ordering.** The per-task consistency check runs
+*after* per-egress and per-credential individual checks (steps 3b
+and 3c) so that a credential typo (`FAIL_CREDENTIAL_NOT_PERMITTED`)
+or a hostname omission (`FAIL_EGRESS_HOST_NOT_PERMITTED`) surfaces
+before the higher-level invariant. This gives operators the most
+specific message first.
+
+**Note on Reviewer / Orchestrator tasks.** Steps 3b–3d are no-ops for
+these roles by structure (`§11.6`): Reviewer and Orchestrator tasks
+declare no credentials and no `allowed_egress`, so their `task_envs`
+is always empty and they always record as Neutral.
 
 ---
 
@@ -563,6 +937,9 @@ This eliminates the namespace-level ambiguity at the network layer.
 | Plan `allowed_egress` (URL + methods) | plan.toml | N/A (plan-declared) | Re-approve new plan |
 | Environment gate `write_requires_approval` | policy.toml | Cannot disable; plan acknowledges | `--no-strict` at approve_plan |
 | Credential injection | plan.toml + policy permitted_credentials | Plan selects from permitted set | N/A |
+| **Environment binding consistency (`INV-ENV-01`, §11)** | derived from policy + plan | **No.** Cannot be downgraded by `--no-strict`. | Refactor plan: split cross-env tasks per §11.5 |
+| **Same-cluster acknowledgment (§11.4)** | `policy.toml [environments.<label>] same_cluster_acknowledged` | No | Policy update (new epoch) |
+| **Per-environment reserved knobs (§5b.4)** | `policy.toml [environments.<label>]` | No (when normative in V2.x) | Policy update (new epoch) |
 
 ---
 
@@ -611,7 +988,7 @@ An attacker needs to compromise multiple independent layers simultaneously.
 - [ ] Implement `FAIL_CREDENTIAL_NOT_PERMITTED` at `approve_plan` (hard error)
 - [ ] Implement `raxis egress diff/approve/reject` CLI commands
 - [ ] Add environment gate admission checks to `approve_plan` check order (step 3b)
-- [ ] Tests:
+- [ ] Tests (V1 + V2 baseline):
       - Block_all gate: plan with prod URL → FAIL_ENVIRONMENT_BLOCKED at approve_plan
       - Write_requires_approval: POST to prod URL → escalation created
       - Write approval: consumed approval → request admitted
@@ -619,5 +996,436 @@ An attacker needs to compromise multiple independent layers simultaneously.
       - Credential injection: staging task gets staging kubeconfig only
       - Undeclared credential: FAIL_CREDENTIAL_NOT_PERMITTED at approve_plan
       - Unreachable credential: WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT at approve_plan
-      - Same-cluster namespace: WARN_SAME_CLUSTER_NAMESPACE_ISOLATION at approve_plan
       - Defense-in-depth: all 4 layers present, each independently blocks prod access
+
+- [ ] V2 environment-binding additions (per §1.5, §5b, §11):
+      - Add `[environments.<label>]` table parsing to `PolicyBundle` per §5b.1
+      - `same_cluster_acknowledged: bool` field with default `false`
+      - V2.x reserved fields recognized and warning-only per §5b.4 (one `WARN_ENVIRONMENT_RESERVED_FIELD_SET` per occurrence; no kernel-side effect)
+      - Environment label syntax validation per §5b.3 — `^[a-z][a-z0-9_-]{0,31}$` → `FAIL_POLICY_ENV_LABEL_INVALID`
+      - Cross-reference validation: every `[[environment_gates]] label` and every non-empty `[[permitted_credentials]] environment` resolves to a declared `[environments.<label>]` → otherwise `FAIL_POLICY_ENV_LABEL_UNDECLARED { label, source }`
+      - Activation gate per §1.5.2: per-task consistency check (§11.3) is a no-op when zero `[environments.<label>]` declared; activates the moment one is declared
+      - Implement `compute_task_envs` per §11.3 algorithm; record `TaskEnvironmentBinding` per §11.9
+      - Implement `handle_same_cluster_conflation` per §11.4; require ALL conflated envs to declare `same_cluster_acknowledged = true` to suppress
+      - Promote `WARN_SAME_CLUSTER_NAMESPACE_ISOLATION` → `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` per §7
+      - Add `FAIL_TASK_ENVIRONMENT_INCONSISTENT { task, environments, sources }` per §11.7
+      - Add `FAIL_POLICY_ENV_LABEL_UNDECLARED { label, source }` per §5b.3
+      - Add `FAIL_POLICY_ENV_UNKNOWN_FIELD { field }` per §5b.3
+      - Add `FAIL_POLICY_ENV_LABEL_INVALID { label }` per §5b.3
+      - Add `WARN_ENVIRONMENT_RESERVED_FIELD_SET { field, env }` per §5b.4
+      - Add `TaskEnvironmentBinding` field to `InitiativeCreated` audit event per §11.9
+      - Reviewer / Orchestrator schema continues to forbid `[[plan.tasks.credentials]]` and `allowed_egress` declarations per `planner-harness.md §3` (no change required for INV-ENV-01; the structural prohibition makes the consistency check a no-op for these roles per §11.6)
+      - `raxis-cli plan explain` (`operator-ergonomics.md §9`) renders per-task environment binding ("Bound: production" / "Neutral" / "SameClusterAcknowledged")
+
+- [ ] V2 environment-binding tests:
+      - **Inert default.** Policy with zero `[environments.<label>]` declared → all V2 environment checks are no-ops; admitted plans get `TaskEnvironmentBinding::Neutral` for every task without any binding consideration.
+      - **Activation transition.** Policy A (no envs) → Policy B (one env declared); same plan submitted under both → admitted under A as Neutral; admitted under B as Bound or rejected.
+      - **Single-env happy path.** Plan with one Executor task whose credentials all bind to "beta" and whose egress URLs all match a "beta" gate → admitted; binding recorded as Bound("beta").
+      - **Cross-env credentials.** Plan with one Executor task holding both `registry-beta-read` (env: "beta") and `registry-prod-write` (env: "production") → `FAIL_TASK_ENVIRONMENT_INCONSISTENT { task, environments: ["beta", "production"], sources: [...] }`.
+      - **Cross-env URL.** Plan with one Executor task whose `allowed_egress` includes one URL matching a "beta" gate and another matching a "production" gate → `FAIL_TASK_ENVIRONMENT_INCONSISTENT`.
+      - **Mixed credential + URL.** Credential bound to "beta", URL matches "production" gate → `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (sources include both).
+      - **Neutral-credential pass-through.** Task with one env-bound credential ("beta") and one neutral credential ("npm-registry") → admitted as Bound("beta"); neutral credential contributes nothing.
+      - **Neutral-egress pass-through.** Task with one env-bound credential ("beta") and one allowed_egress URL matching no gate at all → admitted as Bound("beta").
+      - **All-neutral task.** Task with only neutral credentials and only neutral egress → admitted as Neutral even when policy declares envs.
+      - **DAG split (§11.5).** Two-task plan: `fetch_from_beta` (Bound("beta")) → `publish_to_prod` (Bound("production")); kernel admits both; artifact handoff via task-output store records the SHA-256 in audit chain.
+      - **Reviewer in DAG.** Adding a Reviewer task between the two halves of the §11.5 split: Reviewer is recorded as Neutral (cardinality 0); admission proceeds.
+      - **Same-cluster, no acknowledgment.** Two `[[environment_gates]]` ("beta", "production") sharing hostname; task URL matches both; neither environment declares `same_cluster_acknowledged = true` → `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION { task, conflated_environments: ["beta", "production"], unacknowledged: ["beta", "production"] }`.
+      - **Same-cluster, partial acknowledgment.** Same scenario but only `[environments.beta] same_cluster_acknowledged = true` → still fails because `production` did not acknowledge; FAIL message lists `unacknowledged: ["production"]`.
+      - **Same-cluster, full acknowledgment.** Both envs declare `same_cluster_acknowledged = true`; task has only "beta" credential → admitted as Bound("beta") (URL contributed 0; credential contributed "beta"). The same-cluster conflation no longer fails.
+      - **Same-cluster, full acknowledgment + cross-env credentials.** Both envs acknowledge same-cluster; task has both "beta" and "production" credentials → still `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (acknowledgment helps with URL conflation, not credential mixing).
+      - **Label resolution failure.** `[[environment_gates]] label = "produciton"` (typo) and no `[environments.produciton]` declared → policy load fails with `FAIL_POLICY_ENV_LABEL_UNDECLARED { label: "produciton", source: "environment_gates" }`.
+      - **Reserved field tolerance.** Policy declares `[environments.beta] blast_radius = "high"` → policy loads with `WARN_ENVIRONMENT_RESERVED_FIELD_SET { field: "blast_radius", env: "beta" }`; field has no kernel-side effect.
+      - **Unknown field rejection.** Policy declares `[environments.beta] frobnitz = "x"` (not a reserved name) → `FAIL_POLICY_ENV_UNKNOWN_FIELD { field: "frobnitz" }`.
+      - **Label syntax rejection.** `[environments.Beta]` (uppercase) → `FAIL_POLICY_ENV_LABEL_INVALID`.
+      - **Reviewer cannot declare credentials.** Plan with `[[plan.tasks.credentials]]` on a Reviewer task → existing `FAIL_REVIEWER_CREDENTIALS_NOT_ALLOWED` (per `planner-harness.md`); test that this fires before any environment-binding logic so Reviewers never participate in INV-ENV-01.
+      - **Orchestrator declarations rejected.** Operator attempts to declare an Orchestrator task in `plan.toml` → existing `FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED` per INV-PLANNER-HARNESS-06.1; environment-binding logic never reached.
+      - **`--no-strict` does not bypass.** Plan with cross-env credentials submitted with `--no-strict` → `FAIL_TASK_ENVIRONMENT_INCONSISTENT` still fires (structural invariant; not a warning-class check).
+      - **`--no-strict` does not bypass same-cluster.** Plan with same-cluster conflation, no acknowledgment, `--no-strict` → `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` still fires.
+      - **Audit attribution.** `InitiativeCreated` audit event includes `task_environment_bindings: [{task, binding, bound_via}, ...]` per §11.9 for every admitted task.
+
+---
+
+## 11. Task Environment Consistency (`INV-ENV-01`)
+
+> **Canonical home for `INV-ENV-01`.** The invariant statement also
+> appears in `invariants.md §Environment`. This section is the
+> normative behavioral specification; `invariants.md` is the
+> short-form catalog entry. If the two ever conflict, this section
+> wins.
+
+### 11.1 Why this invariant exists
+
+Without an explicit consistency rule, an operator could write a single
+task that holds credentials for both `beta` and `production` and have
+egress allowlists that match both environments' URL gates. The kernel
+would inject both credentials into the same VM, Layer-1 / Layer-2 /
+Layer-3 would all admit it, and a confused (or compromised) agent
+inside that VM could authenticate to either environment from the same
+process at the same time. That is the canonical "blast radius" failure
+mode — credentials and reach for two compliance boundaries colocated
+in one execution context.
+
+The fix is structural: forbid environment mixing within a single task.
+A task is bound to **at most one** environment for the lifetime of its
+session(s). Cross-environment data flows are expressed at the DAG
+level (§11.5), where the kernel mediates the artifact handoff and
+each task only ever holds credentials for one environment.
+
+### 11.2 The invariant
+
+`INV-ENV-01` — **Task Environment Consistency.**
+
+> **When activated** (per §1.5.2 — at least one `[environments.<label>]`
+> declared in the loaded policy), every admitted task in every plan
+> bundle binds to AT MOST ONE environment. The set of environments
+> a task binds to is computed by walking the task's environment-bound
+> resources per the §11.3 algorithm; if the resulting set contains
+> more than one label, admission fails with
+> `FAIL_TASK_ENVIRONMENT_INCONSISTENT`.
+
+Tasks whose computed set is empty (cardinality 0) are
+**environment-neutral** and pass trivially. Tasks whose computed set
+has exactly one element are bound to that environment for audit and
+for any future per-environment policy knob. No other cardinality is
+admissible.
+
+### 11.3 The binding algorithm
+
+Pseudocode for the per-task check (runs once per task at
+`approve_plan`, after Layer-1 / Layer-2 / Layer-3 individual checks
+have passed):
+
+```
+fn compute_task_envs(task: &PlanTask, policy: &PolicyBundle) -> Result<TaskEnvBinding> {
+    let mut envs: BTreeSet<EnvLabel> = BTreeSet::new();
+    let mut sources: Vec<(EnvLabel, EnvSource)> = Vec::new();
+
+    // Step A — environment-bound credentials
+    for cred_decl in &task.credentials {
+        let permitted = policy.permitted_credentials
+            .iter()
+            .find(|c| c.name == cred_decl.name)
+            .ok_or(FAIL_CREDENTIAL_NOT_PERMITTED)?;
+        if let Some(env) = &permitted.environment {
+            envs.insert(env.clone());
+            sources.push((env.clone(), EnvSource::Credential(cred_decl.name.clone())));
+        }
+        // No `environment` field → neutral; contributes nothing.
+    }
+
+    // Step B — environment-bound egress (URL ↔ gate matching)
+    for egress in &task.allowed_egress {
+        let matching_gates = policy.environment_gates
+            .iter()
+            .filter(|g| egress_url_matches_gate(&egress.url_prefix, g))
+            .collect::<Vec<_>>();
+
+        if matching_gates.len() == 1 {
+            let label = matching_gates[0].label.clone();
+            envs.insert(label.clone());
+            sources.push((label, EnvSource::EgressUrl(egress.url_prefix.clone())));
+        } else if matching_gates.len() > 1 {
+            // Same-cluster conflation case (§11.4).
+            return handle_same_cluster_conflation(task, egress, matching_gates, policy);
+        }
+        // Zero matches → neutral egress; contributes nothing.
+    }
+
+    // Step C — cardinality enforcement
+    match envs.len() {
+        0 => Ok(TaskEnvBinding::Neutral),
+        1 => Ok(TaskEnvBinding::Bound(envs.into_iter().next().unwrap())),
+        _ => Err(FAIL_TASK_ENVIRONMENT_INCONSISTENT {
+            task: task.task_id.clone(),
+            environments: envs.into_iter().collect(),
+            sources,
+        }),
+    }
+}
+```
+
+The check is **per task, not per session**. A task that fans out
+across three sessions (Executor scaling) inherits the task's binding
+on every session; the kernel does not allow per-session environment
+override. This is enforced at admission, not at runtime, so the
+validation is one-shot and cheap.
+
+### 11.4 Same-cluster conflation interaction
+
+When a single egress URL prefix matches two or more environment gates
+(the `§3 Tension T1` same-cluster scenario), the algorithm hands off
+to the same-cluster handler:
+
+```
+fn handle_same_cluster_conflation(
+    task: &PlanTask,
+    egress: &EgressDecl,
+    matching_gates: Vec<&EnvironmentGate>,
+    policy: &PolicyBundle,
+) -> Result<TaskEnvBinding> {
+    let conflated_envs: Vec<EnvLabel> =
+        matching_gates.iter().map(|g| g.label.clone()).collect();
+
+    // For each conflated env, look up its [environments.<label>] entry
+    // and check same_cluster_acknowledged.
+    let acknowledgments: Vec<(EnvLabel, bool)> = conflated_envs.iter()
+        .map(|label| {
+            let env_def = policy.environments.get(label)
+                .expect("§5b.3 ensures every gate label resolves");
+            (label.clone(), env_def.same_cluster_acknowledged)
+        })
+        .collect();
+
+    let all_acknowledged = acknowledgments.iter().all(|(_, ack)| *ack);
+
+    if !all_acknowledged {
+        return Err(FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION {
+            task: task.task_id.clone(),
+            url_prefix: egress.url_prefix.clone(),
+            conflated_environments: conflated_envs,
+            unacknowledged: acknowledgments.into_iter()
+                .filter(|(_, ack)| !ack)
+                .map(|(label, _)| label)
+                .collect(),
+        });
+    }
+
+    // All conflated envs declared `same_cluster_acknowledged = true`.
+    // The URL gate contributes ZERO labels to the task's env set; the
+    // operator is taking responsibility for namespace separation via
+    // credential / cloud RBAC scoping rather than URL-level isolation.
+    // Return success with no contribution; the caller continues
+    // processing other egress entries and credentials.
+    Ok(TaskEnvBinding::SameClusterAcknowledged)
+}
+```
+
+**Why "all conflated envs must acknowledge", not "any single env":**
+
+A same-cluster pattern between `beta` and `production` is a property
+of *both* environments. Requiring acknowledgment on each forces the
+operator (or operators, in a future two-party signing world) to mark
+each environment definition deliberately. A single junior operator
+cannot "acknowledge away" the pattern from the staging side without
+the production environment definition also bearing the mark — which
+shows up in the policy diff and in `raxis-cli plan explain`.
+
+**Alternatives considered and rejected:**
+
+- **Acknowledgment on the gate, not the environment:** Spreads the
+  acknowledgment across N gates for a hostname; harder to inspect
+  ("is this whole environment same-cluster?"). Putting the
+  acknowledgment on the environment definition makes it a property
+  of the environment, queryable in one place.
+- **A single global `[policy] same_cluster_warnings = "off"`:** Too
+  blunt; operators who want acknowledgment for one specific case
+  end up suppressing it everywhere.
+- **Acknowledgment on the plan task instead of the policy:** Lets
+  the operator (or a compromised plan signer) bypass the policy
+  floor without a policy update. INV-POLICY-01 says floors live in
+  policy; same-cluster acknowledgment is a floor exception so it
+  belongs in policy.
+
+### 11.5 Cross-environment workflows: the DAG split pattern
+
+Operators sometimes legitimately need to move data across environment
+boundaries — promoting a verified artifact from `beta` to `production`,
+hydrating staging from a sanitized prod snapshot, etc. Under
+`INV-ENV-01` this CANNOT be expressed as a single task with both
+environments' credentials. The canonical pattern is:
+
+```toml
+# WRONG — rejected with FAIL_TASK_ENVIRONMENT_INCONSISTENT.
+
+[[plan.tasks]]
+task_id = "promote_artifact"
+role    = "Executor"
+
+[[plan.tasks.credentials]]
+name = "registry-beta-read"          # → bound to "beta"
+
+[[plan.tasks.credentials]]
+name = "registry-prod-write"         # → bound to "production"
+
+# At approve_plan: compute_task_envs() returns {beta, production} →
+# FAIL_TASK_ENVIRONMENT_INCONSISTENT { task: "promote_artifact",
+#   environments: ["beta", "production"],
+#   sources: [
+#     (Credential("registry-beta-read"), "beta"),
+#     (Credential("registry-prod-write"), "production"),
+#   ] }
+```
+
+```toml
+# RIGHT — split into two DAG-connected tasks; the kernel mediates the
+# handoff via the artifact mechanism (verifier-processes.md §6 or the
+# task-output store, depending on workflow).
+
+[[plan.tasks]]
+task_id = "fetch_from_beta"
+role    = "Executor"
+
+[[plan.tasks.credentials]]
+name = "registry-beta-read"          # bound to "beta" — task is bound to "beta"
+
+# This task fetches the artifact, computes its SHA-256, writes it to the
+# task-output store under a stable key, and exits. It NEVER holds prod
+# credentials.
+
+[[plan.tasks]]
+task_id    = "publish_to_prod"
+role       = "Executor"
+depends_on = ["fetch_from_beta"]
+
+[[plan.tasks.credentials]]
+name = "registry-prod-write"         # bound to "production" — task is bound to "production"
+
+# This task reads the artifact via the kernel-mediated handoff (the
+# kernel furnishes the bytes from the prior task's output, computing
+# and verifying the SHA-256 against what fetch_from_beta recorded),
+# then publishes to prod. It NEVER holds beta credentials.
+```
+
+**What this pattern buys:**
+
+- The `beta`-credentialed VM and the `production`-credentialed VM are
+  **separate processes** with separate kernels, separate filesystems,
+  separate VirtioFS mounts. There is no execution context that holds
+  both credentials simultaneously.
+- The kernel mediates the artifact handoff. Both tasks' SHA-256
+  records appear in the audit chain. A forensic auditor can answer
+  "what bytes flowed from beta to prod?" by reading two task IDs.
+- Adding a Reviewer between the two tasks (`review_promotion` task,
+  Reviewer role, depends on `fetch_from_beta`, gates
+  `publish_to_prod`) is a pure additive DAG edit. Neither side of
+  the handoff has to change.
+- A future per-environment two-party-sign requirement
+  (§5b.4 reserved field) can land on `production` without affecting
+  `beta`'s authoring flow.
+
+**Anti-patterns this rules out:**
+
+- A single VM that holds both credentials and "carefully" scopes its
+  own access. There's no kernel-side enforcement that the agent
+  actually does this; it's a code-review property at best, and the
+  audit log can't tell you the agent didn't accidentally fan out a
+  beta credential into a prod-bound HTTP request.
+- Manual sneakernet (operator copies bytes from a beta task's output
+  into a prod task's input out-of-band). The audit chain has no
+  record of the handoff, so the prod write looks like it materialized
+  from nowhere.
+
+**Cross-references:**
+
+- `verifier-processes.md §6` — artifact mechanism for handing
+  structured data between tasks.
+- `kernel-mechanics-prompt.md §3.2` — Orchestrator sees the DAG
+  topology when sequencing tasks.
+- `operator-ergonomics.md §9` (`raxis-cli plan explain`) — renders
+  the DAG and per-task environment binding so the operator can
+  inspect the handoff structure at authoring time.
+
+### 11.6 Reviewer and Orchestrator are environment-neutral by structure
+
+Reviewer and Orchestrator tasks have **cardinality 0** for
+environment-bound resources by structural prohibition, not by operator
+choice:
+
+| Role | Operator credentials? | Operator-controlled egress? | Cardinality | INV-ENV-01 status |
+|---|---|---|---|---|
+| Executor | Yes (`[[plan.tasks.credentials]]`) | Yes (`allowed_egress`) | 0..N | Must resolve to 0 or 1 environment. |
+| Reviewer | **No** (`INV-PLANNER-HARNESS-01`: pure-static, no `bash`) — read-only filesystem; no credentials are injected because no network call would consume them | **No** (`INV-PLANNER-HARNESS-04`: no operator-egress) | **0** | **Always neutral by structure.** |
+| Orchestrator | **No** (`INV-PLANNER-HARNESS-06.1`: Orchestrator tasks are not declarable in `plan.toml`; the kernel auto-creates them and owns the configuration) | **No** (`INV-PLANNER-HARNESS-06`: no operator-controlled egress) | **0** | **Always neutral by structure.** |
+
+This means:
+
+1. **An operator never declares an environment binding on a Reviewer
+   or Orchestrator task.** The schema for those roles forbids
+   `[[plan.tasks.credentials]]` and `allowed_egress` declarations
+   already (per `planner-harness.md §3` role table); the
+   environment-consistency check is a no-op for them.
+2. **A cross-environment DAG (§11.5) where the Reviewer gates the
+   handoff between a beta task and a prod task is well-defined**:
+   the Reviewer reads the artifact from the kernel store (no
+   credentials, no egress, no environment binding), produces a
+   `ReviewSubmission`, and the Orchestrator (also environment-neutral)
+   sequences the gated `publish_to_prod` task.
+3. **Forensic attribution.** The audit chain records each task's
+   binding (Bound("beta"), Bound("production"), or Neutral). Reviewer
+   and Orchestrator tasks always show as Neutral, which matches their
+   structural lack of authority over environment-scoped resources.
+
+This is a natural question because the obvious operator instinct is
+"my Reviewer will inspect a beta task's output before I let it merge
+into prod — does the Reviewer somehow span beta and prod?" The answer
+is no: the Reviewer holds no credentials and reaches no URLs in either
+environment. It is a pure-static analyzer acting on bytes; the
+environment binding is meaningless for it.
+
+### 11.7 Failure code: `FAIL_TASK_ENVIRONMENT_INCONSISTENT`
+
+| Field | Description |
+|---|---|
+| `task` | Task ID that failed the check. |
+| `environments` | Sorted list of distinct labels that the task's resources resolved to. Always size ≥ 2 when this code fires. |
+| `sources` | Per-label list of `(EnvSource, label)` pairs. Each `EnvSource` is one of `Credential(name)` or `EgressUrl(url_prefix)`. Lets the operator pinpoint exactly which credential or which URL caused the binding. |
+
+CLI rendering (per the `operator-ergonomics.md §20` failure-code
+display contract):
+
+```
+✗ FAIL_TASK_ENVIRONMENT_INCONSISTENT
+   task: promote_artifact
+   environments: beta, production
+
+   bound to "beta" via:
+     - credential "registry-beta-read"
+
+   bound to "production" via:
+     - credential "registry-prod-write"
+
+   per INV-ENV-01: a task may bind to AT MOST ONE environment.
+   recommended fix: split into two DAG-connected tasks; see
+   environment-access-control.md §11.5.
+```
+
+**Behavior is `--strict`-irrelevant.** This failure is NOT downgraded
+by `--no-strict`. INV-ENV-01 is a structural invariant, not a
+warning-class hygiene check. Operators who genuinely need a
+cross-environment workflow refactor the plan per §11.5; there is no
+escape hatch on the consistency check itself.
+
+### 11.8 Interaction with existing checks
+
+| Existing check | Interaction with INV-ENV-01 |
+|---|---|
+| Layer 1 — plan `allowed_egress` (`§2`) | Runs first, per task. If the URL hostname isn't in `policy.egress_hosts` at all, the task fails before INV-ENV-01 ever computes a binding. |
+| Layer 2 — credential injection (`§5`) | `FAIL_CREDENTIAL_NOT_PERMITTED` runs before INV-ENV-01; an undeclared credential never participates in the binding computation. |
+| Layer 3 — environment gate `block_all` (`§7 FAIL_ENVIRONMENT_BLOCKED`) | Runs first per egress URL; URLs blocked here never participate in the binding computation. |
+| `WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT` (`§7`) | Compatible. After INV-ENV-01 confirms a single-environment binding, the unreachable-credential warning may still fire if the credential's environment doesn't match any *reachable* egress URL inside the binding. |
+| `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` (`§7`, promoted from WARN — see §11.4) | INV-ENV-01 invokes the same-cluster handler when its URL-matching loop sees multi-gate matches. They share an algorithm, not separate codepaths. |
+| `WARN_ENVIRONMENT_GATE_WRITE_REQUIRES_APPROVAL` (`§7`) | Compatible. Independent of binding cardinality. |
+
+### 11.9 Audit and forensic attribution
+
+Every `InitiativeCreated` audit event records, per task, the resolved
+binding:
+
+```rust
+TaskEnvironmentBinding {
+    task_id:     String,
+    binding:     "Neutral" | "Bound(<label>)" | "SameClusterAcknowledged",
+    bound_via:   Vec<(EnvSource, EnvLabel)>,   // empty for Neutral
+}
+```
+
+This makes the post-hoc question "which initiatives ever ran in
+production?" answerable by indexing the audit chain on
+`InitiativeCreated.task_environment_bindings[].binding`, no separate
+inference required.
+
+V2.x audit-retention policies (the reserved
+`audit_retention_days` field per §5b.4) will key off this binding; an
+initiative whose tasks all bound to `production` would, in a future
+release, retain audit records longer than one whose tasks all bound
+to `beta`.
