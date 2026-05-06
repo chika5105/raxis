@@ -149,7 +149,16 @@ For each operation in this table, splitting writes across two transactions or tw
 4. For each `PlanTask` parsed from the plan TOML: call `scheduler::admit_in_tx(&tx, task, policy_epoch)` which (a) runs `dag::detect_cycle_in` against the in-progress edge set, (b) inserts the task row, (c) inserts that task's edges via `dag::insert_edges_in`.
 5. `COMMIT` → drop the mutex → emit the `PlanApproved` audit record (per §2.5.2 audit-after-commit ordering).
 
-Audit emission **after** commit is mandatory: an audit record for an operation that did not commit would corrupt the chain. The kernel routes every audit emission through the `raxis-audit-tools::AuditSink` trait held on `HandlerContext` (production wiring is `FileAuditSink` over `<data_dir>/audit/segment-000.jsonl`; tests inject `FakeAuditSink`). Direct `eprintln!`-based audit emission is forbidden — the only acceptable use of `eprintln!` in handler code is fallback logging when an `AuditSink::emit` call itself fails (a §2.5.2 "SQLite committed, JSONL not appended" gap that recovery::reconcile repairs).
+Audit emission **after** commit is mandatory under V1 single-event ordering: an audit record for an operation that did not commit would corrupt the chain. The kernel routes every audit emission through the `raxis-audit-tools::AuditSink` trait held on `HandlerContext` (production wiring is `FileAuditSink` over `<data_dir>/audit/segment-000.jsonl`; tests inject `FakeAuditSink`). Direct `eprintln!`-based audit emission is forbidden — the only acceptable use of `eprintln!` in handler code is fallback logging when an `AuditSink::emit` call itself fails (a §2.5.2 "SQLite committed, JSONL not appended" gap that `recovery::reconcile` repairs under V1; under V2.1, `recovery::reconcile_advisory` resolves it without being mandatory — see `v2/audit-paired-writes.md §6`).
+
+> **V2.1 paired-class handlers** route through the extended `AuditSink`
+> trait (`emit_pending`, `emit_confirmed_for`, `emit_rolled_back_for`)
+> per `v2/extensibility-traits.md §5`. The "after commit" rule is
+> replaced by a three-phase ordering for paired-class events:
+> `emit_pending` (fsync) → `BEGIN IMMEDIATE` … `COMMIT` → augmented
+> existing-kind emission via `emit_confirmed_for` (fsync). The ordering
+> details and crash-window resolutions live in
+> `v2/audit-paired-writes.md §2.3` and §7.
 
 **Policy epoch atomicity invariant (INV-POLICY-01).** `policy_manager::advance_epoch` Phase 1 (the SQL-write phase) writes to `delegations`, `sessions`, `policy_epoch_history`, and the audit-pointer table inside one transaction held under one INV-STORE-01 mutex acquisition. Phase 2 (in-memory `ArcSwap` swaps for `ctx.policy` and `ctx.allowlist_cache`) runs only after Phase 1 commits, and is infallible. Phase 3 (gateway `EpochAdvanced` signal) is best-effort and does not affect the success of the advance. The full phase contract — including failure modes for each phase, audit events for both rejection (`PolicyAdvanceRejected`) and post-`BEGIN` failure (`PolicyAdvanceFailed`), and crash semantics (which reduce to single-transaction commit/no-commit) — is normative in `kernel-core.md` §`policy_manager.rs`. A partially-applied epoch advance is structurally impossible: either all four SQL writes commit and the in-memory caches are then swapped, or the transaction rolls back and the kernel observably remains at the old epoch with no audit `PolicyEpochAdvanced` row.
 
@@ -458,6 +467,58 @@ The kernel uses two hash families for in-memory maps and sets, picked by the **t
 All tables are created by migration 1 (the v1 baseline migration, applied atomically on first startup). Table names below are canonical — any conflicting name in Parts 2.1–2.4 prose is superseded by these names. **`task_dag_edges`** is the canonical DAG table name (legacy alias in prose: `task_dependencies`).
 
 **Creation order matters** because of foreign key constraints. `sessions` must precede `tasks` (tasks hold a nullable `session_id` FK). `initiatives` must precede `tasks`, `signed_plan_artifacts`, `task_dag_edges`, and `escalations`. The migration DDL below is ordered accordingly.
+
+---
+
+> **V2.1 schema-extension notice — `last_committing_event_seq` column.**
+>
+> Every state-bearing table below (i.e. every table the kernel mutates
+> inside an admission or operator-IPC transaction — `sessions`,
+> `tasks`, `initiatives`, `escalations`, `delegations`,
+> `signed_plan_artifacts`, `lane_budget_reservations`,
+> `lineage_rate_limits`, `policy_epoch_history`, `operator_certificates`,
+> `initiative_quarantines`, plus the V2-introduced state tables
+> `plan_bundles`, `subtask_activations`, `verifier_runs`,
+> `provider_circuit_state`, `candidate_merges`, `plan_signing_keys`,
+> `emergency_revocations`, `notification_dispatch`,
+> `notification_channel_health`, `smtp_proxy_rate_buckets`,
+> `session_escalation_rate_limits`,
+> `operator_quarantine_directives`, `worktree_abandonment_records`)
+> gains a single new column under V2.1:
+>
+> ```sql
+> last_committing_event_seq INTEGER NOT NULL DEFAULT 0
+> ```
+>
+> The column is populated inside the same transaction as every state
+> mutation, holding the `pending_seq` of the `StateChangePending` event
+> that announced the mutation. The offline forensic verifier defined
+> in `v2/audit-paired-writes.md §5` uses this column to disambiguate
+> chain orphans (pending-without-confirmed) into "committed" or
+> "rolled-back" outcomes without needing the kernel to be running.
+>
+> A column value of `0` is a sentinel meaning "row predates the V2.1
+> migration" and triggers `Finding::PreV21Row` from the verifier (a
+> non-critical finding; the verifier falls back to V1 reconciliation
+> semantics for that row's history). The migration backfill walks the
+> chain newest-to-oldest to populate the column for as many rows as
+> the chain references.
+>
+> Tables NOT in the paired class (`audit_chain`, `sqlite_sequence`,
+> `nonce_cache`, `task_intent_ranges`, `task_exported_path_snapshots`,
+> `witness_records`, `approval_token_nonces`, `verifier_run_tokens`,
+> `task_dag_edges`, `approval_proofs`, `approval_tokens`) are
+> explicitly excluded — they are append-only or transition-derivative
+> and do not represent state mutations the kernel takes responsibility
+> for via the audit chain. The exhaustive paired/non-paired
+> classification lives in `v2/audit-paired-writes.md §3.2` and §4.
+>
+> The Table-by-Table DDL below documents the V1 column set.
+> Implementers building against V2.1+ MUST apply
+> `migrations/V21__paired_audit.sql` (per
+> `v2/audit-paired-writes.md §3.3`) on top of the V1 DDL; the migration
+> is non-destructive (`ALTER TABLE … ADD COLUMN … DEFAULT 0`) and
+> idempotent.
 
 ---
 
@@ -1509,7 +1570,37 @@ CREATE INDEX IF NOT EXISTS idx_policy_epoch_history_advanced_at
 
 ### §2.5.2 — Audit Log Transaction Boundary
 
-#### Write ordering invariant
+> **V2.1 supersession notice.** The two-phase write ordering described
+> below (SQLite commit first, JSONL append second, `recovery::reconcile`
+> patching gaps on the next kernel start) is the **V1 / V2.0** mechanism.
+> Under the strict reading of `R-7` ("audit chain integrity MUST NOT
+> depend on continued operation of the authority that produced it"), the
+> V1 ordering has a real but probabilistic R-7 gap: chains crashed in
+> the (SQLite COMMIT, JSONL fsync) window are silent unless `reconcile`
+> runs before the kernel is decommissioned.
+>
+> V2.1 closes the gap with a **paired-audit protocol** —
+> `StateChangePending` → `<existing kind>` (with `confirms_pending_seq`,
+> `sqlite_commit_id`, `actual_post_state_digest`) →
+> `StateChangeRolledBack` — defined in `v2/audit-paired-writes.md`.
+> Under the V2.1 protocol an offline forensic verifier can resolve every
+> chain orphan against a SQLite snapshot without the kernel ever needing
+> to run again, and `recovery::reconcile_advisory` becomes optional.
+>
+> The V1 ordering documented here remains authoritative for:
+> 1. Audit chain entries written before the `AuditSchemaMigration` event
+>    (which marks the V2.0 → V2.1 cutover; see `v2/audit-paired-writes.md
+>    §10`).
+> 2. Single-class events (Phase-A rejections, pure observability,
+>    chain self-events) which the V2.1 protocol explicitly does NOT
+>    pair (see `v2/audit-paired-writes.md §4`).
+>
+> For paired-class state mutations on a V2.1+ kernel, the §2.5.2 ordering
+> is replaced by the three-phase ordering in `v2/audit-paired-writes.md
+> §2.3`. Readers should treat this section as describing the historical
+> baseline plus the residual single-event protocol that V2.1 still uses.
+
+#### Write ordering invariant (V1 / V2.0 single-event ordering)
 
 Every kernel state mutation follows a strict two-phase write order:
 
@@ -1542,9 +1633,9 @@ Each line in the segment file being verified is a single JSON object:
 - `prev_sha256` — SHA-256 of the **raw bytes** of the previous JSONL line (including the trailing newline). The first record uses `"0000...0000"` (64 zeroes). `raxis-audit-tools verify` walks the chain and fails on any hash mismatch.
 - `payload` — event-kind-specific structured data. Schema for each `AuditEventKind` variant is defined in `raxis-types/src/audit.rs`.
 
-#### Crash-window characterisation
+#### Crash-window characterisation (V1 / V2.0)
 
-Two failure modes are possible:
+Two failure modes are possible under the V1 ordering:
 
 | Mode | Description | Recovery |
 |---|---|---|
@@ -1553,11 +1644,34 @@ Two failure modes are possible:
 
 The second mode is structurally impossible given the write ordering invariant. Implementers **must not** attempt JSONL writes before store commit confirmation.
 
-#### What `recovery::reconcile` treats as ground truth
+> **V2.1 paired-class crash-window characterisation.** For paired-class
+> events (state mutations under V2.1+), four crash windows are possible
+> instead of two; each has a deterministic offline-verifier resolution
+> that does NOT depend on `recovery::reconcile` running. See
+> `v2/audit-paired-writes.md §7` (Failure modes — every error path
+> explicitly treated). The paired protocol turns the V1 "SQLite
+> committed, JSONL not appended" probabilistic R-7 gap into a structural
+> guarantee resolvable from a frozen SQLite snapshot alone.
+
+#### What `recovery::reconcile` treats as ground truth (V1 / V2.0)
 
 - **SQLite is ground truth for FSM state.** On divergence, the task/initiative state in SQLite stands; JSONL is repaired to match.
 - **JSONL is ground truth for ordering and chain integrity.** `seq` values from JSONL take precedence for chain repair; the kernel does not re-sequence existing records.
 - `reconcile` never rewrites existing JSONL lines — it only appends gap records.
+
+> **V2.1 supersession.** `reconcile` is renamed `reconcile_advisory` in
+> V2.1 (see `v2/audit-paired-writes.md §6`). Its role is downgraded
+> from "required for chain integrity" to "best-effort advisory":
+> the chain is verifiable end-to-end from a SQLite snapshot without
+> `reconcile_advisory` ever having run. When it does run, it
+> synthesises the missing `confirmed` (or `StateChangeRolledBack`)
+> events into the chain so future verifications don't need to consult
+> SQLite for the same orphans. The "JSONL is ground truth for ordering"
+> property is preserved exactly; what changes is that the V1
+> `ReconciliationGap` event becomes a synthesised V2.1
+> `StateChangeRolledBack { reason: CrashInferred }` (for inferred
+> rollbacks) or a synthesised paired-class confirmed event (for
+> committed orphans).
 
 #### Kernel never reads JSONL
 
