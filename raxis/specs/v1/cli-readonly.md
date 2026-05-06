@@ -730,18 +730,41 @@ doesn't appear as 12 changes. Critical at epoch advance review.
 
 ### §5.5.13 — `raxis verify-chain`
 
-**Purpose:** re-run `recovery::verify_audit_chain` from the CLI process.
-Walks every record, verifies `prev_sha256` linkage and seq monotonicity.
+**Purpose:** re-run the audit verifier from the CLI process — a
+**convenience wrapper**, not the R-7 independence artefact.
+
+> **R-7 NOTE.** `raxis verify-chain` is part of `raxis-cli`, which links
+> the full kernel stack (`raxis-store`, `raxis-policy`, `raxis-types`).
+> Its verdict therefore only proves "the kernel-side tooling agrees with
+> itself" — meaningless under R-7's strict reading. **The R-7
+> independence artefact is the standalone `raxis-audit-verify` binary**
+> (see `audit-paired-writes.md §5.4` and §5.5.20 below). Auditors,
+> compliance reviewers, and forensic investigators MUST use
+> `raxis-audit-verify`. `raxis verify-chain` is intended for operator
+> day-to-day self-checks against a running kernel, where the kernel-
+> linked conveniences (live SQLite for orphan resolution, IPC
+> consistency checks) outweigh the lack of independence.
 
 **Flags:**
 - `--from <seq>` — start from the given seq (default 0).
 - `--quick` — only check the first and last record (used by `raxis status`).
+- `--with-state-snapshot <path>` — orphan resolution against a live
+  SQLite snapshot (kernel-side only; the standalone binary uses
+  `--state-export` against a JSON export instead).
+- `--acknowledge-critical <signed-payload>` — signed override that clears
+  a kernel boot-block from `reconcile_advisory` critical findings (per
+  `audit-paired-writes.md §6.2`). The signed payload MUST embed the
+  hash of a `raxis-audit-verify` verdict over the same chain
+  (independence-bearing acknowledgement; the operator must run the
+  standalone binary first and embed its output, otherwise the kernel
+  refuses to clear the block).
 
 **Exit code:** `0` if intact, `3` if any break or gap is found.
 
-**Data source:** `audit_tools::verifier::verify_chain` — the same function
-the kernel's boot path calls. Already exists; this command just exposes it
-to the CLI surface.
+**Data source:** `raxis_audit_verify::verify` — the same algorithm the
+standalone binary and the kernel's `reconcile_advisory` use. One
+algorithm, three call sites; only the standalone binary's call site
+satisfies R-7 independence (per `audit-paired-writes.md §5.7`).
 
 ### §5.5.14 — `raxis explain <task_id>`
 
@@ -892,6 +915,121 @@ TaskStateChanged              (silenced)
 ```
 
 The bottom row reflects the `[notifications].default_channels` configuration. `(silenced)` indicates an explicit empty `channels = []` route.
+
+### §5.5.19 — `raxis audit export-state-for-verifier` (V2.1)
+
+**Purpose:** export the per-row `last_committing_event_seq` values
+that the **standalone** `raxis-audit-verify` binary needs in its
+`--state-export` mode for orphan resolution. The standalone binary
+ships with a strict dep boundary (no kernel crates; no SQLite); this
+command bridges that boundary by emitting a JSON file the standalone
+binary can consume without linking the kernel stack.
+
+**Usage:** `raxis audit export-state-for-verifier --output <path.json> [--tables <list>]`
+
+**Flags:**
+- `--output <path.json>` — destination file. Required.
+- `--tables <list>` — comma-separated list of state-bearing table
+  names to include (default: all tables that participate in the
+  paired-write protocol per `audit-paired-writes.md §3.3`).
+
+**Output (JSON, schema `raxis-audit-verify-state-export-v1`):**
+
+```json
+{
+  "schema":               "raxis-audit-verify-state-export-v1",
+  "exported_at_unix_ms":  1714500000000,
+  "kernel_version":       "raxis 2.1.0",
+  "kernel_signature":     "ed25519:7d2c...",
+  "rows": [
+    { "table": "tasks",     "primary_key": {"id": "01J..."}, "last_committing_event_seq": 137 },
+    { "table": "sessions",  "primary_key": {"id": "01K..."}, "last_committing_event_seq": 144 },
+    { "table": "initiatives", "primary_key": {"id": "01L..."}, "last_committing_event_seq": 0  }
+  ]
+}
+```
+
+The kernel signs the export with its operator key so the standalone
+binary can detect tampering between the operator host and the
+forensic host (the standalone binary verifies the signature using the
+same `--pubkey` it was given for the chain). Tampering only mis-
+resolves orphans — chain integrity remains provable from the JSONL
+alone, so a tampered export degrades to "indeterminate orphans."
+
+**Exit code:** `0` on success; `2` if the kernel is not running or
+the data directory is unreadable; `4` on internal error.
+
+**Why this command exists in `raxis-cli`, not the standalone binary.**
+The standalone binary's whole point is its strict dep boundary
+(`audit-paired-writes.md §5.4.1`). Adding SQLite or `raxis-store`
+to it would defeat R-7 independence. So the export — which inherently
+reads SQLite — lives in `raxis-cli`, where SQLite is already linked.
+The export's *output* is consumable by the dep-bounded binary; that
+asymmetry is the architectural point.
+
+### §5.5.20 — `raxis-audit-verify` (separate binary, R-7 artefact)
+
+**Purpose:** the **independence-bearing** R-7 verifier. Ships as a
+separate binary with a strict dependency boundary (per
+`audit-paired-writes.md §5.4.1`): `sha2`, `ed25519-dalek`,
+`serde`/`serde_json`, `hex`, `clap`, `glob` — and **no** kernel
+crate, no SQLite, no IPC.
+
+**This command is NOT a `raxis-cli` subcommand.** It is its own
+top-level binary intentionally, so a forensic auditor with a
+read-only filesystem and the operator's public key can run it
+without installing or running the kernel.
+
+**Usage:** `raxis-audit-verify --chain <PATH-OR-GLOB>... --pubkey <PEM>`
+
+**Flags** (full list in `audit-paired-writes.md §5.4.2`):
+
+- `--chain <PATH-OR-GLOB>...` — JSONL segment files; multiple flags
+  accumulate.
+- `--pubkey <PEM-PATH>` — operator Ed25519 public key.
+- `--keyring <DIR>` — directory of pubkeys for chains that span a
+  key rotation.
+- `--state-export <JSON>` — JSON export from
+  `raxis audit export-state-for-verifier` for orphan resolution.
+  Optional; absent means chain-only mode (default).
+- `--json-output` — emit machine-readable findings JSON.
+- `--quiet` — suppress progress; print only verdict.
+- `--strict-monotonic` — treat any seq gap not paired with an
+  `AuditSegmentRotated` marker as a chain break.
+
+**Exit codes:** `0` (INTACT), `2` (CLI error), `3` (critical chain
+finding — same code as `raxis verify-chain` for tooling
+compatibility), `4` (internal error).
+
+**Sample output (the canonical example from
+`audit-paired-writes.md §5.4.2`):**
+
+```text
+$ raxis-audit-verify \
+      --chain  /var/lib/raxis/audit/segment-*.jsonl \
+      --pubkey /etc/raxis/operator-public.pem
+
+raxis-audit-verify v0.1.0 — R-7 chain integrity check
+Chain        : 12,847 records, segments 000-002 (1.4 MiB)
+Sequence     : monotonic, no gaps
+Linkage      : SHA-256 chain intact (12,846 links verified)
+Signatures   : 12,847/12,847 verified against operator key fp:7d2c…
+Pairing      : 4,219 paired (StateChangePending → confirmed)
+               7 pending without confirmed (chain-only mode; see below)
+               0 dangling confirmed
+               0 dangling rolled-back
+               0 digest mismatches
+Orphans      : 7 indeterminate — pass --state-export to resolve
+
+Verdict      : INTACT
+```
+
+**Documentation:** ships with its own man page
+(`raxis-audit-verify(1)`) installed alongside the binary. The man
+page documents the dep boundary as a normative property — a packager
+shipping `raxis-audit-verify` MUST NOT statically link any banned
+crate (per `audit-paired-writes.md §13.3`); the `xtask
+audit-verify-deps` lint enforces this at build time.
 
 ---
 
