@@ -1,7 +1,43 @@
 # RAXIS V2 — Kernel-Mediated Egress
 
-> **Status:** V2 Specified
-> **Cross-references:**
+> **Status: DEPRECATED.** This spec is no longer normative. The
+> `IntentKind::EgressRequest` intent and the `raxis-egress` proxy described
+> below are removed from V2 GA. Superseded by the **Unified Egress** decision
+> recorded in [`v2-deep-spec.md §Part 7`](v2-deep-spec.md), under
+> *Integration & Harness Decisions → Decision — Unified Egress (Drop
+> `IntentKind::EgressRequest`)*.
+>
+> **Where to look instead:**
+>
+> - **Public / unauthenticated egress** (npm, cargo, pip, git, curl, …):
+>   transport-layer SNI allowlist via `raxis-tproxy`. See
+>   [`vm-network-isolation.md`](vm-network-isolation.md).
+> - **Authenticated / sensitive egress** (APIs, k8s, cloud, DB): HTTP-layer
+>   URL-prefix + method allowlist via per-session `localhost:<port>`
+>   Credential Proxy. See [`credential-proxy.md`](credential-proxy.md).
+> - **Dynamic widening at runtime** (URL not in either allowlist): operator
+>   amendment via `IntentKind::EscalationRequest`. See
+>   [`agent-disagreement.md §6`](agent-disagreement.md).
+>
+> **Deprecated invariants** (carried over from this spec, retired with it):
+>
+> - `INV-EGRESS-01` (egress.sock UDS exclusivity) — no `egress.sock` exists
+>   under the unified model.
+> - `INV-EGRESS-INTENT-01` (`require_intent = true` enforcement) — the
+>   `require_intent` field is vestigial without an intent path; production
+>   endpoints needing tighter audit are routed through the Credential Proxy
+>   instead, where URL + method enforcement is the default.
+>
+> **Why the content is preserved.** This document remains in the repository
+> as a historical record of (a) the original two-path design, (b) the
+> alternatives considered during the V2 design phase, and (c) the rationale
+> that motivated the eventual unification. Any cross-reference from another
+> spec to this file should be treated as a pointer to design history, not to
+> normative behavior. New PRs MUST NOT add normative cross-references to
+> this file; cite `vm-network-isolation.md` or `credential-proxy.md` instead.
+
+> **Original status:** V2 Specified
+> **Original cross-references:**
 > - `v2-deep-spec.md §1.3` — Credential isolation / INV-02B
 > - `security/raxis-security-model.md §INV-GATEWAY-01` — Gateway trust boundary pattern
 > - `v2-deep-spec.md §Part 7` — `RaxisToolExecutor` integration point
@@ -302,7 +338,7 @@ AuditEventKind::EgressRequestAdmitted {
     truncated:            bool,
     duration_ms:          u64,
     credential_injected:  bool,        // true if egress_credentials entry matched
-    plan_artifact_sha256: String,
+    plan_bundle_sha256:   String,      // V2 canonical bundle hash (per plan-bundle-sealing.md §8.2); for legacy V1 initiatives this carries plan_artifact_sha256 instead
     policy_epoch:         u64,
 }
 
