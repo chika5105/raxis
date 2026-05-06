@@ -251,7 +251,7 @@ The kernel tracks `task.unblocked_elapsed_ms` in `kernel.db`. The timer:
 - **Starts** when the task is first picked up (`IntentKind::PickUpTask` admitted).
 - **Pauses** when the task enters any `Blocked(*)` state — pending escalation, pending host-capacity, pending review of upstream task, etc.
 - **Resumes** when the task transitions back to a runnable state (`Admitted` or `Running`).
-- **Stops** when the task transitions to a terminal state (`Completed`, `Failed`, `Skipped`).
+- **Stops** when the task transitions to a terminal state. RAXIS's terminal task states are exactly `Completed`, `Failed`, `Aborted`, `Cancelled` (the v1 task FSM in `kernel-store.md §2.5.1`; V2 adds no new task-terminal states — `CancelPending` is the new V2 *initiative*-terminal state per `cli-ceremony.md initiative cancel`, and the bulk task-cancellation it triggers transitions individual tasks to `Cancelled`). There is no `Skipped` task state — a task whose predecessor failed and whose initiative criteria mark it permanently non-schedulable remains in `Admitted` indefinitely (`kernel-core.md §4.5 DAG failure propagation`); the wall-clock timer for those tasks stops at the same point the schedule-eligibility predicate flips to false (no further `Running` transitions can happen, so the timer's "running" condition is never met again — the timer stays paused at its last-paused value).
 
 Pausing during escalation is essential: an escalation that legitimately takes 6 days to resolve must not eat the entire wall-clock budget while the agent is doing nothing.
 

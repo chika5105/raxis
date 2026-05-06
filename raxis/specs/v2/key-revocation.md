@@ -681,7 +681,16 @@ Audit log replay validates signatures using the trust state of the policy bundle
 
 ### INV-KEY-07 — Emergency revocations are append-only and authoritative by filesystem permission
 
-Emergency revocations (§6) are append-only at the database level (`emergency_key_revocations` table) and authoritative at the file level by root ownership and 0600 mode. Once an emergency revocation entry is processed (a row exists in `emergency_key_revocations`), it is permanent — deleting the corresponding entry from `/var/lib/raxis/emergency_revocations.toml` does not un-revoke. No cryptographic signature is required or accepted on emergency revocations; authority comes solely from filesystem permissions.
+Emergency revocations (§6) are append-only at the database level (`emergency_key_revocations` table) and authoritative at the file level by root ownership and 0600 mode. Once an emergency revocation entry is processed (a row exists in `emergency_key_revocations`), it is permanent — **no operator action**, including:
+
+- editing an entry's `revocation_reference` or `authorized_by` to look benign,
+- deleting the entry from `/var/lib/raxis/emergency_revocations.toml`,
+- deleting the entire `emergency_revocations.toml` file (so the file is absent at next reload),
+- restoring an older `emergency_revocations.toml` from backup,
+- pushing a normal `policy.toml` that omits the revocation,
+- editing the SQLite database directly (which is not a supported operation regardless),
+
+— removes the revocation from effect. The DB-row state is the authoritative trust signal; the file is the entry vector. Reload-time tampering detection emits `EmergencyRevocationFileTampered` (with `previous_count`, `new_count`, and `missing_fingerprints`) but the missing rows REMAIN APPLIED. No cryptographic signature is required or accepted on emergency revocations; authority comes solely from filesystem permissions.
 
 **Where:** §6.5 (reload protocol; tampering detection without un-application); §6.6 step 1 (INSERT into `emergency_key_revocations`); §6.7 (schema with no DELETE); §6.9 ("cannot un-revoke").
 

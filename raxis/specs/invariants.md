@@ -65,7 +65,7 @@
 | Operator certificates — V1 | INV-CERT-01..05 | 5 |
 | Convergence — V2 | INV-CONVERGENCE-01..06 | 6 |
 | Planner harness — V2 | INV-PLANNER-HARNESS-01..06 | 6 |
-| Verifier processes — V2 | INV-VERIFIER-01..13 | 13 |
+| Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | **Total** | | **64** |
 
@@ -1992,6 +1992,89 @@ escalates.
 
 **Canonical home.** `v2/verifier-processes.md` §15,
 `v2/integration-merge.md §4 Check 5d`, §11.10.
+
+---
+
+### INV-VERIFIER-14 — Symbol-index witness provenance
+
+**Statement.** Whenever the kernel-canonical
+`raxis-verifier-symbol-index` verifier (per `INV-VERIFIER-12`)
+runs, it MUST run against a kernel-provisioned clone of the
+evaluation tree. The kernel performs `git clone --shared
+--no-checkout master_repo.git` to a fresh path under the
+verifier VM's VirtioFS mount and then `git checkout
+<evaluation_sha>` inside the verifier VM. The Executor's
+worktree is NEVER the substrate for symbol-index verification.
+
+**Justification.** A symbol index that depended on
+Executor-provided source bytes would let a malicious or buggy
+Executor mis-represent the symbol topology of the changes the
+Reviewer is reviewing — the `verifier_witnesses` block in the
+Reviewer's KSB carries an authority bound by the audit chain
+(`INV-04`); cracking the provenance lets the Executor mint
+witnesses against bytes that never traversed `evaluation_sha`'s
+content addressing. The kernel-side clone closes that
+confused-deputy path: `evaluation_sha → symbol_index` is a pure
+function of the commit object, so the symbol index inherits the
+same trust budget as the audit chain itself.
+
+**Operational evidence.** The kernel-spawned helper
+`verifier_provision_workspace` (in `kernel/src/verifier/spawn.rs`)
+emits the audit event
+`VerifierWorkspaceProvisioned { evaluation_sha, clone_method:
+"kernel_share_no_checkout" }` exactly once before the verifier
+VM is started. The forensic auditor verifies provenance by
+reading this event from the audit chain — no instrumentation of
+the verifier VM is required.
+
+**Canonical home.** `v2/verifier-processes.md` §13
+(invariant statement), §16.5 (provisioning step), and the
+`kernel/src/verifier/spawn.rs` helper `verifier_provision_workspace`.
+
+---
+
+### INV-VERIFIER-15 — Verifier authenticated egress requires explicit per-image policy opt-in
+
+**Statement.** A verifier VM that declares `allowed_egress`
+defaults to **audit-only** mode: outbound requests are logged
+but unauthenticated, and credentials from
+`[[providers.credentials]]` / `[[permitted_credentials]]` are
+NOT injected by the egress proxy. Authenticated egress
+requires:
+
+1. A matching `[[verifier_credentials.images]]` entry in
+   `policy.toml` whose `image` resolves to the verifier image's
+   pinned OCI digest.
+2. That entry's `permit_authenticated = true`.
+3. The kill-switch `[verifier_credentials].emergency_audit_only
+   = false`.
+
+If any of those three conditions fails, every credential
+injection attempt against the verifier returns the audit-only
+proxy and the resolution is recorded as
+`VerifierCredentialModeResolved { image, mode: AuditOnly,
+reason }` in the audit chain.
+
+**Justification.** Verifier images are the supply-chain weak
+link: unlike Executor images (kernel-provisioned from a known
+base), verifier images may be operator-authored,
+third-party-authored, or community-maintained. A compromised
+verifier image with authenticated egress to a private package
+registry could exfiltrate the registry token to an
+attacker-controlled package or publish a malicious package
+back to the registry; every downstream consumer of that
+registry is then compromised. The blast radius is wider than
+the equivalent Executor compromise because the verifier sees
+EVERY task's `evaluation_sha`. Audit-only-by-default forces
+operators to make a deliberate per-image decision about which
+verifier images they trust enough to receive real credentials,
+and the global kill-switch lets them revert that decision in a
+single line during incident response without rewriting per-image
+rows.
+
+**Canonical home.** `v2/verifier-processes.md §13` (invariant
+statement), `§16.7` (full policy schema, resolution chain,
+audit events, V2.0→V2.1 migration story).
 
 ---
 

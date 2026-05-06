@@ -1146,6 +1146,31 @@ verifier images are operator-trust domain. The kernel-canonical
 > renamed-and-pushed only on full pass and discarded on any
 > `block_merge` failure. Master is never partially advanced.
 
+> **`INV-VERIFIER-14` — Symbol-index witness provenance is
+> kernel-provisioned, never Executor-derived.** The
+> `raxis-verifier-symbol-index` verifier (per `INV-VERIFIER-12`)
+> is always activated against a kernel-provisioned clone of the
+> evaluation tree — the kernel performs `git clone --shared
+> --no-checkout master_repo.git → /workspace`, then
+> `git checkout <evaluation_sha>` inside the verifier VM, all
+> over the kernel-mediated VirtioFS mount. The Executor's
+> worktree is never the substrate. This closes a confused-deputy
+> path: a malicious or buggy Executor cannot pre-stage source
+> bytes that misrepresent the symbol topology
+> (`evaluation_sha → symbol_index` is a pure function of the
+> commit object, not of any Executor-mutable state). The
+> Reviewer's KSB `verifier_witnesses` section that surfaces the
+> symbol index therefore has the same trust budget as the audit
+> chain itself: bound by the kernel's content addressing, not
+> by the Executor's behavior. Implementation note: the
+> kernel-spawned helper that performs the provisioning is the
+> `verifier_provision_workspace` step in `kernel/src/verifier/
+> spawn.rs` and emits `VerifierWorkspaceProvisioned
+> { evaluation_sha, clone_method: "kernel_share_no_checkout" }`
+> exactly once before the verifier VM is started, so an
+> auditor can verify provenance without instrumenting the
+> verifier itself.
+
 > **`INV-VERIFIER-15` — Verifier authenticated egress requires
 > explicit per-image policy opt-in.** A verifier VM that declares
 > `allowed_egress` defaults to **audit-only** mode: outbound
