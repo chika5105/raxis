@@ -1631,6 +1631,251 @@ This spec implies amendments in adjacent specs:
   long-term retention of artifact bytes for forensic replay.
 
 ---
+## §19 — Implementation Plan
+
+This section enumerates every crate, binary, source file, kernel handler change, image artefact, schema change, and test surface required to ship verifier processes per §4–§16. An implementer reading §19 alone (plus §4 for the lifecycle and §7 for the wire frame) MUST have enough information to land V2 in their first pass.
+
+> **Trait-boundary preconditions.** Every verifier VM boots through `IsolationBackend::spawn` (`extensibility-traits.md §3`) and operates on a `WorkspaceMount` produced by `DomainAdapter::provision_workspace` (`extensibility-traits.md §2`). For pre-merge verifiers (§4.1.2), the candidate merged tree is materialised by the SE-domain extension `SeDomainExt::stage_candidate_tree` exposed through `crates/raxis-domain-git`. §19.2–§19.3 assume the V2 trait extraction in `extensibility-traits.md §10` Phase A+B has landed.
+
+### §19.1 Crate layout
+
+| Crate path                                                  | Kind   | Status | Purpose                                                                                                                                                                                |
+| ----------------------------------------------------------- | ------ | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/raxis-verifier/`                                    | `[bin]` | NEW   | The PID-1 binary that runs inside every verifier VM. Reads its `VerifierSpec` from VirtioFS at `/raxis/verifier-spec.json`, executes the declared command line under cgroup-v2 limits, captures stdout/stderr + structured counters + declared artefacts, then emits exactly one `WitnessSubmission` over `vsock` and exits. No tools, no LLM, no shell of its own. (`INV-VERIFIER-08`.)  |
+| `crates/raxis-verifier-protocol/`                           | `[lib]` | NEW   | Wire schema: `WitnessSubmission`, `VerifierSpec`, `StructuredCounters`, `ArtifactUpload`, `FinalStatus`. Imported by both `raxis-verifier` (writer) and the kernel (reader/verifier).      |
+| `crates/raxis-verifier-runtime/`                            | `[lib]` | NEW   | Kernel-side helpers: `VerifierScheduler`, the per-task and pre-merge orchestrators, the witness-validator (`§7.6` schema gate), the artefact-staging filesystem ops. Carved out so kernel handlers stay small. |
+| `crates/raxis-verifier-images/`                             | `[lib]` | NEW   | Build manifests (`raxis-verifier-symbol-index`, `raxis-verifier-rust`, `raxis-verifier-node`, `raxis-verifier-python`, `raxis-verifier-go`). Mirrors `crates/raxis-image-builder/` but for verifier images; the embedded vs operator-pinned distinction is per-image.                  |
+
+### §19.2 Files to create
+
+`crates/raxis-verifier/`:
+
+- `crates/raxis-verifier/Cargo.toml` — `default-run = "raxis-verifier"`. Depends on `raxis-verifier-protocol`, `tokio`, `serde_json`, `vsock` (Linux), `nix`. Refuses to compile on macOS (`target_family = "unix"` + `target_os = "linux"`); only verifier guests run Linux.
+- `crates/raxis-verifier/src/main.rs` — the PID-1 entrypoint:
+  - `pub async fn main()` reads `/raxis/verifier-spec.json`, mounts `/proc`, `/sys`, the workspace at the path declared in the spec (read-only for per-task and policy-gate verifiers; ephemeral candidate-tree mount for pre-merge), then dispatches to `run_verifier`.
+- `crates/raxis-verifier/src/run.rs` — `run_verifier(spec: VerifierSpec) -> Result<WitnessSubmission, RunError>`:
+  - Forks a child under a dedicated cgroup (`/sys/fs/cgroup/raxis-verifier/<verifier_id>`), execs the declared `command`, captures stdout/stderr to bounded ring buffers (default 1 MiB each per `host-capacity.md §6`).
+  - On exit, parses the optional `--counters-file <path>` JSON, walks the declared `artifact_paths`, sha256-hashes each, and uploads via `artifact.rs` (below).
+  - Constructs `WitnessSubmission { final_status, exit_code, started_at, completed_at, stdout_truncated, stderr_truncated, counters, artifacts: Vec<ArtifactSubmission> }`.
+- `crates/raxis-verifier/src/artifact.rs` — `pub async fn upload_artifact(path: &Path, vsock: &VsockStream) -> Result<ArtifactSubmission, ArtifactError>`: streams the file to the kernel's per-session artefact staging area via vsock; returns the kernel-assigned `artifact_id` + `artifact_sha256` + `artifact_size_bytes`. Refuses files larger than `policy.toml [host_capacity] max_artifact_bytes_per_verifier` (default 64 MiB).
+- `crates/raxis-verifier/src/cgroup.rs` — `pub fn create_verifier_cgroup(id: &VerifierId, limits: &VerifierLimits) -> Result<PathBuf>`: writes `cpu.max`, `memory.max`, `pids.max` per the `VerifierSpec.limits`; teardown via `cgroup.kill`.
+- `crates/raxis-verifier/src/timeout.rs` — async `enforce_wallclock(deadline: Instant)`; on expiry sets `final_status = TimedOut` and writes `1` to the cgroup's `cgroup.kill`.
+- `crates/raxis-verifier/tests/run_smoke.rs` — runs the binary against a hermetic fixture spec (`fixtures/spec_pass.json`, `fixtures/spec_fail.json`, `fixtures/spec_timeout.json`, `fixtures/spec_crash.json`, `fixtures/spec_artifact_missing.json`); each emits one fixture witness file checked byte-for-byte.
+
+`crates/raxis-verifier-protocol/`:
+
+- `crates/raxis-verifier-protocol/Cargo.toml` — `no_std`-friendly; `serde` derive only. Used by both kernel and verifier.
+- `crates/raxis-verifier-protocol/src/lib.rs` — types defined in §7:
+  - `pub struct VerifierSpec { id, image_id, workspace_mount_path, command, args, env_allowlist, limits, artifact_paths, deadline_unix_secs }`.
+  - `pub struct WitnessSubmission { id, verifier_id, plan_role, final_status, exit_code, started_at, completed_at, stdout_truncated, stderr_truncated, counters, artifacts }`.
+  - `pub enum FinalStatus { Passed, Failed, TimedOut, Crashed, ArtifactMissing }` (matches §7.4 enumeration).
+  - `pub struct StructuredCounters(BTreeMap<String, i64>)`.
+  - `pub struct ArtifactSubmission { artifact_id, sha256, size_bytes, path_inside_vm }`.
+- `crates/raxis-verifier-protocol/src/wire.rs` — bincode framing:
+  - `pub fn write_frame<W: AsyncWrite>(w: &mut W, msg: &impl Serialize) -> io::Result<()>`.
+  - `pub fn read_frame<R: AsyncRead>(r: &mut R) -> io::Result<impl DeserializeOwned>`.
+  - 8-byte length prefix, max-frame-size 4 MiB; larger payloads use the artefact-upload side channel.
+- `crates/raxis-verifier-protocol/tests/round_trip.rs` — property test: serialize → deserialize → compare for 1000 random `WitnessSubmission` instances.
+
+`crates/raxis-verifier-runtime/`:
+
+- `crates/raxis-verifier-runtime/Cargo.toml` — kernel-side deps: `raxis-verifier-protocol`, `raxis-store`, `raxis-audit`, `raxis-isolation`.
+- `crates/raxis-verifier-runtime/src/lib.rs` — re-exports.
+- `crates/raxis-verifier-runtime/src/scheduler.rs` — `pub struct VerifierScheduler { isolation: Arc<dyn IsolationBackend>, store: Arc<Store>, audit: Arc<dyn AuditSink>, capacity: VerifierCapacity }`:
+  - `pub async fn schedule_per_task(&self, ctx: PerTaskCtx) -> Result<JoinSet<TaskVerifierResult>, SchedulerError>` — the per-task activation flow of §4.1.1.
+  - `pub async fn schedule_pre_merge(&self, ctx: PreMergeCtx) -> Result<PreMergeVerdict, SchedulerError>` — the pre-merge flow of §4.1.2.
+  - `pub async fn schedule_policy_gate(&self, ctx: PolicyGateCtx) -> Result<PolicyGateVerdict, SchedulerError>` — the policy claim-based gate flow of §4.1.3.
+  - Capacity enforcement against `policy.toml [host_capacity] max_concurrent_verifier_vms` (default 8) using a `tokio::sync::Semaphore`.
+- `crates/raxis-verifier-runtime/src/witness_validator.rs` — `pub fn validate(submission: &WitnessSubmission, expected_verifier: &VerifierSpec) -> Result<ValidatedWitness, ValidationError>`. Rejects mismatched `verifier_id`, missing-required-counter rows, unauthorised artefact paths.
+- `crates/raxis-verifier-runtime/src/artifact_staging.rs` — per-session staging-dir lifecycle: `pub fn open_staging(session_id: SessionId) -> StagingHandle`, `pub async fn ingest_artifact(handle: &StagingHandle, stream: impl AsyncRead) -> Result<IngestedArtifact, IngestError>`, `pub fn cleanup_session(session_id: SessionId)`. Lives under `<data_dir>/verifier-staging/<session_id>/`; chmod 0700, kernel-OS-user.
+- `crates/raxis-verifier-runtime/src/witness_records.rs` — `pub fn insert_witness(tx: &mut Transaction, witness: &ValidatedWitness) -> Result<WitnessRowId, StoreError>` — writes to the new `witness_records` table (DDL in §19.3).
+- `crates/raxis-verifier-runtime/src/gating.rs` — `pub fn evaluate_block_review(...)`, `pub fn evaluate_block_merge(...)` per §5.2 / §5.3 / §16.4.
+- `crates/raxis-verifier-runtime/tests/scheduler_smoke.rs` — drives `VerifierScheduler` against `MockIsolation` + a deterministic verifier-fixture set; asserts capacity, queueing, and gating outcomes.
+- `crates/raxis-verifier-runtime/tests/pre_merge_block.rs` — full pre-merge integration test with two block_merge verifiers (one passes, one fails) and asserts the candidate tree is discarded with `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`.
+
+`crates/raxis-verifier-images/`:
+
+- `crates/raxis-verifier-images/Cargo.toml` — depends on `raxis-image-manifest`, `oci-spec`.
+- `crates/raxis-verifier-images/src/lib.rs` — `pub fn embedded_symbol_index_manifest() -> &'static ImageManifest` (the kernel-canonical image bytes are `include_bytes!`-embedded for `raxis-verifier-symbol-index` per §14.1).
+- `crates/raxis-verifier-images/manifests/<role>/` — one directory per image: `manifest.toml`, `Containerfile`, `verify.sh` (mirrors `crates/raxis-image-builder/` layout per `planner-harness.md §14.4`).
+- `crates/raxis-verifier-images/tests/determinism.rs` — same parallel-rebuild byte-equality assertion as the planner-harness image determinism test.
+
+### §19.3 Files to change
+
+`raxis/Cargo.toml`:
+
+- Add `crates/raxis-verifier`, `crates/raxis-verifier-protocol`, `crates/raxis-verifier-runtime`, `crates/raxis-verifier-images` to `[workspace] members`.
+- Remove `crates/verifier-stub` from `[workspace] members` (V1 host-subprocess verifier; superseded by `raxis-verifier`). Audit-event compatibility for already-stored historical witness rows is preserved by the `witness_records.schema_version = 1` row in §7.6.
+
+`raxis/kernel/Cargo.toml`:
+
+- Add `raxis-verifier-runtime = { path = "../crates/raxis-verifier-runtime" }`, `raxis-verifier-protocol = { path = "../crates/raxis-verifier-protocol" }`, `raxis-verifier-images = { path = "../crates/raxis-verifier-images" }`.
+
+`raxis/kernel/src/handlers/intent.rs`:
+
+- The `CompleteTask` handler picks up a new step between path-allowlist verification (existing) and audit-event emission:
+  - `let task_verifiers = ctx.verifier_runtime.schedule_per_task(PerTaskCtx { task_id, evaluation_sha, declared: plan.tasks[task_id].verifiers.clone() }).await?;`
+  - The handler awaits `task_verifiers` and writes one `witness_records` row per verifier.
+  - If the gating result blocks the Reviewer (`evaluate_block_review` returned `Block`), the handler returns `OK_TASK_AWAITING_VERIFIERS` and does NOT activate the Reviewer.
+- The `IntegrationMerge` handler picks up Check 5d.5 (existing reference in `integration-merge.md §4 Check 5d`):
+  - `let pre_merge = ctx.verifier_runtime.schedule_pre_merge(PreMergeCtx { initiative_id, candidate_tree_sha, declared: combine_policy_and_plan(...) }).await?;`
+  - If `pre_merge.verdict == Block`, return `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary }`. The candidate tree is discarded by `SeDomainExt::discard_candidate_tree(candidate_tree_sha)?` (the SE adapter's clean-up; other domains define their equivalent).
+
+`raxis/kernel/src/handlers/mod.rs`:
+
+- `HandlerContext` gains `pub verifier_runtime: Arc<VerifierScheduler>`.
+- The runtime is constructed in `kernel/src/main.rs` boot step 6b (between the trait construction and the operator-transport bind, per `extensibility-traits.md §9.1`):
+  ```rust
+  let verifier_runtime = Arc::new(VerifierScheduler::new(
+      isolation.clone(),
+      store.clone(),
+      audit_sink.clone(),
+      VerifierCapacity::from_policy(&policy),
+  ));
+  ```
+
+`raxis/kernel/src/gates/verifier_runner.rs`:
+
+- DELETED. Its responsibilities (host-side subprocess spawn for V1 gates) move into `crates/raxis-verifier-runtime/src/scheduler.rs::schedule_policy_gate`. All callers in `kernel/src/handlers/intent.rs` and `kernel/src/scheduler/admit.rs` are updated to `ctx.verifier_runtime.schedule_policy_gate(...)`.
+
+`raxis/kernel/src/gates/witness.rs`:
+
+- The `validate_witness_submission` function moves into `crates/raxis-verifier-runtime/src/witness_validator.rs`. The kernel module retains a thin wrapper for back-compat callers; remove after the migration's last PR.
+
+`raxis/crates/store/src/migration.rs`:
+
+- New migration `0010_witness_records.sql`:
+  ```sql
+  CREATE TABLE witness_records (
+      id                  INTEGER PRIMARY KEY,
+      session_id          TEXT NOT NULL,
+      verifier_id         TEXT NOT NULL,
+      task_id             TEXT,           -- NULL for pre-merge / policy-gate verifiers
+      initiative_id       TEXT,           -- non-NULL for pre-merge verifiers
+      hook_kind           TEXT NOT NULL CHECK (hook_kind IN ('per_task','pre_merge','policy_gate')),
+      schema_version      INTEGER NOT NULL,
+      final_status        TEXT NOT NULL CHECK (final_status IN ('passed','failed','timed_out','crashed','artifact_missing')),
+      exit_code           INTEGER,
+      started_at          TEXT NOT NULL,
+      completed_at        TEXT NOT NULL,
+      stdout_sha256       BLOB,
+      stderr_sha256       BLOB,
+      counters_json       TEXT NOT NULL,
+      artifact_count      INTEGER NOT NULL,
+      witness_blob_sha256 BLOB NOT NULL,   -- the canonicalised WitnessSubmission's sha256, hashed into the audit chain
+      audit_event_id      INTEGER NOT NULL REFERENCES audit_events(id),
+      created_at          TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+  );
+  CREATE INDEX idx_witness_records_session ON witness_records(session_id);
+  CREATE INDEX idx_witness_records_initiative ON witness_records(initiative_id) WHERE initiative_id IS NOT NULL;
+  CREATE INDEX idx_witness_records_status ON witness_records(final_status);
+
+  CREATE TABLE witness_artifacts (
+      id              INTEGER PRIMARY KEY,
+      witness_id      INTEGER NOT NULL REFERENCES witness_records(id) ON DELETE CASCADE,
+      artifact_path   TEXT NOT NULL,
+      sha256          BLOB NOT NULL,
+      size_bytes      INTEGER NOT NULL,
+      staged_path     TEXT NOT NULL  -- absolute path under <data_dir>/verifier-staging/<session_id>/
+  );
+  CREATE INDEX idx_witness_artifacts_witness ON witness_artifacts(witness_id);
+  ```
+- The `0010_witness_records.sql` migration also DROPs the V1 `gates_runner_records` table if present (it was an in-tree experimental artefact; never shipped to a production deployment per the spec's "no V1/V2 fork" guarantee).
+
+`raxis/crates/audit/src/event.rs`:
+
+- New variants per §11:
+  - `AuditEventKind::VerifierActivated { hook_kind, verifier_name, image_digest, integration_merge_id?, task_id? }`.
+  - `AuditEventKind::VerifierCompleted { witness_id, final_status, integration_merge_id?, task_id? }`.
+  - `AuditEventKind::VerifierWitnessAccepted { witness_id, witness_blob_sha256 }` — emitted after the witness validator passes; the audit-chain link incorporates `witness_blob_sha256` so witness rows are tamper-evident.
+  - `AuditEventKind::VerifierArtifactStaged { witness_id, artifact_path, sha256, size_bytes }`.
+  - `AuditEventKind::VerifierBlockMergeFailed { initiative_id, candidate_tree_sha, blocking_verifier_names }`.
+- `crates/audit/src/sink.rs` — no API change; the new variants flow through the existing `append` path. Conformance kit picks up the new variants via the auto-generated test fixture.
+
+`raxis/crates/types/src/operator_wire.rs`:
+
+- New variant `OkResponse::TaskAwaitingVerifiers { task_id, pending_verifier_names, est_completion_unix_secs }` for the case the spec already names but didn't have a wire-frame for.
+- New variant `FailResponse::IntegrationMergeVerifierBlocked { verifier_names, primary_witness_summary }`.
+
+`raxis/cli/src/commands/`:
+
+- `cli/src/commands/witness.rs` (NEW) — `raxis witness list --task <id>`, `raxis witness show <witness_id>`, `raxis witness artifact get <artifact_id> --out <path>`. Read-only; uses the V2 read-only operator socket per `cli-readonly.md`.
+- `cli/src/commands/doctor.rs` — three new checks: see §19.7.
+
+`raxis/specs/v2/integration-merge.md`:
+
+- §4 Check 5d already references this spec; no further edit required. The Check 5d implementation now goes through `ctx.verifier_runtime.schedule_pre_merge(...)` (already noted in `integration-merge.md §12.0` after the DomainAdapter refactor).
+
+`raxis/specs/v2/policy-plan-authority.md`:
+
+- §4 `[default_verifier_images]` and `[[integration_merge_verifiers]]` — no schema change; the implementer's checklist gains a back-pointer to §19.
+
+### §19.4 Image-build pipeline (verifier images)
+
+Mirrors `planner-harness.md §14.4`. Five images live in-tree:
+
+| Image                              | Trust boundary                  | Distribution                                                                    |
+| ---------------------------------- | ------------------------------- | ------------------------------------------------------------------------------- |
+| `raxis-verifier-symbol-index`      | Kernel-bundled, kernel-signed   | Embedded into the kernel binary as `include_bytes!`. Used for `WARN_REVIEWER_MISSING_SYMBOL_INDEX` auto-injection per `operator-ergonomics.md §4.4`.                                                                                                                              |
+| `raxis-verifier-rust`              | Operator-pinned tier            | Distributed alongside the kernel; `policy.toml [default_verifier_images]` opt-in. |
+| `raxis-verifier-node`              | Operator-pinned tier            | Same as Rust tier.                                                              |
+| `raxis-verifier-python`            | Operator-pinned tier            | Same.                                                                           |
+| `raxis-verifier-go`                | Operator-pinned tier            | Same.                                                                           |
+
+Each `crates/raxis-verifier-images/manifests/<image>/` contains the `manifest.toml`, `Containerfile`, `assets/`, `verify.sh` per the planner-harness pattern. Determinism, signing, and CI workflows are shared with `raxis-image-builder` (`planner-harness.md §14.4`); the binary `raxis-image-builder` learns a `verifier` subcommand: `raxis-image-builder build verifier <image-name>`.
+
+### §19.5 Test fixtures and test-support helpers
+
+`crates/test-support/src/verifier_processes/` (NEW module):
+
+- `mod.rs` — re-exports.
+- `fixture_specs/` — `spec_pass.json`, `spec_fail.json`, `spec_timeout.json`, `spec_crash.json`, `spec_artifact_missing.json`, `spec_unknown_artifact.json`, `spec_oversized_artifact.json`. Each is a complete `VerifierSpec` with deterministic exit-code semantics; the corresponding command lines are tiny shell-free programs (compiled into `/usr/local/bin/raxis-verifier-fixture-{name}` inside the fixture image).
+- `fixture_images/` — a single tiny verifier image (`raxis-verifier-fixture`) hosting the seven fixture programs. Built once by `cargo xtask build-fixture-images`; signed with the test signing key.
+- `mock_scheduler.rs` — `pub struct MockVerifierScheduler { intercepted: Mutex<Vec<VerifierSpec>>, scripted: HashMap<VerifierId, FinalStatus> }` — used by handler tests that don't want a real verifier VM in the loop.
+- `golden_witnesses/` — 14 golden `WitnessSubmission` blobs covering the cross-product of `(final_status, has_artifacts, has_counters)` for byte-equality regression tests.
+
+### §19.6 Integration tests
+
+| Test file (NEW)                                                            | Asserts                                                                                                                                     | Spec section                |
+| -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
+| `kernel/tests/verifier/per_task_block_review.rs`                           | An Executor `CompleteTask` whose declared verifier returns `Failed` blocks Reviewer activation; the kernel returns `OK_TASK_AWAITING_VERIFIERS` and emits `VerifierBlockReviewBlocked`.    | §4.1.1, §5.2                |
+| `kernel/tests/verifier/per_task_pass_path.rs`                              | All verifiers passing → Reviewer activation proceeds; `witness_records` rows persisted; `audit_chain.link` re-derivable from `witness_blob_sha256`.                                       | §4.1.1, §11                 |
+| `kernel/tests/verifier/pre_merge_block_merge.rs`                           | Pre-merge verifier with `on_failure = block_merge` returning `Failed` causes IntegrationMerge to fail with `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`; candidate tree discarded.            | §4.1.2, §16.4               |
+| `kernel/tests/verifier/pre_merge_warn_only.rs`                             | Pre-merge verifier with `on_failure = warn_only` returning `Failed` does NOT block the merge; a `VerifierBlockMergeFailed` audit event is recorded but with `severity = "warn"`.          | §4.1.2, §16.4               |
+| `kernel/tests/verifier/policy_gate_blocks_per_task.rs`                     | Policy claim-based gate failure causes `FAIL_INSUFFICIENT_WITNESS`; per-task verifiers do NOT run; resource consumption stays at zero.                                                    | §4.1.3                      |
+| `kernel/tests/verifier/capacity_queue.rs`                                  | Spawning N+1 verifiers (where N = `max_concurrent_verifier_vms`) causes the N+1th to queue; queue ordering is FIFO; the queue drains as VMs finish. Asserts no admission timeouts under load. | §9                          |
+| `kernel/tests/verifier/witness_signature_check.rs`                         | A verifier emits a `WitnessSubmission` with a tampered `verifier_id`; `validate_witness_validator` rejects with `ValidationError::VerifierIdMismatch`; nothing reaches `witness_records`.   | §7.6                        |
+| `kernel/tests/verifier/artifact_oversize_rejected.rs`                      | A verifier declares an artifact larger than `max_artifact_bytes_per_verifier`; the artefact upload fails with `ArtifactError::Oversized`; `final_status` becomes `ArtifactMissing`.        | §6, §10                     |
+| `kernel/tests/verifier/artifact_missing_status.rs`                         | A verifier declares an artifact but the file is missing at exit; `final_status = ArtifactMissing`; the witness still persists; downstream gating treats `ArtifactMissing` as not-passed.   | §7.4                        |
+| `kernel/tests/verifier/timeout_killed.rs`                                  | A verifier whose command never exits hits its `deadline_unix_secs` and is killed via `cgroup.kill`; `final_status = TimedOut` reaches the kernel before the wallclock budget is consumed.  | §7.4, §10                    |
+| `kernel/tests/verifier/crash_recovery.rs`                                  | A verifier that segfaults (process exits with signal) reports `final_status = Crashed` with `exit_code = 128 + signum`; downstream gating treats `Crashed` as not-passed; staging cleans. | §7.4, §10                    |
+| `kernel/tests/verifier/symbol_index_auto_inject.rs`                        | Setup: plan with a Reviewer task and `policy.toml [prepare] auto_inject_symbol_index = true`. Asserts the `raxis-verifier-symbol-index` is injected as a per-task verifier and emits a `symbol_index.json` artefact whose schema matches `symbol-index-schema.md`.                | §14, `operator-ergonomics.md §4.4` |
+| `crates/raxis-verifier/tests/run_smoke.rs`                                 | Already enumerated in §19.2; covers all five fixture specs end-to-end against the `raxis-verifier-fixture` image.                                                                          | §4, §7                       |
+| `crates/raxis-verifier-runtime/tests/scheduler_smoke.rs`                   | Already enumerated; covers `VerifierScheduler` capacity + queueing + gating against `MockIsolation`.                                                                                       | §9                          |
+| `crates/raxis-verifier-runtime/tests/pre_merge_block.rs`                   | Already enumerated; full pre-merge integration test.                                                                                                                                       | §16                         |
+
+All kernel-side tests use `MockIsolation` + `FakePlanner` from `crates/test-support/`. Real verifier-VM end-to-end tests run only on the `[ci-firecracker]` Linux runner under `raxis/tests/e2e/verifier_e2e.rs`.
+
+### §19.7 `raxis doctor` checks specific to verifiers
+
+- `[CHECK] verifier.image.symbol-index` — confirms the embedded `raxis-verifier-symbol-index` manifest's `bundle_hash` matches the live binary; `[FAIL]` on tamper.
+- `[CHECK] verifier.image.tier.<lang>` — `[INFO]` for each operator-pinned tier image (Rust/Node/Python/Go) reporting whether the image is registered in `policy.toml [default_verifier_images]`.
+- `[CHECK] verifier.staging-dir` — confirms `<data_dir>/verifier-staging/` exists, is chmod 0700, and is owned by the kernel OS user; reports `[FAIL]` on permission drift.
+- `[CHECK] verifier.capacity` — reports the configured `max_concurrent_verifier_vms` + the current high-watermark from the heartbeat snapshot; `[WARN]` if high-watermark > 80% of max consistently across the last 24h (suggests under-provisioning).
+
+### §19.8 Phased migration
+
+Five sequential PRs, each compiling and shipping a usable kernel:
+
+- **Phase 1 — Trait wiring + protocol crate.** Land `crates/raxis-verifier-protocol/`; refactor existing host-subprocess verifier code in `kernel/src/gates/witness.rs` to consume the new types. No behavior change. ~2 days.
+- **Phase 2 — `raxis-verifier` PID-1 binary + fixture image.** Land `crates/raxis-verifier/` and the test fixture image. The binary is buildable but the kernel doesn't yet drive it. ~3 days.
+- **Phase 3 — `VerifierScheduler` + per-task path.** Land `crates/raxis-verifier-runtime/`; switch `kernel/src/handlers/intent.rs::handle_complete_task` to `ctx.verifier_runtime.schedule_per_task(...)`. Delete `kernel/src/gates/verifier_runner.rs`. ~3 days.
+- **Phase 4 — Pre-merge path.** Switch `kernel/src/handlers/intent.rs::handle_integration_merge` Check 5d to `ctx.verifier_runtime.schedule_pre_merge(...)`. Land the `pre_merge_*` integration tests. ~3 days.
+- **Phase 5 — Image-signing + doctor checks.** Land `crates/raxis-verifier-images/`, the kernel boot-time embedded-image admission, and the four `raxis doctor` checks. ~2 days.
+
+Total budget: ~13 engineer-days. Phase 1 + Phase 2 are independently mergeable (Phase 2 ships a binary nobody calls yet); Phases 3-5 each rely on the previous one.
+
+---
 
 *Spec complete. When this file is wrong (i.e., when an implementation
 choice contradicts a statement here), the implementation MUST be
