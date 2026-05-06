@@ -93,6 +93,24 @@ pub enum PlannerErrorCode {
     /// kernel-store.md §2.5.8.
     #[serde(rename = "FAIL_INITIATIVE_QUARANTINED")]
     FailInitiativeQuarantined,
+
+    /// **V2 (Step 21).** Orchestrator submitted `ActivateSubTask` for
+    /// a sub-task whose `task_dag_edges` predecessors are not all
+    /// `Completed`. This is a **timing error**, not an authority
+    /// error: the same intent will be authorised once the missing
+    /// dependencies finish. The Orchestrator's non-negotiable system
+    /// prompt teaches it to wait for the next
+    /// `KernelPush::SubTaskCompleted { newly_activatable }` push and
+    /// re-attempt activation, NOT to abandon the sub-task.
+    ///
+    /// **Wire stability:** `DEPENDENCY_NOT_MET` is its own coarse code
+    /// (NOT a `FAIL_POLICY_VIOLATION` template) precisely so the
+    /// Orchestrator can reason about it as transient. INV-08 still
+    /// applies — no further detail is leaked on the wire.
+    ///
+    /// Retryable. v2-deep-spec.md §Step 21.
+    #[serde(rename = "DEPENDENCY_NOT_MET")]
+    DependencyNotMet,
 }
 
 impl PlannerErrorCode {
@@ -127,6 +145,7 @@ impl fmt::Display for PlannerErrorCode {
             Self::InvalidRequest => "INVALID_REQUEST",
             Self::FailApprovalTokenInvalid => "FAIL_APPROVAL_TOKEN_INVALID",
             Self::FailInitiativeQuarantined => "FAIL_INITIATIVE_QUARANTINED",
+            Self::DependencyNotMet => "DEPENDENCY_NOT_MET",
         };
         f.write_str(s)
     }
@@ -248,5 +267,88 @@ impl fmt::Display for OperatorErrorCode {
             Self::FailEscalationNotPending => "FAIL_ESCALATION_NOT_PENDING",
         };
         f.write_str(s)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// V2 added one new `PlannerErrorCode` variant
+    /// (`DEPENDENCY_NOT_MET`, Step 21). `Display`, `serde` rename,
+    /// and JSON round-trip MUST agree on the SCREAMING_SNAKE_CASE
+    /// wire form so audit logs, planner UI, and the wire decoder
+    /// all read the same string.
+    #[test]
+    fn dependency_not_met_renders_as_screaming_snake_case() {
+        let code = PlannerErrorCode::DependencyNotMet;
+        // Display form (used in audit logs, error_code field
+        // projection in `planner_dispatch_log::intent_response`).
+        assert_eq!(format!("{code}"), "DEPENDENCY_NOT_MET");
+        // serde JSON form (used in operator JSON projection of
+        // IntentResponse and in CLI plan-bundle render).
+        let json = serde_json::to_string(&code).unwrap();
+        assert_eq!(json, "\"DEPENDENCY_NOT_MET\"");
+        // Round-trip back through serde.
+        let back: PlannerErrorCode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, code);
+    }
+
+    /// `DEPENDENCY_NOT_MET` is a TIMING error, not an authority
+    /// error. The Orchestrator's NNSP teaches it to retry on
+    /// `KernelPush::SubTaskCompleted` (v2-deep-spec.md §Step 21);
+    /// classifying it as terminal would defeat that retry path.
+    #[test]
+    fn dependency_not_met_is_not_terminal() {
+        assert!(!PlannerErrorCode::DependencyNotMet.is_terminal(),
+            "DEPENDENCY_NOT_MET must be retryable per §Step 21 — \
+             treating it as terminal would cause the Orchestrator to \
+             abandon valid sub-tasks while waiting on dependencies.");
+    }
+
+    /// Pin the existing terminal set so a future re-classification
+    /// of `DependencyNotMet` (or any other code) into `is_terminal`
+    /// fails this test loudly. The rule for terminality is
+    /// "operator must intervene to make this retryable" — for
+    /// `DEPENDENCY_NOT_MET` the Orchestrator's own retry suffices.
+    #[test]
+    fn terminal_set_is_unchanged_by_v2_addition() {
+        let terminal = [
+            PlannerErrorCode::FailUnknownTask,
+            PlannerErrorCode::Unauthorized,
+            PlannerErrorCode::FailInitiativeQuarantined,
+        ];
+        for &code in &terminal {
+            assert!(code.is_terminal(),
+                "{code:?} dropped out of the terminal set — \
+                 spec change requires explicit acknowledgement");
+        }
+
+        // Retryable: every other variant. We use a structural
+        // exhaustive match so any future variant addition forces a
+        // decision in this test (rather than passing by default).
+        for code in [
+            PlannerErrorCode::FailPathPolicyViolation,
+            PlannerErrorCode::FailInvalidCommitTopology,
+            PlannerErrorCode::FailInvalidDiff,
+            PlannerErrorCode::FailMissingWitness,
+            PlannerErrorCode::FailInsufficientWitness,
+            PlannerErrorCode::FailBudgetExceeded,
+            PlannerErrorCode::FailTaskNotRunning,
+            PlannerErrorCode::FailPolicyViolation,
+            PlannerErrorCode::FailStaleBase,
+            PlannerErrorCode::FetchDenied,
+            PlannerErrorCode::InvalidRequest,
+            PlannerErrorCode::FailApprovalTokenInvalid,
+            PlannerErrorCode::DependencyNotMet,
+        ] {
+            assert!(!code.is_terminal(),
+                "{code:?} is in the retryable set but \
+                 `is_terminal()` returned true");
+        }
     }
 }
