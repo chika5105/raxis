@@ -5,6 +5,38 @@
 //! contract) and `cli-readonly.md` §5.5.4 / §5.5.13 (CLI readers
 //! that consume this module).
 //!
+//! # Why this crate MUST NOT depend on `raxis-kernel`
+//!
+//! **`INV-AUDIT-PAIRED-05`** (`specs/invariants.md §11.6`) states:
+//!
+//! > The audit chain MUST be verifiable by an offline process that has
+//! > access only to the JSONL segment files and a frozen SQLite snapshot.
+//! > It MUST NOT require the kernel to start, run a recovery path, or
+//! > synthesise missing entries from in-memory state.
+//!
+//! This invariant is the strict reading of **`R-7 Cryptographic audit
+//! chain`** (`specs/paradigm.md §3`), which requires that the chain
+//! "MUST NOT depend on continued operation of the authority that
+//! produced it." If this crate pulled in `raxis-kernel`, two things
+//! would break that guarantee:
+//!
+//! 1. **Compilation coupling.** Any internal kernel type or function
+//!    used here would silently become load-bearing for chain
+//!    verification; a future kernel refactor could invalidate the
+//!    verifier without the compiler surfacing the dependency.
+//! 2. **Trust boundary collapse.** The entire point of an *independent*
+//!    verifier is that a compromised or buggy kernel cannot influence
+//!    the outcome of verification. If the verifier links kernel code,
+//!    a tampered kernel binary could shadow the verification logic.
+//!
+//! `raxis-kernel` is downstream of `raxis-audit-tools` in the
+//! dependency graph — not the other way around. This is enforced by
+//! Cargo: `raxis-audit-tools/Cargo.toml` deliberately omits any
+//! `raxis-kernel` dependency. If you find yourself needing a type that
+//! lives in the kernel, the correct fix is to move that type into
+//! `raxis-types` (which both this crate and the kernel may depend on),
+//! not to add a kernel dependency here.
+//!
 //! # What lives here
 //!
 //! * [`ChainRecord`] — the per-line projection of an audit JSONL
