@@ -34,7 +34,7 @@
 use crate::table::Table;
 use crate::StoreError;
 use raxis_types::{
-    DelegationStatus, EscalationStatus, InitiativeState, PlanBundleNonceOutcome,
+    CloneStrategy, DelegationStatus, EscalationStatus, InitiativeState, PlanBundleNonceOutcome,
     ReviewVerdict, SessionAgentType, SubtaskActivationState, TaskState, WitnessResultClass,
 };
 use rusqlite::Connection;
@@ -54,7 +54,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -93,6 +93,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 8 {
         apply_migration_8(conn)?;
+    }
+    if current_version < 9 {
+        apply_migration_9(conn)?;
     }
 
     Ok(())
@@ -1405,6 +1408,84 @@ ALTER TABLE {initiatives}
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (8, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 9 — `tasks.clone_strategy` column for V2 worktree provisioning.
+//
+// Normative references:
+//   * v2-deep-spec.md §Step 27 ("Sparse-clone strategies")
+//   * worktree-provision/src/lib.rs — the §Step 27 doc-comments at the
+//     top of that crate name `tasks.clone_strategy` as the persistence
+//     target for the strategy chosen at admission time.
+//
+// Adds a single nullable text column with a CHECK constraint pinning
+// the universe of legal values to `CloneStrategy::ALL`:
+//
+//   tasks.clone_strategy TEXT
+//       — `full` | `blobless` | `sparse`. NULL on every V1 row (V1
+//         knows nothing about clone strategies); NOT NULL on every V2
+//         row, enforced at the application layer in admission rather
+//         than in DDL so V1 tasks already on disk continue to read
+//         cleanly after the column is added.
+//
+// **Why on `tasks` rather than `subtask_activations`.** The clone
+// strategy is a property of the *task* (declared once at admission
+// time and re-used on every retry of that task), not of an individual
+// activation attempt. Putting it on `tasks` matches the producer
+// (admission writes once) and the consumer (worktree provisioning
+// reads it whenever it materialises a new sandbox for a fresh
+// activation of the same task). `subtask_activations` rows already
+// reference `tasks.task_id`, so the strategy is one JOIN away when
+// per-activation queries need it.
+//
+// **V1 backward compatibility.** The new column is NULLable with no
+// default, so every existing V1 row gets `NULL` automatically and
+// every V1 read continues to work unchanged. The CHECK clause
+// permits NULL explicitly; admission rejects V2 tasks that fail to
+// supply a strategy at the application layer.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_9(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_9_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 9 failed: {e}"))
+    })
+}
+
+/// The complete migration-9 DDL. INV-STORE-03: every table identifier
+/// is rendered through `Table::...as_str()`; the CHECK clause is
+/// rendered through the `CloneStrategy` enum's `ALL` array.
+fn render_migration_9_ddl() -> String {
+    let tasks          = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+    let clone_strategy_check =
+        check_in_clause(&CloneStrategy::ALL, CloneStrategy::as_sql_str);
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── tasks: V2 worktree clone strategy column ──────────────────────────────
+-- clone_strategy: chosen at admission time per v2-deep-spec.md §Step 27.
+-- One of `full`, `blobless`, `sparse`. NULL on every V1 row; NOT NULL
+-- on every V2 row (enforced at the application layer in admit_in_tx —
+-- column-level NULLability is preserved here for V1 backward
+-- compatibility). The CHECK clause pins the universe of legal V2
+-- values through `CloneStrategy::ALL`, drift-protected by
+-- `tests::migration_9_clone_strategy_check_pins_known_variants` below.
+ALTER TABLE {tasks}
+    ADD COLUMN clone_strategy TEXT
+        CHECK (clone_strategy IS NULL
+               OR clone_strategy IN {clone_strategy_check});
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (9, strftime('%s', 'now'));
 
 COMMIT;
 "
@@ -3296,5 +3377,183 @@ mod tests {
         assert!(sweep_index.1.contains("first_seen_at_unix_secs"),
             "sweep index must cover first_seen_at_unix_secs (got: {})",
             sweep_index.1);
+    }
+
+    // ── Migration 9 — V2 worktree clone-strategy column on `tasks` ─────
+
+    /// Migration 9 adds `tasks.clone_strategy` as a NULLable TEXT
+    /// column with a CHECK constraint pinning the (NULL | full |
+    /// blobless | sparse) universe.
+    #[test]
+    fn migration_9_adds_clone_strategy_column_to_tasks() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let cols: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let clone_strategy = cols
+            .iter()
+            .find(|(name, _, _, _)| name == "clone_strategy")
+            .expect("tasks.clone_strategy column must exist after migration 9");
+
+        assert_eq!(clone_strategy.1, "TEXT", "clone_strategy must be TEXT");
+        assert_eq!(clone_strategy.2, 0, "clone_strategy must be NULLable");
+        assert!(clone_strategy.3.is_none(), "clone_strategy must have no DEFAULT");
+    }
+
+    /// The CHECK constraint on `clone_strategy` must accept the
+    /// canonical `CloneStrategy::ALL` strings AND NULL, and reject
+    /// anything else.
+    #[test]
+    fn migration_9_check_constraint_accepts_only_canonical_strings() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let now = raxis_types::unix_now_secs();
+        conn.execute_batch(
+            &format!(
+                "INSERT INTO {initiatives} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES ('init-mig9', 'Draft', '{{}}', 'deadbeef', {now}); \
+                 INSERT INTO {tasks} \
+                    (task_id, initiative_id, lane_id, state, actor, \
+                     policy_epoch, admitted_at, transitioned_at) \
+                 VALUES ('task-mig9', 'init-mig9', 'lane.default', \
+                         'Admitted', 'Operator', 1, {now}, {now});",
+                initiatives = Table::Initiatives.as_str(),
+                tasks       = Table::Tasks.as_str(),
+                now         = now,
+            ),
+        ).unwrap();
+
+        let upd_sql = format!(
+            "UPDATE {} SET clone_strategy = ?1 WHERE task_id = 'task-mig9'",
+            Table::Tasks.as_str(),
+        );
+
+        for variant in &CloneStrategy::ALL {
+            let r = conn.execute(&upd_sql, rusqlite::params![variant.as_sql_str()]);
+            assert!(r.is_ok(),
+                "CHECK constraint must accept canonical {variant:?} (got {r:?})");
+        }
+        let r = conn.execute(&upd_sql, rusqlite::params![Option::<&str>::None]);
+        assert!(r.is_ok(), "CHECK constraint must accept NULL (got {r:?})");
+
+        for bogus in ["Full", "shallow", "treeless", ""] {
+            let r = conn.execute(&upd_sql, rusqlite::params![bogus]);
+            assert!(r.is_err(),
+                "CHECK constraint must reject non-canonical {bogus:?}");
+        }
+    }
+
+    /// V2 enum-driven CHECK clauses are pinned at the SQL level so a
+    /// future variant addition forces a migration rather than slipping
+    /// through silently.
+    #[test]
+    fn migration_9_clone_strategy_check_pins_known_variants() {
+        assert_eq!(
+            check_in_clause(&CloneStrategy::ALL, CloneStrategy::as_sql_str),
+            "('full', 'blobless', 'sparse')",
+        );
+    }
+
+    /// Migration 9 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_9_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let n_clone_strategy = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|name| name == "clone_strategy")
+            .count();
+        assert_eq!(n_clone_strategy, 1,
+            "clone_strategy must appear exactly once in tasks PRAGMA");
+    }
+
+    /// Upgrade scenario: a database at v=8 must pick up migration 9
+    /// cleanly when `apply_pending` runs.
+    #[test]
+    fn migration_9_applies_to_a_v8_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        apply_migration_6(&conn).unwrap();
+        apply_migration_7(&conn).unwrap();
+        apply_migration_8(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 8);
+
+        let mut stmt_pre = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let has_pre = stmt_pre
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .any(|name| name == "clone_strategy");
+        assert!(!has_pre, "clone_strategy must not yet exist at v=8");
+
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt_post = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let has_post = stmt_post
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .any(|name| name == "clone_strategy");
+        assert!(has_post, "migration 9 must add clone_strategy");
+    }
+
+    /// Migration 9 wraps the single ALTER TABLE in a single
+    /// `BEGIN EXCLUSIVE; ... COMMIT;`.
+    #[test]
+    fn migration_9_is_a_single_transaction() {
+        let ddl = render_migration_9_ddl();
+        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
+            "migration 9 must open exactly one transaction (BEGIN EXCLUSIVE)");
+        assert_eq!(ddl.matches("COMMIT").count(), 1,
+            "migration 9 must commit exactly once");
+        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
+                < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT");
     }
 }
