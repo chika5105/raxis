@@ -1,0 +1,41 @@
+# Scenario template plan.toml.
+#
+# Copy this folder to scenarios/<id>-<name>/, then edit:
+#   - [workspace] name + lane_id + description
+#   - [[tasks]] entries
+#
+# Run `raxis plan validate ./plan.toml` to confirm validity before
+# committing.
+
+[workspace]
+name        = "Scenario template"
+lane_id     = "scenario-template-lane"
+description = """
+  One-paragraph natural-language description of the work this plan
+  represents. The Orchestrator and Executor agents read this verbatim
+  as part of their boot prompt.
+"""
+
+# ── Executor ──────────────────────────────────────────────────────────────────
+# Replace this stub with one [[tasks]] block per Executor your scenario
+# needs. Reviewer blocks follow the same shape with `session_agent_type =
+# "Reviewer"` and a `predecessors = ["..."]` pointing at the Executor it
+# evaluates.
+[[tasks]]
+task_id            = "implementer"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = []
+context = """
+  Concrete, two-to-five-sentence task brief the agent will execute.
+  Be specific about file names, function signatures, and acceptance
+  criteria — agents do better with sharp prompts than soft ones.
+"""
+
+# ── Orchestrator section (cross-cutting artifacts) ───────────────────────────
+# Optional. List exact filenames the Orchestrator may touch during merge
+# (e.g., lockfiles, generated sums) that don't belong to any one Executor.
+# Globs are NOT permitted — these are exact filenames only.
+[orchestrator]
+cross_cutting_artifacts = []

@@ -1,0 +1,29 @@
+# Scenario template policy delta.
+#
+# Append this snippet to your live $RAXIS_DATA_DIR/policy/policy.toml,
+# then re-sign and either restart the kernel or run `raxis epoch
+# advance` to swap in the new bundle live.
+#
+# This file is the *delta* — it does NOT contain the operator-cert
+# block, the genesis lane definition, or anything else the genesis
+# ceremony already wrote.
+
+# Optional — open a new lane for this scenario. If you reuse the
+# default lane from genesis, omit this block entirely.
+# [[lanes]]
+# id           = "scenario-template-lane"
+# token_budget = 100_000
+# admission_unit_budget = 1000
+
+# Optional — restrict / loosen worktree-root allowlist for the
+# scratch directory this scenario uses.
+# [sessions]
+# allowed_worktree_roots = ["/tmp"]
+
+# Optional — declare any additional providers this scenario calls
+# (besides the Anthropic-prod entry installed at genesis time).
+# [[providers.entries]]
+# id            = "openai-prod"
+# kind          = "OpenAI"
+# credentials   = "openai-prod.toml"
+# default_model = "gpt-5-mini"
