@@ -2425,10 +2425,19 @@ After this phase, every proxy type below operates against any conformant `Creden
 ### 10.1 Proxy types and runtime
 
 - [ ] Design credential proxy trait: `trait CredentialProxy { fn start(&self, ...) -> ProxyHandle; }`
-- [ ] Implement `KubernetesProxy` (HTTPS, Authorization header injection)
-- [ ] Implement `AwsProxy` (IMDS-compatible HTTP server, STS token refresh)
-- [ ] Implement `GcpProxy` (GCP metadata server compatible endpoint)
-- [ ] Implement `AzureProxy` (Azure IMDS + token scoping per `allowed_resources`)
+- [x] **Generic HTTP credential proxy MVP** — covers the `Bearer`-token surface shared by `KubernetesProxy` and the "generic Bearer" variant in §3, plus `Basic` auth for SaaS APIs that demand username:token. **Implementation reference:** `raxis/crates/credential-proxy-http/`. Surface: `HttpProxy::bind` + `serve` accept loop, `ProxyConfig` with `AuthMode::{Bearer, Basic}`, `OwnedConsumer`, policy-declared `CredentialName`, and `Restrictions::{allowed_methods, allowed_path_prefixes}`. Tests: 7 unit + 7 subprocess integration; the integration tests stand up a real in-process `tokio` HTTP/1.1 echo server, drive raw HTTP/1.1 against the proxy from a `TcpStream`, and assert: (1) `Authorization: Bearer <value>` injection + `Host:` rewrite to upstream; (2) `Basic` mode emits correct `base64(user:value)`; (3) method allowlist returns `405` and short-circuits before upstream; (4) path-prefix allowlist returns `403` for out-of-prefix requests; (5) `Upgrade: websocket` returns `400` and short-circuits; (6) missing credential returns `502`; (7) `POST` request bodies forward verbatim with `Content-Type` preserved. Audit events surface as a local `AuditEvent::HttpProxyRequestExecuted` with method, path, sha256(method+path), status code, and `blocked` flag.
+      - [x] Generic Bearer token injection.
+      - [x] HTTP Basic injection with policy-declared username.
+      - [x] Method allowlist (`GET`/`HEAD`/etc.) — non-allowed methods rejected with `405` before upstream contact.
+      - [x] Path prefix allowlist — non-allowed paths rejected with `403` before upstream contact.
+      - [x] Host header rewrite to upstream URL authority.
+      - [x] WebSocket `Upgrade` rejected with `400`.
+      - [ ] **Deferred:** HTTP/2 inbound (most agent SDKs negotiate HTTP/1.1 against an explicit proxy).
+      - [ ] **Deferred:** chunked-encoded streaming uploads — current MVP buffers up to `MAX_REQUEST_BYTES = 1 MiB` and rejects larger payloads with `413`.
+      - [ ] **Deferred:** `KubernetesProxy`-specific surface (path-rewrite for `/api/v1/namespaces/<ns>/...` scoping per `allowed_namespaces`, watch-stream proxying).
+- [ ] Implement `AwsProxy` (IMDS-compatible HTTP server, STS token refresh) — extends the `HttpProxy` plumbing above with an IMDS-shaped `/creds` endpoint.
+- [ ] Implement `GcpProxy` (GCP metadata server compatible endpoint) — extends the `HttpProxy` plumbing above with a GCP-metadata-shaped endpoint.
+- [ ] Implement `AzureProxy` (Azure IMDS + token scoping per `allowed_resources`) — extends the `HttpProxy` plumbing above with an Azure-IMDS-shaped endpoint.
 - [x] Implement `PostgresProxy` (PG wire protocol: startup, auth-ok handshake, simple-query path). **Implementation reference:** `raxis/crates/credential-proxy-postgres/`. Surface: `PostgresProxy::bind` + `serve` accept loop, `ProxyConfig` with `OwnedConsumer` and policy-declared `CredentialName`, `Restrictions::allow_only_select` enforced via `classify_first_operation` (handles `WITH … SELECT|INSERT|…`, `EXPLAIN …`, comments). Tests: 15 unit + 4 subprocess integration covering handshake → ReadyForQuery, simple `SELECT` returning CommandComplete, INSERT blocked with sqlstate `42501` under `allow_only_select`, missing-credential graceful close. Audit events surface as a local `AuditEvent::DatabaseQueryExecuted` with `sql_sha256` (always) and optional plaintext (only when policy `[inference_audit] log_content = true`); kernel translates to `AuditEventKind::DatabaseQueryExecuted` at the audit pipeline boundary.
       - [x] Query text extraction from `Query (Q)` messages.
       - [x] Restriction enforcement: `allow_only_select` (DML/DDL → `ErrorResponse{42501}`).

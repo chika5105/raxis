@@ -1,0 +1,32 @@
+[package]
+name        = "raxis-credential-proxy-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Trait + value type the proxy borrows credentials from.
+raxis-credentials = { workspace = true }
+
+# Async runtime + outbound HTTP client.
+tokio    = { workspace = true }
+reqwest  = { workspace = true }
+# `httparse` is the same minimal HTTP/1.x request parser hyper builds
+# on. We use it directly to keep the inbound parser dependency-free
+# of the full hyper service stack.
+httparse = "1"
+
+bytes    = "1"
+serde    = { workspace = true }
+sha2     = { workspace = true }
+hex      = { workspace = true }
+url      = "2"
+thiserror = { workspace = true }
+tracing   = "0.1"
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

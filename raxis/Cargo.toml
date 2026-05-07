@@ -17,6 +17,7 @@ members = [
     "crates/raxis-credentials",
     "crates/raxis-credentials-file",
     "crates/credential-proxy-postgres",
+    "crates/credential-proxy-http",
     "crates/tproxy-protocol",
     "crates/egress-admission",
     "crates/gateway-substrate",

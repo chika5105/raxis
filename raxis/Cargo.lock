@@ -2659,6 +2659,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-credential-proxy-http"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "httparse",
+ "raxis-credentials",
+ "reqwest",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "raxis-credential-proxy-postgres"
 version = "0.1.0"
 dependencies = [
