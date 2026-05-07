@@ -361,7 +361,8 @@ fn audit_chain_intact_across_kernel_started_and_kernel_stopped() {
         .expect("post-shutdown chain MUST be intact");
     let info = resume.expect("segment is non-empty after a clean run");
 
-    // We expect the chain to look like:
+    // V2 fail-closed boot: the chain MUST contain
+    //
     //   seq=0  GenesisRecord                    (written by bootstrap)
     //   seq=1  KernelStarted                    (step 8)
     //   seq=2  IsolationSubstrateSelected       (step 8c — V2 substrate)
@@ -372,23 +373,29 @@ fn audit_chain_intact_across_kernel_started_and_kernel_stopped() {
     //                                            `RAXIS_UNSAFE_FALLBACK_ISOLATION`)
     //   seq=N  KernelStopped                    (step 10)
     //
-    // The test environment doesn't pass the unsafe flag, so the
-    // `IsolationFallbackBypass` row never appears here. On hosts
-    // without an admissible substrate
-    // (`select_isolation_backend` returns Err), the
-    // `IsolationSubstrateSelected` row is also skipped — the chain
-    // collapses back to the v1 shape. Either canonical shape is a
-    // healthy boot per `extensibility-traits.md §3.8`.
+    // The previous "no substrate admissible → degraded boot"
+    // shape is V2-removed: a kernel without an admissible
+    // substrate exits with `BOOT_ERR_ISOLATION_UNAVAILABLE` (code
+    // 64) and emits `IsolationSubstrateRefused` instead, so the
+    // resulting chain never reaches `KernelStarted` at all.
+    // Test hosts run on macOS (AVF) or Linux+KVM, both of which
+    // admit; this assertion pins the V2 happy-path shape.
     let records = read_audit_segment(data_dir.path());
     let event_kinds: Vec<&str> = records
         .iter()
         .filter_map(|r| r["event_kind"].as_str())
         .collect();
     let valid_shapes: &[&[&str]] = &[
-        // Substrate admitted (Linux+KVM or macOS).
+        // Substrate admitted (Linux+KVM or macOS); no fallback bypass.
         &["GenesisRecord", "KernelStarted", "IsolationSubstrateSelected", "KernelStopped"],
-        // No substrate admissible (e.g. Linux without /dev/kvm).
-        &["GenesisRecord", "KernelStarted", "KernelStopped"],
+        // Substrate admitted under the unsafe-fallback flag.
+        &[
+            "GenesisRecord",
+            "KernelStarted",
+            "IsolationSubstrateSelected",
+            "IsolationFallbackBypass",
+            "KernelStopped",
+        ],
     ];
     assert!(
         valid_shapes.iter().any(|shape| event_kinds == *shape),

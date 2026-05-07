@@ -2142,6 +2142,7 @@ mod escalation_dispatch_tests {
             &data_dir,
             sink.clone(),
         );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
@@ -2152,6 +2153,7 @@ mod escalation_dispatch_tests {
             Arc::new(crate::gateway::client::GatewayClient::new()),
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
+            isolation,
         ))
     }
 
@@ -2546,6 +2548,7 @@ mod escalation_dispatch_tests {
             &data_dir,
             Arc::clone(&audit),
         );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let ctx = Arc::new(HandlerContext::new(
             policy_swap,
             Arc::new(KeyRegistry::stub_for_tests()),
@@ -2556,6 +2559,7 @@ mod escalation_dispatch_tests {
             Arc::new(crate::gateway::client::GatewayClient::new()),
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
+            isolation,
         ));
         (ctx, inner)
     }
@@ -2846,6 +2850,7 @@ mod rotate_epoch_dispatch_tests {
             data_dir,
             sink.clone(),
         );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         Arc::new(HandlerContext::new(
             policy,
             registry,
@@ -2856,6 +2861,7 @@ mod rotate_epoch_dispatch_tests {
             gateway,
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
+            isolation,
         ))
     }
 
@@ -3723,6 +3729,7 @@ mod quarantine_dispatch_tests {
             data_dir,
             sink.clone(),
         );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let ctx = Arc::new(HandlerContext::new(
             policy,
             registry,
@@ -3733,6 +3740,7 @@ mod quarantine_dispatch_tests {
             gateway,
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
+            isolation,
         ));
         (ctx, sink)
     }

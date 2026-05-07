@@ -270,7 +270,7 @@ async fn main() {
     let _ = std::fs::create_dir_all(&runtime_subdir);
     let allow_fallback = std::env::var("RAXIS_UNSAFE_FALLBACK_ISOLATION").is_ok();
     let allow_wasm     = false;
-    let _isolation_backend: Option<Arc<dyn raxis_isolation::Backend>> = match
+    let isolation_backend: Arc<dyn raxis_isolation::Backend> = match
         isolation_select::select_isolation_backend(&isolation_select::SelectorInputs {
             runtime_dir:        runtime_subdir,
             allow_fallback,
@@ -316,20 +316,39 @@ async fn main() {
                 selected.backend.backend_id(),
                 serde_json::to_string(&selected.tier).unwrap_or_else(|_| "\"?\"".to_owned()),
             );
-            Some(selected.backend)
+            selected.backend
         }
         Err(e) => {
-            // Substrate refused. We still allow the kernel to come up
-            // in a degraded mode that rejects every spawn — a session
-            // attempt under the degraded mode will fail fast with a
-            // typed error from `HandlerContext`. This matches the
-            // `--unsafe-fallback-isolation`-absent boot path
-            // documented in `extensibility-traits.md §3.8`.
-            eprintln!(
-                "{{\"level\":\"error\",\"event\":\"IsolationSubstrateRefused\",\
-                 \"reason\":\"{e}\"}}",
+            // V2 fail-closed boot. The previous degraded-mode path
+            // ("kernel boots with isolation = None and rejects every
+            // spawn at session-creation time") is removed: a kernel
+            // without an admissible substrate cannot honour
+            // `[[tasks]]` admission, and the V2 architecture relies
+            // on `ctx.isolation` being a non-Optional
+            // `Arc<dyn IsolationBackend>` so the dispatch sites do
+            // not have to re-prove substrate availability at every
+            // call site.
+            //
+            // Operators who need to run RAXIS on a substrate with
+            // `IsolationLevel::FallbackOnly` set
+            // `RAXIS_UNSAFE_FALLBACK_ISOLATION=1` (handled by
+            // `select_isolation_backend` above). Hosts with no
+            // admissible substrate at all surface the same error
+            // here as a hard exit.
+            let _ = inner_audit.emit(
+                AuditEventKind::IsolationSubstrateRefused {
+                    reason: e.to_string(),
+                },
+                None, None, None,
             );
-            None
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"BOOT_ERR_ISOLATION_UNAVAILABLE\",\
+                 \"reason\":\"{e}\",\"hint\":\"V2 requires an admissible isolation \
+                 substrate (Linux+KVM Firecracker or macOS Virtualization.framework). \
+                 Set RAXIS_UNSAFE_FALLBACK_ISOLATION=1 + RAXIS_UNSAFE_FALLBACK_ISOLATION_REASON \
+                 to admit FallbackOnly substrates on hosts without R-1 hardware.\"}}",
+            );
+            std::process::exit(64);
         }
     };
 
@@ -493,7 +512,7 @@ async fn main() {
         Arc::new(AuditingBackend::new(inner, Arc::clone(&audit)))
     };
 
-    let mut ctx_inner = ipc::context::HandlerContext::new(
+    let ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
         Arc::clone(&store),
@@ -503,10 +522,8 @@ async fn main() {
         Arc::clone(&gateway_client),
         Arc::clone(&epoch_binding),
         Arc::clone(&credentials),
+        Arc::clone(&isolation_backend),
     );
-    if let Some(backend) = _isolation_backend.as_ref() {
-        ctx_inner = ctx_inner.with_isolation(Arc::clone(backend));
-    }
     let ctx = Arc::new(ctx_inner);
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a

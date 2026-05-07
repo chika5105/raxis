@@ -557,6 +557,7 @@ mod tests {
             &data_dir,
             sink.clone(),
         );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let ctx  = Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
@@ -567,6 +568,7 @@ mod tests {
             Arc::new(crate::gateway::client::GatewayClient::new()),
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
+            isolation,
         ));
         (ctx, sink)
     }

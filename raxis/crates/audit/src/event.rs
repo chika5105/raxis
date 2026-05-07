@@ -204,6 +204,21 @@ pub enum AuditEventKind {
         backend_id: String,
     },
 
+    /// V2 boot-time substrate refusal record. Emitted by
+    /// `kernel/src/main.rs` immediately before the kernel exits
+    /// with `BOOT_ERR_ISOLATION_UNAVAILABLE` (exit code 64) when
+    /// `isolation_select::select_isolation_backend` returns
+    /// `Err`. Required by `extensibility-traits.md §3.8` so the
+    /// audit chain records why a kernel boot was aborted —
+    /// otherwise downstream tooling would see only the genesis
+    /// row + the absence of `KernelStarted`.
+    IsolationSubstrateRefused {
+        /// Stringified `SelectError` from the isolation selector.
+        /// Free-form for now (forensic only); pinned-string
+        /// encoding can land later if dashboards need it.
+        reason: String,
+    },
+
     // --- Initiative lifecycle ---
     InitiativeCreated {
         initiative_id: String,
@@ -1027,6 +1042,7 @@ impl AuditEventKind {
             Self::KernelStopped { .. } => "KernelStopped",
             Self::IsolationSubstrateSelected { .. } => "IsolationSubstrateSelected",
             Self::IsolationFallbackBypass { .. } => "IsolationFallbackBypass",
+            Self::IsolationSubstrateRefused { .. } => "IsolationSubstrateRefused",
             Self::InitiativeCreated { .. } => "InitiativeCreated",
             Self::PlanApproved { .. } => "PlanApproved",
             Self::PlanRejected { .. } => "PlanRejected",
