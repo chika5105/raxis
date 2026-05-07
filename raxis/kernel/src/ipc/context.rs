@@ -22,6 +22,7 @@ use raxis_domain::DomainAdapter;
 use raxis_domain_git::{SeIntentKind, SeTerminalArtefact};
 use raxis_isolation::Backend as IsolationBackend;
 use raxis_policy::PolicyBundle;
+use raxis_session_spawn::SessionSpawnService;
 use raxis_store::Store;
 
 use crate::authority::cert_check::CertEnforcer;
@@ -174,6 +175,33 @@ pub struct HandlerContext {
     /// `None`.
     pub proxy_manager: Arc<CredentialProxyManager>,
 
+    /// V2 per-session VM-spawn composer.
+    ///
+    /// Wraps the `(isolation, proxy_manager, audit)` tuple plus a
+    /// per-spawn `Box<dyn AdmissionService>` into the single async
+    /// surface the kernel calls when an orchestrator-driven trigger
+    /// fires (`spawn_session`) and at session teardown
+    /// (`terminate_session`). Owns the per-session admission-loop
+    /// listener lifetime + the live `Box<dyn IsolationSession>`
+    /// handle table.
+    ///
+    /// Constructed once at kernel boot from the same trios this
+    /// `HandlerContext` already carries — there is no other
+    /// independent state. The service ALONE knows which sessions
+    /// have a live VM right now (`SessionSpawnService::is_active`);
+    /// the SQLite `sessions` table is the operator-visible row, the
+    /// service's in-memory table is the substrate-visible row.
+    /// Both are reconciled at boot through the spawn callsite (see
+    /// `extensibility-traits.md §3.5`).
+    ///
+    /// **Why non-Option**: the kernel cannot drive any production
+    /// session-spawn without it. Failing closed at session-spawn
+    /// time would be a worse user experience than failing closed at
+    /// boot, and the constructor only needs the `Arc`s we already
+    /// have, so there is no degraded boot mode that could
+    /// legitimately leave this `None`.
+    pub session_spawn: Arc<SessionSpawnService>,
+
     /// V2 domain adapter selected at boot.
     ///
     /// `extensibility-traits.md §2` — the single seam between the
@@ -230,6 +258,11 @@ impl HandlerContext {
             Arc::clone(&credentials),
             Arc::clone(&audit),
         ));
+        let session_spawn = Arc::new(SessionSpawnService::new(
+            Arc::clone(&isolation),
+            Arc::clone(&proxy_manager),
+            Arc::clone(&audit),
+        ));
         Self {
             policy,
             registry,
@@ -244,6 +277,7 @@ impl HandlerContext {
             isolation,
             credentials,
             proxy_manager,
+            session_spawn,
             domain,
         }
     }
@@ -269,6 +303,17 @@ impl HandlerContext {
         self.credentials = Arc::clone(&credentials);
         self.proxy_manager = Arc::new(CredentialProxyManager::new(
             credentials,
+            Arc::clone(&self.audit),
+        ));
+        // Rebuild the session-spawn composer over the new
+        // proxy_manager (and the existing isolation + audit) so
+        // production session-spawns route through the new backend
+        // too. The composer holds no per-session state at
+        // construction time, so a swap is safe outside an active
+        // spawn.
+        self.session_spawn = Arc::new(SessionSpawnService::new(
+            Arc::clone(&self.isolation),
+            Arc::clone(&self.proxy_manager),
             Arc::clone(&self.audit),
         ));
         self

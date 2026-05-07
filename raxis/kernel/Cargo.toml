@@ -62,6 +62,13 @@ raxis-credentials-file  = { workspace = true }
 # + emit `CredentialProxyStopped`. See
 # `specs/v2/credential-proxy.md §2`.
 raxis-credential-proxy-manager = { path = "../crates/credential-proxy-manager" }
+# Per-session VM-spawn composer. Wraps the
+# `(IsolationBackend, CredentialProxyManager, AdmissionService)` tuple
+# into a single async-driven service the kernel calls at session-
+# spawn / session-terminate time. See `raxis-session-spawn` lib docs
+# and `extensibility-traits.md §3.5`.
+raxis-session-spawn          = { path = "../crates/session-spawn" }
+raxis-egress-admission       = { path = "../crates/egress-admission" }
 raxis-plan-credentials  = { path = "../crates/plan-credentials" }
 # `DomainAdapter` trait + `GitAdapter` reference impl. Wired into
 # `HandlerContext::domain` at boot per `extensibility-traits.md §2.6`.

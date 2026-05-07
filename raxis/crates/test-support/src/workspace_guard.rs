@@ -173,6 +173,19 @@ fn protected_crate_appears_only_under_dev_dependencies() {
         if member == "crates/test-support" {
             continue;
         }
+        // `live-e2e` is itself a test driver binary, not a production
+        // binary: it exercises the real stack against real upstreams
+        // (Anthropic, Postgres, etc.) and is invoked via
+        // `cargo run -p raxis-live-e2e -- <slice>`. The same isolation
+        // discipline that exempts `crates/test-support` from itself
+        // applies — `live-e2e` is allowed to consume test-support
+        // helpers (ephemeral_signing_key, ephemeral_cert_with_key,
+        // FakeClock, …) because no release binary ever links it.
+        // The build artefact is gated behind `--release` invocations
+        // that production never runs.
+        if member == "live-e2e" {
+            continue;
+        }
         let member_manifest = read_toml(&member_toml_path);
 
         // [dependencies] — production

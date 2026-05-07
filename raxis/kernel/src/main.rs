@@ -26,6 +26,7 @@ mod path_scope;
 mod policy_manager;
 mod prompt;
 mod runtime;
+mod session_spawn_orchestrator;
 
 use std::sync::Arc;
 

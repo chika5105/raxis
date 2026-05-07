@@ -3328,6 +3328,28 @@ channels   = []
             AuditEventKind::PathReadAccessed { actor: "x".into(), table: "x".into(), column: "x".into(), task_id: "x".into(), command: "x".into() }.as_str(),
             AuditEventKind::InitiativeQuarantined { initiative_id: "x".into(), quarantined_by: "x".into(), reason: None, quarantined_by_display_name: None }.as_str(),
             AuditEventKind::OperatorQuarantineSwept { target_fingerprint: "x".into(), quarantined_by: "x".into(), count: 0, reason: None, quarantined_by_display_name: None, target_display_name: None }.as_str(),
+            // V2 isolation-substrate refusal at boot. Single-class
+            // observability event (no SQLite row mutates); listed in
+            // `audit-paired-writes.md §4.3` single-class roster.
+            AuditEventKind::IsolationSubstrateRefused { reason: "x".into() }.as_str(),
+            // V2 per-session VM lifecycle. Paired class — every
+            // SessionVmSpawned must be matched by a SessionVmExited
+            // somewhere in the chain (`audit-paired-writes.md §4.1`).
+            AuditEventKind::SessionVmSpawned {
+                session_id:         "x".into(),
+                task_id:            None,
+                initiative_id:      "x".into(),
+                backend_id:         "x".into(),
+                egress_tier:        "x".into(),
+                admission_loopback: "x".into(),
+                credential_proxies: 0,
+            }.as_str(),
+            AuditEventKind::SessionVmExited {
+                session_id:    "x".into(),
+                signal_class:  "x".into(),
+                exit_code:     0,
+                backend_error: None,
+            }.as_str(),
         ];
 
         let policy_kinds: std::collections::HashSet<&str> =
