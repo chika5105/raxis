@@ -381,20 +381,24 @@ SUBCOMMANDS:
         in-process; private bytes are never persisted).
 
     policy sign <artifact.toml> --key <path>
-        Sign a policy or plan artifact with the operator's private key.
+        Sign a policy or non-plan artifact with the operator's private key.
+        Signing a `plan.toml` artifact through this path is REMOVED in
+        V2 — use `submit plan <plan.toml>` (plan-bundle-sealing.md §4.5).
 
     plan submit <initiative_id> <plan_dir>
-        Submit a signed plan (plan.toml + plan.sig) to create an initiative.
-        DEPRECATED in V2 — see `submit plan <plan.toml>` below for the
-        atomic V2.1 sign+submit workflow (plan-bundle-sealing.md §4).
+        REMOVED in V2 — running this command always returns a usage
+        error pointing to `submit plan <plan.toml>`. The V1 two-step
+        ceremony (`policy sign plan.toml` + `plan submit <id> <dir>`)
+        is replaced by atomic V2.1 sign+submit; see
+        plan-bundle-sealing.md §4 / §4.5.
 
     submit plan <plan.toml> [--initiative-id <id>] [--dry-run | --no-dry-run]
         V2.1 atomic plan-bundle submission. Reads plan.toml, builds the
         canonical bundle, stamps a fresh nonce + signed_at, signs in
-        memory, and submits via the V2 IPC envelope. There is no
-        intermediate `plan.sig` file. Default is `--dry-run` while the
-        kernel V2 admission path (plan-bundle-sealing.md §11.1) is
-        pending; pass `--no-dry-run` to attempt a real submission.
+        memory, and submits via the V2 IPC envelope (kernel admission
+        landed per plan-bundle-sealing.md §8.1). There is no intermediate
+        `plan.sig` file. The default is `--dry-run`; pass `--no-dry-run`
+        to commit the bundle to the kernel.
 
     plan approve <initiative_id>
         Approve a pending initiative, admitting all tasks to the scheduler.

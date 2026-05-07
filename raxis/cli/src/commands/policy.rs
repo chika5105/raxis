@@ -70,6 +70,23 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             )
         })?;
 
+    // V2 hard-reject (plan-bundle-sealing.md §4.5): reject any attempt to
+    // produce a V1-style sibling `plan.sig` for a `plan.toml` artifact.
+    // `policy sign` remains the canonical signer for `policy.toml`,
+    // delegation artifacts, and every other non-plan TOML, so the
+    // narrowest reject we can make is to filter on the canonical
+    // V1 plan filename. An operator who insists on signing a plan-shaped
+    // artifact through this path would have to rename it, which is a
+    // strong enough signal that they know they are leaving the V2 happy
+    // path.
+    //
+    // The §4.5 migration guide tells operators their plan submission
+    // path is `raxis submit plan <plan.toml>`, which signs in memory and
+    // submits in the same IPC call — there is no on-disk `plan.sig`.
+    if is_v1_plan_artifact_path(&artifact_path) {
+        return Err(CliError::Usage(v1_plan_sign_removal_message(&artifact_path)));
+    }
+
     // Read artifact bytes verbatim. Whitespace, BOM, trailing newline — the
     // signature is over the file as it sits on disk; the kernel will hash and
     // verify the same exact bytes.
@@ -155,6 +172,49 @@ signed_at      = {signed_at}
 }
 
 // ---------------------------------------------------------------------------
+// V1 plan-signing reject — plan-bundle-sealing.md §4.5
+// ---------------------------------------------------------------------------
+
+/// Returns `true` when the file's basename is the V1 plan convention
+/// (`plan.toml`). Comparison is case-sensitive — the V1 contract was
+/// case-sensitive too (`signed_plan_artifacts` keys on the literal
+/// bytes), and Linux/macOS filesystems are typically case-sensitive.
+/// An operator who genuinely needs to sign a plan-shaped artifact
+/// through `policy sign` can rename it to e.g. `Plan.toml`; the
+/// rename is itself a strong signal that they understand they are
+/// leaving the V2 happy path.
+pub(crate) fn is_v1_plan_artifact_path(path: &std::path::Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| name == "plan.toml")
+        .unwrap_or(false)
+}
+
+/// Operator-facing migration text. Pulled out of `run_sign` so the test
+/// suite can pin the exact message — drift here is operator-visible
+/// behaviour change and forces a corresponding spec update in
+/// `plan-bundle-sealing.md §4.5`.
+pub(crate) fn v1_plan_sign_removal_message(artifact_path: &std::path::Path) -> String {
+    format!(
+        "V1 `policy sign {artifact}` (plan-signing path) is removed in V2.\n\
+         \n\
+         The two-step `policy sign plan.toml` + `plan submit <id> <dir>`\n\
+         workflow is replaced by V2.1 atomic sign+submit:\n\
+         \n\
+         \traxis submit plan {artifact} [--initiative-id <id>] \\\n\
+         \t                                       [--no-dry-run]\n\
+         \n\
+         The V2 path signs the canonical plan bundle in memory and ships\n\
+         it to the kernel in a single IPC call — no on-disk `plan.sig`,\n\
+         no TOCTOU between sign and submit. `policy sign` remains the\n\
+         canonical signer for `policy.toml`, delegation artifacts, and\n\
+         every other non-plan TOML. See plan-bundle-sealing.md §4 for\n\
+         the full ceremony and §4.5 for the migration guide.",
+        artifact = artifact_path.display(),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // scan_for_misconfig_bypass — best-effort detector for the
 // `--force-misconfig` gate.
 //
@@ -223,6 +283,62 @@ fn scan_for_misconfig_bypass(artifact_bytes: &[u8]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ----- V1 plan-signing reject (§4.5) ---------------------------------
+
+    #[test]
+    fn is_v1_plan_artifact_path_matches_canonical_filename() {
+        assert!(is_v1_plan_artifact_path(std::path::Path::new("plan.toml")));
+        assert!(is_v1_plan_artifact_path(std::path::Path::new("./plan.toml")));
+        assert!(is_v1_plan_artifact_path(std::path::Path::new(
+            "/tmp/initiatives/foo/plan.toml"
+        )));
+    }
+
+    #[test]
+    fn is_v1_plan_artifact_path_rejects_non_plan_toml_artifacts() {
+        // policy.toml (the canonical use of `policy sign`) must NOT trip
+        // the §4.5 hard-reject — the operator workflow for policy
+        // signing is unchanged in V2.
+        assert!(!is_v1_plan_artifact_path(std::path::Path::new(
+            "policy.toml"
+        )));
+        assert!(!is_v1_plan_artifact_path(std::path::Path::new(
+            "delegation.toml"
+        )));
+        // Case-sensitivity: a deliberately-renamed file is operator's
+        // explicit choice and bypasses the safety net (see fn doc).
+        assert!(!is_v1_plan_artifact_path(std::path::Path::new(
+            "Plan.toml"
+        )));
+        assert!(!is_v1_plan_artifact_path(std::path::Path::new(
+            "plan.json"
+        )));
+        // No filename component (e.g. directory path) → not a plan.
+        assert!(!is_v1_plan_artifact_path(std::path::Path::new("/tmp/")));
+    }
+
+    #[test]
+    fn v1_plan_sign_removal_message_mentions_v2_replacement_command() {
+        // Pin the exact text so a future drift forces a spec update.
+        // The hint MUST contain (a) the literal V2 invocation
+        // `raxis submit plan`, (b) the reference to the `plan-bundle-
+        // sealing.md` spec, (c) a clarifying mention that
+        // `policy sign` is still the right tool for non-plan artifacts.
+        let p = std::path::Path::new("/work/initiatives/foo/plan.toml");
+        let msg = v1_plan_sign_removal_message(p);
+        assert!(msg.contains("raxis submit plan"), "msg = {msg:?}");
+        assert!(msg.contains("plan-bundle-sealing.md"), "msg = {msg:?}");
+        assert!(msg.contains("`policy.toml`"), "msg = {msg:?}");
+        // The operator's path appears verbatim so they can identify
+        // which file the CLI is rejecting.
+        assert!(
+            msg.contains("/work/initiatives/foo/plan.toml"),
+            "msg = {msg:?}",
+        );
+    }
+
+    // ----- Original `--force-misconfig` gate tests ------------------------
 
     #[test]
     fn scan_returns_empty_for_a_plan_toml_without_operators() {

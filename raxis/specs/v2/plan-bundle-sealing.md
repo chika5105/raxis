@@ -408,17 +408,22 @@ operator's local bundle to the kernel's reject reason).
   with a directory is rejected at argument parse time with a hint
   pointing to the new invocation.
 
-> **Staged-removal note (implementation, best-judgment).** The V1
-> `plan sign` and `plan submit <id> <dir>` commands are NOT yet
-> rejected at argument-parse time. They remain functional during the
-> V2 transition window because kernel admission (§8.1) is still
-> pending — hard-rejecting today would leave operators with no
-> working submit path. The CLI's `print_help` already flags
-> `plan submit` as `DEPRECATED in V2` and points to `submit plan`.
-> Hard rejection lands atomically with kernel admission (§8.1) so the
-> V2 functional replacement and the V1 hard-reject ship together.
-> See §11.1 "CLI workflow (§4)" row for the test fixtures and
-> implementation notes covering the V2 `submit plan` command.
+> **Removal-landing note (implementation).** The V1 `plan submit
+> <id> <dir>` and `policy sign plan.toml` paths are now rejected at
+> argument-parse time, atomically with kernel admission (§8.1). The
+> rejections live in `cli/src/commands/plan.rs::run_submit` (covers
+> every `plan submit ...` invocation, regardless of arity, and emits
+> the migration message via `v1_plan_submit_removal_message()`) and
+> `cli/src/commands/policy.rs::run_sign` (filters by basename = exactly
+> `plan.toml`; non-plan artifacts continue to sign normally and emit
+> the migration message via `v1_plan_sign_removal_message()`). Both
+> messages reference the V2 invocation `raxis submit plan <plan.toml>`
+> verbatim and link back to this spec; their exact text is pinned by
+> dedicated CLI unit tests so any drift forces a corresponding spec
+> update. The kernel's V1 `OperatorRequest::CreateInitiative` IPC
+> handler is intentionally **left in place** — it is the wire-shape
+> tail compatibility for any third-party operator tooling that has
+> not yet upgraded; the CLI no longer emits it.
 
 ---
 
@@ -1020,7 +1025,7 @@ unknown-string rejection, variant pinning, and Display parity).
 ### CLI side
 
 - [x] `raxis-cli submit plan <plan.toml> [--initiative-id <id>]` command implemented per §4.
-- [ ] `raxis-cli plan sign` command removed; `raxis-cli plan submit <id> <dir>` rejected at arg parse with hint to new invocation. *(Staged: lands together with kernel admission §8.1 so the V2 functional replacement and the V1 hard-reject are atomic.)*
+- [x] `raxis-cli plan submit <id> <dir>` rejected at arg parse with hint to new invocation; `raxis-cli policy sign plan.toml` rejected at arg parse with the same hint (so the V1 two-step ceremony is shut at both halves). Migration messages pinned by `cli/src/commands/plan.rs::tests::v1_plan_submit_removal_message_pins_operator_facing_text`, `cli/src/commands/policy.rs::tests::v1_plan_sign_removal_message_mentions_v2_replacement_command`, and the basename-filter tests for `is_v1_plan_artifact_path`. The kernel's V1 `OperatorRequest::CreateInitiative` handler is intentionally left wired for wire-shape tail compatibility with operator tooling that has not yet upgraded; the CLI no longer emits it.
 - [ ] Plan-root canonicalization via `realpath(parent_dir(plan.toml))`.
 - [ ] Path-resolution visitor over the parsed plan; in V2 the visitor's host-path field set is empty (forward-compatibility hook only).
 - [ ] Path-resolution rejects per §5.2 with the §9 FAIL codes.

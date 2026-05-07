@@ -165,6 +165,15 @@ fn parse_args(args: &[String]) -> Result<SubmitPlanArgs, CliError> {
 /// shape (`submit plan <plan.toml>`) leaves room for `submit policy`
 /// or `submit operator-cert` to land in future tasks without a third
 /// rename.
+///
+/// Note: the top-level `match` in `cli/src/main.rs` routes
+/// `submit plan` directly to `run_plan` (because the per-parent catalog
+/// test fixture pins one dispatcher arm per subcommand catalog), so
+/// this helper is currently used only by the in-crate dispatch tests.
+/// Keeping it preserves the future extensibility hook above and the
+/// ergonomic tests that pin "unknown sub-command" / "empty sub-command"
+/// behaviour without rebuilding `cli/src/main.rs`.
+#[allow(dead_code)]
 pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     match sub {
@@ -481,34 +490,10 @@ fn emit_dry_run_summary(
     let _ = bundle_sha256; // silence unused warning if all printlns are removed
 }
 
-/// Optional helper exposed for the reject-stub used by V1 commands —
-/// this keeps the new `submit plan` subcommand from accidentally being
-/// dispatched as `plan submit <id> <dir>` and silently succeeding under
-/// V1 semantics. Spec §4.5: "the two-arg form with a directory is
-/// rejected at argument parse time with a hint pointing to the new
-/// invocation."
-pub fn reject_v1_two_arg_plan_submit_with_hint(
-    args: &[String],
-) -> Option<CliError> {
-    // Heuristic: V1 was `plan submit <initiative_id> <plan_dir>` where
-    // plan_dir is a path that exists as a directory. If the operator
-    // ran `plan submit foo bar` and `bar` is a directory, surface the
-    // V2 hint. We don't *block* the V1 path (that breaks operators
-    // mid-migration); we only emit a *deprecation-style* informational
-    // line on stderr from the call site, returning Some(...) when the
-    // call site should print the hint.
-    if args.len() == 2 {
-        let candidate_dir = std::path::Path::new(&args[1]);
-        if candidate_dir.is_dir() {
-            return Some(CliError::Usage(format!(
-                "V1 `plan submit <id> <dir>` is deprecated in V2; use \
-                 `raxis submit plan <plan.toml>` for the V2 atomic \
-                 sign+submit workflow (see plan-bundle-sealing.md §4)",
-            )));
-        }
-    }
-    None
-}
+// (Older heuristic helper `reject_v1_two_arg_plan_submit_with_hint` was
+// removed in task 15g — the V1 hard-reject now lives unconditionally in
+// `commands/plan.rs::run_submit` and pre-empts every `plan submit ...`
+// invocation at the dispatcher level.)
 
 // ---------------------------------------------------------------------------
 // Tests
