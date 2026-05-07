@@ -1,0 +1,56 @@
+# Scenario 02 — Single Executor + Reviewer.
+#
+# Builds on scenario 01 by adding a Reviewer. The kernel boots the
+# Reviewer at the Executor's evaluation_sha; if the Reviewer rejects,
+# the Executor reboots with the critique prepended to its system prompt.
+
+[workspace]
+name        = "Single Executor + Reviewer"
+lane_id     = "single-er-lane"
+description = """
+  The adder Executor implements pub fn add(a: i32, b: i32) -> i32
+  in src/lib.rs and writes a unit test. The reviewer Reviewer evaluates
+  the resulting commit and approves only if the implementation is
+  correct, idiomatic Rust, and the unit test actually exercises the
+  function.
+"""
+
+# ── Executor ────────────────────────────────────────────────────────────────
+[[tasks]]
+task_id            = "adder"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = []
+context = """
+  Add a public function `pub fn add(a: i32, b: i32) -> i32` to
+  `src/lib.rs` that returns the sum. Add a `#[cfg(test)] mod tests`
+  block in the same file with at least one #[test] that exercises
+  the function with positive, negative, and overflow-near values.
+  Commit with the message "scenario 02: add adder + tests" and
+  submit CompleteTask.
+"""
+
+# ── Reviewer ────────────────────────────────────────────────────────────────
+# `predecessors = ["adder"]` makes the kernel wait until the adder
+# task reaches Completed before it activates the Reviewer. The
+# Reviewer is auto-pinned to the Executor's terminal commit_sha by
+# the kernel — the Reviewer reads `evaluation_sha` from its activation
+# envelope.
+[[tasks]]
+task_id            = "reviewer"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = ["adder"]
+context = """
+  Evaluate the commit produced by `adder`. Approve only if:
+    1. The function signature matches `pub fn add(a: i32, b: i32) -> i32` exactly.
+    2. The implementation is straightforward (a + b is fine; no creative interpretations).
+    3. The test block uses #[cfg(test)] mod tests and the test calls add(...) at
+       least three times with distinct argument sets.
+  Reject with a short, specific critique otherwise.
+"""
+
+[orchestrator]
+cross_cutting_artifacts = []

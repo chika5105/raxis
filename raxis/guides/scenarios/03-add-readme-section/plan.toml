@@ -1,0 +1,27 @@
+# Scenario 03 — Add a README section.
+
+[workspace]
+name        = "Add README section"
+lane_id     = "readme-edit-lane"
+description = """
+  The documenter Executor adds a new top-level section "## Quickstart"
+  to the repo's README.md. The path_allowlist is intentionally exact
+  (just README.md) so any wander-off triggers FAIL_PATH_POLICY_VIOLATION.
+"""
+
+[[tasks]]
+task_id            = "documenter"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["README.md"]
+predecessors       = []
+context = """
+  Add a new top-level section titled "## Quickstart" to README.md, AFTER
+  any existing top-level sections, with three numbered steps explaining
+  how a fresh user clones, builds, and runs this demo repo. Do not
+  modify the existing sections. Commit with message "scenario 03: add
+  Quickstart section" and submit CompleteTask.
+"""
+
+[orchestrator]
+cross_cutting_artifacts = []

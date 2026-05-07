@@ -1,0 +1,66 @@
+# Scenario 07 — Panel review (1 Executor, 3 Reviewers).
+
+[workspace]
+name        = "Panel review"
+lane_id     = "panel-review-lane"
+description = """
+  The implementer Executor adds a tiny URL-parsing function. Three
+  Reviewers evaluate the same evaluation_sha for correctness, style,
+  and security. Any one rejection reboots the Executor with the
+  combined critique.
+"""
+
+[[tasks]]
+task_id            = "implementer"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = []
+context = """
+  Add `pub fn parse_host(url: &str) -> Option<&str>` to src/lib.rs
+  that returns the host portion of an http:// or https:// URL or None
+  if the URL is malformed. Add three unit tests covering: a valid
+  https URL, a URL with a non-http scheme (None), and the empty
+  string (None). Commit with message "scenario 07: parse_host" and
+  submit CompleteTask.
+"""
+
+[[tasks]]
+task_id            = "correctness_review"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = ["implementer"]
+context = """
+  Evaluate parse_host for correctness. Reject if any of: missing
+  scheme handling (http vs https), wrong host extraction for URLs
+  with paths or query strings, or missing/wrong tests.
+"""
+
+[[tasks]]
+task_id            = "style_review"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = ["implementer"]
+context = """
+  Evaluate parse_host for style. Reject if: function is longer than
+  20 lines, the implementation hand-rolls a parser instead of using
+  str::strip_prefix / split_once / find, or the doc comment is
+  missing.
+"""
+
+[[tasks]]
+task_id            = "security_review"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = ["implementer"]
+context = """
+  Evaluate parse_host for security. Reject if the function panics on
+  any input, allocates an unbounded String from caller-controlled
+  bytes, or uses unsafe code.
+"""
+
+[orchestrator]
+cross_cutting_artifacts = []

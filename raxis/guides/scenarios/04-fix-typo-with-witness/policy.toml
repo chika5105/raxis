@@ -1,0 +1,8 @@
+# Scenario 04 policy delta — declares the rust-starter verifier image.
+#
+# Append to your live policy.toml; re-sign; epoch advance.
+
+# [[vm_images]]
+# id           = "raxis-verifier-rust-starter"
+# digest       = "REPLACE_ME_sha256_of_pulled_image"
+# entrypoint   = ["/usr/local/bin/raxis-verifier"]

@@ -1,0 +1,6 @@
+# Scenario 03 policy delta — none required.
+
+# [[lanes]]
+# id           = "readme-edit-lane"
+# token_budget = 50_000
+# admission_unit_budget = 200

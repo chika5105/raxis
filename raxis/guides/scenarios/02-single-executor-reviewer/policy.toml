@@ -1,0 +1,12 @@
+# Scenario 02 policy delta.
+#
+# The single-executor-reviewer scenario reuses the genesis-default
+# lane; nothing extra is required on top of SETUP.md's baseline.
+#
+# If you want a per-scenario lane (cleaner audit chain), uncomment
+# the block below and append to your live policy.toml.
+
+# [[lanes]]
+# id           = "single-er-lane"
+# token_budget = 75_000
+# admission_unit_budget = 200

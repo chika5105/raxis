@@ -1,0 +1,37 @@
+# Scenario 04 — Fix a typo with a cargo-build witness.
+
+[workspace]
+name        = "Fix typo with witness"
+lane_id     = "fix-typo-lane"
+description = """
+  The fixer Executor restores `pub fn add(...)` in src/lib.rs; the
+  cargo_build verifier confirms the build succeeds before the merge
+  is allowed to advance master.
+"""
+
+[[tasks]]
+task_id            = "fixer"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = []
+context = """
+  src/lib.rs has a typo: `pub fn ad(...)` should be `pub fn add(...)`.
+  Restore the correct function name. Do not change the signature, the
+  body, or the test. Commit with the message "scenario 04: fix typo"
+  and submit CompleteTask.
+"""
+
+# ── Per-task verifier ──────────────────────────────────────────────────────
+# Runs `cargo build` inside a verifier subprocess against the
+# Executor's terminal commit. final_status must be "passed" or the
+# merge fails closed with FAIL_INSUFFICIENT_WITNESS.
+[[tasks.verifiers]]
+name        = "cargo_build"
+image       = "raxis-verifier-rust-starter"
+command     = ["cargo", "build", "--release", "--locked"]
+timeout_ms  = 180_000
+on_failure  = "block_review"
+
+[orchestrator]
+cross_cutting_artifacts = []

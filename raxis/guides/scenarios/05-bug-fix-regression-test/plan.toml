@@ -1,0 +1,61 @@
+# Scenario 05 — Bug fix: regression test first, then fix.
+
+[workspace]
+name        = "Bug fix: regression-then-fix"
+lane_id     = "regression-fix-lane"
+description = """
+  regression_test writes a #[test] that calls safe_div(1, 0) and
+  expects an Err. fixer changes safe_div to return Err on b == 0.
+  The cargo_test verifier on `fixer` blocks the merge until the
+  regression test passes.
+"""
+
+[[tasks]]
+task_id            = "regression_test"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = []
+context = """
+  Add a #[cfg(test)] mod tests block to src/lib.rs (or a new file
+  under src/) with one #[test] named `safe_div_returns_err_on_zero`
+  that calls safe_div(1, 0) and asserts the result is Err.
+  The test will currently fail at runtime — that is expected, you
+  are intentionally writing a regression test. The build must
+  succeed (cargo build green); do NOT modify safe_div in this task.
+  Commit with message "scenario 05: regression test for safe_div(0)"
+  and submit CompleteTask.
+"""
+
+[[tasks.verifiers]]
+name        = "cargo_build"
+image       = "raxis-verifier-rust-starter"
+command     = ["cargo", "build", "--locked"]
+timeout_ms  = 120_000
+on_failure  = "block_review"
+
+# ── fixer (depends on regression_test) ─────────────────────────────────────
+[[tasks]]
+task_id            = "fixer"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+predecessors       = ["regression_test"]
+context = """
+  src/lib.rs contains `pub fn safe_div(a: i64, b: i64) -> Result<i64, &'static str>`
+  which currently panics on b == 0. Change it to return
+  `Err("division by zero")` when b == 0; otherwise return `Ok(a / b)`.
+  Do NOT modify the test added by the previous task. Commit with
+  message "scenario 05: fix safe_div(0) to return Err" and submit
+  CompleteTask.
+"""
+
+[[tasks.verifiers]]
+name        = "cargo_test"
+image       = "raxis-verifier-rust-starter"
+command     = ["cargo", "test", "--locked"]
+timeout_ms  = 180_000
+on_failure  = "block_review"
+
+[orchestrator]
+cross_cutting_artifacts = []

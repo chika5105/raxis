@@ -1,0 +1,44 @@
+# Scenario 06 — Parallel decomposition.
+
+[workspace]
+name        = "Parallel decomposition"
+lane_id     = "parallel-decomp-lane"
+description = """
+  Two Executors run in parallel against disjoint sub-trees: auth_module
+  works under src/auth/, billing_module works under src/billing/. The
+  kernel admits both immediately because they have no DAG edges and
+  their path_allowlists do not overlap.
+"""
+
+[[tasks]]
+task_id            = "auth_module"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/auth/"]
+predecessors       = []
+context = """
+  Implement a simple auth module: add `src/auth/session.rs` with a
+  `pub struct Session { id: String, user: String }` and `pub fn
+  new_session(user: &str) -> Session` that constructs a Session with
+  a 16-char hex `id`. Add a `pub mod session;` line to src/auth/mod.rs.
+  Commit with message "scenario 06: auth/session.rs" and submit
+  CompleteTask.
+"""
+
+[[tasks]]
+task_id            = "billing_module"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/billing/"]
+predecessors       = []
+context = """
+  Implement a simple billing module: add `src/billing/invoice.rs` with a
+  `pub struct Invoice { id: u64, amount_cents: u64 }` and `pub fn
+  new_invoice(amount_cents: u64) -> Invoice` that constructs an
+  Invoice with `id = 0`. Add a `pub mod invoice;` line to
+  src/billing/mod.rs. Commit with message "scenario 06: billing/invoice.rs"
+  and submit CompleteTask.
+"""
+
+[orchestrator]
+cross_cutting_artifacts = []
