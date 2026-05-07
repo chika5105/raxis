@@ -2627,6 +2627,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-tproxy-protocol"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "hex",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "raxis-types"
 version = "0.1.0"
 dependencies = [
