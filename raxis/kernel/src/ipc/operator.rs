@@ -30,6 +30,7 @@ use raxis_ipc::{read_json_frame_async, write_json_frame_async, JsonFrameError};
 use tokio::net::UnixStream;
 
 use crate::authority;
+use crate::initiatives;
 use crate::initiatives::lifecycle;
 use crate::ipc::auth::AuthenticatedOperator;
 use crate::ipc::context::HandlerContext;
@@ -610,25 +611,22 @@ async fn handle_request(
             handle_create_initiative(plan_toml, plan_sig_hex, submitted_by, ctx).await
         }
         // V2.1 plan-bundle-sealed admission. Spec:
-        // `plan-bundle-sealing.md §3.4 + §8.1`. The full §8.1 admission
-        // handler (canonical decode → freshness → replay → policy) lands
-        // in a follow-up task; for now the kernel rejects the V2 envelope
-        // with a structured error so a CLI that submits today gets a
-        // clear "kernel admission not yet wired" message rather than
-        // a stale mid-pipeline failure. Replay-protection invariants
-        // (`INV-PLAN-BUNDLE-FRESH`) are NOT broken by this rejection
-        // path — no `plan_bundle_nonces_seen` row is written for a
-        // bundle the kernel could not fully process.
-        OperatorRequest::CreateInitiativeV2 { .. } => {
-            OperatorResponse::Error {
-                code:   "FAIL_PLAN_BUNDLE_KERNEL_ADMISSION_NOT_YET_WIRED".to_owned(),
-                detail: "V2.1 plan-bundle admission lands in a follow-up; \
-                         CLI bundle was constructed and signed correctly, \
-                         but the kernel admission path is still pending \
-                         (see plan-bundle-sealing.md §11.1)."
-                    .to_owned(),
-            }
-        }
+        // `plan-bundle-sealing.md §3.4 + §8.1`. The hex envelope is
+        // decoded here into the `V2AdmissionRequest` typed shape, then
+        // handed to `create_initiative_v2_blocking` which runs the §8.1
+        // step ordering (steps 2–9 pre-tx, 10a–12 inside `BEGIN
+        // IMMEDIATE`). Replay-protection invariants (`INV-PLAN-BUNDLE-
+        // FRESH`) are enforced inside the transaction.
+        OperatorRequest::CreateInitiativeV2 {
+            initiative_id,
+            plan_bundle_hex,
+            bundle_sha256_hex,
+            signature_hex,
+            signed_by_hex,
+        } => handle_create_initiative_v2(
+            initiative_id, plan_bundle_hex, bundle_sha256_hex,
+            signature_hex, signed_by_hex, ctx,
+        ).await,
         OperatorRequest::ApprovePlan { initiative_id, approving_operator, operator_pubkey_hex } => {
             handle_approve_plan(initiative_id, approving_operator, operator_pubkey_hex, operator, ctx).await
         }
@@ -996,6 +994,111 @@ async fn handle_create_initiative(
         },
         Err(e) => OperatorResponse::Error {
             code:   "FAIL_CREATE_INITIATIVE".to_owned(),
+            detail: e.to_string(),
+        },
+    }
+}
+
+/// V2.1 plan-bundle admission handler. Spec: `plan-bundle-sealing.md
+/// §8.1`. Decodes the hex IPC envelope, runs the §8.1 step ordering
+/// via `initiatives::v2_admission`, projects the result onto an
+/// `OperatorResponse`. The decode + admission both happen on a
+/// blocking pool because `canonical_decode` + Ed25519 verify + SQLite
+/// commit are CPU/IO heavy.
+async fn handle_create_initiative_v2(
+    initiative_id:     String,
+    plan_bundle_hex:   String,
+    bundle_sha256_hex: String,
+    signature_hex:     String,
+    signed_by_hex:     String,
+    ctx: &HandlerContext,
+) -> OperatorResponse {
+    // Step 1 — hex-decode the envelope. Errors here are
+    // FAIL_PLAN_BUNDLE_DECODE_FAILED per §8.1; we surface them
+    // before spawning a blocking task so the operator gets fast
+    // structured feedback for trivially-malformed wire payloads.
+    let plan_bundle = match hex::decode(&plan_bundle_hex) {
+        Ok(b) => b,
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+            detail: format!("plan_bundle_hex: {e}"),
+        },
+    };
+    let bundle_sha256 = match hex::decode(&bundle_sha256_hex) {
+        Ok(b) if b.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b);
+            raxis_types::BundleSha256::new(arr)
+        }
+        Ok(b) => return OperatorResponse::Error {
+            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+            detail: format!("bundle_sha256_hex: expected 32 bytes, got {}", b.len()),
+        },
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+            detail: format!("bundle_sha256_hex: {e}"),
+        },
+    };
+    let signature = match hex::decode(&signature_hex) {
+        Ok(b) if b.len() == 64 => {
+            let mut arr = [0u8; 64];
+            arr.copy_from_slice(&b);
+            arr
+        }
+        Ok(b) => return OperatorResponse::Error {
+            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+            detail: format!("signature_hex: expected 64 bytes, got {}", b.len()),
+        },
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+            detail: format!("signature_hex: {e}"),
+        },
+    };
+    let signed_by = match hex::decode(&signed_by_hex) {
+        Ok(b) if b.len() == 8 => {
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(&b);
+            raxis_types::OperatorFingerprint::new(arr)
+        }
+        Ok(b) => return OperatorResponse::Error {
+            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+            detail: format!("signed_by_hex: expected 8 bytes, got {}", b.len()),
+        },
+        Err(e) => return OperatorResponse::Error {
+            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+            detail: format!("signed_by_hex: {e}"),
+        },
+    };
+
+    let req = initiatives::v2_admission::V2AdmissionRequest {
+        initiative_id,
+        plan_bundle,
+        bundle_sha256,
+        signature,
+        signed_by,
+    };
+
+    // `unix_now_secs` returns u64; the admission handler takes i64
+    // (because skew arithmetic needs signed semantics). Cast is
+    // saturating-safe — the kernel cannot run past 2^63 Unix seconds.
+    let now = raxis_types::unix_now_secs() as i64;
+
+    let outcome = initiatives::v2_admission::create_initiative_v2_blocking(
+        req,
+        now,
+        Arc::clone(&ctx.policy),
+        Arc::clone(&ctx.store),
+        Arc::clone(&ctx.audit),
+    )
+    .await;
+
+    match outcome {
+        Ok(result) => OperatorResponse::InitiativeCreated {
+            initiative_id: result.initiative_id,
+            status:        result.status,
+        },
+        Err(e) => OperatorResponse::Error {
+            code:   e.fail_code().to_owned(),
             detail: e.to_string(),
         },
     }

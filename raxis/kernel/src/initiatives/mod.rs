@@ -16,9 +16,14 @@ pub mod lifecycle;
 pub mod plan_registry;
 pub mod review_aggregation;
 pub mod task_transitions;
+pub mod v2_admission;
 
 pub use lifecycle::LifecycleError;
 pub use plan_registry::{OrchestratorPlanFields, PlanRegistry, TaskKey, TaskPlanFields};
 pub use review_aggregation::{
     compute_aggregate_review_verdict, AggregateReviewVerdict,
+};
+pub use v2_admission::{
+    create_initiative_v2, create_initiative_v2_blocking, SizeCapWhich,
+    V2AdmissionError, V2AdmissionRequest, V2InitiativeCreated,
 };

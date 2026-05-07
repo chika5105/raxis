@@ -95,6 +95,17 @@ pub(crate) struct RawPolicy {
     /// hard ceilings) are checked at validate time.
     #[serde(default)]
     pub(crate) plan_signing: Option<PlanSigningSection>,
+
+    /// `[plan_bundle_limits]` — V2 plan-bundle size discipline.
+    /// **Optional**: a kernel that omits the section boots with the
+    /// spec defaults from `plan-bundle-sealing.md §7.4` (1 MiB / 10 MiB
+    /// / 200). All three fields have defaults; the hard ceilings
+    /// (`max_artifact_bytes ≤ 64 MiB`, `max_bundle_bytes ≤ 128 MiB`,
+    /// `max_artifact_count ≤ 1024`) plus the coherence rule
+    /// (`max_artifact_bytes ≤ max_bundle_bytes`) are checked at
+    /// validate time.
+    #[serde(default)]
+    pub(crate) plan_bundle_limits: Option<PlanBundleLimitsSection>,
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +714,159 @@ fn default_nonce_retention_grace_secs()  -> u64 { 60 * 60 }      // 1 h
 fn default_nonce_sweep_interval_secs()   -> u64 { 60 * 60 }      // 1 h
 
 // ---------------------------------------------------------------------------
+// Plan-bundle size limits — `[plan_bundle_limits]`
+// ---------------------------------------------------------------------------
+
+/// Hard ceiling on `[plan_bundle_limits].max_artifact_bytes`. 64 MiB
+/// per `plan-bundle-sealing.md §7.4`. The kernel's SQLite write path
+/// can absorb one 64 MiB blob without touching paging behaviour; above
+/// this, the per-bundle commit cost rises non-linearly under WAL
+/// pressure. Operators who legitimately need bigger artifacts SHOULD
+/// move the data out-of-bundle (e.g. into a side-channel content
+/// store) rather than raising this ceiling.
+pub const PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING: u64 = 64 * 1024 * 1024;
+
+/// Hard ceiling on `[plan_bundle_limits].max_bundle_bytes`. 128 MiB
+/// per `plan-bundle-sealing.md §7.4`. With the per-artifact ceiling
+/// at 64 MiB this leaves room for two near-max artifacts plus
+/// canonical-encoding overhead. The kernel's bundle SHA-256 + Ed25519
+/// verify path is bounded linearly in bundle size; even the worst
+/// case completes in well under 100 ms on commodity hardware.
+pub const PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING: u64 = 128 * 1024 * 1024;
+
+/// Hard ceiling on `[plan_bundle_limits].max_artifact_count`. 1024
+/// per `plan-bundle-sealing.md §7.4`. With one artifact in V2.0
+/// (always `plan.toml`) and a small handful in early V2.1, this
+/// ceiling is two orders of magnitude above realistic usage; it
+/// exists to bound the per-row cost in `plan_bundle_artifacts` and
+/// prevent a misconfigured policy from greenlighting a bundle that
+/// would individually overwhelm the SQLite write path (one row per
+/// artifact, one INSERT per row inside the admission tx).
+pub const PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING: u32 = 1024;
+
+/// `[plan_bundle_limits]` — V2 plan-bundle size discipline.
+///
+/// ```toml
+/// [plan_bundle_limits]
+/// max_artifact_bytes  = 1_048_576       # 1 MiB
+/// max_bundle_bytes    = 10_485_760      # 10 MiB
+/// max_artifact_count  = 200
+/// ```
+///
+/// All three fields default per `plan-bundle-sealing.md §7.4` so a
+/// kernel that omits the section boots cleanly. Operators MAY lower
+/// the caps below the defaults but MUST NOT raise them above the
+/// hard ceilings:
+///
+///   * `max_artifact_bytes ≤ PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING` (64 MiB)
+///   * `max_bundle_bytes ≤ PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING` (128 MiB)
+///   * `max_artifact_count ≤ PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING` (1024)
+///
+/// In addition, structural coherence is enforced at validate time:
+///
+///   * `max_artifact_bytes ≤ max_bundle_bytes` (a single artifact
+///     cannot exceed the total bundle cap, since the bundle contains
+///     at least that artifact)
+///   * `max_bundle_bytes ≥ 1` and `max_artifact_count ≥ 1` (a bundle
+///     with zero artifacts cannot satisfy `artifacts[0] = plan.toml`)
+///
+/// Failures map to `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING` at
+/// policy load (`plan-bundle-sealing.md §9`).
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanBundleLimitsSection {
+    /// Maximum bytes for any single artifact (including `plan.toml`).
+    /// Enforced both CLI-side (§7.2) and kernel-side (§7.3).
+    /// Default: 1 MiB.
+    #[serde(default = "default_max_artifact_bytes")]
+    pub max_artifact_bytes: u64,
+
+    /// Maximum total bytes for the bundle, summed over artifact bytes.
+    /// Canonical-encoding overhead is negligible (a few hundred bytes
+    /// per artifact); the cap covers payload bytes only.
+    /// Default: 10 MiB.
+    #[serde(default = "default_max_bundle_bytes")]
+    pub max_bundle_bytes: u64,
+
+    /// Maximum number of artifacts in the bundle. `plan.toml` itself
+    /// counts as one artifact — so this is the cap on
+    /// `bundle.artifacts.len()`, not on referenced auxiliary files.
+    /// Default: 200.
+    #[serde(default = "default_max_artifact_count")]
+    pub max_artifact_count: u32,
+}
+
+impl Default for PlanBundleLimitsSection {
+    fn default() -> Self {
+        Self {
+            max_artifact_bytes: default_max_artifact_bytes(),
+            max_bundle_bytes:   default_max_bundle_bytes(),
+            max_artifact_count: default_max_artifact_count(),
+        }
+    }
+}
+
+impl PlanBundleLimitsSection {
+    /// Apply the §7.4 ceiling + coherence invariants. Returns the
+    /// field name and a one-line explanation on failure so the
+    /// loader can wrap it in `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING`.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.max_artifact_bytes == 0 {
+            return Err(
+                "[plan_bundle_limits].max_artifact_bytes must be > 0".to_owned(),
+            );
+        }
+        if self.max_artifact_bytes > PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING {
+            return Err(format!(
+                "[plan_bundle_limits].max_artifact_bytes ({}) exceeds the hard \
+                 ceiling of {} bytes (64 MiB)",
+                self.max_artifact_bytes,
+                PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING,
+            ));
+        }
+        if self.max_bundle_bytes == 0 {
+            return Err(
+                "[plan_bundle_limits].max_bundle_bytes must be > 0".to_owned(),
+            );
+        }
+        if self.max_bundle_bytes > PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING {
+            return Err(format!(
+                "[plan_bundle_limits].max_bundle_bytes ({}) exceeds the hard \
+                 ceiling of {} bytes (128 MiB)",
+                self.max_bundle_bytes,
+                PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING,
+            ));
+        }
+        if self.max_artifact_count == 0 {
+            return Err(
+                "[plan_bundle_limits].max_artifact_count must be > 0".to_owned(),
+            );
+        }
+        if self.max_artifact_count > PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING {
+            return Err(format!(
+                "[plan_bundle_limits].max_artifact_count ({}) exceeds the hard \
+                 ceiling of {}",
+                self.max_artifact_count,
+                PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING,
+            ));
+        }
+        if self.max_artifact_bytes > self.max_bundle_bytes {
+            return Err(format!(
+                "[plan_bundle_limits].max_artifact_bytes ({}) must be <= \
+                 max_bundle_bytes ({}) — a single artifact cannot exceed the \
+                 total bundle cap",
+                self.max_artifact_bytes,
+                self.max_bundle_bytes,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn default_max_artifact_bytes() -> u64 { 1 * 1024 * 1024 }       // 1 MiB
+fn default_max_bundle_bytes()   -> u64 { 10 * 1024 * 1024 }      // 10 MiB
+fn default_max_artifact_count() -> u32 { 200 }
+
+// ---------------------------------------------------------------------------
 // Provider entries — `[[providers]]`
 // ---------------------------------------------------------------------------
 
@@ -1127,6 +1291,13 @@ pub struct PolicyBundle {
     /// from "no section at all" (defaults already validated by spec).
     plan_signing: Option<PlanSigningSection>,
 
+    /// `[plan_bundle_limits]` config — V2 plan-bundle size discipline
+    /// (`max_artifact_bytes`, `max_bundle_bytes`, `max_artifact_count`).
+    /// Same `None`-means-defaults pattern as `plan_signing`. Read by
+    /// the kernel admission path (§7.3 / §8.1 step 3) via
+    /// [`PolicyBundle::plan_bundle_limits`].
+    plan_bundle_limits: Option<PlanBundleLimitsSection>,
+
     /// Validated notification channels. ALWAYS contains the implicit
     /// `"shell"` channel — synthesised at validate time when the
     /// operator does not declare it (cli-readonly.md §5.6.2). Channels
@@ -1381,6 +1552,16 @@ impl PolicyBundle {
                 }
                 raw.plan_signing
             },
+            plan_bundle_limits: {
+                if let Some(section) = raw.plan_bundle_limits.as_ref() {
+                    section.validate().map_err(|reason| {
+                        PolicyError::MalformedArtifact(format!(
+                            "FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING: {reason}"
+                        ))
+                    })?;
+                }
+                raw.plan_bundle_limits
+            },
             notification_channels,
             notification_routes,
             default_notification_channels,
@@ -1504,6 +1685,7 @@ impl PolicyBundle {
             gateway: None,
             providers: Vec::new(),
             plan_signing: None,
+            plan_bundle_limits: None,
             base_cost_per_intent_kind: HashMap::new(),
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
@@ -1667,6 +1849,18 @@ impl PolicyBundle {
         self.lanes = lanes;
     }
 
+    /// Test-only setter for `[plan_signing].accept_unfresh_v2_0_bundles`.
+    /// Used by the kernel V2 admission tests (`v2_admission::tests`) to
+    /// flip the V2.0 transitional knob without round-tripping a full
+    /// policy.toml. The production loader path is still gated on the
+    /// `[plan_signing]` validation in `validate_plan_signing`.
+    #[cfg(any(debug_assertions, test))]
+    pub fn set_plan_signing_accept_unfresh_v2_0_for_tests(&mut self, accept: bool) {
+        let mut section = self.plan_signing.clone().unwrap_or_default();
+        section.accept_unfresh_v2_0_bundles = accept;
+        self.plan_signing = Some(section);
+    }
+
     // ── Artifact metadata ───────────────────────────────────────────────────
 
     /// Set the SHA-256 of the raw policy.toml bytes. Called by the loader
@@ -1743,6 +1937,18 @@ impl PolicyBundle {
         self.plan_signing
             .clone()
             .unwrap_or_else(PlanSigningSection::default)
+    }
+
+    /// V2 plan-bundle size limits — `[plan_bundle_limits]`. Returns
+    /// the operator's section if declared, else the spec defaults
+    /// from `plan-bundle-sealing.md §7.4` (1 MiB per artifact, 10 MiB
+    /// total bundle, 200 artifacts). Read by the kernel admission
+    /// path (§7.3 / §8.1 step 3) when re-checking caps against the
+    /// wire bundle.
+    pub fn plan_bundle_limits(&self) -> PlanBundleLimitsSection {
+        self.plan_bundle_limits
+            .clone()
+            .unwrap_or_else(PlanBundleLimitsSection::default)
     }
 
     // ── Provider catalogue ──────────────────────────────────────────────────
@@ -2007,6 +2213,7 @@ mod tests {
             gateway: None,
             providers: Vec::new(),
             plan_signing: None,
+            plan_bundle_limits: None,
             base_cost_per_intent_kind: HashMap::new(),
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
@@ -2611,6 +2818,178 @@ mod plan_signing_tests {
         let p = bundle.plan_signing();
         assert_eq!(p.max_plan_bundle_age_secs,  max_age);
         assert_eq!(p.nonce_sweep_interval_secs, max_sweep);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — `[plan_bundle_limits]` validation (plan-bundle-sealing.md §7.4).
+// ---------------------------------------------------------------------------
+//
+// These cover the same shape as the `plan_signing_tests` module above:
+// (a) accessor returns spec defaults when the section is omitted;
+// (b) accessor returns spec defaults when the section is present but
+//     empty;
+// (c) explicit values round-trip;
+// (d) every field-level invariant is rejected with
+//     `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING`;
+// (e) ceiling-exact-match values are accepted (boundary inclusivity).
+
+#[cfg(test)]
+mod plan_bundle_limits_tests {
+    use super::*;
+    use crate::load_policy;
+
+    fn minimal_with_plan_bundle_limits(extra: &str) -> String {
+        let mut t = super::gateway_providers_tests::minimal_policy_toml_for_tests();
+        t.push_str(extra);
+        t
+    }
+
+    fn write_and_load(
+        toml_str: &str,
+    ) -> Result<crate::PolicyBundle, crate::PolicyError> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_str).unwrap();
+        load_policy(tmp.path()).map(|(b, _, _)| b)
+    }
+
+    #[test]
+    fn omitted_plan_bundle_limits_section_yields_spec_defaults() {
+        let bundle = write_and_load(
+            &super::gateway_providers_tests::minimal_policy_toml_for_tests(),
+        )
+        .expect("policy without [plan_bundle_limits] must load");
+        let p = bundle.plan_bundle_limits();
+        assert_eq!(p.max_artifact_bytes, 1 * 1024 * 1024);
+        assert_eq!(p.max_bundle_bytes,   10 * 1024 * 1024);
+        assert_eq!(p.max_artifact_count, 200);
+    }
+
+    #[test]
+    fn empty_plan_bundle_limits_section_uses_field_level_defaults() {
+        let bundle = write_and_load(&minimal_with_plan_bundle_limits(
+            "\n[plan_bundle_limits]\n",
+        ))
+        .expect("[plan_bundle_limits] with no fields must inherit field defaults");
+        let p = bundle.plan_bundle_limits();
+        assert_eq!(p.max_artifact_bytes, 1 * 1024 * 1024);
+        assert_eq!(p.max_bundle_bytes,   10 * 1024 * 1024);
+        assert_eq!(p.max_artifact_count, 200);
+    }
+
+    #[test]
+    fn explicit_values_round_trip_via_accessor() {
+        let bundle = write_and_load(&minimal_with_plan_bundle_limits(
+            "\n[plan_bundle_limits]\n\
+             max_artifact_bytes  = 524288\n\
+             max_bundle_bytes    = 5242880\n\
+             max_artifact_count  = 50\n",
+        ))
+        .expect("explicit values must validate cleanly");
+        let p = bundle.plan_bundle_limits();
+        assert_eq!(p.max_artifact_bytes, 524_288);
+        assert_eq!(p.max_bundle_bytes,   5_242_880);
+        assert_eq!(p.max_artifact_count, 50);
+    }
+
+    #[test]
+    fn zero_max_artifact_bytes_is_rejected() {
+        let err = write_and_load(&minimal_with_plan_bundle_limits(
+            "\n[plan_bundle_limits]\nmax_artifact_bytes = 0\n",
+        ))
+        .expect_err("zero artifact cap must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(s.contains("max_artifact_bytes"), "got: {s}");
+    }
+
+    #[test]
+    fn artifact_bytes_above_64mib_ceiling_is_rejected() {
+        let above = PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING + 1;
+        let err = write_and_load(&minimal_with_plan_bundle_limits(&format!(
+            "\n[plan_bundle_limits]\nmax_artifact_bytes = {above}\n",
+        )))
+        .expect_err("artifact cap above hard ceiling must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(s.contains("hard ceiling"), "error must mention ceiling; got: {s}");
+    }
+
+    #[test]
+    fn zero_max_bundle_bytes_is_rejected() {
+        let err = write_and_load(&minimal_with_plan_bundle_limits(
+            "\n[plan_bundle_limits]\nmax_bundle_bytes = 0\n",
+        ))
+        .expect_err("zero bundle cap must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(s.contains("max_bundle_bytes"), "got: {s}");
+    }
+
+    #[test]
+    fn bundle_bytes_above_128mib_ceiling_is_rejected() {
+        let above = PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING + 1;
+        let err = write_and_load(&minimal_with_plan_bundle_limits(&format!(
+            "\n[plan_bundle_limits]\nmax_bundle_bytes = {above}\n",
+        )))
+        .expect_err("bundle cap above hard ceiling must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+    }
+
+    #[test]
+    fn zero_max_artifact_count_is_rejected() {
+        let err = write_and_load(&minimal_with_plan_bundle_limits(
+            "\n[plan_bundle_limits]\nmax_artifact_count = 0\n",
+        ))
+        .expect_err("zero artifact count must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(s.contains("max_artifact_count"), "got: {s}");
+    }
+
+    #[test]
+    fn artifact_count_above_1024_ceiling_is_rejected() {
+        let above = PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING + 1;
+        let err = write_and_load(&minimal_with_plan_bundle_limits(&format!(
+            "\n[plan_bundle_limits]\nmax_artifact_count = {above}\n",
+        )))
+        .expect_err("artifact count above hard ceiling must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+    }
+
+    #[test]
+    fn artifact_bytes_above_bundle_bytes_is_rejected() {
+        // Coherence rule: a single artifact cannot exceed the total bundle cap.
+        let err = write_and_load(&minimal_with_plan_bundle_limits(
+            "\n[plan_bundle_limits]\n\
+             max_artifact_bytes = 2_000_000\n\
+             max_bundle_bytes   = 1_500_000\n",
+        ))
+        .expect_err("artifact > bundle cap must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(s.contains("must be <="), "got: {s}");
+    }
+
+    #[test]
+    fn ceiling_at_max_is_accepted() {
+        // Boundary-inclusive: exactly-at-ceiling values are accepted.
+        let max_artifact = PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING;
+        let max_bundle   = PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING;
+        let max_count    = PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING;
+        let bundle = write_and_load(&minimal_with_plan_bundle_limits(&format!(
+            "\n[plan_bundle_limits]\n\
+             max_artifact_bytes  = {max_artifact}\n\
+             max_bundle_bytes    = {max_bundle}\n\
+             max_artifact_count  = {max_count}\n",
+        )))
+        .expect("ceiling exact-match must be accepted");
+        let p = bundle.plan_bundle_limits();
+        assert_eq!(p.max_artifact_bytes, max_artifact);
+        assert_eq!(p.max_bundle_bytes,   max_bundle);
+        assert_eq!(p.max_artifact_count, max_count);
     }
 }
 
