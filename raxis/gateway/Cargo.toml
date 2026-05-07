@@ -35,6 +35,13 @@ raxis-policy = { workspace = true }
 # pulling in the rest of the gateway's dependency closure (and creating
 # a build-graph cycle through this crate's dev-deps).
 raxis-gateway-substrate = { workspace = true }
+# `CredentialBackend` trait + the file-backed reference impl. The
+# gateway resolves provider credentials through the backend rather
+# than reading `<data_dir>/providers/*.toml` directly so a future
+# Vault / AWS-SM / Azure-KV operator can swap the backend without
+# touching the gateway. `extensibility-traits.md §4.4`.
+raxis-credentials       = { workspace = true }
+raxis-credentials-file  = { workspace = true }
 
 tokio        = { workspace = true }
 serde        = { workspace = true }

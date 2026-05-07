@@ -135,11 +135,23 @@ credentials_file = "anthropic-prod.toml"
         b = "b".repeat(64),
     );
     std::fs::write(dd.join("policy/policy.toml"), policy).unwrap();
+    let creds_path = dd.join("providers/anthropic-prod.toml");
     std::fs::write(
-        dd.join("providers/anthropic-prod.toml"),
+        &creds_path,
         "api_key = \"sk-ant-test\"\nauth_header = \"x-api-key\"\nauth_prefix = \"\"\n",
     )
     .unwrap();
+    // The V2 `FileCredentialBackend` validates `chmod 0600` at every
+    // resolve (production invariant — operators copy credential files
+    // in with `install -m 0600`). Make the test fixture honour the
+    // same invariant rather than relying on the umask default (which
+    // is 0644 on macOS).
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&creds_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&creds_path, perms).unwrap();
+    }
     tmp
 }
 

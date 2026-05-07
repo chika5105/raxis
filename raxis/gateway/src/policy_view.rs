@@ -23,7 +23,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use raxis_credentials::{
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName,
+};
+use raxis_credentials_file::FileCredentialBackend;
 use thiserror::Error;
 
 // `ProviderEntryView` and `ProviderCredentials` live in the trait
@@ -73,6 +78,11 @@ pub enum PolicyViewError {
         path: PathBuf,
         source: std::io::Error,
     },
+    #[error("provider {provider_id:?}: credentials backend rejected resolution: {source}")]
+    CredentialsBackend {
+        provider_id: String,
+        source: CredentialError,
+    },
     #[error("provider {provider_id:?}: credentials file {path} malformed: {source}")]
     CredentialsParse {
         provider_id: String,
@@ -86,9 +96,37 @@ pub enum PolicyViewError {
     },
 }
 
-/// Read the full policy view from disk. Wraps `raxis_policy::load_policy`
-/// + per-provider credentials load.
+/// Read the full policy view from disk using the **default**
+/// `FileCredentialBackend` rooted at `data_dir`. This is the convenience
+/// boot-path used by the production gateway subprocess (see
+/// `runtime.rs`); deployments that opt into Vault, AWS Secrets Manager,
+/// Azure Key Vault, or PKCS#11 wire their own
+/// `Arc<dyn CredentialBackend>` and call
+/// [`load_policy_view_with_credential_backend`] directly.
+///
+/// Behaviourally identical to the prior direct `std::fs::read` path —
+/// the file backend's mode/uid validation matches the on-disk
+/// invariants `policy.toml` already assumed (chmod 0600, kernel-OS-user).
 pub fn load_policy_view(data_dir: &Path) -> Result<PolicyView, PolicyViewError> {
+    let backend: Arc<dyn CredentialBackend> = Arc::new(FileCredentialBackend::open(data_dir));
+    load_policy_view_with_credential_backend(data_dir, &backend)
+}
+
+/// Load policy view using a caller-supplied `CredentialBackend`. The
+/// kernel-driven boot path uses this directly so a single
+/// `Arc<dyn CredentialBackend>` (already wrapped in `AuditingBackend`)
+/// is shared across the gateway and every credential proxy.
+///
+/// Provider credentials are resolved by the policy-declared
+/// `[[providers]].credentials_file` (e.g. `"anthropic-prod.toml"`),
+/// translated to the canonical credential name `"providers.<stem>"`
+/// (e.g. `"providers.anthropic-prod"`). The file backend re-derives
+/// the original on-disk path from that name; alternate backends look
+/// up the same name in their own store. `extensibility-traits.md §4.4`.
+pub fn load_policy_view_with_credential_backend(
+    data_dir: &Path,
+    backend: &Arc<dyn CredentialBackend>,
+) -> Result<PolicyView, PolicyViewError> {
     let policy_path = data_dir.join("policy/policy.toml");
     let (bundle, _bytes, _sha) = raxis_policy::load_policy(&policy_path)
         .map_err(|e| PolicyViewError::PolicyLoad {
@@ -100,20 +138,30 @@ pub fn load_policy_view(data_dir: &Path) -> Result<PolicyView, PolicyViewError> 
     let mut providers = HashMap::with_capacity(bundle.providers().len());
     for entry in bundle.providers() {
         let path = providers_dir.join(&entry.credentials_file);
-        let creds = load_provider_credentials_inner(&path).map_err(|e| match e {
-            CredentialsLoadError::Read(io) => PolicyViewError::CredentialsRead {
+        let cred_name = credentials_filename_to_name(&entry.credentials_file);
+        let creds = resolve_provider_credentials_via_backend(
+            backend,
+            &cred_name,
+            &entry.provider_id,
+        )
+        .map_err(|e| match e {
+            ProviderResolveError::Backend(src) => PolicyViewError::CredentialsBackend {
                 provider_id: entry.provider_id.clone(),
-                path: path.clone(),
-                source: io,
+                source: src,
             },
-            CredentialsLoadError::Parse(parse) => PolicyViewError::CredentialsParse {
+            ProviderResolveError::Parse(parse) => PolicyViewError::CredentialsParse {
                 provider_id: entry.provider_id.clone(),
                 path: path.clone(),
                 source: parse,
             },
-            CredentialsLoadError::Empty => PolicyViewError::CredentialsEmpty {
+            ProviderResolveError::EmptyApiKey => PolicyViewError::CredentialsEmpty {
                 provider_id: entry.provider_id.clone(),
                 path: path.clone(),
+            },
+            ProviderResolveError::NotUtf8(io) => PolicyViewError::CredentialsRead {
+                provider_id: entry.provider_id.clone(),
+                path: path.clone(),
+                source: io,
             },
         })?;
         providers.insert(
@@ -135,6 +183,54 @@ pub fn load_policy_view(data_dir: &Path) -> Result<PolicyView, PolicyViewError> 
         egress_patterns: bundle.egress_patterns().to_vec(),
         providers,
     })
+}
+
+/// Translate the policy's `[[providers]].credentials_file` (e.g.
+/// `"anthropic-prod.toml"`) into the canonical credential name the
+/// `FileCredentialBackend` understands (`"providers.anthropic-prod"`).
+/// The mapping strips the `.toml` suffix when present; `policy.toml`
+/// validation pinned that suffix at admission time so the strip is
+/// safe.
+fn credentials_filename_to_name(credentials_file: &str) -> CredentialName {
+    let stem = credentials_file
+        .strip_suffix(".toml")
+        .unwrap_or(credentials_file);
+    CredentialName::from(format!("providers.{stem}"))
+}
+
+/// Errors from `resolve_provider_credentials_via_backend`. Internal —
+/// callers see them mapped onto `PolicyViewError` variants.
+#[derive(Debug)]
+enum ProviderResolveError {
+    Backend(CredentialError),
+    NotUtf8(std::io::Error),
+    Parse(toml::de::Error),
+    EmptyApiKey,
+}
+
+fn resolve_provider_credentials_via_backend(
+    backend: &Arc<dyn CredentialBackend>,
+    name: &CredentialName,
+    provider_id: &str,
+) -> Result<ProviderCredentials, ProviderResolveError> {
+    let value = backend
+        .resolve(
+            name,
+            ConsumerIdentity::new("gateway", provider_id),
+        )
+        .map_err(ProviderResolveError::Backend)?;
+    let text = value.as_utf8().ok_or_else(|| {
+        ProviderResolveError::NotUtf8(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "credentials file is not valid UTF-8",
+        ))
+    })?;
+    let creds: ProviderCredentials =
+        toml::from_str(&text).map_err(ProviderResolveError::Parse)?;
+    if creds.api_key.is_empty() {
+        return Err(ProviderResolveError::EmptyApiKey);
+    }
+    Ok(creds)
 }
 
 /// Internal credentials-load error. Public callers see the richer
