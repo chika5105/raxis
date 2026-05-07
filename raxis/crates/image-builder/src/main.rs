@@ -18,7 +18,9 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use raxis_image_builder::{build_and_sign, read_inputs, BuildInputs};
+use raxis_image_builder::{
+    build_and_sign, compute_artefact_digest_hex, read_inputs, BuildInputs,
+};
 use raxis_image_manifest::{verify, ImageManifest, Role};
 use std::path::{Path, PathBuf};
 
@@ -42,6 +44,14 @@ enum Cmd {
         /// Output manifest path; defaults to `out/<role>.manifest.json`.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Path to the packed `<role>-<kernel_version>.img` blob.
+        /// The builder streams its bytes through SHA-256 and pins the
+        /// digest into `manifest.image_artefact_sha256`. Required for
+        /// signed builds (omitted only when `--unsigned` is set, where
+        /// a deterministic placeholder is used so test builds remain
+        /// hermetic).
+        #[arg(long)]
+        image_artefact: Option<PathBuf>,
         /// Skip signing (for in-tree determinism tests). The output
         /// manifest will have a placeholder signature; production
         /// builds MUST omit this flag.
@@ -79,7 +89,7 @@ impl From<RoleArg> for Role {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { role, source_dir, out, unsigned } => {
+        Cmd::Build { role, source_dir, out, image_artefact, unsigned } => {
             let r: Role = role.into();
             let source = source_dir.unwrap_or_else(|| {
                 Path::new("images").join(r.as_dir_name())
@@ -93,8 +103,31 @@ fn main() -> Result<()> {
             } else {
                 load_signing_key()?
             };
-            let manifest = build_and_sign(&inputs, &rootfs, &signing_key)
-                .with_context(|| format!("building {}", inputs_path.display()))?;
+
+            // Resolve the image-artefact digest. Production builds
+            // MUST pass `--image-artefact` so the manifest commits to
+            // the .img blob the kernel will boot. Unsigned builds
+            // (used only in determinism CI) accept a fixed placeholder
+            // digest because they never reach the kernel boot path.
+            let image_artefact_sha256_hex = match (&image_artefact, unsigned) {
+                (Some(p), _) => compute_artefact_digest_hex(p)
+                    .with_context(|| format!("hashing image artefact {}", p.display()))?,
+                (None, true) => "0".repeat(64),
+                (None, false) => anyhow::bail!(
+                    "--image-artefact <path> is required for signed builds; \
+                     pass the .img blob whose SHA-256 should be pinned in the \
+                     manifest's `image_artefact_sha256` field. (Use --unsigned \
+                     only for determinism CI.)",
+                ),
+            };
+
+            let manifest = build_and_sign(
+                &inputs,
+                &rootfs,
+                image_artefact_sha256_hex,
+                &signing_key,
+            )
+            .with_context(|| format!("building {}", inputs_path.display()))?;
             let out_path = out.unwrap_or_else(|| {
                 PathBuf::from("out").join(format!("{}.manifest.toml", r.as_dir_name()))
             });

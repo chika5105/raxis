@@ -61,7 +61,18 @@ use std::path::Path;
 /// Schema version; bumped on every breaking change to the manifest
 /// shape. The kernel refuses to admit a manifest with a version it
 /// does not know.
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// History:
+///
+/// * `1` — initial schema; `bundle_hash` covers file list only. No
+///   commitment to the packed image artefact (`raxis-<role>-<kernel_version>.img`).
+/// * `2` — adds `image_artefact_sha256: String` and folds it into
+///   the canonical `bundle_hash` input. The kernel boot path can now
+///   trust the manifest's `image_artefact_sha256` field to be the
+///   signed-over expected SHA-256 of the on-disk .img bytes, which
+///   is the kernel-pinned digest under the V2 manifest-trust model
+///   (`planner-harness.md §14.4`).
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Length of the bundle-hash digest in bytes. Public so callers that
 /// surface this value (audit events, doctor output) do not redefine
@@ -156,12 +167,28 @@ pub struct ImageManifest {
     /// Validates the version-locking invariant called out in
     /// `INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`.
     pub kernel_version: String,
-    /// Bundle hash: SHA-256 over the canonical bytes
-    /// `for each (path, sha256) in sort(files): "{path}\0{sha256}\n"`.
+    /// Bundle hash (`SCHEMA_VERSION = 2`): SHA-256 over the canonical
+    /// bytes
+    ///
+    /// ```text
+    /// "__image_artefact__\0{image_artefact_sha256}\n"
+    ///   ++ for each (path, sha256) in sort(files): "{path}\0{sha256}\n"
+    /// ```
+    ///
     /// Stored hex-encoded so the manifest stays human-readable; the
-    /// in-memory representation in [`bundle_hash_bytes`] is the
-    /// `[u8; 32]` form.
+    /// in-memory representation in [`ImageManifest::bundle_hash_bytes`]
+    /// is the `[u8; 32]` form.
     pub bundle_hash:    String,
+    /// Lowercase-hex SHA-256 of the packed `raxis-<role>-<kernel_version>.img`
+    /// blob (the EROFS rootfs the host hands to the hypervisor). The
+    /// builder fills this in **after** EROFS assembly. Folding it
+    /// into [`ImageManifest::recompute_bundle_hash`] means the
+    /// signature covers the artefact bytes; the kernel boot path
+    /// trusts this field to be the expected SHA-256 of the on-disk
+    /// .img and refuses to launch a VM whose blob digest disagrees.
+    ///
+    /// `SCHEMA_VERSION = 2` addition.
+    pub image_artefact_sha256: String,
     /// Build-environment pin (timestamps, tool versions).
     pub build_env:      BuildEnv,
     /// Per-file inventory; sorted by `path` after `recompute_bundle_hash`.
@@ -171,7 +198,8 @@ pub struct ImageManifest {
     /// the expected value in `EXPECTED_KERNEL_SIGNING_KEY_FP` and
     /// rejects manifests bearing any other fingerprint.
     pub signing_key_fp: String,
-    /// Ed25519 signature over [`bundle_hash_bytes`]. Hex-encoded.
+    /// Ed25519 signature over [`ImageManifest::bundle_hash_bytes`].
+    /// Hex-encoded.
     pub signature:      String,
 }
 
@@ -230,6 +258,13 @@ pub enum ManifestError {
         path: String,
     },
 
+    /// `image_artefact_sha256` is not a 32-byte lowercase-hex string.
+    #[error("manifest image_artefact_sha256 is malformed (expected {} lowercase-hex chars): {found}", BUNDLE_HASH_LEN * 2)]
+    ImageArtefactSha256Malformed {
+        /// What was in the field.
+        found: String,
+    },
+
     /// A per-file path is malformed (empty, contains backslash, or
     /// starts with `/`). All paths must be relative-form.
     #[error("manifest file path is malformed: {found}")]
@@ -283,16 +318,31 @@ impl ImageManifest {
         })
     }
 
-    /// Recompute the bundle hash from the manifest's per-file list.
-    /// Canonicalisation: sort by `path`, then hash
-    /// `"{path}\0{lowercase-hex sha256}\n"` for each entry. The
-    /// builder calls this after assembling `files`; `verify` calls
-    /// this when checking the signature.
+    /// Recompute the bundle hash from the manifest.
+    ///
+    /// Canonicalisation (`SCHEMA_VERSION = 2`):
+    ///
+    /// 1. Header line `"__image_artefact__\0{image_artefact_sha256}\n"`.
+    /// 2. Sort `files` by `path`, then hash
+    ///    `"{path}\0{lowercase-hex sha256}\n"` for each entry.
+    ///
+    /// The builder calls this after assembling `files` AND after
+    /// computing the .img blob's digest; `verify` calls it when
+    /// checking the signature. Folding `image_artefact_sha256` into
+    /// `bundle_hash` means the Ed25519 signature implicitly commits
+    /// to the packed artefact, which is what the kernel boot path
+    /// re-streams against the on-disk .img.
     pub fn recompute_bundle_hash(&self) -> Result<[u8; BUNDLE_HASH_LEN], ManifestError> {
+        let mut hasher = Sha256::new();
+
+        validate_artefact_sha256(&self.image_artefact_sha256)?;
+        hasher.update(b"__image_artefact__\0");
+        hasher.update(self.image_artefact_sha256.as_bytes());
+        hasher.update(b"\n");
+
         let mut sorted: Vec<&ManifestFile> = self.files.iter().collect();
         sorted.sort_by(|a, b| a.path.cmp(&b.path));
 
-        let mut hasher = Sha256::new();
         for f in sorted {
             validate_path(&f.path)?;
             // Validate digest hex is 64 chars; we don't need to
@@ -312,6 +362,19 @@ impl ImageManifest {
         }
         let out: [u8; BUNDLE_HASH_LEN] = hasher.finalize().into();
         Ok(out)
+    }
+
+    /// Decode the manifest's claimed image-artefact SHA-256 into the
+    /// binary form the kernel compares against the on-disk .img bytes.
+    pub fn image_artefact_sha256_bytes(
+        &self,
+    ) -> Result<[u8; BUNDLE_HASH_LEN], ManifestError> {
+        validate_artefact_sha256(&self.image_artefact_sha256)?;
+        decode_hex_n::<BUNDLE_HASH_LEN>(&self.image_artefact_sha256).ok_or_else(
+            || ManifestError::ImageArtefactSha256Malformed {
+                found: self.image_artefact_sha256.clone(),
+            },
+        )
     }
 
     /// Decode the signature.
@@ -385,6 +448,18 @@ pub fn fingerprint_signing_key(key: &VerifyingKey) -> [u8; KEY_FP_LEN] {
 // ---------------------------------------------------------------------------
 // Internals
 // ---------------------------------------------------------------------------
+
+fn validate_artefact_sha256(found: &str) -> Result<(), ManifestError> {
+    if found.len() != BUNDLE_HASH_LEN * 2
+        || !found.bytes().all(|b| b.is_ascii_hexdigit())
+        || found.bytes().any(|b| matches!(b, b'A'..=b'F'))
+    {
+        return Err(ManifestError::ImageArtefactSha256Malformed {
+            found: found.to_owned(),
+        });
+    }
+    Ok(())
+}
 
 fn validate_path(path: &str) -> Result<(), ManifestError> {
     if path.is_empty()
@@ -490,6 +565,7 @@ mod tests {
             role:           Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
+            image_artefact_sha256: "0".repeat(64),
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -527,6 +603,7 @@ mod tests {
             role:           Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
+            image_artefact_sha256: "0".repeat(64),
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -573,6 +650,7 @@ mod tests {
             role:           Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
+            image_artefact_sha256: "0".repeat(64),
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -608,6 +686,7 @@ mod tests {
             role:           Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
+            image_artefact_sha256: "0".repeat(64),
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -643,6 +722,7 @@ mod tests {
             role:           Role::Orchestrator,
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
+            image_artefact_sha256: "0".repeat(64),
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -694,6 +774,7 @@ mod tests {
             role:           Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    "0".repeat(64),
+            image_artefact_sha256: "0".repeat(64),
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -711,6 +792,103 @@ mod tests {
             ManifestError::DuplicatePath(p) => assert_eq!(p, "init"),
             other => panic!("expected DuplicatePath, got {other:?}"),
         }
+    }
+
+    /// Folding `image_artefact_sha256` into `bundle_hash` is the
+    /// V2-trust-model invariant: a tamperer who replaces the .img
+    /// blob and rewrites the manifest's `image_artefact_sha256` field
+    /// must also re-sign, which they cannot do without the kernel
+    /// signing key. Verify that mutating `image_artefact_sha256`
+    /// after signing surfaces `BundleHashMismatch`.
+    #[test]
+    fn verify_rejects_post_signing_image_artefact_sha256_edit() {
+        let (sk, vk) = fixture_signing_key();
+        let files = vec![ManifestFile {
+            path:   "init".to_owned(),
+            sha256: "a".repeat(64),
+            size:   1,
+            mode:   0o755,
+        }];
+        let mut m = ImageManifest {
+            schema_version:        SCHEMA_VERSION,
+            role:                  Role::Reviewer,
+            kernel_version:        "0.1.0".to_owned(),
+            bundle_hash:           String::new(),
+            image_artefact_sha256: "1".repeat(64),
+            build_env: BuildEnv {
+                source_date_epoch: 1700000000,
+                erofs_version:     "1.7.1".to_owned(),
+                tar_version:       "1.34".to_owned(),
+                zstd_version:      "1.5.5".to_owned(),
+            },
+            files,
+            signing_key_fp: hex::encode(fingerprint_signing_key(&vk)),
+            signature:      String::new(),
+        };
+        let bh = m.recompute_bundle_hash().unwrap();
+        m.bundle_hash = hex::encode(bh);
+        m.signature   = hex::encode(sk.sign(&bh).to_bytes());
+
+        // Tamperer swaps the artefact digest WITHOUT re-signing. The
+        // bundle-hash recomputation will now disagree with the
+        // claimed bundle_hash → BundleHashMismatch.
+        m.image_artefact_sha256 = "2".repeat(64);
+
+        match verify(&m, &vk).unwrap_err() {
+            ManifestError::BundleHashMismatch { .. } => {}
+            other => panic!("expected BundleHashMismatch, got {other:?}"),
+        }
+    }
+
+    /// `image_artefact_sha256` field validates as 32-byte
+    /// lowercase-hex. Pins the contract that downstream code can
+    /// `decode_hex_n::<32>` after `verify` succeeds.
+    #[test]
+    fn image_artefact_sha256_must_be_lowercase_hex_32_bytes() {
+        for bad in [
+            "",
+            "deadbeef",
+            "G".repeat(64).as_str(),     // non-hex char
+            "A".repeat(64).as_str(),     // uppercase hex rejected (lowercase contract)
+            "0".repeat(63).as_str(),     // wrong length
+            "0".repeat(65).as_str(),     // wrong length
+        ] {
+            assert!(
+                validate_artefact_sha256(bad).is_err(),
+                "expected {bad:?} to be rejected as image_artefact_sha256",
+            );
+        }
+        // Happy paths.
+        validate_artefact_sha256(&"0".repeat(64)).unwrap();
+        validate_artefact_sha256(&"a".repeat(64)).unwrap();
+        validate_artefact_sha256(&"f".repeat(64)).unwrap();
+        validate_artefact_sha256("aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55").unwrap();
+    }
+
+    /// `image_artefact_sha256_bytes` round-trips a valid hex string
+    /// into the `[u8; 32]` form the kernel compares against the
+    /// streamed .img digest.
+    #[test]
+    fn image_artefact_sha256_bytes_round_trips_hex() {
+        let m = ImageManifest {
+            schema_version:        SCHEMA_VERSION,
+            role:                  Role::Reviewer,
+            kernel_version:        "0.1.0".to_owned(),
+            bundle_hash:           "0".repeat(64),
+            image_artefact_sha256: "ab".repeat(32),
+            build_env: BuildEnv {
+                source_date_epoch: 1700000000,
+                erofs_version:     "1.7.1".to_owned(),
+                tar_version:       "1.34".to_owned(),
+                zstd_version:      "1.5.5".to_owned(),
+            },
+            files: vec![],
+            signing_key_fp: "0".repeat(64),
+            signature:      "0".repeat(128),
+        };
+        let bytes = m.image_artefact_sha256_bytes().unwrap();
+        assert_eq!(bytes.len(), BUNDLE_HASH_LEN);
+        for b in bytes.iter() { assert_eq!(*b, 0xab); }
     }
 
     /// Streaming SHA-256 of a temp file matches the one-shot Sha256

@@ -195,16 +195,25 @@ fn walk(
 /// Build a typed manifest given the inputs and a freshly-enumerated
 /// file list. Computes the bundle hash; does NOT sign yet (callers
 /// pass the manifest to [`sign_manifest`] when they have a key).
+///
+/// `image_artefact_sha256_hex` must be the lowercase-hex SHA-256 of
+/// the packed `<role>-<kernel_version>.img` blob (or a deterministic
+/// placeholder like `"0".repeat(64)` for unit tests that do not
+/// produce an .img). The kernel's manifest-trust verification refuses
+/// any manifest whose `image_artefact_sha256` does not match the
+/// streamed-from-disk digest of the on-disk .img.
 pub fn assemble_manifest(
-    inputs: &BuildInputs,
-    files:  Vec<ManifestFile>,
-    signing_key_fp_hex: String,
+    inputs:                    &BuildInputs,
+    files:                     Vec<ManifestFile>,
+    signing_key_fp_hex:        String,
+    image_artefact_sha256_hex: String,
 ) -> Result<ImageManifest, BuildError> {
     let mut m = ImageManifest {
-        schema_version: SCHEMA_VERSION,
-        role:           inputs.role,
-        kernel_version: inputs.kernel_version.clone(),
-        bundle_hash:    String::new(),
+        schema_version:        SCHEMA_VERSION,
+        role:                  inputs.role,
+        kernel_version:        inputs.kernel_version.clone(),
+        bundle_hash:           String::new(),
+        image_artefact_sha256: image_artefact_sha256_hex,
         build_env: BuildEnv {
             source_date_epoch: inputs.source_date_epoch,
             erofs_version:     inputs.erofs_version.clone(),
@@ -218,6 +227,15 @@ pub fn assemble_manifest(
     let bh = m.recompute_bundle_hash()?;
     m.bundle_hash = hex::encode(bh);
     Ok(m)
+}
+
+/// Stream the file at `path`, return its SHA-256 as lowercase hex.
+/// Convenience over [`raxis_image_manifest::sha256_file_hex`] for the
+/// common builder pattern of "compute the artefact digest after EROFS
+/// assembly, before signing".
+pub fn compute_artefact_digest_hex(path: &Path) -> Result<String, BuildError> {
+    let (hex, _size) = sha256_file_hex(path)?;
+    Ok(hex)
 }
 
 /// Sign the manifest's bundle hash with `key`. Idempotent: re-signing
@@ -237,16 +255,22 @@ pub fn sign_manifest(
 
 /// Convenience wrapper: assemble + sign. Used by the test harness and
 /// by the `raxis-image-builder build` CLI.
+///
+/// `image_artefact_sha256_hex` is the lowercase-hex SHA-256 of the
+/// packed `<role>-<kernel_version>.img` blob; pass a fixture string
+/// in tests that do not produce an .img.
 pub fn build_and_sign(
-    inputs:      &BuildInputs,
-    rootfs_dir:  &Path,
-    signing_key: &SigningKey,
+    inputs:                    &BuildInputs,
+    rootfs_dir:                &Path,
+    image_artefact_sha256_hex: String,
+    signing_key:               &SigningKey,
 ) -> Result<ImageManifest, BuildError> {
     let files = enumerate_rootfs(rootfs_dir)?;
     let mut m = assemble_manifest(
         inputs,
         files,
         hex::encode(fingerprint_signing_key(&signing_key.verifying_key())),
+        image_artefact_sha256_hex,
     )?;
     sign_manifest(&mut m, signing_key)?;
     Ok(m)
@@ -372,8 +396,8 @@ mod tests {
         let key = gen_key();
         let inputs = build_inputs();
 
-        let m1 = build_and_sign(&inputs, &root, &key).unwrap();
-        let m2 = build_and_sign(&inputs, &root, &key).unwrap();
+        let m1 = build_and_sign(&inputs, &root, "1".repeat(64), &key).unwrap();
+        let m2 = build_and_sign(&inputs, &root, "1".repeat(64), &key).unwrap();
 
         assert_eq!(m1.bundle_hash, m2.bundle_hash,
             "bundle_hash must be reproducible for identical rootfs");
@@ -393,11 +417,32 @@ mod tests {
         let key = gen_key();
         let inputs = build_inputs();
 
-        let m1 = build_and_sign(&inputs, &root, &key).unwrap();
+        let m1 = build_and_sign(&inputs, &root, "1".repeat(64), &key).unwrap();
         write_file(&root, "init", b"v2", 0o755);
-        let m2 = build_and_sign(&inputs, &root, &key).unwrap();
+        let m2 = build_and_sign(&inputs, &root, "1".repeat(64), &key).unwrap();
 
         assert_ne!(m1.bundle_hash, m2.bundle_hash);
+    }
+
+    /// Changing the image-artefact digest while keeping the rootfs
+    /// constant flips the bundle hash. Pins that the manifest commits
+    /// to the .img blob, not just the source files.
+    #[test]
+    fn build_changes_bundle_hash_when_image_artefact_sha256_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_owned();
+        write_file(&root, "init", b"v1", 0o755);
+
+        let key = gen_key();
+        let inputs = build_inputs();
+
+        let m1 = build_and_sign(&inputs, &root, "1".repeat(64), &key).unwrap();
+        let m2 = build_and_sign(&inputs, &root, "2".repeat(64), &key).unwrap();
+
+        assert_ne!(m1.bundle_hash, m2.bundle_hash,
+            "bundle_hash must change when image_artefact_sha256 changes");
+        assert_ne!(m1.signature, m2.signature,
+            "signature must change when bundle_hash changes");
     }
 
     /// Manifest produced by the builder verifies against the
@@ -411,9 +456,24 @@ mod tests {
 
         let key = gen_key();
         let vk  = key.verifying_key();
-        let m   = build_and_sign(&build_inputs(), &root, &key).unwrap();
+        let m   = build_and_sign(&build_inputs(), &root, "1".repeat(64), &key).unwrap();
         raxis_image_manifest::verify(&m, &vk)
             .expect("freshly built+signed manifest must verify against the matching VK");
+    }
+
+    /// `compute_artefact_digest_hex` matches the manifest crate's
+    /// streaming SHA-256 — pin the API surface that the CLI driver
+    /// relies on so it cannot drift from `raxis_image_manifest::sha256_file_hex`.
+    #[test]
+    fn compute_artefact_digest_hex_matches_manifest_streaming_sha256() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(b"raxis-image-builder-artefact-test").unwrap();
+        f.flush().unwrap();
+
+        let from_helper = compute_artefact_digest_hex(f.path()).unwrap();
+        let (from_manifest, _) = sha256_file_hex(f.path()).unwrap();
+        assert_eq!(from_helper, from_manifest);
     }
 
     /// Empty rootfs surfaces a typed error rather than producing a
@@ -422,7 +482,7 @@ mod tests {
     fn build_rejects_empty_rootfs() {
         let tmp = tempfile::tempdir().unwrap();
         let key = gen_key();
-        let err = build_and_sign(&build_inputs(), tmp.path(), &key).unwrap_err();
+        let err = build_and_sign(&build_inputs(), tmp.path(), "0".repeat(64), &key).unwrap_err();
         match err {
             BuildError::EmptyRootfs { .. } => {}
             other => panic!("expected EmptyRootfs, got {other:?}"),
