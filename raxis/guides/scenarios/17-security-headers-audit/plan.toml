@@ -1,0 +1,19 @@
+# Scenario 17 — security headers audit (Reviewer only).
+
+[workspace]
+name        = "Security headers audit"
+lane_id     = "secaudit-lane"
+
+[[tasks]]
+task_id            = "audit"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+path_allowlist     = ["audits/"]
+context = """
+  Read server/nginx.conf and produce audits/headers-audit.md. The
+  report should list each well-known security header (CSP,
+  X-Content-Type-Options, X-Frame-Options, Referrer-Policy,
+  Strict-Transport-Security, Permissions-Policy) and mark each as
+  `Present` or `Missing`. Commit and submit a Reject decision if any
+  are Missing.
+"""

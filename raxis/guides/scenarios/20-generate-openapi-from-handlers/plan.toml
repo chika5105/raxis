@@ -1,0 +1,17 @@
+# Scenario 20 — generate openapi.yaml from handlers.
+
+[workspace]
+name        = "Generate OpenAPI"
+lane_id     = "openapi-gen-lane"
+
+[[tasks]]
+task_id            = "generate"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["docs/"]
+context = """
+  Read src/handlers.py (read-only). Extract the route comments and
+  produce docs/openapi.yaml as OpenAPI 3.1 with a path entry per
+  handler. Use the function name (snake_case) as operationId.
+  Commit only docs/openapi.yaml.
+"""

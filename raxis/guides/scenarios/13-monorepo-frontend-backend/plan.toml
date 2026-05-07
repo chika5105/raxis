@@ -1,0 +1,30 @@
+# Scenario 13 — monorepo frontend+backend split.
+
+[workspace]
+name        = "Monorepo split"
+lane_id     = "monorepo-lane"
+description = "Add a /health endpoint on the backend and a status badge on the frontend."
+
+[[tasks]]
+task_id            = "backend"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["backend/"]
+context = """
+  In backend/src/main.rs, add a stub `health()` function that
+  returns the static string "ok". Commit with a clear message.
+"""
+
+[[tasks]]
+task_id            = "frontend"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["frontend/"]
+context = """
+  In frontend/src/index.js, add a function showHealthBadge() that
+  console.logs "🟢 healthy" (use only ASCII characters in the
+  source). Commit.
+"""
+
+[orchestrator]
+cross_cutting_artifacts = []

@@ -1,0 +1,18 @@
+# Scenario 11 — Generate Docs From Source.
+
+[workspace]
+name        = "Generate docs from source"
+lane_id     = "doc-gen-lane"
+description = "Read src/lib.rs and produce docs/api.md."
+
+[[tasks]]
+task_id            = "docgen"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["docs/"]
+context = """
+  Read src/lib.rs (read-only) and write docs/api.md describing each
+  public function with a one-line description and a code example.
+  Commit and submit CompleteTask. Do not modify any file outside
+  docs/.
+"""

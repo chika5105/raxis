@@ -1,0 +1,15 @@
+# Scenario 16 step 1 — wire the feature flag (still off).
+
+[workspace]
+name        = "Wire feature flag (off)"
+lane_id     = "ff-wire-lane"
+
+[[tasks]]
+task_id            = "wire"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  In src/main.rs, parse config/flags.json (read only) and branch on
+  `new_pricing`. If true, print "new", else print "legacy". Commit.
+"""

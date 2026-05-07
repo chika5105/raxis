@@ -1,0 +1,15 @@
+# Scenario 16 step 2 — flip the feature flag to on.
+
+[workspace]
+name        = "Flip flag on"
+lane_id     = "ff-flip-lane"
+
+[[tasks]]
+task_id            = "flip"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["config/"]
+context = """
+  Edit config/flags.json: set `new_pricing` to true. Commit only the
+  flag file; do not modify src.
+"""

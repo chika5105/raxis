@@ -1,0 +1,22 @@
+# Scenario 19 — refactor shared utility.
+
+[workspace]
+name        = "Refactor shared utility"
+lane_id     = "refactor-util-lane"
+
+[[tasks]]
+task_id            = "extract"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  Move the `slugify` function from src/utils.rs into a new file
+  src/strings.rs (module name `strings`). Delete the now-empty
+  utils.rs. Update src/main.rs to import from `strings`. Run
+  `cargo build` to verify; commit on green.
+"""
+
+[[tasks.witnesses]]
+kind = "Mechanical"
+command = ["cargo", "build", "--quiet"]
+exit_code_eq = 0

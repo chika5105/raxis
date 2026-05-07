@@ -1,0 +1,53 @@
+# Scenario 08 — Structured debate (proposal -> critique -> implement).
+
+[workspace]
+name        = "Structured debate"
+lane_id     = "structured-debate-lane"
+description = """
+  designer_a proposes one approach in docs/proposal.md, designer_b
+  critiques it in docs/critique.md, then implementer chooses one and
+  implements it in src/lib.rs writing the final decision to
+  docs/decision.md.
+"""
+
+[[tasks]]
+task_id            = "designer_a"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["docs/"]
+predecessors       = []
+context = """
+  Write docs/proposal.md proposing one of two approaches to a small
+  feature: a function `next_id() -> u64` that produces monotonically
+  increasing IDs. Pick a single approach (e.g., AtomicU64 counter)
+  and argue for it in 2-3 paragraphs. Commit and submit CompleteTask.
+"""
+
+[[tasks]]
+task_id            = "designer_b"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["docs/"]
+predecessors       = ["designer_a"]
+context = """
+  Read docs/proposal.md. In docs/critique.md, evaluate the approach
+  for thread-safety, readability, and testability, and either ratify
+  it or propose a different approach. Then write docs/decision.md
+  with the final chosen design (your one-paragraph verdict). Commit
+  and submit CompleteTask.
+"""
+
+[[tasks]]
+task_id            = "implementer"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/", "docs/"]
+predecessors       = ["designer_b"]
+context = """
+  Read docs/decision.md, then implement the agreed-upon next_id()
+  function in src/lib.rs with a unit test. Commit and submit
+  CompleteTask.
+"""
+
+[orchestrator]
+cross_cutting_artifacts = []
