@@ -1045,6 +1045,7 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "TaskAdmitted", "TaskStateChanged",
     // intent
     "IntentAccepted", "IntentRejected",
+    "IntegrationMergeCompleted",
     // session
     "SessionCreated", "SessionRevoked",
     // delegation
@@ -3243,6 +3244,7 @@ channels   = []
             AuditEventKind::TaskStateChanged { task_id: "x".into(), from_state: "x".into(), to_state: "x".into(), actor: "x".into(), policy_epoch: 0 }.as_str(),
             AuditEventKind::IntentAccepted { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), base_sha: None, head_sha: None, sequence_number: 0, remaining_units: 0 }.as_str(),
             AuditEventKind::IntentRejected { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), error_code: "x".into(), sequence_number: 0 }.as_str(),
+            AuditEventKind::IntegrationMergeCompleted { initiative_id: "x".into(), session_id: "x".into(), commit_sha: "x".into(), previous_sha: "x".into(), operator_assisted: false, escalation_id: None }.as_str(),
             AuditEventKind::SessionCreated { session_id: "x".into(), role: "x".into(), lineage_id: "x".into(), worktree_root: None, initiative_id: None, plan_bundle_sha256: None, policy_epoch: None, session_agent_type: None }.as_str(),
             AuditEventKind::SessionRevoked { session_id: "x".into(), revoked_by: "x".into(), revoked_by_display_name: None }.as_str(),
             AuditEventKind::DelegationGranted { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), expires_at: 0, granted_by: "x".into(), granted_by_display_name: None }.as_str(),

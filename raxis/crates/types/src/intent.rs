@@ -9,7 +9,7 @@
 // for JSON projections (operator UIs, test harnesses); they are NOT transmitted
 // on the wire (bincode standard() encodes positionally).
 
-use crate::{CommitSha, SessionId, TaskId, TaskState};
+use crate::{CommitSha, EscalationId, SessionId, TaskId, TaskState};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -300,6 +300,37 @@ pub struct IntentRequest {
     /// round-trip compatibility.
     #[serde(default)]
     pub critique: Option<String>,
+
+    // ── V2 IntegrationMerge attribution payload (v2-deep-spec.md §Step 30) ──
+
+    /// **V2 IntegrationMerge only.** When `Some(id)`, this merge was
+    /// produced via operator escalation: either Path 1 (operator
+    /// hint guided the LLM's re-attempt) or Path 2 (operator
+    /// committed the resolution by hand against the Orchestrator's
+    /// worktree). The kernel verifies the linked escalation is in
+    /// `Consumed` state under `class = MergeConflict` and belongs
+    /// to the submitting Orchestrator's session before admitting
+    /// the merge (Check 6b in `integration-merge.md §4`).
+    ///
+    /// `None` for every standard (LLM-resolved or conflict-free)
+    /// merge AND for every non-`IntegrationMerge` intent kind.
+    ///
+    /// **Why optional, not a separate intent variant:** the
+    /// admission pipeline (Checks 1–5, 7, 8) is identical for both
+    /// merge paths; the only difference is the additional
+    /// escalation-attribution gate at Check 6b. Modelling
+    /// operator-assisted merges as a separate variant would
+    /// duplicate every other check and tempt the kernel into
+    /// path-specific divergence. INV-05 (audit chain attribution)
+    /// is achievable from the optional field alone.
+    ///
+    /// **Wire encoding note:** see the analogous comment on
+    /// `approved` — `skip_serializing_if` is intentionally absent
+    /// for bincode round-trip compatibility (a skipped Option would
+    /// surface as `UnexpectedEnd { additional: 1 }` on every
+    /// V2-aware planner frame).
+    #[serde(default)]
+    pub resolved_via_escalation: Option<EscalationId>,
 }
 
 /// V2 hard cap on `IntentRequest.critique` byte length
@@ -551,6 +582,7 @@ mod tests {
             approval_token:  None,
             approved:        None,
             critique:        None,
+            resolved_via_escalation: None,
         };
 
         // 1. bincode round-trip on the canonical wire shape.
@@ -597,6 +629,7 @@ mod tests {
             approval_token:  None,
             approved:        Some(false),
             critique:        Some("the auth check is missing".to_owned()),
+            resolved_via_escalation: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: IntentRequest = serde_json::from_str(&s).unwrap();
@@ -614,5 +647,102 @@ mod tests {
         assert_eq!(MAX_CRITIQUE_BYTES, 32 * 1024,
             "MAX_CRITIQUE_BYTES is wire-load-bearing per \
              v2-deep-spec.md §Step 22; bumping requires a spec amend.");
+    }
+
+    /// V2 Step 30: `IntegrationMerge` carries an optional
+    /// `resolved_via_escalation` link. The wire shape MUST round-trip
+    /// through both bincode (canonical IPC) and serde JSON (operator
+    /// projections / audit replay tooling) when the field is `Some`.
+    /// Regression guard: a future serde change that defaults the
+    /// field on encode would silently drop attribution evidence and
+    /// the kernel's Check 6b verification would never see the link.
+    #[test]
+    fn v2_integration_merge_round_trips_resolved_via_escalation() {
+        use crate::TaskId;
+        use crate::id::EscalationId;
+        // Fixed UUID — round-trip identity check below depends on
+        // observing exactly this id on the decoded side.
+        let escalation_id = EscalationId::parse(
+            "4f3a4f3a-4f3a-4f3a-4f3a-4f3a4f3a4f3a"
+        ).expect("fixed UUID v4 fixture parses");
+        let req = IntentRequest {
+            session_token:    "tok".into(),
+            sequence_number:  1,
+            envelope_nonce:   "2".repeat(32),
+            intent_kind:      IntentKind::IntegrationMerge,
+            task_id:          TaskId::parse("merge-1").unwrap(),
+            base_sha:         None,
+            head_sha:         None,
+            submitted_claims: vec![],
+            justification:    None,
+            idempotency_key:  None,
+            approval_token:   None,
+            approved:         None,
+            critique:         None,
+            resolved_via_escalation: Some(escalation_id.clone()),
+        };
+
+        // Canonical IPC wire — bincode standard().
+        let bytes = bincode::serde::encode_to_vec(
+            &req, bincode::config::standard()).expect("bincode encode");
+        let (back, _): (IntentRequest, _) = bincode::serde::decode_from_slice(
+            &bytes, bincode::config::standard()).expect("bincode decode");
+        assert_eq!(back.resolved_via_escalation.as_ref(), Some(&escalation_id),
+            "bincode wire MUST preserve resolved_via_escalation: \
+             without it, Step 30 attribution fails silently");
+
+        // Operator JSON projection — round-trip through serde JSON.
+        let s    = serde_json::to_string(&req).unwrap();
+        let back = serde_json::from_str::<IntentRequest>(&s).unwrap();
+        assert_eq!(back.resolved_via_escalation.as_ref(), Some(&escalation_id));
+
+        // The field appears literally (not as a magic-numeric variant)
+        // in the JSON projection so audit-replay UIs can match on key
+        // name without depending on serde's representation rules.
+        let v = serde_json::to_value(&req).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("resolved_via_escalation"),
+            "JSON projection MUST surface `resolved_via_escalation` for \
+             operator UIs that scan the wire frame");
+    }
+
+    /// V2 Step 30: when the field is `None` (the standard merge path),
+    /// bincode round-trip MUST still succeed and the JSON projection
+    /// MUST carry a literal `null` (not absence-of-key) so JSON-mode
+    /// consumers can match on the same key in both branches.
+    #[test]
+    fn v2_integration_merge_round_trips_with_no_escalation() {
+        use uuid::Uuid;
+        use crate::TaskId;
+
+        let req = IntentRequest {
+            session_token:    "tok".into(),
+            sequence_number:  1,
+            envelope_nonce:   "3".repeat(32),
+            intent_kind:      IntentKind::IntegrationMerge,
+            task_id:          TaskId::parse("merge-1").unwrap(),
+            base_sha:         None,
+            head_sha:         None,
+            submitted_claims: vec![],
+            justification:    None,
+            idempotency_key:  Some(Uuid::nil()),
+            approval_token:   None,
+            approved:         None,
+            critique:         None,
+            resolved_via_escalation: None,
+        };
+        let bytes = bincode::serde::encode_to_vec(
+            &req, bincode::config::standard()).expect("bincode encode");
+        let (back, _): (IntentRequest, _) = bincode::serde::decode_from_slice(
+            &bytes, bincode::config::standard()).expect("bincode decode");
+        assert!(back.resolved_via_escalation.is_none());
+
+        let v = serde_json::to_value(&req).unwrap();
+        let obj = v.as_object().unwrap();
+        assert!(obj.contains_key("resolved_via_escalation"),
+            "JSON projection MUST surface `resolved_via_escalation` even \
+             when None — operator UIs key off the field name, not serde \
+             elision");
+        assert!(obj.get("resolved_via_escalation").unwrap().is_null());
     }
 }

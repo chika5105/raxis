@@ -301,6 +301,53 @@ pub enum AuditEventKind {
         sequence_number: u64,
     },
 
+    /// **V2 (Step 30 + integration-merge.md §7).** Emitted when the
+    /// kernel admits an `IntentKind::IntegrationMerge` and updates
+    /// `initiatives.current_sha` to `commit_sha` (Phase 1 of the
+    /// transactional boundary, before the host-side master
+    /// fast-forward).
+    ///
+    /// **Attribution semantics (Step 30).** When
+    /// `operator_assisted = true`, the merge SHA was authored by
+    /// the human operator under the linked `escalation_id`
+    /// (Path 2: manual host-side `git commit`); the RAXIS audit
+    /// chain attributes the **structural request** to the
+    /// Orchestrator session and the **physical authorship** to the
+    /// operator escalation. Together with the `EscalationConsumed`
+    /// event that immediately precedes this one, the chain is
+    /// self-contained for INV-05 forensic reproducibility — an
+    /// auditor never needs to correlate against `git log --author`.
+    ///
+    /// `operator_assisted = false` (the default) covers both
+    /// (a) conflict-free merges and
+    /// (b) Path 1 LLM-guided resolutions (the Orchestrator
+    ///     re-attempts the merge using an operator hint and produces
+    ///     a fresh SHA; the resolution flow is structural to the
+    ///     Orchestrator, not the operator, so no attribution
+    ///     adjustment is warranted).
+    ///
+    /// Forward compat: `operator_assisted` and `escalation_id` are
+    /// `default = false` / `default = None` on deserialisation so
+    /// pre-Step-30 segments parse cleanly.
+    IntegrationMergeCompleted {
+        initiative_id: String,
+        session_id: String,
+        commit_sha: String,
+        previous_sha: String,
+        /// Step 30 attribution: true ⇔ this merge was admitted with
+        /// `IntentRequest.resolved_via_escalation = Some(_)` and the
+        /// kernel verified Check 6b (`escalations.status = 'Consumed'`,
+        /// `class = 'MergeConflict'`, `session_id =` submitting
+        /// session).
+        #[serde(default)]
+        operator_assisted: bool,
+        /// Step 30 attribution: the consumed escalation that produced
+        /// this commit (Path 2 manual operator commit). `None` when
+        /// `operator_assisted = false`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        escalation_id: Option<String>,
+    },
+
     // --- Session management ---
     /// Emitted when the kernel creates a new planner session row.
     ///
@@ -883,6 +930,7 @@ impl AuditEventKind {
             Self::TaskStateChanged { .. } => "TaskStateChanged",
             Self::IntentAccepted { .. } => "IntentAccepted",
             Self::IntentRejected { .. } => "IntentRejected",
+            Self::IntegrationMergeCompleted { .. } => "IntegrationMergeCompleted",
             Self::SessionCreated { .. } => "SessionCreated",
             Self::SessionRevoked { .. } => "SessionRevoked",
             Self::DelegationGranted { .. } => "DelegationGranted",
@@ -1459,5 +1507,106 @@ mod path_read_accessed_tests {
         assert!(!obj.contains_key("session_agent_type"));
         assert_eq!(obj["kind"], serde_json::json!("SessionCreated"));
         assert_eq!(obj["session_id"], serde_json::json!("s-v1"));
+    }
+
+    /// V2 Step 30: `IntegrationMergeCompleted` round-trips through
+    /// JSON when the merge was operator-assisted (escalation_id +
+    /// operator_assisted = true present on the wire).
+    #[test]
+    fn integration_merge_completed_operator_assisted_round_trips_through_json() {
+        let kind = AuditEventKind::IntegrationMergeCompleted {
+            initiative_id:     "init-7".into(),
+            session_id:        "sess-orch-1".into(),
+            commit_sha:        "abc1234".into(),
+            previous_sha:      "f3d21a09".into(),
+            operator_assisted: true,
+            escalation_id:     Some("esc-42".into()),
+        };
+        let s    = serde_json::to_string(&kind).unwrap();
+        let back = serde_json::from_str::<AuditEventKind>(&s).unwrap();
+        match back {
+            AuditEventKind::IntegrationMergeCompleted {
+                initiative_id, session_id, commit_sha, previous_sha,
+                operator_assisted, escalation_id,
+            } => {
+                assert_eq!(initiative_id,     "init-7");
+                assert_eq!(session_id,        "sess-orch-1");
+                assert_eq!(commit_sha,        "abc1234");
+                assert_eq!(previous_sha,      "f3d21a09");
+                assert!(operator_assisted,
+                    "operator_assisted must round-trip as true — \
+                     dropping it would erase Step 30 attribution");
+                assert_eq!(escalation_id.as_deref(), Some("esc-42"));
+            }
+            other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
+        }
+    }
+
+    /// V2 Step 30: a standard (non-operator-assisted) merge omits
+    /// `escalation_id` from the wire and serialises
+    /// `operator_assisted: false`. Forward-compat: a legacy reader
+    /// that has not learned the new variant fields still parses the
+    /// shape via `#[serde(default)]`.
+    #[test]
+    fn integration_merge_completed_standard_merge_round_trips_through_json() {
+        let kind = AuditEventKind::IntegrationMergeCompleted {
+            initiative_id:     "init-7".into(),
+            session_id:        "sess-orch-1".into(),
+            commit_sha:        "def5678".into(),
+            previous_sha:      "f3d21a09".into(),
+            operator_assisted: false,
+            escalation_id:     None,
+        };
+        let v = serde_json::to_value(&kind).unwrap();
+        let obj = v.as_object().unwrap();
+        // operator_assisted is a primitive — serde never elides it
+        // even when false; that is the desired invariant (the field
+        // is the discriminator for forensic reconstruction).
+        assert_eq!(obj["operator_assisted"], serde_json::json!(false));
+        // escalation_id is Option-typed with skip-on-None.
+        assert!(!obj.contains_key("escalation_id"),
+            "escalation_id MUST be elided when None so legacy V1 audit \
+             readers can parse the line without learning the new field");
+        assert_eq!(obj["kind"], serde_json::json!("IntegrationMergeCompleted"));
+
+        // Decode round-trip preserves the None on escalation_id.
+        let back = serde_json::from_value::<AuditEventKind>(v).unwrap();
+        match back {
+            AuditEventKind::IntegrationMergeCompleted {
+                operator_assisted, escalation_id, ..
+            } => {
+                assert!(!operator_assisted);
+                assert!(escalation_id.is_none());
+            }
+            other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
+        }
+    }
+
+    /// Forward-compat: an older audit segment that emitted
+    /// `IntegrationMergeCompleted` without the Step 30 fields MUST
+    /// still deserialise — `operator_assisted` defaults to `false`,
+    /// `escalation_id` defaults to `None`. This pins the
+    /// `#[serde(default)]` contract.
+    #[test]
+    fn legacy_integration_merge_completed_without_step30_fields_still_deserializes() {
+        let legacy = serde_json::json!({
+            "kind":          "IntegrationMergeCompleted",
+            "initiative_id": "init-old",
+            "session_id":    "sess-old",
+            "commit_sha":    "ddddddd",
+            "previous_sha":  "ccccccc",
+        });
+        let parsed: AuditEventKind = serde_json::from_value(legacy).unwrap();
+        match parsed {
+            AuditEventKind::IntegrationMergeCompleted {
+                operator_assisted, escalation_id, ..
+            } => {
+                assert!(!operator_assisted,
+                    "missing operator_assisted defaults to false");
+                assert!(escalation_id.is_none(),
+                    "missing escalation_id defaults to None");
+            }
+            other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
+        }
     }
 }

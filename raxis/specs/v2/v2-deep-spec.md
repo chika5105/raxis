@@ -1953,6 +1953,75 @@ admission time. The operator cannot accidentally merge forbidden paths — the s
 to operator-produced commits as to LLM-produced commits. INV-03 is enforced regardless of
 who authored the commit.
 
+**Implementation reference (V2 init).** The attribution plumbing for Step 30 lands across
+four crates:
+
+- **`raxis-types`** (`crates/types/src/intent.rs`) — `IntentRequest` gains a new optional
+  field `resolved_via_escalation: Option<EscalationId>`. Wire-format note: bincode
+  `config::standard()` is the canonical IPC shape, so the field is NOT marked
+  `skip_serializing_if`; the JSON projection elides `null` naturally. Forward-compat is
+  preserved for V1 senders that omit the field (defaults to `None`). Tests pin both the
+  bincode round-trip and the JSON projection (`v2_integration_merge_round_trips_*`).
+- **`raxis-types`** (`crates/types/src/escalation.rs`) — `EscalationClass` gains
+  `MergeConflict`, and `RequestedEscalationScope` gains
+  `MergeConflict { conflicts: Vec<String> }`. Two hard caps live alongside —
+  `MAX_MERGE_CONFLICT_PATHS = 64` and `MAX_MERGE_CONFLICT_PATH_LEN = 1024 bytes` — to bound
+  the audit-chain footprint of a single conflict escalation. `from_sql_str` /
+  `as_sql_str` round-trip is pinned by a dedicated test.
+- **`raxis-audit-tools`** (`crates/audit/src/event.rs`) — `AuditEventKind` gains
+  `IntegrationMergeCompleted { initiative_id, session_id, commit_sha, previous_sha,
+  operator_assisted, escalation_id }`. `operator_assisted` is a primitive `bool` (always
+  on the wire); `escalation_id` is `Option<String>` with `skip_serializing_if =
+  "Option::is_none"` so legacy V1 audit readers parse the standard-merge shape unchanged.
+  `KNOWN_AUDIT_EVENT_KINDS` in `raxis-policy/src/bundle.rs` is updated and the cross-crate
+  drift-guard test exercises the new entry. Round-trip + forward-compat tests pin every
+  field including `operator_assisted: true` with `escalation_id: Some(_)`.
+- **`raxis-kernel`** (`kernel/src/handlers/integration_merge_attribution.rs`) — the
+  Check 6b verifier `verify_merge_conflict_resolution(escalation_id, submitting_session,
+  store)` performs the three predicates spec-described as
+  `state = 'Consumed' AND class = 'MergeConflict' AND session_id = current`. Failure
+  returns a structured `EscalationVerificationError` with a stable diagnostic code
+  (`FAIL_ESCALATION_NOT_FOUND` / `FAIL_ESCALATION_NOT_CONSUMED` /
+  `FAIL_ESCALATION_CLASS_MISMATCH` / `FAIL_ESCALATION_SESSION_MISMATCH`); per INV-08 the
+  wire surface to the planner stays a single `FAIL_POLICY_VIOLATION`. The verifier is
+  invoked from `handlers::intent::run_phase_a` immediately after the dispatch matrix and
+  intent-kind branching, before any worktree / SHA / path-allowlist work — so a forged
+  attribution rejects with the cheapest possible failure path.
+- **`raxis-kernel`** (`kernel/src/handlers/intent.rs`) — `run_phase_c` emits the
+  `IntegrationMergeCompleted` audit event post-commit (kernel-store.md §2.5.2 ordering)
+  with `operator_assisted` derived from the verified `resolved_via_escalation` carried
+  through `PreGateState`. Best-effort emission per audit-chain-after-commit: a failed
+  emit logs at error severity but does not roll back the admitted intent (the
+  reconciler closes the gap on next boot).
+
+**Best-judgment decisions made during s30 implementation (spec amendments).** Two ambiguities
+were resolved during implementation; both decisions are recorded here so the spec stays in
+lock-step with the kernel binary:
+
+1. **`previous_sha` field provenance.** The §7 audit event lists `previous_sha` as
+   "base_sha before this merge". Until the Step 8 follow-up wires the host-side master
+   fast-forward (integration-merge.md §11 Phase 2/3) into `run_phase_c`, the kernel reads
+   `previous_sha` from the request's `base_sha` rather than `initiatives.current_sha`.
+   *Pros:* the field is meaningful today (the Orchestrator's claimed parent matches the
+   committed parent — if not, Check 3 already rejected); auditors get a non-empty value
+   in the chain. *Cons:* a future Phase 2/3 wiring must repoint the field at the
+   row-pre-update value to preserve semantic identity across initiatives that interleave.
+   The field's semantics are unchanged (still "base before this merge"); only the data
+   source moves. Decision: ship the request-side value now; mark the swap as a Step 8
+   follow-up.
+2. **`MergeConflict` scope payload shape.** The spec refers to "conflict_description" /
+   "context" prose; the Rust enum carries a structured `Vec<String>` of conflict paths
+   (`MergeConflict { conflicts }`). *Pros:* operator UIs can render the list as bullets
+   rather than parsing a free-form string; bincode encodes a `Vec<String>` in
+   well-defined bytes; `MAX_MERGE_CONFLICT_PATHS` × `MAX_MERGE_CONFLICT_PATH_LEN` caps
+   the audit-chain footprint. *Cons:* the Orchestrator NNSP (kernel-pinned) must be
+   updated to populate `conflicts` rather than a free-form context string; the prompt
+   text is generic enough that no NNSP change is needed today (the prompt says
+   "<list of conflicting files>" already, which a structured list satisfies). Decision:
+   ship the structured shape; defer wire-shape validation of the field caps until the
+   `EscalationRequest` admission handler grows them as part of the V2 escalation
+   admission rewrite (currently a follow-up).
+
 ---
 
 *Part 6 complete. Next: Part 7 — claw-code Integration & the `raxis-planner` Binary.*

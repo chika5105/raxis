@@ -134,6 +134,13 @@ struct PreGateState {
     base_sha_raw: String,
     touched_paths: Vec<PathBuf>,
     estimated_cost: u64,
+    /// V2 (Step 30) attribution carry-through. Phase A captures the
+    /// optional escalation link from the incoming `IntentRequest`
+    /// (after Check 6b verifies it) so Phase C can stamp the
+    /// `IntegrationMergeCompleted` audit event with the correct
+    /// `operator_assisted` / `escalation_id` fields without
+    /// re-reading the request struct.
+    resolved_via_escalation: Option<raxis_types::EscalationId>,
 }
 
 /// Outcome of Phase A. Either we have a final response (early dispatch
@@ -483,6 +490,45 @@ fn run_phase_a(
         }
     }
 
+    // ── Step 3b (V2 Step 30): IntegrationMerge attribution gate ───────────
+    //
+    // When the Orchestrator submits `IntegrationMerge` with
+    // `resolved_via_escalation = Some(id)`, verify the linked
+    // escalation row matches the spec's three predicates:
+    //   1. `class = MergeConflict`,
+    //   2. `status = Consumed` (operator has executed
+    //      `raxis escalate resolve`), and
+    //   3. `session_id = submitting Orchestrator's session`.
+    //
+    // Failure rejects the merge with `FAIL_POLICY_VIOLATION` (INV-08
+    // — coarse code on the wire); the structured rejection reason is
+    // recorded internally on the kernel-side eprintln below for
+    // forensic analysis. Without this gate an Orchestrator could
+    // forge operator attribution by quoting an arbitrary escalation
+    // identifier from a sibling initiative.
+    //
+    // Standard merges (no operator-assistance) skip this entire
+    // block — `resolved_via_escalation = None`.
+    if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
+        if let Some(esc_id) = req.resolved_via_escalation.as_ref() {
+            if let Err(e) = crate::handlers::integration_merge_attribution
+                ::verify_merge_conflict_resolution(esc_id, &session_id, store)
+            {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"IntegrationMergeAttributionRejected\",\
+                     \"task_id\":\"{}\",\"session_id\":\"{}\",\"escalation_id\":\"{}\",\
+                     \"diagnostic\":\"{}\"}}",
+                    req.task_id.as_str(),
+                    session_id.as_str(),
+                    esc_id.as_str(),
+                    e.diagnostic_code(),
+                );
+                return PreGateOutcome::Reject(
+                    PlannerErrorCode::FailPolicyViolation, task_state);
+            }
+        }
+    }
+
     // ── Step 4: Validate worktree_root against policy ─────────────────────
     let worktree_root = session.worktree_root.as_deref().unwrap_or("");
     if !policy.worktree_root_allowed(worktree_root) {
@@ -616,6 +662,7 @@ fn run_phase_a(
         base_sha_raw,
         touched_paths,
         estimated_cost,
+        resolved_via_escalation: req.resolved_via_escalation.clone(),
     })
 }
 
@@ -734,6 +781,46 @@ fn run_phase_c(
         pre_state.head_sha_raw,
         pending_gates.len()
     );
+
+    // V2 Step 30 + integration-merge.md §7: emit a typed
+    // `IntegrationMergeCompleted` audit record carrying the Step 30
+    // attribution fields. Best-effort post-commit per
+    // kernel-store.md §2.5.2: a failed audit emit logs and proceeds
+    // (the reconciler closes the gap on next boot).
+    //
+    // Note: `previous_sha` is set to the request's `base_sha` rather
+    // than the row-level `initiatives.current_sha` because the
+    // host-side master-fast-forward (integration-merge.md §11
+    // Phase 2/3) is not yet wired into the admission path; the
+    // Orchestrator's claimed base is the only ancestor visible at
+    // this point in the pipeline. When the Step 8 follow-up wires
+    // Phase 2/3 the field becomes the row-pre-update value.
+    if matches!(intent_kind, IntentKind::IntegrationMerge) {
+        let initiative_id_owned = pre_state.task.initiative_id.clone();
+        let (operator_assisted, escalation_id) =
+            match pre_state.resolved_via_escalation.as_ref() {
+                Some(id) => (true,  Some(id.as_str().to_owned())),
+                None     => (false, None),
+            };
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted {
+                initiative_id: initiative_id_owned.clone(),
+                session_id:    session_id_str.clone(),
+                commit_sha:    pre_state.head_sha_raw.clone(),
+                previous_sha:  pre_state.base_sha_raw.clone(),
+                operator_assisted,
+                escalation_id,
+            },
+            Some(session_id_str.as_str()),
+            Some(task_id_owned.as_str()),
+            Some(initiative_id_owned.as_str()),
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"IntegrationMergeCompleted\",\
+                 \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+            );
+        }
+    }
 
     let remaining = lane_budget_snapshot(&pre_state.task.lane_id, policy, store);
     let final_task_state = if !pending_gates.is_empty() {
@@ -1994,6 +2081,7 @@ mod tests {
             approval_token:  None,
             approved,
             critique:        critique.map(str::to_owned),
+            resolved_via_escalation: None,
         }
     }
 

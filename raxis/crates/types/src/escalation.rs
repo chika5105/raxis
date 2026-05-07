@@ -34,6 +34,20 @@ pub enum EscalationClass {
     /// A quality gate cannot be satisfied for a justifiable reason;
     /// an ad-hoc bypass is needed. Distinct from pre-authorised override_rules.
     QualityGateException,
+    /// **V2 (Step 30).** Orchestrator-only. The Orchestrator has
+    /// encountered a non-trivial git merge conflict during an
+    /// integration wave that it cannot resolve via its in-VM
+    /// `bash` / `edit_file` / `git` tools (criteria T1–T4 in the
+    /// kernel-pinned NNSP). The Orchestrator submits this class
+    /// after running `git merge --abort`, then waits for
+    /// `KernelPush::EscalationResolved` before re-attempting the
+    /// merge or, in the operator-manual-commit path
+    /// (v2-deep-spec.md §Step 30 Path 2), re-submitting
+    /// `IntegrationMerge { resolved_via_escalation: Some(id) }`
+    /// with the operator-authored commit SHA.
+    ///
+    /// `requested_scope` discriminant: [`RequestedEscalationScope::MergeConflict`].
+    MergeConflict,
 }
 
 impl EscalationClass {
@@ -43,6 +57,7 @@ impl EscalationClass {
             Self::DelegationRenewal => "DelegationRenewal",
             Self::BudgetException => "BudgetException",
             Self::QualityGateException => "QualityGateException",
+            Self::MergeConflict => "MergeConflict",
         }
     }
 
@@ -52,6 +67,7 @@ impl EscalationClass {
             "DelegationRenewal" => Some(Self::DelegationRenewal),
             "BudgetException" => Some(Self::BudgetException),
             "QualityGateException" => Some(Self::QualityGateException),
+            "MergeConflict" => Some(Self::MergeConflict),
             _ => None,
         }
     }
@@ -86,7 +102,41 @@ pub enum RequestedEscalationScope {
         /// Must equal the outer task_id in EscalationRequest.
         task_id: TaskId,
     },
+    /// **V2 (Step 30).** Orchestrator-submitted scope for an
+    /// unresolvable merge conflict. The `conflicts` list carries
+    /// repository-relative paths whose merge could not be resolved
+    /// in-VM by the Orchestrator's NNSP-prescribed triviality
+    /// criteria (T1–T4). The list is informational for the
+    /// operator UI; the kernel does NOT use it as authority — the
+    /// authority decision is operator-manual via
+    /// `raxis escalate resolve`, and the resulting commit (in the
+    /// operator-manual-commit path) is gated at IntegrationMerge
+    /// admission by Check 5 (path-allowlist) and Check 6b
+    /// (escalation status / class / session) regardless of which
+    /// paths the Orchestrator originally listed here.
+    ///
+    /// Bounded at [`MAX_MERGE_CONFLICT_PATHS`] entries × 1 KiB each
+    /// to keep `requested_scope_json` writable inside a single
+    /// SQLite row without producing pathological audit chain bloat.
+    MergeConflict {
+        conflicts: Vec<String>,
+    },
 }
+
+/// V2 (Step 30) hard cap on `RequestedEscalationScope::MergeConflict`
+/// `conflicts` length. Real-world merge waves rarely produce more
+/// than a handful of unresolvable paths; capping prevents an
+/// adversarial Orchestrator from flooding the operator UI or audit
+/// chain with millions of fake conflict paths. Enforced at
+/// admission of `EscalationRequest`.
+pub const MAX_MERGE_CONFLICT_PATHS: usize = 64;
+
+/// V2 (Step 30) hard cap on the byte length of any single conflict
+/// path inside [`RequestedEscalationScope::MergeConflict::conflicts`].
+/// 1 KiB is well above the longest path any sensible repository
+/// hosts and prevents bypassing [`MAX_MERGE_CONFLICT_PATHS`] via
+/// pathological single-entry payloads.
+pub const MAX_MERGE_CONFLICT_PATH_LEN: usize = 1024;
 
 impl RequestedEscalationScope {
     /// The class discriminant for this scope variant.
@@ -96,6 +146,7 @@ impl RequestedEscalationScope {
             Self::DelegationRenewal { .. } => EscalationClass::DelegationRenewal,
             Self::BudgetException { .. } => EscalationClass::BudgetException,
             Self::QualityGateException { .. } => EscalationClass::QualityGateException,
+            Self::MergeConflict { .. } => EscalationClass::MergeConflict,
         }
     }
 }
@@ -256,5 +307,83 @@ impl EscalationStatus {
             "Consumed" => Some(Self::Consumed),
             _ => None,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// V2 Step 30: `MergeConflict` joins the four V1 escalation classes.
+    /// The SQL string round-trip is wire-load-bearing (the
+    /// `escalations.class` column is a free TEXT column, but the
+    /// `from_sql_str` parser is the only legal admission path back
+    /// into a typed enum).
+    #[test]
+    fn merge_conflict_class_round_trips_through_sql_string() {
+        for class in [
+            EscalationClass::CapabilityUpgrade,
+            EscalationClass::DelegationRenewal,
+            EscalationClass::BudgetException,
+            EscalationClass::QualityGateException,
+            EscalationClass::MergeConflict,
+        ] {
+            let s = class.as_sql_str();
+            assert_eq!(
+                EscalationClass::from_sql_str(s),
+                Some(class),
+                "{class:?} must round-trip through its as_sql_str / from_sql_str pair",
+            );
+        }
+        // Negative case: the parser is closed.
+        assert_eq!(EscalationClass::from_sql_str("NotARealClass"), None);
+    }
+
+    /// `RequestedEscalationScope::MergeConflict` discriminant must
+    /// project to `EscalationClass::MergeConflict` in every code
+    /// path that derives the outer `class` from the scope (the
+    /// existing scope variants share this guarantee — Step 30 just
+    /// extends it).
+    #[test]
+    fn merge_conflict_scope_projects_to_merge_conflict_class() {
+        let scope = RequestedEscalationScope::MergeConflict {
+            conflicts: vec!["src/a.rs".into(), "src/b.rs".into()],
+        };
+        assert_eq!(scope.class(), EscalationClass::MergeConflict);
+    }
+
+    /// `requested_scope_json` is the on-disk projection of the scope
+    /// enum; we round-trip a populated `MergeConflict` through serde
+    /// to lock in the wire shape that operator UIs and audit-replay
+    /// tools will consume. Bincode is the canonical IPC wire; serde
+    /// JSON is what hits `requested_scope_json`.
+    #[test]
+    fn merge_conflict_scope_round_trips_through_serde_json() {
+        let scope = RequestedEscalationScope::MergeConflict {
+            conflicts: vec!["src/a.rs".into(), "src/b.rs".into()],
+        };
+        let s    = serde_json::to_string(&scope).expect("serde encode");
+        let back = serde_json::from_str::<RequestedEscalationScope>(&s)
+            .expect("serde decode");
+        match back {
+            RequestedEscalationScope::MergeConflict { conflicts } => {
+                assert_eq!(conflicts, vec!["src/a.rs", "src/b.rs"]);
+            }
+            other => panic!("unexpected scope variant after round-trip: {other:?}"),
+        }
+    }
+
+    /// Caps on `MergeConflict.conflicts` are wire-load-bearing: the
+    /// kernel admission path enforces them before persisting the
+    /// scope, and changing them would silently widen the audit
+    /// chain budget. Pin the values so a future bump is visible.
+    #[test]
+    fn merge_conflict_caps_are_pinned() {
+        assert_eq!(MAX_MERGE_CONFLICT_PATHS,    64);
+        assert_eq!(MAX_MERGE_CONFLICT_PATH_LEN, 1024);
     }
 }

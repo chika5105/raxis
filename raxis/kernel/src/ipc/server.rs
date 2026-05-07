@@ -1225,6 +1225,7 @@ mod planner_dispatch_log_tests {
             approval_token:   None,
             approved:         None,
             critique:         None,
+            resolved_via_escalation: None,
         }
     }
 
