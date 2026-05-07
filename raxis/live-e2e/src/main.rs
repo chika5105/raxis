@@ -21,15 +21,28 @@
 //!     body parses as JSON with a non-empty `content` field.
 //!
 //!   * `postgres-proxy` — start the real `PostgresProxy` from
-//!     `crates/credential-proxy-postgres/`, drive a real `tokio-postgres`
-//!     client through it, and verify the handshake reaches
-//!     `ReadyForQuery`. (Upstream forwarding is deferred per spec; the
-//!     handshake-tier integration is what the MVP guarantees.)
+//!     `crates/credential-proxy-postgres/`, drive a real
+//!     Postgres-protocol client through it, and verify the handshake
+//!     reaches `ReadyForQuery`. (Upstream forwarding is deferred per
+//!     spec; the handshake-tier integration is what the MVP guarantees.)
+//!
+//!   * `postgres-proxy-restrictions` — same proxy as above bound with
+//!     `allow_only_select = true`, asserting that INSERT / UPDATE /
+//!     DELETE are rejected with sqlstate `42501` and that
+//!     `queries_blocked` increments while the session stays alive.
+//!     The deny-path twin of `postgres-proxy`.
 //!
 //!   * `http-proxy-bearer` — start the real `HttpProxy` from
 //!     `crates/credential-proxy-http/`, target `https://httpbin.org/`,
-//!     and verify a `GET /headers` round-trip carries the injected
+//!     and verify a `GET /anything` round-trip carries the injected
 //!     Bearer token to the real upstream.
+//!
+//!   * `http-proxy-restrictions` — same proxy as above bound with
+//!     per-task `allowed_methods` + `allowed_path_prefixes` clauses,
+//!     asserting that requests outside the policy are rejected at the
+//!     proxy with a 4xx, *never* reach upstream, and *never* trigger
+//!     a `CredentialBackend::resolve` call. The deny-path twin of
+//!     `http-proxy-bearer`.
 //!
 //!   * `all` — run every slice in order; any slice failure aborts
 //!     with non-zero exit.
@@ -57,7 +70,9 @@ mod env_file;
 mod slice_egress_enforcement;
 mod slice_gateway_anthropic;
 mod slice_http_proxy_bearer;
+mod slice_http_proxy_restrictions;
 mod slice_postgres_proxy;
+mod slice_postgres_proxy_restrictions;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -84,10 +99,21 @@ enum Slice {
     /// Egress allowlist enforcement: real Anthropic call permitted,
     /// real `httpbin.org` call denied with `DomainNotAllowed`.
     EgressEnforcement,
-    /// Real `PostgresProxy` + real `tokio-postgres` client (handshake).
+    /// Real `PostgresProxy` + real Postgres-protocol client (allow-path
+    /// handshake + simple query).
     PostgresProxy,
-    /// Real `HttpProxy` + real `https://httpbin.org/`.
+    /// Real `PostgresProxy` with `allow_only_select = true` enforcing
+    /// DML denial (sqlstate `42501`) for INSERT / UPDATE / DELETE while
+    /// keeping SELECT and the session alive.
+    PostgresProxyRestrictions,
+    /// Real `HttpProxy` + real `https://httpbin.org/` — bearer
+    /// injection on the allow path.
     HttpProxyBearer,
+    /// Real `HttpProxy` with `allowed_methods` + `allowed_path_prefixes`
+    /// enforcing per-restriction denials against `https://httpbin.org/`,
+    /// asserting that denied requests never reach upstream and never
+    /// resolve the credential.
+    HttpProxyRestrictions,
     /// Run every slice in order.
     All,
 }
@@ -142,10 +168,12 @@ fn default_env_file_path() -> PathBuf {
 
 async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
     match slice {
-        Slice::GatewayAnthropic   => slice_gateway_anthropic::run(env).await,
-        Slice::EgressEnforcement  => slice_egress_enforcement::run(env).await,
-        Slice::PostgresProxy      => slice_postgres_proxy::run().await,
-        Slice::HttpProxyBearer    => slice_http_proxy_bearer::run(env).await,
+        Slice::GatewayAnthropic           => slice_gateway_anthropic::run(env).await,
+        Slice::EgressEnforcement          => slice_egress_enforcement::run(env).await,
+        Slice::PostgresProxy              => slice_postgres_proxy::run().await,
+        Slice::PostgresProxyRestrictions  => slice_postgres_proxy_restrictions::run().await,
+        Slice::HttpProxyBearer            => slice_http_proxy_bearer::run(env).await,
+        Slice::HttpProxyRestrictions      => slice_http_proxy_restrictions::run(env).await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
@@ -153,8 +181,12 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice egress-enforcement")?;
             slice_postgres_proxy::run().await
                 .context("slice postgres-proxy")?;
+            slice_postgres_proxy_restrictions::run().await
+                .context("slice postgres-proxy-restrictions")?;
             slice_http_proxy_bearer::run(env).await
                 .context("slice http-proxy-bearer")?;
+            slice_http_proxy_restrictions::run(env).await
+                .context("slice http-proxy-restrictions")?;
             Ok(())
         }
     }
