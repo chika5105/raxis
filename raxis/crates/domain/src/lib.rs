@@ -454,6 +454,76 @@ pub trait DomainAdapter: Send + Sync + 'static {
         ctx: AdmissionContext<'_>,
     ) -> Result<TouchedResources, DomainError>;
 
+    /// Granular admission hook #1 — is `parent_state_ref` a valid
+    /// ancestor of `target_state_ref`? The kernel's IntegrationMerge
+    /// gate calls this first so it can report
+    /// `FailInvalidDiff` when ancestry fails.
+    ///
+    /// SE: `git merge-base --is-ancestor parent target`. Trading:
+    /// portfolio reachability check. Healthcare: bundle-version
+    /// chain check.
+    async fn is_ancestor(
+        &self,
+        parent_state_ref: &str,
+        target_state_ref: &str,
+        workspace_root:   &std::path::Path,
+    ) -> Result<bool, DomainError>;
+
+    /// Granular admission hook #2 — verify there are no
+    /// "implementation-domain merge events" between
+    /// `parent_state_ref` and `target_state_ref`. Reported as
+    /// `FailInvalidCommitTopology` when it fails.
+    ///
+    /// SE: `git rev-list --min-parents=2 --count parent..target`
+    /// (must be 0). Trading: no foreign-order mutations between the
+    /// two snapshots. Healthcare: no out-of-band patient-record
+    /// edits.
+    ///
+    /// Domains that have no notion of "merge commits in range" return
+    /// `Ok(())` unconditionally.
+    async fn topology_check(
+        &self,
+        parent_state_ref: &str,
+        target_state_ref: &str,
+        workspace_root:   &std::path::Path,
+    ) -> Result<(), DomainError>;
+
+    /// Granular admission hook #3 — compute the touched-set between
+    /// the two refs. Reported as `FailInvalidDiff` when it fails.
+    ///
+    /// MUST be deterministic and lexicographically sorted by URI.
+    async fn compute_touched_paths(
+        &self,
+        parent_state_ref: &str,
+        target_state_ref: &str,
+        workspace_root:   &std::path::Path,
+    ) -> Result<TouchedResources, DomainError>;
+
+    /// Convenience method that runs the three granular hooks in
+    /// sequence and collapses their per-step errors into a single
+    /// `PreconditionFailed`. Default implementation delegates to
+    /// `is_ancestor` → `topology_check` → `compute_touched_paths`.
+    /// Adapters with cheaper combined-paths (e.g., a single SQL
+    /// query that fuses the three) override this method.
+    async fn verify_state_advance(
+        &self,
+        parent_state_ref: &str,
+        target_state_ref: &str,
+        workspace_root:   &std::path::Path,
+    ) -> Result<TouchedResources, DomainError> {
+        match self
+            .is_ancestor(parent_state_ref, target_state_ref, workspace_root)
+            .await?
+        {
+            true => {}
+            false => return Err(DomainError::PreconditionFailed(format!(
+                "{parent_state_ref} is not an ancestor of {target_state_ref}"
+            ))),
+        }
+        self.topology_check(parent_state_ref, target_state_ref, workspace_root).await?;
+        self.compute_touched_paths(parent_state_ref, target_state_ref, workspace_root).await
+    }
+
     /// Stable, sorted, deduplicated list of escalation class names
     /// the kernel's escalation FSM should accept for this domain.
     /// SE: `["protected_path_merge", "review_loop_exceeded", …]`.

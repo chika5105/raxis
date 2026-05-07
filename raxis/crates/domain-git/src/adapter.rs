@@ -342,6 +342,48 @@ impl DomainAdapter for GitAdapter {
         Ok(TouchedResources { resources })
     }
 
+    async fn is_ancestor(
+        &self,
+        parent_state_ref: &str,
+        target_state_ref: &str,
+        workspace_root:   &std::path::Path,
+    ) -> Result<bool, DomainError> {
+        let p = parent_state_ref.to_owned();
+        let t = target_state_ref.to_owned();
+        let w = workspace_root.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::git_cli::is_ancestor(&p, &t, &w))
+            .await
+            .map_err(|e| DomainError::Transient(format!("is_ancestor join: {e}")))?
+    }
+
+    async fn topology_check(
+        &self,
+        parent_state_ref: &str,
+        target_state_ref: &str,
+        workspace_root:   &std::path::Path,
+    ) -> Result<(), DomainError> {
+        let p = parent_state_ref.to_owned();
+        let t = target_state_ref.to_owned();
+        let w = workspace_root.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::git_cli::topology_check(&p, &t, &w))
+            .await
+            .map_err(|e| DomainError::Transient(format!("topology_check join: {e}")))?
+    }
+
+    async fn compute_touched_paths(
+        &self,
+        parent_state_ref: &str,
+        target_state_ref: &str,
+        workspace_root:   &std::path::Path,
+    ) -> Result<TouchedResources, DomainError> {
+        let p = parent_state_ref.to_owned();
+        let t = target_state_ref.to_owned();
+        let w = workspace_root.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::git_cli::compute_touched(&p, &t, &w))
+            .await
+            .map_err(|e| DomainError::Transient(format!("compute_touched_paths join: {e}")))?
+    }
+
     fn escalation_classes(&self) -> &'static [&'static str] {
         &[
             "protected_path_merge",

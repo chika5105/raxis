@@ -337,12 +337,26 @@ async fn gate_recheck(
     let touched_paths: Vec<PathBuf> = if let (Some(base), Some(head)) =
         (&task_row.base_sha, &task_row.evaluation_sha)
     {
-        let base_sha = vcs::diff::CommitSha::new(base)
+        // V2 migration: dispatch through the `DomainAdapter`
+        // (`extensibility-traits.md §2.2.B`). Newtype validation is
+        // preserved so we surface a parsing error before the trait
+        // call, mirroring the regular intent admission path.
+        let _base_sha = vcs::diff::CommitSha::new(base)
             .map_err(|e| HandlerError::GateRecheck(format!("invalid base_sha: {e}")))?;
-        let head_sha = vcs::diff::CommitSha::new(head)
+        let _head_sha = vcs::diff::CommitSha::new(head)
             .map_err(|e| HandlerError::GateRecheck(format!("invalid evaluation_sha: {e}")))?;
-        vcs::compute(&base_sha, &head_sha, &worktree_root)
-            .map_err(|e| HandlerError::GateRecheck(format!("vcs diff failed: {e}")))?
+        let resources = ctx.domain
+            .compute_touched_paths(base, head, &worktree_root)
+            .await
+            .map_err(|e| HandlerError::GateRecheck(format!("domain diff failed: {e}")))?;
+        resources
+            .resources
+            .into_iter()
+            .map(|r| {
+                let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
+                PathBuf::from(stripped)
+            })
+            .collect()
     } else {
         // No SHA range — no touched paths, no gate requirements.
         vec![]

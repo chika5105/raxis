@@ -76,6 +76,7 @@
 use std::path::{Path, PathBuf};
 
 mod adapter;
+pub mod git_cli;
 pub use adapter::{GitAdapter, SeIntentKind, SeTerminalArtefact};
 
 // ---------------------------------------------------------------------------

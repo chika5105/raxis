@@ -546,17 +546,33 @@ fn run_phase_a(
         None    => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
 
-    let head_sha = match CommitSha::new(&head_sha_raw) {
+    // The local newtype validation is preserved so we surface
+    // `InvalidRequest` for malformed wire shapes without round-
+    // tripping through the domain adapter (which would surface them
+    // as `PreconditionFailed`).
+    let _head_sha = match CommitSha::new(&head_sha_raw) {
         Ok(s)   => s,
         Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
-    let base_sha = match CommitSha::new(&base_sha_raw) {
+    let _base_sha = match CommitSha::new(&base_sha_raw) {
         Ok(s)   => s,
         Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
 
-    // base must be an ancestor of head (spec §2.5.8 ancestry invariant).
-    let is_anc = match vcs::is_ancestor(&base_sha, &head_sha, &worktree_path) {
+    // V2 migration: ancestry / topology / diff dispatch through the
+    // `DomainAdapter` (`extensibility-traits.md §2.2.B`). The kernel
+    // keeps the per-step planner-error-code mapping; the adapter is
+    // the implementation seam. We are inside a `spawn_blocking`
+    // context, so async adapter methods are bridged to sync via
+    // `tokio::runtime::Handle::current().block_on`. The runtime is
+    // guaranteed to exist because `run_phase_a` is only ever invoked
+    // from a tokio multi-threaded worker.
+    let rt_handle = tokio::runtime::Handle::current();
+
+    // base must be an ancestor of head (ancestry invariant).
+    let is_anc = match rt_handle.block_on(
+        ctx.domain.is_ancestor(&base_sha_raw, &head_sha_raw, &worktree_path)
+    ) {
         Ok(v)   => v,
         Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state),
     };
@@ -566,19 +582,33 @@ fn run_phase_a(
 
     // ── Step 6: Topology check ────────────────────────────────────────────
     // SingleCommit: enforce parent(head) == base (no merge commits in range).
-    // IntegrationMerge: topology check is skipped per spec §2.5.8.
+    // IntegrationMerge: topology check is skipped.
     if matches!(req.intent_kind, IntentKind::SingleCommit) {
-        if let Err(_) = vcs::topology_check(&base_sha, &head_sha, &worktree_path) {
+        if let Err(_) = rt_handle.block_on(
+            ctx.domain.topology_check(&base_sha_raw, &head_sha_raw, &worktree_path)
+        ) {
             return PreGateOutcome::Reject(
                 PlannerErrorCode::FailInvalidCommitTopology, task_state);
         }
     }
 
     // ── Step 7: VCS diff → touched_paths ──────────────────────────────────
-    let touched_paths = match vcs::compute(&base_sha, &head_sha, &worktree_path) {
-        Ok(p)   => p,
+    let touched_resources = match rt_handle.block_on(
+        ctx.domain.compute_touched_paths(&base_sha_raw, &head_sha_raw, &worktree_path)
+    ) {
+        Ok(r)   => r,
         Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state),
     };
+    let touched_paths: Vec<std::path::PathBuf> = touched_resources
+        .resources
+        .iter()
+        .map(|r| {
+            // Strip the `path:///` URI prefix to recover the
+            // workspace-relative path the rest of the kernel expects.
+            let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
+            std::path::PathBuf::from(stripped)
+        })
+        .collect();
 
     // ── Step 7A: Path-scope coverage check (§2.5.8 step 3A) ───────────────
     //
@@ -986,16 +1016,25 @@ fn handle_complete_task(
     // §2.5.8 line 1987 explicitly says we DO NOT re-run topology_check
     // on stored ranges — they were already checked at step 2A on
     // admission (the IntegrationMerge carve-out applied per range).
+    // V2 migration: dispatch through the `DomainAdapter`. The
+    // calling function (`handle_complete_task`) is sync; we bridge
+    // async via `Handle::current().block_on` exactly like the
+    // intent-admission path does.
+    let rt_handle = tokio::runtime::Handle::current();
     let mut full_touched_paths: std::collections::BTreeSet<PathBuf> =
         std::collections::BTreeSet::new();
     for (base_str, head_str) in &ranges {
-        let b = CommitSha::new(base_str)
+        let _b = CommitSha::new(base_str)
             .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
-        let h = CommitSha::new(head_str)
+        let _h = CommitSha::new(head_str)
             .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
-        let paths = vcs::compute(&b, &h, &worktree_path)
-            .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
-        for p in paths { full_touched_paths.insert(p); }
+        let resources = rt_handle.block_on(
+            ctx.domain.compute_touched_paths(base_str, head_str, &worktree_path)
+        ).map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+        for r in resources.resources {
+            let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
+            full_touched_paths.insert(PathBuf::from(stripped));
+        }
     }
 
     // ── 4. Trailing segment: H_bind → req.head_sha (when they differ) ────
@@ -1006,15 +1045,20 @@ fn handle_complete_task(
     // CompleteTask head_sha.
     if let (Some(ref h_bind_str), Some(ref h_req)) = (h_bind.as_ref(), req_head.as_ref()) {
         if h_bind_str.as_str() != h_req.as_str() {
-            let h_bind_sha = CommitSha::new(h_bind_str)
+            let _h_bind_sha = CommitSha::new(h_bind_str)
                 .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
             // 4a — topology check on the trailing range (no carve-out).
-            vcs::topology_check(&h_bind_sha, h_req, &worktree_path)
-                .map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
+            rt_handle.block_on(
+                ctx.domain.topology_check(h_bind_str, h_req.as_str(), &worktree_path)
+            ).map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
             // 4b — diff the trailing range.
-            let trailing = vcs::compute(&h_bind_sha, h_req, &worktree_path)
-                .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
-            for p in trailing { full_touched_paths.insert(p); }
+            let trailing = rt_handle.block_on(
+                ctx.domain.compute_touched_paths(h_bind_str, h_req.as_str(), &worktree_path)
+            ).map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+            for r in trailing.resources {
+                let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
+                full_touched_paths.insert(PathBuf::from(stripped));
+            }
         }
     }
 
