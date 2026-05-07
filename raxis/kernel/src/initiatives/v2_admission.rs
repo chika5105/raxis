@@ -703,7 +703,7 @@ pub async fn create_initiative_v2_blocking(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
     use raxis_crypto::{
         bundle_sha256 as crypto_bundle_sha256, canonical_encode, mint_bundle_nonce,
         sha256_of_artifact_bytes,

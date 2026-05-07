@@ -886,7 +886,8 @@ mod tests {
     // `GatewayClient` and is integration-tested separately.
 
     use ed25519_dalek::{Signer, SigningKey};
-    use raxis_audit_tools::{AuditSink, FakeAuditSink};
+    use raxis_audit_tools::AuditSink;
+    use raxis_test_support::FakeAuditSink;
     use std::sync::Arc as StdArc;
 
     /// Fixed authority key seed → reproducible KeyRegistry across tests.

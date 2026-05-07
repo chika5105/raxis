@@ -501,7 +501,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
     use raxis_policy::{EscalationPolicyForTests, OperatorEntry, PolicyBundle};
     use raxis_store::Store;
     use raxis_types::{

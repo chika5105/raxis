@@ -1913,7 +1913,7 @@ mod tests {
     // ───────────────────────────────────────────────────────────────────
 
     use ed25519_dalek::{Signer, SigningKey};
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
     use raxis_store::Store;
 
     /// Deterministic Ed25519 keypair for fixtures (no entropy needed).

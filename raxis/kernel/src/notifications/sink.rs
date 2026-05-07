@@ -107,7 +107,7 @@ impl AuditSink for NotifyingAuditSink {
 mod tests {
     use super::*;
     use crate::notifications::dispatch_blocking_for_tests;
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
     use raxis_policy::{OperatorEntry, PolicyBundle};
     use serde_json::json;
 

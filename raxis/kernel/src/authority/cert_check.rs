@@ -309,7 +309,7 @@ fn _doc_anchor(_: &OperatorCert) {}
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
     use raxis_crypto::cert::sign_cert;
     use raxis_policy::{OperatorEntry, PolicyBundle};
     use sha2::{Digest, Sha256};

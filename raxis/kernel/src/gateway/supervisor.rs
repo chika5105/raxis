@@ -466,7 +466,7 @@ mod tests {
     // without coupling to the gateway crate.
     // ─────────────────────────────────────────────────────────────────
 
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
 
     fn fake_section(binary_path: &str, max_respawns: u32, backoff_ms: u64) -> GatewaySection {
         GatewaySection {

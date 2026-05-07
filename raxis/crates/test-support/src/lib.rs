@@ -106,6 +106,8 @@
 #[cfg(any(debug_assertions, test))]
 pub mod audit_dir;
 #[cfg(any(debug_assertions, test))]
+pub mod audit_sink;
+#[cfg(any(debug_assertions, test))]
 pub mod cert;
 #[cfg(any(debug_assertions, test))]
 pub mod clock;
@@ -121,6 +123,8 @@ mod workspace_guard;
 #[cfg(any(debug_assertions, test))]
 pub use audit_dir::{AuditDir, GenesisInfo};
 #[cfg(any(debug_assertions, test))]
+pub use audit_sink::{CapturedEvent, FakeAuditSink};
+#[cfg(any(debug_assertions, test))]
 pub use cert::{
     ephemeral_cert, ephemeral_cert_with_key, ephemeral_cert_with_opts,
     ephemeral_signing_key, pubkey_hex, stub_cert_for_pubkey, CertOpts,
@@ -133,10 +137,6 @@ pub use disk_store::DiskStore;
 pub use gateway_backend::MockBackend;
 #[cfg(any(debug_assertions, test))]
 pub use git_repo::{git_available, GitRepo};
-
-// Re-exports — see crate-level docs for the rationale.
-#[cfg(any(debug_assertions, test))]
-pub use raxis_audit_tools::sink::{CapturedEvent, FakeAuditSink};
 
 // ---------------------------------------------------------------------------
 // mem_store — one-line in-memory Store factory.

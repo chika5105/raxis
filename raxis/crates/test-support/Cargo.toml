@@ -45,6 +45,12 @@ tempfile          = "3"
 sha2              = { workspace = true }
 hex               = { workspace = true }
 serde_json        = { workspace = true }
+# `audit_sink::FakeAuditSink::emit` mints `event_id` UUIDs to mirror
+# what the production `FileAuditSink` would have produced. The audit
+# crate already has `uuid` in its [dependencies]; we add it here too
+# so the relocated fake doesn't have to reach back through
+# `raxis-audit-tools` for the UUID type.
+uuid              = { workspace = true }
 
 [dev-dependencies]
 # Used by the Layer 2 workspace-guard test (`src/workspace_guard.rs`)

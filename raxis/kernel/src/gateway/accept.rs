@@ -322,7 +322,7 @@ async fn handle_handshake(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
     use raxis_ipc::message::GatewayMessage;
     use raxis_ipc::write_frame;
     use std::sync::Arc;

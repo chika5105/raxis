@@ -29,30 +29,21 @@
 // # Why this is a new top-level subcommand
 //
 // V1's `plan submit <initiative_id> <plan_dir>` took a directory + a
-// pre-computed `plan.sig` file. The V2 spec deliberately collapses
-// the two-step ceremony, so the V2 command lives at a new top-level
-// path `submit plan <plan.toml>`. V1 remains untouched in the same
-// release for backward compatibility — `raxis-cli plan sign` and
-// `raxis-cli plan submit <id> <dir>` keep working until the V2
-// kernel admission path is fully wired (see
-// `plan-bundle-sealing.md §11.1` and §4.5).
+// pre-computed `plan.sig` file. V2 collapses the two-step ceremony
+// into a single `submit plan <plan.toml>` invocation. The V1 entry
+// points (`raxis plan submit ...` and `raxis policy sign plan.toml`)
+// hard-reject in V2 and direct operators to this command (see
+// `plan-bundle-sealing.md §4.5`).
 //
-// # Best-judgment scope (documented in spec §11.1)
+// # Default-OFF dry-run (V2 admission landed)
 //
-// The V2 kernel admission handler (§8.1) is still pending. Today this
-// command:
-//
-//   * builds, hashes, and signs the bundle in-process (phases 1–9 fully
-//     functional);
-//   * with `--dry-run` (default-on for safety until kernel admission
-//     lands), prints the bundle's content-address fields and exits 0;
-//   * without `--dry-run`, sends the V2 IPC envelope and surfaces the
-//     kernel's "admission not yet wired" rejection cleanly so operators
-//     see what the bundle would look like on the wire.
-//
-// When the kernel admission path lands, the default for `--dry-run`
-// flips OFF and the success path renders the kernel-assigned
-// initiative_id + Status: Draft per §4.2 step 11.
+// Now that the kernel V2 admission handler (§8.1) is live, the
+// default for `--dry-run` is OFF: `raxis submit plan <plan.toml>`
+// performs a real submission and surfaces the kernel-assigned
+// initiative_id + Status: Draft on success. Operators that want a
+// signature-only inspection (no IPC, no kernel admission) pass
+// `--dry-run` explicitly, which prints the canonical-encoding
+// fields and exits 0.
 
 use std::path::{Path, PathBuf};
 
@@ -192,13 +183,12 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let parsed = parse_args(args)?;
 
-    // Default-on dry-run while the V2 kernel admission path is still
-    // pending. Operators must opt OUT explicitly with `--no-dry-run`
-    // if they want to attempt a real submission (which today returns
-    // FAIL_PLAN_BUNDLE_KERNEL_ADMISSION_NOT_YET_WIRED). Once the
-    // kernel admission lands, this default flips OFF and `--dry-run`
-    // becomes opt-in.
-    let dry_run = parsed.dry_run_flag.unwrap_or(true);
+    // V2 kernel admission has landed: the default for `--dry-run`
+    // is OFF. Pass `--dry-run` explicitly for a signature-only
+    // inspection (no IPC, no kernel admission). `--no-dry-run` is
+    // also accepted (for parity with the prior dry-run-default era)
+    // and is currently equivalent to no flag at all.
+    let dry_run = parsed.dry_run_flag.unwrap_or(false);
 
     // Phase 1: parse — read plan.toml bytes.
     let plan_toml_bytes = std::fs::read(&parsed.plan_toml_path).map_err(|e| {
@@ -318,10 +308,12 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         return Ok(());
     }
 
-    // Phase 10: submit via IPC. The kernel currently rejects this with
-    // FAIL_PLAN_BUNDLE_KERNEL_ADMISSION_NOT_YET_WIRED (see operator.rs);
-    // the CLI surfaces that error transparently. When kernel admission
-    // lands, no CLI-side change is required.
+    // Phase 10: submit via IPC. V2 admission (§8.1) is live, so the
+    // kernel either accepts the bundle (success → initiative_id +
+    // Status: Draft below) or returns one of the
+    // `FAIL_PLAN_BUNDLE_*` codes from `plan-bundle-sealing.md §8.1`,
+    // which the CLI surfaces transparently via
+    // `plan::handle_response`.
     let request = OperatorRequest::CreateInitiativeV2 {
         initiative_id:     initiative_id.clone(),
         plan_bundle_hex:   hex::encode(&canonical_input),

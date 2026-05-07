@@ -28,5 +28,5 @@ pub use reader::{
     ChainReader, ChainRecord, ChainStats, AUDIT_DIR_NAME, GENESIS_PREV_SHA256_LITERAL,
     SEGMENT_PREFIX, SEGMENT_SUFFIX,
 };
-pub use sink::{AuditSink, CapturedEvent, FakeAuditSink, FileAuditSink};
+pub use sink::{AuditSink, FileAuditSink};
 pub use writer::{last_chain_state, AuditWriter, AuditWriterError, ChainResumeInfo};

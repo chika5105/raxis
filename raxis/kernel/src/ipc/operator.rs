@@ -2093,7 +2093,8 @@ mod escalation_dispatch_tests {
     use std::sync::Arc;
 
     use ed25519_dalek::{Signer, SigningKey};
-    use raxis_audit_tools::{AuditEventKind, FakeAuditSink};
+    use raxis_audit_tools::AuditEventKind;
+    use raxis_test_support::FakeAuditSink;
     use raxis_policy::{OperatorEntry, PolicyBundle};
     use raxis_store::{Store, Table};
     use raxis_types::operator_wire::ApprovalScopeWire;
@@ -2690,7 +2691,7 @@ mod rotate_epoch_dispatch_tests {
     use std::sync::Arc;
 
     use ed25519_dalek::{Signer, SigningKey};
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
     use raxis_ipc::message::GatewayMessage;
     use raxis_ipc::{read_frame, write_frame};
     use raxis_policy::PolicyBundle;
@@ -3673,7 +3674,7 @@ mod quarantine_dispatch_tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use raxis_audit_tools::FakeAuditSink;
+    use raxis_test_support::FakeAuditSink;
     use raxis_policy::PolicyBundle;
     use raxis_store::Store;
 

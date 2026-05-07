@@ -271,7 +271,8 @@ fn emit_delivery_failed(
 mod tests {
     use super::*;
     use std::path::Path;
-    use raxis_audit_tools::{AuditEvent, FakeAuditSink};
+    use raxis_audit_tools::AuditEvent;
+    use raxis_test_support::FakeAuditSink;
     use raxis_policy::{NotificationChannel, NotificationChannelKind, OperatorEntry, PolicyBundle};
     use serde_json::json;
     use uuid::Uuid;
