@@ -44,6 +44,16 @@
 //!     a `CredentialBackend::resolve` call. The deny-path twin of
 //!     `http-proxy-bearer`.
 //!
+//!   * `session-spawn` — drive `SessionSpawnService` end-to-end against
+//!     a real `CredentialProxyManager`, a real `PolicyAdmissionService`,
+//!     and the real `SubprocessIsolation` substrate. Verifies the
+//!     full spawn → admission round-trip → terminate audit chain
+//!     (`CredentialProxyStarted → SessionVmSpawned → ... →
+//!     SessionVmExited → CredentialProxyStopped`) and that an
+//!     allow-listed SNI receives `Admit` while a non-allow-listed
+//!     SNI receives `Deny`, both with byte-exact bincode wire frames
+//!     identical to what the in-guest `raxis-tproxy` writes.
+//!
 //!   * `all` — run every slice in order; any slice failure aborts
 //!     with non-zero exit.
 //!
@@ -73,6 +83,7 @@ mod slice_http_proxy_bearer;
 mod slice_http_proxy_restrictions;
 mod slice_postgres_proxy;
 mod slice_postgres_proxy_restrictions;
+mod slice_session_spawn;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -114,6 +125,12 @@ enum Slice {
     /// asserting that denied requests never reach upstream and never
     /// resolve the credential.
     HttpProxyRestrictions,
+    /// Real `SessionSpawnService` driving real `CredentialProxyManager`
+    /// + real `PolicyAdmissionService` + real `SubprocessIsolation`.
+    /// Asserts the full spawn → admission → terminate audit chain in
+    /// the spec's fixed order, plus byte-shape verdicts on the
+    /// admission wire (Admit + Deny).
+    SessionSpawn,
     /// Run every slice in order.
     All,
 }
@@ -174,6 +191,7 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::PostgresProxyRestrictions  => slice_postgres_proxy_restrictions::run().await,
         Slice::HttpProxyBearer            => slice_http_proxy_bearer::run(env).await,
         Slice::HttpProxyRestrictions      => slice_http_proxy_restrictions::run(env).await,
+        Slice::SessionSpawn               => slice_session_spawn::run().await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
@@ -187,6 +205,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice http-proxy-bearer")?;
             slice_http_proxy_restrictions::run(env).await
                 .context("slice http-proxy-restrictions")?;
+            slice_session_spawn::run().await
+                .context("slice session-spawn")?;
             Ok(())
         }
     }

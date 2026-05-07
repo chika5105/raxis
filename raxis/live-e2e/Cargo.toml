@@ -17,8 +17,15 @@ raxis-credentials          = { path = "../crates/raxis-credentials" }
 raxis-credentials-file     = { path = "../crates/raxis-credentials-file" }
 raxis-credential-proxy-postgres = { path = "../crates/credential-proxy-postgres" }
 raxis-credential-proxy-http     = { path = "../crates/credential-proxy-http" }
+raxis-credential-proxy-manager  = { path = "../crates/credential-proxy-manager" }
+raxis-egress-admission     = { path = "../crates/egress-admission" }
+raxis-isolation            = { path = "../crates/isolation" }
+raxis-plan-credentials     = { path = "../crates/plan-credentials" }
+raxis-session-spawn        = { path = "../crates/session-spawn" }
+raxis-tproxy-protocol      = { path = "../crates/tproxy-protocol" }
 raxis-genesis-tools        = { path = "../crates/genesis-tools" }
 raxis-test-support         = { path = "../crates/test-support" }
+raxis-audit-tools          = { path = "../crates/audit" }
 raxis-types                = { path = "../crates/types" }
 
 tokio       = { workspace = true }
