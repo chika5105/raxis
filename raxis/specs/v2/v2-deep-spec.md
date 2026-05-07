@@ -1409,6 +1409,33 @@ re-reads `/raxis/diff.patch` cheaply on every call.
   audit because it indicates corruption of the kernel's invariants around
   Step 9 bundling.
 
+**Implementation reference (V2 init).** The host-side `gix` work for Steps 24
+and 24b lives in the dedicated workspace crate
+[`raxis-worktree-provision`](../../crates/worktree-provision/src/lib.rs). It
+exposes two entry points:
+
+- `provision_reviewer(orch_repo_root, evaluation_sha, master_base_sha, dest_root)
+  → ReviewerProvision` clones the Orchestrator's repo via a `file://` URL
+  (`gix::clone::PrepareFetch::fetch_then_checkout` → `main_worktree`), pins
+  `refs/raxis/evaluation` at `evaluation_sha`, re-materialises the worktree at
+  that SHA (a tree walk that copies blobs and sweeps stale paths so the cloned
+  HEAD does not bleed through), then pre-renders `.raxis/diff.patch` and
+  `.raxis/log.txt` covering `master_base_sha..evaluation_sha`. The crate's unit
+  tests prove that the destination ODB is **independent** of the source: a
+  post-clone mutation in the source repo never appears in the destination. This
+  is the on-disk realisation of "no hardlinks, no shared memory mappings".
+- `provision_orchestrator(master_repo_root, base_sha, dest_root) →
+  OrchestratorProvision` clones the master repo at `base_sha` and creates the
+  `.raxis/bundles/` skeleton so the staging crate can land `system_prompt.txt`
+  and `session.env` into the same `.raxis/` directory.
+
+The crate **never shells out to git** in production code. The only `git`
+invocations are in the unit-test fixture builder, which mints a deterministic
+two-commit repository so the gix code path can be exercised against real data.
+Callers wire the resulting `worktree_root` into the `raxis-worktree-staging`
+pipeline (Step 10), which produces the `WorkspaceMount` consumed by the
+isolation backend.
+
 ---
 
 ### Step 24b: Orchestrator Workspace Provisioning — RW Clone at Initiative Boot (V2)

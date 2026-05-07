@@ -22,6 +22,7 @@ members = [
     "crates/runtime",
     "crates/test-support",
     "crates/verifier-stub",
+    "crates/worktree-provision",
     "crates/worktree-staging",
     "kernel",
     "cli",
@@ -118,4 +119,15 @@ raxis-isolation-apple-vz = { path = "crates/isolation-apple-vz" }
 raxis-isolation-firecracker = { path = "crates/isolation-firecracker" }
 raxis-runtime           = { path = "crates/runtime" }
 raxis-verifier-stub     = { path = "crates/verifier-stub" }
+raxis-worktree-provision = { path = "crates/worktree-provision" }
 raxis-worktree-staging  = { path = "crates/worktree-staging" }
+
+# Host-side git operations for V2 Step 24 / 24b worktree provisioning
+# (Reviewer object copy from Orchestrator's ODB; Orchestrator clone
+# from master at base_sha). We use the default features (`basic`,
+# `comfort`, `extras` — including `worktree-mutation`, `blob-diff`)
+# plus `blocking-network-client` to enable the `file://` transport
+# `gix::clone::PrepareFetch::new` requires for local clones. No
+# HTTP / SSH transports — the kernel only ever clones from local
+# disk paths held in `<data_dir>/`.
+gix = { version = "0.83", default-features = true, features = ["blocking-network-client"] }

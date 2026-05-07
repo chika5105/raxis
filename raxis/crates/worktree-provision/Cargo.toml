@@ -1,0 +1,28 @@
+[package]
+name        = "raxis-worktree-provision"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Host-side git provisioning for V2 Steps 24 / 24b — Reviewer +
+# Orchestrator worktree population via the `gix` crate.
+#
+# The Reviewer image has no `git` binary (per
+# `planner-harness.md §4.2 Pure-Static Reviewer` /
+# `INV-PLANNER-HARNESS-02`); the Orchestrator's RW clone must be
+# initialised before its session goes live. Both surfaces require
+# host-side git work — this crate is the seam.
+#
+# Lives in its own crate so kernel integration tests + future
+# operator tooling can drive the same provisioning logic without a
+# kernel boot. Pulls in only `gix`, `raxis-types`, `sha2`, and
+# `thiserror`.
+
+[dependencies]
+gix              = { workspace = true }
+raxis-types      = { workspace = true }
+sha2             = { workspace = true }
+thiserror        = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
