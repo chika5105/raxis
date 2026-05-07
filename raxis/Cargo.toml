@@ -16,6 +16,7 @@ members = [
     "crates/audit",
     "crates/gateway-substrate",
     "crates/genesis-tools",
+    "crates/isolation",
     "crates/runtime",
     "crates/test-support",
     "crates/verifier-stub",
@@ -109,5 +110,6 @@ raxis-crypto = { path = "crates/crypto" }
 raxis-audit-tools       = { path = "crates/audit" }
 raxis-gateway-substrate = { path = "crates/gateway-substrate" }
 raxis-genesis-tools     = { path = "crates/genesis-tools" }
+raxis-isolation         = { path = "crates/isolation" }
 raxis-runtime           = { path = "crates/runtime" }
 raxis-verifier-stub     = { path = "crates/verifier-stub" }

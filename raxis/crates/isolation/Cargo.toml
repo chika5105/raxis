@@ -1,0 +1,44 @@
+[package]
+name        = "raxis-isolation"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# raxis-isolation — V2 trait crate for the agent-runtime substrate.
+#
+# Normative reference:
+#   * `specs/v2/extensibility-traits.md §3` — IsolationBackend / IsolatedSession
+#     trait surface.
+#   * `specs/v2/v2-deep-spec.md §Step 10`  — VirtioFS staging + VSock control
+#     channel.
+#   * `specs/v2/system-requirements.md §5` — Hypervisor admission tiers and
+#     `raxis doctor` integration.
+#
+# Crate scope (deliberately narrow):
+#   * Defines the `Backend` trait (factory for spawning isolated guests)
+#     and the `Session` trait (live handle to one running guest).
+#   * Defines all supporting types — `VerifiedImage`, `WorkspaceMount`,
+#     `VmSpec`, `IsolationLevel`, `ExitStatus`, `IsolationError`,
+#     `SessionTransportId`, `CapabilityKind` / `CapabilityValue`.
+#   * Provides the boot-time admission helper `verify_admission_tier`
+#     used by `raxis-kernel/src/main.rs` to reject backends below the
+#     R-1 conformance bar (per §3.3 / system-requirements.md §11).
+#
+# Crate scope explicitly EXCLUDES:
+#   * Concrete backends. Firecracker lives in
+#     `crates/raxis-isolation-firecracker/`; AVF lives in
+#     `crates/raxis-isolation-apple-vz/`. This crate has no Linux- or
+#     macOS-specific dependencies.
+#   * Mock / fake substrates. Mocks live in `raxis-test-support` per
+#     the workspace's mock-isolation discipline (see the `FakeClock` /
+#     `FakeAuditSink` pattern). Production crates never link mocks.
+
+[dependencies]
+raxis-types = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+serde_json  = { workspace = true }

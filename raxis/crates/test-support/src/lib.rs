@@ -118,6 +118,8 @@ pub mod gateway_backend;
 #[cfg(any(debug_assertions, test))]
 pub mod git_repo;
 #[cfg(any(debug_assertions, test))]
+pub mod subprocess_isolation;
+#[cfg(any(debug_assertions, test))]
 mod workspace_guard;
 
 #[cfg(any(debug_assertions, test))]
@@ -137,6 +139,8 @@ pub use disk_store::DiskStore;
 pub use gateway_backend::MockBackend;
 #[cfg(any(debug_assertions, test))]
 pub use git_repo::{git_available, GitRepo};
+#[cfg(any(debug_assertions, test))]
+pub use subprocess_isolation::{SubprocessIsolation, SubprocessSession};
 
 // ---------------------------------------------------------------------------
 // mem_store — one-line in-memory Store factory.

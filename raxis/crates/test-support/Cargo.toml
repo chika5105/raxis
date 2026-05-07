@@ -17,6 +17,13 @@ raxis-types             = { workspace = true }
 raxis-store             = { workspace = true }
 raxis-audit-tools       = { workspace = true }
 raxis-crypto            = { workspace = true }
+# `raxis-isolation` carries the `Backend` / `Session` trait surface that
+# `subprocess_isolation::SubprocessIsolation` implements. Same FakeClock-
+# style separation: production crates depend on the trait-only crate;
+# fakes (including this subprocess-based substrate) live here in
+# `raxis-test-support` and self-report `IsolationLevel::TestOnly` so the
+# kernel boot admission helper rejects them in production.
+raxis-isolation         = { workspace = true }
 # `raxis-gateway-substrate` carries the `Backend` trait that
 # `gateway_backend::MockBackend` implements. Pulling in just the
 # trait crate (rather than the whole `raxis-gateway` crate) keeps
