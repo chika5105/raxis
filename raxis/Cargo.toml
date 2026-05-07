@@ -160,7 +160,7 @@ raxis-worktree-staging  = { path = "crates/worktree-staging" }
 
 # Host-side git operations for V2 Step 24 / 24b worktree provisioning
 # (Reviewer object copy from Orchestrator's ODB; Orchestrator clone
-# from master at base_sha). We use the default features (`basic`,
+# from main at base_sha). We use the default features (`basic`,
 # `comfort`, `extras` — including `worktree-mutation`, `blob-diff`)
 # plus `blocking-network-client` to enable the `file://` transport
 # `gix::clone::PrepareFetch::new` requires for local clones. No

@@ -88,7 +88,7 @@ Inspecting the V1+V2 reference implementation (`kernel/src/vcs/`, `crates/store/
 | Worktree (VirtioFS-mounted ephemeral clone)        | Mutable state surface the agent operates on                       | Portfolio snapshot + order-staging directory                | Patient record (FHIR bundle) + proposed-action staging                 |
 | `git commit` (signed, content-addressed) | Content-addressed snapshot of the agent's proposed work           | Signed proposed-order manifest (instrument, side, qty, TIF) | Signed proposed-clinical-action (order set, codes, dose, justification) |
 | `git bundle create` (kernel-mediated)    | State transfer between two isolated agent VMs                     | Order-context bundle handed strategy → execution agent      | Diagnostic bundle handed triage → treatment agent                      |
-| `IntegrationMerge` (kernel-authorised cherry-pick into master worktree) | Authorised commit of approved work to canonical external state | Order execution against the exchange API                    | EHR write of approved clinical action                                  |
+| `IntegrationMerge` (kernel-authorised cherry-pick into main worktree) | Authorised commit of approved work to canonical external state | Order execution against the exchange API                    | EHR write of approved clinical action                                  |
 
 Everything else in the reference implementation — the operator-socket handshake (`cli/src/conn.rs`), the SQLite session/task/escalation/audit state machine (`crates/store/`), the audit chain and Merkle tree (`crates/crypto/`), the 13-step intent admission pipeline (`kernel/src/scheduler/admit.rs`, `kernel/src/handlers/intent.rs`), the Credential Proxy invariant (`INV-VM-CAP-04`, `crates/raxis-cred-proxy/`), the escalation FSM (`kernel/src/escalation/`), the policy parser, the operator's challenge-response — is *paradigm-layer* and stays concrete. A `ProposedTrade` intent passes through identical admission gates as a `CompleteTask` intent.
 
@@ -145,7 +145,7 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// session, after the planner VM has been spawned but before
     /// `KernelPush` is allowed to deliver any intent.
     ///
-    /// SE impl:        `git clone --no-hardlinks` of master_repo into
+    /// SE impl:        `git clone --no-hardlinks` of main_repo into
     ///                 `/var/raxis/sessions/<session_id>/work`,
     ///                 returned as a VirtioFS host-path; mounted
     ///                 read-write into the VM at `/work`.
@@ -219,7 +219,7 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// when external credentials are required.
     ///
     /// SE impl:        cherry-pick `snapshot.commit_sha` into the
-    ///                 master worktree (the IntegrationMerge ceremony
+    ///                 main worktree (the IntegrationMerge ceremony
     ///                 of `integration-merge.md`); on protected paths
     ///                 the kernel will have already routed through the
     ///                 escalation FSM and this is the post-approval call.
@@ -324,7 +324,7 @@ pub struct Bundle {
 /// under the `IntegrationMerge`-equivalent event type.
 pub struct DomainCommitReceipt {
     pub receipt_id:     String,        // adapter-defined unique id
-    pub external_ref:   Option<String>,// e.g. SE: master commit sha;
+    pub external_ref:   Option<String>,// e.g. SE: main commit sha;
                                        //      Trading: broker order id;
                                        //      Healthcare: FHIR resource id
     pub committed_at:   chrono::DateTime<chrono::Utc>,
@@ -366,14 +366,14 @@ pub enum DomainError {
 
 | Trait method            | `GitAdapter` implementation                                                                                                                                                     |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `provision_workspace`   | `git clone --no-hardlinks --no-checkout` master_repo → `/var/raxis/sessions/<sid>/work`; `git checkout -b session-<sid> <parent_state_ref>`; return host-path + tree sha256. |
+| `provision_workspace`   | `git clone --no-hardlinks --no-checkout` main_repo → `/var/raxis/sessions/<sid>/work`; `git checkout -b session-<sid> <parent_state_ref>`; return host-path + tree sha256. |
 | `snapshot`              | `git add -A`; `git commit -m "session-<sid>:<intent_id>" --author="raxis-planner <planner@local>"`; capture `(commit_sha, head_tree_sha256)`.                              |
 | `transfer`              | `git bundle create /var/raxis/transfer/<bundle_id>.bundle <base>..<head>`; sha256 the bundle; return `Bundle { host_path, content_hash, byte_len }`.                            |
-| `commit`                | The full `IntegrationMerge` ceremony of `integration-merge.md §4`: lock master worktree → `git cherry-pick --no-commit <commit_sha>` → re-run touched-set diff → emit `IntegrationMergeApplied` event → push to upstream remote via credential proxy. |
+| `commit`                | The full `IntegrationMerge` ceremony of `integration-merge.md §4`: lock main worktree → `git cherry-pick --no-commit <commit_sha>` → re-run touched-set diff → emit `IntegrationMergeApplied` event → push to upstream remote via credential proxy. |
 | `touched_resources`     | `gix::diff_tree_to_tree(parent_tree, head_tree)` → flatten to `path:///`-prefixed URIs. Identical algorithm to today's `kernel/src/vcs/diff.rs`, just relocated.                |
 | `escalation_classes`    | `&["protected_path_merge", "review_loop_exceeded", "merge_conflict_unresolvable", "policy_epoch_drift", "credential_proxy_denied"]`                                                             |
 | `teardown_workspace`    | Unmount VirtioFS; close `gix::Repository`; touch `.raxis-retain-until` with the audit-retention deadline.                                                                       |
-| `purge_workspace`       | `rm -rf` the session worktree; do NOT touch `master_repo` or the audit chain.                                                                                                   |
+| `purge_workspace`       | `rm -rf` the session worktree; do NOT touch `main_repo` or the audit chain.                                                                                                   |
 
 `GitAdapter::IntentKind` is the existing `raxis-types::IntentKind`. `TerminalArtefact` is `(CommitSha, head_tree_sha256)`. The credential proxy parameter to `commit` is the existing `CredentialProxyHandle` for the per-session upstream-push credential leased under `INV-VM-CAP-04`.
 
@@ -392,11 +392,11 @@ Documented here so reviewers can sanity-check that the seam is wide enough to ad
 - `crates/raxis-domain/tests/conformance_kit.rs` — generic property-based tests (idempotency, determinism, cleanup ordering) any adapter can plug its impl into via `pub fn run_conformance_suite<A: DomainAdapter>(adapter: A, fixtures: &Fixtures)`.
 - `crates/raxis-domain/tests/fixtures/` — domain-agnostic recorded `(intent, expected-touched, expected-snapshot-hash)` fixtures.
 - `crates/raxis-domain-git/Cargo.toml` (NEW) — depends on `raxis-domain`, `raxis-types`, `gix`, `git2` (for cherry-pick), `tokio`.
-- `crates/raxis-domain-git/src/lib.rs` — `pub struct GitAdapter { master_repo_path: PathBuf, sessions_root: PathBuf, transfer_root: PathBuf, audit_retention: Duration }` + `impl DomainAdapter for GitAdapter`.
+- `crates/raxis-domain-git/src/lib.rs` — `pub struct GitAdapter { main_repo_path: PathBuf, sessions_root: PathBuf, transfer_root: PathBuf, audit_retention: Duration }` + `impl DomainAdapter for GitAdapter`.
 - `crates/raxis-domain-git/src/provision.rs` — `git clone --no-hardlinks` + checkout logic moved out of `kernel/src/handlers/session.rs`.
 - `crates/raxis-domain-git/src/snapshot.rs` — `git add -A && git commit` logic.
 - `crates/raxis-domain-git/src/transfer.rs` — `git bundle create` logic moved out of `kernel/src/handlers/intent.rs::handle_proposed_handoff`.
-- `crates/raxis-domain-git/src/commit.rs` — the full `IntegrationMerge` cherry-pick ceremony + master-worktree lock acquisition + upstream push.
+- `crates/raxis-domain-git/src/commit.rs` — the full `IntegrationMerge` cherry-pick ceremony + main-worktree lock acquisition + upstream push.
 - `crates/raxis-domain-git/src/touched.rs` — `gix::diff_tree_to_tree` wrapper that returns `TouchedResources`. Functions: `pub fn diff_to_touched(parent_sha: &Oid, head_sha: &Oid, repo: &gix::Repository) -> Result<TouchedResources, DomainError>`.
 - `crates/raxis-domain-git/src/cleanup.rs` — `teardown_workspace` / `purge_workspace`.
 - `crates/raxis-domain-git/tests/conformance.rs` — runs `raxis_domain::tests::run_conformance_suite(GitAdapter::new(...), git_fixtures())`.
@@ -435,12 +435,12 @@ Documented here so reviewers can sanity-check that the seam is wide enough to ad
   ```toml
   [domain]
   adapter = "git"               # one of: "git" (V2 only)
-  master_repo = "/var/raxis/master"
+  main_repo = "/var/raxis/main"
   sessions_root = "/var/raxis/sessions"
   transfer_root = "/var/raxis/transfer"
   audit_retention = "30d"
   ```
-- `raxis/specs/v2/integration-merge.md` — the IntegrationMerge ceremony stays the same end-to-end, but the **implementation step** that today reads "the kernel runs `git cherry-pick --no-commit ...`" is rewritten to "the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`; the SE adapter MUST internally execute the cherry-pick + push sequence under the master-worktree lock". The gate sequence and audit-chain emissions are unchanged.
+- `raxis/specs/v2/integration-merge.md` — the IntegrationMerge ceremony stays the same end-to-end, but the **implementation step** that today reads "the kernel runs `git cherry-pick --no-commit ...`" is rewritten to "the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`; the SE adapter MUST internally execute the cherry-pick + push sequence under the main-worktree lock". The gate sequence and audit-chain emissions are unchanged.
 - `raxis/specs/v2/agent-disagreement.md §7` — the abandoned-worktree lifecycle's `AbandonedSalvageable` entry transition calls `ctx.domain.teardown_workspace(...)`; the daily kernel sweep at `abandoned_commits_retention` elapse calls `ctx.domain.purge_workspace(...)` instead of direct `rm -rf`. The same two hooks fire on a clean (non-abandoned) session-end path: `teardown_workspace` runs immediately on the terminal `CompleteTask` admission; `purge_workspace` runs once the configured audit-retention window has lapsed.
 
 ### §2.7 Conformance contract

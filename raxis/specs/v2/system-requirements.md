@@ -213,7 +213,7 @@ Other disk consumers:
 | Subsystem | Typical size | Notes |
 |---|---|---|
 | `state.db` (SQLite) | 100 MB to 5 GB | Grows with `pending_pushes`, indexed views, escalations |
-| `master_repos/` | 10 MB to 5 GB per initiative | Soft cap: `master_repo_quota_mb` (default 8 GB) per `host-capacity.md §6.2` |
+| `main_repos/` | 10 MB to 5 GB per initiative | Soft cap: `main_repo_quota_mb` (default 8 GB) per `host-capacity.md §6.2` |
 | `worktrees/` | up to 2 GB per active session | Hard cap: `worktree_quota_mb` (default 2 GB) per `host-capacity.md §6.1` |
 | `bundles/` | small (KBs to MBs); ephemeral | Per-initiative bundle staging |
 | `artifacts/` (immutable artifact store) | 1 to 100 GB | Operator-bound via `artifact_store_quota_gb` (default 100 GB) |
@@ -279,7 +279,7 @@ The kernel uses these paths (all under `disk_root`):
 │   ├── policies/<sha>/
 │   ├── plans/<sha>/
 │   └── keys/<fingerprint>/
-├── master_repos/                          # bare git repos, one per initiative
+├── main_repos/                          # bare git repos, one per initiative
 │   └── <initiative_uuid>/
 ├── worktrees/                             # per-session worktrees (mounted into VMs)
 │   └── <session_uuid>/
@@ -360,11 +360,11 @@ Customer demand for any of these has not materialized; if it does, V3+ will revi
 
 ### 6.1 Outbound
 
-The kernel itself makes outbound connections only for `git push` to operator-configured master repositories (per `INV-CRED-KERNEL-01` from the V2 design discussion). Other components have their own outbound needs:
+The kernel itself makes outbound connections only for `git push` to operator-configured main repositories (per `INV-CRED-KERNEL-01` from the V2 design discussion). Other components have their own outbound needs:
 
 | Component | Outbound to | Port | Notes |
 |---|---|---|---|
-| `raxis-kernel` | `git push` destinations | 22 (SSH), 443 (HTTPS) | Configured in `policy.toml` master-repo bindings |
+| `raxis-kernel` | `git push` destinations | 22 (SSH), 443 (HTTPS) | Configured in `policy.toml` main-repo bindings |
 | `raxis-gateway` workers | LLM provider APIs | 443 | Provider list in `policy.toml [[providers.credentials]]` |
 | `raxis-egress` | URLs in `[plan] allowed_egress` | typically 443 | Per-plan operator authorization |
 | `raxis-archiver` (V3) | Archive backend (S3, Azure, etc.) | 443 | Operator-configured |
@@ -490,7 +490,7 @@ The kernel binary is statically-linked for SQLite, rustls, and most other depend
 |---|---|---|
 | A monitoring agent (Prometheus node-exporter, Datadog agent, etc.) | Host capacity visibility | RAXIS exposes metrics via `raxis kernel status` and audit events; agent integration is operator-DIY in V2 |
 | Log shipper (vector, fluentd, etc.) | Centralized operational logs | journald or `kernel.{out,err}` files are the source |
-| Backup tool (restic, borg, snapshots) | Disaster recovery for `disk_root` | Audit log + state.db + master_repos are the critical state |
+| Backup tool (restic, borg, snapshots) | Disaster recovery for `disk_root` | Audit log + state.db + main_repos are the critical state |
 
 ---
 

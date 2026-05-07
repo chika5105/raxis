@@ -452,7 +452,7 @@ HEAD). It does NOT:
 - Walk subdirectories (would explode the suggestion list; the
   trailing-slash discipline naturally encourages directory-prefix
   declarations like `src/` over leaf-file declarations).
-- Consult the kernel's git store (`<data_dir>/master_repos/`) — that is
+- Consult the kernel's git store (`<data_dir>/main_repos/`) — that is
   a kernel-internal implementation detail, not an operator-facing
   concept; the operator's worktree at `$PWD` is the canonical source.
 
@@ -463,10 +463,10 @@ There are two conceptually distinct git locations operators can confuse:
 | Location | Owned by | Purpose | Operator-configurable? |
 |---|---|---|---|
 | **Operator worktree** (e.g., `~/work/myproject/`) | Operator | Where the operator authors code, runs `raxis-cli`, and edits `plan.toml`. | Yes — the operator's filesystem; identified to the CLI via `$PWD` or `--suggest-from`. Bound to a session at session-creation time and validated against `policy.toml [sessions] allowed_worktree_roots`. |
-| **Kernel master_repos** (`<data_dir>/master_repos/<initiative_id>/`) | Kernel | The kernel's internal SQLite-backed git store where it materializes `refs/heads/master` after each `IntegrationMerge`. | No — implementation detail; not an operator-facing config. References to `master_repo` in `integration-merge.md` and `kernel-store.md` are about this kernel-internal location. |
+| **Kernel main_repos** (`<data_dir>/main_repos/<initiative_id>/`) | Kernel | The kernel's internal SQLite-backed git store where it materializes `refs/heads/main` after each `IntegrationMerge`. | No — implementation detail; not an operator-facing config. References to `main_repo` in `integration-merge.md` and `kernel-store.md` are about this kernel-internal location. |
 
 The §4.5.6 suggestion mechanism reads from the **operator worktree**.
-The kernel's master_repos is never inspected by `plan prepare` (it would
+The kernel's main_repos is never inspected by `plan prepare` (it would
 require IPC and kernel-side plan-author authority, both of which would
 violate the boundary between authoring and admission).
 

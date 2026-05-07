@@ -122,7 +122,7 @@ Run these in order. Each one introduces exactly one new concept.
 | 47 | [`crash-recovery-mid-merge`](scenarios/47-crash-recovery-mid-merge/) | Kill the kernel mid-merge; restart; observe Phase 2/3 recovery. |
 | 48 | [`provider-failure-fallback`](scenarios/48-provider-failure-fallback/) | Primary provider returns 5xx; observe fallback to the secondary. |
 | 49 | [`budget-exceeded-graceful-stop`](scenarios/49-budget-exceeded-graceful-stop/) | Lane budget exhausts mid-initiative; tasks transition cleanly. |
-| 50 | [`end-to-end-feature-shipment`](scenarios/50-end-to-end-feature-shipment/) | The capstone: plan → 4 Executors → 2 Reviewers → semantic merge → witness-gated → master fast-forwarded. |
+| 50 | [`end-to-end-feature-shipment`](scenarios/50-end-to-end-feature-shipment/) | The capstone: plan → 4 Executors → 2 Reviewers → semantic merge → witness-gated → main fast-forwarded. |
 
 ---
 

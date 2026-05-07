@@ -89,7 +89,7 @@ pub trait CredentialProxyHandle: Send + Sync {
 /// Per-session read-only context. Constructed by the kernel after
 /// session admission has succeeded; the adapter must not re-validate
 /// authority. The `parent_state_ref` is the canonical-state anchor
-/// the adapter provisions from (SE: a commit SHA on the master
+/// the adapter provisions from (SE: a commit SHA on the main
 /// branch; trading: a portfolio snapshot id; healthcare: a FHIR
 /// bundle id).
 #[derive(Debug, Clone)]
@@ -98,11 +98,11 @@ pub struct SessionContext<'a> {
     /// scope per-session paths under its `sessions_root`.
     pub session_id:        &'a str,
     /// The initiative the session belongs to. The adapter typically
-    /// keys per-initiative shared state (e.g., master worktree lock)
+    /// keys per-initiative shared state (e.g., main-repo worktree lock)
     /// off this id.
     pub initiative_id:     &'a str,
     /// The canonical-state reference the session provisions from.
-    /// SE: the master commit SHA at session-admission time. Adapters
+    /// SE: the main-branch commit SHA at session-admission time. Adapters
     /// for non-VCS domains supply their domain-specific anchor.
     pub parent_state_ref:  &'a str,
     /// Policy epoch in effect when the session was admitted. Pinned
@@ -237,7 +237,7 @@ pub struct Bundle {
 /// audit chain under the domain-specific terminal-commit event type
 /// (SE: `IntegrationMergeCompleted`; trading: `OrderSubmitted`; …).
 pub struct DomainCommitReceipt {
-    /// Adapter-defined unique id for this receipt. SE: the master
+    /// Adapter-defined unique id for this receipt. SE: the main-branch
     /// commit SHA. Trading: the broker order id.
     pub receipt_id:   String,
     /// Optional external reference (e.g., upstream remote URL the
@@ -352,7 +352,7 @@ pub enum DomainError {
 ///
 /// Concurrency: every method may be called from multiple tokio worker
 /// threads in parallel. Adapters are responsible for their own
-/// internal synchronisation (the SE adapter holds a per-master-repo
+/// internal synchronisation (the SE adapter holds a per-main-repo
 /// `gix::Repository` mutex during `commit`).
 ///
 /// The trait is `async` because some adapters (Trading: FIX session;

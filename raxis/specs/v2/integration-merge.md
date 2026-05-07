@@ -25,17 +25,17 @@
 
 `IntegrationMerge` is the intent the Orchestrator submits to the Kernel after it has
 successfully merged one or more Executor sub-task branches into a single commit in its
-ephemeral clone. Upon admission, the Kernel fast-forwards the initiative's master branch
+ephemeral clone. Upon admission, the Kernel fast-forwards the initiative's main branch
 to the merged commit SHA. This is the **only** mechanism that writes agent-produced code
-to the master branch.
+to the main branch.
 
 Until `IntegrationMerge` is admitted:
-- The master branch is untouched
+- The main branch is untouched
 - All Executor commits exist only in ephemeral VM worktrees and Orchestrator staging bundles
 - The initiative state is `InProgress`
 
 After `IntegrationMerge` is admitted:
-- The master branch is updated to `commit_sha`
+- The main branch is updated to `commit_sha`
 - The Orchestrator's base SHA is advanced to `commit_sha`
 - The initiative logs `IntegrationMergeCompleted` in the audit chain
 - The Orchestrator may activate the next wave of sub-tasks (if the DAG has more)
@@ -45,7 +45,7 @@ After `IntegrationMerge` is admitted:
 `IntegrationMerge` is the SE-domain instance of the *paradigm primitive* "authorised commit of agent-produced state to canonical external state" (`paradigm.md §2`, `R-11`). The trait that captures that paradigm primitive is `DomainAdapter::commit` (`extensibility-traits.md §2.2.A`). Concretely:
 
 - The intent struct (§2), the admission pipeline (§4), the multi-task wave model (§5), the audit chain emissions (§7), and the SQLite/git transactional boundary (§11) are *paradigm-layer* mechanisms that stay in the kernel binary unchanged. They apply to **any** domain.
-- The git-specific operations — `gix::diff_tree_to_tree` for the touched-set in Check 5, `git fetch && git update-ref` for the master fast-forward in Check 8 Phase 2, the optional `git push` to upstream in §14 — are *implementation-layer* and live entirely behind the `DomainAdapter` trait, in `crates/raxis-domain-git`. A `TradingAdapter::commit` plugged into the same Phase 2 call site instead submits an order via the credential proxy; an `HealthcareAdapter::commit` POSTs a FHIR resource. The kernel's `IntegrationMerge` handler is unchanged.
+- The git-specific operations — `gix::diff_tree_to_tree` for the touched-set in Check 5, `git fetch && git update-ref` for the main fast-forward in Check 8 Phase 2, the optional `git push` to upstream in §14 — are *implementation-layer* and live entirely behind the `DomainAdapter` trait, in `crates/raxis-domain-git`. A `TradingAdapter::commit` plugged into the same Phase 2 call site instead submits an order via the credential proxy; an `HealthcareAdapter::commit` POSTs a FHIR resource. The kernel's `IntegrationMerge` handler is unchanged.
 
 Where this spec uses the word "git" in a normative paragraph, that paragraph describes the V2 reference adapter's behaviour; the underlying paradigm contract stays domain-agnostic.
 
@@ -125,12 +125,12 @@ Result must be `commit`. Failure: `FAIL_COMMIT_NOT_FOUND`.
 git -C <worktree> merge-base --is-ancestor <base_sha> <commit_sha>
 ```
 If `commit_sha` is not a descendant of `base_sha`, the Orchestrator is attempting to
-merge a commit that doesn't include the previous state of master. This would produce a
+merge a commit that doesn't include the previous state of main. This would produce a
 history rewrite. Failure: `FAIL_ANCESTRY_VIOLATION`.
 
 **Why this matters:** If Orchestrator merges sub-task A (producing SHA `abc`), updates
-master to `abc`, then later submits `IntegrationMerge { commit_sha: "def" }` where `def`
-does not descend from `abc`, the master branch would lose the history of A's work. The
+main to `abc`, then later submits `IntegrationMerge { commit_sha: "def" }` where `def`
+does not descend from `abc`, the main branch would lose the history of A's work. The
 ancestry check prevents this.
 
 ### Check 4 — `merged_task_ids` Validation
@@ -312,7 +312,7 @@ declares pre-merge verifiers (per `verifier-processes.md §15`):
 When neither source declares any pre-merge verifier (the common case
 for simple deployments), Check 5d is a no-op and admission proceeds
 to Check 6a. When either source declares verifiers, Check 5d gates
-master advancement on the candidate merged tree's verifier verdicts.
+main advancement on the candidate merged tree's verifier verdicts.
 
 **Authority composition.** Pre-merge verifiers from both sources fire
 on the same merge attempt. Operator-side declarations cannot be
@@ -356,7 +356,7 @@ verifier-staging area at:
 $RAXIS_DATA_DIR/candidate_merges/<integration_merge_id>/
 ```
 
-This is a separate worktree, NOT on master, NOT on any task branch.
+This is a separate worktree, NOT on main, NOT on any task branch.
 The candidate is reachable only by its SHA — it is not pointed to by
 any ref.
 
@@ -379,7 +379,7 @@ candidate_merge_sha, merged_task_ids }` audit event.
 
 If candidate-merge-tree computation fails (e.g., the Orchestrator
 submitted a malformed `commit_sha` that the kernel can't merge with
-master cleanly), Check 5d returns
+main cleanly), Check 5d returns
 `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED { reason }` and discards
 any partially-created worktree. The Orchestrator typically resolves
 this by re-doing its merge work and re-submitting.
@@ -392,7 +392,7 @@ spawns the VM per `verifier-processes.md §4.2`. The
 spawn-envelope `RAXIS_VERIFIER_HOOK_KIND = "pre_merge"`,
 `RAXIS_INTEGRATION_MERGE_ID` is set, and `/workspace` is mounted
 from the candidate merged tree (NOT from any individual task branch
-and NOT from current master).
+and NOT from current main).
 
 Verifiers run in parallel subject to capacity caps; the kernel waits
 for all matching verifiers to complete (`final_status` set on every
@@ -465,7 +465,7 @@ merges that the operator hasn't approved at the human-gate layer.
 
 | Code | Trigger |
 |---|---|
-| `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary, candidate_merge_sha }` | Any `block_merge` pre-merge verifier reported `final_status ≠ "passed"`. Candidate is discarded; master is NOT advanced. |
+| `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary, candidate_merge_sha }` | Any `block_merge` pre-merge verifier reported `final_status ≠ "passed"`. Candidate is discarded; main is NOT advanced. |
 | `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED { reason }` | The candidate merged tree could not be computed (malformed `commit_sha`, merge conflict the kernel can't represent as an orphan, disk-full at staging area, etc.). |
 
 Both codes return to the Orchestrator. Neither is retryable
@@ -509,7 +509,7 @@ protected path AND had a conflict resolution). Both escalation IDs must be prese
 valid in this case.
 
 ### Check 7 — Idempotency Guard
-If a previous `IntegrationMerge` for this initiative already advanced master to `commit_sha`
+If a previous `IntegrationMerge` for this initiative already advanced main to `commit_sha`
 (i.e., `initiatives.current_sha = commit_sha`), the Kernel returns `OK_ALREADY_APPLIED` —
 not an error. This is an idempotent success. The Orchestrator can re-submit the same
 `IntegrationMerge` safely after a crash-recovery without causing a double-merge.
@@ -547,7 +547,7 @@ UPDATE subtask_activations
 ctx.domain.commit(
     &Snapshot { content_hash: commit_sha_to_content_hash(commit_sha), ... },
     &cred_proxy,                  // from per-session credential lease
-    &CommitContext { initiative_id, master_repo: &master_repo_path, ... },
+    &CommitContext { initiative_id, main_repo: &main_repo_path, ... },
 )?;
 
 # Phase 3 (single SQLite UPDATE)
@@ -556,14 +556,14 @@ UPDATE initiatives SET git_apply_pending = 0 WHERE id = :initiative_id;
 
 `GitAdapter::commit` (the V2 reference impl in `crates/raxis-domain-git/src/commit.rs`) executes:
 ```
-git -C <master_repo> fetch <orchestrator_worktree> <commit_sha>
-git -C <master_repo> update-ref refs/heads/master <commit_sha>
+git -C <main_repo> fetch <orchestrator_worktree> <commit_sha>
+git -C <main_repo> update-ref refs/heads/main <commit_sha>
 ```
-under the master-worktree lock, plus (when `[git_push]` is configured per §14) an upstream push via the credential proxy. Other adapters (`TradingAdapter::commit`, `HealthcareAdapter::commit`) substitute their own canonical-state write here without touching the kernel handler.
+under the main-worktree lock, plus (when `[git_push]` is configured per §14) an upstream push via the credential proxy. Other adapters (`TradingAdapter::commit`, `HealthcareAdapter::commit`) substitute their own canonical-state write here without touching the kernel handler.
 
 The handler dispatches Phase 2 + Phase 3 inline before returning the response to the Orchestrator. If the kernel crashes during Phase 2 or between Phase 2 and Phase 3, recovery on next startup re-runs the missing phases (§11.3).
 
-**Idempotency contract.** `DomainAdapter::commit` MUST return `Err(DomainError::AlreadyApplied { receipt })` if invoked a second time for the same `Snapshot.content_hash` (`extensibility-traits.md §2.7` conformance property #5). The recovery path of §11.3 relies on this: re-running Phase 2 after a crash either re-executes (idempotent fetch + update-ref) or short-circuits via `AlreadyApplied`, both of which leave master at `commit_sha`.
+**Idempotency contract.** `DomainAdapter::commit` MUST return `Err(DomainError::AlreadyApplied { receipt })` if invoked a second time for the same `Snapshot.content_hash` (`extensibility-traits.md §2.7` conformance property #5). The recovery path of §11.3 relies on this: re-running Phase 2 after a crash either re-executes (idempotent fetch + update-ref) or short-circuits via `AlreadyApplied`, both of which leave main at `commit_sha`.
 
 ---
 
@@ -582,7 +582,7 @@ in a single `git merge` chain and submits one `IntegrationMerge` covering all su
                                  │
              IntegrationMerge { merged_task_ids: [A, B, C] }
                                  │
-                    master → final_sha
+                    main → final_sha
 ```
 
 ### When There Are Multiple IntegrationMerge Submissions (Wave Model)
@@ -593,20 +593,20 @@ submit `IntegrationMerge` between waves:
 ```
 Wave 1: [A: Complete] [B: Complete]
   → IntegrationMerge { merged_task_ids: [A, B], commit_sha: "sha1" }
-  → master → sha1
+  → main → sha1
 
 Wave 2 (activated after sha1):
-  [C: Complete]  ← depends on A, B being in master
+  [C: Complete]  ← depends on A, B being in main
   → IntegrationMerge { merged_task_ids: [C], commit_sha: "sha2" }
-  → master → sha2
+  → main → sha2
 ```
 
 Between waves, the Orchestrator's base SHA advances from the initiative's `initial_sha`
 to `sha1`. Wave 2 sub-tasks' clones are provisioned from `sha1` — they see Wave 1's work.
 
-**Key rule:** After `IntegrationMerge` is admitted and master advances, the Orchestrator's
+**Key rule:** After `IntegrationMerge` is admitted and main advances, the Orchestrator's
 next `IntegrationMerge` must descend from the new `current_sha`. The Orchestrator must
-`git pull` or `git merge FETCH_HEAD` from the updated master before starting Wave 2 merges.
+`git pull` or `git merge FETCH_HEAD` from the updated main before starting Wave 2 merges.
 The Kernel's ancestry check (Check 3) enforces this: if the Orchestrator submits a Wave 2
 `IntegrationMerge` that doesn't descend from `sha1`, the check fails.
 
@@ -623,28 +623,28 @@ system prompt includes this instruction explicitly.
 
 ---
 
-## 6. Fast-Forward vs. True Merge Commit on Master
+## 6. Fast-Forward vs. True Merge Commit on Main
 
-The Kernel always uses `git update-ref` (equivalent to `--ff-only`) to advance master.
-It never produces a merge commit on master itself.
+The Kernel always uses `git update-ref` (equivalent to `--ff-only`) to advance main.
+It never produces a merge commit on main itself.
 
 **Implication:** The Orchestrator must produce the merge commit in its ephemeral clone
 before submitting `IntegrationMerge`. The Orchestrator runs `git merge` — which produces
 a merge commit if the branches have diverged. The Orchestrator's merge commit becomes the
-new master HEAD directly.
+new main HEAD directly.
 
-**Why not merge commit on master by the Kernel:** The Kernel runs as a deterministic
+**Why not merge commit on main by the Kernel:** The Kernel runs as a deterministic
 policy enforcer. Producing a merge commit requires author identity, committer identity,
 and a commit message — all of which are either arbitrary (making the audit record
 non-deterministic) or would require the Kernel to run inference (catastrophic). The
 Orchestrator, as an LLM, can produce a contextually appropriate merge commit message
 ("Merge auth-executor and payments-executor: add rate limiting and refunds").
 
-**When the result is a fast-forward on master:** If only one sub-task's branch is in
+**When the result is a fast-forward on main:** If only one sub-task's branch is in
 the wave AND no cross-cutting artifacts were modified, `commit_sha` may be identical to
 the sub-task's `completed_sha` — a fast-forward with no merge commit at all. The Kernel
 handles this identically to a true merge commit: the ancestry check passes (the sub-task
-commit descends from base), and `git update-ref` fast-forwards master.
+commit descends from base), and `git update-ref` fast-forwards main.
 
 ---
 
@@ -750,7 +750,7 @@ the mechanical sequence the Orchestrator must follow when it receives
       }
 
 4. On FAIL_ANCESTRY_VIOLATION:
-   - Run: git pull (pull the current master into the Orchestrator's clone)
+   - Run: git pull (pull the current main into the Orchestrator's clone)
    - Retry from step 2 with the updated base.
 
 5. On FAIL_PATH_POLICY_VIOLATION { path }:
@@ -794,12 +794,12 @@ After `IntegrationMergeCompleted` is emitted:
 | State | Before merge | After merge |
 |---|---|---|
 | `initiatives.current_sha` | `base_sha` (or previous merge SHA) | `commit_sha` |
-| `master` branch in master repo | `base_sha` | `commit_sha` |
+| `main` branch in main repo | `base_sha` | `commit_sha` |
 | `subtask_activations.merge_included` | 0 for merged tasks | 1 for merged tasks |
 | Orchestrator's clone `HEAD` | `commit_sha` (Orchestrator produced it) | Unchanged |
 | Orchestrator's base SHA for next wave | The previous `initiatives.current_sha` | Updated to `commit_sha` |
 
-The Orchestrator does **not** need to pull master after a successful `IntegrationMerge` —
+The Orchestrator does **not** need to pull main after a successful `IntegrationMerge` —
 it already has `commit_sha` in its local clone. The Kernel's `current_sha` advance is the
 authoritative record; the Orchestrator's clone is the source of truth for the commit.
 
@@ -807,20 +807,20 @@ authoritative record; the Orchestrator's clone is the source of truth for the co
 
 ## 10. Edge Cases
 
-### What If the Master Branch Has Advanced Since the Initiative Started?
+### What If the Main Branch Has Advanced Since the Initiative Started?
 
 The initiative records `initial_sha` at `approve_plan` time. If another initiative's
-`IntegrationMerge` advances master between `approve_plan` of this initiative and this
+`IntegrationMerge` advances main between `approve_plan` of this initiative and this
 initiative's first `IntegrationMerge`, the ancestry check (Check 3) will fail:
-`commit_sha` descends from `initial_sha`, but `base_sha` (= the current master HEAD)
+`commit_sha` descends from `initial_sha`, but `base_sha` (= the current main HEAD)
 has advanced beyond `initial_sha`.
 
-**Resolution:** The Orchestrator must rebase or merge master into its clone:
+**Resolution:** The Orchestrator must rebase or merge main into its clone:
 ```
-git fetch origin master
-git merge origin/master
+git fetch origin main
+git merge origin/main
 ```
-This produces a new merge commit that descends from the current master. The Orchestrator
+This produces a new merge commit that descends from the current main. The Orchestrator
 re-submits `IntegrationMerge` with the new SHA. The Kernel's ancestry check now passes.
 
 This is the standard git multi-user workflow — RAXIS does not eliminate the need to
@@ -857,7 +857,7 @@ continues normally. No duplicate `IntegrationMergeCompleted` event is emitted.
 Check 8 has two distinct durable side effects:
 
 1. **SQLite commit** — `initiatives.current_sha` advances; `IntegrationMergeCompleted` audit event is recorded; `subtask_activations.merge_included` flags are set.
-2. **Git operation** — `git fetch` from the Orchestrator's worktree pulls the new commit objects into `master_repo`; `git update-ref refs/heads/master <commit_sha>` advances the local master ref.
+2. **Git operation** — `git fetch` from the Orchestrator's worktree pulls the new commit objects into `main_repo`; `git update-ref refs/heads/main <commit_sha>` advances the local main ref.
 
 These two operations cannot be made atomic. SQLite has no awareness of git, and `gix` does not participate in SQLite's transaction. There is always a window between them. This section specifies the ordering, the failure modes, and the recovery semantics that restore consistency after a crash.
 
@@ -870,7 +870,7 @@ The Kernel uses a three-phase model:
 | Phase | Operation | Durable | Idempotent |
 |---|---|---|---|
 | 1 | SQLite `BEGIN IMMEDIATE`: UPDATE `current_sha`, set `git_apply_pending = 1`, INSERT audit event, UPDATE `merge_included`. Single transaction, atomic on commit. | Yes | Yes (Check 7 idempotency guard) |
-| 2 | Git: `git fetch <orchestrator_worktree> <commit_sha>`; `git update-ref refs/heads/master <commit_sha>`. | Yes (writes to master_repo on disk) | Yes (re-fetching same SHA and re-updating ref to same SHA are no-ops) |
+| 2 | Git: `git fetch <orchestrator_worktree> <commit_sha>`; `git update-ref refs/heads/main <commit_sha>`. | Yes (writes to main_repo on disk) | Yes (re-fetching same SHA and re-updating ref to same SHA are no-ops) |
 | 3 | SQLite UPDATE: `git_apply_pending = 0`. Single statement, no transaction wrapper needed. | Yes | Yes |
 
 The `git_apply_pending` column (new in V2) is the recovery driver flag. It transitions `0 → 1` in Phase 1 and `1 → 0` in Phase 3. Between phases, it is `1` and signals to startup recovery that Phase 2 may be incomplete.
@@ -893,10 +893,10 @@ There are five distinct failure points between Phase 1 begin and Phase 3 complet
 | # | Failure point | Observable state after kernel crash | Recovery |
 |---|---|---|---|
 | 1 | Crash before Phase 1 commits | SQLite unchanged; git unchanged. No partial work. | None. The merge effectively never happened. Orchestrator may resubmit. |
-| 2 | Crash after Phase 1 commits, before Phase 2 starts | SQLite: `current_sha = commit_sha`, `git_apply_pending = 1`. Git: `refs/heads/master` still at base_sha. | §11.3 Case A — re-run Phase 2 from worktree. |
-| 3 | Phase 2 `git fetch` fails (e.g., orchestrator worktree disk error, SHA not present) | SQLite: as above. Git: `refs/heads/master` still at base_sha; objects not fetched. | §11.3 Case A — retry; if persistently fails, transition initiative to `Blocked`. |
-| 4 | Phase 2 `git update-ref` fails (rare; refs/heads/master became unwritable) | SQLite: as above. Git: objects fetched but ref not updated. | §11.3 Case A — re-run update-ref step; the fetch portion is a no-op. |
-| 5 | Crash after Phase 2 completes, before Phase 3 commits | SQLite: as above. Git: `refs/heads/master = commit_sha` (fully consistent on the git side). | §11.3 Case B — verify git state, then run Phase 3. |
+| 2 | Crash after Phase 1 commits, before Phase 2 starts | SQLite: `current_sha = commit_sha`, `git_apply_pending = 1`. Git: `refs/heads/main` still at base_sha. | §11.3 Case A — re-run Phase 2 from worktree. |
+| 3 | Phase 2 `git fetch` fails (e.g., orchestrator worktree disk error, SHA not present) | SQLite: as above. Git: `refs/heads/main` still at base_sha; objects not fetched. | §11.3 Case A — retry; if persistently fails, transition initiative to `Blocked`. |
+| 4 | Phase 2 `git update-ref` fails (rare; refs/heads/main became unwritable) | SQLite: as above. Git: objects fetched but ref not updated. | §11.3 Case A — re-run update-ref step; the fetch portion is a no-op. |
+| 5 | Crash after Phase 2 completes, before Phase 3 commits | SQLite: as above. Git: `refs/heads/main = commit_sha` (fully consistent on the git side). | §11.3 Case B — verify git state, then run Phase 3. |
 
 In all cases except #1, the `git_apply_pending = 1` flag in SQLite is the durable signal that drives recovery.
 
@@ -905,13 +905,13 @@ In all cases except #1, the `git_apply_pending = 1` flag in SQLite is the durabl
 After policy load and after `key-revocation.md §5.3` reconciliation, before accepting new IPC connections, `kernel/src/startup.rs` runs the merge-consistency recovery pass:
 
 ```
-SELECT id, current_sha, master_repo_path
+SELECT id, current_sha, main_repo_path
   FROM initiatives
  WHERE git_apply_pending = 1;
 
 for each row i:
     db_sha = i.current_sha
-    git_sha = read refs/heads/master in i.master_repo_path
+    git_sha = read refs/heads/main in i.main_repo_path
 
     case A — db_sha != git_sha (Phase 2 partially or fully missed):
         // Find the originating Orchestrator worktree from the audit event.
@@ -924,9 +924,9 @@ for each row i:
          ORDER BY e.seq DESC LIMIT 1;
 
         if worktree_path exists on disk and contains db_sha as a reachable commit:
-            git_fetch(master_repo_path, worktree_path, db_sha)
-            git_update_ref(master_repo_path, "refs/heads/master", db_sha)
-            verify: read refs/heads/master == db_sha   // assertion
+            git_fetch(main_repo_path, worktree_path, db_sha)
+            git_update_ref(main_repo_path, "refs/heads/main", db_sha)
+            verify: read refs/heads/main == db_sha   // assertion
             UPDATE initiatives SET git_apply_pending = 0 WHERE id = i.id
             INSERT audit_events (kind = 'GitConsistencyRepaired', initiative_id = i.id,
                                  db_sha, previous_git_sha = git_sha)
@@ -957,7 +957,7 @@ for each row i:
 
 Recovery is idempotent: running it twice on the same state produces the same final state. `git_fetch` and `git_update_ref` are individually idempotent (re-fetching a SHA already present is a no-op; updating a ref to the value it already has is a no-op). The SQLite UPDATEs are also idempotent.
 
-**Recovery runs before IPC accepts new connections.** This guarantees that no new IntegrationMerge for the same initiative can be admitted while a previous one is still pending git apply — the new admission would otherwise see SQLite's `current_sha` ahead of git's `refs/heads/master` and produce a Check 3 ancestry violation.
+**Recovery runs before IPC accepts new connections.** This guarantees that no new IntegrationMerge for the same initiative can be admitted while a previous one is still pending git apply — the new admission would otherwise see SQLite's `current_sha` ahead of git's `refs/heads/main` and produce a Check 3 ancestry violation.
 
 ### 11.4 Worktree Retention Requirement
 
@@ -982,28 +982,28 @@ This complements (does not replace) the forensic retention from `key-revocation.
 
 ### 11.5 Cross-Cutting: Subsequent Operations Must Check `git_apply_pending`
 
-Operations that read git state must be aware that `current_sha` may be ahead of `refs/heads/master` during the Phase 1 → Phase 3 window:
+Operations that read git state must be aware that `current_sha` may be ahead of `refs/heads/main` during the Phase 1 → Phase 3 window:
 
 - **Subsequent IntegrationMerge admission** (Check 8 Phase 1 pre-flight): asserts `git_apply_pending = 0`. If 1, returns `FAIL_GIT_APPLY_PENDING` and the caller should retry shortly. This prevents wave 2 from beginning before wave 1's git is applied. In normal operation this assertion always passes (Phase 3 completes inline within the same handler call); it can fail only after a crash, in which case recovery on the next startup clears the flag.
-- **Push to remote** (§14 Push Approval Gate): waits for `git_apply_pending = 0` before reading `refs/heads/master` and pushing. A push during the pending window would push the OLD sha, which is wrong. The push handler polls the flag with a short timeout (default 5s) before either pushing or returning a transient error.
-- **Audit replay tooling**: when a tool reconstructs git state at a historical timestamp, it should consult `git_apply_pending` at that timestamp. If 1, the tool reports both `current_sha` (kernel-authoritative) and `refs/heads/master` at that moment, and explicitly notes the pending git apply.
+- **Push to remote** (§14 Push Approval Gate): waits for `git_apply_pending = 0` before reading `refs/heads/main` and pushing. A push during the pending window would push the OLD sha, which is wrong. The push handler polls the flag with a short timeout (default 5s) before either pushing or returning a transient error.
+- **Audit replay tooling**: when a tool reconstructs git state at a historical timestamp, it should consult `git_apply_pending` at that timestamp. If 1, the tool reports both `current_sha` (kernel-authoritative) and `refs/heads/main` at that moment, and explicitly notes the pending git apply.
 
 ### 11.6 Why Not Reverse Ordering (Git First, SQLite Second)
 
 Considered: do `git fetch` + `git update-ref` first, then commit SQLite. Rejected:
 
-- **No durable marker for recovery.** If git completes but the kernel crashes before SQLite commits, there is no kernel-side record that the merge happened. Recovery has nothing to drive from. Detection would require scanning `master_repo`'s reflog and trying to reconstruct intent, which is fragile and breaks the "audit log is the source of truth" invariant.
+- **No durable marker for recovery.** If git completes but the kernel crashes before SQLite commits, there is no kernel-side record that the merge happened. Recovery has nothing to drive from. Detection would require scanning `main_repo`'s reflog and trying to reconstruct intent, which is fragile and breaks the "audit log is the source of truth" invariant.
 - **Audit event ordering inversion.** The `IntegrationMergeCompleted` audit event records that the merge was admitted. If git happens first and audit is written later, an external observer monitoring git could see the new commit before the audit log says it was admitted — a transient inversion.
-- **Master ref poisoning on rejection.** If SQLite commit fails for any reason (transient I/O error, foreign-key violation surfaced late, ...), the git ref is already advanced and cannot easily be retracted. Rolling back a git ref requires writing the old SHA, which is itself a state change that would need its own audit record.
+- **Main ref poisoning on rejection.** If SQLite commit fails for any reason (transient I/O error, foreign-key violation surfaced late, ...), the git ref is already advanced and cannot easily be retracted. Rolling back a git ref requires writing the old SHA, which is itself a state change that would need its own audit record.
 - **Idempotency surface.** Putting the non-transactional side AFTER the transactional one means the only thing that needs idempotency-on-recovery is the git side, which is naturally idempotent. The reverse forces SQLite to be re-runnable, which it is not designed to be (no `INSERT OR IGNORE` for audit events that should be append-once).
 
 ### 11.7 Why Not Single-Phase (No `git_apply_pending` Flag)
 
-Considered: just commit SQLite, then run git, with no marker. Recovery scans for `current_sha != refs/heads/master` mismatches and replays. Rejected:
+Considered: just commit SQLite, then run git, with no marker. Recovery scans for `current_sha != refs/heads/main` mismatches and replays. Rejected:
 
 - **Mismatch is ambiguous.** A mismatch could mean "Phase 2 didn't complete" (recoverable) or "git was tampered with externally" (security concern, not recoverable). Without a marker explicitly saying "we expected to apply and didn't," recovery cannot distinguish.
 - **No way to enforce worktree retention.** Worktree GC needs to know whether a worktree is still required for an in-flight git apply. Without `git_apply_pending`, the GC has to make a conservative assumption (never GC, or always GC and risk losing recovery objects). Neither is acceptable.
-- **Subsequent-operation guard becomes guessing.** Phase 1 pre-flight (§11.5) needs to know whether the previous merge's git is applied. Without an explicit flag, it would have to compare `current_sha` against `refs/heads/master` on every IntegrationMerge admission, which requires a git read inside an SQLite transaction (cross-store I/O during a `BEGIN IMMEDIATE` lock — a concurrency hazard).
+- **Subsequent-operation guard becomes guessing.** Phase 1 pre-flight (§11.5) needs to know whether the previous merge's git is applied. Without an explicit flag, it would have to compare `current_sha` against `refs/heads/main` on every IntegrationMerge admission, which requires a git read inside an SQLite transaction (cross-store I/O during a `BEGIN IMMEDIATE` lock — a concurrency hazard).
 
 The `git_apply_pending` flag costs 1 byte per initiative row and resolves all three problems.
 
@@ -1011,7 +1011,7 @@ The `git_apply_pending` flag costs 1 byte per initiative row and resolves all th
 
 For every initiative, exactly one of the following holds at any moment:
 
-(a) **Consistent.** `initiatives.current_sha = refs/heads/master` AND `git_apply_pending = 0`.
+(a) **Consistent.** `initiatives.current_sha = refs/heads/main` AND `git_apply_pending = 0`.
 
 (b) **Recoverable.** `initiatives.git_apply_pending = 1` AND there exists an `IntegrationMergeCompleted` audit event with `commit_sha = initiatives.current_sha` AND the Orchestrator worktree referenced by that event still exists on disk with `commit_sha` reachable.
 
@@ -1031,13 +1031,13 @@ The invariant pairs with INV-PUSH-01 (kernel-push-protocol.md §12) and INV-KEY-
 AuditEventKind::GitConsistencyRepaired {
     initiative_id:      Uuid,
     db_sha:             String,    // the SHA SQLite already committed to
-    previous_git_sha:   String,    // what refs/heads/master was at, before recovery
+    previous_git_sha:   String,    // what refs/heads/main was at, before recovery
     recovered_at_startup_run: Uuid, // links to StartupReconciliationCompleted
 }
 
 AuditEventKind::GitConsistencyVerified {
     initiative_id:      Uuid,
-    sha:                String,    // current_sha == refs/heads/master at recovery
+    sha:                String,    // current_sha == refs/heads/main at recovery
     recovered_at_startup_run: Uuid,
 }
 
@@ -1086,7 +1086,7 @@ CREATE INDEX idx_imerge_attempts_open ON integration_merge_attempts(initiative_i
 
 This table is **distinct** from `initiatives.git_apply_pending`. The
 existing flag governs the SQLite-intent → git-apply boundary for
-the eventual master advance (§11.1); this table governs the
+the eventual main advance (§11.1); this table governs the
 candidate-merge-tree → pre-merge-verifier boundary, which is a
 strictly earlier phase of the pipeline.
 
@@ -1106,7 +1106,7 @@ Phase 1 (Check 8 / §11.1 unchanged):
   - SQLite intent: BEGIN IMMEDIATE; INSERT initiative_merges row;
                                      UPDATE initiatives SET git_apply_pending = 1; COMMIT
 Phase 2 (§11.1 unchanged):
-  - git work: update master ref to candidate_merge_sha
+  - git work: update main ref to candidate_merge_sha
 Phase 3 (§11.1 unchanged):
   - SQLite finalize: UPDATE initiatives SET current_sha = ..., git_apply_pending = 0
   - UPDATE integration_merge_attempts SET state = 'CompletedAdvanceApplied',
@@ -1115,7 +1115,7 @@ Phase 3 (§11.1 unchanged):
 ```
 
 The candidate merged tree is the **input** to phase 1; once phase
-3 finalizes, it becomes reachable from `refs/heads/master` and is
+3 finalizes, it becomes reachable from `refs/heads/main` and is
 no longer an orphan. Until phase 3 finalizes, the candidate is
 discarded on any failure path (verifier failure, candidate-merge
 computation failure, or crash recovery per §11.10.4).
@@ -1147,22 +1147,22 @@ fn discard_candidate_merge_tree(
     .bind(integration_merge_id)
     .execute(&db).await?;
 
-    // 3. Targeted, immediate GC on master_repo (the parent that holds
+    // 3. Targeted, immediate GC on main_repo (the parent that holds
     //    the orphan commit_sha now unreachable from any ref). Bounded
     //    in scope and runtime: --prune=now retires only the unreachable
     //    objects, the lock collision window with a concurrent
     //    IntegrationMerge phase 2 is detected and the call is skipped
-    //    in that case. The periodic git_maintenance_master sweep
+    //    in that case. The periodic git_maintenance_main sweep
     //    (kernel-lifecycle.md §10.5.3) is the catch-all if this
     //    targeted call is skipped or fails.
     //
     //    Without this immediate GC, the orphan commit pollutes
-    //    master_repo's loose-object area for up to 6h (the periodic
+    //    main_repo's loose-object area for up to 6h (the periodic
     //    cadence) — long enough that a high-failure-rate burst of
     //    pre-merge verifiers can fill the disk before the periodic
     //    job runs. With it, the worst-case orphan-object retention
     //    window collapses to a single discard latency.
-    if let Err(e) = git_gc_orphan(&master_repo_path()) {
+    if let Err(e) = git_gc_orphan(&main_repo_path()) {
         // Best-effort: log and continue; the periodic sweep will
         // catch it.
         warn!(target: "integration_merge",
@@ -1202,12 +1202,12 @@ fn git_gc_orphan(repo_path: &Path) -> Result<(), GitGcError> {
 `"candidate_computation_failed"` | `"crash_recovery"` |
 `"merge_aborted_by_operator"`.
 
-The orphan commit on `master_repo` is reaped at one of three points,
+The orphan commit on `main_repo` is reaped at one of three points,
 each with a bounded retention window:
 
 1. **Synchronous**: `git_gc_orphan` succeeds in step 3 above.
    Retention: ~`git gc` runtime, typically <1 s.
-2. **Periodic**: `git_maintenance_master` runs (cadence: 6 h, or
+2. **Periodic**: `git_maintenance_main` runs (cadence: 6 h, or
    opportunistic on disk pressure). Retention: up to one cadence.
 3. **Crash-induced**: `discard_candidate_merge_tree` was interrupted
    between steps 1 and 3 (e.g., kernel killed mid-discard). The next
@@ -1386,9 +1386,9 @@ The IntegrationMerge handler is rewritten on top of the `DomainAdapter` trait
 - [ ] Tests:
       - Plan with no `[[plan.integration_merge_verifiers]]` and policy with no
         `[[integration_merge_verifiers]]` → Check 5d is no-op; merge proceeds to Check 6a
-      - Plan with one `block_merge` verifier that passes → Check 5d.4 advances; master updated
+      - Plan with one `block_merge` verifier that passes → Check 5d.4 advances; main updated
       - Plan with one `block_merge` verifier that fails → `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`;
-        candidate worktree removed; master NOT updated; no `initiative_merges` row written
+        candidate worktree removed; main NOT updated; no `initiative_merges` row written
       - Plan with one `warn_only` verifier that fails → merge proceeds; audit shows
         warning witness in the attempt's `verifier_witnesses`
       - Operator policy `[[integration_merge_verifiers]]` with `on_failure = "warn_only"`
@@ -1428,7 +1428,7 @@ The IntegrationMerge handler is rewritten on top of the `DomainAdapter` trait
 - [ ] Add `SecurityViolationKind::GitStateInconsistent { initiative_id, db_sha, git_sha, reason }` variant
 - [ ] Add `FAIL_GIT_APPLY_PENDING` to `KernelError` enum
 - [ ] Update worktree GC to enforce INV-MERGE-WORKTREE-RETAIN (§11.4) — block GC of any worktree referenced by an initiative with `git_apply_pending = 1`
-- [ ] Update push handler (§14) to wait for `git_apply_pending = 0` before reading `refs/heads/master` (default 5s poll timeout, return transient error on timeout)
+- [ ] Update push handler (§14) to wait for `git_apply_pending = 0` before reading `refs/heads/main` (default 5s poll timeout, return transient error on timeout)
 - [ ] Tests:
       - Crash between Phase 1 and Phase 2: SIGKILL kernel after Phase 1 commit; restart; verify §11.3 Case A re-runs Phase 2; final state matches no-crash baseline.
       - Phase 2 git fetch failure: stub `gix::fetch` to fail once; verify error surfaced to Orchestrator; on retry, Phase 2 succeeds.
@@ -1437,7 +1437,7 @@ The IntegrationMerge handler is rewritten on top of the `DomainAdapter` trait
       - GitStateInconsistent (case C of §11.3): manually delete the Orchestrator's worktree before restart; verify SecurityViolation emitted, initiative transitions to Blocked, kernel does NOT clear `git_apply_pending`.
       - Subsequent IntegrationMerge during pending: hold Phase 2 stalled; submit a second IntegrationMerge from the same Orchestrator; verify `FAIL_GIT_APPLY_PENDING`; release Phase 2; verify second merge succeeds on retry.
       - Push during pending: hold Phase 2 stalled; trigger push (auto-push initiative); verify push handler waits for flag; release Phase 2; verify push proceeds with the correct SHA.
-      - INV-MERGE-CONSISTENCY assertion at startup: corrupt `refs/heads/master` to point at base_sha while leaving `current_sha = commit_sha` and `git_apply_pending = 1`; restart; verify §11.3 Case A re-applies and the invariant is restored to (a).
+      - INV-MERGE-CONSISTENCY assertion at startup: corrupt `refs/heads/main` to point at base_sha while leaving `current_sha = commit_sha` and `git_apply_pending = 1`; restart; verify §11.3 Case A re-applies and the invariant is restored to (a).
 
 ---
 
@@ -1490,7 +1490,7 @@ approval_escalation_class = "ProtectedPathMerge"
   valid (`"Cargo.lock"`). No globs.
 - `require_approval_for` — which intent classes trigger the gate. Currently only
   `IntegrationMerge` is supported. `SingleCommit` is intentionally excluded (agents need
-  to write to these paths freely; only the merge to master requires human sign-off).
+  to write to these paths freely; only the merge to main requires human sign-off).
 - `approval_escalation_class` — must be `"ProtectedPathMerge"`. Extensible for future
   classes.
 
@@ -1534,7 +1534,7 @@ changes require a new signed bundle (`raxis policy push`), which goes through
 
 8. Kernel Check 6a:
    → Verifies esc-99 is Consumed, class = ProtectedPathMerge, session matches, SHA matches
-   → Admits: fast-forwards master to commit_sha
+   → Admits: fast-forwards main to commit_sha
    → Emits IntegrationMergeCompleted { operator_approval_id: Some(esc-99),
                                         protected_paths_approved: ["src/payments/"] }
 ```
@@ -1554,7 +1554,7 @@ issue a new approval.
 
 This means if the Orchestrator retries a merge (e.g., after a conflict resolution changes
 the SHA), it needs a new approval for the new SHA. This is intentional — the operator
-is approving the exact bytes that will enter the master branch, not the concept of the merge.
+is approving the exact bytes that will enter the main branch, not the concept of the merge.
 
 ### Kernel-Initiated vs. Orchestrator-Initiated Escalations
 
@@ -1706,12 +1706,12 @@ which lists all paths from both sources that triggered an approval for this merg
 
 ### The Problem
 
-`IntegrationMerge` updates the local master branch in the RAXIS host's git repository.
-The local master is the record of everything the agent produced. But it has not yet left
+`IntegrationMerge` updates the local main branch in the RAXIS host's git repository.
+The local main is the record of everything the agent produced. But it has not yet left
 the machine — `git push` to the remote (GitHub, GitLab, etc.) is a separate step.
 
 For some deployments, operators want a final human gate between "the DAG completed and
-master is updated locally" and "the code is pushed to the remote and visible to the rest
+main is updated locally" and "the code is pushed to the remote and visible to the rest
 of the team / CI pipeline." This is especially relevant for:
 - Production deployment pipelines where a `git push` triggers CI that deploys to prod
 - Regulated environments where code changes require a human review before becoming visible
@@ -1740,7 +1740,7 @@ is opt-in per initiative by the operator at plan-signing time.
 
 ```
 1. Final IntegrationMerge admitted
-   → master updated to final_sha
+   → main updated to final_sha
    → Kernel emits InitiativeCompleted
 
 2. If plan.require_push_approval = false:
@@ -1763,7 +1763,7 @@ is opt-in per initiative by the operator at plan-signing time.
 5a. On approve:
     → Kernel: UPDATE escalations SET state = 'Consumed', resolved_by = 'operator_alice'
     → Emits EscalationConsumed { class: PushApproval, resolved_by: operator_alice }
-    → Kernel executes git push origin master
+    → Kernel executes git push origin main
     → Emits PushCompleted { initiative_id, commit_sha: final_sha, resolved_by: operator_alice }
     → Initiative transitions to Pushed state
 
@@ -1771,8 +1771,8 @@ is opt-in per initiative by the operator at plan-signing time.
     → Kernel: UPDATE escalations SET state = 'Rejected', resolved_by = 'operator_alice'
     → Emits PushRejected { initiative_id, commit_sha: final_sha, resolved_by: operator_alice }
     → Initiative transitions to PushRejected state
-    → master remains updated locally; remote is NOT updated
-    → Operator must decide: revert local master, re-plan, or investigate
+    → main remains updated locally; remote is NOT updated
+    → Operator must decide: revert local main, re-plan, or investigate
 ```
 
 ### Audit Events
@@ -1783,7 +1783,7 @@ AuditEventKind::PushApprovalRequired {
     escalation_id:   Uuid,
     commit_sha:      String,   // the final_sha that would be pushed
     remote:          String,   // e.g., "origin"
-    ref_spec:        String,   // e.g., "refs/heads/master:refs/heads/master"
+    ref_spec:        String,   // e.g., "refs/heads/main:refs/heads/main"
 }
 
 AuditEventKind::PushCompleted {
@@ -1831,7 +1831,7 @@ PushPending ──── operator approve ──→ Pushed
             └─── operator reject ──→ PushRejected
 ```
 
-The existing `Completed` state now means "DAG done, master updated, push not yet executed
+The existing `Completed` state now means "DAG done, main updated, push not yet executed
 or gated." `Pushed` is the new terminal success state for initiatives with push configured.
 For initiatives without a remote (`remote = ""` in plan), `Completed = Pushed` — there is
 nothing to push.

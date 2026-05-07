@@ -5,7 +5,7 @@
 //! # Scope
 //!
 //! This is the V2 reference adapter: it wraps the existing free
-//! functions in `crate::lib` (master fast-forward, ancestry checks,
+//! functions in `crate::lib` (main fast-forward, ancestry checks,
 //! `gix::diff`-driven touched-set computation) behind the
 //! `DomainAdapter` trait so the kernel can hold an
 //! `Arc<dyn DomainAdapter>` instead of calling free functions
@@ -26,7 +26,7 @@
 //! Adapter methods may be invoked from the tokio multi-threaded
 //! runtime. Synchronous git operations (`gix::diff`, ODB walks,
 //! ref-update transactions) run on the tokio blocking pool via
-//! `spawn_blocking`. The adapter holds no mutable state; the master
+//! `spawn_blocking`. The adapter holds no mutable state; the main
 //! repo's lock is acquired lazily inside `commit` per
 //! `integration-merge.md §11`.
 
@@ -43,7 +43,7 @@ use raxis_domain::{
 use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
 
-use crate::{commit_merge_to_master, MasterAdvance, MasterMergeError};
+use crate::{commit_merge_to_main, MainAdvance, MainMergeError};
 
 // ---------------------------------------------------------------------------
 // IntentKind shape — kernel-defined enum forwarded as a string. The
@@ -101,10 +101,10 @@ pub struct SeTerminalArtefact {
 /// in-flight sessions via `Arc`.
 #[derive(Debug, Clone)]
 pub struct GitAdapter {
-    /// Path to the canonical master repository the adapter advances
+    /// Path to the canonical main repository the adapter advances
     /// in `commit`. SE: typically
-    /// `<data_dir>/repositories/<initiative_id>/master/`.
-    pub master_repo_path: Arc<PathBuf>,
+    /// `<data_dir>/repositories/<initiative_id>/main/`.
+    pub main_repo_path: Arc<PathBuf>,
     /// Path under which per-session worktrees are provisioned. SE:
     /// `<data_dir>/worktrees/`.
     pub sessions_root:    Arc<PathBuf>,
@@ -119,12 +119,12 @@ impl GitAdapter {
     /// adapter on first use; the kernel's `setup wizard` lays down
     /// canonical zero-mode parent dirs at install time.
     pub fn new(
-        master_repo_path: PathBuf,
+        main_repo_path: PathBuf,
         sessions_root:    PathBuf,
         transfer_root:    PathBuf,
     ) -> Self {
         Self {
-            master_repo_path: Arc::new(master_repo_path),
+            main_repo_path: Arc::new(main_repo_path),
             sessions_root:    Arc::new(sessions_root),
             transfer_root:    Arc::new(transfer_root),
         }
@@ -252,7 +252,7 @@ impl DomainAdapter for GitAdapter {
         _cred_proxy: &dyn CredentialProxyHandle,
         ctx: CommitContext<'_>,
     ) -> Result<DomainCommitReceipt, DomainError> {
-        // `commit_merge_to_master` is the existing V2 free function;
+        // `commit_merge_to_main` is the existing V2 free function;
         // the adapter wraps it with the trait's `Snapshot` ↔
         // `commit_sha` translation and the `AlreadyApplied` short-
         // circuit the trait contract requires.
@@ -267,9 +267,9 @@ impl DomainAdapter for GitAdapter {
 
         let orch_worktree = ctx.worktree_root.join(ctx.session.session_id);
 
-        let master = self.master_repo_path.as_ref().clone();
+        let main = self.main_repo_path.as_ref().clone();
         let result = tokio::task::spawn_blocking(move || {
-            commit_merge_to_master(&master, &orch_worktree, &commit_sha)
+            commit_merge_to_main(&main, &orch_worktree, &commit_sha)
         })
         .await
         .map_err(|e| {
@@ -277,7 +277,7 @@ impl DomainAdapter for GitAdapter {
         })?;
 
         match result {
-            Ok(MasterAdvance { current_sha, already_at_target, .. }) => {
+            Ok(MainAdvance { current_sha, already_at_target, .. }) => {
                 let receipt = DomainCommitReceipt {
                     receipt_id:   current_sha.clone(),
                     external_ref: None,
@@ -290,30 +290,30 @@ impl DomainAdapter for GitAdapter {
                     Ok(receipt)
                 }
             }
-            Err(MasterMergeError::ShaMissingPostFetch { sha }) => {
+            Err(MainMergeError::ShaMissingPostFetch { sha }) => {
                 Err(DomainError::PreconditionFailed(format!(
                     "commit_sha {sha} not present in orchestrator worktree ODB"
                 )))
             }
-            Err(MasterMergeError::FetchFailed(reason)) => {
+            Err(MainMergeError::FetchFailed(reason)) => {
                 Err(DomainError::Transient(format!("git fetch failed: {reason}")))
             }
-            Err(MasterMergeError::MasterRepoUnopenable { path, reason }) => {
+            Err(MainMergeError::MainRepoUnopenable { path, reason }) => {
                 Err(DomainError::Permanent(format!(
-                    "master repo at {} unopenable: {reason}",
+                    "main repo at {} unopenable: {reason}",
                     path.display(),
                 )))
             }
-            Err(MasterMergeError::SourceUnopenable { path, reason }) => {
+            Err(MainMergeError::SourceUnopenable { path, reason }) => {
                 Err(DomainError::Permanent(format!(
                     "orchestrator worktree at {} unopenable: {reason}",
                     path.display(),
                 )))
             }
-            Err(MasterMergeError::RefUpdateFailed(reason)) => {
+            Err(MainMergeError::RefUpdateFailed(reason)) => {
                 Err(DomainError::Transient(format!("ref update failed: {reason}")))
             }
-            Err(MasterMergeError::InvalidSha { sha, reason }) => {
+            Err(MainMergeError::InvalidSha { sha, reason }) => {
                 Err(DomainError::PreconditionFailed(format!(
                     "invalid commit_sha {sha}: {reason}"
                 )))
@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn escalation_classes_are_stable() {
         let adapter = GitAdapter::new(
-            PathBuf::from("/tmp/master"),
+            PathBuf::from("/tmp/main"),
             PathBuf::from("/tmp/sessions"),
             PathBuf::from("/tmp/transfer"),
         );
@@ -642,7 +642,7 @@ mod tests {
     async fn provision_workspace_creates_session_subdir() {
         let tmp = tempfile::tempdir().unwrap();
         let adapter = GitAdapter::new(
-            tmp.path().join("master"),
+            tmp.path().join("main"),
             tmp.path().join("sessions"),
             tmp.path().join("transfer"),
         );
@@ -665,7 +665,7 @@ mod tests {
     async fn snapshot_is_idempotent_over_unchanged_workspace() {
         let tmp = tempfile::tempdir().unwrap();
         let adapter = GitAdapter::new(
-            tmp.path().join("master"),
+            tmp.path().join("main"),
             tmp.path().join("sessions"),
             tmp.path().join("transfer"),
         );
@@ -685,7 +685,7 @@ mod tests {
     async fn purge_workspace_removes_host_path() {
         let tmp = tempfile::tempdir().unwrap();
         let adapter = GitAdapter::new(
-            tmp.path().join("master"),
+            tmp.path().join("main"),
             tmp.path().join("sessions"),
             tmp.path().join("transfer"),
         );

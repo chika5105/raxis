@@ -240,7 +240,7 @@ Verifier Execution** (per `integration-merge.md §4 Check 5d`):
 
 1. Kernel computes the **candidate merged tree** as an orphan commit
    (`integration-merge.md §4 Check 5d.2`). The candidate SHA is
-   ephemeral — it is discarded if verification fails (no master
+   ephemeral — it is discarded if verification fails (no main
    pollution) and renamed-and-pushed if verification passes.
 2. Kernel reads:
    - `policy.toml [[integration_merge_verifiers]]` — operator-global
@@ -251,14 +251,14 @@ Verifier Execution** (per `integration-merge.md §4 Check 5d`):
    (per §16.3), the kernel allocates a verifier VM slot.
 4. Verifier VMs are spawned with `/workspace` mounted from the
    candidate merged tree (NOT from any individual task branch and
-   NOT from current master).
+   NOT from current main).
 5. IntegrationMerge admission BLOCKS until all matching pre-merge
    verifiers complete.
 6. Gating algorithm per §16.4: any `block_merge` failure → kernel
    discards the candidate tree, returns
    `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names,
    primary_witness_summary }` to the Orchestrator. All `block_merge`
-   pass → kernel mechanically advances master to the candidate SHA;
+   pass → kernel mechanically advances main to the candidate SHA;
    IntegrationMerge succeeds.
 
 #### 4.1.3 Policy claim-based gate activation
@@ -291,14 +291,14 @@ Per verifier VM (identical for all three hook types):
 
 1. **Worktree provisioning.**
    - **Per-task verifier:** kernel creates a fresh ephemeral clone of
-     `master_repo @ evaluation_sha` at `worktrees/<verifier_run_id>/`.
+     `main_repo @ evaluation_sha` at `worktrees/<verifier_run_id>/`.
      Clone is shallow (depth 1).
    - **Pre-merge verifier:** kernel creates a fresh ephemeral clone of
      the **candidate merged tree** at `worktrees/<verifier_run_id>/`.
      The candidate SHA is the orphan commit produced by
      `integration-merge.md §4 Check 5d.2`.
    - **Policy claim-based gate:** same as per-task verifier —
-     `master_repo @ evaluation_sha`.
+     `main_repo @ evaluation_sha`.
 2. **VM allocation.** Kernel boots the VM from the image declared by
    `image` (digest-verified per `INV-VM-CAP-03`). VM gets:
    - `/workspace` mounted RW from the ephemeral clone (VirtioFS)
@@ -439,7 +439,7 @@ field.
 | Value | Used by | Semantics on non-passing `final_status` | Audit emitted |
 |---|---|---|---|
 | `block_review` | Per-task verifiers only | Dependent Reviewer NEVER activates for this `evaluation_sha`. Originating Executor's `CompleteTask` is rolled into `Failed` per `agent-disagreement.md §3`. Executor receives `FAIL_VERIFIER_BLOCKED` on its next intent. | `VerifierBlockedReview { task_id, verifier_name, final_status }` plus per-status event from §11 |
-| `block_merge` | Pre-merge verifiers only | Candidate merged tree is discarded. Orchestrator receives `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary }` and routes per `agent-disagreement.md §6` (typically: escalate to operator). Master is NOT advanced. | `VerifierBlockedMerge { integration_merge_id, verifier_names, candidate_merge_sha }` plus per-status event |
+| `block_merge` | Pre-merge verifiers only | Candidate merged tree is discarded. Orchestrator receives `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary }` and routes per `agent-disagreement.md §6` (typically: escalate to operator). Main is NOT advanced. | `VerifierBlockedMerge { integration_merge_id, verifier_names, candidate_merge_sha }` plus per-status event |
 | `warn_only` | Per-task AND pre-merge verifiers | The dependent consumer (Reviewer or merge-advance, respectively) IS activated/advanced normally. Witness is surfaced in the consumer's KSB / audit with a flag indicating the warning. | Per-status event from §11 only; no `VerifierBlockedReview` / `VerifierBlockedMerge` |
 
 **Authoring-time rules:**
@@ -515,11 +515,11 @@ if !block_merge_failures.is_empty() {
         primary_witness_summary: block_merge_failures[0].summary(),
         candidate_merge_sha,
     };
-    // Master is NOT advanced. Orchestrator receives the failure and
+    // Main is NOT advanced. Orchestrator receives the failure and
     // routes per agent-disagreement.md §6 (typically operator escalation).
 } else {
     // All block_merge verifiers passed (or there are none matching this merge).
-    // Advance master to candidate_merge_sha; IntegrationMerge succeeds.
+    // Advance main to candidate_merge_sha; IntegrationMerge succeeds.
     proceed_to_check_6_and_8(candidate_merge_sha);
 }
 ```
@@ -833,7 +833,7 @@ Spawn matching pre-merge verifiers (parallel)
 IntegrationMerge advance gating (§5.3)
   ├─ if any block_merge verifier failed → discard candidate; return
   │    FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED to Orchestrator
-  └─ if all block_merge pass → proceed to Check 6, advance master
+  └─ if all block_merge pass → proceed to Check 6, advance main
 ```
 
 ### 9.3 Parallelism
@@ -1094,7 +1094,7 @@ verifier images are operator-trust domain. The kernel-canonical
 > pre-merge verifiers) **and `/raxis/`** (for artifact output). All
 > `/workspace` and `/raxis/` mutations are dropped at VM exit
 > unless declared as artifacts per §6. Verifier VMs cannot persist
-> mutations to the `master_repo` or any session-shared storage.
+> mutations to the `main_repo` or any session-shared storage.
 
 > **`INV-VERIFIER-10` — Verifier timeouts are kernel-enforced via
 > `cgroup.kill` on the verifier-process cgroup at the declared
@@ -1139,19 +1139,19 @@ verifier images are operator-trust domain. The kernel-canonical
 
 > **`INV-VERIFIER-13` — Pre-merge verifier execution gates
 > `IntegrationMerge` admission.** No `IntegrationMerge` advances
-> master while any matching pre-merge verifier (per the
+> main while any matching pre-merge verifier (per the
 > `applies_to` filter in §16.3) has `final_status` other than
 > `"passed"` for the candidate merged tree. The candidate merged
 > tree is an orphan commit until verification completes; it is
 > renamed-and-pushed only on full pass and discarded on any
-> `block_merge` failure. Master is never partially advanced.
+> `block_merge` failure. Main is never partially advanced.
 
 > **`INV-VERIFIER-14` — Symbol-index witness provenance is
 > kernel-provisioned, never Executor-derived.** The
 > `raxis-verifier-symbol-index` verifier (per `INV-VERIFIER-12`)
 > is always activated against a kernel-provisioned clone of the
 > evaluation tree — the kernel performs `git clone --shared
-> --no-checkout master_repo.git → /workspace`, then
+> --no-checkout main_repo.git → /workspace`, then
 > `git checkout <evaluation_sha>` inside the verifier VM, all
 > over the kernel-mediated VirtioFS mount. The Executor's
 > worktree is never the substrate. This closes a confused-deputy
@@ -1348,7 +1348,7 @@ they actually use. A mega-image with all four toolchains would be
 for languages they don't use.
 
 **Setup wizard integration.** `operator-ergonomics.md §16.3` adds a
-"language stacks" phase that scans the master_repo for language
+"language stacks" phase that scans the main_repo for language
 hints (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`)
 and pre-checks the corresponding starters for registration. The
 wizard writes the appropriate `[[vm_images]]` entries with the
@@ -1390,7 +1390,7 @@ deviated.
 Pre-merge verifiers run when the Orchestrator submits
 `IntegrationMerge`. They evaluate the **candidate merged tree**
 (an orphan commit produced by `integration-merge.md §4 Check 5d`
-that is discarded on `block_merge` failure and renamed-to-master on
+that is discarded on `block_merge` failure and renamed-to-main on
 pass). They are the channel for catching cross-task interactions
 and validating the actually-merged state.
 
@@ -1506,7 +1506,7 @@ Per `integration-merge.md §4 Check 5d.2`:
    ```
    $RAXIS_DATA_DIR/candidate_merges/<integration_merge_id>/
    ```
-   This is a separate worktree, NOT on master, NOT on any task
+   This is a separate worktree, NOT on main, NOT on any task
    branch.
 2. Kernel records `candidate_merge_sha` in the
    `integration_merge_attempts` table (new column) for crash
@@ -1556,7 +1556,7 @@ on representative DAG shapes; the kernel's
 `raxis-cli plan explain --merge-coverage` command renders which
 merges each verifier will fire on.
 
-### 16.4 Gating and master advance
+### 16.4 Gating and main advance
 
 Per §5.3 algorithm:
 
@@ -1564,8 +1564,8 @@ Per §5.3 algorithm:
   failed, timed_out, crashed, artifact_missing}.
 - If any `block_merge` verifier is non-passing: discard candidate
   per §16.5; return `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` to
-  Orchestrator; NO master advance.
-- If all `block_merge` verifiers pass: candidate is renamed-to-master
+  Orchestrator; NO main advance.
+- If all `block_merge` verifiers pass: candidate is renamed-to-main
   per the standard `IntegrationMerge` advance flow (Check 6 onward
   in `integration-merge.md §4`).
 
@@ -1579,24 +1579,24 @@ aborted:
 2. Kernel marks `integration_merge_attempts` row with
    `discard_reason ∈ {"verifier_blocked", "crash_recovery",
    "merge_aborted"}`.
-3. Kernel runs `git gc --prune=now` against `master_repo` (the
+3. Kernel runs `git gc --prune=now` against `main_repo` (the
    parent of the orphan candidate commit) under a short-timeout
    advisory lock — see `integration-merge.md §11.10.3`'s
    `git_gc_orphan` helper. Lock contention with an in-flight
    IntegrationMerge phase 2 is a recognized skip case; the orphan
-   is then collected by the periodic `git_maintenance_master` job.
+   is then collected by the periodic `git_maintenance_main` job.
 4. Kernel emits `CandidateMergeTreeDiscarded { integration_merge_id,
    candidate_merge_sha, discard_reason }`.
 
 The retention story for the orphan commit is the union of the
 synchronous step 3 above and the periodic
-`git_maintenance_master` job
+`git_maintenance_main` job
 (`kernel-lifecycle.md §10.5.3`, cadence 6 h with opportunistic
 disk-pressure trigger). With both layers in place, a high
 failure-rate burst of pre-merge verifications can no longer fill the
 disk between cadence ticks: each failed attempt reaps its own orphan
 in step 3, and the periodic sweep is a backstop for cases where the
-synchronous reap could not acquire the repo lock. Master is never
+synchronous reap could not acquire the repo lock. Main is never
 polluted.
 
 ### 16.6 Orchestrator failure handling
@@ -1871,7 +1871,7 @@ This spec implies amendments in adjacent specs:
 | `integration-merge.md` | Rename existing `[[integration_merge_gates]]` (protected-path approval) to `[[plan.protected_path_gates]]` for clarity. Add **Check 5d — Pre-Integration Merge Verifier Execution** between Check 5c and Check 6. Document candidate-merge-tree orphan-commit lifecycle. Add `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` to the failure-code list. Add `integration_merge_attempts` table with `candidate_merge_sha` and `discard_reason` columns. |
 | `policy-plan-authority.md` | New `[default_verifier_images]` policy section (§4). New `[[integration_merge_verifiers]]` policy section (§4). New `[prepare] auto_inject_symbol_index` knob (§4). New `[verifier_credentials]` and `[[verifier_credentials.images]]` policy sections (§16.7). Failure-code catalog (§3b) gains `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`, `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH`, `FAIL_VERIFIER_INVALID_ON_FAILURE`, `FAIL_VERIFIER_TASK_SET_EMPTY`, `FAIL_VERIFIER_TASK_SET_UNKNOWN_TASK`, `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`, `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED`, `FAIL_VERIFIER_CREDENTIAL_UNKNOWN_IMAGE`, `FAIL_VERIFIER_CREDENTIAL_UNKNOWN_CREDENTIAL`, `FAIL_VERIFIER_AUTHENTICATED_EGRESS_DENIED_BY_POLICY`. `approve_plan` shift-left checks gain validation of `[[plan.integration_merge_verifiers]]` declarations and `[verifier_credentials]` references. Implementation checklist + tests extended. |
 | `system-requirements.md` | §8.1 bundled artifacts gain `raxis-verifier-symbol-index-<kernel_version>.img` (canonical) and `raxis-verifier-{rust,node,python,go}-starter-<kernel_version>.img` (bundled). §11 `raxis doctor canonical-images` extended to verify the symbol-index image (fatal on mismatch); new `raxis doctor verifier-starters` category for the tiered starters (warning on mismatch). |
-| `operator-ergonomics.md` | §16.3 setup wizard adds a "language stacks" phase with master_repo detection (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`); selected stacks get their tiered starter registered in `[[vm_images]]`. §4.2 defaultable-fields table gains the symbol_index verifier auto-injection (gated on policy `[prepare] auto_inject_symbol_index`). §18 policy schema additions: `[default_verifier_images]`, `[prepare] auto_inject_symbol_index`. §20 failure codes cross-references new codes. §21 cross-spec impacts row updated. |
+| `operator-ergonomics.md` | §16.3 setup wizard adds a "language stacks" phase with main_repo detection (`Cargo.toml`, `package.json`, `pyproject.toml`, `go.mod`); selected stacks get their tiered starter registered in `[[vm_images]]`. §4.2 defaultable-fields table gains the symbol_index verifier auto-injection (gated on policy `[prepare] auto_inject_symbol_index`). §18 policy schema additions: `[default_verifier_images]`, `[prepare] auto_inject_symbol_index`. §20 failure codes cross-references new codes. §21 cross-spec impacts row updated. |
 | `planner-harness.md` | §4.1 operator note re symbol-index updates: noting that the auto-inject default fixes `WARN_REVIEWER_MISSING_SYMBOL_INDEX` by default. §8 verifier overview rewritten to reflect the unified runtime + the three authoring sources + the pre-merge hook. New §10.7 canonical Verifier symbol-index starter manifest, parallel to the existing canonical image manifests. |
 | `kernel-mechanics-prompt.md` | Reviewer KSB `verifier_witnesses` section schema documented per §8 (already pending application from prior cross-spec impacts). Orchestrator NNSP gains a new step for handling `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` (per §16.6). |
 | `invariants.md` | INV-VERIFIER-01..11 stripped of V1/V2 framing. New INV-VERIFIER-12 (kernel-canonical symbol-index image, exception to INV-VERIFIER-07). New INV-VERIFIER-13 (pre-merge verifier execution gates IntegrationMerge admission). New INV-VERIFIER-14 (symbol-index witness provenance: kernel-provisioned clone, never Executor-derived). New INV-VERIFIER-15 (verifier authenticated egress requires explicit per-image opt-in; audit-only default per §16.7). Composition map gains entries for the unified runtime, the pre-merge gating, and the verifier supply-chain credential bound. |

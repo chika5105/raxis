@@ -484,7 +484,7 @@ Audit log replay (§8) treats `EmergencyKeyCompromised` events identically to `K
 
 - **Cannot un-revoke.** Once applied, an emergency revocation is permanent (INV-KEY-07). The operator who decides "actually, that key wasn't compromised" must rotate to a fresh key; the original key is dead forever.
 - **Cannot revoke as Rotated.** All emergency revocations are reason=compromise. Rotation is non-urgent by definition; if you need to rotate, push a normal policy.
-- **Cannot un-commit work.** A session terminated for `EmergencyKeyCompromised` may have produced commits that already merged into local master via `IntegrationMerge` — see §7.5 for race-outcome detail. Reverting those is operator incident-response, not kernel work.
+- **Cannot un-commit work.** A session terminated for `EmergencyKeyCompromised` may have produced commits that already merged into local main via `IntegrationMerge` — see §7.5 for race-outcome detail. Reverting those is operator incident-response, not kernel work.
 - **Cannot defend against host root compromise.** If the attacker has root on the host, they can also write the emergency file or delete it before SIGHUP. The break-glass mechanism assumes the host root account is not compromised — only the plan-signing key was leaked. Host root compromise is outside RAXIS's defensible perimeter and warrants different incident response (image rebuild, key reissuance from a clean machine).
 
 ### 6.10 Recommended operational practice
@@ -558,22 +558,22 @@ If an `IntegrationMerge` from the terminated session was in-flight at the moment
 
 **Case A — `IntegrationMerge` transaction committed before the revocation transaction acquired the lock.**
 
-- Local `master_repo` is already fast-forwarded to the merge commit.
+- Local `main_repo` is already fast-forwarded to the merge commit.
 - `initiatives.current_sha` is already updated.
-- The git commit is permanent in local master.
+- The git commit is permanent in local main.
 - Audit log entry for the merge has `policy_epoch = <pre-revocation epoch>`. Audit replay (§8) will flag the merge with `RetroactivelyCompromisedKey` per INV-KEY-06; operators reading replay output will see "this merge was admitted under a key that has since been compromised."
 - **The kernel does NOT auto-revert the merge.** Reverting commits requires choosing a strategy (revert commit on the same branch? force-push a clean history? operator-coordinated PR revert?) that depends on remote conventions and is outside RAXIS's authority. The kernel's responsibility ends at preventing future merges from this session.
 
 Sub-cases of A based on remote-push state:
 
-- **A1 — Push to remote not yet executed (`PushApprovalRequired` escalation pending).** The pending escalation is auto-canceled when the requesting Orchestrator session is killed (its `EscalationRequest` was scoped to the now-Failed session; cancellation is part of cascade cleanup). The local master commit remains; remote is untouched. Operator may choose to delete the local commit or investigate first.
+- **A1 — Push to remote not yet executed (`PushApprovalRequired` escalation pending).** The pending escalation is auto-canceled when the requesting Orchestrator session is killed (its `EscalationRequest` was scoped to the now-Failed session; cancellation is part of cascade cleanup). The local main commit remains; remote is untouched. Operator may choose to delete the local commit or investigate first.
 - **A2 — Push to remote already executed.** The remote has the commit. The kernel cannot unpush. Operator coordinates with the remote (revert PR, force-push from a clean branch, etc.). Fully outside RAXIS authority.
 
 **Case B — Revocation transaction committed before `IntegrationMerge` could acquire the lock.**
 
 - `IntegrationMerge`'s `BEGIN IMMEDIATE` blocks waiting for the revocation transaction to release.
 - When `IntegrationMerge` finally acquires the lock, the handler reads `sessions.state = 'Failed'` (set by the revocation) and aborts with `FAIL_SESSION_REVOKED`. No git operation occurs.
-- The commit objects from the Orchestrator's clone are untouched in their worktree (preserved for forensics) but never reach local master.
+- The commit objects from the Orchestrator's clone are untouched in their worktree (preserved for forensics) but never reach local main.
 
 **Case C — `IntegrationMerge` handler is between Phase 2 (git work) and Phase 3 (SQLite "applied" UPDATE) at the moment of revocation.**
 
@@ -584,7 +584,7 @@ When a revocation racing an `IntegrationMerge` lands during the Phase 2/3 window
 - The revocation transaction commits independently of the merge's git work — SQLite serializes the two transactions, but the git work happens between them and is not under SQLite's lock.
 - After both commits, SQLite has `current_sha = commit_sha` AND the session is `Failed` for `KeyCompromised`. The git side may or may not have been updated depending on which physical instant the crash occurred.
 - Startup reconciliation runs both `key-revocation.md §5.3` (to enforce the revocation termination) AND `integration-merge.md §11.3` (to repair git/SQLite consistency). The order is: revocation reconciliation first (per §6.5 emergency reload before reconciliation; same ordering applies to policy-driven revocations), then merge consistency repair.
-- If the Orchestrator's worktree is still on disk (per `INV-MERGE-WORKTREE-RETAIN` from `integration-merge.md §11.4`), Phase 2 is replayed idempotently from that worktree. The merge's commit lands in master under the audit-flagged provenance (replay later flags it `RetroactivelyCompromisedKey` per INV-KEY-06).
+- If the Orchestrator's worktree is still on disk (per `INV-MERGE-WORKTREE-RETAIN` from `integration-merge.md §11.4`), Phase 2 is replayed idempotently from that worktree. The merge's commit lands in main under the audit-flagged provenance (replay later flags it `RetroactivelyCompromisedKey` per INV-KEY-06).
 - If the worktree was lost (extremely unusual — INV-MERGE-WORKTREE-RETAIN forbids GC during pending), the initiative transitions to `Blocked` with `SecurityViolation { kind: GitStateInconsistent }` per `integration-merge.md §11.3` Case A else-branch. Operator intervention is required.
 
 The key-revocation spec does not need to define recovery for this case beyond invoking the standard merge recovery; `integration-merge.md §11` is the source of truth.
@@ -617,15 +617,15 @@ The auditor sees both: "this event was correctly accepted when it happened" AND 
 
 ---
 
-## 9. Cross-cutting: Kernel-Initiated Master-Repo Pushes
+## 9. Cross-cutting: Kernel-Initiated Main-Repo Pushes
 
-Per `INV-CRED-KERNEL-01`, the kernel directly reads exactly one credential class: the master-repo push credential, used to fast-forward the master branch on remote after `IntegrationMerge` commits.
+Per `INV-CRED-KERNEL-01`, the kernel directly reads exactly one credential class: the main-repo push credential, used to fast-forward the main branch on remote after `IntegrationMerge` commits.
 
 This credential is itself declared in `policy.toml` and is NOT a `plan_signing_key`. But it has a parallel revocation story:
 
 - It MAY be revoked the same way (rotation vs compromise).
-- On compromise revocation, kernel-pending pushes (master-branch updates not yet sent to remote) are aborted; their corresponding audit events are flagged.
-- Reconciliation logic for master-repo push credentials is parallel to §5 and lives in `specs/v2/credential-proxy.md` Appendix B (out of scope here, just calling out that the patterns match).
+- On compromise revocation, kernel-pending pushes (main-branch updates not yet sent to remote) are aborted; their corresponding audit events are flagged.
+- Reconciliation logic for main-repo push credentials is parallel to §5 and lives in `specs/v2/credential-proxy.md` Appendix B (out of scope here, just calling out that the patterns match).
 
 ---
 
@@ -861,8 +861,8 @@ The classification of `TerminationReason` variants into Immediate vs Graceful is
 
 ### Integration: race outcomes (§7.5)
 
-- [ ] **Case A1** (merge committed before revocation, push pending): start IntegrationMerge; commit it; immediately push policy with K → Compromised; verify local master has the merge commit, PushApprovalRequired escalation is auto-canceled, remote is untouched, audit replay flags merge with `RetroactivelyCompromisedKey`.
-- [ ] **Case A2** (merge committed AND pushed before revocation): same as A1 but the push escalation was already approved and executed; verify local master has commit, remote has commit, kernel does NOT attempt unpush, audit log clearly identifies the push as suspect.
+- [ ] **Case A1** (merge committed before revocation, push pending): start IntegrationMerge; commit it; immediately push policy with K → Compromised; verify local main has the merge commit, PushApprovalRequired escalation is auto-canceled, remote is untouched, audit replay flags merge with `RetroactivelyCompromisedKey`.
+- [ ] **Case A2** (merge committed AND pushed before revocation): same as A1 but the push escalation was already approved and executed; verify local main has commit, remote has commit, kernel does NOT attempt unpush, audit log clearly identifies the push as suspect.
 - [ ] **Case B** (revocation committed before merge): hold the merge transaction at BEGIN IMMEDIATE; commit revocation; release merge; verify merge handler reads `sessions.state = Failed` and aborts with `FAIL_SESSION_REVOKED`; no git operation occurs; Orchestrator's clone is preserved.
 
 ---
@@ -883,7 +883,7 @@ A `compromise` revocation could surface warnings without termination, deferring 
 
 ### Alt D — Unified key registry with credential-proxy keys
 
-Roll plan-signing keys, master-repo push credentials, gateway provider keys, all into one `[[keys]]` table. Rejected: each key class has different semantics (plan signing is verifying; provider keys are signing/encrypting; push credentials are HTTP authentication). A unified table forces a lowest-common-denominator schema and prevents class-specific validations. Separate tables, parallel revocation patterns, is cleaner.
+Roll plan-signing keys, main-repo push credentials, gateway provider keys, all into one `[[keys]]` table. Rejected: each key class has different semantics (plan signing is verifying; provider keys are signing/encrypting; push credentials are HTTP authentication). A unified table forces a lowest-common-denominator schema and prevents class-specific validations. Separate tables, parallel revocation patterns, is cleaner.
 
 ### Alt E — Auto-bump policy epoch on revocation only
 
@@ -921,4 +921,4 @@ Allow `policy.toml` to override the signal class for any reason. Rejected: a mis
 
 ### Alt M — Auto-revert IntegrationMerge commits on revocation
 
-When a session is killed for `KeyCompromised`, automatically revert any commits it produced via `IntegrationMerge`. Rejected: requires choosing a revert strategy (revert commit on master, force-push clean history, drop and recreate), which depends on remote conventions and team policy. Auto-reverting could destroy work that is actually fine (a buggy `compromise` decision by the operator). Conservative position: kernel preserves the commits and flags them via `RetroactivelyCompromisedKey` audit warning; operator decides whether and how to revert.
+When a session is killed for `KeyCompromised`, automatically revert any commits it produced via `IntegrationMerge`. Rejected: requires choosing a revert strategy (revert commit on main, force-push clean history, drop and recreate), which depends on remote conventions and team policy. Auto-reverting could destroy work that is actually fine (a buggy `compromise` decision by the operator). Conservative position: kernel preserves the commits and flags them via `RetroactivelyCompromisedKey` audit warning; operator decides whether and how to revert.

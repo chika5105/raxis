@@ -5,7 +5,7 @@
 
 RAXIS is a multi-agent orchestration kernel. It admits **plans** signed
 by **operators**, runs each plan's tasks inside isolated **VMs**, and
-fast-forwards a master git branch when (and only when) the kernel's
+fast-forwards a main git branch when (and only when) the kernel's
 admission gates pass. Everything the kernel cares about is encoded
 either in the operator's `policy.toml` (long-lived deployment shape)
 or the operator's per-initiative `plan.toml` (the work to do).

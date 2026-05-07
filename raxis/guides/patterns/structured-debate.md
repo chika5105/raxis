@@ -382,7 +382,7 @@ Design Reviewer:
   → Approve: impl activates
   → Reject with critique: Synthesizer retries with critique prepended to its prompt
 
-Implementer → impl_reviewer → IntegrationMerge → master updated
+Implementer → impl_reviewer → IntegrationMerge → main updated
 ```
 
 ---

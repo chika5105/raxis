@@ -126,7 +126,7 @@ Case A — Reviewer approves:
   Reviewer → SubmitReview { approved: true }
   Kernel → KernelPush::AllReviewersPassed
   Orchestrator → IntegrationMerge { commit_sha: "abc123" }
-  Kernel fast-forwards master branch ✓
+  Kernel fast-forwards main branch ✓
 
 Case B — Reviewer rejects:
   Reviewer → SubmitReview { approved: false, critique: "X-Forwarded-For not sanitised" }

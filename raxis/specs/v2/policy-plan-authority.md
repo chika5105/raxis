@@ -1243,7 +1243,7 @@ and re-pushes.
 | `FAIL_VERIFIER_INVALID_ON_FAILURE { verifier_name, declared, allowed }` | `approve_plan` | A per-task verifier declares `on_failure = "block_merge"`, OR a pre-merge verifier declares `on_failure = "block_review"`. Per-task verifiers gate Reviewer activation only; pre-merge verifiers gate IntegrationMerge advancement only. | `verifier-processes.md §10.3` |
 | `FAIL_VERIFIER_TASK_SET_EMPTY { verifier_name }` | `approve_plan` | A pre-merge verifier declares `applies_to = "task_set"` but provides an empty `task_set` array. | `verifier-processes.md §10.3` |
 | `FAIL_VERIFIER_TASK_SET_UNKNOWN_TASK { verifier_name, unknown_task }` | `approve_plan` | A pre-merge verifier's `task_set` references a task ID that is not declared in `[[plan.tasks]]`. | `verifier-processes.md §10.3` |
-| `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary, candidate_merge_sha }` | `IntegrationMerge` Check 5d | Any matching `block_merge` pre-merge verifier reported `final_status ≠ "passed"`. Candidate merged tree is discarded; master is NOT advanced; Orchestrator routes to operator escalation per `verifier-processes.md §16.6`. | `integration-merge.md §4 Check 5d.6` |
+| `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary, candidate_merge_sha }` | `IntegrationMerge` Check 5d | Any matching `block_merge` pre-merge verifier reported `final_status ≠ "passed"`. Candidate merged tree is discarded; main is NOT advanced; Orchestrator routes to operator escalation per `verifier-processes.md §16.6`. | `integration-merge.md §4 Check 5d.6` |
 | `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED { reason }` | `IntegrationMerge` Check 5d.2 | The candidate merged tree could not be materialized (malformed `commit_sha`, merge conflict the kernel can't represent as an orphan, disk-full at `candidate_merges/` staging area). | `integration-merge.md §4 Check 5d.6` |
 | `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH { expected, actual }` | Verifier-VM spawn | At spawn time, the on-disk `raxis-verifier-symbol-index-<kernel_version>.img` does not match the kernel-binary-embedded canonical digest. Spawn aborted; halts further verifier spawns until `raxis doctor canonical-images` succeeds. Defense-in-depth analog of `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`. | `verifier-processes.md §14.4` |
 | `FAIL_POLICY_RESERVED_VM_IMAGE_NAME { name }` | Policy load | A `[[vm_images]]` entry uses a reserved alias (`"raxis-verifier-symbol-index"`). The alias is reserved per `INV-VERIFIER-12` so plan-side references resolve unambiguously to the kernel-bundled image. | `verifier-processes.md §14.3` |
@@ -1790,7 +1790,7 @@ path is a policy-floor exception that should require operator
 acknowledgment rather than silently being permitted by omission.
 
 **Cross-reference.** Existing `[[plan.protected_paths]]` semantics
-(per the master `protected_paths` mechanism) are unchanged; this
+(per the main `protected_paths` mechanism) are unchanged; this
 section just contributes additional default entries.
 
 ---

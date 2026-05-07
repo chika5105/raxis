@@ -1867,7 +1867,7 @@ verification.
 (for artifact output). All `/workspace` and `/raxis/` mutations
 are dropped at VM exit unless declared as `artifact` per §6 of
 `verifier-processes.md`. Verifier VMs cannot persist mutations
-to the `master_repo` or any session-shared storage.
+to the `main_repo` or any session-shared storage.
 
 **Canonical home.** `v2/verifier-processes.md` §13.
 
@@ -1958,7 +1958,7 @@ filter matches an `IntegrationMerge` request, the kernel MUST
 materialize the candidate merged tree (per
 `integration-merge.md §11.10`), spawn all matching verifier VMs,
 wait for all to complete, and gate `IntegrationMerge` admission on
-the result per `integration-merge.md §4 Check 5d`. Master is
+the result per `integration-merge.md §4 Check 5d`. Main is
 advanced ONLY if every matching verifier with `on_failure =
 "block_merge"` reports `final_status = "passed"`. Pre-merge
 verifier failures with `block_merge` produce
@@ -1984,12 +1984,12 @@ path.
 
 **Justification.** Per-task verifiers gate Reviewer activation but
 do not see cross-task interactions; pre-merge verifiers gate
-master advancement and run against the candidate merged tree, so
+main advancement and run against the candidate merged tree, so
 they see the integration boundary that per-task verifiers cannot.
 This is the operator's mechanism for "regression gating" tests
-that should hold at the master frontier, not just at individual
+that should hold at the main frontier, not just at individual
 task boundaries. The strict `block_merge` discipline prevents
-silent regressions: if a pre-merge gate fails, master does not
+silent regressions: if a pre-merge gate fails, main does not
 advance until either the gate passes or the operator explicitly
 escalates.
 
@@ -2004,7 +2004,7 @@ escalates.
 `raxis-verifier-symbol-index` verifier (per `INV-VERIFIER-12`)
 runs, it MUST run against a kernel-provisioned clone of the
 evaluation tree. The kernel performs `git clone --shared
---no-checkout master_repo.git` to a fresh path under the
+--no-checkout main_repo.git` to a fresh path under the
 verifier VM's VirtioFS mount and then `git checkout
 <evaluation_sha>` inside the verifier VM. The Executor's
 worktree is NEVER the substrate for symbol-index verification.
@@ -2403,7 +2403,7 @@ Most security properties at the system level are emergent from
 | **In-VM background processes are reliably contained** | INV-PLANNER-HARNESS-03 (cgroup v2 + `cgroup.kill`) + INV-VERIFIER-10 (kernel-enforced verifier timeout) + INV-LIFECYCLE-* (VM stop is universal reap point) |
 | **Verifier supply chain bounded** | INV-VERIFIER-07 (operator-published with kernel-canonical exception per INV-VERIFIER-12) + INV-VERIFIER-11 (no network by default) + INV-VERIFIER-09 (mutations don't persist) + INV-VERIFIER-12 (symbol-index image is kernel-canonical, digest-bound, alias-reserved) |
 | **Symbol-index witness is structurally trustworthy under auto-injection** | INV-VERIFIER-12 (kernel-canonical image, kernel-bound digest, reserved alias) + INV-PLANNER-HARNESS-01 (Reviewer cannot bypass the witness with its own code execution) + INV-VERIFIER-01 (witness-only output channel) — the Pure-Static Reviewer's symbol-resolution gap is closed by an artifact whose producer is structurally trusted, structurally isolated, and structurally limited to a witness output |
-| **Master frontier regressions are gated mechanically, not just reviewed** | INV-VERIFIER-13 (pre-merge verifier gating) + INV-MERGE-CONSISTENCY (atomic SQLite-then-git ordering) + INV-TASK-PATH-02 (per-task path closure) — per-task review establishes per-task correctness; pre-merge verifiers establish integration-frontier correctness; the SQLite-first ordering ensures verifier failures cannot half-advance master |
+| **Main frontier regressions are gated mechanically, not just reviewed** | INV-VERIFIER-13 (pre-merge verifier gating) + INV-MERGE-CONSISTENCY (atomic SQLite-then-git ordering) + INV-TASK-PATH-02 (per-task path closure) — per-task review establishes per-task correctness; pre-merge verifiers establish integration-frontier correctness; the SQLite-first ordering ensures verifier failures cannot half-advance main |
 | **No single agent execution context spans two compliance boundaries** | INV-ENV-01 (per-task environment consistency) + INV-VM-CAP-04 (credentials/ never mounted) + INV-PLANNER-HARNESS-01/04/06 (Reviewer/Orchestrator structurally environment-neutral) — credentials are kernel-injected by name, the per-task binding constrains which set of names can be injected together, and the planner-harness invariants ensure only the Executor role even has the surface for binding to fail |
 | **Cross-environment data flows are auditable** | INV-ENV-01 (forces DAG split for cross-env work) + INV-04 (audit log integrity) + INV-VERIFIER-* (artifact mechanism mediates the kernel-store handoff) — every cross-environment byte transfer becomes two task IDs and a SHA-256 in the audit chain rather than a single VM with multiple credentials |
 | **Audit chain is verifiable without the kernel running** | INV-AUDIT-PAIRED-01 (every state change has a pending) + INV-AUDIT-PAIRED-02/03 (pairing integrity) + INV-AUDIT-PAIRED-04 (`last_committing_event_seq` disambiguates orphans) + INV-AUDIT-PAIRED-05 (offline verifier algorithm) + INV-AUDIT-PAIRED-06 (recovery is advisory) + INV-04 (chain hash linkage) — together these turn R-7 from a probabilistic "if recovery runs" guarantee into a structural "verifiable from frozen state alone" guarantee |

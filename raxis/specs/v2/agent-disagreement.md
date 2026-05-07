@@ -480,7 +480,7 @@ raxis worktree inspect <task_id>
 # Output: list of commits with diffs, rejection reasons from review history,
 # tokens consumed, total wall-clock elapsed
 
-# Salvage selected commits to a named branch in the master repo
+# Salvage selected commits to a named branch in the main repo
 # (only available during salvage_window; AbandonedArchived state rejects)
 raxis worktree salvage <task_id> \
     --commits <sha1>,<sha2>,<sha3> \
@@ -497,7 +497,7 @@ raxis worktree purge <task_id> --force
 `raxis worktree salvage` performs:
 
 1. Validates the task is in `AbandonedSalvageable` state and the requested SHAs exist in the worktree.
-2. For each requested commit SHA, the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &CommitContext { mode: SalvageToBranch { target: "agents/salvaged/<task_id>" }, .. })?` — the SE adapter (`crates/raxis-domain-git`) implements this branch by running `git cherry-pick --no-commit <sha>` against the master repo on the named target branch. Other adapters define their own salvage semantics (Trading: re-stage the order in a frozen staging account; Healthcare: revoke + re-author the proposed clinical-action set on a salvage workspace) or return `DomainError::PreconditionFailed("salvage_unsupported")` if the domain has no meaningful salvage notion.
+2. For each requested commit SHA, the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &CommitContext { mode: SalvageToBranch { target: "agents/salvaged/<task_id>" }, .. })?` — the SE adapter (`crates/raxis-domain-git`) implements this branch by running `git cherry-pick --no-commit <sha>` against the main repo on the named target branch. Other adapters define their own salvage semantics (Trading: re-stage the order in a frozen staging account; Healthcare: revoke + re-author the proposed clinical-action set on a salvage workspace) or return `DomainError::PreconditionFailed("salvage_unsupported")` if the domain has no meaningful salvage notion.
 3. The commit step is performed under the kernel's commit-credential lease (`INV-CRED-KERNEL-01`); the abandoned-worktree Executor session is not resurrected.
 4. If any cherry-pick conflicts (or the adapter returns `DomainError::PreconditionFailed`), the salvage fails with `FAIL_SALVAGE_CONFLICT`; the new branch is rolled back to its pre-salvage state. Operator must resolve the conflict manually or salvage a different subset.
 5. On success, audits `AbandonedWorktreeSalvaged { task_id, salvaged_commits, target_branch, operator_id }`.
@@ -772,7 +772,7 @@ The disk-pressure path explicitly does NOT auto-purge abandoned retention (`INV-
 
 ### 9.8 Why salvage does not re-open the failed task
 
-**Decision:** `raxis worktree salvage` cherry-picks selected commits to a named branch in the master repo. The original task remains `Failed`.
+**Decision:** `raxis worktree salvage` cherry-picks selected commits to a named branch in the main repo. The original task remains `Failed`.
 
 **Rationale:** Salvage is an operator-driven extraction of useful artifacts from a failed run. It is not a task-restart mechanism. Restarting a task with selectively retained commits would reset the loop counters, the round counts, and potentially mask the original failure mode — making it likely that the same loop recurs. If the operator wants to retry the task with different parameters, they create a new task in a new initiative (or amend the existing initiative with a new task definition).
 
@@ -1027,7 +1027,7 @@ The `workspace_handles` table referenced in `workspace_handle_id` is already cre
   1. **Round-cap gate (§3).** Read `subtask_activations.review_rounds_consumed` + `max_review_rounds` (with policy fallback). If consumed ≥ limit, the handler returns `FAIL_REVIEW_LOOP_EXCEEDED { task_id, consumed, limit, on_max_rounds_action }`. If `on_max_rounds = "fail_task"`, also calls `record_abandonment(... reason: MaxRounds)`. If `on_max_rounds = "escalate"`, opens an escalation per §6 with class `review_loop_exceeded`. If `on_max_rounds = "force_admit"`, increments a counter and admits with audit-event `ReviewLoopForceAdmitted`.
   2. **Circular-detection gate (§4).** Compute the diff between `previous_evaluation_sha` and the new `commit_sha`, sha256 the diff bytes, and check against `recent_diffs WHERE task_id = ? ORDER BY revision_n DESC LIMIT N` (default N = 4 per §4.1). On match, return `FAIL_CIRCULAR_REVISION { task_id, matched_revision_n }` and call `record_abandonment(... reason: Circular)`. On miss, write the new `(task_id, revision_n, diff_sha256, now)` row.
   3. **Wall-clock gate (§5).** Read the per-task `WallClockTracker` from `kernel/src/scheduler/wall_clock.rs`. If `tracker.is_expired()`, return `FAIL_WALL_CLOCK_LIMIT_EXCEEDED { task_id, elapsed_seconds, limit_seconds }` and call `record_abandonment(... reason: WallClock)`.
-  4. **Effect on existing path-allowlist check.** Existing code path is unchanged; the four new gates fire BEFORE it so the more expensive operations (diff computation against the master tree) only run on tasks that pass the cheap convergence gates first.
+  4. **Effect on existing path-allowlist check.** Existing code path is unchanged; the four new gates fire BEFORE it so the more expensive operations (diff computation against the main tree) only run on tasks that pass the cheap convergence gates first.
 
 `raxis/kernel/src/handlers/escalation.rs`:
 

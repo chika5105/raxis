@@ -73,7 +73,7 @@ Expected progression:
 4. `fixer` activates. Executor changes `safe_div` to return
    `Err("division by zero")` when `b == 0`. The `cargo_test`
    verifier on `fixer` re-runs the same test and now it passes.
-5. The merge advances master.
+5. The merge advances main.
 
 ---
 

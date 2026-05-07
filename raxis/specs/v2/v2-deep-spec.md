@@ -170,11 +170,11 @@ This was rejected because `git format-patch` / `git am` **rewrites commit object
 `git am` step creates a new commit with a new SHA, even if the content is identical, because
 the commit metadata (author timestamp, committer, message encoding) differs. The original
 SHA that the sub-planner signed its work with is destroyed. An auditor cannot verify that
-the commit in the master repo originated from a specific sub-planner session.
+the commit in the main repo originated from a specific sub-planner session.
 
 **Rejected alternative justification:** INV-03 (SHA Preservation) requires that the commit
 SHA produced by the sub-planner's `CompleteTask` intent is the same SHA that ultimately
-appears in the master repo's history. A format-patch pipeline breaks this chain.
+appears in the main repo's history. A format-patch pipeline breaks this chain.
 
 #### The Adopted Design: `git bundle` + `git fetch`
 
@@ -206,13 +206,13 @@ appears in the master repo's history. A format-patch pipeline breaks this chain.
    object database. The commit SHA is **preserved** — the same SHA the Executor produced is
    now reachable in the Orchestrator's clone.
 
-**Why the master repo is bypassed:** The Executor's commits are NOT pushed to the master repo.
-They land only in the Orchestrator's ephemeral clone. The master repo is only updated when the
-Orchestrator submits `IntegrationMerge` and the Kernel fast-forwards the master branch. Until
+**Why the main repo is bypassed:** The Executor's commits are NOT pushed to the main repo.
+They land only in the Orchestrator's ephemeral clone. The main repo is only updated when the
+Orchestrator submits `IntegrationMerge` and the Kernel fast-forwards the main branch. Until
 then, Executor SHAs are private to the initiative's worktree graph.
 
-**Why `refs/raxis/subtasks/*` is not used in the master repo:** Stale refs from failed
-initiatives would accumulate. The bundle/fetch model avoids adding any refs to the master
+**Why `refs/raxis/subtasks/*` is not used in the main repo:** Stale refs from failed
+initiatives would accumulate. The bundle/fetch model avoids adding any refs to the main
 repo during an initiative's execution.
 
 ---
@@ -226,7 +226,7 @@ destruction:
 1. Generates a UUID: `<session_uuid>`
 2. Creates: `$RAXIS_DATA_DIR/worktrees/<session_uuid>/`
 3. Runs the appropriate clone strategy (see Part 5 for `clone_strategy` details):
-   - `full`: `git clone <master_repo> $RAXIS_DATA_DIR/worktrees/<session_uuid>/`
+   - `full`: `git clone <main_repo> $RAXIS_DATA_DIR/worktrees/<session_uuid>/`
    - `blobless`: same with `--filter=blob:none`
    - `sparse`: same with `--no-checkout`, then `git sparse-checkout set <path_allowlist_paths>`
 4. For Reviewer sessions: re-bundles from the Orchestrator's clone (see Part 4) to inject
@@ -311,7 +311,7 @@ Individual handlers read `can_delegate` from the session row; they do not inspec
 
 ### Step 7: Audit Attribution — The 4-Field Chain
 
-**Context:** INV-05 requires that every commit in the master repo's history can be traced back
+**Context:** INV-05 requires that every commit in the main repo's history can be traced back
 to the operator-signed plan epoch that authorized the work. In V1 this is straightforward:
 one session, one task. In V2, the Orchestrator session merges commits from multiple Executor
 sessions, each of which was activated by the Orchestrator, all of which trace back to a plan
@@ -351,7 +351,7 @@ spec for forensic reproducibility.
 ### Step 8: Orchestrator Owns `IntegrationMerge`
 
 **Context:** After all Executor sub-tasks complete, their commits must be merged into the
-master branch. The question was which actor performs the merge and submits it for Kernel
+main branch. The question was which actor performs the merge and submits it for Kernel
 verification.
 
 **Alternative A — Kernel performs the merge directly.**
@@ -360,7 +360,7 @@ enforcer; it cannot make semantic decisions about how to resolve a conflict betw
 Executor branches. Automating merge conflict resolution in the Kernel would require calling
 an LLM from the Kernel — a catastrophic trust boundary violation.
 
-**Alternative B — Each Executor merges into the master branch independently.**
+**Alternative B — Each Executor merges into the main branch independently.**
 Rejected. If Executor A and Executor B both touch `Cargo.lock` (a cross-cutting artifact),
 and both try to merge independently, neither has visibility into the other's changes. The
 second merge will encounter a conflict with no agent capable of resolving it.
@@ -370,10 +370,10 @@ It fetches each Executor's bundle, runs `git merge`, resolves conflicts using it
 loop, and then submits `IntegrationMerge { commit_sha }` to the Kernel. The Kernel verifies:
 ancestry (the merged SHA must be a descendant of `base_sha`), path containment (all touched
 paths are within the hybrid allowlist), and commit integrity (SHA is present and reachable in
-the Orchestrator's clone). Only then does the Kernel fast-forward the master branch.
+the Orchestrator's clone). Only then does the Kernel fast-forward the main branch.
 
 **Implementation reference (V2 init).** Three pieces collaborate to land an admitted
-`IntegrationMerge` on master:
+`IntegrationMerge` on main:
 
 * **Authority gate:** `kernel/src/authority/dispatch_matrix.rs::dispatch` — the static
   `(IntentKind::IntegrationMerge, SessionAgentType::Orchestrator) → Authorized` row
@@ -387,20 +387,20 @@ the Orchestrator's clone). Only then does the Kernel fast-forward the master bra
   in-memory `PlanRegistry`, with the same fail-closed posture as the per-task
   `check_paths` path. Tested in
   `kernel/src/path_scope.rs::tests::hybrid_*`.
-* **Master fast-forward (Phase 2 of Check 8 in `integration-merge.md §11`):**
+* **Main fast-forward (Phase 2 of Check 8 in `integration-merge.md §11`):**
   [`raxis-domain-git`](../../crates/domain-git/src/lib.rs) — the V2 SE-domain
-  `DomainAdapter::commit` reference. `commit_merge_to_master(master, orch, sha)` walks
+  `DomainAdapter::commit` reference. `commit_merge_to_main(main, orch, sha)` walks
   every commit/tree/blob reachable from the Orchestrator's `commit_sha` (skipping
-  objects already in the master ODB) and writes them through `Repository::write_blob`
-  / `objects::write_buf`, then advances `refs/heads/master` via a `gix-ref`
+  objects already in the main ODB) and writes them through `Repository::write_blob`
+  / `objects::write_buf`, then advances `refs/heads/main` via a `gix-ref`
   transaction whose `MustExistAndMatch` precondition catches concurrent writers. The
   whole operation is idempotent: re-running with the same `commit_sha` returns
-  `MasterAdvance { already_at_target: true }` and performs no work — the recovery
+  `MainAdvance { already_at_target: true }` and performs no work — the recovery
   path of `integration-merge.md §11.3` relies on this contract.
 
 These three components together implement the kernel's side of Step 8: the Orchestrator
 is the unique merger, the Kernel verifies path containment via the hybrid allowlist, and
-the master advancement happens host-side via `gix` (no shell-out to `git`, no in-VM git
+the main advancement happens host-side via `gix` (no shell-out to `git`, no in-VM git
 operations, no operator key required). The `IntegrationMergeCompleted` audit emission +
 SQLite Phase 1/3 transitions land alongside these in subsequent iterations as the
 `subtask_activations` row population (Step 25) comes online.
@@ -412,10 +412,10 @@ SQLite Phase 1/3 transitions land alongside these in subsequent iterations as th
 **Context:** When an Executor completes, its commits must reach the Orchestrator's clone.
 Three routing paths were considered.
 
-**Alternative A — Push commits to the master repo as `refs/raxis/subtasks/<task_id>`.**
-Rejected. This pollutes the master repo with unmerged refs from every initiative. If an
-initiative fails mid-flight, stale refs accumulate. The master repo's ref namespace becomes
-a graveyard of aborted work. Additionally, any process with read access to the master repo
+**Alternative A — Push commits to the main repo as `refs/raxis/subtasks/<task_id>`.**
+Rejected. This pollutes the main repo with unmerged refs from every initiative. If an
+initiative fails mid-flight, stale refs accumulate. The main repo's ref namespace becomes
+a graveyard of aborted work. Additionally, any process with read access to the main repo
 can inspect in-progress work — violating the principle that initiative state is private until
 `IntegrationMerge` is accepted.
 
@@ -432,7 +432,7 @@ intermediary.
 4. Orchestrator VM runs `git fetch` against the bundle file inside `/workspace/.raxis/bundles/`.
 
 The Executor's exact commit SHA is preserved through the bundle/fetch transfer (Step 3 /
-1.4). The master repo is untouched until `IntegrationMerge`.
+1.4). The main repo is untouched until `IntegrationMerge`.
 
 **The Economics of Ephemeral MicroVMs:**
 Destroying the Executor's VM (and booting a new one on rejection/retry) might seem computationally expensive, but RAXIS uses microVM hypervisors (Firecracker on Linux, Apple Virtualization Framework on macOS) specifically designed for sub-second boot times. This architecture offers three load-bearing benefits:
@@ -1342,7 +1342,7 @@ Reviewer's activation row. The Reviewer VM boots with this SHA already injected 
 **Context:** The Reviewer needs a worktree containing the bytes at `evaluation_sha`,
 plus pre-rendered diff and log so its NNSP-prescribed workflow (`kernel-mechanics-prompt.md
 §3.3`) can begin immediately with `read_file /raxis/diff.patch`. This SHA does not
-exist in the master repo. It exists in the Orchestrator's clone (where the bundle
+exist in the main repo. It exists in the Orchestrator's clone (where the bundle
 was fetched in Step 9). How does the Reviewer VM get access to it?
 
 **Alternative A — `git clone --local` from the Orchestrator's worktree.**
@@ -1352,9 +1352,9 @@ its object store — and the hardlinked objects in the Reviewer's worktree are a
 mutated. This violates air-gapped isolation: each VM must have an independent,
 unalterable view of the evaluation SHA.
 
-**Alternative B — Push `evaluation_sha` to the master repo as a temporary ref.**
+**Alternative B — Push `evaluation_sha` to the main repo as a temporary ref.**
 Rejected (V1+V2 reasoning unchanged). Same objections as Step 9 Alternative A:
-pollutes the master repo's ref namespace, reveals in-progress work to any
+pollutes the main repo's ref namespace, reveals in-progress work to any
 repository reader.
 
 **Alternative C (V1 design) — Re-bundle, ship into VM, let in-VM `git` fetch + checkout.**
@@ -1373,22 +1373,22 @@ The kernel:
 1. Allocates the Reviewer's worktree at `$RAXIS_DATA_DIR/worktrees/<reviewer_uuid>/`.
 2. Initializes a fresh `gix::Repository` at that path.
 3. Reads the git objects for `evaluation_sha` (and its ancestors back to
-   `master_base_sha`) from the Orchestrator's worktree's object store
+   `main_base_sha`) from the Orchestrator's worktree's object store
    (`gix::ObjectDatabase` opened in read-only mode against
    `$RAXIS_DATA_DIR/worktrees/<orchestrator_uuid>/.git/objects/`).
 4. Copies (does NOT hardlink, does NOT clone-by-reference) every object reachable
    from `evaluation_sha` into the Reviewer's object store, ending at
-   `master_base_sha` — the boundary commit, included.
+   `main_base_sha` — the boundary commit, included.
 5. Creates a single ref `refs/raxis/evaluation` pointing at `evaluation_sha`,
    sets `HEAD` to it, then performs a `gix::worktree::checkout` to materialize
    the working tree files (the Reviewer's `read_file` of `/workspace/<path>`
    reads these regular files, not git objects).
 6. Pre-renders artifacts under `$RAXIS_DATA_DIR/worktrees/<reviewer_uuid>/.raxis/`
    (this directory is mounted into the Reviewer VM as `/raxis/`, read-only):
-   - `/raxis/diff.patch` — the unified diff `master_base_sha..evaluation_sha`
+   - `/raxis/diff.patch` — the unified diff `main_base_sha..evaluation_sha`
      produced via `gix::diff` (or `gix::object::tree::diff`); a textual patch
      ready for the Reviewer to `read_file`.
-   - `/raxis/log.txt` — `git log --oneline master_base_sha..evaluation_sha`
+   - `/raxis/log.txt` — `git log --oneline main_base_sha..evaluation_sha`
      equivalent, produced via `gix::traverse`; one commit per line with
      short SHA + commit message subject + author + timestamp.
    - `/raxis/<verifier_name>/<artifact_basename>` — for each V2 task verifier
@@ -1463,18 +1463,18 @@ and 24b lives in the dedicated workspace crate
 [`raxis-worktree-provision`](../../crates/worktree-provision/src/lib.rs). It
 exposes two entry points:
 
-- `provision_reviewer(orch_repo_root, evaluation_sha, master_base_sha, dest_root)
+- `provision_reviewer(orch_repo_root, evaluation_sha, main_base_sha, dest_root)
   → ReviewerProvision` clones the Orchestrator's repo via a `file://` URL
   (`gix::clone::PrepareFetch::fetch_then_checkout` → `main_worktree`), pins
   `refs/raxis/evaluation` at `evaluation_sha`, re-materialises the worktree at
   that SHA (a tree walk that copies blobs and sweeps stale paths so the cloned
   HEAD does not bleed through), then pre-renders `.raxis/diff.patch` and
-  `.raxis/log.txt` covering `master_base_sha..evaluation_sha`. The crate's unit
+  `.raxis/log.txt` covering `main_base_sha..evaluation_sha`. The crate's unit
   tests prove that the destination ODB is **independent** of the source: a
   post-clone mutation in the source repo never appears in the destination. This
   is the on-disk realisation of "no hardlinks, no shared memory mappings".
-- `provision_orchestrator(master_repo_root, base_sha, dest_root) →
-  OrchestratorProvision` clones the master repo at `base_sha` and creates the
+- `provision_orchestrator(main_repo_root, base_sha, dest_root) →
+  OrchestratorProvision` clones the main repo at `base_sha` and creates the
   `.raxis/bundles/` skeleton so the staging crate can land `system_prompt.txt`
   and `session.env` into the same `.raxis/` directory.
 
@@ -1520,11 +1520,11 @@ and persists for the full initiative duration.
    initiative duration, not session duration (the Orchestrator
    session is initiative-scoped — one Orchestrator per initiative,
    per `INV-PLANNER-HARNESS-06.1`).
-2. The kernel performs a `gix::clone` from the master repo at
+2. The kernel performs a `gix::clone` from the main repo at
    `base_sha` (the initiative's base commit recorded at
    `approve_plan` time). Object copy semantics are the same as
    Step 24 (no hardlinks, independent object database) — the
-   Orchestrator's workspace is fully isolated from the master repo's
+   Orchestrator's workspace is fully isolated from the main repo's
    subsequent state.
 3. The VirtioFS mount of `/workspace/` is **read-write** (the
    Orchestrator merges in commits over time, accumulating the
@@ -1573,7 +1573,7 @@ against `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` at every boot per
   (host-side `gix::Repository::find_object` against
   `<orchestrator_uuid>/.git/objects/`), runs the path-allowlist
   check against `hybrid_effective_allow` (per Step 11), and on
-  success fast-forwards the master branch.
+  success fast-forwards the main branch.
 - *Initiative completion:* The Orchestrator session is reaped; its
   worktree is forensically retained per `INV-CONVERGENCE-05` until
   the operator runs `raxis initiative gc` or the V3 audit-retention
@@ -2162,7 +2162,7 @@ resolved_via_escalation: Some(escalation_id) }`.
 authored by the human operator (their git author identity is in the commit object), but the
 `IntegrationMerge` intent was submitted by the Orchestrator session. Without additional
 attribution, the RAXIS audit log would record the Orchestrator as responsible for a commit
-the operator actually authored. An auditor running `git log --author` on the master repo sees
+the operator actually authored. An auditor running `git log --author` on the main repo sees
 the operator's name; the RAXIS audit log shows the Orchestrator's session. These two records
 are inconsistent, weakening INV-05.
 
@@ -2197,7 +2197,7 @@ The complete audit chain for Path 2:
 EscalationRequested { class: MergeConflict, session_id: <orchestrator> }
   → EscalationConsumed { resolved_by: operator_alice, type: ManualGitCommit }
     → IntegrationMerge { commit_sha: xyz789, operator_assisted: true, escalation_id: esc-42 }
-      → FastForwardCompleted { master_sha: xyz789 }
+      → FastForwardCompleted { main_sha: xyz789 }
 ```
 
 An external auditor can deterministically reconstruct: `xyz789` was structurally requested
@@ -2256,7 +2256,7 @@ were resolved during implementation; both decisions are recorded here so the spe
 lock-step with the kernel binary:
 
 1. **`previous_sha` field provenance.** The §7 audit event lists `previous_sha` as
-   "base_sha before this merge". Until the Step 8 follow-up wires the host-side master
+   "base_sha before this merge". Until the Step 8 follow-up wires the host-side main
    fast-forward (integration-merge.md §11 Phase 2/3) into `run_phase_c`, the kernel reads
    `previous_sha` from the request's `base_sha` rather than `initiatives.current_sha`.
    *Pros:* the field is meaningful today (the Orchestrator's claimed parent matches the
@@ -2535,7 +2535,7 @@ with the rejection. The write never reached the RAXIS record.
 The threat model asks: "can an agent persist unauthorized work?" Not: "can an agent write
 unauthorized files temporarily?" Temporary writes that are never committed have no
 persistent effect and no audit relevance. Only committed work can flow through
-`IntegrationMerge` to the master branch. Path allowlist enforcement at commit time is
+`IntegrationMerge` to the main branch. Path allowlist enforcement at commit time is
 therefore enforcement at the only moment that matters — when the work becomes durable.
 
 #### The VirtioFS Boundary as the Structural Guarantee
@@ -3226,7 +3226,7 @@ into a core orchestration subsystem that warrants its own detailed mechanical sp
 | Plan bundle sealing — canonical-byte plan bundles, atomic-with-submission signature, kernel-side seal at admission time, `submit plan` CLI workflow, post-admission read discipline (host filesystem never re-consulted) | [`plan-bundle-sealing.md`](plan-bundle-sealing.md) | V2 Specified |
 | Operator ergonomics — `plan prepare`, `validate`, `explain`, `fmt`, defaulting precedence, setup wizard, `raxis doctor` extensions, path-allowlist UX | [`operator-ergonomics.md`](operator-ergonomics.md) | V2 Specified |
 | Custom tools — operator-defined Executor-only custom tools, JSON-schema stdin/out, cgroup containment, capability inheritance, token-budget integration | [`custom-tools.md`](custom-tools.md) | V2 Specified |
-| Key revocation — plan-signing-key trust registry, rotation vs compromise, emergency revocations, in-flight session termination, audit replay with retroactive-compromise warnings, master-repo push-credential lifecycle | [`key-revocation.md`](key-revocation.md) | V2 Specified |
+| Key revocation — plan-signing-key trust registry, rotation vs compromise, emergency revocations, in-flight session termination, audit replay with retroactive-compromise warnings, main-repo push-credential lifecycle | [`key-revocation.md`](key-revocation.md) | V2 Specified |
 | Host capacity — VM concurrency caps, per-VM memory caps, disk watchdog, fairness slot allocation, intent admission queue with backpressure, SQLite WAL caps, file-descriptor budget, `AuditWriteImpossible` halt, `INV-CAPACITY-01..06` | [`host-capacity.md`](host-capacity.md) | V2 Specified |
 | Kernel push protocol — `KernelPush` frames, `pending_pushes` table, idempotent ACKs, backpressure, ordering invariants, variant catalog including `SubEscalationResolutionRequired` | [`kernel-push-protocol.md`](kernel-push-protocol.md) | V2 Specified |
 | Kernel lifecycle — daemon vs foreground, systemd / launchd integration, signals, single-instance lock, crash recovery, lifecycle audit events | [`kernel-lifecycle.md`](kernel-lifecycle.md) | V2 Specified |

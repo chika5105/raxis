@@ -371,7 +371,7 @@ pub fn build_default_test_credentials(
 /// kernel unit tests. The adapter operates against three
 /// kernel-test-temporary directories under `data_dir`. Every adapter
 /// method is a no-op or a deterministic pure computation; tests that
-/// exercise the actual `commit_merge_to_master` ceremony override
+/// exercise the actual `commit_merge_to_main` ceremony override
 /// these paths to point at a fixture-built repo.
 #[cfg(any(debug_assertions, test))]
 pub fn build_default_test_domain(
@@ -383,7 +383,7 @@ pub fn build_default_test_domain(
     >,
 > {
     Arc::new(raxis_domain_git::GitAdapter::new(
-        data_dir.join("repositories").join("master"),
+        data_dir.join("repositories").join("main"),
         data_dir.join("worktrees"),
         data_dir.join("transfer"),
     ))

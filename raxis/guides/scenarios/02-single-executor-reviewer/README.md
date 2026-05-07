@@ -3,7 +3,7 @@
 > **Complexity:** ⭐ Beginner | **Wall clock:** ~8 min | **Provider:** Anthropic
 
 Add a Reviewer to scenario 01. The Executor writes a small utility,
-the Reviewer evaluates it, and the kernel either fast-forwards master
+the Reviewer evaluates it, and the kernel either fast-forwards main
 or kicks the Executor back into a critique-prepended retry. After this
 scenario you understand `predecessors`, the Reviewer activation gate,
 and the rejection retry loop.
@@ -66,7 +66,7 @@ Expected progression:
    i32) -> i32` in `src/lib.rs` with a unit test.
 2. After `CompleteTask` lands, the kernel boots the Reviewer
    (`reviewer`) at the Executor's `evaluation_sha`.
-3. The Reviewer either approves (initiative completes; master
+3. The Reviewer either approves (initiative completes; main
    advances) or rejects (Executor reboots with the critique).
 
 ---

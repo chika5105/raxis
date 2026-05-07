@@ -863,7 +863,7 @@ Several subsystems generate state that needs background reaping
 ("garbage", in the literal sense) but whose reaping is wrong to do
 synchronously on the request path:
 
-- **Git orphan objects** in `master_repo` and orchestrator clones,
+- **Git orphan objects** in `main_repo` and orchestrator clones,
   produced when pre-`IntegrationMerge` verifiers fail and the kernel
   discards the candidate merge tree (`verifier-processes.md §16.5`,
   `integration-merge.md §11.10`).
@@ -939,7 +939,7 @@ may register additional ones following the §10.5.1 trait.
 | Name | Cadence | Trigger | Owner spec |
 |---|---|---|---|
 | `plan_bundle_nonce_sweep` | 1 h | always | `plan-bundle-sealing.md §8.4` |
-| `git_maintenance_master` | 6 h, OR opportunistic on `disk_pressure ≥ Warning` | `active_merges == 0 && active_sessions == 0` (or 6h elapsed regardless) | this spec §10.5.3 |
+| `git_maintenance_main` | 6 h, OR opportunistic on `disk_pressure ≥ Warning` | `active_merges == 0 && active_sessions == 0` (or 6h elapsed regardless) | this spec §10.5.3 |
 | `git_maintenance_orchestrator_clones` | 1 h | `active_merges == 0` | this spec §10.5.4 |
 | `verifier_cgroup_orphan_sweep` | 5 min | always | `verifier-processes.md §4.4` |
 | `lane_reservation_orphan_sweep` | 5 min | always | `token-limit-enforcement.md §10.5` |
@@ -950,7 +950,7 @@ The cadence values are configurable via
 ```toml
 [kernel_lifecycle]
 maintenance_period_secs               = 3600       # base loop period (1 h)
-git_maintenance_master_period_secs    = 21_600     # 6 h
+git_maintenance_main_period_secs    = 21_600     # 6 h
 git_maintenance_clones_period_secs    = 3600       # 1 h
 verifier_cgroup_sweep_period_secs     = 300        # 5 min
 plan_bundle_nonce_sweep_period_secs   = 3600       # 1 h (matches base)
@@ -961,12 +961,12 @@ Each per-job period MUST be a multiple of `maintenance_period_secs`
 otherwise) so the scheduler logic stays trivial: every tick, a job
 runs if `now - last_run >= job_period`.
 
-### 10.5.3 `git_maintenance_master`
+### 10.5.3 `git_maintenance_main`
 
-Drives `git gc --prune=<retention>` against `<data_dir>/master_repo`.
+Drives `git gc --prune=<retention>` against `<data_dir>/main_repo`.
 
 ```
-1. Acquire an advisory lock on master_repo (gix/git2 file-locking).
+1. Acquire an advisory lock on main_repo (gix/git2 file-locking).
    If contended (an in-flight IntegrationMerge phase 2 is running),
    skip this tick — the next 6h tick or the next disk-pressure tick
    will retry.
@@ -975,14 +975,14 @@ Drives `git gc --prune=<retention>` against `<data_dir>/master_repo`.
    reachable-but-uncommitted refs exist; the retention floor for
    forensic git data is `INV-CONVERGENCE-05` (abandoned worktrees),
    which is enforced separately via worktree-retention rules — not
-   via loose-object retention in master_repo.
-3. Record bytes_reclaimed via `du` of master_repo before/after.
-4. Emit MaintenanceJobCompleted { name: "git_maintenance_master",
+   via loose-object retention in main_repo.
+3. Record bytes_reclaimed via `du` of main_repo before/after.
+4. Emit MaintenanceJobCompleted { name: "git_maintenance_main",
    items_reaped: <objects_pruned>, bytes_reclaimed }.
 ```
 
 Pre-`IntegrationMerge` verifier failures produce orphan candidate
-merge commits in master_repo (`verifier-processes.md §16.5`); this
+merge commits in main_repo (`verifier-processes.md §16.5`); this
 job is the canonical reaper for those orphans. The cadence is
 deliberately conservative (6 h) to amortize the GC cost; the
 opportunistic-on-disk-pressure trigger covers the case where many
@@ -1147,7 +1147,7 @@ AuditEventKind::MaintenanceTickCompleted {
 
 `MaintenanceJobCompleted` lets operators monitor reap rates and
 spot regressions (e.g., `bytes_reclaimed` dropping toward zero on
-`git_maintenance_master` may indicate refs piling up that GC can't
+`git_maintenance_main` may indicate refs piling up that GC can't
 prune).
 
 ---

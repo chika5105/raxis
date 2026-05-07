@@ -113,7 +113,7 @@ requires Reviewer approval and Kernel path-allowlist verification.
 
 **Statement:** Git commits produced by agents are never rewritten, cherry-picked, or
 rebased by the Kernel or the Orchestrator. The SHA produced by the Executor's `git commit`
-is the same SHA that appears in the master branch after `IntegrationMerge`.
+is the same SHA that appears in the main branch after `IntegrationMerge`.
 
 **Why:** SHA rewriting (rebase, cherry-pick, `git commit --amend`) creates a new commit
 object with a new SHA. The original SHA — which appears in the audit event, in the
@@ -129,7 +129,7 @@ preserves the Executor's original SHA as a parent. Any ancestry violation causes
 
 **Scenario it prevents:** An Orchestrator (potentially compromised) attempts to rebase
 the Executor's branch before merging, producing a new commit with the same diff but a
-different SHA. The Reviewer evaluated SHA `abc123`. Post-rebase, master shows SHA `def456`.
+different SHA. The Reviewer evaluated SHA `abc123`. Post-rebase, main shows SHA `def456`.
 An auditor cannot verify that what was reviewed is what was merged. RAXIS's ancestry
 verification catches the SHA mismatch and rejects the `IntegrationMerge`.
 
@@ -826,7 +826,7 @@ orchestrator.path_allowlist ⊇ UNION(task.path_allowlist for task in all_tasks)
 ```
 
 **Why:** The Orchestrator performs `IntegrationMerge` — it merges sub-task commits into
-the master branch. If the Orchestrator's allowlist is narrower than a sub-task's, the
+the main branch. If the Orchestrator's allowlist is narrower than a sub-task's, the
 Orchestrator's `IntegrationMerge` intent would include paths outside its own allowlist,
 causing the merge to be rejected at admission. The subset invariant is validated before
 the initiative starts to prevent this class of planning error.
@@ -1424,7 +1424,7 @@ to carry a prompt injection payload designed to override the system prompt entir
 **Property 5 — `IntegrationMerge` with conflict escalation carries a traceable ID:**
 When `IntegrationMerge { operator_assisted: true, escalation_id: X }` is submitted, the
 Kernel verifies `escalation_id X` is in `Consumed` state under `MergeConflict` class.
-This creates a direct audit link: the final commit on master is traceable to the specific
+This creates a direct audit link: the final commit on main is traceable to the specific
 escalation event, which is traceable to the specific operator who resolved it.
 
 ### What Escalation Cannot Do
@@ -1651,7 +1651,7 @@ the exact diff.
 payment handler in `src/payments/charge.rs` — a logic bomb that rounds down to zero
 for certain account IDs. The LLM Reviewer inspects the code, is itself jailbroken or
 simply doesn't catch the subtle condition, and approves. The `IntegrationMerge` is
-admitted. The malicious code reaches master.
+admitted. The malicious code reaches main.
 
 **With protected path approval:** The `IntegrationMerge` touching `src/payments/` fires
 the `[[protected_paths]]` gate. The Kernel auto-creates a `ProtectedPathMerge` escalation.
@@ -1701,7 +1701,7 @@ Operator: raxis merge approve esc-99 ← or reject
 Orchestrator re-submits IntegrationMerge { commit_sha: "abc", operator_approval_id: Some(esc-99) }
   ↓
 Kernel Check 6a: verifies esc-99 is Consumed, class matches, SHA matches → admitted
-  → master fast-forwards to "abc"
+  → main fast-forwards to "abc"
   → Emits IntegrationMergeCompleted { operator_approval_id: Some(esc-99), ... }
 ```
 
@@ -1716,7 +1716,7 @@ fails Check 6a: `escalations.commit_sha = "abc" ≠ "def"` → `FAIL_APPROVAL_SH
 2. Discard `abc`, produce a malicious commit `def`
 3. Reuse the approval for `def`
 
-SHA binding means the operator is approving the exact bytes entering master — not the
+SHA binding means the operator is approving the exact bytes entering main — not the
 concept of the merge. If the Orchestrator retries after conflict resolution (new SHA), a
 new approval is required. This is intentional.
 

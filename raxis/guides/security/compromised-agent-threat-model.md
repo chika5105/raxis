@@ -5,7 +5,7 @@
 > This guide answers a single question: if one agent in a running initiative is compromised
 > — whether through LLM jailbreak, adversarial prompt injection, or process-level VM
 > compromise — what prevents the damage from propagating to other agents, other sessions,
-> or the master branch?
+> or the main branch?
 >
 > The short answer is **layered enforcement**. Each layer assumes the previous one can fail.
 > No single layer is trusted to be the last line of defense.
@@ -208,10 +208,10 @@ Implementer writes malicious code; the Reviewer approves it. The malicious commi
    wrote, which commit SHA the Reviewer evaluated, and what the Reviewer approved. The
    breach is fully attributable.
 
-4. **The operator inspects `IntegrationMerge` before master is updated.** `IntegrationMerge`
-   submits a commit SHA to the Kernel; the Kernel fast-forwards master. The operator can
+4. **The operator inspects `IntegrationMerge` before main is updated.** `IntegrationMerge`
+   submits a commit SHA to the Kernel; the Kernel fast-forwards main. The operator can
    add an approval gate here (escalation-class `IntegrationApproval`) requiring an explicit
-   operator token before any commit reaches master. This is an optional additional layer for
+   operator token before any commit reaches main. This is an optional additional layer for
    high-trust-required paths.
 
 5. **Adding a second independent Reviewer with different criteria reduces risk.** See
@@ -240,7 +240,7 @@ The defenses are depth, blast-radius bounding, and audit completeness.
 | **DAG dependency gates** | Kernel state machine on `task_dag_edges` | Skipping Reviewer or other gates |
 | **Shared lane ceiling** | Budget aggregated across all sessions | Budget exhaustion DoS |
 | **Audit chain** | Every intent recorded with SHA attribution | Untraceable post-hoc attacks |
-| **Reviewer gate** | Independent Reviewer VM evaluates before merge | Compromised Implementer reaching master |
+| **Reviewer gate** | Independent Reviewer VM evaluates before merge | Compromised Implementer reaching main |
 
 ---
 

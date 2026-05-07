@@ -65,7 +65,7 @@ auth_module:    Completed
 billing_module: Completed
 ```
 
-Final commit on master is a merge of both branches; `git log
+Final commit on main is a merge of both branches; `git log
 --graph` shows two parents on the merge commit.
 
 ---

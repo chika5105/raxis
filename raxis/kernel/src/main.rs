@@ -611,7 +611,7 @@ async fn main() {
     // kernel binary monomorphises against the SE-domain binding in
     // V2; future trading / healthcare / robotics kernels swap the
     // adapter behind a `cfg`-gated boot-time selector. The three
-    // host-side roots — master repo, per-session worktrees,
+    // host-side roots — main repo, per-session worktrees,
     // transfer staging — anchor under `<data_dir>/`; the
     // `worktree-provision` and `worktree-staging` crates own the
     // actual content laid down inside them.
@@ -621,13 +621,13 @@ async fn main() {
             TerminalArtefact = raxis_domain_git::SeTerminalArtefact,
         >,
     > = {
-        let master_root   = data_dir.join("repositories").join("master");
+        let main_root     = data_dir.join("repositories").join("main");
         let sessions_root = data_dir.join("worktrees");
         let transfer_root = data_dir.join("transfer");
         // Lay down the three roots if they are missing — the
         // worktree-provision crate expects them to exist before the
         // first session is admitted.
-        for p in [&master_root, &sessions_root, &transfer_root] {
+        for p in [&main_root, &sessions_root, &transfer_root] {
             if !p.exists() {
                 if let Err(e) = std::fs::create_dir_all(p) {
                     eprintln!(
@@ -639,7 +639,7 @@ async fn main() {
             }
         }
         Arc::new(raxis_domain_git::GitAdapter::new(
-            master_root,
+            main_root,
             sessions_root,
             transfer_root,
         ))

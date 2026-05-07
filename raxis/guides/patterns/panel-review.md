@@ -145,7 +145,7 @@ t=20m  correctness_reviewer → approved  ← last one; verdict computed
 
 Kernel: all approved → KernelPush::AllReviewersPassed
 Orchestrator → IntegrationMerge { commit_sha: "abc123" }
-Kernel fast-forwards master. Done.
+Kernel fast-forwards main. Done.
 
 Total wall-clock: ~20 minutes.
 Sequential equivalent: 12 + 8 + 8 + 10 = 38 minutes.

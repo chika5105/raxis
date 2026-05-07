@@ -2,7 +2,7 @@
 //!
 //! Normative reference: `v2-deep-spec.md §Step 24` (Reviewer
 //! object-copy from the Orchestrator's ODB) and `§Step 24b`
-//! (Orchestrator RW clone from master at `base_sha`).
+//! (Orchestrator RW clone from main at `base_sha`).
 //!
 //! The Reviewer image (`raxis-reviewer-core`) ships **without `git`**
 //! per `planner-harness.md §4.2 Pure-Static Reviewer` /
@@ -19,7 +19,7 @@
 //! │   Source ODB        │  ──────────────────────────────────────────► │   Destination       │
 //! │   (Orchestrator's   │     `gix::clone::PrepareFetch::new(          │   (Reviewer or      │
 //! │   .git/objects/ for │      "file://<src>", dest, …)                │    Orchestrator     │
-//! │   Step 24, master   │      .fetch_then_checkout(...)               │    worktree)        │
+//! │   Step 24, main     │      .fetch_then_checkout(...)               │    worktree)        │
 //! │   for Step 24b)     │      .main_worktree(...)                     │                     │
 //! └─────────────────────┘                                              └─────────────────────┘
 //! ```
@@ -137,7 +137,7 @@ pub enum ProvisionError {
     /// The requested SHA was not found in the destination ODB after
     /// clone. Indicates a bug in the kernel's bundle pipeline (Step
     /// 9): the Orchestrator's worktree advertises an `evaluation_sha`
-    /// the master ODB does not contain.
+    /// the main ODB does not contain.
     #[error("requested SHA {sha} not present in destination ODB after clone")]
     ShaMissingPostClone {
         /// The SHA the kernel asked to checkout / pin.
@@ -224,7 +224,7 @@ pub enum ProvisionError {
 /// * `evaluation_sha` — the commit SHA the Reviewer evaluates. The
 ///   kernel resolved this from `subtask_activations.evaluation_sha`
 ///   at Reviewer activation time (Step 23).
-/// * `master_base_sha` — the initiative's base commit (the
+/// * `main_base_sha` — the initiative's base commit (the
 ///   boundary the Reviewer's diff and log are computed against).
 /// * `dest_root` — the Reviewer's worktree root path
 ///   (`<data_dir>/worktrees/<reviewer_uuid>/`).
@@ -240,7 +240,7 @@ pub enum ProvisionError {
 /// 3. Detached-HEAD checkout at `evaluation_sha`.
 /// 4. Pre-render `<dest_root>/.raxis/diff.patch` and
 ///    `<dest_root>/.raxis/log.txt` covering
-///    `master_base_sha..evaluation_sha`.
+///    `main_base_sha..evaluation_sha`.
 ///
 /// **Returns.** [`ReviewerProvision`] with the destination paths
 /// the kernel passes to the worktree-staging crate.
@@ -307,7 +307,7 @@ pub enum ProvisionError {
 pub fn provision_reviewer(
     orch_repo_root:   &Path,
     evaluation_sha:   &str,
-    master_base_sha:  &str,
+    main_base_sha:  &str,
     dest_root:        &Path,
     strategy:         CloneStrategy,
     path_allowlist:   &[String],
@@ -377,8 +377,8 @@ pub fn provision_reviewer(
 
     let diff_path = raxis_dir.join("diff.patch");
     let log_path  = raxis_dir.join("log.txt");
-    render_diff(&dest_repo, master_base_sha, evaluation_sha, &diff_path)?;
-    render_log(&dest_repo, master_base_sha, evaluation_sha, &log_path)?;
+    render_diff(&dest_repo, main_base_sha, evaluation_sha, &diff_path)?;
+    render_log(&dest_repo, main_base_sha, evaluation_sha, &log_path)?;
 
     Ok(ReviewerProvision {
         worktree_root:  dest_root.to_path_buf(),
@@ -397,7 +397,7 @@ pub fn provision_reviewer(
 ///
 /// Three concrete differences from `provision_reviewer`:
 ///
-/// 1. Source is the master repo (`master_repo_root`), not an
+/// 1. Source is the main repo (`main_repo_root`), not an
 ///    intermediate clone.
 /// 2. HEAD lands at `base_sha` (no detached pin to a custom ref).
 /// 3. The staging crate's caller maps the resulting worktree as
@@ -419,7 +419,7 @@ pub fn provision_reviewer(
 /// a sparse-trimmed Orchestrator worktree that would silently
 /// corrupt git's 3-way merge traversal at `IntegrationMerge` time.
 pub fn provision_orchestrator(
-    master_repo_root: &Path,
+    main_repo_root: &Path,
     base_sha:         &str,
     dest_root:        &Path,
     strategy:         CloneStrategy,
@@ -431,7 +431,7 @@ pub fn provision_orchestrator(
         return Err(ProvisionError::SparseOrchestratorRefused);
     }
 
-    let _ = clone_local(master_repo_root, dest_root)?;
+    let _ = clone_local(main_repo_root, dest_root)?;
 
     let dest_repo = gix::open(dest_root).map_err(|e| ProvisionError::DestUnusable {
         path:   dest_root.to_path_buf(),

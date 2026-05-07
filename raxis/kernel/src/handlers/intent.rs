@@ -820,7 +820,7 @@ fn run_phase_c(
     //
     // Note: `previous_sha` is set to the request's `base_sha` rather
     // than the row-level `initiatives.current_sha` because the
-    // host-side master-fast-forward (integration-merge.md §11
+    // host-side main-fast-forward (integration-merge.md §11
     // Phase 2/3) is not yet wired into the admission path; the
     // Orchestrator's claimed base is the only ancestor visible at
     // this point in the pipeline. When the Step 8 follow-up wires

@@ -6,7 +6,7 @@ lane_id     = "fix-typo-lane"
 description = """
   The fixer Executor restores `pub fn add(...)` in src/lib.rs; the
   cargo_build verifier confirms the build succeeds before the merge
-  is allowed to advance master.
+  is allowed to advance main.
 """
 
 [[tasks]]

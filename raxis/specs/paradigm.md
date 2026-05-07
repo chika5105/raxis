@@ -57,7 +57,7 @@ Two implementations satisfying the same paradigm invariants on different hardwar
 
 A *reference implementation* is a concrete realization of the paradigm for a specific domain, with specific technology choices, specific authority semantics, and specific tooling. Reference implementations make the paradigm concrete — they prove it is buildable and they give operators something they can deploy.
 
-The current reference implementation in this repository targets **autonomous software engineering**: planners that read code, write code, run tests, and integrate changes into a master git repository. Its concrete instantiations of the paradigm are:
+The current reference implementation in this repository targets **autonomous software engineering**: planners that read code, write code, run tests, and integrate changes into a main git repository. Its concrete instantiations of the paradigm are:
 
 - Intelligence runs in microVMs (Firecracker on Linux, Apple Virtualization.framework on macOS)
 - Authority is a Rust daemon (`raxis-kernel`) speaking VSock to planners and Unix sockets to operators
@@ -356,19 +356,19 @@ The paradigm is domain-agnostic. Different reference implementations apply it to
 
 **Reference implementation:** the Rust workspace in this repository.
 
-**Domain.** A planner agent reads code, writes code, runs tests, integrates changes into a master git repository, and may coordinate with reviewer agents and orchestrator agents on complex initiatives.
+**Domain.** A planner agent reads code, writes code, runs tests, integrates changes into a main git repository, and may coordinate with reviewer agents and orchestrator agents on complex initiatives.
 
 **Domain-specific authority operations.**
 
 - `IntentRequest::CompleteTask` — agent claims to have finished a task at a specific commit SHA
-- `IntentRequest::IntegrationMerge` — orchestrator merges sub-task commits into the master branch
+- `IntentRequest::IntegrationMerge` — orchestrator merges sub-task commits into the main branch
 - `IntentRequest::SubmitReview` — reviewer agent submits a verdict on a peer's work
 - `IntentRequest::EscalationRequest` — agent requests authority for an action outside its plan
 - `IntentRequest::InferenceRequest` — agent calls an LLM provider via the kernel-mediated gateway
 - `IntentRequest::EgressRequest` — agent makes an HTTP call to an allowlisted external URL
 - `IntentRequest::FetchRequest` — agent reads from an allowlisted external resource
 
-**Domain-specific policy.** `policy.toml` declares allowed operators, allowed providers and pricing, allowed master-repo bindings with push credentials, allowed worktree roots, allowed egress hosts, host capacity caps, audit retention, etc. `plan.toml` declares per-initiative path allowlists, per-task token limits, per-task egress allowlists, agent role declarations (Orchestrator, Executor, Reviewer), `can_delegate` capabilities, and per-task reviewers.
+**Domain-specific policy.** `policy.toml` declares allowed operators, allowed providers and pricing, allowed main-repo bindings with push credentials, allowed worktree roots, allowed egress hosts, host capacity caps, audit retention, etc. `plan.toml` declares per-initiative path allowlists, per-task token limits, per-task egress allowlists, agent role declarations (Orchestrator, Executor, Reviewer), `can_delegate` capabilities, and per-task reviewers.
 
 **Two-credential-system architecture.** The reference implementation makes paradigm invariant **R-2 — Mediated Access to External Resources** mechanically tractable by maintaining **two orthogonal credential stores** with non-overlapping access paths. Operators interact with both, but they live in different on-disk locations, are loaded by different processes, and defend against different threats:
 

@@ -447,7 +447,7 @@ pub enum AuditEventKind {
     /// **V2 (Step 30 + integration-merge.md §7).** Emitted when the
     /// kernel admits an `IntentKind::IntegrationMerge` and updates
     /// `initiatives.current_sha` to `commit_sha` (Phase 1 of the
-    /// transactional boundary, before the host-side master
+    /// transactional boundary, before the host-side main-branch
     /// fast-forward).
     ///
     /// **Attribution semantics (Step 30).** When

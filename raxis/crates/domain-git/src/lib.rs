@@ -1,4 +1,4 @@
-//! Host-side master-branch fast-forward for V2 `IntegrationMerge`
+//! Host-side main-branch fast-forward for V2 `IntegrationMerge`
 //! Phase 2.
 //!
 //! Normative reference:
@@ -14,33 +14,33 @@
 //!   domain.
 //! * `v2-deep-spec.md §Step 8` (Orchestrator owns
 //!   `IntegrationMerge`; Kernel verifies ancestry and path
-//!   containment, then fast-forwards the master branch).
+//!   containment, then fast-forwards the main branch).
 //!
 //! ## What this crate does
 //!
 //! Two operations, both deliberately simple:
 //!
-//! 1. [`fetch_into_master`] — copy the merge commit (and its
+//! 1. [`fetch_into_main`] — copy the merge commit (and its
 //!    transitive object graph) from the Orchestrator's worktree
 //!    object database (the `<data_dir>/worktrees/<orch_uuid>/.git/`
 //!    directory; populated by `raxis-worktree-provision`) into the
-//!    master repository's object database. This is the host-side
+//!    main repository's object database. This is the host-side
 //!    `git fetch <orchestrator_worktree> <commit_sha>` referenced
 //!    in `integration-merge.md §4 Check 8 Phase 2`. Pure object
 //!    copy: it does NOT update any ref.
-//! 2. [`update_master_ref`] — atomically advance
-//!    `refs/heads/master` to point at the requested commit SHA via
+//! 2. [`update_main_ref`] — atomically advance
+//!    `refs/heads/main` to point at the requested commit SHA via
 //!    `gix-ref::file::Transaction::commit`, mirroring the host-side
-//!    `git update-ref refs/heads/master <commit_sha>`.
+//!    `git update-ref refs/heads/main <commit_sha>`.
 //!
-//! These two calls together implement the master-advancement work
+//! These two calls together implement the main-advancement work
 //! the spec calls "Phase 2 (idempotent domain commit)". They are
 //! independently idempotent:
 //!
-//! * Re-running [`fetch_into_master`] after the objects were
+//! * Re-running [`fetch_into_main`] after the objects were
 //!   already copied is a no-op (gix's clone path skips objects
 //!   already present in the destination ODB).
-//! * Re-running [`update_master_ref`] when `refs/heads/master`
+//! * Re-running [`update_main_ref`] when `refs/heads/main`
 //!   already equals the target SHA is a no-op (the transaction's
 //!   precondition matches the target value).
 //!
@@ -64,7 +64,7 @@
 //! ## Failure handling
 //!
 //! Every public function is fail-closed: a transient I/O error
-//! returns a typed `MasterMergeError` and leaves the master ODB +
+//! returns a typed `MainMergeError` and leaves the main ODB +
 //! refs untouched at any partial state the underlying gix call
 //! would have produced. The kernel's recovery path
 //! (`integration-merge.md §11.3`) re-invokes both calls on next
@@ -83,13 +83,13 @@ pub use adapter::{GitAdapter, SeIntentKind, SeTerminalArtefact};
 // Errors
 // ---------------------------------------------------------------------------
 
-/// Errors the master-merge module can surface.
+/// Errors the main-merge module can surface.
 #[derive(Debug, thiserror::Error)]
-pub enum MasterMergeError {
-    /// The master repository at `path` cannot be opened (path
+pub enum MainMergeError {
+    /// The main repository at `path` cannot be opened (path
     /// missing, not a git repo, ODB corrupt).
-    #[error("master repo at {path} cannot be opened: {reason}")]
-    MasterRepoUnopenable {
+    #[error("main repo at {path} cannot be opened: {reason}")]
+    MainRepoUnopenable {
         /// Path the kernel asked to open.
         path:   PathBuf,
         /// Underlying gix error string.
@@ -114,20 +114,20 @@ pub enum MasterMergeError {
     #[error("gix fetch failed: {0}")]
     FetchFailed(String),
 
-    /// The requested SHA is not present in the master ODB after
+    /// The requested SHA is not present in the main ODB after
     /// fetching. Indicates either a bug in the kernel's bundle
     /// pipeline (the Orchestrator's worktree advertises a SHA the
     /// fetch did not pull) or a corrupted Orchestrator ODB.
-    #[error("requested SHA {sha} not present in master ODB after fetch")]
+    #[error("requested SHA {sha} not present in main ODB after fetch")]
     ShaMissingPostFetch {
         /// The SHA the Orchestrator submitted as `commit_sha`.
         sha: String,
     },
 
     /// The ref-update transaction failed. Common causes: a
-    /// concurrent writer raced (spec §11 mandates a master-worktree
+    /// concurrent writer raced (spec §11 mandates a main-worktree
     /// lock; if the kernel forgets to take it the transaction
-    /// catches the race), or the master repo's ref database is
+    /// catches the race), or the main repo's ref database is
     /// read-only.
     #[error("ref update failed: {0}")]
     RefUpdateFailed(String),
@@ -146,20 +146,20 @@ pub enum MasterMergeError {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Snapshot of where the master branch landed after a successful
-/// merge. Returned by [`commit_merge_to_master`] so the caller
+/// Snapshot of where the main branch landed after a successful
+/// merge. Returned by [`commit_merge_to_main`] so the caller
 /// (the kernel's merge handler) can reconcile its in-memory
 /// `initiatives.current_sha` against ground truth.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MasterAdvance {
-    /// Where master pointed before this call (or `None` if master
+pub struct MainAdvance {
+    /// Where main pointed before this call (or `None` if main
     /// did not yet exist — initial-commit case).
     pub previous_sha: Option<String>,
-    /// Where master points after this call. Equals the `commit_sha`
+    /// Where main points after this call. Equals the `commit_sha`
     /// argument on success, or equals `previous_sha` when the
     /// idempotency short-circuit fires.
     pub current_sha:  String,
-    /// `true` iff this call was a no-op because master already
+    /// `true` iff this call was a no-op because main already
     /// pointed at the requested SHA. The kernel's audit chain
     /// emits `IntegrationMergeCompleted` once per advancement,
     /// not per call — `already_at_target = true` lets the handler
@@ -168,13 +168,13 @@ pub struct MasterAdvance {
 }
 
 /// Apply the merge commit produced by the Orchestrator to the
-/// master repository: copy objects, then advance
-/// `refs/heads/master`. This is the full Phase 2 of
+/// main repository: copy objects, then advance
+/// `refs/heads/main`. This is the full Phase 2 of
 /// `integration-merge.md §4 Check 8`.
 ///
 /// **Inputs.**
 ///
-/// * `master_repo_root` — absolute path to the master repository
+/// * `main_repo_root` — absolute path to the main repository
 ///   (the canonical state target for this initiative). Must be a
 ///   git repository the kernel has write access to.
 /// * `orch_worktree_root` — absolute path to the Orchestrator's
@@ -185,30 +185,30 @@ pub struct MasterAdvance {
 ///   verified ancestry (Check 3) and path containment (Check 5)
 ///   against this SHA.
 ///
-/// **Returns.** [`MasterAdvance`] capturing the previous and
-/// current master SHAs. The kernel reads `current_sha` back into
+/// **Returns.** [`MainAdvance`] capturing the previous and
+/// current main SHAs. The kernel reads `current_sha` back into
 /// `initiatives.current_sha` before issuing Phase 3's
 /// `git_apply_pending = 0` UPDATE.
 ///
 /// **Idempotency.** Safe to call multiple times with the same
 /// `commit_sha`. Subsequent calls observe `already_at_target =
 /// true` and perform no work.
-pub fn commit_merge_to_master(
-    master_repo_root:   &Path,
+pub fn commit_merge_to_main(
+    main_repo_root:   &Path,
     orch_worktree_root: &Path,
     commit_sha:         &str,
-) -> Result<MasterAdvance, MasterMergeError> {
+) -> Result<MainAdvance, MainMergeError> {
     let oid = parse_oid(commit_sha)?;
 
-    let master_repo = open_master(master_repo_root)?;
+    let main_repo = open_main(main_repo_root)?;
 
-    // Capture the master tip before any work — this is the
-    // `previous_sha` we'll surface in the `MasterAdvance`.
-    let previous = current_master_oid(&master_repo).ok();
+    // Capture the main tip before any work — this is the
+    // `previous_sha` we'll surface in the `MainAdvance`.
+    let previous = current_main_oid(&main_repo).ok();
 
-    // Idempotency short-circuit: master already at the target.
+    // Idempotency short-circuit: main already at the target.
     if previous.as_ref().map(|p| p == &oid).unwrap_or(false) {
-        return Ok(MasterAdvance {
+        return Ok(MainAdvance {
             previous_sha:      previous.as_ref().map(|p| p.to_string()),
             current_sha:       oid.to_string(),
             already_at_target: true,
@@ -216,22 +216,22 @@ pub fn commit_merge_to_master(
     }
 
     // Phase 2a — fetch objects from the Orchestrator's worktree
-    // ODB into the master repo. Must complete before Phase 2b.
-    fetch_into_master(master_repo_root, orch_worktree_root, &oid)?;
+    // ODB into the main repo. Must complete before Phase 2b.
+    fetch_into_main(main_repo_root, orch_worktree_root, &oid)?;
 
     // Re-open after fetch so we observe the new objects via the
-    // master repo's loose-/pack-store handle.
-    let master_repo = open_master(master_repo_root)?;
-    if master_repo.find_object(oid).is_err() {
-        return Err(MasterMergeError::ShaMissingPostFetch {
+    // main repo's loose-/pack-store handle.
+    let main_repo = open_main(main_repo_root)?;
+    if main_repo.find_object(oid).is_err() {
+        return Err(MainMergeError::ShaMissingPostFetch {
             sha: oid.to_string(),
         });
     }
 
-    // Phase 2b — atomically advance refs/heads/master to oid.
-    update_master_ref(&master_repo, &oid, previous.as_ref())?;
+    // Phase 2b — atomically advance refs/heads/main to oid.
+    update_main_ref(&main_repo, &oid, previous.as_ref())?;
 
-    Ok(MasterAdvance {
+    Ok(MainAdvance {
         previous_sha:      previous.as_ref().map(|p| p.to_string()),
         current_sha:       oid.to_string(),
         already_at_target: false,
@@ -239,53 +239,53 @@ pub fn commit_merge_to_master(
 }
 
 /// Fetch a commit (and its transitive object graph) from the
-/// Orchestrator's worktree ODB into the master ODB.
+/// Orchestrator's worktree ODB into the main ODB.
 ///
 /// Pure object copy: it never updates a ref. After this call the
-/// master ODB sees `commit_sha` as a reachable object but no
+/// main ODB sees `commit_sha` as a reachable object but no
 /// branch points at it.
 ///
 /// **Why a hand-rolled traversal, not `gix::clone::PrepareFetch`:**
 /// `PrepareFetch` refuses to operate against a non-empty
 /// destination, so it cannot be repurposed to pour objects into an
-/// existing master repository. The alternative — invoking the
+/// existing main repository. The alternative — invoking the
 /// `gix::Remote::fetch` async API against the Orchestrator's
 /// worktree — pulls in a `tokio` runtime for what is logically a
 /// local-only object copy and forces packfile negotiation we do
 /// not need. The traversal here is the minimal correct
 /// implementation: walk every object reachable from `commit_sha`
 /// (commits → trees → blobs/symlinks), short-circuit at objects
-/// already present in the master ODB, and write the rest via
+/// already present in the main ODB, and write the rest via
 /// `Repository::write_object`. Each write is automatically a
 /// no-op if the object already exists (gix dedups by hash).
-pub fn fetch_into_master(
-    master_repo_root:   &Path,
+pub fn fetch_into_main(
+    main_repo_root:   &Path,
     orch_worktree_root: &Path,
     commit_sha:         &gix::ObjectId,
-) -> Result<(), MasterMergeError> {
-    if !master_repo_root.exists() {
-        return Err(MasterMergeError::MasterRepoUnopenable {
-            path:   master_repo_root.to_path_buf(),
+) -> Result<(), MainMergeError> {
+    if !main_repo_root.exists() {
+        return Err(MainMergeError::MainRepoUnopenable {
+            path:   main_repo_root.to_path_buf(),
             reason: "path does not exist".to_owned(),
         });
     }
     if !orch_worktree_root.exists() {
-        return Err(MasterMergeError::SourceUnopenable {
+        return Err(MainMergeError::SourceUnopenable {
             path:   orch_worktree_root.to_path_buf(),
             reason: "path does not exist".to_owned(),
         });
     }
 
-    let master_repo = open_master(master_repo_root)?;
+    let main_repo = open_main(main_repo_root)?;
     let orch_repo = gix::open(orch_worktree_root).map_err(|e| {
-        MasterMergeError::SourceUnopenable {
+        MainMergeError::SourceUnopenable {
             path:   orch_worktree_root.to_path_buf(),
             reason: e.to_string(),
         }
     })?;
 
     // Short-circuit if the object is already present.
-    if master_repo.find_object(*commit_sha).is_ok() {
+    if main_repo.find_object(*commit_sha).is_ok() {
         return Ok(());
     }
 
@@ -294,13 +294,13 @@ pub fn fetch_into_master(
     // (Step 9 wrote a SHA the Orchestrator's worktree doesn't
     // contain), and surfaces as a typed fetch failure.
     if orch_repo.find_object(*commit_sha).is_err() {
-        return Err(MasterMergeError::FetchFailed(format!(
+        return Err(MainMergeError::FetchFailed(format!(
             "commit_sha {commit_sha} not found in orchestrator worktree at {}",
             orch_worktree_root.display(),
         )));
     }
 
-    walk_and_copy(&orch_repo, &master_repo, *commit_sha)?;
+    walk_and_copy(&orch_repo, &main_repo, *commit_sha)?;
 
     Ok(())
 }
@@ -312,7 +312,7 @@ fn walk_and_copy(
     src:   &gix::Repository,
     dst:   &gix::Repository,
     start: gix::ObjectId,
-) -> Result<(), MasterMergeError> {
+) -> Result<(), MainMergeError> {
     use gix::objs::tree::EntryKind;
     use std::collections::{HashSet, VecDeque};
 
@@ -331,17 +331,17 @@ fn walk_and_copy(
             continue;
         }
         let obj = src.find_object(commit_oid).map_err(|e| {
-            MasterMergeError::FetchFailed(format!("find_object({commit_oid}): {e}"))
+            MainMergeError::FetchFailed(format!("find_object({commit_oid}): {e}"))
         })?;
         let commit = obj.try_into_commit().map_err(|e| {
-            MasterMergeError::FetchFailed(format!(
+            MainMergeError::FetchFailed(format!(
                 "object {commit_oid} is not a commit: {e}"
             ))
         })?;
 
         // Decode and queue parents + tree.
         let raw = commit.decode().map_err(|e| {
-            MasterMergeError::FetchFailed(format!("decode commit {commit_oid}: {e}"))
+            MainMergeError::FetchFailed(format!("decode commit {commit_oid}: {e}"))
         })?;
         let tree_oid = raw.tree();
         trees.push_back(tree_oid);
@@ -363,15 +363,15 @@ fn walk_and_copy(
             continue;
         }
         let obj = src.find_object(tree_oid).map_err(|e| {
-            MasterMergeError::FetchFailed(format!("find_object({tree_oid}): {e}"))
+            MainMergeError::FetchFailed(format!("find_object({tree_oid}): {e}"))
         })?;
         let tree = obj.try_into_tree().map_err(|e| {
-            MasterMergeError::FetchFailed(format!(
+            MainMergeError::FetchFailed(format!(
                 "object {tree_oid} is not a tree: {e}"
             ))
         })?;
         let decoded = tree.decode().map_err(|e| {
-            MasterMergeError::FetchFailed(format!("decode tree {tree_oid}: {e}"))
+            MainMergeError::FetchFailed(format!("decode tree {tree_oid}: {e}"))
         })?;
         for entry in decoded.entries.iter() {
             let oid: gix::ObjectId = entry.oid.into();
@@ -396,7 +396,7 @@ fn walk_and_copy(
             continue;
         }
         let obj = src.find_object(blob_oid).map_err(|e| {
-            MasterMergeError::FetchFailed(format!("find_object({blob_oid}): {e}"))
+            MainMergeError::FetchFailed(format!("find_object({blob_oid}): {e}"))
         })?;
         write_object_bytes(dst, obj.data.as_slice(), gix::object::Kind::Blob)?;
     }
@@ -412,45 +412,45 @@ fn write_object_bytes(
     dst:  &gix::Repository,
     body: &[u8],
     kind: gix::object::Kind,
-) -> Result<(), MasterMergeError> {
+) -> Result<(), MainMergeError> {
     use gix::object::Kind;
     match kind {
         Kind::Blob => {
             dst.write_blob(body).map_err(|e| {
-                MasterMergeError::FetchFailed(format!("write_blob: {e}"))
+                MainMergeError::FetchFailed(format!("write_blob: {e}"))
             })?;
         }
         _ => {
             use gix::prelude::Write as _;
             dst.objects.write_buf(kind, body).map_err(|e| {
-                MasterMergeError::FetchFailed(format!("write_buf: {e}"))
+                MainMergeError::FetchFailed(format!("write_buf: {e}"))
             })?;
         }
     }
     Ok(())
 }
 
-/// Atomically advance `refs/heads/master` to `oid` via a
-/// `gix-ref` transaction. Used by [`commit_merge_to_master`] but
+/// Atomically advance `refs/heads/main` to `oid` via a
+/// `gix-ref` transaction. Used by [`commit_merge_to_main`] but
 /// also exposed for tests that want to drive the ref update in
 /// isolation.
 ///
-/// `expected_previous` is the value the kernel believes master
+/// `expected_previous` is the value the kernel believes main
 /// points at right now; if `Some`, the transaction's precondition
 /// requires the on-disk ref to equal that value (so a concurrent
 /// writer's update is detected and the transaction aborts). If
-/// `None`, the transaction is unconstrained — master must not
+/// `None`, the transaction is unconstrained — main must not
 /// exist yet (an initial-commit pinning).
-pub fn update_master_ref(
+pub fn update_main_ref(
     repo:              &gix::Repository,
     oid:               &gix::ObjectId,
     expected_previous: Option<&gix::ObjectId>,
-) -> Result<(), MasterMergeError> {
+) -> Result<(), MainMergeError> {
     use gix::refs::transaction::{Change, LogChange, RefEdit, RefLog, PreviousValue};
     use gix::refs::{FullName, Target};
 
-    let full_name = FullName::try_from("refs/heads/master").map_err(|e| {
-        MasterMergeError::RefUpdateFailed(format!("FullName::try_from: {e}"))
+    let full_name = FullName::try_from("refs/heads/main").map_err(|e| {
+        MainMergeError::RefUpdateFailed(format!("FullName::try_from: {e}"))
     })?;
 
     let previous = match expected_previous {
@@ -473,7 +473,7 @@ pub fn update_master_ref(
     };
 
     repo.edit_reference(edit).map_err(|e| {
-        MasterMergeError::RefUpdateFailed(format!("edit_reference: {e}"))
+        MainMergeError::RefUpdateFailed(format!("edit_reference: {e}"))
     })?;
     Ok(())
 }
@@ -482,33 +482,33 @@ pub fn update_master_ref(
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-fn open_master(path: &Path) -> Result<gix::Repository, MasterMergeError> {
-    gix::open(path).map_err(|e| MasterMergeError::MasterRepoUnopenable {
+fn open_main(path: &Path) -> Result<gix::Repository, MainMergeError> {
+    gix::open(path).map_err(|e| MainMergeError::MainRepoUnopenable {
         path:   path.to_path_buf(),
         reason: e.to_string(),
     })
 }
 
-fn current_master_oid(repo: &gix::Repository) -> Result<gix::ObjectId, MasterMergeError> {
+fn current_main_oid(repo: &gix::Repository) -> Result<gix::ObjectId, MainMergeError> {
     let r = repo
-        .find_reference("refs/heads/master")
-        .map_err(|e| MasterMergeError::RefUpdateFailed(format!("find_reference: {e}")))?;
+        .find_reference("refs/heads/main")
+        .map_err(|e| MainMergeError::RefUpdateFailed(format!("find_reference: {e}")))?;
     Ok(r.target().try_id().map(|id| id.to_owned()).ok_or_else(|| {
-        MasterMergeError::RefUpdateFailed(
-            "refs/heads/master is symbolic, expected direct".to_owned(),
+        MainMergeError::RefUpdateFailed(
+            "refs/heads/main is symbolic, expected direct".to_owned(),
         )
     })?)
 }
 
-fn parse_oid(sha: &str) -> Result<gix::ObjectId, MasterMergeError> {
-    gix::ObjectId::from_hex(sha.as_bytes()).map_err(|e| MasterMergeError::InvalidSha {
+fn parse_oid(sha: &str) -> Result<gix::ObjectId, MainMergeError> {
+    gix::ObjectId::from_hex(sha.as_bytes()).map_err(|e| MainMergeError::InvalidSha {
         sha:    sha.to_owned(),
         reason: e.to_string(),
     })
 }
 
 // ---------------------------------------------------------------------------
-// Tests — exercise master-advancement against real gix repositories.
+// Tests — exercise main-advancement against real gix repositories.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -516,19 +516,19 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    /// Set up two repositories: a master repo (initially containing
+    /// Set up two repositories: a main repo (initially containing
     /// one commit at `base_sha`) and an "orchestrator" worktree
     /// containing two commits (`base_sha` and `merge_sha`). The
-    /// orchestrator worktree was cloned from the master repo, then
+    /// orchestrator worktree was cloned from the main repo, then
     /// advanced.
-    fn fixture_master_and_orchestrator(
+    fn fixture_main_and_orchestrator(
         tmp: &Path,
     ) -> Option<(PathBuf, PathBuf, String, String)> {
         if Command::new("git").arg("--version").output().is_err() {
             return None;
         }
-        let master = tmp.join("master");
-        std::fs::create_dir_all(&master).ok()?;
+        let main = tmp.join("main");
+        std::fs::create_dir_all(&main).ok()?;
         let run = |args: &[&str], cwd: &Path| {
             let s = Command::new("git")
                 .args(args)
@@ -550,21 +550,21 @@ mod tests {
             );
             s
         };
-        run(&["init", "-q"], &master);
-        run(&["symbolic-ref", "HEAD", "refs/heads/master"], &master);
-        run(&["config", "user.name", "RAXIS Test"], &master);
-        run(&["config", "user.email", "test@raxis.local"], &master);
-        run(&["config", "commit.gpgsign", "false"], &master);
-        std::fs::write(master.join("README.md"), "v1\n").ok()?;
-        run(&["add", "README.md"], &master);
-        run(&["commit", "-q", "-m", "initial"], &master);
-        let base = String::from_utf8(run(&["rev-parse", "HEAD"], &master).stdout).ok()?
+        run(&["init", "-q"], &main);
+        run(&["symbolic-ref", "HEAD", "refs/heads/main"], &main);
+        run(&["config", "user.name", "RAXIS Test"], &main);
+        run(&["config", "user.email", "test@raxis.local"], &main);
+        run(&["config", "commit.gpgsign", "false"], &main);
+        std::fs::write(main.join("README.md"), "v1\n").ok()?;
+        run(&["add", "README.md"], &main);
+        run(&["commit", "-q", "-m", "initial"], &main);
+        let base = String::from_utf8(run(&["rev-parse", "HEAD"], &main).stdout).ok()?
             .trim().to_owned();
 
-        // Now mint an "orchestrator worktree" by cloning master
+        // Now mint an "orchestrator worktree" by cloning main
         // and advancing it by one more commit.
         let orch = tmp.join("orchestrator.work");
-        run(&["clone", "-q", master.to_str()?, orch.to_str()?], tmp);
+        run(&["clone", "-q", main.to_str()?, orch.to_str()?], tmp);
         run(&["config", "user.name", "RAXIS Test"], &orch);
         run(&["config", "user.email", "test@raxis.local"], &orch);
         run(&["config", "commit.gpgsign", "false"], &orch);
@@ -574,29 +574,29 @@ mod tests {
         let merge_sha = String::from_utf8(run(&["rev-parse", "HEAD"], &orch).stdout).ok()?
             .trim().to_owned();
 
-        Some((master, orch, base, merge_sha))
+        Some((main, orch, base, merge_sha))
     }
 
     #[test]
-    fn commit_merge_to_master_fast_forwards_master_branch() {
+    fn commit_merge_to_main_fast_forwards_main_branch() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((master, orch, base, merge)) =
-            fixture_master_and_orchestrator(tmp.path())
+        let Some((main, orch, base, merge)) =
+            fixture_main_and_orchestrator(tmp.path())
         else {
             eprintln!("skipping: git CLI not available");
             return;
         };
 
-        let advance = commit_merge_to_master(&master, &orch, &merge).unwrap();
+        let advance = commit_merge_to_main(&main, &orch, &merge).unwrap();
         assert_eq!(advance.previous_sha.as_deref(), Some(base.as_str()));
         assert_eq!(advance.current_sha, merge);
         assert!(!advance.already_at_target);
 
-        // master must now point at merge.
+        // main must now point at merge.
         let head = String::from_utf8(
             std::process::Command::new("git")
-                .args(["rev-parse", "refs/heads/master"])
-                .current_dir(&master)
+                .args(["rev-parse", "refs/heads/main"])
+                .current_dir(&main)
                 .output()
                 .unwrap()
                 .stdout,
@@ -605,26 +605,26 @@ mod tests {
         .trim()
         .to_owned();
         assert_eq!(head, merge,
-            "master must fast-forward to the merge commit");
+            "main must fast-forward to the merge commit");
     }
 
     #[test]
-    fn commit_merge_to_master_is_idempotent_on_replay() {
+    fn commit_merge_to_main_is_idempotent_on_replay() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((master, orch, base, merge)) =
-            fixture_master_and_orchestrator(tmp.path())
+        let Some((main, orch, base, merge)) =
+            fixture_main_and_orchestrator(tmp.path())
         else {
             eprintln!("skipping: git CLI not available");
             return;
         };
 
-        let first = commit_merge_to_master(&master, &orch, &merge).unwrap();
+        let first = commit_merge_to_main(&main, &orch, &merge).unwrap();
         assert!(!first.already_at_target);
 
         // Re-run — idempotency guard: returns already_at_target.
-        let second = commit_merge_to_master(&master, &orch, &merge).unwrap();
+        let second = commit_merge_to_main(&main, &orch, &merge).unwrap();
         assert!(second.already_at_target,
-            "second commit_merge_to_master must be a no-op when master \
+            "second commit_merge_to_main must be a no-op when main \
              is already at the target SHA (Check 8 Phase 2 idempotency)");
         assert_eq!(second.previous_sha.as_deref(), Some(merge.as_str()));
         assert_eq!(second.current_sha, merge);
@@ -632,54 +632,54 @@ mod tests {
     }
 
     #[test]
-    fn commit_merge_to_master_fails_closed_on_bogus_sha() {
+    fn commit_merge_to_main_fails_closed_on_bogus_sha() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((master, orch, _base, _merge)) =
-            fixture_master_and_orchestrator(tmp.path())
+        let Some((main, orch, _base, _merge)) =
+            fixture_main_and_orchestrator(tmp.path())
         else {
             eprintln!("skipping: git CLI not available");
             return;
         };
 
-        let result = commit_merge_to_master(
-            &master,
+        let result = commit_merge_to_main(
+            &main,
             &orch,
             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
         );
         match result {
-            Err(MasterMergeError::ShaMissingPostFetch { sha }) => {
+            Err(MainMergeError::ShaMissingPostFetch { sha }) => {
                 assert!(sha.starts_with("deadbeef"));
             }
             // PrepareFetch may surface this as a fetch error if the
             // refspec walk doesn't find the requested SHA in the
             // source repo.
-            Err(MasterMergeError::FetchFailed(_)) => {}
+            Err(MainMergeError::FetchFailed(_)) => {}
             other => panic!("expected ShaMissingPostFetch / FetchFailed, got {other:?}"),
         }
     }
 
     #[test]
-    fn commit_merge_to_master_rejects_unopenable_master() {
+    fn commit_merge_to_main_rejects_unopenable_main() {
         let tmp = tempfile::tempdir().unwrap();
         let nonexistent = tmp.path().join("never-existed");
         let orch = tmp.path().join("orch");
         std::fs::create_dir_all(&orch).unwrap();
-        let result = commit_merge_to_master(
+        let result = commit_merge_to_main(
             &nonexistent,
             &orch,
             "0000000000000000000000000000000000000000",
         );
         match result {
-            Err(MasterMergeError::MasterRepoUnopenable { .. }) => {}
-            other => panic!("expected MasterRepoUnopenable, got {other:?}"),
+            Err(MainMergeError::MainRepoUnopenable { .. }) => {}
+            other => panic!("expected MainRepoUnopenable, got {other:?}"),
         }
     }
 
     #[test]
-    fn commit_merge_to_master_copies_full_object_graph() {
+    fn commit_merge_to_main_copies_full_object_graph() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((master, orch, _base, _merge)) =
-            fixture_master_and_orchestrator(tmp.path())
+        let Some((main, orch, _base, _merge)) =
+            fixture_main_and_orchestrator(tmp.path())
         else {
             eprintln!("skipping: git CLI not available");
             return;
@@ -708,13 +708,13 @@ mod tests {
         let final_sha = String::from_utf8(run(&["rev-parse", "HEAD"], &orch).stdout)
             .unwrap().trim().to_owned();
 
-        // Now run the master fast-forward. Every intermediate
-        // commit, tree, and blob must land in master's ODB.
-        let advance = commit_merge_to_master(&master, &orch, &final_sha).unwrap();
+        // Now run the main fast-forward. Every intermediate
+        // commit, tree, and blob must land in main's ODB.
+        let advance = commit_merge_to_main(&main, &orch, &final_sha).unwrap();
         assert_eq!(advance.current_sha, final_sha);
 
-        // Verify the master ODB has every blob in the chain.
-        let master_repo = gix::open(&master).unwrap();
+        // Verify the main ODB has every blob in the chain.
+        let main_repo = gix::open(&main).unwrap();
         for entry in ["README.md", "a.txt", "b.txt"] {
             let body = std::fs::read(orch.join(entry)).unwrap();
             let blob_oid = gix::ObjectId::from_hex(
@@ -726,11 +726,11 @@ mod tests {
                 .as_bytes(),
             )
             .unwrap();
-            let copied = master_repo.find_object(blob_oid).unwrap();
+            let copied = main_repo.find_object(blob_oid).unwrap();
             assert_eq!(
                 copied.data.as_slice(),
                 body.as_slice(),
-                "blob for {entry} did not round-trip into master ODB",
+                "blob for {entry} did not round-trip into main ODB",
             );
         }
     }
@@ -745,7 +745,7 @@ mod tests {
     fn parse_oid_rejects_bad_hex() {
         let err = parse_oid("nothex").unwrap_err();
         match err {
-            MasterMergeError::InvalidSha { sha, .. } => assert_eq!(sha, "nothex"),
+            MainMergeError::InvalidSha { sha, .. } => assert_eq!(sha, "nothex"),
             other => panic!("expected InvalidSha, got {other:?}"),
         }
     }
