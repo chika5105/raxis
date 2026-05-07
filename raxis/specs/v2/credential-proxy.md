@@ -2429,10 +2429,13 @@ After this phase, every proxy type below operates against any conformant `Creden
 - [ ] Implement `AwsProxy` (IMDS-compatible HTTP server, STS token refresh)
 - [ ] Implement `GcpProxy` (GCP metadata server compatible endpoint)
 - [ ] Implement `AzureProxy` (Azure IMDS + token scoping per `allowed_resources`)
-- [ ] Implement `PostgresProxy` (full PG wire protocol: startup, auth, query, extended)
-      - [ ] Query text extraction from `Query (Q)` and `Parse (P)` messages
-      - [ ] Restriction enforcement: allow_only_select, forbidden_tables
-      - [ ] Prepared statement tracking
+- [x] Implement `PostgresProxy` (PG wire protocol: startup, auth-ok handshake, simple-query path). **Implementation reference:** `raxis/crates/credential-proxy-postgres/`. Surface: `PostgresProxy::bind` + `serve` accept loop, `ProxyConfig` with `OwnedConsumer` and policy-declared `CredentialName`, `Restrictions::allow_only_select` enforced via `classify_first_operation` (handles `WITH … SELECT|INSERT|…`, `EXPLAIN …`, comments). Tests: 15 unit + 4 subprocess integration covering handshake → ReadyForQuery, simple `SELECT` returning CommandComplete, INSERT blocked with sqlstate `42501` under `allow_only_select`, missing-credential graceful close. Audit events surface as a local `AuditEvent::DatabaseQueryExecuted` with `sql_sha256` (always) and optional plaintext (only when policy `[inference_audit] log_content = true`); kernel translates to `AuditEventKind::DatabaseQueryExecuted` at the audit pipeline boundary.
+      - [x] Query text extraction from `Query (Q)` messages.
+      - [x] Restriction enforcement: `allow_only_select` (DML/DDL → `ErrorResponse{42501}`).
+      - [ ] **Deferred:** extended-query path (`Parse`/`Bind`/`Execute`/`Describe`/`Sync`/`Close`) — current MVP returns `0A000` (`feature_not_supported`). Unblocks prepared-statement tracking and ORM workloads.
+      - [ ] **Deferred:** real upstream forwarding via `tokio-postgres` — current MVP synthesises `CommandComplete` for the simple-query path so handshake-tier integration is demonstrable end-to-end without a real Postgres process.
+      - [ ] **Deferred:** `forbidden_tables`, `forbidden_schemas`, `max_result_rows`, `statement_timeout_ms`.
+      - [ ] **Deferred:** transaction-scoped restriction tracking with auto-`ROLLBACK` on blocked DML inside `BEGIN`.
       - [ ] Connection multiplexing (1:1 agent-to-real per session)
       - [ ] Transaction state tracking
 - [ ] Implement `MysqlProxy` (MySQL wire: challenge-response auth, COM_QUERY)
