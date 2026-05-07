@@ -50,7 +50,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
 ];
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
-const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject"];
+const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject", "validate"];
 /// V2.1 atomic plan-bundle submit. Spec: plan-bundle-sealing.md §4.
 /// Currently exposes only `plan`; future sub-commands (`policy`,
 /// `operator-cert`) will plug in here without a third rename.
@@ -180,6 +180,7 @@ fn run() -> Result<(), CliError> {
                 "submit" => commands::plan::run_submit(&flags, &rest[1..]),
                 "approve" => commands::plan::run_approve(&flags, &rest[1..]),
                 "reject" => commands::plan::run_reject(&flags, &rest[1..]),
+                "validate" => commands::plan_validate::run(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "plan sub-command", sub2, PLAN_SUBCOMMANDS,
                 ))),
@@ -406,6 +407,17 @@ SUBCOMMANDS:
 
     plan reject <initiative_id>
         Reject a pending initiative without instantiating tasks.
+
+    plan validate <plan.toml>
+        Local-only structural pre-flight for plan.toml. Catches the
+        operator's common mistakes (TOML syntax, missing
+        `[workspace] lane_id`, per-task `lane_id` overrides,
+        Orchestrator declarations, invalid `clone_strategy`,
+        duplicate / self-loop / dangling / cyclic predecessors,
+        glob characters in `cross_cutting_artifacts` or
+        `path_allowlist`) before the signed-bundle round-trip
+        through `submit plan`. Exits 0 on success, non-zero on the
+        first violation.
 
     initiative abort <initiative_id>
         Force-terminate an initiative and bulk-cancel all non-terminal tasks.

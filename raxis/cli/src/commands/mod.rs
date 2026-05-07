@@ -31,6 +31,7 @@ pub mod inspect_initiative;
 pub mod log;
 pub mod operator;
 pub mod plan;
+pub mod plan_validate;
 pub mod policy;
 pub mod policy_diff;
 pub mod policy_show;

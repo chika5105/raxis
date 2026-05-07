@@ -905,6 +905,56 @@ Summary: 0 errors, 2 advisories. Run `raxis-cli plan prepare` to apply defaults.
 
 Exit code 0 on success (advisories don't fail), non-zero on any error.
 
+### 7.4a Implementation reference (local-only checks)
+
+The first-pass `plan validate` lands as
+`cli/src/commands/plan_validate.rs` and is wired through the existing
+`plan` sub-command dispatcher in `cli/src/main.rs::PLAN_SUBCOMMANDS`.
+The validator runs against the on-disk `plan.toml` bytes and returns
+a `ValidationReport` whose `lines` are emitted as `[OK]` or `[FAIL]`
+rows. The pure validator (`validate_plan_text`) is unit-tested in
+the same file and is the API future host-side tooling (`plan
+explain`, `plan diff`) will reuse.
+
+Coverage shipped in V2:
+
+- TOML parse (line/col diagnostic from the `toml` crate).
+- Required sections: `[workspace]`, `[[tasks]]`.
+- `[workspace] lane_id` non-empty.
+- Per-task: `task_id` required, no `lane_id` per-task override
+  (V2 §28 single-lane propagation), no
+  `session_agent_type = "Orchestrator"` (V2 §27 rule 1), valid
+  `clone_strategy` ∈ {`full`, `blobless`, `sparse`}, valid
+  `session_agent_type` ∈ {`Executor`, `Reviewer`}.
+- DAG family (mirrors `kernel/src/initiatives/lifecycle.rs::validate_plan_dag`):
+  duplicate `task_id`, self-loop, dangling predecessor, cyclic
+  dependency (iterative DFS with three-color marking).
+- `cross_cutting_artifacts` syntax (mirrors
+  `validate_cross_cutting_artifacts`): empty entry, leading `!`,
+  leading or trailing `/`, `..` segment, embedded `/`, glob
+  characters.
+- `path_allowlist` syntax (V2 §19 entry shape): empty, leading
+  `!`, leading `/`, glob characters, `..` segment.
+
+Deferred to follow-up landings:
+
+- Profile inheritance graph (`custom-tools.md §8.2`) — requires
+  custom-tools profile resolver.
+- Custom-tool reserved-name conflicts — requires CLI-side mirror of
+  the kernel's reserved-name list.
+- Per-task field consistency advisories (e.g., `review.symbol_index =
+  "not_needed"` without a Reviewer in the DAG).
+- Bundle size pre-check against `[plan_bundle_limits]`.
+- `--with-kernel` admission dry-run (depends on the operator-socket
+  `ProposeDefaults` / `DryRunAdmit` IPCs, which are sequenced after
+  the credential-proxy and egress-proxy landings).
+- `--explain-environment` (depends on
+  `environment-access-control.md` follow-on work).
+
+The kernel admission handler remains the single source of truth;
+anything `plan validate` misses is still rejected by `submit plan`,
+so a clean `plan validate` is necessary-but-not-sufficient.
+
 ### 7.5 Failure modes
 
 `plan validate` exits non-zero on any `FAIL_PLAN_*` issue. The full failure code set is the union of `policy-plan-authority.md §3b` (admission failures) plus `plan-bundle-sealing.md §9` (bundle-format failures). With `--with-kernel`, the failure set additionally includes policy-dependent codes.
