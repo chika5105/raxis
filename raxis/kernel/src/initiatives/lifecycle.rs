@@ -225,6 +225,40 @@ pub enum LifecycleError {
         suggestion:     String,
     },
 
+    /// **V2 (Step 17 / `credential-proxy.md §3`) —
+    /// `INVALID_PLAN_SCHEMA` task-credentials family.** A
+    /// `[[tasks.credentials]]` block declared by an operator is
+    /// structurally invalid:
+    ///
+    ///   * `"unknown_proxy_type"` — the `proxy_type` is not one of
+    ///     `postgres | http | k8s` (the V2 implemented set). Future
+    ///     proxy types (`smtp`, `redis`, `aws`) gain new variants in
+    ///     `raxis_plan_credentials::ProxyDecl` and graduate out of
+    ///     this rule.
+    ///   * `"malformed"` — a generic structural error from
+    ///     `raxis_plan_credentials::ParseError` (missing required
+    ///     field, wrong TOML type, etc.). The exact diagnostic from
+    ///     the parser is preserved in `suggestion`.
+    ///
+    /// Surfaced by `validate_task_credentials` at `approve_plan`
+    /// time, **before** `BEGIN TRANSACTION`, so a malformed plan
+    /// never allocates a row. Sister-of `PlanDagInvalid` —
+    /// shift-left validation per `v2-deep-spec.md §Step 17`.
+    #[error("plan task-credentials invalid (rule={rule}, task={offending_task}, credential={offending_credential}): {suggestion}")]
+    PlanTaskCredentialsInvalid {
+        /// One of `unknown_proxy_type`, `malformed`.
+        rule:                 &'static str,
+        /// The task whose `[[tasks.credentials]]` block was rejected.
+        offending_task:       String,
+        /// The `name` field on the offending credential decl, or
+        /// the literal `"<unparsed>"` when the parser failed before
+        /// the name was reached.
+        offending_credential: String,
+        /// Operator-facing remediation hint per Step 17 ("must
+        /// always include a concrete remediation suggestion").
+        suggestion:           String,
+    },
+
     #[error("scheduler error during admission: {0}")]
     Scheduler(#[from] SchedulerError),
 
@@ -483,6 +517,14 @@ pub fn approve_plan(
     validate_plan_dag(&plan_tasks)?;
     validate_path_allowlist_v2_format(&plan_tasks)?;
     validate_cross_cutting_artifacts(&orchestrator_fields)?;
+    // V2 `credential-proxy.md §3` shift-left: any
+    // `[[tasks.credentials]]` block declaring an unknown
+    // `proxy_type` (or a structurally malformed entry — already
+    // surfaced as `PlanInvalid` inside `parse_plan_tasks`) is
+    // rejected here, before BEGIN TRANSACTION, so a plan that
+    // names a proxy this kernel build does not implement cannot
+    // allocate a task row.
+    validate_task_credentials(&plan_tasks)?;
     // V2 §Step 27 — clone-strategy + Sparse-Orchestrator exclusion +
     // Orchestrator-in-`[[tasks]]` rejection. Runs after the parser-
     // level "unknown value" rejection (which fires inside
@@ -1207,6 +1249,17 @@ struct PlanTask {
     /// Bypass flag. Default `false`. When `true`, kernel emits
     /// `PathScopeOverrideApplied` at `approve_plan`.
     path_scope_override:       bool,
+
+    // ── V2 `credential-proxy.md §3` typed credential decls ─────────────
+    /// Parsed `[[tasks.credentials]]` entries for this task. Empty
+    /// when the operator omitted the block. The
+    /// `validate_task_credentials` shift-left validator runs against
+    /// these to fail-fast on `Unknown` proxy types and structural
+    /// errors before `BEGIN TRANSACTION`. The kernel-side
+    /// `CredentialProxyManager::start_for_session` consumes the
+    /// vector once a session-spawn callsite hands it the
+    /// per-task decls (see `kernel/src/ipc/context.rs proxy_manager`).
+    credentials:               Vec<raxis_plan_credentials::TaskCredentialDecl>,
 }
 
 /// Parse `[[tasks]]` array from plan TOML.
@@ -1319,6 +1372,20 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             },
         };
 
+        // V2 `credential-proxy.md §3` — parse the optional
+        // `[[tasks.credentials]]` sub-array. The parser is strict: a
+        // missing required field (`name`, `proxy_type`) surfaces as
+        // a `ParseError::Malformed` here and gets converted to
+        // `PlanInvalid` so approve_plan rejects the whole plan. The
+        // *semantic* check (Unknown proxy type) runs in
+        // `validate_task_credentials` alongside the other Step 17
+        // shift-left validators so the error path matches the rest
+        // of the plan-shape rejections.
+        let credentials = raxis_plan_credentials::parse_for_task(entry)
+            .map_err(|e| LifecycleError::PlanInvalid {
+                reason: format!("[[tasks.credentials]] (task `{task_id}`): {e}"),
+            })?;
+
         tasks.push(PlanTask {
             task_id,
             name,
@@ -1330,6 +1397,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             path_scope_override,
             clone_strategy,
             session_agent_type,
+            credentials,
         });
     }
 
@@ -1881,6 +1949,53 @@ fn validate_path_allowlist_v2_format(tasks: &[PlanTask]) -> Result<(), Lifecycle
     Ok(())
 }
 
+/// **V2 §Step 17 / `credential-proxy.md §3` — shift-left
+/// validation of `[[tasks.credentials]]` declarations.**
+///
+/// Runs at `approve_plan` time, **before** `BEGIN TRANSACTION`, so a
+/// plan declaring an unknown `proxy_type` (or a structurally
+/// malformed credential block — already converted to
+/// `PlanInvalid` inside `parse_plan_tasks`) cannot allocate a row.
+///
+/// Today the V2 implemented set is `postgres | http | k8s`. The
+/// `Unknown` variant from `raxis_plan_credentials::ProxyDecl` is
+/// surfaced here as a `PlanTaskCredentialsInvalid {
+/// rule: "unknown_proxy_type" }` rejection so future proxy types
+/// (`smtp`, `redis`, `aws`, ...) do not silently parse as
+/// no-ops; the operator gets a clear "this proxy type is not yet
+/// supported in this kernel build" signal that names the offending
+/// task and credential.
+///
+/// Sister-of `validate_path_allowlist_v2_format` /
+/// `validate_cross_cutting_artifacts` — same shift-left posture.
+fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
+    use raxis_plan_credentials::ProxyDecl;
+
+    for pt in tasks {
+        for decl in &pt.credentials {
+            if matches!(decl.proxy, ProxyDecl::Unknown) {
+                return Err(LifecycleError::PlanTaskCredentialsInvalid {
+                    rule:                 "unknown_proxy_type",
+                    offending_task:       pt.task_id.clone(),
+                    offending_credential: decl.name.as_str().to_owned(),
+                    suggestion: format!(
+                        "task `{}` declares credential `{}` with a \
+                         `proxy_type` this kernel build does not \
+                         implement. Valid values in V2: \
+                         `postgres`, `http`, `k8s`. Drop the \
+                         credential block or upgrade the kernel \
+                         build to one that ships the matching \
+                         proxy.",
+                        pt.task_id,
+                        decl.name.as_str(),
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Returns `Some(reason)` if `entry` violates the V2 path-allowlist
 /// syntax discipline; `None` if the entry is acceptable. The reason
 /// strings are stable wire-side identifiers — DO NOT rename without
@@ -2108,6 +2223,7 @@ lane_id = "rogue-lane"
             path_scope_override:       false,
             clone_strategy:            CloneStrategy::Blobless,
             session_agent_type:        SessionAgentType::Executor,
+            credentials:               vec![],
         }
     }
 
@@ -2277,6 +2393,7 @@ lane_id = "rogue-lane"
             path_scope_override:       false,
             clone_strategy:            CloneStrategy::Blobless,
             session_agent_type:        SessionAgentType::Executor,
+            credentials:               vec![],
         }
     }
 
@@ -2466,6 +2583,7 @@ lane_id = "rogue-lane"
             path_scope_override: false,
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: SessionAgentType::Executor,
+            credentials: vec![],
         }
     }
 
@@ -2650,6 +2768,7 @@ session_agent_type = "Coordinator"
             path_scope_override: false,
             clone_strategy: strategy,
             session_agent_type: agent,
+            credentials: vec![],
         }
     }
 
@@ -2820,6 +2939,144 @@ predecessors = ["run-tests"]
         assert_eq!(by_id["run-tests"].session_agent_type, SessionAgentType::Executor);
         assert_eq!(by_id["review-it"].clone_strategy, CloneStrategy::Full);
         assert_eq!(by_id["review-it"].session_agent_type, SessionAgentType::Reviewer);
+    }
+
+    // ── V2 `credential-proxy.md §3` — task-credential shift-left
+    // validation. The validator runs in approve_plan alongside the
+    // path_allowlist / cross_cutting_artifacts validators per Step 17,
+    // **before** BEGIN TRANSACTION. The tests below pin both the
+    // happy-path (postgres / http with restrictions) and the
+    // unknown-proxy-type rejection.
+
+    #[test]
+    fn approve_plan_accepts_known_proxy_types_in_tasks_credentials() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "build-svc"
+
+  [[tasks.credentials]]
+  name       = "pg-staging"
+  mount_as   = "DATABASE_URL"
+  proxy_type = "postgres"
+
+    [tasks.credentials.restrictions]
+    allow_only_select = true
+
+[[tasks]]
+task_id = "test-it"
+predecessors = ["build-svc"]
+
+  [[tasks.credentials]]
+  name         = "stripe-api-key"
+  mount_as     = "STRIPE_API_BASE_URL"
+  proxy_type   = "http"
+  upstream_url = "https://api.stripe.com/v1"
+  auth_mode    = "bearer"
+
+    [tasks.credentials.restrictions]
+    allowed_methods = ["GET", "POST"]
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).expect("plan with valid task-credentials must be accepted");
+
+        // The plan landed in Executing — task-credential validation
+        // did not block the happy path.
+        assert_eq!(read_initiative_state(&store, &init_id), "Executing");
+    }
+
+    #[test]
+    fn approve_plan_rejects_unknown_proxy_type_in_tasks_credentials() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "send-email"
+
+  [[tasks.credentials]]
+  name       = "smtp-relay"
+  mount_as   = "SMTP_URL"
+  proxy_type = "smtp"
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).expect_err("unknown proxy_type must be rejected");
+
+        match err {
+            LifecycleError::PlanTaskCredentialsInvalid {
+                rule, offending_task, offending_credential, suggestion,
+            } => {
+                assert_eq!(rule, "unknown_proxy_type");
+                assert_eq!(offending_task, "send-email");
+                assert_eq!(offending_credential, "smtp-relay");
+                assert!(
+                    suggestion.contains("postgres") &&
+                    suggestion.contains("http") &&
+                    suggestion.contains("k8s"),
+                    "diagnostic should enumerate the V2 implemented set, got: {suggestion}",
+                );
+            }
+            other => panic!("expected PlanTaskCredentialsInvalid, got {other:?}"),
+        }
+        // Plan stayed in Draft — shift-left rejection is pre-tx so no
+        // state mutation happened.
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+    }
+
+    #[test]
+    fn approve_plan_rejects_malformed_tasks_credentials_block() {
+        // A `[[tasks.credentials]]` entry without `proxy_type` is
+        // structurally malformed — the parser inside parse_plan_tasks
+        // surfaces it as PlanInvalid (the catch-all generic-shape
+        // error), not the typed PlanTaskCredentialsInvalid. This pins
+        // the parser-level rejection.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "x"
+
+  [[tasks.credentials]]
+  name     = "no-proxy-type"
+  mount_as = "DATABASE_URL"
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).expect_err("malformed credential block must be rejected");
+
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(
+                    reason.contains("[[tasks.credentials]]") && reason.contains("`x`"),
+                    "diagnostic should name the offending task block, got: {reason}",
+                );
+            }
+            other => panic!("expected PlanInvalid for malformed creds, got {other:?}"),
+        }
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
     }
 
     #[test]
