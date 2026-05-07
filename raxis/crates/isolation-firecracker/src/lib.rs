@@ -629,6 +629,7 @@ mod tests {
             session_token:    SessionToken(token.to_owned()),
             vsock_cid:        Some(3),
             virtio_fs_mounts: Vec::new(),
+            env:              Default::default(),
         }
     }
 

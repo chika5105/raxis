@@ -3138,6 +3138,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-session-spawn"
+version = "0.1.0"
+dependencies = [
+ "raxis-audit-tools",
+ "raxis-credential-proxy-manager",
+ "raxis-credentials",
+ "raxis-credentials-file",
+ "raxis-egress-admission",
+ "raxis-isolation",
+ "raxis-plan-credentials",
+ "raxis-test-support",
+ "raxis-tproxy-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "raxis-store"
 version = "0.1.0"
 dependencies = [

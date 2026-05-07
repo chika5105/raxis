@@ -141,7 +141,18 @@ impl Backend for SubprocessIsolation {
         if !spec.entrypoint_argv.is_empty() {
             cmd.args(&spec.entrypoint_argv);
         }
+        // Per-substrate-instance env (set via builder) lands first,
+        // then the per-spawn env from `VmSpec::env` — the per-spawn
+        // values win on conflicts because the kernel's
+        // `SessionSpawnService` is the authoritative source for
+        // credential-proxy loopback URLs and the admission-service
+        // address. Without that ordering a static `with_env` from a
+        // test fixture could shadow the per-session credential
+        // bindings the kernel just bound.
         for (k, v) in &self.extra_env {
+            cmd.env(k, v);
+        }
+        for (k, v) in &spec.env {
             cmd.env(k, v);
         }
         // Test fixtures usually want the session token reachable in
@@ -372,6 +383,7 @@ mod tests {
             session_token:    SessionToken("tok-test-1".into()),
             vsock_cid:        Some(0xC1D_FACE),
             virtio_fs_mounts: Vec::new(),
+            env:              Default::default(),
         }
     }
 

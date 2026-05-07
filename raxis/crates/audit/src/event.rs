@@ -219,6 +219,88 @@ pub enum AuditEventKind {
         reason: String,
     },
 
+    /// V2 per-session VM-spawn record. Emitted by
+    /// `raxis-session-spawn::SessionSpawnService::spawn_session`
+    /// AFTER `IsolationBackend::spawn` returns Ok and AFTER the
+    /// per-session credential proxies + egress-admission listener
+    /// are bound. Pairs 1:1 with a later `SessionVmExited`.
+    ///
+    /// Defined in `extensibility-traits.md §3.5, §3.8` (boot-step 6a
+    /// references) and `credential-proxy.md §2`.
+    ///
+    /// **Why this is a separate variant from `SessionCreated`.**
+    /// `SessionCreated` (V1) records an *operator-facing* row in the
+    /// `sessions` SQL table; it lands at `OperatorRequest::
+    /// CreateSession` time, BEFORE any VM is booted. `SessionVmSpawned`
+    /// records the V2 *substrate-facing* moment when the agent VM
+    /// actually started — those two moments are temporally and
+    /// architecturally distinct (a session row may exist for hours
+    /// before its VM boots; the V2 substrate may refuse to boot a
+    /// session row that V1 admission accepted).
+    SessionVmSpawned {
+        /// Session id the VM was booted for. References both
+        /// `sessions.session_id` and the spawn-service's per-VM
+        /// session table.
+        session_id:        String,
+        /// Owning task id (`None` for the canonical Orchestrator
+        /// session, which has no `[[tasks]]` row).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id:           Option<String>,
+        /// Owning initiative id; pins the spawn into the
+        /// initiative's lineage.
+        initiative_id:     String,
+        /// `Backend::backend_id()` of the substrate that booted the
+        /// VM. Stable string; pairs with `IsolationSubstrateSelected`
+        /// at audit-replay time.
+        backend_id:        String,
+        /// `EgressTier` that the substrate enforces for this VM,
+        /// stringified PascalCase. Operator dashboards key on this
+        /// to surface "Tier1Tproxy" vs "Tier2CredProxy" sessions.
+        egress_tier:       String,
+        /// `host:port` of the per-session egress-admission listener
+        /// the in-guest tproxy phones home to. Loopback in dev,
+        /// vsock-shaped at V2 GA. Recorded for forensic replay
+        /// (so a misbehaving session's admission stream can be
+        /// correlated back to its kernel-side listener).
+        admission_loopback: String,
+        /// Number of credential proxies bound for this session.
+        /// Each is itself recorded by an adjacent
+        /// `CredentialProxyStarted` event; this field is the
+        /// audit-replay-side cardinality check.
+        credential_proxies: u32,
+    },
+
+    /// V2 per-session VM-exit record. Emitted by
+    /// `raxis-session-spawn::SessionSpawnService::terminate_session`
+    /// AFTER `IsolationSession::shutdown` returns and BEFORE the
+    /// credential-proxy `CredentialProxyStopped` events fire (so
+    /// audit-chain readers see the VM-exit-then-cleanup ordering).
+    ///
+    /// Pairs 1:1 with `SessionVmSpawned`. `audit-paired-writes.md`
+    /// lints enforce the pairing.
+    SessionVmExited {
+        /// Echo of the spawn event's `session_id`.
+        session_id:    String,
+        /// Stable, PascalCase classification of the exit. One of:
+        ///   * `"GracefulExit"` — guest PID 1 returned a code.
+        ///   * `"SignalKilled"` — substrate sent a signal.
+        ///   * `"Timeout"`      — grace expired without exit.
+        ///   * `"BackendError"` — substrate-internal failure.
+        /// Closed set; new variants land here AND in
+        /// `IsolationError::ExitStatus` together.
+        signal_class:  String,
+        /// Numeric exit code reduced from `ExitStatus`. Mapping is
+        /// pinned by `raxis-session-spawn::exit_status_code` —
+        /// dashboards rely on the specific numbers (e.g. -2 for
+        /// `BackendError`).
+        exit_code:     i32,
+        /// Free-form payload from the substrate when
+        /// `signal_class == "BackendError"`. `None` for the other
+        /// classes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend_error: Option<String>,
+    },
+
     /// A security boundary the kernel enforces was violated AT the
     /// moment a fail-closed guard surfaced the violation. Distinct
     /// from "policy admission rejected an operator's request"
@@ -1171,6 +1253,8 @@ impl AuditEventKind {
             Self::IsolationSubstrateSelected { .. } => "IsolationSubstrateSelected",
             Self::IsolationFallbackBypass { .. } => "IsolationFallbackBypass",
             Self::IsolationSubstrateRefused { .. } => "IsolationSubstrateRefused",
+            Self::SessionVmSpawned { .. } => "SessionVmSpawned",
+            Self::SessionVmExited { .. } => "SessionVmExited",
             Self::SecurityViolationDetected { .. } => "SecurityViolationDetected",
             Self::InitiativeCreated { .. } => "InitiativeCreated",
             Self::PlanApproved { .. } => "PlanApproved",

@@ -240,6 +240,45 @@ pub struct VmSpec {
     /// that route filesystem access elsewhere (Wasm preopen-dirs,
     /// SGX shared pages).
     pub virtio_fs_mounts: Vec<WorkspaceMount>,
+
+    /// Environment variables exposed to PID 1 inside the guest.
+    ///
+    /// **Why per-spawn (not per-backend-instance).** The kernel's
+    /// `SessionSpawnService` stamps three classes of values into
+    /// this map at session-spawn time:
+    ///
+    /// * **Credential-proxy loopback URLs** — one entry per
+    ///   `[[tasks.credentials]]` block, keyed by the operator-
+    ///   declared `mount_as` field. The proxy listener binds on
+    ///   the host's loopback interface and the URL it emits here
+    ///   is the *only* address the agent sees; the credential
+    ///   bytes themselves never leave the kernel process per
+    ///   `credential-proxy.md §1`.
+    ///
+    /// * **Egress-admission service address** — the kernel-side
+    ///   admission service binds a per-session listener and writes
+    ///   its `host:port` here under
+    ///   `RAXIS_TPROXY_KERNEL_TCP` so the in-guest tproxy
+    ///   substrate can find it. Replaced by a vsock CID at V2 GA.
+    ///
+    /// * **Session token** — `RAXIS_SESSION_TOKEN` mirrors the
+    ///   value of `session_token` for guests that consume it via
+    ///   env rather than via the framed handshake.
+    ///
+    /// Substrates MUST honour this map in spawn order; the
+    /// reference subprocess substrate forwards the map to
+    /// `Command::env`. Firecracker / Apple-VZ stamp it through
+    /// the metadata service or the boot-args env block — see each
+    /// concrete substrate's docs for the exact channel.
+    ///
+    /// Backends that have no concept of guest env (Wasm modules,
+    /// pure ring buffers) MAY ignore the map; the kernel surfaces
+    /// the same values through alternative channels for those
+    /// backends (currently: out-of-band session metadata RPC).
+    ///
+    /// **`BTreeMap` rather than `HashMap`** — deterministic
+    /// iteration order makes audit-log replay reproducible.
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------

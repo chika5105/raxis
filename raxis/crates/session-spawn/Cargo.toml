@@ -1,0 +1,43 @@
+[package]
+name        = "raxis-session-spawn"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Core trait: who actually boots the VM.
+raxis-isolation         = { path = "../isolation" }
+
+# Per-session credential proxies — the SessionSpawnService binds them
+# at session-spawn time, hands the loopback URLs to the substrate via
+# VmSpec.env, and tears them down at session-terminate time.
+raxis-credential-proxy-manager = { path = "../credential-proxy-manager" }
+
+# Per-session admission decision plane — the kernel-side policy
+# enforcement loop the in-guest tproxy substrate talks to over
+# loopback (dev) or vsock (V2 GA).
+raxis-egress-admission  = { path = "../egress-admission" }
+
+# Plan-level credential declarations (the input the spawn service
+# consumes when building a SpawnRequest).
+raxis-plan-credentials  = { path = "../plan-credentials" }
+
+# Shared tooling.
+raxis-audit-tools       = { workspace = true }
+raxis-credentials       = { workspace = true }
+
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
+tracing     = "0.1"
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+raxis-test-support      = { path = "../test-support" }
+raxis-credentials-file  = { workspace = true }
+raxis-tproxy-protocol   = { path = "../tproxy-protocol" }
+tempfile                = "3"
+tokio                   = { workspace = true, features = ["full"] }

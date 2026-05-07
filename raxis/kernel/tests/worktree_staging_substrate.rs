@@ -74,6 +74,7 @@ fn fixture_spec(token: &str, mounts: Vec<WorkspaceMount>) -> VmSpec {
         session_token:    SessionToken(token.to_owned()),
         vsock_cid:        Some(0xC1D_5070),
         virtio_fs_mounts: mounts,
+        env:              Default::default(),
     }
 }
 

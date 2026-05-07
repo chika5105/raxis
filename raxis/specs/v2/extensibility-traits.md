@@ -663,6 +663,13 @@ pub struct VmSpec {
     pub session_token:     SessionToken,   // injected by kernel; the only secret in flight
     pub vsock_cid:         Option<u32>,    // microVM-only; backends ignore if not relevant
     pub virtio_fs_mounts:  Vec<WorkspaceMount>, // microVM-only; SGX/Wasm map elsewhere
+    pub env:               BTreeMap<String, String>, // per-spawn env block — the kernel
+                                              // SessionSpawnService stamps credential-
+                                              // proxy loopback URLs and the egress-
+                                              // admission service address here at
+                                              // session-spawn time. See
+                                              // `credential-proxy.md §1` and
+                                              // `vm-network-isolation.md §3-§5`.
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

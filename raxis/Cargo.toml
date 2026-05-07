@@ -37,6 +37,7 @@ members = [
     "crates/canonical-images",
     "crates/worktree-provision",
     "crates/worktree-staging",
+    "crates/session-spawn",
     "kernel",
     "cli",
     "gateway",

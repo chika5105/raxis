@@ -1060,6 +1060,10 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "KernelStarted", "KernelStopped",
     // V2 agent-runtime substrate (extensibility-traits.md §3.8)
     "IsolationSubstrateSelected", "IsolationFallbackBypass",
+    "IsolationSubstrateRefused",
+    // V2 per-session VM lifecycle (extensibility-traits.md §3.5,
+    // credential-proxy.md §2; paired-class — see audit-paired-writes.md §4.1).
+    "SessionVmSpawned", "SessionVmExited",
     // initiative
     "InitiativeCreated", "PlanApproved", "PlanRejected",
     "PathScopeOverrideApplied", "InitiativeStateChanged", "InitiativeAborted",

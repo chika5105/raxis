@@ -890,6 +890,7 @@ mod tests {
             session_token:    SessionToken("avf-test-token".to_owned()),
             vsock_cid:        Some(7),
             virtio_fs_mounts: Vec::new(),
+            env:              Default::default(),
         }
     }
 

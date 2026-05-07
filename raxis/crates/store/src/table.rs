@@ -168,15 +168,15 @@ pub enum Table {
     /// # ⚠ This table does NOT store credential values.
     ///
     /// Each row is **proxy metadata only**:
-    ///   * `credential_name`     — the policy-declared *name* of the
-    ///                             credential (e.g. `"db-prod"`); the
-    ///                             actual secret bytes resolve through
-    ///                             the kernel's `CredentialBackend`.
-    ///   * `mount_as`            — the env-var the proxy will inject
-    ///                             into the agent VM (e.g. `"DB_URL"`).
-    ///   * `proxy_type`          — `postgres | http | k8s | smtp`.
-    ///   * `proxy_json`          — the per-proxy restriction blob
-    ///                             (allow-lists, upstream URL, etc.).
+    ///
+    /// * `credential_name` — the policy-declared *name* of the
+    ///   credential (e.g. `"db-prod"`); the actual secret bytes
+    ///   resolve through the kernel's `CredentialBackend`.
+    /// * `mount_as` — the env-var the proxy will inject into the
+    ///   agent VM (e.g. `"DB_URL"`).
+    /// * `proxy_type` — `postgres | http | k8s | smtp`.
+    /// * `proxy_json` — the per-proxy restriction blob (allow-lists,
+    ///   upstream URL, etc.).
     ///
     /// The credential **bytes themselves** (postgres URL with
     /// password, bearer tokens, kubeconfig YAML, …) are NEVER
@@ -190,11 +190,13 @@ pub enum Table {
     ///
     /// (vs. a normalised per-proxy-type column set): the
     /// per-proxy-type schemas drift independently —
-    ///   * postgres has `allow_only_select`;
-    ///   * http has `auth_mode`, `upstream_url`, allowed_methods,
-    ///     allowed_path_prefixes;
-    ///   * k8s reuses http restrictions but is auditing-distinct;
-    ///   * future smtp adds rate-limit fields —
+    ///
+    /// * postgres has `allow_only_select`;
+    /// * http has `auth_mode`, `upstream_url`, allowed_methods,
+    ///   allowed_path_prefixes;
+    /// * k8s reuses http restrictions but is auditing-distinct;
+    /// * future smtp adds rate-limit fields —
+    ///
     /// and the kernel never writes to this column outside of the
     /// approve_plan transaction. It is read once at session-spawn
     /// time and re-deserialised back into

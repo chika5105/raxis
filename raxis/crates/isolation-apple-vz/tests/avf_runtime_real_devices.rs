@@ -74,6 +74,7 @@ fn fixture_spec(token: &str, egress: EgressTier) -> VmSpec {
         session_token:    SessionToken(token.to_owned()),
         vsock_cid:        Some(11),
         virtio_fs_mounts: Vec::new(),
+        env:              Default::default(),
     }
 }
 
