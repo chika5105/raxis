@@ -2465,12 +2465,14 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [ ] Body SHA-256 audit; opt-in body archive to immutable artifact store
       - [ ] Emit `SmtpProxyConnected`, `SmtpProxyMessageSent`, `SmtpProxyMessageRejected`, `SmtpProxyRateLimited`, `SmtpProxyUpstreamError`, `SmtpProxyDisconnected`
       - [ ] Reuse `crates/raxis-smtp-client/` (also used by `EmailChannel` notification impl)
-- [ ] Kernel: start all declared credential proxies before VM boot
-- [ ] Kernel: emit `CredentialProxyStarted` for each proxy
-- [ ] Kernel: send shutdown signal to proxies on session termination
-- [ ] Kernel: emit `CredentialProxyStopped` with connection/query stats
-- [ ] Proxy: emit `DatabaseQueryExecuted` for each query (with optional SQL text)
-- [ ] Proxy: emit `DatabaseQueryBlocked` for rejected queries
+- [x] **`[[tasks.credentials]]` plan parser** — typed parser for the per-task credential declaration block. **Implementation reference:** `raxis/crates/plan-credentials/`. Surface: `parse_for_task(&toml::Value) -> Result<Vec<TaskCredentialDecl>, ParseError>` + a `ProxyDecl` enum with typed variants for each proxy_type (`Postgres`, `Http`, `K8s`) + an `Unknown` catch-all that preserves unimplemented `proxy_type` strings without losing information. Tests: 12 unit tests pinning the schema (postgres with default + `allow_only_select` restrictions, http with bearer + basic auth modes, http with method/path-prefix allowlists, k8s convenience over http, multiple credentials per task, unknown proxy_type preservation, structured errors for missing required fields). The parser does NOT touch the credential backend or spawn proxies; that is the kernel-side `CredentialProxyManager`'s job once VM-spawn callsites land.
+- [ ] **Kernel: start all declared credential proxies before VM boot.** Blocked on V2 VM-spawn callsites (`isolation.spawn` from production code path). Wiring shape: at `handle_create_session(Role::Planner)`, the kernel reads `task.credentials` (already parsed via `raxis-plan-credentials`), iterates the `Vec<TaskCredentialDecl>`, calls the matching proxy's `bind` per variant, holds the resulting handles in a per-session `BTreeMap`, and emits `CredentialProxyStarted` per proxy.
+- [ ] Kernel: emit `CredentialProxyStarted` for each proxy. **Audit kind shipped** — `AuditEventKind::CredentialProxyStarted { session_id, proxy_type, credential_name, addr }` lives in `crates/audit/src/event.rs` with a pinning unit test. Awaiting the kernel-side wiring above.
+- [ ] Kernel: send shutdown signal to proxies on session termination. Blocked on the per-session proxy-handle map.
+- [ ] Kernel: emit `CredentialProxyStopped` with connection/query stats. **Audit kind shipped** — `AuditEventKind::CredentialProxyStopped { session_id, proxy_type, credential_name, connections_served, forwards_completed, forwards_blocked }` lives in `crates/audit/src/event.rs` with a pinning unit test.
+- [x] **Proxy: emit `DatabaseQueryExecuted` for each query.** The Postgres proxy emits a local `AuditEvent::DatabaseQueryExecuted` (sql_sha256 always; plaintext only under `[inference_audit] log_content = true`). The kernel-side `AuditEventKind::DatabaseQueryExecuted` is shipped in `crates/audit/src/event.rs`; the kernel-side translation step (proxy local event → kernel audit kind) lands with the proxy lifecycle wiring above.
+- [x] **Proxy: emit `DatabaseQueryBlocked` for rejected queries.** Same surface — `AuditEvent::DatabaseQueryExecuted { blocked: true, .. }` carries the rejection. (No separate `DatabaseQueryBlocked` variant needed; the boolean field disambiguates.)
+- [x] **Proxy: emit `HttpProxyRequestExecuted` for each forwarded/rejected request.** The HTTP proxy emits a local `AuditEvent::HttpProxyRequestExecuted`; the kernel-side `AuditEventKind::HttpProxyRequestExecuted` is shipped in `crates/audit/src/event.rs`; translation lands with proxy lifecycle wiring.
 - [ ] Generate blank kubeconfig / blank DATABASE_URL / IMDS env vars at VM boot
 - [ ] KSB: add `proxies` field listing active credential proxies
 - [ ] NNSP: add credential proxy protocol section to all Executor/Orchestrator templates

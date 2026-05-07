@@ -3071,6 +3071,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-plan-credentials"
+version = "0.1.0"
+dependencies = [
+ "raxis-credentials",
+ "serde",
+ "thiserror 1.0.69",
+ "toml",
+]
+
+[[package]]
 name = "raxis-policy"
 version = "0.1.0"
 dependencies = [
