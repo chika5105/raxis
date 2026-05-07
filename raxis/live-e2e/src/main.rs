@@ -54,6 +54,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
 mod env_file;
+mod slice_egress_enforcement;
 mod slice_gateway_anthropic;
 mod slice_http_proxy_bearer;
 mod slice_postgres_proxy;
@@ -80,6 +81,9 @@ struct Cli {
 enum Slice {
     /// Real `raxis-gateway` subprocess + real Anthropic API.
     GatewayAnthropic,
+    /// Egress allowlist enforcement: real Anthropic call permitted,
+    /// real `httpbin.org` call denied with `DomainNotAllowed`.
+    EgressEnforcement,
     /// Real `PostgresProxy` + real `tokio-postgres` client (handshake).
     PostgresProxy,
     /// Real `HttpProxy` + real `https://httpbin.org/`.
@@ -138,12 +142,15 @@ fn default_env_file_path() -> PathBuf {
 
 async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
     match slice {
-        Slice::GatewayAnthropic => slice_gateway_anthropic::run(env).await,
-        Slice::PostgresProxy    => slice_postgres_proxy::run().await,
-        Slice::HttpProxyBearer  => slice_http_proxy_bearer::run(env).await,
+        Slice::GatewayAnthropic   => slice_gateway_anthropic::run(env).await,
+        Slice::EgressEnforcement  => slice_egress_enforcement::run(env).await,
+        Slice::PostgresProxy      => slice_postgres_proxy::run().await,
+        Slice::HttpProxyBearer    => slice_http_proxy_bearer::run(env).await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
+            slice_egress_enforcement::run(env).await
+                .context("slice egress-enforcement")?;
             slice_postgres_proxy::run().await
                 .context("slice postgres-proxy")?;
             slice_http_proxy_bearer::run(env).await

@@ -200,6 +200,13 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
 // but uses the real Anthropic dev key.
 // ---------------------------------------------------------------------------
 
+/// Public alias used by `slice_egress_enforcement` so it can lean on
+/// the same fixture (egress allowlist already pins to
+/// `*.anthropic.com`).
+pub(crate) fn build_data_dir_for_egress(api_key: &str) -> Result<tempfile::TempDir> {
+    build_data_dir(api_key)
+}
+
 fn build_data_dir(api_key: &str) -> Result<tempfile::TempDir> {
     let tmp = tempfile::tempdir()?;
     let dd = tmp.path();
