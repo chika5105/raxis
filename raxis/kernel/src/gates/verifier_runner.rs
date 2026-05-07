@@ -927,6 +927,7 @@ mod stub_round_trip {
             credentials,
             isolation,
             orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
             domain,
         ).with_witness_dir(witness_dir))
     }

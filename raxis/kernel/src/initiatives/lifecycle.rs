@@ -39,6 +39,12 @@ const TASKS: &str                  = Table::Tasks.as_str();
 /// `raxis_store::Table::TaskCredentialProxies` for the authoritative
 /// invariant note.
 const TASK_CREDENTIAL_PROXIES: &str = Table::TaskCredentialProxies.as_str();
+/// Per-(initiative, sub-task) activation FSM. Inserted by
+/// `approve_plan` for every Executor / Reviewer task in lock-step
+/// with the parent `tasks` row (INV-STORE-02). See
+/// `raxis_store::Table::SubtaskActivations` for the authoritative
+/// invariant note.
+const SUBTASK_ACTIVATIONS: &str    = Table::SubtaskActivations.as_str();
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -643,6 +649,7 @@ pub fn approve_plan(
         // `tasks(task_id)` row (INV-STORE-02 / Pattern A).
         let task_id_for_creds = pt.task_id.clone();
         let credentials_for_task = pt.credentials.clone();
+        let agent_type_for_activation = pt.session_agent_type;
 
         let task = scheduler::PlanTask {
             task_id:       pt.task_id.clone(),
@@ -674,6 +681,23 @@ pub fn approve_plan(
                 &credentials_for_task,
             )?;
         }
+
+        // V2 §Step 5 — `subtask_activations` row population.
+        //
+        // Insert one row per Executor / Reviewer task in
+        // `PendingActivation`. INV-STORE-02 (Pattern A): atomic with
+        // the parent `tasks` row. The Orchestrator's newly-activatable
+        // prompt query (Layer 2 prompt assembly) reads this table on
+        // every InferenceRequest, so the row must be visible to the
+        // first prompt rendered after `tx.commit()`. Orchestrator
+        // tasks (auto-spawned by the kernel) deliberately receive no
+        // row — the helper is a no-op for that agent_type.
+        insert_subtask_activation_in_tx(
+            &tx,
+            &task_id_for_creds,
+            initiative_id,
+            agent_type_for_activation,
+        )?;
     }
 
     // V2 §Step 6 / `INV-PLANNER-HARNESS-06` — auto-spawn the canonical
@@ -2134,6 +2158,83 @@ fn insert_task_credential_proxies_in_tx(
     Ok(())
 }
 
+/// Insert a `subtask_activations` row for every Executor / Reviewer
+/// task admitted by `approve_plan`.
+///
+/// Spec reference: `v2-deep-spec.md §Step 5` — the `subtask_activations`
+/// table is the V2 sub-task FSM (`PendingActivation → Active →
+/// Completed | Failed`). Orchestrator tasks deliberately get NO row
+/// here: the Orchestrator session is auto-spawned by the Kernel itself
+/// at initiative start (see `auto_spawn_orchestrator_session_in_tx`),
+/// not by another agent's `ActivateSubTask` intent.
+///
+/// **Atomicity.** Caller passes the open `approve_plan` transaction.
+/// INV-STORE-02 (Pattern A): the activation row commits together with
+/// the parent `tasks(task_id)` row. A `tx.commit()` failure rolls
+/// both back; a successful commit guarantees the activation FSM is
+/// observable by the Orchestrator's "newly_activatable" prompt query
+/// on the next `InferenceRequest` (see `prompt-assembler.md §Layer 2`
+/// + `idx_subtask_activations_pending`).
+///
+/// **Initial state.** The row is inserted with:
+///
+/// * `activation_state = 'PendingActivation'` — the only state for
+///   which the cross-column CHECK clause permits `session_id IS NULL
+///   AND activated_at IS NULL AND terminated_at IS NULL`. The
+///   activation transitions to `Active` when `handle_activate_sub_task`
+///   completes the `ctx.session_spawn.spawn_session()` round-trip.
+///
+/// * `crash_retry_count = 0`, `review_reject_count = 0` — the two
+///   independent counters per `v2-deep-spec.md §Step 12` (a VM
+///   crash and a code-review rejection do NOT share a counter; their
+///   ceilings are tracked separately).
+///
+/// * `evaluation_sha = NULL` — for Reviewer activations this is
+///   filled by the predecessor Executor's `CompleteTask` admission
+///   (per `v2-deep-spec.md §Step 23`); for Executor activations it
+///   stays `NULL` for the row's lifetime.
+///
+/// **Drift protection.** The `activation_state` literal is taken
+/// straight from `SubtaskActivationState::PendingActivation`'s SQL
+/// projection so a future addition to the enum surfaces here at
+/// compile time. The DDL CHECK clause in
+/// `migration::ensure_v2_schema` independently pins the same set;
+/// the round-trip read in
+/// `read_subtask_activation_in_tx` (below) plus the
+/// `subtask_activations_round_trip_after_approve_plan` test in this
+/// file exercises the full insert → read loop.
+fn insert_subtask_activation_in_tx(
+    tx:                 &rusqlite::Transaction<'_>,
+    task_id:            &str,
+    initiative_id:      &str,
+    session_agent_type: SessionAgentType,
+) -> Result<(), LifecycleError> {
+    // Orchestrator tasks deliberately get no row (Step 5 §"Only
+    // Executor and Reviewer tasks have rows here"). The caller is
+    // expected to gate on this; we defense-in-depth here.
+    if matches!(session_agent_type, SessionAgentType::Orchestrator) {
+        return Ok(());
+    }
+
+    let activation_id = uuid::Uuid::new_v4().to_string();
+    let now = unix_now_secs() as i64;
+
+    tx.execute(
+        &format!(
+            "INSERT INTO {SUBTASK_ACTIVATIONS} (
+                activation_id, task_id, initiative_id,
+                activation_state, session_id, evaluation_sha,
+                crash_retry_count, review_reject_count,
+                created_at, activated_at, terminated_at
+             ) VALUES (?1, ?2, ?3, 'PendingActivation', NULL, NULL,
+                       0, 0, ?4, NULL, NULL)"
+        ),
+        rusqlite::params![activation_id, task_id, initiative_id, now],
+    )?;
+
+    Ok(())
+}
+
 /// Read the per-task credential-proxy declarations stored at
 /// `approve_plan` time and rehydrate them into the same
 /// `TaskCredentialDecl` shape that
@@ -3149,6 +3250,103 @@ predecessors = ["run-tests"]
         assert_eq!(by_id["run-tests"].session_agent_type, SessionAgentType::Executor);
         assert_eq!(by_id["review-it"].clone_strategy, CloneStrategy::Full);
         assert_eq!(by_id["review-it"].session_agent_type, SessionAgentType::Reviewer);
+    }
+
+    /// V2 §Step 5 — `approve_plan` MUST insert one
+    /// `subtask_activations` row per Executor / Reviewer task in the
+    /// `PendingActivation` state. Orchestrator tasks deliberately
+    /// receive NO row. The row is inserted in the same transaction
+    /// as the parent `tasks` row (INV-STORE-02 / Pattern A).
+    #[test]
+    fn approve_plan_populates_subtask_activations_for_each_executor_or_reviewer_task() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "build-svc"
+
+[[tasks]]
+task_id = "run-tests"
+predecessors = ["build-svc"]
+
+[[tasks]]
+task_id = "review-it"
+session_agent_type = "Reviewer"
+predecessors = ["run-tests"]
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap();
+
+        // Three Executor / Reviewer tasks → three activation rows.
+        let conn = store.lock_sync();
+        let activation_count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {SUBTASK_ACTIVATIONS}
+                 WHERE initiative_id = ?1"
+            ),
+            rusqlite::params![&init_id],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(
+            activation_count, 3,
+            "expected one subtask_activations row per Executor/Reviewer task",
+        );
+
+        // Every row must start in PendingActivation with all three
+        // post-activation timestamps NULL (the cross-column CHECK
+        // requires this).
+        let mut stmt = conn.prepare(
+            &format!(
+                "SELECT task_id, activation_state, session_id,
+                        activated_at, terminated_at,
+                        crash_retry_count, review_reject_count
+                 FROM {SUBTASK_ACTIVATIONS}
+                 WHERE initiative_id = ?1
+                 ORDER BY task_id"
+            )
+        ).unwrap();
+        let rows: Vec<(String, String, Option<String>, Option<i64>, Option<i64>, i64, i64)> = stmt
+            .query_map(rusqlite::params![&init_id], |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
+            )))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows.len(), 3);
+        for (task_id, state, session_id, activated_at, terminated_at, crash, review)
+            in &rows
+        {
+            assert_eq!(
+                state, "PendingActivation",
+                "{task_id}: expected PendingActivation, got {state}",
+            );
+            assert!(session_id.is_none(),
+                "{task_id}: PendingActivation rows must have NULL session_id");
+            assert!(activated_at.is_none(),
+                "{task_id}: PendingActivation rows must have NULL activated_at");
+            assert!(terminated_at.is_none(),
+                "{task_id}: PendingActivation rows must have NULL terminated_at");
+            assert_eq!(*crash, 0,
+                "{task_id}: crash_retry_count must start at 0");
+            assert_eq!(*review, 0,
+                "{task_id}: review_reject_count must start at 0");
+        }
+
+        // The Orchestrator's auto-spawned session row (Step 6) must
+        // NOT carry an activation row of its own — it's activated by
+        // the kernel itself, not by another agent's ActivateSubTask.
+        let task_ids: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert!(task_ids.contains(&"build-svc"));
+        assert!(task_ids.contains(&"run-tests"));
+        assert!(task_ids.contains(&"review-it"));
     }
 
     // ── V2 `credential-proxy.md §3` — task-credential shift-left

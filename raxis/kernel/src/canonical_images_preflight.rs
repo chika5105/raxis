@@ -119,6 +119,24 @@ pub fn orchestrator_image_path(install_dir: &Path, kernel_version: &str) -> Path
     ))
 }
 
+/// Resolve the canonical Executor-starter image filename for
+/// `kernel_version`. Format pinned by `system-requirements.md §1`:
+/// `raxis-executor-starter-<kernel_version>.img`.
+///
+/// **Why a separate path helper.** Executor / Reviewer activations
+/// (`v2-deep-spec.md §Steps 21–24`) resolve the canonical guest
+/// rootfs at spawn time — keeping the path-template in one place
+/// here lets `images/README.md`, the boot-time preflight, and the
+/// activation-spawn callsite all share a single source of truth.
+/// The Executor-starter is the V2 GA opt-in image; Reviewer
+/// activations stay on `raxis-reviewer-core` (Pure-Static Reviewer,
+/// `INV-PLANNER-HARNESS-02`).
+pub fn executor_starter_image_path(install_dir: &Path, kernel_version: &str) -> PathBuf {
+    install_dir.join("images").join(format!(
+        "raxis-executor-starter-{kernel_version}.img"
+    ))
+}
+
 /// Run the canonical-image digest preflight at boot. Returns one
 /// outcome per image (Reviewer first, Orchestrator second) and emits
 /// `SecurityViolationDetected` audit events for any mismatch.

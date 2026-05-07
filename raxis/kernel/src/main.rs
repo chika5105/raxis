@@ -693,6 +693,19 @@ async fn main() {
                 ),
             )
         },
+        // V2 — Executor / Reviewer spawn-context. Reuses the same
+        // boot-time install-dir + kernel-version as the orchestrator
+        // spawn so all three canonical images
+        // (`raxis-{reviewer,orchestrator,executor-starter}-core`)
+        // resolve through one root. Per-VM resource budgets default
+        // to `host-capacity.md §4.1` reference values
+        // (`ExecutorSpawnContext::new`).
+        Arc::new(
+            crate::session_spawn_orchestrator::ExecutorSpawnContext::new(
+                install_dir.clone(),
+                kernel_version.to_owned(),
+            ),
+        ),
         Arc::clone(&domain),
     );
     let ctx = Arc::new(ctx_inner);

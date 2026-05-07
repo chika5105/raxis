@@ -84,6 +84,19 @@ pub enum OrchestratorSpawnError {
     #[error("canonical Orchestrator image not found at {path}")]
     OrchestratorImageMissing { path: PathBuf },
 
+    /// Could not locate the canonical Reviewer image at the
+    /// expected install-dir path.
+    #[error("canonical Reviewer image not found at {path}")]
+    ReviewerImageMissing { path: PathBuf },
+
+    /// Could not locate the canonical Executor-starter image at the
+    /// expected install-dir path. Surfaced when a Reviewer-less
+    /// Executor activation is attempted on a half-installed kernel
+    /// where the operator has not deployed the executor-starter
+    /// image (which is opt-in per `system-requirements.md §1`).
+    #[error("canonical Executor-starter image not found at {path}")]
+    ExecutorStarterImageMissing { path: PathBuf },
+
     /// `task_credential_proxies` read failed while rehydrating the
     /// credential decls for the spawn. Surfaces underlying SQLite
     /// errors verbatim — these are typically schema-drift bugs.
@@ -466,6 +479,279 @@ async fn terminate_orchestrator(
     service:    Arc<SessionSpawnService>,
 ) -> Result<TerminationReport, OrchestratorSpawnError> {
     Ok(service.terminate_session(session_id, grace).await?)
+}
+
+// ---------------------------------------------------------------------------
+// Executor / Reviewer spawn — `spawn_executor_for_task` (free fn).
+// ---------------------------------------------------------------------------
+
+/// Resource-budget knobs for an Executor / Reviewer activation. Kept
+/// alongside `OrchestratorSpawnContext` so callers can construct one
+/// shared "spawn defaults" struct at boot. The path-templating logic
+/// lives in `canonical_images_preflight`; this struct only supplies
+/// the per-VM ceilings + the install-dir/kernel-version pair the
+/// path templates need.
+#[derive(Clone)]
+pub struct ExecutorSpawnContext {
+    /// Install dir from which the Executor-starter / Reviewer-core
+    /// canonical images are resolved.
+    pub install_dir:    PathBuf,
+    /// Kernel version pinned per `system-requirements.md §1`.
+    pub kernel_version: String,
+    /// Default Executor VM resource budget.
+    /// `host-capacity.md §4.1` — Executor budgets are sized for
+    /// agent code, not orchestration. 2 vCPU / 1 GiB matches the
+    /// reference deployment; operators override at boot when those
+    /// policy keys land.
+    pub executor_vcpu_count: u32,
+    /// Memory ceiling in MiB for Executor VMs.
+    pub executor_mem_mib:    u32,
+    /// Default Reviewer VM resource budget — Reviewers run pure-
+    /// static `ripgrep` / `read_file` workflows so the budget is
+    /// smaller than the Executor's. Matches `planner-harness.md
+    /// §4.2 Pure-Static Reviewer`.
+    pub reviewer_vcpu_count: u32,
+    /// Memory ceiling in MiB for Reviewer VMs.
+    pub reviewer_mem_mib:    u32,
+}
+
+impl ExecutorSpawnContext {
+    /// Default Executor / Reviewer VM resource budgets. Pinned to
+    /// match `host-capacity.md §4.1`; operators override at boot.
+    pub fn new(install_dir: PathBuf, kernel_version: String) -> Self {
+        Self {
+            install_dir,
+            kernel_version,
+            executor_vcpu_count: 2,
+            executor_mem_mib:    1024,
+            reviewer_vcpu_count: 1,
+            reviewer_mem_mib:    512,
+        }
+    }
+}
+
+/// Which canonical image + budget profile to spawn for an
+/// `IntentKind::ActivateSubTask` activation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutorAgentKind {
+    /// Executor-starter image, larger resource budget. Requires
+    /// `raxis-executor-starter-<kernel_version>.img` to be present.
+    Executor,
+    /// Reviewer-core image, smaller resource budget. Requires
+    /// `raxis-reviewer-core-<kernel_version>.img` to be present.
+    Reviewer,
+}
+
+/// Free-function helper: spawn the Executor / Reviewer VM for a
+/// V2 sub-task activation directly through `SessionSpawnService`.
+///
+/// **Why a free function (not a trait).** The kernel already owns
+/// `Arc<SessionSpawnService>` at every IPC handler call site
+/// (`HandlerContext::session_spawn`). Adding a second
+/// trait — analogous to [`OrchestratorSpawn`] — would just wrap
+/// `service.spawn_session()` once more without giving fixtures a
+/// distinct test seam (the existing
+/// `Arc<dyn IsolationBackend>` already provides one). Per the V2
+/// `executor-spawn-callsite` design note: the
+/// activation handler calls this helper, which calls
+/// `service.spawn_session()` directly. Production tests that need a
+/// substrate fake wire `SubprocessIsolation`; in-process unit tests
+/// wire `FailClosedTestIsolation` and assert on the spawn-error
+/// surface.
+///
+/// **What this helper does:**
+///   1. Resolves the canonical image path for `agent_kind`
+///      (`raxis-executor-starter-<v>.img` or
+///      `raxis-reviewer-core-<v>.img`).
+///   2. Reads `task_credential_proxies` rows for `task_id` so the
+///      `SessionSpawnService` can rehydrate per-session credential
+///      proxies (`credential-proxy.md §3`).
+///   3. Builds a `SpawnRequest` shaped per `extensibility-traits.md
+///      §3.5` — Executor egress on `Tier1Tproxy` (full admission
+///      enforcement) and Reviewer egress on `Tier0NoEgress` (the
+///      Pure-Static Reviewer mandate, `INV-PLANNER-HARNESS-02`).
+///   4. Delegates to `service.spawn_session(req).await` and
+///      surfaces the resulting `SpawnHandle`.
+///
+/// **What this helper deliberately does NOT do:**
+///   * Worktree provisioning. The kernel's intent handler is
+///     responsible for calling
+///     `raxis_worktree_provision::provision_executor` /
+///     `provision_reviewer` BEFORE this helper, then passing the
+///     materialised `WorkspaceMount` through `workspace_mounts`.
+///   * Activation-FSM transitions. The handler updates the
+///     `subtask_activations` row PendingActivation → Active under
+///     the same SQL transaction as the `sessions` row update on
+///     successful spawn.
+///   * `evaluation_sha` plumbing for Reviewer activations. That
+///     value lives on the activation row at this point; the helper
+///     receives it through `extra_env` if needed.
+///
+/// **Egress tiering.** Reviewer VMs run with `EgressTier::None`
+/// (no tap device in the guest, the substrate-layer enforcement
+/// of `INV-NETISO-01`): any outbound TCP attempt is denied because
+/// the guest has no network adapter. This matches
+/// `policy-plan-authority.md §Reviewer authority` — the Reviewer
+/// cannot make HTTP calls, gateway calls, or credential-proxy
+/// calls because its only authorised output is `SubmitReview`
+/// against an in-memory `evaluation_sha`. Executor VMs run with
+/// `Tier1Tproxy` so the per-session admission listener arbitrates
+/// every egress request against the active `EgressAllowlist`.
+#[allow(clippy::too_many_arguments)]
+pub async fn spawn_executor_for_task(
+    spawn_ctx:        &ExecutorSpawnContext,
+    agent_kind:       ExecutorAgentKind,
+    session_id:       &str,
+    task_id:          &str,
+    initiative_id:    &str,
+    egress_allowlist: EgressAllowlist,
+    workspace_mounts: Vec<raxis_isolation::WorkspaceMount>,
+    extra_env:        BTreeMap<String, String>,
+    service:          Arc<SessionSpawnService>,
+    store:            &Arc<Store>,
+) -> Result<SpawnHandle, OrchestratorSpawnError> {
+    // ── Step 1: resolve canonical image path for the agent. ──────
+    let (image_path, image_id, missing_err): (PathBuf, String, fn(PathBuf) -> OrchestratorSpawnError) =
+        match agent_kind {
+            ExecutorAgentKind::Executor => {
+                let p = crate::canonical_images_preflight::executor_starter_image_path(
+                    &spawn_ctx.install_dir,
+                    &spawn_ctx.kernel_version,
+                );
+                (
+                    p,
+                    format!(
+                        "raxis-executor-starter-{kernel_version}",
+                        kernel_version = spawn_ctx.kernel_version,
+                    ),
+                    |path| OrchestratorSpawnError::ExecutorStarterImageMissing { path },
+                )
+            }
+            ExecutorAgentKind::Reviewer => {
+                let p = crate::canonical_images_preflight::reviewer_image_path(
+                    &spawn_ctx.install_dir,
+                    &spawn_ctx.kernel_version,
+                );
+                (
+                    p,
+                    format!(
+                        "raxis-reviewer-core-{kernel_version}",
+                        kernel_version = spawn_ctx.kernel_version,
+                    ),
+                    |path| OrchestratorSpawnError::ReviewerImageMissing { path },
+                )
+            }
+        };
+    if !image_path.exists() {
+        return Err(missing_err(image_path));
+    }
+    let verified_image = VerifiedImage {
+        kind:      ImageKind::RootfsErofs,
+        body:      ImageBody::Path(image_path),
+        signature: ImageSignature(Vec::new()),
+        image_id,
+    };
+
+    // ── Step 2: rehydrate credential decls. ──────────────────────
+    // `read_task_credential_proxies_in_tx` is keyed by `task_id`,
+    // not `session_id`, because the `[[tasks.credentials]]` block
+    // is plan-side configuration. Reviewer activations always
+    // return an empty Vec (Pure-Static Reviewer cannot consume
+    // credentials, `INV-PLANNER-HARNESS-02`); we still call through
+    // the uniform path so a future regression in plan validation
+    // does not silently slip past.
+    let store_for_read = Arc::clone(store);
+    let task_id_for_read = task_id.to_owned();
+    let credentials = tokio::task::spawn_blocking(move || -> Result<_, String> {
+        let conn = store_for_read.lock_sync();
+        kernel_lifecycle::read_task_credential_proxies_in_tx(&conn, &task_id_for_read)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| OrchestratorSpawnError::StoreRead(e.to_string()))?
+    .map_err(OrchestratorSpawnError::StoreRead)?;
+
+    // Defense-in-depth: refuse any `[[tasks.credentials]]` decl
+    // attached to a Reviewer task. The plan-side validator
+    // (`raxis-plan-validator`) already rejects this combination
+    // because the Reviewer image ships without a tproxy capable of
+    // brokering credential-proxy upstreams; we re-check here so a
+    // future plan-validator regression cannot silently boot a
+    // Reviewer with credential bindings.
+    if matches!(agent_kind, ExecutorAgentKind::Reviewer) && !credentials.is_empty() {
+        return Err(OrchestratorSpawnError::Substrate(SpawnError::Audit(format!(
+            "reviewer task `{task_id}` has {n} credential decl(s); \
+             the Pure-Static Reviewer image cannot consume credentials \
+             (planner-harness.md §INV-PLANNER-HARNESS-02)",
+            n = credentials.len(),
+        ))));
+    }
+
+    // ── Step 3: build the spawn spec. ────────────────────────────
+    let (vcpu_count, mem_mib, egress_tier, entrypoint_argv) = match agent_kind {
+        ExecutorAgentKind::Executor => (
+            spawn_ctx.executor_vcpu_count,
+            spawn_ctx.executor_mem_mib,
+            EgressTier::Tier1Tproxy,
+            vec![
+                "/usr/local/bin/raxis-executor".to_owned(),
+                "--task-id".to_owned(),
+                task_id.to_owned(),
+                "--initiative-id".to_owned(),
+                initiative_id.to_owned(),
+            ],
+        ),
+        ExecutorAgentKind::Reviewer => (
+            spawn_ctx.reviewer_vcpu_count,
+            spawn_ctx.reviewer_mem_mib,
+            EgressTier::None,
+            vec![
+                "/usr/local/bin/raxis-reviewer".to_owned(),
+                "--task-id".to_owned(),
+                task_id.to_owned(),
+                "--initiative-id".to_owned(),
+                initiative_id.to_owned(),
+            ],
+        ),
+    };
+
+    let vm_spec = VmSpec {
+        vcpu_count,
+        mem_mib,
+        egress_tier,
+        cgroup_quota:     None,
+        boot_args:        Vec::new(),
+        entrypoint_argv,
+        // Per-session token; the substrate stamps it into the
+        // guest env under `RAXIS_SESSION_TOKEN`. Production wires
+        // this from `sessions.session_token`; the trait round-trip
+        // accepts a deterministic-but-opaque shape here.
+        session_token:    SessionToken(format!(
+            "{kind}-{session}",
+            kind    = match agent_kind {
+                ExecutorAgentKind::Executor => "exec",
+                ExecutorAgentKind::Reviewer => "rev",
+            },
+            session = session_id,
+        )),
+        vsock_cid:        None,
+        virtio_fs_mounts: Vec::new(),
+        env:              extra_env,
+    };
+
+    let req = SpawnRequest {
+        session_id:        session_id.to_owned(),
+        task_id:           Some(task_id.to_owned()),
+        initiative_id:     initiative_id.to_owned(),
+        image:             verified_image,
+        workspace_mounts,
+        vm_spec,
+        credentials,
+        admission_service: Box::new(PolicyAdmissionService::new(egress_allowlist)),
+    };
+
+    // ── Step 4: delegate to `ctx.session_spawn`. ─────────────────
+    Ok(service.spawn_session(req).await?)
 }
 
 #[cfg(test)]

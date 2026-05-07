@@ -223,6 +223,32 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
         return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
     }
 
+    // ── V2 sub-task lifecycle early dispatch ──────────────────────────────
+    //
+    // `IntentKind::ActivateSubTask` (v2-deep-spec.md §Step 21) drives
+    // an Executor / Reviewer VM spawn through `ctx.session_spawn`,
+    // which is async (the substrate's `Backend::spawn` may bind
+    // listeners + start a hypervisor child). Phase A is sync
+    // (spawn_blocking), so the cleanest split is to handle
+    // `ActivateSubTask` here on the async path BEFORE Phase A
+    // begins. The handler internally hops into `spawn_blocking` for
+    // the SQLite envelope-acceptance and activation-row reads, then
+    // back to async for `ctx.session_spawn.spawn_session()`, then
+    // back to `spawn_blocking` for the activation FSM transition.
+    //
+    // Authorization for this branch is already covered by the
+    // dispatch matrix above (Orchestrator + ActivateSubTask is the
+    // only Authorized cell). `RetrySubTask` stays fail-closed
+    // pending `subtask_activations.crash_retry_count` /
+    // `review_reject_count` ceiling enforcement (v2-deep-spec.md
+    // §Step 12 — separate task).
+    if matches!(req.intent_kind, IntentKind::ActivateSubTask) {
+        return handle_activate_sub_task(req, session, session_id, seq, ctx).await;
+    }
+    if matches!(req.intent_kind, IntentKind::RetrySubTask) {
+        return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+    }
+
     // ── Phase A (spawn_blocking) — Steps 2-8 + dispatch ───────────────────
     //
     // Everything from here through Step 8 (estimated_cost) is sync and
@@ -449,15 +475,15 @@ fn run_phase_a(
     // fall through to Steps 4-8 below and continue into Phase B.
     //
     // V2 sub-task lifecycle kinds — `SubmitReview` is now routed to
-    // its dedicated handler (v2-deep-spec.md §Step 22). The remaining
-    // V2 kinds (`ActivateSubTask`, `RetrySubTask`) still fail-closed
-    // because their plan-side prerequisites (V2 plan bundle sealing,
-    // `subtask_activations` row population) are not yet wired —
-    // landing them here would silently fail in production. They get
-    // their own task once the activation table is populated by
-    // approve_plan.
+    // its dedicated handler (v2-deep-spec.md §Step 22).
+    // `ActivateSubTask` is intercepted on the async path BEFORE
+    // Phase A and never reaches here (see `handle_activate_sub_task`
+    // dispatch in `handle_inner`). `RetrySubTask` is intercepted
+    // alongside it as a fail-closed shim until the
+    // `crash_retry_count` / `review_reject_count` ceiling enforcement
+    // lands (v2-deep-spec.md §Step 12).
     //
-    // Authorization for all three V2 kinds was already enforced by
+    // Authorization for all V2 kinds was already enforced by
     // the static dispatch matrix in `handle_inner` BEFORE Phase A
     // (v2-deep-spec.md §Step 20). A V2 kind reaching this point is
     // already (intent_kind, session_agent_type)-authorized.
@@ -483,8 +509,9 @@ fn run_phase_a(
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
         IntentKind::ActivateSubTask
         | IntentKind::RetrySubTask => {
-            // Awaiting activation-row population (Step 25 / Plan
-            // Bundle Sealing). Until then, fail-closed.
+            // Belt-and-braces: `handle_inner` intercepts these
+            // BEFORE Phase A; this arm catches a future regression
+            // that lets one slip past the early-dispatch.
             return PreGateOutcome::Reject(
                 PlannerErrorCode::FailPolicyViolation, task_state);
         }
@@ -1434,6 +1461,422 @@ fn handle_submit_review(
     Ok(IntentResponse {
         sequence_number: seq,
         task_state: TaskState::Completed,
+        outcome: IntentOutcome::Accepted {
+            remaining_budget:      remaining,
+            warn_delegation_stale: false,
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// handle_activate_sub_task — V2 Step 21 dedicated handler.
+// ---------------------------------------------------------------------------
+//
+// Spec references:
+//   * `v2-deep-spec.md §Step 21` — Orchestrator submits
+//     `ActivateSubTask { task_id }` to spawn an Executor / Reviewer
+//     VM for a previously-admitted sub-task.
+//   * `v2-deep-spec.md §Step 5` — `subtask_activations` row FSM
+//     (`PendingActivation → Active → Completed | Failed`).
+//   * `extensibility-traits.md §3.5` — kernel-substrate seam; the
+//     handler calls `ctx.session_spawn.spawn_session()` directly
+//     (free-fn `spawn_executor_for_task`) rather than going through
+//     a second trait surface.
+//
+// The handler runs ENTIRELY on the async path (no Phase A / B / C
+// split): the substrate spawn is async by definition, and the
+// surrounding SQLite work is small enough that two `spawn_blocking`
+// hops bracket it cleanly.
+//
+// Pipeline:
+//   1. Sequence + nonce envelope acceptance (replay protection,
+//      INV-01) — `spawn_blocking`, mirrors Phase A Step 2.
+//   2. Activation-row + task lookup; assert `PendingActivation` and
+//      `Admitted`; mint a new `sessions` row in the same SQL
+//      transaction as the activation row claim — `spawn_blocking`.
+//   3. Substrate spawn through `ctx.session_spawn.spawn_session()`
+//      via the `spawn_executor_for_task` free function — async.
+//   4. Activation-row FSM transition `PendingActivation → Active`,
+//      stamp `session_id` + `activated_at`, persist the substrate's
+//      `vsock_cid` on the new `sessions` row — `spawn_blocking`.
+//   5. Audit emit (`SessionCreated`) — async.
+//
+// Atomicity / consistency:
+//   * Steps 1, 2, 4 are each their own transaction. Step 1 is
+//     replay-tight (envelope acceptance commits the sequence
+//     advance + nonce in one tx).
+//   * Step 4's transition only runs if Step 3's substrate spawn
+//     returned `Ok`. Substrate failure leaves the activation row
+//     in `PendingActivation` and the freshly-minted session row
+//     in the table with `revoked = 1`; the recovery sweep can
+//     reclaim both on the next boot. We deliberately do NOT roll
+//     back the session insert when the substrate fails so
+//     forensic replay can see the attempted spawn.
+//
+// Worktree provisioning is OUT OF SCOPE for this handler: the
+// kernel's `worktree_provision` integration call site (which
+// resolves the source ODB + materialises a fresh worktree per
+// `v2-deep-spec.md §Step 24 / §Step 24b`) is wired in a follow-up.
+// The substrate spawn proceeds with an empty `workspace_mounts`
+// vector for now; an Executor that needs a worktree at boot will
+// surface a `BackendInternal` error from the substrate.
+async fn handle_activate_sub_task(
+    req:        IntentRequest,
+    _session:   authority::session::SessionRow,
+    session_id: SessionId,
+    seq:        u64,
+    ctx:        &Arc<HandlerContext>,
+) -> HandlerResult {
+    // ── Step 1: replay protection (envelope acceptance) ────────────────
+    let presented_seq_i64 = match i64::try_from(seq) {
+        Ok(v) => v,
+        Err(_) => return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted)),
+    };
+    {
+        let store     = Arc::clone(&ctx.store);
+        let session   = session_id.clone();
+        let nonce     = req.envelope_nonce.clone();
+        let audit     = Arc::clone(&ctx.audit);
+        let session_s = session.as_str().to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            authority::session::accept_envelope_and_advance_sequence(
+                &session, presented_seq_i64, &nonce, &store,
+            )
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
+        if let Err(reason) = result {
+            let _ = audit.emit(
+                raxis_audit_tools::AuditEventKind::ReplayRejected {
+                    session_id:   session_s,
+                    sequence_num: seq,
+                    reason:       format!("{reason:?}"),
+                },
+                Some(session_id.as_str()),
+                None,
+                None,
+            );
+            return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
+        }
+    }
+
+    // ── Step 2: activation-row + task lookup; mint session row. ────────
+    //
+    // We do steps 2a (read activation row), 2b (read task agent type
+    // from PlanRegistry), and 2c (insert sessions row) in the same
+    // transaction. The activation row STAYS in `PendingActivation`
+    // here — we only flip it to `Active` after the substrate spawn
+    // succeeds (Step 4). The cross-column CHECK enforces this:
+    // `Active` requires non-NULL `session_id` AND non-NULL
+    // `activated_at`, and we have neither yet.
+    let task_id_owned     = req.task_id.as_str().to_owned();
+    let plan_registry_arc = Arc::clone(&ctx.plan_registry);
+
+    #[derive(Clone)]
+    struct ActivationLookup {
+        agent_kind:    crate::session_spawn_orchestrator::ExecutorAgentKind,
+        initiative_id: String,
+        new_session_id: String,
+        new_lineage_id: String,
+        activation_id: String,
+    }
+
+    let lookup: ActivationLookup = {
+        let store_arc = Arc::clone(&ctx.store);
+        let task_id   = task_id_owned.clone();
+        tokio::task::spawn_blocking(move || -> Result<ActivationLookup, (PlannerErrorCode, TaskState)> {
+            let mut conn = store_arc.lock_sync();
+            let tx = conn.transaction()
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+
+            // 2a. Activation row — must exist, must be PendingActivation.
+            let activation_id: String = {
+                let row: Result<(String, String, String), rusqlite::Error> = tx.query_row(
+                    "SELECT activation_id, activation_state, initiative_id
+                       FROM subtask_activations
+                      WHERE task_id = ?1
+                      ORDER BY created_at DESC
+                      LIMIT 1",
+                    rusqlite::params![&task_id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                );
+                let (activation_id, state, _initiative_id) = match row {
+                    Ok(r)  => r,
+                    Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
+                };
+                if state != "PendingActivation" {
+                    return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+                }
+                activation_id
+            };
+
+            // 2b. Task row — must be Admitted, and must carry a
+            //      typed `session_agent_type` (Executor or Reviewer)
+            //      retrievable from the in-memory plan registry.
+            let task_row: (String, String) = match tx.query_row(
+                &format!("SELECT initiative_id, state FROM {TASKS} WHERE task_id = ?1"),
+                rusqlite::params![&task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            ) {
+                Ok(r)  => r,
+                Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
+            };
+            let (initiative_id, task_state_str) = task_row;
+            if task_state_str != TaskState::Admitted.as_sql_str() {
+                return Err((PlannerErrorCode::FailTaskNotRunning,
+                            parse_task_state(&task_state_str)));
+            }
+
+            // The plan registry holds the typed `session_agent_type`
+            // (the `tasks` DDL stores it as a string column on
+            // older migrations; the in-memory plan registry is the
+            // canonical V2 source).
+            let agent_kind = {
+                let key = crate::initiatives::plan_registry::TaskKey::new(
+                    &initiative_id, &task_id,
+                );
+                let fields = match plan_registry_arc.get(&key) {
+                    Some(f) => f,
+                    None    => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
+                };
+                match fields.session_agent_type {
+                    raxis_types::SessionAgentType::Executor =>
+                        crate::session_spawn_orchestrator::ExecutorAgentKind::Executor,
+                    raxis_types::SessionAgentType::Reviewer =>
+                        crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer,
+                    raxis_types::SessionAgentType::Orchestrator => {
+                        // Defense-in-depth — `approve_plan`'s structural
+                        // validator already rejects Orchestrator-typed
+                        // `[[tasks]]` blocks, but a corrupt registry
+                        // entry would surface here as a policy
+                        // violation rather than a substrate error.
+                        return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+                    }
+                }
+            };
+
+            // 2c. Mint the new Executor / Reviewer session row.
+            //     `lineage_id` is freshly generated (the activation
+            //     is the start of a new lineage; tying it to the
+            //     Orchestrator's lineage would conflate parent /
+            //     child trust scopes).
+            let new_session_id  = raxis_types::SessionId::new_v4();
+            let new_session_str = new_session_id.as_str().to_owned();
+            let new_lineage_id  = uuid::Uuid::new_v4().to_string();
+            let session_token   = match raxis_crypto::token::generate_session_token() {
+                Ok(t)  => t,
+                Err(_) => return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)),
+            };
+            let now_secs   = unix_now_secs();
+            let expires_at = now_secs + 86_400;
+            let agent_type_str = match agent_kind {
+                crate::session_spawn_orchestrator::ExecutorAgentKind::Executor =>
+                    raxis_types::SessionAgentType::Executor.as_sql_str(),
+                crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer =>
+                    raxis_types::SessionAgentType::Reviewer.as_sql_str(),
+            };
+            tx.execute(
+                "INSERT INTO sessions (
+                    session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, fetch_quota, created_at, expires_at, revoked,
+                    session_agent_type, can_delegate
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0)",
+                rusqlite::params![
+                    new_session_str,
+                    "Planner",
+                    session_token,
+                    0i64,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    new_lineage_id,
+                    1000i64,
+                    now_secs,
+                    expires_at,
+                    agent_type_str,
+                ],
+            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+
+            tx.commit()
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+
+            Ok(ActivationLookup {
+                agent_kind,
+                initiative_id,
+                new_session_id: new_session_str,
+                new_lineage_id,
+                activation_id,
+            })
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))??
+    };
+
+    // ── Step 3: substrate spawn via ctx.session_spawn ──────────────────
+    //
+    // The free-fn `spawn_executor_for_task` is the single source of
+    // truth for "kernel turns (session_id, task_id, agent_kind) into
+    // a `SessionSpawnService::spawn_session()` call". It owns the
+    // canonical-image resolution, credential-decl rehydration, and
+    // SpawnRequest construction — keeping that logic out of the
+    // intent handler.
+    let policy_snapshot = ctx.policy.load_full();
+    let allowlist = raxis_egress_admission::EgressAllowlist {
+        exact_hosts: policy_snapshot.egress_domains().to_vec(),
+        patterns:    policy_snapshot.egress_patterns().to_vec(),
+        credential_proxy_real_targets: Default::default(),
+    };
+
+    let spawn_handle = match crate::session_spawn_orchestrator::spawn_executor_for_task(
+        &ctx.executor_spawn,
+        lookup.agent_kind,
+        &lookup.new_session_id,
+        &task_id_owned,
+        &lookup.initiative_id,
+        allowlist,
+        Vec::new(),
+        std::collections::BTreeMap::new(),
+        Arc::clone(&ctx.session_spawn),
+        &ctx.store,
+    )
+    .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            // Substrate failure: the activation row stays in
+            // `PendingActivation`; the freshly-minted session row
+            // is revoked so the recovery sweep can reclaim it.
+            // INV-08 — wire surface stays coarse; the structured
+            // error is logged here for forensic analysis.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"ActivateSubTaskSpawnFailed\",\
+                 \"task_id\":\"{}\",\"new_session_id\":\"{}\",\"error\":\"{}\"}}",
+                task_id_owned, lookup.new_session_id, e,
+            );
+            // Best-effort: revoke the freshly-minted session row.
+            let store_arc = Arc::clone(&ctx.store);
+            let revoke_session_id = lookup.new_session_id.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let conn = store_arc.lock_sync();
+                let _ = conn.execute(
+                    "UPDATE sessions SET revoked = 1, revoked_at = ?1 WHERE session_id = ?2",
+                    rusqlite::params![unix_now_secs(), revoke_session_id],
+                );
+            }).await;
+            return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+        }
+    };
+
+    // ── Step 4: activation-row → Active; persist substrate metadata. ───
+    {
+        let store_arc        = Arc::clone(&ctx.store);
+        let activation_id    = lookup.activation_id.clone();
+        let new_session_id   = lookup.new_session_id.clone();
+        let vsock_cid        = spawn_handle.vsock_cid;
+        let activate_result = tokio::task::spawn_blocking(move || -> Result<(), rusqlite::Error> {
+            let mut conn = store_arc.lock_sync();
+            let tx = conn.transaction()?;
+            let now = unix_now_secs();
+
+            // Activation FSM: PendingActivation → Active. The cross-
+            // column CHECK requires `session_id IS NOT NULL` and
+            // `activated_at IS NOT NULL`; both stamped here.
+            tx.execute(
+                "UPDATE subtask_activations
+                    SET activation_state = 'Active',
+                        session_id       = ?1,
+                        activated_at     = ?2
+                  WHERE activation_id   = ?3
+                    AND activation_state = 'PendingActivation'",
+                rusqlite::params![&new_session_id, now, &activation_id],
+            )?;
+
+            // Persist the substrate's vsock CID on the session row
+            // so the kernel's per-session admission listener can
+            // verify guest provenance (`vm-network-isolation.md §3`
+            // CID allowlist).
+            if let Some(cid) = vsock_cid {
+                tx.execute(
+                    "UPDATE sessions SET vsock_cid = ?1 WHERE session_id = ?2",
+                    rusqlite::params![cid as i64, &new_session_id],
+                )?;
+            }
+
+            tx.commit()
+        }).await;
+        match activate_result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"ActivateSubTaskActivateFailed\",\
+                     \"task_id\":\"{}\",\"activation_id\":\"{}\",\"reason\":\"{e}\"}}",
+                    task_id_owned, lookup.activation_id,
+                );
+                return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+            }
+            Err(_) => {
+                return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+            }
+        }
+    }
+
+    // ── Step 5: audit-after-commit — `SessionCreated`. ─────────────────
+    //
+    // The activation row's `Active` transition is the committed
+    // state mutation; emitting `SessionCreated` here mirrors the
+    // `auto_spawn_orchestrator_session_in_tx` audit pairing in
+    // `lifecycle::approve_plan`.
+    let agent_type_str = match lookup.agent_kind {
+        crate::session_spawn_orchestrator::ExecutorAgentKind::Executor =>
+            raxis_types::SessionAgentType::Executor.as_sql_str().to_owned(),
+        crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer =>
+            raxis_types::SessionAgentType::Reviewer.as_sql_str().to_owned(),
+    };
+    let role_str = match lookup.agent_kind {
+        crate::session_spawn_orchestrator::ExecutorAgentKind::Executor => "executor",
+        crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer => "reviewer",
+    }.to_owned();
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::SessionCreated {
+            session_id:        lookup.new_session_id.clone(),
+            role:              role_str,
+            lineage_id:        lookup.new_lineage_id.clone(),
+            worktree_root:     None,
+            initiative_id:     Some(lookup.initiative_id.clone()),
+            plan_bundle_sha256: None,
+            policy_epoch:      Some(policy_snapshot.epoch()),
+            session_agent_type: Some(agent_type_str),
+        },
+        Some(&lookup.new_session_id),
+        None,
+        Some(&lookup.initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"ActivateSubTaskAuditEmitFailed\",\
+             \"new_session_id\":\"{}\",\"error\":\"{e}\"}}",
+            lookup.new_session_id,
+        );
+    }
+
+    // ── Response ───────────────────────────────────────────────────────
+    //
+    // The TASK FSM stays in `Admitted` here — the activation row
+    // FSM is `Active` (separate FSM per Step 5). The Executor's
+    // first intent against this task will drive `tasks.state`
+    // `Admitted → Running` through the standard pipeline.
+    let task_for_budget = match load_task(&task_id_owned, ctx.store.as_ref()) {
+        Ok(t)  => t,
+        Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
+    };
+    let remaining = lane_budget_snapshot(
+        &task_for_budget.lane_id,
+        policy_snapshot.as_ref(),
+        ctx.store.as_ref(),
+    );
+    Ok(IntentResponse {
+        sequence_number: seq,
+        task_state:      TaskState::Admitted,
         outcome: IntentOutcome::Accepted {
             remaining_budget:      remaining,
             warn_delegation_stale: false,

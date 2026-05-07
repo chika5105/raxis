@@ -572,6 +572,7 @@ mod tests {
             credentials,
             isolation,
             orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
             domain,
         ));
         (ctx, sink)

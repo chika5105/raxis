@@ -2238,6 +2238,7 @@ mod escalation_dispatch_tests {
             credentials,
             isolation,
             orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
             domain,
         ))
     }
@@ -2648,6 +2649,7 @@ mod escalation_dispatch_tests {
             credentials,
             isolation,
             orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
             domain,
         ));
         (ctx, inner)
@@ -2954,6 +2956,7 @@ mod rotate_epoch_dispatch_tests {
             credentials,
             isolation,
             orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
             domain,
         ))
     }
@@ -3837,6 +3840,7 @@ mod quarantine_dispatch_tests {
             credentials,
             isolation,
             orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
             domain,
         ));
         (ctx, sink)

@@ -30,7 +30,7 @@ use crate::authority::keys::KeyRegistry;
 use crate::gateway::client::GatewayClient;
 use crate::initiatives::PlanRegistry;
 use crate::prompt::EpochBinding;
-use crate::session_spawn_orchestrator::OrchestratorSpawn;
+use crate::session_spawn_orchestrator::{ExecutorSpawnContext, OrchestratorSpawn};
 
 /// Shared, read-only context for all IPC handlers.
 ///
@@ -227,6 +227,31 @@ pub struct HandlerContext {
     /// `Arc<dyn CredentialBackend>` pattern.
     pub orchestrator_spawn: Arc<dyn OrchestratorSpawn>,
 
+    /// V2 executor / reviewer spawn-context — shared boot-time
+    /// install-dir + kernel-version + per-agent VM resource
+    /// budgets used by the `IntentKind::ActivateSubTask` handler.
+    ///
+    /// The activation handler does NOT go through a trait surface
+    /// for executor / reviewer spawn (deliberately — see
+    /// `session_spawn_orchestrator::spawn_executor_for_task` doc
+    /// comment). It calls the free function with this context plus
+    /// `Arc::clone(&ctx.session_spawn)`. Production wires the
+    /// same install-dir + kernel-version pair that
+    /// `OrchestratorSpawnContext` uses; the budgets default to
+    /// `host-capacity.md §4.1` reference values and can be
+    /// overridden at boot when the relevant `[isolation]` policy
+    /// keys land.
+    ///
+    /// **Why a separate struct** (vs. extracting fields from
+    /// `Arc<dyn OrchestratorSpawn>`): the orchestrator-spawn trait
+    /// hides its concrete impl behind a `dyn` pointer, so the
+    /// install-dir/kernel-version are not directly readable from
+    /// the trait surface. The activation handler keeps its own
+    /// view here so the trait abstraction stays intact and the
+    /// activation callsite has zero coupling to the orchestrator
+    /// trait.
+    pub executor_spawn: Arc<ExecutorSpawnContext>,
+
     /// V2 domain adapter selected at boot.
     ///
     /// `extensibility-traits.md §2` — the single seam between the
@@ -272,6 +297,7 @@ impl HandlerContext {
         credentials: Arc<dyn CredentialBackend>,
         isolation: Arc<dyn IsolationBackend>,
         orchestrator_spawn: Arc<dyn OrchestratorSpawn>,
+        executor_spawn: Arc<ExecutorSpawnContext>,
         domain: Arc<
             dyn DomainAdapter<
                 IntentKind       = SeIntentKind,
@@ -305,6 +331,7 @@ impl HandlerContext {
             proxy_manager,
             session_spawn,
             orchestrator_spawn,
+            executor_spawn,
             domain,
         }
     }
@@ -467,4 +494,34 @@ impl raxis_isolation::Backend for FailClosedTestIsolation {
 #[cfg(any(debug_assertions, test))]
 pub fn build_test_orchestrator_spawn() -> Arc<dyn OrchestratorSpawn> {
     Arc::new(crate::session_spawn_orchestrator::NoopOrchestratorSpawn::new())
+}
+
+/// Build a default [`ExecutorSpawnContext`] for in-process kernel
+/// unit tests.
+///
+/// The context points at a never-existing install dir
+/// (`/tmp/raxis-test-executor-spawn-non-existent`) and a
+/// deterministic-but-fake kernel version. Production binaries
+/// never construct this — they wire the boot-time real values from
+/// `main.rs`. Mirrors the cfg-gated `build_fail_closed_test_isolation`
+/// / `build_test_orchestrator_spawn` discipline.
+///
+/// **Why a known-bad path.** Activation handlers that resolve the
+/// canonical Executor / Reviewer image will fail-closed with
+/// `OrchestratorSpawnError::ExecutorStarterImageMissing` /
+/// `OrchestratorSpawnError::ReviewerImageMissing`. Tests that
+/// exercise the spawn callsite happy-path override `install_dir` to
+/// a tempfile that holds the fake image (see
+/// `session_spawn_orchestrator::tests::write_canonical_image_fake`
+/// for the helper).
+#[cfg(any(debug_assertions, test))]
+pub fn build_test_executor_spawn()
+    -> Arc<crate::session_spawn_orchestrator::ExecutorSpawnContext>
+{
+    Arc::new(
+        crate::session_spawn_orchestrator::ExecutorSpawnContext::new(
+            std::path::PathBuf::from("/tmp/raxis-test-executor-spawn-non-existent"),
+            "test-only-fake-version".to_owned(),
+        ),
+    )
 }
