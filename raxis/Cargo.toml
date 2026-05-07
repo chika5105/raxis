@@ -14,6 +14,8 @@ members = [
     "crates/policy",
     "crates/crypto",
     "crates/audit",
+    "crates/raxis-credentials",
+    "crates/raxis-credentials-file",
     "crates/gateway-substrate",
     "crates/genesis-tools",
     "crates/isolation",
@@ -114,6 +116,8 @@ raxis-store  = { path = "crates/store" }
 raxis-policy = { path = "crates/policy" }
 raxis-crypto = { path = "crates/crypto" }
 raxis-audit-tools       = { path = "crates/audit" }
+raxis-credentials       = { path = "crates/raxis-credentials" }
+raxis-credentials-file  = { path = "crates/raxis-credentials-file" }
 raxis-gateway-substrate = { path = "crates/gateway-substrate" }
 raxis-genesis-tools     = { path = "crates/genesis-tools" }
 raxis-isolation         = { path = "crates/isolation" }

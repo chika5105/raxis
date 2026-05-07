@@ -910,6 +910,58 @@ pub enum AuditEventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_display_name: Option<String>,
     },
+
+    // --- CredentialBackend resolutions (extensibility-traits.md §4.5
+    //     conformance contract — every `resolve` MUST emit one such
+    //     event; every `rotate` MUST emit `CredentialRotated`).
+    /// Emitted when a `CredentialBackend::resolve` returns. `success`
+    /// reflects whether the resolve produced a value; the credential
+    /// VALUE is never recorded — only the name and the consumer's
+    /// identity. Required by `INV-CRED-AUDIT-01` (per §4.5 of
+    /// `extensibility-traits.md`): every resolve emits exactly one
+    /// audit event.
+    ///
+    /// Field semantics:
+    ///   * `name` — the policy-declared credential name
+    ///     (e.g. `"postgres-staging"`, `"providers.anthropic-prod"`).
+    ///   * `consumer_kind` — stable short string identifying the
+    ///     consumer subsystem (`"gateway"`, `"credential_proxy"`,
+    ///     `"isolation_kernel_signer"`, `"operator_cli"`).
+    ///   * `consumer_id` — disambiguator within the consumer kind:
+    ///     for `gateway` the provider_id; for `credential_proxy` the
+    ///     `<session_id>:<proxy_type>:<proxy_port>`; for `operator_cli`
+    ///     the operator pubkey fingerprint. Free-form short string.
+    ///   * `backend_kind` — stable short string identifying the
+    ///     `CredentialBackend` impl (`"file"`, `"vault"`,
+    ///     `"aws_secrets_manager"`, `"azure_key_vault"`, `"pkcs11"`).
+    ///   * `success` — whether the resolution returned `Ok`. Failure
+    ///     reasons (`NotFound`, `PermissionDenied`, `BackendUnavailable`)
+    ///     are NOT included as variants here — operators that want
+    ///     post-mortem failure reasons read the kernel logs alongside
+    ///     this event. The wire-stable boolean is sufficient for
+    ///     forensic audit.
+    CredentialAccessed {
+        name:          String,
+        consumer_kind: String,
+        consumer_id:   String,
+        backend_kind:  String,
+        success:       bool,
+    },
+
+    /// Emitted when a `CredentialBackend::rotate` succeeds. The new
+    /// VALUE is never recorded — only the name and the operator
+    /// pubkey fingerprint that authorised the rotation.
+    /// `INV-CRED-AUDIT-02`: every successful rotation emits one such
+    /// event AFTER the underlying store has acknowledged the write
+    /// (atomic-rename for `file`, KV v2 versioned write for `vault`).
+    ///
+    /// Failed rotations do NOT emit this event; they surface as
+    /// `CredentialError` returned to the operator CLI.
+    CredentialRotated {
+        name:                String,
+        actor_fingerprint:   String,
+        backend_kind:        String,
+    },
 }
 
 impl AuditEventKind {
@@ -967,6 +1019,8 @@ impl AuditEventKind {
             Self::InitiativeQuarantined { .. } => "InitiativeQuarantined",
             Self::OperatorQuarantineSwept { .. } => "OperatorQuarantineSwept",
             Self::SecurityViolation { .. } => "SecurityViolation",
+            Self::CredentialAccessed { .. } => "CredentialAccessed",
+            Self::CredentialRotated { .. } => "CredentialRotated",
         }
     }
 }

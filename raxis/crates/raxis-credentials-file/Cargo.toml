@@ -1,0 +1,32 @@
+[package]
+name        = "raxis-credentials-file"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = """
+The V2 default `CredentialBackend` impl: plaintext credential files
+under `<data_dir>/credentials/<name>.env` and
+`<data_dir>/providers/<name>.toml` (chmod 0600, kernel-OS-user). This is
+the reference reader the gateway and credential proxies use unless an
+operator opts into Vault, AWS-SM, Azure-KV, or PKCS#11 via
+`policy.toml [credential_backend]`.
+"""
+
+[lib]
+name = "raxis_credentials_file"
+path = "src/lib.rs"
+
+[dependencies]
+# The trait + value/name newtypes + audit-emission helpers.
+raxis-credentials = { workspace = true }
+
+# `chmod 0600` mode validation requires the Unix metadata APIs.
+# The crate is Unix-only; on Windows this would panic at boot. The
+# kernel itself is Unix-only so this matches the deployment surface.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+raxis-test-support = { path = "../test-support" }
+raxis-audit-tools = { workspace = true }

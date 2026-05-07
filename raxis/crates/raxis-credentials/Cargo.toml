@@ -1,0 +1,38 @@
+[package]
+name        = "raxis-credentials"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = """
+Trait crate for the V2 CredentialBackend extensibility seam. Defines the
+shape every credential store (file, Vault, AWS Secrets Manager, Azure Key
+Vault, PKCS#11 HSM) presents to the kernel and the credential proxy. The
+file-based reference impl lives in `raxis-credentials-file`; this crate
+holds only the trait, the value/name newtypes (zeroed on Drop), and the
+audit-emission wrapper that every concrete impl is composed with.
+"""
+
+[lib]
+name = "raxis_credentials"
+path = "src/lib.rs"
+
+[dependencies]
+# AuditSink trait + AuditEventKind (we emit `CredentialAccessed` /
+# `CredentialRotated` from the audit wrapper).
+raxis-audit-tools = { workspace = true }
+
+# `Secret<T>` newtype + automatic zeroize-on-drop for the credential
+# value bytes. `extensibility-traits.md §4.1` mandates the zeroize
+# behaviour as a conformance requirement.
+secrecy   = { version = "0.10", features = ["serde"] }
+zeroize   = { version = "1", features = ["zeroize_derive"] }
+
+serde     = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = { workspace = true }
+# `FakeAuditSink` for conformance tests. Dev-dep only — see
+# `philosophy.md §1.6` (the same RealClock / FakeClock split).
+raxis-test-support = { path = "../test-support" }
