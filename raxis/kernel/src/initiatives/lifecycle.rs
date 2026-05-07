@@ -309,16 +309,19 @@ pub struct PlanApproved {
     /// `approve_plan` either persists BOTH the tasks AND the
     /// Orchestrator session, or rolls back both (INV-STORE-02).
     ///
-    /// Caller path: the kernel's downstream `auto-spawn` step (host
-    /// capacity check + `IsolationBackend::launch`) reads this
-    /// `session_id` to bind the session token (`sessions.session_token`)
-    /// to the freshly-launched canonical Orchestrator VM.
+    /// Caller path: `kernel/src/handlers/intent.rs` consumes this id
+    /// in `handle_approve_plan` (post-transaction) and hands it to
+    /// `ctx.orchestrator_spawn.spawn_for_initiative(...)` —
+    /// `kernel/src/session_spawn_orchestrator.rs` —
+    /// which performs the host-capacity check and the
+    /// `IsolationBackend::spawn` call that boots the canonical
+    /// Orchestrator VM. The substrate handle is then bound to the
+    /// session token in the same hop, satisfying
+    /// `extensibility-traits.md §3.5` post-commit ordering.
     ///
-    /// `None` only on legacy code paths that have not yet adopted the
-    /// V2 auto-spawn (none in the current kernel; the field is kept
-    /// `Option` for forward-compat in case a future test fixture
-    /// admits a plan without the auto-spawn helper, but every
-    /// production caller of `approve_plan` must observe it as `Some`).
+    /// `None` is reserved for test fixtures that bypass the auto-spawn
+    /// (e.g. unit tests asserting only the SQL admission tx). Every
+    /// production caller of `approve_plan` observes this as `Some`.
     pub orchestrator_session_id: Option<String>,
 }
 

@@ -24,8 +24,22 @@
 //!   `bootstrap.rs`'s job (it provisions `<data_dir>/runtime`).
 //! * Recording the substrate's `backend_id` into the audit chain —
 //!   that's `kernel/src/main.rs`'s `SessionVmSpawned` emission.
-//! * The actual VM spawn — `handlers/session.rs` calls
-//!   `Arc::clone(&isolation).spawn(...)` from the `HandlerContext`.
+//! * The actual VM spawn. The kernel-side spawn callsites live in:
+//!     * `kernel/src/session_spawn_orchestrator.rs` —
+//!       `LiveOrchestratorSpawn::spawn_for_initiative` for the
+//!       canonical Orchestrator session (driven by
+//!       `OperatorRequest::ApprovePlan` after the SQL transaction
+//!       commits, per `extensibility-traits.md §3.5`); plus
+//!       `spawn_executor_for_task`, the free-fn helper the
+//!       `IntentKind::ActivateSubTask` handler calls to drive
+//!       Executor / Reviewer spawn against the same trait surface
+//!       (`extensibility-traits.md §3.5` + `v2-deep-spec.md §Step 21`).
+//!     * `crates/session-spawn/src/lib.rs` — the
+//!       `SessionSpawnService::spawn_session()` composer that owns
+//!       the `Arc::clone(&isolation).spawn(...)` call into the
+//!       `IsolationBackend`. Both kernel-side bridges flow through
+//!       this single composer, so there is exactly one
+//!       `Backend::spawn` invocation point in the kernel binary.
 
 use std::path::PathBuf;
 use std::sync::Arc;
