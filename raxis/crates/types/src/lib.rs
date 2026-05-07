@@ -33,8 +33,8 @@ pub use escalation::{
     EscalationStatus, RequestedEscalationScope,
 };
 pub use fsm::{
-    BlockReason, InitiativeState, PlanBundleNonceOutcome, ReviewVerdict, SessionAgentType,
-    SubtaskActivationState, TaskState, TerminalCriteria,
+    BlockReason, CloneStrategy, InitiativeState, PlanBundleNonceOutcome, ReviewVerdict,
+    SessionAgentType, SubtaskActivationState, TaskState, TerminalCriteria,
 };
 pub use id::{
     CommitSha, CommitShaError, DelegationId, EscalationId, GateType, GateTypeError,

@@ -363,6 +363,100 @@ impl SessionAgentType {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CloneStrategy — V2 §Step 27 typed clone strategy.
+// v2-deep-spec.md §Step 27 ("Sparse Clone Strategy — Typed Strategies with
+// Orchestrator Merge Constraint").
+// DDL: tasks.clone_strategy TEXT NOT NULL DEFAULT 'blobless' CHECK
+//      (clone_strategy IN ('full', 'blobless', 'sparse')).
+//
+// Why this enum lives in fsm.rs alongside SessionAgentType: it is a pure
+// data discriminant carried per-task, set at approve_plan from the plan
+// TOML, read at provisioning time. Same lifecycle shape as
+// SessionAgentType — one canonical SQL string, one enum, no runtime
+// transitions.
+// ---------------------------------------------------------------------------
+
+/// V2 typed clone strategy for a planner-session worktree.
+///
+/// **Decision (v2-deep-spec.md §Step 27).** Three strategies:
+///
+/// | Strategy   | Mechanism (gix-equivalent)                            | Use case                                        |
+/// |------------|--------------------------------------------------------|-------------------------------------------------|
+/// | `full`     | Full object DB                                         | Small repos; any agent type                     |
+/// | `blobless` | Tree+commit objects, blobs lazy-loaded                 | Large repos with big binaries; any agent type   |
+/// | `sparse`   | Full objects + sparse-checkout from `path_allowlist`   | Executors/Reviewers with narrow allowlists      |
+///
+/// **The Sparse-Orchestrator exclusion (Step 27, approve_plan check #6).**
+/// `sparse` is rejected for `SessionAgentType::Orchestrator` at admission
+/// time. Git's 3-way merge machinery walks the trees of merge-base, current
+/// HEAD, and incoming branch simultaneously; if the Orchestrator's sparse
+/// checkout has excluded a path that an incoming Executor branch touches,
+/// the traversal either fails or silently corrupts the index. `full` and
+/// `blobless` are both safe for merge work because both download complete
+/// tree objects (only blob content is lazy in `blobless`). The constraint
+/// is checked by `kernel/src/initiatives/lifecycle.rs::
+/// validate_sparse_orchestrator_exclusion` at approve_plan time.
+///
+/// **Why `blobless` is the V2 default.** It is uniformly safer than
+/// `sparse` (works for every agent type including Orchestrators) and
+/// strictly cheaper than `full` for the common case of repos with binary
+/// blobs (build artifacts, vendored deps, fixtures). Operators who know
+/// their repo is small enough to clone in full opt in to `full`; operators
+/// with a known narrow path scope opt in to `sparse`.
+///
+/// **Auto-configuration of sparse.** When `sparse` is selected, the kernel
+/// auto-derives the sparse-checkout path set from the task's
+/// `path_allowlist` (sealed in the signed plan). The operator does not
+/// duplicate the allowlist between two TOML keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CloneStrategy {
+    /// `git clone` with no filters. Safe for every agent type.
+    Full,
+    /// `git clone --filter=blob:none` equivalent (gix lazy-blob).
+    /// Safe for every agent type — tree objects are downloaded in full.
+    /// V2 default.
+    Blobless,
+    /// Sparse checkout: full object DB, but the working tree is filtered
+    /// to the union of the task's `path_allowlist`. Forbidden for
+    /// `SessionAgentType::Orchestrator` (Step 27 check #6).
+    Sparse,
+}
+
+impl CloneStrategy {
+    /// All variants — referenced by the `tasks.clone_strategy` SQL
+    /// CHECK constraint and the parser tests.
+    pub const ALL: [Self; 3] = [Self::Full, Self::Blobless, Self::Sparse];
+
+    /// Canonical at-rest string. Lower-case to match the TOML
+    /// surface (`clone_strategy = "blobless"`).
+    pub fn as_sql_str(self) -> &'static str {
+        match self {
+            Self::Full     => "full",
+            Self::Blobless => "blobless",
+            Self::Sparse   => "sparse",
+        }
+    }
+
+    /// Parse the at-rest / TOML string. Returns `None` for any unknown
+    /// spelling — case-sensitive.
+    pub fn from_sql_str(s: &str) -> Option<Self> {
+        match s {
+            "full"     => Some(Self::Full),
+            "blobless" => Some(Self::Blobless),
+            "sparse"   => Some(Self::Sparse),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CloneStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_sql_str())
+    }
+}
+
 impl fmt::Display for SessionAgentType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_sql_str())
@@ -719,6 +813,60 @@ mod tests {
     /// JSONL projection (audit-paired-writes.md §3) and the SQL CHECK
     /// constraint. A future serde-rename refactor that changes the
     /// projection silently would break audit-replay tooling.
+    // ── CloneStrategy ─────────────────────────────────────────────────────
+
+    #[test]
+    fn clone_strategy_sql_round_trip_is_total() {
+        for &variant in &CloneStrategy::ALL {
+            let s = variant.as_sql_str();
+            assert!(!s.is_empty());
+            assert_eq!(CloneStrategy::from_sql_str(s), Some(variant));
+        }
+    }
+
+    #[test]
+    fn clone_strategy_canonical_strings_match_spec() {
+        // v2-deep-spec.md §Step 27 declares exactly these three lower-case
+        // strings on the wire surface (TOML key) and at-rest (SQL CHECK).
+        assert_eq!(CloneStrategy::Full.as_sql_str(),     "full");
+        assert_eq!(CloneStrategy::Blobless.as_sql_str(), "blobless");
+        assert_eq!(CloneStrategy::Sparse.as_sql_str(),   "sparse");
+    }
+
+    #[test]
+    fn clone_strategy_unknown_sql_returns_none() {
+        assert_eq!(CloneStrategy::from_sql_str(""), None);
+        assert_eq!(CloneStrategy::from_sql_str("Full"), None,
+            "case-sensitive match: PascalCase must NOT round-trip");
+        assert_eq!(CloneStrategy::from_sql_str("treeless"), None,
+            "git's treeless filter is NOT a V2 strategy");
+    }
+
+    #[test]
+    fn clone_strategy_variant_count_is_pinned_to_v2() {
+        assert_eq!(CloneStrategy::ALL.len(), 3,
+            "V2 has exactly 3 CloneStrategy variants (full, blobless, sparse); \
+             bumping this requires a v2-deep-spec.md §Step 27 update.");
+    }
+
+    #[test]
+    fn clone_strategy_display_equals_as_sql_str() {
+        for &variant in &CloneStrategy::ALL {
+            assert_eq!(variant.to_string(), variant.as_sql_str());
+        }
+    }
+
+    #[test]
+    fn clone_strategy_serde_uses_lowercase() {
+        // The serde projection must match the TOML key — operators and
+        // tools that read `clone_strategy = "blobless"` from a plan should
+        // see the same casing in any audit/JSON dumps.
+        let json = serde_json::to_string(&CloneStrategy::Blobless).unwrap();
+        assert_eq!(json, r#""blobless""#);
+        let parsed: CloneStrategy = serde_json::from_str(r#""sparse""#).unwrap();
+        assert_eq!(parsed, CloneStrategy::Sparse);
+    }
+
     #[test]
     fn session_agent_type_serde_uses_pascal_case() {
         let json = serde_json::to_string(&SessionAgentType::Orchestrator).unwrap();

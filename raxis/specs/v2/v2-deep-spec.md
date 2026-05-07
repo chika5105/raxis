@@ -1659,6 +1659,31 @@ git sparse-checkout set $(cat .raxis/allowlist_paths.txt)
 The operator does not need to duplicate the allowlist in two places. The Kernel derives the
 sparse-checkout configuration from the already-signed allowlist.
 
+**Implementation reference (Step 27 admission rules).**
+
+`raxis_types::CloneStrategy` (`Full | Blobless | Sparse`, lower-case at-rest /
+TOML strings) is the typed surface. Per-task TOML reads `clone_strategy = "..."`
+and `session_agent_type = "..."`; defaults are `Blobless` and `Executor`
+(the Orchestrator is auto-created at admission per `planner-harness.md §4.8`,
+not declared in `[[tasks]]`).
+
+`parse_plan_tasks` rejects unknown values for either field at parse time
+(`PlanCloneStrategyInvalid` with `rule = "unknown_clone_strategy"` or
+`"unknown_agent_type"`). The structural admission gate
+`validate_sparse_orchestrator_exclusion` runs in `approve_plan` before
+`BEGIN TRANSACTION` and enforces two rules:
+
+| `rule`                              | When it fires                                                                                            |
+|-------------------------------------|----------------------------------------------------------------------------------------------------------|
+| `orchestrator_task_not_permitted`   | `[[tasks]]` block declares `session_agent_type = "Orchestrator"`. V2 forbids operator-declared Orchestrators. |
+| `sparse_orchestrator_exclusion`     | `clone_strategy = "sparse"` together with `session_agent_type = "Orchestrator"`. Defense-in-depth backstop after the structural rule. |
+
+Both `clone_strategy` and `session_agent_type` are persisted in the in-memory
+`PlanRegistry::TaskPlanFields` (`kernel/src/initiatives/plan_registry.rs`) so
+the Step 24 / Step 24b clone provisioners can read the typed strategy without
+re-parsing the signed plan TOML on every activation. Re-hydration on hot-restart
+is handled by `repopulate_from_store` and goes through the same parser.
+
 ---
 
 ### Step 28: Initiative Budget Ceiling — Shared Lane Model

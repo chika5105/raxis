@@ -24,7 +24,7 @@
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_store::{Store, Table};
-use raxis_types::{unix_now_secs, InitiativeState, TaskState};
+use raxis_types::{unix_now_secs, CloneStrategy, InitiativeState, SessionAgentType, TaskState};
 
 use crate::authority::keys::AuthorityError;
 use crate::initiatives::plan_registry::{PlanRegistry, TaskKey, TaskPlanFields};
@@ -111,6 +111,42 @@ pub enum LifecycleError {
     CrossCuttingArtifactInvalidSyntax {
         entry:  String,
         reason: &'static str,
+    },
+
+    /// **V2 (Step 27) — `INVALID_PLAN_SCHEMA` clone-strategy family.**
+    /// A `[[tasks]]` block declares either:
+    ///   * an unknown `clone_strategy` value (must be one of `full`,
+    ///     `blobless`, `sparse`), OR
+    ///   * an unknown `session_agent_type` (must be one of
+    ///     `Executor`, `Reviewer` for plan-declared tasks; see also
+    ///     `OrchestratorTaskNotPermitted` below for the
+    ///     `Orchestrator`-in-`[[tasks]]` rejection), OR
+    ///   * `clone_strategy = "sparse"` together with
+    ///     `session_agent_type = "Orchestrator"` — the V2 §Step 27
+    ///     check #6 ("Sparse-Orchestrator exclusion"). Git's 3-way
+    ///     merge machinery walks the merge-base / current / incoming
+    ///     trees in lockstep; an Orchestrator with a sparse-trimmed
+    ///     working tree cannot safely complete a merge if any incoming
+    ///     branch touches an excluded path.
+    ///
+    /// Surfaced by `validate_clone_strategy_v2_format` /
+    /// `validate_sparse_orchestrator_exclusion` at `approve_plan` time,
+    /// **before** `BEGIN TRANSACTION`.
+    ///
+    /// `rule` is one of:
+    ///   * `"unknown_clone_strategy"` — value is not `full|blobless|sparse`.
+    ///   * `"unknown_agent_type"` — value is not in `SessionAgentType`'s
+    ///     SQL set (`Orchestrator|Executor|Reviewer`).
+    ///   * `"sparse_orchestrator_exclusion"` — `sparse` + `Orchestrator`.
+    ///   * `"orchestrator_task_not_permitted"` — `[[tasks]]` block declares
+    ///     `session_agent_type = "Orchestrator"` (V2: the Orchestrator
+    ///     session is auto-created by the kernel from the kernel-bundled
+    ///     `raxis-orchestrator-core` image; operators do not declare it).
+    #[error("plan clone-strategy invalid (rule={rule}, task={offending_task}): {suggestion}")]
+    PlanCloneStrategyInvalid {
+        rule:           &'static str,
+        offending_task: String,
+        suggestion:     String,
     },
 
     /// **V2 (Step 28) — `INVALID_PLAN_SCHEMA` single-lane propagation.**
@@ -428,6 +464,12 @@ pub fn approve_plan(
     validate_plan_dag(&plan_tasks)?;
     validate_path_allowlist_v2_format(&plan_tasks)?;
     validate_cross_cutting_artifacts(&orchestrator_fields)?;
+    // V2 §Step 27 — clone-strategy + Sparse-Orchestrator exclusion +
+    // Orchestrator-in-`[[tasks]]` rejection. Runs after the parser-
+    // level "unknown value" rejection (which fires inside
+    // `parse_plan_tasks`) so by here every task has a valid typed
+    // `clone_strategy` and `session_agent_type`.
+    validate_sparse_orchestrator_exclusion(&plan_tasks)?;
     // V2 §Step 28 — single-lane propagation: rejects missing /
     // empty `[workspace] lane_id` AND per-task `lane_id` overrides
     // before the transaction opens. `workspace_lane` is the
@@ -512,6 +554,9 @@ pub fn approve_plan(
             path_export_to_successors: pt.path_export_to_successors,
             path_export_globs:         pt.path_export_globs.clone(),
             path_scope_override:       pt.path_scope_override,
+            // V2 §Step 27 — typed clone strategy + agent type.
+            clone_strategy:            pt.clone_strategy,
+            session_agent_type:        pt.session_agent_type,
         };
         path_scope_snapshots.push((
             pt.task_id.clone(),
@@ -708,6 +753,10 @@ pub fn repopulate_plan_registry(
                     path_export_to_successors: pt.path_export_to_successors,
                     path_export_globs:         pt.path_export_globs,
                     path_scope_override:       pt.path_scope_override,
+                    // V2 §Step 27 — re-hydrate typed clone strategy +
+                    // agent type from the immutable signed plan bytes.
+                    clone_strategy:            pt.clone_strategy,
+                    session_agent_type:        pt.session_agent_type,
                 },
             );
             inserted += 1;
@@ -957,6 +1006,19 @@ struct PlanTask {
     lane_id:      String,
     predecessors: Vec<String>,
 
+    // ── V2 §Step 27 typed fields ───────────────────────────────────────
+    /// **V2 §Step 27 — typed clone strategy.** `full | blobless | sparse`.
+    /// Default `Blobless` (uniformly safe; cheaper than `Full` for repos
+    /// with binary blobs). The TOML key is `clone_strategy`.
+    clone_strategy:     CloneStrategy,
+    /// **V2 §Step 6 — agent type for this plan-declared task.**
+    /// Default `Executor`. The Orchestrator is auto-created by the
+    /// kernel at admission and is NOT operator-declared in `[[tasks]]`;
+    /// `validate_sparse_orchestrator_exclusion` rejects any
+    /// `[[tasks]]` block that declares `session_agent_type = "Orchestrator"`
+    /// regardless of clone strategy.
+    session_agent_type: SessionAgentType,
+
     // ── §2.5.8 path-scope fields (in-memory only) ──────────────────────
     /// Glob patterns this task may touch. **Default `[]` (deny everything)**.
     path_allowlist:            Vec<String>,
@@ -1036,6 +1098,50 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        // V2 §Step 27 — typed clone strategy. We carry the *raw* string
+        // through to the validator (`validate_clone_strategy_v2_format`)
+        // so the diagnostic can name the offending string verbatim. We
+        // don't decode here so a malformed value reports
+        // `unknown_clone_strategy` at validation time, not as a silent
+        // fallback to the default. Operators who omit the key get the
+        // V2 default (`Blobless`).
+        let clone_strategy_raw     = entry.get("clone_strategy")
+            .and_then(|v| v.as_str()).map(str::to_owned);
+        let session_agent_type_raw = entry.get("session_agent_type")
+            .and_then(|v| v.as_str()).map(str::to_owned);
+
+        let clone_strategy = match clone_strategy_raw.as_deref() {
+            None    => CloneStrategy::Blobless,
+            Some(s) => match CloneStrategy::from_sql_str(s) {
+                Some(strategy) => strategy,
+                None => return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule:           "unknown_clone_strategy",
+                    offending_task: task_id.clone(),
+                    suggestion: format!(
+                        "value `{s}` is not a valid clone_strategy. \
+                         Valid values: full, blobless, sparse. \
+                         (V2 default: blobless.)",
+                    ),
+                }),
+            },
+        };
+        let session_agent_type = match session_agent_type_raw.as_deref() {
+            None    => SessionAgentType::Executor,
+            Some(s) => match SessionAgentType::from_sql_str(s) {
+                Some(t) => t,
+                None => return Err(LifecycleError::PlanCloneStrategyInvalid {
+                    rule:           "unknown_agent_type",
+                    offending_task: task_id.clone(),
+                    suggestion: format!(
+                        "value `{s}` is not a valid session_agent_type. \
+                         Valid values: Executor, Reviewer. \
+                         (Orchestrator is auto-created by the kernel and \
+                         must not appear in [[tasks]].)",
+                    ),
+                }),
+            },
+        };
+
         tasks.push(PlanTask {
             task_id,
             name,
@@ -1045,6 +1151,8 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             path_export_to_successors,
             path_export_globs,
             path_scope_override,
+            clone_strategy,
+            session_agent_type,
         });
     }
 
@@ -1201,6 +1309,74 @@ fn validate_single_lane_propagation(
     }
 
     Ok(workspace_lane)
+}
+
+// ---------------------------------------------------------------------------
+// V2 §Step 27 — Sparse-Orchestrator exclusion (approve_plan check #6)
+// ---------------------------------------------------------------------------
+
+/// V2 §Step 27 — reject plans that combine `clone_strategy = sparse`
+/// with `session_agent_type = Orchestrator`, AND reject plans that
+/// declare `Orchestrator` tasks in `[[tasks]]` at all.
+///
+/// **Why two rules in one validator.** Both rules concern the
+/// Orchestrator's structural relationship to clone strategy:
+///   * `sparse_orchestrator_exclusion` — semantic: a sparse-trimmed
+///     working tree breaks `git merge`'s 3-way tree traversal.
+///   * `orchestrator_task_not_permitted` — structural: V2 auto-creates
+///     the Orchestrator from the kernel-bundled
+///     `raxis-orchestrator-core` image (`planner-harness.md §4.7-§4.8`,
+///     `INV-PLANNER-HARNESS-05`/`-06`). An operator-declared
+///     `Orchestrator` task would either silently shadow the
+///     auto-created session or run alongside it; both are wrong.
+///
+/// The structural rule fires first (it's a more general violation:
+/// any Orchestrator-in-[[tasks]] is wrong, regardless of clone
+/// strategy). The semantic rule fires when an Orchestrator declaration
+/// somehow slipped past defense-in-depth — useful for forward-compat
+/// where the Orchestrator might re-enter `[[tasks]]` in a future spec.
+///
+/// Runs before `BEGIN TRANSACTION` so a malformed plan never allocates
+/// a row.
+fn validate_sparse_orchestrator_exclusion(
+    tasks: &[PlanTask],
+) -> Result<(), LifecycleError> {
+    for task in tasks {
+        if task.session_agent_type == SessionAgentType::Orchestrator {
+            return Err(LifecycleError::PlanCloneStrategyInvalid {
+                rule:           "orchestrator_task_not_permitted",
+                offending_task: task.task_id.clone(),
+                suggestion:
+                    "Remove the `session_agent_type = \"Orchestrator\"` line from \
+                     this `[[tasks]]` block. V2 auto-creates exactly one \
+                     Orchestrator session per initiative from the kernel-bundled \
+                     `raxis-orchestrator-core` image; operators only declare \
+                     Executor (and optionally Reviewer) tasks."
+                    .to_owned(),
+            });
+        }
+
+        if task.clone_strategy == CloneStrategy::Sparse
+            && task.session_agent_type == SessionAgentType::Orchestrator
+        {
+            // Defense-in-depth — unreachable given the first check fires
+            // first, but kept as a structural backstop in case the
+            // structural rule is loosened or a new agent type is added
+            // without re-evaluating this constraint.
+            return Err(LifecycleError::PlanCloneStrategyInvalid {
+                rule:           "sparse_orchestrator_exclusion",
+                offending_task: task.task_id.clone(),
+                suggestion:
+                    "The Orchestrator runs `git merge` in its workspace; \
+                     git's 3-way tree traversal cannot complete safely \
+                     against a sparse-checkout-trimmed working tree. \
+                     Use `clone_strategy = \"full\"` or `\"blobless\"` for \
+                     Orchestrator-class tasks (V2 default: blobless)."
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// V2 §Step 11 — Validate `cross_cutting_artifacts` entries.
@@ -1753,6 +1929,8 @@ lane_id = "rogue-lane"
             path_export_to_successors: false,
             path_export_globs:         vec![],
             path_scope_override:       false,
+            clone_strategy:            CloneStrategy::Blobless,
+            session_agent_type:        SessionAgentType::Executor,
         }
     }
 
@@ -1920,6 +2098,8 @@ lane_id = "rogue-lane"
             path_export_to_successors: false,
             path_export_globs:         vec![],
             path_scope_override:       false,
+            clone_strategy:            CloneStrategy::Blobless,
+            session_agent_type:        SessionAgentType::Executor,
         }
     }
 
@@ -2107,6 +2287,8 @@ lane_id = "rogue-lane"
             path_export_to_successors: false,
             path_export_globs: vec![],
             path_scope_override: false,
+            clone_strategy: CloneStrategy::Blobless,
+            session_agent_type: SessionAgentType::Executor,
         }
     }
 
@@ -2169,6 +2351,298 @@ lane_id = "rogue-lane"
             &Some("feature-work".into()), &tasks,
         ).unwrap();
         assert_eq!(lane, "feature-work");
+    }
+
+    // ── V2 §Step 27 — clone_strategy / session_agent_type parsing ───────
+
+    #[test]
+    fn parse_plan_tasks_omitted_clone_strategy_defaults_to_blobless() {
+        let toml = "[[tasks]]\ntask_id = \"t1\"\n";
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].clone_strategy, CloneStrategy::Blobless);
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_clone_strategy_full() {
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+clone_strategy = "full"
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].clone_strategy, CloneStrategy::Full);
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_clone_strategy_sparse() {
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+clone_strategy = "sparse"
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].clone_strategy, CloneStrategy::Sparse);
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_unknown_clone_strategy() {
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+clone_strategy = "treeless"
+"#;
+        let err = parse_plan_tasks(toml).unwrap_err();
+        match err {
+            LifecycleError::PlanCloneStrategyInvalid { rule, offending_task, suggestion } => {
+                assert_eq!(rule, "unknown_clone_strategy");
+                assert_eq!(offending_task, "t1");
+                assert!(suggestion.contains("treeless"));
+                assert!(suggestion.contains("full, blobless, sparse"));
+            }
+            other => panic!("expected PlanCloneStrategyInvalid(unknown_clone_strategy), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_plan_tasks_omitted_session_agent_type_defaults_to_executor() {
+        let toml = "[[tasks]]\ntask_id = \"t1\"\n";
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].session_agent_type, SessionAgentType::Executor);
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_session_agent_type_reviewer() {
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+session_agent_type = "Reviewer"
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].session_agent_type, SessionAgentType::Reviewer);
+    }
+
+    #[test]
+    fn parse_plan_tasks_reads_session_agent_type_orchestrator_passes_parser() {
+        // The parser accepts `Orchestrator` because it's a valid SQL
+        // string for the type — the rejection is structural and lives
+        // in `validate_sparse_orchestrator_exclusion`. Pinning this
+        // separation prevents accidentally moving the structural check
+        // into the parser (where `OrchestratorTaskNotPermitted` would
+        // become an unstructured `PlanInvalid`).
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+session_agent_type = "Orchestrator"
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].session_agent_type, SessionAgentType::Orchestrator);
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_unknown_session_agent_type() {
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+session_agent_type = "Coordinator"
+"#;
+        let err = parse_plan_tasks(toml).unwrap_err();
+        match err {
+            LifecycleError::PlanCloneStrategyInvalid { rule, offending_task, .. } => {
+                assert_eq!(rule, "unknown_agent_type");
+                assert_eq!(offending_task, "t1");
+            }
+            other => panic!("expected PlanCloneStrategyInvalid(unknown_agent_type), got {other:?}"),
+        }
+    }
+
+    // ── V2 §Step 27 — validate_sparse_orchestrator_exclusion ─────────────
+
+    fn task_with_strategy_and_agent(
+        task_id: &str,
+        strategy: CloneStrategy,
+        agent: SessionAgentType,
+    ) -> PlanTask {
+        PlanTask {
+            task_id: task_id.into(),
+            name: task_id.into(),
+            lane_id: String::new(),
+            predecessors: vec![],
+            path_allowlist: vec![],
+            path_export_to_successors: false,
+            path_export_globs: vec![],
+            path_scope_override: false,
+            clone_strategy: strategy,
+            session_agent_type: agent,
+        }
+    }
+
+    #[test]
+    fn validate_sparse_orchestrator_rejects_orchestrator_task() {
+        // V2 auto-creates the Orchestrator; declaring one in `[[tasks]]`
+        // is structurally wrong regardless of clone strategy.
+        let tasks = vec![task_with_strategy_and_agent(
+            "rogue", CloneStrategy::Full, SessionAgentType::Orchestrator,
+        )];
+        let err = validate_sparse_orchestrator_exclusion(&tasks).unwrap_err();
+        match err {
+            LifecycleError::PlanCloneStrategyInvalid { rule, offending_task, .. } => {
+                assert_eq!(rule, "orchestrator_task_not_permitted");
+                assert_eq!(offending_task, "rogue");
+            }
+            other => panic!("expected PlanCloneStrategyInvalid(orchestrator_task_not_permitted), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_sparse_orchestrator_accepts_executor_with_any_strategy() {
+        // Every strategy is valid for plan-declared Executor tasks.
+        for strategy in CloneStrategy::ALL {
+            let tasks = vec![task_with_strategy_and_agent(
+                "t", strategy, SessionAgentType::Executor,
+            )];
+            validate_sparse_orchestrator_exclusion(&tasks)
+                .unwrap_or_else(|e| panic!("strategy {strategy:?} on Executor must pass: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn validate_sparse_orchestrator_accepts_reviewer_with_any_strategy() {
+        for strategy in CloneStrategy::ALL {
+            let tasks = vec![task_with_strategy_and_agent(
+                "rev", strategy, SessionAgentType::Reviewer,
+            )];
+            validate_sparse_orchestrator_exclusion(&tasks)
+                .unwrap_or_else(|e| panic!("strategy {strategy:?} on Reviewer must pass: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn validate_sparse_orchestrator_short_circuits_on_first_offender() {
+        // Multiple offenders → only the first task_id is reported.
+        let tasks = vec![
+            task_with_strategy_and_agent(
+                "executor-ok", CloneStrategy::Full, SessionAgentType::Executor,
+            ),
+            task_with_strategy_and_agent(
+                "first-rogue", CloneStrategy::Full, SessionAgentType::Orchestrator,
+            ),
+            task_with_strategy_and_agent(
+                "second-rogue", CloneStrategy::Sparse, SessionAgentType::Orchestrator,
+            ),
+        ];
+        let err = validate_sparse_orchestrator_exclusion(&tasks).unwrap_err();
+        match err {
+            LifecycleError::PlanCloneStrategyInvalid { offending_task, .. } => {
+                assert_eq!(offending_task, "first-rogue");
+            }
+            other => panic!("expected PlanCloneStrategyInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approve_plan_rejects_orchestrator_task_in_tasks_array() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        // Operator declared an Orchestrator task — V2 forbids this.
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "rogue-orch"
+session_agent_type = "Orchestrator"
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanCloneStrategyInvalid { rule, offending_task, .. } => {
+                assert_eq!(rule, "orchestrator_task_not_permitted");
+                assert_eq!(offending_task, "rogue-orch");
+            }
+            other => panic!("expected PlanCloneStrategyInvalid, got {other:?}"),
+        }
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
+    }
+
+    #[test]
+    fn approve_plan_rejects_unknown_clone_strategy() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "t1"
+clone_strategy = "treeless"
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanCloneStrategyInvalid { rule, .. } => {
+                assert_eq!(rule, "unknown_clone_strategy");
+            }
+            other => panic!("expected PlanCloneStrategyInvalid(unknown_clone_strategy), got {other:?}"),
+        }
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+    }
+
+    #[test]
+    fn approve_plan_persists_clone_strategy_and_agent_type_in_registry() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "build-svc"
+clone_strategy = "blobless"
+
+[[tasks]]
+task_id = "run-tests"
+clone_strategy = "sparse"
+path_allowlist = ["tests/", "Cargo.toml"]
+predecessors = ["build-svc"]
+
+[[tasks]]
+task_id = "review-it"
+session_agent_type = "Reviewer"
+clone_strategy = "full"
+predecessors = ["run-tests"]
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap();
+
+        // Each task's typed `clone_strategy` and `session_agent_type`
+        // are persisted in the in-memory PlanRegistry; this is what
+        // `Step 24` and `Step 24b` will read at provisioning time.
+        let by_id: std::collections::HashMap<String, _> = registry
+            .tasks_in_initiative(&init_id)
+            .into_iter()
+            .collect();
+        assert_eq!(by_id["build-svc"].clone_strategy, CloneStrategy::Blobless);
+        assert_eq!(by_id["build-svc"].session_agent_type, SessionAgentType::Executor);
+        assert_eq!(by_id["run-tests"].clone_strategy, CloneStrategy::Sparse);
+        assert_eq!(by_id["run-tests"].session_agent_type, SessionAgentType::Executor);
+        assert_eq!(by_id["review-it"].clone_strategy, CloneStrategy::Full);
+        assert_eq!(by_id["review-it"].session_agent_type, SessionAgentType::Reviewer);
     }
 
     #[test]

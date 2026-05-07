@@ -34,6 +34,8 @@ use std::sync::RwLock;
 
 use rustc_hash::FxHashMap;
 
+use raxis_types::{CloneStrategy, SessionAgentType};
+
 // ---------------------------------------------------------------------------
 // TaskKey — composite (initiative_id, task_id) for registry lookup
 // ---------------------------------------------------------------------------
@@ -68,15 +70,46 @@ impl TaskKey {
 /// `path_export_globs = []` (full touched set when export is on; ignored
 /// when export is off), `path_scope_override = false` (no bypass).
 ///
+/// **V2 §Step 27 fields:**
+///   * `clone_strategy` — typed clone strategy (`full | blobless | sparse`).
+///     Default `Blobless` matches the V2 spec rationale: uniformly safe for
+///     every agent type, strictly cheaper than `full` for repos with binary
+///     blobs.
+///   * `session_agent_type` — agent kind for this plan-declared task.
+///     Default `Executor`. The Orchestrator is *not* operator-declared in
+///     V2 (auto-created at admission per `planner-harness.md §4.8`); this
+///     field is kept on the per-task surface as defense-in-depth so the
+///     `validate_sparse_orchestrator_exclusion` rule still fires if a
+///     hand-edited plan or a future spec change ever puts an
+///     `Orchestrator` task in `[[tasks]]`.
+///
 /// Cloned (cheap — `Vec<String>` is heap-shared on Arc nowhere; this is a
 /// regular owning clone) on every `effective_allow` call so the lock is
 /// dropped immediately after lookup.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPlanFields {
     pub path_allowlist:            Vec<String>,
     pub path_export_to_successors: bool,
     pub path_export_globs:         Vec<String>,
     pub path_scope_override:       bool,
+
+    // V2 §Step 27 — typed clone strategy.
+    pub clone_strategy:            CloneStrategy,
+    // V2 §Step 6 / §Step 27 check #6 — agent type for this task.
+    pub session_agent_type:        SessionAgentType,
+}
+
+impl Default for TaskPlanFields {
+    fn default() -> Self {
+        Self {
+            path_allowlist:            Vec::new(),
+            path_export_to_successors: false,
+            path_export_globs:         Vec::new(),
+            path_scope_override:       false,
+            clone_strategy:            CloneStrategy::Blobless,
+            session_agent_type:        SessionAgentType::Executor,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -306,6 +339,15 @@ mod tests {
         assert!(!f.path_export_to_successors, "default export must be off");
         assert!(f.path_export_globs.is_empty(), "default export globs must be empty");
         assert!(!f.path_scope_override, "default override must be false");
+        // V2 §Step 27 defaults — `Blobless` is uniformly safe for every
+        // agent type and uniformly cheaper than `Full` for repos with
+        // binary blobs.
+        assert_eq!(f.clone_strategy, CloneStrategy::Blobless,
+            "default clone_strategy must be Blobless (V2 §Step 27)");
+        // Plan-declared tasks default to Executor; the Orchestrator
+        // is auto-created at admission per `planner-harness.md §4.8`.
+        assert_eq!(f.session_agent_type, SessionAgentType::Executor,
+            "default session_agent_type must be Executor (V2 §Step 6)");
     }
 
     #[test]
@@ -421,6 +463,8 @@ mod tests {
             path_export_to_successors: true,
             path_export_globs:         vec!["src/**".to_owned()],
             path_scope_override:       false,
+            clone_strategy:            CloneStrategy::Sparse,
+            session_agent_type:        SessionAgentType::Executor,
         };
         r.insert(TaskKey::new("init-A", "t1"), f.clone());
         let snapshot = r.tasks_in_initiative("init-A");
