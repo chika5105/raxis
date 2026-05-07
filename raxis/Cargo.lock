@@ -2378,6 +2378,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-domain-git"
+version = "0.1.0"
+dependencies = [
+ "gix",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "raxis-gateway"
 version = "0.1.0"
 dependencies = [

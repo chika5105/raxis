@@ -372,6 +372,39 @@ ancestry (the merged SHA must be a descendant of `base_sha`), path containment (
 paths are within the hybrid allowlist), and commit integrity (SHA is present and reachable in
 the Orchestrator's clone). Only then does the Kernel fast-forward the master branch.
 
+**Implementation reference (V2 init).** Three pieces collaborate to land an admitted
+`IntegrationMerge` on master:
+
+* **Authority gate:** `kernel/src/authority/dispatch_matrix.rs::dispatch` — the static
+  `(IntentKind::IntegrationMerge, SessionAgentType::Orchestrator) → Authorized` row
+  enforces "Orchestrator-only" mechanically, before any handler logic runs. The Reviewer
+  / Executor rows are `Unauthorized`.
+* **Hybrid allowlist (Check 5 of `integration-merge.md §4`):**
+  `kernel/src/path_scope.rs::check_paths_hybrid` is dispatched from
+  `kernel/src/handlers/intent.rs::run_pre_gate` whenever
+  `intent_kind == IntegrationMerge`. The fold computes
+  `UNION(subtask path_allowlists) ∪ orchestrator.cross_cutting_artifacts` from the
+  in-memory `PlanRegistry`, with the same fail-closed posture as the per-task
+  `check_paths` path. Tested in
+  `kernel/src/path_scope.rs::tests::hybrid_*`.
+* **Master fast-forward (Phase 2 of Check 8 in `integration-merge.md §11`):**
+  [`raxis-domain-git`](../../crates/domain-git/src/lib.rs) — the V2 SE-domain
+  `DomainAdapter::commit` reference. `commit_merge_to_master(master, orch, sha)` walks
+  every commit/tree/blob reachable from the Orchestrator's `commit_sha` (skipping
+  objects already in the master ODB) and writes them through `Repository::write_blob`
+  / `objects::write_buf`, then advances `refs/heads/master` via a `gix-ref`
+  transaction whose `MustExistAndMatch` precondition catches concurrent writers. The
+  whole operation is idempotent: re-running with the same `commit_sha` returns
+  `MasterAdvance { already_at_target: true }` and performs no work — the recovery
+  path of `integration-merge.md §11.3` relies on this contract.
+
+These three components together implement the kernel's side of Step 8: the Orchestrator
+is the unique merger, the Kernel verifies path containment via the hybrid allowlist, and
+the master advancement happens host-side via `gix` (no shell-out to `git`, no in-VM git
+operations, no operator key required). The `IntegrationMergeCompleted` audit emission +
+SQLite Phase 1/3 transitions land alongside these in subsequent iterations as the
+`subtask_activations` row population (Step 25) comes online.
+
 ---
 
 ### Step 9: Bundle Routing — Orchestrator's Clone Only

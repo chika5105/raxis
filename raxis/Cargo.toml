@@ -22,6 +22,7 @@ members = [
     "crates/runtime",
     "crates/test-support",
     "crates/verifier-stub",
+    "crates/domain-git",
     "crates/worktree-provision",
     "crates/worktree-staging",
     "kernel",
@@ -119,6 +120,7 @@ raxis-isolation-apple-vz = { path = "crates/isolation-apple-vz" }
 raxis-isolation-firecracker = { path = "crates/isolation-firecracker" }
 raxis-runtime           = { path = "crates/runtime" }
 raxis-verifier-stub     = { path = "crates/verifier-stub" }
+raxis-domain-git        = { path = "crates/domain-git" }
 raxis-worktree-provision = { path = "crates/worktree-provision" }
 raxis-worktree-staging  = { path = "crates/worktree-staging" }
 
