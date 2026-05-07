@@ -461,6 +461,38 @@ async fn main() {
     // written by `policy_manager::advance_epoch` after every epoch
     // rotation. A single Arc is shared across handlers via `ctx`.
     let epoch_binding = Arc::new(prompt::EpochBinding::new());
+
+    // Step 8.0a — V2 credential backend (extensibility-traits.md §4.4).
+    // The active selector lives in `policy.toml [credential_backend]`
+    // and defaults to `File` when omitted. We construct the concrete
+    // backend, wrap it in `AuditingBackend` so every resolve emits a
+    // `CredentialAccessed` event, and inject it into `HandlerContext`
+    // so the gateway and the credential proxies share one audited
+    // seam. The wrapping is unconditional — the audit decorator owns
+    // the `AuditSink` once, freeing concrete impls from repeating the
+    // emit step in their own `resolve` / `rotate` bodies.
+    let credentials: Arc<dyn raxis_credentials::CredentialBackend> = {
+        use raxis_credentials::{AuditingBackend, CredentialBackendKind};
+        let bundle = policy.load();
+        let kind = bundle.credential_backend_kind();
+        let inner: Arc<dyn raxis_credentials::CredentialBackend> = match kind {
+            CredentialBackendKind::File => Arc::new(
+                raxis_credentials_file::FileCredentialBackend::open(data_dir.clone()),
+            ),
+            other => {
+                eprintln!(
+                    "BOOT_ERR_CREDENTIAL_BACKEND_NOT_IMPLEMENTED: \
+                     policy.toml selects credential_backend.kind = {} but only \
+                     `file` is implemented in V2; future Vault / AWS-SM / \
+                     Azure-KV / PKCS#11 backends are out of scope for V2 GA.",
+                    other.as_str(),
+                );
+                std::process::exit(64);
+            }
+        };
+        Arc::new(AuditingBackend::new(inner, Arc::clone(&audit)))
+    };
+
     let mut ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -470,6 +502,7 @@ async fn main() {
         Arc::clone(&plan_registry),
         Arc::clone(&gateway_client),
         Arc::clone(&epoch_binding),
+        Arc::clone(&credentials),
     );
     if let Some(backend) = _isolation_backend.as_ref() {
         ctx_inner = ctx_inner.with_isolation(Arc::clone(backend));

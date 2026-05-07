@@ -552,15 +552,21 @@ mod tests {
             escalation_policy,
         );
         let sink = Arc::new(FakeAuditSink::new());
+        let data_dir = PathBuf::from("/tmp/raxis-escalation-test");
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            &data_dir,
+            sink.clone(),
+        );
         let ctx  = Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
             Arc::new(store),
             sink.clone(),
-            PathBuf::from("/tmp/raxis-escalation-test"),
+            data_dir,
             Arc::new(PlanRegistry::new()),
             Arc::new(crate::gateway::client::GatewayClient::new()),
             Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
         ));
         (ctx, sink)
     }

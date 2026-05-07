@@ -2137,15 +2137,21 @@ mod escalation_dispatch_tests {
             cert,
             force_misconfig_bypass: false,
         }]);
+        let data_dir = PathBuf::from("/tmp/raxis-test");
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            &data_dir,
+            sink.clone(),
+        );
         Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
             store,
             sink,
-            PathBuf::from("/tmp/raxis-test"),
+            data_dir,
             Arc::new(PlanRegistry::new()),
             Arc::new(crate::gateway::client::GatewayClient::new()),
             Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
         ))
     }
 
@@ -2536,6 +2542,10 @@ mod escalation_dispatch_tests {
             data_dir.clone(),
         ));
 
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            &data_dir,
+            Arc::clone(&audit),
+        );
         let ctx = Arc::new(HandlerContext::new(
             policy_swap,
             Arc::new(KeyRegistry::stub_for_tests()),
@@ -2545,6 +2555,7 @@ mod escalation_dispatch_tests {
             Arc::new(PlanRegistry::new()),
             Arc::new(crate::gateway::client::GatewayClient::new()),
             Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
         ));
         (ctx, inner)
     }
@@ -2831,6 +2842,10 @@ mod rotate_epoch_dispatch_tests {
         let bundle = PolicyBundle::for_tests_with_operators(vec![]);
         let policy = Arc::new(arc_swap::ArcSwap::from_pointee(bundle));
 
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            data_dir,
+            sink.clone(),
+        );
         Arc::new(HandlerContext::new(
             policy,
             registry,
@@ -2840,6 +2855,7 @@ mod rotate_epoch_dispatch_tests {
             Arc::new(PlanRegistry::new()),
             gateway,
             Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
         ))
     }
 
@@ -3703,6 +3719,10 @@ mod quarantine_dispatch_tests {
         let gateway  = Arc::new(GatewayClient::new());
         let sink     = Arc::new(FakeAuditSink::new());
 
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            data_dir,
+            sink.clone(),
+        );
         let ctx = Arc::new(HandlerContext::new(
             policy,
             registry,
@@ -3712,6 +3732,7 @@ mod quarantine_dispatch_tests {
             Arc::new(PlanRegistry::new()),
             gateway,
             Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
         ));
         (ctx, sink)
     }

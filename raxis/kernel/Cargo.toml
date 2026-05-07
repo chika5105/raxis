@@ -41,6 +41,15 @@ raxis-isolation     = { workspace = true }
 # `WorkspaceMount` the substrate consumes. Lives in its own crate
 # so kernel integration tests can drive the same staging path.
 raxis-worktree-staging = { workspace = true }
+# `CredentialBackend` trait + `FileCredentialBackend` reference impl.
+# The kernel boot constructs the backend from `policy.toml
+# [credential_backend]` (default `File`), wraps it in
+# `AuditingBackend`, and threads the resulting
+# `Arc<dyn CredentialBackend>` through `HandlerContext` so every
+# handler that resolves a credential goes through the same
+# audited seam. `extensibility-traits.md §4.4`.
+raxis-credentials       = { workspace = true }
+raxis-credentials-file  = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }

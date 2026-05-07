@@ -907,15 +907,21 @@ mod stub_round_trip {
         let audit: Arc<dyn AuditSink> = Arc::new(FakeAuditSink::new());
         let plan_registry = Arc::new(PlanRegistry::new());
 
+        let data_dir_path = witness_dir.parent().unwrap_or(Path::new("/tmp")).to_path_buf();
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            &data_dir_path,
+            Arc::clone(&audit),
+        );
         Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             registry,
             store,
             audit,
-            witness_dir.parent().unwrap_or(Path::new("/tmp")).to_path_buf(),
+            data_dir_path,
             plan_registry,
             Arc::new(crate::gateway::client::GatewayClient::new()),
             Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
         ).with_witness_dir(witness_dir))
     }
 

@@ -18,6 +18,7 @@
 // which apply business-rule validation and return well-typed values rather
 // than raw TOML scalars.
 
+use raxis_credentials::CredentialBackendKind;
 use raxis_types::operator_cert::{CertKind, OperatorCert};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -106,6 +107,27 @@ pub(crate) struct RawPolicy {
     /// validate time.
     #[serde(default)]
     pub(crate) plan_bundle_limits: Option<PlanBundleLimitsSection>,
+
+    /// `[credential_backend]` — V2 selector for the active
+    /// `CredentialBackend` impl. **Optional**: a kernel that omits
+    /// the section boots with `kind = "file"` (the V2 reference
+    /// `FileCredentialBackend`). Future Vault / AWS-SM / Azure-KV /
+    /// PKCS#11 backends are selected by setting `kind` to one of
+    /// `"vault"`, `"aws_secrets_manager"`, `"azure_key_vault"`,
+    /// `"pkcs11"`; `extensibility-traits.md §4.4`.
+    #[serde(default)]
+    pub(crate) credential_backend: Option<CredentialBackendSection>,
+}
+
+/// `[credential_backend]` — selector for the active credential
+/// store. The `kind` discriminator picks one of the registered
+/// backends; non-file backends will eventually carry their own
+/// per-backend configuration sub-table here, but V2 ships only
+/// the `kind = "file"` selector and ignores anything else with a
+/// validation error.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CredentialBackendSection {
+    pub(crate) kind: CredentialBackendKind,
 }
 
 // ---------------------------------------------------------------------------
@@ -1329,6 +1351,13 @@ pub struct PolicyBundle {
     /// that care about misconfig handling (step 3 unit tests) read
     /// it through [`PolicyBundle::bypassed_cert_misconfigs`].
     bypassed_cert_misconfigs:      Vec<BypassedCertMisconfig>,
+
+    /// V2 selector for the active `CredentialBackend` impl. Defaults
+    /// to [`CredentialBackendKind::File`] when `policy.toml` omits the
+    /// `[credential_backend]` section. Read at kernel boot
+    /// (`kernel/src/main.rs`) to construct the
+    /// `Arc<dyn CredentialBackend>` injected into `HandlerContext`.
+    credential_backend: CredentialBackendKind,
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -1569,6 +1598,10 @@ impl PolicyBundle {
             notification_routes,
             default_notification_channels,
             bypassed_cert_misconfigs,
+            credential_backend: raw
+                .credential_backend
+                .map(|s| s.kind)
+                .unwrap_or_default(),
         })
     }
 
@@ -1578,6 +1611,15 @@ impl PolicyBundle {
     /// `policy_epoch_history` rows (kernel-store.md §2.5.1 Table 19).
     pub fn epoch(&self) -> u64 {
         self.epoch
+    }
+
+    /// V2 selector for the active `CredentialBackend` impl. Read at
+    /// kernel boot to decide which `Arc<dyn CredentialBackend>` to
+    /// inject into `HandlerContext`. Defaults to
+    /// [`CredentialBackendKind::File`] when `policy.toml` omits the
+    /// `[credential_backend]` section.
+    pub fn credential_backend_kind(&self) -> CredentialBackendKind {
+        self.credential_backend
     }
 
     // ── Key accessors ───────────────────────────────────────────────────────
@@ -1710,6 +1752,7 @@ impl PolicyBundle {
             notification_routes: HashMap::new(),
             default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
             bypassed_cert_misconfigs: Vec::new(),
+            credential_backend: CredentialBackendKind::default(),
         }
     }
 
@@ -2236,6 +2279,7 @@ mod tests {
             notification_routes: HashMap::new(),
             default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
             bypassed_cert_misconfigs: Vec::new(),
+            credential_backend: CredentialBackendKind::default(),
         }
     }
 

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use raxis_audit_tools::AuditSink;
+use raxis_credentials::CredentialBackend;
 use raxis_isolation::Backend as IsolationBackend;
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
@@ -118,6 +119,25 @@ pub struct HandlerContext {
     /// §3.8` boot-order step 6a so every IPC handler dispatches
     /// through the same `Arc<dyn Backend>` clone.
     pub isolation: Option<Arc<dyn IsolationBackend>>,
+
+    /// V2 credential-store backend selected at boot.
+    ///
+    /// Always present — the kernel boot path constructs a default
+    /// [`raxis_credentials_file::FileCredentialBackend`] when
+    /// `policy.toml` omits `[credential_backend]`, then wraps it in
+    /// `raxis_credentials::AuditingBackend` so every resolve emits
+    /// the spec-mandated `CredentialAccessed` event. Consumed by
+    /// the credential proxy (per session) and the gateway (provider
+    /// API keys). Per `extensibility-traits.md §4.4`.
+    ///
+    /// **Why non-Option** (unlike `isolation`): a kernel without a
+    /// credential backend cannot spawn any session that declares
+    /// `[[tasks.credentials]]` and cannot dispatch any
+    /// `FetchRequest` because the gateway needs provider API keys.
+    /// The `File` default is universally available (it just reads
+    /// from `<data_dir>/credentials/`), so there is no degraded
+    /// boot mode that could legitimately leave this `None`.
+    pub credentials: Arc<dyn CredentialBackend>,
 }
 
 impl HandlerContext {
@@ -131,6 +151,7 @@ impl HandlerContext {
         plan_registry: Arc<PlanRegistry>,
         gateway: Arc<GatewayClient>,
         epoch_binding: Arc<EpochBinding>,
+        credentials: Arc<dyn CredentialBackend>,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
         Self {
@@ -145,6 +166,7 @@ impl HandlerContext {
             epoch_binding,
             cert_enforcer: Arc::new(CertEnforcer::new()),
             isolation: None,
+            credentials,
         }
     }
 
@@ -163,4 +185,33 @@ impl HandlerContext {
         self.isolation = Some(isolation);
         self
     }
+
+    /// Replace the credential backend after construction. Used by
+    /// kernel boot (when `policy.toml [credential_backend]` selects
+    /// a non-default backend) and by tests that want to inject a
+    /// stub backend for negative-path coverage.
+    pub fn with_credentials(mut self, credentials: Arc<dyn CredentialBackend>) -> Self {
+        self.credentials = credentials;
+        self
+    }
+}
+
+/// Build a default file-backed credential backend (without uid check)
+/// for tests. Centralised here so every test fixture in the kernel
+/// crate constructs the same shape — and a future migration to a
+/// different default for tests only needs to touch this one helper.
+///
+/// The backend is wrapped in `AuditingBackend` against the supplied
+/// `Arc<dyn AuditSink>` so audit-sensitive tests can assert on
+/// `CredentialAccessed` / `CredentialRotated` events emitted through
+/// the same path production uses.
+#[cfg(any(debug_assertions, test))]
+pub fn build_default_test_credentials(
+    data_dir: &std::path::Path,
+    audit: Arc<dyn AuditSink>,
+) -> Arc<dyn CredentialBackend> {
+    use raxis_credentials::AuditingBackend;
+    let inner: Arc<dyn CredentialBackend> =
+        Arc::new(raxis_credentials_file::FileCredentialBackend::open_without_uid_check(data_dir));
+    Arc::new(AuditingBackend::new(inner, audit))
 }

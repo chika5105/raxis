@@ -17,6 +17,12 @@ raxis-types  = { workspace = true }
 # crypto code centralised means the kernel and CLI ALWAYS validate certs
 # the same way (no parallel implementations).
 raxis-crypto = { workspace = true }
+# `CredentialBackendKind` enum (file / vault / aws_secrets_manager /
+# azure_key_vault / pkcs11) parsed from `policy.toml [credential_backend]`.
+# Trait-only crate; pulls in `secrecy` + `zeroize` for `CredentialValue`
+# but no I/O — appropriate to depend on from `raxis-policy` which is
+# itself I/O-light.
+raxis-credentials = { workspace = true }
 
 [dev-dependencies]
 tempfile          = "3"
