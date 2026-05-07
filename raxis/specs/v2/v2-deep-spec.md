@@ -474,6 +474,47 @@ These must be exact filenames (no globs), operator-declared, and sealed in the s
 The Kernel computes `hybrid_effective_allow` at `IntegrationMerge` admission time using the
 same `starts_with()` algorithm as sub-task path enforcement.
 
+**Implementation reference:**
+
+* `kernel/src/initiatives/plan_registry.rs::OrchestratorPlanFields { cross_cutting_artifacts:
+  Vec<String> }` is the in-memory projection of the `[orchestrator]` table. The
+  `PlanRegistry` keeps a per-initiative `RwLock<FxHashMap<String, OrchestratorPlanFields>>`
+  alongside its existing per-task map; `tasks_in_initiative(initiative_id)` enumerates every
+  sub-task's `TaskPlanFields` so the union step has O(N) access.
+* `kernel/src/initiatives/lifecycle.rs::parse_plan_orchestrator` lifts the optional
+  `[orchestrator] cross_cutting_artifacts` array out of the plan TOML. A plan WITHOUT this
+  section is legal — the registry entry defaults to an empty artifact list.
+* `kernel/src/initiatives/lifecycle.rs::validate_cross_cutting_artifacts` runs in
+  `approve_plan` BEFORE `BEGIN TRANSACTION` (mirroring `validate_plan_dag` /
+  `validate_path_allowlist_v2_format`). It enforces the seven exact-filename rules:
+  `empty_entry`, `negation_marker`, `absolute_path`, `trailing_slash`, `path_escape` (`..`
+  segments), `contains_slash`, `glob_character` (`* ? [ ] { }`). The first offender is
+  surfaced as `LifecycleError::CrossCuttingArtifactInvalidSyntax { entry, reason }`; the
+  wire-side projection collapses to `INVALID_PLAN_SCHEMA` per `INV-08`.
+* `kernel/src/path_scope.rs::compute_hybrid_effective_allow(initiative_id, &PlanRegistry)`
+  returns the merged `AllowSet`. The fold preserves V1 semantics: a single sub-task with
+  `path_scope_override = true` makes the entire IntegrationMerge unrestricted (universal
+  set); otherwise sub-task `path_allowlist` entries flow into `path_entries` (parsed via
+  `PathEntry::Exact` / `PathEntry::DirectoryPrefix`) and `cross_cutting_artifacts` flow into
+  `exact_paths` for parallel symmetry with predecessor exports.
+* `kernel/src/path_scope.rs::check_paths_hybrid` is the IntegrationMerge counterpart to the
+  per-task `check_paths`. The Phase B pre-gate in `kernel/src/handlers/intent.rs` dispatches
+  on `intent_kind`: `IntentKind::IntegrationMerge → check_paths_hybrid`, every other intent
+  → `check_paths`. The dispatch is a single match arm to keep the path check single-shot.
+* **Hot-restart parity:** `repopulate_plan_registry` rebuilds per-task entries from the
+  on-disk plan TOML on kernel boot AND now also rebuilds the orchestrator entry via
+  `parse_plan_orchestrator` (best-effort: a malformed `[orchestrator]` table on hot-restart
+  is logged at error level and skipped, mirroring the existing per-task parse error
+  handling). A V1 plan without `[orchestrator]` rebuilds to an empty artifact list — no
+  failure mode.
+* **Test coverage:** `approve_plan_populates_orchestrator_cross_cutting_artifacts`,
+  `approve_plan_orchestrator_section_is_optional`,
+  `approve_plan_rejects_glob_in_cross_cutting_artifacts`,
+  `approve_plan_rejects_directory_in_cross_cutting_artifacts`,
+  `repopulate_plan_registry_rehydrates_orchestrator_artifacts` (kernel restart parity),
+  plus `path_scope::tests::hybrid_*` (10 tests covering union semantics, override
+  propagation, cross-cutting artifact match, empty initiative, invalid path entry).
+
 ---
 
 ### Step 12: Crash Recovery — Dual Retry Counters

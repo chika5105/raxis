@@ -88,6 +88,31 @@ pub enum LifecycleError {
         reason:  &'static str,
     },
 
+    /// **V2 (Step 11) — `FAIL_CROSS_CUTTING_ARTIFACT_INVALID_SYNTAX`.**
+    /// A `[orchestrator] cross_cutting_artifacts` entry violates the
+    /// "exact filename only" discipline. Surfaced by
+    /// `validate_cross_cutting_artifacts` at `approve_plan` time.
+    /// The wire-side projection collapses to
+    /// `INVALID_PLAN_SCHEMA` per INV-08.
+    ///
+    /// `reason` is one of:
+    ///   * `"glob_character"` — entry contains `*`, `?`, `[`, `]`,
+    ///     `{`, or `}`.
+    ///   * `"contains_slash"` — entry contains `/` (must be a bare
+    ///     filename, no directory prefix).
+    ///   * `"absolute_path"` — entry begins with `/`.
+    ///   * `"path_escape"` — entry contains a `..` segment.
+    ///   * `"empty_entry"` — entry is the empty string.
+    ///   * `"negation_marker"` — entry begins with `!`.
+    ///   * `"trailing_slash"` — entry ends with `/` (would otherwise be
+    ///     a directory prefix; cross-cutting artifacts are exact files
+    ///     only per Step 11).
+    #[error("cross_cutting_artifacts[{entry:?}]: {reason}")]
+    CrossCuttingArtifactInvalidSyntax {
+        entry:  String,
+        reason: &'static str,
+    },
+
     /// **V2 (Step 17) — `INVALID_PLAN_SCHEMA` shift-left, DAG family.**
     /// A `[[tasks]]` block declares a structurally invalid dependency
     /// graph. Surfaced by `validate_plan_dag` at `approve_plan` time,
@@ -331,8 +356,9 @@ pub fn approve_plan(
             reason: e.to_string(),
         })?;
 
-    let plan_toml_str = String::from_utf8_lossy(&plan_bytes);
-    let plan_tasks    = parse_plan_tasks(&plan_toml_str)?;
+    let plan_toml_str    = String::from_utf8_lossy(&plan_bytes);
+    let plan_tasks       = parse_plan_tasks(&plan_toml_str)?;
+    let orchestrator_fields = parse_plan_orchestrator(&plan_toml_str)?;
 
     // V2 Step 17 — shift-left plan validation. Each helper runs BEFORE
     // `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
@@ -340,6 +366,11 @@ pub fn approve_plan(
     // plan can confuse later validators (e.g. a path-allowlist entry
     // on a duplicate task_id), and the path-format check second because
     // it is purely syntactic and cannot depend on graph well-formedness.
+    //
+    // V2 §Step 11 cross_cutting_artifacts validator runs alongside —
+    // it has no dependency on graph well-formedness either, but lives
+    // here so a malformed orchestrator stanza is rejected with the same
+    // pre-tx posture as the path_allowlist validator.
     //
     // The other Step 17 checks (referential integrity over `[[subtasks]]`,
     // meta-authority of the unique Orchestrator, path-subset containment,
@@ -352,6 +383,7 @@ pub fn approve_plan(
     // `predecessors` / `path_allowlist`, both already in the V1 schema).
     validate_plan_dag(&plan_tasks)?;
     validate_path_allowlist_v2_format(&plan_tasks)?;
+    validate_cross_cutting_artifacts(&orchestrator_fields)?;
 
     let task_count    = plan_tasks.len();
     let now           = unix_now_secs();
@@ -468,6 +500,13 @@ pub fn approve_plan(
             fields.clone(),
         );
     }
+
+    // V2 §Step 11 — persist the orchestrator's `cross_cutting_artifacts`
+    // for IntegrationMerge admission. Same post-commit ordering as the
+    // per-task registry insert: the SQLite tx is the source of truth,
+    // and the in-memory registry is repopulated from `plan_bytes` on
+    // hot-restart so a missed insert here cannot survive a kernel boot.
+    plan_registry.insert_orchestrator(initiative_id, orchestrator_fields);
 
     // Audit-after-commit per kernel-store.md §2.5.2. A failure here
     // produces a §2.5.2 "SQLite committed, JSONL not appended" gap that
@@ -615,6 +654,19 @@ pub fn repopulate_plan_registry(
                 },
             );
             inserted += 1;
+        }
+
+        // V2 §Step 11 — repopulate the per-initiative orchestrator
+        // section. Best-effort: a malformed `[orchestrator]` table on
+        // hot-restart is logged at error-level and skipped (mirrors the
+        // pattern used for `parse_plan_tasks` above) rather than
+        // aborting registry rebuild for the whole kernel.
+        match parse_plan_orchestrator(&plan_str) {
+            Ok(orch) => registry.insert_orchestrator(&init_id, orch),
+            Err(e)   => eprintln!(
+                "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
+                 \"initiative_id\":\"{init_id}\",\"reason\":\"orchestrator_parse_failed: {e}\"}}",
+            ),
         }
     }
 
@@ -911,6 +963,123 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
     }
 
     Ok(tasks)
+}
+
+/// V2 §Step 11 — Parse the optional `[orchestrator]` section.
+///
+/// Returns the parsed `OrchestratorPlanFields`. Missing or malformed
+/// (i.e., not a TOML table) sections degrade silently to the default
+/// (empty `cross_cutting_artifacts`) — V1 plans never had this section
+/// and must continue to round-trip. The semantic check
+/// (`validate_cross_cutting_artifacts`) runs in approve_plan and
+/// surfaces malformed entries as `CrossCuttingArtifactInvalidSyntax`,
+/// not as TOML parse failures.
+///
+/// **TOML shape (`v2-deep-spec.md §Step 11`):**
+/// ```toml
+/// [orchestrator]
+/// cross_cutting_artifacts = ["Cargo.lock", "package-lock.json", "go.sum"]
+/// ```
+fn parse_plan_orchestrator(plan_toml: &str)
+    -> Result<crate::initiatives::OrchestratorPlanFields, LifecycleError>
+{
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
+        LifecycleError::PlanInvalid {
+            reason: format!("TOML parse error: {e}"),
+        }
+    })?;
+
+    let cross_cutting_artifacts = doc
+        .get("orchestrator")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("cross_cutting_artifacts"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(crate::initiatives::OrchestratorPlanFields { cross_cutting_artifacts })
+}
+
+/// V2 §Step 11 — Validate `cross_cutting_artifacts` entries.
+///
+/// Spec (`v2-deep-spec.md §Step 11`): "These must be exact filenames
+/// (no globs), operator-declared, and sealed in the signed plan."
+///
+/// We enforce the following at `approve_plan` time, BEFORE
+/// `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
+/// state:
+///
+///   1. **`empty_entry`** — `""` is rejected (would degenerate to a
+///      vacuous match-everything).
+///   2. **`glob_character`** — `*`, `?`, `[`, `]`, `{`, `}` rejected
+///      (the matcher is exact; globs would silently widen scope).
+///   3. **`contains_slash`** — any `/` rejected (the spec says "exact
+///      filenames" — a multi-segment path is a directory prefix in
+///      Step 19's vocabulary, which doesn't compose with the
+///      cross-cutting "small list of well-known files" model).
+///   4. **`absolute_path`** — `/`-prefixed entry rejected (covered by
+///      rule 3 but kept distinct for operator diagnostics).
+///   5. **`path_escape`** — `..` segments rejected (defense in depth).
+///   6. **`negation_marker`** — `!`-prefixed entries rejected
+///      (consistent with Step 19's `path_allowlist` rule).
+///   7. **`trailing_slash`** — `/`-suffix rejected (covered by rule 3
+///      but kept distinct: in Step 19 a trailing slash means
+///      "directory prefix"; cross-cutting artifacts MUST be exact
+///      files only).
+fn validate_cross_cutting_artifacts(
+    fields: &crate::initiatives::OrchestratorPlanFields,
+) -> Result<(), LifecycleError> {
+    for raw in &fields.cross_cutting_artifacts {
+        let entry = raw.as_str();
+
+        if entry.is_empty() {
+            return Err(LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                entry: raw.clone(),
+                reason: "empty_entry",
+            });
+        }
+        if entry.starts_with('!') {
+            return Err(LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                entry: raw.clone(),
+                reason: "negation_marker",
+            });
+        }
+        if entry.starts_with('/') {
+            return Err(LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                entry: raw.clone(),
+                reason: "absolute_path",
+            });
+        }
+        if entry.ends_with('/') {
+            return Err(LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                entry: raw.clone(),
+                reason: "trailing_slash",
+            });
+        }
+        if entry.split('/').any(|seg| seg == "..") {
+            return Err(LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                entry: raw.clone(),
+                reason: "path_escape",
+            });
+        }
+        if entry.contains('/') {
+            return Err(LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                entry: raw.clone(),
+                reason: "contains_slash",
+            });
+        }
+        if entry.chars().any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}')) {
+            return Err(LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                entry: raw.clone(),
+                reason: "glob_character",
+            });
+        }
+    }
+    Ok(())
 }
 
 /// V2 Step 17 — DAG family of the seven shift-left checks
@@ -2205,6 +2374,179 @@ mod tests {
         assert_eq!(f2.path_allowlist, vec!["docs/"]);
         assert!(!f2.path_export_to_successors,
                 "t2 omits the field — must default to false");
+    }
+
+    // ── V2 §Step 11 — `[orchestrator]` cross_cutting_artifacts wiring ─────
+
+    #[test]
+    fn approve_plan_populates_orchestrator_cross_cutting_artifacts() {
+        // The `[orchestrator]` table's `cross_cutting_artifacts` lands
+        // in `PlanRegistry::orchestrator(initiative_id)` — the bridge
+        // that `compute_hybrid_effective_allow` reads at IntegrationMerge
+        // admission time.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [orchestrator]
+            cross_cutting_artifacts = ["Cargo.lock", "package-lock.json"]
+
+            [[tasks]]
+            task_id        = "t1"
+            path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+
+        let orch = registry.orchestrator(&init_id)
+            .expect("registry must contain an orchestrator entry for the initiative");
+        assert_eq!(
+            orch.cross_cutting_artifacts,
+            vec!["Cargo.lock".to_owned(), "package-lock.json".to_owned()],
+            "approve_plan must hydrate `[orchestrator] cross_cutting_artifacts` \
+             into the in-memory PlanRegistry verbatim (V2 §Step 11)",
+        );
+    }
+
+    #[test]
+    fn approve_plan_orchestrator_section_is_optional() {
+        // Plans WITHOUT `[orchestrator]` must approve cleanly — the
+        // section is optional per `v2-deep-spec.md §Step 11`. The
+        // registry entry that's persisted is the empty `Default::default()`.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id        = "lone-task"
+            path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+
+        let orch = registry.orchestrator(&init_id)
+            .unwrap_or_default();
+        assert!(orch.cross_cutting_artifacts.is_empty(),
+                "missing `[orchestrator]` must yield an empty artifact list");
+    }
+
+    #[test]
+    fn approve_plan_rejects_glob_in_cross_cutting_artifacts() {
+        // Glob-bearing entries are rejected before BEGIN TRANSACTION —
+        // the kernel state must remain Draft and the registry must stay
+        // empty. Mirrors the shift-left posture of `validate_plan_dag` /
+        // `validate_path_allowlist_v2_format`.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [orchestrator]
+            cross_cutting_artifacts = ["Cargo.*"]
+
+            [[tasks]]
+            task_id        = "t1"
+            path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                    reason: "glob_character", ..
+                },
+            ),
+            "expected CrossCuttingArtifactInvalidSyntax(glob_character), got {err:?}",
+        );
+
+        // Shift-left posture: state never advanced past Draft, no tasks
+        // admitted, audit silent, registry empty for both per-task and
+        // orchestrator entries.
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
+        assert!(audit.events().is_empty());
+        assert!(registry.is_empty());
+        assert!(registry.orchestrator(&init_id).is_none(),
+                "registry must NOT carry an orchestrator entry when approve_plan failed");
+    }
+
+    #[test]
+    fn approve_plan_rejects_directory_in_cross_cutting_artifacts() {
+        // Trailing-slash entries are rejected — Step 11 mandates exact
+        // filenames, not directory prefixes (Step 19 vocabulary doesn't
+        // compose with the cross-cutting "well-known files" model).
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [orchestrator]
+            cross_cutting_artifacts = ["vendor/"]
+
+            [[tasks]]
+            task_id        = "t1"
+            path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LifecycleError::CrossCuttingArtifactInvalidSyntax {
+                    reason: "trailing_slash", ..
+                },
+            ),
+            "expected CrossCuttingArtifactInvalidSyntax(trailing_slash), got {err:?}",
+        );
+    }
+
+    #[test]
+    fn repopulate_plan_registry_rehydrates_orchestrator_artifacts() {
+        // Hot-restart parity: kernel reboot must rebuild the in-memory
+        // PlanRegistry's orchestrator entry from the on-disk plan TOML.
+        // Without this, IntegrationMerge would silently fail post-restart
+        // because `compute_hybrid_effective_allow` would not see the
+        // operator-declared cross-cutting artifacts.
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [orchestrator]
+            cross_cutting_artifacts = ["Cargo.lock", "go.sum"]
+
+            [[tasks]]
+            task_id        = "t1"
+            path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry_one = PlanRegistry::new();
+
+        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry_one).unwrap();
+
+        // Simulate a kernel restart: brand-new (empty) registry rebuilt
+        // from the on-disk store via repopulate_plan_registry.
+        let registry_two = PlanRegistry::new();
+        repopulate_plan_registry(&store, &registry_two).unwrap();
+
+        let orch = registry_two.orchestrator(&init_id)
+            .expect("repopulate must rehydrate orchestrator entry");
+        assert_eq!(
+            orch.cross_cutting_artifacts,
+            vec!["Cargo.lock".to_owned(), "go.sum".to_owned()],
+            "repopulate_plan_registry must rebuild cross_cutting_artifacts from \
+             the on-disk plan TOML (V2 §Step 11 hot-restart parity)",
+        );
     }
 
     #[test]

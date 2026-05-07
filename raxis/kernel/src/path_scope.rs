@@ -59,7 +59,7 @@ use std::collections::BTreeSet;
 
 use raxis_store::{Store, Table};
 
-use crate::initiatives::{PlanRegistry, TaskKey, TaskPlanFields};
+use crate::initiatives::{OrchestratorPlanFields, PlanRegistry, TaskKey, TaskPlanFields};
 
 // INV-STORE-03 (kernel-store.md §2.5.1): no raw SQL table-name literals
 // in `kernel/src`; the constants below are interpolated into every query.
@@ -249,6 +249,119 @@ pub fn effective_allow(
     let exact_paths  = collect_predecessor_exports(initiative_id, task_id, registry, store)?;
 
     Ok(AllowSet { universal: false, path_entries, exact_paths })
+}
+
+/// V2 §Step 11 — Compute the `hybrid_effective_allow` for an
+/// `IntentKind::IntegrationMerge` admission.
+///
+/// Spec form (`v2-deep-spec.md §Step 11`):
+///
+/// ```text
+/// hybrid_effective_allow =
+///     UNION(all subtask path_allowlists for this initiative)
+///     ∪ cross_cutting_artifacts (from `[orchestrator]`)
+/// ```
+///
+/// The Orchestrator's per-task `path_allowlist` is NOT consulted here.
+/// At `IntegrationMerge` admission the Orchestrator's authority comes
+/// from being the union of all sub-task owners plus the operator-
+/// declared cross-cutting list — its own allowlist would be either a
+/// strict subset of the union (redundant) or a superset (a covert
+/// widening, which Step 11 specifically forbids).
+///
+/// **Predecessor exports are intentionally NOT folded in** here: at
+/// `IntegrationMerge` time, the Orchestrator is operating on the merged
+/// HEAD of every sub-task's branch, not on a single sub-task's
+/// `effective_allow`. The export channel exists to grant downstream
+/// sub-tasks the right to touch artifacts another sub-task wrote; an
+/// integration merge is a different relation (it owns the post-merge
+/// state of the whole graph).
+///
+/// **`path_scope_override` per sub-task** is honoured by widening that
+/// sub-task's contribution to "match everything" — a single overriding
+/// sub-task makes the hybrid set universal. This is consistent with the
+/// V1 `effective_allow` semantics for an overriding task.
+///
+/// Returns `Ok(AllowSet::universal())` when ANY sub-task in the
+/// initiative has `path_scope_override = true`. Otherwise returns a
+/// non-universal `AllowSet` whose `path_entries` are the parsed union
+/// and whose `exact_paths` are the cross-cutting artifacts.
+///
+/// Errors only on `InvalidPathEntry` (a registry row with an empty
+/// path entry, defense-in-depth — Step 19's admission gate prevents
+/// this). The "no tasks in this initiative" case is reported as the
+/// empty allow set; the IntegrationMerge handler is responsible for
+/// rejecting an `IntegrationMerge` against an unknown initiative on
+/// other grounds (initiative quarantine / not found / not Executing).
+pub fn compute_hybrid_effective_allow(
+    initiative_id: &str,
+    registry:      &PlanRegistry,
+) -> Result<AllowSet, PathScopeError> {
+    let task_snapshot = registry.tasks_in_initiative(initiative_id);
+
+    // §Step 11 universal-override propagation: a single override
+    // makes the entire IntegrationMerge unrestricted. This is rare in
+    // production (override is the operator-quarantine bypass; spec
+    // §2.5.8) but we handle it for symmetry with `effective_allow`.
+    if task_snapshot.iter().any(|(_, f)| f.path_scope_override) {
+        return Ok(AllowSet::universal());
+    }
+
+    // Fold every sub-task's `path_allowlist` into one parsed list.
+    // De-duplication is implicit in the matcher (any redundant prefix
+    // costs an O(1) extra check; not worth the BTreeSet overhead in
+    // the inner loop). Order is preserved per the per-task insertion
+    // order returned by `tasks_in_initiative`.
+    let mut entries = Vec::new();
+    for (_, fields) in &task_snapshot {
+        for raw in &fields.path_allowlist {
+            let entry = PathEntry::parse(raw)
+                .ok_or_else(|| PathScopeError::InvalidPathEntry { entry: raw.clone() })?;
+            entries.push(entry);
+        }
+    }
+
+    // `cross_cutting_artifacts` join. Operator-declared exact filenames
+    // (validated by `validate_cross_cutting_artifacts` in `lifecycle.rs`
+    // at admission time). We materialise them into `exact_paths` —
+    // semantically the same as a `PathEntry::Exact`, but the
+    // §2.5.8 type model puts operator-declared concretes in
+    // `exact_paths` for parallel symmetry with predecessor exports.
+    let exact_paths: BTreeSet<String> = registry
+        .orchestrator(initiative_id)
+        .map(|o: OrchestratorPlanFields| o.cross_cutting_artifacts.into_iter().collect())
+        .unwrap_or_default();
+
+    Ok(AllowSet { universal: false, path_entries: entries, exact_paths })
+}
+
+/// V2 §Step 11 — `check_paths` analog for `IntentKind::IntegrationMerge`.
+///
+/// Same return shape as `check_paths` (the inner `Result<(),
+/// PathPolicyViolation>` distinguishes coverage success from per-path
+/// rejections). Composes `compute_hybrid_effective_allow` with the
+/// linear scan over `touched_paths`.
+pub fn check_paths_hybrid(
+    touched_paths: &[std::path::PathBuf],
+    initiative_id: &str,
+    registry:      &PlanRegistry,
+) -> Result<Result<(), PathPolicyViolation>, PathScopeError> {
+    let allow = compute_hybrid_effective_allow(initiative_id, registry)?;
+
+    let mut violations: Vec<String> = Vec::new();
+    for p in touched_paths {
+        let s = p.to_string_lossy();
+        if !allow.matches(&s) {
+            violations.push(s.into_owned());
+        }
+    }
+
+    Ok(if violations.is_empty() {
+        Ok(())
+    } else {
+        violations.sort();
+        Err(PathPolicyViolation { paths: violations })
+    })
 }
 
 /// Parse a list of V2-syntax `path_allowlist` entries into `PathEntry`s.
@@ -805,5 +918,193 @@ mod tests {
         ];
         let result = check_paths(&touched, "init-A", "t1", &registry, &store).unwrap();
         assert!(result.is_ok());
+    }
+
+    // ── compute_hybrid_effective_allow / check_paths_hybrid (Step 11) ────
+
+    #[test]
+    fn hybrid_unions_subtask_allowlists_in_initiative_scope_only() {
+        // Two tasks in init-A, one in init-B. The hybrid allow for
+        // init-A must contain both A-tasks' entries and NOTHING from
+        // init-B (cross-initiative leakage would be a security bug).
+        let registry = registry_with(&[
+            ("init-A", "t1", TaskPlanFields {
+                path_allowlist: vec!["src/api/".to_owned()],
+                ..Default::default()
+            }),
+            ("init-A", "t2", TaskPlanFields {
+                path_allowlist: vec!["src/db/".to_owned()],
+                ..Default::default()
+            }),
+            ("init-B", "x1", TaskPlanFields {
+                path_allowlist: vec!["should/not/leak/".to_owned()],
+                ..Default::default()
+            }),
+        ]);
+
+        let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
+        assert!(!allow.universal);
+        assert!(allow.matches("src/api/handler.rs"));
+        assert!(allow.matches("src/db/migrate.rs"));
+        assert!(!allow.matches("should/not/leak/x.rs"),
+            "init-B's entries must NOT leak into init-A's hybrid allow");
+        assert!(!allow.matches("README.md"),
+            "no entry, no admission");
+    }
+
+    #[test]
+    fn hybrid_adds_cross_cutting_artifacts_as_exact_matches() {
+        let registry = registry_with(&[
+            ("init-A", "t1", TaskPlanFields {
+                path_allowlist: vec!["src/".to_owned()],
+                ..Default::default()
+            }),
+        ]);
+        registry.insert_orchestrator("init-A", OrchestratorPlanFields {
+            cross_cutting_artifacts: vec![
+                "Cargo.lock".to_owned(),
+                "package-lock.json".to_owned(),
+            ],
+        });
+
+        let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
+        // Sub-task allowlist still admits.
+        assert!(allow.matches("src/lib.rs"));
+        // Cross-cutting artifacts admit by EXACT match — not by prefix.
+        assert!(allow.matches("Cargo.lock"));
+        assert!(allow.matches("package-lock.json"));
+        // A path that begins with a cross-cutting filename but is NOT
+        // exactly that name must NOT match (the entries are exact, not
+        // prefix). This pins the no-prefix-bleed semantic.
+        assert!(!allow.matches("Cargo.lock.bak"));
+        assert!(!allow.matches("not/Cargo.lock"));
+    }
+
+    #[test]
+    fn hybrid_with_no_orchestrator_section_uses_only_subtask_union() {
+        // V1 backward compat: an initiative with no `[orchestrator]`
+        // entry in the registry produces a hybrid allow that's just
+        // the union of sub-task allowlists, with NO cross-cutting.
+        let registry = registry_with(&[
+            ("init-A", "t1", TaskPlanFields {
+                path_allowlist: vec!["src/".to_owned()],
+                ..Default::default()
+            }),
+        ]);
+
+        let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
+        assert!(allow.matches("src/x.rs"));
+        // Cargo.lock NOT admitted (no cross-cutting declared).
+        assert!(!allow.matches("Cargo.lock"));
+    }
+
+    #[test]
+    fn hybrid_universalizes_when_any_subtask_overrides() {
+        // §Step 11 + §2.5.8 override propagation: if any sub-task
+        // carries `path_scope_override = true`, the hybrid allow is
+        // universal. Pin this so an audit/forensics review of an
+        // override doesn't quietly miss the IntegrationMerge widening.
+        let registry = registry_with(&[
+            ("init-A", "t1", TaskPlanFields {
+                path_allowlist: vec!["src/".to_owned()],
+                ..Default::default()
+            }),
+            ("init-A", "t2", TaskPlanFields {
+                path_scope_override: true,
+                ..Default::default()
+            }),
+        ]);
+
+        let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
+        assert!(allow.universal);
+        assert!(allow.matches("/etc/passwd"));
+        assert!(allow.matches("../escape"));
+    }
+
+    #[test]
+    fn hybrid_with_no_tasks_returns_empty_allowlist() {
+        // Step 11 spec edge-case: an initiative with no `[[tasks]]`
+        // entries (e.g., admit-time recovery from a corrupted plan
+        // bundle) yields an empty allow set. The IntegrationMerge
+        // handler must reject EVERY non-empty `touched_paths` against
+        // such an initiative — fail-closed.
+        let registry = PlanRegistry::new();
+        let allow = compute_hybrid_effective_allow("init-no-tasks", &registry).unwrap();
+        assert!(!allow.universal);
+        assert!(allow.path_entries.is_empty());
+        assert!(allow.exact_paths.is_empty());
+        assert!(!allow.matches("anything"));
+    }
+
+    #[test]
+    fn hybrid_invalid_path_entry_propagates_as_error() {
+        // Defense in depth: a registry row containing an empty
+        // `path_allowlist` entry (impossible under Step 19's
+        // admission gate, but defensively guarded here) surfaces as
+        // `InvalidPathEntry`. The handler maps this to the opaque
+        // `FailPathPolicyViolation` per INV-08.
+        let registry = registry_with(&[
+            ("init-A", "t1", TaskPlanFields {
+                path_allowlist: vec!["".to_owned()],  // <-- malformed
+                ..Default::default()
+            }),
+        ]);
+
+        let err = compute_hybrid_effective_allow("init-A", &registry)
+            .expect_err("empty entry must surface InvalidPathEntry");
+        match err {
+            PathScopeError::InvalidPathEntry { entry } => assert!(entry.is_empty()),
+            other => panic!("expected InvalidPathEntry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_paths_hybrid_passes_when_every_path_admitted() {
+        let registry = registry_with(&[
+            ("init-A", "t1", TaskPlanFields {
+                path_allowlist: vec!["src/".to_owned()],
+                ..Default::default()
+            }),
+        ]);
+        registry.insert_orchestrator("init-A", OrchestratorPlanFields {
+            cross_cutting_artifacts: vec!["Cargo.lock".to_owned()],
+        });
+        let touched = vec![
+            PathBuf::from("src/lib.rs"),
+            PathBuf::from("Cargo.lock"),
+        ];
+        let result = check_paths_hybrid(&touched, "init-A", &registry).unwrap();
+        assert!(result.is_ok(), "all paths admitted by hybrid allow");
+    }
+
+    #[test]
+    fn check_paths_hybrid_collects_violations() {
+        let registry = registry_with(&[
+            ("init-A", "t1", TaskPlanFields {
+                path_allowlist: vec!["src/".to_owned()],
+                ..Default::default()
+            }),
+        ]);
+        registry.insert_orchestrator("init-A", OrchestratorPlanFields {
+            cross_cutting_artifacts: vec!["Cargo.lock".to_owned()],
+        });
+        let touched = vec![
+            PathBuf::from("src/lib.rs"),       // admitted (sub-task)
+            PathBuf::from("Cargo.lock"),       // admitted (cross-cutting)
+            PathBuf::from("docs/intro.md"),    // VIOLATION
+            PathBuf::from("Cargo.lock.bak"),   // VIOLATION (no prefix bleed)
+        ];
+        let result = check_paths_hybrid(&touched, "init-A", &registry).unwrap();
+        let violation = result.expect_err("violations expected");
+        assert_eq!(violation.paths, vec!["Cargo.lock.bak", "docs/intro.md"]);
+    }
+
+    #[test]
+    fn check_paths_hybrid_passes_vacuously_on_empty_input() {
+        let registry = PlanRegistry::new();
+        let touched: Vec<PathBuf> = vec![];
+        let result = check_paths_hybrid(&touched, "init-A", &registry).unwrap();
+        assert!(result.is_ok(),
+            "empty touched_paths trivially passes regardless of allow set");
     }
 }

@@ -548,13 +548,29 @@ fn run_phase_a(
     // default of `path_allowlist = []` it means the kernel will never
     // silently widen `touched_paths` because the in-memory plan was
     // unavailable.
-    match crate::path_scope::check_paths(
-        &touched_paths,
-        &task.initiative_id,
-        req.task_id.as_str(),
-        &ctx.plan_registry,
-        store,
-    ) {
+    // V2 §Step 11 — IntegrationMerge uses the *hybrid* allowlist
+    // (UNION of all sub-task `path_allowlist`s ∪ orchestrator's
+    // `cross_cutting_artifacts`); every other intent uses the
+    // per-task allowlist via `effective_allow`. Dispatching by
+    // `intent_kind` here keeps Phase B's path check single-shot
+    // (no double-evaluation) while preserving the V1 behaviour for
+    // SingleCommit / Read / etc.
+    let path_check = match req.intent_kind {
+        IntentKind::IntegrationMerge => crate::path_scope::check_paths_hybrid(
+            &touched_paths,
+            &task.initiative_id,
+            &ctx.plan_registry,
+        ),
+        _ => crate::path_scope::check_paths(
+            &touched_paths,
+            &task.initiative_id,
+            req.task_id.as_str(),
+            &ctx.plan_registry,
+            store,
+        ),
+    };
+
+    match path_check {
         Ok(Ok(())) => {}
         Ok(Err(violation)) => {
             // Internal log only — INV-08 keeps the wire response opaque.
