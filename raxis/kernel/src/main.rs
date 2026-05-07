@@ -280,6 +280,36 @@ async fn main() {
         })
     };
 
+    // Step 8b: Spawn the V2.1 plan-bundle nonce sweep loop. Per
+    // `plan-bundle-sealing.md §8.4` the kernel periodically reaps
+    // rows from `plan_bundle_nonces_seen` whose
+    // `first_seen_at_unix_secs` is older than
+    // `[plan_signing].max_plan_bundle_age_secs +
+    //  max_clock_skew_secs +
+    //  nonce_retention_grace_secs`. The cadence comes from the same
+    // `[plan_signing].nonce_sweep_interval_secs` field (default 1 h).
+    //
+    // Replay protection (`INV-PLAN-BUNDLE-FRESH`) survives the sweep:
+    // a row that is eligible for deletion has, by construction, a
+    // `signed_at_unix_secs` outside the freshness window already, so
+    // any future re-submission of its bundle would be rejected by
+    // admission step 10a (`FAIL_PLAN_BUNDLE_EXPIRED`) before step 10b
+    // even queries the table.
+    let (nonce_sweep_shutdown_tx, nonce_sweep_shutdown_rx) =
+        tokio::sync::oneshot::channel::<()>();
+    let nonce_sweep_handle = {
+        let store_for_sweep  = Arc::clone(&store);
+        let policy_for_sweep = Arc::clone(&policy);
+        tokio::spawn(async move {
+            runtime::nonce_sweeper_loop(
+                store_for_sweep,
+                policy_for_sweep,
+                nonce_sweep_shutdown_rx,
+            )
+            .await;
+        })
+    };
+
     // Step 7b: Construct the in-memory PlanRegistry and repopulate it from
     // every non-terminal initiative's signed plan artifact. Per
     // kernel-store.md §2.5.8 the four path-scope plan fields live only
@@ -394,24 +424,28 @@ async fn main() {
     let shutdown = match ipc::server::start(&data_dir, ctx).await {
         Ok(reason) => reason,
         Err(e) => {
-            // Try to tell the supervisor + heartbeat to clean up
-            // before bailing out. Both channels are best-effort — if
-            // either receiver was already dropped the send returns
-            // Err, which we discard.
+            // Try to tell the supervisor + heartbeat + nonce sweep to
+            // clean up before bailing out. All channels are
+            // best-effort — if a receiver was already dropped the
+            // send returns Err, which we discard.
             let _ = gateway_shutdown_tx.send(());
             let _ = heartbeat_shutdown_tx.send(());
+            let _ = nonce_sweep_shutdown_tx.send(());
             exit_with_code(e);
         }
     };
 
-    // Step 9.5: Tell the gateway supervisor + heartbeat loop to wind
-    // down. The supervisor sends SIGKILL to the child (Tokio
-    // `Command::start_kill`) and waits for reap; the heartbeat loop
-    // writes one final `state = "Stopping"` snapshot before
-    // returning. Errors inside both are logged from inside; we just
-    // need to know they're done before emitting `KernelStopped`.
+    // Step 9.5: Tell the gateway supervisor + heartbeat loop + nonce
+    // sweeper to wind down. The supervisor sends SIGKILL to the child
+    // (Tokio `Command::start_kill`) and waits for reap; the heartbeat
+    // loop writes one final `state = "Stopping"` snapshot before
+    // returning; the nonce sweeper exits on its current `select!`
+    // arm without running a final sweep. Errors inside each are
+    // logged from inside; we just need to know they're done before
+    // emitting `KernelStopped`.
     let _ = gateway_shutdown_tx.send(());
     let _ = heartbeat_shutdown_tx.send(());
+    let _ = nonce_sweep_shutdown_tx.send(());
     match supervisor_handle.await {
         Ok(reason) => eprintln!(
             "{{\"level\":\"info\",\"event\":\"gateway_supervisor_done\",\
@@ -433,6 +467,16 @@ async fn main() {
         ),
         Err(join_err) => eprintln!(
             "{{\"level\":\"warn\",\"event\":\"heartbeat_loop_join_failed\",\
+             \"reason\":\"{join_err}\"}}"
+        ),
+    }
+    match nonce_sweep_handle.await {
+        Ok(()) => eprintln!(
+            "{{\"level\":\"info\",\"event\":\"plan_bundle_nonce_sweep_loop_done\"}}"
+        ),
+        Err(join_err) => eprintln!(
+            "{{\"level\":\"warn\",\
+             \"event\":\"plan_bundle_nonce_sweep_loop_join_failed\",\
              \"reason\":\"{join_err}\"}}"
         ),
     }

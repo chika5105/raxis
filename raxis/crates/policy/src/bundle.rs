@@ -86,6 +86,15 @@ pub(crate) struct RawPolicy {
     /// Normative reference: `cli-readonly.md` §5.6.
     #[serde(default)]
     pub(crate) notifications: NotificationsSection,
+
+    /// `[plan_signing]` — V2.1 plan-bundle freshness / replay-protection
+    /// configuration. **Optional**: a kernel that omits the section
+    /// boots with the spec defaults from `plan-bundle-sealing.md §7.4`.
+    /// All five fields have field-level defaults; the structural
+    /// invariants (`max_clock_skew_secs ≤ max_plan_bundle_age_secs / 4`,
+    /// hard ceilings) are checked at validate time.
+    #[serde(default)]
+    pub(crate) plan_signing: Option<PlanSigningSection>,
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +534,175 @@ fn default_gateway_respawn_backoff_ms() -> u64 { 1000 }
 fn default_gateway_max_consecutive_respawns() -> u32 { 5 }
 
 // ---------------------------------------------------------------------------
+// Plan-signing freshness / replay-protection — `[plan_signing]`
+// ---------------------------------------------------------------------------
+
+/// Hard ceiling on `[plan_signing].max_plan_bundle_age_secs`. 30 days.
+/// Per `plan-bundle-sealing.md §7.4`: operators with longer review
+/// cycles MAY raise the freshness window up to this ceiling. Above this
+/// the storage cost of `plan_bundle_nonces_seen` rises faster than the
+/// operational benefit (the sweep window is `age + skew + grace`).
+pub const PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS: u64 = 30 * 24 * 60 * 60;
+
+/// Hard ceiling on `[plan_signing].nonce_sweep_interval_secs`. Once
+/// per day. The sweep is a single SQL DELETE on a small (typically
+/// <100 KiB) table — it is essentially free. The hard ceiling exists
+/// only to keep the table from growing without bound under operator
+/// misconfiguration: with the default 25h freshness window and a 1d
+/// sweep cadence, steady-state growth is bounded by twice the daily
+/// admission rate.
+pub const PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS: u64 = 24 * 60 * 60;
+
+/// `[plan_signing]` — replay-protection and freshness configuration
+/// for the V2.1 plan-bundle admission path.
+///
+/// ```toml
+/// [plan_signing]
+/// max_plan_bundle_age_secs    = 86_400   # 24 h freshness window
+/// max_clock_skew_secs         = 300      # 5 min future tolerance
+/// nonce_retention_grace_secs  = 3_600    # 1 h sweep grace beyond age+skew
+/// nonce_sweep_interval_secs   = 3_600    # how often the kernel sweeps
+/// accept_unfresh_v2_0_bundles = false    # transitional: accept legacy schema-1 bundles
+/// ```
+///
+/// All five fields have defaults so a kernel that omits the section
+/// boots with the spec defaults — a deliberate forward-compat choice
+/// while §7.4 / §8.4 incrementally lands. The structural invariants
+/// from `plan-bundle-sealing.md §7.4` are checked at policy validate
+/// time:
+///
+///   * `max_plan_bundle_age_secs ≤ PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS`
+///   * `max_clock_skew_secs ≤ max_plan_bundle_age_secs / 4`
+///   * `nonce_retention_grace_secs ≤ max_plan_bundle_age_secs`
+///     *(grace beyond the freshness window is bounded by the window
+///     itself — a longer grace would just store dead rows)*
+///   * `1 ≤ nonce_sweep_interval_secs ≤ PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS`
+///
+/// Failures map to `FAIL_POLICY_PLAN_SIGNING_INVALID` at policy load
+/// (`plan-bundle-sealing.md §9`).
+///
+/// `nonce_sweep_interval_secs` is a V2.1 implementation field not
+/// present in the original `plan-bundle-sealing.md §7.4` table. It is
+/// the cadence on which the kernel runs the §8.4 nonce-table DELETE
+/// query. The spec previously left this implicit ("default once per
+/// hour"); making it operator-tunable lets large deployments lengthen
+/// the cadence without touching the freshness window. Documented
+/// in-spec at §7.4 / §8.4 to keep implementation and spec aligned.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlanSigningSection {
+    /// How long a signed bundle remains submittable before
+    /// `FAIL_PLAN_BUNDLE_EXPIRED`. Default: 24 h. Hard ceiling: 30 d.
+    #[serde(default = "default_max_plan_bundle_age_secs")]
+    pub max_plan_bundle_age_secs: u64,
+
+    /// Future-clock tolerance: `signed_at_unix_secs - now() > this`
+    /// triggers `FAIL_PLAN_BUNDLE_FROM_FUTURE`. MUST be
+    /// ≤ `max_plan_bundle_age_secs / 4` so the freshness window cannot
+    /// invert under operator clock drift. Default: 5 min.
+    #[serde(default = "default_max_clock_skew_secs")]
+    pub max_clock_skew_secs: u64,
+
+    /// Grace term added to the §8.4 sweep cutoff: a nonce is reaped
+    /// once `now() - first_seen_at_unix_secs >
+    ///   max_plan_bundle_age_secs + max_clock_skew_secs + this`.
+    /// Default: 1 h. MUST be ≤ `max_plan_bundle_age_secs` (a longer
+    /// grace just stores dead rows).
+    #[serde(default = "default_nonce_retention_grace_secs")]
+    pub nonce_retention_grace_secs: u64,
+
+    /// Cadence on which the kernel runs the §8.4 sweep DELETE query.
+    /// Default: 1 h. Hard floor: 1 second. Hard ceiling: 24 h.
+    #[serde(default = "default_nonce_sweep_interval_secs")]
+    pub nonce_sweep_interval_secs: u64,
+
+    /// Transitional knob (§3.1): accept schema-1 / V2.0 bundles
+    /// without a freshness envelope. Default: `false`. Setting to
+    /// `true` is operator-acknowledged legacy bypass; documented as
+    /// transitional only in §3.1.
+    #[serde(default)]
+    pub accept_unfresh_v2_0_bundles: bool,
+}
+
+impl Default for PlanSigningSection {
+    fn default() -> Self {
+        Self {
+            max_plan_bundle_age_secs:    default_max_plan_bundle_age_secs(),
+            max_clock_skew_secs:         default_max_clock_skew_secs(),
+            nonce_retention_grace_secs:  default_nonce_retention_grace_secs(),
+            nonce_sweep_interval_secs:   default_nonce_sweep_interval_secs(),
+            accept_unfresh_v2_0_bundles: false,
+        }
+    }
+}
+
+impl PlanSigningSection {
+    /// Total span of time during which a nonce row is considered live
+    /// for replay-protection purposes. Used by the kernel's §8.4 sweep
+    /// loop: rows older than `now() - nonce_live_window_secs` are
+    /// safe to delete because their associated `signed_at_unix_secs`
+    /// is, by construction, outside the freshness window already.
+    pub fn nonce_live_window_secs(&self) -> u64 {
+        self.max_plan_bundle_age_secs
+            .saturating_add(self.max_clock_skew_secs)
+            .saturating_add(self.nonce_retention_grace_secs)
+    }
+
+    /// Apply the §7.4 structural invariants. Returns the field name
+    /// and a one-line explanation on failure so the loader can wrap
+    /// it in `FAIL_POLICY_PLAN_SIGNING_INVALID`.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.max_plan_bundle_age_secs == 0 {
+            return Err(
+                "[plan_signing].max_plan_bundle_age_secs must be > 0".to_owned(),
+            );
+        }
+        if self.max_plan_bundle_age_secs > PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS {
+            return Err(format!(
+                "[plan_signing].max_plan_bundle_age_secs ({}) exceeds the hard \
+                 ceiling of {} seconds (30 days)",
+                self.max_plan_bundle_age_secs,
+                PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS,
+            ));
+        }
+        if self.max_clock_skew_secs > self.max_plan_bundle_age_secs / 4 {
+            return Err(format!(
+                "[plan_signing].max_clock_skew_secs ({}) must be <= \
+                 max_plan_bundle_age_secs / 4 ({})",
+                self.max_clock_skew_secs,
+                self.max_plan_bundle_age_secs / 4,
+            ));
+        }
+        if self.nonce_retention_grace_secs > self.max_plan_bundle_age_secs {
+            return Err(format!(
+                "[plan_signing].nonce_retention_grace_secs ({}) must be <= \
+                 max_plan_bundle_age_secs ({})",
+                self.nonce_retention_grace_secs,
+                self.max_plan_bundle_age_secs,
+            ));
+        }
+        if self.nonce_sweep_interval_secs == 0 {
+            return Err(
+                "[plan_signing].nonce_sweep_interval_secs must be > 0".to_owned(),
+            );
+        }
+        if self.nonce_sweep_interval_secs > PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS {
+            return Err(format!(
+                "[plan_signing].nonce_sweep_interval_secs ({}) exceeds the hard \
+                 ceiling of {} seconds (24 hours)",
+                self.nonce_sweep_interval_secs,
+                PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS,
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn default_max_plan_bundle_age_secs()    -> u64 { 24 * 60 * 60 } // 24 h
+fn default_max_clock_skew_secs()         -> u64 { 5 * 60 }       // 5 min
+fn default_nonce_retention_grace_secs()  -> u64 { 60 * 60 }      // 1 h
+fn default_nonce_sweep_interval_secs()   -> u64 { 60 * 60 }      // 1 h
+
+// ---------------------------------------------------------------------------
 // Provider entries — `[[providers]]`
 // ---------------------------------------------------------------------------
 
@@ -940,6 +1118,15 @@ pub struct PolicyBundle {
     /// caps. Empty `Vec` is permitted (matches `gateway = None`).
     providers: Vec<ProviderEntry>,
 
+    /// `[plan_signing]` config — V2.1 plan-bundle freshness window,
+    /// clock-skew tolerance, nonce retention grace, and sweep cadence.
+    /// `None` means "operator omitted the section; use spec defaults"
+    /// — `plan_signing()` materialises a `Cow::Owned` default in that
+    /// case. The bundle stores `Option` rather than always-Some so the
+    /// validator can distinguish "operator declared values" (validated)
+    /// from "no section at all" (defaults already validated by spec).
+    plan_signing: Option<PlanSigningSection>,
+
     /// Validated notification channels. ALWAYS contains the implicit
     /// `"shell"` channel — synthesised at validate time when the
     /// operator does not declare it (cli-readonly.md §5.6.2). Channels
@@ -1184,6 +1371,16 @@ impl PolicyBundle {
             egress_max_fetches_per_window: raw.egress.max_fetches_per_window,
             gateway: raw.gateway,
             providers: raw.providers,
+            plan_signing: {
+                if let Some(section) = raw.plan_signing.as_ref() {
+                    section.validate().map_err(|reason| {
+                        PolicyError::MalformedArtifact(format!(
+                            "FAIL_POLICY_PLAN_SIGNING_INVALID: {reason}"
+                        ))
+                    })?;
+                }
+                raw.plan_signing
+            },
             notification_channels,
             notification_routes,
             default_notification_channels,
@@ -1306,6 +1503,7 @@ impl PolicyBundle {
             max_delegation_ttl: Duration::from_secs(0),
             gateway: None,
             providers: Vec::new(),
+            plan_signing: None,
             base_cost_per_intent_kind: HashMap::new(),
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
@@ -1528,6 +1726,23 @@ impl PolicyBundle {
     /// (kernel runs without a gateway subprocess; no inference dispatch).
     pub fn gateway(&self) -> Option<&GatewaySection> {
         self.gateway.as_ref()
+    }
+
+    // ── Plan-signing freshness / replay-protection ──────────────────────────
+
+    /// Effective `[plan_signing]` config — operator-declared values if
+    /// present, otherwise the spec defaults from
+    /// `plan-bundle-sealing.md §7.4`. Always returns a fully-populated
+    /// `PlanSigningSection`, so the kernel sweep loop and the §8.1
+    /// admission step can read fields without an `Option` dance.
+    ///
+    /// Cloning the section is cheap (six u64s + one bool) and lets the
+    /// caller (heartbeat / sweep loops) move it into a long-lived
+    /// `tokio::spawn` without holding a borrow on the `ArcSwap` snapshot.
+    pub fn plan_signing(&self) -> PlanSigningSection {
+        self.plan_signing
+            .clone()
+            .unwrap_or_else(PlanSigningSection::default)
     }
 
     // ── Provider catalogue ──────────────────────────────────────────────────
@@ -1791,6 +2006,7 @@ mod tests {
             max_delegation_ttl: Duration::from_secs(0),
             gateway: None,
             providers: Vec::new(),
+            plan_signing: None,
             base_cost_per_intent_kind: HashMap::new(),
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
@@ -2215,6 +2431,186 @@ priority             = 100
         );
         let bundle = write_and_load(&t).expect("unknown kind must load");
         assert_eq!(bundle.providers()[0].kind, "NotAValidKindYet");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — `[plan_signing]` validation (plan-bundle-sealing.md §7.4).
+// ---------------------------------------------------------------------------
+//
+// These cover the §7.4 invariants (hard ceilings, clock-skew ratio,
+// nonce-grace bound, sweep cadence bounds), the all-defaults path
+// for kernels that omit `[plan_signing]`, and the round-trip through
+// `PolicyBundle::plan_signing()`.
+
+#[cfg(test)]
+mod plan_signing_tests {
+    use super::*;
+    use crate::load_policy;
+
+    fn minimal_with_plan_signing(extra: &str) -> String {
+        let mut t = super::gateway_providers_tests::minimal_policy_toml_for_tests();
+        t.push_str(extra);
+        t
+    }
+
+    fn write_and_load(
+        toml_str: &str,
+    ) -> Result<crate::PolicyBundle, crate::PolicyError> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), toml_str).unwrap();
+        load_policy(tmp.path()).map(|(b, _, _)| b)
+    }
+
+    #[test]
+    fn omitted_plan_signing_section_yields_spec_defaults() {
+        let bundle = write_and_load(
+            &super::gateway_providers_tests::minimal_policy_toml_for_tests(),
+        )
+        .expect("policy without [plan_signing] must load");
+        let p = bundle.plan_signing();
+        assert_eq!(p.max_plan_bundle_age_secs,    24 * 60 * 60);
+        assert_eq!(p.max_clock_skew_secs,         5 * 60);
+        assert_eq!(p.nonce_retention_grace_secs,  60 * 60);
+        assert_eq!(p.nonce_sweep_interval_secs,   60 * 60);
+        assert!(!p.accept_unfresh_v2_0_bundles);
+    }
+
+    #[test]
+    fn empty_plan_signing_section_uses_field_level_defaults() {
+        let bundle = write_and_load(&minimal_with_plan_signing("\n[plan_signing]\n"))
+            .expect("[plan_signing] with no fields must inherit field defaults");
+        let p = bundle.plan_signing();
+        assert_eq!(p.max_plan_bundle_age_secs,   24 * 60 * 60);
+        assert_eq!(p.nonce_sweep_interval_secs,  60 * 60);
+    }
+
+    #[test]
+    fn explicit_values_round_trip_via_accessor() {
+        let bundle = write_and_load(&minimal_with_plan_signing(
+            "\n[plan_signing]\n\
+             max_plan_bundle_age_secs    = 3600\n\
+             max_clock_skew_secs         = 60\n\
+             nonce_retention_grace_secs  = 300\n\
+             nonce_sweep_interval_secs   = 120\n\
+             accept_unfresh_v2_0_bundles = true\n",
+        ))
+        .expect("explicit values must validate cleanly");
+        let p = bundle.plan_signing();
+        assert_eq!(p.max_plan_bundle_age_secs,   3600);
+        assert_eq!(p.max_clock_skew_secs,        60);
+        assert_eq!(p.nonce_retention_grace_secs, 300);
+        assert_eq!(p.nonce_sweep_interval_secs,  120);
+        assert!(p.accept_unfresh_v2_0_bundles);
+    }
+
+    #[test]
+    fn nonce_live_window_secs_is_age_plus_skew_plus_grace() {
+        let bundle = write_and_load(&minimal_with_plan_signing(
+            "\n[plan_signing]\n\
+             max_plan_bundle_age_secs    = 3600\n\
+             max_clock_skew_secs         = 60\n\
+             nonce_retention_grace_secs  = 300\n",
+        ))
+        .expect("explicit values must validate cleanly");
+        assert_eq!(bundle.plan_signing().nonce_live_window_secs(), 3600 + 60 + 300);
+    }
+
+    #[test]
+    fn zero_max_age_is_rejected() {
+        let err = write_and_load(&minimal_with_plan_signing(
+            "\n[plan_signing]\nmax_plan_bundle_age_secs = 0\n",
+        ))
+        .expect_err("zero freshness window must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_SIGNING_INVALID"), "got: {s}");
+        assert!(s.contains("max_plan_bundle_age_secs"), "got: {s}");
+    }
+
+    #[test]
+    fn max_age_above_30_day_ceiling_is_rejected() {
+        let above = PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS + 1;
+        let err = write_and_load(&minimal_with_plan_signing(&format!(
+            "\n[plan_signing]\nmax_plan_bundle_age_secs = {above}\n",
+        )))
+        .expect_err("ceiling overshoot must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_SIGNING_INVALID"), "got: {s}");
+        assert!(s.contains("hard ceiling"), "error must mention ceiling; got: {s}");
+    }
+
+    #[test]
+    fn skew_above_quarter_of_max_age_is_rejected() {
+        let err = write_and_load(&minimal_with_plan_signing(
+            "\n[plan_signing]\n\
+             max_plan_bundle_age_secs = 3600\n\
+             max_clock_skew_secs      = 901\n", // > 3600 / 4 = 900
+        ))
+        .expect_err("skew > age/4 must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_SIGNING_INVALID"), "got: {s}");
+        assert!(s.contains("max_clock_skew_secs"), "got: {s}");
+    }
+
+    #[test]
+    fn skew_at_quarter_boundary_is_accepted() {
+        let bundle = write_and_load(&minimal_with_plan_signing(
+            "\n[plan_signing]\n\
+             max_plan_bundle_age_secs = 3600\n\
+             max_clock_skew_secs      = 900\n", // == 3600 / 4
+        ))
+        .expect("skew == age/4 must be accepted (boundary inclusive)");
+        assert_eq!(bundle.plan_signing().max_clock_skew_secs, 900);
+    }
+
+    #[test]
+    fn grace_above_max_age_is_rejected() {
+        let err = write_and_load(&minimal_with_plan_signing(
+            "\n[plan_signing]\n\
+             max_plan_bundle_age_secs   = 3600\n\
+             nonce_retention_grace_secs = 3601\n",
+        ))
+        .expect_err("grace > age must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_SIGNING_INVALID"), "got: {s}");
+        assert!(s.contains("nonce_retention_grace_secs"), "got: {s}");
+    }
+
+    #[test]
+    fn zero_sweep_interval_is_rejected() {
+        let err = write_and_load(&minimal_with_plan_signing(
+            "\n[plan_signing]\nnonce_sweep_interval_secs = 0\n",
+        ))
+        .expect_err("zero sweep interval must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_SIGNING_INVALID"), "got: {s}");
+        assert!(s.contains("nonce_sweep_interval_secs"), "got: {s}");
+    }
+
+    #[test]
+    fn sweep_interval_above_24h_ceiling_is_rejected() {
+        let above = PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS + 1;
+        let err = write_and_load(&minimal_with_plan_signing(&format!(
+            "\n[plan_signing]\nnonce_sweep_interval_secs = {above}\n",
+        )))
+        .expect_err("sweep interval ceiling overshoot must fail policy load");
+        let s = format!("{err}");
+        assert!(s.contains("FAIL_POLICY_PLAN_SIGNING_INVALID"), "got: {s}");
+    }
+
+    #[test]
+    fn ceiling_at_max_is_accepted() {
+        let max_age = PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS;
+        let max_sweep = PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS;
+        let bundle = write_and_load(&minimal_with_plan_signing(&format!(
+            "\n[plan_signing]\n\
+             max_plan_bundle_age_secs   = {max_age}\n\
+             nonce_sweep_interval_secs  = {max_sweep}\n",
+        )))
+        .expect("ceiling exact-match must be accepted");
+        let p = bundle.plan_signing();
+        assert_eq!(p.max_plan_bundle_age_secs,  max_age);
+        assert_eq!(p.nonce_sweep_interval_secs, max_sweep);
     }
 }
 

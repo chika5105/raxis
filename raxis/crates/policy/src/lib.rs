@@ -19,9 +19,10 @@ pub mod loader;
 
 pub use bundle::{
     GateEntry, GatewaySection, LaneEntry, NotificationChannel, NotificationChannelKind,
-    NotificationRoute, OperatorEntry, PolicyBundle, ProviderEntry,
+    NotificationRoute, OperatorEntry, PlanSigningSection, PolicyBundle, ProviderEntry,
     IMPLICIT_SHELL_CHANNEL_ID, IMPLICIT_SHELL_INBOX_FILENAME, KNOWN_AUDIT_EVENT_KINDS,
     MAX_DATA_FETCH_TIMEOUT_MS, MAX_INFERENCE_TIMEOUT_MS, MAX_RESPONSE_BYTES_CEILING,
+    PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS, PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS,
 };
 
 #[cfg(any(debug_assertions, test))]

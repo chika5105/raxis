@@ -34,5 +34,7 @@
 //! kernel-internal state (the verifier runner, the policy `ArcSwap`).
 
 pub mod heartbeat;
+pub mod nonce_sweeper;
 
 pub use heartbeat::run_loop as heartbeat_loop;
+pub use nonce_sweeper::run_loop as nonce_sweeper_loop;
