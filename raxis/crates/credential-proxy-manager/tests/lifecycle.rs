@@ -30,11 +30,14 @@ async fn postgres_listener_accepts_connection_and_counter_increments_through_shu
     let tmp = tempfile::tempdir().expect("tmpdir");
     let creds_dir = tmp.path().join("credentials");
     std::fs::create_dir_all(&creds_dir).unwrap();
-    std::fs::write(
-        creds_dir.join("pg-staging.url"),
-        b"postgresql://raxis@127.0.0.1:5432/test",
-    )
-    .unwrap();
+    let pg_path = creds_dir.join("pg-staging.env");
+    std::fs::write(&pg_path, b"postgresql://raxis@127.0.0.1:5432/test").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&pg_path, perms).unwrap();
+    }
 
     let backend: Arc<dyn CredentialBackend> =
         Arc::new(FileCredentialBackend::open_without_uid_check(tmp.path()));

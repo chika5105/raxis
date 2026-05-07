@@ -55,6 +55,22 @@
 //!   proxy crates expose an `AuditChannel` callback parameter (a
 //!   followup); for now the kernel only emits the lifecycle pair
 //!   (`Started` + `Stopped`).
+//!
+//! ## K8s proxy (`proxy_type = "k8s"`)
+//!
+//! K8s rides the HTTP credential proxy with a fixed `auth_mode =
+//! "bearer"`; the upstream URL is the `cluster.server` field from
+//! the kubeconfig YAML the credential body holds. Per
+//! `credential-proxy.md §3.1`, a kubeconfig declares the upstream
+//! cluster and the bearer token (or other auth) the proxy injects.
+//! The MVP implementation here parses the `server:` line from the
+//! first `cluster:` block in the kubeconfig with a tiny
+//! line-based extractor; full YAML compliance (anchors, multi-doc,
+//! list-of-clusters by `current-context` selector) is a forthcoming
+//! refinement that lands when the kubeconfig surface grows beyond
+//! the V2 MVP one-cluster shape. The credential body MUST be
+//! valid UTF-8 — opaque-byte kubeconfigs are rejected at bind
+//! time.
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
@@ -90,6 +106,19 @@ pub enum ManagerError {
     UnknownProxyType {
         /// Policy-declared credential name from the plan.
         credential_name: String,
+    },
+
+    /// A `K8s` declaration named a credential whose body could not
+    /// be resolved into a kubeconfig with a `cluster.server` URL.
+    /// Either the credential resolution failed, the body was not
+    /// UTF-8, or the kubeconfig had no parseable `server:` line.
+    #[error("k8s kubeconfig resolution failed for `{credential_name}`: {detail}")]
+    KubeconfigResolution {
+        /// Policy-declared credential name from the plan.
+        credential_name: String,
+        /// Free-form diagnostic. NEVER includes the credential
+        /// value (the kubeconfig body is treated as secret).
+        detail:          String,
     },
 
     /// Postgres proxy failed to bind / start.
@@ -438,20 +467,32 @@ impl CredentialProxyManager {
                     .await?
                 }
                 ProxyDecl::K8s { restrictions } => {
-                    // k8s rides the HTTP proxy with a fixed Bearer
-                    // mode. The upstream URL is taken from the
-                    // resolved kubeconfig at proxy-bind time. The
-                    // MVP defers the kubeconfig.server lookup
-                    // (which would require shelling out to read
-                    // the credential body and YAML-parse it); for
-                    // now the manager refuses K8s proxies with a
-                    // clear error so the kernel session-spawn path
-                    // can fail fast and the operator can switch the
-                    // declaration to `proxy_type = "http"`.
-                    let _ = restrictions;
-                    return Err(ManagerError::UnknownProxyType {
-                        credential_name,
-                    });
+                    // k8s rides the HTTP credential proxy with a
+                    // fixed Bearer mode. The upstream URL is the
+                    // `cluster.server` field from the resolved
+                    // kubeconfig YAML. We resolve the credential
+                    // body once at bind time (the same way the
+                    // HTTP proxy resolves its bearer token), parse
+                    // the `server:` line, and then drive the rest
+                    // of the bind through `bind_http`. The
+                    // `proxy_type` label on the resulting
+                    // `ActiveProxy` is overridden to `"k8s"` so
+                    // audit events carry the operator-declared type.
+                    let upstream_url =
+                        self.resolve_kubeconfig_server_url(&decl.name, session_id)?;
+                    let mut active = self
+                        .bind_http(
+                            session_id,
+                            task_id,
+                            &decl.name,
+                            &decl.mount_as,
+                            &HttpAuthMode::Bearer,
+                            &upstream_url,
+                            restrictions,
+                        )
+                        .await?;
+                    active.proxy_type = "k8s";
+                    active
                 }
                 ProxyDecl::Unknown => {
                     return Err(ManagerError::UnknownProxyType {
@@ -527,6 +568,45 @@ impl CredentialProxyManager {
         })
     }
 
+    /// Resolve a kubeconfig credential and extract the
+    /// `cluster.server` URL. The credential body is treated as
+    /// secret — the helper does NOT log the body, only the
+    /// derived URL (which is operator-known by definition since
+    /// it points at the cluster API server). The credential is
+    /// dropped before returning.
+    fn resolve_kubeconfig_server_url(
+        &self,
+        name:       &raxis_credentials::CredentialName,
+        session_id: &str,
+    ) -> Result<String, ManagerError> {
+        let consumer = raxis_credentials::ConsumerIdentity::new("session", session_id);
+        let value = self
+            .backend
+            .resolve(name, consumer)
+            .map_err(|e| ManagerError::KubeconfigResolution {
+                credential_name: name.as_str().to_owned(),
+                detail:          format!("backend resolve failed: {e}"),
+            })?;
+        let url = value
+            .as_utf8()
+            .ok_or_else(|| ManagerError::KubeconfigResolution {
+                credential_name: name.as_str().to_owned(),
+                detail:          "kubeconfig body is not UTF-8".to_owned(),
+            })
+            .and_then(|body| {
+                kubeconfig::extract_first_cluster_server(&body).ok_or_else(|| {
+                    ManagerError::KubeconfigResolution {
+                        credential_name: name.as_str().to_owned(),
+                        detail:          "no `cluster.server` line found in kubeconfig"
+                            .to_owned(),
+                    }
+                })
+            });
+        // `value` drops here regardless of success — its zeroize
+        // discipline cleans the body bytes.
+        url
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn bind_http(
         &self,
@@ -582,6 +662,132 @@ impl CredentialProxyManager {
     }
 }
 
+// ---------------------------------------------------------------------------
+// kubeconfig — minimal `cluster.server` extractor.
+// ---------------------------------------------------------------------------
+
+mod kubeconfig {
+    /// Extract the first `cluster.server` URL from a kubeconfig
+    /// YAML body. Returns `None` if no parseable `server:` line
+    /// is found inside the first `cluster:` block.
+    ///
+    /// **Why a tiny line-based parser** (vs. a full YAML
+    /// dependency): the V2 kubeconfig surface — generated by
+    /// `kubectl config view --minify --raw` and the cluster
+    /// fixtures the CredentialProxy tests exercise — has a
+    /// well-shaped `clusters: -> cluster: -> server: <url>`
+    /// pattern with consistent indentation. A line-based
+    /// extractor handles every kubeconfig the V2 tests pass
+    /// through it without taking on a YAML parser
+    /// (`serde_yaml` is unmaintained; `serde_yaml_ng` is a
+    /// fork). When we hit a real-world kubeconfig that breaks
+    /// this extractor (anchors, multi-doc, list-of-clusters
+    /// selected by `current-context`), the extractor fails
+    /// with a structured `ManagerError::KubeconfigResolution`
+    /// the operator can act on; at that point we replace it
+    /// with a real YAML parser. The extractor is conservative:
+    /// only `https?://` schemes are accepted to keep operator
+    /// typos from binding the proxy to a non-HTTP upstream.
+    pub fn extract_first_cluster_server(body: &str) -> Option<String> {
+        // Walk lines top-down. Once we see the *singular* `cluster:`
+        // keyword (typically as `- cluster:` inside the
+        // `clusters:` list), the next non-comment `server: <url>`
+        // line is taken as the upstream URL. We deliberately do
+        // NOT accept `clusters:` (the plural list keyword) as the
+        // gate — that would match the parent list header.
+        let mut after_cluster_keyword = false;
+        for raw in body.lines() {
+            let line = raw.trim_end();
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            // Strip leading `- ` so YAML-list items match the same
+            // way as plain mapping entries.
+            let key_part = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            if key_part == "cluster:" || key_part.starts_with("cluster:\n") {
+                after_cluster_keyword = true;
+                continue;
+            }
+            if after_cluster_keyword {
+                if let Some(rest) = trimmed.strip_prefix("server:") {
+                    let url = rest.trim().trim_matches('"').trim_matches('\'').to_owned();
+                    if url.starts_with("http://") || url.starts_with("https://") {
+                        return Some(url);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const KUBECONFIG_BASIC: &str = r#"apiVersion: v1
+clusters:
+- cluster:
+    server: https://cluster.example.com:6443
+    insecure-skip-tls-verify: true
+  name: prod
+contexts:
+- context:
+    cluster: prod
+    user: agent
+  name: default
+current-context: default
+users:
+- name: agent
+  user:
+    token: REDACTED
+"#;
+
+        #[test]
+        fn extracts_https_server_from_basic_kubeconfig() {
+            assert_eq!(
+                extract_first_cluster_server(KUBECONFIG_BASIC).as_deref(),
+                Some("https://cluster.example.com:6443"),
+            );
+        }
+
+        #[test]
+        fn extracts_quoted_server_url() {
+            let body = r#"clusters:
+- cluster:
+    server: "https://cluster.example.com:443"
+"#;
+            assert_eq!(
+                extract_first_cluster_server(body).as_deref(),
+                Some("https://cluster.example.com:443"),
+            );
+        }
+
+        #[test]
+        fn returns_none_when_server_is_missing() {
+            let body = r#"clusters:
+- cluster:
+    name: prod
+"#;
+            assert_eq!(extract_first_cluster_server(body), None);
+        }
+
+        #[test]
+        fn returns_none_for_non_http_scheme() {
+            let body = r#"clusters:
+- cluster:
+    server: ssh://cluster.example.com
+"#;
+            assert_eq!(extract_first_cluster_server(body), None);
+        }
+
+        #[test]
+        fn returns_none_for_empty_body() {
+            assert_eq!(extract_first_cluster_server(""), None);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,6 +795,20 @@ mod tests {
     use raxis_credentials::CredentialName;
     use raxis_credentials_file::FileCredentialBackend;
     use raxis_test_support::FakeAuditSink;
+
+    /// Write a credential body and chmod it to `0600` so
+    /// `FileCredentialBackend::validate_path_security` accepts the
+    /// file.
+    fn write_cred_file(dir: &std::path::Path, name: &str, body: &[u8]) {
+        let p = dir.join(name);
+        std::fs::write(&p, body).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            std::fs::set_permissions(&p, perms).unwrap();
+        }
+    }
 
     fn build_manager() -> (CredentialProxyManager, Arc<FakeAuditSink>, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tmpdir");
@@ -599,16 +819,39 @@ mod tests {
         // to exist for `exists` checks down the road.
         let creds_dir = tmp.path().join("credentials");
         std::fs::create_dir_all(&creds_dir).unwrap();
-        std::fs::write(
-            creds_dir.join("pg-staging.url"),
+        // FileCredentialBackend resolves `<name>` → `credentials/<name>.env`.
+        write_cred_file(
+            &creds_dir,
+            "pg-staging.env",
             b"postgresql://raxis@127.0.0.1:5432/test",
-        )
-        .unwrap();
-        std::fs::write(
-            creds_dir.join("api-key.token"),
-            b"sk-test-token-123",
-        )
-        .unwrap();
+        );
+        write_cred_file(&creds_dir, "api-key.env", b"sk-test-token-123");
+        write_cred_file(
+            &creds_dir,
+            "k8s-staging.env",
+            br#"apiVersion: v1
+clusters:
+- cluster:
+    server: https://cluster.example.com:6443
+    insecure-skip-tls-verify: true
+  name: prod
+contexts:
+- context:
+    cluster: prod
+    user: agent
+  name: default
+current-context: default
+users:
+- name: agent
+  user:
+    token: REDACTED
+"#,
+        );
+        write_cred_file(
+            &creds_dir,
+            "k8s-broken.env",
+            b"# missing clusters block\nfoo: bar\n",
+        );
         let backend: Arc<dyn CredentialBackend> =
             Arc::new(FileCredentialBackend::open_without_uid_check(tmp.path()));
         let audit = Arc::new(FakeAuditSink::new());
@@ -731,8 +974,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn k8s_proxy_decl_is_rejected_pending_kubeconfig_resolution() {
-        let (mgr, _audit, _tmp) = build_manager();
+    async fn k8s_proxy_decl_binds_using_kubeconfig_server_url() {
+        let (mgr, audit, _tmp) = build_manager();
 
         let decls = vec![TaskCredentialDecl {
             name:     CredentialName::new("k8s-staging"),
@@ -742,12 +985,65 @@ mod tests {
             },
         }];
 
-        let err = mgr
+        let handles = mgr
             .start_for_session("sess-4", "task-4", &decls)
             .await
+            .expect("k8s bind should succeed when kubeconfig has a server URL");
+        let summaries = handles.started_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].proxy_type, "k8s");
+        assert_eq!(summaries[0].mount_as, "KUBECONFIG");
+
+        let env = handles.loopback_env();
+        let kubeconfig_url = env.get("KUBECONFIG").expect("env var present");
+        assert!(
+            kubeconfig_url.starts_with("http://127.0.0.1:"),
+            "expected loopback http URL, got {kubeconfig_url}",
+        );
+
+        let started_events: Vec<_> = audit.events()
+            .into_iter()
+            .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
+            .collect();
+        assert_eq!(started_events.len(), 1);
+
+        let report = handles.shutdown().expect("shutdown");
+        assert_eq!(report.stopped[0].proxy_type, "k8s");
+    }
+
+    #[tokio::test]
+    async fn k8s_proxy_decl_with_broken_kubeconfig_surfaces_resolution_error() {
+        let (mgr, audit, _tmp) = build_manager();
+
+        let decls = vec![TaskCredentialDecl {
+            name:     CredentialName::new("k8s-broken"),
+            mount_as: "KUBECONFIG".to_owned(),
+            proxy:    ProxyDecl::K8s {
+                restrictions: HttpRestrictions::default(),
+            },
+        }];
+
+        let err = mgr
+            .start_for_session("sess-4b", "task-4b", &decls)
+            .await
             .err()
-            .expect("k8s should be rejected at MVP");
-        assert!(matches!(err, ManagerError::UnknownProxyType { .. }));
+            .expect("broken kubeconfig should be rejected");
+        match err {
+            ManagerError::KubeconfigResolution { credential_name, detail } => {
+                assert_eq!(credential_name, "k8s-broken");
+                assert!(
+                    detail.contains("server"),
+                    "diagnostic should mention server URL: {detail}",
+                );
+            }
+            other => panic!("expected KubeconfigResolution, got {other:?}"),
+        }
+        // No audit emission for a failed bind.
+        let started_events: Vec<_> = audit.events()
+            .into_iter()
+            .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
+            .collect();
+        assert!(started_events.is_empty());
     }
 
     #[tokio::test]
