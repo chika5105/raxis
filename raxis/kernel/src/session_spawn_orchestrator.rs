@@ -54,14 +54,18 @@
 //!   advisory check.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use raxis_egress_admission::{EgressAllowlist, PolicyAdmissionService};
 use raxis_isolation::{
     EgressTier, ImageBody, ImageKind, ImageSignature, SessionToken, VerifiedImage, VmSpec,
 };
-use raxis_session_spawn::{SessionSpawnService, SpawnError, SpawnHandle, SpawnRequest};
+use raxis_session_spawn::{
+    SessionSpawnService, SpawnError, SpawnHandle, SpawnRequest, TerminationReport,
+};
 use raxis_store::Store;
 use thiserror::Error;
 
@@ -135,43 +139,227 @@ impl OrchestratorSpawnContext {
     }
 }
 
-/// Spawn the canonical Orchestrator VM for a freshly-approved
-/// initiative.
+// ---------------------------------------------------------------------------
+// Trait surface — what the kernel's IPC handlers call.
+// ---------------------------------------------------------------------------
+
+/// Kernel-internal trait that `handle_approve_plan` (and any other
+/// orchestrator-driving callsite) drives to boot the canonical
+/// Orchestrator VM for a freshly-approved initiative.
 ///
-/// Inputs:
+/// Two production-relevant impls live in this module:
 ///
-/// * `spawn_ctx` — install-dir + kernel-version + resource ceilings.
-/// * `session_id` — pre-allocated by `auto_spawn_orchestrator_session_in_tx`
-///   and returned in `PlanApproved::orchestrator_session_id`.
-/// * `initiative_id` — passed straight through to the SpawnRequest
-///   for audit attribution.
-/// * `egress_allowlist` — the operator's policy bundle's egress
-///   surface, lifted into an `EgressAllowlist` for the per-session
-///   `PolicyAdmissionService`.
-/// * `service` — the kernel's `SessionSpawnService` (typically
-///   `Arc::clone(&ctx.session_spawn)`).
-/// * `store` — needed to read `task_credential_proxies`. The
-///   orchestrator session has no `[[tasks]]` row of its own (the
-///   canonical orchestrator is auto-created), so the credential
-///   decls returned here are always empty — but we read through the
-///   uniform path for forward compat (a future spec extension may
-///   permit operator-declared orchestrator credentials).
+/// * [`LiveOrchestratorSpawn`] — the production implementation that
+///   delegates to `SessionSpawnService::spawn_session` against the
+///   real canonical image bytes resolved via the boot-time
+///   install-dir. Wired by `main.rs`.
 ///
-/// Side effects:
+/// * [`NoopOrchestratorSpawn`] (cfg-gated to
+///   `debug_assertions || test`) — the test fake that records every
+///   call and returns `Ok(())` without binding any listener. Wired
+///   by `ipc::context::build_test_orchestrator_spawn` and never
+///   reachable from a release-mode binary, mirroring the
+///   `FailClosedTestIsolation` / `FakeAuditSink` discipline.
 ///
-/// * One per-session credential-proxy listener per declared
-///   credential (typically zero for the orchestrator).
-/// * One per-session egress-admission TCP listener on loopback.
-/// * One subprocess / Firecracker / AVF VM running the canonical
-///   Orchestrator image.
-/// * Audit chain: one `CredentialProxyStarted` per credential plus
-///   one `SessionVmSpawned` paired with a future `SessionVmExited`.
+/// **Why a trait** (rather than a free function or
+/// `Option<OrchestratorSpawnContext>`): test fixtures need a real-
+/// shaped substitute that exercises the same `handle_approve_plan`
+/// path as production. An `Option` would let the handler quietly
+/// branch around the spawn — a trait keeps the call site uniform
+/// and lets tests assert on the recorded calls.
+pub trait OrchestratorSpawn: Send + Sync {
+    /// Spawn the canonical Orchestrator VM for `(session_id,
+    /// initiative_id)`. The implementation is responsible for
+    /// rehydrating the credential decls (production reads from the
+    /// store; the test fake returns an empty list).
+    fn spawn_for_initiative<'a>(
+        &'a self,
+        session_id:       &'a str,
+        initiative_id:    &'a str,
+        egress_allowlist: EgressAllowlist,
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>>;
+
+    /// Tear down a previously-spawned Orchestrator VM. Idempotent:
+    /// terminating a session that is no longer active surfaces
+    /// `OrchestratorSpawnError::Substrate(SpawnError::SessionNotActive)`
+    /// from production and `Ok(_)` from the test fake.
+    fn terminate_orchestrator<'a>(
+        &'a self,
+        session_id: &'a str,
+        grace:      std::time::Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<TerminationReport, OrchestratorSpawnError>> + Send + 'a>>;
+}
+
+// ---------------------------------------------------------------------------
+// Production impl — `LiveOrchestratorSpawn`.
+// ---------------------------------------------------------------------------
+
+/// Production [`OrchestratorSpawn`] implementation.
 ///
-/// Failure mode: every failure path tears down already-bound
-/// listeners before returning the error (handled inside
-/// `SessionSpawnService::spawn_session`). The kernel can safely
-/// retry a failed orchestrator spawn without leaking ports.
-pub async fn spawn_orchestrator_for_initiative(
+/// Holds the boot-time install-dir + kernel-version (via
+/// [`OrchestratorSpawnContext`]) plus the kernel's
+/// `Arc<SessionSpawnService>` and `Arc<Store>`. Constructed once at
+/// `main.rs` boot and cloned into `HandlerContext`.
+pub struct LiveOrchestratorSpawn {
+    ctx:     OrchestratorSpawnContext,
+    service: Arc<SessionSpawnService>,
+    store:   Arc<Store>,
+}
+
+impl LiveOrchestratorSpawn {
+    /// Construct the production impl.
+    pub fn new(
+        ctx:     OrchestratorSpawnContext,
+        service: Arc<SessionSpawnService>,
+        store:   Arc<Store>,
+    ) -> Self {
+        Self { ctx, service, store }
+    }
+}
+
+impl OrchestratorSpawn for LiveOrchestratorSpawn {
+    fn spawn_for_initiative<'a>(
+        &'a self,
+        session_id:       &'a str,
+        initiative_id:    &'a str,
+        egress_allowlist: EgressAllowlist,
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>> {
+        Box::pin(async move {
+            spawn_orchestrator_for_initiative(
+                &self.ctx,
+                session_id,
+                initiative_id,
+                egress_allowlist,
+                Arc::clone(&self.service),
+                &self.store,
+            )
+            .await
+        })
+    }
+
+    fn terminate_orchestrator<'a>(
+        &'a self,
+        session_id: &'a str,
+        grace:      std::time::Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<TerminationReport, OrchestratorSpawnError>> + Send + 'a>> {
+        Box::pin(async move {
+            terminate_orchestrator(session_id, grace, Arc::clone(&self.service)).await
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test fake — `NoopOrchestratorSpawn`.
+// ---------------------------------------------------------------------------
+
+/// In-process unit-test fake [`OrchestratorSpawn`].
+///
+/// Records every `(session_id, initiative_id)` pair the kernel
+/// asks to spawn so tests can assert that
+/// `handle_approve_plan` reached the orchestrator-spawn callsite.
+/// Returns `Ok(_)` synchronously without binding any listener,
+/// without touching the substrate, and without emitting any audit
+/// event — mirroring the `FailClosedTestIsolation` /
+/// `FakeAuditSink` discipline.
+///
+/// **Layer-1 enforcement.** This type is `cfg`-gated to
+/// `debug_assertions || test`: in a release build, the type does
+/// not exist and any consumer that mistakenly references it fails
+/// to compile.
+#[cfg(any(debug_assertions, test))]
+pub struct NoopOrchestratorSpawn {
+    /// Sequence of `(session_id, initiative_id)` pairs the kernel
+    /// asked to spawn, in call order.
+    spawn_calls:     std::sync::Mutex<Vec<(String, String)>>,
+    /// Sequence of `session_id`s the kernel asked to terminate.
+    terminate_calls: std::sync::Mutex<Vec<String>>,
+}
+
+#[cfg(any(debug_assertions, test))]
+impl NoopOrchestratorSpawn {
+    /// Construct a fresh fake.
+    pub fn new() -> Self {
+        Self {
+            spawn_calls:     std::sync::Mutex::new(Vec::new()),
+            terminate_calls: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Snapshot of `(session_id, initiative_id)` pairs the kernel
+    /// has asked to spawn so far. Tests use this to assert that
+    /// `handle_approve_plan` reached the orchestrator-spawn callsite.
+    pub fn spawn_calls(&self) -> Vec<(String, String)> {
+        self.spawn_calls.lock().expect("spawn_calls poisoned").clone()
+    }
+
+    /// Snapshot of session ids the kernel has asked to terminate.
+    pub fn terminate_calls(&self) -> Vec<String> {
+        self.terminate_calls.lock().expect("terminate_calls poisoned").clone()
+    }
+}
+
+#[cfg(any(debug_assertions, test))]
+impl Default for NoopOrchestratorSpawn {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(any(debug_assertions, test))]
+impl OrchestratorSpawn for NoopOrchestratorSpawn {
+    fn spawn_for_initiative<'a>(
+        &'a self,
+        session_id:        &'a str,
+        initiative_id:     &'a str,
+        _egress_allowlist: EgressAllowlist,
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>> {
+        let session_owned    = session_id.to_owned();
+        let initiative_owned = initiative_id.to_owned();
+        Box::pin(async move {
+            self.spawn_calls
+                .lock()
+                .expect("spawn_calls poisoned")
+                .push((session_owned.clone(), initiative_owned));
+            Ok(SpawnHandle {
+                session_id:         session_owned,
+                vsock_cid:          None,
+                loopback_env:       BTreeMap::new(),
+                // Placeholder; tests that assert on this value should
+                // wire `LiveOrchestratorSpawn` against a real
+                // substrate instead.
+                admission_loopback: "127.0.0.1:0".parse().expect("static ipv4 literal"),
+            })
+        })
+    }
+
+    fn terminate_orchestrator<'a>(
+        &'a self,
+        session_id: &'a str,
+        _grace:     std::time::Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<TerminationReport, OrchestratorSpawnError>> + Send + 'a>> {
+        let session_owned = session_id.to_owned();
+        Box::pin(async move {
+            self.terminate_calls
+                .lock()
+                .expect("terminate_calls poisoned")
+                .push(session_owned.clone());
+            Ok(TerminationReport {
+                session_id:                session_owned,
+                exit_status:               raxis_isolation::ExitStatus::GracefulExit { code: 0 },
+                credential_proxy_shutdown:
+                    raxis_credential_proxy_manager::ShutdownReport { stopped: Vec::new() },
+            })
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Free-function helpers used by `LiveOrchestratorSpawn` (kept private
+// to this module so the trait remains the only callsite the rest of
+// the kernel ever sees).
+// ---------------------------------------------------------------------------
+
+async fn spawn_orchestrator_for_initiative(
     spawn_ctx:        &OrchestratorSpawnContext,
     session_id:       &str,
     initiative_id:    &str,
@@ -272,11 +460,11 @@ pub async fn spawn_orchestrator_for_initiative(
 /// Idempotent at the bridge level: if the session has already been
 /// terminated, the underlying call returns
 /// `SpawnError::SessionNotActive` which the bridge surfaces verbatim.
-pub async fn terminate_orchestrator(
+async fn terminate_orchestrator(
     session_id: &str,
     grace:      std::time::Duration,
     service:    Arc<SessionSpawnService>,
-) -> Result<raxis_session_spawn::TerminationReport, OrchestratorSpawnError> {
+) -> Result<TerminationReport, OrchestratorSpawnError> {
     Ok(service.terminate_session(session_id, grace).await?)
 }
 
@@ -337,7 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_orchestrator_for_initiative_full_round_trip() {
+    async fn live_orchestrator_spawn_full_round_trip_through_trait_surface() {
         let _g = ENV_LOCK.lock().unwrap();
         enable_test_harness();
 
@@ -387,16 +575,14 @@ mod tests {
         let session_id = "kernel-orch-test-1";
         let initiative_id = "init-kernel-orch-test-1";
 
-        let handle = spawn_orchestrator_for_initiative(
-            &spawn_ctx,
-            session_id,
-            initiative_id,
-            allowlist,
-            Arc::clone(&service),
-            &store,
-        )
-        .await
-        .expect("orchestrator spawn");
+        // Drive the production trait impl exactly as `handle_approve_plan` does.
+        let live: Arc<dyn OrchestratorSpawn> = Arc::new(
+            LiveOrchestratorSpawn::new(spawn_ctx, Arc::clone(&service), Arc::clone(&store))
+        );
+        let handle = live
+            .spawn_for_initiative(session_id, initiative_id, allowlist)
+            .await
+            .expect("orchestrator spawn");
 
         assert_eq!(handle.session_id, session_id);
         // Orchestrator has no credential decls -> empty loopback env.
@@ -404,13 +590,10 @@ mod tests {
         assert!(service.is_active(session_id).await);
 
         // ── Tear down. ────────────────────────────────────────
-        let report = terminate_orchestrator(
-            session_id,
-            std::time::Duration::from_secs(2),
-            Arc::clone(&service),
-        )
-        .await
-        .expect("terminate");
+        let report = live
+            .terminate_orchestrator(session_id, std::time::Duration::from_secs(2))
+            .await
+            .expect("terminate");
         assert_eq!(report.session_id, session_id);
 
         // ── Audit chain: paired SessionVmSpawned / SessionVmExited. ──
@@ -435,7 +618,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn spawn_orchestrator_with_missing_canonical_image_surfaces_typed_error() {
+    async fn live_orchestrator_spawn_with_missing_canonical_image_surfaces_typed_error() {
         let _g = ENV_LOCK.lock().unwrap();
         enable_test_harness();
 
@@ -470,16 +653,17 @@ mod tests {
             "v2-missing".to_owned(),
         );
 
-        let err = spawn_orchestrator_for_initiative(
-            &spawn_ctx,
-            "sess-missing-1",
-            "init-missing-1",
-            EgressAllowlist::default(),
-            service,
-            &store,
-        )
-        .await
-        .expect_err("must error when image missing");
+        let live: Arc<dyn OrchestratorSpawn> = Arc::new(
+            LiveOrchestratorSpawn::new(spawn_ctx, service, store),
+        );
+        let err = live
+            .spawn_for_initiative(
+                "sess-missing-1",
+                "init-missing-1",
+                EgressAllowlist::default(),
+            )
+            .await
+            .expect_err("must error when image missing");
 
         match err {
             OrchestratorSpawnError::OrchestratorImageMissing { path } => {
@@ -487,5 +671,42 @@ mod tests {
             }
             other => panic!("expected OrchestratorImageMissing; got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn noop_orchestrator_spawn_records_calls_and_returns_ok_without_substrate() {
+        // The test fake must not require RAXIS_TEST_HARNESS — it
+        // never touches a substrate. Verify it works without the
+        // env-var flip that LiveOrchestratorSpawn needs.
+        let fake = NoopOrchestratorSpawn::new();
+        let dyn_fake: &dyn OrchestratorSpawn = &fake;
+
+        let h1 = dyn_fake
+            .spawn_for_initiative("sess-A", "init-A", EgressAllowlist::default())
+            .await
+            .expect("fake spawn always Ok");
+        assert_eq!(h1.session_id, "sess-A");
+        assert!(h1.loopback_env.is_empty());
+
+        let h2 = dyn_fake
+            .spawn_for_initiative("sess-B", "init-B", EgressAllowlist::default())
+            .await
+            .expect("fake spawn always Ok");
+        assert_eq!(h2.session_id, "sess-B");
+
+        let report = dyn_fake
+            .terminate_orchestrator("sess-A", std::time::Duration::from_millis(1))
+            .await
+            .expect("fake terminate always Ok");
+        assert_eq!(report.session_id, "sess-A");
+
+        assert_eq!(
+            fake.spawn_calls(),
+            vec![
+                ("sess-A".to_owned(), "init-A".to_owned()),
+                ("sess-B".to_owned(), "init-B".to_owned()),
+            ],
+        );
+        assert_eq!(fake.terminate_calls(), vec!["sess-A".to_owned()]);
     }
 }

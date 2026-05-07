@@ -30,6 +30,7 @@ use crate::authority::keys::KeyRegistry;
 use crate::gateway::client::GatewayClient;
 use crate::initiatives::PlanRegistry;
 use crate::prompt::EpochBinding;
+use crate::session_spawn_orchestrator::OrchestratorSpawn;
 
 /// Shared, read-only context for all IPC handlers.
 ///
@@ -202,6 +203,30 @@ pub struct HandlerContext {
     /// legitimately leave this `None`.
     pub session_spawn: Arc<SessionSpawnService>,
 
+    /// V2 orchestrator-spawn surface — the trait `handle_approve_plan`
+    /// calls to drive the canonical Orchestrator VM boot after the
+    /// SQL transaction has committed.
+    ///
+    /// Production wires `LiveOrchestratorSpawn` (delegates to
+    /// `SessionSpawnService::spawn_session` against the real
+    /// canonical image bytes resolved via the boot-time install-dir).
+    /// In-process unit tests that exercise the IPC dispatch tree but
+    /// do NOT need a real substrate boot wire `NoopOrchestratorSpawn`
+    /// (cfg-gated) which records the call in a counter and returns
+    /// `Ok(())` without touching the substrate. Behaviour-shaped
+    /// tests that DO need a real spawn (e.g.
+    /// `session_spawn_orchestrator::tests::*`) wire
+    /// `LiveOrchestratorSpawn` themselves against a tempdir-built
+    /// fake image.
+    ///
+    /// **Why a trait** (vs. an `Option<OrchestratorSpawnContext>`):
+    /// avoids a degraded "missing context" mode in `HandlerContext`
+    /// and lets test fixtures wire a no-op impl with the same shape
+    /// as the production impl. Mirrors the existing
+    /// `Arc<dyn IsolationBackend>` /
+    /// `Arc<dyn CredentialBackend>` pattern.
+    pub orchestrator_spawn: Arc<dyn OrchestratorSpawn>,
+
     /// V2 domain adapter selected at boot.
     ///
     /// `extensibility-traits.md §2` — the single seam between the
@@ -246,6 +271,7 @@ impl HandlerContext {
         epoch_binding: Arc<EpochBinding>,
         credentials: Arc<dyn CredentialBackend>,
         isolation: Arc<dyn IsolationBackend>,
+        orchestrator_spawn: Arc<dyn OrchestratorSpawn>,
         domain: Arc<
             dyn DomainAdapter<
                 IntentKind       = SeIntentKind,
@@ -278,6 +304,7 @@ impl HandlerContext {
             credentials,
             proxy_manager,
             session_spawn,
+            orchestrator_spawn,
             domain,
         }
     }
@@ -416,4 +443,28 @@ impl raxis_isolation::Backend for FailClosedTestIsolation {
     fn backend_id(&self) -> &'static str {
         "fail-closed-test-isolation"
     }
+}
+
+/// Build a no-op [`OrchestratorSpawn`] for in-process kernel unit
+/// tests that exercise the IPC dispatch tree without driving a
+/// real substrate boot.
+///
+/// Returns a counter-backed implementation that:
+///
+/// * Accepts every `spawn_for_initiative` call.
+/// * Records the `(session_id, initiative_id)` pair so tests can
+///   assert the IPC handler reached the substrate-spawn callsite.
+/// * Returns `Ok(())` without binding any credential proxy or
+///   admission listener.
+///
+/// Mirrors the cfg-gated `build_fail_closed_test_isolation` /
+/// `build_default_test_credentials` / `build_default_test_domain`
+/// pattern: production binaries never construct this — they wire
+/// `LiveOrchestratorSpawn` from `main.rs`. The cfg gate
+/// (`debug_assertions || test`) is the same Layer-1 guard that keeps
+/// `FakeAuditSink` / `MockBackend` / `FailClosedTestIsolation` out of
+/// release artefacts.
+#[cfg(any(debug_assertions, test))]
+pub fn build_test_orchestrator_spawn() -> Arc<dyn OrchestratorSpawn> {
+    Arc::new(crate::session_spawn_orchestrator::NoopOrchestratorSpawn::new())
 }

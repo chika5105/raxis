@@ -1202,14 +1202,95 @@ async fn handle_approve_plan(
         },
     };
     match outcome {
-        Ok(result) => OperatorResponse::PlanApproved {
-            initiative_id:  result.initiative_id,
-            tasks_admitted: result.tasks_admitted,
-        },
+        Ok(result) => {
+            // ── Post-commit orchestrator boot ─────────────────────
+            //
+            // The SQLite tx already committed (initiative ↔ tasks ↔
+            // orchestrator session_id) and the audit chain landed
+            // both `PlanApproved` and `SessionCreated`. Drive the
+            // canonical Orchestrator VM through the trait surface
+            // on `ctx.orchestrator_spawn`. Production wires
+            // `LiveOrchestratorSpawn`; in-process unit tests wire
+            // `NoopOrchestratorSpawn` (cfg-gated) which records the
+            // call without booting a substrate.
+            //
+            // Failure here is **non-fatal to the response** —
+            // PlanApproved already represents a committed,
+            // operator-visible state mutation. A spawn failure
+            // (canonical image missing on a half-installed kernel,
+            // substrate refusal, etc.) is logged structurally so
+            // recovery::reconcile / operator inspection can pick up
+            // the gap; we still return PlanApproved so the operator
+            // sees the SQL state honoured. The audit chain is the
+            // source of truth: a missing `SessionVmSpawned` event
+            // for the orchestrator session_id means the boot failed.
+            if let Some(orch_session_id) = result.orchestrator_session_id.as_deref() {
+                let allowlist = build_egress_allowlist_from_policy(&policy_snapshot);
+                match ctx
+                    .orchestrator_spawn
+                    .spawn_for_initiative(
+                        orch_session_id,
+                        &result.initiative_id,
+                        allowlist,
+                    )
+                    .await
+                {
+                    Ok(handle) => {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"orchestrator_spawn_ok\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"session_id\":\"{session_id}\",\
+                             \"admission_loopback\":\"{admission}\"}}",
+                            initiative_id = result.initiative_id,
+                            session_id    = handle.session_id,
+                            admission     = handle.admission_loopback,
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"orchestrator_spawn_failed\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"session_id\":\"{session_id}\",\
+                             \"error\":\"{err}\",\
+                             \"hint\":\"PlanApproved was committed; recovery::reconcile or \
+                                       a follow-up operator command is needed to drive the \
+                                       orchestrator boot once the substrate is available\"}}",
+                            initiative_id = result.initiative_id,
+                            session_id    = orch_session_id,
+                            err           = e,
+                        );
+                    }
+                }
+            }
+
+            OperatorResponse::PlanApproved {
+                initiative_id:  result.initiative_id,
+                tasks_admitted: result.tasks_admitted,
+            }
+        }
         Err(e) => OperatorResponse::Error {
             code:   "FAIL_APPROVE_PLAN".to_owned(),
             detail: e.to_string(),
         },
+    }
+}
+
+/// Lift the active policy bundle's egress allowlist into the wire
+/// shape the per-session `PolicyAdmissionService` expects.
+///
+/// The `EgressAllowlist::credential_proxy_real_targets` field stays
+/// empty here; the credential-proxy bypass-detection is keyed on the
+/// per-session credential decls (which the kernel has already bound
+/// listeners for at this point). The per-task `allowed_egress`
+/// surface is folded in by the per-session admission service the
+/// kernel constructs at executor-spawn time, not here.
+fn build_egress_allowlist_from_policy(
+    policy: &raxis_policy::PolicyBundle,
+) -> raxis_egress_admission::EgressAllowlist {
+    raxis_egress_admission::EgressAllowlist {
+        exact_hosts: policy.egress_domains().to_vec(),
+        patterns:    policy.egress_patterns().to_vec(),
+        credential_proxy_real_targets: Default::default(),
     }
 }
 
@@ -2143,6 +2224,7 @@ mod escalation_dispatch_tests {
             sink.clone(),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(&data_dir);
         Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
@@ -2155,6 +2237,7 @@ mod escalation_dispatch_tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            orchestrator_spawn,
             domain,
         ))
     }
@@ -2551,6 +2634,7 @@ mod escalation_dispatch_tests {
             Arc::clone(&audit),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(&data_dir);
         let ctx = Arc::new(HandlerContext::new(
             policy_swap,
@@ -2563,6 +2647,7 @@ mod escalation_dispatch_tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            orchestrator_spawn,
             domain,
         ));
         (ctx, inner)
@@ -2855,6 +2940,7 @@ mod rotate_epoch_dispatch_tests {
             sink.clone(),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(data_dir);
         Arc::new(HandlerContext::new(
             policy,
@@ -2867,6 +2953,7 @@ mod rotate_epoch_dispatch_tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            orchestrator_spawn,
             domain,
         ))
     }
@@ -3736,6 +3823,7 @@ mod quarantine_dispatch_tests {
             sink.clone(),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(data_dir);
         let ctx = Arc::new(HandlerContext::new(
             policy,
@@ -3748,6 +3836,7 @@ mod quarantine_dispatch_tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            orchestrator_spawn,
             domain,
         ));
         (ctx, sink)

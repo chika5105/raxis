@@ -656,6 +656,43 @@ async fn main() {
         Arc::clone(&epoch_binding),
         Arc::clone(&credentials),
         Arc::clone(&isolation_backend),
+        // Production wires the live orchestrator-spawn impl that
+        // drives the canonical Orchestrator VM via the kernel's
+        // `SessionSpawnService` (the same Arc that lands on
+        // `ctx.session_spawn` for future executor-spawn handlers).
+        // The boot-time install-dir + kernel-version are the only
+        // values the bridge needs that aren't already on
+        // `HandlerContext`. The pre-pass here clones the same
+        // `(isolation, proxy, audit)` trio that `HandlerContext::new`
+        // builds internally, so the bridge sees an equivalent
+        // service; both will be unified in a follow-up so there's
+        // a single SessionSpawnService instance shared across
+        // orchestrator + executor spawn paths.
+        {
+            let proxy_manager_for_orch = Arc::new(
+                raxis_credential_proxy_manager::CredentialProxyManager::new(
+                    Arc::clone(&credentials),
+                    Arc::clone(&audit),
+                ),
+            );
+            let session_spawn_for_orch = Arc::new(
+                raxis_session_spawn::SessionSpawnService::new(
+                    Arc::clone(&isolation_backend),
+                    proxy_manager_for_orch,
+                    Arc::clone(&audit),
+                ),
+            );
+            Arc::new(
+                crate::session_spawn_orchestrator::LiveOrchestratorSpawn::new(
+                    crate::session_spawn_orchestrator::OrchestratorSpawnContext::new(
+                        install_dir.clone(),
+                        kernel_version.to_owned(),
+                    ),
+                    session_spawn_for_orch,
+                    Arc::clone(&store),
+                ),
+            )
+        },
         Arc::clone(&domain),
     );
     let ctx = Arc::new(ctx_inner);
