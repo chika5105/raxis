@@ -54,7 +54,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -96,6 +96,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 9 {
         apply_migration_9(conn)?;
+    }
+    if current_version < 10 {
+        apply_migration_10(conn)?;
     }
 
     Ok(())
@@ -1493,6 +1496,144 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 10 — `task_credential_proxies` table: per-task credential-proxy
+// declarations persisted at approve_plan time.
+//
+// Normative references:
+//   * credential-proxy.md §3 ("Plan-level declarations")
+//   * v2-deep-spec.md §Step 17 ("approve_plan shift-left validation")
+//
+// ⚠ THIS TABLE DOES NOT STORE CREDENTIAL VALUES.
+//
+// `task_credential_proxies` is a metadata-only registry of which
+// credential proxies should be bound for each task. Each row carries:
+//
+//   task_credential_proxies(task_id, credential_name, mount_as,
+//                           proxy_type, proxy_json,
+//                           created_at_unix_secs)
+//       — one row per `[[tasks.credentials]]` block declared on a
+//         V2 task. Inserted by `approve_plan` in the SAME
+//         transaction that inserts the parent `tasks` row
+//         (INV-STORE-02). Read once at session-spawn time by the
+//         kernel's `CredentialProxyManager`, which deserialises
+//         `proxy_json` back into
+//         `raxis_plan_credentials::TaskCredentialDecl` and uses the
+//         resulting decl to bind a fresh proxy listener.
+//
+// The credential bytes themselves (postgres URL with password,
+// bearer tokens, kubeconfig YAML, …) are NEVER persisted in
+// `kernel.db`. They live with the kernel's `CredentialBackend`. The
+// reference `FileCredentialBackend` stores them on disk in
+// `~/.config/raxis/credentials/<name>.env` with `0600` perms
+// enforced. Production deployments may swap in a `VaultBackend`,
+// `AwsSecretsManagerBackend`, or similar — but the kernel.db schema
+// stays the same: it only holds the *names* of credentials and the
+// proxy restrictions to apply.
+//
+// **Naming.** The table is `task_credential_proxies`, NOT
+// `task_credentials`. The shorter name was rejected because it
+// would falsely imply that credential bytes are persisted here.
+//
+// **Why a JSON column for `proxy_json`** (vs. a normalised
+// per-proxy-type column set):
+//   * Per-proxy-type fields drift independently:
+//     - postgres has `allow_only_select`
+//     - http  has `auth_mode`, `upstream_url`, allowed_methods,
+//             allowed_path_prefixes
+//     - k8s   reuses http restrictions but is auditing-distinct
+//     - smtp  (future) adds rate-limit fields
+//   * The kernel never UPDATEs this column outside of the approve_plan
+//     transaction — it is a write-once, read-once property of the
+//     admitted task.
+//   * JSON keeps the schema flat across proxy types while preserving
+//     per-proxy fidelity. The `proxy_type` column is projected out of
+//     the JSON for index/query convenience and to enable a CHECK
+//     clause that pins the legal proxy-type universe.
+//
+// **Composite primary key.** `(task_id, credential_name)` is unique
+// per task; `raxis-plan-credentials` already enforces this in its
+// parser (`parse_for_task` rejects duplicate `name` within a task),
+// but pinning it in DDL also as the PK gives us a hard backstop.
+//
+// **V1 backward compatibility.** New table; no V1 rows. Migration 10
+// is idempotent on a fresh DB *and* on a DB already at version 9.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_10(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_10_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 10 failed: {e}"))
+    })
+}
+
+/// The complete migration-10 DDL. INV-STORE-03: every table
+/// identifier is rendered through `Table::...as_str()`. The
+/// `proxy_type` CHECK clause is hand-pinned to the four MVP
+/// variants declared by `raxis-plan-credentials::ProxyDecl` —
+/// drift-protected by
+/// `tests::migration_10_proxy_type_check_pins_known_variants`.
+fn render_migration_10_ddl() -> String {
+    let tasks                  = Table::Tasks.as_str();
+    let task_credential_proxies = Table::TaskCredentialProxies.as_str();
+    let schema_version         = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── Table: task_credential_proxies ───────────────────────────────────────
+-- METADATA ONLY. One row per [[tasks.credentials]] block per task,
+-- describing WHICH credential proxy should be bound for that task.
+--
+-- ⚠ Credential VALUES (passwords, tokens, kubeconfig bytes, etc.)
+--   are NEVER stored in this table — or anywhere else in kernel.db.
+--   They live with the kernel's CredentialBackend
+--   (FileCredentialBackend on disk with 0600 perms; or a VaultBackend
+--   / AwsSecretsManagerBackend in production).
+--
+--   * task_id          — FK to tasks(task_id).
+--   * credential_name  — the policy-declared NAME of the credential
+--                        the proxy will resolve at bind time
+--                        (e.g. \"db-prod\"). NOT the secret bytes.
+--   * mount_as         — the env-var the proxy injects into the
+--                        agent VM (e.g. \"DB_URL\").
+--   * proxy_type       — postgres | http | k8s | smtp. CHECK-pinned.
+--   * proxy_json       — the per-proxy restriction blob (allow-lists,
+--                        upstream URL, etc.). NOT the secret bytes.
+--
+-- Inserted by approve_plan in the same transaction that admits the
+-- parent task. Read once at session-spawn time by
+-- CredentialProxyManager.
+-- See credential-proxy.md §3 and v2-deep-spec.md §Step 17.
+CREATE TABLE IF NOT EXISTS {task_credential_proxies} (
+    task_id              TEXT    NOT NULL
+        REFERENCES {tasks}(task_id),
+    credential_name      TEXT    NOT NULL,
+    mount_as             TEXT    NOT NULL,
+    proxy_type           TEXT    NOT NULL
+        CHECK (proxy_type IN ('postgres', 'http', 'k8s', 'smtp')),
+    proxy_json           TEXT    NOT NULL,
+    created_at_unix_secs INTEGER NOT NULL,
+    PRIMARY KEY (task_id, credential_name)
+);
+
+-- Lookup index. CredentialProxyManager queries by task_id at
+-- session-spawn time; the composite PK already covers this prefix
+-- but the explicit index makes the query plan self-documenting in
+-- EXPLAIN output and survives any future PK refactor.
+CREATE INDEX IF NOT EXISTS idx_task_credential_proxies_task_id
+    ON {task_credential_proxies} (task_id);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (10, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1756,6 +1897,11 @@ mod tests {
             Table::PlanBundles,
             Table::PlanBundleArtifacts,
             Table::PlanBundleNoncesSeen,
+            // Migration 10 — v2: per-task credential-proxy declarations
+            //                    (METADATA ONLY; credential bytes never
+            //                    stored in kernel.db).
+            //                    See credential-proxy.md §3.
+            Table::TaskCredentialProxies,
         ]
         .iter()
         .map(|t| t.as_str().to_owned())
@@ -3555,5 +3701,253 @@ mod tests {
         assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
                 < ddl.find("COMMIT").unwrap(),
             "BEGIN must precede COMMIT");
+    }
+
+    // ── Migration 10: task_credential_proxies (per-task credential-proxy
+    //                  declarations, METADATA ONLY — no credential
+    //                  bytes are stored in kernel.db) ──────────────────────
+
+    /// Migration 10 creates the `task_credential_proxies` table on
+    /// a fresh DB after `apply_pending` runs.
+    #[test]
+    fn migration_10_creates_task_credential_proxies_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [Table::TaskCredentialProxies.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "task_credential_proxies table must exist after migration 10",
+        );
+    }
+
+    /// The table name MUST be `task_credential_proxies`, NOT
+    /// `task_credentials`. The shorter name was rejected because it
+    /// would falsely imply that credential bytes are persisted in
+    /// kernel.db (they are not — bytes live with the
+    /// CredentialBackend, never in the DB). Pinning the literal at
+    /// migration time surfaces any rename in code review.
+    #[test]
+    fn migration_10_table_name_disambiguates_from_credential_bytes() {
+        assert_eq!(
+            Table::TaskCredentialProxies.as_str(),
+            "task_credential_proxies",
+        );
+        assert_ne!(
+            Table::TaskCredentialProxies.as_str(),
+            "task_credentials",
+            "the bare `task_credentials` name is forbidden; it falsely \
+             implies credential bytes are stored",
+        );
+    }
+
+    /// The CHECK clause on `proxy_type` must accept the four MVP
+    /// variants and reject everything else.
+    #[test]
+    fn migration_10_proxy_type_check_pins_known_variants() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let initiative_id = "init-mig10";
+        let task_id       = "task-mig10";
+        let now           = 1_700_000_000_i64;
+
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives}
+                 (initiative_id, state, terminal_criteria_json,
+                  plan_artifact_sha256, created_at)
+             VALUES ('{initiative_id}', 'Draft', '{{}}',
+                     'deadbeef', {now});
+             INSERT INTO {tasks}
+                 (task_id, initiative_id, lane_id, state, actor,
+                  policy_epoch, admitted_at, transitioned_at)
+             VALUES ('{task_id}', '{initiative_id}', 'lane.default',
+                     'Admitted', 'Operator', 1, {now}, {now});",
+            initiatives = Table::Initiatives.as_str(),
+            tasks       = Table::Tasks.as_str(),
+            now         = now,
+        )).unwrap();
+
+        let ins_sql = format!(
+            "INSERT INTO {} (task_id, credential_name, mount_as,
+                              proxy_type, proxy_json,
+                              created_at_unix_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            Table::TaskCredentialProxies.as_str(),
+        );
+
+        for (idx, ok) in ["postgres", "http", "k8s", "smtp"].iter().enumerate() {
+            let r = conn.execute(
+                &ins_sql,
+                rusqlite::params![
+                    task_id,
+                    format!("cred-{idx}"),
+                    format!("MOUNT_{idx}"),
+                    ok,
+                    "{}",
+                    now,
+                ],
+            );
+            assert!(r.is_ok(),
+                "CHECK constraint must accept canonical proxy_type {ok:?} (got {r:?})");
+        }
+
+        for bogus in ["Postgres", "HTTP", "ftp", "", "ssh"] {
+            let r = conn.execute(
+                &ins_sql,
+                rusqlite::params![
+                    task_id,
+                    format!("cred-bogus-{bogus}"),
+                    "MOUNT_X",
+                    bogus,
+                    "{}",
+                    now,
+                ],
+            );
+            assert!(r.is_err(),
+                "CHECK constraint must reject non-canonical proxy_type {bogus:?}");
+        }
+    }
+
+    /// Migration 10 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_10_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, SCHEMA_VERSION as i64);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='table' AND name=?1",
+                [Table::TaskCredentialProxies.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1,
+            "task_credential_proxies must appear exactly once after \
+             repeated apply_pending");
+    }
+
+    /// Upgrade scenario: a database at v=9 must pick up migration 10
+    /// cleanly when `apply_pending` runs.
+    #[test]
+    fn migration_10_applies_to_a_v9_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        apply_migration_6(&conn).unwrap();
+        apply_migration_7(&conn).unwrap();
+        apply_migration_8(&conn).unwrap();
+        apply_migration_9(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 9);
+
+        let pre_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='table' AND name=?1",
+                [Table::TaskCredentialProxies.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pre_count, 0,
+            "task_credential_proxies must not yet exist at v=9",
+        );
+
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let post_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='table' AND name=?1",
+                [Table::TaskCredentialProxies.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            post_count, 1,
+            "migration 10 must add task_credential_proxies",
+        );
+    }
+
+    /// Migration 10 wraps the table+index creation in a single
+    /// `BEGIN EXCLUSIVE; ... COMMIT;`.
+    #[test]
+    fn migration_10_is_a_single_transaction() {
+        let ddl = render_migration_10_ddl();
+        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
+            "migration 10 must open exactly one transaction (BEGIN EXCLUSIVE)");
+        assert_eq!(ddl.matches("COMMIT").count(), 1,
+            "migration 10 must commit exactly once");
+        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
+                < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT");
+    }
+
+    /// The composite PK enforces (task_id, credential_name) uniqueness.
+    #[test]
+    fn migration_10_pk_enforces_unique_credential_name_per_task() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let now = 1_700_000_000_i64;
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives}
+                 (initiative_id, state, terminal_criteria_json,
+                  plan_artifact_sha256, created_at)
+             VALUES ('init-pk', 'Draft', '{{}}', 'deadbeef', {now});
+             INSERT INTO {tasks}
+                 (task_id, initiative_id, lane_id, state, actor,
+                  policy_epoch, admitted_at, transitioned_at)
+             VALUES ('task-pk', 'init-pk', 'lane.default', 'Admitted',
+                     'Operator', 1, {now}, {now});",
+            initiatives = Table::Initiatives.as_str(),
+            tasks       = Table::Tasks.as_str(),
+            now         = now,
+        )).unwrap();
+
+        let ins_sql = format!(
+            "INSERT INTO {} (task_id, credential_name, mount_as,
+                              proxy_type, proxy_json,
+                              created_at_unix_secs)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            Table::TaskCredentialProxies.as_str(),
+        );
+
+        let r1 = conn.execute(
+            &ins_sql,
+            rusqlite::params!["task-pk", "db-main", "DB_URL", "postgres", "{}", now],
+        );
+        assert!(r1.is_ok(), "first insert must succeed (got {r1:?})");
+
+        let r2 = conn.execute(
+            &ins_sql,
+            rusqlite::params!["task-pk", "db-main", "OTHER", "http", "{}", now],
+        );
+        assert!(r2.is_err(),
+            "second insert with same (task_id, credential_name) must violate PK");
     }
 }

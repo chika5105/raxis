@@ -10,6 +10,22 @@
 //     stay in bijection with it. The unit test `all_variants_have_nonempty_str`
 //     guards against empty returns.
 //   - This enum is not serialized over the wire; it is a compile-time constant.
+//
+// ── Invariant: kernel.db never stores credential VALUES ───────────────────
+//
+// `kernel.db` is the kernel's metadata store. It records WHICH credentials
+// each task wants bound (see `Table::TaskCredentialProxies`) but it never
+// records the credential bytes themselves. Bytes — postgres URLs with
+// passwords, bearer tokens, kubeconfig YAML, SMTP passwords, etc. — live
+// behind the `CredentialBackend` trait (the reference `FileCredentialBackend`
+// stores them with `0600` perms in `~/.config/raxis/credentials/<name>.env`;
+// production deployments may swap in `VaultBackend`,
+// `AwsSecretsManagerBackend`, `Pkcs11HsmBackend`, etc. — see
+// `extensibility-traits.md §4`).
+//
+// Adding a column or table that would persist a credential VALUE is
+// forbidden by `credential-proxy.md §1.1`. Reviewers MUST reject such a
+// change.
 
 /// All kernel.db tables. v1 baseline = 19 tables (kernel-store.md §2.5.1
 /// migration 1); v1.x extensions append below.
@@ -142,6 +158,57 @@ pub enum Table {
     /// reaped by the kernel's maintenance loop
     /// (`plan-bundle-sealing.md §8.4`).
     PlanBundleNoncesSeen,
+
+    // ── v2: Per-task credential-proxy declarations
+    //        (credential-proxy.md §3) ─────────────────────────────────────
+    /// **Per-task credential-proxy declarations** parsed out of
+    /// `[[tasks.credentials]]` at `approve_plan` time. One row per
+    /// declared proxy per task.
+    ///
+    /// # ⚠ This table does NOT store credential values.
+    ///
+    /// Each row is **proxy metadata only**:
+    ///   * `credential_name`     — the policy-declared *name* of the
+    ///                             credential (e.g. `"db-prod"`); the
+    ///                             actual secret bytes resolve through
+    ///                             the kernel's `CredentialBackend`.
+    ///   * `mount_as`            — the env-var the proxy will inject
+    ///                             into the agent VM (e.g. `"DB_URL"`).
+    ///   * `proxy_type`          — `postgres | http | k8s | smtp`.
+    ///   * `proxy_json`          — the per-proxy restriction blob
+    ///                             (allow-lists, upstream URL, etc.).
+    ///
+    /// The credential **bytes themselves** (postgres URL with
+    /// password, bearer tokens, kubeconfig YAML, …) are NEVER
+    /// persisted in `kernel.db`. They live with the
+    /// `CredentialBackend` (the reference `FileCredentialBackend`
+    /// stores them in `~/.config/raxis/credentials/<name>.env` with
+    /// `0600` perms enforced; production deployments may swap in a
+    /// `VaultBackend`, `AwsSecretsManagerBackend`, etc.).
+    ///
+    /// # Why a JSON column for `proxy_json`
+    ///
+    /// (vs. a normalised per-proxy-type column set): the
+    /// per-proxy-type schemas drift independently —
+    ///   * postgres has `allow_only_select`;
+    ///   * http has `auth_mode`, `upstream_url`, allowed_methods,
+    ///     allowed_path_prefixes;
+    ///   * k8s reuses http restrictions but is auditing-distinct;
+    ///   * future smtp adds rate-limit fields —
+    /// and the kernel never writes to this column outside of the
+    /// approve_plan transaction. It is read once at session-spawn
+    /// time and re-deserialised back into
+    /// `raxis_plan_credentials::TaskCredentialDecl`. JSON keeps the
+    /// schema flat while preserving per-proxy fidelity. The
+    /// `proxy_type` column is projected out of the JSON for
+    /// index/query convenience and CHECK-clause pinning.
+    ///
+    /// # Atomicity
+    ///
+    /// Inserted by `approve_plan` in the SAME transaction that
+    /// admits the parent `tasks` row (INV-STORE-02). Foreign key on
+    /// `task_id` references `tasks(task_id)`.
+    TaskCredentialProxies,
 }
 
 impl Table {
@@ -184,6 +251,7 @@ impl Table {
             Self::PlanBundles               => "plan_bundles",
             Self::PlanBundleArtifacts       => "plan_bundle_artifacts",
             Self::PlanBundleNoncesSeen      => "plan_bundle_nonces_seen",
+            Self::TaskCredentialProxies     => "task_credential_proxies",
         }
     }
 }
@@ -210,6 +278,7 @@ mod tests {
             Table::OperatorCertificates, Table::InitiativeQuarantines,
             Table::SubtaskActivations,
             Table::PlanBundles, Table::PlanBundleArtifacts, Table::PlanBundleNoncesSeen,
+            Table::TaskCredentialProxies,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
@@ -233,6 +302,25 @@ mod tests {
     #[test]
     fn subtask_activations_table_name_is_pinned() {
         assert_eq!(Table::SubtaskActivations.as_str(), "subtask_activations");
+    }
+
+    /// V2 per-task credential-proxy declaration table name is
+    /// wire-stable (the `CredentialProxyManager` will read this
+    /// table at session-spawn time using its literal name in
+    /// production SQL). Pinning the literal here surfaces any
+    /// rename in code review. See `credential-proxy.md §3`.
+    ///
+    /// **Naming note.** The table is `task_credential_proxies`,
+    /// NOT `task_credentials`. The latter would falsely imply that
+    /// credential bytes are persisted in `kernel.db`; they are
+    /// not — see the `Table::TaskCredentialProxies` doc for the
+    /// authoritative list of what each row contains.
+    #[test]
+    fn task_credential_proxies_table_name_is_pinned() {
+        assert_eq!(
+            Table::TaskCredentialProxies.as_str(),
+            "task_credential_proxies",
+        );
     }
 
     #[test]

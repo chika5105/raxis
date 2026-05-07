@@ -34,6 +34,11 @@ use crate::scheduler::{self, SchedulerError};
 const INITIATIVES: &str            = Table::Initiatives.as_str();
 const SIGNED_PLAN_ARTIFACTS: &str  = Table::SignedPlanArtifacts.as_str();
 const TASKS: &str                  = Table::Tasks.as_str();
+/// Per-task credential-proxy declarations, METADATA ONLY. Credential
+/// **values** never live in `kernel.db` — see
+/// `raxis_store::Table::TaskCredentialProxies` for the authoritative
+/// invariant note.
+const TASK_CREDENTIAL_PROXIES: &str = Table::TaskCredentialProxies.as_str();
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -629,6 +634,16 @@ pub fn approve_plan(
         // lane verbatim. `pt.lane_id` is `""` here (validator
         // already rejected non-empty per-task overrides); this is
         // the propagation step.
+        //
+        // We capture (`task_id`, `credentials`) up front because we
+        // are about to move `pt.predecessors` and `pt.name` into the
+        // scheduler's `PlanTask` struct; the credential rows are
+        // inserted immediately AFTER `admit_in_tx` so they share
+        // the same approve-plan transaction as the parent
+        // `tasks(task_id)` row (INV-STORE-02 / Pattern A).
+        let task_id_for_creds = pt.task_id.clone();
+        let credentials_for_task = pt.credentials.clone();
+
         let task = scheduler::PlanTask {
             task_id:       pt.task_id.clone(),
             initiative_id: initiative_id.to_owned(),
@@ -637,6 +652,28 @@ pub fn approve_plan(
             dependencies:  pt.predecessors,
         };
         scheduler::admit_in_tx(&tx, task, policy_epoch)?;
+
+        // V2 — `[[tasks.credentials]]` persistence
+        // (credential-proxy.md §3 + §1.1).
+        //
+        // Insert one `task_credential_proxies` row per declared
+        // credential proxy. METADATA ONLY: each row carries
+        // `credential_name`, `mount_as`, `proxy_type`, and the
+        // serialised `proxy_json` restriction blob — *never* the
+        // credential value bytes themselves. Bytes resolve through
+        // the kernel's `CredentialBackend` at proxy-bind time.
+        //
+        // Atomicity. Same `tx` as `admit_in_tx`, so a partial
+        // approve_plan is impossible: either both the parent
+        // `tasks` row AND every declared credential-proxy land,
+        // or both roll back together.
+        if !credentials_for_task.is_empty() {
+            insert_task_credential_proxies_in_tx(
+                &tx,
+                &task_id_for_creds,
+                &credentials_for_task,
+            )?;
+        }
     }
 
     // V2 §Step 6 / `INV-PLANNER-HARNESS-06` — auto-spawn the canonical
@@ -1996,6 +2033,179 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     Ok(())
 }
 
+/// Wire label for `task_credential_proxies.proxy_type`. Kept in
+/// lock-step with the SQL CHECK clause in
+/// `raxis_store::migration::render_migration_10_ddl`. The
+/// `ProxyDecl::Unknown` arm is unreachable here because
+/// `validate_task_credentials` rejects it shift-left BEFORE this
+/// helper is reached; we surface that constraint as an
+/// `Invariant` store error rather than a panic so the operator
+/// gets a structured diagnostic on the (impossible) hot-path.
+fn proxy_type_label_for_storage(
+    decl: &raxis_plan_credentials::ProxyDecl,
+) -> Result<&'static str, LifecycleError> {
+    use raxis_plan_credentials::ProxyDecl;
+    Ok(match decl {
+        ProxyDecl::Postgres { .. } => "postgres",
+        ProxyDecl::Http { .. }     => "http",
+        ProxyDecl::K8s { .. }      => "k8s",
+        ProxyDecl::Unknown => {
+            return Err(LifecycleError::Store(
+                raxis_store::StoreError::Invariant(
+                    "ProxyDecl::Unknown reached the persistence \
+                     layer; validate_task_credentials must reject \
+                     it shift-left before approve_plan opens its \
+                     transaction".to_owned(),
+                ),
+            ));
+        }
+    })
+}
+
+/// Insert the per-task `task_credential_proxies` rows for one
+/// admitted task.
+///
+/// **What this writes** (METADATA ONLY): one row per declared
+/// `[[tasks.credentials]]` block, carrying `credential_name`,
+/// `mount_as`, `proxy_type`, and the serde-JSON `proxy_json`
+/// restriction blob.
+///
+/// **What this does NOT write.** Credential VALUES (postgres URLs
+/// with passwords, bearer tokens, kubeconfig YAML bytes, …) are
+/// never persisted — they live behind the `CredentialBackend`
+/// trait. See `credential-proxy.md §1.1` and
+/// `raxis_store::Table::TaskCredentialProxies` for the
+/// authoritative invariant.
+///
+/// **Atomicity.** Caller passes the open `approve_plan`
+/// transaction. INV-STORE-02 (Pattern A): the rows commit together
+/// with the parent `tasks(task_id)` row.
+///
+/// **Drift protection.** The `proxy_type` string is rendered
+/// through `proxy_type_label_for_storage`, which is pinned to the
+/// same set as the SQL CHECK clause in migration 10. Any new
+/// `ProxyDecl` variant requires updating both this label table
+/// AND the migration's CHECK clause; the
+/// `task_credential_proxies_persistence_round_trips_via_session_spawn`
+/// test at the bottom of this file additionally exercises the
+/// (insert → re-read → re-deserialise) loop end to end.
+fn insert_task_credential_proxies_in_tx(
+    tx:          &rusqlite::Transaction<'_>,
+    task_id:     &str,
+    credentials: &[raxis_plan_credentials::TaskCredentialDecl],
+) -> Result<(), LifecycleError> {
+    let now = unix_now_secs();
+
+    // We prepare once and reuse the cached statement across the
+    // (usually small) credentials slice — cheaper than rebuilding
+    // SQL per row, and gives a clearer query plan in EXPLAIN logs.
+    let mut stmt = tx.prepare_cached(&format!(
+        "INSERT INTO {table}
+             (task_id, credential_name, mount_as,
+              proxy_type, proxy_json, created_at_unix_secs)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        table = TASK_CREDENTIAL_PROXIES,
+    ))?;
+
+    for decl in credentials {
+        let proxy_type = proxy_type_label_for_storage(&decl.proxy)?;
+        let proxy_json = serde_json::to_string(&decl.proxy)
+            .map_err(|e| {
+                LifecycleError::Store(raxis_store::StoreError::Invariant(
+                    format!(
+                        "task `{task_id}` credential `{cred}`: \
+                         serde_json failed to serialise \
+                         ProxyDecl: {e}",
+                        cred = decl.name.as_str(),
+                    ),
+                ))
+            })?;
+
+        stmt.execute(rusqlite::params![
+            task_id,
+            decl.name.as_str(),
+            &decl.mount_as,
+            proxy_type,
+            proxy_json,
+            now as i64,
+        ])?;
+    }
+
+    Ok(())
+}
+
+/// Read the per-task credential-proxy declarations stored at
+/// `approve_plan` time and rehydrate them into the same
+/// `TaskCredentialDecl` shape that
+/// `raxis_plan_credentials::parse_for_task` produced.
+///
+/// Used at session-spawn time by the kernel's
+/// `CredentialProxyManager` (see `credential-proxy.md §3`). The
+/// helper is the read-side mirror of
+/// `insert_task_credential_proxies_in_tx`: every row inserted by
+/// approve_plan round-trips back through this function losslessly.
+///
+/// Returns rows in declaration order (insertion order is the
+/// PRIMARY KEY composite (`task_id`, `credential_name`); since we
+/// insert in the order we saw entries, we order by
+/// `created_at_unix_secs ASC` and break ties with
+/// `credential_name ASC` for determinism).
+///
+/// **No credential values are returned**: the `TaskCredentialDecl`
+/// struct does not carry secret bytes, by design. The proxy
+/// manager separately calls `CredentialBackend::resolve` to fetch
+/// the bytes for each `decl.name` at bind time.
+pub fn read_task_credential_proxies_in_tx(
+    tx:      &rusqlite::Connection,
+    task_id: &str,
+) -> Result<Vec<raxis_plan_credentials::TaskCredentialDecl>, LifecycleError> {
+    use raxis_credentials::CredentialName;
+
+    let mut stmt = tx.prepare(&format!(
+        "SELECT credential_name, mount_as, proxy_json
+           FROM {table}
+          WHERE task_id = ?1
+       ORDER BY created_at_unix_secs ASC, credential_name ASC",
+        table = TASK_CREDENTIAL_PROXIES,
+    ))?;
+
+    let rows = stmt
+        .query_map([task_id], |row| {
+            let credential_name: String = row.get(0)?;
+            let mount_as:        String = row.get(1)?;
+            let proxy_json:      String = row.get(2)?;
+            Ok((credential_name, mount_as, proxy_json))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for (credential_name, mount_as, proxy_json) in rows {
+        // Re-deserialise the proxy variant. If a future kernel
+        // build changes the serde tag layout this is the place
+        // we'd surface the migration error — fail-closed so the
+        // operator notices on the next session-spawn rather than
+        // the proxy silently no-op-ing.
+        let proxy: raxis_plan_credentials::ProxyDecl =
+            serde_json::from_str(&proxy_json).map_err(|e| {
+                LifecycleError::Store(raxis_store::StoreError::Invariant(
+                    format!(
+                        "task `{task_id}` credential `{credential_name}`: \
+                         serde_json failed to re-deserialise \
+                         ProxyDecl from `task_credential_proxies. \
+                         proxy_json` (schema drift?): {e}",
+                    ),
+                ))
+            })?;
+
+        out.push(raxis_plan_credentials::TaskCredentialDecl {
+            name: CredentialName::new(credential_name),
+            mount_as,
+            proxy,
+        });
+    }
+    Ok(out)
+}
+
 /// Returns `Some(reason)` if `entry` violates the V2 path-allowlist
 /// syntax discipline; `None` if the entry is acceptable. The reason
 /// strings are stable wire-side identifiers — DO NOT rename without
@@ -2992,6 +3202,178 @@ predecessors = ["build-svc"]
         // The plan landed in Executing — task-credential validation
         // did not block the happy path.
         assert_eq!(read_initiative_state(&store, &init_id), "Executing");
+    }
+
+    /// End-to-end round-trip across the persistence boundary:
+    ///   * `approve_plan` parses `[[tasks.credentials]]`
+    ///   * inserts one `task_credential_proxies` row per decl, and
+    ///   * `read_task_credential_proxies_in_tx` re-deserialises each
+    ///     row back into the same `TaskCredentialDecl` shape the
+    ///     parser produced.
+    ///
+    /// This pins the (insert → SELECT → serde-from-JSON) path that
+    /// the kernel-side `CredentialProxyManager` will use at session-
+    /// spawn time. METADATA-ONLY invariant is enforced by inspecting
+    /// the column projection: no row may carry credential bytes.
+    #[test]
+    fn task_credential_proxies_persistence_round_trips_via_session_spawn() {
+        use raxis_plan_credentials::{
+            HttpAuthMode, HttpRestrictions, PostgresRestrictions, ProxyDecl,
+        };
+
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        // Two tasks, each declaring a different proxy variant, so the
+        // round-trip exercises postgres + http + k8s + per-task row
+        // partitioning all in one go.
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "build-svc"
+
+  [[tasks.credentials]]
+  name       = "pg-staging"
+  mount_as   = "DATABASE_URL"
+  proxy_type = "postgres"
+
+    [tasks.credentials.restrictions]
+    allow_only_select = true
+
+[[tasks]]
+task_id = "deploy"
+predecessors = ["build-svc"]
+
+  [[tasks.credentials]]
+  name         = "stripe-api-key"
+  mount_as     = "STRIPE_API_BASE_URL"
+  proxy_type   = "http"
+  upstream_url = "https://api.stripe.com/v1"
+  auth_mode    = "bearer"
+
+    [tasks.credentials.restrictions]
+    allowed_methods       = ["GET", "POST"]
+    allowed_path_prefixes = ["/charges", "/customers"]
+
+  [[tasks.credentials]]
+  name       = "k8s-staging"
+  mount_as   = "KUBECONFIG_API"
+  proxy_type = "k8s"
+
+    [tasks.credentials.restrictions]
+    allowed_methods = ["GET"]
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).expect("approve_plan must succeed");
+
+        // Read back through the session-spawn-side helper. We use a
+        // short-lived read-only connection on the same store; the
+        // helper accepts any rusqlite::Connection (transaction or
+        // not) so we can call it without opening a write tx here.
+        let conn = store.lock_sync();
+
+        let build_svc = read_task_credential_proxies_in_tx(&conn, "build-svc")
+            .expect("read build-svc creds");
+        assert_eq!(build_svc.len(), 1, "build-svc has exactly 1 credential");
+        assert_eq!(build_svc[0].name.as_str(), "pg-staging");
+        assert_eq!(build_svc[0].mount_as, "DATABASE_URL");
+        match &build_svc[0].proxy {
+            ProxyDecl::Postgres { restrictions: PostgresRestrictions { allow_only_select } } => {
+                assert!(*allow_only_select, "postgres restrictions round-trip");
+            }
+            other => panic!("expected ProxyDecl::Postgres, got {other:?}"),
+        }
+
+        let deploy = read_task_credential_proxies_in_tx(&conn, "deploy")
+            .expect("read deploy creds");
+        assert_eq!(deploy.len(), 2, "deploy has exactly 2 credentials");
+        // Order-stable: created_at_unix_secs ASC + credential_name ASC.
+        // Both rows are inserted at the same wall-clock second by the
+        // approve_plan loop, so the alphabetical tiebreaker applies:
+        // `k8s-staging` < `stripe-api-key`.
+        assert_eq!(deploy[0].name.as_str(), "k8s-staging");
+        match &deploy[0].proxy {
+            ProxyDecl::K8s { restrictions: HttpRestrictions { allowed_methods, .. } } => {
+                assert_eq!(allowed_methods, &vec!["GET".to_owned()]);
+            }
+            other => panic!("expected ProxyDecl::K8s, got {other:?}"),
+        }
+
+        assert_eq!(deploy[1].name.as_str(), "stripe-api-key");
+        assert_eq!(deploy[1].mount_as, "STRIPE_API_BASE_URL");
+        match &deploy[1].proxy {
+            ProxyDecl::Http {
+                auth_mode: HttpAuthMode::Bearer,
+                upstream_url,
+                restrictions: HttpRestrictions { allowed_methods, allowed_path_prefixes },
+            } => {
+                assert_eq!(upstream_url, "https://api.stripe.com/v1");
+                assert_eq!(allowed_methods, &vec!["GET".to_owned(), "POST".to_owned()]);
+                assert_eq!(
+                    allowed_path_prefixes,
+                    &vec!["/charges".to_owned(), "/customers".to_owned()],
+                );
+            }
+            other => panic!("expected ProxyDecl::Http, got {other:?}"),
+        }
+
+        // ── Invariant probe: no credential bytes leak into the row ────
+        // Inspect every column of the new table and assert that none
+        // contains anything resembling a secret. This is the SQL-level
+        // mirror of the documentation invariant: future schema
+        // changes that accidentally added a value column would land
+        // here as a hard test failure rather than slipping through
+        // review.
+        let columns: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT name FROM pragma_table_info(?1)"
+            )).unwrap()
+            .query_map([TASK_CREDENTIAL_PROXIES], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        let expected_columns = [
+            "task_id",
+            "credential_name",
+            "mount_as",
+            "proxy_type",
+            "proxy_json",
+            "created_at_unix_secs",
+        ];
+        assert_eq!(
+            columns.len(),
+            expected_columns.len(),
+            "task_credential_proxies must have exactly the metadata-only \
+             column set; observed {columns:?}",
+        );
+        for c in &expected_columns {
+            assert!(
+                columns.iter().any(|col| col == c),
+                "task_credential_proxies missing expected column {c}",
+            );
+        }
+        for forbidden in [
+            "credential_value",
+            "value",
+            "secret",
+            "password",
+            "token",
+            "kubeconfig",
+            "credential_bytes",
+        ] {
+            assert!(
+                !columns.iter().any(|col| col == forbidden),
+                "task_credential_proxies must NEVER carry a {forbidden:?} \
+                 column — credential VALUES live with the \
+                 CredentialBackend, not in kernel.db",
+            );
+        }
     }
 
     #[test]
