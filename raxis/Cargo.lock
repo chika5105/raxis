@@ -2622,6 +2622,7 @@ name = "raxis-worktree-provision"
 version = "0.1.0"
 dependencies = [
  "gix",
+ "glob",
  "raxis-types",
  "sha2",
  "tempfile",

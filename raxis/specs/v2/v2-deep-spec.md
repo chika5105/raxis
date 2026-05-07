@@ -1794,6 +1794,116 @@ the Step 24 / Step 24b clone provisioners can read the typed strategy without
 re-parsing the signed plan TOML on every activation. Re-hydration on hot-restart
 is handled by `repopulate_from_store` and goes through the same parser.
 
+**Implementation reference (Step 27 provisioner-side mechanics).**
+
+`raxis-worktree-provision::provision_reviewer` and
+`provision_orchestrator` accept the typed `CloneStrategy` plus, for the
+Reviewer, the sealed `path_allowlist`. The provisioner performs the
+following on-disk work per strategy:
+
+| Strategy   | `.git/config` writes                                                    | `.git/info/sparse-checkout` | Worktree filter             | Notes                                                                      |
+|------------|-------------------------------------------------------------------------|-----------------------------|------------------------------|----------------------------------------------------------------------------|
+| `Full`     | (none)                                                                  | (none)                      | Materialise every leaf       | Default-shaped clone; safe for every agent type.                           |
+| `Blobless` | `remote.origin.promisor = true`, `remote.origin.partialclonefilter = blob:none` | (none)                      | Materialise every leaf       | Records partial-clone intent for future fetches; see best-judgment below. |
+| `Sparse`   | `core.sparseCheckout = true`                                            | One pattern per allowlist line | Materialise leaves matching at least one allowlist glob (literal-separator boundary) | Reviewer/Executor only — `provision_orchestrator` rejects with `SparseOrchestratorRefused`. |
+
+The `Sparse` worktree filter uses `glob::Pattern::matches_path_with` with
+`require_literal_separator = true`, mirroring git's
+`sparse-checkout`-style directory boundary semantics: `src/*` covers
+`src/foo.rs` but not `src/sub/foo.rs`; `src/**` covers all descendants.
+Empty parent directories are swept after materialisation so an
+allowlist of `src/api/**` does not leave behind an empty `src/ml/` or
+`docs/`.
+
+The `Sparse` ODB is **not** filtered: every object reachable from the
+source HEAD is still copied via the `file://` clone's pack-decode
+pipeline. Only the working tree is filtered. This preserves the
+Reviewer's ability to render a full diff at a sibling SHA whose tree
+touches paths outside the current allowlist (rendering happens before
+checkout-filter narrowing) and is consistent with the spec's
+"approve_plan binds the path scope of the worktree, not the ODB"
+contract.
+
+**Best-judgment decisions made during s27 implementation (spec amendments).**
+
+* **Blobless under `file://` transport produces zero on-disk savings
+  in V2.** gix 0.83 — pinned in `raxis/Cargo.toml` — does not yet
+  expose a partial-clone (`--filter=blob:none`) wire-protocol surface.
+  The kernel's only transport is `file://` (it always clones from a
+  local path under `<data_dir>/`), so even if gix supported the
+  filter, the bytes-on-disk in the source are already host-local —
+  the lazy-blob optimisation has nothing to defer. V2 therefore
+  treats `Blobless` and `Full` as worktree-equivalent and instead
+  persists the partial-clone *intent* in `.git/config`
+  (`remote.origin.promisor = true`,
+  `remote.origin.partialclonefilter = blob:none`). When gix gains
+  partial-clone support (or if the kernel ever fetches over a
+  non-`file://` transport), `provision_reviewer` /
+  `provision_orchestrator` swap in `with_in_memory_config_overrides`
+  / `configure_remote` calls and the existing config markers become
+  retroactively active. This avoids silently "lying" in the audit
+  surface — `tasks.clone_strategy` and the
+  `IsolationSubstrateSelected` event family still record the
+  operator-declared strategy.
+  *Pros (chosen):* implementation is correct *now* (no missing
+  blobs, no dangling promisor pointers); the strategy is forward-
+  compatible (one swap-in when gix lands the API); the audit
+  surface stays honest.
+  *Cons:* there is no observable disk-size delta between `Full` and
+  `Blobless` in V2. We surface this in the doc-comment on
+  `provision_reviewer` and accept the gap explicitly.
+
+* **`SparseEmptyAllowlist` is fail-closed.** A sparse provision with
+  an empty `path_allowlist` would materialise an empty worktree,
+  which the Reviewer's diff/log pipeline would then render as
+  "every path was deleted." That projection is operationally
+  indistinguishable from a fail-closed checkout failure but
+  semantically very different — a sealed plan with `[]` allowlist
+  reaches the provisioner *only* via a corrupted plan registry.
+  V2 surfaces a structured error
+  (`ProvisionError::SparseEmptyAllowlist`) before the clone touches
+  the filesystem.
+  *Pros (chosen):* deterministic refusal; no half-clone on disk;
+  caller can map to a specific operator-facing diagnostic.
+  *Cons:* none — the structural admission gate already rejects
+  `Sparse + Executor` with `path_allowlist = []` at parse time, so
+  this only fires under registry corruption.
+
+* **`SparseOrchestratorRefused` is a defense-in-depth backstop.**
+  The structural validator
+  (`validate_sparse_orchestrator_exclusion`) at `approve_plan` is
+  the primary gate; the spec mandates that no
+  `provision_orchestrator(.., CloneStrategy::Sparse, ..)` call ever
+  reaches the provisioner under correct kernel behaviour. The
+  provisioner refuses anyway — short-circuiting before
+  `clone_local` so no partial Orchestrator clone is left on disk —
+  to prevent a future kernel regression from silently producing a
+  sparse-trimmed Orchestrator worktree that would then corrupt
+  git's 3-way merge traversal at `IntegrationMerge` time.
+  *Pros (chosen):* the sparse-Orchestrator constraint is enforced
+  at *every* boundary (parser, structural validator, provisioner);
+  no single-point-of-failure regression can produce a corrupt
+  Orchestrator worktree.
+  *Cons:* the rule is now duplicated at three sites. Each site has
+  a clear, distinct purpose (parser = type validity; admission =
+  structural rule; provisioner = on-disk fail-closed) so the
+  duplication is intentional rather than drift.
+
+* **Path-matching uses `glob::Pattern::matches_path_with` with
+  literal-separator semantics, not git's full sparse-checkout cone
+  syntax.** Git's sparse-checkout supports two modes (cone and
+  pattern); we choose the pattern-mode equivalent because it
+  matches the operator's mental model from `path_allowlist` (which
+  uses the same glob crate elsewhere in the kernel — see
+  `kernel/src/handlers/intent.rs::compute_effective_allow`).
+  *Pros (chosen):* uniform path-glob semantics across the kernel;
+  no bespoke cone-pattern compiler; future `path_allowlist`
+  features (e.g., `!`-negation) come for free.
+  *Cons:* operators familiar with `git sparse-checkout set --cone`
+  may expect cone-mode performance optimisations. Documented as
+  a known gap in the doc-comment; the V2 worktree is small enough
+  that the performance gap is academic.
+
 ---
 
 ### Step 28: Initiative Budget Ceiling — Shared Lane Model
