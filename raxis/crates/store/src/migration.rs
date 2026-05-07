@@ -54,7 +54,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -84,6 +84,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 5 {
         apply_migration_5(conn)?;
+    }
+    if current_version < 6 {
+        apply_migration_6(conn)?;
     }
 
     Ok(())
@@ -1080,6 +1083,80 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 6 — V2 critique routing column on `tasks`.
+// v2-deep-spec.md §Step 22 ("Critique routing") and §Step 25 ("Parallel
+// reviewer aggregation").
+//
+// Adds a single nullable text column:
+//
+//   tasks.last_critique TEXT  — most recent reviewer-rejection critique,
+//                               aggregated across N parallel reviewers
+//                               for the SAME activation; cleared at the
+//                               next activation. The Kernel writes it
+//                               on `IntentKind::SubmitReview` with
+//                               `approved=false`; the Executor's retry
+//                               prompt assembler reads it to prepend
+//                               into the system prompt (Step 22).
+//
+// **Why on `tasks` rather than `subtask_activations`.** v2-deep-spec.md
+// is internally inconsistent here: §Step 22 sketches the Kernel writing
+// to `tasks.last_critique` (singular, per-task), while the activation
+// recovery sweep contemplates per-activation critiques. We resolve in
+// favor of `tasks.last_critique` because:
+//   1. The Executor only ever consumes the LATEST critique on retry —
+//      historical critiques are append-only audit material, never
+//      prompt material. Putting it on `tasks` matches the consumer.
+//   2. Aggregation across N parallel reviewers (Step 25) writes ONE
+//      logical-AND verdict; the natural shape is a single row that
+//      mutates, not a per-reviewer history table.
+//   3. The aspirational DDL in v2-deep-spec.md §Part 8 places it on
+//      `tasks`; the working DDL in §1.2 was a transcription drift.
+// Spec drift is corrected in this migration's spec reference (Part 8
+// is now authoritative for this column).
+//
+// **V1 backward compatibility.** The new column is NULLable with no
+// default; every V1 row gets `NULL` and every V1 read continues to
+// work because no V1 code reads `last_critique`.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_6(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_6_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 6 failed: {e}"))
+    })
+}
+
+/// The complete migration-6 DDL. INV-STORE-03: every table identifier
+/// is rendered through `Table::...as_str()`.
+fn render_migration_6_ddl() -> String {
+    let tasks          = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── tasks: V2 critique routing column ─────────────────────────────────────
+-- last_critique: most-recent aggregated reviewer critique for this
+-- (sub)task. NULL for V1 tasks and for V2 tasks that have never been
+-- rejected. Hard-capped at MAX_CRITIQUE_BYTES at the application layer
+-- (v2-deep-spec.md §Step 22) — the database does NOT enforce length so
+-- a forensic dump can preserve the full payload that the kernel
+-- accepted. Cleared (set NULL) on every fresh activation by the
+-- subtask activation handler.
+ALTER TABLE {tasks}
+    ADD COLUMN last_critique TEXT;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (6, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2061,6 +2138,190 @@ mod tests {
             "migration 5 must open exactly one transaction (BEGIN EXCLUSIVE)");
         assert_eq!(ddl.matches("COMMIT").count(), 1,
             "migration 5 must commit exactly once");
+        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
+                < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT");
+    }
+
+    // ── Migration 6 — V2 critique routing column on `tasks` ─────────────
+
+    /// Migration 6 adds `tasks.last_critique` as a NULLable TEXT column.
+    /// The presence and shape of the column is the entire contract: any
+    /// future write to the column happens through application code
+    /// (handlers/intent.rs), so the schema test is purely structural.
+    #[test]
+    fn migration_6_adds_last_critique_column_to_tasks() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let cols: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,           // name
+                    r.get::<_, String>(2)?,           // type
+                    r.get::<_, i64>(3)?,              // notnull
+                    r.get::<_, Option<String>>(4)?,   // dflt_value
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let last_critique = cols
+            .iter()
+            .find(|(name, _, _, _)| name == "last_critique")
+            .expect("tasks.last_critique column must exist after migration 6");
+
+        assert_eq!(last_critique.1, "TEXT", "last_critique must be TEXT");
+        assert_eq!(last_critique.2, 0, "last_critique must be NULLable");
+        assert!(last_critique.3.is_none(), "last_critique must have no DEFAULT");
+    }
+
+    /// Migration 6 leaves V1 task rows untouched: the column is added
+    /// with no DEFAULT, so `last_critique` defaults to NULL on every
+    /// pre-existing row. We pin this with a synthetic V1 row inserted
+    /// before migration 6 runs.
+    #[test]
+    fn migration_6_preserves_v1_task_rows_with_null_last_critique() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Apply only migrations 1–5 (the V1+v1.x+v2-substrate state
+        // that existed before this column landed).
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 5);
+
+        // Insert a V1-shaped row. We only care that the row survives
+        // migration 6 with last_critique = NULL; the exact column set
+        // matches whatever migration 1 created (kernel-store.md §2.5.1
+        // Table 5).
+        conn.execute_batch(
+            &format!(
+                "INSERT INTO {initiatives} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES ('init-mig6', 'Draft', '{{}}', 'deadbeef', 0); \
+                 INSERT INTO {tasks} \
+                    (task_id, initiative_id, lane_id, state, actor, \
+                     policy_epoch, admitted_at, transitioned_at) \
+                 VALUES ('task-mig6', 'init-mig6', 'lane.default', \
+                         'Admitted', 'Operator', 1, 0, 0);",
+                initiatives = Table::Initiatives.as_str(),
+                tasks       = Table::Tasks.as_str(),
+            ),
+        ).unwrap();
+
+        // Now run migration 6.
+        apply_migration_6(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let last_critique: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT last_critique FROM {} WHERE task_id = ?1",
+                    Table::Tasks.as_str(),
+                ),
+                ["task-mig6"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            last_critique.is_none(),
+            "last_critique must be NULL on pre-existing V1 rows (got {last_critique:?})"
+        );
+    }
+
+    /// Migration 6 is idempotent under `apply_pending` — re-running
+    /// after a successful boot is a no-op (no duplicate column, no
+    /// duplicate schema_version row).
+    #[test]
+    fn migration_6_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        // schema_version has exactly SCHEMA_VERSION rows (one per applied
+        // migration) — no duplicates from repeated apply_pending.
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, SCHEMA_VERSION as i64);
+
+        // last_critique appears exactly once in the column list.
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let n_last_critique = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|name| name == "last_critique")
+            .count();
+        assert_eq!(n_last_critique, 1,
+            "last_critique must appear exactly once in tasks PRAGMA");
+    }
+
+    /// Upgrade scenario: a database at v=5 (a build that shipped before
+    /// critique routing) must pick up migration 6 cleanly.
+    #[test]
+    fn migration_6_applies_to_a_v5_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 5);
+
+        // last_critique not yet present.
+        let mut stmt_pre = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let has_pre = stmt_pre
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .any(|name| name == "last_critique");
+        assert!(!has_pre, "last_critique must not yet exist at v=5");
+
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        // last_critique now present.
+        let mut stmt_post = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let has_post = stmt_post
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .any(|name| name == "last_critique");
+        assert!(has_post, "migration 6 must add last_critique");
+    }
+
+    /// Migration 6 wraps the single ALTER TABLE in a single
+    /// `BEGIN EXCLUSIVE; ... COMMIT;`. Pinning the transaction shape
+    /// guards against future drift to multi-tx layout.
+    #[test]
+    fn migration_6_is_a_single_transaction() {
+        let ddl = render_migration_6_ddl();
+        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
+            "migration 6 must open exactly one transaction (BEGIN EXCLUSIVE)");
+        assert_eq!(ddl.matches("COMMIT").count(), 1,
+            "migration 6 must commit exactly once");
         assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
                 < ddl.find("COMMIT").unwrap(),
             "BEGIN must precede COMMIT");

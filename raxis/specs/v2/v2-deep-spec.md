@@ -1046,11 +1046,12 @@ that all inter-agent communication passes through the Kernel.
 **Decision (Step 22):** The Kernel intercepts and stores the critique:
 
 1. Reviewer submits `IntentKind::SubmitReview { approved: false, critique: String }`.
-2. Kernel enforces a hard size cap of 32,768 bytes on `critique`. Oversized critique returns
-   `FAIL_INVALID_ARGUMENT` — the critique is not stored, the Reviewer must resubmit with a
-   shorter critique. **Why 32 KiB?** Long critiques (including full file diffs) would exhaust
-   the retry Executor's context window before it processes a single turn. 32 KiB is generous
-   for actionable feedback while preventing context-flooding DoS.
+2. Kernel enforces a hard size cap of 32,768 bytes (`raxis_types::MAX_CRITIQUE_BYTES`) on
+   `critique`. Oversized critique returns `INVALID_REQUEST` — the critique is not stored,
+   the Reviewer must resubmit with a shorter critique. **Why 32 KiB?** Long critiques
+   (including full file diffs) would exhaust the retry Executor's context window before it
+   processes a single turn. 32 KiB is generous for actionable feedback while preventing
+   context-flooding DoS.
 3. Kernel writes the critique to `tasks.last_critique` on the Executor's `tasks` row,
    aggregating across multiple parallel Reviewers with format:
    `"[Reviewer <task_id>]: <critique>\n\n"`.
@@ -1059,6 +1060,54 @@ that all inter-agent communication passes through the Kernel.
    `tasks.last_critique` and prepends it verbatim to the retry Executor's
    `.raxis/system_prompt.txt` before VM boot. The critique arrives inside the non-negotiable
    system prompt — the LLM cannot ignore or override it.
+
+**Implementation reference:** `raxis/kernel/src/handlers/intent.rs::handle_submit_review` —
+the SubmitReview branch of the dispatch matrix. The handler:
+- Gates on `task_state == Running` for the Reviewer (`FAIL_TASK_NOT_RUNNING` otherwise).
+- Validates `req.approved.is_some()` (else `INVALID_REQUEST`).
+- On `approved == Some(false)`: validates `critique` is `Some(non-empty)` and at most
+  `MAX_CRITIQUE_BYTES` bytes (else `INVALID_REQUEST`); otherwise drops any supplied text.
+- Reverse-joins `task_dag_edges` to find the predecessor Executor task (`INVALID_REQUEST`
+  if none — defense-in-depth against an orphan reviewer escaping plan-DAG validation).
+- Writes the formatted critique to every predecessor's `tasks.last_critique` via
+  `last_critique = COALESCE(last_critique, '') || ?` (NULL→string append; aggregates across
+  parallel Reviewers per Step 25).
+- Transitions the Reviewer's own task FSM `Running → Completed` in the same SQLite
+  transaction as the critique append (INV-STORE-02 atomicity Pattern B).
+
+**Schema reference:** `tasks.last_critique TEXT` is added by Migration 6
+(`raxis/crates/store/src/migration.rs::render_migration_6_ddl`). NULLable, no default,
+no length CHECK — the application layer enforces `MAX_CRITIQUE_BYTES` so a forensic dump
+preserves whatever bytes the kernel actually accepted.
+
+**Error-code reconciliation (best-judgment decision, recorded here for
+spec/implementation lock-step).** Earlier drafts of this section called for
+`FAIL_INVALID_ARGUMENT` on oversized critique and `FAIL_INVALID_REQUEST` on missing
+fields. Implementation consolidated both to the existing `INVALID_REQUEST`
+(`PlannerErrorCode::InvalidRequest`) for three reasons:
+
+1. INV-08 forbids leaking detail beyond the coarse code; the planner sees the same
+   class of "your request is malformed and cannot be processed" in either case, and
+   the structured remediation is identical (re-form the request, then resubmit).
+2. The existing `PlannerErrorCode` enum has no `FAIL_INVALID_ARGUMENT` variant;
+   adding one would force a wire-protocol bump for a distinction the planner cannot
+   act on differently.
+3. The reviewer harness (planner-side) treats both the missing-`approved` case and
+   the oversized-`critique` case as "bug in the harness, abort and let the operator
+   diagnose"; the granularity is academic.
+
+The wire surface is therefore `INVALID_REQUEST` for: `approved` is `None`, `critique`
+is missing or empty when `approved=false`, `critique` exceeds `MAX_CRITIQUE_BYTES`,
+and a Reviewer with no predecessor edge. `FAIL_TASK_NOT_RUNNING` covers the
+task-state gate.
+
+**Activation-row updates and downstream pushes.** The `subtask_activations` row
+update (`activation_state` transition) and the `KernelPush::ReviewRejected` /
+`AllReviewersPassed` notifications (Step 25) are NOT yet wired in this iteration:
+the V2 plan-bundle sealing path (Step 1.2 / `plan-bundle-sealing.md` §8.2) does not
+yet populate `subtask_activations`, so adding those writes here would silently fail
+in production and pass in fixtures — the worst possible failure mode. They land
+together with the activation-row population call site (Plan Bundle Sealing task).
 
 **Wire encoding addendum (implementation note, derived from Step 22):** The `approved` and
 `critique` fields on `IntentRequest` are `Option<bool>` and `Option<String>` respectively at

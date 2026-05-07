@@ -441,14 +441,19 @@ fn run_phase_a(
     // result through `EarlyResponse`. SingleCommit / IntegrationMerge
     // fall through to Steps 4-8 below and continue into Phase B.
     //
-    // V2 sub-task lifecycle kinds (`ActivateSubTask`, `RetrySubTask`,
-    // `SubmitReview`) are NOT yet routed by this handler — they are
-    // addressed by the static dispatch matrix introduced in
-    // v2-deep-spec.md §Step 20, which will live BEFORE this entry point
-    // (frame parse → matrix → handler). Until that matrix lands, any
-    // V2 kind reaching this handler indicates an authority bypass; we
-    // fail-closed with `FAIL_POLICY_VIOLATION` (INV-08 coarse codes —
-    // no template detail leaked).
+    // V2 sub-task lifecycle kinds — `SubmitReview` is now routed to
+    // its dedicated handler (v2-deep-spec.md §Step 22). The remaining
+    // V2 kinds (`ActivateSubTask`, `RetrySubTask`) still fail-closed
+    // because their plan-side prerequisites (V2 plan bundle sealing,
+    // `subtask_activations` row population) are not yet wired —
+    // landing them here would silently fail in production. They get
+    // their own task once the activation table is populated by
+    // approve_plan.
+    //
+    // Authorization for all three V2 kinds was already enforced by
+    // the static dispatch matrix in `handle_inner` BEFORE Phase A
+    // (v2-deep-spec.md §Step 20). A V2 kind reaching this point is
+    // already (intent_kind, session_agent_type)-authorized.
     match req.intent_kind {
         IntentKind::ReportFailure => {
             return match handle_report_failure(req, task_state, &session_id, seq, store, policy) {
@@ -462,13 +467,17 @@ fn run_phase_a(
                 Err((code, st))  => PreGateOutcome::Reject(code, st),
             };
         }
+        IntentKind::SubmitReview => {
+            return match handle_submit_review(req, task_state, &session_id, seq, store, policy) {
+                Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
+                Err((code, st))  => PreGateOutcome::Reject(code, st),
+            };
+        }
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
         IntentKind::ActivateSubTask
-        | IntentKind::RetrySubTask
-        | IntentKind::SubmitReview => {
-            // Will be handled by the static dispatch matrix
-            // (v2-deep-spec.md §Step 20) once it lands. Until then,
-            // fail-closed.
+        | IntentKind::RetrySubTask => {
+            // Awaiting activation-row population (Step 25 / Plan
+            // Bundle Sealing). Until then, fail-closed.
             return PreGateOutcome::Reject(
                 PlannerErrorCode::FailPolicyViolation, task_state);
         }
@@ -1050,6 +1059,220 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// handle_submit_review — IntentKind::SubmitReview (V2)
+//
+// Normative reference: v2-deep-spec.md §Step 22 ("Critique Routing — Why
+// the Kernel Holds the Critique") and §Step 25 ("Parallel Reviewer
+// logical-AND verdict aggregation").
+//
+// Pipeline (sync, runs on the blocking pool inside `run_phase_a`):
+//
+//   1. Task-state gate. The Reviewer task must be `Running`.
+//   2. Wire payload validation:
+//        a. `req.approved` MUST be `Some(_)` (NULL ⇒ INVALID_REQUEST).
+//        b. On `approved == Some(false)`, `req.critique` MUST be
+//           `Some(non-empty)` (missing ⇒ INVALID_REQUEST) and at most
+//           `MAX_CRITIQUE_BYTES` (32 KiB) bytes long
+//           (oversized ⇒ INVALID_REQUEST). The critique is NOT stored
+//           on rejection — INV-08, no detail leaked, and an attacker
+//           cannot use oversized payloads to flood `tasks.last_critique`.
+//        c. On `approved == Some(true)` we silently drop any critique
+//           text the planner sent — the success path has no critique.
+//   3. On rejection (`approved == Some(false)`) only: reverse-DAG join
+//      (`task_dag_edges`) to find the predecessor Executor task. The
+//      Reviewer's plan-declared `depends_on` MUST list exactly one
+//      Executor sub-task (Step 23 sequential model); we tolerate
+//      multiple predecessors at the kernel layer (concatenate to all)
+//      and rely on plan validation (Step 17 / 19) to enforce shape.
+//   4. On rejection only: append the formatted critique to every
+//      predecessor task's `tasks.last_critique`. Format is exactly
+//      `"[Reviewer <reviewer_task_id>]: <critique>\n\n"` per Step 22 —
+//      this is the form the Executor's retry prompt assembler reads.
+//      Aggregation across N parallel reviewers (Step 25) is by string
+//      concatenation, not replacement: every rejecting reviewer's
+//      critique survives until the next activation clears the column.
+//   5. Reviewer task FSM transition: Running → Completed. The Reviewer
+//      has fulfilled its only authorized output (`SubmitReview`), so
+//      its task lifecycle terminates here regardless of verdict
+//      (v2-deep-spec.md §Step 22 + dispatch matrix § "Reviewer +
+//      ReportFailure = Unauthorized" — the Reviewer cannot self-fail).
+//      The downstream consequences (review_reject_count++,
+//      KernelPush::ReviewRejected / AllReviewersPassed) are out of
+//      scope for this iteration — they are implemented when the
+//      `subtask_activations` row population path lands (Step 25).
+//
+// **Why no `subtask_activations` write here.** V2 plan approval does
+// not yet populate `subtask_activations` (that arrives with the
+// V2 plan-bundle sealing work, Step 1.2). Until then, any Reviewer
+// task is a synthetic test fixture; the activation-row update is a
+// no-op. Adding it here would silently fail in production and pass
+// in fixtures, which is the worst possible failure mode. We make
+// the activation-row update a separate task (Step 25 / Plan Bundle
+// Sealing) so the implementation lands together with the call site
+// that creates the row.
+//
+// **Idempotency.** Re-submission of the same `(session, sequence_number,
+// nonce)` is rejected at Step 2 (envelope acceptance) before this
+// handler runs — duplicate submissions never reach this code path.
+// A retransmitted critique with a fresh sequence number is treated as
+// a NEW reviewer event and aggregated; the planner (Reviewer harness)
+// is responsible for not double-submitting the same verdict.
+// ---------------------------------------------------------------------------
+
+fn handle_submit_review(
+    req: IntentRequest,
+    task_state: TaskState,
+    _session_id: &SessionId,
+    seq: u64,
+    store: &Store,
+    policy: &raxis_policy::PolicyBundle,
+) -> HandlerResult {
+    // ── 1. Task-state gate ────────────────────────────────────────────────
+    if task_state != TaskState::Running {
+        return Err((PlannerErrorCode::FailTaskNotRunning, task_state));
+    }
+
+    // ── 2. Wire payload validation ────────────────────────────────────────
+    let approved = match req.approved {
+        Some(v) => v,
+        None    => return Err((PlannerErrorCode::InvalidRequest, task_state)),
+    };
+
+    // The reviewer's own task_id (NOT the Executor's). Used as the
+    // attribution prefix in the aggregated critique format.
+    let reviewer_task_id = req.task_id.as_str().to_owned();
+
+    // On rejection: validate critique presence + size BEFORE doing any
+    // database work. Empty/missing/oversized critiques are rejected
+    // without touching `tasks.last_critique`.
+    let formatted_critique = if !approved {
+        let critique = req.critique.as_deref().unwrap_or("");
+        if critique.is_empty() {
+            return Err((PlannerErrorCode::InvalidRequest, task_state));
+        }
+        if critique.len() > raxis_types::MAX_CRITIQUE_BYTES {
+            // Oversized critique. INV-08: coarse code only. The planner
+            // sees `INVALID_REQUEST`; the audit chain (out of scope
+            // here) records the structured rejection.
+            return Err((PlannerErrorCode::InvalidRequest, task_state));
+        }
+        // Step 22 canonical format: `[Reviewer <task_id>]: <critique>\n\n`.
+        Some(format!("[Reviewer {reviewer_task_id}]: {critique}\n\n"))
+    } else {
+        // Success path: no critique to store. Any text the planner sent
+        // is silently dropped (Step 22 — "Some(\"...\") with approved =
+        // true is silently dropped").
+        None
+    };
+
+    // ── 3 + 4 + 5: predecessor lookup + critique append + FSM transition ──
+    //
+    // We do these three writes in ONE SQLite transaction so a crash
+    // between the critique append and the Running → Completed update
+    // cannot leave the Reviewer in `Running` with a stale critique on
+    // the Executor's row (INV-STORE-02 atomicity, Pattern B).
+    {
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction()
+            .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+
+        if let Some(formatted) = formatted_critique.as_deref() {
+            // Reverse-DAG: find every predecessor task_id of this
+            // Reviewer. In the canonical Step 23 sequential model
+            // there is exactly one (the Executor); we tolerate
+            // multiple at the kernel layer and append to each.
+            let predecessors: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    &format!(
+                        "SELECT predecessor_task_id FROM {dag_edges}
+                         WHERE successor_task_id = ?1",
+                        dag_edges = Table::TaskDagEdges.as_str(),
+                    )
+                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                let rows = stmt.query_map(
+                    rusqlite::params![reviewer_task_id.as_str()],
+                    |r| r.get::<_, String>(0),
+                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                rows.filter_map(Result::ok).collect()
+            };
+
+            // No predecessors: a Reviewer task without any `depends_on`
+            // edge is malformed at the plan layer (Step 17 DAG validation
+            // would have rejected it on approve_plan, but defense in
+            // depth — also reject here). We surface INVALID_REQUEST to
+            // the planner so the Reviewer harness retries via the
+            // operator. INV-08 — coarse code, no detail.
+            if predecessors.is_empty() {
+                return Err((PlannerErrorCode::InvalidRequest, task_state));
+            }
+
+            // Append the formatted critique to every predecessor's
+            // `tasks.last_critique` (NULL → just the new entry; existing
+            // string → existing || new). `COALESCE(last_critique, '')`
+            // keeps the SQL single-statement and idempotent across
+            // null-vs-string starting state.
+            let mut update_stmt = tx.prepare(
+                &format!(
+                    "UPDATE {tasks} SET last_critique =
+                        COALESCE(last_critique, '') || ?1
+                     WHERE task_id = ?2",
+                    tasks = Table::Tasks.as_str(),
+                )
+            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+
+            for predecessor in &predecessors {
+                update_stmt.execute(
+                    rusqlite::params![formatted, predecessor.as_str()],
+                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+            }
+        }
+
+        // Reviewer's own task FSM: Running → Completed. The Reviewer
+        // has done its job — successful or not, the Reviewer task
+        // terminates here. This is by design: the Reviewer cannot
+        // self-fail (Step 20 dispatch matrix forbids ReportFailure for
+        // Reviewers); its only terminal output is SubmitReview, and
+        // that output is the activation lifecycle terminator.
+        transition_task_in_tx(
+            &tx,
+            req.task_id.as_str(),
+            TaskState::Completed,
+            None,
+            TransitionActor::Kernel,
+        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+
+        tx.commit()
+            .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+    }
+
+    // Structured log for forensic traceability. INV-08 means the wire
+    // returns the coarse outcome only; the kernel logs carry the
+    // structured detail (audit chain entry follows in a future task).
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"ReviewSubmitted\",\
+         \"reviewer_task_id\":\"{}\",\"approved\":{}}}",
+        reviewer_task_id,
+        approved,
+    );
+
+    // Lane budget snapshot (lane unchanged on review submission — the
+    // Reviewer's admission cost was charged at activation; SubmitReview
+    // itself consumes nothing).
+    let task = load_task(req.task_id.as_str(), store)
+        .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Completed))?;
+    let remaining = lane_budget_snapshot(&task.lane_id, policy, store);
+
+    Ok(IntentResponse {
+        sequence_number: seq,
+        task_state: TaskState::Completed,
+        outcome: IntentOutcome::Accepted {
+            remaining_budget:      remaining,
+            warn_delegation_stale: false,
+        },
+    })
+}
+
 /// Atomically transition the task to `Completed` AND insert the export
 /// snapshot rows in ONE SQLite transaction (§2.5.8 line 2014).
 ///
@@ -1625,6 +1848,428 @@ mod tests {
         assert!(h_bind.is_none(),
             "first-intent-not-yet-arrived → evaluation_sha is NULL");
         assert!(ranges.is_empty());
+    }
+
+    // ── handle_submit_review — v2-deep-spec.md §Step 22 ───────────────────
+    //
+    // These unit tests exercise the SubmitReview handler in isolation,
+    // bypassing the dispatch matrix (covered in
+    // `authority::dispatch_matrix` tests) and the session-loading path
+    // (covered in `handle_inner` integration tests). The handler-under-
+    // test takes a pre-validated `(req, task_state, ...)` tuple and
+    // is responsible for: (a) payload validation, (b) reverse-DAG
+    // critique routing, (c) FSM transition.
+
+    /// Insert one Reviewer task in `Running` plus an Executor predecessor
+    /// in `Admitted`, plus the `task_dag_edges` row connecting them.
+    /// Returns `(reviewer_task_id, executor_task_id)`.
+    fn seed_reviewer_with_executor_predecessor(
+        store: &Store,
+        reviewer_id: &str,
+        executor_id: &str,
+    ) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        let _ = conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-rev', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
+        );
+        // Executor task — Admitted (we don't transition it here; we
+        // just need a row whose `last_critique` we can observe).
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES (?1, 'init-rev', 'default', ?2, 'kernel',
+                         1, ?3, ?3, 0)"
+            ),
+            rusqlite::params![executor_id, TaskState::Admitted.as_sql_str(), now],
+        ).unwrap();
+        // Reviewer task — Running (the state SubmitReview requires).
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES (?1, 'init-rev', 'default', ?2, 'kernel',
+                         1, ?3, ?3, 0)"
+            ),
+            rusqlite::params![reviewer_id, TaskState::Running.as_sql_str(), now],
+        ).unwrap();
+        // DAG edge: executor → reviewer.
+        conn.execute(
+            &format!(
+                "INSERT INTO {dag_edges}
+                    (initiative_id, predecessor_task_id, successor_task_id,
+                     predecessor_satisfied)
+                 VALUES ('init-rev', ?1, ?2, 1)",
+                dag_edges = Table::TaskDagEdges.as_str(),
+            ),
+            rusqlite::params![executor_id, reviewer_id],
+        ).unwrap();
+    }
+
+    fn read_last_critique(store: &Store, task_id: &str) -> Option<String> {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT last_critique FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![task_id],
+            |r| r.get::<_, Option<String>>(0),
+        ).unwrap()
+    }
+
+    /// Build a minimal `IntentRequest` for SubmitReview from
+    /// `(reviewer_task_id, approved, critique)`. All non-relevant
+    /// fields receive deterministic placeholder values that the
+    /// SubmitReview handler ignores (per §Step 22 wire-shape comment
+    /// in `crates/types/src/intent.rs`).
+    fn make_submit_review_request(
+        reviewer_task_id: &str,
+        approved: Option<bool>,
+        critique: Option<&str>,
+    ) -> IntentRequest {
+        IntentRequest {
+            session_token:   "tok".into(),
+            sequence_number: 1,
+            envelope_nonce:  "0".repeat(32),
+            intent_kind:     IntentKind::SubmitReview,
+            task_id:         raxis_types::TaskId::parse(reviewer_task_id).unwrap(),
+            base_sha:        None,
+            head_sha:        None,
+            submitted_claims: vec![],
+            justification:   None,
+            idempotency_key: None,
+            approval_token:  None,
+            approved,
+            critique:        critique.map(str::to_owned),
+        }
+    }
+
+    /// Default policy bundle for tests that exercise the budget snapshot
+    /// path on success (the snapshot is not asserted on; we just need
+    /// the call to not panic).
+    fn default_test_policy() -> raxis_policy::PolicyBundle {
+        raxis_policy::PolicyBundle::for_tests_with_operators(vec![])
+    }
+
+    fn dummy_session_id() -> SessionId {
+        SessionId::parse("11111111-1111-1111-1111-111111111111").unwrap()
+    }
+
+    /// Approval path: the handler transitions the Reviewer from
+    /// Running → Completed, leaves `tasks.last_critique` untouched on
+    /// the predecessor, and returns Accepted.
+    #[test]
+    fn submit_review_approved_transitions_reviewer_to_completed() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_submit_review_request("rev1", Some(true), None);
+        let resp = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect("approval must be Accepted");
+
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+        assert_eq!(resp.task_state, TaskState::Completed);
+        assert_eq!(task_state_of(&store, "rev1"), TaskState::Completed.as_sql_str());
+        assert!(read_last_critique(&store, "exe1").is_none(),
+            "approval path must not write to executor's last_critique");
+    }
+
+    /// Approval-with-critique-text: the spec says critique text on
+    /// `approved=true` is silently dropped. The Reviewer transitions,
+    /// and the Executor's `last_critique` stays NULL.
+    #[test]
+    fn submit_review_approved_silently_drops_supplied_critique() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_submit_review_request(
+            "rev1",
+            Some(true),
+            Some("kernel must drop this — approval path"),
+        );
+        let resp = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect("approval must be Accepted");
+
+        assert_eq!(resp.task_state, TaskState::Completed);
+        assert!(read_last_critique(&store, "exe1").is_none(),
+            "approved=true critique must NOT be persisted");
+    }
+
+    /// Rejection path: handler writes a formatted critique to the
+    /// predecessor Executor's `tasks.last_critique` and transitions
+    /// the Reviewer to Completed.
+    #[test]
+    fn submit_review_rejected_writes_formatted_critique_to_predecessor() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_submit_review_request(
+            "rev1",
+            Some(false),
+            Some("auth check missing on /admin"),
+        );
+        let resp = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect("rejection must be Accepted (the handler accepts the verdict)");
+
+        assert_eq!(resp.task_state, TaskState::Completed);
+        assert_eq!(task_state_of(&store, "rev1"), TaskState::Completed.as_sql_str());
+        // Spec format pinned: `[Reviewer <task_id>]: <critique>\n\n`.
+        let written = read_last_critique(&store, "exe1")
+            .expect("rejection must write last_critique");
+        assert_eq!(
+            written,
+            "[Reviewer rev1]: auth check missing on /admin\n\n",
+            "critique format must match v2-deep-spec.md §Step 22 verbatim"
+        );
+    }
+
+    /// Aggregation across N parallel reviewers (Step 25): each
+    /// rejecting reviewer's critique is appended; the order matches
+    /// arrival order; the Executor's column carries every entry.
+    #[test]
+    fn submit_review_rejected_aggregates_across_multiple_reviewers() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+
+        // Insert 1 Executor + 2 Reviewers, both rejecting in turn.
+        // Reuse `seed_reviewer_with_executor_predecessor` for the
+        // first reviewer, then add the second by hand (sharing the
+        // same Executor predecessor).
+        seed_reviewer_with_executor_predecessor(&store, "revA", "exe1");
+        {
+            let conn = store.lock_sync();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES ('revB', 'init-rev', 'default', ?1, 'kernel',
+                             1, ?2, ?2, 0)"
+                ),
+                rusqlite::params![TaskState::Running.as_sql_str(), now],
+            ).unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {dag_edges}
+                        (initiative_id, predecessor_task_id, successor_task_id,
+                         predecessor_satisfied)
+                     VALUES ('init-rev', 'exe1', 'revB', 1)",
+                    dag_edges = Table::TaskDagEdges.as_str(),
+                ),
+                [],
+            ).unwrap();
+        }
+
+        // First reviewer rejects.
+        let req_a = make_submit_review_request(
+            "revA", Some(false), Some("missing input validation"),
+        );
+        handle_submit_review(
+            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect("first rejection accepted");
+
+        // Second reviewer rejects.
+        let req_b = make_submit_review_request(
+            "revB", Some(false), Some("uses deprecated tokio API"),
+        );
+        handle_submit_review(
+            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy,
+        ).expect("second rejection accepted");
+
+        // Both critiques visible on the Executor's row, in arrival order.
+        let aggregated = read_last_critique(&store, "exe1")
+            .expect("aggregated critiques must persist");
+        assert_eq!(
+            aggregated,
+            "[Reviewer revA]: missing input validation\n\n\
+             [Reviewer revB]: uses deprecated tokio API\n\n",
+            "Step 25 aggregation: critiques append in arrival order"
+        );
+    }
+
+    /// Missing `approved` (None) → INVALID_REQUEST. The handler MUST
+    /// NOT touch `tasks.last_critique` or the Reviewer's FSM.
+    #[test]
+    fn submit_review_missing_approved_returns_invalid_request() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_submit_review_request("rev1", None, None);
+        let err = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect_err("missing approved must reject");
+
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
+        // FSM unchanged: Reviewer still Running, Executor's column NULL.
+        assert_eq!(task_state_of(&store, "rev1"), TaskState::Running.as_sql_str());
+        assert!(read_last_critique(&store, "exe1").is_none());
+    }
+
+    /// Rejection with missing critique (None) → INVALID_REQUEST.
+    #[test]
+    fn submit_review_rejected_missing_critique_returns_invalid_request() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_submit_review_request("rev1", Some(false), None);
+        let err = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect_err("missing critique on rejection must reject");
+
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
+        assert_eq!(task_state_of(&store, "rev1"), TaskState::Running.as_sql_str());
+        assert!(read_last_critique(&store, "exe1").is_none());
+    }
+
+    /// Rejection with empty critique (Some("")) → INVALID_REQUEST.
+    /// An empty string offers no actionable feedback to the retry
+    /// Executor; treat it as planner error rather than silently
+    /// accepting a meaningless verdict.
+    #[test]
+    fn submit_review_rejected_empty_critique_returns_invalid_request() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_submit_review_request("rev1", Some(false), Some(""));
+        let err = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect_err("empty critique on rejection must reject");
+
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
+        assert!(read_last_critique(&store, "exe1").is_none());
+    }
+
+    /// Oversized critique (> MAX_CRITIQUE_BYTES) → INVALID_REQUEST.
+    /// Critically, the oversized text MUST NOT be persisted — that's
+    /// the entire point of the cap (context-flooding DoS prevention).
+    #[test]
+    fn submit_review_rejected_oversized_critique_is_not_persisted() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        // 1 byte over the cap.
+        let oversized = "x".repeat(raxis_types::MAX_CRITIQUE_BYTES + 1);
+        let req = make_submit_review_request("rev1", Some(false), Some(&oversized));
+        let err = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect_err("oversized critique must reject");
+
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
+        assert!(read_last_critique(&store, "exe1").is_none(),
+            "oversized critique MUST NOT be persisted (DoS prevention)");
+        assert_eq!(task_state_of(&store, "rev1"), TaskState::Running.as_sql_str());
+    }
+
+    /// Critique exactly at the cap (== MAX_CRITIQUE_BYTES) is
+    /// accepted. Boundary check pinned so a future refactor that
+    /// flips `>` to `>=` regresses loudly.
+    #[test]
+    fn submit_review_rejected_critique_at_cap_is_accepted() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let at_cap = "y".repeat(raxis_types::MAX_CRITIQUE_BYTES);
+        let req = make_submit_review_request("rev1", Some(false), Some(&at_cap));
+        let resp = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect("critique at cap must be Accepted");
+
+        assert_eq!(resp.task_state, TaskState::Completed);
+        let written = read_last_critique(&store, "exe1")
+            .expect("at-cap critique must persist");
+        // The persisted form is `[Reviewer rev1]: <text>\n\n`. Just
+        // assert it carries the full body bytes.
+        assert!(written.contains(&at_cap),
+            "at-cap critique must be persisted in full");
+    }
+
+    /// Reviewer task NOT in Running → FailTaskNotRunning. The
+    /// task-state gate is the first check; payload validation is
+    /// short-circuited.
+    #[test]
+    fn submit_review_rejects_non_running_reviewer() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        // Caller passes Admitted; the gate must reject regardless of
+        // the actual DB state.
+        let req = make_submit_review_request(
+            "rev1", Some(false), Some("auth missing"),
+        );
+        let err = handle_submit_review(
+            req, TaskState::Admitted, &dummy_session_id(), 1, &store, &policy,
+        ).expect_err("non-Running reviewer must reject");
+
+        assert_eq!(err.0, PlannerErrorCode::FailTaskNotRunning);
+        // Critically: no side effects on the Executor's column.
+        assert!(read_last_critique(&store, "exe1").is_none());
+    }
+
+    /// Reviewer with NO predecessor edges → INVALID_REQUEST.
+    /// Defense in depth: a malformed plan that slipped past
+    /// approve_plan validation must not silently accept a
+    /// SubmitReview that has nowhere to route the critique.
+    #[test]
+    fn submit_review_rejected_with_no_predecessor_returns_invalid_request() {
+        let store  = Store::open_in_memory().unwrap();
+        let policy = default_test_policy();
+        // Insert a Reviewer task with NO `task_dag_edges` row.
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-rev-orphan', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
+        ).unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     actual_cost)
+                 VALUES ('orphan-rev', 'init-rev-orphan', 'default', ?1, 'kernel',
+                         1, ?2, ?2, 0)"
+            ),
+            rusqlite::params![TaskState::Running.as_sql_str(), now],
+        ).unwrap();
+        drop(conn);
+
+        let req = make_submit_review_request(
+            "orphan-rev", Some(false), Some("no predecessor — defensive case"),
+        );
+        let err = handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+        ).expect_err("orphan reviewer must reject");
+
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
+        // Reviewer FSM unchanged.
+        assert_eq!(task_state_of(&store, "orphan-rev"),
+                   TaskState::Running.as_sql_str());
     }
 
     #[test]
