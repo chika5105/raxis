@@ -52,18 +52,51 @@ thiserror       = { workspace = true }
 # Virtualization.framework. Linked only on macOS targets so the
 # crate compiles cleanly on Linux (where the library is meaningless).
 #
-# V2 wires the configuration-build + `validateWithError:` path —
-# `VZVirtualMachineConfiguration` plus `VZLinuxBootLoader` are
-# sufficient for that. Typed device-array setters land in
-# iso-3-followup; the feature flags below are the exact set V2
-# touches and nothing more.
+# Feature footprint (everything the iso-3 + iso-3-followup arc
+# touches): boot loader, virtual-machine configuration & runtime,
+# block / VirtioFS / network / VSock device classes, and the
+# completion-handler bridges (`block2`, `dispatch2`). Nothing more
+# — keeps the link surface tight so the substrate fails fast at the
+# AVF seam rather than at link time.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2                    = "0.6"
 objc2-foundation         = { version = "0.3", features = ["NSURL", "NSError", "NSString"] }
+block2                   = "0.6"
+dispatch2                = { version = "0.3", features = ["objc2"] }
 objc2-virtualization     = { version = "0.3", features = [
+    # Boot loader
     "VZBootLoader",
     "VZLinuxBootLoader",
+    # VM configuration + runtime
     "VZVirtualMachineConfiguration",
+    "VZVirtualMachine",
+    "VZVirtualMachineDelegate",
+    # Storage (rootfs)
+    "VZStorageDeviceConfiguration",
+    "VZStorageDeviceAttachment",
+    "VZVirtioBlockDeviceConfiguration",
+    "VZDiskImageStorageDeviceAttachment",
+    # Directory sharing (VirtioFS)
+    "VZDirectorySharingDeviceConfiguration",
+    "VZVirtioFileSystemDeviceConfiguration",
+    "VZDirectoryShare",
+    "VZSingleDirectoryShare",
+    "VZSharedDirectory",
+    # Network (Tier1Tproxy NAT)
+    "VZNetworkDeviceConfiguration",
+    "VZVirtioNetworkDeviceConfiguration",
+    "VZNetworkDeviceAttachment",
+    "VZNATNetworkDeviceAttachment",
+    "VZMACAddress",
+    # VSock (control plane)
+    "VZSocketDeviceConfiguration",
+    "VZVirtioSocketDeviceConfiguration",
+    "VZSocketDevice",
+    "VZVirtioSocketDevice",
+    "VZVirtioSocketConnection",
+    # Async-start completion-handler bridging
+    "block2",
+    "dispatch2",
 ] }
 
 [dev-dependencies]

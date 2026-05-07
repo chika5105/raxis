@@ -489,8 +489,24 @@ socket. The framing protocol is length-prefixed bincode (unchanged from V1 UDS f
   the length-prefixed VSock framing (16 MiB cap, big-endian u32 prefix). Tests:
   `handshake_and_frame_round_trip_against_in_test_multiplexer`,
   `malformed_handshake_reply_surfaces_as_handshake_error`,
-  `send_frame_rejects_oversize_payload`. The AVF substrate's VSock seam is wired
-  fail-closed today (`iso-3-followup` finalises the device delegate).
+  `send_frame_rejects_oversize_payload`.
+* The AVF substrate now wires the same wire contract end-to-end: `iso-3-followup`
+  delivered (a) full device-array translation
+  (`VZVirtioBlockDeviceConfiguration` + `VZDiskImageStorageDeviceAttachment`
+  for storage; `VZVirtioFileSystemDeviceConfiguration` + `VZSingleDirectoryShare`
+  + `VZSharedDirectory` for VirtioFS; `VZVirtioNetworkDeviceConfiguration` +
+  `VZNATNetworkDeviceAttachment` for Tier1Tproxy egress;
+  `VZVirtioSocketDeviceConfiguration` for the planner channel) and (b) the
+  async lifecycle (`startWithCompletionHandler:`, `stopWithCompletionHandler:`,
+  `connectToPort:completionHandler:`) bridged from AVF's serial dispatch
+  queue back to the synchronous `Backend::spawn` contract via a bounded
+  `mpsc::sync_channel`. The substrate's `push` / `recv_intent` use the
+  `VZVirtioSocketConnection` file descriptor with the same length-prefixed
+  framing the firecracker substrate uses on Linux. Pinned tests:
+  `crates/isolation-apple-vz/tests/avf_runtime_real_devices.rs::avf_runtime_drives_full_device_array_lifecycle_against_real_avf`,
+  `runtime_start_engages_real_avf_validation_and_fails_honestly_without_real_image`,
+  `runtime_stop_without_start_is_idempotent_graceful`,
+  `runtime_connect_vsock_refuses_without_a_started_vm`.
 * **Integration test:** `kernel/tests/worktree_staging_substrate.rs` exercises the
   full Step 10 pipeline against the real `raxis_test_support::SubprocessIsolation`
   substrate (`stage → Backend::spawn → push → recv_intent → shutdown → destroy`).

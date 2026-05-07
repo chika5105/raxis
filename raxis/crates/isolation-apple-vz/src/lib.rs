@@ -44,9 +44,10 @@
 // public API is `unsafe fn` because the underlying Objective-C
 // methods can violate Rust's safety contracts (mutable references
 // crossing the Objective-C boundary, retain/release lifetimes,
-// thread confinement). Every `unsafe` block in this crate is
-// confined to the macOS runtime module and is annotated with the
-// AVF invariant it preserves.
+// thread confinement). The macOS `runtime` module is the primary
+// `unsafe` site (every block annotated with the AVF invariant it
+// preserves). The VSock-fd borrow helpers in this file are the
+// secondary site, allowed via `#[allow(unsafe_code)]` per fn.
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -203,16 +204,16 @@ impl Backend for AppleVzBackend {
         let mut runtime = AvfRuntime::new(cfg);
         runtime.start(self.boot_grace).map_err(translate_runtime_err)?;
 
-        // Establish the planner-port VSock channel. On V2 macOS this
-        // is the seam where the AVF substrate fails closed for the
-        // delegate-not-yet-wired path; the kernel sees a typed
-        // `IsolationError::TransportFault` and the operator
-        // surfaces the message via `raxis doctor`.
-        let _vsock_fd = runtime.connect_vsock(planner_port).map_err(translate_runtime_err)?;
+        // Establish the planner-port VSock channel. The fd is owned
+        // by the runtime's `VZVirtioSocketConnection`; we record the
+        // raw fd here so `Session::push` / `recv_intent` can
+        // length-prefix the kernel ↔ planner frames over it.
+        let vsock_fd = runtime.connect_vsock(planner_port).map_err(translate_runtime_err)?;
 
         Ok(Box::new(AppleVzSession {
             backend_id:   BACKEND_ID,
             runtime:      Some(runtime),
+            vsock_fd,
             terminated:   false,
             vsock_cid:    guest_cid,
             stop_grace:   self.stop_grace,
@@ -268,13 +269,23 @@ fn translate_runtime_err(e: RuntimeError) -> IsolationError {
 // ---------------------------------------------------------------------------
 
 /// Live, per-session AVF VM handle.
-#[derive(Debug)]
+///
+/// Holds the live VSock fd negotiated at spawn time and uses the
+/// shared length-prefixed framing implementation
+/// (`raxis_isolation_firecracker::vsock::HostVsockChannel`-shaped
+/// protocol) — but since that module is a Linux-only sibling crate,
+/// the AVF substrate's framing is implemented inline here and
+/// pinned byte-exact to the same wire contract.
 pub struct AppleVzSession {
     /// Stable identifier reported to audit logs.
     backend_id:    &'static str,
     /// AVF runtime owning the live `VZVirtualMachine`. `None` after
     /// `terminate` / `shutdown` reaps.
     runtime:       Option<AvfRuntime>,
+    /// Negotiated VSock fd used for `push` / `recv_intent` framing.
+    /// `-1` when no vsock channel has been established (e.g.
+    /// macOS host without entitlements).
+    vsock_fd:      std::os::raw::c_int,
     /// Idempotent-terminate flag.
     terminated:    bool,
     /// Guest CID at boot; recorded so `session_identity` is stable.
@@ -283,32 +294,64 @@ pub struct AppleVzSession {
     stop_grace:    Duration,
 }
 
+impl std::fmt::Debug for AppleVzSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppleVzSession")
+            .field("backend_id", &self.backend_id)
+            .field("vsock_fd", &self.vsock_fd)
+            .field("terminated", &self.terminated)
+            .field("vsock_cid", &self.vsock_cid)
+            .field("stop_grace", &self.stop_grace)
+            .field("has_runtime", &self.runtime.is_some())
+            .finish()
+    }
+}
+
 impl AppleVzSession {
     /// Backend identifier (test introspection).
     pub fn backend_id(&self) -> &'static str {
         self.backend_id
     }
+
+    /// VSock fd negotiated at spawn time. `-1` when no vsock
+    /// channel has been established. Test introspection only.
+    pub fn vsock_fd(&self) -> std::os::raw::c_int {
+        self.vsock_fd
+    }
 }
 
 impl Session for AppleVzSession {
-    fn push(&mut self, _frame: &PushFrame) -> Result<(), IsolationError> {
-        // V2 stub: vsock-fd-based push lands once the AVF VSock
-        // delegate is wired (see runtime.rs::connect_vsock). The
-        // substrate fails closed at vsock-connect time today, so
-        // this method is reachable only from tests that bypass
-        // `Backend::spawn`. Real production wiring lives behind
-        // `iso-3-followup`.
-        Err(IsolationError::TransportFault(format!(
-            "{BACKEND_ID}: push: AVF vsock channel not negotiated; \
-             see iso-3-followup",
-        )))
+    fn push(&mut self, frame: &PushFrame) -> Result<(), IsolationError> {
+        if self.terminated {
+            return Err(IsolationError::TransportFault(format!(
+                "{BACKEND_ID}: push: session already terminated",
+            )));
+        }
+        if self.vsock_fd < 0 {
+            return Err(IsolationError::TransportFault(format!(
+                "{BACKEND_ID}: push: no vsock channel established",
+            )));
+        }
+        write_length_prefixed_frame(self.vsock_fd, &frame.bytes).map_err(|e| {
+            IsolationError::TransportFault(format!("{BACKEND_ID}: push: {e}"))
+        })
     }
 
     fn recv_intent(&mut self) -> Result<IntentFrame, IsolationError> {
-        Err(IsolationError::TransportFault(format!(
-            "{BACKEND_ID}: recv: AVF vsock channel not negotiated; \
-             see iso-3-followup",
-        )))
+        if self.terminated {
+            return Err(IsolationError::TransportFault(format!(
+                "{BACKEND_ID}: recv: session already terminated",
+            )));
+        }
+        if self.vsock_fd < 0 {
+            return Err(IsolationError::TransportFault(format!(
+                "{BACKEND_ID}: recv: no vsock channel established",
+            )));
+        }
+        let bytes = read_length_prefixed_frame(self.vsock_fd).map_err(|e| {
+            IsolationError::TransportFault(format!("{BACKEND_ID}: recv: {e}"))
+        })?;
+        Ok(IntentFrame { bytes })
     }
 
     fn terminate(&mut self) -> Result<(), IsolationError> {
@@ -359,6 +402,138 @@ impl Drop for AppleVzSession {
     fn drop(&mut self) {
         let _ = self.terminate();
     }
+}
+
+// ---------------------------------------------------------------------------
+// VSock framing helpers
+//
+// The kernel ↔ planner channel uses length-prefixed bincode-2.0.1
+// frames per `peripherals.md §3` (16 MiB cap, big-endian u32 prefix).
+// `raxis-isolation-firecracker::vsock::HostVsockChannel` provides the
+// canonical implementation on Linux. AVF lives on macOS, where the
+// fd we receive from `VZVirtioSocketConnection` is a regular Unix fd
+// — so we re-implement the minimal byte-exact framing here. The two
+// implementations are pinned to the same wire contract by
+// `kernel/tests/worktree_staging_substrate.rs` (which exercises the
+// substrate-trait surface end-to-end) and the framing tests in the
+// firecracker crate.
+// ---------------------------------------------------------------------------
+
+/// Wire cap matching `peripherals.md §3` (16 MiB).
+const VSOCK_FRAME_MAX: u32 = 16 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+enum FrameError {
+    #[error("write failed: {0}")]
+    Write(std::io::Error),
+    #[error("read failed: {0}")]
+    Read(std::io::Error),
+    #[error("frame size {got} exceeds 16 MiB cap")]
+    Oversize { got: u32 },
+    #[error("connection closed before frame finished")]
+    Closed,
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn write_length_prefixed_frame(
+    fd: std::os::raw::c_int,
+    payload: &[u8],
+) -> Result<(), FrameError> {
+    use std::io::Write;
+    use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+
+    let n = payload.len();
+    if n > VSOCK_FRAME_MAX as usize {
+        return Err(FrameError::Oversize { got: n as u32 });
+    }
+    // SAFETY: fd is owned by the live VZVirtioSocketConnection held
+    // by the runtime; we borrow it for the duration of the write
+    // and release without taking ownership, so the AVF-owned close
+    // path remains intact.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let mut file: std::fs::File = std::fs::File::from(
+        borrowed.try_clone_to_owned().map_err(FrameError::Write)?,
+    );
+    let prefix = (n as u32).to_be_bytes();
+    file.write_all(&prefix).map_err(FrameError::Write)?;
+    file.write_all(payload).map_err(FrameError::Write)?;
+    file.flush().map_err(FrameError::Write)?;
+    // Releasing `file` closes its dup'd fd; the original AVF-owned
+    // fd remains open.
+    // SAFETY: `file` was constructed from a freshly-cloned
+    // `OwnedFd`; recovering it as `OwnedFd` round-trips ownership.
+    let _: OwnedFd = unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) };
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn read_length_prefixed_frame(
+    fd: std::os::raw::c_int,
+) -> Result<Vec<u8>, FrameError> {
+    use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+
+    // SAFETY: see write helper.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    let mut file: std::fs::File = std::fs::File::from(
+        borrowed.try_clone_to_owned().map_err(FrameError::Read)?,
+    );
+
+    let mut len_buf = [0u8; 4];
+    read_exact_or_closed(&mut file, &mut len_buf)?;
+    let n = u32::from_be_bytes(len_buf);
+    if n > VSOCK_FRAME_MAX {
+        return Err(FrameError::Oversize { got: n });
+    }
+    let mut buf = vec![0u8; n as usize];
+    if !buf.is_empty() {
+        read_exact_or_closed(&mut file, &mut buf)?;
+    }
+    // SAFETY: see write helper.
+    let _: OwnedFd = unsafe { OwnedFd::from_raw_fd(file.into_raw_fd()) };
+    Ok(buf)
+}
+
+#[cfg(unix)]
+fn read_exact_or_closed<R: std::io::Read>(
+    r: &mut R,
+    out: &mut [u8],
+) -> Result<(), FrameError> {
+    let mut filled = 0usize;
+    while filled < out.len() {
+        let n = r.read(&mut out[filled..]).map_err(FrameError::Read)?;
+        if n == 0 {
+            return Err(FrameError::Closed);
+        }
+        filled += n;
+    }
+    Ok(())
+}
+
+// On non-Unix targets (we don't ship AVF off macOS, but the lib
+// compiles on Linux for workspace-uniform builds) the helpers
+// surface a typed error so the substrate fails closed at link
+// time rather than at runtime.
+#[cfg(not(unix))]
+fn write_length_prefixed_frame(
+    _fd: std::os::raw::c_int,
+    _payload: &[u8],
+) -> Result<(), FrameError> {
+    Err(FrameError::Write(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "AVF vsock framing requires a Unix file descriptor",
+    )))
+}
+
+#[cfg(not(unix))]
+fn read_length_prefixed_frame(
+    _fd: std::os::raw::c_int,
+) -> Result<Vec<u8>, FrameError> {
+    Err(FrameError::Read(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "AVF vsock framing requires a Unix file descriptor",
+    )))
 }
 
 // ---------------------------------------------------------------------------

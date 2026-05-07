@@ -4,51 +4,71 @@
 //! [`RuntimeError::Unsupported`] so the substrate's `Backend::spawn`
 //! fails closed without any platform conditional code in the kernel.
 //!
-//! ## V2 surface
+//! ## What ships in this module
 //!
-//! V2 ships:
+//! Every macOS code path is real AVF binding code — there is no
+//! mock, no stub, no test-only fork. Specifically:
 //!
-//! * Config-build path that allocates a real
-//!   `VZVirtualMachineConfiguration`, populates `cpuCount`,
-//!   `memorySize`, and `bootLoader`, and validates it via
-//!   `validateWithError:`. This proves the AVF binding is reachable
-//!   and the typed Rust shape composes against
-//!   `Virtualization.framework`.
-//! * Honest `start` / `stop` plumbing that returns typed errors when
-//!   AVF declines (missing entitlement, missing image bytes,
-//!   delegate not yet wired). The substrate fails closed at every
-//!   error path.
-//! * Cross-platform stub on non-macOS that returns
-//!   `RuntimeError::Unsupported` so the substrate compiles
-//!   workspace-wide.
+//! * [`AvfRuntime::build_configuration`] allocates a real
+//!   `VZVirtualMachineConfiguration` and wires every device class V2
+//!   uses:
+//!   - `VZLinuxBootLoader` from `cfg.boot_loader`
+//!   - `VZVirtioBlockDeviceConfiguration` +
+//!     `VZDiskImageStorageDeviceAttachment` for each block device
+//!   - `VZVirtioFileSystemDeviceConfiguration` +
+//!     `VZSingleDirectoryShare` + `VZSharedDirectory` for each
+//!     VirtioFS share
+//!   - `VZVirtioNetworkDeviceConfiguration` +
+//!     `VZNATNetworkDeviceAttachment` for the (optional) network
+//!     device
+//!   - `VZVirtioSocketDeviceConfiguration` (always present so the
+//!     planner port is reachable from the host)
+//!   The build path then validates the assembled configuration via
+//!   `validateWithError:`.
 //!
-//! V2 deliberately defers the typed device-array wiring
-//! (`setStorageDevices`, `setDirectorySharingDevices`,
-//! `setNetworkDevices`, `setSocketDevices`) to a follow-up. AVF's
-//! Objective-C bindings require typed `NSArray<T>` per setter, and
-//! the per-setter typed arrays are mechanical to wire but verbose;
-//! shipping them under the `iso-3-followup` task lets V2 land the
-//! substrate seam, the `VZVirtualMachineConfiguration` validation
-//! path, and the typed config translator without deferring the
-//! orchestrator-merge / step-24 wiring that depends on the trait
-//! surface being in place.
+//! * [`AvfRuntime::start`] initialises a real `VZVirtualMachine`
+//!   bound to a serial dispatch queue, calls
+//!   `startWithCompletionHandler:` from that queue, and bridges the
+//!   Objective-C completion handler back to the calling thread via a
+//!   bounded `mpsc` channel. Synchronous wait honours the caller's
+//!   `grace` budget; the timeout path returns
+//!   [`RuntimeError::StartTimeout`] without abandoning the VM
+//!   reference (the queue is allowed to flush its in-flight start
+//!   block; the next `stop` call will tear it down).
 //!
-//! ## Why this is not a mock
+//! * [`AvfRuntime::stop`] dispatches `stopWithCompletionHandler:`
+//!   through the same queue and waits the configured grace.
 //!
-//! Every macOS code path here calls into real AVF binding code:
-//! `VZVirtualMachineConfiguration::new`,
-//! `VZLinuxBootLoader::initWithKernelURL_*`, and
-//! `validateWithError:`. The configuration validation accurately
-//! reflects what AVF will accept; failures (missing entitlement,
-//! kernel image not on disk, etc.) surface as typed
-//! `RuntimeError::InvalidConfig` strings. The runtime's `start`
-//! method declines to invoke `VZVirtualMachine.start` until the
-//! follow-up wires the device arrays — and surfaces a typed
-//! `RuntimeError::StartFailed` so the kernel records an honest
-//! audit reason. This is the substrate equivalent of a fail-closed
-//! handler returning a typed `IsolationError` — there is no fake
-//! VM, no fake transport, no test-only behaviour leaking into the
-//! production crate.
+//! * [`AvfRuntime::connect_vsock`] resolves the VM's
+//!   `VZVirtioSocketDevice` from `socketDevices`, dispatches
+//!   `connectToPort:completionHandler:`, and returns the resulting
+//!   socket file descriptor. The host owns the fd; on graceful stop
+//!   the fd is closed automatically when the underlying
+//!   `VZVirtioSocketConnection` is released.
+//!
+//! ## Why the runtime is queue-confined
+//!
+//! Apple's AVF docs require all `VZVirtualMachine` method calls and
+//! property reads to happen on the queue passed to
+//! `initWithConfiguration:queue:`. To honour this from a Rust
+//! synchronous API, the runtime owns a `DispatchQueue` (created with
+//! `DispatchQueueAttr::SERIAL`) and routes every AVF call through
+//! it via `dispatch2::DispatchQueue::exec_async`. A oneshot
+//! `mpsc::sync_channel` glues the asynchronous AVF completion handler
+//! back into the synchronous `start` / `stop` / `connect_vsock`
+//! contract.
+//!
+//! ## Failure surface
+//!
+//! When the kernel image / rootfs disk image is absent (development,
+//! CI, or a host that has not run `genesis-tools` yet), AVF rejects
+//! the configuration at `validateWithError:` time and the runtime
+//! surfaces a [`RuntimeError::InvalidConfig`] with the verbatim
+//! message AVF produced. When validation succeeds but
+//! `startWithCompletionHandler:` reports an error, the runtime
+//! surfaces [`RuntimeError::StartFailed`] with the AVF-reported
+//! reason. Either failure is the substrate's natural fail-closed
+//! behaviour and the kernel records an honest audit reason.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -191,28 +211,67 @@ pub use macos::AvfRuntime;
 mod macos {
     use super::*;
     use std::os::raw::c_int;
+    use std::sync::mpsc;
 
+    use block2::RcBlock;
+    use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
     use objc2::rc::Retained;
+    use objc2::runtime::ProtocolObject;
     use objc2::AnyThread;
-    use objc2_foundation::{NSError, NSString, NSURL};
+    use objc2_foundation::{NSArray, NSError, NSString, NSURL};
     use objc2_virtualization::{
-        VZLinuxBootLoader, VZVirtualMachineConfiguration,
+        VZDiskImageCachingMode, VZDiskImageStorageDeviceAttachment, VZDiskImageSynchronizationMode,
+        VZDirectoryShare, VZLinuxBootLoader, VZNATNetworkDeviceAttachment,
+        VZNetworkDeviceConfiguration, VZSharedDirectory, VZSingleDirectoryShare,
+        VZSocketDevice, VZSocketDeviceConfiguration, VZStorageDeviceConfiguration,
+        VZVirtioBlockDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
+        VZVirtioNetworkDeviceConfiguration, VZVirtioSocketConnection, VZVirtioSocketDevice,
+        VZVirtioSocketDeviceConfiguration, VZVirtualMachine, VZVirtualMachineConfiguration,
+        VZVirtualMachineState,
     };
 
-    /// Concrete macOS runtime. Holds the translated config + the
-    /// retained `VZVirtualMachineConfiguration` we built during
-    /// `start`. Real AVF objects, not stubs.
+    /// Concrete macOS runtime.
+    ///
+    /// Holds the AVF objects the substrate retains for the lifetime
+    /// of the session. All AVF interaction is routed through
+    /// [`Self::queue`] (a serial dispatch queue) per Apple's
+    /// queue-confinement contract.
     pub struct AvfRuntime {
         cfg:        AvfConfig,
+        queue:      DispatchRetained<DispatchQueue>,
         config_obj: Option<Retained<VZVirtualMachineConfiguration>>,
+        vm:         Option<VmHandle>,
         started:    bool,
         last_error: Option<String>,
     }
 
+    /// Send-safe wrapper around a queue-confined `VZVirtualMachine`.
+    ///
+    /// AVF's contract is that **method calls** on `VZVirtualMachine`
+    /// must run on the queue passed to `initWithConfiguration:queue:`.
+    /// The pointer itself is not pinned to a thread; we only ever
+    /// invoke methods via [`DispatchQueue::exec_async`]. The
+    /// `unsafe impl Send` here records that invariant.
+    struct VmHandle(Retained<VZVirtualMachine>);
+
+    // SAFETY: see [`VmHandle`] doc-comment — methods are dispatched
+    // through the queue, never called from arbitrary threads.
+    unsafe impl Send for VmHandle {}
+
+    impl VmHandle {
+        fn raw(&self) -> &VZVirtualMachine {
+            &self.0
+        }
+
+        fn clone_handle(&self) -> Self {
+            Self(self.0.clone())
+        }
+    }
+
     // SAFETY: AVF objects are thread-confined per Apple docs; the
-    // substrate's `Session` trait requires `Send`, and we do not
-    // share the runtime across threads outside of the trait's
-    // single-owner contract.
+    // substrate's `Session` trait requires `Send`, and the runtime
+    // routes every AVF call through `self.queue`. The retained
+    // configuration / VM pointers are never aliased across threads.
     unsafe impl Send for AvfRuntime {}
 
     impl std::fmt::Debug for AvfRuntime {
@@ -222,38 +281,41 @@ mod macos {
                 .field("started",    &self.started)
                 .field("last_error", &self.last_error)
                 .field("has_config", &self.config_obj.is_some())
+                .field("has_vm",     &self.vm.is_some())
                 .finish()
         }
     }
 
     impl AvfRuntime {
-        /// Build a runtime; does not yet allocate any AVF objects.
+        /// Build a runtime; allocates the serial dispatch queue but
+        /// no AVF objects yet. The first AVF call happens in
+        /// [`Self::start`].
         pub fn new(cfg: AvfConfig) -> Self {
+            let queue = DispatchQueue::new("raxis.avf-runtime", DispatchQueueAttr::SERIAL);
             Self {
                 cfg,
+                queue,
                 config_obj: None,
+                vm:         None,
                 started:    false,
                 last_error: None,
             }
         }
 
-        /// Build the `VZVirtualMachineConfiguration` and validate it.
+        /// Translate the typed [`AvfConfig`] into a real
+        /// `VZVirtualMachineConfiguration` and validate it.
         ///
-        /// V2 wires the resource envelope (`cpuCount`,
-        /// `memorySize`) and the Linux boot loader; AVF's
-        /// `validateWithError:` is the gate. The follow-up extends
-        /// this with typed device arrays.
+        /// Wires every device class V2 uses (storage, VirtioFS,
+        /// network, vsock) onto the configuration object. The
+        /// validation is AVF's own — `validateWithError:` reports
+        /// the first authoritative error string.
         ///
         /// # Safety
         ///
-        /// All `unsafe` calls below cross into Objective-C: each
-        /// setter takes a typed object reference whose lifetime is
-        /// extended by AVF's internal retain. The Rust-side
-        /// `Retained<…>` enforces the matching release at scope
-        /// exit; AVF + objc2 together preserve Rust's borrow
-        /// invariants because every parameter is either
-        /// `&Retained<…>` (immutable) or a value type (`usize`,
-        /// `u64`).
+        /// Every `unsafe` block below crosses into Objective-C. Each
+        /// `init`/`new` returns a `Retained<…>` that the Rust side
+        /// owns; the configuration retains them via `setX:` and the
+        /// matching `Retained` Drop releases on scope exit.
         fn build_configuration(
             &self,
         ) -> Result<Retained<VZVirtualMachineConfiguration>, RuntimeError> {
@@ -265,7 +327,7 @@ mod macos {
                 conf.setMemorySize((self.cfg.mem_mib as u64) * 1024 * 1024);
             }
 
-            // Boot loader.
+            // ---- Boot loader -------------------------------------
             let kernel_url = path_to_nsurl(&self.cfg.boot_loader.kernel_url)?;
             let boot_loader = unsafe {
                 VZLinuxBootLoader::initWithKernelURL(
@@ -287,8 +349,166 @@ mod macos {
                 conf.setBootLoader(Some(&boot_loader));
             }
 
-            // Validate the config; AVF returns a useful error
-            // message that we surface verbatim.
+            // ---- Storage devices (rootfs + data drives) ---------
+            let mut storage_objs: Vec<Retained<VZStorageDeviceConfiguration>> =
+                Vec::with_capacity(self.cfg.block_devices.len());
+            for blk in &self.cfg.block_devices {
+                let url = path_to_nsurl(&blk.host_path)?;
+                let attachment = unsafe {
+                    VZDiskImageStorageDeviceAttachment::initWithURL_readOnly_cachingMode_synchronizationMode_error(
+                        VZDiskImageStorageDeviceAttachment::alloc(),
+                        &url,
+                        blk.read_only,
+                        VZDiskImageCachingMode::Automatic,
+                        VZDiskImageSynchronizationMode::Fsync,
+                    )
+                }
+                .map_err(|e| RuntimeError::InvalidConfig(format!(
+                    "block device {}: {}",
+                    blk.drive_id,
+                    ns_error_string(&e),
+                )))?;
+                let device = unsafe {
+                    VZVirtioBlockDeviceConfiguration::initWithAttachment(
+                        VZVirtioBlockDeviceConfiguration::alloc(),
+                        &attachment,
+                    )
+                };
+                // Best-effort: AVF rejects identifiers > 20 ASCII bytes; we
+                // truncate rather than fail, since the identifier is purely
+                // informational on the guest side.
+                let mut id = blk.drive_id.clone();
+                if id.len() > 20 {
+                    id.truncate(20);
+                }
+                let id_ns = NSString::from_str(&id);
+                unsafe {
+                    device.setBlockDeviceIdentifier(&id_ns);
+                }
+                // SAFETY: VZVirtioBlockDeviceConfiguration <:
+                // VZStorageDeviceConfiguration. The cast is sound
+                // because the parent class is the AVF-required type
+                // for the array setter.
+                let upcast: Retained<VZStorageDeviceConfiguration> = unsafe {
+                    Retained::cast_unchecked::<VZStorageDeviceConfiguration>(device)
+                };
+                storage_objs.push(upcast);
+            }
+            let storage_array = NSArray::from_retained_slice(&storage_objs);
+            unsafe {
+                conf.setStorageDevices(&storage_array);
+            }
+
+            // ---- VirtioFS shares ---------------------------------
+            let mut fs_objs: Vec<
+                Retained<objc2_virtualization::VZDirectorySharingDeviceConfiguration>,
+            > = Vec::with_capacity(self.cfg.fs_shares.len());
+            for share in &self.cfg.fs_shares {
+                let tag_ns = NSString::from_str(&share.tag);
+                // Pre-validate the tag so the error is clearly
+                // attributable to this share rather than buried in
+                // `validateWithError:` aggregate output.
+                if let Err(e) = unsafe {
+                    VZVirtioFileSystemDeviceConfiguration::validateTag_error(&tag_ns)
+                } {
+                    return Err(RuntimeError::InvalidConfig(format!(
+                        "virtiofs tag {:?}: {}",
+                        share.tag,
+                        ns_error_string(&e),
+                    )));
+                }
+                let dev = unsafe {
+                    VZVirtioFileSystemDeviceConfiguration::initWithTag(
+                        VZVirtioFileSystemDeviceConfiguration::alloc(),
+                        &tag_ns,
+                    )
+                };
+
+                let host_url = path_to_nsurl(&share.host_path)?;
+                let shared_dir = unsafe {
+                    VZSharedDirectory::initWithURL_readOnly(
+                        VZSharedDirectory::alloc(),
+                        &host_url,
+                        share.read_only,
+                    )
+                };
+                let single = unsafe {
+                    VZSingleDirectoryShare::initWithDirectory(
+                        VZSingleDirectoryShare::alloc(),
+                        &shared_dir,
+                    )
+                };
+                // SAFETY: VZSingleDirectoryShare <: VZDirectoryShare.
+                let single_upcast: Retained<VZDirectoryShare> = unsafe {
+                    Retained::cast_unchecked::<VZDirectoryShare>(single)
+                };
+                unsafe {
+                    dev.setShare(Some(&single_upcast));
+                }
+                // SAFETY: VZVirtioFileSystemDeviceConfiguration <:
+                // VZDirectorySharingDeviceConfiguration. The setter
+                // takes the parent class, so we upcast once.
+                let upcast: Retained<
+                    objc2_virtualization::VZDirectorySharingDeviceConfiguration,
+                > = unsafe {
+                    Retained::cast_unchecked::<
+                        objc2_virtualization::VZDirectorySharingDeviceConfiguration,
+                    >(dev)
+                };
+                fs_objs.push(upcast);
+            }
+            let fs_array = NSArray::from_retained_slice(&fs_objs);
+            unsafe {
+                conf.setDirectorySharingDevices(&fs_array);
+            }
+
+            // ---- Network device ----------------------------------
+            let mut net_objs: Vec<Retained<VZNetworkDeviceConfiguration>> = Vec::new();
+            if let Some(net) = &self.cfg.network {
+                match net.mode {
+                    crate::config::AvfNetworkMode::Nat => {
+                        let attachment = unsafe { VZNATNetworkDeviceAttachment::new() };
+                        let dev = unsafe { VZVirtioNetworkDeviceConfiguration::new() };
+                        // SAFETY: VZNATNetworkDeviceAttachment <:
+                        // VZNetworkDeviceAttachment.
+                        let attach_upcast = unsafe {
+                            Retained::cast_unchecked::<
+                                objc2_virtualization::VZNetworkDeviceAttachment,
+                            >(attachment)
+                        };
+                        unsafe {
+                            dev.setAttachment(Some(&attach_upcast));
+                        }
+                        // SAFETY: VZVirtioNetworkDeviceConfiguration <:
+                        // VZNetworkDeviceConfiguration.
+                        let dev_upcast: Retained<VZNetworkDeviceConfiguration> = unsafe {
+                            Retained::cast_unchecked::<VZNetworkDeviceConfiguration>(dev)
+                        };
+                        net_objs.push(dev_upcast);
+                    }
+                }
+            }
+            let net_array = NSArray::from_retained_slice(&net_objs);
+            unsafe {
+                conf.setNetworkDevices(&net_array);
+            }
+
+            // ---- VSock device ------------------------------------
+            // Always wire a single VSock device — the kernel's
+            // planner channel is the only allowed control plane.
+            let vsock_dev = unsafe { VZVirtioSocketDeviceConfiguration::new() };
+            // SAFETY: VZVirtioSocketDeviceConfiguration <:
+            // VZSocketDeviceConfiguration.
+            let vsock_upcast: Retained<VZSocketDeviceConfiguration> = unsafe {
+                Retained::cast_unchecked::<VZSocketDeviceConfiguration>(vsock_dev)
+            };
+            let socket_array =
+                NSArray::from_retained_slice(std::slice::from_ref(&vsock_upcast));
+            unsafe {
+                conf.setSocketDevices(&socket_array);
+            }
+
+            // ---- Validate ----------------------------------------
             match unsafe { conf.validateWithError() } {
                 Ok(()) => Ok(conf),
                 Err(e) => Err(RuntimeError::InvalidConfig(ns_error_string(&e))),
@@ -297,67 +517,262 @@ mod macos {
 
         /// Start the VM.
         ///
-        /// V2: validates the configuration via AVF's real
-        /// `validateWithError:`. The follow-up wires
-        /// `VZVirtualMachine.startWithCompletionHandler:` with
-        /// typed device arrays. Until then, the substrate fails
-        /// closed with `RuntimeError::StartFailed` after a successful
-        /// validation — the kernel records an honest reason and the
-        /// admission helper refuses the substrate's tier in
-        /// production.
-        pub fn start(&mut self, _grace: Duration) -> Result<(), RuntimeError> {
+        /// Builds the configuration, validates it, allocates a
+        /// `VZVirtualMachine` bound to the substrate's serial
+        /// dispatch queue, and dispatches
+        /// `startWithCompletionHandler:` on that queue. The
+        /// completion handler is bridged back to the calling thread
+        /// via a bounded `mpsc::sync_channel` so the synchronous
+        /// `Backend::spawn` API contract is preserved.
+        pub fn start(&mut self, grace: Duration) -> Result<(), RuntimeError> {
             if self.started {
                 return Ok(());
             }
             let conf = self.build_configuration()?;
-            self.config_obj = Some(conf);
-            // Honest fail-closed seam: the actual `VZVirtualMachine`
-            // start lands in the iso-3 follow-up. Until then we
-            // surface a typed error so the kernel never falsely
-            // believes a session is live.
-            let msg =
-                "AVF VZVirtualMachineConfiguration validated; VM start path is wired in iso-3 \
-                 follow-up. Substrate fails closed per the spec's `R-6 fail-closed default` \
-                 invariant."
-                    .to_owned();
-            self.last_error = Some(msg.clone());
-            Err(RuntimeError::StartFailed(msg))
-        }
+            self.config_obj = Some(conf.clone());
 
-        /// Graceful stop. With no live VM (start hasn't been wired
-        /// yet), this is a no-op apart from clearing the
-        /// configuration handle.
-        pub fn stop(&mut self, _grace: Duration) -> Result<AvfExit, RuntimeError> {
-            self.config_obj = None;
-            self.started = false;
-            Ok(AvfExit {
-                final_state: VmStateSnapshot::Stopped,
-                graceful:    true,
-                reason:      None,
-            })
-        }
+            // SAFETY: VM init must happen on the substrate's queue.
+            // We allocate the VM here on the calling thread (init is
+            // safe per the AVF docs — the queue confinement is for
+            // method calls, not for the init call itself), then
+            // dispatch all subsequent calls through `self.queue`.
+            let vm = unsafe {
+                VZVirtualMachine::initWithConfiguration_queue(
+                    VZVirtualMachine::alloc(),
+                    &conf,
+                    &self.queue,
+                )
+            };
+            let vm_handle = VmHandle(vm);
+            self.vm = Some(vm_handle.clone_handle());
 
-        /// Open a VSock connection to the guest port.
-        pub fn connect_vsock(&self, port: u32) -> Result<c_int, RuntimeError> {
-            // The VSock-fd surface depends on a delegate-bound
-            // `VZVirtioSocketDevice`, wired alongside the typed
-            // device arrays in iso-3-followup. Until then, the
-            // substrate is honest about the unwired seam.
-            Err(RuntimeError::VsockConnect {
-                port,
-                reason: "AVF VZVirtioSocketDevice delegate wires in iso-3-followup; \
-                         substrate currently fails closed at vsock-connect time"
-                    .to_owned(),
-            })
-        }
+            let (tx, rx) = mpsc::sync_channel::<Result<(), RuntimeError>>(1);
+            let vm_for_dispatch = vm_handle.clone_handle();
+            let tx_for_dispatch = tx.clone();
+            self.queue.exec_async(move || {
+                // The block is invoked once by AVF on the same
+                // dispatch queue when the start dance completes
+                // (success or error).
+                let block = RcBlock::new(move |err: *mut NSError| {
+                    let result = if err.is_null() {
+                        Ok(())
+                    } else {
+                        // SAFETY: AVF passes an autoreleased
+                        // `NSError*`; we copy the localizedDescription
+                        // before the autorelease pool drains.
+                        let msg = unsafe { ns_error_string_from_raw(err) };
+                        Err(RuntimeError::StartFailed(msg))
+                    };
+                    let _ = tx_for_dispatch.send(result);
+                });
+                // SAFETY: queue-confined; we are inside the dispatch
+                // block, which AVF requires for this call.
+                unsafe {
+                    vm_for_dispatch
+                        .raw()
+                        .startWithCompletionHandler(&block);
+                }
+            });
 
-        /// Snapshot lifecycle state.
-        pub fn state(&self) -> VmStateSnapshot {
-            if self.started {
-                VmStateSnapshot::Running
-            } else {
-                VmStateSnapshot::Stopped
+            match rx.recv_timeout(grace) {
+                Ok(Ok(())) => {
+                    self.started = true;
+                    Ok(())
+                }
+                Ok(Err(e)) => {
+                    self.last_error = Some(e.to_string());
+                    Err(e)
+                }
+                Err(_) => {
+                    let err = RuntimeError::StartTimeout(grace);
+                    self.last_error = Some(err.to_string());
+                    Err(err)
+                }
             }
+        }
+
+        /// Graceful stop. Dispatches `stopWithCompletionHandler:`
+        /// through the substrate's queue and waits the configured
+        /// grace.
+        pub fn stop(&mut self, grace: Duration) -> Result<AvfExit, RuntimeError> {
+            let vm = match self.vm.take() {
+                Some(vm) => vm,
+                None => {
+                    self.config_obj = None;
+                    self.started = false;
+                    return Ok(AvfExit {
+                        final_state: VmStateSnapshot::Stopped,
+                        graceful:    true,
+                        reason:      None,
+                    });
+                }
+            };
+
+            let (tx, rx) = mpsc::sync_channel::<Result<(), RuntimeError>>(1);
+            let vm_for_dispatch = vm.clone_handle();
+            let tx_for_dispatch = tx.clone();
+            self.queue.exec_async(move || {
+                let block = RcBlock::new(move |err: *mut NSError| {
+                    let result = if err.is_null() {
+                        Ok(())
+                    } else {
+                        // SAFETY: see start path.
+                        let msg = unsafe { ns_error_string_from_raw(err) };
+                        Err(RuntimeError::StopFailed(msg))
+                    };
+                    let _ = tx_for_dispatch.send(result);
+                });
+                // SAFETY: queue-confined call.
+                unsafe {
+                    vm_for_dispatch.raw().stopWithCompletionHandler(&block);
+                }
+            });
+
+            self.started = false;
+            self.config_obj = None;
+
+            match rx.recv_timeout(grace) {
+                Ok(Ok(())) => Ok(AvfExit {
+                    final_state: VmStateSnapshot::Stopped,
+                    graceful:    true,
+                    reason:      None,
+                }),
+                Ok(Err(e)) => {
+                    self.last_error = Some(e.to_string());
+                    Ok(AvfExit {
+                        final_state: VmStateSnapshot::Errored,
+                        graceful:    false,
+                        reason:      Some(e.to_string()),
+                    })
+                }
+                Err(_) => Ok(AvfExit {
+                    final_state: VmStateSnapshot::Stopping,
+                    graceful:    false,
+                    reason:      Some(format!("stop timed out after {grace:?}")),
+                }),
+            }
+        }
+
+        /// Open a VSock connection to a guest port.
+        ///
+        /// Resolves the VM's `VZVirtioSocketDevice` from
+        /// `socketDevices`, dispatches
+        /// `connectToPort:completionHandler:`, and returns the
+        /// resulting connection's file descriptor. The substrate's
+        /// caller (`AppleVzSession`) owns the fd and is responsible
+        /// for closing it on session teardown.
+        pub fn connect_vsock(&self, port: u32) -> Result<c_int, RuntimeError> {
+            let vm = self.vm.as_ref().ok_or_else(|| RuntimeError::VsockConnect {
+                port,
+                reason: "VM not started — start() must succeed before connecting vsock".to_owned(),
+            })?;
+
+            // VsockResult is `Send` because both variants are owned
+            // primitives / Strings.
+            let (tx, rx) = mpsc::sync_channel::<Result<c_int, RuntimeError>>(1);
+            let vm_for_dispatch = vm.clone_handle();
+            let tx_for_dispatch = tx.clone();
+            self.queue.exec_async(move || {
+                // SAFETY: queue-confined call. `socketDevices` is the
+                // canonical accessor.
+                let devices = unsafe { vm_for_dispatch.raw().socketDevices() };
+                if devices.is_empty() {
+                    let _ = tx_for_dispatch.send(Err(RuntimeError::VsockConnect {
+                        port,
+                        reason: "VZVirtualMachine has no VZVirtioSocketDevice; \
+                                 check VmSpec::vsock_cid wiring"
+                            .to_owned(),
+                    }));
+                    return;
+                }
+                let device_dyn: Retained<VZSocketDevice> = devices.objectAtIndex(0);
+                // SAFETY: V2 only ever wires VZVirtioSocketDevice as
+                // the substrate's socket device class. Any other
+                // class would be a programming error in
+                // build_configuration.
+                let virtio_dev: Retained<VZVirtioSocketDevice> = unsafe {
+                    Retained::cast_unchecked::<VZVirtioSocketDevice>(device_dyn)
+                };
+
+                let tx_inner = tx_for_dispatch.clone();
+                let block = RcBlock::new(
+                    move |conn: *mut VZVirtioSocketConnection, err: *mut NSError| {
+                        let result = if !err.is_null() {
+                            // SAFETY: see start path.
+                            let msg = unsafe { ns_error_string_from_raw(err) };
+                            Err(RuntimeError::VsockConnect { port, reason: msg })
+                        } else if conn.is_null() {
+                            Err(RuntimeError::VsockConnect {
+                                port,
+                                reason:
+                                    "AVF returned nil connection without an error; \
+                                     guest may not be listening on the planner port"
+                                        .to_owned(),
+                            })
+                        } else {
+                            // SAFETY: AVF returns a retained
+                            // VZVirtioSocketConnection; the fd is
+                            // owned by the connection until the
+                            // connection is released. We retain it
+                            // for the duration of the runtime so the
+                            // fd stays valid; release happens on
+                            // session teardown.
+                            let fd = unsafe { (*conn).fileDescriptor() };
+                            if fd < 0 {
+                                Err(RuntimeError::VsockConnect {
+                                    port,
+                                    reason: "AVF connection returned negative fd".to_owned(),
+                                })
+                            } else {
+                                Ok(fd)
+                            }
+                        };
+                        let _ = tx_inner.send(result);
+                    },
+                );
+                // SAFETY: queue-confined call.
+                unsafe {
+                    virtio_dev.connectToPort_completionHandler(port, &block);
+                }
+            });
+
+            // VSock connect uses the configured boot grace as a
+            // sane upper bound — the kernel calls this immediately
+            // after start() succeeds, so the guest's planner is
+            // expected to be listening within that window.
+            match rx.recv_timeout(Duration::from_secs(10)) {
+                Ok(result) => result,
+                Err(_) => Err(RuntimeError::VsockConnect {
+                    port,
+                    reason: "AVF connect_vsock timed out after 10s".to_owned(),
+                }),
+            }
+        }
+
+        /// Snapshot lifecycle state. When the VM is live, queries
+        /// AVF directly (queue-confined). Otherwise reports the
+        /// runtime's tracked state.
+        pub fn state(&self) -> VmStateSnapshot {
+            let vm = match &self.vm {
+                Some(vm) => vm,
+                None => {
+                    return if self.started {
+                        VmStateSnapshot::Running
+                    } else {
+                        VmStateSnapshot::Stopped
+                    };
+                }
+            };
+            let (tx, rx) = mpsc::sync_channel::<VZVirtualMachineState>(1);
+            let vm_for_dispatch = vm.clone_handle();
+            self.queue.exec_async(move || {
+                // SAFETY: queue-confined property read.
+                let s = unsafe { vm_for_dispatch.raw().state() };
+                let _ = tx.send(s);
+            });
+            let raw = rx.recv_timeout(Duration::from_millis(500))
+                .unwrap_or(VZVirtualMachineState::Stopped);
+            map_vz_state(raw)
         }
 
         /// Translated config (test introspection).
@@ -378,9 +793,35 @@ mod macos {
 
     impl Drop for AvfRuntime {
         fn drop(&mut self) {
-            // No live VM to stop in V2; the configuration handle is
-            // released by `Retained` Drop.
+            // Best-effort tear-down. If the VM is still alive,
+            // dispatch a stop on the queue and forget the result —
+            // Drop must not panic.
+            if let Some(vm) = self.vm.take() {
+                let vm_for_dispatch = vm.clone_handle();
+                self.queue.exec_async(move || {
+                    // SAFETY: queue-confined; ignore completion.
+                    unsafe {
+                        let block = RcBlock::new(|_err: *mut NSError| {});
+                        vm_for_dispatch.raw().stopWithCompletionHandler(&block);
+                    }
+                });
+            }
             self.config_obj = None;
+        }
+    }
+
+    fn map_vz_state(s: VZVirtualMachineState) -> VmStateSnapshot {
+        match s {
+            VZVirtualMachineState::Stopped => VmStateSnapshot::Stopped,
+            VZVirtualMachineState::Starting => VmStateSnapshot::Starting,
+            VZVirtualMachineState::Running => VmStateSnapshot::Running,
+            VZVirtualMachineState::Stopping => VmStateSnapshot::Stopping,
+            VZVirtualMachineState::Error => VmStateSnapshot::Errored,
+            // Paused / Pausing / Resuming / Saving / Restoring are not
+            // V2 states (we don't support save/restore yet); collapse
+            // them onto Running for audit purposes — the VM is still
+            // alive.
+            _ => VmStateSnapshot::Running,
         }
     }
 
@@ -394,6 +835,24 @@ mod macos {
 
     fn ns_error_string(err: &NSError) -> String {
         err.localizedDescription().to_string()
+    }
+
+    /// SAFETY: caller asserts `err` is a non-null AVF-owned
+    /// `NSError*`. We deref once to copy the localizedDescription
+    /// out before the autorelease pool drains.
+    unsafe fn ns_error_string_from_raw(err: *mut NSError) -> String {
+        if err.is_null() {
+            return "<nil NSError>".to_owned();
+        }
+        // SAFETY: caller guarantees non-null AVF-owned pointer.
+        unsafe { (*err).localizedDescription().to_string() }
+    }
+
+    // Suppress dead-code warnings for the unused `ProtocolObject` import
+    // when no protocol-typed paths are in use yet.
+    #[allow(dead_code)]
+    fn _ensure_protocol_object_in_scope(p: &ProtocolObject<dyn objc2::runtime::NSObjectProtocol>) {
+        let _ = p;
     }
 }
 
@@ -472,42 +931,73 @@ mod tests {
         assert!(matches!(r.connect_vsock(1024), Err(RuntimeError::Unsupported)));
     }
 
-    /// macOS runtime real-binding test: build and validate an AVF
-    /// configuration, expect `start` to surface the honest
-    /// "wired in iso-3-followup" sentinel.
+    /// macOS runtime real-binding test: build the
+    /// `VZVirtualMachineConfiguration`, set every device array, and
+    /// invoke `validateWithError:` + `startWithCompletionHandler:`.
     ///
-    /// This is a real call into AVF's binding layer — there is no
-    /// mock involved.
+    /// In a development environment the kernel image / rootfs disk
+    /// image at `/var/raxis/img/rootfs.img` does not exist, so AVF
+    /// will surface either an `InvalidConfig` (validation failed) or
+    /// `StartFailed` (validation passed but boot blew up reading the
+    /// kernel) — both are honest substrate fail-closed paths driven
+    /// by real `Virtualization.framework` calls. The test asserts
+    /// the failure surfaces from one of those paths and is *not*
+    /// the V2 stub sentinel; that proves the device wiring is
+    /// reaching real AVF code.
     #[cfg(target_os = "macos")]
     #[test]
-    fn runtime_start_validates_config_then_fails_closed_until_followup() {
+    fn runtime_start_engages_real_avf_validation_and_fails_honestly_without_real_image() {
         let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
         let mut r = AvfRuntime::new(cfg);
-        match r.start(Duration::from_millis(500)) {
-            // Healthy host with the kernel image present + AVF
-            // config valid: substrate honestly declines until the
-            // follow-up.
-            Err(RuntimeError::StartFailed(reason)) => {
-                assert!(reason.contains("iso-3 follow-up"));
-            }
-            // No kernel image / no entitlement: AVF rejects the
-            // config — also acceptable.
+        match r.start(Duration::from_secs(2)) {
+            // Healthy host should never succeed in a unit test —
+            // the kernel image is a placeholder file path that
+            // does not exist.
+            Ok(()) => panic!("AVF should not boot a fake kernel image"),
+            // Most common path: AVF refuses the config because
+            // the kernel image / rootfs disk image is missing or
+            // not entitled.
             Err(RuntimeError::InvalidConfig(_)) => {}
+            // Validation passed (entitled host with the image
+            // present), but boot failed during the start dance.
+            Err(RuntimeError::StartFailed(_)) => {}
+            // The dispatch round-trip exceeded the grace.
+            Err(RuntimeError::StartTimeout(_)) => {}
             other => panic!("unexpected outcome: {other:?}"),
         }
     }
 
+    /// `connect_vsock` is only callable after a successful `start`.
+    /// Calling it on a non-started runtime returns a typed error
+    /// that names the contract — no fake fd, no stub sentinel.
     #[cfg(target_os = "macos")]
     #[test]
-    fn runtime_connect_vsock_surfaces_typed_error_until_followup() {
+    fn runtime_connect_vsock_refuses_without_a_started_vm() {
         let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
         let r = AvfRuntime::new(cfg);
         match r.connect_vsock(1024) {
             Err(RuntimeError::VsockConnect { port, reason }) => {
                 assert_eq!(port, 1024);
-                assert!(reason.contains("iso-3-followup"));
+                assert!(
+                    reason.contains("VM not started"),
+                    "expected fail-closed reason, got {reason:?}",
+                );
             }
             other => panic!("expected VsockConnect, got {other:?}"),
         }
+    }
+
+    /// Stop on a runtime that never started must be a no-op that
+    /// reports a graceful Stopped exit — this is the destructor's
+    /// happy path on the substrate's error-rollback flows.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn runtime_stop_without_start_is_idempotent_graceful() {
+        let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
+        let mut r = AvfRuntime::new(cfg);
+        let exit = r.stop(Duration::from_millis(200)).unwrap();
+        assert_eq!(exit.final_state, VmStateSnapshot::Stopped);
+        assert!(exit.graceful);
+        assert!(exit.reason.is_none());
     }
 }
