@@ -221,6 +221,41 @@ The agent's environment variables point to proxy addresses, not real services:
 
 The agent can read these values, include them in inference requests, print them to stdout — none of it matters because they contain no secret material.
 
+### 2.3 — Per-session lifecycle: the `SessionSpawnService` composer
+
+The proxy listeners + the egress-admission listener + the VM itself are bound and torn down together via `raxis-session-spawn::SessionSpawnService`, the kernel-side composer that wraps the `(IsolationBackend, CredentialProxyManager, AdmissionService)` triple into one async lifecycle. Implementation reference: `raxis/crates/session-spawn/`.
+
+**Spawn order** (`SessionSpawnService::spawn_session`):
+
+1. `CredentialProxyManager::start_for_session(session_id, task_id, &decls)` binds one listener per `[[tasks.credentials]]` declaration on `127.0.0.1:0`.
+2. A per-session egress-admission `tokio::net::TcpListener::bind("127.0.0.1:0")` is bound for the in-guest `raxis-tproxy` to phone home to.
+3. The composer stamps three classes of values into `VmSpec.env` (per `extensibility-traits.md §3.5`):
+   * One entry per credential proxy keyed by the operator-declared `mount_as` field, value = the proxy's loopback URL (`postgresql://raxis@127.0.0.1:NNN/` for postgres, `http://127.0.0.1:NNN` for HTTP/k8s).
+   * `RAXIS_SESSION_ID`.
+   * `RAXIS_TPROXY_KERNEL_TCP` = the per-session admission listener address.
+4. `IsolationBackend::spawn(image, mounts, vm_spec)` → live `Box<dyn Session>`. Substrates honour the env block via their respective channels (Subprocess substrate forwards to `Command::env`; Firecracker / Apple-VZ stamp through metadata service or boot-args).
+5. The admission-loop is spawned as a per-session `tokio::task` that accepts loopback connections from the in-guest tproxy and runs `raxis-egress-admission::run_admission_loop` per accepted connection.
+6. Audit emit: `SessionVmSpawned { session_id, task_id, initiative_id, backend_id, egress_tier, admission_loopback, credential_proxies }`.
+
+**Atomic-on-failure guarantee.** Every failure path between step 1 and step 6 tears down the listeners that DID succeed before returning the typed error. There is no half-bound state that can escape the call. See `raxis/crates/session-spawn/tests/spawn_round_trip.rs` for the full real-substrate round-trip.
+
+**Teardown order** (`SessionSpawnService::terminate_session`, fixed by audit-after-state-mutation discipline):
+
+1. `IsolationSession::shutdown(grace)` → `ExitStatus`.
+2. Audit emit: `SessionVmExited { session_id, signal_class, exit_code, backend_error }`.
+3. Admission-loop `JoinHandle::abort()`.
+4. `SessionProxyHandles::shutdown()` → emits one `CredentialProxyStopped` per bound proxy with the final counter snapshot.
+
+The fixed ordering means audit-chain readers see a clean V exit-then-cleanup time series:
+`SessionVmExited` lands BEFORE `CredentialProxyStopped` events. The pair `SessionVmSpawned`/`SessionVmExited` is paired-class per `audit-paired-writes.md §4.1`; the `CredentialProxyStarted`/`CredentialProxyStopped` pair is single-class observability per §4.3.
+
+**Production callsite seam.** Higher-level kernel callsites (operator IPC `ApprovePlan` → orchestrator auto-spawn; `ActivateSubTask` → executor spawn; recovery resume) all flow through one of two thin bridges in `raxis/kernel/src/session_spawn_orchestrator.rs`:
+
+* `spawn_orchestrator_for_initiative(spawn_ctx, session_id, initiative_id, egress_allowlist, service, store)` — consumes `PlanApproved::orchestrator_session_id`, locates the canonical Orchestrator image, rehydrates `[[tasks.credentials]]` from `task_credential_proxies`, and delegates to `SessionSpawnService::spawn_session`. Returns a typed `OrchestratorSpawnError::OrchestratorImageMissing { path }` for half-installed kernels (operator-visible signal).
+* `terminate_orchestrator(session_id, grace, service)` — thin wrapper around `SessionSpawnService::terminate_session`.
+
+The bridges are tested end-to-end against `SubprocessIsolation` in inline tests under the bridge module (`raxis/kernel/src/session_spawn_orchestrator.rs::tests`). The IPC dispatch trigger that actually invokes the bridge from `OperatorRequest::ApprovePlan` is the next-step wiring, gated on the canonical Orchestrator image artefact being built and shipped.
+
 ---
 
 ## 3. Proxy Types
@@ -2490,7 +2525,7 @@ After this phase, every proxy type below operates against any conformant `Creden
   * Structural malformations (`raxis_plan_credentials::ParseError`) — surfaced as `LifecycleError::PlanInvalid { reason }` with the offending task id and parser diagnostic preserved verbatim.
   Both rejections are pre-tx, so a malformed plan never allocates a row. **Tests:** 3 new tests in `lifecycle::tests` (`approve_plan_accepts_known_proxy_types_in_tasks_credentials`, `approve_plan_rejects_unknown_proxy_type_in_tasks_credentials`, `approve_plan_rejects_malformed_tasks_credentials_block`).
 - [x] Kernel: emit `CredentialProxyStarted` for each proxy. Emitted by the manager at bind time (see above).
-- [ ] Kernel: send shutdown signal to proxies on session termination. **Manager-side ready** (see `SessionProxyHandles::shutdown`); blocked on the same session-spawn-callsite wiring that holds the handles in a per-session map.
+- [x] **Kernel: send shutdown signal to proxies on session termination.** **Implementation reference:** `raxis/crates/session-spawn/src/lib.rs::SessionSpawnService::terminate_session` (which calls `SessionProxyHandles::shutdown` after `IsolationSession::shutdown`) plus the kernel-side bridge `raxis/kernel/src/session_spawn_orchestrator.rs::terminate_orchestrator`. The composer holds the `SessionProxyHandles` for the lifetime of the session in its in-memory `sessions` table; teardown is `(VM-shutdown → SessionVmExited audit → admission-loop abort → proxies-drain → CredentialProxyStopped audit per proxy)`. Tested end-to-end against `SubprocessIsolation` in `raxis/crates/session-spawn/tests/spawn_round_trip.rs::spawn_session_binds_proxies_admission_and_vm_then_terminates_cleanly` and at the kernel-bridge level in `raxis/kernel/src/session_spawn_orchestrator.rs::tests::spawn_orchestrator_for_initiative_full_round_trip`.
 - [x] Kernel: emit `CredentialProxyStopped` with connection/query stats. Emitted by the manager at shutdown time (see above).
 - [x] **Proxy: emit `DatabaseQueryExecuted` for each query.** The Postgres proxy emits a local `AuditEvent::DatabaseQueryExecuted` (sql_sha256 always; plaintext only under `[inference_audit] log_content = true`). The kernel-side `AuditEventKind::DatabaseQueryExecuted` is shipped in `crates/audit/src/event.rs`; the kernel-side translation step (proxy local event → kernel audit kind) lands with the proxy lifecycle wiring above.
 - [x] **Proxy: emit `DatabaseQueryBlocked` for rejected queries.** Same surface — `AuditEvent::DatabaseQueryExecuted { blocked: true, .. }` carries the rejection. (No separate `DatabaseQueryBlocked` variant needed; the boolean field disambiguates.)
