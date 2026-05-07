@@ -1409,6 +1409,37 @@ be promoted to dedicated subsections when resolved:
   `Yield`/`PauseSession` intent (deferred to V3) that lets the kernel
   suspend the VM and free capacity. A dumb thread-sleep is operationally
   hostile.
+
+  **What "external async event" means concretely.** The motivating case
+  is: an Executor agent triggers a GitHub Actions workflow via the GitHub
+  API, then needs to wait for that workflow's result before deciding what
+  to do next. With `Sleep`, the agent calls `Sleep(600)` — holding a
+  live microVM slot and a VSock connection open for 10 minutes while doing
+  nothing. With `Yield`/`PauseSession` (V3), the agent instead emits a
+  `YieldUntil` intent naming the expected event source; the kernel
+  suspends and snapshots the VM (freeing the compute slot), and resumes
+  the VM when the event arrives — injecting the payload into the next
+  Kernel State Block so the agent continues with the CI result as context.
+  The same pattern applies to any external async signal: a queue message,
+  a rate-limit reset, a polling HTTP endpoint, a deployment health check.
+  None of these are solvable by `Sleep` without burning capacity; all of
+  them are solvable by a kernel that can suspend and resume on an event.
+
+  **V3 open question — inbound event delivery.** How the kernel *receives*
+  the external event is a design decision deferred to the V3 spec. Two
+  options exist: (A) operator-mediated — the operator runs a webhook
+  receiver that verifies the external auth (e.g. GitHub HMAC-SHA256) and
+  forwards the payload to the kernel as an `ExternalEventNotification`
+  message via the existing `OperatorTransport`; (B) a new
+  `InboundEventBus` extensibility trait giving the kernel a dedicated HTTP
+  listener or queue consumer. Option A is more consistent with RAXIS's
+  principle of keeping the kernel surface minimal and routing all trust
+  through operator authority. Option B is more ergonomic for production
+  deployments. `OperatorTransport` is NOT an inbound event bus in its
+  current V2 design — it is the operator-authenticated IPC channel for
+  synchronous operator commands; routing async machine-initiated events
+  through it without a V3 design decision would conflate two distinct
+  trust models.
 - **`branch_lock`** — preliminary verdict: exclude. claw-code's
   in-process git concurrency primitive assumes intra-process
   concurrency. RAXIS's planner LLM loop is strictly synchronous
@@ -2222,7 +2253,81 @@ are marked ⏳; items deferred to post-V2-GA are marked 🔮.
 - 🔮 `Yield` / `PauseSession` intent — addresses the legitimate use
   case Sleep was trying to serve (waiting on external async events
   without burning microVM slots). Defers to V3 because the kernel-side
-  resume-on-event mechanism is non-trivial.
+  resume-on-event mechanism is non-trivial. Canonical motivating example:
+  an Executor triggers a GitHub Actions workflow via the GitHub API and
+  needs the workflow result before continuing; with `Yield`/`PauseSession`
+  the kernel suspends the VM (freeing the slot) and resumes it when the
+  event arrives, injecting the CI result into the next KSB. Without this
+  primitive, agents must either busy-poll (worse than `Sleep`) or
+  structure all external-CI interactions as fire-and-forget with a
+  separate follow-up task activation.
+
+  **Why "non-trivial" — the six load-bearing problems:**
+
+  1. **VM snapshot/restore is not free.** Suspending a microVM means
+     serializing its entire memory state to disk — CPU registers, RAM
+     pages, device emulation state, VSock device state — atomically
+     while the VM is mid-execution. Firecracker has a snapshot API but
+     the RAXIS kernel must orchestrate it: pause the VM cleanly, flush
+     the VSock frame buffer, write the snapshot, update the session row
+     in SQLite, all transactionally. On resume the sequence runs in
+     reverse. Any crash between those steps leaves the session in an
+     indeterminate state the existing recovery path does not handle.
+
+  2. **A new event-registration subsystem inside the kernel.** The kernel
+     currently has no concept of "I am waiting for an inbound signal
+     addressed to session X." That requires a new registration table
+     `(session_id, event_source, event_filter, timeout_at)`, an inbound
+     routing layer that matches arriving events to registrations, and a
+     wake-up path that restores the VM snapshot and resumes the session.
+     How events are delivered to the kernel is itself an open V3 design
+     question: (A) operator-mediated — operator tooling verifies external
+     auth (e.g. GitHub HMAC-SHA256) and forwards the payload via the
+     existing `OperatorTransport`; or (B) a new `InboundEventBus`
+     extensibility trait. `OperatorTransport` in its current V2 form is
+     the operator-authenticated IPC channel for synchronous operator
+     commands — it is not an inbound event bus and must not be treated
+     as one without an explicit V3 design decision.
+
+  3. **The session FSM grows significantly.** Adding a `Yielded` state
+     requires answering: What happens if the policy epoch advances while
+     the session is suspended — does the admitted plan still satisfy
+     current policy? What happens if the operator key is revoked during
+     the yield window? What is the yield timeout — if the expected event
+     never fires, when does the kernel transition to
+     `YieldTimeout → Abandoned`? Can a session yield multiple times
+     across its lifetime, and does the wall-clock TTL pause during yield
+     or keep counting? Each answer is a new invariant with audit
+     implications.
+
+  4. **KSB assembly on resume.** The event payload must appear in the
+     next Kernel State Block so the agent has context when it wakes up.
+     The kernel must store the raw payload in SQLite while the session is
+     suspended, the KSB assembler must be extended with a "resume
+     context" block, and the planner binary must handle resuming
+     mid-loop without re-executing its previous tool calls.
+
+  5. **Audit paired writes.** `SessionYielded` is a paired-class event —
+     every yield must be paired with exactly one `SessionResumed` or
+     `SessionYieldTimeout`. These variants must be added to the
+     `audit-paired-writes.md §4.1` classification table and the
+     standalone `raxis-audit-verify` binary must understand them. Small
+     in isolation, but the audit chain is the most invariant-sensitive
+     surface in the kernel.
+
+  6. **Durability across kernel restarts.** If the kernel crashes while
+     sessions are yielded, on reboot it must find all `Yielded` sessions
+     in SQLite, locate their VM snapshots on disk, and re-register their
+     event registrations with the inbound delivery subsystem. Without
+     this, a kernel restart silently drops every suspended session — an
+     unacceptable data-loss failure mode for a system with cryptographic
+     chain-of-custody guarantees.
+
+  Net: it is not one hard problem — it is six medium problems that must
+  all be correct simultaneously, touching the session FSM, audit chain,
+  KSB assembler, policy epoch semantics, VM lifecycle, and an
+  as-yet-unspecified inbound event delivery mechanism. That composition
+  cost is why this is V3.
 - 🔮 Multi-arch Reviewer image — RAXIS V2 ships single-arch (x86_64);
   arm64 Reviewer image follows in V3 once arm64 host support is
   prioritized.
