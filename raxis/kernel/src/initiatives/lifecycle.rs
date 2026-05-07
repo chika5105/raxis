@@ -256,6 +256,25 @@ pub struct InitiativeCreated {
 pub struct PlanApproved {
     pub initiative_id: String,
     pub tasks_admitted: usize,
+
+    /// V2 §Step 6 / `INV-PLANNER-HARNESS-06` — the kernel auto-creates
+    /// the canonical Orchestrator session for every V2 initiative at
+    /// `approve_plan` time. The session row is inserted inside the
+    /// same transaction that admits `[[tasks]]`, so a successful
+    /// `approve_plan` either persists BOTH the tasks AND the
+    /// Orchestrator session, or rolls back both (INV-STORE-02).
+    ///
+    /// Caller path: the kernel's downstream `auto-spawn` step (host
+    /// capacity check + `IsolationBackend::launch`) reads this
+    /// `session_id` to bind the session token (`sessions.session_token`)
+    /// to the freshly-launched canonical Orchestrator VM.
+    ///
+    /// `None` only on legacy code paths that have not yet adopted the
+    /// V2 auto-spawn (none in the current kernel; the field is kept
+    /// `Option` for forward-compat in case a future test fixture
+    /// admits a plan without the auto-spawn helper, but every
+    /// production caller of `approve_plan` must observe it as `Some`).
+    pub orchestrator_session_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +597,21 @@ pub fn approve_plan(
         scheduler::admit_in_tx(&tx, task, policy_epoch)?;
     }
 
+    // V2 §Step 6 / `INV-PLANNER-HARNESS-06` — auto-spawn the canonical
+    // Orchestrator session inside the SAME transaction as the task
+    // admit loop. INV-STORE-02 (Pattern A): a successful approve_plan
+    // either persists tasks AND the Orchestrator session, or rolls
+    // back both. The session row is `Planner`-roled at the wire layer
+    // (the IPC role taxonomy) and `Orchestrator`-typed at the V2
+    // dispatch layer (`session_agent_type`). `worktree_root` and
+    // `base_sha` start NULL — both will be populated by the kernel's
+    // VM-spawn step when it provisions the Orchestrator's worktree
+    // (DDL allows `(base_sha NULL, worktree_root NULL)` per the
+    // sessions table CHECK clause). `vsock_cid` is also NULL until
+    // the hypervisor returns the assigned CID.
+    let orchestrator_auto_spawn =
+        auto_spawn_orchestrator_session_in_tx(&tx, initiative_id)?;
+
     tx.commit()?;
     drop(conn); // release the store mutex before doing audit I/O.
 
@@ -630,6 +664,39 @@ pub fn approve_plan(
         );
     }
 
+    // V2 §Step 6 / `INV-PLANNER-HARNESS-06` — emit `SessionCreated` for
+    // the auto-spawned Orchestrator session. Same audit-after-commit
+    // treatment as `PlanApproved`: the row is committed; an emit
+    // failure here is repaired by `recovery::reconcile`.
+    if let Err(e) = audit.emit(
+        AuditEventKind::SessionCreated {
+            session_id:    orchestrator_auto_spawn.session_id.clone(),
+            role:          "planner".to_owned(),
+            lineage_id:    orchestrator_auto_spawn.lineage_id.clone(),
+            worktree_root: None,
+            initiative_id: Some(initiative_id.to_owned()),
+            // The plan_bundle_sha256 reference is wired by the
+            // V2-bundle admission path (Migration 8); for the V1+V2
+            // signed_plan_artifacts path we leave it None and the
+            // attribution chain still resolves through
+            // `signed_plan_artifacts.plan_artifact_sha256`.
+            plan_bundle_sha256: None,
+            policy_epoch:  Some(policy_epoch),
+            session_agent_type:
+                Some(SessionAgentType::Orchestrator.as_sql_str().to_owned()),
+        },
+        Some(&orchestrator_auto_spawn.session_id),
+        None,
+        Some(initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"SessionCreated\",\
+             \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id}\",\
+             \"orchestrator_session_id\":\"{}\"}}",
+            orchestrator_auto_spawn.session_id,
+        );
+    }
+
     // §2.5.8 path_scope_override semantics: emit one
     // `PathScopeOverrideApplied` event per task with the override on,
     // recording (initiative, task, approving_operator). Same audit-
@@ -661,6 +728,116 @@ pub fn approve_plan(
     Ok(PlanApproved {
         initiative_id: initiative_id.to_owned(),
         tasks_admitted: task_count,
+        orchestrator_session_id: Some(orchestrator_auto_spawn.session_id),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// auto_spawn_orchestrator_session_in_tx — V2 §Step 6
+// ---------------------------------------------------------------------------
+
+/// Outcome of `auto_spawn_orchestrator_session_in_tx`. Returned to
+/// `approve_plan` so the post-commit audit emitter has the freshly
+/// generated `session_id` and `lineage_id` without a follow-up read
+/// from the store.
+#[derive(Debug, Clone)]
+pub struct OrchestratorAutoSpawn {
+    /// Newly generated session UUID.
+    pub session_id: String,
+    /// Newly generated lineage id (the Orchestrator session is the
+    /// root of a fresh lineage tree per initiative).
+    pub lineage_id: String,
+}
+
+/// V2 §Step 6 / `INV-PLANNER-HARNESS-06` — auto-create the canonical
+/// Orchestrator session for `initiative_id` inside the same SQLite
+/// transaction that admits the plan's `[[tasks]]` rows.
+///
+/// **Why inside the tx.** The session row, the task rows, and the
+/// initiative state flip all share a single INV-STORE-02 atomicity
+/// boundary: a successful `approve_plan` produces a complete and
+/// consistent V2 admission state (initiative `Executing` + tasks
+/// `Admitted` + Orchestrator session `created` and ready to be
+/// VM-spawned), or it rolls everything back.
+///
+/// **Wire-role vs. agent-type.** The IPC role taxonomy
+/// (`Planner | Gateway | Verifier`) does not distinguish among V2
+/// agent types — that distinction lives in the dispatch matrix
+/// (v2-deep-spec.md §Step 20) and is keyed on
+/// `sessions.session_agent_type`. We persist the row with
+/// `role_id = 'Planner'` (matching the wire taxonomy) and
+/// `session_agent_type = 'Orchestrator'` + `can_delegate = 1` (the
+/// V2 dispatch keys).
+///
+/// **NULL columns at insert time.** The DDL CHECK clause on `sessions`
+/// is `CHECK (base_sha IS NULL OR worktree_root IS NOT NULL)`; the
+/// `(base_sha NULL, worktree_root NULL)` pair is therefore admissible.
+/// Both columns are filled in later by the kernel's VM-spawn step
+/// when it provisions the Orchestrator's worktree; the
+/// `vsock_cid` column is similarly NULL until the hypervisor returns
+/// the assigned CID (Migration 5 doc-comment).
+///
+/// **Failure mode.** RNG / SQLite errors propagate as
+/// `LifecycleError::Sql` and abort the entire `approve_plan` tx —
+/// the operator sees a generic `FAIL_APPROVE_PLAN` and the store
+/// stays in `Draft`. There is no partial-spawn failure mode.
+fn auto_spawn_orchestrator_session_in_tx(
+    tx:            &rusqlite::Transaction<'_>,
+    initiative_id: &str,
+) -> Result<OrchestratorAutoSpawn, LifecycleError> {
+    use raxis_types::SessionId;
+
+    let session_id    = SessionId::new_v4();
+    let session_id_s  = session_id.as_str().to_owned();
+    let lineage_id    = uuid::Uuid::new_v4().to_string();
+
+    // 32 CSPRNG bytes → 64 hex chars. RNG failure surfaces here and
+    // short-circuits approve_plan; we never write a zeroed token.
+    let session_token = raxis_crypto::token::generate_session_token()
+        .map_err(|e| LifecycleError::PlanInvalid {
+            reason: format!("orchestrator session token RNG failed: {e}"),
+        })?;
+
+    // Default V2 session lifetime: 1 day. The kernel-side maintenance
+    // loop renews active session expiries on heartbeat; a 1-day
+    // baseline matches `SessionConfig::default()` in
+    // `authority::session::create_session`.
+    let now_secs   = unix_now_secs();
+    let expires_at = now_secs + 86_400;
+
+    let sessions_t = Table::Sessions.as_str();
+    tx.execute(
+        &format!(
+            "INSERT INTO {sessions_t} (
+                session_id, role_id, session_token, sequence_number,
+                worktree_root, base_sha, base_tracking_ref,
+                lineage_id, fetch_quota, created_at, expires_at, revoked,
+                session_agent_type, can_delegate
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,1)"
+        ),
+        rusqlite::params![
+            session_id_s,
+            "Planner",
+            session_token,
+            0i64,
+            // worktree_root: NULL — populated by VM spawn step.
+            Option::<String>::None,
+            // base_sha: NULL — populated by VM spawn step.
+            Option::<String>::None,
+            // base_tracking_ref: NULL — paired with base_sha.
+            Option::<String>::None,
+            lineage_id,
+            // fetch_quota: same default as `SessionConfig::default()`.
+            1000i64,
+            now_secs,
+            expires_at,
+            SessionAgentType::Orchestrator.as_sql_str(),
+        ],
+    )?;
+
+    Ok(OrchestratorAutoSpawn {
+        session_id: session_id_s,
+        lineage_id,
     })
 }
 
@@ -2878,12 +3055,37 @@ task_id = "t1"
             "one DAG edge (t1 → t2) should be inserted alongside the task rows",
         );
 
-        // Audit-after-commit per kernel-store.md §2.5.2: PlanApproved emits
-        // exactly once, with the initiative_id wired through.
+        // Audit-after-commit per kernel-store.md §2.5.2: V2 admission
+        // emits `PlanApproved` followed by `SessionCreated` (for the
+        // auto-spawned canonical Orchestrator session per
+        // INV-PLANNER-HARNESS-06). Both carry `initiative_id`.
         let events = audit.events();
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2,
+            "V2 admission emits PlanApproved + SessionCreated (orchestrator); got {:?}",
+            events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>());
         assert_eq!(events[0].kind.as_str(), "PlanApproved");
         assert_eq!(events[0].initiative_id.as_deref(), Some(init_id.as_str()));
+        assert_eq!(events[1].kind.as_str(), "SessionCreated");
+        assert_eq!(events[1].initiative_id.as_deref(), Some(init_id.as_str()));
+        // The auto-spawned session must surface a canonical Orchestrator
+        // agent type on the audit record.
+        match &events[1].kind {
+            AuditEventKind::SessionCreated { session_agent_type, .. } => {
+                assert_eq!(session_agent_type.as_deref(), Some("Orchestrator"));
+            }
+            other => panic!("expected SessionCreated; got {other:?}"),
+        }
+        // The post-commit `PlanApproved` return must carry the same
+        // session_id as the audit emit.
+        let auto_spawn_id = result.orchestrator_session_id
+            .as_deref()
+            .expect("V2 approve_plan must return orchestrator_session_id");
+        match &events[1].kind {
+            AuditEventKind::SessionCreated { session_id, .. } => {
+                assert_eq!(session_id, auto_spawn_id);
+            }
+            other => panic!("expected SessionCreated; got {other:?}"),
+        }
 
         // V2 §Step 28: every task row carries the workspace-root
         // lane_id verbatim (the helper prepended `lane_id = "default"`).
@@ -2901,6 +3103,161 @@ task_id = "t1"
         assert_eq!(lanes.len(), 2);
         assert!(lanes.iter().all(|l| l == "default"),
             "every task row must carry the workspace-root lane_id; got {lanes:?}");
+    }
+
+    // ── V2 §Step 6 / INV-PLANNER-HARNESS-06 — Orchestrator auto-spawn ───
+
+    /// `approve_plan` MUST insert the canonical Orchestrator session
+    /// row inside the same transaction that admits the plan tasks.
+    /// This pins the row's V2-mandated columns at the SQL layer:
+    ///   * `session_agent_type = 'Orchestrator'`
+    ///   * `can_delegate       = 1`
+    ///   * `role_id            = 'Planner'` (wire-role taxonomy)
+    ///   * `worktree_root      IS NULL` (filled at VM spawn)
+    ///   * `base_sha           IS NULL` (filled at VM spawn)
+    ///   * `vsock_cid          IS NULL` (filled by hypervisor)
+    #[test]
+    fn approve_plan_inserts_canonical_orchestrator_session_row() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id = "only"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let result = approve_plan(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap();
+
+        let auto_spawn_id = result.orchestrator_session_id
+            .as_deref()
+            .expect("approve_plan must surface orchestrator_session_id");
+
+        let conn = store.lock_sync();
+        let row: (
+            String, String, String,         // session_id, role_id, session_token
+            Option<String>, Option<String>, // session_agent_type, worktree_root
+            Option<String>, Option<i64>,    // base_sha, vsock_cid
+            i64,                            // can_delegate
+        ) = conn.query_row(
+            &format!(
+                "SELECT session_id, role_id, session_token,
+                        session_agent_type, worktree_root,
+                        base_sha, vsock_cid, can_delegate
+                 FROM {} WHERE session_id = ?1",
+                Table::Sessions.as_str(),
+            ),
+            rusqlite::params![auto_spawn_id],
+            |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?,
+                r.get(3)?, r.get(4)?,
+                r.get(5)?, r.get(6)?,
+                r.get(7)?,
+            )),
+        ).expect("orchestrator session row must exist after approve_plan");
+
+        assert_eq!(row.1, "Planner",
+            "wire-role taxonomy: orchestrator session is roled as Planner");
+        assert_eq!(row.2.len(), 64,
+            "session_token must be 32 CSPRNG bytes hex-encoded");
+        assert_eq!(row.3.as_deref(), Some("Orchestrator"),
+            "session_agent_type must be 'Orchestrator' (V2 dispatch key)");
+        assert!(row.4.is_none(),
+            "worktree_root must be NULL until VM spawn provisions it");
+        assert!(row.5.is_none(),
+            "base_sha must be NULL until VM spawn binds it");
+        assert!(row.6.is_none(),
+            "vsock_cid must be NULL until hypervisor returns it");
+        assert_eq!(row.7, 1,
+            "can_delegate must be 1 for Orchestrator (INV-DELEGATE-01)");
+    }
+
+    /// Two independently-approved initiatives MUST receive two distinct
+    /// orchestrator sessions with different session_ids and tokens.
+    /// Pins the per-initiative auto-spawn contract. Uses two stores
+    /// because `seed_draft_initiative` collides on the hardcoded
+    /// `init-test` initiative_id within a single store.
+    #[test]
+    fn approve_plan_orchestrator_session_is_unique_per_initiative() {
+        let plan = r#"
+            [[tasks]]
+            task_id = "t"
+        "#;
+
+        let approve = |store: &Store| -> String {
+            let (sk, _) = fixture_keypair();
+            let (init, pk_bytes) = seed_draft_initiative(store, plan, &sk);
+            let audit    = FakeAuditSink::new();
+            let registry = PlanRegistry::new();
+            let r = approve_plan(
+                &init, "op", None, &pk_bytes, 1, store, &audit, &registry,
+            ).unwrap();
+            r.orchestrator_session_id.unwrap()
+        };
+
+        let store_a = Store::open_in_memory().unwrap();
+        let store_b = Store::open_in_memory().unwrap();
+        let id_a    = approve(&store_a);
+        let id_b    = approve(&store_b);
+        assert_ne!(id_a, id_b,
+            "every initiative must auto-spawn a distinct orchestrator session");
+
+        let token = |store: &Store, sid: &str| -> String {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!("SELECT session_token FROM {} WHERE session_id = ?1",
+                         Table::Sessions.as_str()),
+                rusqlite::params![sid],
+                |r| r.get(0),
+            ).unwrap()
+        };
+        assert_ne!(token(&store_a, &id_a), token(&store_b, &id_b),
+            "each orchestrator session token must come from a fresh CSPRNG draw");
+    }
+
+    /// INV-STORE-02 atomicity: when the plan validator rejects mid-flight
+    /// (e.g. cyclic DAG), no orchestrator session row is left behind.
+    /// Pins the rollback contract.
+    #[test]
+    fn approve_plan_rolls_back_orchestrator_session_on_cycle() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        // Two-node cycle: t1 → t2 → t1.
+        let plan = r#"
+            [[tasks]]
+            task_id      = "t1"
+            predecessors = ["t2"]
+
+            [[tasks]]
+            task_id      = "t2"
+            predecessors = ["t1"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        assert!(matches!(err, LifecycleError::PlanDagInvalid { .. }),
+            "cyclic plan must yield PlanDagInvalid; got {err:?}");
+
+        // No orchestrator session row must be present for the failed
+        // initiative — the entire transaction rolled back.
+        let conn = store.lock_sync();
+        let count: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {} WHERE session_agent_type = 'Orchestrator'",
+                Table::Sessions.as_str(),
+            ),
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0,
+            "rollback contract: no orchestrator session row may survive a failed approve_plan");
     }
 
     // ── V2 §Step 28 — approve_plan-level rejection of malformed plans ───
@@ -3564,10 +3921,19 @@ task_id = "t1"
 
         let evs = audit.events();
         let kinds: Vec<_> = evs.iter().map(|e| e.kind.as_str()).collect();
+        // V2 admission emits the per-initiative audit sequence:
+        //   PlanApproved → SessionCreated (auto-spawned Orchestrator,
+        //   INV-PLANNER-HARNESS-06) → one PathScopeOverrideApplied per
+        //   overriding task.
         assert_eq!(
             kinds,
-            vec!["PlanApproved", "PathScopeOverrideApplied", "PathScopeOverrideApplied"],
-            "expected exactly one PlanApproved + 2 PathScopeOverrideApplied (in that order)",
+            vec![
+                "PlanApproved",
+                "SessionCreated",
+                "PathScopeOverrideApplied",
+                "PathScopeOverrideApplied",
+            ],
+            "expected PlanApproved → SessionCreated → 2× PathScopeOverrideApplied",
         );
 
         // The override events MUST carry initiative + task + operator.
@@ -3611,7 +3977,11 @@ task_id = "t1"
         approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let kinds: Vec<_> = audit.events().iter().map(|e| e.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["PlanApproved"],
+        // V2 admission still emits SessionCreated for the auto-spawned
+        // Orchestrator (INV-PLANNER-HARNESS-06); the rule under test is
+        // that NO PathScopeOverrideApplied event is emitted when no
+        // operator task sets the override.
+        assert_eq!(kinds, vec!["PlanApproved", "SessionCreated"],
                    "PathScopeOverrideApplied must NOT emit when no task sets the override");
     }
 
