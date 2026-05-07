@@ -1,0 +1,96 @@
+# raxis-kernel.service — RAXIS kernel systemd unit (Linux).
+#
+# Normative reference: kernel-lifecycle.md §3 (daemon mode), §14.4
+# (logs go to journald on Linux).
+#
+# Install:
+#
+#     sudo install -m 0644 -o root -g root \
+#       raxis/installer/systemd/raxis-kernel.service \
+#       /etc/systemd/system/raxis-kernel.service
+#
+#     sudo useradd --system --no-create-home --shell /usr/sbin/nologin _raxis
+#     sudo install -d -m 0750 -o _raxis -g _raxis /var/lib/raxis
+#
+#     sudo systemctl daemon-reload
+#     sudo systemctl enable --now raxis-kernel
+#
+# Uninstall:
+#
+#     sudo systemctl disable --now raxis-kernel
+#     sudo rm /etc/systemd/system/raxis-kernel.service
+#     sudo systemctl daemon-reload
+#
+# Logs:
+#
+#     journalctl -u raxis-kernel -f
+#
+# Defaults assumed:
+#
+#     ExecStart           — /usr/local/bin/raxis-kernel; edit if you
+#                           installed via `cargo install` (typically
+#                           /home/<you>/.cargo/bin/raxis-kernel).
+#     User                — _raxis. Create with `useradd --system` (above).
+#     WorkingDirectory    — /var/lib/raxis. Create with `install -d` (above).
+#     /dev/kvm permissions — the kernel needs RW access to /dev/kvm to
+#                           drive the Firecracker substrate; the
+#                           SupplementaryGroups line below adds the
+#                           kernel user to the `kvm` group.
+
+[Unit]
+Description=RAXIS kernel
+Documentation=https://github.com/chika5105/aegis-ai/blob/main/raxis/specs/v2/kernel-lifecycle.md
+After=network-online.target
+Wants=network-online.target
+# The kernel writes the genesis audit chain anchor inside its data
+# directory at first start; if /var/lib is on a separate filesystem
+# we wait until it's mounted before starting.
+RequiresMountsFor=/var/lib/raxis
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/raxis-kernel --data-dir /var/lib/raxis
+User=_raxis
+Group=_raxis
+SupplementaryGroups=kvm
+WorkingDirectory=/var/lib/raxis
+
+# Per kernel-lifecycle.md §3.5: the kernel exits non-zero on any
+# unrecoverable internal error. Restart on failure with a 10-second
+# minimum gap so SIGTERM-driven shutdown audit emissions complete.
+Restart=on-failure
+RestartSec=10s
+
+# Sandboxing — defense-in-depth. The kernel itself drops into per-VM
+# isolation for any agent execution (Firecracker), so the kernel
+# process itself only needs filesystem and /dev/kvm access.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=false
+DeviceAllow=/dev/kvm rw
+ReadWritePaths=/var/lib/raxis
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_VSOCK
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+
+# Logs go to journald (kernel-lifecycle.md §14.4). The kernel writes
+# JSON-shaped lines so `journalctl -u raxis-kernel --output=json` is
+# the canonical structured-log read path.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=raxis-kernel
+
+# Per kernel-lifecycle.md §3.5: graceful SIGTERM-driven shutdown.
+# Allow up to 30 seconds for the in-flight intent queue to drain
+# before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+[Install]
+WantedBy=multi-user.target

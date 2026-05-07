@@ -529,6 +529,8 @@ The kernel does NOT rotate its own operational logs (this is supervisor territor
 
 (10 generations, 10 MB max per file, gzip-compressed.) The `raxis kernel install --system` command can optionally write this file with `--with-newsyslog-config`; otherwise the operator is responsible.
 
+**Implementation reference (V2 partial — supervisor units shipped, installer CLI deferred).** The reference newsyslog snippet ships under [`raxis/installer/newsyslog/raxis.conf`](../../installer/newsyslog/raxis.conf), the macOS LaunchDaemon under [`raxis/installer/launchd/com.raxis.kernel.plist`](../../installer/launchd/com.raxis.kernel.plist), and the Linux systemd unit under [`raxis/installer/systemd/raxis-kernel.service`](../../installer/systemd/raxis-kernel.service). All three files are self-documenting at the top with install / uninstall commands. The convenience CLI surface (`raxis kernel install --system [--with-newsyslog-config]` etc.) is deferred to a follow-up sprint; until then operators install the snippets manually as shown in each file's header. `guides/SETUP.md` step 7 includes a pointer to this folder.
+
 ---
 
 ## 6. Logging in Foreground Mode

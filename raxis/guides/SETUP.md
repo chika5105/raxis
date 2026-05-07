@@ -221,6 +221,18 @@ The kernel auto-spawns and supervises the gateway subprocess. Leave
 this terminal running for the lifetime of the scenarios; switch to a
 second terminal for the scenario commands.
 
+> **Running RAXIS as a system daemon.** For long-lived production
+> hosts, install one of the bundled supervisor units instead of
+> running `raxis-kernel` in a foreground terminal:
+>
+> - macOS — [`raxis/installer/launchd/com.raxis.kernel.plist`](../installer/launchd/com.raxis.kernel.plist)
+>   plus [`raxis/installer/newsyslog/raxis.conf`](../installer/newsyslog/raxis.conf) for log rotation.
+> - Linux — [`raxis/installer/systemd/raxis-kernel.service`](../installer/systemd/raxis-kernel.service);
+>   journald handles log rotation.
+>
+> Each file is self-documenting at the top with install / uninstall
+> commands and the spec section it implements.
+
 ---
 
 ## Step 8 — Confirm the install is healthy

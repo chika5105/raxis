@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    com.raxis.kernel.plist — RAXIS kernel launchd unit (macOS).
+
+    Normative reference: kernel-lifecycle.md §3 (daemon mode), §5
+    (logging), §14.4 (log destination on macOS).
+
+    Install:
+
+        sudo install -m 0644 -o root -g wheel \
+          raxis/installer/launchd/com.raxis.kernel.plist \
+          /Library/LaunchDaemons/com.raxis.kernel.plist
+
+        sudo launchctl bootstrap system /Library/LaunchDaemons/com.raxis.kernel.plist
+        sudo launchctl enable system/com.raxis.kernel
+        sudo launchctl kickstart -kp system/com.raxis.kernel
+
+    Uninstall:
+
+        sudo launchctl bootout system /Library/LaunchDaemons/com.raxis.kernel.plist
+        sudo rm /Library/LaunchDaemons/com.raxis.kernel.plist
+
+    Defaults assumed:
+
+        ProgramArguments[0] — /usr/local/bin/raxis-kernel (your install path).
+            Edit if you installed via `cargo install --path raxis/kernel`
+            (typically /Users/<you>/.cargo/bin/raxis-kernel).
+
+        UserName            — _raxis. Create with:
+            sudo dscl . -create /Users/_raxis UserShell /usr/bin/false
+            sudo dscl . -create /Users/_raxis NFSHomeDirectory /var/empty
+
+        WorkingDirectory    — /var/raxis. Create with:
+            sudo install -d -m 0750 -o _raxis -g _raxis /var/raxis
+            sudo install -d -m 0755 -o _raxis -g _raxis /var/log/raxis
+
+        Logs                — /var/log/raxis/kernel.{out,err}, rotated by
+                              the bundled newsyslog snippet at
+                              raxis/installer/newsyslog/raxis.conf.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.raxis.kernel</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/raxis-kernel</string>
+        <string>--data-dir</string>
+        <string>/var/raxis</string>
+    </array>
+
+    <key>UserName</key>
+    <string>_raxis</string>
+
+    <key>WorkingDirectory</key>
+    <string>/var/raxis</string>
+
+    <!--
+        StandardOutPath and StandardErrorPath: write directly to flat
+        log files (kernel-lifecycle.md §14.4). newsyslog rotates
+        them; see raxis/installer/newsyslog/raxis.conf.
+    -->
+    <key>StandardOutPath</key>
+    <string>/var/log/raxis/kernel.out</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/raxis/kernel.err</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <!--
+        ThrottleInterval — minimum seconds between launches.
+        kernel-lifecycle.md §3.5 mandates exponential backoff on the
+        kernel's side; the launchd hard-floor of 10s gives the kernel
+        time to write a coherent SIGTERM-captured shutdown audit
+        before we respawn.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!--
+        ProcessType — Background gives the kernel non-interactive
+        priority (no Quality-of-Service throttling during foreground
+        UI work). The kernel is I/O- and IPC-bound; it does not need
+        the foreground QoS class.
+    -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
