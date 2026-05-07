@@ -962,6 +962,61 @@ pub enum AuditEventKind {
         actor_fingerprint:   String,
         backend_kind:        String,
     },
+
+    // --- Tier 1 transparent egress (`vm-network-isolation.md §3.2`).
+    /// Emitted when the kernel's egress admission service admits
+    /// one outbound connection from the agent VM. Carries the
+    /// host-or-SNI it admitted on, the original destination
+    /// `(ip, port)` after iptables redirect, and the layer-7
+    /// protocol guess from the in-VM proxy.
+    ///
+    /// `INV-EGRESS-AUDIT-01`: every Admit verdict from
+    /// `AdmissionService::admit` MUST be reflected by exactly one
+    /// such event AFTER the verdict is sent back to the proxy.
+    /// The audit-after-decision order matches the
+    /// audit-after-commit order used elsewhere — the agent must
+    /// not observe an admission whose audit failed.
+    TransparentProxyAdmitted {
+        /// Session whose VM the connection came from.
+        session_id:        String,
+        /// Host or SNI passed to admission. `None` when the in-VM
+        /// proxy could not extract one (raw TCP database bypass).
+        host_or_sni:       Option<String>,
+        /// Original destination address as seen by the proxy.
+        original_dst_ip:   String,
+        /// Original destination port.
+        original_dst_port: u16,
+        /// Layer-7 protocol guess (`https` / `http` / `tcp`).
+        protocol:          String,
+    },
+
+    /// Emitted when the kernel's egress admission service denies
+    /// one outbound connection. Carries the same target info as
+    /// `TransparentProxyAdmitted` plus a stable `reason` string
+    /// from the `DenyReason` enum.
+    ///
+    /// Note: a `proxy_target_bypass` denial ALSO emits a separate
+    /// `SecurityViolation` event (per `vm-network-isolation.md §5`
+    /// proxy-bypass detection) — the two events together are how
+    /// forensic tooling distinguishes "agent tried a forbidden
+    /// host" from "agent tried to reach a credential proxy's real
+    /// upstream directly".
+    TransparentProxyDenied {
+        /// Session whose VM the connection came from.
+        session_id:        String,
+        /// Host or SNI passed to admission, when available.
+        host_or_sni:       Option<String>,
+        /// Original destination address as seen by the proxy.
+        original_dst_ip:   String,
+        /// Original destination port.
+        original_dst_port: u16,
+        /// Layer-7 protocol guess (`https` / `http` / `tcp`).
+        protocol:          String,
+        /// Stable short reason string (`host_not_in_allowlist`,
+        /// `proxy_target_bypass`, `protocol_not_permitted`,
+        /// `port_not_redirected`, `unknown`).
+        reason:            String,
+    },
 }
 
 impl AuditEventKind {
@@ -1021,6 +1076,8 @@ impl AuditEventKind {
             Self::SecurityViolation { .. } => "SecurityViolation",
             Self::CredentialAccessed { .. } => "CredentialAccessed",
             Self::CredentialRotated { .. } => "CredentialRotated",
+            Self::TransparentProxyAdmitted { .. } => "TransparentProxyAdmitted",
+            Self::TransparentProxyDenied { .. } => "TransparentProxyDenied",
         }
     }
 }

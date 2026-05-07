@@ -17,6 +17,7 @@ members = [
     "crates/raxis-credentials",
     "crates/raxis-credentials-file",
     "crates/tproxy-protocol",
+    "crates/egress-admission",
     "crates/gateway-substrate",
     "crates/genesis-tools",
     "crates/isolation",
@@ -120,6 +121,7 @@ raxis-audit-tools       = { path = "crates/audit" }
 raxis-credentials       = { path = "crates/raxis-credentials" }
 raxis-credentials-file  = { path = "crates/raxis-credentials-file" }
 raxis-tproxy-protocol   = { path = "crates/tproxy-protocol" }
+raxis-egress-admission  = { path = "crates/egress-admission" }
 raxis-gateway-substrate = { path = "crates/gateway-substrate" }
 raxis-genesis-tools     = { path = "crates/genesis-tools" }
 raxis-isolation         = { path = "crates/isolation" }

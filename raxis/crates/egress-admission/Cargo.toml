@@ -1,0 +1,29 @@
+[package]
+name        = "raxis-egress-admission"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = """
+Kernel-side admission service for the V2 Tier 1 transparent egress
+proxy. Holds the policy-aware decision logic (`AdmissionService`),
+the bincode framing on top of an arbitrary `AsyncRead + AsyncWrite`
+duplex (so the same code drives a vsock channel in production and a
+loopback TCP socket in tests), and the audit-event emitters that
+surface admit/deny verdicts on the kernel's audit chain.
+"""
+
+[lib]
+name = "raxis_egress_admission"
+path = "src/lib.rs"
+
+[dependencies]
+raxis-tproxy-protocol = { workspace = true }
+raxis-policy          = { workspace = true }
+raxis-audit-tools     = { workspace = true }
+
+tokio                 = { workspace = true }
+serde                 = { workspace = true }
+thiserror             = { workspace = true }
+
+[dev-dependencies]
+raxis-test-support    = { path = "../test-support" }

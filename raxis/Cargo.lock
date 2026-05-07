@@ -2414,6 +2414,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-egress-admission"
+version = "0.1.0"
+dependencies = [
+ "raxis-audit-tools",
+ "raxis-policy",
+ "raxis-test-support",
+ "raxis-tproxy-protocol",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "raxis-gateway"
 version = "0.1.0"
 dependencies = [
