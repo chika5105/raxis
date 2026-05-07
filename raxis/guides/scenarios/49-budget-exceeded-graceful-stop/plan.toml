@@ -1,0 +1,16 @@
+# Scenario 49 — under-budget initiative.
+
+[workspace]
+name        = "Tiny budget"
+lane_id     = "tiny-budget-lane"
+
+[budget]
+max_tokens          = 500
+max_wall_clock_secs = 60
+
+[[tasks]]
+task_id            = "verbose-task"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["docs/"]
+context = "Write a 5,000-word essay on monad transformers in docs/essay.md."

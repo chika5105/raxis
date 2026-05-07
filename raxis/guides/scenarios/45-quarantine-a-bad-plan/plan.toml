@@ -1,0 +1,13 @@
+# Scenario 45 — intentionally invalid plan to demonstrate
+# admission-time rejection.
+
+[workspace]
+name        = "Bad plan"
+lane_id     = "bad-plan-lane"
+
+[[tasks]]
+task_id            = "escapes-the-jail"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["../etc/passwd"]
+context = "Will be rejected by validate."

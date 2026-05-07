@@ -1,0 +1,3 @@
+# Scenario 42 — operator rotation example policy. The actual rotation
+# is performed by `raxis operator add` and `raxis operator deactivate`,
+# not via policy.toml.

@@ -1,0 +1,110 @@
+# Scenario 50 — capstone end-to-end demo.
+
+[workspace]
+name        = "End-to-end feature shipment"
+lane_id     = "e2e-feature-lane"
+description = """
+  A realistic feature: add a /version endpoint that returns crate
+  version, a corresponding frontend status badge, an integration
+  test, and matching docs. Coordinated across multiple agents.
+"""
+
+[budget]
+max_tokens          = 200000
+max_wall_clock_secs = 1800
+
+# --- Phase 1: parallel backend + frontend ---
+
+[[tasks]]
+task_id            = "backend-version-endpoint"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  In src/main.rs, build a tiny_http server on 127.0.0.1:7878 with
+  a GET /version handler returning the crate version as JSON.
+  Run cargo build to verify; commit.
+"""
+
+[[tasks.witnesses]]
+kind = "Mechanical"
+command = ["cargo", "build", "--release", "--quiet"]
+exit_code_eq = 0
+
+[[tasks]]
+task_id            = "frontend-status-badge"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["frontend/"]
+context = """
+  In frontend/src/index.js, add a fetchStatus() function that GETs
+  /version and console.logs "version: <v>". Plain JavaScript, no
+  bundler. Commit.
+"""
+
+# --- Phase 2: integration test (depends on both phase-1 tasks) ---
+
+[[tasks]]
+task_id            = "integration-test"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["tests/"]
+predecessors       = ["backend-version-endpoint", "frontend-status-badge"]
+context = """
+  Add tests/integration.rs that boots the backend, hits /version
+  with reqwest, and asserts the body contains "version".
+"""
+
+[[tasks.witnesses]]
+kind = "Mechanical"
+command = ["cargo", "test", "--quiet", "--test", "integration"]
+exit_code_eq = 0
+
+# --- Phase 3: docs (depends on integration-test) ---
+
+[[tasks]]
+task_id            = "docs"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["docs/"]
+predecessors       = ["integration-test"]
+context = """
+  Document the new /version endpoint and the frontend integration
+  in docs/api.md and docs/frontend.md.
+"""
+
+# --- Phase 4: panel review ---
+
+[[tasks]]
+task_id            = "review-security"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+predecessors       = ["docs"]
+context = """
+  Review the merged tree for security issues: hard-coded secrets,
+  unauthenticated endpoints, etc. Submit Approve or Reject.
+"""
+
+[[tasks]]
+task_id            = "review-style"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+predecessors       = ["docs"]
+context = """
+  Review for code style: clippy-clean Rust, JS semicolons, doc
+  punctuation, etc. Submit Approve or Reject.
+"""
+
+[[tasks]]
+task_id            = "review-correctness"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+predecessors       = ["docs"]
+context = """
+  Review for functional correctness: does /version actually return
+  the crate version? Does the test exercise it? Does the doc match
+  reality?
+"""
+
+[orchestrator]
+cross_cutting_artifacts = ["Cargo.lock"]

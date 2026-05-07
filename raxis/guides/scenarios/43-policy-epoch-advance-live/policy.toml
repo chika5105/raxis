@@ -1,0 +1,8 @@
+# Scenario 43 — example tighter policy delta.
+
+[meta]
+schema_version = 1
+description    = "Tightened: ban network egress entirely."
+
+[network]
+default_deny = true

@@ -1,0 +1,14 @@
+# Scenario 48 — provider fallback chain.
+
+[meta]
+schema_version = 1
+
+[[providers]]
+id        = "anthropic-primary"
+endpoint  = "https://api.anthropic.com"
+priority  = 0
+
+[[providers]]
+id        = "anthropic-broken"
+endpoint  = "https://does-not-exist.example.com"
+priority  = 1
