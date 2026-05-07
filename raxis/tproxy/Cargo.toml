@@ -1,0 +1,47 @@
+[package]
+name        = "raxis-tproxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = """
+In-VM Tier 1 transparent egress proxy. Runs as `root` inside the
+agent VM, listens on TCP :3129, reads SO_ORIGINAL_DST after iptables
+REDIRECT, parses the SNI / Host header, asks the kernel for an
+admission verdict over vsock, and either:
+
+  * forwards bytes bidirectionally between the agent and the real
+    upstream (Admit verdict), or
+  * closes the agent-side socket with `RST` so the agent's library
+    surfaces `ECONNREFUSED` (Deny verdict).
+
+The binary itself is Linux-only — the kernel substrate is `vsock`
+(AF_VSOCK) which only exists on Linux. The library APIs that don't
+require Linux syscalls (the SNI peek loop, the byte-shuttle helper)
+ARE cross-compilable so unit tests can exercise them on macOS host
+build agents too.
+"""
+
+[lib]
+name = "raxis_tproxy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "raxis-tproxy"
+path = "src/main.rs"
+
+[dependencies]
+raxis-tproxy-protocol = { workspace = true }
+
+tokio       = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux-only — `nix` for `getsockopt(SO_ORIGINAL_DST)` and AF_VSOCK
+# helpers. Pinned to `=` for reproducibility of the in-VM image.
+nix = { version = "0.27", features = ["socket", "net"] }
+
+[dev-dependencies]
+raxis-test-support     = { path = "../crates/test-support" }
+raxis-egress-admission = { workspace = true }
+raxis-audit-tools      = { workspace = true }
