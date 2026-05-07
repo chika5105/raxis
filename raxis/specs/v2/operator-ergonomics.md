@@ -1786,12 +1786,12 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 
 ### CLI side
 
-- [ ] `raxis-cli plan prepare <plan.toml>` per §5.
+- [ ] `raxis-cli plan prepare <plan.toml>` per §5. **Status: deferred.** The full surface depends on (a) the kernel-side `OperatorRequest::ProposeDefaults` handler (§5.3, listed below in "Kernel side"), (b) the `[token_policy_defaults]`, `[default_executor_image]`, `[default_verifier_images]`, `[default_protected_paths]`, and `[prepare]` policy sections, and (c) the `@raxis-default` annotation reader/writer (§4.3, §4.4). None of those prerequisites have landed. Until they do, `plan prepare` is intentionally unimplemented; operators write fully-explicit plans and rely on `plan validate` + `plan fmt`. Plans submitted that *would have* required prepare-time defaulting are rejected at admission with `FAIL_PLAN_REQUIRES_PREPARE { missing_fields: [...] }` — a hard-fail that points the operator at this deferred work, never silently filled. The `plan fmt` canonicalizer (above, shipped) is ready to be invoked as `plan prepare`'s final phase the moment the kernel handler lands.
 - [ ] `raxis-cli plan init -t <template>` per §6; templates bundled with the CLI binary.
 - [ ] `raxis-cli plan validate [--with-kernel] [--explain-environment]` per §7.
 - [ ] `raxis-cli plan diff [--format unified|json]` per §8.
 - [ ] `raxis-cli plan explain [--task <id>] [--format text|markdown|html]` per §9.
-- [ ] `raxis-cli plan fmt [--check] [--stdout]` per §10; runs as final phase of `plan prepare`.
+- [x] `raxis-cli plan fmt [--check] [--stdout]` per §10. **Implementation reference:** `raxis/cli/src/commands/plan_fmt.rs`; canonicalizer is `toml_edit`-backed (preserves comments including `@raxis-default` annotations) with a deterministic post-process pass (trailing-whitespace strip, ≤ 1 blank line between rows, single trailing newline). Tests: 7 unit tests + 8 subprocess integration tests in `raxis/cli/tests/plan_fmt_cli.rs`. Will be invoked as `plan prepare`'s final phase once `plan prepare` lands; today operators run it standalone.
 - [ ] `raxis-cli plan cost-estimate [--scenario typical|worst-case]` per §11.
 - [ ] `raxis-cli submit plan --dry-run` per §12 (extends the existing `submit plan` command).
 - [ ] `raxis-cli initiative watch <id> [--follow] [--task]` per §13.

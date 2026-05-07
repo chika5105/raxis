@@ -51,7 +51,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
 ];
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
-const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject", "validate"];
+const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject", "validate", "fmt"];
 /// V2.1 atomic plan-bundle submit. Spec: plan-bundle-sealing.md §4.
 /// Currently exposes only `plan`; future sub-commands (`policy`,
 /// `operator-cert`) will plug in here without a third rename.
@@ -196,6 +196,7 @@ fn run() -> Result<(), CliError> {
                 "approve" => commands::plan::run_approve(&flags, &rest[1..]),
                 "reject" => commands::plan::run_reject(&flags, &rest[1..]),
                 "validate" => commands::plan_validate::run(&flags, &rest[1..]),
+                "fmt"      => commands::plan_fmt::run(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "plan sub-command", sub2, PLAN_SUBCOMMANDS,
                 ))),
@@ -453,6 +454,15 @@ SUBCOMMANDS:
         `path_allowlist`) before the signed-bundle round-trip
         through `submit plan`. Exits 0 on success, non-zero on the
         first violation.
+
+    plan fmt <plan.toml> [--check] [--stdout]
+        Canonicalize plan.toml's formatting (2-space indent, trailing
+        whitespace stripped, blank lines normalised, final newline
+        ensured) while preserving all comments — including
+        `@raxis-default` annotations. `--check` is a CI gate that
+        exits non-zero if the file is not already canonical;
+        `--stdout` prints the canonical bytes without modifying
+        the file.
 
     initiative abort <initiative_id>
         Force-terminate an initiative and bulk-cancel all non-terminal tasks.

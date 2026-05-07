@@ -52,6 +52,11 @@ ed25519-dalek = { workspace = true }
 hex           = { workspace = true }
 uuid         = { workspace = true }
 toml         = { workspace = true }
+# `plan fmt` (operator-ergonomics §10) canonicalizes plan.toml while
+# preserving comments — including `@raxis-default` annotations — at
+# their original line positions. The base `toml` crate cannot do this
+# round-trip; `toml_edit` exposes the document-preserving API we need.
+toml_edit    = "0.22"
 thiserror    = { workspace = true }
 # Used by `commands::status::is_pid_alive` for `kill(pid, 0)` —
 # POSIX existence check that doesn't deliver a signal. Already a
