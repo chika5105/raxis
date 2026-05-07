@@ -17,6 +17,7 @@ members = [
     "crates/gateway-substrate",
     "crates/genesis-tools",
     "crates/isolation",
+    "crates/isolation-apple-vz",
     "crates/isolation-firecracker",
     "crates/runtime",
     "crates/test-support",
@@ -112,6 +113,7 @@ raxis-audit-tools       = { path = "crates/audit" }
 raxis-gateway-substrate = { path = "crates/gateway-substrate" }
 raxis-genesis-tools     = { path = "crates/genesis-tools" }
 raxis-isolation         = { path = "crates/isolation" }
+raxis-isolation-apple-vz = { path = "crates/isolation-apple-vz" }
 raxis-isolation-firecracker = { path = "crates/isolation-firecracker" }
 raxis-runtime           = { path = "crates/runtime" }
 raxis-verifier-stub     = { path = "crates/verifier-stub" }

@@ -1,0 +1,70 @@
+[package]
+name        = "raxis-isolation-apple-vz"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# raxis-isolation-apple-vz — concrete `Backend` impl for macOS using
+# Apple's Virtualization.framework (AVF).
+#
+# Normative reference:
+#   * `specs/v2/extensibility-traits.md §3.5` (Reference impl table; this is
+#     the `AppleVirtualizationIsolation` row, default on macOS, R1Conformant).
+#   * `specs/v2/system-requirements.md §5.2` (AVF admission rules).
+#   * `specs/v2/v2-deep-spec.md §Step 10` (VirtioFS + VSock plumbing — AVF's
+#     `VZVirtioFileSystemDeviceConfiguration` + `VZVirtioSocketDeviceConfiguration`
+#     are the macOS counterparts of Firecracker's virtio devices).
+#
+# Crate scope:
+#   * `AppleVzBackend`               — `raxis_isolation::Backend` factory.
+#   * `AppleVzSession`               — `raxis_isolation::Session` live handle.
+#   * `config::VmConfigBuilder`      — pure-data typed translator from
+#                                      `raxis_isolation::VmSpec` into the
+#                                      AVF configuration objects we hand
+#                                      to `VZVirtualMachineConfiguration`.
+#   * `runtime::AvfRuntime`          — macOS-only dispatch wrapper around
+#                                      `VZVirtualMachine::start` /
+#                                      `stop`. Compiles to a stub on
+#                                      non-macOS targets so the trait
+#                                      surface is single-target across
+#                                      the workspace.
+#
+# Crate scope explicitly EXCLUDES:
+#   * Mock substrate. Test fakes live in `raxis-test-support` per the
+#     workspace's mock-isolation discipline.
+#   * Kernel-side host-detection fan-out — picking AVF vs Firecracker at
+#     boot is the kernel's job.
+#
+# Why a dedicated crate (and not part of `raxis-kernel`):
+#   * Same reason as `raxis-isolation-firecracker`: the kernel is
+#     compiled against the trait, substrates are independent crates.
+
+[dependencies]
+raxis-isolation = { workspace = true }
+raxis-types     = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+
+# `objc2-virtualization` is the macOS-only binding to
+# Virtualization.framework. Linked only on macOS targets so the
+# crate compiles cleanly on Linux (where the library is meaningless).
+#
+# V2 wires the configuration-build + `validateWithError:` path —
+# `VZVirtualMachineConfiguration` plus `VZLinuxBootLoader` are
+# sufficient for that. Typed device-array setters land in
+# iso-3-followup; the feature flags below are the exact set V2
+# touches and nothing more.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2                    = "0.6"
+objc2-foundation         = { version = "0.3", features = ["NSURL", "NSError", "NSString"] }
+objc2-virtualization     = { version = "0.3", features = [
+    "VZBootLoader",
+    "VZLinuxBootLoader",
+    "VZVirtualMachineConfiguration",
+] }
+
+[dev-dependencies]
+tempfile = "3"
