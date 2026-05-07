@@ -50,6 +50,19 @@ raxis-worktree-staging = { workspace = true }
 # audited seam. `extensibility-traits.md §4.4`.
 raxis-credentials       = { workspace = true }
 raxis-credentials-file  = { workspace = true }
+# Per-session credential-proxy lifecycle. The kernel constructs one
+# `CredentialProxyManager` at boot (sharing the same
+# `Arc<dyn CredentialBackend>` as `HandlerContext::credentials`) and
+# threads it through `HandlerContext`. At session-spawn time the
+# kernel reads `[[tasks.credentials]]` (already parsed by
+# `raxis-plan-credentials`) and calls
+# `manager.start_for_session(session_id, task_id, &decls)` to bind
+# real listeners + emit `CredentialProxyStarted`. At session
+# teardown the kernel calls `handles.shutdown()` to abort listeners
+# + emit `CredentialProxyStopped`. See
+# `specs/v2/credential-proxy.md §2`.
+raxis-credential-proxy-manager = { path = "../crates/credential-proxy-manager" }
+raxis-plan-credentials  = { path = "../crates/plan-credentials" }
 # `DomainAdapter` trait + `GitAdapter` reference impl. Wired into
 # `HandlerContext::domain` at boot per `extensibility-traits.md §2.6`.
 # The kernel binary monomorphises against the SE binding only —

@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use raxis_audit_tools::AuditSink;
+use raxis_credential_proxy_manager::CredentialProxyManager;
 use raxis_credentials::CredentialBackend;
 use raxis_domain::DomainAdapter;
 use raxis_domain_git::{SeIntentKind, SeTerminalArtefact};
@@ -145,6 +146,34 @@ pub struct HandlerContext {
     /// boot mode that could legitimately leave this `None`.
     pub credentials: Arc<dyn CredentialBackend>,
 
+    /// V2 per-session credential-proxy lifecycle manager.
+    ///
+    /// Constructed once at kernel boot from the same
+    /// `Arc<dyn CredentialBackend>` as `credentials` above (so the
+    /// proxy resolves the same names through the same audit
+    /// chain) plus the same `Arc<dyn AuditSink>` as `audit` (so the
+    /// `CredentialProxyStarted` / `CredentialProxyStopped` lifecycle
+    /// events land in the canonical chain rather than a side
+    /// channel). The kernel calls
+    /// `proxy_manager.start_for_session(session_id, task_id,
+    /// &task_decls)` at session-spawn time AFTER `tx.commit()` and
+    /// BEFORE the in-VM agent process is started, so the loopback
+    /// addresses returned by the manager are the values the kernel
+    /// injects into the VM environment (`DATABASE_URL`, `KUBECONFIG`,
+    /// etc.). At teardown the kernel calls `handles.shutdown()` to
+    /// abort the listeners and emit one `CredentialProxyStopped`
+    /// per proxy with the final counter snapshot.
+    ///
+    /// **Why non-Option**: a kernel without a proxy manager cannot
+    /// admit any session that declares `[[tasks.credentials]]` —
+    /// failing closed at session-spawn would be a worse user
+    /// experience than failing closed at boot. The constructor
+    /// is universally available (it just needs the
+    /// `Arc<dyn CredentialBackend>` we already have), so there is
+    /// no degraded boot mode that could legitimately leave this
+    /// `None`.
+    pub proxy_manager: Arc<CredentialProxyManager>,
+
     /// V2 domain adapter selected at boot.
     ///
     /// `extensibility-traits.md §2` — the single seam between the
@@ -197,6 +226,10 @@ impl HandlerContext {
         >,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
+        let proxy_manager = Arc::new(CredentialProxyManager::new(
+            Arc::clone(&credentials),
+            Arc::clone(&audit),
+        ));
         Self {
             policy,
             registry,
@@ -210,6 +243,7 @@ impl HandlerContext {
             cert_enforcer: Arc::new(CertEnforcer::new()),
             isolation,
             credentials,
+            proxy_manager,
             domain,
         }
     }
@@ -225,8 +259,18 @@ impl HandlerContext {
     /// kernel boot (when `policy.toml [credential_backend]` selects
     /// a non-default backend) and by tests that want to inject a
     /// stub backend for negative-path coverage.
+    ///
+    /// IMPORTANT: this also rebuilds `proxy_manager` so the proxy
+    /// resolves credentials through the same backend the rest of
+    /// the kernel uses. Tests that swap the credentials backend
+    /// AND inspect proxy-emitted audit events should rely on the
+    /// rebuilt manager.
     pub fn with_credentials(mut self, credentials: Arc<dyn CredentialBackend>) -> Self {
-        self.credentials = credentials;
+        self.credentials = Arc::clone(&credentials);
+        self.proxy_manager = Arc::new(CredentialProxyManager::new(
+            credentials,
+            Arc::clone(&self.audit),
+        ));
         self
     }
 }

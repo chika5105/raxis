@@ -1,0 +1,32 @@
+[package]
+name        = "raxis-credential-proxy-manager"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde     = { workspace = true }
+tokio     = { workspace = true }
+tracing   = "0.1"
+thiserror = { workspace = true }
+
+# Audit + credential surfaces.
+raxis-audit-tools     = { workspace = true }
+raxis-credentials     = { workspace = true }
+
+# Plan-level decl parser feeds the manager.
+raxis-plan-credentials = { path = "../plan-credentials" }
+
+# Concrete proxy crates the manager binds.
+raxis-credential-proxy-postgres = { path = "../credential-proxy-postgres" }
+raxis-credential-proxy-http     = { path = "../credential-proxy-http" }
+
+[dev-dependencies]
+raxis-credentials-file = { workspace = true }
+raxis-test-support     = { path = "../test-support" }
+tempfile               = "3"
+tokio                  = { workspace = true, features = ["full"] }
+toml                   = { workspace = true }

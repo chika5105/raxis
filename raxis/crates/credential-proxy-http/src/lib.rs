@@ -222,6 +222,14 @@ impl HttpProxy {
         self.stats.snapshot()
     }
 
+    /// Borrow the underlying `Arc<ProxyStats>` so a caller (e.g. the
+    /// kernel-side `CredentialProxyManager`) can keep reading counters
+    /// AFTER `serve` has consumed the proxy. Call this BEFORE
+    /// `tokio::spawn(proxy.serve())`.
+    pub fn stats_handle(&self) -> Arc<ProxyStats> {
+        Arc::clone(&self.stats)
+    }
+
     /// Run the accept loop until the future is dropped.
     pub async fn serve(self) {
         loop {

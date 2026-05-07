@@ -2809,6 +2809,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-credential-proxy-manager"
+version = "0.1.0"
+dependencies = [
+ "raxis-audit-tools",
+ "raxis-credential-proxy-http",
+ "raxis-credential-proxy-postgres",
+ "raxis-credentials",
+ "raxis-credentials-file",
+ "raxis-plan-credentials",
+ "raxis-test-support",
+ "serde",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "raxis-credential-proxy-postgres"
 version = "0.1.0"
 dependencies = [
@@ -3015,6 +3034,7 @@ dependencies = [
  "libc",
  "raxis-audit-tools",
  "raxis-canonical-images",
+ "raxis-credential-proxy-manager",
  "raxis-credentials",
  "raxis-credentials-file",
  "raxis-crypto",
@@ -3025,6 +3045,7 @@ dependencies = [
  "raxis-isolation",
  "raxis-isolation-apple-vz",
  "raxis-isolation-firecracker",
+ "raxis-plan-credentials",
  "raxis-policy",
  "raxis-runtime",
  "raxis-store",
