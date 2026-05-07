@@ -34,8 +34,8 @@
 use crate::table::Table;
 use crate::StoreError;
 use raxis_types::{
-    DelegationStatus, EscalationStatus, InitiativeState, ReviewVerdict,
-    SessionAgentType, SubtaskActivationState, TaskState, WitnessResultClass,
+    DelegationStatus, EscalationStatus, InitiativeState, PlanBundleNonceOutcome,
+    ReviewVerdict, SessionAgentType, SubtaskActivationState, TaskState, WitnessResultClass,
 };
 use rusqlite::Connection;
 
@@ -54,7 +54,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -90,6 +90,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 7 {
         apply_migration_7(conn)?;
+    }
+    if current_version < 8 {
+        apply_migration_8(conn)?;
     }
 
     Ok(())
@@ -1230,6 +1233,185 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 8 — V2 Plan Bundle Sealing storage layout (§8.2)
+//
+// Normative reference: plan-bundle-sealing.md §8.2 ("Storage layout").
+//
+// Adds three V2 tables and one V1-table column:
+//   1. `plan_bundles`             — content-addressed store of every
+//                                    operator-signed plan bundle, keyed by
+//                                    bundle_sha256. Retained indefinitely
+//                                    (§10 / D8).
+//   2. `plan_bundle_artifacts`    — per-artifact rows (artifact_seq=0 ⇒
+//                                    plan.toml; 1.. ⇒ host-path artifacts).
+//   3. `plan_bundle_nonces_seen`  — replay-protection state (§3.5). The
+//                                    only `plan_bundle_*` table that
+//                                    participates in periodic GC (§8.4).
+//   4. `initiatives.plan_bundle_sha256` — V2 admission's reference into
+//                                    `plan_bundles`. NULLable for V1 rows;
+//                                    every V2 row carries a non-NULL
+//                                    bundle reference (enforced at
+//                                    admission time, NOT in DDL — V1
+//                                    rows that pre-date the column must
+//                                    keep working unchanged).
+//
+// V1 backward compatibility: every existing `initiatives` row keeps its
+// `plan_artifact_sha256` (the V1 reference into `signed_plan_artifacts`)
+// and gets `plan_bundle_sha256 = NULL`. The V1 admission path is removed
+// for new initiatives (handled at the kernel-level `OperatorRequest`
+// dispatcher), but V1 reads (audit replay, recovery of pre-V2 history)
+// continue to work against the unchanged `signed_plan_artifacts` table.
+//
+// Replay-protection sweep cadence is implemented in
+// `kernel-lifecycle.md`'s maintenance loop, NOT in this migration.
+// Migration only creates the table + supporting index. The sweep query
+// itself (§8.4) lives in the kernel runtime path.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_8(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_8_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 8 failed: {e}"))
+    })
+}
+
+/// The complete migration-8 DDL. INV-STORE-03: every table identifier
+/// is rendered through `Table::...as_str()`; the CHECK clause is
+/// rendered through the `PlanBundleNonceOutcome` enum.
+fn render_migration_8_ddl() -> String {
+    let initiatives              = Table::Initiatives.as_str();
+    let plan_bundles             = Table::PlanBundles.as_str();
+    let plan_bundle_artifacts    = Table::PlanBundleArtifacts.as_str();
+    let plan_bundle_nonces_seen  = Table::PlanBundleNoncesSeen.as_str();
+    let schema_version           = Table::SchemaVersion.as_str();
+    let outcome_check =
+        check_in_clause(&PlanBundleNonceOutcome::ALL, PlanBundleNonceOutcome::as_sql_str);
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── plan_bundles ─────────────────────────────────────────────────────────
+-- Content-addressed store of admitted V2 plan bundles. Keyed by the
+-- canonical bundle_sha256 (32 bytes, the hash the operator signed); two
+-- initiatives that happen to use byte-identical bundles share a single
+-- row here.
+--
+-- Retained indefinitely per plan-bundle-sealing.md §10 (D8): the bundle
+-- bytes are foundational cryptographic input to the initiative state
+-- machine, and audit-chain replay needs to be able to re-derive the
+-- exact plan the kernel executed.
+--
+-- Schema-1 envelopes (V2.0 cutover bundles) carry NULL for
+-- signed_at_unix_secs / bundle_nonce. Schema-2 envelopes (V2.1 default)
+-- carry both. The kernel admission path enforces the schema-vs-fields
+-- contract at decode time.
+CREATE TABLE IF NOT EXISTS {plan_bundles} (
+    bundle_sha256          BLOB    NOT NULL PRIMARY KEY,
+    bundle_bytes           BLOB    NOT NULL,
+    signature              BLOB    NOT NULL,
+    signed_by              BLOB    NOT NULL,
+    schema_version         INTEGER NOT NULL,
+    artifact_count         INTEGER NOT NULL,
+    bundle_bytes_len       INTEGER NOT NULL,
+    sealed_at_unix_secs    INTEGER NOT NULL,
+    signed_at_unix_secs    INTEGER,
+    bundle_nonce           BLOB,
+    CHECK (length(bundle_sha256) = 32),
+    CHECK (length(signature)     = 64),
+    CHECK (length(signed_by)     = 8),
+    CHECK (schema_version IN (1, 2)),
+    CHECK (artifact_count   >= 1),
+    CHECK (bundle_bytes_len >= 0),
+    CHECK (
+        (schema_version = 1
+         AND signed_at_unix_secs IS NULL
+         AND bundle_nonce        IS NULL)
+        OR
+        (schema_version = 2
+         AND signed_at_unix_secs IS NOT NULL
+         AND bundle_nonce        IS NOT NULL
+         AND length(bundle_nonce) = 16)
+    )
+);
+
+-- ── plan_bundle_artifacts ────────────────────────────────────────────────
+-- Per-artifact rows. artifact_seq=0 is always plan.toml; subsequent rows
+-- (1..) are operator-declared host-path artifacts. The composite PK
+-- gives the kernel an O(1) lookup by (bundle, seq) without a secondary
+-- index, and ON DELETE is moot here because `plan_bundles` rows are
+-- never deleted (§10).
+CREATE TABLE IF NOT EXISTS {plan_bundle_artifacts} (
+    bundle_sha256        BLOB    NOT NULL
+        REFERENCES {plan_bundles}(bundle_sha256),
+    artifact_seq         INTEGER NOT NULL,
+    artifact_name        TEXT    NOT NULL,
+    artifact_sha256      BLOB    NOT NULL,
+    artifact_bytes       BLOB    NOT NULL,
+    artifact_bytes_len   INTEGER NOT NULL,
+    PRIMARY KEY (bundle_sha256, artifact_seq),
+    CHECK (length(artifact_sha256) = 32),
+    CHECK (artifact_seq        >= 0),
+    CHECK (artifact_bytes_len  >= 0)
+);
+
+-- ── plan_bundle_nonces_seen ──────────────────────────────────────────────
+-- Replay-protection state (plan-bundle-sealing.md §3.5). One row per
+-- consumed bundle_nonce. `outcome` distinguishes whether the nonce was
+-- consumed by a successful admission (`Admitted`, with a non-NULL
+-- initiative_id) or a terminal rejection (`TerminallyRejected`,
+-- initiative_id is NULL).
+--
+-- Sweep schedule: rows older than (max_plan_bundle_age_secs +
+-- max_clock_skew_secs + nonce_retention_grace_secs) are reaped by the
+-- kernel's maintenance loop (§8.4). The freshness window in §3.5
+-- guarantees a reaped row's nonce is no longer admissible (step 10a
+-- rejects with FAIL_PLAN_BUNDLE_EXPIRED before step 10b queries this
+-- table).
+CREATE TABLE IF NOT EXISTS {plan_bundle_nonces_seen} (
+    bundle_nonce             BLOB    NOT NULL PRIMARY KEY,
+    bundle_sha256            BLOB    NOT NULL,
+    signed_at_unix_secs      INTEGER NOT NULL,
+    first_seen_at_unix_secs  INTEGER NOT NULL,
+    outcome                  TEXT    NOT NULL
+        CHECK (outcome IN {outcome_check}),
+    initiative_id            TEXT,
+    CHECK (length(bundle_nonce)   = 16),
+    CHECK (length(bundle_sha256) = 32),
+    -- Admitted rows MUST carry an initiative_id; TerminallyRejected
+    -- rows MUST carry NULL. Enforces the §8.1 step 12b contract at the
+    -- DDL layer so a future code path that forgets the join-key cannot
+    -- silently violate it.
+    CHECK (
+        (outcome = 'Admitted'           AND initiative_id IS NOT NULL)
+        OR
+        (outcome = 'TerminallyRejected' AND initiative_id IS NULL)
+    )
+);
+
+-- Sweep-driver index. The §8.4 retention DELETE filters on
+-- first_seen_at_unix_secs; without this index it'd be a full scan.
+CREATE INDEX IF NOT EXISTS idx_plan_bundle_nonces_first_seen
+    ON {plan_bundle_nonces_seen}(first_seen_at_unix_secs);
+
+-- ── initiatives.plan_bundle_sha256 ───────────────────────────────────────
+-- V2 admissions populate this column with the bundle's canonical hash,
+-- which joins back to plan_bundles. V1 admissions kept plan_artifact_sha256
+-- and leave this NULL.
+ALTER TABLE {initiatives}
+    ADD COLUMN plan_bundle_sha256 BLOB
+        REFERENCES {plan_bundles}(bundle_sha256);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (8, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1489,6 +1671,10 @@ mod tests {
             Table::InitiativeQuarantines,
             // Migration 5 — v2: hierarchical orchestration
             Table::SubtaskActivations,
+            // Migration 8 — v2: plan-bundle-sealing storage layout (§8.2)
+            Table::PlanBundles,
+            Table::PlanBundleArtifacts,
+            Table::PlanBundleNoncesSeen,
         ]
         .iter()
         .map(|t| t.as_str().to_owned())
@@ -2578,5 +2764,537 @@ mod tests {
         assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
                 < ddl.find("COMMIT").unwrap(),
             "BEGIN must precede COMMIT");
+    }
+
+    // ── Migration 8 — V2 plan-bundle-sealing storage layout (§8.2) ─────
+
+    /// `apply_pending` advances the schema all the way to V8 (current
+    /// `SCHEMA_VERSION`), creating the three plan-bundle-sealing tables
+    /// alongside the V1+V1.x+V2 baseline.
+    #[test]
+    fn migration_8_creates_plan_bundle_sealing_tables() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        for table in [
+            Table::PlanBundles,
+            Table::PlanBundleArtifacts,
+            Table::PlanBundleNoncesSeen,
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type='table' AND name=?1",
+                    rusqlite::params![table.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1,
+                "{} must exist after migration 8", table.as_str());
+        }
+    }
+
+    /// `plan_bundles` columns match the §8.2 schema exactly (column
+    /// names, types, and NULLability). Pinning each column shape
+    /// surfaces silent drift between this DDL and the spec.
+    #[test]
+    fn migration_8_plan_bundles_column_shape_matches_spec() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::PlanBundles.as_str(),
+            ))
+            .unwrap();
+        let cols: Vec<(String, String, i64)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let by_name: std::collections::HashMap<&str, (&str, i64)> = cols
+            .iter()
+            .map(|(n, ty, nn)| (n.as_str(), (ty.as_str(), *nn)))
+            .collect();
+
+        // NOT NULL columns
+        for (name, expected_type) in [
+            ("bundle_sha256",       "BLOB"),
+            ("bundle_bytes",        "BLOB"),
+            ("signature",           "BLOB"),
+            ("signed_by",           "BLOB"),
+            ("schema_version",      "INTEGER"),
+            ("artifact_count",      "INTEGER"),
+            ("bundle_bytes_len",    "INTEGER"),
+            ("sealed_at_unix_secs", "INTEGER"),
+        ] {
+            let (ty, nn) = by_name.get(name)
+                .copied()
+                .unwrap_or_else(|| panic!("missing column: {name}"));
+            assert_eq!(ty, expected_type, "column {name}: type mismatch");
+            assert_eq!(nn, 1, "column {name} must be NOT NULL");
+        }
+        // Schema-1-nullable columns
+        for (name, expected_type) in [
+            ("signed_at_unix_secs", "INTEGER"),
+            ("bundle_nonce",        "BLOB"),
+        ] {
+            let (ty, nn) = by_name.get(name)
+                .copied()
+                .unwrap_or_else(|| panic!("missing column: {name}"));
+            assert_eq!(ty, expected_type, "column {name}: type mismatch");
+            assert_eq!(nn, 0, "column {name} must be NULLable for schema-1");
+        }
+    }
+
+    /// `plan_bundle_artifacts` exposes the §8.2 composite primary key
+    /// (`bundle_sha256`, `artifact_seq`).
+    #[test]
+    fn migration_8_plan_bundle_artifacts_uses_composite_primary_key() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::PlanBundleArtifacts.as_str(),
+            ))
+            .unwrap();
+        let pk_columns: Vec<(String, i64)> = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|(_, pk)| *pk > 0)
+            .collect();
+
+        assert_eq!(pk_columns.len(), 2,
+            "plan_bundle_artifacts must have a 2-column primary key");
+        // pk index is the position WITHIN the PK; SQLite assigns 1, 2.
+        let by_pk: std::collections::HashMap<i64, String> = pk_columns
+            .iter()
+            .map(|(n, pk)| (*pk, n.clone()))
+            .collect();
+        assert_eq!(by_pk.get(&1).map(String::as_str), Some("bundle_sha256"));
+        assert_eq!(by_pk.get(&2).map(String::as_str), Some("artifact_seq"));
+    }
+
+    /// `plan_bundle_nonces_seen.outcome` CHECK constraint accepts only
+    /// the two `PlanBundleNonceOutcome::ALL` strings.
+    #[test]
+    fn migration_8_nonces_outcome_check_constraint_is_canonical() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let now = raxis_types::unix_now_secs();
+        let nonce_a = vec![0x01u8; 16];
+        let nonce_b = vec![0x02u8; 16];
+        let nonce_c = vec![0x03u8; 16];
+        let bundle  = vec![0xAAu8; 32];
+
+        // Seed an initiative for the Admitted row's FK target.
+        conn.execute_batch(
+            &format!(
+                "INSERT INTO {initiatives} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES ('init-mig8', 'Draft', '{{}}', 'deadbeef', {now});",
+                initiatives = Table::Initiatives.as_str(),
+                now         = now,
+            ),
+        ).unwrap();
+
+        let ins_sql = format!(
+            "INSERT INTO {} \
+                (bundle_nonce, bundle_sha256, signed_at_unix_secs, \
+                 first_seen_at_unix_secs, outcome, initiative_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            Table::PlanBundleNoncesSeen.as_str(),
+        );
+
+        // Admitted requires non-NULL initiative_id.
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                nonce_a, bundle, now, now,
+                PlanBundleNonceOutcome::Admitted.as_sql_str(),
+                "init-mig8",
+            ],
+        );
+        assert!(r.is_ok(), "Admitted with init_id must be accepted: {r:?}");
+
+        // TerminallyRejected requires NULL initiative_id.
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                nonce_b, bundle, now, now,
+                PlanBundleNonceOutcome::TerminallyRejected.as_sql_str(),
+                Option::<&str>::None,
+            ],
+        );
+        assert!(r.is_ok(),
+            "TerminallyRejected with NULL init_id must be accepted: {r:?}");
+
+        // Bogus outcome must be rejected.
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                nonce_c, bundle, now, now,
+                "Pending",
+                Option::<&str>::None,
+            ],
+        );
+        assert!(r.is_err(),
+            "non-canonical outcome string must be rejected by CHECK");
+    }
+
+    /// Admitted nonce row MUST carry a non-NULL `initiative_id`; a NULL
+    /// `initiative_id` violates the §8.1 step 12b contract enforced at
+    /// the DDL layer by the §8.2 CHECK clause.
+    #[test]
+    fn migration_8_admitted_nonce_row_requires_initiative_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let now = raxis_types::unix_now_secs();
+        let nonce  = vec![0x55u8; 16];
+        let bundle = vec![0xCCu8; 32];
+
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {} \
+                    (bundle_nonce, bundle_sha256, signed_at_unix_secs, \
+                     first_seen_at_unix_secs, outcome, initiative_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                Table::PlanBundleNoncesSeen.as_str(),
+            ),
+            rusqlite::params![
+                nonce, bundle, now, now,
+                PlanBundleNonceOutcome::Admitted.as_sql_str(),
+                Option::<&str>::None,
+            ],
+        );
+        assert!(r.is_err(),
+            "Admitted with NULL initiative_id must be rejected by CHECK \
+             (plan-bundle-sealing.md §8.1 step 12b)");
+    }
+
+    /// TerminallyRejected nonce row MUST carry a NULL `initiative_id`
+    /// (§8.1 step 12b: "for terminal rejections in steps 10–11 …
+    /// `initiative_id = NULL`").
+    #[test]
+    fn migration_8_terminally_rejected_nonce_row_requires_null_initiative_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let now = raxis_types::unix_now_secs();
+        let nonce  = vec![0xAAu8; 16];
+        let bundle = vec![0xBBu8; 32];
+
+        // Seed an initiative so the FK *would* otherwise resolve.
+        conn.execute_batch(
+            &format!(
+                "INSERT INTO {initiatives} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES ('init-mig8b', 'Draft', '{{}}', 'deadbeef', {now});",
+                initiatives = Table::Initiatives.as_str(),
+                now         = now,
+            ),
+        ).unwrap();
+
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {} \
+                    (bundle_nonce, bundle_sha256, signed_at_unix_secs, \
+                     first_seen_at_unix_secs, outcome, initiative_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                Table::PlanBundleNoncesSeen.as_str(),
+            ),
+            rusqlite::params![
+                nonce, bundle, now, now,
+                PlanBundleNonceOutcome::TerminallyRejected.as_sql_str(),
+                "init-mig8b",
+            ],
+        );
+        assert!(r.is_err(),
+            "TerminallyRejected with non-NULL initiative_id must be rejected \
+             by CHECK (plan-bundle-sealing.md §8.1 step 12b)");
+    }
+
+    /// Migration 8 enforces the schema-1/schema-2 envelope contract on
+    /// `plan_bundles`: schema-1 rows MUST have NULL signed_at/nonce;
+    /// schema-2 rows MUST have non-NULL of both, with a 16-byte nonce.
+    #[test]
+    fn migration_8_plan_bundles_envelope_check_clause_is_enforced() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let bundle_a   = vec![0x01u8; 32];
+        let bundle_b   = vec![0x02u8; 32];
+        let bundle_c   = vec![0x03u8; 32];
+        let bundle_d   = vec![0x04u8; 32];
+        let bundle_e   = vec![0x05u8; 32];
+        let signature  = vec![0x77u8; 64];
+        let signed_by  = vec![0x88u8; 8];
+        let nonce_16   = vec![0xAAu8; 16];
+        let nonce_short = vec![0xAAu8; 12];
+        let now = raxis_types::unix_now_secs();
+        let bundle_bytes = vec![0u8; 4];
+
+        let ins = |sha: &Vec<u8>, schema: i64, signed_at: Option<i64>, nonce: Option<&Vec<u8>>| {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {} \
+                       (bundle_sha256, bundle_bytes, signature, signed_by, \
+                        schema_version, artifact_count, bundle_bytes_len, \
+                        sealed_at_unix_secs, signed_at_unix_secs, bundle_nonce) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                    Table::PlanBundles.as_str(),
+                ),
+                rusqlite::params![
+                    sha, bundle_bytes, signature, signed_by,
+                    schema, 1i64, bundle_bytes.len() as i64, now,
+                    signed_at, nonce,
+                ],
+            )
+        };
+
+        // Schema-1 with both NULL → OK.
+        let r = ins(&bundle_a, 1, None, None);
+        assert!(r.is_ok(), "schema-1 with NULL envelope fields must accept: {r:?}");
+
+        // Schema-2 with full envelope → OK.
+        let r = ins(&bundle_b, 2, Some(now), Some(&nonce_16));
+        assert!(r.is_ok(), "schema-2 with full envelope must accept: {r:?}");
+
+        // Schema-1 with envelope fields populated → REJECT.
+        let r = ins(&bundle_c, 1, Some(now), Some(&nonce_16));
+        assert!(r.is_err(),
+            "schema-1 with non-NULL envelope fields must be rejected by CHECK");
+
+        // Schema-2 missing nonce → REJECT.
+        let r = ins(&bundle_d, 2, Some(now), None);
+        assert!(r.is_err(),
+            "schema-2 with NULL bundle_nonce must be rejected by CHECK");
+
+        // Schema-2 with wrong-length nonce → REJECT.
+        let r = ins(&bundle_e, 2, Some(now), Some(&nonce_short));
+        assert!(r.is_err(),
+            "schema-2 with non-16-byte bundle_nonce must be rejected by CHECK");
+    }
+
+    /// V1 initiatives rows survive migration 8 with `plan_bundle_sha256
+    /// = NULL`. The new column is additive; existing data is untouched.
+    #[test]
+    fn migration_8_preserves_v1_initiatives_rows_with_null_plan_bundle_sha256() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        apply_migration_6(&conn).unwrap();
+        apply_migration_7(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 7);
+
+        let now = raxis_types::unix_now_secs();
+        conn.execute_batch(
+            &format!(
+                "INSERT INTO {initiatives} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES ('legacy-init', 'Draft', '{{}}', 'deadbeef', {now});",
+                initiatives = Table::Initiatives.as_str(),
+                now         = now,
+            ),
+        ).unwrap();
+
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        // Pre-existing column still readable.
+        let plan_artifact: String = conn.query_row(
+            &format!(
+                "SELECT plan_artifact_sha256 FROM {} WHERE initiative_id='legacy-init'",
+                Table::Initiatives.as_str(),
+            ),
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(plan_artifact, "deadbeef");
+
+        // New column is NULL for pre-existing row.
+        let plan_bundle: Option<Vec<u8>> = conn.query_row(
+            &format!(
+                "SELECT plan_bundle_sha256 FROM {} WHERE initiative_id='legacy-init'",
+                Table::Initiatives.as_str(),
+            ),
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert!(plan_bundle.is_none(),
+            "V1 rows must retain plan_bundle_sha256 = NULL after migration 8");
+    }
+
+    /// Migration 8 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_8_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, SCHEMA_VERSION as i64,
+            "schema_version must hold exactly SCHEMA_VERSION rows after \
+             two apply_pending calls");
+
+        // Both new tables exist exactly once each.
+        for table in [
+            Table::PlanBundles,
+            Table::PlanBundleArtifacts,
+            Table::PlanBundleNoncesSeen,
+        ] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type='table' AND name=?1",
+                    rusqlite::params![table.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "{} must exist exactly once", table.as_str());
+        }
+    }
+
+    /// Upgrade scenario: a database at v=7 must pick up migration 8
+    /// cleanly when `apply_pending` runs.
+    #[test]
+    fn migration_8_applies_to_a_v7_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        apply_migration_6(&conn).unwrap();
+        apply_migration_7(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 7);
+
+        // Pre: none of the V2 plan-bundle tables exist yet.
+        for table in [
+            Table::PlanBundles,
+            Table::PlanBundleArtifacts,
+            Table::PlanBundleNoncesSeen,
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type='table' AND name=?1",
+                    rusqlite::params![table.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 0, "{} must NOT yet exist at v=7", table.as_str());
+        }
+
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        // Post: every V2 table now exists.
+        for table in [
+            Table::PlanBundles,
+            Table::PlanBundleArtifacts,
+            Table::PlanBundleNoncesSeen,
+        ] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type='table' AND name=?1",
+                    rusqlite::params![table.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "{} must exist after migration 8", table.as_str());
+        }
+    }
+
+    /// Migration 8 wraps every DDL statement in a single
+    /// `BEGIN EXCLUSIVE; ... COMMIT;`. Spliting the migration across
+    /// multiple transactions would let a crash mid-DDL leave the schema
+    /// half-applied (`schema_version` updated, indexes missing, …).
+    #[test]
+    fn migration_8_is_a_single_transaction() {
+        let ddl = render_migration_8_ddl();
+        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
+            "migration 8 must open exactly one transaction (BEGIN EXCLUSIVE)");
+        assert_eq!(ddl.matches("COMMIT").count(), 1,
+            "migration 8 must commit exactly once");
+        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
+                < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT");
+    }
+
+    /// V2 enum-driven CHECK clause for the nonce-outcome column is
+    /// pinned at the SQL level so a future variant addition forces a
+    /// migration rather than slipping through silently.
+    #[test]
+    fn v2_plan_bundle_nonce_outcome_check_clause_is_pinned_to_migration_8() {
+        assert_eq!(
+            check_in_clause(
+                &PlanBundleNonceOutcome::ALL,
+                PlanBundleNonceOutcome::as_sql_str,
+            ),
+            "('Admitted', 'TerminallyRejected')",
+        );
+    }
+
+    /// The supporting index on `plan_bundle_nonces_seen` is what makes
+    /// the §8.4 retention sweep tractable. Pinning the index name +
+    /// column surfaces silent removal in code review.
+    #[test]
+    fn migration_8_creates_first_seen_index_for_nonce_sweep() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT name, sql FROM sqlite_master \
+                 WHERE type='index' AND tbl_name=?1 \
+                   AND name NOT LIKE 'sqlite_%'",
+            ))
+            .unwrap();
+        let indexes: Vec<(String, String)> = stmt
+            .query_map(
+                rusqlite::params![Table::PlanBundleNoncesSeen.as_str()],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let sweep_index = indexes
+            .iter()
+            .find(|(n, _)| n == "idx_plan_bundle_nonces_first_seen")
+            .expect("idx_plan_bundle_nonces_first_seen must exist (§8.4 sweep)");
+        assert!(sweep_index.1.contains("first_seen_at_unix_secs"),
+            "sweep index must cover first_seen_at_unix_secs (got: {})",
+            sweep_index.1);
     }
 }

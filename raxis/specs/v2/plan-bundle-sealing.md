@@ -956,6 +956,33 @@ storage). V2 does not implement this; the bundle bytes stay in
 
 ---
 
+## §11.1 — Implementation Status (V2.1 incremental land)
+
+This spec is being implemented incrementally to keep each commit
+reviewable in isolation. As of `Migration 8`:
+
+| Phase | Status | Notes |
+|---|---|---|
+| **Schema (§8.2 storage layout)** | **Landed** | `Migration 8` adds `plan_bundles`, `plan_bundle_artifacts`, `plan_bundle_nonces_seen`, the supporting `idx_plan_bundle_nonces_first_seen` index, and the `initiatives.plan_bundle_sha256` column. The §8.2 envelope/outcome/artifact CHECK constraints are enforced at the DDL layer. `PlanBundleNonceOutcome` enum (Admitted / TerminallyRejected) is the wire-stable projection of the `outcome` column. V1 backwards compatibility: existing `initiatives` rows survive with `plan_bundle_sha256 = NULL`; the V1 `signed_plan_artifacts` table is unchanged. |
+| **Bundle codec (§3.2)** | Pending | Canonical-input encoder/decoder per §3.2; CSPRNG nonce + `signed_at_unix_secs` stamping; cross-language round-trip fixture `kernel/tests/plan_bundle_decode.rs`. Lands as a dedicated `raxis-plan-bundle` crate so the CLI and kernel can share it. |
+| **CLI workflow (§4)** | Pending | `raxis-cli submit plan` rework; removal of `raxis-cli plan sign`; argument-shape change for `plan submit`. |
+| **Kernel admission (§8.1)** | Pending | New `OperatorRequest::CreateInitiative` wire envelope; §8.1 step ordering (envelope decode → key lookup → `BEGIN IMMEDIATE` → freshness/replay/policy/admission); `plan_bundle::read_artifact` as the sole post-admission read API. |
+| **Nonce sweep (§8.4)** | Pending | Periodic-maintenance hook for the §8.4 `DELETE` query. |
+| **Operator-facing tooling (§8.5)** | Pending | `raxis initiative show <id> --bundle`; `raxis log --filter` updates. |
+
+The schema landing is intentionally additive: the V1 admission path
+keeps working unchanged (V1 rows are read through
+`signed_plan_artifacts`), and the V2 admission path will populate
+`plan_bundle_sha256` / `plan_bundles` / `plan_bundle_artifacts` once
+the codec + admission steps land. Test coverage at this milestone:
+`raxis-store::migration::tests::migration_8_*` (12 tests covering
+DDL shape, CHECK semantics, V1 preservation, idempotency, V7→V8
+upgrade, and the sweep index); `raxis-types::fsm::tests` covering the
+new `PlanBundleNonceOutcome` enum (4 tests covering round-trip,
+unknown-string rejection, variant pinning, and Display parity).
+
+---
+
 ## §12 — Implementation Checklist
 
 ### CLI side

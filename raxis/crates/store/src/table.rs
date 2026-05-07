@@ -95,6 +95,53 @@ pub enum Table {
     /// task is activated by the Kernel itself at initiative start
     /// (no `subtask_activations` row for it).
     SubtaskActivations,
+
+    // ── v2: Plan Bundle Sealing (plan-bundle-sealing.md §8.2) ─────────────
+    /// Content-addressed store of every operator-signed plan bundle
+    /// admitted under V2. One row per distinct `bundle_sha256`. Holds
+    /// the canonical-encoded bundle bytes (`canonical_input` per
+    /// `plan-bundle-sealing.md §3.2`), the Ed25519 signature, the
+    /// signing operator's fingerprint, and (for schema_version >= 2)
+    /// the `signed_at_unix_secs` + `bundle_nonce` envelope fields.
+    ///
+    /// Retained **indefinitely** per `plan-bundle-sealing.md §10` (D8):
+    /// the bundle is the foundational cryptographic input to the
+    /// initiative state machine; deleting it destroys forensic
+    /// reproducibility. Audit-chain replay, post-compromise
+    /// `quarantine-plans-by` sweeps, and operator dispute resolution
+    /// all join through `bundle_sha256`.
+    PlanBundles,
+
+    /// Per-artifact rows for each `plan_bundles` row. `artifact_seq = 0`
+    /// is always `plan.toml`; subsequent rows are operator-declared
+    /// host-path artifacts (forward-compatibility hook —
+    /// `plan-bundle-sealing.md §5.4` notes V2 ships zero plan.toml
+    /// fields that take host-side paths, so well-formed V2 bundles
+    /// have exactly one row in this table per `bundle_sha256`).
+    ///
+    /// Composite primary key `(bundle_sha256, artifact_seq)` keeps the
+    /// per-artifact ordering stable for canonical decode and lets
+    /// kernel-side `plan_bundle::read_artifact` join in O(1) without
+    /// a secondary index.
+    PlanBundleArtifacts,
+
+    /// Replay-protection state for V2.1 plan bundles
+    /// (`plan-bundle-sealing.md §3.5` + §8.2). One row per
+    /// `bundle_nonce` that has been consumed by an admission attempt
+    /// (`outcome = 'Admitted'`) or terminally rejected
+    /// (`outcome = 'TerminallyRejected'`). The kernel's §8.1 admission
+    /// sequence inserts into this table inside the same `BEGIN
+    /// IMMEDIATE` transaction that decides admission, so a concurrent
+    /// re-submission of the same nonce cannot race past the check.
+    ///
+    /// **Sweepable.** Unlike `plan_bundles` / `plan_bundle_artifacts`,
+    /// this table participates in periodic GC: rows older than
+    /// `max_plan_bundle_age_secs + max_clock_skew_secs +
+    /// nonce_retention_grace_secs` are inert (the freshness window
+    /// in step 10a fails before step 10b queries the table) and are
+    /// reaped by the kernel's maintenance loop
+    /// (`plan-bundle-sealing.md §8.4`).
+    PlanBundleNoncesSeen,
 }
 
 impl Table {
@@ -134,6 +181,9 @@ impl Table {
             Self::OperatorCertificates      => "operator_certificates",
             Self::InitiativeQuarantines     => "initiative_quarantines",
             Self::SubtaskActivations        => "subtask_activations",
+            Self::PlanBundles               => "plan_bundles",
+            Self::PlanBundleArtifacts       => "plan_bundle_artifacts",
+            Self::PlanBundleNoncesSeen      => "plan_bundle_nonces_seen",
         }
     }
 }
@@ -159,10 +209,22 @@ mod tests {
             Table::TaskIntentRanges, Table::TaskExportedPathSnapshots, Table::PolicyEpochHistory,
             Table::OperatorCertificates, Table::InitiativeQuarantines,
             Table::SubtaskActivations,
+            Table::PlanBundles, Table::PlanBundleArtifacts, Table::PlanBundleNoncesSeen,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
         }
+    }
+
+    /// V2 plan-bundle-sealing table names are wire-stable (the kernel's
+    /// audit & forensic tools join across them by literal name in the
+    /// CLI's read-only path). Pinning the literals here surfaces any
+    /// rename in code review.
+    #[test]
+    fn plan_bundle_sealing_table_names_are_pinned() {
+        assert_eq!(Table::PlanBundles.as_str(),          "plan_bundles");
+        assert_eq!(Table::PlanBundleArtifacts.as_str(),  "plan_bundle_artifacts");
+        assert_eq!(Table::PlanBundleNoncesSeen.as_str(), "plan_bundle_nonces_seen");
     }
 
     /// V2 sub-task activation table name is wire-stable (it is queried

@@ -592,6 +592,69 @@ impl fmt::Display for ReviewVerdict {
 }
 
 // ---------------------------------------------------------------------------
+// PlanBundleNonceOutcome — how the kernel disposed of a `bundle_nonce`.
+// DDL: CHECK (outcome IN ('Admitted','TerminallyRejected'))
+// plan-bundle-sealing.md §8.2 (`plan_bundle_nonces_seen.outcome` column).
+// ---------------------------------------------------------------------------
+
+/// The disposition the kernel reached for a given `bundle_nonce` during
+/// the §8.1 admission sequence. Recorded inside the same `BEGIN
+/// IMMEDIATE` transaction as the admission decision so a concurrent
+/// re-submission cannot race past the §3.5 replay check.
+///
+/// Only two outcomes are persisted: a third virtual outcome —
+/// "transient rejection that consumed nothing" (e.g. the bundle never
+/// reached the transaction because of an envelope SHA mismatch in step
+/// 2) — is represented by the absence of a row, not by a third variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum PlanBundleNonceOutcome {
+    /// The nonce was committed by a successful admission. The
+    /// `plan_bundle_nonces_seen.initiative_id` column carries the
+    /// resulting `initiatives.initiative_id` for forensic join.
+    Admitted,
+    /// The nonce was committed by a terminal rejection inside steps
+    /// 10a–11 of the admission sequence (e.g. key revocation,
+    /// freshness expiry, or a policy admission failure). The
+    /// `initiative_id` column is NULL. A terminally-rejected nonce
+    /// is consumed for replay-protection purposes — the operator
+    /// MUST mint a fresh nonce (re-run `raxis-cli submit plan`) to
+    /// retry against future policy.
+    TerminallyRejected,
+}
+
+impl PlanBundleNonceOutcome {
+    /// All variants — referenced by the SQL CHECK constraint on
+    /// `plan_bundle_nonces_seen.outcome` (Migration 8 / §8.2).
+    pub const ALL: [Self; 2] = [Self::Admitted, Self::TerminallyRejected];
+
+    /// Canonical SQL string used in CHECK constraints and at-rest
+    /// storage.
+    pub fn as_sql_str(self) -> &'static str {
+        match self {
+            Self::Admitted           => "Admitted",
+            Self::TerminallyRejected => "TerminallyRejected",
+        }
+    }
+
+    /// Parse from the SQL at-rest string. NULL is not a valid outcome
+    /// — every nonce row carries one of the two variants.
+    pub fn from_sql_str(s: &str) -> Option<Self> {
+        match s {
+            "Admitted"           => Some(Self::Admitted),
+            "TerminallyRejected" => Some(Self::TerminallyRejected),
+            _                    => None,
+        }
+    }
+}
+
+impl fmt::Display for PlanBundleNonceOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_sql_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -752,6 +815,52 @@ mod tests {
     #[test]
     fn review_verdict_display_equals_as_sql_str() {
         for &variant in &ReviewVerdict::ALL {
+            assert_eq!(variant.to_string(), variant.as_sql_str());
+        }
+    }
+
+    // ── PlanBundleNonceOutcome round-trips ─────────────────────────────
+
+    #[test]
+    fn plan_bundle_nonce_outcome_round_trips_through_as_sql_str_and_from_sql_str() {
+        for &variant in &PlanBundleNonceOutcome::ALL {
+            let s = variant.as_sql_str();
+            assert!(!s.is_empty());
+            assert_eq!(PlanBundleNonceOutcome::from_sql_str(s), Some(variant),
+                "round-trip failed for {variant:?}: as_sql_str → {s}");
+        }
+        // Pin the wire-stable strings — these are persisted in
+        // `plan_bundle_nonces_seen.outcome` and embedded in the SQL CHECK
+        // constraint emitted by Migration 8.
+        assert_eq!(PlanBundleNonceOutcome::Admitted.as_sql_str(), "Admitted");
+        assert_eq!(PlanBundleNonceOutcome::TerminallyRejected.as_sql_str(),
+                   "TerminallyRejected");
+    }
+
+    #[test]
+    fn plan_bundle_nonce_outcome_unknown_sql_returns_none() {
+        assert_eq!(PlanBundleNonceOutcome::from_sql_str(""), None);
+        // Defensive: lowercase / kebab-case must NOT round-trip.
+        assert_eq!(PlanBundleNonceOutcome::from_sql_str("admitted"), None);
+        assert_eq!(PlanBundleNonceOutcome::from_sql_str("terminally-rejected"), None);
+        // Defensive: avoid accidental collision with the InitiativeState
+        // family — distinct columns, distinct vocab.
+        assert_eq!(PlanBundleNonceOutcome::from_sql_str("Aborted"), None);
+        assert_eq!(PlanBundleNonceOutcome::from_sql_str("Failed"), None);
+    }
+
+    #[test]
+    fn plan_bundle_nonce_outcome_variant_count_is_pinned() {
+        assert_eq!(PlanBundleNonceOutcome::ALL.len(), 2,
+            "PlanBundleNonceOutcome has exactly 2 variants \
+             (Admitted | TerminallyRejected); bumping this requires a new \
+             migration that ALTERs the CHECK constraint on already-installed \
+             databases (plan-bundle-sealing.md §8.2).");
+    }
+
+    #[test]
+    fn plan_bundle_nonce_outcome_display_equals_as_sql_str() {
+        for &variant in &PlanBundleNonceOutcome::ALL {
             assert_eq!(variant.to_string(), variant.as_sql_str());
         }
     }
