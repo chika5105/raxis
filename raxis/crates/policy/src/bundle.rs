@@ -1036,6 +1036,8 @@ pub const IMPLICIT_SHELL_INBOX_FILENAME: &str = "inbox.jsonl";
 pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // lifecycle
     "KernelStarted", "KernelStopped",
+    // V2 agent-runtime substrate (extensibility-traits.md §3.8)
+    "IsolationSubstrateSelected", "IsolationFallbackBypass",
     // initiative
     "InitiativeCreated", "PlanApproved", "PlanRejected",
     "PathScopeOverrideApplied", "InitiativeStateChanged", "InitiativeAborted",
@@ -3229,6 +3231,8 @@ channels   = []
         let probes: Vec<&'static str> = vec![
             AuditEventKind::KernelStarted { data_dir: "x".into(), policy_epoch: 0, schema_version: 0 }.as_str(),
             AuditEventKind::KernelStopped { reason: "x".into() }.as_str(),
+            AuditEventKind::IsolationSubstrateSelected { backend_id: "x".into(), tier: "x".into(), fallback_bypass: false }.as_str(),
+            AuditEventKind::IsolationFallbackBypass { reason: "x".into(), backend_id: "x".into() }.as_str(),
             AuditEventKind::InitiativeCreated { initiative_id: "x".into(), plan_hash: "x".into(), signed_by: "x".into(), signed_at: 0 }.as_str(),
             AuditEventKind::PlanApproved { initiative_id: "x".into(), task_count: 0 }.as_str(),
             AuditEventKind::PlanRejected { initiative_id: "x".into() }.as_str(),

@@ -158,6 +158,52 @@ pub enum AuditEventKind {
         reason: String,
     },
 
+    /// V2 agent-runtime substrate selection record.
+    ///
+    /// Emitted exactly once per kernel boot, immediately after
+    /// `KernelStarted`, by `kernel/src/main.rs`. Records which
+    /// substrate (`firecracker-1.x` / `apple-vz-14.x` / etc.) the
+    /// kernel admitted at boot and what tier its
+    /// `verify_isolation_guarantee` reported. Audit replay tooling
+    /// uses this row to attribute every subsequent `SessionVmSpawned`
+    /// event to a known substrate.
+    ///
+    /// Defined in `extensibility-traits.md §3.8` (boot-order step 6a).
+    IsolationSubstrateSelected {
+        /// `Backend::backend_id` of the admitted substrate. Stable
+        /// string; audit dashboards group on it.
+        backend_id: String,
+        /// PascalCase tier the substrate self-reported and that
+        /// passed admission. Always one of
+        /// `R1Conformant{,Strong}` / `WasmSandbox` / `FallbackOnly`
+        /// — never `TestOnly`, since production refuses
+        /// absolutely.
+        tier: String,
+        /// `true` iff this admission required the operator-supplied
+        /// `--unsafe-fallback-isolation` flag (paired with the
+        /// adjacent `IsolationFallbackBypass` event).
+        fallback_bypass: bool,
+    },
+
+    /// V2 fallback-substrate bypass record.
+    ///
+    /// Emitted exactly once per kernel boot iff
+    /// `IsolationSubstrateSelected.fallback_bypass == true`. Records
+    /// the operator-acknowledged downgrade of the isolation
+    /// substrate below the `R-1` bar (e.g. running on a Linux host
+    /// without `/dev/kvm` and accepting the namespace fallback).
+    ///
+    /// Defined in `extensibility-traits.md §3.5` and §3.8 — the
+    /// kernel is required to emit this event BEFORE admitting any
+    /// session under a `FallbackOnly` substrate.
+    IsolationFallbackBypass {
+        /// Operator-supplied reason string from the boot flag.
+        /// Empty string if the operator gave none.
+        reason: String,
+        /// `Backend::backend_id` of the admitted substrate.
+        backend_id: String,
+    },
+
     // --- Initiative lifecycle ---
     InitiativeCreated {
         initiative_id: String,
@@ -825,6 +871,8 @@ impl AuditEventKind {
         match self {
             Self::KernelStarted { .. } => "KernelStarted",
             Self::KernelStopped { .. } => "KernelStopped",
+            Self::IsolationSubstrateSelected { .. } => "IsolationSubstrateSelected",
+            Self::IsolationFallbackBypass { .. } => "IsolationFallbackBypass",
             Self::InitiativeCreated { .. } => "InitiativeCreated",
             Self::PlanApproved { .. } => "PlanApproved",
             Self::PlanRejected { .. } => "PlanRejected",

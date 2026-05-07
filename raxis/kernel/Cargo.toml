@@ -32,6 +32,11 @@ raxis-genesis-tools = { workspace = true }
 # Lives in its own crate so the CLI binary can deserialize what the
 # kernel writes without depending on the kernel binary.
 raxis-runtime       = { workspace = true }
+# Trait crate for the agent-runtime substrate. Concrete substrates
+# (Firecracker for Linux, AVF for macOS) are pulled in below behind
+# the matching `[target.'cfg(target_os = ...)']` blocks per
+# `extensibility-traits.md §3.8`.
+raxis-isolation     = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }
@@ -47,6 +52,15 @@ toml        = { workspace = true }
 glob        = { workspace = true }
 rustc-hash  = { workspace = true }
 arc-swap    = { workspace = true }
+
+# Concrete isolation substrates — platform-gated. The kernel's
+# `select_isolation_backend` (`isolation_select.rs`) builds the
+# correct one at boot per `extensibility-traits.md §3.8`.
+[target.'cfg(target_os = "linux")'.dependencies]
+raxis-isolation-firecracker = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+raxis-isolation-apple-vz = { workspace = true }
 
 [dev-dependencies]
 tempfile    = "3"

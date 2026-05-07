@@ -456,7 +456,7 @@ Provider model selection (v2):
   AliasResolved                                       // writes session-affinity pin
 ```
 
-**Out-of-scope events** (single, not paired): `InferenceRequested`, `InferenceCompleted`, all `FAIL_*` Phase-A rejections, `Heartbeat`, `KSBSnapshot`, `RaxisDoctorChecksRan`, `MaintenanceTickStarted/Completed/Skipped`, `GenesisRecord`, `AuditSegmentRotated`, `AuditSchemaMigration`, `IsolationFallbackBypass` (warning at boot, no state row), `NotificationDelivered`, `NotificationDeliveryFailed`, `NotificationTestSent` (the *test sent* is paired via `NotificationDispatchClaimed`; the *outcome* is single).
+**Out-of-scope events** (single, not paired): `InferenceRequested`, `InferenceCompleted`, all `FAIL_*` Phase-A rejections, `Heartbeat`, `KSBSnapshot`, `RaxisDoctorChecksRan`, `MaintenanceTickStarted/Completed/Skipped`, `GenesisRecord`, `AuditSegmentRotated`, `AuditSchemaMigration`, `IsolationSubstrateSelected` (boot-time substrate identity record, no state row), `IsolationFallbackBypass` (warning at boot, no state row), `NotificationDelivered`, `NotificationDeliveryFailed`, `NotificationTestSent` (the *test sent* is paired via `NotificationDispatchClaimed`; the *outcome* is single).
 
 ### §4.2 Spec-graph lint enforcement
 

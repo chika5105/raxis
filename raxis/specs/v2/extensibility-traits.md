@@ -815,6 +815,44 @@ Any cell in this matrix is a valid V2-or-future deployment. The kernel binary do
 - `crates/raxis-isolation-namespace/Cargo.toml` (NEW)
 - `crates/raxis-isolation-namespace/src/lib.rs` — `unshare`/`pivot_root`/`seccomp-bpf` + UDS-based `IsolatedSession`.
 
+> **🔮 V3 — Windows `IsolationBackend` impls.** Windows support requires a
+> Hyper-V-backed isolation backend. Two candidates are identified for V3
+> design; neither is in scope for V2:
+>
+> - **`HcsIsolation` (Host Compute Service via `hcsshim`)** — The production
+>   Windows path. HCS is the API underpinning WSL2, Docker Desktop, and
+>   containerd-on-Windows; it creates Linux "utility VMs" under Hyper-V and
+>   exposes Hyper-V sockets (`vmbus`) as the VSock equivalent. This is the
+>   pragmatic choice: it has a large production track record and can run RAXIS
+>   Linux guest images unchanged. Crate: `crates/raxis-isolation-hcs/`.
+>   Transport layer: `vmbus` replaces `AF_VSOCK` inside `HcsSession`; the
+>   bincode framing above it is unchanged.
+>
+> - **`CloudHypervisorWinIsolation` (Cloud Hypervisor on WHP)** — Cloud
+>   Hypervisor is a Rust-native, minimal-device-model VMM (architecturally
+>   closer to Firecracker than HCS). Its Windows Hypervisor Platform (WHP)
+>   backend is experimental as of V2 spec date but is the better long-term
+>   fit for RAXIS's minimal-attack-surface posture. Crate:
+>   `crates/raxis-isolation-cloud-hypervisor-win/`. Tracks upstream Cloud
+>   Hypervisor WHP maturity before committing.
+>
+> **Design note.** Neither option is as lean as Firecracker. Firecracker's
+> device model was purpose-built for minimal attack surface (no BIOS, no PCI,
+> minimal virtio). Both Windows options carry more Hyper-V overhead. `R-1`
+> domain isolation is still structurally satisfied — hardware VM boundaries
+> hold — but the hypervisor attack surface is larger. This trade-off is
+> acceptable for V3; a hardened Windows microVM path (comparable to
+> Firecracker's device model reduction) is a post-V3 concern.
+>
+> **Files (V3, not created in V2):**
+> - `crates/raxis-isolation-hcs/Cargo.toml`
+> - `crates/raxis-isolation-hcs/src/lib.rs` — `HcsIsolation` + `HcsSession`.
+> - `crates/raxis-isolation-hcs/src/vmbus.rs` — Hyper-V socket transport.
+> - `crates/raxis-isolation-cloud-hypervisor-win/Cargo.toml`
+> - `crates/raxis-isolation-cloud-hypervisor-win/src/lib.rs`
+> - `kernel/Cargo.toml` gains `raxis-isolation-hcs` behind
+>   `#[cfg(target_os = "windows")]` (mirrors the Linux/macOS pattern in §3.8).
+
 ### §3.8 Files to change
 
 - `kernel/Cargo.toml` — add `raxis-isolation = { path = "../crates/raxis-isolation" }`. Pull in `raxis-isolation-firecracker` behind `#[cfg(target_os = "linux")]` and `raxis-isolation-apple-vz` behind `#[cfg(target_os = "macos")]`. Remove direct `firecracker-rs` and `objc2-virtualization` deps from `kernel/`.

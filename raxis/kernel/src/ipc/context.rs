@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use raxis_audit_tools::AuditSink;
+use raxis_isolation::Backend as IsolationBackend;
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
@@ -101,6 +102,22 @@ pub struct HandlerContext {
     /// the `permitted_ops` gate and handler dispatch — see
     /// `ipc::operator::accept_operator_loop` for the call site.
     pub cert_enforcer: Arc<CertEnforcer>,
+
+    /// V2 agent-runtime substrate selected at boot.
+    ///
+    /// `Some(...)` when `isolation_select::select_isolation_backend`
+    /// admitted a substrate (Linux+KVM ⇒ Firecracker; macOS ⇒ AVF).
+    /// `None` indicates **degraded boot** — the host has no admissible
+    /// substrate and the kernel is up only to serve operator queries.
+    /// Every code path that reaches into the substrate to spawn a
+    /// session MUST handle `None` by surfacing a typed
+    /// `FAIL_ISOLATION_UNAVAILABLE`-style rejection rather than
+    /// panicking.
+    ///
+    /// Threaded into `HandlerContext` per `extensibility-traits.md
+    /// §3.8` boot-order step 6a so every IPC handler dispatches
+    /// through the same `Arc<dyn Backend>` clone.
+    pub isolation: Option<Arc<dyn IsolationBackend>>,
 }
 
 impl HandlerContext {
@@ -127,6 +144,7 @@ impl HandlerContext {
             gateway,
             epoch_binding,
             cert_enforcer: Arc::new(CertEnforcer::new()),
+            isolation: None,
         }
     }
 
@@ -134,6 +152,15 @@ impl HandlerContext {
     /// non-standard layout or a temporary directory).
     pub fn with_witness_dir(mut self, witness_dir: PathBuf) -> Self {
         self.witness_dir = witness_dir;
+        self
+    }
+
+    /// Attach the V2 isolation substrate (Firecracker / AVF) selected
+    /// at boot. Required before any session-spawning handler is
+    /// reached; absence means degraded mode and every spawn is
+    /// expected to fail closed.
+    pub fn with_isolation(mut self, isolation: Arc<dyn IsolationBackend>) -> Self {
+        self.isolation = Some(isolation);
         self
     }
 }

@@ -19,6 +19,7 @@ mod witness_index;
 mod gates;
 mod gateway;
 mod handlers;
+mod isolation_select;
 mod notifications;
 mod path_scope;
 mod policy_manager;
@@ -246,6 +247,92 @@ async fn main() {
         );
     }
 
+    // Step 8c: Select + admit the V2 agent-runtime isolation substrate.
+    //
+    // Per `extensibility-traits.md §3.8` the kernel picks the
+    // platform-default substrate (Firecracker on Linux, AVF on macOS)
+    // and admits it through `verify_admission_tier`. The selector
+    // returns the boxed backend + the verified tier so we can record
+    // a single canonical `IsolationSubstrateSelected` audit row right
+    // here. If the substrate self-reports `FallbackOnly` we ALSO
+    // emit `IsolationFallbackBypass` (paired-write contract is
+    // documented in `audit-paired-writes.md §4`: both events are
+    // single, non-paired, and produced sequentially within this
+    // boot block).
+    //
+    // `--unsafe-fallback-isolation`: V2 sources this from
+    // `RAXIS_UNSAFE_FALLBACK_ISOLATION` (a kernel-internal env var,
+    // not a user-facing CLI flag) so the substrate selector stays
+    // pure-data and unit-testable. Operators that need to bypass the
+    // R-1 admission bar set this in their systemd unit per
+    // `system-requirements.md §11`.
+    let runtime_subdir = data_dir.join("runtime");
+    let _ = std::fs::create_dir_all(&runtime_subdir);
+    let allow_fallback = std::env::var("RAXIS_UNSAFE_FALLBACK_ISOLATION").is_ok();
+    let allow_wasm     = false;
+    let _isolation_backend: Option<Arc<dyn raxis_isolation::Backend>> = match
+        isolation_select::select_isolation_backend(&isolation_select::SelectorInputs {
+            runtime_dir:        runtime_subdir,
+            allow_fallback,
+            allow_wasm_sandbox: allow_wasm,
+        })
+    {
+        Ok(selected) => {
+            if let Err(e) = inner_audit.emit(
+                AuditEventKind::IsolationSubstrateSelected {
+                    backend_id:      selected.backend.backend_id().to_owned(),
+                    tier:            serde_json::to_value(&selected.tier)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_else(|| "Unknown".to_owned()),
+                    fallback_bypass: selected.fallback_bypass_required,
+                },
+                None, None, None,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"IsolationSubstrateSelected\",\
+                     \"audit_emit_failed\":\"{e}\"}}",
+                );
+            }
+            if selected.fallback_bypass_required {
+                let reason = std::env::var("RAXIS_UNSAFE_FALLBACK_ISOLATION_REASON")
+                    .unwrap_or_default();
+                if let Err(e) = inner_audit.emit(
+                    AuditEventKind::IsolationFallbackBypass {
+                        reason,
+                        backend_id: selected.backend.backend_id().to_owned(),
+                    },
+                    None, None, None,
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"IsolationFallbackBypass\",\
+                         \"audit_emit_failed\":\"{e}\"}}",
+                    );
+                }
+            }
+            eprintln!(
+                "{{\"level\":\"info\",\"message\":\"isolation substrate admitted\",\
+                 \"backend_id\":\"{}\",\"tier\":{}}}",
+                selected.backend.backend_id(),
+                serde_json::to_string(&selected.tier).unwrap_or_else(|_| "\"?\"".to_owned()),
+            );
+            Some(selected.backend)
+        }
+        Err(e) => {
+            // Substrate refused. We still allow the kernel to come up
+            // in a degraded mode that rejects every spawn — a session
+            // attempt under the degraded mode will fail fast with a
+            // typed error from `HandlerContext`. This matches the
+            // `--unsafe-fallback-isolation`-absent boot path
+            // documented in `extensibility-traits.md §3.8`.
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"IsolationSubstrateRefused\",\
+                 \"reason\":\"{e}\"}}",
+            );
+            None
+        }
+    };
+
     // Step 8a: Spawn the heartbeat loop. cli-readonly.md §5.2.1 contract:
     //   - one initial write IMMEDIATELY (handled inside `run_loop`),
     //   - periodic writes every 5s thereafter,
@@ -374,7 +461,7 @@ async fn main() {
     // written by `policy_manager::advance_epoch` after every epoch
     // rotation. A single Arc is shared across handlers via `ctx`.
     let epoch_binding = Arc::new(prompt::EpochBinding::new());
-    let ctx = Arc::new(ipc::context::HandlerContext::new(
+    let mut ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
         Arc::clone(&store),
@@ -383,7 +470,11 @@ async fn main() {
         Arc::clone(&plan_registry),
         Arc::clone(&gateway_client),
         Arc::clone(&epoch_binding),
-    ));
+    );
+    if let Some(backend) = _isolation_backend.as_ref() {
+        ctx_inner = ctx_inner.with_isolation(Arc::clone(backend));
+    }
+    let ctx = Arc::new(ctx_inner);
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a
     // long-lived tokio task: it spawns one `raxis-gateway` subprocess,

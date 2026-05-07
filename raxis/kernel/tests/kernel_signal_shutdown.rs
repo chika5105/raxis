@@ -362,21 +362,43 @@ fn audit_chain_intact_across_kernel_started_and_kernel_stopped() {
     let info = resume.expect("segment is non-empty after a clean run");
 
     // We expect the chain to look like:
-    //   seq=0  GenesisRecord    (written by bootstrap)
-    //   seq=1  KernelStarted    (step 8)
-    //   seq=2  KernelStopped    (step 10)
-    // → next_seq = 3.
-    assert_eq!(info.next_seq, 3,
-        "expected chain length 3 (Genesis + Started + Stopped); got next_seq={}",
-        info.next_seq);
-
+    //   seq=0  GenesisRecord                    (written by bootstrap)
+    //   seq=1  KernelStarted                    (step 8)
+    //   seq=2  IsolationSubstrateSelected       (step 8c — V2 substrate)
+    //   seq=3  IsolationFallbackBypass          (step 8c — only if the
+    //                                            substrate self-reported
+    //                                            FallbackOnly AND the
+    //                                            operator passed
+    //                                            `RAXIS_UNSAFE_FALLBACK_ISOLATION`)
+    //   seq=N  KernelStopped                    (step 10)
+    //
+    // The test environment doesn't pass the unsafe flag, so the
+    // `IsolationFallbackBypass` row never appears here. On hosts
+    // without an admissible substrate
+    // (`select_isolation_backend` returns Err), the
+    // `IsolationSubstrateSelected` row is also skipped — the chain
+    // collapses back to the v1 shape. Either canonical shape is a
+    // healthy boot per `extensibility-traits.md §3.8`.
     let records = read_audit_segment(data_dir.path());
     let event_kinds: Vec<&str> = records
         .iter()
         .filter_map(|r| r["event_kind"].as_str())
         .collect();
-    assert_eq!(event_kinds, vec!["GenesisRecord", "KernelStarted", "KernelStopped"],
-        "event_kind sequence must match spec; got {event_kinds:?}");
+    let valid_shapes: &[&[&str]] = &[
+        // Substrate admitted (Linux+KVM or macOS).
+        &["GenesisRecord", "KernelStarted", "IsolationSubstrateSelected", "KernelStopped"],
+        // No substrate admissible (e.g. Linux without /dev/kvm).
+        &["GenesisRecord", "KernelStarted", "KernelStopped"],
+    ];
+    assert!(
+        valid_shapes.iter().any(|shape| event_kinds == *shape),
+        "event_kind sequence must match one of {valid_shapes:?}; got {event_kinds:?}",
+    );
+    assert_eq!(
+        info.next_seq as usize,
+        records.len(),
+        "next_seq must match record count after a clean shutdown",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -417,22 +439,46 @@ fn kernel_can_restart_cleanly_and_chain_persists() {
         assert!(status.success(), "second boot exit non-zero: {status:?}");
     }
 
-    // Final chain shape:
+    // Final chain shape (V2):
     //   seq=0  GenesisRecord
-    //   seq=1  KernelStarted   (boot 1)
-    //   seq=2  KernelStopped   (boot 1, SIGTERM)
-    //   seq=3  KernelStarted   (boot 2)
-    //   seq=4  KernelStopped   (boot 2, SIGTERM)
+    //   seq=1  KernelStarted               (boot 1)
+    //   seq=2  IsolationSubstrateSelected  (boot 1, optional — see below)
+    //   seq=3  KernelStopped               (boot 1, SIGTERM)
+    //   seq=4  KernelStarted               (boot 2)
+    //   seq=5  IsolationSubstrateSelected  (boot 2, optional)
+    //   seq=6  KernelStopped               (boot 2, SIGTERM)
+    //
+    // The `IsolationSubstrateSelected` row is present only on hosts
+    // where `select_isolation_backend` admitted a substrate
+    // (Linux+KVM or macOS); on hosts without an admissible substrate
+    // the chain collapses to the v1 5-record shape. The test pins
+    // the per-boot sub-shape so we catch substrate selection
+    // regressions without making the whole test host-fragile.
     let records = read_audit_segment(data_dir.path());
-    assert_eq!(records.len(), 5,
-        "expected 5 records across two boots; got {}", records.len());
     for (i, r) in records.iter().enumerate() {
         assert_eq!(r["seq"].as_u64().unwrap(), i as u64,
             "seq monotonicity must hold across restart boundary; record {i}: {r}");
     }
     let kinds: Vec<&str> = records.iter().filter_map(|r| r["event_kind"].as_str()).collect();
-    assert_eq!(kinds, vec![
-        "GenesisRecord", "KernelStarted", "KernelStopped",
-        "KernelStarted", "KernelStopped"
-    ]);
+
+    // The two boots must produce identical sub-shapes (same admit
+    // outcome each time).
+    let valid_shapes: &[&[&str]] = &[
+        // Substrate admitted on both boots.
+        &[
+            "GenesisRecord",
+            "KernelStarted", "IsolationSubstrateSelected", "KernelStopped",
+            "KernelStarted", "IsolationSubstrateSelected", "KernelStopped",
+        ],
+        // No substrate admissible on either boot.
+        &[
+            "GenesisRecord",
+            "KernelStarted", "KernelStopped",
+            "KernelStarted", "KernelStopped",
+        ],
+    ];
+    assert!(
+        valid_shapes.iter().any(|shape| kinds == *shape),
+        "two-boot chain must match one of {valid_shapes:?}; got {kinds:?}",
+    );
 }
