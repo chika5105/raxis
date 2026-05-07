@@ -1,0 +1,18 @@
+# Scenario 31 — pre-merge symbol-index verifier (deferred surface).
+
+[workspace]
+name        = "Pre-merge symbol index"
+lane_id     = "premerge-index-lane"
+
+[[tasks]]
+task_id            = "edit"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = "Add `pub fn nop() {}` to src/lib.rs."
+
+[[plan.verifiers.pre_merge]]
+name             = "symbol-index"
+on_failure       = "block"
+command          = ["bash", "-c", "find src -name '*.rs' | head -1"]
+attach_artifacts = ["symbol-index.json"]

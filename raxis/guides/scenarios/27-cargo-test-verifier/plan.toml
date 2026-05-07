@@ -1,0 +1,21 @@
+# Scenario 27 — cargo test verifier.
+
+[workspace]
+name        = "cargo test verifier"
+lane_id     = "cargo-test-lane"
+
+[[tasks]]
+task_id            = "extend"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  Extend src/lib.rs: add `pub fn fib(n: u32) -> u64` (iterative,
+  no overflow on small n). Add tests for fib(0)=0, fib(1)=1,
+  fib(10)=55. Run `cargo test`. Commit on green.
+"""
+
+[[tasks.witnesses]]
+kind         = "Mechanical"
+command      = ["cargo", "test", "--quiet"]
+exit_code_eq = 0

@@ -1,0 +1,2 @@
+# Scenario 35 — egress is enforced by the kernel admission service;
+# no policy delta required beyond baseline.

@@ -1,0 +1,21 @@
+# Scenario 28 — clippy verifier.
+
+[workspace]
+name        = "clippy verifier"
+lane_id     = "clippy-lane"
+
+[[tasks]]
+task_id            = "lint-clean"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  Add `pub fn deduplicate<T: Eq + std::hash::Hash + Clone>(xs: &[T])
+   -> Vec<T>`. Use a HashSet to remove duplicates while preserving
+  insertion order. Code must pass `cargo clippy -- -D warnings`.
+"""
+
+[[tasks.witnesses]]
+kind         = "Mechanical"
+command      = ["cargo", "clippy", "--all-targets", "--", "-D", "warnings"]
+exit_code_eq = 0

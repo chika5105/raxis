@@ -1,0 +1,18 @@
+# Scenario 35 — HTTP egress allowlist.
+
+[workspace]
+name        = "HTTP egress allowlist"
+lane_id     = "egress-allowlist-lane"
+
+[[tasks]]
+task_id            = "fetch"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["data/"]
+allowed_egress     = ["api.github.com:443"]
+context = """
+  Fetch https://api.github.com/repos/rust-lang/rust and save the
+  body to data/rust-repo.json. Try also fetching
+  https://evil.example.com/foo — that must FAIL with a clear
+  egress-denied error from the proxy. Commit data/rust-repo.json.
+"""

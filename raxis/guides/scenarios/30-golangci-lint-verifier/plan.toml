@@ -1,0 +1,20 @@
+# Scenario 30 — golangci-lint verifier.
+
+[workspace]
+name        = "golangci-lint"
+lane_id     = "golangci-lane"
+
+[[tasks]]
+task_id            = "extend"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["main.go"]
+context = """
+  Add a function `Greet(name string) string` to main.go returning
+  "Hello, NAME!". Lint must pass.
+"""
+
+[[tasks.witnesses]]
+kind         = "Mechanical"
+command      = ["golangci-lint", "run"]
+exit_code_eq = 0

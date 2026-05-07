@@ -1,0 +1,30 @@
+# Scenario 21 — semantic merge conflict (disjoint symbols, same file).
+
+[workspace]
+name        = "Semantic merge"
+lane_id     = "semantic-merge-lane"
+
+[[tasks]]
+task_id            = "harden-add"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  In src/lib.rs, change `add` to use checked arithmetic (return
+  `Option<i64>`). Do NOT touch `mul`. Run `cargo build`. Commit.
+"""
+
+[[tasks]]
+task_id            = "harden-mul"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  In src/lib.rs, change `mul` to use checked arithmetic (return
+  `Option<i64>`). Do NOT touch `add`. Run `cargo build`. Commit.
+"""
+
+[[tasks.witnesses]]
+kind         = "Mechanical"
+command      = ["cargo", "build", "--quiet"]
+exit_code_eq = 0

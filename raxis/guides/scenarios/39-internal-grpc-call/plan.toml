@@ -1,0 +1,16 @@
+# Scenario 39 — internal gRPC call.
+
+[workspace]
+name        = "Internal gRPC"
+lane_id     = "grpc-lane"
+
+[[tasks]]
+task_id            = "ping"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["data/"]
+allowed_egress     = ["internal.example.com:443"]
+context = """
+  Invoke internal.example.com:443/myservice.PingService/Ping using
+  grpcurl. Save the response to data/ping.json.
+"""

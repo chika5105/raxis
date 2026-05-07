@@ -1,0 +1,20 @@
+# Scenario 29 — pytest verifier.
+
+[workspace]
+name        = "pytest verifier"
+lane_id     = "pytest-lane"
+
+[[tasks]]
+task_id            = "extend"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/", "tests/"]
+context = """
+  Add `def sub(a, b)` to src/calc.py and a test for it in
+  tests/test_calc.py. Run pytest. Commit on green.
+"""
+
+[[tasks.witnesses]]
+kind         = "Mechanical"
+command      = ["pytest", "-q"]
+exit_code_eq = 0

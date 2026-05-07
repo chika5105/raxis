@@ -1,0 +1,4 @@
+# Scenario 36 — credentials are mediated by the kernel-level
+# CredentialBackend. Operators may also globally allow `db_main`
+# in their global policy bundle; otherwise this plan declaration
+# alone is sufficient.

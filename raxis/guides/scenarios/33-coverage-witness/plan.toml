@@ -1,0 +1,21 @@
+# Scenario 33 — coverage witness.
+
+[workspace]
+name        = "Coverage witness"
+lane_id     = "coverage-lane"
+
+[[tasks]]
+task_id            = "extend-with-coverage"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  Add `pub fn sub(a, b)` and matching tests. Coverage must stay
+  above 80%.
+"""
+
+[[tasks.witnesses]]
+kind = "Mechanical"
+command = ["sh", "-c",
+  "cargo llvm-cov --quiet --summary-only --fail-under-lines 80"]
+exit_code_eq = 0

@@ -1,0 +1,22 @@
+# Scenario 37 — S3 credential proxy.
+
+[workspace]
+name        = "S3 credential proxy"
+lane_id     = "s3-cred-lane"
+
+[[tasks]]
+task_id            = "fetch-object"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["data/"]
+allowed_egress     = ["mybucket.s3.amazonaws.com:443"]
+context = """
+  Use the aws_main credential to GET
+  https://mybucket.s3.amazonaws.com/example.txt and save to
+  data/example.txt.
+"""
+
+[[tasks.credentials]]
+name           = "aws_main"
+kind           = "http_basic"
+egress_allowed = false

@@ -1,0 +1,27 @@
+# Scenario 23 — escalation when revision rounds exceed.
+
+[workspace]
+name        = "Escalation flow"
+lane_id     = "escalation-lane"
+
+[[tasks]]
+task_id            = "impossible"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+max_revision_rounds = 1
+context = """
+  Modify src/main.rs to satisfy a deliberately self-contradictory
+  request: print BOTH "hi" and "bye" but use only one println!()
+  call AND the output must contain a literal newline character but
+  no escape sequences. (This will not satisfy the reviewer.)
+"""
+
+[[tasks]]
+task_id            = "block"
+session_agent_type = "Reviewer"
+clone_strategy     = "blobless"
+predecessors       = ["impossible"]
+context = """
+  Always reject: ask for "satisfy contradictory constraints fully".
+"""

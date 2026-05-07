@@ -1,0 +1,20 @@
+# Scenario 36 — Postgres credential proxy.
+
+[workspace]
+name        = "Postgres credential proxy"
+lane_id     = "pg-cred-lane"
+
+[[tasks]]
+task_id            = "query-users"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+path_allowlist     = ["src/"]
+context = """
+  Use psql connecting via the credential proxy to query SELECT 1 +
+  1. Print the result. Do NOT log or write the connection string.
+"""
+
+[[tasks.credentials]]
+name           = "db_main"
+kind           = "postgres"
+egress_allowed = false
