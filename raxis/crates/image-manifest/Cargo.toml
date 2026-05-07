@@ -1,0 +1,20 @@
+[package]
+name        = "raxis-image-manifest"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — typed `ImageManifest` for the canonical Reviewer / Orchestrator / Executor-starter images. Per-file SHA-256, bundle hash, kernel-signed Ed25519 signature. Used by `raxis-image-builder` (production) and `raxis-kernel` (admission)."
+
+[dependencies]
+serde         = { workspace = true }
+toml          = { workspace = true }
+sha2          = { workspace = true }
+hex           = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror     = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+rand     = "0.8"

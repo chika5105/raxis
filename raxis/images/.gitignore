@@ -1,0 +1,4 @@
+# Built rootfs trees — assembled per-release by the image build
+# pipeline (see images/README.md). Never check in.
+*/rootfs/
+out/

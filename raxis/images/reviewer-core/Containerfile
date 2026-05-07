@@ -1,0 +1,44 @@
+# RAXIS canonical Reviewer image — Containerfile.
+#
+# Normative reference: planner-harness.md §10.4 (image manifest) and
+# §14.4 (image-build pipeline).
+#
+# This Containerfile produces the rootfs that the builder hashes into
+# `images/reviewer-core/rootfs/`. The image is the strictest of the
+# three RAXIS canonical images:
+#
+#  - No shell of any kind (no /bin/sh, /bin/bash, busybox sh, …).
+#  - No git, no compilers, no language runtimes, no LSP servers.
+#  - No network utilities (curl, wget, ssh).
+#  - Only `raxis-planner-reviewer` (PID 1, statically linked) and
+#    `ripgrep` (statically linked); both invoked via `execvp` only.
+#
+# The Reviewer's NNSP and the harness's tool registry are baked into
+# `raxis-planner-reviewer` at build time; this image does not carry
+# any operator-supplied configuration.
+#
+# Build is hermetic. CI runs `cargo run -p raxis-image-builder build
+# reviewer` to re-derive the manifest and assert byte-determinism
+# against the previous main artefact.
+
+FROM scratch AS builder
+
+# We start from `scratch` and copy in fully-static binaries, so there
+# is no Linux distribution we inherit from. The agent binary is
+# produced by `binaries/raxis-planner-reviewer/` (planner-harness.md
+# §14.1) as a `--target=x86_64-unknown-linux-musl` build with all
+# features stripped except `read_file`, `glob_search`, `grep_search`,
+# `TodoWrite`, `SubmitReview`.
+
+COPY rootfs/init                          /sbin/init
+COPY rootfs/raxis-planner-reviewer        /usr/local/bin/raxis-planner-reviewer
+COPY rootfs/usr/bin/rg                    /usr/bin/rg
+
+# `/init` symlinks to `/usr/local/bin/raxis-planner-reviewer`; the
+# kernel's image-admission check verifies this file is exactly the
+# RAXIS-built `raxis-planner-reviewer` binary, not a wrapper.
+
+# Notably absent (verified by the verify.sh smoke test the builder
+# runs after image creation):
+#   /bin/sh, /bin/bash, /usr/bin/busybox, /usr/bin/git, /usr/bin/curl,
+#   /usr/bin/wget, /usr/bin/ssh, /usr/bin/python3, /usr/bin/node, …

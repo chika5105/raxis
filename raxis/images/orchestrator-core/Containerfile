@@ -1,0 +1,62 @@
+# RAXIS canonical Orchestrator image — Containerfile.
+#
+# Normative reference: planner-harness.md §10.5 (image manifest) and
+# §14.4 (image-build pipeline).
+#
+# The Orchestrator image is exactly large enough to perform 3-way
+# semantic git merges with bash + git + edit_file, and nothing more.
+# Per `planner-harness.md §10.5`:
+#
+#  - `raxis-planner-orchestrator` (PID 1, foreground bash only,
+#    custom-tool dispatch excluded, SubmitReview / SingleCommit
+#    excluded at link time)
+#  - `bash` ≥ 5.0 (foreground only — bg_* paths excluded by build)
+#  - `git` ≥ 2.30 (semantic conflict resolution via `git merge`,
+#    `git diff`, `edit_file`, `IntegrationMerge`)
+#  - `ripgrep` (statically linked)
+#  - Standard POSIX coreutils for `git`'s helper invocations
+#  - Minimal CA-certificates bundle (no network exposed; git's
+#    sanity checks expect one)
+#
+# Notably absent: language runtimes, compilers, package managers,
+# LSP servers, network utilities, editors, build systems.
+
+FROM scratch AS builder
+
+# Static `raxis-planner-orchestrator` plus the system tools the
+# Orchestrator role's foreground bash + git need at runtime.
+
+COPY rootfs/init                                 /sbin/init
+COPY rootfs/raxis-planner-orchestrator           /usr/local/bin/raxis-planner-orchestrator
+COPY rootfs/bin/bash                             /bin/bash
+COPY rootfs/bin/sh                               /bin/sh
+COPY rootfs/usr/bin/git                          /usr/bin/git
+COPY rootfs/usr/bin/rg                           /usr/bin/rg
+COPY rootfs/usr/lib/git-core                     /usr/lib/git-core
+COPY rootfs/usr/bin/cat                          /usr/bin/cat
+COPY rootfs/usr/bin/head                         /usr/bin/head
+COPY rootfs/usr/bin/tail                         /usr/bin/tail
+COPY rootfs/usr/bin/diff                         /usr/bin/diff
+COPY rootfs/usr/bin/patch                        /usr/bin/patch
+COPY rootfs/usr/bin/awk                          /usr/bin/awk
+COPY rootfs/usr/bin/sed                          /usr/bin/sed
+COPY rootfs/usr/bin/grep                         /usr/bin/grep
+COPY rootfs/usr/bin/sort                         /usr/bin/sort
+COPY rootfs/usr/bin/wc                           /usr/bin/wc
+COPY rootfs/usr/bin/find                         /usr/bin/find
+COPY rootfs/usr/bin/xargs                        /usr/bin/xargs
+COPY rootfs/usr/bin/test                         /usr/bin/test
+COPY rootfs/usr/bin/echo                         /usr/bin/echo
+COPY rootfs/usr/bin/printf                       /usr/bin/printf
+COPY rootfs/usr/bin/tr                           /usr/bin/tr
+COPY rootfs/usr/bin/cut                          /usr/bin/cut
+COPY rootfs/usr/bin/uniq                         /usr/bin/uniq
+COPY rootfs/etc/ssl/certs/ca-certificates.crt    /etc/ssl/certs/ca-certificates.crt
+
+# Notably absent (verify.sh enforces this):
+#   /usr/bin/python3, /usr/bin/node, /usr/bin/ruby, /usr/bin/perl,
+#   /usr/bin/rustc, /usr/bin/gcc, /usr/bin/clang, /usr/bin/tsc,
+#   /usr/bin/go, /usr/bin/npm, /usr/bin/cargo, /usr/bin/pip,
+#   /usr/bin/curl, /usr/bin/wget, /usr/bin/ssh, /usr/bin/nc,
+#   /usr/bin/vi, /usr/bin/nano, /usr/bin/emacs, /usr/bin/less,
+#   /usr/bin/make, /usr/bin/bazel, /usr/bin/meson, /usr/bin/ninja

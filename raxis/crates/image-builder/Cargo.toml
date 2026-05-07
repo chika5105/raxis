@@ -1,0 +1,31 @@
+[package]
+name        = "raxis-image-builder"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — reproducible builder for the kernel-canonical Reviewer / Orchestrator / Executor-starter VM image artefacts. Produces signed `ImageManifest` + per-file SHA-256 + `bundle_hash`. The EROFS rootfs assembly is delegated to `mkfs.erofs` invoked from `--build` mode."
+
+[lib]
+name = "raxis_image_builder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "raxis-image-builder"
+path = "src/main.rs"
+
+[dependencies]
+raxis-image-manifest = { workspace = true }
+serde         = { workspace = true }
+toml          = { workspace = true }
+sha2          = { workspace = true }
+hex           = { workspace = true }
+ed25519-dalek = { workspace = true }
+thiserror     = { workspace = true }
+clap          = { version = "4", features = ["derive"] }
+anyhow        = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+rand     = "0.8"
