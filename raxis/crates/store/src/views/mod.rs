@@ -69,6 +69,7 @@ pub mod initiative_quarantines;
 pub mod initiatives;
 pub mod kernel_meta;
 pub mod operator_certificates;
+pub mod plan_bundles;
 pub mod plan_fields;
 pub mod policy_history;
 pub mod sessions;
@@ -87,6 +88,13 @@ pub use initiatives::{
 };
 pub use kernel_meta::{KernelMeta, KernelMetaError};
 pub use operator_certificates::{OperatorCertRow, OperatorCertViewError};
+pub use plan_bundles::{
+    header_by_sha256 as plan_bundle_header_by_sha256,
+    list_artifact_names as plan_bundle_list_artifact_names,
+    nonce_row_by_nonce as plan_bundle_nonce_row_by_nonce,
+    read_artifact as plan_bundle_read_artifact,
+    NonceRow, PlanBundleArtifactName, PlanBundleHeader, PlanBundleViewError,
+};
 pub use plan_fields::{reveal_for_task as reveal_plan_fields_for_task, PlanFieldsError, PlanPathFields};
 pub use policy_history::PolicyEpochRow;
 pub use sessions::{SessionRow, SessionStateCounts};
