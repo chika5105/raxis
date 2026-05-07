@@ -1600,6 +1600,65 @@ worktree contents). Foreground-only `bash` keeps the Orchestrator's
 state machine tractable: every merge step is one inference call →
 one foreground bash invocation → one tool result, all serialized.
 
+**Implementation reference (canonical image digest enforcement).**
+The compiled-in expected SHA-256 digests live in
+`crates/canonical-images/src/lib.rs`
+(`EXPECTED_REVIEWER_IMAGE_DIGEST`, `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`
+— both currently the all-zero placeholder `UNPOPULATED_DIGEST`,
+intentionally surfaced as a startup warning until the canonical
+image-builder lands and the digests are wired in). The crate ships
+`compute_image_digest`, `verify_canonical_image`, and the
+`CanonicalImageError` enum with its three terminal states
+(`Io`, `DigestMismatch`, `DigestUnpopulated`). Boot-time enforcement
+is wired in `kernel/src/canonical_images_preflight.rs` and called
+from `kernel/src/main.rs` step 8b — *before* substrate selection
+(8c), so a tampered image short-circuits the boot before any VM
+admission. Outcomes:
+
+- `PreflightOutcome::Ok` — image present, digest matches → kernel
+  proceeds normally with an `info canonical_image_ok` log line.
+- `PreflightOutcome::Missing` — image not yet installed →
+  `warn canonical_image_missing` plus a hint to run `raxis install`;
+  the kernel proceeds, since dev environments routinely run without
+  the artifact while the image-builder is pre-GA.
+- `PreflightOutcome::DigestUnpopulated` — image present but kernel
+  binary still ships placeholder zeros →
+  `warn canonical_image_digest_unpopulated`; same rationale as
+  Missing, kernel proceeds. Once the image-builder GA-lands and
+  populates the constants, this branch becomes unreachable.
+- `PreflightOutcome::Tampered` — image present, digest mismatches
+  → `error BOOT_ERR_CANONICAL_IMAGE_TAMPERED` *and* an
+  `AuditEventKind::SecurityViolationDetected { violation_kind, image_path, expected_digest, actual_digest }`
+  event (the `kind` field is renamed `violation_kind` because
+  `AuditEventKind` itself uses `#[serde(tag = "kind")]`). The
+  kernel does not abort boot in the preflight — the substrate
+  layer will refuse the launch when the resolver lands; the
+  warning + audit event surfaces the tamper at boot time so an
+  operator running `raxis doctor` sees it before the first
+  initiative admission.
+
+Test coverage:
+
+- Unit tests in `crates/canonical-images/src/lib.rs::tests` exercise
+  the digest computation against deterministic byte streams,
+  multi-chunk reads, the unpopulated-digest sentinel, and mismatch
+  reporting (`compute_image_digest_*`, `verify_canonical_image_*`,
+  `audit_kind_returns_*`).
+- Unit tests in `kernel/src/canonical_images_preflight.rs::tests`
+  pin the `<install_dir>/images/raxis-{reviewer,orchestrator}-core-<kernel_version>.img`
+  filename layout against `system-requirements.md §1.1`,
+  the missing-image warning-only branch, and the
+  unpopulated-digest warning-only branch.
+- Launch-time defense-in-depth (re-verifying the digest at the
+  moment of `Backend::spawn` for Reviewer / Orchestrator
+  activations) is wired in the image-resolver path that boots a
+  canonical image; the resolver itself is sequenced after the
+  kernel-bundled image artifact lands. Until that ships, the
+  boot-time preflight is the sole enforcement point and the
+  `IsolationBackend::spawn` contract continues to honor its
+  upstream-verified `VerifiedImage` invariant
+  (`crates/isolation/src/lib.rs:103`).
+
 ---
 
 ### Step 29: Orchestrator Prompt — KernelPush Discovery and Merge Duty

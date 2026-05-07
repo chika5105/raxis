@@ -29,6 +29,7 @@ members = [
     "crates/verifier-stub",
     "crates/domain-git",
     "crates/prompts",
+    "crates/canonical-images",
     "crates/worktree-provision",
     "crates/worktree-staging",
     "kernel",
@@ -133,6 +134,7 @@ raxis-runtime           = { path = "crates/runtime" }
 raxis-verifier-stub     = { path = "crates/verifier-stub" }
 raxis-domain-git        = { path = "crates/domain-git" }
 raxis-prompts           = { path = "crates/prompts" }
+raxis-canonical-images  = { path = "crates/canonical-images" }
 raxis-worktree-provision = { path = "crates/worktree-provision" }
 raxis-worktree-staging  = { path = "crates/worktree-staging" }
 

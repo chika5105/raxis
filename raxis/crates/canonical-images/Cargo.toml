@@ -1,0 +1,15 @@
+[package]
+name        = "raxis-canonical-images"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — kernel-pinned canonical VM image digests. Carries `EXPECTED_REVIEWER_IMAGE_DIGEST` (INV-PLANNER-HARNESS-02) and `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` (INV-PLANNER-HARNESS-05) as compile-time `[u8; 32]` constants, plus on-disk verification helpers used at every Reviewer / Orchestrator activation."
+
+[dependencies]
+sha2      = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

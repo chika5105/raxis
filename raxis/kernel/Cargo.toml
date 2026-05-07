@@ -50,6 +50,14 @@ raxis-worktree-staging = { workspace = true }
 # audited seam. `extensibility-traits.md §4.4`.
 raxis-credentials       = { workspace = true }
 raxis-credentials-file  = { workspace = true }
+# Compile-time canonical VM image digests + on-disk verification.
+# Carries `EXPECTED_REVIEWER_IMAGE_DIGEST` (INV-PLANNER-HARNESS-02)
+# and `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` (INV-PLANNER-HARNESS-05).
+# The kernel boot calls `verify_canonical_image` against the
+# bundled images at `$RAXIS_INSTALL_DIR/images/...` and surfaces
+# `SecurityViolationDetected { kind: "ReviewerImageDigestMismatch" |
+# "OrchestratorImageDigestMismatch" }` audit events on mismatch.
+raxis-canonical-images  = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }

@@ -219,6 +219,52 @@ pub enum AuditEventKind {
         reason: String,
     },
 
+    /// A security boundary the kernel enforces was violated AT the
+    /// moment a fail-closed guard surfaced the violation. Distinct
+    /// from "policy admission rejected an operator's request"
+    /// (those are `PlanRejected` / IPC error paths) — this variant
+    /// records mechanical, kernel-internal trust-boundary checks
+    /// that detected tampering or version-mismatch.
+    ///
+    /// Normative references:
+    /// * `planner-harness.md §4.5` (`INV-PLANNER-HARNESS-02`) —
+    ///   `kind = "ReviewerImageDigestMismatch"`.
+    /// * `planner-harness.md §4.7` (`INV-PLANNER-HARNESS-05`) —
+    ///   `kind = "OrchestratorImageDigestMismatch"`.
+    /// * `system-requirements.md §3` — the operator-facing
+    ///   "Tampered or version-mismatched canonical image on disk"
+    ///   error mode.
+    ///
+    /// **Wire shape.** `violation_kind` is a stable PascalCase string
+    /// so audit dashboards and `raxis doctor canonical-images`
+    /// consume one taxonomy. The kind set is closed (drift-protected
+    /// by tests in `raxis-canonical-images::CanonicalImageKind::audit_kind`).
+    /// The field name is `violation_kind` rather than `kind` because
+    /// the enum's `#[serde(tag = "kind")]` already reserves the
+    /// `kind` JSON key for the variant discriminant
+    /// (`"SecurityViolationDetected"`); a same-named struct field
+    /// would collide on the wire. `expected` and `actual` are
+    /// lowercase-hex 64-character SHA-256 strings when the violation
+    /// is digest-shaped; both fields are `None` for non-digest
+    /// violations to keep this variant useful as a forward-compatible
+    /// umbrella for future `INV-*` enforcement seams.
+    SecurityViolationDetected {
+        /// PascalCase kind tag (closed set; see doc-comment above).
+        violation_kind: String,
+        /// Hex-encoded SHA-256 the kernel expected, when applicable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected: Option<String>,
+        /// Hex-encoded SHA-256 the kernel observed, when applicable.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        actual: Option<String>,
+        /// Forensic-only: the path or symbolic location the kernel
+        /// was attempting to verify. Free-form to keep the variant
+        /// useful for non-filesystem checks (e.g. an in-memory
+        /// constant mismatch).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
+
     // --- Initiative lifecycle ---
     InitiativeCreated {
         initiative_id: String,
@@ -1043,6 +1089,7 @@ impl AuditEventKind {
             Self::IsolationSubstrateSelected { .. } => "IsolationSubstrateSelected",
             Self::IsolationFallbackBypass { .. } => "IsolationFallbackBypass",
             Self::IsolationSubstrateRefused { .. } => "IsolationSubstrateRefused",
+            Self::SecurityViolationDetected { .. } => "SecurityViolationDetected",
             Self::InitiativeCreated { .. } => "InitiativeCreated",
             Self::PlanApproved { .. } => "PlanApproved",
             Self::PlanRejected { .. } => "PlanRejected",

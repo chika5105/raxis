@@ -10,6 +10,7 @@
 mod errors;
 mod bootstrap;
 mod authority;
+mod canonical_images_preflight;
 mod ipc;
 mod recovery;
 mod initiatives;
@@ -245,6 +246,97 @@ async fn main() {
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"KernelStarted\",\"audit_emit_failed\":\"{e}\"}}"
         );
+    }
+
+    // Step 8b: V2 canonical-image digest preflight per
+    // `INV-PLANNER-HARNESS-02` (Reviewer image) and
+    // `INV-PLANNER-HARNESS-05` (Orchestrator image).
+    //
+    // Resolves `$RAXIS_INSTALL_DIR/images/raxis-{reviewer,orchestrator}-core-<version>.img`,
+    // streams the SHA-256 of each present file, and surfaces:
+    //   * `Ok` — digest matches the kernel-binary-pinned constant; no
+    //     audit event needed (the absence of a violation IS the
+    //     pass).
+    //   * `Missing` — the image file is not on disk yet (early-deployment
+    //     case, before `raxis-image-builder` lands or before the
+    //     operator runs `raxis doctor canonical-images`); logged at
+    //     warn level. The kernel boots; activations that need the
+    //     image will fail-closed at `IsolationBackend::launch` time.
+    //   * `DigestUnpopulated` — kernel binary was built before the
+    //     matching image artefact landed (placeholder constants in
+    //     `raxis-canonical-images`). Logged at warn level. Once
+    //     `raxis-image-builder` ships, this branch becomes a hard
+    //     mismatch by construction.
+    //   * `Tampered` — digest mismatch is real. The preflight emits
+    //     `SecurityViolationDetected { violation_kind:
+    //     "ReviewerImageDigestMismatch" | "OrchestratorImageDigestMismatch",
+    //     expected, actual, path }` and the kernel continues so
+    //     `IsolationBackend::launch` can fail-closed at the matching
+    //     activation surface (defense-in-depth — preflight surfaces
+    //     the audit event eagerly, the launch path enforces the
+    //     gate).
+    //
+    // `RAXIS_INSTALL_DIR` is the operator-supplied bundle root
+    // (default: `/usr/local/lib/raxis` for system installs;
+    // `~/.local/share/raxis` for user installs). Falls back to
+    // `data_dir` so dev workstations without a configured install
+    // dir still see consistent preflight output.
+    let install_dir = std::env::var("RAXIS_INSTALL_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data_dir.clone());
+    let kernel_version = env!("CARGO_PKG_VERSION");
+    let canonical_image_outcomes =
+        canonical_images_preflight::verify_canonical_images_at_boot(
+            &install_dir,
+            kernel_version,
+            &*inner_audit,
+        );
+    for (kind, outcome) in &canonical_image_outcomes {
+        match outcome {
+            canonical_images_preflight::PreflightOutcome::Ok { path } => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"canonical_image_ok\",\
+                     \"kind\":\"{}\",\"path\":\"{}\"}}",
+                    kind.audit_kind(),
+                    path.display(),
+                );
+            }
+            canonical_images_preflight::PreflightOutcome::Missing { path } => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"canonical_image_missing\",\
+                     \"kind\":\"{}\",\"path\":\"{}\",\
+                     \"hint\":\"install the kernel-bundled image; \
+                       Reviewer / Orchestrator activations cannot start without it\"}}",
+                    kind.audit_kind(),
+                    path.display(),
+                );
+            }
+            canonical_images_preflight::PreflightOutcome::DigestUnpopulated { path } => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"canonical_image_digest_unpopulated\",\
+                     \"kind\":\"{}\",\"path\":\"{}\",\
+                     \"hint\":\"this kernel was built before raxis-image-builder \
+                        published the matching image artefact; rebuild the kernel \
+                        once the artefact lands\"}}",
+                    kind.audit_kind(),
+                    path.display(),
+                );
+            }
+            canonical_images_preflight::PreflightOutcome::Tampered {
+                path, expected, actual,
+            } => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"BOOT_ERR_CANONICAL_IMAGE_TAMPERED\",\
+                     \"kind\":\"{}\",\"path\":\"{}\",\"expected\":\"{}\",\"actual\":\"{}\",\
+                     \"hint\":\"reinstall raxis from a verified source; \
+                        operator remediation in system-requirements.md §3\"}}",
+                    kind.audit_kind(),
+                    path.display(),
+                    expected,
+                    actual,
+                );
+            }
+        }
     }
 
     // Step 8c: Select + admit the V2 agent-runtime isolation substrate.
