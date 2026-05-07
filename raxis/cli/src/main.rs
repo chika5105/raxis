@@ -43,7 +43,7 @@ use errors::CliError;
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "genesis", "policy", "plan", "initiative", "operator", "task", "session",
-    "delegation", "escalation", "epoch", "audit", "cert", "submit",
+    "delegation", "escalation", "epoch", "audit", "cert", "credential", "submit",
     "status", "log", "verify-chain", "queue", "inspect", "inspect-initiative",
     "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
     "budget", "explain", "top",
@@ -66,6 +66,13 @@ const AUDIT_SUBCOMMANDS:       &[&str] = &["verify"];
 const CERT_SUBCOMMANDS:        &[&str] = &[
     "mint", "mint-emergency", "show", "verify", "list", "install",
 ];
+/// V2 §extensibility-traits.md §4 — local-only credential ops.
+/// MVP scope (V2 GA) is `list` + `rotate`; `add` / `show` /
+/// `remove` / `verify` / `audit` from credential-proxy.md §12 are
+/// deferred — they depend on the per-proxy-type validators and
+/// the credential-proxy runtime (Postgres / k8s / AWS / GCP /
+/// Azure / Redis / MongoDB / MySQL / MSSQL / SMTP).
+const CREDENTIAL_SUBCOMMANDS:  &[&str] = &["list", "rotate"];
 
 // ---------------------------------------------------------------------------
 // Global CLI flags
@@ -290,6 +297,16 @@ fn run() -> Result<(), CliError> {
                 ))),
             }
         }
+        "credential" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "list"   => commands::credential::run_list(&flags, &rest[1..]),
+                "rotate" => commands::credential::run_rotate(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "credential sub-command", sub2, CREDENTIAL_SUBCOMMANDS,
+                ))),
+            }
+        }
         "status" => commands::status::run(&flags, rest),
         "log" => commands::log::run(&flags, rest),
         "verify-chain" => commands::verify_chain::run(&flags, rest),
@@ -493,6 +510,17 @@ SUBCOMMANDS:
 
     audit verify [--log-path <path>]
         Verify the integrity of the JSONL audit log chain.
+
+    credential list [--json]
+        List registered credentials (metadata only — never the value).
+        Reads <data-dir>/credentials/*.env and <data-dir>/providers/*.toml
+        directly; the kernel does not need to be running.
+
+    credential rotate <name> [--stdin | --file <path> | --interactive]
+        Replace the bytes of an existing credential through an atomic
+        temp-write + rename ceremony. The new value is read via
+        stdin (default), a file on disk, or a hidden terminal prompt.
+        --value <bytes> is REJECTED — secrets must never enter argv.
 
 READ-ONLY OBSERVATION:
 
@@ -844,6 +872,7 @@ mod catalog_consistency_tests {
             ("epoch",      EPOCH_SUBCOMMANDS),
             ("audit",      AUDIT_SUBCOMMANDS),
             ("cert",       CERT_SUBCOMMANDS),
+            ("credential", CREDENTIAL_SUBCOMMANDS),
             ("submit",     SUBMIT_SUBCOMMANDS),
         ] {
             assert!(!list.is_empty(), "{name}_SUBCOMMANDS is empty");
@@ -876,6 +905,7 @@ mod catalog_consistency_tests {
             ("\"epoch\" => {",      EPOCH_SUBCOMMANDS),
             ("\"audit\" => {",      AUDIT_SUBCOMMANDS),
             ("\"cert\" => {",       CERT_SUBCOMMANDS),
+            ("\"credential\" => {", CREDENTIAL_SUBCOMMANDS),
             ("\"submit\" => {",     SUBMIT_SUBCOMMANDS),
         ];
 

@@ -39,6 +39,12 @@ raxis-runtime        = { workspace = true }
 # share one byte-exact JSONL parser instead of three independent
 # parsers drifting on `prev_sha256` canonicalisation.
 raxis-audit-tools    = { workspace = true }
+# `raxis credential` (V2 §4 of `extensibility-traits.md`) is local-only
+# (read/write under `<data_dir>/credentials/` and `<data_dir>/providers/`)
+# so we depend on the trait crate + the file-backend crate, not on a
+# kernel IPC. The CLI never opens the operator socket for these ops.
+raxis-credentials      = { workspace = true }
+raxis-credentials-file = { workspace = true }
 
 serde        = { workspace = true }
 serde_json   = { workspace = true }

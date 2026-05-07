@@ -15,6 +15,7 @@
 pub mod audit;
 pub mod budget;
 pub mod cert;
+pub mod credential;
 pub mod delegation;
 pub mod doctor;
 pub mod epoch;
