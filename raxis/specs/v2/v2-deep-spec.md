@@ -1689,6 +1689,26 @@ Assembler writes it to `.raxis/system_prompt.txt`; the `raxis-planner` binary re
 passes it as the system message in the first `InferenceRequest`. The provider (Anthropic,
 OpenAI, Gemini, or any other) receives it as a standard system prompt.
 
+**Implementation reference (V2 init).** The kernel-pinned NNSP lives in the dedicated
+[`raxis-prompts`](../../crates/prompts/src/lib.rs) crate as the
+`ORCHESTRATOR_NNSP_BYTES: &[u8]` constant, embedded via
+`include_bytes!("orchestrator_nnsp.txt")` so the kernel binary alone is the source of
+truth (modifying the text is a binary diff of the kernel artifact, satisfying
+`INV-PLANNER-HARNESS-06.3`). `render_orchestrator_nnsp(&inputs) -> String` performs the
+substitution layer: only the five spec-mandated tokens are substituted —
+`<session_uuid>`, `<initiative_id>`, `<initiative_description>`, `<dag_snapshot>`, and
+`<cross_cutting_artifacts>`. Defence-in-depth: the renderer rejects any
+`<initiative_description>` containing the literal `[RAXIS:KERNEL_STATE` (INV-KSB-01) or
+exceeding `MAX_INITIATIVE_DESCRIPTION_BYTES = 8 KiB`. Tests pin every protocol block
+required by `kernel-mechanics-prompt.md §3.2` (`IDENTITY`, `KSB LEGEND`, `INITIATIVE
+GUIDANCE`, `INTEGRATION MERGE PROTOCOL`, `CONFLICT RESOLUTION PROTOCOL`, `DAG
+ACTIVATION`, `ESCALATION PROTOCOL`, `TOKEN LIMIT PROTOCOL`, `KSB ALERT CLASSES`) plus
+the spec-mandated absences (`BACKGROUND PROCESS TOOLS`, `CUSTOM TOOLS`, `CREDENTIAL
+PROXIES`, `EGRESS PROTOCOL`). The kernel's session-admission handler calls
+`render_orchestrator_nnsp` and hands the string to
+`raxis-worktree-staging::stage` via `StageInputs.system_prompt`, which writes it to
+`<.raxis>/system_prompt.txt` before VM boot.
+
 ---
 
 *Part 5 complete. Next: Part 6 — Performance, Budget & Operator Intervention (Steps 27–28, 30).*

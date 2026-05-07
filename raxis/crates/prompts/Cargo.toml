@@ -1,0 +1,11 @@
+[package]
+name        = "raxis-prompts"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — kernel-pinned Non-Negotiable System Prompts (NNSPs) and Kernel State Block templating. Carries `ORCHESTRATOR_NNSP_BYTES` (version-locked with the kernel binary per INV-PLANNER-HARNESS-06.3)."
+
+[dependencies]
+thiserror = { workspace = true }

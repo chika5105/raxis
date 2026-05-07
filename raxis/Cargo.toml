@@ -23,6 +23,7 @@ members = [
     "crates/test-support",
     "crates/verifier-stub",
     "crates/domain-git",
+    "crates/prompts",
     "crates/worktree-provision",
     "crates/worktree-staging",
     "kernel",
@@ -121,6 +122,7 @@ raxis-isolation-firecracker = { path = "crates/isolation-firecracker" }
 raxis-runtime           = { path = "crates/runtime" }
 raxis-verifier-stub     = { path = "crates/verifier-stub" }
 raxis-domain-git        = { path = "crates/domain-git" }
+raxis-prompts           = { path = "crates/prompts" }
 raxis-worktree-provision = { path = "crates/worktree-provision" }
 raxis-worktree-staging  = { path = "crates/worktree-staging" }
 
