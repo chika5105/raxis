@@ -84,17 +84,32 @@ pub async fn run_gateway(env: GatewayEnv) -> Result<(), GatewayRunError> {
         view_slot.read().await.as_ref().map(|v| v.providers.len()).unwrap_or(0),
     );
 
-    // Step 2: backend selection. v1 only ships MockBackend; choosing
-    // `Http` falls back to mock with a warning so the gateway still
-    // accepts requests in deployments where Phase B has not landed yet.
+    // Step 2: backend selection.
+    //
+    // Phase B has landed: when the binary was built with the
+    // `http-backend` feature, `BackendKind::Http` produces a real
+    // `reqwest`-backed `HttpBackend`; otherwise we fall back to the
+    // mock with a warning (so the gateway still accepts requests in
+    // bare-bones operator builds and the kernel supervisor's
+    // probe-on-spawn doesn't immediately re-loop).
     let backend: Arc<dyn Backend> = match env.backend_kind {
         BackendKind::Mock => Arc::new(MockBackend::default()),
         BackendKind::Http => {
-            eprintln!(
-                "{{\"level\":\"warn\",\"event\":\"backend_http_unsupported_in_v1\",\
-                 \"action\":\"falling back to MockBackend\"}}",
-            );
-            Arc::new(MockBackend::default())
+            #[cfg(feature = "http-backend")]
+            {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"http_backend_enabled\"}}",
+                );
+                Arc::new(crate::http_backend::HttpBackend::new())
+            }
+            #[cfg(not(feature = "http-backend"))]
+            {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"backend_http_feature_disabled\",\
+                     \"action\":\"falling back to MockBackend\"}}",
+                );
+                Arc::new(MockBackend::default())
+            }
         }
     };
 

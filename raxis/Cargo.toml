@@ -35,6 +35,16 @@ repository  = "https://github.com/chika5105/aegis-ai"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 tokio       = { version = "1", features = ["full"] }
+# Real HTTP client used by `raxis-gateway::backend::HttpBackend` for
+# outbound provider calls (Anthropic, etc.). `rustls-tls` keeps us off
+# the system OpenSSL/Schannel and pins TLS to a single audited
+# implementation. `gzip` is pulled in because Anthropic responses can
+# come back compressed when the operator's policy permits the
+# `accept-encoding: gzip` header. `json` is intentionally NOT pulled
+# in — the gateway treats every response body as opaque bytes per
+# `peripherals.md` §3.2 ("the gateway does NOT parse provider response
+# bodies"); JSON deserialisation is the agent runtime's concern.
+reqwest     = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip"] }
 rusqlite    = { version = "0.31", features = ["bundled"] }
 ed25519-dalek = "2"
 rand_core     = "0.6"

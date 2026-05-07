@@ -39,12 +39,16 @@
 pub mod backend;
 pub mod dispatch;
 pub mod env;
+#[cfg(feature = "http-backend")]
+pub mod http_backend;
 pub mod policy_view;
 pub mod runtime;
 
 // Re-export the most common types so callers don't need to know the
 // module layout.
 pub use backend::{Backend, BackendError, MockBackend};
+#[cfg(feature = "http-backend")]
+pub use http_backend::HttpBackend;
 pub use dispatch::{handle_fetch_request, DispatchError};
 pub use env::{parse_gateway_env_from_process, GatewayEnv, GatewayEnvError};
 pub use policy_view::{

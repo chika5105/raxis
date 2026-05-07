@@ -20,6 +20,15 @@ path = "src/lib.rs"
 name = "raxis-gateway"
 path = "src/main.rs"
 
+[features]
+# `http-backend` pulls in `reqwest` and exposes `HttpBackend`, the real
+# upstream HTTP client used by the kernel-mediated egress path
+# (`peripherals.md` §3.2). When the feature is OFF the gateway still
+# compiles and ships `MockBackend` only, which is what every unit /
+# integration test under `cargo test` (no flag) relies on.
+default      = []
+http-backend = ["dep:reqwest"]
+
 [dependencies]
 # IPC framing + the GatewayMessage / FetchKind enums that the kernel and
 # the gateway both speak. peripherals.md §3.2.
@@ -37,6 +46,11 @@ toml         = { workspace = true }
 hex          = { workspace = true }
 uuid         = { workspace = true }
 thiserror    = { workspace = true }
+# Real HTTP backend (HttpBackend). Optional: tests use MockBackend by
+# default to avoid linking the TLS stack into every CI run. Production
+# builds and the e2e harness enable the `http-backend` feature so the
+# gateway emits real outbound calls.
+reqwest      = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
