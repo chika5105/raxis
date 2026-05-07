@@ -1078,6 +1078,88 @@ pub enum AuditEventKind {
         /// `port_not_redirected`, `unknown`).
         reason:            String,
     },
+
+    // --- Credential proxy lifecycle (`credential-proxy.md §5`).
+    /// Emitted when the kernel binds a credential-proxy listener
+    /// for a task. Carries the `proxy_type` (`postgres`, `http`,
+    /// etc.), the policy-declared credential `name`, the loopback
+    /// `addr` the agent will connect to, and the consumer identity
+    /// (`session_id` of the agent).
+    ///
+    /// Single-class event (per `audit-paired-writes.md §4` —
+    /// observability emitted alongside the proxy's
+    /// already-tracked SQLite registry rows; the proxy registry
+    /// state mutation is paired-class through its own event).
+    CredentialProxyStarted {
+        /// Session whose VM the proxy is provisioned for.
+        session_id:      String,
+        /// Proxy type (`postgres`, `http`, `mysql`, etc.).
+        proxy_type:      String,
+        /// Policy-declared credential name. Never the value.
+        credential_name: String,
+        /// Loopback address the agent connects to.
+        addr:            String,
+    },
+
+    /// Emitted when the kernel tears down a credential-proxy
+    /// listener for a task. Carries the same identity fields plus
+    /// the final counters snapshot.
+    CredentialProxyStopped {
+        /// Session whose VM the proxy was provisioned for.
+        session_id:         String,
+        /// Proxy type (`postgres`, `http`, `mysql`, etc.).
+        proxy_type:         String,
+        /// Policy-declared credential name. Never the value.
+        credential_name:    String,
+        /// Total accepted connections served.
+        connections_served: u32,
+        /// Number of requests/queries forwarded.
+        forwards_completed: u32,
+        /// Number of requests/queries rejected by `Restrictions`.
+        forwards_blocked:   u32,
+    },
+
+    /// Emitted by the Postgres credential proxy on every audited
+    /// query. Carries the SQL sha256 (always) plus the plaintext
+    /// query (only when policy `[inference_audit] log_content =
+    /// true`). Single-class observability event — the underlying
+    /// proxy state row is paired through the lifecycle pair above.
+    DatabaseQueryExecuted {
+        /// Session whose VM submitted the query.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Operation kind (`SELECT`, `INSERT`, ...).
+        operation:       String,
+        /// SHA-256 of the SQL text. Always present.
+        sql_sha256:      String,
+        /// Plaintext SQL. `None` unless policy opt-in is set.
+        sql_plaintext:   Option<String>,
+        /// True if the proxy refused the query under restrictions.
+        blocked:         bool,
+    },
+
+    /// Emitted by the HTTP credential proxy on every forwarded
+    /// (or rejected) request. Carries the SHA-256 of `<METHOD>
+    /// <path>`, the status code returned to the agent, and a
+    /// `blocked` flag. Single-class observability event.
+    HttpProxyRequestExecuted {
+        /// Session whose VM submitted the request.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Request method (uppercase).
+        method:          String,
+        /// Request path (no scheme/host).
+        path:            String,
+        /// SHA-256 of `"<METHOD> <path>"`.
+        path_sha256:     String,
+        /// Status returned to the agent (or 0 if the proxy
+        /// short-circuited before any HTTP shape was decided).
+        status_code:     u16,
+        /// True if a restriction blocked this request.
+        blocked:         bool,
+    },
 }
 
 impl AuditEventKind {
@@ -1141,6 +1223,10 @@ impl AuditEventKind {
             Self::CredentialRotated { .. } => "CredentialRotated",
             Self::TransparentProxyAdmitted { .. } => "TransparentProxyAdmitted",
             Self::TransparentProxyDenied { .. } => "TransparentProxyDenied",
+            Self::CredentialProxyStarted { .. } => "CredentialProxyStarted",
+            Self::CredentialProxyStopped { .. } => "CredentialProxyStopped",
+            Self::DatabaseQueryExecuted { .. } => "DatabaseQueryExecuted",
+            Self::HttpProxyRequestExecuted { .. } => "HttpProxyRequestExecuted",
         }
     }
 }
@@ -1782,5 +1868,85 @@ mod path_read_accessed_tests {
             }
             other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod credential_proxy_kind_tests {
+    use super::*;
+
+    #[test]
+    fn credential_proxy_started_kind_string_is_pinned() {
+        let kind = AuditEventKind::CredentialProxyStarted {
+            session_id:      "sess-1".to_owned(),
+            proxy_type:      "postgres".to_owned(),
+            credential_name: "db-staging".to_owned(),
+            addr:            "127.0.0.1:5432".to_owned(),
+        };
+        assert_eq!(kind.as_str(), "CredentialProxyStarted");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"],            serde_json::json!("CredentialProxyStarted"));
+        assert_eq!(v["session_id"],      serde_json::json!("sess-1"));
+        assert_eq!(v["proxy_type"],      serde_json::json!("postgres"));
+        assert_eq!(v["credential_name"], serde_json::json!("db-staging"));
+        assert_eq!(v["addr"],            serde_json::json!("127.0.0.1:5432"));
+    }
+
+    #[test]
+    fn credential_proxy_stopped_kind_string_and_counters_pinned() {
+        let kind = AuditEventKind::CredentialProxyStopped {
+            session_id:         "sess-1".to_owned(),
+            proxy_type:         "postgres".to_owned(),
+            credential_name:    "db-staging".to_owned(),
+            connections_served: 7,
+            forwards_completed: 5,
+            forwards_blocked:   2,
+        };
+        assert_eq!(kind.as_str(), "CredentialProxyStopped");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"],               serde_json::json!("CredentialProxyStopped"));
+        assert_eq!(v["connections_served"], serde_json::json!(7));
+        assert_eq!(v["forwards_completed"], serde_json::json!(5));
+        assert_eq!(v["forwards_blocked"],   serde_json::json!(2));
+    }
+
+    #[test]
+    fn database_query_executed_kind_string_and_fields_pinned() {
+        let kind = AuditEventKind::DatabaseQueryExecuted {
+            session_id:      "sess-1".to_owned(),
+            credential_name: "db-staging".to_owned(),
+            operation:       "SELECT".to_owned(),
+            sql_sha256:      "deadbeef".to_owned(),
+            sql_plaintext:   None,
+            blocked:         false,
+        };
+        assert_eq!(kind.as_str(), "DatabaseQueryExecuted");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"],          serde_json::json!("DatabaseQueryExecuted"));
+        assert_eq!(v["operation"],     serde_json::json!("SELECT"));
+        assert_eq!(v["sql_sha256"],    serde_json::json!("deadbeef"));
+        assert_eq!(v["sql_plaintext"], serde_json::json!(null));
+        assert_eq!(v["blocked"],       serde_json::json!(false));
+    }
+
+    #[test]
+    fn http_proxy_request_executed_kind_string_and_fields_pinned() {
+        let kind = AuditEventKind::HttpProxyRequestExecuted {
+            session_id:      "sess-1".to_owned(),
+            credential_name: "kube-prod".to_owned(),
+            method:          "GET".to_owned(),
+            path:            "/api/v1/widgets".to_owned(),
+            path_sha256:     "cafebabe".to_owned(),
+            status_code:     200,
+            blocked:         false,
+        };
+        assert_eq!(kind.as_str(), "HttpProxyRequestExecuted");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"],        serde_json::json!("HttpProxyRequestExecuted"));
+        assert_eq!(v["method"],      serde_json::json!("GET"));
+        assert_eq!(v["path"],        serde_json::json!("/api/v1/widgets"));
+        assert_eq!(v["path_sha256"], serde_json::json!("cafebabe"));
+        assert_eq!(v["status_code"], serde_json::json!(200));
+        assert_eq!(v["blocked"],     serde_json::json!(false));
     }
 }
