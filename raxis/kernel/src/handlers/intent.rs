@@ -1228,6 +1228,27 @@ fn handle_submit_review(
             }
         }
 
+        // Persist the per-Reviewer verdict on the Reviewer's own task
+        // row. Step 25 aggregation reads this column to compute the
+        // logical-AND across all sibling Reviewers of an Executor.
+        // Written BEFORE the FSM transition so the row carries
+        // (state=Completed, review_verdict=non-NULL) atomically — the
+        // aggregator never observes a Completed Reviewer with a NULL
+        // verdict (which would otherwise be classified as "still
+        // working" and stall the pipeline forever).
+        let verdict = if approved {
+            raxis_types::ReviewVerdict::Approved
+        } else {
+            raxis_types::ReviewVerdict::Rejected
+        };
+        tx.execute(
+            &format!(
+                "UPDATE {tasks} SET review_verdict = ?1 WHERE task_id = ?2",
+                tasks = Table::Tasks.as_str(),
+            ),
+            rusqlite::params![verdict.as_sql_str(), req.task_id.as_str()],
+        ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+
         // Reviewer's own task FSM: Running → Completed. The Reviewer
         // has done its job — successful or not, the Reviewer task
         // terminates here. This is by design: the Reviewer cannot
@@ -1924,6 +1945,15 @@ mod tests {
         ).unwrap()
     }
 
+    fn read_review_verdict(store: &Store, task_id: &str) -> Option<String> {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT review_verdict FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![task_id],
+            |r| r.get::<_, Option<String>>(0),
+        ).unwrap()
+    }
+
     /// Build a minimal `IntentRequest` for SubmitReview from
     /// `(reviewer_task_id, approved, critique)`. All non-relevant
     /// fields receive deterministic placeholder values that the
@@ -1964,7 +1994,8 @@ mod tests {
 
     /// Approval path: the handler transitions the Reviewer from
     /// Running → Completed, leaves `tasks.last_critique` untouched on
-    /// the predecessor, and returns Accepted.
+    /// the predecessor, persists `review_verdict = 'Approved'` on
+    /// the Reviewer's own row, and returns Accepted.
     #[test]
     fn submit_review_approved_transitions_reviewer_to_completed() {
         let store  = Store::open_in_memory().unwrap();
@@ -1981,6 +2012,9 @@ mod tests {
         assert_eq!(task_state_of(&store, "rev1"), TaskState::Completed.as_sql_str());
         assert!(read_last_critique(&store, "exe1").is_none(),
             "approval path must not write to executor's last_critique");
+        assert_eq!(read_review_verdict(&store, "rev1"),
+            Some(raxis_types::ReviewVerdict::Approved.as_sql_str().to_owned()),
+            "approval path must persist Approved verdict on Reviewer's own row");
     }
 
     /// Approval-with-critique-text: the spec says critique text on
@@ -2034,6 +2068,9 @@ mod tests {
             "[Reviewer rev1]: auth check missing on /admin\n\n",
             "critique format must match v2-deep-spec.md §Step 22 verbatim"
         );
+        assert_eq!(read_review_verdict(&store, "rev1"),
+            Some(raxis_types::ReviewVerdict::Rejected.as_sql_str().to_owned()),
+            "rejection path must persist Rejected verdict on Reviewer's own row");
     }
 
     /// Aggregation across N parallel reviewers (Step 25): each

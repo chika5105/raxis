@@ -14,7 +14,11 @@
 
 pub mod lifecycle;
 pub mod plan_registry;
+pub mod review_aggregation;
 pub mod task_transitions;
 
 pub use lifecycle::LifecycleError;
 pub use plan_registry::{PlanRegistry, TaskKey, TaskPlanFields};
+pub use review_aggregation::{
+    compute_aggregate_review_verdict, AggregateReviewVerdict,
+};

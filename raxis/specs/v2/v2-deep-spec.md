@@ -966,13 +966,59 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
    that depend on this Executor task. It activates all of them simultaneously.
 2. Each Reviewer VM runs concurrently, evaluating the same `evaluation_sha`.
 3. As each Reviewer submits `SubmitReview`, the Kernel:
-   - If `approved: false`: writes the critique to `tasks.last_critique` (aggregating).
-     Records `review_reject_count + 1` on the Executor task.
-   - Runs the reverse DAG query to check if any Reviewers are still `Active`.
-4. When the last Reviewer submits:
-   - If all `approved: true`: Kernel sends `KernelPush::AllReviewersPassed`.
-   - If any `approved: false`: Kernel sends `KernelPush::ReviewFailed`, with all critiques
-     aggregated in `tasks.last_critique`.
+   - Persists the per-Reviewer outcome to the Reviewer's own `tasks.review_verdict`
+     column (`'Approved'` or `'Rejected'`) atomically with the Reviewer's
+     `Running → Completed` FSM transition.
+   - If `approved: false`: writes the critique to the Executor's `tasks.last_critique`
+     (aggregating; Step 22 format `[Reviewer <task_id>]: <critique>\n\n`). The Executor
+     task's `review_reject_count` increment is deferred to plan-bundle-sealing alongside
+     `subtask_activations` row population.
+   - Runs the reverse DAG query (`compute_aggregate_review_verdict`) to fold every
+     successor's `review_verdict` into one of `Pending | AllPassed | AtLeastOneRejected`.
+4. When the last Reviewer submits (i.e., the aggregator transitions out of `Pending`):
+   - If `AllPassed`: Kernel sends `KernelPush::AllReviewersPassed { task_id: <executor> }`.
+   - If `AtLeastOneRejected`: Kernel sends `KernelPush::ReviewRejected { ... }`, with all
+     critiques aggregated in `tasks.last_critique`.
+
+**Implementation reference:**
+- `raxis_types::ReviewVerdict` — the (Approved | Rejected) per-Reviewer outcome enum.
+- `raxis-store` Migration 7 — adds `tasks.review_verdict TEXT CHECK (review_verdict
+  IN ('Approved', 'Rejected'))`. NULLable, no DEFAULT, V1 backward compatible.
+- `raxis-kernel::initiatives::review_aggregation::compute_aggregate_review_verdict` —
+  the pure read predicate folding successor verdicts to `AggregateReviewVerdict`. Returns
+  `Pending` when ANY successor's verdict is NULL (the wait-for-everyone gate);
+  `AllPassed` when every successor is `Approved`; `AtLeastOneRejected` when every
+  successor has submitted and at least one rejected; `NoSuccessors` when the executor has
+  no successor edges (malformed plan; caller fail-closes).
+- `handlers/intent::handle_submit_review` — writes `tasks.review_verdict` BEFORE the
+  Reviewer's FSM transition in the same SQLite transaction so the aggregator never
+  observes a `(state=Completed, review_verdict=NULL)` row.
+
+**Best-judgment scope decisions, recorded for spec/implementation lock-step:**
+
+* **`tasks.review_verdict`, not `subtask_activations.review_verdict`.** The aggregation
+  query joins `task_dag_edges → tasks` once. Pivoting via `subtask_activations` would
+  require a per-task "latest activation" subquery that adds no value — the LATEST verdict
+  is the only one the AND fold reads. Symmetric with `tasks.last_critique` (Step 22 /
+  Migration 6). See `raxis_types::ReviewVerdict` doc for full reasoning.
+
+* **No `SessionAgentType` filter in the aggregation query.** Step 25 specifies the AND
+  is "across Reviewer dependents" but the agent-type signal lives on the bound session
+  row (`sessions.session_agent_type`) which is not yet populated for V2 sub-tasks (plan-
+  bundle-sealing dependency). The current implementation aggregates over ALL successors;
+  the contract is sound today because:
+    * V1 plans never produce `SubmitReview` intents (the dispatch matrix rejects them),
+      so V1 successors stay `review_verdict = NULL` and the aggregator reports `Pending`
+      indefinitely — which is the correct "wait for the missing agent" semantic for V1.
+    * V2 plans approved AFTER plan-bundle-sealing lands will declare `agent_type` per
+      task, at which point a follow-up patch will scope the join to Reviewer successors.
+
+* **`KernelPush::AllReviewersPassed` / `ReviewRejected` emission is deferred to
+  plan-bundle-sealing.** The push channel itself is implemented in
+  `raxis_types::push::KernelPush` (Step 16) but the wire from kernel to planner has
+  no producer yet — that arrives with the operator/planner subtask-activation flow
+  (Plan Bundle Sealing). Until then the aggregator is an observable predicate that
+  the future emitter call site can consume directly.
 
 ---
 

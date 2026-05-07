@@ -34,8 +34,8 @@
 use crate::table::Table;
 use crate::StoreError;
 use raxis_types::{
-    DelegationStatus, EscalationStatus, InitiativeState, SessionAgentType,
-    SubtaskActivationState, TaskState, WitnessResultClass,
+    DelegationStatus, EscalationStatus, InitiativeState, ReviewVerdict,
+    SessionAgentType, SubtaskActivationState, TaskState, WitnessResultClass,
 };
 use rusqlite::Connection;
 
@@ -54,7 +54,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -87,6 +87,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 6 {
         apply_migration_6(conn)?;
+    }
+    if current_version < 7 {
+        apply_migration_7(conn)?;
     }
 
     Ok(())
@@ -1157,6 +1160,76 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 7 — V2 per-Reviewer verdict column on `tasks`.
+// v2-deep-spec.md §Step 25 ("Parallel Reviewers and the Logical AND Verdict").
+//
+// Adds a single nullable text column with a CHECK constraint:
+//
+//   tasks.review_verdict TEXT CHECK (review_verdict IN ('Approved',
+//                                                        'Rejected'))
+//
+//     NULL  — no SubmitReview accepted for this task yet.
+//     'Approved' — Reviewer submitted `approved=true`.
+//     'Rejected' — Reviewer submitted `approved=false`.
+//
+// Why on `tasks` rather than `subtask_activations`. The Step 25
+// aggregation pass joins `task_dag_edges → tasks.review_verdict` to
+// answer the question "have all sibling Reviewers of this Executor
+// submitted, and what's the AND verdict?" — putting the column on
+// `tasks` makes that a single one-row-per-Reviewer query without a
+// per-activation history scan. The PER-ACTIVATION verdict signal lives
+// on `subtask_activations.activation_state` (Completed = kernel
+// accepted the verdict; the actual approve/reject signal is the
+// per-task `review_verdict` column added here). See doc on
+// `raxis_types::ReviewVerdict` for the full reasoning.
+//
+// V1 backward compatibility: NULLable, no DEFAULT — every V1 row keeps
+// `NULL`, every V1 read continues to work.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_7(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_7_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 7 failed: {e}"))
+    })
+}
+
+/// The complete migration-7 DDL. INV-STORE-03: every table identifier
+/// is rendered through `Table::...as_str()`; the CHECK clause is
+/// rendered through the `ReviewVerdict` enum.
+fn render_migration_7_ddl() -> String {
+    let tasks          = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+    let review_verdict_check =
+        check_in_clause(&ReviewVerdict::ALL, ReviewVerdict::as_sql_str);
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── tasks: V2 per-Reviewer verdict column ─────────────────────────────────
+-- review_verdict: latest verdict for this (Reviewer) task. NULL for
+-- pre-V2 tasks and for Reviewer tasks that have not yet submitted.
+-- Written by `handlers/intent::handle_submit_review` on accept of a
+-- SubmitReview, alongside the FSM transition Running → Completed (one
+-- SQLite tx, INV-STORE-02 Pattern B). Cleared (set NULL) on every fresh
+-- activation by the subtask activation handler — same lifecycle as
+-- `last_critique`.
+ALTER TABLE {tasks}
+    ADD COLUMN review_verdict TEXT
+        CHECK (review_verdict IS NULL
+               OR review_verdict IN {review_verdict_check});
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (7, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2217,9 +2290,11 @@ mod tests {
             ),
         ).unwrap();
 
-        // Now run migration 6.
+        // Now run migration 6 only — assert the version is exactly 6
+        // (this test is scoped to migration 6's contract; migration 7
+        // is exercised by the v6→v7 upgrade test below).
         apply_migration_6(&conn).unwrap();
-        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+        assert_eq!(read_current_version(&conn).unwrap(), 6);
 
         let last_critique: Option<String> = conn
             .query_row(
@@ -2322,6 +2397,184 @@ mod tests {
             "migration 6 must open exactly one transaction (BEGIN EXCLUSIVE)");
         assert_eq!(ddl.matches("COMMIT").count(), 1,
             "migration 6 must commit exactly once");
+        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
+                < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT");
+    }
+
+    // ── Migration 7 — V2 per-Reviewer verdict column on `tasks` ─────────
+
+    /// Migration 7 adds `tasks.review_verdict` as a NULLable TEXT column
+    /// with a CHECK constraint pinning the (NULL | Approved | Rejected)
+    /// universe.
+    #[test]
+    fn migration_7_adds_review_verdict_column_to_tasks() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let cols: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,           // name
+                    r.get::<_, String>(2)?,           // type
+                    r.get::<_, i64>(3)?,              // notnull
+                    r.get::<_, Option<String>>(4)?,   // dflt_value
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let review_verdict = cols
+            .iter()
+            .find(|(name, _, _, _)| name == "review_verdict")
+            .expect("tasks.review_verdict column must exist after migration 7");
+
+        assert_eq!(review_verdict.1, "TEXT", "review_verdict must be TEXT");
+        assert_eq!(review_verdict.2, 0, "review_verdict must be NULLable");
+        assert!(review_verdict.3.is_none(), "review_verdict must have no DEFAULT");
+    }
+
+    /// The CHECK constraint on `review_verdict` must accept the canonical
+    /// `ReviewVerdict::ALL` strings AND NULL, and reject anything else.
+    #[test]
+    fn migration_7_check_constraint_accepts_only_canonical_strings() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        // Seed an initiative + task so the CHECK constraint is exercised
+        // by an actual UPDATE.
+        let now = raxis_types::unix_now_secs();
+        conn.execute_batch(
+            &format!(
+                "INSERT INTO {initiatives} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at) \
+                 VALUES ('init-mig7', 'Draft', '{{}}', 'deadbeef', {now}); \
+                 INSERT INTO {tasks} \
+                    (task_id, initiative_id, lane_id, state, actor, \
+                     policy_epoch, admitted_at, transitioned_at) \
+                 VALUES ('task-mig7', 'init-mig7', 'lane.default', \
+                         'Admitted', 'Operator', 1, {now}, {now});",
+                initiatives = Table::Initiatives.as_str(),
+                tasks       = Table::Tasks.as_str(),
+                now         = now,
+            ),
+        ).unwrap();
+
+        let upd_sql = format!(
+            "UPDATE {} SET review_verdict = ?1 WHERE task_id = 'task-mig7'",
+            Table::Tasks.as_str(),
+        );
+
+        // Canonical strings must be accepted.
+        for variant in &ReviewVerdict::ALL {
+            let r = conn.execute(&upd_sql, rusqlite::params![variant.as_sql_str()]);
+            assert!(r.is_ok(),
+                "CHECK constraint must accept canonical {variant:?} (got {r:?})");
+        }
+        // NULL must be accepted.
+        let r = conn.execute(&upd_sql, rusqlite::params![Option::<&str>::None]);
+        assert!(r.is_ok(), "CHECK constraint must accept NULL (got {r:?})");
+
+        // A bogus string must be rejected.
+        let r = conn.execute(&upd_sql, rusqlite::params!["ApprovedYes"]);
+        assert!(r.is_err(),
+            "CHECK constraint must reject non-canonical strings");
+    }
+
+    /// V2 enum-driven CHECK clauses are pinned at the SQL level so a
+    /// future variant addition forces a migration rather than slipping
+    /// through silently.
+    #[test]
+    fn v2_review_verdict_check_clause_is_pinned_to_migration_7() {
+        assert_eq!(
+            check_in_clause(&ReviewVerdict::ALL, ReviewVerdict::as_sql_str),
+            "('Approved', 'Rejected')",
+        );
+    }
+
+    /// Migration 7 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_7_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let n_review_verdict = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|name| name == "review_verdict")
+            .count();
+        assert_eq!(n_review_verdict, 1,
+            "review_verdict must appear exactly once in tasks PRAGMA");
+    }
+
+    /// Upgrade scenario: a database at v=6 must pick up migration 7
+    /// cleanly when `apply_pending` runs.
+    #[test]
+    fn migration_7_applies_to_a_v6_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        apply_migration_6(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 6);
+
+        let mut stmt_pre = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let has_pre = stmt_pre
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .any(|name| name == "review_verdict");
+        assert!(!has_pre, "review_verdict must not yet exist at v=6");
+
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt_post = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let has_post = stmt_post
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .any(|name| name == "review_verdict");
+        assert!(has_post, "migration 7 must add review_verdict");
+    }
+
+    /// Migration 7 wraps the single ALTER TABLE in a single
+    /// `BEGIN EXCLUSIVE; ... COMMIT;`.
+    #[test]
+    fn migration_7_is_a_single_transaction() {
+        let ddl = render_migration_7_ddl();
+        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
+            "migration 7 must open exactly one transaction (BEGIN EXCLUSIVE)");
+        assert_eq!(ddl.matches("COMMIT").count(), 1,
+            "migration 7 must commit exactly once");
         assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
                 < ddl.find("COMMIT").unwrap(),
             "BEGIN must precede COMMIT");

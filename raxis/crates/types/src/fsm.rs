@@ -515,6 +515,83 @@ impl fmt::Display for TerminalCriteria {
 }
 
 // ---------------------------------------------------------------------------
+// ReviewVerdict — the per-Reviewer outcome on a SubmitReview.
+// v2-deep-spec.md §Step 25 "Parallel Reviewers and the Logical AND Verdict".
+// DDL: tasks.review_verdict TEXT (Migration 7).
+// ---------------------------------------------------------------------------
+//
+// **Why on `tasks` rather than `subtask_activations`.** The aggregation
+// pass (Step 25) runs at the moment the LAST sibling Reviewer submits;
+// it queries the executor's successors in `task_dag_edges` and counts
+// per-task verdicts. Putting the column on `tasks` lets the aggregation
+// query be a single join — `task_dag_edges → tasks.review_verdict` —
+// without traversing the activation history (which may have multiple
+// rows per task across retries). The PER-ACTIVATION verdict lives on
+// `subtask_activations` as `activation_state` (Completed = the kernel
+// accepted the verdict, regardless of approve/reject — see the doc on
+// `SubtaskActivationState::Completed`); `tasks.review_verdict` is the
+// LATEST verdict, mirroring the LATEST critique on `tasks.last_critique`.
+//
+// Aggregation contract: a Reviewer task whose `review_verdict` is NULL
+// has not yet submitted; one whose verdict is `Approved` passed; one
+// whose verdict is `Rejected` failed. The Logical-AND verdict over all
+// Reviewer siblings is "all Approved (and none NULL)" → AllPassed,
+// "any Rejected (and none NULL)" → AtLeastOneRejected, otherwise →
+// Pending.
+
+/// Per-Reviewer outcome on a `IntentKind::SubmitReview` accept.
+///
+/// Persisted on `tasks.review_verdict` as TEXT so the aggregation
+/// query (Step 25) can join `task_dag_edges → tasks` in one shot. NULL
+/// means "not yet submitted"; the enum represents the two terminal
+/// per-Reviewer outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ReviewVerdict {
+    /// Reviewer submitted `SubmitReview { approved: true, .. }`. The
+    /// Reviewer's task transitioned to `Completed` and the Executor's
+    /// `last_critique` was untouched by this Reviewer.
+    Approved,
+    /// Reviewer submitted `SubmitReview { approved: false, critique }`.
+    /// The Reviewer's task transitioned to `Completed` and the
+    /// Executor's `last_critique` was appended with this Reviewer's
+    /// formatted critique.
+    Rejected,
+}
+
+impl ReviewVerdict {
+    /// All variants — referenced by the SQL CHECK constraint on
+    /// `tasks.review_verdict`.
+    pub const ALL: [Self; 2] = [Self::Approved, Self::Rejected];
+
+    /// Canonical SQL string used in CHECK constraints and at-rest
+    /// storage.
+    pub fn as_sql_str(self) -> &'static str {
+        match self {
+            Self::Approved => "Approved",
+            Self::Rejected => "Rejected",
+        }
+    }
+
+    /// Parse from the SQL at-rest string. NULL is the "not yet
+    /// submitted" sentinel; this function does NOT accept NULL — the
+    /// caller deals with `Option<ReviewVerdict>` at the row-read layer.
+    pub fn from_sql_str(s: &str) -> Option<Self> {
+        match s {
+            "Approved" => Some(Self::Approved),
+            "Rejected" => Some(Self::Rejected),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ReviewVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_sql_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -630,6 +707,51 @@ mod tests {
     #[test]
     fn subtask_activation_state_display_equals_as_sql_str() {
         for &variant in &SubtaskActivationState::ALL {
+            assert_eq!(variant.to_string(), variant.as_sql_str());
+        }
+    }
+
+    // ── ReviewVerdict round-trips ──────────────────────────────────────
+
+    #[test]
+    fn review_verdict_round_trips_through_as_sql_str_and_from_sql_str() {
+        for &variant in &ReviewVerdict::ALL {
+            let s = variant.as_sql_str();
+            assert!(!s.is_empty());
+            assert_eq!(ReviewVerdict::from_sql_str(s), Some(variant),
+                "round-trip failed for {variant:?}: as_sql_str → {s}");
+        }
+        // Pin the wire-stable strings — these are persisted in
+        // `tasks.review_verdict` and embedded in the SQL CHECK
+        // constraint emitted by Migration 7.
+        assert_eq!(ReviewVerdict::Approved.as_sql_str(), "Approved");
+        assert_eq!(ReviewVerdict::Rejected.as_sql_str(), "Rejected");
+    }
+
+    #[test]
+    fn review_verdict_unknown_sql_returns_none() {
+        assert_eq!(ReviewVerdict::from_sql_str(""), None);
+        // Defensive: the SubtaskActivationState terminal strings must
+        // NOT collide — review_verdict and activation_state are
+        // distinct columns.
+        assert_eq!(ReviewVerdict::from_sql_str("Completed"), None);
+        assert_eq!(ReviewVerdict::from_sql_str("Failed"), None);
+        // Defensive: avoid collision with Postgres-style booleans.
+        assert_eq!(ReviewVerdict::from_sql_str("true"), None);
+        assert_eq!(ReviewVerdict::from_sql_str("false"), None);
+    }
+
+    #[test]
+    fn review_verdict_variant_count_is_pinned() {
+        assert_eq!(ReviewVerdict::ALL.len(), 2,
+            "ReviewVerdict has exactly 2 variants (Approved | Rejected); \
+             bumping this requires a new migration that ALTERs the CHECK \
+             constraint on already-installed databases.");
+    }
+
+    #[test]
+    fn review_verdict_display_equals_as_sql_str() {
+        for &variant in &ReviewVerdict::ALL {
             assert_eq!(variant.to_string(), variant.as_sql_str());
         }
     }
