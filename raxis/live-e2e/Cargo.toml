@@ -1,0 +1,34 @@
+[package]
+name        = "raxis-live-e2e"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Out-of-band end-to-end suite for RAXIS that exercises real subsystems against real upstream services. Never linked into a release binary; never run by `cargo test`."
+
+[[bin]]
+name = "raxis-live-e2e"
+path = "src/main.rs"
+
+[dependencies]
+raxis-gateway              = { path = "../gateway" }
+raxis-gateway-substrate    = { path = "../crates/gateway-substrate" }
+raxis-ipc                  = { path = "../crates/ipc" }
+raxis-credentials          = { path = "../crates/raxis-credentials" }
+raxis-credentials-file     = { path = "../crates/raxis-credentials-file" }
+raxis-credential-proxy-postgres = { path = "../crates/credential-proxy-postgres" }
+raxis-credential-proxy-http     = { path = "../crates/credential-proxy-http" }
+raxis-genesis-tools        = { path = "../crates/genesis-tools" }
+raxis-test-support         = { path = "../crates/test-support" }
+raxis-types                = { path = "../crates/types" }
+
+tokio       = { workspace = true }
+serde_json  = { workspace = true }
+hex         = { workspace = true }
+uuid        = { workspace = true }
+tempfile    = "3"
+ed25519-dalek = { workspace = true }
+toml        = { workspace = true }
+clap        = { version = "4", features = ["derive"] }
+anyhow      = "1"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

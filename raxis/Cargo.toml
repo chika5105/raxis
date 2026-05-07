@@ -38,6 +38,7 @@ members = [
     "kernel",
     "cli",
     "gateway",
+    "live-e2e",
     "xtask",
 ]
 
