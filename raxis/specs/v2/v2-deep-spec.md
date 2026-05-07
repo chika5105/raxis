@@ -1984,6 +1984,78 @@ detail: <Display of PlanSingleLaneInvalid> }` (kernel/src/ipc/operator.rs::handl
 The detail string carries the rule + offending task + suggestion verbatim, so an
 operator can grep their `plan.toml` for the offending block.
 
+**Implementation reference (Step 28 runtime mechanics).**
+
+The shared-lane invariant is implemented entirely on top of the pre-V2
+`lane_budget_reservations` table — no new schema is required. Three
+load-bearing call sites pin the contract:
+
+| Call site                                           | Role                                                                                                                                                                                                                                                                  |
+|-----------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `lifecycle::approve_plan` propagation               | Reads `[workspace] lane_id`; stamps every `tasks` row with that lane verbatim. Per-task `lane_id` overrides are rejected upstream by `validate_single_lane_propagation`. The task row is therefore the *single* source of truth for lane membership.                  |
+| `handlers::intent::run_phase_a/c` budget call sites | Loads `task.lane_id` from the row referenced by the incoming `IntentRequest` and passes it to `budget::reserve_budget_in_tx`. Every session in the initiative — Orchestrator, Executor, Reviewer — flows through the same call path; the lane is read from the task. |
+| `scheduler::budget::reserve_budget_in_tx`           | Computes `SUM(reserved_cost)` over `lane_budget_reservations WHERE lane_id = ?` and rejects if `sum + estimated_cost > lane.max_cost_per_epoch`. Because every task in the initiative carries the same lane, the SUM is naturally initiative-wide.                    |
+
+Three pinned-name unit tests anchor the contract:
+
+* `step28_shared_lane_bounds_orchestrator_plus_executors_plus_reviewer`
+  exercises the full multi-session shape (one Orchestrator, two
+  Executors, one Reviewer) all on a single workspace lane and pins
+  that the cumulative budget is ceiling-bounded.
+* `step28_shared_lane_rejection_is_order_independent` runs both
+  permutations (Orchestrator-first; Executor-first) against the same
+  fixture and verifies the rejection point is determined by sum
+  crossing the cap, not by submitter identity.
+* `step28_disjoint_lanes_do_not_share_ceiling` pins that two
+  initiatives on disjoint lanes do not interfere — V2 supports
+  concurrent initiatives on disjoint lanes for free.
+
+**Best-judgment decisions made during s28 implementation (spec amendments).**
+
+* **`sessions.lane_id` column is deferred — runtime reads
+  `task.lane_id` directly.** The original spec text reads:
+  *"At `ActivateSubTask → create_session`, the Kernel reads
+  `task.lane_id` from the task row and sets `sessions.lane_id` for
+  the new session."* Adding the column requires (a) a new migration,
+  (b) extending `create_session`'s signature with a `lane_id`
+  parameter, (c) updating both `SessionRow` projections and every
+  caller of `get_session` / `get_session_by_token`, and (d) a
+  cross-column CHECK to prevent drift between `task.lane_id` and
+  `sessions.lane_id`. The runtime enforcement does NOT need this
+  column: every budget call site already loads `task.lane_id` for
+  the task referenced by the incoming intent.
+  *Pros (chosen — defer):* zero migration churn; one source of
+  truth for lane membership (the task row); no drift risk between
+  two columns; budget enforcement is byte-identical.
+  *Cons:* an out-of-band auditor reading the `sessions` table
+  directly cannot answer "which lane is this session on?" without
+  joining `tasks`. We accept this — the kernel's audit chain
+  (which records `task_id` on every event) carries enough
+  information to recover the lane via `tasks.lane_id`.
+  When a future feature genuinely needs `sessions.lane_id` (e.g.,
+  a hot-restart fast-path for the lane-allowlist cache), the
+  migration is small and additive; no behaviour pivots. This
+  amendment supersedes the original spec text — the canonical
+  V2 implementation reads `task.lane_id`.
+
+* **No new audit kind for shared-lane budget rejection.** The
+  existing `IntentRejected` audit event with
+  `PlannerErrorCode::FailBudgetExceeded` already captures the
+  rejection. The audit event records `task_id`; an operator
+  joining the audit log against `tasks.lane_id` recovers the
+  lane. Introducing a new
+  `InitiativeBudgetCeilingReached` audit kind would be a strict
+  superset of the existing event with no new fact (the lane is
+  already discoverable). We hold the audit-event surface area
+  steady to keep the kernel-policy crates' `KNOWN_AUDIT_EVENT_KINDS`
+  list (the lockstep test) minimal.
+  *Pros (chosen):* no policy-crate churn; no new known-event-kind
+  drift risk; existing operator tooling already grep-friendly via
+  `IntentRejected` + the structured `code` field.
+  *Cons:* the audit log doesn't loudly call out *initiative-wide
+  budget exhaustion* as a distinct concept. We accept this — the
+  signal is recoverable via SQL join.
+
 ---
 
 ### Step 30: Audit Attribution for Operator-Assisted Commits

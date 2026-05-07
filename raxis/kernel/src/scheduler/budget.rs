@@ -345,6 +345,159 @@ mod tests {
         tx.commit().unwrap();
     }
 
+    // ─────────────────────────────────────────────────────────────────
+    // V2 §Step 28 — shared-lane budget invariant.
+    //
+    // Pins the spec contract: every session inside one initiative
+    // shares a single `[workspace] lane_id`, so the existing
+    // `SUM(reserved_cost) FROM lane_budget_reservations WHERE lane_id`
+    // query naturally bounds the *initiative-wide* spend at
+    // `max_cost_per_epoch`. The first intent (regardless of which
+    // session submits it) whose reservation crosses the ceiling is
+    // rejected with `BudgetExceeded`, independent of submission order.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// V2 §Step 28 contract: an Orchestrator + multiple Executor +
+    /// Reviewer tasks all on the same workspace lane share one
+    /// budget. The lane's ceiling bounds the sum across all of them.
+    #[test]
+    fn step28_shared_lane_bounds_orchestrator_plus_executors_plus_reviewer() {
+        let store  = Store::open_in_memory().unwrap();
+        // Workspace-shaped lane: a "feature-work" lane with ceiling
+        // 100 admission units. The cap is intentionally tight so the
+        // sum of three reservations crosses it.
+        let policy = policy_with_lane(
+            "feature-work",
+            /*max_concurrent=*/ 8,
+            /*max_cost=*/        100,
+        );
+        // Mirror the V2 multi-session shape: one Orchestrator + two
+        // Executors + one Reviewer, every task carrying the same
+        // workspace lane (per Step 28 propagation).
+        seed_initiative_and_tasks(&store, "init-step28-A", &[
+            ("orch-task-1",  "feature-work", "Admitted"),
+            ("exec-task-1",  "feature-work", "Admitted"),
+            ("exec-task-2",  "feature-work", "Admitted"),
+            ("rev-task-1",   "feature-work", "Admitted"),
+        ]);
+
+        // Budget consumption walk: Orchestrator(40) + Executor1(30) +
+        // Executor2(20) = 90 (all admit). Reviewer's 15 trips the
+        // ceiling.
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        reserve_budget_in_tx(&tx, "feature-work", "orch-task-1", 40, &policy)
+            .expect("orchestrator's 40 fits under the lane cap");
+        reserve_budget_in_tx(&tx, "feature-work", "exec-task-1", 30, &policy)
+            .expect("first executor's 30 fits under the lane cap");
+        reserve_budget_in_tx(&tx, "feature-work", "exec-task-2", 20, &policy)
+            .expect("second executor's 20 brings the total to 90 — still under 100");
+
+        let snapshot = get_lane_status_in_tx(&tx, "feature-work").unwrap();
+        assert_eq!(snapshot.reserved_cost, 90,
+            "Step 28: lane ceiling must aggregate across all sessions in the initiative");
+
+        let err = reserve_budget_in_tx(&tx, "feature-work", "rev-task-1", 15, &policy)
+            .expect_err("reviewer's 15 must be rejected — initiative-wide sum 105 > 100");
+        match err {
+            SchedulerError::BudgetExceeded { kind } => {
+                assert!(kind.starts_with("CostLimit"),
+                    "Step 28 rejection must surface as CostLimit (initiative-wide ceiling), \
+                     got {kind}");
+            }
+            other => panic!("expected BudgetExceeded(CostLimit), got {other:?}"),
+        }
+        tx.commit().unwrap();
+    }
+
+    /// Step 28 contract continued: the rejection point is independent
+    /// of submission order. Whether the Orchestrator submits the
+    /// over-cap intent or an Executor does, the kernel rejects the
+    /// crossing intent — never the earlier "smaller" intents.
+    #[test]
+    fn step28_shared_lane_rejection_is_order_independent() {
+        // Permutation A: Executor submits first and consumes the bulk.
+        // The Orchestrator's smaller intent is the one that crosses.
+        {
+            let store  = Store::open_in_memory().unwrap();
+            let policy = policy_with_lane("lane-permA", 8, 100);
+            seed_initiative_and_tasks(&store, "init-permA", &[
+                ("exec-task", "lane-permA", "Admitted"),
+                ("orch-task", "lane-permA", "Admitted"),
+            ]);
+            let mut conn = store.lock_sync();
+            let tx = conn.transaction().unwrap();
+            reserve_budget_in_tx(&tx, "lane-permA", "exec-task", 95, &policy)
+                .expect("exec's 95 fits under the cap");
+            let err = reserve_budget_in_tx(&tx, "lane-permA", "orch-task", 10, &policy)
+                .expect_err("orch's 10 must be rejected (exec already consumed 95; sum=105>100)");
+            match err {
+                SchedulerError::BudgetExceeded { .. } => {}
+                other => panic!("permutation A expected BudgetExceeded, got {other:?}"),
+            }
+            tx.commit().unwrap();
+        }
+        // Permutation B: Orchestrator submits first; an Executor's
+        // larger intent crosses.
+        {
+            let store  = Store::open_in_memory().unwrap();
+            let policy = policy_with_lane("lane-permB", 8, 100);
+            seed_initiative_and_tasks(&store, "init-permB", &[
+                ("orch-task", "lane-permB", "Admitted"),
+                ("exec-task", "lane-permB", "Admitted"),
+            ]);
+            let mut conn = store.lock_sync();
+            let tx = conn.transaction().unwrap();
+            reserve_budget_in_tx(&tx, "lane-permB", "orch-task", 10, &policy)
+                .expect("orch's 10 fits comfortably");
+            let err = reserve_budget_in_tx(&tx, "lane-permB", "exec-task", 95, &policy)
+                .expect_err("exec's 95 must be rejected (sum=105>100)");
+            match err {
+                SchedulerError::BudgetExceeded { .. } => {}
+                other => panic!("permutation B expected BudgetExceeded, got {other:?}"),
+            }
+            tx.commit().unwrap();
+        }
+    }
+
+    /// Step 28 contract: tasks that belong to *different* initiatives
+    /// (and therefore different lanes) do NOT interfere. This pins
+    /// that the shared-lane ceiling is scoped per-lane, not global —
+    /// V2 supports concurrent initiatives on disjoint lanes.
+    #[test]
+    fn step28_disjoint_lanes_do_not_share_ceiling() {
+        let store  = Store::open_in_memory().unwrap();
+        let mut bundle = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
+        bundle.set_lanes_for_tests(vec![
+            LaneEntry { lane_id: "lane-feature".into(), max_concurrent_tasks: 8, max_cost_per_epoch: 100, priority: 0 },
+            LaneEntry { lane_id: "lane-bugfix".into(),  max_concurrent_tasks: 8, max_cost_per_epoch: 100, priority: 0 },
+        ]);
+        let policy = bundle;
+
+        seed_initiative_and_tasks(&store, "init-feature", &[
+            ("feat-task-1", "lane-feature", "Admitted"),
+            ("feat-task-2", "lane-feature", "Admitted"),
+        ]);
+        seed_initiative_and_tasks(&store, "init-bugfix", &[
+            ("bug-task-1", "lane-bugfix", "Admitted"),
+        ]);
+
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction().unwrap();
+        // Saturate lane-feature.
+        reserve_budget_in_tx(&tx, "lane-feature", "feat-task-1", 100, &policy)
+            .expect("feature lane fully consumed");
+        let err = reserve_budget_in_tx(&tx, "lane-feature", "feat-task-2", 1, &policy)
+            .expect_err("any further reservation on lane-feature must be rejected");
+        assert!(matches!(err, SchedulerError::BudgetExceeded { .. }));
+
+        // lane-bugfix's ceiling is unaffected — the bugfix initiative
+        // can still consume its own 100 admission units.
+        reserve_budget_in_tx(&tx, "lane-bugfix", "bug-task-1", 100, &policy)
+            .expect("Step 28: a saturated lane-feature must NOT bleed into lane-bugfix");
+        tx.commit().unwrap();
+    }
+
     /// Concurrency-cap is also enforced inside the transaction.
     #[test]
     fn reserve_in_tx_enforces_concurrency_cap() {
