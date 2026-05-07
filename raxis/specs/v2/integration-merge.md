@@ -277,6 +277,32 @@ await KernelPush::EscalationResolved; re-submit with operator_approval_id`).
 
 ### Check 5d — Pre-Integration Merge Verifier Execution (conditional, V2 addition)
 
+> **Implementation status (V2 GA):** The plan-author and operator-global
+> surfaces below are **not yet wired** in the kernel. Until the
+> `raxis-verifier-runtime` crate (per `verifier-processes.md §17.5`)
+> lands, the kernel rejects any plan or policy that declares
+> `[[plan.integration_merge_verifiers]]` or `[[integration_merge_verifiers]]`
+> at the earliest gate (plan-approve / policy-load), with
+> `FAIL_VERIFIER_INVALID_ON_FAILURE` and a structured reason
+> `pre_merge_verifier_runtime_not_yet_landed`. The common case (no
+> declarations) is unaffected — Check 5d is trivially a no-op for all
+> existing plans and policies.
+>
+> **Tracker.** The full Check 5d implementation is a multi-day phase
+> (per `verifier-processes.md §17.5 Phased Rollout — Phase 4`). It depends on:
+>
+> - The `raxis-verifier-runtime` crate (`§17.5.1`).
+> - `DDL Migration 10` for `integration_merge_attempts` (§11.10.1).
+> - The candidate-merge-tree creation primitive (`§16.2`).
+> - VM-spawn integration with `RAXIS_VERIFIER_HOOK_KIND = "pre_merge"`
+>   (`verifier-processes.md §11`).
+> - Crash-recovery for in-flight pre-merge runs (§11.10.4).
+>
+> The fail-closed posture above ensures no operator can accidentally
+> declare pre-merge verifiers and have them silently bypass at merge
+> time. When the runtime lands, the early rejection is removed and
+> the gate fires per the algorithm below.
+
 Runs **immediately after Check 5c** when at least one of the following
 declares pre-merge verifiers (per `verifier-processes.md §15`):
 
