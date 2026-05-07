@@ -1136,6 +1136,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-isolation-firecracker"
+version = "0.1.0"
+dependencies = [
+ "raxis-isolation",
+ "raxis-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "raxis-kernel"
 version = "0.1.0"
 dependencies = [

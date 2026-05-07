@@ -1,0 +1,55 @@
+[package]
+name        = "raxis-isolation-firecracker"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# raxis-isolation-firecracker — concrete `Backend` impl for Linux + KVM.
+#
+# Normative reference:
+#   * `specs/v2/extensibility-traits.md §3.5` (Reference impl table; this is
+#     the `FirecrackerIsolation` row, default on Linux, R1Conformant).
+#   * `specs/v2/system-requirements.md §5.1` (KVM admission rules).
+#   * `specs/v2/v2-deep-spec.md §Step 10` (VirtioFS + VSock plumbing).
+#
+# Crate scope:
+#   * `FirecrackerBackend`           — `raxis_isolation::Backend` factory.
+#   * `FirecrackerSession`           — `raxis_isolation::Session` live handle.
+#   * `api::FirecrackerApi`          — typed Unix-domain-socket REST client
+#                                      against the Firecracker VMM API.
+#   * `vmm::FirecrackerVmm`          — child-process supervision (spawn,
+#                                      health, reap).
+#   * `vsock::HostVsockListener`     — host-side `AF_VSOCK` listener that
+#                                      multiplexes guest control traffic.
+#
+# Crate scope explicitly EXCLUDES:
+#   * Mock substrate. Test fakes for Firecracker (e.g. an in-process REST
+#     server that mimics `firecracker --api-sock`) live in
+#     `raxis-test-support` per the workspace's mock-isolation discipline.
+#   * Cross-platform runtime detection. Selecting between Firecracker and
+#     AVF at boot is the kernel's job (`raxis-kernel/src/main.rs`); this
+#     crate compiles on every platform but its `Backend::spawn` returns
+#     `IsolationError::BackendInternal` when the host is not Linux+KVM.
+#
+# Why a dedicated crate (and not part of `raxis-kernel`):
+#   * Adheres to the §3 split: kernel binary is compiled against the
+#     `raxis-isolation` trait; a substrate is a separate crate that the
+#     kernel boots into via `Arc<dyn Backend>`. Tests use
+#     `raxis-test-support::SubprocessIsolation` as a non-VMM substrate;
+#     real-isolation integration tests link this crate.
+
+[dependencies]
+raxis-isolation = { workspace = true }
+raxis-types     = { workspace = true }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+
+[dev-dependencies]
+# `tempfile` is workspace-wide test-only. We re-import directly here so
+# the integration tests can stage UDS / kernel image fixtures next to
+# the ephemeral `firecracker --api-sock` socket without leaking into
+# the parent process's `$TMPDIR`.
+tempfile        = "3"
