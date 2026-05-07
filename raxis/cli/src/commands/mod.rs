@@ -29,6 +29,7 @@ pub mod initiative_show;
 pub mod initiatives;
 pub mod inspect;
 pub mod inspect_initiative;
+pub mod kernel;
 pub mod log;
 pub mod operator;
 pub mod plan;

@@ -222,8 +222,26 @@ this terminal running for the lifetime of the scenarios; switch to a
 second terminal for the scenario commands.
 
 > **Running RAXIS as a system daemon.** For long-lived production
-> hosts, install one of the bundled supervisor units instead of
-> running `raxis-kernel` in a foreground terminal:
+> hosts, the easiest path is the one-liner:
+>
+> ```bash
+> # User-level install — runs as your user, ~/.config/systemd/user/
+> # on Linux or ~/Library/LaunchAgents/ on macOS.
+> raxis kernel install
+>
+> # System-level install — runs as the dedicated `_raxis` user.
+> sudo raxis kernel install --system
+> ```
+>
+> The CLI templates the unit file with this binary's resolved path
+> and your current `--data-dir`, then prints the `systemctl --user
+> enable --now raxis-kernel` (Linux) or `launchctl bootstrap`
+> (macOS) command to start the service. To uninstall, run
+> `raxis kernel uninstall` (add `--system` if you installed system-wide).
+>
+> The hand-edited reference templates remain available under
+> `raxis/installer/` for operators who want to inspect or customize
+> them before installing:
 >
 > - macOS — [`raxis/installer/launchd/com.raxis.kernel.plist`](../installer/launchd/com.raxis.kernel.plist)
 >   plus [`raxis/installer/newsyslog/raxis.conf`](../installer/newsyslog/raxis.conf) for log rotation.

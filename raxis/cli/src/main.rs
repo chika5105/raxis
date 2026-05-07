@@ -43,7 +43,8 @@ use errors::CliError;
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "genesis", "policy", "plan", "initiative", "operator", "task", "session",
-    "delegation", "escalation", "epoch", "audit", "cert", "credential", "submit",
+    "delegation", "escalation", "epoch", "audit", "cert", "credential", "kernel",
+    "submit",
     "status", "log", "verify-chain", "queue", "inspect", "inspect-initiative",
     "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
     "budget", "explain", "top",
@@ -73,6 +74,13 @@ const CERT_SUBCOMMANDS:        &[&str] = &[
 /// the credential-proxy runtime (Postgres / k8s / AWS / GCP /
 /// Azure / Redis / MongoDB / MySQL / MSSQL / SMTP).
 const CREDENTIAL_SUBCOMMANDS:  &[&str] = &["list", "rotate"];
+/// V2 §kernel-lifecycle.md §3 — daemon mode. The MVP ships
+/// `install` and `uninstall` (template + place / remove the
+/// platform unit file). The full surface (`start --daemon`,
+/// `stop`, `status`, `restart` with sd_notify and single-instance
+/// enforcement) is a follow-up phase per kernel-lifecycle.md
+/// §"Implementation checklist".
+const KERNEL_SUBCOMMANDS:      &[&str] = &["install", "uninstall"];
 
 // ---------------------------------------------------------------------------
 // Global CLI flags
@@ -307,6 +315,16 @@ fn run() -> Result<(), CliError> {
                 ))),
             }
         }
+        "kernel" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "install"   => commands::kernel::run_install(&flags, &rest[1..]),
+                "uninstall" => commands::kernel::run_uninstall(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "kernel sub-command", sub2, KERNEL_SUBCOMMANDS,
+                ))),
+            }
+        }
         "status" => commands::status::run(&flags, rest),
         "log" => commands::log::run(&flags, rest),
         "verify-chain" => commands::verify_chain::run(&flags, rest),
@@ -521,6 +539,22 @@ SUBCOMMANDS:
         temp-write + rename ceremony. The new value is read via
         stdin (default), a file on disk, or a hidden terminal prompt.
         --value <bytes> is REJECTED — secrets must never enter argv.
+
+    kernel install [--system] [--binary <path>] [--force]
+        Install RAXIS as a platform-native daemon. Writes a systemd
+        unit (Linux) or launchd plist (macOS) populated with this
+        binary's resolved raxis-kernel path and the operator's
+        --data-dir. Without --system the unit is installed under
+        the invoking user; with --system it is installed at the
+        system level (sudo required). Prints the next-step
+        `systemctl --user enable --now raxis-kernel` (Linux) or
+        `launchctl bootstrap` (macOS) to start the service.
+
+    kernel uninstall [--system]
+        Remove the unit file written by `kernel install`. Does NOT
+        stop a currently-running kernel; print the `systemctl
+        disable` / `launchctl bootout` commands the operator should
+        run for full cleanup.
 
 READ-ONLY OBSERVATION:
 
@@ -873,6 +907,7 @@ mod catalog_consistency_tests {
             ("audit",      AUDIT_SUBCOMMANDS),
             ("cert",       CERT_SUBCOMMANDS),
             ("credential", CREDENTIAL_SUBCOMMANDS),
+            ("kernel",     KERNEL_SUBCOMMANDS),
             ("submit",     SUBMIT_SUBCOMMANDS),
         ] {
             assert!(!list.is_empty(), "{name}_SUBCOMMANDS is empty");
@@ -906,6 +941,7 @@ mod catalog_consistency_tests {
             ("\"audit\" => {",      AUDIT_SUBCOMMANDS),
             ("\"cert\" => {",       CERT_SUBCOMMANDS),
             ("\"credential\" => {", CREDENTIAL_SUBCOMMANDS),
+            ("\"kernel\" => {",     KERNEL_SUBCOMMANDS),
             ("\"submit\" => {",     SUBMIT_SUBCOMMANDS),
         ];
 
