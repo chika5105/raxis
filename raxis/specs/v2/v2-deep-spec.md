@@ -1711,13 +1711,33 @@ This naturally sums across all sessions in the initiative. When the combined
 `FAIL_BUDGET_EXCEEDED` — regardless of which specific session submitted the intent that
 crossed the ceiling. The entire initiative is budget-constrained as a unit.
 
-**approve_plan check #7 — Single lane enforcement:** Any `[[subtasks]]` block with its own
-`lane_id` override is rejected at `approve_plan` time with:
+**approve_plan check #7 — Single lane enforcement.** Implemented in
+`kernel/src/initiatives/lifecycle.rs::validate_single_lane_propagation`,
+called from `approve_plan` immediately after `validate_plan_dag` and
+`validate_path_allowlist_v2_format`, **before** `BEGIN TRANSACTION`. The
+diagnostic shape is `LifecycleError::PlanSingleLaneInvalid { rule,
+offending_task, suggestion }`. Three disjoint `rule` strings map to the
+three malformed shapes:
+
+| `rule`                      | When it fires                                                                                              |
+|-----------------------------|------------------------------------------------------------------------------------------------------------|
+| `missing_workspace_lane`    | Plan TOML has no `[workspace] lane_id` table/key. Without it, the kernel has nothing to propagate.         |
+| `empty_workspace_lane`      | `[workspace] lane_id = ""`. The empty marker is reserved internally for *omitted by per-task block*.       |
+| `single_lane_propagation`   | At least one `[[tasks]]` block sets `lane_id = "..."`. V2 forbids per-task overrides.                       |
+
+Worked example (`single_lane_propagation`):
 ```
 { rule: "single_lane_propagation",
   offending_task: "<task_id>",
-  suggestion: "Remove lane_id from [[subtasks]] blocks. Lane is declared once at [workspace]." }
+  suggestion: "Remove `lane_id` from `[[tasks]]` blocks. V2 declares the lane
+               once at `[workspace] lane_id` and propagates it to every sub-task —
+               per-task overrides defeat the shared-budget ceiling." }
 ```
+
+The wire-side projection is `OperatorResponse::Error { code: "FAIL_APPROVE_PLAN",
+detail: <Display of PlanSingleLaneInvalid> }` (kernel/src/ipc/operator.rs::handle_approve_plan).
+The detail string carries the rule + offending task + suggestion verbatim, so an
+operator can grep their `plan.toml` for the offending block.
 
 ---
 

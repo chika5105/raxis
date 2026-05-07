@@ -113,6 +113,47 @@ pub enum LifecycleError {
         reason: &'static str,
     },
 
+    /// **V2 (Step 28) — `INVALID_PLAN_SCHEMA` single-lane propagation.**
+    /// Either:
+    ///   * the plan TOML has no `[workspace] lane_id = "..."` declaration
+    ///     (V2 makes the workspace-root lane mandatory so the
+    ///     budget-ceiling propagation in `v2-deep-spec.md §Step 28` has
+    ///     a concrete value to fan out to every task row, every
+    ///     orchestrator session, every executor session, and every
+    ///     reviewer session — without it the existing per-lane
+    ///     `SUM(reserved_cost)` enforcement cannot bound an initiative as
+    ///     a unit), OR
+    ///   * a `[[tasks]]` block declares its own `lane_id = "..."`
+    ///     override. The Step 28 single-lane invariant rejects per-task
+    ///     overrides at `approve_plan` time so the operator's
+    ///     workspace-root lane is the authoritative ceiling for every
+    ///     session in the initiative.
+    ///
+    /// Surfaced by `validate_single_lane_propagation` at `approve_plan`
+    /// time, **before** `BEGIN TRANSACTION`, so a malformed plan never
+    /// allocates a row.
+    ///
+    /// `rule` is one of:
+    ///   * `"missing_workspace_lane"` — plan TOML has no
+    ///     `[workspace] lane_id`.
+    ///   * `"empty_workspace_lane"` — `[workspace] lane_id` is the empty
+    ///     string.
+    ///   * `"single_lane_propagation"` — at least one `[[tasks]]`
+    ///     block sets `lane_id` (V2 forbids per-task overrides).
+    ///
+    /// `offending_task` names the offending task (or the literal
+    /// `"<workspace>"` for `missing_workspace_lane` /
+    /// `empty_workspace_lane`).
+    /// `suggestion` is the actionable remediation hint required by
+    /// `v2-deep-spec.md §Step 17` ("must always include a concrete
+    /// remediation suggestion, not just the violation").
+    #[error("plan single-lane propagation invalid (rule={rule}, task={offending_task}): {suggestion}")]
+    PlanSingleLaneInvalid {
+        rule:           &'static str,
+        offending_task: String,
+        suggestion:     String,
+    },
+
     /// **V2 (Step 17) — `INVALID_PLAN_SCHEMA` shift-left, DAG family.**
     /// A `[[tasks]]` block declares a structurally invalid dependency
     /// graph. Surfaced by `validate_plan_dag` at `approve_plan` time,
@@ -359,6 +400,9 @@ pub fn approve_plan(
     let plan_toml_str    = String::from_utf8_lossy(&plan_bytes);
     let plan_tasks       = parse_plan_tasks(&plan_toml_str)?;
     let orchestrator_fields = parse_plan_orchestrator(&plan_toml_str)?;
+    // V2 §Step 28 — read `[workspace] lane_id` (or surface the
+    // missing/empty/override error below).
+    let workspace_lane_raw  = parse_plan_workspace_lane(&plan_toml_str)?;
 
     // V2 Step 17 — shift-left plan validation. Each helper runs BEFORE
     // `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
@@ -384,6 +428,15 @@ pub fn approve_plan(
     validate_plan_dag(&plan_tasks)?;
     validate_path_allowlist_v2_format(&plan_tasks)?;
     validate_cross_cutting_artifacts(&orchestrator_fields)?;
+    // V2 §Step 28 — single-lane propagation: rejects missing /
+    // empty `[workspace] lane_id` AND per-task `lane_id` overrides
+    // before the transaction opens. `workspace_lane` is the
+    // authoritative non-empty lane id every `scheduler::PlanTask`
+    // below will be stamped with.
+    let workspace_lane = validate_single_lane_propagation(
+        &workspace_lane_raw,
+        &plan_tasks,
+    )?;
 
     let task_count    = plan_tasks.len();
     let now           = unix_now_secs();
@@ -466,10 +519,14 @@ pub fn approve_plan(
             pt.path_scope_override,
         ));
 
+        // V2 §Step 28 — every task row carries the workspace-root
+        // lane verbatim. `pt.lane_id` is `""` here (validator
+        // already rejected non-empty per-task overrides); this is
+        // the propagation step.
         let task = scheduler::PlanTask {
             task_id:       pt.task_id.clone(),
             initiative_id: initiative_id.to_owned(),
-            lane_id:       pt.lane_id,
+            lane_id:       workspace_lane.clone(),
             name:          pt.name,
             dependencies:  pt.predecessors,
         };
@@ -881,10 +938,22 @@ pub fn retry_task(task_id: &str, store: &Store) -> Result<(), LifecycleError> {
 /// `path_export_globs`, `path_scope_override`) are NOT persisted to
 /// `tasks` — they live in the in-memory `PlanRegistry`. The `tasks` DDL
 /// has no columns for them by intent (kernel-store.md §2.5.8 line 1911).
+///
+/// **V2 §Step 28 single-lane propagation.** `lane_id` carries the
+/// *plan-author-declared* value, defaulting to the empty string when
+/// the `[[tasks]]` block did not set one. The empty marker is
+/// distinguishable from `"default"` (which is itself a plan-explicit
+/// value); `validate_single_lane_propagation` rejects any task whose
+/// `lane_id` is non-empty (i.e. a per-task override) and otherwise the
+/// approve_plan path overwrites every task's `lane_id` with the
+/// workspace-root value before persisting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanTask {
     task_id:      String,
     name:         String,
+    /// Plan-author-declared lane override; `""` when omitted. The
+    /// approve_plan path replaces this with the `[workspace] lane_id`
+    /// value before constructing the scheduler-side `PlanTask`.
     lane_id:      String,
     predecessors: Vec<String>,
 
@@ -904,15 +973,24 @@ struct PlanTask {
 /// Parse `[[tasks]]` array from plan TOML.
 ///
 /// Required: `task_id`.
-/// Optional: `name` (defaults to `task_id`), `lane_id` (defaults to `"default"`),
+/// Optional: `name` (defaults to `task_id`),
 ///           `predecessors` (defaults to empty list).
+///
+/// **V2 §Step 28 — `lane_id` is intentionally NOT defaulted here.** A
+/// `[[tasks]] lane_id = "..."` override is parsed verbatim into
+/// `PlanTask::lane_id` so `validate_single_lane_propagation` can
+/// distinguish "operator omitted lane_id (good — propagation will
+/// fill it)" from "operator declared a per-task lane_id (rejected —
+/// the workspace-root lane is the only authority)". Tasks that omit
+/// `lane_id` get `lane_id = ""` here; the approve_plan path replaces
+/// that with the workspace-root value after validation passes.
 ///
 /// §2.5.8 path-scope fields: all optional; defaults are deny-everything,
 /// no-export, no-override (matching the spec's locked-down defaults).
-/// Non-array values for the array-typed fields silently fall back to the
-/// default — same conservative behaviour as `predecessors`. The signing
-/// tool is the gate that catches operator typos; the kernel does not
-/// re-validate plan shape beyond what's necessary for safety.
+/// Non-array values for the array-typed fields silently fall back to
+/// the default — same conservative behaviour as `predecessors`. The
+/// signing tool is the gate that catches operator typos; the kernel
+/// does not re-validate plan shape beyond what's necessary for safety.
 fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
     let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
         reason: format!("TOML parse error: {e}"),
@@ -935,7 +1013,15 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             })?
             .to_owned();
         let name    = entry.get("name").and_then(|v| v.as_str()).unwrap_or(&task_id).to_owned();
-        let lane_id = entry.get("lane_id").and_then(|v| v.as_str()).unwrap_or("default").to_owned();
+        // V2 §Step 28: do NOT default to "default" here. Empty marker
+        // means "operator omitted lane_id"; any non-empty value is a
+        // per-task override that `validate_single_lane_propagation`
+        // rejects.
+        let lane_id = entry
+            .get("lane_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
 
         let predecessors        = string_array(entry, "predecessors");
         let path_allowlist      = string_array(entry, "path_allowlist");
@@ -1002,6 +1088,119 @@ fn parse_plan_orchestrator(plan_toml: &str)
         .unwrap_or_default();
 
     Ok(crate::initiatives::OrchestratorPlanFields { cross_cutting_artifacts })
+}
+
+// ---------------------------------------------------------------------------
+// V2 §Step 28 — workspace-root lane (single lane per initiative)
+// ---------------------------------------------------------------------------
+
+/// Parse the V2-mandatory `[workspace] lane_id = "..."` declaration.
+///
+/// **Normative reference:** `v2-deep-spec.md §Step 28`. The `[workspace]`
+/// table is the single authoritative source for the initiative's lane
+/// — every task row, every Orchestrator/Executor/Reviewer session, and
+/// every budget reservation propagates this value, so the existing
+/// `SUM(reserved_cost) FROM lane_budget_reservations WHERE lane_id = ?`
+/// query in `scheduler::lane::get_lane_status_in_tx` naturally bounds
+/// the *initiative as a whole* (not the per-session view).
+///
+/// **TOML shape:**
+/// ```toml
+/// [workspace]
+/// lane_id = "feature-work"
+/// ```
+///
+/// Returns `Ok(Some(lane_id))` when the table+key is present and the
+/// value is a non-empty string. Returns `Ok(None)` when the
+/// `[workspace]` table is missing or `lane_id` is absent — the
+/// `validate_single_lane_propagation` validator turns that into
+/// `PlanSingleLaneInvalid { rule: "missing_workspace_lane", .. }`.
+/// An empty-string value yields
+/// `Ok(Some("".to_owned()))`, surfaced as `"empty_workspace_lane"` by
+/// the same validator.
+///
+/// We accept silent absence here (rather than returning the error
+/// directly) so the caller can compose the workspace-lane validator
+/// with the per-task-override validator inside the same audit
+/// surface — a single `PlanSingleLaneInvalid` error type, three
+/// disjoint `rule` strings.
+fn parse_plan_workspace_lane(plan_toml: &str)
+    -> Result<Option<String>, LifecycleError>
+{
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
+        LifecycleError::PlanInvalid {
+            reason: format!("TOML parse error: {e}"),
+        }
+    })?;
+
+    let raw = doc
+        .get("workspace")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("lane_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    Ok(raw)
+}
+
+/// V2 §Step 28 — Reject malformed single-lane plans before
+/// `BEGIN TRANSACTION`.
+///
+/// Three rules:
+///
+///   * `"missing_workspace_lane"` — plan TOML has no
+///     `[workspace] lane_id`. The kernel cannot propagate a lane
+///     value into task rows / sessions / budget reservations
+///     without it, so the initiative-as-a-whole budget ceiling
+///     would be unbounded. Rejected.
+///   * `"empty_workspace_lane"` — `[workspace] lane_id` is the
+///     empty string. The empty marker is reserved internally for
+///     "task did not declare a lane" (see `parse_plan_tasks`); the
+///     workspace-root MUST be a non-empty identifier.
+///   * `"single_lane_propagation"` — at least one `[[tasks]]` block
+///     declares its own `lane_id`. V2 forbids per-task overrides;
+///     the workspace-root lane is the single authority.
+///
+/// On success, returns the workspace-root lane id (a non-empty
+/// `String`) for the caller to propagate into every
+/// `scheduler::PlanTask::lane_id`.
+fn validate_single_lane_propagation(
+    workspace_lane: &Option<String>,
+    tasks:          &[PlanTask],
+) -> Result<String, LifecycleError> {
+    let workspace_lane = match workspace_lane {
+        None => return Err(LifecycleError::PlanSingleLaneInvalid {
+            rule:           "missing_workspace_lane",
+            offending_task: "<workspace>".to_owned(),
+            suggestion:     "Add `[workspace]\\nlane_id = \"<lane>\"` to plan.toml. \
+                             V2 requires a single workspace-root lane so the \
+                             initiative budget ceiling propagates to every \
+                             session in the initiative."
+                .to_owned(),
+        }),
+        Some(s) if s.is_empty() => return Err(LifecycleError::PlanSingleLaneInvalid {
+            rule:           "empty_workspace_lane",
+            offending_task: "<workspace>".to_owned(),
+            suggestion:     "Set `[workspace] lane_id` to a non-empty lane \
+                             identifier from your policy.toml `[[lanes]]` list."
+                .to_owned(),
+        }),
+        Some(s) => s.clone(),
+    };
+
+    if let Some(offender) = tasks.iter().find(|t| !t.lane_id.is_empty()) {
+        return Err(LifecycleError::PlanSingleLaneInvalid {
+            rule:           "single_lane_propagation",
+            offending_task: offender.task_id.clone(),
+            suggestion:     "Remove `lane_id` from `[[tasks]]` blocks. V2 declares \
+                             the lane once at `[workspace] lane_id` and \
+                             propagates it to every sub-task — per-task \
+                             overrides defeat the shared-budget ceiling."
+                .to_owned(),
+        });
+    }
+
+    Ok(workspace_lane)
 }
 
 /// V2 §Step 11 — Validate `cross_cutting_artifacts` entries.
@@ -1420,10 +1619,29 @@ mod tests {
     }
 
     #[test]
-    fn parse_plan_tasks_lane_defaults_to_default() {
+    fn parse_plan_tasks_omitted_lane_id_yields_empty_marker() {
+        // V2 §Step 28: omitted `lane_id` parses as `""`, which is the
+        // internal "operator did not declare" marker. The approve_plan
+        // path replaces this with the workspace-root value after
+        // `validate_single_lane_propagation` accepts the plan.
         let toml = "[[tasks]]\ntask_id = \"t2\"\n";
         let tasks = parse_plan_tasks(toml).unwrap();
-        assert_eq!(tasks[0].lane_id, "default");
+        assert_eq!(tasks[0].lane_id, "");
+    }
+
+    #[test]
+    fn parse_plan_tasks_lane_id_override_is_preserved_for_validator() {
+        // V2 §Step 28: an explicit per-task `lane_id` survives parsing
+        // verbatim so `validate_single_lane_propagation` can spot the
+        // override and emit `single_lane_propagation`. The approve_plan
+        // path never reaches the propagation step in this case.
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+lane_id = "rogue-lane"
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].lane_id, "rogue-lane");
     }
 
     #[test]
@@ -1872,6 +2090,107 @@ mod tests {
         validate_plan_dag(&plan).unwrap();
     }
 
+    // ── V2 §Step 28 — single-lane propagation tests ──────────────────────
+    //
+    // These run against the pure validator (no SQLite, no signing) so
+    // they pin the rule semantics without coupling to the approve_plan
+    // transactional surface. End-to-end approve_plan coverage of the
+    // same rules lives further down.
+
+    fn lane_task(task_id: &str, lane_id: &str) -> PlanTask {
+        PlanTask {
+            task_id: task_id.into(),
+            name: task_id.into(),
+            lane_id: lane_id.into(),
+            predecessors: vec![],
+            path_allowlist: vec![],
+            path_export_to_successors: false,
+            path_export_globs: vec![],
+            path_scope_override: false,
+        }
+    }
+
+    #[test]
+    fn validate_single_lane_missing_workspace_lane_is_rejected() {
+        let tasks = vec![lane_task("t1", "")];
+        let err = validate_single_lane_propagation(&None, &tasks).unwrap_err();
+        match err {
+            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, .. } => {
+                assert_eq!(rule, "missing_workspace_lane");
+                assert_eq!(offending_task, "<workspace>");
+            }
+            other => panic!("expected PlanSingleLaneInvalid(missing_workspace_lane), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_single_lane_empty_workspace_lane_is_rejected() {
+        let tasks = vec![lane_task("t1", "")];
+        let err = validate_single_lane_propagation(
+            &Some(String::new()), &tasks,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, .. } => {
+                assert_eq!(rule, "empty_workspace_lane");
+                assert_eq!(offending_task, "<workspace>");
+            }
+            other => panic!("expected PlanSingleLaneInvalid(empty_workspace_lane), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_single_lane_per_task_override_is_rejected() {
+        // Workspace lane is fine; one task declares its own override.
+        // The validator names that task in `offending_task`.
+        let tasks = vec![
+            lane_task("t1", ""),
+            lane_task("t2", "rogue-lane"),
+        ];
+        let err = validate_single_lane_propagation(
+            &Some("default".into()), &tasks,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, suggestion } => {
+                assert_eq!(rule, "single_lane_propagation");
+                assert_eq!(offending_task, "t2");
+                assert!(suggestion.contains("Remove `lane_id`"));
+            }
+            other => panic!("expected PlanSingleLaneInvalid(single_lane_propagation), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_single_lane_happy_path_returns_workspace_lane() {
+        let tasks = vec![
+            lane_task("t1", ""),
+            lane_task("t2", ""),
+        ];
+        let lane = validate_single_lane_propagation(
+            &Some("feature-work".into()), &tasks,
+        ).unwrap();
+        assert_eq!(lane, "feature-work");
+    }
+
+    #[test]
+    fn parse_plan_workspace_lane_reads_value() {
+        let toml = r#"
+[workspace]
+lane_id = "feature-work"
+
+[[tasks]]
+task_id = "t1"
+"#;
+        let lane = parse_plan_workspace_lane(toml).unwrap();
+        assert_eq!(lane.as_deref(), Some("feature-work"));
+    }
+
+    #[test]
+    fn parse_plan_workspace_lane_missing_returns_none() {
+        let toml = "[[tasks]]\ntask_id = \"t1\"\n";
+        let lane = parse_plan_workspace_lane(toml).unwrap();
+        assert_eq!(lane, None);
+    }
+
     #[test]
     fn path_allowlist_entry_violation_canonical_table() {
         // Direct unit test of the helper — pins the (entry → reason)
@@ -1923,9 +2242,41 @@ mod tests {
         (sk, pk)
     }
 
-    /// Build a Draft initiative + signed_plan_artifacts row directly (no
-    /// IPC), returning everything the test needs to call `approve_plan`.
+    /// V2 §Step 28 — every signed plan needs `[workspace] lane_id`.
+    /// Tests that don't explicitly exercise the missing/override
+    /// workspace-lane error paths use this helper to prepend the
+    /// canonical default block. Tests that DO want to exercise those
+    /// rejection paths use `seed_draft_initiative_raw` directly.
+    fn ensure_workspace_lane(plan_toml: &str) -> String {
+        // Detect either `[workspace]` or `[ workspace ]` (whitespace
+        // around the table name). The bytes-substring check is good
+        // enough — TOML test fixtures here are hand-authored and
+        // never embed the literal sequence inside a string value.
+        if plan_toml.contains("[workspace]") || plan_toml.contains("[ workspace ]") {
+            return plan_toml.to_owned();
+        }
+        format!("[workspace]\nlane_id = \"default\"\n\n{plan_toml}")
+    }
+
+    /// Build a Draft initiative + signed_plan_artifacts row directly
+    /// (no IPC), returning everything the test needs to call
+    /// `approve_plan`. Auto-prepends `[workspace] lane_id = "default"`
+    /// unless the plan already has a `[workspace]` table.
     fn seed_draft_initiative(
+        store:      &Store,
+        plan_toml:  &str,
+        sk:         &SigningKey,
+    ) -> (String, Vec<u8>) {
+        let plan_with_lane = ensure_workspace_lane(plan_toml);
+        seed_draft_initiative_raw(store, &plan_with_lane, sk)
+    }
+
+    /// Like `seed_draft_initiative` but persists the plan TOML
+    /// verbatim — used by tests that need to assert the
+    /// `validate_single_lane_propagation` error paths
+    /// (`missing_workspace_lane`, `empty_workspace_lane`,
+    /// `single_lane_propagation`).
+    fn seed_draft_initiative_raw(
         store:      &Store,
         plan_toml:  &str,
         sk:         &SigningKey,
@@ -2027,12 +2378,10 @@ mod tests {
             [[tasks]]
             task_id  = "t1"
             name     = "first"
-            lane_id  = "default"
 
             [[tasks]]
             task_id      = "t2"
             name         = "second"
-            lane_id      = "default"
             predecessors = ["t1"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
@@ -2061,6 +2410,164 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind.as_str(), "PlanApproved");
         assert_eq!(events[0].initiative_id.as_deref(), Some(init_id.as_str()));
+
+        // V2 §Step 28: every task row carries the workspace-root
+        // lane_id verbatim (the helper prepended `lane_id = "default"`).
+        // We assert the propagation persisted to the `tasks` table —
+        // that's where `scheduler::lane::get_lane_status_in_tx` reads it
+        // when computing the budget snapshot for new intent admission.
+        let conn = store.lock_sync();
+        let lanes: Vec<String> = conn.prepare(
+            &format!("SELECT lane_id FROM {TASKS} WHERE initiative_id = ?1"),
+        ).unwrap()
+            .query_map(rusqlite::params![&init_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(lanes.len(), 2);
+        assert!(lanes.iter().all(|l| l == "default"),
+            "every task row must carry the workspace-root lane_id; got {lanes:?}");
+    }
+
+    // ── V2 §Step 28 — approve_plan-level rejection of malformed plans ───
+
+    #[test]
+    fn approve_plan_rejects_missing_workspace_lane() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        // No `[workspace]` table at all. `seed_draft_initiative_raw`
+        // bypasses the auto-prepend so the validator must surface the
+        // missing-workspace-lane rule.
+        let plan = r#"
+            [meta]
+            version = 1
+
+            [[tasks]]
+            task_id = "t1"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, .. } => {
+                assert_eq!(rule, "missing_workspace_lane");
+                assert_eq!(offending_task, "<workspace>");
+            }
+            other => panic!("expected PlanSingleLaneInvalid(missing_workspace_lane), got {other:?}"),
+        }
+
+        // Initiative stays Draft; no tasks admitted.
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
+        // No audit event emitted (the rejection happens before commit).
+        assert!(audit.events().is_empty());
+    }
+
+    #[test]
+    fn approve_plan_rejects_empty_workspace_lane() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [workspace]
+            lane_id = ""
+
+            [[tasks]]
+            task_id = "t1"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanSingleLaneInvalid { rule, .. } => {
+                assert_eq!(rule, "empty_workspace_lane");
+            }
+            other => panic!("expected PlanSingleLaneInvalid(empty_workspace_lane), got {other:?}"),
+        }
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+    }
+
+    #[test]
+    fn approve_plan_rejects_per_task_lane_id_override() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [workspace]
+            lane_id = "feature-work"
+
+            [[tasks]]
+            task_id = "t1"
+
+            [[tasks]]
+            task_id = "t2"
+            lane_id = "rogue-lane"
+            predecessors = ["t1"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, .. } => {
+                assert_eq!(rule, "single_lane_propagation");
+                assert_eq!(offending_task, "t2");
+            }
+            other => panic!("expected PlanSingleLaneInvalid(single_lane_propagation), got {other:?}"),
+        }
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
+    }
+
+    #[test]
+    fn approve_plan_propagates_workspace_lane_to_every_task() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        // Three tasks, none declare lane_id. `[workspace]` declares the
+        // single source of truth.
+        let plan = r#"
+            [workspace]
+            lane_id = "feature-work"
+
+            [[tasks]]
+            task_id = "t1"
+
+            [[tasks]]
+            task_id = "t2"
+            predecessors = ["t1"]
+
+            [[tasks]]
+            task_id = "t3"
+            predecessors = ["t2"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap();
+
+        let conn = store.lock_sync();
+        let lanes: Vec<String> = conn.prepare(
+            &format!("SELECT lane_id FROM {TASKS} WHERE initiative_id = ?1"),
+        ).unwrap()
+            .query_map(rusqlite::params![&init_id], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(lanes.len(), 3);
+        assert!(lanes.iter().all(|l| l == "feature-work"),
+            "every task row must carry the workspace-root lane_id verbatim; got {lanes:?}");
     }
 
     #[test]
