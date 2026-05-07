@@ -237,6 +237,22 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
             // the response log line via `response_summary_fields`.
             vec![("submitted_by", submitted_by.clone())]
         }
+        OperatorRequest::CreateInitiativeV2 {
+            initiative_id,
+            bundle_sha256_hex,
+            signed_by_hex,
+            ..
+        } => vec![
+            // V2.1 envelope carries operator-chosen initiative_id +
+            // the bundle's content-address + the operator fingerprint
+            // (plan-bundle-sealing.md §3.4). Logging the sha256 +
+            // fingerprint makes admission failures correlatable
+            // with the operator's local bundle without dumping
+            // kilobytes of plan_bundle_hex into operator stderr.
+            ("initiative_id",     initiative_id.clone()),
+            ("bundle_sha256_hex", bundle_sha256_hex.clone()),
+            ("signed_by_hex",     signed_by_hex.clone()),
+        ],
         OperatorRequest::ApprovePlan {
             initiative_id,
             approving_operator,
@@ -592,6 +608,26 @@ async fn handle_request(
         // Initiative lifecycle:
         OperatorRequest::CreateInitiative { plan_toml, plan_sig_hex, submitted_by } => {
             handle_create_initiative(plan_toml, plan_sig_hex, submitted_by, ctx).await
+        }
+        // V2.1 plan-bundle-sealed admission. Spec:
+        // `plan-bundle-sealing.md §3.4 + §8.1`. The full §8.1 admission
+        // handler (canonical decode → freshness → replay → policy) lands
+        // in a follow-up task; for now the kernel rejects the V2 envelope
+        // with a structured error so a CLI that submits today gets a
+        // clear "kernel admission not yet wired" message rather than
+        // a stale mid-pipeline failure. Replay-protection invariants
+        // (`INV-PLAN-BUNDLE-FRESH`) are NOT broken by this rejection
+        // path — no `plan_bundle_nonces_seen` row is written for a
+        // bundle the kernel could not fully process.
+        OperatorRequest::CreateInitiativeV2 { .. } => {
+            OperatorResponse::Error {
+                code:   "FAIL_PLAN_BUNDLE_KERNEL_ADMISSION_NOT_YET_WIRED".to_owned(),
+                detail: "V2.1 plan-bundle admission lands in a follow-up; \
+                         CLI bundle was constructed and signed correctly, \
+                         but the kernel admission path is still pending \
+                         (see plan-bundle-sealing.md §11.1)."
+                    .to_owned(),
+            }
         }
         OperatorRequest::ApprovePlan { initiative_id, approving_operator, operator_pubkey_hex } => {
             handle_approve_plan(initiative_id, approving_operator, operator_pubkey_hex, operator, ctx).await
@@ -1914,6 +1950,7 @@ fn op_name(req: &OperatorRequest) -> &'static str {
         OperatorRequest::RevokeSession { .. }  => "RevokeSession",
         OperatorRequest::GrantDelegation { .. }=> "GrantDelegation",
         OperatorRequest::CreateInitiative { .. }=> "CreateInitiative",
+        OperatorRequest::CreateInitiativeV2 { .. } => "CreateInitiativeV2",
         OperatorRequest::ApprovePlan { .. }     => "ApprovePlan",
         OperatorRequest::RejectPlan { .. }      => "RejectPlan",
         OperatorRequest::RetryTask { .. }       => "RetryTask",

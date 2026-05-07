@@ -37,6 +37,7 @@ pub mod queue;
 pub mod session;
 pub mod sessions;
 pub mod status;
+pub mod submit;
 pub mod task;
 pub mod top;
 pub mod verifiers;

@@ -74,6 +74,68 @@ pub enum OperatorRequest {
         plan_sig_hex: String,
         submitted_by: String,
     },
+    /// V2.1 plan-bundle-sealed initiative creation.
+    ///
+    /// Normative reference: `specs/v2/plan-bundle-sealing.md` §3.4 (IPC
+    /// envelope) and §4.2 step 10 (CLI submit phase).
+    ///
+    /// The wire fields differ structurally from V1:
+    ///
+    /// * `initiative_id` is **CLI-chosen** (UUIDv7). V1 had the kernel
+    ///   assign one server-side; V2 hands authority for the id to the
+    ///   operator so the audit chain can correlate the operator's
+    ///   `raxis submit plan` invocation with the kernel-side
+    ///   `InitiativeCreated` event using a single id known to both
+    ///   sides at IPC time. The kernel rejects the request with
+    ///   `FAIL_INITIATIVE_ID_COLLISION` if the id is already in use.
+    /// * `plan_bundle` carries the **canonical_input bytes** per
+    ///   §3.2 — every artifact's name, length, and bytes are
+    ///   length-prefix-encoded. This is the byte-stream the
+    ///   operator signed, byte-identical to what the kernel will
+    ///   re-decode and seal into `plan_bundles`.
+    /// * `bundle_sha256` is the SHA-256 over `plan_bundle`. Sent
+    ///   redundantly so the kernel can reject obviously-corrupt
+    ///   wire bytes before allocating Ed25519 verification cycles
+    ///   (admission step 2 per §8.1).
+    /// * `signature` is the 64-byte raw Ed25519 signature over
+    ///   `signing_input` per §3.2 (= `RAXIS-V2-PLAN-BUNDLE-SIG\0` ||
+    ///   `bundle_sha256`).
+    /// * `signed_by` is the 8-byte operator key fingerprint
+    ///   (SHA-256[:16] of the operator's Ed25519 public key) used
+    ///   to look up the operator entry in `policy.operators` at
+    ///   admission step 8.
+    ///
+    /// **Hex-encoding choice (best-judgment, documented in spec):**
+    /// the V2 spec lists raw Rust types (`Vec<u8>`, `[u8; 32]`,
+    /// `[u8; 64]`, `OperatorFingerprint`). The actual JSON wire format
+    /// uses lowercase hex strings for byte-array fields because the
+    /// V1 envelope (`plan_sig_hex`, fingerprints in `policy.operators`)
+    /// is also hex-on-the-wire — keeping the encoding consistent across
+    /// V1 and V2 wire variants means the operator socket has a single
+    /// "what does a bytes field look like" answer and the JSON-frame
+    /// contract test in `tests::create_initiative_v2_pinned` can pin
+    /// the byte shape with a regular string literal. The hex values
+    /// are decoded back into the typed bundle structures
+    /// (`BundleSha256` / `BundleNonce` / `OperatorFingerprint`) by
+    /// the kernel admission decoder.
+    CreateInitiativeV2 {
+        /// CLI-chosen UUIDv7. Rejected with
+        /// `FAIL_INITIATIVE_ID_COLLISION` on collision.
+        initiative_id:    String,
+        /// canonical_input bytes per §3.2. Hex-encoded on the wire so
+        /// the JSON frame stays string-only; the kernel decodes back
+        /// to bytes before calling `canonical_decode`.
+        plan_bundle_hex:  String,
+        /// SHA-256 of `plan_bundle` (the decoded canonical_input
+        /// bytes). 64-char lowercase hex.
+        bundle_sha256_hex: String,
+        /// Ed25519 signature over `signing_input` per §3.2.
+        /// 128-char lowercase hex.
+        signature_hex:    String,
+        /// Operator's pubkey fingerprint — 16-char lowercase hex of
+        /// the 8-byte SHA-256[:16] fingerprint.
+        signed_by_hex:    String,
+    },
     ApprovePlan {
         initiative_id:       String,
         approving_operator:  String,
@@ -438,6 +500,36 @@ mod tests {
                     "plan_toml": "[[tasks]]\ntask_id = \"t1\"",
                     "plan_sig_hex": "00ff",
                     "submitted_by": "op-prime"
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn create_initiative_v2_wire_shape() {
+        // Pin the V2.1 envelope hex-encoded byte shape exactly. If
+        // this test fails, every released CLI/kernel pair stops
+        // talking — treat the field set/order/encoding as a
+        // forever-stable wire contract. Spec: plan-bundle-sealing.md
+        // §3.4 + §11.1 "CLI workflow" landing.
+        let sig_hex = "02".repeat(64);
+        let bundle_sha_hex = "01".repeat(32);
+        round_trip(
+            &OperatorRequest::CreateInitiativeV2 {
+                initiative_id:     "0192a8f0-1234-7abc-9000-000000000001".into(),
+                plan_bundle_hex:   "deadbeef".into(),
+                bundle_sha256_hex: bundle_sha_hex.clone(),
+                signature_hex:     sig_hex.clone(),
+                signed_by_hex:     "0303030303030303".into(),
+            },
+            json!({
+                "op": "CreateInitiativeV2",
+                "payload": {
+                    "initiative_id":     "0192a8f0-1234-7abc-9000-000000000001",
+                    "plan_bundle_hex":   "deadbeef",
+                    "bundle_sha256_hex": bundle_sha_hex,
+                    "signature_hex":     sig_hex,
+                    "signed_by_hex":     "0303030303030303"
                 }
             }),
         );

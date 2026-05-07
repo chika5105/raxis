@@ -43,7 +43,7 @@ use errors::CliError;
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "genesis", "policy", "plan", "initiative", "operator", "task", "session",
-    "delegation", "escalation", "epoch", "audit", "cert",
+    "delegation", "escalation", "epoch", "audit", "cert", "submit",
     "status", "log", "verify-chain", "queue", "inspect", "inspect-initiative",
     "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
     "budget", "explain", "top",
@@ -51,6 +51,10 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
 const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject"];
+/// V2.1 atomic plan-bundle submit. Spec: plan-bundle-sealing.md §4.
+/// Currently exposes only `plan`; future sub-commands (`policy`,
+/// `operator-cert`) will plug in here without a third rename.
+const SUBMIT_SUBCOMMANDS:      &[&str] = &["plan"];
 const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "list", "quarantine"];
 const OPERATOR_SUBCOMMANDS:    &[&str] = &["quarantine-plans-by"];
 const TASK_SUBCOMMANDS:        &[&str] = &["abort", "resume", "retry"];
@@ -275,6 +279,15 @@ fn run() -> Result<(), CliError> {
                 ))),
             }
         }
+        "submit" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "plan" => commands::submit::run_plan(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "submit sub-command", sub2, SUBMIT_SUBCOMMANDS,
+                ))),
+            }
+        }
         "status" => commands::status::run(&flags, rest),
         "log" => commands::log::run(&flags, rest),
         "verify-chain" => commands::verify_chain::run(&flags, rest),
@@ -372,6 +385,16 @@ SUBCOMMANDS:
 
     plan submit <initiative_id> <plan_dir>
         Submit a signed plan (plan.toml + plan.sig) to create an initiative.
+        DEPRECATED in V2 — see `submit plan <plan.toml>` below for the
+        atomic V2.1 sign+submit workflow (plan-bundle-sealing.md §4).
+
+    submit plan <plan.toml> [--initiative-id <id>] [--dry-run | --no-dry-run]
+        V2.1 atomic plan-bundle submission. Reads plan.toml, builds the
+        canonical bundle, stamps a fresh nonce + signed_at, signs in
+        memory, and submits via the V2 IPC envelope. There is no
+        intermediate `plan.sig` file. Default is `--dry-run` while the
+        kernel V2 admission path (plan-bundle-sealing.md §11.1) is
+        pending; pass `--no-dry-run` to attempt a real submission.
 
     plan approve <initiative_id>
         Approve a pending initiative, admitting all tasks to the scheduler.
@@ -792,6 +815,7 @@ mod catalog_consistency_tests {
             ("epoch",      EPOCH_SUBCOMMANDS),
             ("audit",      AUDIT_SUBCOMMANDS),
             ("cert",       CERT_SUBCOMMANDS),
+            ("submit",     SUBMIT_SUBCOMMANDS),
         ] {
             assert!(!list.is_empty(), "{name}_SUBCOMMANDS is empty");
         }
@@ -804,18 +828,26 @@ mod catalog_consistency_tests {
     fn per_parent_catalogs_match_dispatcher_arms() {
         let src = fs::read_to_string(main_rs_path()).expect("read main.rs source");
 
+        // Anchor format note: every top-level dispatcher arm uses the
+        // block form `"<name>" => { ... }`. Inner arms (e.g. `"submit"
+        // => commands::plan::run_submit(...)` inside the `plan` block)
+        // use the expression form `=> commands::...`. We therefore key
+        // the anchor on `=> {` so the scraper unambiguously lands on
+        // the top-level dispatcher arm even when the same literal
+        // (e.g. `"submit"`) is also used as an inner arm name.
         let pairs: &[(&str, &[&str])] = &[
-            ("\"policy\" =>",     POLICY_SUBCOMMANDS),
-            ("\"plan\" =>",       PLAN_SUBCOMMANDS),
-            ("\"initiative\" =>", INITIATIVE_SUBCOMMANDS),
-            ("\"operator\" =>",   OPERATOR_SUBCOMMANDS),
-            ("\"task\" =>",       TASK_SUBCOMMANDS),
-            ("\"session\" =>",    SESSION_SUBCOMMANDS),
-            ("\"delegation\" =>", DELEGATION_SUBCOMMANDS),
-            ("\"escalation\" =>", ESCALATION_SUBCOMMANDS),
-            ("\"epoch\" =>",      EPOCH_SUBCOMMANDS),
-            ("\"audit\" =>",      AUDIT_SUBCOMMANDS),
-            ("\"cert\" =>",       CERT_SUBCOMMANDS),
+            ("\"policy\" => {",     POLICY_SUBCOMMANDS),
+            ("\"plan\" => {",       PLAN_SUBCOMMANDS),
+            ("\"initiative\" => {", INITIATIVE_SUBCOMMANDS),
+            ("\"operator\" => {",   OPERATOR_SUBCOMMANDS),
+            ("\"task\" => {",       TASK_SUBCOMMANDS),
+            ("\"session\" => {",    SESSION_SUBCOMMANDS),
+            ("\"delegation\" => {", DELEGATION_SUBCOMMANDS),
+            ("\"escalation\" => {", ESCALATION_SUBCOMMANDS),
+            ("\"epoch\" => {",      EPOCH_SUBCOMMANDS),
+            ("\"audit\" => {",      AUDIT_SUBCOMMANDS),
+            ("\"cert\" => {",       CERT_SUBCOMMANDS),
+            ("\"submit\" => {",     SUBMIT_SUBCOMMANDS),
         ];
 
         for (anchor, catalog) in pairs {
