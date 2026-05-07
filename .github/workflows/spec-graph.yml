@@ -1,0 +1,39 @@
+# Spec-graph cross-spec consistency lint.
+#
+# Normative reference: raxis/specs/v2/v2-deep-spec.md §Spec-Graph Lint.
+#
+# Runs `cargo xtask spec-graph` on every PR that touches a spec file.
+# The lint currently runs in non-strict mode (informational only)
+# because the corpus has 116 pre-existing findings that need to be
+# cleaned up in a follow-up PR train. Once the baseline is clean,
+# flip the `--strict` flag below.
+
+name: spec-graph
+
+on:
+  pull_request:
+    paths:
+      - 'raxis/specs/**'
+      - 'raxis/xtask/**'
+  push:
+    branches: [main]
+    paths:
+      - 'raxis/specs/**'
+      - 'raxis/xtask/**'
+
+jobs:
+  spec-graph:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: raxis
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: raxis -> target
+      # Informational mode: surfaces findings without failing the
+      # PR. Flip to `cargo xtask spec-graph --strict` once the
+      # baseline is clean.
+      - run: cargo xtask spec-graph

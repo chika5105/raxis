@@ -36,6 +36,7 @@ members = [
     "kernel",
     "cli",
     "gateway",
+    "xtask",
 ]
 
 [workspace.package]

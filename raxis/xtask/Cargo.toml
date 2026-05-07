@@ -1,0 +1,16 @@
+[package]
+name        = "xtask"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish     = false
+
+# Workspace task runner. Invoked as `cargo xtask <target>` via the
+# `.cargo/config.toml` alias, never built or shipped.
+#
+# Normative reference: `specs/v2/v2-deep-spec.md §Spec-Graph Lint`.
+
+[dependencies]
+anyhow    = { workspace = true }
+walkdir   = "2"
+regex     = "1"

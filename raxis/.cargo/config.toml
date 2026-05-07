@@ -1,0 +1,8 @@
+# Workspace cargo aliases.
+#
+# `cargo xtask <target>` resolves to `cargo run --package xtask --
+# <target>`, which is the canonical pattern for workspace-internal
+# task runners (see `<https://github.com/matklad/cargo-xtask>`).
+
+[alias]
+xtask = "run --package xtask --"

@@ -3176,6 +3176,28 @@ class.
 The lint catches structural drift; semantic drift remains the
 reviewer's responsibility.
 
+#### Implementation reference
+
+The lint is implemented in `raxis/xtask/src/spec_graph.rs` and
+the CI workflow lives at `.github/workflows/spec-graph.yml`. The
+xtask binary supports a `--strict` flag:
+
+```bash
+cargo xtask spec-graph             # informational; exits 0 on findings
+cargo xtask spec-graph --strict    # gating; exits 1 on any finding
+```
+
+The CI workflow currently invokes the non-strict mode. The
+informational baseline at the time the lint was first wired had
+116 findings — a mix of dangling section anchors, duplicated
+`FAIL_*` / `WARN_*` codes, duplicated `AuditEventKind`
+definitions, and missing paired/single classification entries
+in `audit-paired-writes.md §4`. Cleaning up these findings is
+tracked as a follow-up cleanup PR train; once the baseline is
+green the workflow flips to `--strict` and the lint becomes a
+hard gate. New PRs are expected not to *increase* the finding
+count even before the flip.
+
 ---
 
 ## Related Specifications
