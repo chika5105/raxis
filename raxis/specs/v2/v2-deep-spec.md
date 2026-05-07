@@ -438,6 +438,36 @@ the Kernel's VSock listener on a well-known CID/port pair. All `IntentRequest` f
 sent guest→host over this socket. All `KernelPush` frames are sent host→guest over the same
 socket. The framing protocol is length-prefixed bincode (unchanged from V1 UDS framing).
 
+**Implementation reference:**
+
+* `crates/worktree-staging/` (NEW) — `raxis-worktree-staging` crate. Contains the
+  pure-data host-side staging logic: `stage(&StageInputs) -> StagedWorktree` mints
+  `<data_dir>/worktrees/<session_uuid>/.raxis/{system_prompt.txt, session.env, bundles/}`
+  and returns a [`raxis_isolation::WorkspaceMount`] ready for `Backend::spawn`.
+  `destroy(&Path)` is the idempotent teardown counterpart called from the
+  session-revoke handler. The crate is dependency-light by design (`raxis-isolation`,
+  `sha2`, `thiserror`) so kernel integration tests can drive it without a full
+  `HandlerContext`.
+* `kernel/Cargo.toml` pulls in `raxis-worktree-staging` as a regular dep. The kernel's
+  session-admission handler (forthcoming) calls `stage(&inputs)` after sealing the
+  session token + minting the VSock CID, then hands `staged.mount` to
+  `ctx.isolation.spawn(...)`.
+* `crates/isolation-firecracker/src/vsock.rs::HostVsockChannel` already implements
+  the length-prefixed VSock framing (16 MiB cap, big-endian u32 prefix). Tests:
+  `handshake_and_frame_round_trip_against_in_test_multiplexer`,
+  `malformed_handshake_reply_surfaces_as_handshake_error`,
+  `send_frame_rejects_oversize_payload`. The AVF substrate's VSock seam is wired
+  fail-closed today (`iso-3-followup` finalises the device delegate).
+* **Integration test:** `kernel/tests/worktree_staging_substrate.rs` exercises the
+  full Step 10 pipeline against the real `raxis_test_support::SubprocessIsolation`
+  substrate (`stage → Backend::spawn → push → recv_intent → shutdown → destroy`).
+  The test substrate is a real `Backend`/`Session` impl that runs an actual child
+  process and streams bytes through real OS pipes — the framing contract pinned
+  here is byte-exact identical to what `FirecrackerSession` performs over VSock
+  on a Linux host. Tests pinned: `step10_full_pipeline_stage_spawn_push_recv_destroy`,
+  `step10_mount_carries_content_hash_through_substrate_boundary`,
+  `step10_distinct_sessions_stage_independent_worktrees`.
+
 ---
 
 ### Step 11: Hybrid Allowlist for `IntegrationMerge`

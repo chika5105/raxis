@@ -1,0 +1,24 @@
+[package]
+name        = "raxis-worktree-staging"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Per-session host-side worktree staging (V2 Step 10).
+#
+# The kernel calls into this crate at session admission to mint
+# `<data_dir>/worktrees/<session_uuid>/.raxis/{system_prompt.txt,
+# session.env, bundles/}` and produces the
+# `raxis_isolation::WorkspaceMount` the substrate consumes.
+#
+# Lives in its own crate so kernel integration tests can re-use the
+# staging logic without dragging in the full kernel binary's dep
+# graph (the kernel is a binary crate, not a lib crate).
+
+[dependencies]
+raxis-isolation = { workspace = true }
+sha2            = { workspace = true }
+thiserror       = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

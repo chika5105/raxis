@@ -1267,6 +1267,7 @@ dependencies = [
  "raxis-store",
  "raxis-test-support",
  "raxis-types",
+ "raxis-worktree-staging",
  "rusqlite",
  "rustc-hash 1.1.0",
  "serde",
@@ -1371,6 +1372,16 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "raxis-worktree-staging"
+version = "0.1.0"
+dependencies = [
+ "raxis-isolation",
+ "sha2",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
