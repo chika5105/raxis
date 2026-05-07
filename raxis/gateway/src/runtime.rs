@@ -19,9 +19,10 @@ use thiserror::Error;
 use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 
-use crate::backend::{Backend, MockBackend};
+use crate::backend::Backend;
 use crate::dispatch::handle_fetch_request;
-use crate::env::{BackendKind, GatewayEnv};
+use crate::env::GatewayEnv;
+use crate::http_backend::HttpBackend;
 use crate::policy_view::{load_policy_view, PolicyView, PolicyViewError};
 
 /// Fatal errors that abort the gateway process. Anything that should
@@ -44,7 +45,12 @@ pub enum GatewayRunError {
     FrameWrite(String),
 }
 
-/// Run the gateway against the env-supplied UDS socket.
+/// Run the gateway against the env-supplied UDS socket using the
+/// production [`HttpBackend`]. This is what `main.rs` calls.
+///
+/// Tests that need to exercise the dispatch path without a real
+/// network use [`run_gateway_with_backend`] directly with a
+/// `MockBackend` from `raxis-test-support`.
 ///
 /// Lifecycle:
 /// 1. Load policy_view (FAIL if this fails — the gateway has nothing
@@ -62,12 +68,25 @@ pub enum GatewayRunError {
 /// 5. On EOF / connection error: return `Ok(())`. The kernel supervisor
 ///    detects the closed socket and respawns us with a fresh token.
 pub async fn run_gateway(env: GatewayEnv) -> Result<(), GatewayRunError> {
+    let backend: Arc<dyn Backend> = Arc::new(HttpBackend::new());
+    run_gateway_with_backend(env, backend).await
+}
+
+/// Like [`run_gateway`] but with an externally-supplied backend.
+/// Used by integration tests (with `raxis_test_support::MockBackend`)
+/// and by future custom-middleware deployments. Production binaries
+/// always go through [`run_gateway`], which constructs the
+/// `HttpBackend` internally so no operator-controlled env can swap
+/// it out.
+pub async fn run_gateway_with_backend(
+    env:     GatewayEnv,
+    backend: Arc<dyn Backend>,
+) -> Result<(), GatewayRunError> {
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"gateway_start\",\
-         \"socket\":\"{}\",\"data_dir\":\"{}\",\"backend\":{:?}}}",
+         \"socket\":\"{}\",\"data_dir\":\"{}\"}}",
         env.gateway_socket.display(),
         env.data_dir.display(),
-        env.backend_kind,
     );
 
     // Step 1: initial policy view. Any failure aborts startup so the
@@ -84,36 +103,7 @@ pub async fn run_gateway(env: GatewayEnv) -> Result<(), GatewayRunError> {
         view_slot.read().await.as_ref().map(|v| v.providers.len()).unwrap_or(0),
     );
 
-    // Step 2: backend selection.
-    //
-    // Phase B has landed: when the binary was built with the
-    // `http-backend` feature, `BackendKind::Http` produces a real
-    // `reqwest`-backed `HttpBackend`; otherwise we fall back to the
-    // mock with a warning (so the gateway still accepts requests in
-    // bare-bones operator builds and the kernel supervisor's
-    // probe-on-spawn doesn't immediately re-loop).
-    let backend: Arc<dyn Backend> = match env.backend_kind {
-        BackendKind::Mock => Arc::new(MockBackend::default()),
-        BackendKind::Http => {
-            #[cfg(feature = "http-backend")]
-            {
-                eprintln!(
-                    "{{\"level\":\"info\",\"event\":\"http_backend_enabled\"}}",
-                );
-                Arc::new(crate::http_backend::HttpBackend::new())
-            }
-            #[cfg(not(feature = "http-backend"))]
-            {
-                eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"backend_http_feature_disabled\",\
-                     \"action\":\"falling back to MockBackend\"}}",
-                );
-                Arc::new(MockBackend::default())
-            }
-        }
-    };
-
-    // Step 3: connect.
+    // Step 2: connect.
     let mut stream = UnixStream::connect(&env.gateway_socket).await.map_err(|e| {
         GatewayRunError::Connect {
             socket: env.gateway_socket.clone(),
@@ -121,7 +111,7 @@ pub async fn run_gateway(env: GatewayEnv) -> Result<(), GatewayRunError> {
         }
     })?;
 
-    // Step 4: handshake.
+    // Step 3: handshake.
     let ready = GatewayMessage::GatewayReady {
         gateway_token: env.gateway_token.clone(),
     };
@@ -134,7 +124,7 @@ pub async fn run_gateway(env: GatewayEnv) -> Result<(), GatewayRunError> {
         &env.gateway_token[..8.min(env.gateway_token.len())],
     );
 
-    // Step 5: dispatch loop.
+    // Step 4: dispatch loop.
     loop {
         let msg: GatewayMessage = match read_frame(&mut stream).await {
             Ok(m) => m,

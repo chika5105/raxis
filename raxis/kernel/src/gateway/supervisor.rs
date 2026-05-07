@@ -313,16 +313,18 @@ fn spawn_child(
         .env("RAXIS_GATEWAY_TOKEN", token)
         .env("RAXIS_GATEWAY_SOCKET", socket_path)
         .env("RAXIS_DATA_DIR", data_dir)
-        // v1 ships only the mock backend in production builds. When
-        // Phase B adds the real HTTP backend, change this to "http"
-        // (or expose a kernel-level env to choose).
-        .env("RAXIS_GATEWAY_BACKEND", "mock")
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         // Don't put the child in our process group — SIGINT to the
         // kernel from the operator's terminal would otherwise also
         // hit the gateway, racing the supervisor's clean kill.
+        //
+        // No `RAXIS_GATEWAY_BACKEND` env: the production gateway
+        // always uses `HttpBackend`, and the in-memory test fake
+        // (`raxis_test_support::MockBackend`) lives in dev-dep-only
+        // territory. See `gateway/src/env.rs` module header for the
+        // mock-isolation rationale (philosophy.md §1.6).
         .kill_on_drop(true);
     cmd.spawn()
 }

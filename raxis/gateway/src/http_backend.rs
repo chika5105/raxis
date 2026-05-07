@@ -1,19 +1,11 @@
-//! `HttpBackend` — real outbound HTTP for the gateway.
+//! `HttpBackend` — the production outbound HTTP path for the gateway.
 //!
-//! Normative reference: `peripherals.md` §3.2 ("Gateway Wire Format" and
-//! "Outbound provider call"). This is the production backend that
-//! replaces `MockBackend` for real provider traffic.
-//!
-//! # Why this is feature-gated
-//!
-//! `cargo test` (no flag) must NOT link `reqwest` / `rustls`: the
-//! gateway test surface is built around `MockBackend`, and pulling
-//! TLS into every CI run inflates link times by ~3 s and pulls in
-//! `ring` / `rustls-pemfile` / a transitive web-pki bundle that
-//! every workspace crate then has to either depend-on or ignore.
-//! `cargo test --features http-backend` opts in for real-network
-//! work (e2e harness, `raxis-gateway` binary) without changing the
-//! default test discipline.
+//! Normative reference: `peripherals.md` §3.2 ("Gateway Wire Format"
+//! and "Outbound provider call"). This is the **only** production
+//! backend; the in-memory test fake (`MockBackend`) lives in
+//! `raxis-test-support` and is never linked into a release binary
+//! (philosophy.md §1.6 — same discipline that keeps `FakeClock` out
+//! of `raxis-types`).
 //!
 //! # Discipline
 //!
@@ -48,7 +40,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::backend::{Backend, BackendError, BackendRequest, BackendResponse};
+use raxis_gateway_substrate::{Backend, BackendError, BackendRequest, BackendResponse};
 
 /// Production HTTP backend backed by a single `reqwest::Client`. Cheap
 /// to clone (`Arc` underneath); keep one per gateway process and reuse

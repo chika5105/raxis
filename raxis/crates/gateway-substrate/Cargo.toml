@@ -1,0 +1,22 @@
+[package]
+name        = "raxis-gateway-substrate"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# Tiny crate that owns the gateway's outbound-call substrate trait
+# (`Backend`) plus the runtime-resolved provider view shapes
+# (`ProviderEntryView`, `ProviderCredentials`). Lives outside
+# `raxis-gateway` so the in-memory test fake (`MockBackend`) in
+# `raxis-test-support` can implement the trait without forcing a
+# circular `raxis-gateway -dev-> raxis-test-support -dep-> raxis-gateway`
+# build-graph cycle. Same shape as `raxis-types::Clock` / `RealClock`
+# vs. `raxis-test-support::FakeClock` (philosophy.md §1.6).
+
+description = "RAXIS gateway substrate trait + runtime provider-view shapes (peripherals.md §3.2)"
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }

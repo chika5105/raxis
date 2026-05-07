@@ -13,11 +13,24 @@ publish     = false
 description = "RAXIS workspace-wide test helpers (FakeClock, in-memory store, audit sink re-exports)."
 
 [dependencies]
-raxis-types       = { workspace = true }
-raxis-store       = { workspace = true }
-raxis-audit-tools = { workspace = true }
-raxis-crypto      = { workspace = true }
-ed25519-dalek     = { workspace = true }
+raxis-types             = { workspace = true }
+raxis-store             = { workspace = true }
+raxis-audit-tools       = { workspace = true }
+raxis-crypto            = { workspace = true }
+# `raxis-gateway-substrate` carries the `Backend` trait that
+# `gateway_backend::MockBackend` implements. Pulling in just the
+# trait crate (rather than the whole `raxis-gateway` crate) keeps
+# the build graph acyclic: `raxis-gateway` itself dev-deps on
+# `raxis-test-support` for cert helpers, so a transitive
+# `raxis-test-support → raxis-gateway → (dev) raxis-test-support`
+# loop would cause cargo to compile two copies of `raxis-gateway`
+# (one for prod, one as a test-support dep) and the resulting
+# `Backend` impls wouldn't satisfy each other at the trait level.
+# Same separation principle as the FakeClock pattern
+# (`philosophy.md` §1.6).
+raxis-gateway-substrate = { workspace = true }
+ed25519-dalek           = { workspace = true }
+thiserror               = { workspace = true }
 
 # Temp-dir lifecycle for the GitRepo / AuditDir / DiskStore fixtures.
 # `tempfile` is already a dev-dep of `raxis-kernel`; we re-pin the same
@@ -38,3 +51,8 @@ serde_json        = { workspace = true }
 # to parse every member's Cargo.toml and assert raxis-test-support
 # only appears under [dev-dependencies].
 toml              = { workspace = true }
+# `gateway_backend::tests` use `#[tokio::test]` to drive the async
+# `Backend::call` surface. Dev-dep only — production code never needs
+# a runtime here (the `MockBackend` itself is sync-friendly because
+# `Box::pin(async move { ... })` doesn't require a runtime to construct).
+tokio             = { workspace = true }

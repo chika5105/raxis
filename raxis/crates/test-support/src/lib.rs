@@ -112,6 +112,8 @@ pub mod clock;
 #[cfg(any(debug_assertions, test))]
 pub mod disk_store;
 #[cfg(any(debug_assertions, test))]
+pub mod gateway_backend;
+#[cfg(any(debug_assertions, test))]
 pub mod git_repo;
 #[cfg(any(debug_assertions, test))]
 mod workspace_guard;
@@ -127,6 +129,8 @@ pub use cert::{
 pub use clock::FakeClock;
 #[cfg(any(debug_assertions, test))]
 pub use disk_store::DiskStore;
+#[cfg(any(debug_assertions, test))]
+pub use gateway_backend::MockBackend;
 #[cfg(any(debug_assertions, test))]
 pub use git_repo::{git_available, GitRepo};
 

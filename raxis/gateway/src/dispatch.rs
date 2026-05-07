@@ -69,7 +69,6 @@ impl DispatchError {
             Self::Backend(BackendError::Timeout { .. }) => "TimeoutExceeded",
             Self::Backend(BackendError::TooLarge { .. }) => "ResponseTooLarge",
             Self::Backend(BackendError::Upstream { .. }) => "NetworkError",
-            Self::Backend(BackendError::MockMisconfigured { .. }) => "NetworkError",
             Self::PolicyReloadFailed => "PolicyReloadFailed",
         }
     }
@@ -116,13 +115,15 @@ pub async fn handle_fetch_request(
             body_bytes,
             timeout_ms,
         ),
-        // Caller invariant: only `FetchRequest` ever lands here. If it
-        // does not, that is a runtime-loop bug — emit a wire error and
-        // let the operator chase it.
+        // Caller invariant: only `FetchRequest` ever lands here. If
+        // it does not, that is a runtime-loop bug — surface it as
+        // `Upstream` (which projects to "NetworkError" on the wire)
+        // so an operator sees a clear envelope while the kernel-side
+        // log carries the variant name for diagnosis.
         other => {
             return error_response(
                 Uuid::nil(),
-                DispatchError::Backend(BackendError::MockMisconfigured {
+                DispatchError::Backend(BackendError::Upstream {
                     reason: format!(
                         "handle_fetch_request received non-FetchRequest variant: \
                          {}",
@@ -314,7 +315,11 @@ fn provider_for_host<'a>(view: &'a PolicyView, host: &str) -> Option<&'a Provide
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::MockBackend;
+    // The in-memory `MockBackend` lives in `raxis-test-support` (the
+    // dev-dep-only crate) so it can never reach a release binary.
+    // See `gateway/src/backend.rs` module header for the discipline
+    // rationale (philosophy.md §1.6 / `RealClock` ↔ `FakeClock`).
+    use raxis_test_support::MockBackend;
     use crate::policy_view::{PolicyView, ProviderCredentials};
     use std::collections::HashMap;
 

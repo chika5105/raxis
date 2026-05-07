@@ -1,15 +1,27 @@
 //! Environment-variable parser for the gateway subprocess.
 //!
-//! Normative reference: `peripherals.md` §3.2 "Spawn model" — the kernel
-//! sets `RAXIS_GATEWAY_TOKEN` and `RAXIS_GATEWAY_SOCKET` at spawn time;
-//! `RAXIS_DATA_DIR` is also passed so the gateway can read policy.toml
-//! and the provider credentials directory.
+//! Normative reference: `peripherals.md` §3.2 "Spawn model" — the
+//! kernel sets `RAXIS_GATEWAY_TOKEN` and `RAXIS_GATEWAY_SOCKET` at
+//! spawn time; `RAXIS_DATA_DIR` is also passed so the gateway can
+//! read policy.toml and the provider credentials directory.
 //!
-//! Why a dedicated module: `parse_gateway_env_from_process` is the SOLE
-//! entry point that reads from `std::env::var`. Keeping the read confined
-//! makes it trivial to test the rest of the crate by constructing
-//! `GatewayEnv` literals directly. The `verifier-stub` crate uses the
-//! same pattern (`parse_stub_env_from_process`), and we mirror it here.
+//! Why a dedicated module: `parse_gateway_env_from_process` is the
+//! SOLE entry point that reads from `std::env::var`. Keeping the
+//! read confined makes it trivial to test the rest of the crate by
+//! constructing `GatewayEnv` literals directly. The `verifier-stub`
+//! crate uses the same pattern (`parse_stub_env_from_process`), and
+//! we mirror it here.
+//!
+//! # No `BackendKind`
+//!
+//! Earlier revisions parsed an optional `RAXIS_GATEWAY_BACKEND` env
+//! var into a `Mock` / `Http` selector. That selector has been
+//! removed: production gateways always use `HttpBackend`, and the
+//! in-memory test fake (`MockBackend`) lives in `raxis-test-support`
+//! where it is reachable only from `cargo test` builds. A binary
+//! that picks its substrate at runtime depending on operator-supplied
+//! env conflates "production behaviour" with "test scaffolding" —
+//! the same anti-pattern the `RealClock` / `FakeClock` split avoids.
 
 use std::path::PathBuf;
 use thiserror::Error;
@@ -26,24 +38,6 @@ pub struct GatewayEnv {
     /// Data dir root (e.g. `~/.raxis`). Used to resolve
     /// `<data_dir>/policy/policy.toml` and `<data_dir>/providers/...`.
     pub data_dir: PathBuf,
-    /// Backend selector. `"mock"` → in-process canned responses (tests
-    /// + offline development). `"http"` → real network calls (NOT
-    /// implemented in Phase A; reserved name).
-    pub backend_kind: BackendKind,
-}
-
-/// Which `Backend` impl to instantiate at boot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BackendKind {
-    /// `MockBackend` — returns canned responses based on a per-request
-    /// env knob (`RAXIS_GATEWAY_MOCK_*`). The default in v1; the kernel
-    /// sets `RAXIS_GATEWAY_BACKEND=mock` at spawn time. Real HTTP
-    /// (planned for Phase B) ships behind `BackendKind::Http`.
-    Mock,
-    /// Reserved — real `reqwest`-based backend lands in a follow-up.
-    /// A gateway started with `BackendKind::Http` in v1 logs a warning
-    /// and degrades to mock so operators get visible feedback.
-    Http,
 }
 
 /// Why the env-var parse failed. Pinned by tests so the gateway's
@@ -65,23 +59,17 @@ pub enum GatewayEnvError {
     /// `RAXIS_DATA_DIR` was empty / non-absolute.
     #[error("invalid RAXIS_DATA_DIR: {reason}")]
     InvalidDataDir { reason: String },
-
-    /// `RAXIS_GATEWAY_BACKEND` was set to an unknown value.
-    #[error("invalid RAXIS_GATEWAY_BACKEND: {got:?}; expected \"mock\" or \"http\"")]
-    InvalidBackendKind { got: String },
 }
 
-/// Read the four env vars from the process and return a validated
+/// Read the three env vars from the process and return a validated
 /// [`GatewayEnv`]. This is the ONLY function in the crate that calls
 /// `std::env::var` — every other module takes a `GatewayEnv` reference.
 pub fn parse_gateway_env_from_process() -> Result<GatewayEnv, GatewayEnvError> {
     let token = read_required("RAXIS_GATEWAY_TOKEN")?;
     let socket = read_required("RAXIS_GATEWAY_SOCKET")?;
     let data_dir = read_required("RAXIS_DATA_DIR")?;
-    let backend_str =
-        std::env::var("RAXIS_GATEWAY_BACKEND").unwrap_or_else(|_| "mock".to_owned());
 
-    parse_gateway_env(&token, &socket, &data_dir, &backend_str)
+    parse_gateway_env(&token, &socket, &data_dir)
 }
 
 /// Pure parser. Tests call this directly with hand-crafted inputs.
@@ -89,7 +77,6 @@ pub fn parse_gateway_env(
     token: &str,
     socket: &str,
     data_dir: &str,
-    backend: &str,
 ) -> Result<GatewayEnv, GatewayEnvError> {
     // Token: must be 64 hex chars (32 random bytes). Anything else is
     // either truncated (operator misconfig) or padded (attacker-supplied
@@ -132,21 +119,10 @@ pub fn parse_gateway_env(
         });
     }
 
-    // Backend kind: one of two strings; case-sensitive on purpose so
-    // the kernel and the operator agree byte-for-byte.
-    let backend_kind = match backend {
-        "mock" => BackendKind::Mock,
-        "http" => BackendKind::Http,
-        other => {
-            return Err(GatewayEnvError::InvalidBackendKind { got: other.to_owned() });
-        }
-    };
-
     Ok(GatewayEnv {
         gateway_token: token.to_owned(),
         gateway_socket: socket_path,
         data_dir: data_dir_path,
-        backend_kind,
     })
 }
 
@@ -163,23 +139,16 @@ mod tests {
     }
 
     #[test]
-    fn happy_path_with_mock_backend() {
-        let env = parse_gateway_env(&ok_token(), "/tmp/gw.sock", "/tmp/data", "mock").unwrap();
+    fn happy_path() {
+        let env = parse_gateway_env(&ok_token(), "/tmp/gw.sock", "/tmp/data").unwrap();
         assert_eq!(env.gateway_token, ok_token());
         assert_eq!(env.gateway_socket, PathBuf::from("/tmp/gw.sock"));
         assert_eq!(env.data_dir, PathBuf::from("/tmp/data"));
-        assert_eq!(env.backend_kind, BackendKind::Mock);
-    }
-
-    #[test]
-    fn happy_path_with_http_backend() {
-        let env = parse_gateway_env(&ok_token(), "/tmp/gw.sock", "/tmp/data", "http").unwrap();
-        assert_eq!(env.backend_kind, BackendKind::Http);
     }
 
     #[test]
     fn token_too_short_is_rejected_with_chars_count() {
-        let err = parse_gateway_env("abcd", "/tmp/gw.sock", "/tmp/data", "mock").unwrap_err();
+        let err = parse_gateway_env("abcd", "/tmp/gw.sock", "/tmp/data").unwrap_err();
         match err {
             GatewayEnvError::InvalidToken { reason } => {
                 assert!(reason.contains("64 hex chars"), "reason: {reason}");
@@ -192,13 +161,13 @@ mod tests {
     #[test]
     fn token_with_non_hex_chars_is_rejected() {
         let bad = format!("{}", "Z".repeat(64));
-        let err = parse_gateway_env(&bad, "/tmp/gw.sock", "/tmp/data", "mock").unwrap_err();
+        let err = parse_gateway_env(&bad, "/tmp/gw.sock", "/tmp/data").unwrap_err();
         assert!(matches!(err, GatewayEnvError::InvalidToken { .. }));
     }
 
     #[test]
     fn empty_token_is_rejected_as_length_mismatch() {
-        let err = parse_gateway_env("", "/tmp/gw.sock", "/tmp/data", "mock").unwrap_err();
+        let err = parse_gateway_env("", "/tmp/gw.sock", "/tmp/data").unwrap_err();
         match err {
             GatewayEnvError::InvalidToken { reason } => {
                 assert!(reason.contains("0 chars"), "reason: {reason}");
@@ -209,23 +178,13 @@ mod tests {
 
     #[test]
     fn relative_socket_path_is_rejected() {
-        let err = parse_gateway_env(&ok_token(), "gw.sock", "/tmp/data", "mock").unwrap_err();
+        let err = parse_gateway_env(&ok_token(), "gw.sock", "/tmp/data").unwrap_err();
         assert!(matches!(err, GatewayEnvError::InvalidSocket { .. }));
     }
 
     #[test]
     fn relative_data_dir_is_rejected() {
-        let err = parse_gateway_env(&ok_token(), "/tmp/gw.sock", "raxis", "mock").unwrap_err();
+        let err = parse_gateway_env(&ok_token(), "/tmp/gw.sock", "raxis").unwrap_err();
         assert!(matches!(err, GatewayEnvError::InvalidDataDir { .. }));
-    }
-
-    #[test]
-    fn unknown_backend_kind_is_rejected_with_value_in_message() {
-        let err =
-            parse_gateway_env(&ok_token(), "/tmp/gw.sock", "/tmp/data", "potato").unwrap_err();
-        match err {
-            GatewayEnvError::InvalidBackendKind { got } => assert_eq!(got, "potato"),
-            other => panic!("wrong variant: {other:?}"),
-        }
     }
 }

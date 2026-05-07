@@ -20,14 +20,6 @@ path = "src/lib.rs"
 name = "raxis-gateway"
 path = "src/main.rs"
 
-[features]
-# `http-backend` pulls in `reqwest` and exposes `HttpBackend`, the real
-# upstream HTTP client used by the kernel-mediated egress path
-# (`peripherals.md` §3.2). When the feature is OFF the gateway still
-# compiles and ships `MockBackend` only, which is what every unit /
-# integration test under `cargo test` (no flag) relies on.
-default      = []
-http-backend = ["dep:reqwest"]
 
 [dependencies]
 # IPC framing + the GatewayMessage / FetchKind enums that the kernel and
@@ -38,6 +30,11 @@ raxis-types  = { workspace = true }
 # the domain allowlist; it does NOT trust kernel-supplied lists).
 # peripherals.md §3.2 "Domain allowlist re-validation".
 raxis-policy = { workspace = true }
+# `Backend` trait + provider-view shapes. Lives in its own tiny crate
+# so `raxis-test-support::MockBackend` can implement the trait without
+# pulling in the rest of the gateway's dependency closure (and creating
+# a build-graph cycle through this crate's dev-deps).
+raxis-gateway-substrate = { workspace = true }
 
 tokio        = { workspace = true }
 serde        = { workspace = true }
@@ -46,11 +43,14 @@ toml         = { workspace = true }
 hex          = { workspace = true }
 uuid         = { workspace = true }
 thiserror    = { workspace = true }
-# Real HTTP backend (HttpBackend). Optional: tests use MockBackend by
-# default to avoid linking the TLS stack into every CI run. Production
-# builds and the e2e harness enable the `http-backend` feature so the
-# gateway emits real outbound calls.
-reqwest      = { workspace = true, optional = true }
+# Production HTTP backend. Unconditional — `HttpBackend` is the sole
+# production substrate and the in-memory test fake (`MockBackend`)
+# lives in `raxis-test-support`, which is dev-dep-only. The earlier
+# `http-backend` cargo feature was removed as part of the V2
+# mock-isolation cleanup: a feature flag here meant the production
+# binary's behaviour depended on a build flag, which is exactly the
+# anti-pattern `philosophy.md` §1.6 warns against.
+reqwest      = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

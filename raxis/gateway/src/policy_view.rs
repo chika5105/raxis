@@ -24,17 +24,26 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use thiserror::Error;
+
+// `ProviderEntryView` and `ProviderCredentials` live in the trait
+// crate (`raxis-gateway-substrate`) so the in-memory test fake
+// `raxis-test-support::MockBackend` can take a `&ProviderEntryView`
+// without circular-deps through `raxis-gateway` itself. Re-export
+// both so the gateway's existing
+// `raxis_gateway::policy_view::ProviderEntryView` call sites keep
+// working.
+pub use raxis_gateway_substrate::{ProviderCredentials, ProviderEntryView};
 
 /// All policy state the gateway needs to validate one `FetchRequest`.
 /// Held behind an `Arc<RwLock<PolicyView>>` in the runtime loop so an
 /// `EpochAdvanced` reload can swap it without blocking in-flight tasks.
 #[derive(Debug, Clone)]
 pub struct PolicyView {
-    /// Current policy epoch — recorded for log diagnostics; the gateway
-    /// does not gate on this value but the `FetchResponse` includes it
-    /// so the kernel can detect skew between its view and ours.
+    /// Current policy epoch — recorded for log diagnostics; the
+    /// gateway does not gate on this value but the `FetchResponse`
+    /// includes it so the kernel can detect skew between its view and
+    /// ours.
     pub epoch: u64,
 
     /// Domain allowlist (exact-match hostnames). Populated from
@@ -45,48 +54,10 @@ pub struct PolicyView {
     /// `[egress] patterns` in policy.toml.
     pub egress_patterns: Vec<String>,
 
-    /// Provider catalogue keyed by `provider_id`. The gateway looks up
-    /// the kind + credentials when dispatching a `FetchRequest`.
+    /// Provider catalogue keyed by `provider_id`. The gateway looks
+    /// up the kind + credentials when dispatching a `FetchRequest`.
     pub providers: HashMap<String, ProviderEntryView>,
 }
-
-/// One provider's gateway-relevant config + credentials. Mirrors
-/// `raxis_policy::ProviderEntry` plus the loaded credentials file.
-#[derive(Debug, Clone)]
-pub struct ProviderEntryView {
-    pub provider_id: String,
-    pub kind: String,
-    pub inference_timeout_ms: u32,
-    pub data_fetch_timeout_ms: u32,
-    pub max_response_bytes: u64,
-    pub credentials: ProviderCredentials,
-}
-
-/// Parsed `<data_dir>/providers/<credentials_file>`. Format is
-/// intentionally minimal in v1: a single `api_key` plus optional auth
-/// header overrides. v2 will likely add per-credential rotation
-/// timestamps and a key-id to allow zero-downtime rolls.
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProviderCredentials {
-    /// The bearer token / API key. The gateway injects this into the
-    /// outbound request via `auth_header` (default `"Authorization"`)
-    /// with `auth_prefix` (default `"Bearer "`). Never logged.
-    pub api_key: String,
-
-    /// Header name to inject the credential under. Default
-    /// `"Authorization"` — overridable for providers that use a custom
-    /// header name (e.g. Anthropic uses `x-api-key`).
-    #[serde(default = "default_auth_header")]
-    pub auth_header: String,
-
-    /// Prefix to prepend before the api_key in the header value. Default
-    /// `"Bearer "`. Set to `""` for providers that pass the key bare.
-    #[serde(default = "default_auth_prefix")]
-    pub auth_prefix: String,
-}
-
-fn default_auth_header() -> String { "Authorization".to_owned() }
-fn default_auth_prefix() -> String { "Bearer ".to_owned() }
 
 /// Fail-closed reasons `load_policy_view` can return.
 #[derive(Debug, Error)]
