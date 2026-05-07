@@ -55,7 +55,7 @@ const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject"];
 /// Currently exposes only `plan`; future sub-commands (`policy`,
 /// `operator-cert`) will plug in here without a third rename.
 const SUBMIT_SUBCOMMANDS:      &[&str] = &["plan"];
-const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "list", "quarantine"];
+const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "list", "quarantine", "show"];
 const OPERATOR_SUBCOMMANDS:    &[&str] = &["quarantine-plans-by"];
 const TASK_SUBCOMMANDS:        &[&str] = &["abort", "resume", "retry"];
 const SESSION_SUBCOMMANDS:     &[&str] = &["create", "revoke"];
@@ -191,6 +191,7 @@ fn run() -> Result<(), CliError> {
                 "abort"      => commands::initiative::run_abort(&flags, &rest[1..]),
                 "list"       => commands::initiatives::run(&flags, &rest[1..]),
                 "quarantine" => commands::initiative::run_quarantine(&flags, &rest[1..]),
+                "show"       => commands::initiative_show::run(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "initiative sub-command", sub2, INITIATIVE_SUBCOMMANDS,
                 ))),
@@ -423,6 +424,18 @@ SUBCOMMANDS:
         In-flight tasks are NOT aborted (use `initiative abort` for
         that). Reason is capped at 512 bytes server-side and mirrored
         into the audit chain.
+
+    initiative show <initiative_id> [--bundle] [--to <dir>] [--json]
+        V2 plan-bundle forensic surface (plan-bundle-sealing.md §8.5).
+        Without flags: prints the initiative's plan-bundle envelope
+        summary (sha-256 prefix, schema version, signed-by, sealed-at,
+        signed-at, artifact count, total bytes). With `--bundle`:
+        adds the per-artifact `(seq, name)` listing. With
+        `--bundle --to <dir>`: extracts every artifact under <dir>,
+        preserving artifact_name as the relative path. Refuses to
+        write into a non-empty directory. `--json` is supported in
+        the bundle-summary mode (no `--to`). Reads kernel.db
+        read-only; no kernel IPC.
 
     operator quarantine-plans-by <target_fingerprint> [--reason <text>]
         Sweep every initiative whose plan was approved by the given

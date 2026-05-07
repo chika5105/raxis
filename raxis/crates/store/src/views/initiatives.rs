@@ -80,6 +80,54 @@ pub fn counts_by_state(conn: &RoConn) -> Result<InitiativeStateCounts, Initiativ
     Ok(counts)
 }
 
+/// Return the V2 plan-bundle SHA-256 for one initiative, or `None`
+/// when (a) the initiative does not exist, or (b) the initiative was
+/// admitted via the V1 `plan submit` path and so has a NULL
+/// `plan_bundle_sha256`.
+///
+/// Distinguishing "no initiative" from "V1 initiative" is the caller's
+/// responsibility: pair this with [`by_id`] when the difference
+/// matters. The dual lookup keeps the SQL columns each accessor
+/// touches narrow — `by_id` does not need to widen its row shape just
+/// to hand out a forensic field.
+///
+/// V2 admission stores `plan_bundle_sha256` as a 32-byte BLOB, which
+/// this function decodes into a typed [`raxis_types::BundleSha256`].
+/// A column with the wrong width surfaces as
+/// [`InitiativeViewError::Sqlite`] (rusqlite's `FromSqlError`).
+pub fn plan_bundle_sha256_by_id(
+    conn:          &RoConn,
+    initiative_id: &str,
+) -> Result<Option<raxis_types::BundleSha256>, InitiativeViewError> {
+    let row = conn.query_row(
+        &format!(
+            "SELECT plan_bundle_sha256 \
+             FROM {} WHERE initiative_id = ?1",
+            Table::Initiatives.as_str(),
+        ),
+        rusqlite::params![initiative_id],
+        |r| r.get::<_, Option<Vec<u8>>>(0),
+    ).optional()?;
+
+    let Some(blob_opt) = row else { return Ok(None); };
+    let Some(blob) = blob_opt else { return Ok(None); };
+
+    let arr: [u8; 32] = blob.as_slice().try_into().map_err(|_| {
+        // Surface as a structured rusqlite error: the DDL CHECK
+        // constraint pins the BLOB to exactly 32 bytes, so a
+        // wrong-width payload is a corrupted row.
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Blob,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("plan_bundle_sha256 is {} bytes, expected 32", blob.len()),
+            )),
+        )
+    })?;
+    Ok(Some(raxis_types::BundleSha256::new(arr)))
+}
+
 /// Look up a single initiative by id. Returns `None` when missing.
 pub fn by_id(conn: &RoConn, initiative_id: &str) -> Result<Option<InitiativeRow>, InitiativeViewError> {
     let row = conn.query_row(
@@ -355,6 +403,86 @@ mod tests {
         assert_eq!(row.state, "Draft");
         assert_eq!(row.created_at, 300);
         assert_eq!(row.completed_at, None);
+    }
+
+    // ── plan_bundle_sha256_by_id ────────────────────────────────────────
+
+    #[test]
+    fn plan_bundle_sha256_by_id_returns_none_for_missing_initiative() {
+        let tmp = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        assert!(plan_bundle_sha256_by_id(&conn, "nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_bundle_sha256_by_id_returns_none_for_v1_initiative() {
+        // The seed function inserts every row without `plan_bundle_sha256`
+        // (V1 admission path). The accessor MUST NOT confuse that with
+        // "missing initiative" — return None for both, but the
+        // operator distinguishes via `by_id` paired with this helper.
+        let tmp = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        assert!(plan_bundle_sha256_by_id(&conn, "init-fresh").unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_bundle_sha256_by_id_round_trips_a_v2_admission_blob() {
+        // Insert one V2-shaped initiative directly (no kernel admission
+        // dependency in this view crate) and confirm the BLOB
+        // round-trips into a typed BundleSha256. The DDL puts a FK
+        // from `initiatives.plan_bundle_sha256` onto `plan_bundles`,
+        // so the test seeds the parent row first via the typed
+        // helpers in `crate::plan_bundles`.
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let bundle_sha_arr = [0xABu8; 32];
+        let bundle_sha = raxis_types::BundleSha256::new(bundle_sha_arr);
+        let bundle = raxis_types::PlanBundle::new_v2_1(
+            100, 200,
+            raxis_types::BundleNonce::new([0xCDu8; 16]),
+            "myplan".to_owned(),
+            vec![raxis_types::BundleArtifact {
+                name:   "plan.toml".to_owned(),
+                bytes:  b"[orchestrator]\n".to_vec(),
+                sha256: {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(b"[orchestrator]\n");
+                    raxis_types::BundleSha256::new(h.finalize().into())
+                },
+            }],
+        );
+        {
+            let mut conn = store.lock_sync();
+            let tx = conn.transaction_with_behavior(
+                rusqlite::TransactionBehavior::Immediate,
+            ).unwrap();
+            crate::plan_bundles::insert_bundle(
+                &tx, &bundle_sha,
+                b"placeholder-canonical-bytes",
+                &[0x77u8; 64],
+                &raxis_types::OperatorFingerprint::new([0x88u8; 8]),
+                &bundle, 1_700_000_999,
+            ).unwrap();
+            crate::plan_bundles::insert_artifacts(
+                &tx, &bundle_sha, &bundle.artifacts,
+            ).unwrap();
+            const INITIATIVES: &str = Table::Initiatives.as_str();
+            tx.execute(
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
+                     (initiative_id, state, terminal_criteria_json, \
+                      plan_artifact_sha256, plan_bundle_sha256, created_at) \
+                     VALUES ('init-v2', 'Draft', '{{}}', 'fallback-sha', ?1, 1700000000)"
+                ),
+                rusqlite::params![bundle_sha_arr.as_slice()],
+            ).unwrap();
+            tx.commit().unwrap();
+        }
+        let conn = open_ro(tmp.path()).unwrap();
+        let sha = plan_bundle_sha256_by_id(&conn, "init-v2").unwrap()
+            .expect("V2 bundle sha should round-trip");
+        assert_eq!(sha.as_bytes(), &[0xABu8; 32]);
     }
 
     #[test]
