@@ -2143,6 +2143,7 @@ mod escalation_dispatch_tests {
             sink.clone(),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let domain = crate::ipc::context::build_default_test_domain(&data_dir);
         Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
@@ -2154,6 +2155,7 @@ mod escalation_dispatch_tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            domain,
         ))
     }
 
@@ -2549,6 +2551,7 @@ mod escalation_dispatch_tests {
             Arc::clone(&audit),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let domain = crate::ipc::context::build_default_test_domain(&data_dir);
         let ctx = Arc::new(HandlerContext::new(
             policy_swap,
             Arc::new(KeyRegistry::stub_for_tests()),
@@ -2560,6 +2563,7 @@ mod escalation_dispatch_tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            domain,
         ));
         (ctx, inner)
     }
@@ -2851,6 +2855,7 @@ mod rotate_epoch_dispatch_tests {
             sink.clone(),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let domain = crate::ipc::context::build_default_test_domain(data_dir);
         Arc::new(HandlerContext::new(
             policy,
             registry,
@@ -2862,6 +2867,7 @@ mod rotate_epoch_dispatch_tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            domain,
         ))
     }
 
@@ -3730,6 +3736,7 @@ mod quarantine_dispatch_tests {
             sink.clone(),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let domain = crate::ipc::context::build_default_test_domain(data_dir);
         let ctx = Arc::new(HandlerContext::new(
             policy,
             registry,
@@ -3741,6 +3748,7 @@ mod quarantine_dispatch_tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            domain,
         ));
         (ctx, sink)
     }

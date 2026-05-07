@@ -604,6 +604,46 @@ async fn main() {
         Arc::new(AuditingBackend::new(inner, Arc::clone(&audit)))
     };
 
+    // Step 8.0c — V2 DomainAdapter selection.
+    //
+    // Spec: `extensibility-traits.md §2.6` (boot-order step). The
+    // kernel binary monomorphises against the SE-domain binding in
+    // V2; future trading / healthcare / robotics kernels swap the
+    // adapter behind a `cfg`-gated boot-time selector. The three
+    // host-side roots — master repo, per-session worktrees,
+    // transfer staging — anchor under `<data_dir>/`; the
+    // `worktree-provision` and `worktree-staging` crates own the
+    // actual content laid down inside them.
+    let domain: Arc<
+        dyn raxis_domain::DomainAdapter<
+            IntentKind       = raxis_domain_git::SeIntentKind,
+            TerminalArtefact = raxis_domain_git::SeTerminalArtefact,
+        >,
+    > = {
+        let master_root   = data_dir.join("repositories").join("master");
+        let sessions_root = data_dir.join("worktrees");
+        let transfer_root = data_dir.join("transfer");
+        // Lay down the three roots if they are missing — the
+        // worktree-provision crate expects them to exist before the
+        // first session is admitted.
+        for p in [&master_root, &sessions_root, &transfer_root] {
+            if !p.exists() {
+                if let Err(e) = std::fs::create_dir_all(p) {
+                    eprintln!(
+                        "BOOT_ERR_DOMAIN_DIR_CREATE: failed to create {}: {e}",
+                        p.display(),
+                    );
+                    std::process::exit(64);
+                }
+            }
+        }
+        Arc::new(raxis_domain_git::GitAdapter::new(
+            master_root,
+            sessions_root,
+            transfer_root,
+        ))
+    };
+
     let ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -615,6 +655,7 @@ async fn main() {
         Arc::clone(&epoch_binding),
         Arc::clone(&credentials),
         Arc::clone(&isolation_backend),
+        Arc::clone(&domain),
     );
     let ctx = Arc::new(ctx_inner);
 

@@ -17,6 +17,8 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use raxis_audit_tools::AuditSink;
 use raxis_credentials::CredentialBackend;
+use raxis_domain::DomainAdapter;
+use raxis_domain_git::{SeIntentKind, SeTerminalArtefact};
 use raxis_isolation::Backend as IsolationBackend;
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
@@ -142,6 +144,36 @@ pub struct HandlerContext {
     /// from `<data_dir>/credentials/`), so there is no degraded
     /// boot mode that could legitimately leave this `None`.
     pub credentials: Arc<dyn CredentialBackend>,
+
+    /// V2 domain adapter selected at boot.
+    ///
+    /// `extensibility-traits.md §2` — the single seam between the
+    /// domain-agnostic kernel core and the domain-specific state
+    /// primitives that vary per problem domain. The kernel boot
+    /// path constructs `Arc::new(GitAdapter::new(...))` (the
+    /// SE-domain reference impl) and stores it here. Future trading
+    /// / healthcare / robotics adapters plug into the same field
+    /// behind a `cfg`-gated boot-time selector.
+    ///
+    /// **Why a concrete `IntentKind = SeIntentKind` binding**: the
+    /// kernel's IPC handlers compile against a single domain at a
+    /// time — there is no run-time dispatch over multiple
+    /// `IntentKind` enums. The trait's associated types are
+    /// monomorphised at the kernel binary boundary; per-domain
+    /// kernels are produced by swapping the `cfg` flag at build.
+    /// V2 ships only the SE binding.
+    ///
+    /// **Why non-Option**: the kernel cannot admit any intent
+    /// without a domain adapter to compute the touched-set against
+    /// (`R-9` admission gate). A degraded boot without a domain
+    /// adapter would refuse every spawn, which is identical to
+    /// failing closed at boot — so we fail closed at boot instead.
+    pub domain: Arc<
+        dyn DomainAdapter<
+            IntentKind       = SeIntentKind,
+            TerminalArtefact = SeTerminalArtefact,
+        >,
+    >,
 }
 
 impl HandlerContext {
@@ -157,6 +189,12 @@ impl HandlerContext {
         epoch_binding: Arc<EpochBinding>,
         credentials: Arc<dyn CredentialBackend>,
         isolation: Arc<dyn IsolationBackend>,
+        domain: Arc<
+            dyn DomainAdapter<
+                IntentKind       = SeIntentKind,
+                TerminalArtefact = SeTerminalArtefact,
+            >,
+        >,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
         Self {
@@ -172,6 +210,7 @@ impl HandlerContext {
             cert_enforcer: Arc::new(CertEnforcer::new()),
             isolation,
             credentials,
+            domain,
         }
     }
 
@@ -210,6 +249,28 @@ pub fn build_default_test_credentials(
     let inner: Arc<dyn CredentialBackend> =
         Arc::new(raxis_credentials_file::FileCredentialBackend::open_without_uid_check(data_dir));
     Arc::new(AuditingBackend::new(inner, audit))
+}
+
+/// Build a default `GitAdapter`-backed [`DomainAdapter`] for in-process
+/// kernel unit tests. The adapter operates against three
+/// kernel-test-temporary directories under `data_dir`. Every adapter
+/// method is a no-op or a deterministic pure computation; tests that
+/// exercise the actual `commit_merge_to_master` ceremony override
+/// these paths to point at a fixture-built repo.
+#[cfg(any(debug_assertions, test))]
+pub fn build_default_test_domain(
+    data_dir: &std::path::Path,
+) -> Arc<
+    dyn DomainAdapter<
+        IntentKind       = SeIntentKind,
+        TerminalArtefact = SeTerminalArtefact,
+    >,
+> {
+    Arc::new(raxis_domain_git::GitAdapter::new(
+        data_dir.join("repositories").join("master"),
+        data_dir.join("worktrees"),
+        data_dir.join("transfer"),
+    ))
 }
 
 /// Build a fail-closed isolation substrate placeholder for in-process

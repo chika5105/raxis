@@ -558,6 +558,7 @@ mod tests {
             sink.clone(),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let domain = crate::ipc::context::build_default_test_domain(&data_dir);
         let ctx  = Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
@@ -569,6 +570,7 @@ mod tests {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            domain,
         ));
         (ctx, sink)
     }

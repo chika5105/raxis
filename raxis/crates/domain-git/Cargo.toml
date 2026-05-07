@@ -8,8 +8,15 @@ repository  = { workspace = true }
 description = "RAXIS V2 — `DomainAdapter` reference implementation for the SE (git) domain. Master fast-forward + ancestry verification host-side via `gix`."
 
 [dependencies]
-gix       = { workspace = true }
-thiserror = { workspace = true }
+raxis-domain = { workspace = true }
+gix          = { workspace = true }
+thiserror    = { workspace = true }
+async-trait  = { workspace = true }
+chrono       = { workspace = true }
+sha2         = { workspace = true }
+serde        = { workspace = true }
+tokio        = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+tokio    = { workspace = true }

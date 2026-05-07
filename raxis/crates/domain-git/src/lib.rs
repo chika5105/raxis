@@ -75,6 +75,9 @@
 
 use std::path::{Path, PathBuf};
 
+mod adapter;
+pub use adapter::{GitAdapter, SeIntentKind, SeTerminalArtefact};
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------

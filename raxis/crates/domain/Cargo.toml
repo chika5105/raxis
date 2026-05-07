@@ -1,0 +1,25 @@
+[package]
+name        = "raxis-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# crates/raxis-domain — the `DomainAdapter` trait crate.
+#
+# Normative reference: `specs/v2/extensibility-traits.md §2`.
+# Per the spec, this crate has zero git / DB / network deps. It is the
+# kernel-binary-compiled-against trait surface; concrete impls
+# (`raxis-domain-git`, future `TradingAdapter`, etc.) live in their own
+# crates and depend on this one.
+
+[dependencies]
+raxis-types       = { workspace = true }
+raxis-credentials = { workspace = true }
+serde             = { workspace = true }
+chrono            = { workspace = true }
+thiserror         = { workspace = true }
+async-trait       = { workspace = true }
+
+[dev-dependencies]
+tokio             = { workspace = true }
+serde_json        = { workspace = true }

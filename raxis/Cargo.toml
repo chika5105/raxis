@@ -27,6 +27,7 @@ members = [
     "crates/runtime",
     "crates/test-support",
     "crates/verifier-stub",
+    "crates/domain",
     "crates/domain-git",
     "crates/prompts",
     "crates/canonical-images",
@@ -76,6 +77,17 @@ toml        = "0.8"
 glob        = "0.3"
 anyhow      = "1"
 thiserror   = "1"
+# `async-trait` is required for `DomainAdapter` (the trait has async
+# methods; `async fn` in traits became stable in 1.75 but bringing
+# back the dyn-trait support requires `async-trait` until the
+# stabilisation of "dyn AsyncFn" lands). Pinned to the long-stable
+# 0.1 line.
+async-trait = "0.1"
+# Wallclock timestamps in audit-shaped types (DomainCommitReceipt,
+# audit retention deadlines). `chrono` is pinned to the 0.4 line which
+# has been API-stable since 2018; we use only the `serde` and `clock`
+# features.
+chrono      = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
 # Fast non-cryptographic hash for kernel-internal maps where keys are
 # either small integers or short, **non-user-controllable** strings —
@@ -132,6 +144,7 @@ raxis-isolation-apple-vz = { path = "crates/isolation-apple-vz" }
 raxis-isolation-firecracker = { path = "crates/isolation-firecracker" }
 raxis-runtime           = { path = "crates/runtime" }
 raxis-verifier-stub     = { path = "crates/verifier-stub" }
+raxis-domain            = { path = "crates/domain" }
 raxis-domain-git        = { path = "crates/domain-git" }
 raxis-prompts           = { path = "crates/prompts" }
 raxis-canonical-images  = { path = "crates/canonical-images" }

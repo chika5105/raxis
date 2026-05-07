@@ -50,6 +50,13 @@ raxis-worktree-staging = { workspace = true }
 # audited seam. `extensibility-traits.md §4.4`.
 raxis-credentials       = { workspace = true }
 raxis-credentials-file  = { workspace = true }
+# `DomainAdapter` trait + `GitAdapter` reference impl. Wired into
+# `HandlerContext::domain` at boot per `extensibility-traits.md §2.6`.
+# The kernel binary monomorphises against the SE binding only —
+# future trading / healthcare / robotics kernels swap the adapter
+# behind a `cfg`-gated boot-time selector.
+raxis-domain            = { workspace = true }
+raxis-domain-git        = { workspace = true }
 # Compile-time canonical VM image digests + on-disk verification.
 # Carries `EXPECTED_REVIEWER_IMAGE_DIGEST` (INV-PLANNER-HARNESS-02)
 # and `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` (INV-PLANNER-HARNESS-05).

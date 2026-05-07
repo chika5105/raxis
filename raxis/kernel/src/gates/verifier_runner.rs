@@ -913,6 +913,7 @@ mod stub_round_trip {
             Arc::clone(&audit),
         );
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let domain = crate::ipc::context::build_default_test_domain(&data_dir_path);
         Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             registry,
@@ -924,6 +925,7 @@ mod stub_round_trip {
             Arc::new(crate::prompt::EpochBinding::new()),
             credentials,
             isolation,
+            domain,
         ).with_witness_dir(witness_dir))
     }
 
