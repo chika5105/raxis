@@ -19,6 +19,7 @@ pub mod intent;
 pub mod operator;
 pub mod operator_cert;
 pub mod operator_wire;
+pub mod plan_bundle;
 pub mod policy;
 pub mod push;
 pub mod witness;
@@ -45,6 +46,9 @@ pub use intent::{
 };
 pub use operator::{ApprovalScope, OperatorErrorDetail, OperatorRequest, OperatorResponse};
 pub use operator_cert::{CertKind, OperatorCert};
+pub use plan_bundle::{
+    BundleArtifact, BundleNonce, BundleSha256, OperatorFingerprint, PlanBundle, SchemaVersion,
+};
 pub use policy::Role;
 pub use push::{KernelPush, KernelPushFrame};
 pub use witness::{WitnessResultClass, WitnessSubmission};

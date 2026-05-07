@@ -32,6 +32,13 @@ pub enum CryptoError {
     /// zeros has produced real-world key compromise. See cli-ceremony.md §4.2.
     #[error("OS CSPRNG unavailable: {0}")]
     Rng(#[from] getrandom::Error),
+
+    /// Canonical encoding of a V2 plan bundle failed. Surfaced from
+    /// `plan_bundle::canonical_encode` when the schema-version /
+    /// freshness-envelope contract is violated. See
+    /// `plan-bundle-sealing.md §3.2`.
+    #[error("plan-bundle canonical encoding failed: {0}")]
+    PlanBundleEncode(#[from] crate::plan_bundle::PlanBundleCodecError),
 }
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,7 @@ pub mod cert;
 pub mod delegation;
 pub mod escalation;
 pub mod plan;
+pub mod plan_bundle;
 pub mod pubkey;
 pub mod token;
 pub mod verify;
@@ -30,6 +31,11 @@ pub use cert::{
     CertKind,
     CertStatus,
     OperatorCert,
+};
+pub use plan_bundle::{
+    bundle_sha256, canonical_decode, canonical_encode, mint_bundle_nonce,
+    sha256_of_artifact_bytes, signing_input, verify_plan_bundle_signature,
+    PlanBundleCodecError, CANONICAL_INPUT_PREFIX, SIGNING_INPUT_PREFIX,
 };
 pub use pubkey::{PubkeyParseError, parse_ed25519_public_material};
 pub use verify::{CryptoError, verify_ed25519};

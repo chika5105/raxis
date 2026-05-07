@@ -130,6 +130,10 @@ impl From<CryptoError> for CertError {
             CryptoError::MalformedSignature(s) => CertError::MalformedSelfSig(s),
             CryptoError::HexDecode(e)          => CertError::HexDecode(e.to_string()),
             CryptoError::Rng(e)                => CertError::HexDecode(e.to_string()),
+            // Cert verification never enters the plan-bundle code path.
+            // If it ever does, surface the codec error through the
+            // structurally-closest variant rather than `panic!`-ing.
+            CryptoError::PlanBundleEncode(e)   => CertError::HexDecode(e.to_string()),
         }
     }
 }

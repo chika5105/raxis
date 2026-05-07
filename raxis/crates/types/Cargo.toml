@@ -9,6 +9,11 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 uuid        = { version = "1", features = ["v4", "serde"] }
 thiserror   = { workspace = true }
+# Required for plan-bundle byte projections (BundleSha256::to_hex,
+# BundleNonce::to_hex, OperatorFingerprint::to_hex). The crate is a
+# pure data module — no `hex::FromHex` parsers — so the dependency
+# is read-only.
+hex         = { workspace = true }
 
 [dev-dependencies]
 # Required for the regression test in `witness::tests` that pins the
