@@ -12,7 +12,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use raxis_audit_tools::{AuditEventKind, AuditSink};
+use raxis_audit_tools::AuditSink;
 use raxis_ipc::message::GatewayMessage;
 use raxis_ipc::{read_frame, FrameError};
 use tokio::net::{UnixListener, UnixStream};

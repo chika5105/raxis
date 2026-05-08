@@ -374,6 +374,7 @@ fn unix_now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use std::io::Write as _; // for `writeln!` on std::fs::File in test fixtures
 
     fn write_inbox(dir: &Path, lines: &[&str]) -> PathBuf {

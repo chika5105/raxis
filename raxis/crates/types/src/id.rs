@@ -28,6 +28,7 @@ macro_rules! string_id {
 
         impl $name {
             /// Wrap an already-validated string. Callers inside this crate only.
+            #[allow(dead_code)]
             pub(crate) fn from_string_unchecked(s: String) -> Self {
                 Self(s)
             }

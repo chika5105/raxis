@@ -13,7 +13,7 @@
 // startup_check detects and reports orphans. Safe because lookup requires
 // an index row; an orphaned blob is invisible to queries.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use raxis_crypto::token::sha256_hex;
 use raxis_store::{Store, Table};
@@ -339,7 +339,7 @@ pub fn startup_check(
 mod tests {
     use super::*;
 
-    fn temp_dir() -> PathBuf {
+    fn temp_dir() -> std::path::PathBuf {
         let p = std::env::temp_dir().join(format!(
             "raxis-witness-test-{}",
             std::time::SystemTime::now()

@@ -45,7 +45,7 @@
 // format the kernel returns.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -596,7 +596,7 @@ task_id = "noop"
         assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
     }
 
-    fn _unused_warns_to_silence_compiler(p: &Path) {
+    fn _unused_warns_to_silence_compiler(p: &std::path::Path) {
         let _ = p;
     }
 }

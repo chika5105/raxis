@@ -1237,7 +1237,6 @@ mod edge_cases {
     use super::*;
     use ed25519_dalek::SigningKey;
     use raxis_test_support::{ephemeral_cert_with_key, CertOpts};
-    use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
     /// Build a fresh `(TempDir, BootstrapConfig)` pair that points at a

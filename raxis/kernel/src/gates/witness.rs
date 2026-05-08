@@ -9,7 +9,7 @@
 
 use raxis_store::Store;
 
-use crate::witness_index::{self, WitnessRecord, WitnessError};
+use crate::witness_index::{self, WitnessRecord};
 use super::GateError;
 
 /// Look up a witness record for (evaluation_sha, task_id, gate_type).

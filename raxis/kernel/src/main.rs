@@ -6,6 +6,15 @@
 // This file is intentionally thin — no policy logic, no IPC logic, no
 // authority logic. Only: step sequencing + signal handling + error dispatch.
 // Each step calls a subsystem function; this file is the call list.
+//
+// V2 scaffolding note: many sibling modules expose structs / enum
+// variants / functions that the V2 hot path does not call yet
+// (V3 reachability — orchestrator restart, witness recovery,
+// scheduler re-entry, etc.). These are pinned by spec but intent-
+// ionally unwired in the V2 binary. We allow `dead_code` at the
+// crate root so the binary build is clean while the API surface
+// stays stable for the V3 patches that will wire each in turn.
+#![allow(dead_code)]
 
 mod errors;
 mod bootstrap;

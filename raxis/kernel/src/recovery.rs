@@ -16,9 +16,11 @@ use std::path::Path;
 
 use raxis_store::{Store, Table};
 use raxis_types::{
-    unix_now_secs, InitiativeState, IntegrationMergeAttemptDiscardReason,
+    unix_now_secs, IntegrationMergeAttemptDiscardReason,
     IntegrationMergeAttemptState, TaskState,
 };
+#[cfg(test)]
+use raxis_types::InitiativeState;
 
 use crate::errors::KernelError;
 

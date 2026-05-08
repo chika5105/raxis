@@ -21,7 +21,6 @@ pub mod witness;
 
 use std::path::{Path, PathBuf};
 
-use raxis_store::Store;
 use raxis_types::{SessionId, SubmittedClaim};
 
 use crate::authority::delegation;

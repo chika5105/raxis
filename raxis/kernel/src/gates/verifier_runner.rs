@@ -16,14 +16,14 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::process::Command;
-use tokio::sync::Mutex;
 
 use raxis_policy::PolicyBundle;
-use raxis_store::{Store, Table};
+use raxis_store::Store;
+#[cfg(test)]
+use raxis_store::Table;
 
 use crate::authority::verifier_token;
 use super::GateError;

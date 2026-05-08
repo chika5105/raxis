@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# `panic = abort` parity with the kernel: a gateway that has lost the
-# invariant of "one process token + one open UDS connection" should never
-# attempt unwinding. The kernel's supervisor (Phase A.5) will respawn.
-[profile.release]
-panic     = "abort"
-opt-level = 3
-debug     = false
+# `panic = abort` parity with the kernel: a gateway that has lost
+# the invariant of "one process token + one open UDS connection"
+# should never attempt unwinding. The kernel's supervisor (Phase
+# A.5) will respawn. The release profile is pinned at the
+# workspace root (`raxis/Cargo.toml [profile.release]`); per-
+# package overrides outside the workspace root are ignored (and
+# warn).
 
 [lib]
 name = "raxis_gateway"

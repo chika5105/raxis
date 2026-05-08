@@ -34,16 +34,7 @@ pub mod cert_check;
 pub mod dispatch_matrix;
 
 // Re-export the public API surface per kernel-core.md §2.3 authority/mod.rs.
-pub use delegation::{
-    check_capability, record_capability_use, list_delegations, mark_stale_on_epoch_advance,
-    grant_delegation,
-};
-pub use session::{
-    accept_envelope_and_advance_sequence, create_session, get_session, revoke_session,
-    update_sequence_number, EnvelopeReplayReason,
-};
-pub use verifier_token::{issue_verifier_token, validate_verifier_token, consume_verifier_token};
-pub use keys::{verify_hmac, sign_audit_record, authority_pubkey_fingerprint, KeyRegistry, load_key_registry};
-pub use approval::{validate_approval_token, revoke_approval};
-pub use cert_check::{CertEnforcer, CertGuard};
-pub use dispatch_matrix::{evaluate_dispatch, DispatchVerdict};
+pub use keys::{authority_pubkey_fingerprint, load_key_registry};
+#[cfg(test)]
+pub use keys::sign_audit_record;
+pub use dispatch_matrix::evaluate_dispatch;

@@ -4,11 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-# Part 2.1: panic = "abort" in release — no unwinding in a trust-critical process.
-[profile.release]
-panic     = "abort"
-opt-level = 3
-debug     = false
+# Part 2.1: panic = "abort" in release — no unwinding in a
+# trust-critical process. Pinned at the workspace root
+# (`raxis/Cargo.toml [profile.release]`) so Cargo applies it to
+# the kernel binary; per-package overrides outside the workspace
+# root are ignored (and warn).
 
 [[bin]]
 name = "raxis-kernel"

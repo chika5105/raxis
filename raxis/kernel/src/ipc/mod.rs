@@ -22,7 +22,3 @@ pub mod operator;
 // accept layer consults it BEFORE any authenticated session lookup
 // (cf. `ipc::auth`, which runs AFTER the connection is established).
 // See `cid_blocklist.rs` and `v2-deep-spec.md §Step 15` for design.
-pub use cid_blocklist::{
-    BlocklistInsertError, CidBlocklist,
-    VMADDR_CID_ANY, VMADDR_CID_HOST, VMADDR_CID_LOCAL,
-};

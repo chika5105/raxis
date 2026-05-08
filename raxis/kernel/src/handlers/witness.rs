@@ -33,7 +33,7 @@
 
 use std::path::PathBuf;
 
-use raxis_types::{unix_now_secs, GateType, TaskId, WitnessSubmission};
+use raxis_types::{unix_now_secs, GateType, WitnessSubmission};
 use raxis_store::Table;
 use raxis_types::TaskState;
 
@@ -533,7 +533,7 @@ fn map_result_class(rc: raxis_types::WitnessResultClass) -> ResultClass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raxis_types::{WitnessResultClass, WitnessSubmission, CommitSha, TaskId, GateType};
+    use raxis_types::WitnessResultClass;
 
     // ── WitnessRejectionReason equality sanity check ──────────────────────
 
@@ -744,7 +744,7 @@ mod tests {
     fn commit_witness_in_tx_rolls_back_when_token_concurrently_expired() {
         let store = Store::open_in_memory().unwrap();
         let (raw_token, run_id) = seed_pending_witness(&store, "t-w-2");
-        let record = make_record(&run_id, "t-w-2");
+        let _record = make_record(&run_id, "t-w-2");
 
         // Simulate `recovery::reconcile_tasks` expiring the token between
         // our pre-tx state and the consume step inside the transaction.

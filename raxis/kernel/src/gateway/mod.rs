@@ -38,6 +38,5 @@ pub mod accept;
 pub mod client;
 pub mod supervisor;
 
-pub use accept::accept_gateway_loop;
-pub use client::{FetchResult, GatewayCallError, GatewayClient};
-pub use supervisor::{spawn_and_supervise, SupervisorShutdown};
+pub use client::GatewayCallError;
+pub use supervisor::spawn_and_supervise;

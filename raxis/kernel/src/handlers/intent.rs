@@ -36,9 +36,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use raxis_types::{
-    unix_now_secs, BudgetSnapshot, InitiativeState, IntentKind, IntentOutcome, IntentRequest,
+    unix_now_secs, BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest,
     IntentResponse, PlannerErrorCode, SessionId, SubmittedClaim, TaskState,
 };
+#[cfg(test)]
+use raxis_types::InitiativeState;
 use raxis_store::{Store, Table};
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers come from the
@@ -55,7 +57,6 @@ use crate::initiatives::task_transitions::{
 };
 use crate::ipc::context::HandlerContext;
 use crate::scheduler::budget;
-use crate::vcs;
 use crate::vcs::diff::CommitSha;
 
 // ---------------------------------------------------------------------------

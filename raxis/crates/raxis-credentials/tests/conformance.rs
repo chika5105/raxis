@@ -53,6 +53,7 @@ struct MemBackend {
 impl MemBackend {
     fn new() -> Self { Self { inner: Mutex::new(HashMap::new()) } }
 
+    #[allow(dead_code)]
     fn pre_seed(&self, name: &str, bytes: Vec<u8>) {
         self.inner.lock().unwrap().insert(name.to_owned(), bytes);
     }

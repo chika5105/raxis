@@ -273,7 +273,7 @@ mod tests {
     use std::path::Path;
     use raxis_audit_tools::AuditEvent;
     use raxis_test_support::FakeAuditSink;
-    use raxis_policy::{NotificationChannel, NotificationChannelKind, OperatorEntry, PolicyBundle};
+    use raxis_policy::{NotificationChannel, OperatorEntry, PolicyBundle};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -314,7 +314,7 @@ mod tests {
         // only needs an OperatorEntry to populate the bundle; it does
         // NOT exercise cert validation.
         let pubkey = "0".repeat(64);
-        let mut b = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
+        let b = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: "fp".into(),
             display_name:       "fp".into(),
             pubkey_hex:         pubkey.clone(),

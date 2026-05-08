@@ -84,7 +84,8 @@ pub async fn deliver(
     opts.create(true).append(true);
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
+        // `tokio::fs::OpenOptions::mode` is a direct method on
+        // unix targets — no `OpenOptionsExt` import required.
         opts.mode(0o644);
     }
     let mut file = opts.open(&target).await.map_err(DeliveryError::Io)?;

@@ -24,9 +24,7 @@ pub mod lane;
 pub mod budget;
 
 pub use admit::{admit_in_tx, PlanTask};
-pub use dag::{next_ready_tasks, mark_task_complete, transition_to_admitted};
-pub use lane::{lane_config_for_row, get_lane_status};
-pub use budget::{check_budget, current_budget};
+pub use dag::transition_to_admitted;
 
 // ---------------------------------------------------------------------------
 // SchedulerError — shared error type for all scheduler sub-modules

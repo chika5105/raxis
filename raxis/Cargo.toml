@@ -186,3 +186,12 @@ raxis-planner-core       = { path = "crates/planner-core" }
 # HTTP / SSH transports — the kernel only ever clones from local
 # disk paths held in `<data_dir>/`.
 gix = { version = "0.83", default-features = true, features = ["blocking-network-client"] }
+
+# Release profile pinned at the workspace root so per-crate
+# overrides in `kernel/Cargo.toml` and `gateway/Cargo.toml` are no
+# longer ignored by Cargo (which warns on per-package release
+# profiles outside the workspace root).
+[profile.release]
+panic     = "abort"
+opt-level = 3
+debug     = false

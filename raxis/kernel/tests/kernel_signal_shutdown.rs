@@ -132,6 +132,12 @@ fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
 struct KernelHandle {
     child: std::process::Child,
     stderr_lines: Arc<Mutex<Vec<String>>>,
+    /// Stored for forensic context only — the test asserts on
+    /// stderr lines, not on the data dir's contents — but we
+    /// keep the path on the handle so future shutdown tests
+    /// (V3 will add coverage for the kernel.db rollover ledger)
+    /// have it without re-reading env vars.
+    #[allow(dead_code)]
     data_dir: PathBuf,
 }
 

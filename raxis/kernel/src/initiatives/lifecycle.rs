@@ -957,8 +957,8 @@ pub struct OrchestratorAutoSpawn {
 /// the operator sees a generic `FAIL_APPROVE_PLAN` and the store
 /// stays in `Draft`. There is no partial-spawn failure mode.
 fn auto_spawn_orchestrator_session_in_tx(
-    tx:            &rusqlite::Transaction<'_>,
-    initiative_id: &str,
+    tx:             &rusqlite::Transaction<'_>,
+    _initiative_id: &str,
 ) -> Result<OrchestratorAutoSpawn, LifecycleError> {
     use raxis_types::SessionId;
 

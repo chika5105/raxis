@@ -730,6 +730,7 @@ mod operator_key_resolution_tests {
     /// `RAXIS_OPERATOR_KEY_PATH` would silently break operator
     /// muscle memory across releases.
     #[test]
+    #[allow(non_snake_case)]
     fn env_var_name_is_exactly_RAXIS_OPERATOR_KEY() {
         let mut seen: Option<String> = None;
         let _ = resolve_operator_key_path(None, |key| {

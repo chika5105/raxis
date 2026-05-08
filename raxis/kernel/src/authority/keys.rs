@@ -189,7 +189,7 @@ pub fn verify_hmac(
     msg_bytes: &[u8],
     registry: &KeyRegistry,
 ) -> Result<(), AuthorityError> {
-    use sha2::Sha256 as HmacSha256;
+    
     // Use ring-style HMAC: H(K XOR opad || H(K XOR ipad || message))
     // We implement a simple HMAC-SHA256 inline to avoid pulling in the `hmac`
     // crate outside raxis-crypto. This is acceptable because keys.rs is the

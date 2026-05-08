@@ -9,7 +9,7 @@
 // for JSON projections (operator UIs, test harnesses); they are NOT transmitted
 // on the wire (bincode standard() encodes positionally).
 
-use crate::{CommitSha, EscalationId, SessionId, TaskId, TaskState};
+use crate::{CommitSha, EscalationId, TaskId, TaskState};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -612,7 +612,6 @@ mod tests {
     /// every field.
     #[test]
     fn v2_submit_review_round_trips_with_approved_and_critique() {
-        use uuid::Uuid;
         use crate::TaskId;
 
         let req = IntentRequest {

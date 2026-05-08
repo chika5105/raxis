@@ -30,6 +30,12 @@ use crate::signing::{load_operator_key, sign_bytes};
 
 pub struct OperatorConn {
     pub stream: UnixStream,
+    /// Stored for forensic context only; the kernel hashes the
+    /// public-key bytes the CLI sends in the handshake and does
+    /// not echo a fingerprint back, so V2 doesn't read this
+    /// field after the constructor populates it. V3 surfaces
+    /// it to `raxis whoami`.
+    #[allow(dead_code)]
     pub operator_fingerprint: String,
 }
 
