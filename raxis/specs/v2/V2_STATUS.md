@@ -101,12 +101,21 @@ packets, and streams results back to the agent. Spec-amendment
   `SmtpProxyConnected` / `SmtpProxyDisconnected` audit kinds
   (which serve the same purpose) and is **not** migrated to the
   generic envelope.
-* **MySQL**, **MSSQL**, **MongoDB**: real-upstream-forwarding
-  scheduled in the next milestone of this V2.1 sequence
-  (~250 lines + tests per protocol). Until then, allowed queries
-  synthesise empty success packets — the wire contract is
-  identical to V2.0 and the agent's driver does not crash, but
-  the result set is structurally empty.
+* **MySQL** — shipped at V2.1 in commit
+  `880bc5e credential-proxy-mysql: real upstream forwarding` with
+  hand-rolled `mysql_native_password`; `caching_sha2_password`
+  (MySQL 8.0 default) deferred to V3.
+* **MongoDB** — shipped at V2.1 in commit
+  `e6c9445 credential-proxy-mongodb: real upstream forwarding`
+  for `--noauth` upstreams; SCRAM-SHA-256 + TLS deferred to V2.2.
+  URLs with userinfo or `tls=true` fail fast with a clear
+  `CredentialProxyUpstreamFailed { reason: "ProtocolHandshakeFailed" }`
+  audit signal so operators get a precise migration message.
+* **MSSQL** — shipped at V2.1 in commit
+  `9e8ca39 credential-proxy-mssql: real upstream forwarding` with
+  plaintext-TDS SQL-Authentication (`[MS-TDS] 2.2.6.4` password
+  obfuscation); Windows Auth, Entra ID, and `?encrypt=true`
+  deferred to V3.
 
 "**Handshake-tier — real cloud creds**" means the proxy returns the
 operator's actual cloud credentials in the metadata-service envelope
@@ -254,38 +263,55 @@ checks live as `Vec::new()`-returning stubs in
 `xtask/src/spec_graph.rs` so the surface is named for the follow-up
 PR.
 
-### 2.5 Real-upstream-forwarding for MySQL / MSSQL / MongoDB (V2.1)
+### 2.5 Real-upstream-forwarding refinements (V2.2 / V3)
 
-**Spec home:** `credential-proxy.md §14` (V2.1 contract amendment).
+**Spec home:** `credential-proxy.md §14` + per-proxy notes in §14.8.
 
-**What's missing:** real `tokio::net::TcpStream::connect` to the
-upstream named in the credential URL, plus protocol-specific
-relay logic:
+**What's shipped (V2.1):** all six TCP-protocol proxies (Postgres,
+MySQL, MSSQL, MongoDB, Redis, SMTP) open a real upstream
+connection on the first allowed agent query and relay
+classified-and-approved packets through. See §1.6 for the per-
+proxy status row and the "V2.1 real-upstream-forwarding contract"
+note that follows it.
 
-* MySQL: `HandshakeV10` ↔ `HandshakeResponse41` ↔
-  `mysql_native_password` reply ↔ `COM_QUERY` relay with multi-
-  packet `ResultSetHeader + ColumnDef* + EOF + Row* + EOF`.
-* MSSQL: `PRELOGIN` ↔ TLS handshake (per cloud SQL) ↔ `LOGIN7`
-  with cleartext password OR Entra ID token ↔ `SQLBatch` relay
-  with `COLMETADATA + ROW* + DONE` token streaming.
-* MongoDB: `OP_MSG hello` ↔ SCRAM-SHA-256 `saslStart/saslContinue`
-  ↔ `OP_MSG` command relay (the framing is already in place;
-  this is mostly upstream-connect plus relay).
+**What's deferred to V2.2:**
 
-**Why deferred:** sequencing — Postgres landed first as the
-canonical pattern; MySQL / MSSQL / MongoDB will follow the same
-shape with protocol-specific deltas. Postgres's
-`tokio_postgres::Config::connect` removed cryptographic-correctness
-risk for SCRAM-SHA-256; MySQL's `mysql_async`, MongoDB's `mongodb`
-crate, and MSSQL's `tiberius` are the analogous workspace adds.
+* **MongoDB SCRAM-SHA-256 + TLS upstream** — the V2.1 MongoDB
+  proxy supports `--noauth` upstreams only. URLs with userinfo
+  or `tls=true` fail fast at `connect()` with a
+  `CredentialProxyUpstreamFailed { reason: "ProtocolHandshakeFailed" }`
+  and a detail string mentioning `--noauth`. The SCRAM-SHA-256
+  saslStart/saslContinue handshake plus a `tokio-rustls` upstream
+  layer is ~150 LOC + ~40 LOC, scheduled as a focused V2.2 follow-up.
 
-**What you can do today:** the agent's wire contract for these
-three protocols is identical to V2.0. Drivers do not crash;
-allowed `SELECT` / `find` / `SQLBatch` returns an empty success
-packet. Plans that only need governance-pipeline observation
-(audit chain, restriction enforcement) work end-to-end; plans
-that need real result data should pin to `proxy_type =
-"postgres"` until this milestone lands.
+**What's deferred to V3:**
+
+* **MySQL `caching_sha2_password`** — V2.1 ships
+  `mysql_native_password` only. MySQL 8.0 defaults to
+  `caching_sha2_password`, which adds a public-key exchange + a
+  fast-auth-cache code path. URLs naming a user whose plugin is
+  `caching_sha2_password` fail fast with the same
+  `CredentialProxyUpstreamFailed` envelope and a detail string
+  pointing operators at V3.
+* **MSSQL Windows Auth + Entra ID + `?encrypt=true`** — V2.1 ships
+  plaintext-TDS SQL Authentication only. Windows Auth requires
+  GSS-API/SSPI; Entra ID requires the OAuth2 token-exchange flow;
+  TLS-to-MSSQL requires negotiating the TDS PRELOGIN ENC_REQ
+  branch and bringing up `tokio-rustls`. URLs with
+  `?encrypt=true` or non-SQL auth modes fail fast with
+  `CredentialProxyUpstreamFailed`.
+* **Redis ACL-form `AUTH user password`** — V2.1 supports the
+  legacy `AUTH password` form. Redis 6.0 added named users;
+  ACL-form auth is ~30 LOC + a `CredentialBackend` change to
+  return `(username, password)` tuples (see V2_GAPS §3
+  upstream-auth status table).
+* **Redis TLS-to-upstream** — required by Elasticache,
+  Memorystore, Azure Cache; ~40 LOC with `tokio-rustls`
+  (already a workspace dep).
+
+**What you can do today:** all six TCP proxies relay real query
+results from real upstream services. The deferred items above
+are protocol extensions; the core relay path is V2-shipped.
 
 ### 2.6 Planner agent loop (T1-1 from the V2.1 audit)
 
@@ -326,7 +352,7 @@ slot in without touching kernel code.
 
 * `cargo build --workspace` — clean
 * `cargo build --release -p raxis-kernel -p raxis-gateway -p raxis-cli -p raxis-planner-orchestrator -p raxis-planner-executor -p raxis-planner-reviewer -p raxis-tproxy` — clean
-* `cargo test --workspace --no-fail-fast` — **all green** (1700+ tests; Postgres proxy gained 6 new integration tests at V2.1 + 13 new unit tests in `upstream.rs`)
+* `cargo test --workspace --no-fail-fast` — **all green** (1700+ tests; the V2.1 real-upstream-forwarding sequence added integration tests across four crates: Postgres `tests/proxy_handshake.rs` (6 tests), MySQL `tests/proxy_upstream.rs` (4 tests), MSSQL `tests/proxy_upstream.rs` (4 tests + 25 unit tests in `upstream.rs`), MongoDB `tests/proxy_upstream.rs` (4 tests + 11 unit tests))
 * `cargo run -p raxis-live-e2e -- all` — **15/15 slices pass** (incl. real Anthropic API call)
 * `cargo xtask spec-graph --strict` — **0 findings**, 44 files / 120 fail codes / 64 audit kinds
 
@@ -416,7 +442,13 @@ The audit's genuine open items, in order of remaining work:
 1. **T1-1 — Planner agent loop** (~1,500 LOC across four crates).
    Confirmed gap; see §2.6 above. Largest remaining V2.1 piece.
 2. **T1-2 — MySQL / MSSQL / MongoDB real upstream forwarding**
-   (~750 LOC across three crates). Confirmed gap; see §2.5.
+   — **shipped at V2.1** in commits `880bc5e` (MySQL),
+   `9e8ca39` (MSSQL), `e6c9445` (MongoDB). The remaining
+   per-protocol refinements (MongoDB SCRAM-SHA-256, MSSQL
+   Windows Auth / Entra ID, MySQL `caching_sha2_password`)
+   are documented in §2.5 with explicit `CredentialProxyUpstreamFailed`
+   audit signals at `connect()` time so operators get a
+   precise migration message.
 3. **T2-1 — CI determinism gate for `mkfs.erofs`** (~40 LOC of
    YAML in `.github/workflows/build-images.yml`). Small.
 4. **T2-2 — Homebrew tap auto-update from `release.yml`**
