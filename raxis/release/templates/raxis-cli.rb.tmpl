@@ -1,0 +1,56 @@
+# Auto-generated from raxis/release/templates/raxis-cli.rb.tmpl
+# by .github/workflows/release.yml. Do NOT hand-edit this file in
+# the homebrew-tap repository — the next release will overwrite it.
+#
+# Normative reference: raxis/specs/v2/release-and-distribution.md.
+
+class RaxisCli < Formula
+  desc     "RAXIS V2 CLI — operator-side commands; talks to a local or remote raxis-kernel"
+  homepage "https://github.com/chika5105/aegis-ai"
+  version  "@@RAXIS_VERSION@@"
+  license  "SSPL-1.0"
+
+  # Operators who only need the CLI on a control-plane machine
+  # that talks to a remote kernel can `brew install raxis-cli`
+  # alone; the CLI does not depend on the kernel binary at runtime
+  # (the dependency is via UDS to a separately-running kernel).
+  # The `depends_on "raxis-kernel"` line is intentionally omitted
+  # so this formula stays standalone-installable.
+
+  on_macos do
+    on_arm do
+      url "@@RAXIS_DARWIN_ARM64_URL@@"
+      sha256 "@@RAXIS_DARWIN_ARM64_SHA256@@"
+    end
+    on_intel do
+      url "@@RAXIS_DARWIN_X86_64_URL@@"
+      sha256 "@@RAXIS_DARWIN_X86_64_SHA256@@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "@@RAXIS_LINUX_ARM64_URL@@"
+      sha256 "@@RAXIS_LINUX_ARM64_SHA256@@"
+    end
+    on_intel do
+      url "@@RAXIS_LINUX_X86_64_URL@@"
+      sha256 "@@RAXIS_LINUX_X86_64_SHA256@@"
+    end
+  end
+
+  conflicts_with "raxis-kernel",
+                 because: "both formulas ship `bin/raxis-cli`. \
+                           Install raxis-kernel for the full stack \
+                           on a host that runs the kernel; install \
+                           raxis-cli alone on a control-plane host \
+                           that talks to a remote kernel."
+
+  def install
+    bin.install "bin/raxis-cli"
+  end
+
+  test do
+    assert_match "raxis-cli", shell_output("#{bin}/raxis-cli --version")
+  end
+end

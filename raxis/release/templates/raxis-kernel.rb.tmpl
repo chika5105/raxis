@@ -1,0 +1,134 @@
+# Auto-generated from raxis/release/templates/raxis-kernel.rb.tmpl
+# by .github/workflows/release.yml. Do NOT hand-edit this file in
+# the homebrew-tap repository — the next release will overwrite it.
+#
+# Normative reference: raxis/specs/v2/release-and-distribution.md.
+
+class RaxisKernel < Formula
+  desc     "RAXIS V2 — supervised AI agent kernel with VM-isolated planner sessions"
+  homepage "https://github.com/chika5105/aegis-ai"
+  version  "@@RAXIS_VERSION@@"
+  license  "SSPL-1.0"
+
+  on_macos do
+    on_arm do
+      url "@@RAXIS_DARWIN_ARM64_URL@@"
+      sha256 "@@RAXIS_DARWIN_ARM64_SHA256@@"
+    end
+    on_intel do
+      url "@@RAXIS_DARWIN_X86_64_URL@@"
+      sha256 "@@RAXIS_DARWIN_X86_64_SHA256@@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "@@RAXIS_LINUX_ARM64_URL@@"
+      sha256 "@@RAXIS_LINUX_ARM64_SHA256@@"
+    end
+    on_intel do
+      url "@@RAXIS_LINUX_X86_64_URL@@"
+      sha256 "@@RAXIS_LINUX_X86_64_SHA256@@"
+    end
+  end
+
+  # Canonical-image archives. Distributed as separate resources so
+  # they can be rotated independently of the binary tarball when
+  # only the image content changes (e.g. an EROFS-builder bug fix
+  # that does not touch the kernel binary).
+  resource "raxis-reviewer-core" do
+    url "@@RAXIS_REVIEWER_IMG_URL@@"
+    sha256 "@@RAXIS_REVIEWER_IMG_SHA256@@"
+  end
+
+  resource "raxis-orchestrator-core" do
+    url "@@RAXIS_ORCHESTRATOR_IMG_URL@@"
+    sha256 "@@RAXIS_ORCHESTRATOR_IMG_SHA256@@"
+  end
+
+  resource "raxis-executor-starter" do
+    url "@@RAXIS_EXECUTOR_STARTER_IMG_URL@@"
+    sha256 "@@RAXIS_EXECUTOR_STARTER_IMG_SHA256@@"
+  end
+
+  def install
+    # Lay out the binaries. The tarballs ship a `bin/` subdirectory
+    # whose contents are byte-identical across architectures save
+    # for the Mach-O / ELF headers; brew handles the per-arch
+    # selection above.
+    bin.install "bin/raxis-kernel"
+    bin.install "bin/raxis-cli"
+    bin.install "bin/raxis-orchestrator"
+    bin.install "bin/raxis-executor"
+    bin.install "bin/raxis-reviewer"
+
+    # Linux ships a real raxis-tproxy; macOS ships a stub
+    # (release-and-distribution.md §6.3) — both are present in
+    # `bin/raxis-tproxy` regardless.
+    bin.install "bin/raxis-tproxy"
+
+    # Stage canonical images under share/raxis/images/. The kernel
+    # reads from $RAXIS_INSTALL_DIR/images/ at boot; the post_install
+    # hook below symlinks share/raxis -> $RAXIS_INSTALL_DIR.
+    images_dir = pkgshare/"images"
+    images_dir.mkpath
+
+    resource("raxis-reviewer-core").stage do
+      images_dir.install "reviewer-core.img"
+      images_dir.install "reviewer-core.manifest.toml"
+    end
+    resource("raxis-orchestrator-core").stage do
+      images_dir.install "orchestrator-core.img"
+      images_dir.install "orchestrator-core.manifest.toml"
+    end
+    resource("raxis-executor-starter").stage do
+      images_dir.install "executor-starter.img"
+      images_dir.install "executor-starter.manifest.toml"
+    end
+
+    # Operator-policy skeleton. NEVER overwritten on upgrade — see
+    # release-and-distribution.md §9.4.
+    (etc/"raxis").mkpath
+    (etc/"raxis/policy.toml.example").write(<<~EOS) unless (etc/"raxis/policy.toml.example").exist?
+      # RAXIS operator policy — example skeleton. Copy to policy.toml
+      # and edit before running raxis-kernel for the first time.
+      #
+      # Full schema: raxis/specs/v2/policy-plan-authority.md.
+    EOS
+  end
+
+  def post_install
+    # Verify each shipped artefact against the kernel's
+    # compiled-in trust anchor + per-role digest. Failure here
+    # aborts the install rather than letting an unverifiable
+    # binary land on PATH (release-and-distribution.md §9.2).
+    system bin/"raxis-cli", "doctor", "canonical-images"
+    system bin/"raxis-cli", "doctor", "signing-key-fp"
+  end
+
+  def caveats
+    <<~EOS
+      RAXIS canonical images are installed at:
+        #{pkgshare}/images/
+
+      Operator policy lives at:
+        #{etc}/raxis/policy.toml.example
+        (copy to #{etc}/raxis/policy.toml and edit before first run)
+
+      State directories that are NOT removed by `brew uninstall`:
+        macOS:  ~/Library/Application Support/raxis/
+        Linux:  ~/.local/state/raxis/
+
+      They hold the SQLite store, the audit chain, and operator
+      policy — preserved across uninstall so forensics on a
+      decommissioned machine remains possible.
+    EOS
+  end
+
+  test do
+    # Smoke test — does the kernel binary print its compiled-in
+    # trust-anchor fingerprint? Catches a tap that landed an
+    # un-notarized / wrong-arch binary.
+    assert_match "signing key fingerprint", shell_output("#{bin}/raxis-cli doctor signing-key-fp")
+  end
+end
