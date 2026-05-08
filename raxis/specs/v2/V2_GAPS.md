@@ -1,10 +1,11 @@
 # RAXIS V2 — Specification Gaps & ORM Strategy
 
-> **Last updated:** 2026-05-08
+> **Last updated:** 2026-05-08 (pass 2)
 > **Method:** Systematic audit of all 30 V2 specification documents
-> against 150,119 lines of Rust, with three cross-check passes
-> covering CLI subcommand completeness, invariant coverage, and
-> per-environment enforcement.
+> against 140,010 lines of Rust, with five cross-check passes
+> covering CLI subcommand completeness, invariant coverage,
+> per-environment enforcement, IPC handler coverage, and
+> kernel-push / notification / review-aggregation wiring.
 > **Baseline SHA:** the commit that ships this file.
 
 ---
@@ -25,7 +26,9 @@ partial or schema-only implementations**.
 | D — Schema/skeleton only | 2 | Store tables or trait stubs exist |
 | E — Deferred/partial | 1 | Confirmed post-V2 or partially done |
 
-**Total lines remaining:** ~10,300 lines of Rust to close all V2 gaps.
+**Total lines remaining:** ~11,000 lines of Rust to close all V2 gaps
+(revised up from ~10,300 after pass 2 identified additional unwired
+subsystems).
 
 ---
 
@@ -175,11 +178,25 @@ Zero references to `model_selection`, `ProviderRouting`.
 **Spec:** `email-and-notification-channels.md` (61KB)
 **Estimate:** ~500 lines
 
-`NotificationTransport` trait with Slack webhook, email, and CLI poll
-implementations. Escalation → operator notification delivery.
-Acknowledgment tracking. Per-initiative notification preferences.
+**Partially implemented (1,327 lines exist but incomplete):**
 
-Zero references to `NotificationTransport`, `SlackWebhook`.
+The kernel ships a notification subsystem (`kernel/src/notifications/`,
+1,327 lines) with `mod.rs`, `sink.rs`, `summary.rs`, and
+`handler/file.rs`. However:
+
+| Channel kind | Policy parsed | Handler impl | Status |
+|---|---|---|---|
+| `Shell` | ✅ | ✅ `file.rs` | Working — runs a shell command |
+| `File` | ✅ | ✅ `file.rs` | Working — appends to a log file |
+| `Email` | ✅ (parsed) | ❌ No SMTP handler | Parsed at policy load, rejected at dispatch |
+| `Webhook` | ✅ (parsed) | ❌ No HTTP handler | Parsed at policy load, rejected at dispatch |
+
+The spec (`email-and-notification-channels.md`) defines Email and
+Webhook as the primary operator notification paths. The Shell/File
+handlers are viable for dev/CI but insufficient for production
+deployments where operators expect Slack webhooks or email.
+
+**Remaining:** ~300 lines (SMTP transport + HTTP webhook transport).
 
 ### C5: Immutable Artifact Store
 
@@ -507,7 +524,7 @@ The proxy:
 | 9 | **D2** — Host capacity management | 500 | Multi-session safety |
 | 10 | **C7** — Credential CLI (`add`/`remove`) | 400 | Operator onboarding friction |
 
-### Phase 3: GA polish (~2,100 lines)
+### Phase 3: GA polish (~2,800 lines)
 
 | # | Item | Lines | Rationale |
 |---|---|---|---|
@@ -518,6 +535,9 @@ The proxy:
 | 15 | `raxis init` project scaffolding | 200 | New-operator onboarding |
 | 16 | Remaining `INV-` invariant enforcement (48 of 89) | 300 | Formal spec compliance |
 | 17 | Gateway binary integrity (embedded binary) | 90 | Eliminates file-on-disk tampering surface |
+| 18 | KernelPush transport (kernel → agent sessions) | 200 | Pushes are typed but never sent (see §12.1) |
+| 19 | Review aggregation wiring | 50 | Module exists but is never called (see §12.2) |
+| 20 | Email + Webhook notification transports | 300 | Only Shell/File channels work (see §12.3) |
 
 ---
 
@@ -594,15 +614,116 @@ require.
 
 ## §11 — Reconciliation Notes
 
-Corrections made during the cross-check passes:
+Corrections made during cross-check passes:
 
-| Item | Previous status | Actual status | How found |
+| Item | Previous status | Actual status | How found | Pass |
+|---|---|---|---|---|
+| Policy epoch diffing (C5) | "Zero code" | ✅ Shipped (649 lines in `policy_diff.rs`) | CLI command grep | 1 |
+| Session spawn handler | "Single blocker, ~400 lines" | ✅ Shipped (1,590 lines) | `session_spawn_orchestrator.rs` + `session-spawn` crate | 1 |
+| Heartbeat writer | "Not wired, ~30 lines" | ✅ Shipped, wired in `main.rs:532` | `grep heartbeat_loop` | 1 |
+| Gateway supervisor | "~200 lines missing" | ✅ Shipped (715 lines) | `gateway/supervisor.rs` | 1 |
+| Credential CLI | "Fully shipped" | 🟡 Partial (2 of 7 subcommands) | CLI code header comments | 1 |
+| `raxis init` | Not tracked | ❌ Missing | CLI subcommand grep | 1 |
+| Env access control | Not tracked (Tier E) | 🟡 Schema parsed, enforcement missing | `credential-proxy.md §11` examples | 1 |
+| Invariant coverage | Not tracked | 46% (41 of 89 `INV-` refs in code) | `grep -c INV-` | 1 |
+| Notification channels (C4) | "Zero code" | 🟡 Partial (Shell+File only, 1,327 lines) | `kernel/src/notifications/` grep | 2 |
+| KernelPush type | "Spec complete, zero code" | 🟡 Type defined (6 variants), never sent | `grep KernelPush kernel/src/` — zero hits | 2 |
+| Review aggregation | "Shipped" (in Tier A8) | 🟡 Module exists (403 lines), never called | `grep review_aggregation kernel/src/initiatives/lifecycle.rs` — zero hits | 2 |
+| `plan explain` (CLI) | Not tracked | ✅ Shipped (552 lines) | `wc -l explain.rs` | 2 |
+| Planner binaries | "~36 lines each" | ✅ Correct (boot+park, scaffold only) | `wc -l planner-*/src/main.rs` | 2 |
+| `submit plan --dry-run` | "Not implemented" | 🟡 CLI flag parsed, kernel handler missing | `grep dry_run submit.rs` — flag exists; no `DryRunAdmit` IPC type | 2 |
+| Codebase total | 150,119 lines | 140,010 lines | `find ... -name "*.rs" \| xargs wc -l` | 2 |
+
+---
+
+## §12 — Newly Discovered Gaps (Pass 2)
+
+### 12.1 KernelPush: Types defined, transport missing
+
+`KernelPush` is defined in `crates/types/src/push.rs` with 6 variants:
+`SubTaskActivated`, `SubTaskCompleted`, `AllReviewersPassed`,
+`ReviewRejected`, `SubTaskSecurityViolation`, and the framing type
+`KernelPushFrame`.
+
+However, **zero push messages are ever sent.** No function in
+`kernel/src/` calls any send/dispatch/push method with a `KernelPush`.
+The kernel knows what it *would* push (the types are well-defined and
+referenced in doc-comments like `review_aggregation.rs:42` and
+`intent.rs:1276`), but the transport layer does not exist.
+
+**What's missing:** A session-addressed push channel (VSock or UDS)
+that the kernel writes `KernelPushFrame` messages to when lifecycle
+events fire. ~200 lines (session registry + write path).
+
+### 12.2 Review aggregation: Module exists, never wired
+
+`kernel/src/initiatives/review_aggregation.rs` (403 lines) implements
+the Step 25 logical-AND verdict aggregation — pure functions that
+aggregate reviewer verdicts for an executor task.
+
+But `lifecycle.rs` (the only caller candidate) has **zero references**
+to `review_aggregation`. The module is registered in `mod.rs` but
+never invoked at the `CompleteTask` or `SubmitReview` intent handling
+points where the spec requires it.
+
+**What's missing:** Wire `review_aggregation::aggregate_verdict()` into
+the `SubmitReview` handler in `lifecycle.rs`. ~50 lines (call site +
+state transition on aggregated result).
+
+### 12.3 Notification channels: Shell + File only
+
+See updated C4 above. The policy parser accepts all four channel kinds
+(`Shell`, `File`, `Email`, `Webhook`), but the dispatch handler only
+implements Shell and File. Email and Webhook configurations are parsed
+at policy load but produce runtime errors at dispatch.
+
+### 12.4 Operator-ergonomics IPC: 5 of 5 V2 handlers missing
+
+The `operator-ergonomics.md` spec defines 5 new `OperatorRequest`
+variants. None exist in `crates/types/src/operator.rs` or in the
+kernel's IPC dispatcher:
+
+| IPC variant | Spec section | Type defined | Handler |
 |---|---|---|---|
-| Policy epoch diffing (C5) | "Zero code" | ✅ Shipped (649 lines in `policy_diff.rs`) | CLI command grep |
-| Session spawn handler | "Single blocker, ~400 lines" | ✅ Shipped (1,590 lines) | `session_spawn_orchestrator.rs` + `session-spawn` crate |
-| Heartbeat writer | "Not wired, ~30 lines" | ✅ Shipped, wired in `main.rs:532` | `grep heartbeat_loop` |
-| Gateway supervisor | "~200 lines missing" | ✅ Shipped (715 lines) | `gateway/supervisor.rs` |
-| Credential CLI | "Fully shipped" | 🟡 Partial (2 of 7 subcommands) | CLI code header comments |
-| `raxis init` | Not tracked | ❌ Missing | CLI subcommand grep |
-| Env access control | Not tracked (Tier E) | 🟡 Schema parsed, enforcement missing | `credential-proxy.md §11` examples |
-| Invariant coverage | Not tracked | 46% (41 of 89 `INV-` refs in code) | `grep -c INV-` |
+| `ProposeDefaults` | §5.3 | ❌ | ❌ |
+| `EstimateCost` | §11.3 | ❌ | ❌ |
+| `DryRunAdmit` | §12.3 | ❌ | ❌ (CLI flag exists) |
+| `SubscribeInitiative` | §13.4 | ❌ | ❌ |
+| `DescribeInitiativePause` | §14.3 | ❌ | ❌ |
+
+These are not blockers for Phase 1 (agent loop) but are required for
+the operator-ergonomics CLI commands (`plan prepare`, `plan cost-estimate`,
+`submit plan --dry-run`, `initiative watch`, `initiative resume`).
+
+### 12.5 `raxis doctor`: categories missing
+
+The spec (`operator-ergonomics.md §17`) defines 6 doctor categories:
+`policy`, `providers`, `host`, `network`, `keys`, `bundles`. The CLI
+implements:
+
+| Category | Implemented | Notes |
+|---|---|---|
+| `canonical-images` | ✅ | Digest verification |
+| `signing-key-fp` | ✅ | Operator key check |
+| `cache-prune` | ✅ | Image cache management |
+| (default) | ✅ | Subdirectory perms, cert check, policy parse |
+| `policy` (standalone) | ❌ | Covered partially by default run |
+| `providers` | ❌ | No live credential smoke-test |
+| `host` | ❌ | No OS version / cgroup / KVM check |
+| `network` | ❌ | No egress-host reachability probe |
+| `keys` | ❌ | No CRL / revocation check |
+| `bundles` | ❌ | No storage utilization check |
+
+### 12.6 `setup wizard`: not started
+
+The `operator-ergonomics.md §16` defines a 10-phase interactive setup
+wizard. Zero code exists in the CLI. This is a convenience feature
+(operators can manually run genesis + policy sign + credential add),
+but the spec positions it as the recommended first-run experience.
+
+### 12.7 VSock IPC client: not implemented
+
+`planner-core/src/lib.rs` explicitly states: *"No VSock kernel-IPC
+client."* The planner binaries boot and park but cannot communicate
+with the kernel. The VSock frame reader/writer (guest-side) is a
+prerequisite for B1 (planner agent loop).
