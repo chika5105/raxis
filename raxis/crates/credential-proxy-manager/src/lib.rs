@@ -855,6 +855,103 @@ impl MysqlAuditChannel for MysqlKernelAuditAdapter {
                     );
                 }
             }
+            // V2.1 upstream-forwarding events. See
+            // `credential-proxy.md §14.5`.
+            MysqlAuditEvent::DatabaseQueryCompleted {
+                credential,
+                sql_sha256,
+                rows_returned,
+                bytes_returned,
+                duration_ms,
+                upstream_error,
+                ..
+            } => {
+                let kind = AuditEventKind::DatabaseQueryCompleted {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type:      "mysql".to_owned(),
+                    sql_sha256,
+                    rows_returned,
+                    bytes_returned,
+                    duration_ms,
+                    upstream_error,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "DatabaseQueryCompleted (mysql) audit emit failed",
+                    );
+                }
+            }
+            MysqlAuditEvent::CredentialProxyUpstreamConnected {
+                credential,
+                upstream_host,
+                upstream_port,
+                tls,
+                handshake_ms,
+                ..
+            } => {
+                let kind = AuditEventKind::CredentialProxyUpstreamConnected {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type:      "mysql".to_owned(),
+                    upstream_host,
+                    upstream_port,
+                    tls,
+                    handshake_ms,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "CredentialProxyUpstreamConnected (mysql) audit emit failed",
+                    );
+                }
+            }
+            MysqlAuditEvent::CredentialProxyUpstreamFailed {
+                credential,
+                upstream_host,
+                upstream_port,
+                reason,
+                detail,
+                ..
+            } => {
+                let kind = AuditEventKind::CredentialProxyUpstreamFailed {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type:      "mysql".to_owned(),
+                    upstream_host,
+                    upstream_port,
+                    reason,
+                    detail,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "CredentialProxyUpstreamFailed (mysql) audit emit failed",
+                    );
+                }
+            }
         }
     }
 }

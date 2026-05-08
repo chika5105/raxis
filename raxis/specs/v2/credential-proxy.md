@@ -2787,14 +2787,14 @@ appear in `policy-plan-authority.md §3b`). They are visible on
 
 ### 14.8 — Per-proxy implementation matrix
 
-| Proxy | Upstream protocol surface | New code (~ lines) | Reference |
-|---|---|---|---|
-| `postgres` | StartupMessage + AuthenticationCleartextPassword/SCRAM-SHA-256 + simple-query relay (Q → RowDescription* + DataRow* + CommandComplete + RFQ) | ~250 | §14.8.1 |
-| `mysql` | HandshakeV10 → HandshakeResponse41 → mysql_native_password reply → COM_QUERY relay (ResultSetHeader + ColumnDef* + EOF + Row* + EOF) | ~280 | §14.8.2 |
-| `mssql` | PRELOGIN with TLS handshake → LOGIN7 with cleartext password (or ADAL/Entra token) → SQLBatch relay (COLMETADATA + ROW* + DONE) | ~280 | §14.8.3 |
-| `mongodb` | OP_MSG `hello` → SCRAM-SHA-256 saslStart/saslContinue → OP_MSG command relay | ~240 | §14.8.4 |
-| `redis` | RESP2 AUTH (or HELLO 2 AUTH user pass) → command relay (response framing follows `+OK` / `$<n>` / `*<n>` / `:<n>` / `-ERR`) | ~150 | §14.8.5 |
-| `smtp` | EHLO → STARTTLS (per `smtps:` scheme) → AUTH PLAIN → MAIL/RCPT/DATA relay | ~220 | §14.8.6 |
+| Proxy | Upstream protocol surface | New code (~ lines) | Status (V2.1) | Reference |
+|---|---|---|---|---|
+| `postgres` | StartupMessage + AuthenticationCleartextPassword/SCRAM-SHA-256 + simple-query relay (Q → RowDescription* + DataRow* + CommandComplete + RFQ) | ~600 (incl. tests + fake-pg fixture) | **shipped** (`tokio-postgres`-driven) | §14.8.1 |
+| `mysql` | HandshakeV10 → HandshakeResponse41 → mysql_native_password reply → COM_QUERY relay (ResultSetHeader + ColumnDef* + EOF + Row* + EOF) | ~900 (incl. tests + fake-mysql fixture) | **shipped** (hand-rolled `mysql_native_password`; `caching_sha2_password` + TLS upstream deferred to V3) | §14.8.2 |
+| `mssql` | PRELOGIN with TLS handshake → LOGIN7 with cleartext password (or ADAL/Entra token) → SQLBatch relay (COLMETADATA + ROW* + DONE) | ~280 | pending | §14.8.3 |
+| `mongodb` | OP_MSG `hello` → SCRAM-SHA-256 saslStart/saslContinue → OP_MSG command relay | ~240 | pending | §14.8.4 |
+| `redis` | RESP2 AUTH (or HELLO 2 AUTH user pass) → command relay (response framing follows `+OK` / `$<n>` / `*<n>` / `:<n>` / `-ERR`) | ~150 | **shipped** (V2.0 base; V2.1 audit envelope upgrade) | §14.8.5 |
+| `smtp` | EHLO → STARTTLS (per `smtps:` scheme) → AUTH PLAIN → MAIL/RCPT/DATA relay | ~220 | **shipped** (V2.0 base; protocol-specific `SmtpProxyConnected`/`SmtpProxyDisconnected` lifecycle audit kept rather than migrating to the generic §14.5 envelope) | §14.8.6 |
 
 Each entry is treated as an independent merge in the implementation
 checklist; landing one proxy at a time is the V2.1 phasing strategy

@@ -68,9 +68,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 pub mod restriction;
+pub mod upstream;
 pub mod wire;
 
 pub use restriction::{OperationKind, Restrictions, classify_first_operation};
+pub use upstream::{
+    ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamSession,
+    redact_for_audit, resolve_upstream_url, DEFAULT_CONNECT_TIMEOUT,
+};
 
 // ---------------------------------------------------------------------------
 // OwnedConsumer — local mirror.
@@ -140,6 +145,14 @@ pub struct ProxyStats {
     pub queries_blocked:    AtomicU32,
     /// Bytes seen in inbound `COM_QUERY` payloads.
     pub bytes_observed:     AtomicU64,
+    /// V2.1: number of upstream TCP+auth handshakes started.
+    pub upstream_connects_attempted: AtomicU32,
+    /// V2.1: subset that reached a usable upstream session.
+    pub upstream_connects_succeeded: AtomicU32,
+    /// V2.1: subset that failed (DNS / TCP / auth / timeout).
+    pub upstream_connects_failed:    AtomicU32,
+    /// V2.1: sum of upstream→agent payload bytes relayed.
+    pub upstream_bytes_forwarded:    AtomicU64,
 }
 
 impl ProxyStats {
@@ -150,6 +163,10 @@ impl ProxyStats {
             queries_audited:    self.queries_audited   .load(Ordering::Relaxed),
             queries_blocked:    self.queries_blocked   .load(Ordering::Relaxed),
             bytes_observed:     self.bytes_observed    .load(Ordering::Relaxed),
+            upstream_connects_attempted: self.upstream_connects_attempted.load(Ordering::Relaxed),
+            upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
+            upstream_connects_failed:    self.upstream_connects_failed   .load(Ordering::Relaxed),
+            upstream_bytes_forwarded:    self.upstream_bytes_forwarded   .load(Ordering::Relaxed),
         }
     }
 }
@@ -165,6 +182,14 @@ pub struct ProxyStatsSnapshot {
     pub queries_blocked:    u32,
     /// Bytes seen in inbound `COM_QUERY` payloads.
     pub bytes_observed:     u64,
+    /// V2.1: number of upstream TCP+auth handshakes started.
+    pub upstream_connects_attempted: u32,
+    /// V2.1: subset that reached a usable upstream session.
+    pub upstream_connects_succeeded: u32,
+    /// V2.1: subset that failed.
+    pub upstream_connects_failed:    u32,
+    /// V2.1: sum of upstream→agent payload bytes relayed.
+    pub upstream_bytes_forwarded:    u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +214,8 @@ impl AuditChannel for NoopAuditChannel {
 #[derive(Debug, Clone)]
 pub enum AuditEvent {
     /// One `COM_QUERY` statement observed (allowed or blocked).
+    /// Pre-upstream-contact event — fires before the proxy attempts
+    /// to forward to the real backend.
     DatabaseQueryExecuted {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
@@ -205,6 +232,77 @@ pub enum AuditEvent {
         operation:   OperationKind,
         /// True if the proxy refused the query under restrictions.
         blocked:     bool,
+    },
+
+    /// V2.1: emitted on the upstream's terminal frame for a
+    /// forwarded query. Pairs with `DatabaseQueryExecuted` via
+    /// matching `sql_sha256`. Per `credential-proxy.md §14.5.1`.
+    DatabaseQueryCompleted {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session.
+        consumer:    OwnedConsumer,
+        /// Credential name (never the value).
+        credential:  CredentialName,
+        /// SHA-256 of the SQL text — matches the prior
+        /// `DatabaseQueryExecuted.sql_sha256`.
+        sql_sha256:  String,
+        /// Number of `ResultSetRow` packets forwarded.
+        rows_returned:  u64,
+        /// Number of payload bytes the proxy relayed
+        /// upstream→agent for this query.
+        bytes_returned: u64,
+        /// Wall-clock duration agent's-COM_QUERY-arrival → upstream's
+        /// terminal frame in milliseconds.
+        duration_ms:    u32,
+        /// `Some(<sqlstate>)` if the upstream returned an error;
+        /// `None` on success.
+        upstream_error: Option<String>,
+    },
+
+    /// V2.1: emitted once per agent connection on the first
+    /// successful upstream TCP+auth handshake.
+    /// Per `credential-proxy.md §14.5.2`.
+    CredentialProxyUpstreamConnected {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session.
+        consumer:    OwnedConsumer,
+        /// Credential name (never the value).
+        credential:  CredentialName,
+        /// Upstream **hostname from the credential URL** (NOT a
+        /// resolved IP).
+        upstream_host: String,
+        /// Upstream port from the credential URL after default-port
+        /// substitution.
+        upstream_port: u16,
+        /// True if the URL requested TLS.
+        tls: bool,
+        /// Wall-clock from `TcpStream::connect()` start to first
+        /// usable session, in milliseconds.
+        handshake_ms: u32,
+    },
+
+    /// V2.1: emitted on every upstream-connect attempt that did NOT
+    /// reach a usable session. The `reason` discriminant is one of
+    /// `"DnsResolveFailed" | "TcpConnectFailed" | "TlsHandshakeFailed"
+    /// | "ProtocolHandshakeFailed" | "AuthRejected" | "Timeout"`.
+    /// Per `credential-proxy.md §14.5.3`.
+    CredentialProxyUpstreamFailed {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session.
+        consumer:    OwnedConsumer,
+        /// Credential name (never the value).
+        credential:  CredentialName,
+        /// Upstream hostname from the credential URL.
+        upstream_host: String,
+        /// Upstream port from the credential URL.
+        upstream_port: u16,
+        /// Failure category — see variant doc.
+        reason: String,
+        /// Short redacted message; never carries credential bytes.
+        detail: String,
     },
 }
 
@@ -306,21 +404,26 @@ async fn serve_one(
     stats:      Arc<ProxyStats>,
     audit:      Arc<dyn AuditChannel>,
 ) -> std::io::Result<()> {
-    // Resolve the credential once at connect time so a missing /
-    // malformed credential aborts the handshake rather than mid-
-    // query.
-    if let Err(e) = backend.resolve(&config.credential_name, config.consumer.as_ref()) {
-        tracing::warn!(error = %e, "mysql proxy credential resolve failed");
-        // Send an ERR_Packet with a clear "access denied" shape.
-        let payload = wire::build_err_packet(
-            1045, // ER_ACCESS_DENIED_ERROR
-            "28000",
-            "credential resolve failed at RAXIS proxy",
-        );
-        let _ = stream.write_all(&wire::frame_packet(&payload, 0)).await;
-        let _ = stream.flush().await;
-        return Ok(());
-    }
+    // Resolve+parse the upstream URL on accept. We tolerate failure
+    // here and surface it lazily (on the first allowed COM_QUERY)
+    // so a session that never issues queries still cleanly
+    // disconnects and so blocked queries do not require an upstream
+    // to be reachable at all.
+    let upstream_url: Option<ParsedUpstreamUrl> = match upstream::resolve_upstream_url(
+        &backend,
+        &config.credential_name,
+        &config.consumer,
+    ) {
+        Ok(u) => Some(u),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                credential = %config.credential_name.as_str(),
+                "mysql proxy upstream URL resolution failed; first allowed query will fail",
+            );
+            None
+        }
+    };
 
     // Send Protocol::HandshakeV10 (seq=0).
     let auth_plugin_data: [u8; 20] = derive_handshake_scramble(&config);
@@ -348,19 +451,21 @@ async fn serve_one(
     stream.write_all(&wire::frame_packet(&ok, 2)).await?;
     stream.flush().await?;
 
+    // V2.1: lazy upstream session, opened on the first allowed query.
+    let mut upstream_session: Option<UpstreamSession> = None;
+
     // Command loop.
     loop {
         let pkt = match read_packet(&mut stream).await? {
             Some(p) => p,
-            None    => return Ok(()),
+            None    => break,
         };
         let (_header, payload) = pkt;
-        if payload.is_empty() { return Ok(()); }
+        if payload.is_empty() { break; }
         let cmd = payload[0];
-        // Sequence resets to 0 on every command. Our reply is seq=1.
         match cmd {
             wire::cmd::QUIT => {
-                return Ok(());
+                break;
             }
             wire::cmd::PING => {
                 let ok = wire::build_ok_packet();
@@ -368,13 +473,25 @@ async fn serve_one(
                 stream.flush().await?;
             }
             wire::cmd::QUERY => {
-                let sql_bytes = &payload[1..];
+                let sql_bytes = payload[1..].to_vec();
                 stats.bytes_observed.fetch_add(sql_bytes.len() as u64, Ordering::Relaxed);
-                let sql = String::from_utf8_lossy(sql_bytes).into_owned();
+                let sql = String::from_utf8_lossy(&sql_bytes).into_owned();
                 let op  = classify_first_operation(&sql);
 
                 let blocked = config.restrictions.is_blocked(&op);
                 stats.queries_audited.fetch_add(1, Ordering::Relaxed);
+                let sql_sha = sha256_hex(&sql_bytes);
+
+                audit.emit(AuditEvent::DatabaseQueryExecuted {
+                    timestamp_unix_seconds: now_secs(),
+                    consumer:   config.consumer.clone(),
+                    credential: config.credential_name.clone(),
+                    sql_sha256: sql_sha.clone(),
+                    sql_text:   if config.log_content { Some(sql.clone()) } else { None },
+                    operation:  op,
+                    blocked,
+                });
+
                 if blocked {
                     stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
                     let err = wire::build_err_packet(
@@ -384,26 +501,127 @@ async fn serve_one(
                     );
                     stream.write_all(&wire::frame_packet(&err, 1)).await?;
                     stream.flush().await?;
-                } else {
-                    let ok = wire::build_ok_packet();
-                    stream.write_all(&wire::frame_packet(&ok, 1)).await?;
-                    stream.flush().await?;
+                    continue;
                 }
 
-                audit.emit(AuditEvent::DatabaseQueryExecuted {
-                    timestamp_unix_seconds: SystemTime::now()
-                        .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-                    consumer:   config.consumer.clone(),
-                    credential: config.credential_name.clone(),
-                    sql_sha256: sha256_hex(sql_bytes),
-                    sql_text:   if config.log_content { Some(sql) } else { None },
-                    operation:  op,
-                    blocked,
-                });
+                // Allowed query: ensure we have a usable upstream
+                // session, then forward.
+                if upstream_session.is_none() {
+                    let url = match upstream_url.as_ref() {
+                        Some(u) => u,
+                        None => {
+                            send_err(&mut stream, 2003, "HY000",
+                                "RAXIS proxy: upstream credential could not be resolved (FAIL_PROXY_UPSTREAM_URL_INVALID)").await?;
+                            continue;
+                        }
+                    };
+                    let host = url.host.clone();
+                    let port = url.port;
+                    stats.upstream_connects_attempted.fetch_add(1, Ordering::Relaxed);
+                    match UpstreamSession::connect(url, upstream::DEFAULT_CONNECT_TIMEOUT).await {
+                        Ok(sess) => {
+                            stats.upstream_connects_succeeded.fetch_add(1, Ordering::Relaxed);
+                            audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
+                                timestamp_unix_seconds: now_secs(),
+                                consumer:      config.consumer.clone(),
+                                credential:    config.credential_name.clone(),
+                                upstream_host: sess.host.clone(),
+                                upstream_port: sess.port,
+                                tls:           sess.tls,
+                                handshake_ms:  sess.handshake_ms,
+                            });
+                            upstream_session = Some(sess);
+                        }
+                        Err(e) => {
+                            stats.upstream_connects_failed.fetch_add(1, Ordering::Relaxed);
+                            audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
+                                timestamp_unix_seconds: now_secs(),
+                                consumer:      config.consumer.clone(),
+                                credential:    config.credential_name.clone(),
+                                upstream_host: host,
+                                upstream_port: port,
+                                reason:        e.audit_reason().to_owned(),
+                                detail:        e.audit_detail(),
+                            });
+                            let (code, sqlstate, msg) = match &e {
+                                UpstreamError::AuthRejected(_) => (
+                                    1045u16, "28000",
+                                    "RAXIS proxy: upstream authentication rejected (FAIL_PROXY_UPSTREAM_AUTH_REJECTED)",
+                                ),
+                                UpstreamError::TcpConnect(_) | UpstreamError::Timeout { .. } => (
+                                    2003u16, "HY000",
+                                    "RAXIS proxy: upstream unreachable (FAIL_PROXY_UPSTREAM_UNREACHABLE)",
+                                ),
+                                UpstreamError::InvalidUrl(_) => (
+                                    2003u16, "HY000",
+                                    "RAXIS proxy: upstream URL invalid (FAIL_PROXY_UPSTREAM_URL_INVALID)",
+                                ),
+                                _ => (
+                                    2003u16, "HY000",
+                                    "RAXIS proxy: upstream connection failed",
+                                ),
+                            };
+                            send_err(&mut stream, code, sqlstate, msg).await?;
+                            continue;
+                        }
+                    }
+                }
+
+                let session = upstream_session.as_mut().expect("upstream connected above");
+                match session.forward_query(&sql_bytes).await {
+                    Ok(outcome) => {
+                        for frame in &outcome.frames {
+                            stream.write_all(frame).await?;
+                        }
+                        stream.flush().await?;
+                        stats.upstream_bytes_forwarded.fetch_add(
+                            outcome.bytes_returned, Ordering::Relaxed,
+                        );
+                        let upstream_error = outcome.upstream_error.as_ref().map(|(_, sqlstate, _)| {
+                            if sqlstate.is_empty() { "HY000".to_owned() } else { sqlstate.clone() }
+                        });
+                        audit.emit(AuditEvent::DatabaseQueryCompleted {
+                            timestamp_unix_seconds: now_secs(),
+                            consumer:       config.consumer.clone(),
+                            credential:     config.credential_name.clone(),
+                            sql_sha256:     sql_sha,
+                            rows_returned:  outcome.rows_returned,
+                            bytes_returned: outcome.bytes_returned,
+                            duration_ms:    outcome.duration_ms,
+                            upstream_error,
+                        });
+                    }
+                    Err(other) => {
+                        let detail = redact_for_audit(&other.to_string());
+                        // Mid-stream I/O / payload-too-large errors
+                        // close the upstream session — drop it so the
+                        // next allowed query opens a fresh upstream
+                        // connection.
+                        if let Some(sess) = upstream_session.take() {
+                            sess.shutdown().await;
+                        }
+                        send_err(&mut stream, 2013, "HY000",
+                            &format!("RAXIS proxy: upstream relay failed: {detail}")).await?;
+                        audit.emit(AuditEvent::DatabaseQueryCompleted {
+                            timestamp_unix_seconds: now_secs(),
+                            consumer:       config.consumer.clone(),
+                            credential:     config.credential_name.clone(),
+                            sql_sha256:     sql_sha,
+                            rows_returned:  0,
+                            bytes_returned: 0,
+                            duration_ms:    0,
+                            upstream_error: Some("HY000".to_owned()),
+                        });
+                    }
+                }
             }
             wire::cmd::RESET => {
                 // COM_RESET_CONNECTION — synthesise an OK_Packet so
-                // the driver's pool can keep using the connection.
+                // the driver's pool can keep using the agent-facing
+                // connection. We deliberately do NOT propagate this
+                // to the upstream because pooling is V3 work and
+                // the V2.1 mapping is one agent connection ↔ one
+                // upstream session for its full lifetime.
                 let ok = wire::build_ok_packet();
                 stream.write_all(&wire::frame_packet(&ok, 1)).await?;
                 stream.flush().await?;
@@ -422,6 +640,33 @@ async fn serve_one(
             }
         }
     }
+
+    // Best-effort upstream shutdown so the real backend logs a
+    // `Quit` rather than a connection-reset.
+    if let Some(sess) = upstream_session {
+        sess.shutdown().await;
+    }
+    Ok(())
+}
+
+/// Send an ERR_Packet with the canonical V2.1 sequence ID (1) and
+/// flush it to the agent.
+async fn send_err(
+    stream:   &mut TcpStream,
+    code:     u16,
+    sqlstate: &str,
+    msg:      &str,
+) -> std::io::Result<()> {
+    let err = wire::build_err_packet(code, sqlstate, msg);
+    stream.write_all(&wire::frame_packet(&err, 1)).await?;
+    stream.flush().await
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 async fn read_packet(stream: &mut TcpStream) -> std::io::Result<Option<(wire::PacketHeader, Vec<u8>)>> {
