@@ -1393,9 +1393,21 @@ The IntegrationMerge handler is rewritten on top of the `DomainAdapter` trait
       proceed to Check 6a based on outcome
 - [ ] Implement `discard_candidate_merge_tree` per §11.10.3 (worktree removal,
       SQLite update, audit emission)
-- [ ] Extend startup recovery (`kernel-lifecycle.md §7`) per §11.10.4 — handle
+- [x] Extend startup recovery (`kernel-lifecycle.md §7`) per §11.10.4 — handle
       attempts in `'AwaitingPreMergeVerifiers'` and `'PreMergeVerifiersPassed'`
-      states; reconcile with verifier-VM cgroup orphan cleanup
+      states; reconcile with verifier-VM cgroup orphan cleanup. **Implemented**
+      as `recovery::reconcile_integration_merge_attempts` in
+      `raxis-kernel/src/recovery.rs`, called from the same Step 6
+      `recovery::reconcile` entry point that handles task sweeping —
+      single bulk `UPDATE` inside one `BEGIN`/`COMMIT` (INV-STORE-02)
+      folds every non-terminal row to `DiscardedCrashRecovery` with
+      `discard_reason = 'crash_recovery'` and `finalized_at = now`.
+      Verifier-VM cgroups are killed by the generic verifier-VM orphan
+      cleanup (kernel-lifecycle.md §7); this sweep is the SQLite-row
+      half. Six dedicated `recovery::tests::imerge_recon_*` tests pin
+      the Awaiting fold path, the Passed fold path, terminal rows
+      being left untouched, idempotency under repeated sweeps, the
+      mixed-seed contract, and the empty-store no-op.
 - [ ] Add audit events `CandidateMergeTreeCreated`, `CandidateMergeTreeDiscarded`,
       `VerifierBlockedMerge` per §11.10.6
 - [ ] Add `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` and
