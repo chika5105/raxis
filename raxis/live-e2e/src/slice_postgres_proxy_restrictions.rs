@@ -33,7 +33,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{anyhow, Result};
 use raxis_credential_proxy_postgres::{
-    OwnedConsumer, PostgresProxy, ProxyConfig, restriction::Restrictions,
+    NoopAuditChannel, OwnedConsumer, PostgresProxy, ProxyConfig, restriction::Restrictions,
 };
 use raxis_credentials::{
     CredentialBackend, CredentialError, CredentialName, CredentialValue,
@@ -84,7 +84,7 @@ pub(crate) async fn run() -> Result<()> {
         consumer:        OwnedConsumer::new("credential_proxy", "live-e2e:postgres:r"),
         restrictions:    Restrictions { allow_only_select: true },
     };
-    let proxy = PostgresProxy::bind(backend.clone(), cfg).await
+    let proxy = PostgresProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel)).await
         .map_err(|e| anyhow!("PostgresProxy::bind: {e}"))?;
     let addr = proxy.local_addr()?;
     let stats = proxy.stats_handle();

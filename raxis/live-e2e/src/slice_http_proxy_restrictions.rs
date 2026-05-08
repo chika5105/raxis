@@ -37,7 +37,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use anyhow::{anyhow, Result};
 use raxis_credential_proxy_http::{
-    AuthMode, HttpProxy, OwnedConsumer, ProxyConfig, restriction::Restrictions,
+    AuthMode, HttpProxy, NoopAuditChannel, OwnedConsumer, ProxyConfig,
+    restriction::Restrictions,
 };
 use raxis_credentials::{
     CredentialBackend, CredentialError, CredentialName, CredentialValue,
@@ -96,7 +97,7 @@ pub(crate) async fn run(_env: &EnvMap) -> Result<()> {
             allowed_path_prefixes: vec!["/anything".to_owned()],
         },
     };
-    let proxy = HttpProxy::bind(backend.clone(), cfg).await
+    let proxy = HttpProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel)).await
         .map_err(|e| anyhow!("HttpProxy::bind: {e}"))?;
     let addr = proxy.local_addr()?;
     tokio::spawn(proxy.serve());

@@ -1242,6 +1242,66 @@ pub enum AuditEventKind {
         /// True if a restriction blocked this request.
         blocked:         bool,
     },
+
+    /// Emitted by the SMTP credential proxy when an envelope passes
+    /// every restriction gate and is forwarded to the upstream
+    /// relay. Carries the SHA-256 of the canonical
+    /// `<sender>\n<rcpt1>\n<rcpt2>...` envelope key (so reviewers
+    /// can cross-correlate against the upstream relay's logs
+    /// without having the recipient list itself land in the audit
+    /// chain), the recipient count, and the bytes-relayed counter.
+    /// Single-class observability event — the underlying
+    /// `task_credential_proxies` row is paired through the
+    /// lifecycle pair (`CredentialProxyStarted` /
+    /// `CredentialProxyStopped`).
+    ///
+    /// Spec reference: `email-and-notification-channels.md §3.3`
+    /// (`SmtpProxyMessageSent`); the V2 implementation pins the
+    /// `kind` string to `SmtpMessageRelayed` to mirror the proxy
+    /// crate's `EnvelopeOutcome::Relayed` so the cross-walk is
+    /// 1:1.
+    SmtpMessageRelayed {
+        /// Session whose VM submitted the envelope.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// SHA-256 (hex-encoded) of the canonical envelope key
+        /// (`<sender>\n<rcpt1>\n<rcpt2>...`). Always present.
+        envelope_sha256: String,
+        /// Number of recipients in the envelope (>= 1, post-gate).
+        recipient_count: u32,
+        /// Total DATA bytes the agent submitted.
+        bytes_relayed:   u64,
+    },
+
+    /// Emitted by the SMTP credential proxy when an envelope is
+    /// rejected at the proxy boundary (sender not allowed,
+    /// recipient domain not allowed, recipient cap exceeded,
+    /// message too large, rate limit exceeded). Carries the same
+    /// envelope SHA-256 as the matching `SmtpMessageRelayed`
+    /// shape, plus a stable short reason string the operator can
+    /// filter on (`sender_not_allowed`, `recipient_not_allowed`,
+    /// `too_many_recipients`, `message_too_large`,
+    /// `rate_limit_exceeded`). Single-class observability event.
+    SmtpMessageRejected {
+        /// Session whose VM submitted the envelope.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// SHA-256 (hex-encoded) of the canonical envelope key
+        /// (`<sender>\n<rcpt1>\n<rcpt2>...`).
+        envelope_sha256: String,
+        /// Number of recipients in the envelope (may be 0 if
+        /// rejected pre-RCPT TO).
+        recipient_count: u32,
+        /// Total DATA bytes the agent submitted (0 if rejected
+        /// pre-DATA).
+        bytes_submitted: u64,
+        /// Stable short reason string for filtering. Matches the
+        /// `audit_summary` prefixes the proxy crate documents in
+        /// `credential-proxy.md §22`.
+        reason:          String,
+    },
 }
 
 impl AuditEventKind {
@@ -1311,6 +1371,8 @@ impl AuditEventKind {
             Self::CredentialProxyStopped { .. } => "CredentialProxyStopped",
             Self::DatabaseQueryExecuted { .. } => "DatabaseQueryExecuted",
             Self::HttpProxyRequestExecuted { .. } => "HttpProxyRequestExecuted",
+            Self::SmtpMessageRelayed { .. } => "SmtpMessageRelayed",
+            Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",
         }
     }
 }

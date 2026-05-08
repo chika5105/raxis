@@ -52,12 +52,22 @@
 //! - It does NOT spin up the credential backend. The kernel
 //!   constructs that at boot and threads an `Arc<dyn CredentialBackend>`
 //!   into the manager.
-//! - It does NOT translate proxy-local `AuditEvent`s into kernel
-//!   `AuditEventKind::DatabaseQueryExecuted` / `HttpProxyRequestExecuted`
-//!   yet. That translation is a thin wrapper that lands when the
-//!   proxy crates expose an `AuditChannel` callback parameter (a
-//!   followup); for now the kernel only emits the lifecycle pair
-//!   (`Started` + `Stopped`).
+//!
+//! ## Per-event audit translation
+//!
+//! Each `bind_*` helper constructs a kernel-side adapter
+//! (`PostgresKernelAuditAdapter`, `HttpKernelAuditAdapter`,
+//! `SmtpKernelAuditAdapter`) that implements the matching proxy
+//! crate's audit-channel trait (`PgAuditChannel`,
+//! `HttpAuditChannel`, `EnvelopeAuditSink`). The adapter translates
+//! every proxy-local `AuditEvent` / `EnvelopeAudit` into the kernel
+//! `AuditEventKind::{DatabaseQueryExecuted, HttpProxyRequestExecuted,
+//! SmtpMessageRelayed, SmtpMessageRejected}` and writes it through
+//! the same `Arc<dyn AuditSink>` as every other audit event. This
+//! is in addition to the lifecycle pair (`CredentialProxyStarted` /
+//! `CredentialProxyStopped`) emitted by the manager itself, giving
+//! the audit chain one entry per query / request / envelope on top
+//! of the bracketing lifecycle events.
 //!
 //! ## K8s proxy (`proxy_type = "k8s"`)
 //!
@@ -90,18 +100,21 @@ use raxis_plan_credentials::{
 };
 
 use raxis_credential_proxy_http::{
-    AuthMode as HttpAuthModeImpl, HttpProxy, OwnedConsumer as HttpOwnedConsumer,
-    ProxyConfig as HttpProxyConfig, ProxyError as HttpProxyError, ProxyStats as HttpProxyStats,
+    AuditChannel as HttpAuditChannel, AuditEvent as HttpAuditEvent, AuthMode as HttpAuthModeImpl,
+    HttpProxy, OwnedConsumer as HttpOwnedConsumer, ProxyConfig as HttpProxyConfig,
+    ProxyError as HttpProxyError, ProxyStats as HttpProxyStats,
     Restrictions as HttpProxyRestrictions,
 };
 use raxis_credential_proxy_postgres::{
+    AuditChannel as PgAuditChannel, AuditEvent as PgAuditEvent,
     OwnedConsumer as PgOwnedConsumer, PostgresProxy, ProxyConfig as PgProxyConfig,
     ProxyError as PgProxyError, ProxyStats as PgProxyStats,
     Restrictions as PgProxyRestrictions,
 };
 use raxis_credential_proxy_smtp::{
-    AuthMode as SmtpAuthModeImpl, NoopEnvelopeAuditSink, OwnedConsumer as SmtpOwnedConsumer,
-    ProxyConfig as SmtpProxyConfig, ProxyError as SmtpProxyError, ProxyStats as SmtpProxyStats,
+    AuthMode as SmtpAuthModeImpl, EnvelopeAudit, EnvelopeAuditSink, EnvelopeOutcome,
+    OwnedConsumer as SmtpOwnedConsumer, ProxyConfig as SmtpProxyConfig,
+    ProxyError as SmtpProxyError, ProxyStats as SmtpProxyStats,
     Restrictions as SmtpProxyRestrictions, SmtpProxy,
 };
 
@@ -189,6 +202,188 @@ fn proxy_type_str(decl: &ProxyDecl) -> &'static str {
         ProxyDecl::Smtp { .. } => "smtp",
         ProxyDecl::Unknown => "unknown",
     }
+}
+
+// ---------------------------------------------------------------------------
+// Per-proxy → kernel `AuditSink` adapters
+//
+// Each proxy crate exposes a small typed audit-event surface
+// (`AuditEvent::DatabaseQueryExecuted`,
+// `AuditEvent::HttpProxyRequestExecuted`, `EnvelopeAudit`) that
+// stays dependency-free of `raxis-audit-tools`. The manager is the
+// single seam where those proxy-local events become kernel
+// `AuditEventKind` rows on the audit chain — emission is
+// fire-and-forget on the per-connection task, and the adapter
+// `tracing::warn!`s on a transient `AuditWriterError` rather than
+// panicking so a wedged audit pipe doesn't tear down the agent
+// session mid-query.
+//
+// All adapters carry the `session_id` and `task_id` for the bound
+// session so each translated event lands with the correct
+// correlation columns on the audit chain. They are constructed
+// inside `bind_postgres` / `bind_http` / `bind_smtp` and dropped
+// when the matching `ActiveProxy` is dropped.
+// ---------------------------------------------------------------------------
+
+struct PostgresKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl PgAuditChannel for PostgresKernelAuditAdapter {
+    fn emit(&self, event: PgAuditEvent) {
+        match event {
+            PgAuditEvent::DatabaseQueryExecuted {
+                credential,
+                sql_sha256,
+                sql_text,
+                operation,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::DatabaseQueryExecuted {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    operation,
+                    sql_sha256,
+                    sql_plaintext:   sql_text,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "DatabaseQueryExecuted audit emit failed; per-query audit chain entry skipped",
+                    );
+                }
+            }
+        }
+    }
+}
+
+struct HttpKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl HttpAuditChannel for HttpKernelAuditAdapter {
+    fn emit(&self, event: HttpAuditEvent) {
+        match event {
+            HttpAuditEvent::HttpProxyRequestExecuted {
+                credential,
+                method,
+                path,
+                path_sha256,
+                status_code,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::HttpProxyRequestExecuted {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    method,
+                    path,
+                    path_sha256,
+                    status_code,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "HttpProxyRequestExecuted audit emit failed; per-request audit chain entry skipped",
+                    );
+                }
+            }
+        }
+    }
+}
+
+struct SmtpKernelAuditAdapter {
+    audit_sink:      Arc<dyn AuditSink>,
+    session_id:      String,
+    task_id:         String,
+    credential_name: String,
+}
+
+impl EnvelopeAuditSink for SmtpKernelAuditAdapter {
+    fn emit(&self, event: EnvelopeAudit) {
+        let envelope_sha256 = hex::encode(event.envelope_sha256);
+        let kind = match event.outcome {
+            EnvelopeOutcome::Relayed => AuditEventKind::SmtpMessageRelayed {
+                session_id:      self.session_id.clone(),
+                credential_name: self.credential_name.clone(),
+                envelope_sha256,
+                recipient_count: event.recipient_count,
+                bytes_relayed:   event.bytes_submitted,
+            },
+            EnvelopeOutcome::Rejected => {
+                let reason = event
+                    .rejection_reason
+                    .unwrap_or_else(|| "unknown".to_owned());
+                let short_reason = short_reject_reason(&reason);
+                AuditEventKind::SmtpMessageRejected {
+                    session_id:      self.session_id.clone(),
+                    credential_name: self.credential_name.clone(),
+                    envelope_sha256,
+                    recipient_count: event.recipient_count,
+                    bytes_submitted: event.bytes_submitted,
+                    reason:          short_reason.to_owned(),
+                }
+            }
+        };
+        if let Err(e) = self.audit_sink.emit(
+            kind,
+            Some(&self.session_id),
+            Some(&self.task_id),
+            None,
+        ) {
+            tracing::warn!(
+                target:     "raxis::credential_proxy::manager",
+                session_id = %self.session_id,
+                error      = %e,
+                "SmtpMessageRelayed/Rejected audit emit failed; per-envelope audit chain entry skipped",
+            );
+        }
+    }
+}
+
+/// Map the proxy-side `EnvelopeAudit::rejection_reason` (which
+/// typically embeds the SMTP refusal reply text after a stable
+/// `audit_summary` prefix) into the short stable reason string the
+/// `SmtpMessageRejected` audit event documents (`sender_not_allowed`,
+/// `recipient_not_allowed`, `too_many_recipients`,
+/// `message_too_large`, `rate_limit_exceeded`). When the proxy emits
+/// a reason we don't recognise, the raw string is forwarded so the
+/// audit chain still carries diagnostic context.
+fn short_reject_reason(raw: &str) -> &str {
+    const KNOWN: &[&str] = &[
+        "sender_not_allowed",
+        "recipient_not_allowed",
+        "too_many_recipients",
+        "message_too_large",
+        "rate_limit_exceeded",
+    ];
+    for prefix in KNOWN {
+        if raw.starts_with(prefix) {
+            return prefix;
+        }
+    }
+    raw
 }
 
 /// One bound proxy listener belonging to a session. Carries the
@@ -582,7 +777,7 @@ impl CredentialProxyManager {
     async fn bind_postgres(
         &self,
         session_id: &str,
-        _task_id:   &str,
+        task_id:    &str,
         name:       &raxis_credentials::CredentialName,
         mount_as:   &str,
         restrictions: &PostgresRestrictions,
@@ -598,7 +793,12 @@ impl CredentialProxyManager {
                 allow_only_select: restrictions.allow_only_select,
             },
         };
-        let proxy = PostgresProxy::bind(Arc::clone(&self.backend), cfg)
+        let audit_channel: Arc<dyn PgAuditChannel> = Arc::new(PostgresKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = PostgresProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
             .map_err(|source| ManagerError::PostgresBind {
                 credential_name: name.as_str().to_owned(),
@@ -665,7 +865,7 @@ impl CredentialProxyManager {
     async fn bind_http(
         &self,
         session_id: &str,
-        _task_id:   &str,
+        task_id:    &str,
         name:       &raxis_credentials::CredentialName,
         mount_as:   &str,
         auth_mode:  &HttpAuthMode,
@@ -691,7 +891,12 @@ impl CredentialProxyManager {
                 allowed_path_prefixes: restrictions.allowed_path_prefixes.clone(),
             },
         };
-        let proxy = HttpProxy::bind(Arc::clone(&self.backend), cfg)
+        let audit_channel: Arc<dyn HttpAuditChannel> = Arc::new(HttpKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = HttpProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
             .await
             .map_err(|source| ManagerError::HttpBind {
                 credential_name: name.as_str().to_owned(),
@@ -719,7 +924,7 @@ impl CredentialProxyManager {
     async fn bind_smtp(
         &self,
         session_id:           &str,
-        _task_id:             &str,
+        task_id:              &str,
         name:                 &raxis_credentials::CredentialName,
         mount_as:             &str,
         auth_mode:            &SmtpAuthMode,
@@ -728,10 +933,14 @@ impl CredentialProxyManager {
         restrictions:         &SmtpRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         if require_upstream_tls {
-            // V2 deferred — the wire driver currently uses
-            // cleartext upstream. Surface a structured warning so
-            // operators know their `require_upstream_tls = true`
-            // declaration is policy-pinned but not yet enforced.
+            // The wire driver currently uses cleartext upstream;
+            // STARTTLS / implicit TLS via `tokio-rustls` is the
+            // matching follow-up checklist item in
+            // `credential-proxy.md §22`. Surface a structured warning
+            // so operators know their `require_upstream_tls = true`
+            // declaration is policy-pinned but not yet enforced; the
+            // policy MUST already restrict the upstream to a trusted
+            // host:port for this to be safe.
             tracing::warn!(
                 target: "raxis::credential_proxy::manager",
                 credential_name = %name.as_str(),
@@ -759,10 +968,16 @@ impl CredentialProxyManager {
                 max_messages_per_minute:    restrictions.max_messages_per_minute,
             },
         };
+        let envelope_sink: Arc<dyn EnvelopeAuditSink> = Arc::new(SmtpKernelAuditAdapter {
+            audit_sink:      Arc::clone(&self.audit),
+            session_id:      session_id.to_owned(),
+            task_id:         task_id.to_owned(),
+            credential_name: name.as_str().to_owned(),
+        });
         let proxy = SmtpProxy::bind(
             Arc::clone(&self.backend),
             cfg,
-            Arc::new(NoopEnvelopeAuditSink),
+            envelope_sink,
         )
         .await
         .map_err(|source| ManagerError::SmtpBind {

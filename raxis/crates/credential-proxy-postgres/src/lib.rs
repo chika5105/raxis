@@ -114,6 +114,44 @@ pub struct ProxyConfig {
     pub restrictions: Restrictions,
 }
 
+// ---------------------------------------------------------------------------
+// Audit channel (kernel-injected sink for per-query audit events)
+// ---------------------------------------------------------------------------
+
+/// Sink the kernel-side `CredentialProxyManager` plugs into so each
+/// `AuditEvent::DatabaseQueryExecuted` produced by the proxy is
+/// translated into the kernel's `AuditEventKind::DatabaseQueryExecuted`
+/// and written through the same `AuditSink` as every other audit
+/// event (one chained line per query, hashed into the audit chain).
+///
+/// Per the postgres / http parity contract documented in
+/// `credential-proxy.md §5`, this proxy crate stays
+/// dependency-free of `raxis-audit-tools`. The kernel wraps the
+/// real `AuditSink` adapter around this trait at bind time
+/// (`raxis-credential-proxy-manager::bind_postgres`).
+///
+/// The trait is `Send + Sync` because the proxy spawns one
+/// per-connection task per accepted client and threads the channel
+/// through to the simple-query loop. Emission is deliberately
+/// fire-and-forget (`fn emit` returns `()`) — the SQL has already
+/// been forwarded by the time we audit it, and the kernel-side
+/// adapter logs (rather than panics) on a transient audit-pipe
+/// failure to keep the agent's session alive when the chain is
+/// momentarily wedged.
+pub trait AuditChannel: Send + Sync {
+    /// Record one `AuditEvent::DatabaseQueryExecuted`.
+    fn emit(&self, event: AuditEvent);
+}
+
+/// Convenience no-op channel for tests / out-of-band callers that
+/// don't care about per-query audit translation.
+#[derive(Default)]
+pub struct NoopAuditChannel;
+
+impl AuditChannel for NoopAuditChannel {
+    fn emit(&self, _event: AuditEvent) {}
+}
+
 /// Errors the proxy lifecycle can surface.
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -187,13 +225,25 @@ pub struct PostgresProxy {
     backend:  Arc<dyn CredentialBackend>,
     config:   ProxyConfig,
     stats:    Arc<ProxyStats>,
+    audit:    Arc<dyn AuditChannel>,
 }
 
 impl PostgresProxy {
     /// Bind a listener and return an owned proxy.
+    ///
+    /// The `audit` channel is invoked with one
+    /// `AuditEvent::DatabaseQueryExecuted` per simple-query message
+    /// the proxy processes. The kernel-side
+    /// `CredentialProxyManager::bind_postgres` plugs in an adapter
+    /// that translates each event into the kernel's
+    /// `AuditEventKind::DatabaseQueryExecuted` and writes it through
+    /// the same `AuditSink` as every other audit event. Out-of-band
+    /// callers (subprocess integration tests, ad-hoc tooling) that
+    /// don't want translation can pass [`NoopAuditChannel`].
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
         config: ProxyConfig,
+        audit:   Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
         let listener = tokio::net::TcpListener::bind(&config.listen_addr)
             .await
@@ -206,6 +256,7 @@ impl PostgresProxy {
             backend,
             config,
             stats: Arc::new(ProxyStats::default()),
+            audit,
         })
     }
 
@@ -236,8 +287,9 @@ impl PostgresProxy {
                     let backend  = self.backend.clone();
                     let config   = self.config.clone();
                     let stats    = self.stats.clone();
+                    let audit    = Arc::clone(&self.audit);
                     tokio::spawn(async move {
-                        if let Err(e) = serve_one(stream, backend, config, stats).await {
+                        if let Err(e) = serve_one(stream, backend, config, stats, audit).await {
                             tracing::warn!(peer = %peer, error = %e, "postgres proxy connection ended");
                         }
                     });
@@ -260,6 +312,7 @@ async fn serve_one(
     backend: Arc<dyn CredentialBackend>,
     config: ProxyConfig,
     stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 ) -> Result<(), ProxyError> {
     use crate::wire::*;
 
@@ -339,11 +392,7 @@ async fn serve_one(
                 let op = classify_first_operation(&sql);
                 stats.queries_audited.fetch_add(1, Ordering::Relaxed);
                 let blocked = config.restrictions.is_blocked(&op);
-                let _audit_kind = audit_query_executed(&config, &sql, &op, blocked);
-                // (audit emission to AuditSink: in production this
-                // would go through the kernel's audit pipeline; the
-                // MVP returns the AuditEvent struct so the kernel
-                // wires emission at its tier.)
+                audit.emit(audit_query_executed(&config, &sql, &op, blocked));
 
                 if blocked {
                     stats.queries_blocked.fetch_add(1, Ordering::Relaxed);

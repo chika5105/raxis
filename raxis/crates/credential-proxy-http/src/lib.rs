@@ -113,6 +113,41 @@ pub struct ProxyConfig {
     pub restrictions: Restrictions,
 }
 
+// ---------------------------------------------------------------------------
+// Audit channel — kernel-injected sink for per-request audit events.
+// ---------------------------------------------------------------------------
+
+/// Sink the kernel-side `CredentialProxyManager` plugs into so each
+/// `AuditEvent::HttpProxyRequestExecuted` produced by the proxy is
+/// translated into the kernel's
+/// `AuditEventKind::HttpProxyRequestExecuted` and written through
+/// the same `AuditSink` as every other audit event.
+///
+/// Per the postgres / http parity contract documented in
+/// `credential-proxy.md §5`, this proxy crate stays
+/// dependency-free of `raxis-audit-tools`. The kernel wraps the
+/// real `AuditSink` adapter around this trait at bind time
+/// (`raxis-credential-proxy-manager::bind_http`).
+///
+/// Emission is deliberately fire-and-forget (`fn emit` returns
+/// `()`) — the request has already been forwarded by the time we
+/// audit it, and the kernel-side adapter logs (rather than panics)
+/// on a transient audit-pipe failure to keep the agent's session
+/// alive when the chain is momentarily wedged.
+pub trait AuditChannel: Send + Sync {
+    /// Record one `AuditEvent::HttpProxyRequestExecuted`.
+    fn emit(&self, event: AuditEvent);
+}
+
+/// Convenience no-op channel for tests / out-of-band callers that
+/// don't care about per-request audit translation.
+#[derive(Default)]
+pub struct NoopAuditChannel;
+
+impl AuditChannel for NoopAuditChannel {
+    fn emit(&self, _event: AuditEvent) {}
+}
+
 /// Errors the proxy lifecycle can surface.
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
@@ -179,13 +214,26 @@ pub struct HttpProxy {
     upstream:  url::Url,
     stats:     Arc<ProxyStats>,
     http:      reqwest::Client,
+    audit:     Arc<dyn AuditChannel>,
 }
 
 impl HttpProxy {
     /// Bind a listener and return an owned proxy.
+    ///
+    /// The `audit` channel is invoked with one
+    /// `AuditEvent::HttpProxyRequestExecuted` per request the proxy
+    /// processes (forwarded or rejected). The kernel-side
+    /// `CredentialProxyManager::bind_http` plugs in an adapter that
+    /// translates each event into the kernel's
+    /// `AuditEventKind::HttpProxyRequestExecuted` and writes it
+    /// through the same `AuditSink` as every other audit event.
+    /// Out-of-band callers (subprocess integration tests, ad-hoc
+    /// tooling) that don't want translation can pass
+    /// [`NoopAuditChannel`].
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
         config: ProxyConfig,
+        audit:  Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
         let upstream = url::Url::parse(&config.upstream_url)
             .map_err(|_| ProxyError::BadUpstream(config.upstream_url.clone()))?;
@@ -209,6 +257,7 @@ impl HttpProxy {
             upstream,
             stats: Arc::new(ProxyStats::default()),
             http,
+            audit,
         })
     }
 
@@ -241,8 +290,9 @@ impl HttpProxy {
                     let stats    = self.stats.clone();
                     let upstream = self.upstream.clone();
                     let http     = self.http.clone();
+                    let audit    = Arc::clone(&self.audit);
                     tokio::spawn(async move {
-                        if let Err(e) = serve_one(stream, backend, config, upstream, http, stats).await {
+                        if let Err(e) = serve_one(stream, backend, config, upstream, http, stats, audit).await {
                             tracing::warn!(error = %e, "http proxy connection ended with error");
                         }
                     });
@@ -269,6 +319,7 @@ async fn serve_one(
     upstream: url::Url,
     http: reqwest::Client,
     stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 ) -> std::io::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -300,17 +351,17 @@ async fn serve_one(
     // Step 3: restriction checks.
     if !config.restrictions.allows_method(&method) {
         stats.requests_blocked.fetch_add(1, Ordering::Relaxed);
-        let _ = audit_request_executed(&config, &method, &raw_path, 405, true);
+        audit.emit(audit_request_executed(&config, &method, &raw_path, 405, true));
         return write_error(&mut client_stream, 405, "Method Not Allowed").await;
     }
     if !config.restrictions.allows_path(&raw_path) {
         stats.requests_blocked.fetch_add(1, Ordering::Relaxed);
-        let _ = audit_request_executed(&config, &method, &raw_path, 403, true);
+        audit.emit(audit_request_executed(&config, &method, &raw_path, 403, true));
         return write_error(&mut client_stream, 403, "Forbidden by RAXIS policy").await;
     }
     if request_attempts_websocket_upgrade(&req) {
         stats.requests_blocked.fetch_add(1, Ordering::Relaxed);
-        let _ = audit_request_executed(&config, &method, &raw_path, 400, true);
+        audit.emit(audit_request_executed(&config, &method, &raw_path, 400, true));
         return write_error(&mut client_stream, 400, "Upgrade not supported").await;
     }
 
@@ -411,8 +462,8 @@ async fn serve_one(
     };
     stats.requests_forwarded.fetch_add(1, Ordering::Relaxed);
     stats.bytes_out.fetch_add(body_bytes.len() as u64, Ordering::Relaxed);
-    let _ = audit_request_executed(&config, &method, &raw_path,
-        status.as_u16(), false);
+    audit.emit(audit_request_executed(&config, &method, &raw_path,
+        status.as_u16(), false));
 
     let mut out = Vec::with_capacity(64 + body_bytes.len());
     out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n",

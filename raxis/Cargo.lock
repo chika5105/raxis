@@ -2843,6 +2843,7 @@ dependencies = [
 name = "raxis-credential-proxy-manager"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "raxis-audit-tools",
  "raxis-credential-proxy-http",
  "raxis-credential-proxy-postgres",

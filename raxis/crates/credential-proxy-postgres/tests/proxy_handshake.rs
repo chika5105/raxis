@@ -23,7 +23,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use raxis_credential_proxy_postgres::{
-    OwnedConsumer, PostgresProxy, ProxyConfig, restriction::Restrictions,
+    AuditChannel, AuditEvent, NoopAuditChannel, OwnedConsumer, PostgresProxy, ProxyConfig,
+    restriction::Restrictions,
 };
 use raxis_credentials::{
     CredentialBackend, CredentialError, CredentialName, CredentialValue,
@@ -151,7 +152,7 @@ async fn handshake_completes_to_ready_for_query() {
         restrictions:    Restrictions::default(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg).await.unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
     let addr  = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -181,7 +182,7 @@ async fn select_query_returns_command_complete() {
         restrictions:    Restrictions::default(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg).await.unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
     let addr  = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -212,7 +213,7 @@ async fn insert_blocked_under_select_only() {
         restrictions:    Restrictions::select_only(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg).await.unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
     let addr  = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -250,7 +251,7 @@ async fn missing_credential_terminates_after_handshake() {
         restrictions:    Restrictions::default(),
     };
 
-    let proxy = PostgresProxy::bind(backend, cfg).await.unwrap();
+    let proxy = PostgresProxy::bind(backend, cfg, Arc::new(NoopAuditChannel)).await.unwrap();
     let addr  = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -261,4 +262,69 @@ async fn missing_credential_terminates_after_handshake() {
     // connection drops. The exact tail depends on TCP buffering;
     // we just want to confirm the test process doesn't hang.
     let _ = drain_until_ready(&mut s).await;
+}
+
+// ---------------------------------------------------------------------------
+// AuditChannel emission test — verifies the proxy emits one
+// `DatabaseQueryExecuted` audit event per simple-query message and
+// that the kernel-side adapter sees the SHA-256 + operation kind.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CapturingAudit {
+    events: std::sync::Mutex<Vec<AuditEvent>>,
+}
+
+impl AuditChannel for CapturingAudit {
+    fn emit(&self, event: AuditEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+#[tokio::test]
+async fn audit_channel_receives_database_query_executed_per_query() {
+    let backend = Arc::new(FakeBackend {
+        value:    b"postgresql://demo:demo@127.0.0.1:5432/demo".to_vec(),
+        resolves: AtomicU32::new(0),
+    });
+    let cfg = ProxyConfig {
+        listen_addr:     "127.0.0.1:0".to_owned(),
+        credential_name: CredentialName::new("demo"),
+        consumer:        OwnedConsumer::new("credential_proxy", "test:postgres:audit"),
+        restrictions:    Restrictions::select_only(),
+    };
+    let audit = Arc::new(CapturingAudit::default());
+
+    let proxy = PostgresProxy::bind(backend, cfg, audit.clone()).await.unwrap();
+    let addr  = proxy.local_addr().unwrap();
+    tokio::spawn(proxy.serve());
+
+    let mut s = TcpStream::connect(addr).await.unwrap();
+    write_startup(&mut s).await;
+    let _ = drain_until_ready(&mut s).await;
+
+    write_query(&mut s, "SELECT 1").await;
+    let _ = drain_until_ready(&mut s).await;
+    write_query(&mut s, "INSERT INTO t VALUES (1)").await;
+    let _ = drain_until_ready(&mut s).await;
+
+    write_terminate(&mut s).await;
+
+    // Audit emission is fire-and-forget on the per-connection task —
+    // give it a tick to flush.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let events = audit.events.lock().unwrap();
+    assert_eq!(events.len(), 2, "expected one audit event per Q message; got {events:?}");
+
+    let AuditEvent::DatabaseQueryExecuted { operation, blocked, sql_sha256, credential, .. } =
+        &events[0];
+    assert_eq!(operation, "SELECT");
+    assert!(!blocked);
+    assert_eq!(credential.as_str(), "demo");
+    assert_eq!(sql_sha256.len(), 64, "sha256 hex length");
+
+    let AuditEvent::DatabaseQueryExecuted { operation, blocked, .. } = &events[1];
+    assert_eq!(operation, "INSERT");
+    assert!(*blocked, "select-only restriction must block INSERT");
 }

@@ -21,7 +21,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use raxis_credential_proxy_http::{
-    AuthMode, HttpProxy, OwnedConsumer, ProxyConfig, restriction::Restrictions,
+    AuditChannel, AuditEvent, AuthMode, HttpProxy, NoopAuditChannel, OwnedConsumer, ProxyConfig,
+    restriction::Restrictions,
 };
 use raxis_credentials::{
     CredentialBackend, CredentialError, CredentialName, CredentialValue,
@@ -213,7 +214,7 @@ async fn bearer_injected_and_host_rewritten() {
         consumer:        OwnedConsumer::new("credential_proxy", "test:http:0"),
         restrictions:    Restrictions::default(),
     };
-    let proxy = HttpProxy::bind(backend.clone(), cfg).await.unwrap();
+    let proxy = HttpProxy::bind(backend.clone(), cfg, std::sync::Arc::new(NoopAuditChannel)).await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -258,7 +259,7 @@ async fn method_allowlist_blocks_post() {
         consumer:        OwnedConsumer::new("credential_proxy", "test:http:1"),
         restrictions:    Restrictions::read_only(),
     };
-    let proxy = HttpProxy::bind(backend, cfg).await.unwrap();
+    let proxy = HttpProxy::bind(backend, cfg, std::sync::Arc::new(NoopAuditChannel)).await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -301,7 +302,7 @@ async fn path_prefix_blocks_unscoped() {
             allowed_path_prefixes:  vec!["/api/v1/widgets".to_owned()],
         },
     };
-    let proxy = HttpProxy::bind(backend, cfg).await.unwrap();
+    let proxy = HttpProxy::bind(backend, cfg, std::sync::Arc::new(NoopAuditChannel)).await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -332,7 +333,7 @@ async fn basic_auth_mode_emits_base64_header() {
         consumer:        OwnedConsumer::new("credential_proxy", "test:http:3"),
         restrictions:    Restrictions::default(),
     };
-    let proxy = HttpProxy::bind(backend, cfg).await.unwrap();
+    let proxy = HttpProxy::bind(backend, cfg, std::sync::Arc::new(NoopAuditChannel)).await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -362,7 +363,7 @@ async fn websocket_upgrade_rejected() {
         consumer:        OwnedConsumer::new("credential_proxy", "test:http:4"),
         restrictions:    Restrictions::default(),
     };
-    let proxy = HttpProxy::bind(backend, cfg).await.unwrap();
+    let proxy = HttpProxy::bind(backend, cfg, std::sync::Arc::new(NoopAuditChannel)).await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -399,7 +400,7 @@ async fn missing_credential_returns_502() {
         consumer:        OwnedConsumer::new("credential_proxy", "test:http:5"),
         restrictions:    Restrictions::default(),
     };
-    let proxy = HttpProxy::bind(backend, cfg).await.unwrap();
+    let proxy = HttpProxy::bind(backend, cfg, std::sync::Arc::new(NoopAuditChannel)).await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -432,7 +433,7 @@ async fn post_body_forwarded_to_upstream() {
         consumer:        OwnedConsumer::new("credential_proxy", "test:http:6"),
         restrictions:    Restrictions::default(),
     };
-    let proxy = HttpProxy::bind(backend, cfg).await.unwrap();
+    let proxy = HttpProxy::bind(backend, cfg, std::sync::Arc::new(NoopAuditChannel)).await.unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(proxy.serve());
 
@@ -458,4 +459,72 @@ async fn post_body_forwarded_to_upstream() {
     assert_eq!(cap.body, body);
     assert_eq!(cap.headers.get("content-type").map(String::as_str),
         Some("application/json"));
+}
+
+// ---------------------------------------------------------------------------
+// AuditChannel emission test — verifies the proxy emits one
+// `HttpProxyRequestExecuted` audit event per processed request and that
+// allowlist-blocked requests carry `blocked: true`.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct CapturingAudit {
+    events: std::sync::Mutex<Vec<AuditEvent>>,
+}
+
+impl AuditChannel for CapturingAudit {
+    fn emit(&self, event: AuditEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+#[tokio::test]
+async fn audit_channel_receives_http_proxy_request_executed_for_forwards_and_blocks() {
+    let (upstream_addr, _captured_rx) = spawn_echo(200, b"{\"ok\":true}").await;
+    let backend = Arc::new(FakeBackend {
+        value:    b"tok".to_vec(),
+        resolves: AtomicU32::new(0),
+    });
+    let cfg = ProxyConfig {
+        listen_addr:     "127.0.0.1:0".to_owned(),
+        upstream_url:    format!("http://{upstream_addr}/"),
+        credential_name: CredentialName::new("demo"),
+        auth_mode:       AuthMode::Bearer,
+        consumer:        OwnedConsumer::new("credential_proxy", "test:http:audit"),
+        restrictions:    Restrictions::read_only(),
+    };
+    let audit = Arc::new(CapturingAudit::default());
+    let proxy = HttpProxy::bind(backend, cfg, audit.clone()).await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    tokio::spawn(proxy.serve());
+
+    // First: a forwarded GET → should emit blocked=false, status=200.
+    let req_get = b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n";
+    let _ = drive_request(proxy_addr, req_get).await;
+
+    // Second: a blocked POST → should emit blocked=true, status=405.
+    let req_post = b"POST /x HTTP/1.1\r\nHost: x\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    let _ = drive_request(proxy_addr, req_post).await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let events = audit.events.lock().unwrap();
+    assert_eq!(events.len(), 2, "expected 2 audit events; got {events:?}");
+
+    let AuditEvent::HttpProxyRequestExecuted {
+        method, path, status_code, blocked, path_sha256, credential, ..
+    } = &events[0];
+    assert_eq!(method, "GET");
+    assert_eq!(path, "/");
+    assert_eq!(*status_code, 200);
+    assert!(!blocked);
+    assert_eq!(path_sha256.len(), 64);
+    assert_eq!(credential.as_str(), "demo");
+
+    let AuditEvent::HttpProxyRequestExecuted {
+        method, status_code, blocked, ..
+    } = &events[1];
+    assert_eq!(method, "POST");
+    assert_eq!(*status_code, 405);
+    assert!(*blocked);
 }

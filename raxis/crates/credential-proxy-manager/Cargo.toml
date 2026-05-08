@@ -12,6 +12,10 @@ serde     = { workspace = true }
 tokio     = { workspace = true }
 tracing   = "0.1"
 thiserror = { workspace = true }
+# Hex-encode envelope SHA-256 bytes for the SmtpMessageRelayed /
+# SmtpMessageRejected audit events (the kernel `AuditEventKind`
+# carries `envelope_sha256` as a hex string for chain legibility).
+hex       = { workspace = true }
 
 # Audit + credential surfaces.
 raxis-audit-tools     = { workspace = true }
