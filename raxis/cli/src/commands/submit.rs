@@ -226,14 +226,16 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         sha256: sha256_of_artifact_bytes(&plan_toml_bytes),
         bytes:  plan_toml_bytes,
     });
-    // Future-extension: read each host-side path's bytes here, capped at
-    // MAX_ARTIFACT_BYTES_HARD_CEILING + 1. For V2 this loop iterates 0 times.
-    for _path in &host_paths {
-        unreachable!(
-            "V2 visitor set is empty per plan-bundle-sealing.md §5.4; \
-             reaching this branch indicates a forward-compat regression."
-        );
-    }
+    // Future-extension: read each host-side path's bytes here, capped
+    // at MAX_ARTIFACT_BYTES_HARD_CEILING + 1. For V2 this set is
+    // empty per `plan-bundle-sealing.md §5.4`. Hard-asserting on a
+    // non-empty set keeps the forward-compat invariant explicit
+    // without producing a clippy-flagged "loop that never loops".
+    assert!(
+        host_paths.is_empty(),
+        "V2 visitor set must be empty per plan-bundle-sealing.md §5.4; \
+         a non-empty set indicates a forward-compat regression"
+    );
 
     // Phase 5: validate size caps. The kernel re-checks at admission step 3,
     // but failing fast here means an oversize plan never even allocates
