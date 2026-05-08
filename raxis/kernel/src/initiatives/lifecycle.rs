@@ -300,8 +300,9 @@ pub enum LifecycleError {
     /// structurally invalid:
     ///
     ///   * `"unknown_proxy_type"` — the `proxy_type` is not one of
-    ///     `postgres | http | k8s` (the V2 implemented set). Future
-    ///     proxy types (`smtp`, `redis`, `aws`) gain new variants in
+    ///     the V2 implemented set: `postgres | http | k8s | smtp |
+    ///     redis | aws | gcp | azure | mysql | mssql | mongodb`.
+    ///     Future proxy types gain new variants in
     ///     `raxis_plan_credentials::ProxyDecl` and graduate out of
     ///     this rule.
     ///   * `"malformed"` — a generic structural error from
@@ -2502,14 +2503,14 @@ fn validate_path_allowlist_v2_format(tasks: &[PlanTask]) -> Result<(), Lifecycle
 /// malformed credential block — already converted to
 /// `PlanInvalid` inside `parse_plan_tasks`) cannot allocate a row.
 ///
-/// Today the V2 implemented set is `postgres | http | k8s`. The
+/// Today the V2 implemented set is `postgres | http | k8s | smtp |
+/// redis | aws | gcp | azure | mysql | mssql | mongodb`. The
 /// `Unknown` variant from `raxis_plan_credentials::ProxyDecl` is
 /// surfaced here as a `PlanTaskCredentialsInvalid {
 /// rule: "unknown_proxy_type" }` rejection so future proxy types
-/// (`smtp`, `redis`, `aws`, ...) do not silently parse as
-/// no-ops; the operator gets a clear "this proxy type is not yet
-/// supported in this kernel build" signal that names the offending
-/// task and credential.
+/// do not silently parse as no-ops; the operator gets a clear
+/// "this proxy type is not yet supported in this kernel build"
+/// signal that names the offending task and credential.
 ///
 /// Sister-of `validate_path_allowlist_v2_format` /
 /// `validate_cross_cutting_artifacts` — same shift-left posture.
@@ -2528,9 +2529,10 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
                          `proxy_type` this kernel build does not \
                          implement. Valid values in V2: \
                          `postgres`, `http`, `k8s`, `smtp`, `redis`, \
-                         `aws`, `gcp`, `azure`. Drop the credential \
-                         block or upgrade the kernel build to one \
-                         that ships the matching proxy.",
+                         `aws`, `gcp`, `azure`, `mysql`, `mssql`, \
+                         `mongodb`. Drop the credential block or \
+                         upgrade the kernel build to one that ships \
+                         the matching proxy.",
                         pt.task_id,
                         decl.name.as_str(),
                     ),
@@ -4090,11 +4092,12 @@ predecessors = ["build-svc"]
     fn approve_plan_rejects_unknown_proxy_type_in_tasks_credentials() {
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
-        // V2 ships `postgres`, `http`, `k8s`, `smtp`. Any other
-        // `proxy_type` MUST land in `ProxyDecl::Unknown` and be
-        // rejected shift-left by `validate_task_credentials`. Pin
-        // a forward-looking name (`mongodb-future-spec`) so the
-        // test keeps tracking the unknown-arm policy as new
+        // V2 ships `postgres`, `http`, `k8s`, `smtp`, `redis`,
+        // `aws`, `gcp`, `azure`, `mysql`, `mssql`, `mongodb`. Any
+        // other `proxy_type` MUST land in `ProxyDecl::Unknown` and
+        // be rejected shift-left by `validate_task_credentials`.
+        // Pin a forward-looking name (`couchbase-future-spec`) so
+        // the test keeps tracking the unknown-arm policy as new
         // proxies are added.
         let plan = r#"
 [workspace]
@@ -4106,7 +4109,7 @@ task_id = "send-email"
   [[tasks.credentials]]
   name       = "future-uri"
   mount_as   = "FUTURE_URL"
-  proxy_type = "mongodb-future-spec"
+  proxy_type = "couchbase-future-spec"
 "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -4123,13 +4126,18 @@ task_id = "send-email"
                 assert_eq!(rule, "unknown_proxy_type");
                 assert_eq!(offending_task, "send-email");
                 assert_eq!(offending_credential, "future-uri");
-                assert!(
-                    suggestion.contains("postgres") &&
-                    suggestion.contains("http") &&
-                    suggestion.contains("k8s") &&
-                    suggestion.contains("smtp"),
-                    "diagnostic should enumerate the V2 implemented set, got: {suggestion}",
-                );
+                for proxy_type in &[
+                    "postgres", "http", "k8s", "smtp", "redis",
+                    "aws", "gcp", "azure",
+                    "mysql", "mssql", "mongodb",
+                ] {
+                    assert!(
+                        suggestion.contains(proxy_type),
+                        "diagnostic should enumerate the V2 \
+                         implemented set (missing `{proxy_type}`), got: \
+                         {suggestion}",
+                    );
+                }
             }
             other => panic!("expected PlanTaskCredentialsInvalid, got {other:?}"),
         }
