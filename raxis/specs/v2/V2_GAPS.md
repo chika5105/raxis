@@ -218,8 +218,17 @@ provider chain (`Anthropic → OpenAI → Bedrock`). Circuit breaker
 (per-provider error rate threshold). Partial-response recovery
 (streaming failure mid-response). `ProviderExhausted` escalation.
 
+**Per-provider failover status:**
+
+| Provider | Spec'd as failover target | Code | Spec section |
+|---|---|---|---|
+| **Anthropic** | ✅ Primary in most chains | ❌ No HTTP client | `provider-failure-handling.md §3.1, §4` |
+| **OpenAI** | ✅ Cross-provider fallback | ❌ No HTTP client | `provider-failure-handling.md §3.1, §4` |
+| **Google Gemini** | ✅ Tier-3 fallback | ❌ No HTTP client | `provider-failure-handling.md §4` |
+| **AWS Bedrock** | ✅ Referenced as alternative | ❌ No HTTP client | `provider-failure-handling.md §4` |
+
 Zero references to `provider_failure`, `RetryBudget`,
-`fallback_provider`, `circuit_breaker`.
+`fallback_provider`, `circuit_breaker` in any crate.
 
 ### C3: Provider Model Selection
 
@@ -230,7 +239,26 @@ Per-task model override (`model = "claude-sonnet-4-20250514"`). Provider
 routing based on model availability. Cost-aware routing. Model
 deprecation warnings at plan admission.
 
-Zero references to `model_selection`, `ProviderRouting`.
+**Per-provider implementation status:**
+
+| Provider | Spec'd models | Config types | HTTP client | Wire-compatible |
+|---|---|---|---|---|
+| **Anthropic** | `claude-sonnet-4-20250514`, `claude-opus-4.7-thinking-medium` | 🟡 `api_key` + `base_url` in `gateway-substrate` | ❌ | ❌ |
+| **OpenAI** | `gpt-5.5-medium`, `gpt-5.3-codex` | ❌ | ❌ | ❌ |
+| **Google Gemini** | `gemini-2.5-pro`, `gemini-2.5-flash` | ❌ | ❌ | ❌ |
+| **AWS Bedrock** | Via Anthropic/Cohere model IDs | ❌ | ❌ | ❌ |
+
+**Deployment tiers** (from `provider-model-selection.md §4`):
+
+- **§4.1** — Single-provider (Anthropic only): all three roles use
+  `anthropic:claude-*`. No failover if Anthropic has an outage.
+- **§4.2** — Two-provider (Anthropic + OpenAI): cross-provider
+  fallback chains per role. Recommended for production.
+- **§4.3** — Three-provider (Anthropic + OpenAI + Gemini): per-role
+  model chains with tiered fallback. Reviewer uses `gemini-flash`
+  at tier-3 for cost efficiency.
+
+Zero references to `model_selection`, `ProviderRouting` in any crate.
 
 ### C4: Email & Notification Channels
 
