@@ -1872,6 +1872,102 @@ and circuit-breaker framework as built-in routers
   `GET /health`; timeout or non-200 → circuit opens.
 - **Retry:** on `InferenceError::Retriable`, kernel retries per
   the policy's retry budget, same as built-in routers.
+### §9A.7A Sidecar authentication (kernel ↔ sidecar trust)
+
+A sidecar running on `127.0.0.1:9100` is indistinguishable from
+any other localhost process unless the kernel authenticates it.
+Without authentication, a malicious process on the host could
+bind the same port before the legitimate sidecar boots and
+intercept all inference traffic — receiving prompts, injecting
+tool calls, and exfiltrating context.
+
+The kernel authenticates the sidecar using the **same trust chain
+as the gateway** (`planner-harness.md §14.4`): operator-signed
+policy carries the shared secret; the kernel validates it at boot
+and stamps every request.
+
+**Mechanism: HMAC-SHA256 shared secret.**
+
+```toml
+# policy.toml (operator-signed)
+[inference_router]
+kind = "http_sidecar"
+endpoint = "http://127.0.0.1:9100"
+timeout_ms = 120000
+health_check_path = "/health"
+
+# Operator-generated, 32-byte hex-encoded shared secret.
+# The same value must be configured in the sidecar's env.
+# Because policy.toml is operator-signed (Ed25519), the planner
+# cannot read or modify this field.
+sidecar_hmac_secret = "a3f1...64-hex-chars..."
+```
+
+**Boot-time handshake (challenge-response):**
+
+```
+1. Kernel generates a random 32-byte nonce.
+2. Kernel sends POST /auth/challenge { nonce: "<hex>" }
+   with header X-Raxis-HMAC: HMAC-SHA256(secret, nonce)
+3. Sidecar verifies the HMAC, proving the kernel knows the secret.
+4. Sidecar responds 200 { server_nonce: "<hex>" }
+   with header X-Raxis-HMAC: HMAC-SHA256(secret, server_nonce)
+5. Kernel verifies the response HMAC, proving the sidecar knows
+   the secret.
+6. Both sides now trust each other.
+```
+
+If step 3 or 5 fails → `BootError::SidecarAuthFailed` (fail-closed).
+
+**Per-request authentication:**
+
+Every `POST /v1/complete` request carries:
+
+```
+X-Raxis-Request-Id: <uuid>
+X-Raxis-Timestamp: <unix-epoch-ms>
+X-Raxis-HMAC: HMAC-SHA256(secret, request_id || timestamp || body)
+```
+
+The sidecar MUST reject any request where:
+- The HMAC does not verify against the shared secret
+- The timestamp is more than 30 seconds stale (replay window)
+
+The sidecar's response carries the same triple:
+
+```
+X-Raxis-Request-Id: <same uuid>
+X-Raxis-Timestamp: <unix-epoch-ms>
+X-Raxis-HMAC: HMAC-SHA256(secret, request_id || timestamp || body)
+```
+
+The kernel rejects any response that fails HMAC verification
+with `InferenceError::SidecarAuthFailed` → fail-closed.
+
+**Why HMAC, not mTLS:**
+
+- mTLS requires a CA, certificate rotation, and TLS termination
+  on localhost — unnecessary complexity for a loopback connection.
+- HMAC-SHA256 is sufficient for mutual authentication on localhost
+  where network-level MITM is not a concern (the attacker would
+  need host-level access, at which point they could also extract
+  the shared secret from process memory — equivalent threat model
+  to the gateway's UDS file-permission model).
+- The shared secret is stored in operator-signed `policy.toml`,
+  which the planner cannot read (R-2).
+
+**Operator workflow for secret generation:**
+
+```bash
+# Generate a cryptographically random shared secret
+raxis policy generate-sidecar-secret
+
+# This writes the secret to policy.toml and prints it once
+# for the operator to configure in the sidecar's environment.
+# The operator then sets it in the sidecar:
+export RAXIS_SIDECAR_HMAC_SECRET="a3f1...64-hex-chars..."
+kombai-raxis-sidecar --port 9100
+```
 
 ### §9A.8 Files to create
 

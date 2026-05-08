@@ -285,6 +285,9 @@ isolation ensures no foreign code runs in the kernel.
 - `"http_sidecar"` match arm in `kernel/src/main.rs` boot site
 - `[CHECK] sidecar.health` in `cli/src/commands/doctor.rs`
 - `specs/v2/sidecar-protocol.yaml` — OpenAPI schema
+- HMAC-SHA256 mutual authentication (boot-time challenge-response
+  + per-request HMAC headers) per `extensibility-traits.md §9A.7A`
+- `raxis policy generate-sidecar-secret` CLI command
 
 **Invariant safety:** all R-* invariants hold trivially. The
 sidecar is downstream of admission, upstream of audit, in a
