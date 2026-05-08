@@ -312,13 +312,29 @@ async fn main() {
                     path.display(),
                 );
             }
-            canonical_images_preflight::PreflightOutcome::DigestUnpopulated { path } => {
+            canonical_images_preflight::PreflightOutcome::ManifestMissing {
+                image_path, manifest_path,
+            } => {
                 eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"canonical_image_digest_unpopulated\",\
+                    "{{\"level\":\"warn\",\"event\":\"canonical_image_manifest_missing\",\
+                     \"kind\":\"{}\",\"image_path\":\"{}\",\"manifest_path\":\"{}\",\
+                     \"hint\":\"the .img is on disk but the sibling \
+                        <role>-<kernel_version>.manifest.toml is not; \
+                        Reviewer / Orchestrator activations cannot start \
+                        until raxis-image-builder publishes the signed manifest\"}}",
+                    kind.audit_kind(),
+                    image_path.display(),
+                    manifest_path.display(),
+                );
+            }
+            canonical_images_preflight::PreflightOutcome::TrustAnchorUnpopulated { path } => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"canonical_image_trust_anchor_unpopulated\",\
                      \"kind\":\"{}\",\"path\":\"{}\",\
-                     \"hint\":\"this kernel was built before raxis-image-builder \
-                        published the matching image artefact; rebuild the kernel \
-                        once the artefact lands\"}}",
+                     \"hint\":\"this kernel was built before the release pipeline \
+                        committed the signing-key trust anchor; rebuild the kernel \
+                        once raxis-canonical-images::EXPECTED_KERNEL_SIGNING_KEY_BYTES \
+                        is populated\"}}",
                     kind.audit_kind(),
                     path.display(),
                 );
@@ -335,6 +351,20 @@ async fn main() {
                     path.display(),
                     expected,
                     actual,
+                );
+            }
+            canonical_images_preflight::PreflightOutcome::ManifestRejected {
+                image_path, manifest_path, reason,
+            } => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"BOOT_ERR_CANONICAL_IMAGE_MANIFEST_REJECTED\",\
+                     \"kind\":\"{}\",\"image_path\":\"{}\",\"manifest_path\":\"{}\",\"reason\":\"{}\",\
+                     \"hint\":\"the manifest could not be loaded, parsed, or its signature/role/kernel-version \
+                        failed the kernel's trust contract; reinstall from a verified source\"}}",
+                    kind.audit_kind(),
+                    image_path.display(),
+                    manifest_path.display(),
+                    reason,
                 );
             }
         }

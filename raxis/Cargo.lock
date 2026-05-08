@@ -2777,6 +2777,10 @@ dependencies = [
 name = "raxis-canonical-images"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.6",
+ "raxis-image-manifest",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",

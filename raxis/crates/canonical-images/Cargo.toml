@@ -5,11 +5,15 @@ edition     = { workspace = true }
 license     = { workspace = true }
 authors     = { workspace = true }
 repository  = { workspace = true }
-description = "RAXIS V2 — kernel-pinned canonical VM image digests. Carries `EXPECTED_REVIEWER_IMAGE_DIGEST` (INV-PLANNER-HARNESS-02) and `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` (INV-PLANNER-HARNESS-05) as compile-time `[u8; 32]` constants, plus on-disk verification helpers used at every Reviewer / Orchestrator activation."
+description = "RAXIS V2 — kernel-pinned canonical VM image trust anchors. Carries `EXPECTED_KERNEL_SIGNING_KEY_FP` (the SHA-256 fingerprint of the kernel signing key); reads + verifies on-disk `<role>-<kernel_version>.manifest.toml` files via raxis-image-manifest; uses the manifest's signed `image_artefact_sha256` to verify the on-disk .img bytes at every Reviewer (INV-PLANNER-HARNESS-02) / Orchestrator (INV-PLANNER-HARNESS-05) activation."
 
 [dependencies]
-sha2      = { workspace = true }
-thiserror = { workspace = true }
+ed25519-dalek        = { workspace = true }
+raxis-image-manifest = { path = "../image-manifest" }
+sha2                 = { workspace = true }
+thiserror            = { workspace = true }
 
 [dev-dependencies]
+hex      = { workspace = true }
+rand     = "0.8"
 tempfile = "3"
