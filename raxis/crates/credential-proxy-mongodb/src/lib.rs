@@ -65,9 +65,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 pub mod restriction;
+pub mod upstream;
 pub mod wire;
 
 pub use restriction::Restrictions;
+pub use upstream::{
+    ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamSession,
+    redact_for_audit, resolve_upstream_url, DEFAULT_CONNECT_TIMEOUT,
+};
 
 /// Owned form of `ConsumerIdentity`.
 #[derive(Debug, Clone)]
@@ -115,6 +120,14 @@ pub struct ProxyStats {
     pub commands_blocked:   AtomicU32,
     /// Bytes seen in inbound OP_MSG bodies.
     pub bytes_observed:     AtomicU64,
+    /// V2.1: number of upstream TCP+auth handshakes started.
+    pub upstream_connects_attempted: AtomicU32,
+    /// V2.1: subset that reached a usable upstream session.
+    pub upstream_connects_succeeded: AtomicU32,
+    /// V2.1: subset that failed.
+    pub upstream_connects_failed:    AtomicU32,
+    /// V2.1: sum of upstream→agent payload bytes relayed.
+    pub upstream_bytes_forwarded:    AtomicU64,
 }
 
 impl ProxyStats {
@@ -125,6 +138,10 @@ impl ProxyStats {
             commands_audited:   self.commands_audited  .load(Ordering::Relaxed),
             commands_blocked:   self.commands_blocked  .load(Ordering::Relaxed),
             bytes_observed:     self.bytes_observed    .load(Ordering::Relaxed),
+            upstream_connects_attempted: self.upstream_connects_attempted.load(Ordering::Relaxed),
+            upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
+            upstream_connects_failed:    self.upstream_connects_failed   .load(Ordering::Relaxed),
+            upstream_bytes_forwarded:    self.upstream_bytes_forwarded   .load(Ordering::Relaxed),
         }
     }
 }
@@ -140,6 +157,14 @@ pub struct ProxyStatsSnapshot {
     pub commands_blocked:   u32,
     /// Bytes seen in inbound OP_MSG bodies.
     pub bytes_observed:     u64,
+    /// V2.1: number of upstream TCP+auth handshakes started.
+    pub upstream_connects_attempted: u32,
+    /// V2.1: subset that reached a usable upstream session.
+    pub upstream_connects_succeeded: u32,
+    /// V2.1: subset that failed.
+    pub upstream_connects_failed:    u32,
+    /// V2.1: sum of upstream→agent payload bytes relayed.
+    pub upstream_bytes_forwarded:    u64,
 }
 
 /// Audit channel.
@@ -160,6 +185,8 @@ impl AuditChannel for NoopAuditChannel {
 #[derive(Debug, Clone)]
 pub enum AuditEvent {
     /// One MongoDB command observed (allowed or blocked).
+    /// Pre-upstream-contact event — fires before the proxy attempts
+    /// to forward to the real backend.
     MongoCommandExecuted {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
@@ -174,6 +201,75 @@ pub enum AuditEvent {
         /// True if the proxy refused the command under
         /// restrictions.
         blocked:     bool,
+    },
+
+    /// V2.1: emitted on the upstream's terminal frame for a
+    /// forwarded command. Pairs with `MongoCommandExecuted` via
+    /// matching `body_sha256`. Per `credential-proxy.md §14.5.1`.
+    DatabaseQueryCompleted {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session.
+        consumer:    OwnedConsumer,
+        /// Credential name (never the value).
+        credential:  CredentialName,
+        /// SHA-256 of the OP_MSG body bytes — matches the prior
+        /// `MongoCommandExecuted.body_sha256`.
+        body_sha256: String,
+        /// Always `1` for OP_MSG (the proxy doesn't try to count
+        /// nested cursor batches in V2.1; that's V3 work).
+        rows_returned: u64,
+        /// Bytes the upstream returned (header + body of the OP_MSG
+        /// reply).
+        bytes_returned: u64,
+        /// Wall-clock duration of the upstream round trip.
+        duration_ms: u32,
+        /// `Some("ok=0".to_owned())` if the upstream's reply doc had
+        /// `{ ok: 0 }`; `None` on success.
+        upstream_error: Option<String>,
+    },
+
+    /// V2.1: emitted once per agent connection on the first
+    /// successful upstream TCP connect. (No SCRAM in V2.1 MVP, so
+    /// this fires after just the TCP connect succeeds.)
+    /// Per `credential-proxy.md §14.5.2`.
+    CredentialProxyUpstreamConnected {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session.
+        consumer:    OwnedConsumer,
+        /// Credential name (never the value).
+        credential:  CredentialName,
+        /// Upstream hostname from the credential URL.
+        upstream_host: String,
+        /// Upstream port from the credential URL after default-port
+        /// substitution.
+        upstream_port: u16,
+        /// True if the URL requested TLS.
+        tls: bool,
+        /// Wall-clock from `TcpStream::connect()` start to first
+        /// usable session, in milliseconds.
+        handshake_ms: u32,
+    },
+
+    /// V2.1: emitted on every upstream-connect attempt that did NOT
+    /// reach a usable session.
+    /// Per `credential-proxy.md §14.5.3`.
+    CredentialProxyUpstreamFailed {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session.
+        consumer:    OwnedConsumer,
+        /// Credential name (never the value).
+        credential:  CredentialName,
+        /// Upstream hostname from the credential URL.
+        upstream_host: String,
+        /// Upstream port from the credential URL.
+        upstream_port: u16,
+        /// Failure category — see variant doc.
+        reason: String,
+        /// Short redacted message; never carries credential bytes.
+        detail: String,
     },
 }
 
@@ -263,26 +359,39 @@ async fn serve_one(
     stats:      Arc<ProxyStats>,
     audit:      Arc<dyn AuditChannel>,
 ) -> std::io::Result<()> {
-    // Resolve once at connect time (mirrors the postgres / mysql
-    // proxies). A missing credential aborts the handshake before
-    // we ever touch the wire.
-    if let Err(e) = backend.resolve(&config.credential_name, config.consumer.as_ref()) {
-        tracing::warn!(error = %e, "mongodb proxy credential resolve failed");
-        return Ok(());
-    }
+    // Resolve+parse the upstream URL on accept. Failures are
+    // tolerated and surfaced lazily on the first allowed agent
+    // command (mirrors the postgres + mysql proxies).
+    let upstream_url: Option<ParsedUpstreamUrl> = match upstream::resolve_upstream_url(
+        &backend,
+        &config.credential_name,
+        &config.consumer,
+    ) {
+        Ok(u) => Some(u),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                credential = %config.credential_name.as_str(),
+                "mongodb proxy upstream URL resolution failed; first allowed command will fail",
+            );
+            None
+        }
+    };
+
+    let mut upstream_session: Option<UpstreamSession> = None;
 
     loop {
         // Read 16-byte header.
         let mut header_bytes = [0u8; wire::HEADER_LEN];
         if let Err(e) = stream.read_exact(&mut header_bytes).await {
             if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                return Ok(());
+                break;
             }
             return Err(e);
         }
         let header = wire::MsgHeader::parse(header_bytes);
         if header.message_length < wire::HEADER_LEN as i32 {
-            return Ok(()); // malformed; close.
+            break; // malformed; close.
         }
         let total = header.message_length as usize;
         if total > wire::MAX_MESSAGE_LEN {
@@ -297,11 +406,10 @@ async fn serve_one(
         stats.bytes_observed.fetch_add(body_len as u64, Ordering::Relaxed);
 
         // Only OP_MSG is supported. Everything else gets a clean
-        // close so a confused client backs off rather than
-        // hanging.
+        // close so a confused client backs off rather than hanging.
         if header.op_code != wire::OP_MSG {
             tracing::debug!(op_code = header.op_code, "mongodb proxy received non-OP_MSG, closing");
-            return Ok(());
+            break;
         }
 
         let command = wire::first_command_name(&body)
@@ -311,30 +419,193 @@ async fn serve_one(
         let body_sha256 = sha256_hex(&body);
         let blocked     = config.restrictions.is_blocked(&command);
 
-        let reply_doc = if blocked {
-            stats.commands_blocked.fetch_add(1, Ordering::Relaxed);
-            build_unauthorized_doc(&command)
-        } else {
-            build_reply_for(&command)
-        };
-        let reply_msg = wire::build_op_msg_reply(
-            header.request_id.wrapping_add(0x4000_0000),
-            header.request_id,
-            &reply_doc,
-        );
-        stream.write_all(&reply_msg).await?;
-        stream.flush().await?;
-
         audit.emit(AuditEvent::MongoCommandExecuted {
-            timestamp_unix_seconds: SystemTime::now()
-                .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+            timestamp_unix_seconds: now_secs(),
             consumer:    config.consumer.clone(),
             credential:  config.credential_name.clone(),
-            command,
-            body_sha256,
+            command:     command.clone(),
+            body_sha256: body_sha256.clone(),
             blocked,
         });
+
+        if blocked {
+            stats.commands_blocked.fetch_add(1, Ordering::Relaxed);
+            let reply_doc = build_unauthorized_doc(&command);
+            let reply_msg = wire::build_op_msg_reply(
+                header.request_id.wrapping_add(0x4000_0000),
+                header.request_id,
+                &reply_doc,
+            );
+            stream.write_all(&reply_msg).await?;
+            stream.flush().await?;
+            continue;
+        }
+
+        // Hello / isMaster / ismaster / ping / buildInfo — the
+        // proxy answers these locally so an agent's driver can
+        // negotiate the connection topology without ever touching
+        // the upstream. This matches the V2.0 MVP behaviour and
+        // also lets the V2.1 relay path stay focused on data
+        // commands.
+        if matches!(command.as_str(), "hello" | "isMaster" | "ismaster" | "ping" | "buildInfo" | "buildinfo") {
+            let reply_doc = build_reply_for(&command);
+            let reply_msg = wire::build_op_msg_reply(
+                header.request_id.wrapping_add(0x4000_0000),
+                header.request_id,
+                &reply_doc,
+            );
+            stream.write_all(&reply_msg).await?;
+            stream.flush().await?;
+            continue;
+        }
+
+        // Allowed data command: ensure a usable upstream session,
+        // then forward the agent's full OP_MSG frame verbatim.
+        if upstream_session.is_none() {
+            let url = match upstream_url.as_ref() {
+                Some(u) => u,
+                None => {
+                    let reply_doc = build_proxy_error_doc(
+                        "RAXIS proxy: upstream credential could not be resolved (FAIL_PROXY_UPSTREAM_URL_INVALID)",
+                    );
+                    let reply_msg = wire::build_op_msg_reply(
+                        header.request_id.wrapping_add(0x4000_0000),
+                        header.request_id,
+                        &reply_doc,
+                    );
+                    stream.write_all(&reply_msg).await?;
+                    stream.flush().await?;
+                    continue;
+                }
+            };
+            let host = url.host.clone();
+            let port = url.port;
+            stats.upstream_connects_attempted.fetch_add(1, Ordering::Relaxed);
+            match UpstreamSession::connect(url, upstream::DEFAULT_CONNECT_TIMEOUT).await {
+                Ok(sess) => {
+                    stats.upstream_connects_succeeded.fetch_add(1, Ordering::Relaxed);
+                    audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
+                        timestamp_unix_seconds: now_secs(),
+                        consumer:      config.consumer.clone(),
+                        credential:    config.credential_name.clone(),
+                        upstream_host: sess.host.clone(),
+                        upstream_port: sess.port,
+                        tls:           sess.tls,
+                        handshake_ms:  sess.handshake_ms,
+                    });
+                    upstream_session = Some(sess);
+                }
+                Err(e) => {
+                    stats.upstream_connects_failed.fetch_add(1, Ordering::Relaxed);
+                    audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
+                        timestamp_unix_seconds: now_secs(),
+                        consumer:      config.consumer.clone(),
+                        credential:    config.credential_name.clone(),
+                        upstream_host: host,
+                        upstream_port: port,
+                        reason:        e.audit_reason().to_owned(),
+                        detail:        e.audit_detail(),
+                    });
+                    let reply_doc = build_proxy_error_doc(&format!(
+                        "RAXIS proxy: upstream connect failed ({}): {}",
+                        e.audit_reason(),
+                        e.audit_detail(),
+                    ));
+                    let reply_msg = wire::build_op_msg_reply(
+                        header.request_id.wrapping_add(0x4000_0000),
+                        header.request_id,
+                        &reply_doc,
+                    );
+                    stream.write_all(&reply_msg).await?;
+                    stream.flush().await?;
+                    continue;
+                }
+            }
+        }
+
+        // Re-encode the agent's frame (header + body) and forward it
+        // to the upstream. Reading the frame back from the parsed
+        // pieces avoids the cost of buffering the on-wire bytes
+        // separately.
+        let agent_frame = {
+            let mut f = Vec::with_capacity(total);
+            f.extend_from_slice(&header.encode());
+            f.extend_from_slice(&body);
+            f
+        };
+        let session = upstream_session.as_mut().expect("upstream connected above");
+        match session.forward_op_msg(&agent_frame).await {
+            Ok(outcome) => {
+                stream.write_all(&outcome.frame).await?;
+                stream.flush().await?;
+                stats.upstream_bytes_forwarded.fetch_add(
+                    outcome.frame.len() as u64, Ordering::Relaxed,
+                );
+                let upstream_error = if outcome.upstream_error_marker {
+                    Some("ok=0".to_owned())
+                } else {
+                    None
+                };
+                audit.emit(AuditEvent::DatabaseQueryCompleted {
+                    timestamp_unix_seconds: now_secs(),
+                    consumer:       config.consumer.clone(),
+                    credential:     config.credential_name.clone(),
+                    body_sha256,
+                    rows_returned:  1,
+                    bytes_returned: outcome.frame.len() as u64,
+                    duration_ms:    outcome.duration_ms,
+                    upstream_error,
+                });
+            }
+            Err(e) => {
+                let detail = redact_for_audit(&e.to_string());
+                upstream_session = None;
+                let reply_doc = build_proxy_error_doc(&format!(
+                    "RAXIS proxy: upstream relay failed: {detail}"
+                ));
+                let reply_msg = wire::build_op_msg_reply(
+                    header.request_id.wrapping_add(0x4000_0000),
+                    header.request_id,
+                    &reply_doc,
+                );
+                stream.write_all(&reply_msg).await?;
+                stream.flush().await?;
+                audit.emit(AuditEvent::DatabaseQueryCompleted {
+                    timestamp_unix_seconds: now_secs(),
+                    consumer:       config.consumer.clone(),
+                    credential:     config.credential_name.clone(),
+                    body_sha256,
+                    rows_returned:  0,
+                    bytes_returned: 0,
+                    duration_ms:    0,
+                    upstream_error: Some("relay_failed".to_owned()),
+                });
+            }
+        }
     }
+
+    Ok(())
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Build a synthetic Mongo command failure doc the proxy can return
+/// when the upstream relay path fails (URL resolve, connect, mid-
+/// query I/O). The shape mirrors the upstream's own error-reply
+/// envelope so drivers surface a clean `MongoServerError`.
+fn build_proxy_error_doc(message: &str) -> Vec<u8> {
+    use wire::BsonBuilder as B;
+    B::new()
+        .double("ok",       0.0)
+        .int32 ("code",     8000)
+        .string("codeName", "RaxisProxyError")
+        .string("errmsg",   message)
+        .finish()
 }
 
 /// Build a synthesised reply document for the given command.
