@@ -21,12 +21,15 @@ orchestrator = []
 
 [dependencies]
 serde       = { workspace = true }
+serde_json  = { workspace = true }
 thiserror   = { workspace = true }
-tokio       = { workspace = true }
+tokio       = { workspace = true, features = ["fs", "process", "io-util"] }
 raxis-ipc   = { path = "../ipc" }
 raxis-types = { path = "../types" }
 uuid        = { workspace = true }
 async-trait = { workspace = true }
+reqwest     = { workspace = true, features = ["json"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "io-util"] }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "io-util", "fs", "process"] }
+tempfile = "3"

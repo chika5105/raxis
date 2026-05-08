@@ -72,9 +72,14 @@ use std::ffi::OsString;
 use std::fmt;
 
 mod error;
+pub mod model;
 pub mod transport;
 
 pub use error::PlannerError;
+pub use model::{
+    AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse, MockModelClient,
+    ModelClient, ModelError, ToolSpec, Usage,
+};
 pub use transport::{
     connect, KernelTransport, KernelTransportConfig, StreamTransport, TransportError,
 };
