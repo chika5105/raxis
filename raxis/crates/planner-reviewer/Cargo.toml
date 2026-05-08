@@ -1,0 +1,16 @@
+[package]
+name        = "raxis-planner-reviewer"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — guest-side planner-harness binary for the Reviewer role. Installed at `/usr/local/bin/raxis-reviewer` inside the canonical reviewer image; the kernel session-spawn path stamps this exact path into the VM's entrypoint_argv. Currently a minimum-bootable scaffold per `planner-harness.md §14.1`."
+
+[[bin]]
+name = "raxis-reviewer"
+path = "src/main.rs"
+
+[dependencies]
+raxis-planner-core = { path = "../planner-core", features = ["reviewer"] }
+tokio              = { workspace = true }

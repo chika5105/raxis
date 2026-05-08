@@ -3194,6 +3194,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-planner-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "raxis-planner-executor"
+version = "0.1.0"
+dependencies = [
+ "raxis-planner-core",
+ "tokio",
+]
+
+[[package]]
+name = "raxis-planner-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "raxis-planner-core",
+ "tokio",
+]
+
+[[package]]
+name = "raxis-planner-reviewer"
+version = "0.1.0"
+dependencies = [
+ "raxis-planner-core",
+ "tokio",
+]
+
+[[package]]
 name = "raxis-policy"
 version = "0.1.0"
 dependencies = [

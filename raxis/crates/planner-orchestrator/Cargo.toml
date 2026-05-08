@@ -1,0 +1,16 @@
+[package]
+name        = "raxis-planner-orchestrator"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — guest-side planner-harness binary for the Orchestrator role. Installed at `/usr/local/bin/raxis-orchestrator` inside the canonical orchestrator image; the kernel session-spawn path stamps this exact path into the VM's entrypoint_argv. Currently a minimum-bootable scaffold per `planner-harness.md §14.1`."
+
+[[bin]]
+name = "raxis-orchestrator"
+path = "src/main.rs"
+
+[dependencies]
+raxis-planner-core = { path = "../planner-core", features = ["orchestrator"] }
+tokio              = { workspace = true }

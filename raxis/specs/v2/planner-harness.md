@@ -2401,6 +2401,38 @@ This section enumerates every crate, binary, source file, image artefact, and te
 
 V2 introduces three planner role binaries built from one shared workspace, plus two new image-build helpers. Final `raxis/Cargo.toml` `[workspace] members` additions:
 
+> **Implementation status (minimum-bootable scaffold landed).** The
+> three role binaries and `raxis-planner-core` exist in the workspace
+> as of the current iteration:
+>
+> - `raxis/crates/planner-core/` — `Role` enum, `BootArgs`, `BootEnv`,
+>   `BootContext`, `PlannerError` with structured exit codes,
+>   `render_boot_log` (session-token-redacting). 21 unit tests pin
+>   the argv contract, env contract, role-shortname mapping, and the
+>   exact `binary_path()` strings the kernel session-spawn path stamps
+>   into `VmSpec.entrypoint_argv`.
+> - `raxis/crates/planner-orchestrator/` — `[bin] raxis-orchestrator`
+>   at `/usr/local/bin/raxis-orchestrator`. Parses
+>   `--initiative-id <ID>`, emits `step:"planner-boot"`, parks on
+>   SIGTERM/SIGINT.
+> - `raxis/crates/planner-executor/` — `[bin] raxis-executor` at
+>   `/usr/local/bin/raxis-executor`. Parses `--task-id <ID>
+>   --initiative-id <ID>`, emits `step:"planner-boot"`, parks on
+>   SIGTERM/SIGINT.
+> - `raxis/crates/planner-reviewer/` — `[bin] raxis-reviewer` at
+>   `/usr/local/bin/raxis-reviewer`. Parses `--task-id <ID>
+>   --initiative-id <ID>`, emits `step:"planner-boot"`, parks on
+>   SIGTERM/SIGINT.
+>
+> What is **not** yet in this iteration (all deferred to subsequent
+> milestones): `raxis-planner-tools`, `raxis-planner-reviewer-tools`,
+> the `loop_engine` / `KsbRenderer` / `alert_pump` modules, the
+> NNSP loader, the VSock control plane, the build-time feature mutex
+> guard, and the `trybuild` / `ksb_golden` test fixtures. The current
+> iteration deliberately ships the **wire shape only** (argv, env,
+> exit codes, binary paths) so that the kernel session-spawn path has
+> a real binary to hand control to inside the guest.
+
 | Crate path                                     | Kind          | Status         | Purpose                                                                                                                                       |
 | ---------------------------------------------- | ------------- | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `crates/raxis-planner-core/`                   | `[lib]`       | NEW            | Shared infrastructure: the claw-code execution loop, KSB renderer, alert pump, IPC framing on top of `IsolatedSession`, common tool registry. |

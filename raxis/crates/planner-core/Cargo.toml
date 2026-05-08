@@ -1,0 +1,25 @@
+[package]
+name        = "raxis-planner-core"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — shared planner-harness infrastructure: Role enum, PlannerHarness trait, role-asymmetric tool-registry construction. The three planner role binaries (raxis-planner-{executor,reviewer,orchestrator}) all link this crate. Currently a minimum-bootable scaffold per `planner-harness.md §14.1`; tool implementations land in `raxis-planner-tools` (see `planner-harness.md §14.2`)."
+
+[features]
+default = []
+# **Mutually exclusive** role features. The three planner binaries
+# pick ONE; build.rs (when added) will surface a `compile_error!` if
+# more than one is set. The minimum-bootable scaffold currently
+# treats them as additive informational flags; the feature-mutex
+# guard lands when the tool-registry construction surfaces actually
+# branch on them.
+executor     = []
+reviewer     = []
+orchestrator = []
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }
+tokio     = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name        = "raxis-planner-executor"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — guest-side planner-harness binary for the Executor role. Installed at `/usr/local/bin/raxis-executor` inside the canonical executor-starter image; the kernel session-spawn path stamps this exact path into the VM's entrypoint_argv. Currently a minimum-bootable scaffold per `planner-harness.md §14.1`."
+
+[[bin]]
+name = "raxis-executor"
+path = "src/main.rs"
+
+[dependencies]
+raxis-planner-core = { path = "../planner-core", features = ["executor"] }
+tokio              = { workspace = true }
