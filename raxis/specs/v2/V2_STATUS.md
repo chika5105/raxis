@@ -70,27 +70,52 @@ during `start_for_session`, emit `CredentialProxyStarted` on bind and
 through the `CredentialBackend` trait. None of them ever expose
 credential bytes to the agent VM.
 
-| `proxy_type` | Status | MVP scope | Reference |
+| `proxy_type` | Status | Scope | Reference |
 |---|---|---|---|
-| `postgres` | shipped (handshake-tier) | startup-message rewrite, parameter-status forwarding, simple-query SELECT pass-through, `allow_only_select` enforcement, `ReadyForQuery` advancement | `crates/credential-proxy-postgres/` + live-e2e slice `postgres-proxy` |
+| `postgres` | **shipped (real-upstream-tier, V2.1)** | full simple-query relay against a live Postgres via `tokio-postgres`, real `RowDescription`/`DataRow`/`CommandComplete` frames, lazy upstream connect on first allowed query, `allow_only_select` short-circuits before upstream, V2.1 audit envelope (`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`) | `crates/credential-proxy-postgres/` + integration tests in `tests/proxy_handshake.rs` (6 passing) + live-e2e slice `postgres-proxy` |
 | `http`     | shipped | bearer / basic auth modes, host rewrite, method+path-prefix allowlist, real upstream forwarding | `crates/credential-proxy-http/` + live-e2e slices `http-proxy-bearer`, `http-proxy-restrictions` |
 | `k8s`      | shipped (rides HTTP) | bearer auth, RBAC-style verb allowlist via the HTTP proxy | `crates/credential-proxy-http/` (k8s convenience layer) |
-| `smtp`     | shipped | RCPT/MAIL/DATA framing, sender allowlist, recipient-domain allowlist, per-message and per-minute rate caps, TLS upstream | `crates/credential-proxy-smtp/` + live-e2e slice `smtp-proxy` |
-| `redis`    | shipped | RESP2 framing, AUTH/HELLO interception, command allowlist, downstream forwarding | `crates/credential-proxy-redis/` + live-e2e slice `redis-proxy` |
-| `aws`      | shipped (handshake-tier) | IMDS-shaped `/creds` envelope, path allowlist, `AWS_CONTAINER_CREDENTIALS_FULL_URI` mount | `crates/credential-proxy-aws/` + live-e2e slice `aws-proxy` |
-| `gcp`      | shipped (handshake-tier) | metadata-server endpoints (`/computeMetadata/v1/...`), `Metadata-Flavor: Google` enforcement, path allowlist | `crates/credential-proxy-gcp/` + live-e2e slice `gcp-proxy` |
-| `azure`    | shipped (handshake-tier) | IMDS `/metadata/identity/oauth2/token`, `Metadata: true` enforcement, resource allowlist | `crates/credential-proxy-azure/` + live-e2e slice `azure-proxy` |
-| `mysql`    | shipped (handshake-tier) | `HandshakeV10` greeting, `OK_Packet` synth, `COM_QUERY` classifier with `allow_only_select` | `crates/credential-proxy-mysql/` + live-e2e slice `mysql-proxy` |
-| `mssql`    | shipped (handshake-tier) | TDS `PRELOGIN` / `LOGIN7` greeting, `LOGINACK+DONE` synth, `SQLBatch` classifier with `allow_only_select` | `crates/credential-proxy-mssql/` + live-e2e slice `mssql-proxy` |
-| `mongodb`  | shipped (handshake-tier) | `OP_MSG` framing, `hello`/`isMaster` synth without auth advertisement, BSON command classifier with `allow_read_only` | `crates/credential-proxy-mongodb/` + live-e2e slice `mongodb-proxy` |
+| `smtp`     | shipped (real-upstream-tier) | RCPT/MAIL/DATA framing, sender allowlist, recipient-domain allowlist, per-message and per-minute rate caps, real upstream relay with optional STARTTLS | `crates/credential-proxy-smtp/` + live-e2e slice `smtp-proxy` |
+| `redis`    | **shipped (real-upstream-tier, V2.1 audit)** | RESP2 framing, AUTH/HELLO interception, command allowlist, real upstream forwarding (predates V2.1), V2.1 audit envelope (`CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`) | `crates/credential-proxy-redis/` + live-e2e slice `redis-proxy` |
+| `aws`      | shipped (handshake-tier — real cloud creds) | IMDS-shaped `/creds` envelope, path allowlist, `AWS_CONTAINER_CREDENTIALS_FULL_URI` mount; the proxy returns **real IAM credentials** from the configured backend so the agent's AWS SDK can call real AWS APIs end-to-end | `crates/credential-proxy-aws/` + live-e2e slice `aws-proxy` |
+| `gcp`      | shipped (handshake-tier — real cloud creds) | metadata-server endpoints (`/computeMetadata/v1/...`), `Metadata-Flavor: Google` enforcement, path allowlist; same real-credentials posture as AWS | `crates/credential-proxy-gcp/` + live-e2e slice `gcp-proxy` |
+| `azure`    | shipped (handshake-tier — real cloud creds) | IMDS `/metadata/identity/oauth2/token`, `Metadata: true` enforcement, resource allowlist; same real-credentials posture as AWS | `crates/credential-proxy-azure/` + live-e2e slice `azure-proxy` |
+| `mysql`    | shipped (handshake-tier; **real-upstream pending**) | `HandshakeV10` greeting, `OK_Packet` synth, `COM_QUERY` classifier with `allow_only_select`; allowed queries currently return a synthetic `OK_Packet` with no result set | `crates/credential-proxy-mysql/` + live-e2e slice `mysql-proxy` |
+| `mssql`    | shipped (handshake-tier; **real-upstream pending**) | TDS `PRELOGIN` / `LOGIN7` greeting, `LOGINACK+DONE` synth, `SQLBatch` classifier with `allow_only_select` | `crates/credential-proxy-mssql/` + live-e2e slice `mssql-proxy` |
+| `mongodb`  | shipped (handshake-tier; **real-upstream pending**) | `OP_MSG` framing, `hello`/`isMaster` synth without auth advertisement, BSON command classifier with `allow_read_only` | `crates/credential-proxy-mongodb/` + live-e2e slice `mongodb-proxy` |
 
-"**Handshake-tier**" means the proxy implements the protocol greeting,
-authentication interception, and command classification end-to-end —
-including audit emission and restriction enforcement — but synthesises
-success packets locally rather than forwarding to a real upstream
-service. The agent's wire contract is identical to the upstream
-contract; swapping in a real upstream is a V3 patch that does not
-change the operator-facing interface.
+**V2.1 real-upstream-forwarding contract** (per `credential-proxy.md
+§14`): each TCP-protocol proxy opens a real upstream connection on
+the first allowed agent query, relays classified-and-approved
+packets, and streams results back to the agent. Spec-amendment
+`§14.5` defines three new audit kinds the proxies emit
+(`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`,
+`CredentialProxyUpstreamFailed`).
+
+* **Postgres**: shipped at V2.1 in commit
+  `e44f69a credential-proxy-postgres: real upstream forwarding`.
+* **Redis** + **SMTP**: were already real-upstream in V2.0; Redis
+  upgraded to the V2.1 audit envelope in commit
+  `0cf013e credential-proxy-redis: emit V2.1 upstream-forwarding
+  audit events`. SMTP retains its protocol-specific
+  `SmtpProxyConnected` / `SmtpProxyDisconnected` audit kinds
+  (which serve the same purpose) and is **not** migrated to the
+  generic envelope.
+* **MySQL**, **MSSQL**, **MongoDB**: real-upstream-forwarding
+  scheduled in the next milestone of this V2.1 sequence
+  (~250 lines + tests per protocol). Until then, allowed queries
+  synthesise empty success packets — the wire contract is
+  identical to V2.0 and the agent's driver does not crash, but
+  the result set is structurally empty.
+
+"**Handshake-tier — real cloud creds**" means the proxy returns the
+operator's actual cloud credentials in the metadata-service envelope
+shape; the agent's cloud SDK uses them to talk to real AWS / GCP /
+Azure APIs. The "handshake" terminology here refers to the
+metadata-protocol hand-off, NOT to whether the proxy reaches a real
+upstream — for cloud proxies the agent IS the only client, and the
+upstream is the cloud API itself, which the agent reaches directly
+through the cloud SDK using the served credentials.
 
 ### 1.7 Pre-merge verifier admission (validation, not dispatch)
 
@@ -135,8 +160,11 @@ specific named slice when an API key is not available.
 | #5 — Capability-class completeness | **deferred** (see §2.4) | scaffolded as `check_capability_class_completeness` (no-op) |
 
 `cargo xtask spec-graph --strict` succeeds with **0 findings** across
-**42 spec files, 117 unique fail codes, 64 unique audit kinds** at the
-V2 sign-off SHA.
+**44 spec files, 120 unique fail codes, 64 unique audit kinds** at
+the current HEAD (the file count rose from 42→44 with the
+`V2_STATUS.md` ledger and `credential-proxy.md §14` amendment; the
+fail-code count rose from 117→120 with the three new
+`FAIL_PROXY_UPSTREAM_*` codes from §14.7).
 
 ---
 
@@ -226,15 +254,81 @@ checks live as `Vec::new()`-returning stubs in
 `xtask/src/spec_graph.rs` so the surface is named for the follow-up
 PR.
 
+### 2.5 Real-upstream-forwarding for MySQL / MSSQL / MongoDB (V2.1)
+
+**Spec home:** `credential-proxy.md §14` (V2.1 contract amendment).
+
+**What's missing:** real `tokio::net::TcpStream::connect` to the
+upstream named in the credential URL, plus protocol-specific
+relay logic:
+
+* MySQL: `HandshakeV10` ↔ `HandshakeResponse41` ↔
+  `mysql_native_password` reply ↔ `COM_QUERY` relay with multi-
+  packet `ResultSetHeader + ColumnDef* + EOF + Row* + EOF`.
+* MSSQL: `PRELOGIN` ↔ TLS handshake (per cloud SQL) ↔ `LOGIN7`
+  with cleartext password OR Entra ID token ↔ `SQLBatch` relay
+  with `COLMETADATA + ROW* + DONE` token streaming.
+* MongoDB: `OP_MSG hello` ↔ SCRAM-SHA-256 `saslStart/saslContinue`
+  ↔ `OP_MSG` command relay (the framing is already in place;
+  this is mostly upstream-connect plus relay).
+
+**Why deferred:** sequencing — Postgres landed first as the
+canonical pattern; MySQL / MSSQL / MongoDB will follow the same
+shape with protocol-specific deltas. Postgres's
+`tokio_postgres::Config::connect` removed cryptographic-correctness
+risk for SCRAM-SHA-256; MySQL's `mysql_async`, MongoDB's `mongodb`
+crate, and MSSQL's `tiberius` are the analogous workspace adds.
+
+**What you can do today:** the agent's wire contract for these
+three protocols is identical to V2.0. Drivers do not crash;
+allowed `SELECT` / `find` / `SQLBatch` returns an empty success
+packet. Plans that only need governance-pipeline observation
+(audit chain, restriction enforcement) work end-to-end; plans
+that need real result data should pin to `proxy_type =
+"postgres"` until this milestone lands.
+
+### 2.6 Planner agent loop (T1-1 from the V2.1 audit)
+
+**Spec home:** `planner-harness.md` (the §15 VSock control-plane
+section is forthcoming; for now the harness's §14 boot contract is
+authoritative for the scaffold that ships today).
+
+**What's missing:** the three planner binaries
+(`raxis-planner-orchestrator/executor/reviewer`) currently boot,
+parse argv + env, log the boot context, and then park on
+`tokio::signal::ctrl_c().await`. The kernel can spawn a session
+and the VM stays alive long enough for the lifecycle FSM to
+observe `Running`, but the agent process inside the VM does not
+yet:
+
+1. open a VSock control plane back to the kernel,
+2. ingest the KSB,
+3. call the model API through the gateway,
+4. dispatch tool calls (`file_write`, `shell_exec`, `git_commit`),
+5. submit Intents (executor) / Witnesses (reviewer) back over
+   VSock.
+
+**Why deferred:** this is a ~1,500-line cross-cutting milestone
+spanning four crates (`planner-core` extension, `planner-tools`,
+the model-API client, and the VSock IPC client). Landing it as
+one atomic PR makes review hard; landing it after the database-
+proxy real-upstream work means the model loop will have a real
+end-to-end DB call to issue when it comes online.
+
+**What you can do today:** the kernel + gateway + credential
+proxies are wired and observable. A future planner binary linked
+against the `raxis-planner-core` scaffold + a model client can
+slot in without touching kernel code.
+
 ---
 
-## 3. Test status (V2 sign-off SHA)
+## 3. Test status (current HEAD)
 
 * `cargo build --workspace` — clean
 * `cargo build --release -p raxis-kernel -p raxis-gateway -p raxis-cli -p raxis-planner-orchestrator -p raxis-planner-executor -p raxis-planner-reviewer -p raxis-tproxy` — clean
-* `cargo test --workspace --no-fail-fast` — **all green**, 1700+ tests
+* `cargo test --workspace --no-fail-fast` — **all green** (1700+ tests; Postgres proxy gained 6 new integration tests at V2.1 + 13 new unit tests in `upstream.rs`)
 * `cargo run -p raxis-live-e2e -- all` — **15/15 slices pass** (incl. real Anthropic API call)
-* `cargo xtask spec-graph --strict` — **0 findings**, 42 files / 117 fail codes / 64 audit kinds
+* `cargo xtask spec-graph --strict` — **0 findings**, 44 files / 120 fail codes / 64 audit kinds
 
 `cargo build --workspace --release` deliberately **fails** because
 `raxis-test-support` (a dev-dependency-only crate) is consumed by
@@ -258,3 +352,75 @@ cargo run -p raxis-live-e2e -- all
 
 Every line in §1 is observable from the green output; every line in
 §2 is documented in the named spec section.
+
+---
+
+## 5. Audit corrections — what the V2.1 audit got right, and where it conflated layers
+
+The "RAXIS V2 — Remaining Work Roadmap" audit dated 2026-05-08 was
+sharp on the database-proxy capability gap and correctly promoted
+real upstream forwarding from V3 to V2. The implementation in
+e44f69a (Postgres) and 0cf013e (Redis audit upgrade) closes the
+first half of T1-2 from that roadmap. For completeness, here is
+what the audit conflated with code that was already shipped:
+
+* **T0-1 "Session Spawn Handler"** — claimed a missing
+  `kernel/src/handlers/session.rs`. The file does not exist as
+  named, but the **session-spawn callsites are wired**:
+  - `kernel/src/ipc/operator.rs::handle_approve_plan` (lines
+    1227–1264) calls
+    `ctx.orchestrator_spawn.spawn_for_initiative(...)` →
+    `LiveOrchestratorSpawn::spawn_for_initiative` →
+    `session_spawn_orchestrator::spawn_session_for_initiative`
+    → `SessionSpawnService::spawn_session` →
+    `CredentialProxyManager::start_for_session` →
+    `IsolationBackend::spawn`.
+  - `kernel/src/handlers/intent.rs::handle_activate_sub_task`
+    calls the analogous executor / reviewer path through
+    `spawn_executor_for_task`.
+  The "kernel handler that transitions an admitted intent into a
+  running VM" is therefore split across `ipc/operator.rs` and
+  `handlers/intent.rs` rather than living in a dedicated
+  `session.rs` file. The audit's bulleted call chain (start_for_session,
+  IsolationBackend::spawn, env-var injection, task-state transition,
+  SessionStarted audit) is **all present at the named call sites**.
+
+* **T1-3 "Gateway ↔ Kernel IPC"** — claimed missing. The kernel's
+  `gateway/{supervisor.rs (715 LOC), client.rs (806 LOC),
+  accept.rs (617 LOC)}` ship the supervisor (crash-and-respawn
+  with backoff), kernel-side client, and accept loop. `main.rs`
+  spawns the supervisor at boot and tears it down on shutdown.
+
+* **T1-4 "Heartbeat Writer"** — claimed missing. `main.rs:526–540`
+  spawns `runtime::heartbeat_loop` in a `tokio::spawn` at boot
+  with shutdown channel; the loop writes
+  `runtime/heartbeat.json` atomically every 5s with one initial
+  write at boot per the cli-readonly.md §5.2.1 contract.
+
+* **T2-1 "mkfs.erofs integration"** — claimed not wired. The
+  shell-out IS implemented in
+  `crates/image-builder/src/lib.rs::erofs_assemble` with
+  `-z zstd -T <SOURCE_DATE_EPOCH>` flags and a graceful skip
+  when `mkfs.erofs` is not on the host. What's still missing
+  is the CI determinism gate (build twice, byte-equal) — a
+  separate piece called out in §2.3 above.
+
+* **T2-3 "raxis doctor CLI"** — claimed missing. Shipped at
+  `cli/src/commands/doctor.rs` (1,681 lines) with all eight
+  documented checks plus `signing-key-fp` and
+  `canonical-images` subcommands. The Homebrew formula's
+  `post_install` block already references the latter.
+
+The audit's genuine open items, in order of remaining work:
+
+1. **T1-1 — Planner agent loop** (~1,500 LOC across four crates).
+   Confirmed gap; see §2.6 above. Largest remaining V2.1 piece.
+2. **T1-2 — MySQL / MSSQL / MongoDB real upstream forwarding**
+   (~750 LOC across three crates). Confirmed gap; see §2.5.
+3. **T2-1 — CI determinism gate for `mkfs.erofs`** (~40 LOC of
+   YAML in `.github/workflows/build-images.yml`). Small.
+4. **T2-2 — Homebrew tap auto-update from `release.yml`**
+   (~40 LOC of shell). Small.
+5. **T3 polish items** (CLA enforcement, coverage CI, egress
+   firewall injection, operator notification transport, etc.)
+   — all post-GA, none block V2.1 sign-off.
