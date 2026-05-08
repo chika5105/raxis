@@ -884,11 +884,56 @@ client."* The planner binaries boot and park but cannot communicate
 with the kernel. The VSock frame reader/writer (guest-side) is a
 prerequisite for B1 (planner agent loop).
 
-### 12.8 Target branch ref: hardcoded to `refs/heads/main`
+### 12.8 Target branch ref: configurable via [git] / [workspace] ✅ CLOSED (V2.2)
 
-`domain-git/src/lib.rs` hardcodes `refs/heads/main` in 9 locations
-including `update_main_ref()`, `find_reference()`, and the recovery
-path. There is no policy or plan field to override it.
+**Resolution.** `domain-git`'s legacy `refs/heads/main`-pinned API
+is now a thin wrapper around the new
+[`commit_merge_to_target_ref(...)`] /
+[`update_target_ref(..., target_ref)`] entry points, which accept
+any fully-qualified branch ref. The kernel resolves the
+per-initiative value at `lifecycle::approve_plan` admission time
+via `resolve_target_ref(plan_value, policy_default, locked)` per
+the precedence chain documented in §12.9 below.
+
+* **Policy schema (operator-signed).** New optional `[git]`
+  section in `policy.toml`:
+  ```toml
+  [git]
+  default_target_ref = "refs/heads/main"   # default if omitted
+  target_ref_locked  = false               # default; plans may override
+  ```
+  Both fields are validated at policy-load time
+  (`raxis_policy::validate_target_ref_format` for the ref shape;
+  the loader surfaces `FAIL_POLICY_TARGET_REF_INVALID` on
+  malformed values).
+* **Plan schema (plan-author-signed).** New optional
+  `[workspace] target_ref` field in `plan.toml`:
+  ```toml
+  [workspace]
+  target_ref = "refs/heads/raxis/auth-refactor"
+  ```
+* **Resolution.** Plan value (when present and valid) wins unless
+  `target_ref_locked = true` AND the plan value differs from
+  `default_target_ref`, in which case the kernel rejects with
+  `FAIL_POLICY_LOCKED_FIELD`. Format-invalid plan values surface
+  `FAIL_WORKSPACE_TARGET_REF_INVALID` (both wire codes added to
+  `raxis_types::OperatorErrorCode` in this commit).
+* **Persistence.** The resolved value is recomputed from the plan
+  bytes during recovery; persistence into a future
+  `initiatives.target_ref` column is gated on the worktree-provision
+  + IntegrationMerge wiring deferred in `V2_STATUS.md §2.2` (which
+  is the only consumer that needs the persisted value).
+* **Tests.** New cases pin every branch of the resolution chain:
+  `parse_plan_workspace_target_ref_*` (3),
+  `resolve_target_ref_*` (6, including
+  `resolve_target_ref_format_takes_precedence_over_locked` for the
+  diagnostic-priority property),
+  `commit_merge_to_target_ref_advances_pr_style_branch` (1).
+  All 10 pass on a clean `cargo test`.
+
+**Spec updates.** `policy-plan-authority.md`,
+`integration-merge.md`, `v2-deep-spec.md §Step 8`, and
+`extensibility-traits.md §2.2.A` were updated in the same commit.
 
 **Impact:** Repos using `master`, `develop`, `trunk`, or any
 non-`main` default branch cannot use RAXIS without renaming their
@@ -944,7 +989,24 @@ making adoption incrementally safe.
 **Estimate:** ~80 lines (policy field, plan field, thread through
 `domain-git`, update recovery path, update ancestry check).
 
-### 12.9 Policy vs Plan Configuration: Precedence Rules
+### 12.9 Policy vs Plan Configuration: Precedence Rules ✅ CLOSED (V2.2)
+
+**Resolution.** Codified as `INV-PLAN-POLICY-PRECEDENCE-01`.
+The locked-field substrate ships with this commit (the first
+concrete locked field is `target_ref` from §12.8); future locked
+fields plug into the same `(policy_default, locked, plan_value)`
+shape that `lifecycle::resolve_target_ref` exemplifies.
+
+The new wire codes (`FAIL_POLICY_LOCKED_FIELD`,
+`FAIL_WORKSPACE_TARGET_REF_INVALID`) are registered in
+`raxis_types::OperatorErrorCode` and surface from the
+`approve_plan` IPC handler with a structured JSON detail
+`{ rule, field, plan_value, policy_value, suggestion }` so
+operators get the precise locked-field conflict, not a generic
+`FAIL_APPROVE_PLAN`.
+
+The original §12.9 design notes are preserved below as the
+normative reference for future locked-field landings:
 
 The `target_ref` gap (§12.8) surfaces a broader tension that applies
 across every field where both `policy.toml` (operator-authored,

@@ -237,6 +237,33 @@ pub enum OperatorErrorCode {
     // --- escalation ---
     #[serde(rename = "FAIL_ESCALATION_NOT_PENDING")]
     FailEscalationNotPending,
+
+    /// **V2 (V2_GAPS.md §12.8 / §12.9, INV-PLAN-POLICY-PRECEDENCE-01).**
+    /// The plan declared a value for a field whose policy-side
+    /// counterpart is `_locked = true`, AND the plan value differs
+    /// from the locked policy default. The kernel rejects admission
+    /// rather than silently coerce the plan to the policy value
+    /// (the plan author would otherwise believe their override took
+    /// effect when it did not). The `error_detail` JSON carries the
+    /// `field`, `plan_value`, and `policy_value` triple so the
+    /// operator's diagnostic surfaces the precise locked-field
+    /// conflict. NOT retryable until either the plan is rewritten
+    /// or the operator unlocks the field in `policy.toml`.
+    #[serde(rename = "FAIL_POLICY_LOCKED_FIELD")]
+    FailPolicyLockedField,
+
+    /// **V2 (V2_GAPS.md §12.8).** The plan's
+    /// `[workspace] target_ref` (or the operator's
+    /// `[git] default_target_ref`) failed
+    /// [`raxis_policy::validate_target_ref_format`] — the value did
+    /// not match the spec's fully-qualified branch-ref shape (must
+    /// start with `refs/heads/`, no control chars, no `..`, etc.).
+    /// Surfaced from `approve_plan` (plan-side) and from
+    /// `PolicyBundle::validate` (operator-side, raised through
+    /// `MalformedArtifact`). NOT retryable without rewriting the
+    /// offending TOML field.
+    #[serde(rename = "FAIL_WORKSPACE_TARGET_REF_INVALID")]
+    FailWorkspaceTargetRefInvalid,
 }
 
 impl fmt::Display for OperatorErrorCode {
@@ -265,6 +292,8 @@ impl fmt::Display for OperatorErrorCode {
             Self::FailDelegationAlreadyActive => "FAIL_DELEGATION_ALREADY_ACTIVE",
             Self::FailUnknownCapabilityClass => "FAIL_UNKNOWN_CAPABILITY_CLASS",
             Self::FailEscalationNotPending => "FAIL_ESCALATION_NOT_PENDING",
+            Self::FailPolicyLockedField => "FAIL_POLICY_LOCKED_FIELD",
+            Self::FailWorkspaceTargetRefInvalid => "FAIL_WORKSPACE_TARGET_REF_INVALID",
         };
         f.write_str(s)
     }

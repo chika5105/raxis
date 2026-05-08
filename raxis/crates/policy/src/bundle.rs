@@ -129,6 +129,41 @@ pub(crate) struct RawPolicy {
     /// `PolicyBundle::validate`.
     #[serde(default, rename = "integration_merge_verifiers")]
     pub(crate) integration_merge_verifiers: Vec<IntegrationMergeVerifierEntry>,
+
+    /// `[git]` — operator-side defaults for git-domain configuration.
+    /// **Optional**: a kernel that omits the section gets the
+    /// hardcoded defaults (`default_target_ref = "refs/heads/main"`,
+    /// `target_ref_locked = false`). See `V2_GAPS.md §12.8`.
+    #[serde(default)]
+    pub(crate) git: Option<GitSection>,
+}
+
+/// `[git]` — operator default + lock for the per-initiative
+/// `target_ref` field declared in `plan.toml [workspace] target_ref`.
+/// Resolution at admission time follows
+/// `INV-PLAN-POLICY-PRECEDENCE-01` (`V2_GAPS.md §12.9`):
+///
+/// * If the plan declares `target_ref`, it wins **unless**
+///   `target_ref_locked = true`, in which case the kernel rejects
+///   admission with `FAIL_POLICY_LOCKED_FIELD`.
+/// * If the plan omits `target_ref`, `default_target_ref` applies.
+/// * If the operator omits the whole section, the hardcoded fallback
+///   `"refs/heads/main"` applies and `target_ref_locked` defaults to
+///   `false` (i.e., plans may freely override).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct GitSection {
+    /// Default value the kernel applies when the plan omits its own
+    /// `[workspace] target_ref` field. Validated at policy-load to
+    /// be a fully-qualified `refs/heads/...` ref.
+    #[serde(default)]
+    pub(crate) default_target_ref: Option<String>,
+
+    /// When `true`, plans MAY NOT override `target_ref`. Any plan
+    /// whose `[workspace] target_ref` differs from `default_target_ref`
+    /// is rejected at admission with `FAIL_POLICY_LOCKED_FIELD` (see
+    /// `INV-PLAN-POLICY-PRECEDENCE-01`).
+    #[serde(default)]
+    pub(crate) target_ref_locked: bool,
 }
 
 /// `[credential_backend]` — selector for the active credential
@@ -1583,6 +1618,106 @@ pub fn is_valid_verifier_name(s: &str) -> bool {
         .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
 }
 
+/// V2_GAPS.md §12.8 — fully-qualified target-ref name validator
+/// shared by `[git] default_target_ref` (operator-side) and
+/// `[workspace] target_ref` (plan-side).
+///
+/// Approximates `git-check-ref-format(1) --refspec-pattern --branch`:
+///
+/// * MUST start with `refs/heads/` (only branch refs are advanceable
+///   targets — tag refs are immutable, remote-tracking refs are
+///   mirrors, `HEAD` is symbolic).
+/// * The ref name following `refs/heads/` MUST be 1..=240 bytes
+///   (kernel-side total ≤ 256 bytes including the `refs/heads/`
+///   prefix, well below libgit2 / gix limits).
+/// * Each `/`-separated path component MUST be non-empty and MUST
+///   NOT start with `-`, `.`, or end with `.lock` or `.`.
+/// * The whole ref name MUST NOT contain any of: ` ` (space),
+///   `~`, `^`, `:`, `?`, `*`, `[`, `\\`, control chars (< 0x20 or
+///   0x7F), `..`, `@{`, `//`.
+/// * Bytes outside ASCII printable are rejected (UTF-8 ref names
+///   are theoretically allowed by git but our enforcement table
+///   does not yet cover them; reject to fail-closed).
+///
+/// Returns `Ok(())` on success and `Err(reason)` describing the
+/// first violation (used by the loader to construct
+/// `FAIL_POLICY_TARGET_REF_INVALID` /
+/// `FAIL_WORKSPACE_TARGET_REF_INVALID` diagnostics).
+pub fn validate_target_ref_format(target_ref: &str) -> Result<(), String> {
+    const PREFIX: &str = "refs/heads/";
+    if !target_ref.starts_with(PREFIX) {
+        return Err(format!(
+            "must start with `{PREFIX}` (only branch refs may be advanced; \
+             got prefix-mismatch on {target_ref:?})"
+        ));
+    }
+    if target_ref.len() > 256 {
+        return Err(format!(
+            "exceeds 256-byte ref-name limit (got {} bytes)",
+            target_ref.len()
+        ));
+    }
+    let suffix = &target_ref[PREFIX.len()..];
+    if suffix.is_empty() {
+        return Err("branch name following `refs/heads/` is empty".to_owned());
+    }
+    if suffix.contains("//") {
+        return Err("contains empty path component (`//`)".to_owned());
+    }
+    if suffix.contains("..") {
+        return Err("contains forbidden `..` sequence".to_owned());
+    }
+    if suffix.contains("@{") {
+        return Err("contains forbidden `@{` sequence".to_owned());
+    }
+    for &b in suffix.as_bytes() {
+        if b < 0x20 || b == 0x7F {
+            return Err(format!(
+                "contains control character 0x{b:02X}"
+            ));
+        }
+        match b {
+            b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\' => {
+                return Err(format!(
+                    "contains forbidden character {:?}", b as char
+                ));
+            }
+            _ => {}
+        }
+        if !b.is_ascii() {
+            return Err(format!(
+                "contains non-ASCII byte 0x{b:02X}"
+            ));
+        }
+    }
+    for component in suffix.split('/') {
+        if component.is_empty() {
+            return Err("contains empty path component".to_owned());
+        }
+        if component.starts_with('-') {
+            return Err(format!(
+                "path component {component:?} starts with `-`"
+            ));
+        }
+        if component.starts_with('.') {
+            return Err(format!(
+                "path component {component:?} starts with `.`"
+            ));
+        }
+        if component.ends_with('.') {
+            return Err(format!(
+                "path component {component:?} ends with `.`"
+            ));
+        }
+        if component.ends_with(".lock") {
+            return Err(format!(
+                "path component {component:?} ends with `.lock`"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parse a verifier `timeout = "Ns"|"Nm"|"Nh"` shape into seconds.
 /// Returns `None` for unparseable strings or for values that
 /// overflow a `u64` second count.
@@ -1852,6 +1987,21 @@ pub struct PolicyBundle {
     /// `verifier-processes.md §15`. Empty when the operator omits
     /// the section (the default).
     integration_merge_verifiers: Vec<IntegrationMergeVerifierEntry>,
+
+    /// Resolved `[git] default_target_ref` — the fully-qualified ref
+    /// the kernel's IntegrationMerge handler advances when the plan
+    /// omits `[workspace] target_ref`. Always non-empty; defaults to
+    /// `"refs/heads/main"` when the operator omits the `[git]`
+    /// section. Validated at policy-load to start with `refs/heads/`
+    /// and pass `git-check-ref-format`-style structural rules. See
+    /// `V2_GAPS.md §12.8` and `INV-PLAN-POLICY-PRECEDENCE-01`.
+    git_default_target_ref: String,
+
+    /// Resolved `[git] target_ref_locked`. When `true`, plans MAY
+    /// NOT override `target_ref`. Any plan whose
+    /// `[workspace] target_ref` differs from `git_default_target_ref`
+    /// is rejected at admission with `FAIL_POLICY_LOCKED_FIELD`.
+    git_target_ref_locked: bool,
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -2101,6 +2251,25 @@ impl PolicyBundle {
                 .map(|s| s.kind)
                 .unwrap_or_default(),
             integration_merge_verifiers: raw.integration_merge_verifiers,
+            git_default_target_ref: {
+                let raw_value = raw
+                    .git
+                    .as_ref()
+                    .and_then(|g| g.default_target_ref.as_deref())
+                    .unwrap_or("refs/heads/main");
+                validate_target_ref_format(raw_value).map_err(|reason| {
+                    PolicyError::MalformedArtifact(format!(
+                        "FAIL_POLICY_TARGET_REF_INVALID: \
+                         [git] default_target_ref={raw_value:?} {reason}"
+                    ))
+                })?;
+                raw_value.to_owned()
+            },
+            git_target_ref_locked: raw
+                .git
+                .as_ref()
+                .map(|g| g.target_ref_locked)
+                .unwrap_or(false),
         })
     }
 
@@ -2135,6 +2304,28 @@ impl PolicyBundle {
     /// surfaces only operator-side entries.
     pub fn integration_merge_verifiers(&self) -> &[IntegrationMergeVerifierEntry] {
         &self.integration_merge_verifiers
+    }
+
+    /// V2_GAPS.md §12.8 — operator-side `[git] default_target_ref`.
+    /// Always non-empty; defaults to `"refs/heads/main"` when the
+    /// operator omits the `[git]` section. The plan-admission code
+    /// path resolves the per-initiative `target_ref` as
+    /// `plan_value || policy_default || "refs/heads/main"`,
+    /// subject to [`git_target_ref_locked`].
+    ///
+    /// [`git_target_ref_locked`]: PolicyBundle::git_target_ref_locked
+    pub fn git_default_target_ref(&self) -> &str {
+        &self.git_default_target_ref
+    }
+
+    /// V2_GAPS.md §12.8 — operator-side `[git] target_ref_locked`.
+    /// When `true`, plans whose `[workspace] target_ref` differs from
+    /// [`git_default_target_ref`] are rejected at admission with
+    /// `FAIL_POLICY_LOCKED_FIELD` per `INV-PLAN-POLICY-PRECEDENCE-01`.
+    ///
+    /// [`git_default_target_ref`]: PolicyBundle::git_default_target_ref
+    pub fn git_target_ref_locked(&self) -> bool {
+        self.git_target_ref_locked
     }
 
     // ── Key accessors ───────────────────────────────────────────────────────
@@ -2269,6 +2460,8 @@ impl PolicyBundle {
             bypassed_cert_misconfigs: Vec::new(),
             credential_backend: CredentialBackendKind::default(),
             integration_merge_verifiers: Vec::new(),
+            git_default_target_ref: "refs/heads/main".to_owned(),
+            git_target_ref_locked: false,
         }
     }
 
@@ -2797,6 +2990,8 @@ mod tests {
             bypassed_cert_misconfigs: Vec::new(),
             credential_backend: CredentialBackendKind::default(),
             integration_merge_verifiers: Vec::new(),
+            git_default_target_ref: "refs/heads/main".to_owned(),
+            git_target_ref_locked: false,
         }
     }
 

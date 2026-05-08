@@ -27,6 +27,60 @@
 
 This invariant applies uniformly across all features. For each configurable dimension:
 
+### 1.1 INV-PLAN-POLICY-PRECEDENCE-01 (V2_GAPS.md §12.9)
+
+> **INV-PLAN-POLICY-PRECEDENCE-01:** at admission time, for every
+> field where both policy and plan declare a value, the kernel's
+> resolved value must satisfy this precedence table. A plan can
+> never weaken a policy floor, exceed a policy ceiling, or override
+> a `_locked` field.
+
+| Category | Policy role | Plan role | Resolution |
+|---|---|---|---|
+| **Hard ceilings** (e.g., `max_cost_per_task`) | Sets the maximum | Plan may request ≤ policy ceiling | `min(plan, policy_ceiling)` |
+| **Hard floors** (e.g., `min_reviewers`) | Sets the minimum | Plan may request ≥ policy floor | `max(plan, policy_floor)` |
+| **Defaults with override** (e.g., `[git] default_target_ref`) | Sets default | Plan may override | Plan wins **unless** `_locked` |
+| **Locked fields** (e.g., `[git] target_ref_locked = true`) | Immutable | Plan override rejected | `FAIL_POLICY_LOCKED_FIELD` |
+| **Policy-only** (e.g., `[[vm_images]] oci_digest`) | Sole authority | Plan cannot declare | Plan field ignored or rejected |
+| **Plan-only** (e.g., `[[tasks]]`, `path_allowlist`) | Constrains via ceilings | Sole authority | Policy bounds via ceilings/floors |
+
+The first concrete locked-field landing is `target_ref` (V2_GAPS
+§12.8); future locked fields plug into the same shape. The
+Rust-side substrate is `kernel/src/initiatives/lifecycle.rs::resolve_target_ref`
+(an exemplar implementation of the
+`(policy_default, locked, plan_value) → resolved | FAIL_POLICY_LOCKED_FIELD`
+contract). The wire codes
+`FAIL_POLICY_LOCKED_FIELD` and
+`FAIL_WORKSPACE_TARGET_REF_INVALID` are registered in
+`raxis_types::OperatorErrorCode`.
+
+### 1.2 `[git]` section (V2_GAPS.md §12.8)
+
+```toml
+# policy.toml — operator-side defaults for git-domain configuration.
+# Optional section. Both fields default to the values shown.
+
+[git]
+default_target_ref = "refs/heads/main"     # ref the kernel advances on IntegrationMerge
+target_ref_locked  = false                 # plans may override (recommended for internal teams)
+```
+
+* `default_target_ref` — the fully-qualified branch ref the
+  kernel's IntegrationMerge handler advances when the plan omits
+  `[workspace] target_ref`. Validated via
+  `raxis_policy::validate_target_ref_format` at policy-load time
+  (must start with `refs/heads/`, no control chars, no `..`,
+  per `git-check-ref-format(1)`).
+* `target_ref_locked` — when `true`, plans whose
+  `[workspace] target_ref` differs from `default_target_ref` are
+  rejected at admission. Use this for tenants where plan authors
+  should not be able to redirect merged code (e.g., locking to a
+  RAXIS-only PR-branch convention).
+
+The corresponding plan-side field is `[workspace] target_ref`
+(see `plan-bundle-sealing.md §8`); resolution chain runs at
+`lifecycle::approve_plan` admission time.
+
 ### Why Approach A Has the Strongest Security Model
 
 Of the four approaches considered (see §8), Approach A provides the strongest security

@@ -49,6 +49,40 @@ After `IntegrationMerge` is admitted:
 
 Where this spec uses the word "git" in a normative paragraph, that paragraph describes the V2 reference adapter's behaviour; the underlying paradigm contract stays domain-agnostic.
 
+### 1.2 Configurable target ref (V2_GAPS.md §12.8 / §12.9)
+
+This spec mentions `refs/heads/main` throughout the historical
+text below. Per the V2.2 amendment landed alongside
+`V2_GAPS.md §12.8 / §12.9`, the kernel actually advances a
+**resolved `target_ref`** that defaults to `refs/heads/main` but
+may be overridden per-initiative. The resolution chain runs at
+`lifecycle::approve_plan` admission time:
+
+1. `[workspace] target_ref` from `plan.toml` (per-initiative override)
+2. `[git] default_target_ref` from `policy.toml` (operator default)
+3. Hardcoded fallback `"refs/heads/main"`
+
+Operators who want to enforce the historical "always push to main"
+posture set `[git] target_ref_locked = true`; plans that try to
+override are then rejected at admission with
+`FAIL_POLICY_LOCKED_FIELD` per `INV-PLAN-POLICY-PRECEDENCE-01`.
+
+Operators who want a **PR-branch workflow** (kernel pushes a
+RAXIS-only branch like `refs/heads/raxis/<initiative>`, the
+team's existing CI + human-review pipeline merges into `main`)
+leave `target_ref_locked = false` and let plans declare
+`[workspace] target_ref = "refs/heads/raxis/<name>"`. This
+separates RAXIS's structural authority (path-allowlist, reviewer
+verdicts, INV-MERGE-* invariants) from the team's SDLC authority
+(human review, branch protection, merge approval).
+
+Every "advance `refs/heads/main`" / "update-ref `refs/heads/main`"
+phrase in §4–§14 should be read as "advance the resolved
+`target_ref`"; the V2 reference `domain-git` adapter's
+`commit_merge_to_target_ref(...)` / `update_target_ref(..., target_ref)`
+APIs accept any fully-qualified branch ref (validated via
+`raxis_policy::validate_target_ref_format`).
+
 ---
 
 ## 2. The Intent Struct

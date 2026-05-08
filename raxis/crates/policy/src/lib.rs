@@ -34,7 +34,8 @@ pub use bundle::{
 // (`approve_plan`) keeps the two surfaces in lock-step on name shape,
 // timeout parsing, and the env-cap / reserved-prefix rules.
 pub use bundle::{
-    is_valid_verifier_name, parse_verifier_timeout_secs, RAXIS_RESERVED_ENV_PREFIX,
+    is_valid_verifier_name, parse_verifier_timeout_secs, validate_target_ref_format,
+    RAXIS_RESERVED_ENV_PREFIX,
     VERIFIER_ARTIFACT_MAX_PATH_CHARS, VERIFIER_ENV_MAX_ENTRIES, VERIFIER_ENV_MAX_TOTAL_BYTES,
     VERIFIER_TIMEOUT_MIN_SECS,
 };

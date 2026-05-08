@@ -329,6 +329,39 @@ pub enum LifecycleError {
         suggestion:           String,
     },
 
+    /// **V2 (V2_GAPS.md §12.8 / §12.9, INV-PLAN-POLICY-PRECEDENCE-01).**
+    /// The plan-side `[workspace] target_ref` declared a value that
+    /// is not legal under the operator's `[git]` policy section:
+    ///
+    ///   * `"locked"` — `[git] target_ref_locked = true` is set on
+    ///     the active policy AND the plan's `target_ref` differs from
+    ///     `[git] default_target_ref`. The kernel rejects rather than
+    ///     silently coercing the plan to the policy default; the
+    ///     plan author must rewrite the plan or the operator must
+    ///     unlock the field.
+    ///   * `"invalid"` — the plan-side `target_ref` failed
+    ///     [`raxis_policy::validate_target_ref_format`].
+    ///
+    /// Surfaces the operator-facing
+    /// `FAIL_POLICY_LOCKED_FIELD` (rule="locked") /
+    /// `FAIL_WORKSPACE_TARGET_REF_INVALID` (rule="invalid") error
+    /// codes from `raxis_types::OperatorErrorCode`.
+    #[error("plan target_ref invalid (rule={rule}): plan={plan_value:?}, policy={policy_value:?}, suggestion={suggestion}")]
+    PlanTargetRefInvalid {
+        /// One of `"locked"`, `"invalid"`.
+        rule:         &'static str,
+        /// The value the plan declared (may be `None` for
+        /// rule="invalid" if the policy default itself failed
+        /// validation, but in practice the policy default is
+        /// validated at `PolicyBundle::validate` time and never
+        /// reaches this site).
+        plan_value:   Option<String>,
+        /// The operator-side `[git] default_target_ref` for context.
+        policy_value: String,
+        /// Operator-facing remediation hint.
+        suggestion:   String,
+    },
+
     #[error("scheduler error during admission: {0}")]
     Scheduler(#[from] SchedulerError),
 
@@ -516,12 +549,55 @@ pub fn create_initiative(
 /// view per approval" guarantee the dispatcher already establishes.
 /// `None` when the dispatcher could not resolve the fingerprint
 /// (legacy callers, or a tight rotation race).
+/// V2_GAPS.md §12.8 — `policy_default_target_ref` is the operator-side
+/// `[git] default_target_ref` resolved at policy-load time (always
+/// non-empty; defaults to `"refs/heads/main"` when the operator omits
+/// the section).
+///
+/// V2_GAPS.md §12.8 / §12.9 — `policy_target_ref_locked` is the
+/// operator-side `[git] target_ref_locked`. When `true`, the
+/// per-initiative resolver rejects any plan whose
+/// `[workspace] target_ref` differs from `policy_default_target_ref`.
+///
+/// **Test ergonomics.** In-process unit tests that don't care about
+/// per-initiative target_ref resolution should use
+/// [`approve_plan_for_test`] which fixes
+/// `policy_default_target_ref = "refs/heads/main"` and
+/// `policy_target_ref_locked = false` — the behaviour all V2.0
+/// tests previously assumed.
+#[cfg(any(debug_assertions, test))]
+pub fn approve_plan_for_test(
+    initiative_id:                   &str,
+    approving_operator:              &str,
+    approving_operator_display_name: Option<String>,
+    operator_pubkey_bytes:           &[u8],
+    policy_epoch:                    u64,
+    store:                           &Store,
+    audit:                           &dyn AuditSink,
+    plan_registry:                   &PlanRegistry,
+) -> Result<PlanApproved, LifecycleError> {
+    approve_plan(
+        initiative_id,
+        approving_operator,
+        approving_operator_display_name,
+        operator_pubkey_bytes,
+        policy_epoch,
+        "refs/heads/main",
+        false,
+        store,
+        audit,
+        plan_registry,
+    )
+}
+
 pub fn approve_plan(
     initiative_id:                   &str,
     approving_operator:              &str,
     approving_operator_display_name: Option<String>,
     operator_pubkey_bytes:           &[u8],
     policy_epoch:                    u64,
+    policy_default_target_ref:       &str,
+    policy_target_ref_locked:        bool,
     store:                           &Store,
     audit:                           &dyn AuditSink,
     plan_registry:                   &PlanRegistry,
@@ -565,6 +641,9 @@ pub fn approve_plan(
     // V2 §Step 28 — read `[workspace] lane_id` (or surface the
     // missing/empty/override error below).
     let workspace_lane_raw  = parse_plan_workspace_lane(&plan_toml_str)?;
+    // V2_GAPS.md §12.8 — read `[workspace] target_ref` (or `None`
+    // for plans that don't override the operator default).
+    let plan_target_ref_raw = parse_plan_workspace_target_ref(&plan_toml_str)?;
     // V2 (`verifier-processes.md §15`) — parse plan-source pre-merge
     // verifiers. Empty `Vec` for plans that don't declare any.
     // Structural per-field rules run inside the validator below.
@@ -624,6 +703,27 @@ pub fn approve_plan(
         &workspace_lane_raw,
         &plan_tasks,
     )?;
+
+    // V2_GAPS.md §12.8 / §12.9 (INV-PLAN-POLICY-PRECEDENCE-01).
+    // Resolve the per-initiative target_ref from the plan-side
+    // override + policy-side default + locked flag. Surface
+    // `LifecycleError::PlanTargetRefInvalid { rule="locked"|"invalid" }`
+    // pre-tx so a malformed/locked plan cannot allocate any
+    // initiative state. The resolved value is currently observable
+    // in the audit chain via the `IntegrationMergeCompleted` event
+    // path; persistence into a future `initiatives.target_ref` column
+    // is gated on the worktree-provision wiring deferred in
+    // `V2_STATUS.md §2.2`.
+    let resolved_target_ref = resolve_target_ref(
+        plan_target_ref_raw.as_deref(),
+        policy_default_target_ref,
+        policy_target_ref_locked,
+    )?;
+    // Plumb the resolved value into the orchestrator-fields snapshot
+    // so the post-commit audit path can record it. Currently a no-op
+    // until the integration-merge handler consumes
+    // `current_target_ref` per the §12.8 follow-up.
+    let _ = &resolved_target_ref;
 
     let task_count    = plan_tasks.len();
     let now           = unix_now_secs();
@@ -1628,6 +1728,110 @@ fn parse_plan_workspace_lane(plan_toml: &str)
         .map(str::to_owned);
 
     Ok(raw)
+}
+
+/// **V2_GAPS.md §12.8.** Parse the plan-side
+/// `[workspace] target_ref` field — the per-initiative override
+/// for the git ref the kernel's IntegrationMerge handler advances.
+///
+/// Returns `Ok(None)` when the plan omits the field (the typical
+/// default; the resolver falls back to the operator's
+/// `[git] default_target_ref` and ultimately to the hardcoded
+/// `"refs/heads/main"`).
+///
+/// Surfaces structural-shape errors (non-string, wrong section
+/// nesting) through `LifecycleError::PlanInvalid` so the operator
+/// diagnostic shows the malformed-section context.
+fn parse_plan_workspace_target_ref(plan_toml: &str)
+    -> Result<Option<String>, LifecycleError>
+{
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
+        LifecycleError::PlanInvalid {
+            reason: format!("TOML parse error: {e}"),
+        }
+    })?;
+
+    let workspace = match doc.get("workspace").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None    => return Ok(None),
+    };
+
+    match workspace.get("target_ref") {
+        None => Ok(None),
+        Some(v) => {
+            let s = v.as_str().ok_or_else(|| LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[workspace] target_ref must be a string, got {:?}",
+                    v.type_str(),
+                ),
+            })?;
+            if s.is_empty() {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: "[workspace] target_ref is the empty string \
+                             (omit the field to apply the policy default)".to_owned(),
+                });
+            }
+            Ok(Some(s.to_owned()))
+        }
+    }
+}
+
+/// **V2_GAPS.md §12.8 / §12.9, INV-PLAN-POLICY-PRECEDENCE-01.**
+/// Resolve the per-initiative `target_ref` from the plan +
+/// policy + hardcoded fallback per the precedence table:
+///
+/// 1. `[workspace] target_ref` from `plan.toml` (if present),
+/// 2. else `[git] default_target_ref` from `policy.toml`,
+/// 3. else `"refs/heads/main"`.
+///
+/// **Locked-field enforcement.** When the active policy has
+/// `[git] target_ref_locked = true`, any plan-declared override
+/// that differs from `[git] default_target_ref` is rejected with
+/// `LifecycleError::PlanTargetRefInvalid { rule: "locked" }`.
+/// Equality is strict-byte (no canonicalization) — an operator
+/// who locks `"refs/heads/main"` and a plan that declares
+/// `"refs/heads/main"` round-trips cleanly.
+///
+/// **Format enforcement.** A plan-declared override is structurally
+/// validated through [`raxis_policy::validate_target_ref_format`]
+/// before the locked-field check; the policy default was already
+/// validated at `PolicyBundle::validate` time.
+pub(crate) fn resolve_target_ref(
+    plan_value:    Option<&str>,
+    policy_default: &str,
+    locked:         bool,
+) -> Result<String, LifecycleError> {
+    match plan_value {
+        None => Ok(policy_default.to_owned()),
+        Some(plan_ref) => {
+            raxis_policy::validate_target_ref_format(plan_ref).map_err(|reason| {
+                LifecycleError::PlanTargetRefInvalid {
+                    rule:         "invalid",
+                    plan_value:   Some(plan_ref.to_owned()),
+                    policy_value: policy_default.to_owned(),
+                    suggestion:   format!(
+                        "[workspace] target_ref={plan_ref:?} {reason}; \
+                         valid example: \"refs/heads/raxis/<initiative-name>\""
+                    ),
+                }
+            })?;
+            if locked && plan_ref != policy_default {
+                return Err(LifecycleError::PlanTargetRefInvalid {
+                    rule:         "locked",
+                    plan_value:   Some(plan_ref.to_owned()),
+                    policy_value: policy_default.to_owned(),
+                    suggestion:   format!(
+                        "policy `[git] target_ref_locked = true` forbids the \
+                         plan from overriding `target_ref`; either rewrite \
+                         the plan with `[workspace] target_ref = \"{policy_default}\"` \
+                         (the policy default) or have the operator unlock the \
+                         field by setting `[git] target_ref_locked = false`"
+                    ),
+                });
+            }
+            Ok(plan_ref.to_owned())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3657,7 +3861,7 @@ session_agent_type = "Orchestrator"
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         match err {
@@ -3687,7 +3891,7 @@ clone_strategy = "treeless"
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         match err {
@@ -3727,7 +3931,7 @@ predecessors = ["run-tests"]
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(
+        approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap();
 
@@ -3775,7 +3979,7 @@ predecessors = ["run-tests"]
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(
+        approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap();
 
@@ -3907,7 +4111,7 @@ predecessors = ["test-it"]
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(
+        approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).expect("plan with valid task-credentials must be accepted");
 
@@ -3980,7 +4184,7 @@ predecessors = ["build-svc"]
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(
+        approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).expect("approve_plan must succeed");
 
@@ -4115,7 +4319,7 @@ task_id = "send-email"
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).expect_err("unknown proxy_type must be rejected");
 
@@ -4170,7 +4374,7 @@ task_id = "x"
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).expect_err("malformed credential block must be rejected");
 
@@ -4568,7 +4772,7 @@ task_set    = ["implement_auth", "implement_session"]
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).expect_err("plan referencing undeclared task in task_set must be rejected");
 
@@ -4609,7 +4813,7 @@ applies_to  = "all"
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
-        approve_plan(
+        approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).expect("a structurally valid plan with a pre-merge verifier must approve");
     }
@@ -4632,6 +4836,128 @@ task_id = "t1"
         let toml = "[[tasks]]\ntask_id = \"t1\"\n";
         let lane = parse_plan_workspace_lane(toml).unwrap();
         assert_eq!(lane, None);
+    }
+
+    // ── V2_GAPS.md §12.8 / §12.9 ─────────────────────────────────────────
+    // INV-PLAN-POLICY-PRECEDENCE-01 unit-tests for the
+    // `target_ref` resolution chain.
+
+    #[test]
+    fn parse_plan_workspace_target_ref_reads_value() {
+        let toml = r#"
+[workspace]
+lane_id    = "default"
+target_ref = "refs/heads/raxis/feature"
+"#;
+        let r = parse_plan_workspace_target_ref(toml).unwrap();
+        assert_eq!(r.as_deref(), Some("refs/heads/raxis/feature"));
+    }
+
+    #[test]
+    fn parse_plan_workspace_target_ref_missing_returns_none() {
+        let toml = "[workspace]\nlane_id = \"default\"\n";
+        let r = parse_plan_workspace_target_ref(toml).unwrap();
+        assert_eq!(r, None);
+    }
+
+    #[test]
+    fn parse_plan_workspace_target_ref_rejects_empty_string() {
+        let toml = "[workspace]\nlane_id = \"default\"\ntarget_ref = \"\"\n";
+        let err = parse_plan_workspace_target_ref(toml).unwrap_err();
+        assert!(matches!(err, LifecycleError::PlanInvalid { .. }),
+            "empty target_ref must surface PlanInvalid, got {err:?}");
+    }
+
+    #[test]
+    fn resolve_target_ref_falls_back_to_policy_default_when_plan_omits() {
+        let resolved = resolve_target_ref(
+            None,
+            "refs/heads/main",
+            false,
+        ).unwrap();
+        assert_eq!(resolved, "refs/heads/main");
+    }
+
+    #[test]
+    fn resolve_target_ref_plan_override_wins_when_unlocked() {
+        let resolved = resolve_target_ref(
+            Some("refs/heads/raxis/feature-x"),
+            "refs/heads/main",
+            false,
+        ).unwrap();
+        assert_eq!(resolved, "refs/heads/raxis/feature-x");
+    }
+
+    #[test]
+    fn resolve_target_ref_locked_with_matching_plan_value_succeeds() {
+        // INV-PLAN-POLICY-PRECEDENCE-01: equality check is strict-byte;
+        // a plan that explicitly declares the same value as the policy
+        // default round-trips cleanly even when the field is locked.
+        let resolved = resolve_target_ref(
+            Some("refs/heads/main"),
+            "refs/heads/main",
+            true,
+        ).unwrap();
+        assert_eq!(resolved, "refs/heads/main");
+    }
+
+    #[test]
+    fn resolve_target_ref_locked_with_diverging_plan_value_rejects() {
+        let err = resolve_target_ref(
+            Some("refs/heads/raxis/feature-x"),
+            "refs/heads/main",
+            true,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanTargetRefInvalid {
+                rule, plan_value, policy_value, ..
+            } => {
+                assert_eq!(rule, "locked");
+                assert_eq!(plan_value.as_deref(), Some("refs/heads/raxis/feature-x"));
+                assert_eq!(policy_value, "refs/heads/main");
+            }
+            other => panic!("expected PlanTargetRefInvalid {{ rule: \"locked\" }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_target_ref_rejects_invalid_plan_format() {
+        // Non-`refs/heads/` prefix → "invalid" rule, NOT "locked".
+        let err = resolve_target_ref(
+            Some("refs/tags/v1.0"),
+            "refs/heads/main",
+            false,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanTargetRefInvalid {
+                rule, plan_value, ..
+            } => {
+                assert_eq!(rule, "invalid");
+                assert_eq!(plan_value.as_deref(), Some("refs/tags/v1.0"));
+            }
+            other => panic!("expected PlanTargetRefInvalid {{ rule: \"invalid\" }}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_target_ref_format_takes_precedence_over_locked() {
+        // When the plan-side ref is BOTH structurally invalid AND
+        // would violate the locked-field check, the format check
+        // wins so the operator's diagnostic surfaces the actionable
+        // syntax problem first.
+        let err = resolve_target_ref(
+            Some("refs/heads/has space"),
+            "refs/heads/main",
+            true,
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanTargetRefInvalid { rule, .. } => {
+                assert_eq!(rule, "invalid",
+                    "format-invalid input must surface rule=\"invalid\" \
+                     even when the locked-field check would also fire");
+            }
+            other => panic!("expected PlanTargetRefInvalid, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4831,7 +5157,7 @@ task_id = "t1"
         let audit = FakeAuditSink::new();
 
         let registry = PlanRegistry::new();
-        let result = approve_plan(
+        let result = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap();
         assert_eq!(result.tasks_admitted, 2);
@@ -4920,7 +5246,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let result = approve_plan(
+        let result = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap();
 
@@ -4984,7 +5310,7 @@ task_id = "t1"
             let (init, pk_bytes) = seed_draft_initiative(store, plan, &sk);
             let audit    = FakeAuditSink::new();
             let registry = PlanRegistry::new();
-            let r = approve_plan(
+            let r = approve_plan_for_test(
                 &init, "op", None, &pk_bytes, 1, store, &audit, &registry,
             ).unwrap();
             r.orchestrator_session_id.unwrap()
@@ -5031,7 +5357,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         assert!(matches!(err, LifecycleError::PlanDagInvalid { .. }),
@@ -5072,7 +5398,7 @@ task_id = "t1"
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         match err {
@@ -5105,7 +5431,7 @@ task_id = "t1"
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         match err {
@@ -5137,7 +5463,7 @@ task_id = "t1"
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         match err {
@@ -5176,7 +5502,7 @@ task_id = "t1"
         let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(
+        approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap();
 
@@ -5221,7 +5547,7 @@ task_id = "t1"
         let audit = FakeAuditSink::new();
 
         let registry = PlanRegistry::new();
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         match &err {
@@ -5271,7 +5597,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         match err {
@@ -5341,7 +5667,7 @@ task_id = "t1"
         let wrong_pk = SigningKey::from_bytes(&[0x99u8; 32]).verifying_key().to_bytes();
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op-test", None, &wrong_pk, 1, &store, &audit, &registry,
         ).unwrap_err();
         assert!(
@@ -5371,8 +5697,8 @@ task_id = "t1"
         let audit = FakeAuditSink::new();
 
         let registry = PlanRegistry::new();
-        approve_plan(&init_id, "op-1", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
-        let second = approve_plan(&init_id, "op-2", None, &pk_bytes, 1, &store, &audit, &registry);
+        approve_plan_for_test(&init_id, "op-1", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        let second = approve_plan_for_test(&init_id, "op-2", None, &pk_bytes, 1, &store, &audit, &registry);
         assert!(second.is_err(), "second approve must fail (not Draft)");
 
         assert_eq!(read_initiative_state(&store, &init_id), "Executing");
@@ -5401,7 +5727,7 @@ task_id = "t1"
         let audit = FakeAuditSink::new();
 
         let registry = PlanRegistry::new();
-        approve_plan(&init_id, "op", None, &pk_bytes, 42, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 42, &store, &audit, &registry).unwrap();
 
         let conn = store.lock_sync();
         let epoch: i64 = conn.query_row(
@@ -5443,7 +5769,7 @@ task_id = "t1"
                 "fresh signed_plan_artifacts row must have NULL signed_by_fingerprint until approval");
         }
 
-        approve_plan(&init_id, "op-prime-fp", None, &pk_bytes, 1, &store, &audit, &registry)
+        approve_plan_for_test(&init_id, "op-prime-fp", None, &pk_bytes, 1, &store, &audit, &registry)
             .unwrap();
 
         let conn = store.lock_sync();
@@ -5490,7 +5816,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let f1 = registry.get(&TaskKey::new(&init_id, "t1"))
             .expect("registry must contain t1");
@@ -5528,7 +5854,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let orch = registry.orchestrator(&init_id)
             .expect("registry must contain an orchestrator entry for the initiative");
@@ -5556,7 +5882,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let orch = registry.orchestrator(&init_id)
             .unwrap_or_default();
@@ -5584,7 +5910,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         assert!(
@@ -5627,7 +5953,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        let err = approve_plan(
+        let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
         ).unwrap_err();
         assert!(
@@ -5662,7 +5988,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry_one = PlanRegistry::new();
 
-        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry_one).unwrap();
+        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry_one).unwrap();
 
         // Simulate a kernel restart: brand-new (empty) registry rebuilt
         // from the on-disk store via repopulate_plan_registry.
@@ -5709,7 +6035,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(&init_id, "op-prime", Some("Chika".to_owned()), &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(&init_id, "op-prime", Some("Chika".to_owned()), &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let evs = audit.events();
         let kinds: Vec<_> = evs.iter().map(|e| e.kind.as_str()).collect();
@@ -5766,7 +6092,7 @@ task_id = "t1"
         let audit    = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
 
         let kinds: Vec<_> = audit.events().iter().map(|e| e.kind.as_str()).collect();
         // V2 admission still emits SessionCreated for the auto-spawned
@@ -5802,7 +6128,7 @@ task_id = "t1"
         let audit         = FakeAuditSink::new();
         let live_registry = PlanRegistry::new();
 
-        approve_plan(
+        approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &live_registry,
         ).unwrap();
 
@@ -5838,7 +6164,7 @@ task_id = "t1"
         let audit         = FakeAuditSink::new();
         let live_registry = PlanRegistry::new();
 
-        approve_plan(
+        approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &live_registry,
         ).unwrap();
         abort_initiative(&init_id, "op", &store).unwrap();
@@ -5906,7 +6232,7 @@ task_id = "t1"
         let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
         let audit         = FakeAuditSink::new();
         let live_registry = PlanRegistry::new();
-        approve_plan(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry).unwrap();
+        approve_plan_for_test(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry).unwrap();
 
         // Sanity: task is Admitted, initiative is Executing.
         {

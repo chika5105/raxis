@@ -28,10 +28,15 @@
 //!    `git fetch <orchestrator_worktree> <commit_sha>` referenced
 //!    in `integration-merge.md §4 Check 8 Phase 2`. Pure object
 //!    copy: it does NOT update any ref.
-//! 2. [`update_main_ref`] — atomically advance
-//!    `refs/heads/main` to point at the requested commit SHA via
-//!    `gix-ref::file::Transaction::commit`, mirroring the host-side
-//!    `git update-ref refs/heads/main <commit_sha>`.
+//! 2. [`update_target_ref`] — atomically advance the
+//!    operator-configured target ref (default `refs/heads/main`,
+//!    overridable per-initiative via `[workspace] target_ref` in
+//!    plan.toml — see `V2_GAPS.md §12.8`) to point at the
+//!    requested commit SHA via `gix-ref::file::Transaction::commit`,
+//!    mirroring the host-side
+//!    `git update-ref <target_ref> <commit_sha>`. The legacy
+//!    [`update_main_ref`] entry point is preserved as a
+//!    `target_ref = "refs/heads/main"` shim.
 //!
 //! These two calls together implement the main-advancement work
 //! the spec calls "Phase 2 (idempotent domain commit)". They are
@@ -40,9 +45,9 @@
 //! * Re-running [`fetch_into_main`] after the objects were
 //!   already copied is a no-op (gix's clone path skips objects
 //!   already present in the destination ODB).
-//! * Re-running [`update_main_ref`] when `refs/heads/main`
-//!   already equals the target SHA is a no-op (the transaction's
-//!   precondition matches the target value).
+//! * Re-running [`update_target_ref`] when the configured
+//!   target ref already equals the target SHA is a no-op (the
+//!   transaction's precondition matches the target value).
 //!
 //! Either ordering of crash-recovery (Phase 2 partially completed,
 //! Phase 3 not yet started) replays cleanly.
@@ -169,7 +174,7 @@ pub struct MainAdvance {
 
 /// Apply the merge commit produced by the Orchestrator to the
 /// main repository: copy objects, then advance
-/// `refs/heads/main`. This is the full Phase 2 of
+/// the operator-configured target ref. This is the full Phase 2 of
 /// `integration-merge.md §4 Check 8`.
 ///
 /// **Inputs.**
@@ -184,29 +189,35 @@ pub struct MainAdvance {
 ///   in `IntegrationMerge.commit_sha`. The kernel has already
 ///   verified ancestry (Check 3) and path containment (Check 5)
 ///   against this SHA.
+/// * `target_ref` — the fully-qualified ref name to advance
+///   (e.g., `"refs/heads/main"` or `"refs/heads/raxis/auth-refactor"`).
+///   The plan-side override + policy-side default + locked flag is
+///   resolved at admission time per `V2_GAPS.md §12.8`; this
+///   function takes the resolved string verbatim.
 ///
 /// **Returns.** [`MainAdvance`] capturing the previous and
-/// current main SHAs. The kernel reads `current_sha` back into
-/// `initiatives.current_sha` before issuing Phase 3's
+/// current target-ref SHAs. The kernel reads `current_sha` back
+/// into `initiatives.current_sha` before issuing Phase 3's
 /// `git_apply_pending = 0` UPDATE.
 ///
 /// **Idempotency.** Safe to call multiple times with the same
 /// `commit_sha`. Subsequent calls observe `already_at_target =
 /// true` and perform no work.
-pub fn commit_merge_to_main(
+pub fn commit_merge_to_target_ref(
     main_repo_root:   &Path,
     orch_worktree_root: &Path,
     commit_sha:         &str,
+    target_ref:         &str,
 ) -> Result<MainAdvance, MainMergeError> {
     let oid = parse_oid(commit_sha)?;
 
     let main_repo = open_main(main_repo_root)?;
 
-    // Capture the main tip before any work — this is the
+    // Capture the target-ref tip before any work — this is the
     // `previous_sha` we'll surface in the `MainAdvance`.
-    let previous = current_main_oid(&main_repo).ok();
+    let previous = current_ref_oid(&main_repo, target_ref).ok();
 
-    // Idempotency short-circuit: main already at the target.
+    // Idempotency short-circuit: target ref already at the SHA.
     if previous.as_ref().map(|p| p == &oid).unwrap_or(false) {
         return Ok(MainAdvance {
             previous_sha:      previous.as_ref().map(|p| p.to_string()),
@@ -228,14 +239,32 @@ pub fn commit_merge_to_main(
         });
     }
 
-    // Phase 2b — atomically advance refs/heads/main to oid.
-    update_main_ref(&main_repo, &oid, previous.as_ref())?;
+    // Phase 2b — atomically advance the target ref to oid.
+    update_target_ref(&main_repo, &oid, previous.as_ref(), target_ref)?;
 
     Ok(MainAdvance {
         previous_sha:      previous.as_ref().map(|p| p.to_string()),
         current_sha:       oid.to_string(),
         already_at_target: false,
     })
+}
+
+/// Backwards-compatible wrapper around [`commit_merge_to_target_ref`]
+/// pinned to `refs/heads/main`. Kept for callers that have not yet
+/// adopted the per-initiative `target_ref` resolution from
+/// `V2_GAPS.md §12.8`. New code paths SHOULD use
+/// [`commit_merge_to_target_ref`] directly.
+pub fn commit_merge_to_main(
+    main_repo_root:   &Path,
+    orch_worktree_root: &Path,
+    commit_sha:         &str,
+) -> Result<MainAdvance, MainMergeError> {
+    commit_merge_to_target_ref(
+        main_repo_root,
+        orch_worktree_root,
+        commit_sha,
+        "refs/heads/main",
+    )
 }
 
 /// Fetch a commit (and its transitive object graph) from the
@@ -430,27 +459,34 @@ fn write_object_bytes(
     Ok(())
 }
 
-/// Atomically advance `refs/heads/main` to `oid` via a
-/// `gix-ref` transaction. Used by [`commit_merge_to_main`] but
-/// also exposed for tests that want to drive the ref update in
-/// isolation.
+/// Atomically advance `target_ref` to `oid` via a `gix-ref`
+/// transaction. Used by [`commit_merge_to_target_ref`] but also
+/// exposed for tests that want to drive the ref update in isolation.
 ///
-/// `expected_previous` is the value the kernel believes main
-/// points at right now; if `Some`, the transaction's precondition
+/// `expected_previous` is the value the kernel believes the target
+/// ref points at right now; if `Some`, the transaction's precondition
 /// requires the on-disk ref to equal that value (so a concurrent
 /// writer's update is detected and the transaction aborts). If
-/// `None`, the transaction is unconstrained — main must not
-/// exist yet (an initial-commit pinning).
-pub fn update_main_ref(
+/// `None`, the transaction is unconstrained — the target ref must
+/// not exist yet (an initial-commit pinning).
+///
+/// `target_ref` MUST be a fully-qualified ref name (e.g.,
+/// `"refs/heads/main"`, `"refs/heads/raxis/auth-refactor"`). The
+/// caller resolves the per-initiative override + policy default per
+/// `V2_GAPS.md §12.8`; this function performs no resolution.
+pub fn update_target_ref(
     repo:              &gix::Repository,
     oid:               &gix::ObjectId,
     expected_previous: Option<&gix::ObjectId>,
+    target_ref:        &str,
 ) -> Result<(), MainMergeError> {
     use gix::refs::transaction::{Change, LogChange, RefEdit, RefLog, PreviousValue};
     use gix::refs::{FullName, Target};
 
-    let full_name = FullName::try_from("refs/heads/main").map_err(|e| {
-        MainMergeError::RefUpdateFailed(format!("FullName::try_from: {e}"))
+    let full_name = FullName::try_from(target_ref).map_err(|e| {
+        MainMergeError::RefUpdateFailed(format!(
+            "FullName::try_from({target_ref:?}): {e}"
+        ))
     })?;
 
     let previous = match expected_previous {
@@ -478,6 +514,18 @@ pub fn update_main_ref(
     Ok(())
 }
 
+/// Backwards-compatible wrapper around [`update_target_ref`]
+/// pinned to `refs/heads/main`. New code paths SHOULD use
+/// [`update_target_ref`] directly so the operator-configurable
+/// target-ref work from `V2_GAPS.md §12.8` lights up.
+pub fn update_main_ref(
+    repo:              &gix::Repository,
+    oid:               &gix::ObjectId,
+    expected_previous: Option<&gix::ObjectId>,
+) -> Result<(), MainMergeError> {
+    update_target_ref(repo, oid, expected_previous, "refs/heads/main")
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -489,14 +537,17 @@ fn open_main(path: &Path) -> Result<gix::Repository, MainMergeError> {
     })
 }
 
-fn current_main_oid(repo: &gix::Repository) -> Result<gix::ObjectId, MainMergeError> {
+fn current_ref_oid(
+    repo: &gix::Repository,
+    target_ref: &str,
+) -> Result<gix::ObjectId, MainMergeError> {
     let r = repo
-        .find_reference("refs/heads/main")
-        .map_err(|e| MainMergeError::RefUpdateFailed(format!("find_reference: {e}")))?;
+        .find_reference(target_ref)
+        .map_err(|e| MainMergeError::RefUpdateFailed(format!("find_reference({target_ref:?}): {e}")))?;
     Ok(r.target().try_id().map(|id| id.to_owned()).ok_or_else(|| {
-        MainMergeError::RefUpdateFailed(
-            "refs/heads/main is symbolic, expected direct".to_owned(),
-        )
+        MainMergeError::RefUpdateFailed(format!(
+            "{target_ref} is symbolic, expected direct"
+        ))
     })?)
 }
 
@@ -733,6 +784,80 @@ mod tests {
                 "blob for {entry} did not round-trip into main ODB",
             );
         }
+    }
+
+    /// V2_GAPS.md §12.8 — `commit_merge_to_target_ref` must
+    /// advance an arbitrary fully-qualified ref (here a PR-style
+    /// `refs/heads/raxis/<initiative>` branch), not only
+    /// `refs/heads/main`. This is the substrate for the PR-branch
+    /// workflow described in V2_GAPS §12.8.
+    #[test]
+    fn commit_merge_to_target_ref_advances_pr_style_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((main, orch, base, merge)) =
+            fixture_main_and_orchestrator(tmp.path())
+        else {
+            eprintln!("skipping: git CLI not available");
+            return;
+        };
+
+        // Pre-create the PR branch at base so the transaction has
+        // an `expected_previous = Some(base_oid)` precondition to
+        // satisfy. (Production: the kernel creates the branch at
+        // `initial_sha` during `approve_plan` per V2_GAPS §12.8
+        // step 1.)
+        let create_branch = std::process::Command::new("git")
+            .args([
+                "branch",
+                "raxis/auth-refactor",
+                base.as_str(),
+            ])
+            .current_dir(&main)
+            .output()
+            .expect("git branch");
+        assert!(create_branch.status.success(),
+            "pre-creating PR branch failed: {}",
+            String::from_utf8_lossy(&create_branch.stderr));
+
+        let target_ref = "refs/heads/raxis/auth-refactor";
+        let advance = commit_merge_to_target_ref(
+            &main, &orch, &merge, target_ref,
+        ).unwrap();
+        assert_eq!(advance.previous_sha.as_deref(), Some(base.as_str()));
+        assert_eq!(advance.current_sha, merge);
+        assert!(!advance.already_at_target);
+
+        // The PR branch must point at the merge commit.
+        let head = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", target_ref])
+                .current_dir(&main)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        assert_eq!(head, merge);
+
+        // refs/heads/main MUST NOT have moved — the PR-branch flow
+        // is the spec's structural separation between RAXIS-merged
+        // state and the team's SDLC-approved main branch.
+        let main_head = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "refs/heads/main"])
+                .current_dir(&main)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        assert_eq!(main_head, base,
+            "refs/heads/main MUST NOT advance when the resolved \
+             target_ref is a non-main PR branch (V2_GAPS §12.8)");
     }
 
     #[test]

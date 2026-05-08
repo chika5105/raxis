@@ -1172,6 +1172,15 @@ async fn handle_approve_plan(
     };
 
     let policy_epoch = policy_snapshot.epoch();
+    // V2_GAPS.md §12.8 / §12.9 — snapshot the operator-side `[git]`
+    // policy values from the same bundle we resolved the pubkey
+    // from, so the per-initiative `target_ref` resolution happens
+    // against the policy that was authoritative at approval time
+    // (avoids a TOCTOU between policy reload and the spawn_blocking
+    // hop into `approve_plan`).
+    let policy_default_target_ref =
+        policy_snapshot.git_default_target_ref().to_owned();
+    let policy_target_ref_locked = policy_snapshot.git_target_ref_locked();
     // Snapshot the operator's display name from the same bundle we
     // resolved the pubkey from, so the audit event records the name
     // that was authoritative at approval time. See
@@ -1189,6 +1198,8 @@ async fn handle_approve_plan(
             approving_op_display_name,
             &pubkey_bytes,
             policy_epoch,
+            &policy_default_target_ref,
+            policy_target_ref_locked,
             &store_for_blocking,
             &*audit_for_blocking,
             &plan_registry_for_blocking,
@@ -1268,9 +1279,42 @@ async fn handle_approve_plan(
                 tasks_admitted: result.tasks_admitted,
             }
         }
-        Err(e) => OperatorResponse::Error {
-            code:   "FAIL_APPROVE_PLAN".to_owned(),
-            detail: e.to_string(),
+        Err(e) => match &e {
+            // V2_GAPS.md §12.8 / §12.9 — surface the structured
+            // locked-field / format-invalid rejections with their
+            // dedicated wire codes so the CLI's diagnostic does not
+            // bury the conflict under a generic FAIL_APPROVE_PLAN.
+            lifecycle::LifecycleError::PlanTargetRefInvalid {
+                rule, plan_value, policy_value, suggestion,
+            } => {
+                let code = match *rule {
+                    "locked"  => raxis_types::OperatorErrorCode::FailPolicyLockedField,
+                    "invalid" => raxis_types::OperatorErrorCode::FailWorkspaceTargetRefInvalid,
+                    // Future rules added to LifecycleError::PlanTargetRefInvalid
+                    // should be wired here too; until then, fall back to the
+                    // generic FAIL_APPROVE_PLAN so the operator still sees the
+                    // diagnostic instead of silently 200-OK.
+                    _ => return OperatorResponse::Error {
+                        code:   "FAIL_APPROVE_PLAN".to_owned(),
+                        detail: e.to_string(),
+                    },
+                };
+                let detail_json = serde_json::json!({
+                    "rule":         rule,
+                    "field":        "target_ref",
+                    "plan_value":   plan_value,
+                    "policy_value": policy_value,
+                    "suggestion":   suggestion,
+                }).to_string();
+                OperatorResponse::Error {
+                    code:   code.to_string(),
+                    detail: detail_json,
+                }
+            }
+            _ => OperatorResponse::Error {
+                code:   "FAIL_APPROVE_PLAN".to_owned(),
+                detail: e.to_string(),
+            },
         },
     }
 }
