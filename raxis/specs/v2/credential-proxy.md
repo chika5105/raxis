@@ -2458,9 +2458,392 @@ Docker-in-VM: only available if explicitly enabled in the VM image and policy.
 
 ---
 
----
+## 14. Real Upstream Forwarding (V2 contract amendment)
 
-## 10. Implementation Checklist
+> **Status:** **V2 normative.** Promotes real upstream forwarding for
+> the six TCP-protocol proxies (`postgres`, `mysql`, `mssql`,
+> `mongodb`, `redis`, `smtp`) from V3 follow-up to V2 in-scope.
+>
+> **Cross-references:**
+> - `kernel-mediated-egress.md` (deprecated; superseded by this section
+>   for Tier-2 authenticated egress)
+> - `vm-network-isolation.md` — Tier-1 SNI-allowlist tproxy is
+>   unchanged; this section affects Tier-2 only.
+> - `audit-paired-writes.md §3.1` — paired-write status of the new
+>   audit events introduced here.
+> - `extensibility-traits.md §4` — `CredentialBackend` trait whose
+>   `resolve()` returns the upstream URL bytes the proxy parses below.
+>
+> **Why this section exists.** The V2.0 cut shipped wire-protocol
+> parsing, restriction enforcement, and audit emission for every
+> database proxy, but synthesised success packets locally rather than
+> forwarding to a real upstream. That decision shipped a coherent
+> governance pipeline (parse → classify → audit → restrict) but a
+> *broken capability surface*: an agent that runs `SELECT * FROM
+> orders` gets a well-formed Postgres `CommandComplete` with zero
+> rows, so any task requiring real DB data was structurally
+> impossible. Cloud + HTTP proxies already round-trip real bytes;
+> the database / mail proxies must do the same to close the gap.
+
+### 14.1 — Authoring goal
+
+After this section ships, an agent inside a Reviewer / Executor VM
+can run:
+
+```bash
+psql -h 127.0.0.1 -p 5432 -U app -c "SELECT id, status FROM orders"
+```
+
+and observe the following sequence on the wire (numbered steps
+mirror §1b's diagram, with **(NEW)** marking V2.1 additions):
+
+1. ✓ Proxy accepts the agent TCP connection.
+2. ✓ Proxy synthesises an `AuthenticationOk` for the agent (no
+   credential bytes ever cross the VM boundary).
+3. ✓ Proxy reads the agent's `Query` message.
+4. ✓ Proxy parses the SQL, classifies the operation, and applies
+   `restrictions` (`allow_only_select`, `forbidden_tables`, …).
+5. ✓ Proxy emits `DatabaseQueryExecuted { sql_sha256, operation,
+   blocked }` per query.
+6. **(NEW)** If the query is allowed: the proxy ensures it has a live
+   upstream connection (lazy connect on first allowed query — see
+   §14.4), sends the resolved-credential authentication, and forwards
+   the agent's `Query` packet bytes verbatim.
+7. **(NEW)** Proxy reads upstream's `RowDescription`, every `DataRow`,
+   `CommandComplete`, and the trailing `ReadyForQuery`, and relays
+   each frame to the agent.
+8. **(NEW)** Proxy emits `DatabaseQueryCompleted { rows_returned,
+   bytes_returned, duration_ms, upstream_error }` once
+   `ReadyForQuery` arrives.
+
+The agent gets actual rows. The proxy is a transparent, auditing
+man-in-the-middle that **never lets credential bytes cross the VM
+boundary** and **never advances past a blocked statement** to the
+real database.
+
+### 14.2 — Where the upstream URL comes from
+
+The upstream URL is the **credential value** itself, resolved through
+`CredentialBackend::resolve(name, consumer)`. Per-proxy parsing:
+
+| `proxy_type` | Credential format the backend resolves | Upstream `host:port` derivation |
+|---|---|---|
+| `postgres` | `postgresql://user:pass@host:5432/db?sslmode=require` (libpq URL syntax, RFC 3986) | `host:port` from URL authority; default port 5432 |
+| `mysql`    | `mysql://user:pass@host:3306/db?ssl-mode=REQUIRED` | `host:port`; default 3306 |
+| `mssql`    | `mssql://user:pass@host:1433/db?encrypt=true` (or Azure AD token via `azure_credential` reference) | `host:port`; default 1433 |
+| `mongodb`  | `mongodb://user:pass@host:27017/db?tls=true` (RFC 3986 with mongo extensions) | `host:port`; default 27017 |
+| `redis`    | `redis://:pass@host:6379` or `redis://user:pass@host:6379/0` | `host:port`; default 6379 |
+| `smtp`     | `smtp://user:pass@host:587` (or `smtps://` for SMTPS-on-connect) | `host:port`; default 587 (`smtp://`) or 465 (`smtps://`) |
+
+The credential value is opaque bytes to the kernel — only the proxy
+crate parses it. Parsing failures (malformed URL, missing scheme,
+unparseable port) surface as `FAIL_PROXY_UPSTREAM_URL_INVALID` (see
+§14.7) at the **first allowed-query attempt**, not at session spawn:
+the proxy binds its loopback listener before any credential is
+resolved, so a typo in the credential value is observable as a clean
+agent-facing error rather than a silent session-spawn failure.
+
+> **Why parse the URL inside the proxy, not in the kernel?** Two
+> reasons. (1) Each protocol has its own URL extension grammar
+> (`?sslmode=`, `?ssl-mode=`, `?tls=`, `?encrypt=`) that only the
+> proxy crate cares about. (2) Centralising URL parsing in the kernel
+> would mean the kernel has to *open the credential bytes* — that's
+> exactly the boundary `CredentialBackend` was built to keep on the
+> backend side. The proxy is the only consumer of the resolved bytes
+> in V2, and that's the right scope.
+
+### 14.3 — Connection lifecycle (per agent connection)
+
+The proxy maintains **at most one upstream connection per agent
+connection** in V2. Connection pooling is V3 — for V2 we accept
+the per-connection latency cost in exchange for clean lifecycle
+semantics.
+
+State machine (Postgres example; the others mirror this with
+protocol-specific authentication tokens):
+
+```
+Agent ── TCP connect ──→ Proxy        Proxy        ── ?? ──→  Upstream
+                          │
+                          ├─ Step 1: synthesise AuthOk to agent
+                          │   (immediate; no upstream contact)
+                          │
+                          ├─ Step 2: ReadyForQuery to agent
+                          │
+                          ├─ Step 3: read agent Query
+                          ├─         classify + audit
+                          ├─         if blocked: ErrorResponse to agent;
+                          │                       continue loop (no upstream)
+                          │
+                          ├─ Step 4 (LAZY UPSTREAM CONNECT, FIRST ALLOWED Q):
+                          │  ─────────────────────────────────────────→
+                          │  open TcpStream to host:port from credential URL
+                          │  perform real Postgres handshake using
+                          │  user:pass from URL (StartupMessage with
+                          │  user= and database=, then password auth)
+                          │  if upstream auth fails:
+                          │     ErrorResponse to agent (sqlstate 28P01
+                          │     "invalid_password"); connection NOT
+                          │     killed — the agent can retry with a
+                          │     different statement, but every future
+                          │     allowed-Q in this session re-attempts
+                          │     upstream connect at the same backoff.
+                          │
+                          ├─ Step 5: forward agent's Query bytes to upstream
+                          ├─         relay every backend message
+                          │           (RowDescription, DataRow*, CommandComplete,
+                          │            ReadyForQuery, NoticeResponse,
+                          │            ErrorResponse) to agent verbatim
+                          │
+                          ├─ Step 6: emit DatabaseQueryCompleted audit
+                          │   on ReadyForQuery
+                          │
+                          └─ Loop: back to Step 3 for next agent message.
+                              On agent Terminate ('X'): proxy closes
+                              upstream cleanly (TCP FIN), emits
+                              CredentialProxyConnectionClosed.
+```
+
+**Key design choices:**
+
+* **Lazy upstream connect.** The proxy doesn't open the upstream
+  TCP connection at agent-connect time; it waits for the first
+  *allowed* query. This means a session that connects but only ever
+  issues blocked queries (e.g., agent tries `INSERT` under
+  `allow_only_select` and gets rejected) never opens an upstream
+  connection, so the upstream-side authentication audit
+  (`CredentialAccessed` from the backend) does not fire for
+  policy-blocked sessions.
+
+* **Authentication failure does not kill the agent connection.** A
+  bad credential value (wrong password, expired token) surfaces to
+  the agent as a single `ErrorResponse` per failed attempt; the
+  agent connection stays open. This matches `psql`'s behaviour
+  against a real Postgres that rejects a connection
+  re-authentication. The proxy retries upstream connect with a
+  100ms / 500ms / 2s exponential backoff capped at three attempts
+  per query; the fourth and subsequent allowed queries return the
+  same `ErrorResponse` without re-attempting until the agent
+  explicitly resets the connection.
+
+* **Upstream TLS.** Cloud-managed databases (Azure SQL, Aurora,
+  CockroachDB, Neon) require TLS from the proxy to the upstream.
+  The proxy reads the URL query parameters (`?sslmode=require` /
+  `?ssl-mode=REQUIRED` / `?tls=true` / `?encrypt=true`) and starts a
+  `tokio_rustls::TlsConnector::connect()` against the upstream host
+  before sending the protocol-specific StartupMessage. The agent's
+  side of the connection is **always** plaintext on `127.0.0.1` —
+  the VM network namespace makes the loopback a private boundary,
+  so plaintext is safe by construction.
+
+* **Per-query forwarding, not byte-stream tunneling.** The proxy
+  re-frames every protocol message rather than `tokio::io::copy()`-
+  ing the streams. This is essential for restriction enforcement:
+  the agent might pipeline a `SELECT` then an `INSERT` in a single
+  TCP segment; the proxy must classify each frame independently and
+  refuse to forward the second.
+
+### 14.4 — Restriction enforcement after forwarding
+
+V2.0's restriction enforcement was *pre-forward* (block-and-synth):
+the proxy classified each message and returned a synthetic error if
+disallowed. V2.1's behaviour is identical for blocked statements —
+the proxy still does **not** open an upstream connection for the
+blocked statement and returns the same `42501 / 1142 / 16401`
+sqlstate / errno the agent has been seeing in V2.0. **Allowed**
+statements pick up the new upstream-forwarding path.
+
+The single new corner case is **transactionality**:
+
+* `BEGIN` is allowed (it's a `Other` operation, not `Insert`).
+* `INSERT` inside the transaction is blocked at the proxy under
+  `allow_only_select = true`.
+* The transaction state on the upstream is now an open `BEGIN`
+  with no follow-up.
+* On the agent's next `COMMIT` / `ROLLBACK`, the proxy forwards it
+  as normal. Postgres / MySQL / MSSQL all accept `COMMIT` against
+  an open transaction with no statements, so the upstream-side
+  state cleans up naturally.
+
+This is a deliberately conservative behaviour — we accept that a
+blocked statement leaves the upstream session in an "open
+transaction with one rolled-back attempt" state for the duration of
+the agent's session. Pooling (V3) will reset session state at
+connection-return time; for V2 the per-agent-connection upstream
+isolates this from any other consumer.
+
+### 14.5 — New audit events
+
+This section adds three new `AuditEventKind` variants. All three are
+**single-write** (per §audit-paired-writes.md classification —
+they're observability of an already-admitted action, not a
+state-mutation gate).
+
+#### 14.5.1 — `DatabaseQueryCompleted`
+
+Fired on receipt of upstream's terminal `ReadyForQuery` /
+`OK_Packet (final)` / `DONE` / `OP_MSG response`. Pairs with the
+existing `DatabaseQueryExecuted` (which fires *before* upstream
+contact and carries `sql_sha256` + `operation`).
+
+```jsonc
+{
+  "event_kind": "DatabaseQueryCompleted",
+  "session_id": "…",
+  "task_id":    "…",
+  "credential_name": "postgres-staging",
+  "proxy_type":      "postgres",
+  "sql_sha256":      "<hex-sha256, matches the prior DatabaseQueryExecuted>",
+  "rows_returned":   <u64>,
+  "bytes_returned":  <u64>,
+  "duration_ms":     <u32>,
+  "upstream_error":  null | "<sqlstate or errno from upstream>"
+}
+```
+
+#### 14.5.2 — `CredentialProxyUpstreamConnected`
+
+Fired once per agent connection, on the first successful upstream
+TCP+auth handshake. Lets operators correlate "agent connection
+opened at T0" with "real DB session established at T0+latency_ms".
+
+```jsonc
+{
+  "event_kind": "CredentialProxyUpstreamConnected",
+  "session_id":     "…",
+  "credential_name": "postgres-staging",
+  "proxy_type":      "postgres",
+  "upstream_host":   "db.staging.example.com",
+  "upstream_port":   5432,
+  "tls":             true,
+  "handshake_ms":    <u32>
+}
+```
+
+The `upstream_host` field is the **hostname from the credential
+URL** — not a resolved IP — so an operator dashboard can group
+events by upstream cluster without leaking DNS-resolution noise.
+
+#### 14.5.3 — `CredentialProxyUpstreamFailed`
+
+Fired on every upstream-connect failure (DNS, TCP, TLS, or
+protocol-level auth). Distinguishes the *category* via the `reason`
+discriminant:
+
+```jsonc
+{
+  "event_kind": "CredentialProxyUpstreamFailed",
+  "session_id":      "…",
+  "credential_name": "postgres-staging",
+  "proxy_type":      "postgres",
+  "upstream_host":   "db.staging.example.com",
+  "upstream_port":   5432,
+  "reason":          "DnsResolveFailed" | "TcpConnectFailed"
+                    | "TlsHandshakeFailed" | "ProtocolHandshakeFailed"
+                    | "AuthRejected" | "Timeout",
+  "detail":          "<short, redacted message — no credential bytes>"
+}
+```
+
+**Redaction guarantee.** The `detail` field MUST NOT carry the
+credential value (or any substring of it). The proxy implementation
+uses a dedicated `redact_for_audit()` helper that strips anything
+matching `password=…` / `:secret@` / `?password=` from upstream
+error messages before they enter the audit envelope. Round-trip
+property tested in `crates/audit/tests/redaction_round_trip.rs`.
+
+### 14.6 — New `ProxyStats` counters
+
+Per-session per-proxy counter snapshots gain three fields, surfaced
+in the existing `CredentialProxyStopped { counters }` event:
+
+| Counter | Semantics |
+|---|---|
+| `upstream_connects_attempted` | Total TCP+auth handshakes started. |
+| `upstream_connects_succeeded` | Subset that reached a usable session. |
+| `upstream_bytes_forwarded`    | Sum of payload bytes relayed agent→upstream and upstream→agent. |
+
+The counters are session-scoped; the manager's
+`ProxyStatsHandle::snapshot_counters` aggregates them at session
+teardown.
+
+### 14.7 — Failure codes
+
+Three new agent-facing error codes are introduced. Each matches the
+protocol-specific sqlstate / errno space so the agent's driver
+surfaces the same error class it would see against a real
+misconfigured upstream:
+
+| Code | Surfaced as | Meaning |
+|---|---|---|
+| `FAIL_PROXY_UPSTREAM_URL_INVALID` | `ErrorResponse 28000` (Postgres) / `1045` (MySQL) / `18456` (MSSQL) / `command failed: 18` (MongoDB) / `-ERR invalid upstream` (Redis) | The credential value is not a parseable URL of the expected scheme. |
+| `FAIL_PROXY_UPSTREAM_UNREACHABLE` | `ErrorResponse 08006` (Postgres) / `2003` (MySQL) / `40` (MSSQL) | DNS resolution succeeded or TCP connect timed out. |
+| `FAIL_PROXY_UPSTREAM_AUTH_REJECTED` | `ErrorResponse 28P01` (Postgres) / `1045` (MySQL) / `18456` (MSSQL) | Upstream rejected the credential at the protocol-handshake step. |
+
+These three codes are wire-level only — they never reach the
+kernel's intent-admission failure-code surface (so they do not
+appear in `policy-plan-authority.md §3b`). They are visible on
+`raxis audit dump --kind CredentialProxyUpstreamFailed`.
+
+### 14.8 — Per-proxy implementation matrix
+
+| Proxy | Upstream protocol surface | New code (~ lines) | Reference |
+|---|---|---|---|
+| `postgres` | StartupMessage + AuthenticationCleartextPassword/SCRAM-SHA-256 + simple-query relay (Q → RowDescription* + DataRow* + CommandComplete + RFQ) | ~250 | §14.8.1 |
+| `mysql` | HandshakeV10 → HandshakeResponse41 → mysql_native_password reply → COM_QUERY relay (ResultSetHeader + ColumnDef* + EOF + Row* + EOF) | ~280 | §14.8.2 |
+| `mssql` | PRELOGIN with TLS handshake → LOGIN7 with cleartext password (or ADAL/Entra token) → SQLBatch relay (COLMETADATA + ROW* + DONE) | ~280 | §14.8.3 |
+| `mongodb` | OP_MSG `hello` → SCRAM-SHA-256 saslStart/saslContinue → OP_MSG command relay | ~240 | §14.8.4 |
+| `redis` | RESP2 AUTH (or HELLO 2 AUTH user pass) → command relay (response framing follows `+OK` / `$<n>` / `*<n>` / `:<n>` / `-ERR`) | ~150 | §14.8.5 |
+| `smtp` | EHLO → STARTTLS (per `smtps:` scheme) → AUTH PLAIN → MAIL/RCPT/DATA relay | ~220 | §14.8.6 |
+
+Each entry is treated as an independent merge in the implementation
+checklist; landing one proxy at a time is the V2.1 phasing strategy
+(small, mergeable PRs that each ship a green live-e2e slice
+exercising real rows).
+
+### 14.9 — Live-e2e harness extensions
+
+Each proxy gains a second live-e2e slice named
+`<proxy>-proxy-real-upstream` that:
+
+1. Boots a real upstream (Docker compose for postgres:16 / mysql:8 /
+   mssql:2022 / mongo:7 / redis:7 / mailhog) — or, where docker is
+   not available, an in-process tokio implementation that speaks
+   the protocol (the postgres slice ships both modes; the others
+   ship docker-only).
+2. Seeds a known `users(id, name)` table / `users` collection /
+   `user:1` key.
+3. Drives an agent-side query through the proxy.
+4. Asserts the **real row bytes** flow end-to-end and the audit
+   chain reads `DatabaseQueryExecuted → DatabaseQueryCompleted` in
+   that order with non-zero `rows_returned`.
+
+The slices are gated behind `--with-real-upstream` so a developer
+laptop without docker can still run the in-process slice set. CI
+runs both modes.
+
+### 14.10 — Migration from V2.0 to V2.1
+
+The wire-shape contract from V2.0 is unchanged for the agent. The
+*observable* differences are:
+
+* Allowed statements now return real rows; the agent's `cur.fetchall()`
+  / `rows.next()` returns non-empty on a real DB.
+* The audit chain gains `DatabaseQueryCompleted` /
+  `CredentialProxyUpstreamConnected` /
+  `CredentialProxyUpstreamFailed` events. Existing
+  `DatabaseQueryExecuted` events are **unchanged** so a V2.0 audit
+  reader keeps working.
+* Plans that worked under V2.0 because they never inspected query
+  results (smoke tests, audit-only verification) keep working
+  identically.
+* Plans that previously had to skip the database-dependent steps
+  now run them.
+
+No `policy.toml` schema change is required. No `plan.toml` schema
+change is required. No migration on `kernel.db`.
+
+---
 
 ### 10.0 Trait-boundary refactor (V2 prerequisite)
 
