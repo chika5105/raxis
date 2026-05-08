@@ -1700,6 +1700,283 @@ Existing kernel tests (`kernel/tests/mock_planner_end_to_end.rs`, `kernel/tests/
 
 ---
 
+## §9A — Third-Party Provider Integration Without Kernel Code Changes
+
+### §9A.1 Problem statement
+
+The seven traits (§2–§7, §6A) define open boundaries — anyone can
+implement them. But the boot-site wiring in `kernel/src/main.rs`
+(§9) uses a closed enum to select which impl to construct. Adding
+a new LLM provider (Kombai, Cohere, a private vLLM cluster)
+requires adding an enum variant — a kernel code change.
+
+### §9A.2 Rejected approach: shared-library plugins
+
+Loading `.so`/`.dylib` files into the kernel process was considered
+and **rejected**. A native plugin runs in the kernel's address
+space with full memory access. No conformance check can prevent a
+malicious or buggy plugin from corrupting kernel state, bypassing
+audit, or exfiltrating credentials. This violates RAXIS's security
+posture: the kernel binary is the trust root, and injecting foreign
+code into it undermines every R-* guarantee.
+
+### §9A.3 Design: process-isolated HTTP sidecar
+
+Instead, the kernel ships a built-in `HttpSidecarRouter` impl of
+`InferenceRouter` (§7). The sidecar is a **separate process** the
+operator runs alongside the kernel. The kernel communicates with
+it over localhost HTTP using a fixed, RAXIS-defined JSON schema.
+
+```
+                RAXIS protocol              Provider API
+                (fixed schema)              (their format)
+┌──────────┐   ──────────────►  ┌─────────┐  ──────────►  ┌──────────┐
+│  Kernel  │   POST /complete   │Sidecar  │  POST /v1/... │ Provider │
+│(concrete)│   ◄──────────────  │(adapter)│  ◄──────────  │   API    │
+└──────────┘   SidecarResponse  └─────────┘  their JSON   └──────────┘
+```
+
+**Security properties:**
+
+- Plugin cannot corrupt kernel memory (process isolation)
+- Plugin crash does not take down the kernel
+- Kernel controls what data crosses the boundary
+- Kernel validates every response (fail-closed on malformed)
+- No `unsafe`, no ABI, no `libloading`
+- All R-* invariants hold trivially (§9A.6)
+
+### §9A.4 Policy configuration
+
+```toml
+# policy.toml — built-in Anthropic/OpenAI/Gemini (no sidecar)
+[inference_router]
+kind = "https_gateway"
+
+# policy.toml — third-party provider via sidecar
+[inference_router]
+kind = "http_sidecar"
+endpoint = "http://127.0.0.1:9100"
+timeout_ms = 120000
+health_check_path = "/health"
+```
+
+The operator starts the sidecar independently:
+
+```bash
+# Operator runs (any language, any container, any process manager)
+kombai-raxis-sidecar --port 9100 --api-key "$KOMBAI_KEY"
+```
+
+### §9A.5 RAXIS Sidecar Protocol (fixed schema)
+
+The kernel sends and receives exactly these JSON shapes. The
+sidecar translates between RAXIS's schema and the provider's
+native API. The kernel never parses provider-specific formats.
+
+**Request (kernel → sidecar):**
+
+```json
+{
+  "request_id": "uuid",
+  "provider_id": "kombai",
+  "model_id": "kombai-ui-v3",
+  "system_prompt": "You are a RAXIS executor agent...",
+  "messages": [
+    { "role": "user", "content": "Execute your assigned task." }
+  ],
+  "tools": [
+    {
+      "name": "edit_file",
+      "description": "Create or edit a file.",
+      "input_schema": { "type": "object", "properties": { "path": {}, "content": {} } }
+    }
+  ],
+  "max_tokens": 4096
+}
+```
+
+**Response (sidecar → kernel):**
+
+```json
+{
+  "response_text": "I'll create the file now.",
+  "tool_calls": [
+    {
+      "id": "call_01",
+      "name": "edit_file",
+      "input": { "path": "hello.txt", "content": "Hello!\n" }
+    }
+  ],
+  "tokens_in": 150,
+  "tokens_out": 42,
+  "model_id_actual": "kombai-ui-v3",
+  "provider_request_id": "req_abc123",
+  "stop_reason": "tool_use"
+}
+```
+
+**Kernel-side deserialisation (Rust):**
+
+```rust
+#[derive(Deserialize)]
+pub struct SidecarResponse {
+    pub response_text: Option<String>,
+    #[serde(default)]
+    pub tool_calls: Vec<SidecarToolCall>,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    pub model_id_actual: String,
+    pub provider_request_id: Option<String>,
+    pub stop_reason: String,
+}
+
+#[derive(Deserialize)]
+pub struct SidecarToolCall {
+    pub id: String,
+    pub name: String,
+    pub input: serde_json::Value,
+}
+```
+
+If the response does not match this schema →
+`serde_json::from_slice` fails → `InferenceError::MalformedResponse`
+→ fail-closed (R-3). The planner sees a coarse error code per
+INV-08, never the malformed bytes.
+
+### §9A.6 Invariant analysis
+
+| Invariant | Why the sidecar cannot weaken it |
+|---|---|
+| **R-1** (Domain separation) | Sidecar is a separate process; not in the agent VM |
+| **R-2** (Mediated I/O) | Kernel calls sidecar AFTER admission; `ResolvedInferenceRequest` is post-admission data |
+| **R-3** (Fail-closed) | Malformed response → `MalformedResponse` error → kernel rejects |
+| **R-5** (Bounded capabilities) | Budget reserved BEFORE the HTTP call; reconciled AFTER via `tokens_in`/`tokens_out` |
+| **R-7** (Audit chain) | Audit is kernel-side; sidecar has no audit API |
+| **R-9** (Attributable intent) | Session tokens are kernel-side; sidecar never sees them |
+| **R-10** (Opaque rejection) | Error codes emitted by kernel, not sidecar |
+
+**No invariant weakened.** The sidecar occupies the same logical
+position as `HttpsGatewayRouter` — downstream of admission,
+upstream of audit — but in a separate process with zero access
+to kernel internals.
+
+### §9A.7 Health checking and circuit breaking
+
+The `HttpSidecarRouter` participates in the same provider health
+and circuit-breaker framework as built-in routers
+(`provider-failure-handling.md §4`):
+
+- **Boot probe:** kernel sends `GET /health` at boot; non-200 →
+  `BootError::SidecarUnreachable` (fail-closed).
+- **Runtime health:** `provider_health()` trait method sends
+  `GET /health`; timeout or non-200 → circuit opens.
+- **Retry:** on `InferenceError::Retriable`, kernel retries per
+  the policy's retry budget, same as built-in routers.
+
+### §9A.8 Files to create
+
+- `crates/raxis-inference-router-sidecar/Cargo.toml`
+- `crates/raxis-inference-router-sidecar/src/lib.rs` — `HttpSidecarRouter` implementing `InferenceRouter` trait
+- `crates/raxis-inference-router-sidecar/src/protocol.rs` — `SidecarRequest`, `SidecarResponse`, `SidecarToolCall` types
+- `crates/raxis-inference-router-sidecar/tests/integration.rs` — drives a mock HTTP server, asserts schema round-trip
+
+### §9A.9 Files to change
+
+- `kernel/src/main.rs` — boot site gains `"http_sidecar"` arm
+- `crates/policy/src/bundle.rs` — `InferenceRouterKind` gains `HttpSidecar { endpoint, timeout_ms, health_check_path }`
+- `cli/src/commands/doctor.rs` — `[CHECK] sidecar.health` probes the endpoint
+
+### §9A.10 Scope
+
+`HttpSidecarRouter` ships in **V2.0** as a built-in impl alongside
+`HttpsGatewayRouter`. No new trust model, no plugin ABI, no
+`unsafe`. The RAXIS Sidecar Protocol JSON schema is published as
+an OpenAPI document at `specs/v2/sidecar-protocol.yaml`.
+
+### §9A.11 Example: Kombai sidecar (Python, ~80 lines)
+
+```python
+#!/usr/bin/env python3
+"""Kombai RAXIS sidecar — translates RAXIS protocol to Kombai API."""
+import json, os, requests
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+KOMBAI_KEY = os.environ["KOMBAI_API_KEY"]
+KOMBAI_URL = "https://api.kombai.com/v1/generate"
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+@app.route("/v1/complete", methods=["POST"])
+def complete():
+    raxis_req = request.json
+
+    # 1. Translate RAXIS request → Kombai format
+    kombai_payload = {
+        "model": raxis_req["model_id"],
+        "system_instruction": raxis_req["system_prompt"],
+        "messages": raxis_req["messages"],
+        "available_tools": [
+            {"function": t} for t in raxis_req.get("tools", [])
+        ],
+        "max_output_tokens": raxis_req["max_tokens"],
+    }
+
+    # 2. Call Kombai
+    resp = requests.post(
+        KOMBAI_URL,
+        headers={"Authorization": f"Bearer {KOMBAI_KEY}"},
+        json=kombai_payload,
+        timeout=120,
+    )
+    resp.raise_for_status()
+    kombai = resp.json()
+
+    # 3. Translate Kombai response → RAXIS schema
+    tool_calls = []
+    for tc in kombai.get("tool_invocations", []):
+        tool_calls.append({
+            "id": tc["invocation_id"],
+            "name": tc["function_name"],
+            "input": tc["arguments"],
+        })
+
+    return jsonify({
+        "response_text": kombai.get("text_output"),
+        "tool_calls": tool_calls,
+        "tokens_in": kombai["usage"]["input_tokens"],
+        "tokens_out": kombai["usage"]["output_tokens"],
+        "model_id_actual": kombai["model_used"],
+        "provider_request_id": kombai.get("request_id"),
+        "stop_reason": kombai.get("finish_reason", "end_turn"),
+    })
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=9100)
+```
+
+**Operator workflow:**
+
+```bash
+# 1. Start sidecar
+KOMBAI_API_KEY=sk-... python3 kombai_sidecar.py &
+
+# 2. Configure RAXIS policy
+raxis policy set inference_router.kind http_sidecar
+raxis policy set inference_router.endpoint http://127.0.0.1:9100
+raxis policy sign
+
+# 3. Restart kernel — picks up new router
+raxis restart
+```
+
+Zero RAXIS code changes. The kernel sends its fixed JSON, the
+sidecar translates, the kernel validates the response.
+
+---
+
 ## §10 — V2 Migration Plan (Phased, Mergeable)
 
 The trait extraction touches the kernel boot site and every handler. Doing it as one PR is unreviewable. The migration is structured as five phases, each independently shippable:

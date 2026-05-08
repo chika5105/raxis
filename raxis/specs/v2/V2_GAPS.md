@@ -260,6 +260,44 @@ deprecation warnings at plan admission.
 
 Zero references to `model_selection`, `ProviderRouting` in any crate.
 
+### C5: Third-Party Provider Integration (HTTP Sidecar)
+
+**Spec:** `extensibility-traits.md §9A`
+**Status:** ❌ Not implemented
+**Severity:** Medium — blocks operators who want non-built-in providers
+
+The V2 boot site uses a closed `InferenceRouterKind` enum. Adding
+Kombai, Cohere, or any non-built-in provider requires a kernel
+code change (new enum variant + match arm).
+
+**Resolution (specced, not yet implemented):** `HttpSidecarRouter` —
+a built-in `InferenceRouter` impl that forwards
+`ResolvedInferenceRequest` as JSON over localhost HTTP to an
+operator-run sidecar process. The sidecar translates RAXIS's
+fixed schema to the provider's native API and back. Process
+isolation ensures no foreign code runs in the kernel.
+
+**What's needed:**
+
+- `crates/raxis-inference-router-sidecar/` — ~400 lines
+  (`HttpSidecarRouter`, `SidecarRequest`, `SidecarResponse`)
+- `InferenceRouterKind::HttpSidecar` variant in `policy/src/bundle.rs`
+- `"http_sidecar"` match arm in `kernel/src/main.rs` boot site
+- `[CHECK] sidecar.health` in `cli/src/commands/doctor.rs`
+- `specs/v2/sidecar-protocol.yaml` — OpenAPI schema
+
+**Invariant safety:** all R-* invariants hold trivially. The
+sidecar is downstream of admission, upstream of audit, in a
+separate process with zero access to kernel internals. Malformed
+sidecar responses → `InferenceError::MalformedResponse` →
+fail-closed (R-3). See `extensibility-traits.md §9A.6` for the
+full invariant analysis.
+
+**Rejected alternative:** `.so`/`.dylib` plugin loading. A native
+plugin runs in kernel address space with full memory access — no
+conformance check can prevent memory corruption or invariant
+bypass. See `extensibility-traits.md §9A.2`.
+
 ### C4: Email & Notification Channels
 
 **Spec:** `email-and-notification-channels.md` (61KB)
