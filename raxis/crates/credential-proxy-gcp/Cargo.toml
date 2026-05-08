@@ -1,0 +1,26 @@
+[package]
+name        = "raxis-credential-proxy-gcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GCP metadata-server-compatible credential proxy. Emits /computeMetadata/v1/instance/service-accounts/default/token responses so google-auth-library / google-cloud-storage / Terraform's google provider authenticate against the kernel CredentialBackend without the GCP service account key bytes ever crossing the VM boundary."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raxis-credentials = { workspace = true }
+
+tokio     = { workspace = true }
+httparse  = "1"
+bytes     = "1"
+serde     = { workspace = true }
+serde_json = { workspace = true }
+sha2      = { workspace = true }
+hex       = { workspace = true }
+thiserror = { workspace = true }
+tracing   = "0.1"
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

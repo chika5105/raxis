@@ -157,6 +157,56 @@ pub enum ProxyDecl {
         #[serde(default)]
         restrictions: AwsRestrictions,
     },
+    /// `proxy_type = "gcp"` — see `credential-proxy.md §3.3`. The
+    /// GCP proxy emulates the Compute Engine metadata server.
+    /// `google-auth-library`, `google-cloud-storage`, the `gcloud`
+    /// CLI's application-default flow, and the Terraform `google`
+    /// provider all reach for `metadata.google.internal`; the
+    /// agent's VM `/etc/hosts` redirects that name to the proxy.
+    Gcp {
+        /// GCP project ID, returned by
+        /// `/computeMetadata/v1/project/project-id`.
+        project: String,
+        /// Optional numeric project ID, returned by
+        /// `/computeMetadata/v1/project/numeric-project-id`. When
+        /// `None`, the proxy returns `"0"` so SDKs that demand the
+        /// field do not panic.
+        #[serde(default)]
+        numeric_project: Option<u64>,
+        /// Lease length advertised in `expires_in`. Defaults to
+        /// 3600 seconds (1 hour) matching the GCP metadata-server
+        /// default.
+        #[serde(default = "default_gcp_lease_seconds")]
+        lease_seconds: u64,
+        /// Restrictions clause (`[tasks.credentials.restrictions]`).
+        #[serde(default)]
+        restrictions: GcpRestrictions,
+    },
+    /// `proxy_type = "azure"` — see `credential-proxy.md §3.4`. The
+    /// Azure proxy emulates the Azure Instance Metadata Service
+    /// (IMDS). `azure-identity`, `Azure.Identity` (.NET),
+    /// `@azure/identity` (Node), and `az` CLI's
+    /// `ManagedIdentityCredential` reach for `169.254.169.254`; the
+    /// agent's VM iptables NAT redirects that IP to the proxy.
+    Azure {
+        /// Azure tenant ID. Audit-only at proxy-bind time; not echoed
+        /// in the IMDS body.
+        tenant_id: String,
+        /// Optional managed-identity client ID echoed back in the
+        /// IMDS response body. Useful for SDKs that record the
+        /// identity that minted the token.
+        #[serde(default)]
+        client_id: Option<String>,
+        /// Lease length advertised in `expires_in`. Defaults to
+        /// 3600 seconds (1 hour) matching the Azure IMDS default.
+        #[serde(default = "default_azure_lease_seconds")]
+        lease_seconds: u64,
+        /// Resource URI allowlist
+        /// (`[tasks.credentials.restrictions].allowed_resources`).
+        /// REQUIRED — empty allowlist blocks every request.
+        #[serde(default)]
+        restrictions: AzureRestrictions,
+    },
     /// Catch-all for proxy types declared in policy but not yet
     /// implemented. The parser preserves the literal `proxy_type`
     /// string so the validator can map it to a clear "not
@@ -172,6 +222,10 @@ fn default_smtp_auth_mode() -> SmtpAuthMode {
 }
 
 fn default_aws_lease_seconds() -> u64 { 900 }
+
+fn default_gcp_lease_seconds() -> u64 { 3600 }
+
+fn default_azure_lease_seconds() -> u64 { 3600 }
 
 /// HTTP-proxy authentication mode (mirrors
 /// `raxis_credential_proxy_http::AuthMode`).
@@ -304,6 +358,54 @@ impl Default for AwsRestrictions {
 
 fn default_aws_allowed_paths() -> Vec<String> {
     vec!["/creds".to_owned()]
+}
+
+/// GCP restrictions
+/// (`[tasks.credentials.restrictions]` for `proxy_type = "gcp"`).
+///
+/// Mirrors `raxis_credential_proxy_gcp::Restrictions`. The proxy
+/// only ever serves the path allowlist; everything else gets a
+/// `404 Not Found`. Default permits the four canonical GCP
+/// metadata-server endpoints (`/computeMetadata/v1/...`) that
+/// `google-auth-library` and `gcloud` walk through.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GcpRestrictions {
+    /// Paths the proxy will serve. Defaults to the four canonical
+    /// metadata-server endpoints.
+    #[serde(default = "default_gcp_allowed_paths")]
+    pub allowed_paths: Vec<String>,
+}
+
+impl Default for GcpRestrictions {
+    fn default() -> Self {
+        Self { allowed_paths: default_gcp_allowed_paths() }
+    }
+}
+
+fn default_gcp_allowed_paths() -> Vec<String> {
+    vec![
+        "/computeMetadata/v1/instance/service-accounts/default/token".to_owned(),
+        "/computeMetadata/v1/instance/service-accounts/default/email".to_owned(),
+        "/computeMetadata/v1/project/project-id".to_owned(),
+        "/computeMetadata/v1/project/numeric-project-id".to_owned(),
+    ]
+}
+
+/// Azure restrictions
+/// (`[tasks.credentials.restrictions]` for `proxy_type = "azure"`).
+///
+/// Mirrors `raxis_credential_proxy_azure::Restrictions`. Azure IMDS
+/// uses a single path (`/metadata/identity/oauth2/token`) for every
+/// resource; scoping happens through the `?resource=...` query
+/// parameter. The proxy refuses to mint tokens for resources outside
+/// `allowed_resources`, even if the agent passes an arbitrary URI.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AzureRestrictions {
+    /// Azure resource URIs (e.g. `"https://management.azure.com/"`,
+    /// `"https://database.windows.net/"`) the proxy will mint tokens
+    /// for. Empty list means "block everything".
+    #[serde(default)]
+    pub allowed_resources: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -673,6 +775,127 @@ mod tests {
                 );
             }
             other => panic!("expected Redis, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_gcp_decl_with_default_restrictions() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name       = "gcp-staging"
+              proxy_type = "gcp"
+              mount_as   = "GOOGLE_APPLICATION_CREDENTIALS"
+              project    = "my-staging-project"
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Gcp { project, numeric_project, lease_seconds, restrictions } => {
+                assert_eq!(project, "my-staging-project");
+                assert_eq!(*numeric_project, None);
+                assert_eq!(*lease_seconds, 3600);
+                assert_eq!(restrictions, &GcpRestrictions::default());
+            }
+            other => panic!("expected Gcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_gcp_decl_with_numeric_project_and_path_allowlist() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name             = "gcp-prod"
+              proxy_type       = "gcp"
+              mount_as         = "GOOGLE_APPLICATION_CREDENTIALS"
+              project          = "my-prod-project"
+              numeric_project  = 1234567890
+              lease_seconds    = 1800
+
+                [tasks.credentials.restrictions]
+                allowed_paths = [
+                  "/computeMetadata/v1/instance/service-accounts/default/token",
+                ]
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Gcp { project, numeric_project, lease_seconds, restrictions } => {
+                assert_eq!(project, "my-prod-project");
+                assert_eq!(*numeric_project, Some(1234567890));
+                assert_eq!(*lease_seconds, 1800);
+                assert_eq!(
+                    restrictions.allowed_paths,
+                    vec!["/computeMetadata/v1/instance/service-accounts/default/token".to_owned()],
+                );
+            }
+            other => panic!("expected Gcp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_azure_decl_with_resource_allowlist() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name      = "azure-staging"
+              proxy_type = "azure"
+              mount_as  = "AZURE_TOKEN_URL"
+              tenant_id = "aaaa-bbbb-cccc-dddd"
+
+                [tasks.credentials.restrictions]
+                allowed_resources = [
+                  "https://management.azure.com/",
+                  "https://database.windows.net/",
+                ]
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Azure { tenant_id, client_id, lease_seconds, restrictions } => {
+                assert_eq!(tenant_id, "aaaa-bbbb-cccc-dddd");
+                assert_eq!(*client_id, None);
+                assert_eq!(*lease_seconds, 3600);
+                assert_eq!(
+                    restrictions.allowed_resources,
+                    vec![
+                        "https://management.azure.com/".to_owned(),
+                        "https://database.windows.net/".to_owned(),
+                    ],
+                );
+            }
+            other => panic!("expected Azure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_azure_decl_with_client_id_and_custom_lease() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name          = "azure-mi"
+              proxy_type    = "azure"
+              mount_as      = "AZURE_TOKEN_URL"
+              tenant_id     = "tenant-1"
+              client_id     = "client-1"
+              lease_seconds = 1800
+
+                [tasks.credentials.restrictions]
+                allowed_resources = ["https://management.azure.com/"]
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Azure { client_id, lease_seconds, .. } => {
+                assert_eq!(client_id.as_deref(), Some("client-1"));
+                assert_eq!(*lease_seconds, 1800);
+            }
+            other => panic!("expected Azure, got {other:?}"),
         }
     }
 

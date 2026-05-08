@@ -1297,6 +1297,51 @@ pub enum AuditEventKind {
         blocked:         bool,
     },
 
+    /// Emitted by the GCP credential proxy on every served (or
+    /// blocked) compute-metadata-server request. Mirrors the AWS
+    /// event shape so downstream consumers process all four of
+    /// (AWS, GCP, Azure, K8s) through one switch. Carries the
+    /// declared GCP project ID — never the access token bytes.
+    GcpMetadataServed {
+        /// Session whose VM made the request.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Request path (`/computeMetadata/v1/...`).
+        path:            String,
+        /// SHA-256 of `"<METHOD> <path>"`.
+        path_sha256:     String,
+        /// Operator-declared GCP project ID.
+        project_id:      String,
+        /// True if a restriction or missing
+        /// `Metadata-Flavor: Google` header blocked the request.
+        blocked:         bool,
+    },
+
+    /// Emitted by the Azure credential proxy on every served (or
+    /// blocked) IMDS token request. Carries the requested
+    /// resource URI so reviewers can confirm tokens were only
+    /// minted for operator-declared resources.
+    AzureTokenServed {
+        /// Session whose VM made the request.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Request path (always `/metadata/identity/oauth2/token`
+        /// in V2; future-proofed for additional IMDS endpoints).
+        path:            String,
+        /// Resource URI the agent requested in the `?resource=`
+        /// query parameter. Empty when the parameter was missing.
+        resource:        String,
+        /// SHA-256 of `"<METHOD> <path>?resource=<resource>"`.
+        request_sha256:  String,
+        /// Operator-declared tenant ID.
+        tenant_id:       String,
+        /// True if a restriction or missing `Metadata: true`
+        /// header blocked the request.
+        blocked:         bool,
+    },
+
     /// Emitted by the SMTP credential proxy when an envelope passes
     /// every restriction gate and is forwarded to the upstream
     /// relay. Carries the SHA-256 of the canonical
@@ -1427,6 +1472,8 @@ impl AuditEventKind {
             Self::HttpProxyRequestExecuted { .. } => "HttpProxyRequestExecuted",
             Self::RedisCommandExecuted { .. } => "RedisCommandExecuted",
             Self::AwsCredentialServed { .. } => "AwsCredentialServed",
+            Self::GcpMetadataServed { .. } => "GcpMetadataServed",
+            Self::AzureTokenServed { .. } => "AzureTokenServed",
             Self::SmtpMessageRelayed { .. } => "SmtpMessageRelayed",
             Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",
         }

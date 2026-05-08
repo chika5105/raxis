@@ -95,8 +95,9 @@ use std::sync::Arc;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credentials::CredentialBackend;
 use raxis_plan_credentials::{
-    AwsRestrictions, HttpAuthMode, HttpRestrictions, PostgresRestrictions, ProxyDecl,
-    RedisRestrictions, SmtpAuthMode, SmtpRestrictions, TaskCredentialDecl,
+    AwsRestrictions, AzureRestrictions, GcpRestrictions, HttpAuthMode, HttpRestrictions,
+    PostgresRestrictions, ProxyDecl, RedisRestrictions, SmtpAuthMode, SmtpRestrictions,
+    TaskCredentialDecl,
 };
 
 use raxis_credential_proxy_http::{
@@ -116,6 +117,18 @@ use raxis_credential_proxy_aws::{
     OwnedConsumer as AwsOwnedConsumer, ProxyConfig as AwsProxyConfig,
     ProxyError as AwsProxyError, ProxyStats as AwsProxyStats,
     Restrictions as AwsProxyRestrictions,
+};
+use raxis_credential_proxy_gcp::{
+    AuditChannel as GcpAuditChannel, AuditEvent as GcpAuditEvent, GcpProxy,
+    OwnedConsumer as GcpOwnedConsumer, ProxyConfig as GcpProxyConfig,
+    ProxyError as GcpProxyError, ProxyStats as GcpProxyStats,
+    Restrictions as GcpProxyRestrictions,
+};
+use raxis_credential_proxy_azure::{
+    AuditChannel as AzureAuditChannel, AuditEvent as AzureAuditEvent, AzureProxy,
+    OwnedConsumer as AzureOwnedConsumer, ProxyConfig as AzureProxyConfig,
+    ProxyError as AzureProxyError, ProxyStats as AzureProxyStats,
+    Restrictions as AzureProxyRestrictions,
 };
 use raxis_credential_proxy_redis::{
     AuditChannel as RedisAuditChannel, AuditEvent as RedisAuditEvent,
@@ -205,6 +218,26 @@ pub enum ManagerError {
         source: AwsProxyError,
     },
 
+    /// GCP proxy failed to bind / start.
+    #[error("gcp proxy bind failed for `{credential_name}`: {source}")]
+    GcpBind {
+        /// Credential name whose proxy bind failed.
+        credential_name: String,
+        /// Source error from the gcp-proxy crate.
+        #[source]
+        source: GcpProxyError,
+    },
+
+    /// Azure proxy failed to bind / start.
+    #[error("azure proxy bind failed for `{credential_name}`: {source}")]
+    AzureBind {
+        /// Credential name whose proxy bind failed.
+        credential_name: String,
+        /// Source error from the azure-proxy crate.
+        #[source]
+        source: AzureProxyError,
+    },
+
     /// `local_addr()` on a freshly-bound listener failed (very rare;
     /// signals a race against listener shutdown, or that the OS lost
     /// our binding mid-construction).
@@ -234,6 +267,8 @@ fn proxy_type_str(decl: &ProxyDecl) -> &'static str {
         ProxyDecl::Smtp { .. } => "smtp",
         ProxyDecl::Redis { .. } => "redis",
         ProxyDecl::Aws { .. } => "aws",
+        ProxyDecl::Gcp { .. } => "gcp",
+        ProxyDecl::Azure { .. } => "azure",
         ProxyDecl::Unknown => "unknown",
     }
 }
@@ -481,6 +516,94 @@ impl RedisAuditChannel for RedisKernelAuditAdapter {
     }
 }
 
+struct GcpKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl GcpAuditChannel for GcpKernelAuditAdapter {
+    fn emit(&self, event: GcpAuditEvent) {
+        match event {
+            GcpAuditEvent::GcpMetadataServed {
+                credential,
+                path,
+                path_sha256,
+                project_id,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::GcpMetadataServed {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    path,
+                    path_sha256,
+                    project_id,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "GcpMetadataServed audit emit failed; per-request audit chain entry skipped",
+                    );
+                }
+            }
+        }
+    }
+}
+
+struct AzureKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl AzureAuditChannel for AzureKernelAuditAdapter {
+    fn emit(&self, event: AzureAuditEvent) {
+        match event {
+            AzureAuditEvent::AzureTokenServed {
+                credential,
+                path,
+                resource,
+                request_sha256,
+                tenant_id,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::AzureTokenServed {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    path,
+                    resource,
+                    request_sha256,
+                    tenant_id,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "AzureTokenServed audit emit failed; per-request audit chain entry skipped",
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Map the proxy-side `EnvelopeAudit::rejection_reason` (which
 /// typically embeds the SMTP refusal reply text after a stable
 /// `audit_summary` prefix) into the short stable reason string the
@@ -537,6 +660,8 @@ enum ProxyStatsHandle {
     Smtp(Arc<SmtpProxyStats>),
     Redis(Arc<RedisProxyStats>),
     Aws(Arc<AwsProxyStats>),
+    Gcp(Arc<GcpProxyStats>),
+    Azure(Arc<AzureProxyStats>),
 }
 
 impl ProxyStatsHandle {
@@ -579,6 +704,22 @@ impl ProxyStatsHandle {
                 StoppedCounters {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.credentials_served,
+                    forwards_blocked:   snap.requests_blocked,
+                }
+            }
+            ProxyStatsHandle::Gcp(s) => {
+                let snap = s.snapshot();
+                StoppedCounters {
+                    connections_served: snap.connections_served,
+                    forwards_completed: snap.credentials_served,
+                    forwards_blocked:   snap.requests_blocked,
+                }
+            }
+            ProxyStatsHandle::Azure(s) => {
+                let snap = s.snapshot();
+                StoppedCounters {
+                    connections_served: snap.connections_served,
+                    forwards_completed: snap.tokens_served,
                     forwards_blocked:   snap.requests_blocked,
                 }
             }
@@ -898,6 +1039,32 @@ impl CredentialProxyManager {
                         &decl.name,
                         &decl.mount_as,
                         role_arn.as_deref(),
+                        *lease_seconds,
+                        restrictions,
+                    )
+                    .await?
+                }
+                ProxyDecl::Gcp { project, numeric_project, lease_seconds, restrictions } => {
+                    self.bind_gcp(
+                        session_id,
+                        task_id,
+                        &decl.name,
+                        &decl.mount_as,
+                        project,
+                        *numeric_project,
+                        *lease_seconds,
+                        restrictions,
+                    )
+                    .await?
+                }
+                ProxyDecl::Azure { tenant_id, client_id, lease_seconds, restrictions } => {
+                    self.bind_azure(
+                        session_id,
+                        task_id,
+                        &decl.name,
+                        &decl.mount_as,
+                        tenant_id,
+                        client_id.as_deref(),
                         *lease_seconds,
                         restrictions,
                     )
@@ -1260,6 +1427,116 @@ impl CredentialProxyManager {
             mount_as:        mount_as.to_owned(),
             addr,
             stats:           ProxyStatsHandle::Aws(stats_handle),
+            join,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_gcp(
+        &self,
+        session_id:      &str,
+        task_id:         &str,
+        name:            &raxis_credentials::CredentialName,
+        mount_as:        &str,
+        project:         &str,
+        numeric_project: Option<u64>,
+        lease_seconds:   u64,
+        restrictions:    &GcpRestrictions,
+    ) -> Result<ActiveProxy, ManagerError> {
+        let cfg = GcpProxyConfig {
+            listen_addr:        "127.0.0.1:0".to_owned(),
+            credential_name:    name.clone(),
+            consumer:           GcpOwnedConsumer::new(
+                "session",
+                session_id.to_owned(),
+            ),
+            lease_seconds,
+            project_id:         project.to_owned(),
+            numeric_project_id: numeric_project,
+            restrictions:       GcpProxyRestrictions {
+                allowed_paths: restrictions.allowed_paths.clone(),
+            },
+        };
+        let audit_channel: Arc<dyn GcpAuditChannel> = Arc::new(GcpKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = GcpProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
+            .await
+            .map_err(|source| ManagerError::GcpBind {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
+        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let stats_handle = proxy.stats_handle();
+        let join = tokio::spawn(async move {
+            proxy.serve().await;
+        });
+        Ok(ActiveProxy {
+            proxy_type:      "gcp",
+            credential_name: name.as_str().to_owned(),
+            mount_as:        mount_as.to_owned(),
+            addr,
+            stats:           ProxyStatsHandle::Gcp(stats_handle),
+            join,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_azure(
+        &self,
+        session_id:    &str,
+        task_id:       &str,
+        name:          &raxis_credentials::CredentialName,
+        mount_as:      &str,
+        tenant_id:     &str,
+        client_id:     Option<&str>,
+        lease_seconds: u64,
+        restrictions:  &AzureRestrictions,
+    ) -> Result<ActiveProxy, ManagerError> {
+        let cfg = AzureProxyConfig {
+            listen_addr:     "127.0.0.1:0".to_owned(),
+            credential_name: name.clone(),
+            consumer:        AzureOwnedConsumer::new(
+                "session",
+                session_id.to_owned(),
+            ),
+            lease_seconds,
+            tenant_id:       tenant_id.to_owned(),
+            client_id:       client_id.map(|s| s.to_owned()),
+            restrictions:    AzureProxyRestrictions {
+                allowed_resources: restrictions.allowed_resources.clone(),
+            },
+        };
+        let audit_channel: Arc<dyn AzureAuditChannel> = Arc::new(AzureKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = AzureProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
+            .await
+            .map_err(|source| ManagerError::AzureBind {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
+        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let stats_handle = proxy.stats_handle();
+        let join = tokio::spawn(async move {
+            proxy.serve().await;
+        });
+        Ok(ActiveProxy {
+            proxy_type:      "azure",
+            credential_name: name.as_str().to_owned(),
+            mount_as:        mount_as.to_owned(),
+            addr,
+            stats:           ProxyStatsHandle::Azure(stats_handle),
             join,
         })
     }

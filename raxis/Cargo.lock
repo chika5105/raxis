@@ -2896,6 +2896,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-credential-proxy-azure"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "httparse",
+ "raxis-credentials",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "raxis-credential-proxy-gcp"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "httparse",
+ "raxis-credentials",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "raxis-credential-proxy-http"
 version = "0.1.0"
 dependencies = [
@@ -2920,6 +2954,8 @@ dependencies = [
  "hex",
  "raxis-audit-tools",
  "raxis-credential-proxy-aws",
+ "raxis-credential-proxy-azure",
+ "raxis-credential-proxy-gcp",
  "raxis-credential-proxy-http",
  "raxis-credential-proxy-postgres",
  "raxis-credential-proxy-redis",

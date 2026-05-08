@@ -1615,7 +1615,7 @@ CREATE TABLE IF NOT EXISTS {task_credential_proxies} (
     credential_name      TEXT    NOT NULL,
     mount_as             TEXT    NOT NULL,
     proxy_type           TEXT    NOT NULL
-        CHECK (proxy_type IN ('postgres', 'http', 'k8s', 'smtp', 'redis', 'aws')),
+        CHECK (proxy_type IN ('postgres', 'http', 'k8s', 'smtp', 'redis', 'aws', 'gcp', 'azure')),
     proxy_json           TEXT    NOT NULL,
     created_at_unix_secs INTEGER NOT NULL,
     PRIMARY KEY (task_id, credential_name)
@@ -3951,7 +3951,7 @@ mod tests {
             Table::TaskCredentialProxies.as_str(),
         );
 
-        for (idx, ok) in ["postgres", "http", "k8s", "smtp", "redis", "aws"].iter().enumerate() {
+        for (idx, ok) in ["postgres", "http", "k8s", "smtp", "redis", "aws", "gcp", "azure"].iter().enumerate() {
             let r = conn.execute(
                 &ins_sql,
                 rusqlite::params![
