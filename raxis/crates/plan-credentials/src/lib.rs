@@ -94,6 +94,30 @@ pub enum ProxyDecl {
         #[serde(default)]
         restrictions: HttpRestrictions,
     },
+    /// `proxy_type = "smtp"` — see `credential-proxy.md §3` ("SMTP
+    /// relay"). The proxy injects the relay's username + password
+    /// (resolved through `CredentialBackend`) and forwards the
+    /// envelope to a single pinned upstream `host:port`. The agent
+    /// inside the VM dials a localhost SMTP-shaped socket; envelope
+    /// sender, recipient domains, and message size / rate are gated
+    /// by `[tasks.credentials.restrictions]`.
+    Smtp {
+        /// Authentication mode for upstream injection (`AUTH PLAIN`
+        /// or `AUTH LOGIN`).
+        #[serde(default = "default_smtp_auth_mode")]
+        auth_mode: SmtpAuthMode,
+        /// Single pinned upstream relay `host:port` (no scheme).
+        upstream_host_port: String,
+        /// Whether the proxy MUST establish an outbound TLS session
+        /// to the upstream relay before issuing AUTH (V2 deferred —
+        /// the wire driver currently uses cleartext upstream and
+        /// surfaces a startup warning when `true`).
+        #[serde(default)]
+        require_upstream_tls: bool,
+        /// Restrictions clause (`[tasks.credentials.restrictions]`).
+        #[serde(default)]
+        restrictions: SmtpRestrictions,
+    },
     /// Catch-all for proxy types declared in policy but not yet
     /// implemented. The parser preserves the literal `proxy_type`
     /// string so the validator can map it to a clear "not
@@ -103,6 +127,10 @@ pub enum ProxyDecl {
 }
 
 fn default_http_auth_mode() -> HttpAuthMode { HttpAuthMode::Bearer }
+
+fn default_smtp_auth_mode() -> SmtpAuthMode {
+    SmtpAuthMode::Plain { user: String::new() }
+}
 
 /// HTTP-proxy authentication mode (mirrors
 /// `raxis_credential_proxy_http::AuthMode`).
@@ -114,6 +142,33 @@ pub enum HttpAuthMode {
     /// `Authorization: Basic base64(<user>:<value>)`.
     Basic {
         /// Username placed before the colon.
+        user: String,
+    },
+}
+
+/// SMTP-proxy authentication mode (mirrors
+/// `raxis_credential_proxy_smtp::AuthMode`).
+///
+/// `Plain` is the default operator choice — RFC 4954 `AUTH PLAIN`
+/// accepts the username and password in a single base64-encoded
+/// `\\0user\\0password` payload, which is the simplest shape for
+/// well-behaved relays. `Login` is provided for relays whose ACL
+/// rejects `AUTH PLAIN` outright; behaviourally equivalent on the
+/// kernel side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum SmtpAuthMode {
+    /// `AUTH PLAIN` — single-shot base64 user/password payload.
+    Plain {
+        /// Username placed before the credential value.
+        #[serde(default)]
+        user: String,
+    },
+    /// `AUTH LOGIN` — base64 username followed by a separate
+    /// base64 password line.
+    Login {
+        /// Username placed in the first AUTH LOGIN line.
+        #[serde(default)]
         user: String,
     },
 }
@@ -140,6 +195,36 @@ pub struct HttpRestrictions {
     /// Path prefixes the proxy will forward. Empty = unrestricted.
     #[serde(default)]
     pub allowed_path_prefixes: Vec<String>,
+}
+
+/// SMTP restrictions
+/// (`[tasks.credentials.restrictions]` for `proxy_type = "smtp"`).
+///
+/// Mirrors `raxis_credential_proxy_smtp::Restrictions`. Empty values
+/// (or `None` on the optional fields) mean unrestricted on that
+/// axis; production deployments SHOULD pin every field that makes
+/// sense for the upstream relay.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmtpRestrictions {
+    /// Single allowed `MAIL FROM:` envelope sender address. When
+    /// `None`, the sender address is unrestricted.
+    #[serde(default)]
+    pub allowed_sender_address: Option<String>,
+    /// Allowlisted recipient domains (compared case-insensitively
+    /// against the part after `@`). Empty = unrestricted.
+    #[serde(default)]
+    pub allowed_recipient_domains: Vec<String>,
+    /// Cap on `RCPT TO` count per envelope. `None` = uncapped.
+    #[serde(default)]
+    pub max_recipients_per_message: Option<u32>,
+    /// Cap on the DATA-stage message body in bytes. `None` =
+    /// uncapped.
+    #[serde(default)]
+    pub max_message_bytes: Option<u64>,
+    /// Rolling rate cap (messages successfully forwarded per
+    /// 60-second window). `None` = unrestricted.
+    #[serde(default)]
+    pub max_messages_per_minute: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -408,6 +493,93 @@ mod tests {
                 assert_eq!(restrictions.allowed_methods, vec!["GET".to_owned()]);
             }
             other => panic!("expected K8s, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_smtp_decl_with_default_auth_mode_and_no_restrictions() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name               = "smtp-relay-staging"
+              proxy_type         = "smtp"
+              mount_as           = "SMTP_URL"
+              upstream_host_port = "smtp.example.com:587"
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Smtp {
+                auth_mode,
+                upstream_host_port,
+                require_upstream_tls,
+                restrictions,
+            } => {
+                match auth_mode {
+                    SmtpAuthMode::Plain { user } => assert_eq!(user, ""),
+                    other => panic!("expected default Plain auth, got {other:?}"),
+                }
+                assert_eq!(upstream_host_port, "smtp.example.com:587");
+                assert!(!require_upstream_tls);
+                assert_eq!(restrictions, &SmtpRestrictions::default());
+            }
+            other => panic!("expected Smtp, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_smtp_decl_with_full_restrictions_and_login_auth() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name                 = "smtp-prod"
+              proxy_type           = "smtp"
+              mount_as             = "SMTP_URL"
+              upstream_host_port   = "mail.example.com:25"
+              require_upstream_tls = true
+
+                [tasks.credentials.auth_mode]
+                kind = "login"
+                user = "smtp-user"
+
+                [tasks.credentials.restrictions]
+                allowed_sender_address     = "noreply@example.com"
+                allowed_recipient_domains  = ["customers.example.com", "ops.example.com"]
+                max_recipients_per_message = 50
+                max_message_bytes          = 1048576
+                max_messages_per_minute    = 30
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Smtp {
+                auth_mode,
+                upstream_host_port,
+                require_upstream_tls,
+                restrictions,
+            } => {
+                match auth_mode {
+                    SmtpAuthMode::Login { user } => assert_eq!(user, "smtp-user"),
+                    other => panic!("expected Login auth, got {other:?}"),
+                }
+                assert_eq!(upstream_host_port, "mail.example.com:25");
+                assert!(*require_upstream_tls);
+                assert_eq!(restrictions.allowed_sender_address.as_deref(),
+                    Some("noreply@example.com"));
+                assert_eq!(
+                    restrictions.allowed_recipient_domains,
+                    vec![
+                        "customers.example.com".to_owned(),
+                        "ops.example.com".to_owned(),
+                    ],
+                );
+                assert_eq!(restrictions.max_recipients_per_message, Some(50));
+                assert_eq!(restrictions.max_message_bytes, Some(1_048_576));
+                assert_eq!(restrictions.max_messages_per_minute, Some(30));
+            }
+            other => panic!("expected Smtp, got {other:?}"),
         }
     }
 

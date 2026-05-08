@@ -23,6 +23,7 @@ raxis-plan-credentials = { path = "../plan-credentials" }
 # Concrete proxy crates the manager binds.
 raxis-credential-proxy-postgres = { path = "../credential-proxy-postgres" }
 raxis-credential-proxy-http     = { path = "../credential-proxy-http" }
+raxis-credential-proxy-smtp     = { path = "../credential-proxy-smtp" }
 
 [dev-dependencies]
 raxis-credentials-file = { workspace = true }

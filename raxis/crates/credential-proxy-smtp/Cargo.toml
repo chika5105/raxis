@@ -1,0 +1,28 @@
+[package]
+name        = "raxis-credential-proxy-smtp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RAXIS V2 — SMTP credential proxy. Per credential-proxy.md §3 ('SMTP relay'): the kernel binds the upstream SMTP relay's username + password through the CredentialBackend; the agent VM sees a localhost SMTP-shaped socket whose envelope (MAIL FROM, RCPT TO) is gated by [tasks.credentials.restrictions]."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raxis-credentials = { workspace = true }
+
+tokio    = { workspace = true }
+serde    = { workspace = true }
+sha2     = { workspace = true }
+hex      = { workspace = true }
+thiserror = { workspace = true }
+tracing   = "0.1"
+# Base64 codec for `AUTH PLAIN` / `AUTH LOGIN` envelope. `0.21` is
+# the long-stable line; pinning here matches the rest of the
+# workspace's "minimal exposed API" stance for crypto-adjacent
+# encodings.
+base64    = "0.21"
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

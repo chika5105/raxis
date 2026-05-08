@@ -13,11 +13,12 @@
 //!   [`CredentialProxyManager::start_for_session`] with the parsed
 //!   [`raxis_plan_credentials::TaskCredentialDecl`] vector for the
 //!   session's task. Each declaration is materialised into a real
-//!   bound proxy listener (Postgres or HTTP — k8s rides the HTTP
-//!   path with a fixed `bearer` `auth_mode`). The returned
-//!   [`SessionProxyHandles`] carries the handles back to the caller.
-//!   Per spec the kernel emits a `CredentialProxyStarted` audit event
-//!   per bound proxy from inside `start_for_session`.
+//!   bound proxy listener (Postgres, HTTP, k8s — which rides the
+//!   HTTP path with a fixed `bearer` `auth_mode` — or SMTP). The
+//!   returned [`SessionProxyHandles`] carries the handles back to
+//!   the caller. Per spec the kernel emits a
+//!   `CredentialProxyStarted` audit event per bound proxy from
+//!   inside `start_for_session`.
 //! - At session teardown the kernel calls
 //!   [`SessionProxyHandles::shutdown`]. The manager aborts the
 //!   listeners, snapshots their stat counters, and emits one
@@ -26,11 +27,13 @@
 //!
 //! ## Why a kernel-side wrapper instead of inlining
 //!
-//! - Each proxy crate (`raxis-credential-proxy-postgres` and
-//!   `raxis-credential-proxy-http`) is intentionally domain-agnostic
-//!   — they have no dependency on `raxis-audit-tools` and no
-//!   knowledge of `AuditEventKind::CredentialProxyStarted`. Owning
-//!   the kernel-shaped audit semantics (event kinds + stat-snapshot
+//! - Each proxy crate (`raxis-credential-proxy-postgres`,
+//!   `raxis-credential-proxy-http`, and
+//!   `raxis-credential-proxy-smtp`) is intentionally
+//!   domain-agnostic — they have no dependency on
+//!   `raxis-audit-tools` and no knowledge of
+//!   `AuditEventKind::CredentialProxyStarted`. Owning the
+//!   kernel-shaped audit semantics (event kinds + stat-snapshot
 //!   translation) at this layer keeps that abstraction crisp.
 //! - The kernel needs a single typed handle (`SessionProxyHandles`)
 //!   that aborts every listener for a session in a single place. We
@@ -82,7 +85,8 @@ use std::sync::Arc;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credentials::CredentialBackend;
 use raxis_plan_credentials::{
-    HttpAuthMode, HttpRestrictions, PostgresRestrictions, ProxyDecl, TaskCredentialDecl,
+    HttpAuthMode, HttpRestrictions, PostgresRestrictions, ProxyDecl, SmtpAuthMode,
+    SmtpRestrictions, TaskCredentialDecl,
 };
 
 use raxis_credential_proxy_http::{
@@ -94,6 +98,11 @@ use raxis_credential_proxy_postgres::{
     OwnedConsumer as PgOwnedConsumer, PostgresProxy, ProxyConfig as PgProxyConfig,
     ProxyError as PgProxyError, ProxyStats as PgProxyStats,
     Restrictions as PgProxyRestrictions,
+};
+use raxis_credential_proxy_smtp::{
+    AuthMode as SmtpAuthModeImpl, NoopEnvelopeAuditSink, OwnedConsumer as SmtpOwnedConsumer,
+    ProxyConfig as SmtpProxyConfig, ProxyError as SmtpProxyError, ProxyStats as SmtpProxyStats,
+    Restrictions as SmtpProxyRestrictions, SmtpProxy,
 };
 
 /// Errors surfaced by the manager.
@@ -141,6 +150,16 @@ pub enum ManagerError {
         source: HttpProxyError,
     },
 
+    /// SMTP proxy failed to bind / start.
+    #[error("smtp proxy bind failed for `{credential_name}`: {source}")]
+    SmtpBind {
+        /// Credential name whose proxy bind failed.
+        credential_name: String,
+        /// Source error from the smtp-proxy crate.
+        #[source]
+        source: SmtpProxyError,
+    },
+
     /// `local_addr()` on a freshly-bound listener failed (very rare;
     /// signals a race against listener shutdown, or that the OS lost
     /// our binding mid-construction).
@@ -167,6 +186,7 @@ fn proxy_type_str(decl: &ProxyDecl) -> &'static str {
         ProxyDecl::Postgres { .. } => "postgres",
         ProxyDecl::Http { .. } => "http",
         ProxyDecl::K8s { .. } => "k8s",
+        ProxyDecl::Smtp { .. } => "smtp",
         ProxyDecl::Unknown => "unknown",
     }
 }
@@ -176,8 +196,9 @@ fn proxy_type_str(decl: &ProxyDecl) -> &'static str {
 /// can abort the listener cleanly. The address is the loopback
 /// address the agent VM will dial.
 struct ActiveProxy {
-    /// Free-form proxy_type label ("postgres" / "http" / "k8s") —
-    /// reused in the matching `CredentialProxyStopped` event.
+    /// Free-form proxy_type label ("postgres" / "http" / "k8s" /
+    /// "smtp") — reused in the matching `CredentialProxyStopped`
+    /// event.
     proxy_type: &'static str,
     /// Policy-declared credential name (never the value).
     credential_name: String,
@@ -199,6 +220,7 @@ struct ActiveProxy {
 enum ProxyStatsHandle {
     Postgres(Arc<PgProxyStats>),
     Http(Arc<HttpProxyStats>),
+    Smtp(Arc<SmtpProxyStats>),
 }
 
 impl ProxyStatsHandle {
@@ -218,6 +240,14 @@ impl ProxyStatsHandle {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.requests_forwarded,
                     forwards_blocked:   snap.requests_blocked,
+                }
+            }
+            ProxyStatsHandle::Smtp(s) => {
+                let snap = s.snapshot();
+                StoppedCounters {
+                    connections_served: snap.connections_served,
+                    forwards_completed: snap.messages_relayed,
+                    forwards_blocked:   snap.messages_rejected,
                 }
             }
         }
@@ -242,7 +272,7 @@ pub struct StoppedCounters {
 /// into the VM's environment.
 #[derive(Debug, Clone)]
 pub struct StartedProxy {
-    /// `proxy_type` string — `postgres` / `http` / `k8s`.
+    /// `proxy_type` string — `postgres` / `http` / `k8s` / `smtp`.
     pub proxy_type: &'static str,
     /// Policy-declared credential name (never the value).
     pub credential_name: String,
@@ -258,7 +288,7 @@ pub struct StartedProxy {
 /// log/observe the final counters.
 #[derive(Debug, Clone)]
 pub struct StoppedProxy {
-    /// `proxy_type` string — `postgres` / `http` / `k8s`.
+    /// `proxy_type` string — `postgres` / `http` / `k8s` / `smtp`.
     pub proxy_type: &'static str,
     /// Policy-declared credential name (never the value).
     pub credential_name: String,
@@ -329,6 +359,12 @@ impl SessionProxyHandles {
                     "postgresql://raxis@{}/",
                     p.addr,
                 ),
+                // SMTP proxies are dialed as a host:port pair (no
+                // scheme). Common SMTP client libraries expect a
+                // bare `host:port`; surface that exactly so the
+                // injected env var (e.g. `SMTP_URL` or `SMTP_HOST`)
+                // is plug-compatible.
+                "smtp" => p.addr.to_string(),
                 _ => format!("http://{}", p.addr),
             };
             out.insert(p.mount_as.clone(), url);
@@ -494,6 +530,24 @@ impl CredentialProxyManager {
                     active.proxy_type = "k8s";
                     active
                 }
+                ProxyDecl::Smtp {
+                    auth_mode,
+                    upstream_host_port,
+                    require_upstream_tls,
+                    restrictions,
+                } => {
+                    self.bind_smtp(
+                        session_id,
+                        task_id,
+                        &decl.name,
+                        &decl.mount_as,
+                        auth_mode,
+                        upstream_host_port,
+                        *require_upstream_tls,
+                        restrictions,
+                    )
+                    .await?
+                }
                 ProxyDecl::Unknown => {
                     return Err(ManagerError::UnknownProxyType {
                         credential_name,
@@ -657,6 +711,78 @@ impl CredentialProxyManager {
             mount_as:        mount_as.to_owned(),
             addr,
             stats:           ProxyStatsHandle::Http(stats_handle),
+            join,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_smtp(
+        &self,
+        session_id:           &str,
+        _task_id:             &str,
+        name:                 &raxis_credentials::CredentialName,
+        mount_as:             &str,
+        auth_mode:            &SmtpAuthMode,
+        upstream_host_port:   &str,
+        require_upstream_tls: bool,
+        restrictions:         &SmtpRestrictions,
+    ) -> Result<ActiveProxy, ManagerError> {
+        if require_upstream_tls {
+            // V2 deferred — the wire driver currently uses
+            // cleartext upstream. Surface a structured warning so
+            // operators know their `require_upstream_tls = true`
+            // declaration is policy-pinned but not yet enforced.
+            tracing::warn!(
+                target: "raxis::credential_proxy::manager",
+                credential_name = %name.as_str(),
+                "smtp proxy declared `require_upstream_tls = true` but tokio-rustls upstream is deferred (cleartext upstream is used until that lands)",
+            );
+        }
+        let cfg = SmtpProxyConfig {
+            listen_addr:           "127.0.0.1:0".to_owned(),
+            upstream_host_port:    upstream_host_port.to_owned(),
+            require_upstream_tls,
+            credential_name:       name.clone(),
+            auth_mode: match auth_mode {
+                SmtpAuthMode::Plain { user } => SmtpAuthModeImpl::Plain { user: user.clone() },
+                SmtpAuthMode::Login { user } => SmtpAuthModeImpl::Login { user: user.clone() },
+            },
+            consumer:              SmtpOwnedConsumer::new(
+                "session",
+                session_id.to_owned(),
+            ),
+            restrictions: SmtpProxyRestrictions {
+                allowed_sender_address:     restrictions.allowed_sender_address.clone(),
+                allowed_recipient_domains:  restrictions.allowed_recipient_domains.clone(),
+                max_recipients_per_message: restrictions.max_recipients_per_message,
+                max_message_bytes:          restrictions.max_message_bytes,
+                max_messages_per_minute:    restrictions.max_messages_per_minute,
+            },
+        };
+        let proxy = SmtpProxy::bind(
+            Arc::clone(&self.backend),
+            cfg,
+            Arc::new(NoopEnvelopeAuditSink),
+        )
+        .await
+        .map_err(|source| ManagerError::SmtpBind {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let stats_handle = proxy.stats_handle();
+        let join = tokio::spawn(async move {
+            proxy.serve().await;
+        });
+        Ok(ActiveProxy {
+            proxy_type:      "smtp",
+            credential_name: name.as_str().to_owned(),
+            mount_as:        mount_as.to_owned(),
+            addr,
+            stats:           ProxyStatsHandle::Smtp(stats_handle),
             join,
         })
     }
@@ -944,6 +1070,76 @@ users:
         let report = handles.shutdown().expect("shutdown");
         assert_eq!(report.stopped.len(), 1);
         assert_eq!(report.stopped[0].proxy_type, "http");
+    }
+
+    #[tokio::test]
+    async fn start_then_shutdown_emits_paired_audit_events_for_smtp() {
+        let (mgr, audit, tmp) = build_manager();
+        // Provision an SMTP credential body. The wire driver only
+        // resolves it lazily when a real envelope is forwarded; the
+        // bind itself does not need the credential present, but
+        // `FileCredentialBackend::exists` is invoked elsewhere so we
+        // give it a real file.
+        write_cred_file(
+            &tmp.path().join("credentials"),
+            "smtp-staging.env",
+            b"plaintext-smtp-password",
+        );
+
+        let decls = vec![TaskCredentialDecl {
+            name:     CredentialName::new("smtp-staging"),
+            mount_as: "SMTP_URL".to_owned(),
+            proxy:    ProxyDecl::Smtp {
+                auth_mode:            SmtpAuthMode::Plain { user: "smtp-user".to_owned() },
+                upstream_host_port:   "127.0.0.1:1".to_owned(),
+                require_upstream_tls: false,
+                restrictions:         SmtpRestrictions {
+                    allowed_sender_address: Some("noreply@example.com".to_owned()),
+                    allowed_recipient_domains: vec!["customers.example.com".to_owned()],
+                    max_recipients_per_message: Some(10),
+                    max_message_bytes: Some(64 * 1024),
+                    max_messages_per_minute: Some(60),
+                },
+            },
+        }];
+
+        let handles = mgr
+            .start_for_session("sess-smtp", "task-smtp", &decls)
+            .await
+            .expect("smtp bind should succeed");
+        assert_eq!(handles.len(), 1);
+        let summaries = handles.started_summaries();
+        assert_eq!(summaries[0].proxy_type, "smtp");
+        assert_eq!(summaries[0].mount_as, "SMTP_URL");
+
+        // SMTP loopback URL is a bare `host:port` (no scheme).
+        let env = handles.loopback_env();
+        let smtp_url = env.get("SMTP_URL").expect("env var present");
+        assert!(
+            smtp_url.starts_with("127.0.0.1:"),
+            "expected loopback host:port for smtp, got {smtp_url:?}",
+        );
+        assert!(
+            !smtp_url.contains("://"),
+            "smtp loopback must not embed a scheme, got {smtp_url:?}",
+        );
+
+        let started_events: Vec<_> = audit.events()
+            .into_iter()
+            .filter(|e| e.kind.as_str() == "CredentialProxyStarted")
+            .collect();
+        assert_eq!(started_events.len(), 1);
+        assert_eq!(started_events[0].session_id.as_deref(), Some("sess-smtp"));
+
+        let report = handles.shutdown().expect("smtp shutdown");
+        assert_eq!(report.stopped.len(), 1);
+        assert_eq!(report.stopped[0].proxy_type, "smtp");
+
+        let stopped_events: Vec<_> = audit.events()
+            .into_iter()
+            .filter(|e| e.kind.as_str() == "CredentialProxyStopped")
+            .collect();
+        assert_eq!(stopped_events.len(), 1);
     }
 
     #[tokio::test]

@@ -18,6 +18,7 @@ members = [
     "crates/raxis-credentials-file",
     "crates/credential-proxy-postgres",
     "crates/credential-proxy-http",
+    "crates/credential-proxy-smtp",
     "crates/credential-proxy-manager",
     "crates/plan-credentials",
     "crates/tproxy-protocol",

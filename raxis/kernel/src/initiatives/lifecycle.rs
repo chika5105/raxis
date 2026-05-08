@@ -2046,8 +2046,8 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
                         "task `{}` declares credential `{}` with a \
                          `proxy_type` this kernel build does not \
                          implement. Valid values in V2: \
-                         `postgres`, `http`, `k8s`. Drop the \
-                         credential block or upgrade the kernel \
+                         `postgres`, `http`, `k8s`, `smtp`. Drop \
+                         the credential block or upgrade the kernel \
                          build to one that ships the matching \
                          proxy.",
                         pt.task_id,
@@ -2076,6 +2076,7 @@ fn proxy_type_label_for_storage(
         ProxyDecl::Postgres { .. } => "postgres",
         ProxyDecl::Http { .. }     => "http",
         ProxyDecl::K8s { .. }      => "k8s",
+        ProxyDecl::Smtp { .. }     => "smtp",
         ProxyDecl::Unknown => {
             return Err(LifecycleError::Store(
                 raxis_store::StoreError::Invariant(
@@ -3391,6 +3392,26 @@ predecessors = ["build-svc"]
 
     [tasks.credentials.restrictions]
     allowed_methods = ["GET", "POST"]
+
+[[tasks]]
+task_id = "send-receipts"
+predecessors = ["test-it"]
+
+  [[tasks.credentials]]
+  name               = "smtp-relay"
+  mount_as           = "SMTP_URL"
+  proxy_type         = "smtp"
+  upstream_host_port = "smtp.example.com:587"
+
+    [tasks.credentials.auth_mode]
+    kind = "plain"
+    user = "smtp-user"
+
+    [tasks.credentials.restrictions]
+    allowed_sender_address     = "noreply@example.com"
+    allowed_recipient_domains  = ["customers.example.com"]
+    max_recipients_per_message = 10
+    max_message_bytes          = 65536
 "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -3581,6 +3602,12 @@ predecessors = ["build-svc"]
     fn approve_plan_rejects_unknown_proxy_type_in_tasks_credentials() {
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
+        // V2 ships `postgres`, `http`, `k8s`, `smtp`. Any other
+        // `proxy_type` MUST land in `ProxyDecl::Unknown` and be
+        // rejected shift-left by `validate_task_credentials`. Pin
+        // a forward-looking name (`mongodb-future-spec`) so the
+        // test keeps tracking the unknown-arm policy as new
+        // proxies are added.
         let plan = r#"
 [workspace]
 lane_id = "default"
@@ -3589,9 +3616,9 @@ lane_id = "default"
 task_id = "send-email"
 
   [[tasks.credentials]]
-  name       = "smtp-relay"
-  mount_as   = "SMTP_URL"
-  proxy_type = "smtp"
+  name       = "future-uri"
+  mount_as   = "FUTURE_URL"
+  proxy_type = "mongodb-future-spec"
 "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -3607,11 +3634,12 @@ task_id = "send-email"
             } => {
                 assert_eq!(rule, "unknown_proxy_type");
                 assert_eq!(offending_task, "send-email");
-                assert_eq!(offending_credential, "smtp-relay");
+                assert_eq!(offending_credential, "future-uri");
                 assert!(
                     suggestion.contains("postgres") &&
                     suggestion.contains("http") &&
-                    suggestion.contains("k8s"),
+                    suggestion.contains("k8s") &&
+                    suggestion.contains("smtp"),
                     "diagnostic should enumerate the V2 implemented set, got: {suggestion}",
                 );
             }
