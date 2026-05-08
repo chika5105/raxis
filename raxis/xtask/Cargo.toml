@@ -12,5 +12,6 @@ publish     = false
 
 [dependencies]
 anyhow    = { workspace = true }
+toml      = { workspace = true }
 walkdir   = "2"
 regex     = "1"
