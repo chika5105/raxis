@@ -1,6 +1,8 @@
 //! `raxis-canonical-images` build script — emits the kernel-pinned
-//! trust anchor [`EXPECTED_KERNEL_SIGNING_KEY_BYTES`] as a generated
-//! Rust file under `OUT_DIR`.
+//! trust anchor [`EXPECTED_KERNEL_SIGNING_KEY_BYTES`] **and** the
+//! V1-fallback per-role image digests
+//! ([`EXPECTED_REVIEWER_IMAGE_DIGEST`] / [`EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`])
+//! as a generated Rust file under `OUT_DIR`.
 //!
 //! ## Why a build script
 //!
@@ -53,6 +55,34 @@
 //! constant emission. The build script is single-file, single-
 //! purpose, and visible at the same level as the constant it
 //! generates.
+//!
+//! ## V1-fallback per-role image digests
+//!
+//! The V2 boot path uses the manifest-trust model and does NOT
+//! consult the per-role digest constants. They remain on the public
+//! API of `raxis-canonical-images` for two reasons:
+//!
+//! * `verify_canonical_image_pinned` — out-of-band tools
+//!   (`raxis doctor`, ad-hoc image audits) want a single self-
+//!   contained "does this `.img` byte-equal the kernel's expected
+//!   digest" check that does not require loading a manifest.
+//! * `CanonicalImageKind::expected_digest` — audit-event payloads
+//!   carry the V1 digest as a stable identifier even when the V2
+//!   manifest path is the one actually enforcing.
+//!
+//! The build script therefore emits **two extra optional**
+//! per-role digest constants alongside the trust anchor:
+//!
+//! * `RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX`     — 64 lowercase
+//!   hex chars committing to the Reviewer image's SHA-256.
+//! * `RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX` — 64 lowercase
+//!   hex chars committing to the Orchestrator image's SHA-256.
+//!
+//! Each defaults to the all-zero placeholder when its env var is
+//! absent. The kernel V2 boot path is unaffected by either default
+//! (the manifest path is the source of truth); the `verify_canonical_image_pinned`
+//! callers see `DigestNotPopulated` exactly when these values are
+//! unset, matching the existing V1 contract.
 
 use std::env;
 use std::fs;
@@ -60,24 +90,34 @@ use std::path::PathBuf;
 
 const TRUST_ANCHOR_HEX_VAR:    &str = "RAXIS_KERNEL_SIGNING_KEY_HEX";
 const TRUST_ANCHOR_PATH_VAR:   &str = "RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH";
+const REVIEWER_DIGEST_HEX_VAR:     &str = "RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX";
+const ORCHESTRATOR_DIGEST_HEX_VAR: &str = "RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX";
 const TRUST_ANCHOR_LEN_BYTES:  usize = 32;
 const TRUST_ANCHOR_LEN_HEX:    usize = TRUST_ANCHOR_LEN_BYTES * 2;
 const TRUST_ANCHOR_OUT_FILE:   &str = "trust_anchor.rs";
 
 fn main() {
-    // Re-run the build script when either input variable changes.
+    // Re-run the build script when any input variable changes.
     // Without this, `cargo` will cache the previous output even after
-    // the operator has populated the env var.
+    // the operator has populated an env var.
     println!("cargo:rerun-if-env-changed={TRUST_ANCHOR_HEX_VAR}");
     println!("cargo:rerun-if-env-changed={TRUST_ANCHOR_PATH_VAR}");
+    println!("cargo:rerun-if-env-changed={REVIEWER_DIGEST_HEX_VAR}");
+    println!("cargo:rerun-if-env-changed={ORCHESTRATOR_DIGEST_HEX_VAR}");
     println!("cargo:rerun-if-changed=build.rs");
 
-    let bytes = resolve_trust_anchor_bytes();
+    let trust_anchor          = resolve_trust_anchor_bytes();
+    let reviewer_digest       = resolve_role_digest(REVIEWER_DIGEST_HEX_VAR);
+    let orchestrator_digest   = resolve_role_digest(ORCHESTRATOR_DIGEST_HEX_VAR);
+
     let out_dir = env::var_os("OUT_DIR")
         .expect("cargo always sets OUT_DIR for build scripts");
     let dest    = PathBuf::from(out_dir).join(TRUST_ANCHOR_OUT_FILE);
-    fs::write(&dest, render_anchor_module(&bytes))
-        .expect("write generated trust_anchor.rs");
+    fs::write(
+        &dest,
+        render_anchor_module(&trust_anchor, &reviewer_digest, &orchestrator_digest),
+    )
+    .expect("write generated trust_anchor.rs");
 
     // Re-run if the on-disk key file is touched. We only register
     // this when the path variable is set; otherwise rerun-if-changed
@@ -119,6 +159,24 @@ fn resolve_trust_anchor_bytes() -> [u8; TRUST_ANCHOR_LEN_BYTES] {
     // explains how this is detected at runtime
     // (`SigningKeyFpNotPopulated`); developer builds rely on this.
     [0u8; TRUST_ANCHOR_LEN_BYTES]
+}
+
+/// Resolve a per-role image-digest env var. Hex-only input (the raw-
+/// file form is reserved for the trust anchor where HSM-backed
+/// pipelines need it; per-role digests are SHA-256s and always
+/// round-trip cleanly through hex). Returns the all-zero placeholder
+/// when unset; panics on a mistyped non-empty value.
+fn resolve_role_digest(env_var: &str) -> [u8; TRUST_ANCHOR_LEN_BYTES] {
+    let raw = match env::var(env_var) {
+        Ok(s)  => s,
+        Err(_) => return [0u8; TRUST_ANCHOR_LEN_BYTES],
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return [0u8; TRUST_ANCHOR_LEN_BYTES];
+    }
+    decode_hex(trimmed)
+        .unwrap_or_else(|e| panic!("{env_var}: {e}"))
 }
 
 fn decode_hex(input: &str) -> Result<[u8; TRUST_ANCHOR_LEN_BYTES], String> {
@@ -163,17 +221,34 @@ fn read_raw_bytes(path: &str) -> Result<[u8; TRUST_ANCHOR_LEN_BYTES], String> {
     Ok(out)
 }
 
-fn render_anchor_module(bytes: &[u8; TRUST_ANCHOR_LEN_BYTES]) -> String {
-    let mut s = String::with_capacity(2048);
+fn render_anchor_module(
+    trust_anchor:        &[u8; TRUST_ANCHOR_LEN_BYTES],
+    reviewer_digest:     &[u8; TRUST_ANCHOR_LEN_BYTES],
+    orchestrator_digest: &[u8; TRUST_ANCHOR_LEN_BYTES],
+) -> String {
+    let mut s = String::with_capacity(4096);
     s.push_str(
         "// AUTO-GENERATED by raxis-canonical-images/build.rs.\n\
-         // DO NOT EDIT — set RAXIS_KERNEL_SIGNING_KEY_HEX or\n\
-         // RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH before `cargo build`.\n\
-         // The generated constant is consumed by lib.rs at\n\
-         // `EXPECTED_KERNEL_SIGNING_KEY_BYTES`.\n\
-         pub(crate) const GENERATED_KERNEL_SIGNING_KEY_BYTES: \
-         [u8; 32] = [",
+         // DO NOT EDIT — set the relevant env var(s) before `cargo build`:\n\
+         //   RAXIS_KERNEL_SIGNING_KEY_HEX                   (trust anchor)\n\
+         //   RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH            (trust anchor, alt)\n\
+         //   RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX       (V1 fallback)\n\
+         //   RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX   (V1 fallback)\n\
+         // The generated constants are consumed by lib.rs at\n\
+         // `EXPECTED_KERNEL_SIGNING_KEY_BYTES`,\n\
+         // `EXPECTED_REVIEWER_IMAGE_DIGEST`, and\n\
+         // `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`.\n",
     );
+    push_byte_array(&mut s, "GENERATED_KERNEL_SIGNING_KEY_BYTES",   trust_anchor);
+    push_byte_array(&mut s, "GENERATED_REVIEWER_IMAGE_DIGEST",      reviewer_digest);
+    push_byte_array(&mut s, "GENERATED_ORCHESTRATOR_IMAGE_DIGEST",  orchestrator_digest);
+    s
+}
+
+fn push_byte_array(s: &mut String, name: &str, bytes: &[u8; TRUST_ANCHOR_LEN_BYTES]) {
+    s.push_str("pub(crate) const ");
+    s.push_str(name);
+    s.push_str(": [u8; 32] = [");
     for (i, b) in bytes.iter().enumerate() {
         if i > 0 {
             s.push_str(", ");
@@ -181,5 +256,4 @@ fn render_anchor_module(bytes: &[u8; TRUST_ANCHOR_LEN_BYTES]) -> String {
         s.push_str(&format!("0x{:02x}", b));
     }
     s.push_str("];\n");
-    s
 }

@@ -166,20 +166,39 @@ pub const UNPOPULATED_DIGEST: [u8; DIGEST_LEN] = [0u8; DIGEST_LEN];
 /// SHA-256 of the kernel-bundled `raxis-reviewer-core-<kernel_version>.img`
 /// for callers using the V1 compile-time-pinned verification path.
 ///
-/// **Currently unpopulated.** The V2 boot path uses the manifest-trust
-/// model in [`verify_canonical_image_via_manifest`] and does NOT read
-/// this constant. Out-of-band diagnostic tooling that wants a single
-/// self-contained digest check still has access to it via
-/// [`verify_canonical_image_pinned`].
-pub const EXPECTED_REVIEWER_IMAGE_DIGEST: [u8; DIGEST_LEN] = UNPOPULATED_DIGEST;
+/// **Build-pipeline driven.** Populated by `build.rs` from
+/// `RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX` (64 lowercase hex
+/// chars). Defaults to the all-zero placeholder
+/// ([`UNPOPULATED_DIGEST`]) when the env var is unset, in which case
+/// [`verify_canonical_image_pinned`] surfaces
+/// [`CanonicalImageError::DigestNotPopulated`] — i.e. unsigned
+/// developer builds and unconfigured CI runs are loud about it
+/// rather than silently treating any image as valid.
+///
+/// **The V2 boot path does NOT read this constant.** V2 uses
+/// [`verify_canonical_image_via_manifest`], which trusts the signed
+/// `<role>.manifest.toml`'s `image_artefact_sha256` instead. This
+/// constant remains for:
+///
+/// * `verify_canonical_image_pinned` — out-of-band tools
+///   (`raxis doctor`, ad-hoc image audits) that want a self-contained
+///   digest check without loading a manifest.
+/// * Audit-event payloads
+///   ([`CanonicalImageKind::expected_digest`]) that carry the V1
+///   digest as a stable identifier even when the V2 manifest path is
+///   the one actually enforcing.
+pub const EXPECTED_REVIEWER_IMAGE_DIGEST: [u8; DIGEST_LEN] =
+    GENERATED_REVIEWER_IMAGE_DIGEST;
 
 /// SHA-256 of the kernel-bundled `raxis-orchestrator-core-<kernel_version>.img`
 /// for callers using the V1 compile-time-pinned verification path.
 ///
-/// **Currently unpopulated.** Same caveat as
-/// [`EXPECTED_REVIEWER_IMAGE_DIGEST`]; not consulted by the V2 boot
-/// path.
-pub const EXPECTED_ORCHESTRATOR_IMAGE_DIGEST: [u8; DIGEST_LEN] = UNPOPULATED_DIGEST;
+/// **Build-pipeline driven.** Populated by `build.rs` from
+/// `RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX` (64 lowercase hex
+/// chars). Defaults to the all-zero placeholder; same V2-vs-V1
+/// caveats as [`EXPECTED_REVIEWER_IMAGE_DIGEST`].
+pub const EXPECTED_ORCHESTRATOR_IMAGE_DIGEST: [u8; DIGEST_LEN] =
+    GENERATED_ORCHESTRATOR_IMAGE_DIGEST;
 
 /// Errors the verification helpers can surface.
 #[derive(Debug, thiserror::Error)]
@@ -842,6 +861,93 @@ mod tests {
             EXPECTED_KERNEL_SIGNING_KEY_BYTES,
             UNPOPULATED_SIGNING_KEY_BYTES,
             "developer builds must default to the all-zero placeholder",
+        );
+    }
+
+    /// Same wiring contract as
+    /// `generated_trust_anchor_is_wired_through_to_public_constant`,
+    /// applied to the V1-fallback per-role image digests. A divergence
+    /// here means a refactor to `build.rs` has silently disconnected
+    /// the per-role digest population path while leaving the trust
+    /// anchor working — an easy-to-miss bug because the V2 boot path
+    /// would still succeed (it ignores these constants), but
+    /// `verify_canonical_image_pinned`, `raxis doctor` audits, and
+    /// the `CanonicalImageKind::expected_digest` audit-event field
+    /// would all return placeholder zeros.
+    #[test]
+    fn generated_role_digests_are_wired_through_to_public_constants() {
+        assert_eq!(
+            EXPECTED_REVIEWER_IMAGE_DIGEST,
+            GENERATED_REVIEWER_IMAGE_DIGEST,
+            "`EXPECTED_REVIEWER_IMAGE_DIGEST` must alias \
+             `GENERATED_REVIEWER_IMAGE_DIGEST` (build.rs output for \
+             RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX); divergence \
+             here means the V1-fallback digest pipeline has been \
+             silently broken",
+        );
+        assert_eq!(
+            EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
+            GENERATED_ORCHESTRATOR_IMAGE_DIGEST,
+            "`EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` must alias \
+             `GENERATED_ORCHESTRATOR_IMAGE_DIGEST` (build.rs output \
+             for RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX)",
+        );
+    }
+
+    /// Developer builds with the per-role digest env vars unset MUST
+    /// default to the all-zero placeholder, exactly the same way the
+    /// trust anchor does. Pinned here so a future refactor of
+    /// build.rs that, say, defaulted to a checked-in known-good
+    /// digest, cannot land without either updating this test or
+    /// finding a different placeholder value.
+    #[test]
+    fn placeholder_build_defaults_to_all_zero_role_digests() {
+        if EXPECTED_REVIEWER_IMAGE_DIGEST != UNPOPULATED_DIGEST {
+            eprintln!(
+                "skipping placeholder default test: \
+                 EXPECTED_REVIEWER_IMAGE_DIGEST is non-zero (signed build)"
+            );
+        } else {
+            assert_eq!(
+                EXPECTED_REVIEWER_IMAGE_DIGEST,
+                UNPOPULATED_DIGEST,
+                "developer builds must default the Reviewer digest to \
+                 the all-zero placeholder",
+            );
+        }
+
+        if EXPECTED_ORCHESTRATOR_IMAGE_DIGEST != UNPOPULATED_DIGEST {
+            eprintln!(
+                "skipping placeholder default test: \
+                 EXPECTED_ORCHESTRATOR_IMAGE_DIGEST is non-zero \
+                 (signed build)"
+            );
+        } else {
+            assert_eq!(
+                EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
+                UNPOPULATED_DIGEST,
+                "developer builds must default the Orchestrator digest \
+                 to the all-zero placeholder",
+            );
+        }
+    }
+
+    /// `CanonicalImageKind::expected_digest` is the canonical mapping
+    /// from a kind tag to its V1-fallback digest. Pin that the mapping
+    /// is consistent with both per-role public constants — a future
+    /// refactor that silently swapped the two arms would otherwise be
+    /// caught only at audit-event-payload review time.
+    #[test]
+    fn canonical_image_kind_expected_digest_matches_role_constants() {
+        assert_eq!(
+            CanonicalImageKind::Reviewer.expected_digest(),
+            EXPECTED_REVIEWER_IMAGE_DIGEST,
+            "Reviewer kind must map to EXPECTED_REVIEWER_IMAGE_DIGEST",
+        );
+        assert_eq!(
+            CanonicalImageKind::Orchestrator.expected_digest(),
+            EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
+            "Orchestrator kind must map to EXPECTED_ORCHESTRATOR_IMAGE_DIGEST",
         );
     }
 
