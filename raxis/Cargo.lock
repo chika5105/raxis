@@ -4902,7 +4902,11 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.6",
  "regex",
+ "tempfile",
  "toml",
  "walkdir",
 ]

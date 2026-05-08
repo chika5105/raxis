@@ -468,70 +468,98 @@ edits, no checked-in zero-byte placeholders sneaking through).
 
 ### §8.1 One-time keypair generation
 
+The recommended path uses the workspace's built-in helper:
+
 ```bash
-# Pick a working directory OUTSIDE the repo. The signing key MUST
-# never be checked in; placing it under `~/.config/raxis/keys/`
-# keeps it out of the source tree by construction.
-mkdir -p ~/.config/raxis/keys
-cd      ~/.config/raxis/keys
-
-# Generate an Ed25519 keypair. We use openssl rather than ssh-keygen
-# because the PEM `-----BEGIN PRIVATE KEY-----` form is what
-# `raxis-image-builder --signing-key` accepts.
-openssl genpkey -algorithm ed25519 -out raxis-dev-signing.pem
-chmod 0600                                  raxis-dev-signing.pem
-
-# Extract the raw 32-byte public key half. The DER public-key
-# encoding of an Ed25519 key is a 12-byte SPKI header followed by
-# the raw key bytes; tail -c 32 strips the header.
-openssl pkey -in raxis-dev-signing.pem -pubout -outform DER \
-  | tail -c 32 \
-  > raxis-dev-signing.pub
-chmod 0644 raxis-dev-signing.pub
+cargo xtask dev-keys init
 ```
 
+That command:
+
+1. Creates `~/.config/raxis/keys/` (`0700`) if it does not exist.
+2. Generates a fresh Ed25519 keypair using the OS RNG.
+3. Writes the **private** half as 64 lowercase hex chars to
+   `~/.config/raxis/keys/raxis-dev-signing.key.hex` at `0600`.
+4. Writes the **public** half as 64 lowercase hex chars to
+   `~/.config/raxis/keys/raxis-dev-signing.pub.hex` at `0644`.
+5. Refuses to overwrite an existing keypair unless `--force` is
+   passed (a developer who forgets they already generated one
+   should not silently lose access to their previously-signed
+   images).
+
+The hex-file format matches what `raxis-image-builder` already
+consumes via the `RAXIS_IMAGE_SIGNING_KEY` environment variable
+(see `image-builder::main::load_signing_key`); we deliberately do
+NOT use a PEM-wrapped PKCS#8 form, because:
+
+* The image-builder verifier already speaks raw hex, so a PEM file
+  would force `openssl pkey -in ... | tail -c 32 | xxd -p` round-
+  trip plumbing the developer does not need.
+* `RAXIS_KERNEL_SIGNING_KEY_HEX` (the kernel's `build.rs` input)
+  also speaks raw hex, so a single file shape feeds both producer
+  (image-builder) and consumer (kernel `build.rs`) sides.
+
+A developer who insists on PEM (e.g. interop with an HSM that
+exports PEM only) can run `openssl genpkey -algorithm ed25519 -out
+raxis-dev-signing.pem` themselves, then derive the hex via
+`openssl pkey -in raxis-dev-signing.pem -outform DER | tail -c 32
+| xxd -p -c 64` for the private half and the matching `-pubout
+-outform DER | tail -c 32 | xxd -p -c 64` for the public half.
+
 ### §8.2 Configure `cargo build` to bake the developer key
+
+`cargo xtask dev-keys init` prints the exact recipe a developer
+should add to their shell rc:
 
 ```bash
 # One-time: drop a shell snippet your interactive shell sources.
 cat >> ~/.config/raxis/dev-env <<'EOF'
-export RAXIS_KERNEL_SIGNING_KEY_HEX="$(xxd -p -c 64 \
-  ~/.config/raxis/keys/raxis-dev-signing.pub)"
+export RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat \
+  ~/.config/raxis/keys/raxis-dev-signing.pub.hex)"
+export RAXIS_IMAGE_SIGNING_KEY="$HOME/.config/raxis/keys/raxis-dev-signing.key.hex"
 EOF
 echo 'source ~/.config/raxis/dev-env' >> ~/.zshrc   # or .bashrc
-
-# Subsequent shells now have the env var set; cargo build will
-# bake the developer's public key as the kernel's trust anchor.
-cargo build --release -p raxis-kernel
 ```
 
-The `xxd -p -c 64` flag pair emits 64 hex chars on a single line
-with no `:` separators — exactly the form `build.rs::decode_hex`
-accepts. A misconfigured shell that strips the env var causes
-`cargo build` to fall back to the all-zero placeholder; the kernel
-then refuses to verify any image manifest at boot, surfacing
-`SigningKeyFpNotPopulated`. This is the desired behaviour: a
-developer who forgot to source the env file sees a loud failure
-the first time they try to spawn an agent VM, not a silent
-"agent ran but with no trust anchor" success.
+Subsequent shells have both env vars set:
+
+* `RAXIS_KERNEL_SIGNING_KEY_HEX` — read by
+  `canonical-images/build.rs` to bake the developer's PUBLIC key
+  as the kernel's compile-time trust anchor.
+* `RAXIS_IMAGE_SIGNING_KEY` — read by
+  `raxis-image-builder::load_signing_key` to load the developer's
+  PRIVATE key for manifest signing.
+
+```bash
+cargo build --release -p raxis-kernel
+# Kernel binary now trusts manifests signed by the developer's key.
+```
+
+A misconfigured shell that strips `RAXIS_KERNEL_SIGNING_KEY_HEX`
+causes `cargo build` to fall back to the all-zero placeholder; the
+kernel then refuses to verify any image manifest at boot,
+surfacing `SigningKeyFpNotPopulated`. This is the desired
+behaviour: a developer who forgot to source the env file sees a
+loud failure the first time they try to spawn an agent VM, not a
+silent "agent ran but with no trust anchor" success.
 
 ### §8.3 Sign images with the developer keypair
 
 ```bash
 # After cargo build, build the canonical images using the
 # matching PRIVATE half. raxis-image-builder writes
-# <role>.manifest.toml signed by --signing-key.
+# <role>.manifest.toml signed by RAXIS_IMAGE_SIGNING_KEY.
 cargo run -p raxis-image-builder -- \
   build reviewer \
-  --rootfs-dir   ./images/reviewer-core \
-  --signing-key  ~/.config/raxis/keys/raxis-dev-signing.pem \
-  --out-dir      ./out/images
+  --inputs   ./images/reviewer-core/inputs.toml \
+  --image-artefact ./out/reviewer-core.img \
+  --out      ./out/reviewer-core.manifest.toml
 
 cargo run -p raxis-image-builder -- \
   build orchestrator \
-  --rootfs-dir   ./images/orchestrator-core \
-  --signing-key  ~/.config/raxis/keys/raxis-dev-signing.pem \
-  --out-dir      ./out/images
+  --inputs   ./images/orchestrator-core/inputs.toml \
+  --image-artefact ./out/orchestrator-core.img \
+  --out      ./out/orchestrator-core.manifest.toml
 ```
 
 The kernel from §8.2 will accept these manifests because its

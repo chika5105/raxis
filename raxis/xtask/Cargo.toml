@@ -15,3 +15,14 @@ anyhow    = { workspace = true }
 toml      = { workspace = true }
 walkdir   = "2"
 regex     = "1"
+# Used by `cargo xtask dev-keys init` (the local-build signing
+# helper from `release-and-distribution.md §8.1–§8.2`). Generates
+# an Ed25519 keypair on the OS RNG and emits the private/public
+# halves as hex files matching the formats RAXIS_IMAGE_SIGNING_KEY
+# and RAXIS_KERNEL_SIGNING_KEY_HEX expect.
+ed25519-dalek = { workspace = true }
+hex           = { workspace = true }
+rand          = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
