@@ -201,7 +201,8 @@ impl AuditChannel for NoopAuditChannel {
     fn emit(&self, _event: AuditEvent) {}
 }
 
-/// Audit-event surface emitted by this crate.
+/// Audit-event surface emitted by this crate. Names match
+/// `credential-proxy.md §5` and `§14.5`.
 #[derive(Debug, Clone)]
 pub enum AuditEvent {
     /// One forwarded (or rejected) command.
@@ -222,6 +223,49 @@ pub enum AuditEvent {
         frame_sha256: String,
         /// True if a restriction blocked this command.
         blocked:     bool,
+    },
+
+    /// Emitted once per agent connection on the first successful
+    /// upstream TCP+AUTH handshake. Per `credential-proxy.md §14.5.2`.
+    CredentialProxyUpstreamConnected {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session that triggered upstream contact.
+        consumer:    OwnedConsumer,
+        /// Credential name (never the value).
+        credential:  CredentialName,
+        /// Upstream **hostname from the credential URL** so
+        /// dashboards can group events without leaking DNS noise.
+        upstream_host: String,
+        /// Upstream port from the credential URL.
+        upstream_port: u16,
+        /// True if the upstream connection negotiated TLS. V2.1
+        /// MVP supports plaintext only; this is always `false`.
+        tls: bool,
+        /// Wall-clock from `TcpStream::connect()` start to first
+        /// usable session, in milliseconds.
+        handshake_ms: u32,
+    },
+
+    /// Emitted on every upstream-connect attempt that did NOT reach
+    /// a usable session. Per `credential-proxy.md §14.5.3`.
+    CredentialProxyUpstreamFailed {
+        /// Wall-clock time of emission.
+        timestamp_unix_seconds: u64,
+        /// Identity of the session that triggered upstream contact.
+        consumer:    OwnedConsumer,
+        /// Credential name (never the value).
+        credential:  CredentialName,
+        /// Upstream hostname from the credential URL.
+        upstream_host: String,
+        /// Upstream port from the credential URL.
+        upstream_port: u16,
+        /// Failure category. One of `"DnsResolveFailed" |
+        /// "TcpConnectFailed" | "TlsHandshakeFailed" |
+        /// "ProtocolHandshakeFailed" | "AuthRejected" | "Timeout"`.
+        reason: String,
+        /// Short redacted message; never carries credential bytes.
+        detail: String,
     },
 }
 
@@ -347,9 +391,35 @@ async fn serve_one(
         }
     };
 
-    // Dial upstream.
-    let upstream = TcpStream::connect(&config.upstream_host_port).await
-        .map_err(|e| std::io::Error::other(format!("upstream dial: {e}")))?;
+    // Dial upstream. Per `credential-proxy.md §14.3` the proxy
+    // emits CredentialProxyUpstreamConnected on a successful TCP+
+    // AUTH handshake and CredentialProxyUpstreamFailed on every
+    // failure category (TCP, AUTH, timeout). The host/port pair
+    // we report is the one parsed from `upstream_host_port` BEFORE
+    // DNS resolution so dashboards group by upstream cluster
+    // without DNS noise.
+    let (upstream_host, upstream_port) = parse_host_port(&config.upstream_host_port);
+    let connect_started = std::time::Instant::now();
+    let upstream = match TcpStream::connect(&config.upstream_host_port).await {
+        Ok(s) => s,
+        Err(e) => {
+            audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
+                timestamp_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs()).unwrap_or(0),
+                consumer:      config.consumer.clone(),
+                credential:    config.credential_name.clone(),
+                upstream_host: upstream_host.clone(),
+                upstream_port,
+                reason:        if e.kind() == std::io::ErrorKind::TimedOut {
+                    "Timeout".into()
+                } else {
+                    "TcpConnectFailed".into()
+                },
+                detail:        e.to_string(),
+            });
+            return Err(std::io::Error::other(format!("upstream dial: {e}")));
+        }
+    };
     // Authenticate upstream.
     let mut upstream_reader = BufReader::new(upstream);
     write_auth(&mut upstream_reader, &cred_str).await?;
@@ -357,10 +427,34 @@ async fn serve_one(
     if !is_ok_or_unauth_already(&auth_resp) {
         // Upstream rejected our credential. Surface a generic
         // upstream auth error to the agent and close.
+        audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
+            timestamp_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs()).unwrap_or(0),
+            consumer:      config.consumer.clone(),
+            credential:    config.credential_name.clone(),
+            upstream_host: upstream_host.clone(),
+            upstream_port,
+            reason:        "AuthRejected".into(),
+            detail:        format!(
+                "upstream rejected AUTH (response prefix: {:.32?})",
+                String::from_utf8_lossy(&auth_resp[..auth_resp.len().min(64)]),
+            ),
+        });
         let mut client = client_stream;
         client.write_all(b"-ERR upstream auth rejected by RAXIS proxy\r\n").await?;
         return Ok(());
     }
+    let handshake_ms = connect_started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
+        timestamp_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs()).unwrap_or(0),
+        consumer:      config.consumer.clone(),
+        credential:    config.credential_name.clone(),
+        upstream_host,
+        upstream_port,
+        tls:           false,
+        handshake_ms,
+    });
 
     let (client_read, client_write) = client_stream.into_split();
     let mut client_reader = BufReader::new(client_read);
@@ -561,6 +655,21 @@ async fn read_until_crlf(
         return Err(std::io::Error::other("short read mid-frame"));
     }
     Ok(acc)
+}
+
+/// Split an `upstream_host_port` string into `(host, port)` pieces
+/// for the V2.1 audit envelopes. Falls back to `("unknown", 0)` for
+/// malformed inputs — `bind()` already rejects those at proxy
+/// startup, so this path is only reached if a future caller manages
+/// to construct a `ProxyConfig` with a malformed `upstream_host_port`.
+fn parse_host_port(host_port: &str) -> (String, u16) {
+    match host_port.rsplit_once(':') {
+        Some((host, port_str)) => {
+            let port = port_str.parse::<u16>().unwrap_or(0);
+            (host.trim_start_matches('[').trim_end_matches(']').to_owned(), port)
+        }
+        None => (host_port.to_owned(), 0),
+    }
 }
 
 fn audit_event(

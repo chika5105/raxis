@@ -631,6 +631,70 @@ struct RedisKernelAuditAdapter {
 impl RedisAuditChannel for RedisKernelAuditAdapter {
     fn emit(&self, event: RedisAuditEvent) {
         match event {
+            // V2.1 upstream-forwarding events. See
+            // `credential-proxy.md §14.5`.
+            RedisAuditEvent::CredentialProxyUpstreamConnected {
+                credential,
+                upstream_host,
+                upstream_port,
+                tls,
+                handshake_ms,
+                ..
+            } => {
+                let kind = AuditEventKind::CredentialProxyUpstreamConnected {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type:      "redis".to_owned(),
+                    upstream_host,
+                    upstream_port,
+                    tls,
+                    handshake_ms,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "CredentialProxyUpstreamConnected (redis) audit emit failed",
+                    );
+                }
+            }
+            RedisAuditEvent::CredentialProxyUpstreamFailed {
+                credential,
+                upstream_host,
+                upstream_port,
+                reason,
+                detail,
+                ..
+            } => {
+                let kind = AuditEventKind::CredentialProxyUpstreamFailed {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type:      "redis".to_owned(),
+                    upstream_host,
+                    upstream_port,
+                    reason,
+                    detail,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "CredentialProxyUpstreamFailed (redis) audit emit failed",
+                    );
+                }
+            }
             RedisAuditEvent::RedisCommandExecuted {
                 consumer: _,
                 credential,
