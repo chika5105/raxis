@@ -72,8 +72,12 @@ use std::ffi::OsString;
 use std::fmt;
 
 mod error;
+pub mod transport;
 
 pub use error::PlannerError;
+pub use transport::{
+    connect, KernelTransport, KernelTransportConfig, StreamTransport, TransportError,
+};
 
 /// **The three valid planner-harness roles** — informational mirror
 /// of the build-time `[features]` selector in each binary's
