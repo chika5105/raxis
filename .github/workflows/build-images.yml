@@ -11,7 +11,7 @@
 #
 #   1. cargo check --workspace --all-targets    (compile every crate)
 #   2. cargo test  --workspace --all-targets    (unit + integration tests)
-#   3. cargo xtask spec-graph                   (cross-spec consistency)
+#   3. cargo xtask spec-graph --strict          (cross-spec consistency, gating)
 #   4. cargo xtask license-check --strict       (SSPL-1.0 enforcement)
 #
 # What the job WILL do once the canonical-image-build pipeline is
@@ -78,10 +78,11 @@ jobs:
 
       # Spec-graph + license check run on Linux only — they are
       # platform-independent text-corpus walks and double-running
-      # them on macOS adds 60s for no incremental signal.
-      - name: spec-graph (informational)
+      # them on macOS adds 60s for no incremental signal. Both run
+      # in strict mode: any finding fails the job and blocks merge.
+      - name: spec-graph (strict)
         if:   matrix.runner == 'ubuntu-22.04'
-        run:  cargo xtask spec-graph
+        run:  cargo xtask spec-graph --strict
 
       - name: license-check (strict)
         if:   matrix.runner == 'ubuntu-22.04'

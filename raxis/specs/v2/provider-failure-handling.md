@@ -1408,6 +1408,8 @@ The reserved amount (worst-case) is reconciled against the actually-debited amou
 
 Audit event:
 
+<!-- spec-graph:cross-ref -->
+
 ```rust
 AuditEventKind::InferenceCompleted {
     request_id:                RequestId,

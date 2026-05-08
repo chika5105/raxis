@@ -575,7 +575,7 @@ admission decision needs to be made. Doing this work locally:
 - Preserves the property that `plan prepare` does useful work even when
   the kernel daemon is down (a partial-utility offline mode for
   operators editing on a laptop disconnected from their RAXIS host).
-- Avoids cross-spec coupling — `policy-plan-authority.md §4.5` doesn't
+- Avoids cross-spec coupling — `policy-plan-authority.md §4` doesn't
   need a new kernel handler for path-allowlist concerns.
 
 ### 5.3 IPC contract: `OperatorRequest::ProposeDefaults`
@@ -1736,16 +1736,26 @@ Both events are rate-limited per operator fingerprint to prevent DoS via repeate
 | `FAIL_PLAN_INIT_OUTPUT_EXISTS { path }` | `plan init` (CLI-local) | Output path already exists; `--force` not passed. |
 | `FAIL_COST_ESTIMATE_PROVIDER_RATE_MISSING { provider }` | `plan cost-estimate` IPC | Policy doesn't declare rates for a configured provider. |
 | `FAIL_INITIATIVE_NOT_PAUSED { state }` | `initiative resume` | Initiative is not in a paused state; nothing to resume. |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL { role, missing_models }` | Policy load (cross-reference) | A `[provider_aliases_defaults.<role>] chain` entry references a model not in `[providers] permitted_models`. Canonical home: `provider-model-selection.md §10`. |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL { role, missing_provider }` | Policy load (cross-reference) | A `[provider_aliases_defaults.<role>] chain` entry references a provider with no `[[providers.credentials]]` entry. Canonical home: `provider-model-selection.md §10`. |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN { role }` | Policy load (cross-reference) | A declared `[provider_aliases_defaults.<role>]` has an empty `chain`. Canonical home: `provider-model-selection.md §10`. |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR { role, value }` | Policy load (cross-reference) | `fallback_behavior` is not `"attempt_in_order"`. Canonical home: `provider-model-selection.md §10`. |
+<!-- spec-graph:cross-ref-row -->
 | `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE { role }` | Policy load (cross-reference) | `[provider_aliases_defaults.<role>]` declares a role name other than `executor` or `reviewer`. Non-fatal. Canonical home: `provider-model-selection.md §10`. |
+<!-- spec-graph:cross-ref-row -->
 | `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER { alias }` | Policy load (cross-reference) | Single-element chain in a deployment with 2+ configured providers. Non-fatal. Canonical home: `provider-model-selection.md §10`. |
+<!-- spec-graph:cross-ref-row -->
 | `WARN_ORCHESTRATOR_DEFAULT_ALIAS_RENAMED { alias }` | Policy load (cross-reference) | V1 default name `"fast_low_cost"` still in use; recommends rename to `"orchestrator_default"`. Non-fatal V1→V2 migration aid. Canonical home: `provider-model-selection.md §10`. |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE { language, alias }` | Policy load (cross-reference) | A `[default_verifier_images].<language>` value doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"`. Canonical home: `policy-plan-authority.md §3b`. |
+<!-- spec-graph:cross-ref-row -->
 | `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE { language }` | Policy load (cross-reference) | `[default_verifier_images].<language>` declares a language other than the V2 recognized set (`rust`, `node`, `python`, `go`). Non-fatal. Canonical home: `policy-plan-authority.md §3b`. |
 | `FAIL_PLAN_VERIFIER_IMAGE_SHORTCUT_UNRESOLVABLE { task_id, verifier_name, shortcut }` | `plan prepare` IPC | Plan declares `image = "@<lang>"` but `[default_verifier_images].<lang>` is not configured. Operator either sets the policy entry (typical fix) or replaces the shortcut with the literal alias. |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_POLICY_RESERVED_VM_IMAGE_NAME { name }` | Policy load (cross-reference) | A `[[vm_images]]` entry uses a reserved alias (`"raxis-verifier-symbol-index"`). Reserved per `INV-VERIFIER-12`. Canonical home: `policy-plan-authority.md §3b`. |
 | `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED { task_id }` | `approve_plan` (cross-reference) | A Reviewer task declares `path_allowlist`. Reviewer's `/workspace` is RO and the harness has no commit-pathway intent; the field is structurally meaningless. `plan prepare` aborts with the §4.5.5 hard-refusal pre-signing. Canonical home: `policy-plan-authority.md §3b`. |
 | `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST { task_id }` | `approve_plan` (cross-reference) | An Executor task omits `path_allowlist` entirely. Run `plan prepare` to insert the §4.5.3 template; uncomment and customize. Canonical home: `policy-plan-authority.md §3b`. |

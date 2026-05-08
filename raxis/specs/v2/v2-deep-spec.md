@@ -3151,34 +3151,81 @@ pub fn run() -> anyhow::Result<()> {
 
 #### CI integration
 
+The lint is wired into two GitHub Actions workflows. Both
+invoke `cargo xtask spec-graph --strict` so any finding fails
+the job and blocks merge.
+
+- `.github/workflows/spec-graph.yml` — runs on every PR (and
+  every push to `main`) that touches `raxis/specs/**` or
+  `raxis/xtask/**`. The narrow path filter keeps the job fast
+  for non-spec PRs.
+- `.github/workflows/build-images.yml` — runs the spec-graph
+  lint as part of the broader workspace check (`cargo build
+  --workspace --all-targets`, `cargo test --workspace
+  --all-targets`, license check). Linux only; macOS skips
+  the spec-graph step because the lint is platform-independent
+  and double-running adds 60s for no incremental signal.
+
 ```yaml
-# .github/workflows/spec-graph.yml
+# .github/workflows/spec-graph.yml — abbreviated
 on:
   pull_request:
-    paths: ['raxis/specs/**']
+    paths: ['raxis/specs/**', 'raxis/xtask/**', '.github/workflows/spec-graph.yml']
+  push:
+    branches: [main]
+    paths: ['raxis/specs/**', 'raxis/xtask/**', '.github/workflows/spec-graph.yml']
 
 jobs:
   spec-graph:
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: raxis } }
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo xtask spec-graph
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask spec-graph --strict
 ```
 
-#### Suppression for intentional one-way references
+The strict flag is non-negotiable: dropping it would let a
+duplicate failure code or a dangling section ref slip into
+`main`, exactly the regression class this lint exists to
+prevent. The check is **required** by `main`-branch protection
+(see `.github/scripts/protect-main.sh`); the merge button is
+disabled on PRs whose `spec-graph` job is red.
 
-A lint pragma on the same line lets specs reference an
-external `[invariant]` or `[section]` that does not yet exist
-(e.g., a forward reference to a not-yet-merged spec):
+#### Suppression for cross-references (multiple definitions)
 
-```markdown
-See `future-spec.md §4`. <!-- spec-graph-lint: allow-dangling -->
-```
+The check #3 / #4 single-definition rule is defeated by specs
+that intentionally re-tabulate codes / audit-event variants
+for narrative completeness — e.g., `policy-plan-authority.md`
+maintains a master *index* of plan-bundle-sealing failure codes
+even though the canonical definitions live in
+`plan-bundle-sealing.md`. A pair of HTML-comment markers makes
+the duplication explicit so the lint can distinguish "another
+copy of the definition" from "a reference to the definition":
 
-The pragma must be on the same line as the reference; it does
-NOT suppress *all* lints on the line, only the dangling-ref
-class.
+- `<!-- spec-graph:cross-ref -->` — placed immediately before a
+  markdown table or a ` ```rust ` fence. Every code / audit
+  variant inside the marked block is treated as a reference,
+  not a definition. The marker is consumed by the very next
+  table or fence; it does not span multiple blocks. Blank lines
+  between the marker and the block are preserved so the
+  natural authoring idiom (marker, blank line, table) works.
+  Any non-blank, non-marker content cancels the pending marker
+  to prevent silent drift across paragraphs.
+- `<!-- spec-graph:cross-ref-row -->` — placed immediately
+  before a *single* table row. Suppresses just that one row,
+  leaving sibling rows in the same table as definitions. Used
+  for mixed tables where most rows are local definitions but a
+  handful are cross-references to codes whose canonical home
+  is another spec.
+
+For a not-yet-merged spec (true forward reference), either
+land the heading-target spec first, or change the cross-ref
+to point at an existing section and update once the new spec
+ships. The lint deliberately does NOT support "allow-dangling"
+suppression — silent forward references were the bit-rot
+vector this lint was built to close.
 
 #### What this lint does NOT do
 
@@ -3196,25 +3243,41 @@ reviewer's responsibility.
 
 #### Implementation reference
 
-The lint is implemented in `raxis/xtask/src/spec_graph.rs` and
-the CI workflow lives at `.github/workflows/spec-graph.yml`. The
-xtask binary supports a `--strict` flag:
+The lint is implemented in `raxis/xtask/src/spec_graph.rs`
+(57 findings of bring-up baseline cleared in two cleanup
+passes — see commit history) and the CI workflow lives at
+`.github/workflows/spec-graph.yml`. The xtask binary supports
+a `--strict` flag:
 
 ```bash
 cargo xtask spec-graph             # informational; exits 0 on findings
 cargo xtask spec-graph --strict    # gating; exits 1 on any finding
 ```
 
-The CI workflow currently invokes the non-strict mode. The
-informational baseline at the time the lint was first wired had
-116 findings — a mix of dangling section anchors, duplicated
-`FAIL_*` / `WARN_*` codes, duplicated `AuditEventKind`
-definitions, and missing paired/single classification entries
-in `audit-paired-writes.md §4`. Cleaning up these findings is
-tracked as a follow-up cleanup PR train; once the baseline is
-green the workflow flips to `--strict` and the lint becomes a
-hard gate. New PRs are expected not to *increase* the finding
-count even before the flip.
+CI invokes the strict mode; the lint is a hard gate on `main`.
+Branch protection (`.github/scripts/protect-main.sh`) requires
+both the `spec-graph` job and the `build-images / cargo check
++ test (ubuntu-22.04)` job to be green before a PR can merge.
+
+Two checks remain explicitly deferred and are tracked on the
+implementation roadmap:
+
+- **#2 — Invariant-ID resolution.** Every `INV-FOO-NN` reference
+  must resolve to a definition in `invariants.md` or its named
+  canonical-home spec. Implementation depends on a stable
+  invariant-index format that is amenable to mechanical
+  parsing; today the index lives as a prose list in
+  `invariants.md` §1.
+- **#5 — Capability-class completeness.** Every top-level
+  `policy.toml` key referenced in `policy-plan-authority.md`
+  must have a matching entry in `policy-epoch-diffing.md §2.2`.
+  Implementation depends on adding a structured-data block
+  to both specs that the lint can read; the prose-table form
+  used today is too lossy for mechanical comparison.
+
+Both checks are scaffolded as `// TODO(#NN)` items in the
+xtask source so the follow-up commit can fill them in
+without re-architecting the lint.
 
 ---
 

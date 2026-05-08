@@ -547,7 +547,7 @@ For each `[provider_aliases_defaults.<role>]` declared:
 
 1. Every model in `chain` MUST appear in `policy.toml [providers]
    permitted_models` (per `INV-PROVIDER-01`,
-   `provider-failure-handling.md §16`).
+   `provider-failure-handling.md §10`).
    - Otherwise: `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL { role, missing_models }`.
 2. For every distinct provider referenced in `chain`, at least one
    `[[providers.credentials]]` entry MUST exist with that
@@ -731,7 +731,7 @@ Step 6 — Kernel decorates and returns to planner.
 |---|---|---|
 | Planner cannot bypass the kernel for inference | Step 2 (no IPC type for "raw provider call") | `INV-02A`, `paradigm.md` R-2 |
 | Planner cannot inject its own provider key | Step 5 (gateway is the only key holder) | `INV-02A`, this spec §8.1 |
-| Plan cannot reference an unpermitted model | Step 3a + earlier `approve_plan` check | `INV-PROVIDER-01`, `provider-failure-handling.md §16` |
+| Plan cannot reference an unpermitted model | Step 3a + earlier `approve_plan` check | `INV-PROVIDER-01`, `provider-failure-handling.md §10` |
 | Chain element with no credential is silently skipped | Step 3b | `provider-failure-handling.md §4.1` |
 | Outage in one provider doesn't take down the initiative | Step 3c (circuit breaker) + chain fallback | `provider-failure-handling.md §5–§6` |
 | Audit chain records which concrete model answered | Step 6 | `INV-04`, `provider-failure-handling.md §3.1` |

@@ -1755,7 +1755,7 @@ not the verifier process state).
 **Statement.** A Reviewer is activated for a given `evaluation_sha`
 ONLY after every plan-declared per-task verifier (per
 `verifier-processes.md §15.1` plan-author per-task source) AND every
-policy claim-based gate (per `verifier-processes.md §15.0`) for that
+policy claim-based gate (per `verifier-processes.md §15.2`) for that
 task has written a witness with non-NULL `final_status` (`passed`,
 `failed`, `timed_out`, `crashed`, or `artifact_missing`). A Reviewer
 is NEVER activated with partial witness data. If any per-task

@@ -151,6 +151,8 @@ and a new policy epoch.
 
 The existing event is extended to include full content attribution:
 
+<!-- spec-graph:cross-ref -->
+
 ```rust
 AuditEventKind::PolicyEpochAdvanced {
     from:                    u64,

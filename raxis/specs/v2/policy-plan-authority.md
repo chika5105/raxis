@@ -758,7 +758,7 @@ prohibits this image from booting in the requested role.
 the plan task at a different image whose `role_restriction` permits the
 role.
 
-**Canonical home:** `policy-plan-authority.md §4.4` (this spec, §4.4 below).
+**Canonical home:** `policy-plan-authority.md §4` (this spec, `[[vm_images]] role_restriction` subsection of §4 below).
 
 ---
 
@@ -1143,6 +1143,8 @@ the size caps defensively against non-canonical CLIs. Each code's
 canonical semantics live in `plan-bundle-sealing.md §9`; this
 catalog is the failure-code index.
 
+<!-- spec-graph:cross-ref -->
+
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
 | `FAIL_PLAN_BUNDLE_INVALID_PATH` | CLI resolve | Path field is empty / null / wrong type. | `plan-bundle-sealing.md §5.2` |
@@ -1180,6 +1182,8 @@ index. The whole subsystem is opt-in per
 `environment-access-control.md §1.5` — none of these codes can fire
 in a deployment whose policy declares zero `[environments.<label>]`.
 
+<!-- spec-graph:cross-ref -->
+
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
 | `FAIL_TASK_ENVIRONMENT_INCONSISTENT { task, environments, sources }` | `approve_plan` step 3d | A task's environment-bound credentials and/or environment-bound egress URLs resolve to more than one environment label. | `environment-access-control.md §11.7` |
@@ -1209,6 +1213,8 @@ prepare`) or at `OperatorRequest::CreateInitiative` (when the operator
 submitted a plan without running `plan prepare` first). Each code's
 canonical semantics live in `operator-ergonomics.md §20`; this catalog
 is the failure-code index.
+
+<!-- spec-graph:cross-ref -->
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
@@ -1243,9 +1249,12 @@ and re-pushes.
 | `FAIL_VERIFIER_INVALID_ON_FAILURE { verifier_name, declared, allowed }` | `approve_plan` | A per-task verifier declares `on_failure = "block_merge"`, OR a pre-merge verifier declares `on_failure = "block_review"`. Per-task verifiers gate Reviewer activation only; pre-merge verifiers gate IntegrationMerge advancement only. | `verifier-processes.md §10.3` |
 | `FAIL_VERIFIER_TASK_SET_EMPTY { verifier_name }` | `approve_plan` | A pre-merge verifier declares `applies_to = "task_set"` but provides an empty `task_set` array. | `verifier-processes.md §10.3` |
 | `FAIL_VERIFIER_TASK_SET_UNKNOWN_TASK { verifier_name, unknown_task }` | `approve_plan` | A pre-merge verifier's `task_set` references a task ID that is not declared in `[[plan.tasks]]`. | `verifier-processes.md §10.3` |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary, candidate_merge_sha }` | `IntegrationMerge` Check 5d | Any matching `block_merge` pre-merge verifier reported `final_status ≠ "passed"`. Candidate merged tree is discarded; main is NOT advanced; Orchestrator routes to operator escalation per `verifier-processes.md §16.6`. | `integration-merge.md §4 Check 5d.6` |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED { reason }` | `IntegrationMerge` Check 5d.2 | The candidate merged tree could not be materialized (malformed `commit_sha`, merge conflict the kernel can't represent as an orphan, disk-full at `candidate_merges/` staging area). | `integration-merge.md §4 Check 5d.6` |
 | `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH { expected, actual }` | Verifier-VM spawn | At spawn time, the on-disk `raxis-verifier-symbol-index-<kernel_version>.img` does not match the kernel-binary-embedded canonical digest. Spawn aborted; halts further verifier spawns until `raxis doctor canonical-images` succeeds. Defense-in-depth analog of `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`. | `verifier-processes.md §14.4` |
+<!-- spec-graph:cross-ref-row -->
 | `FAIL_POLICY_RESERVED_VM_IMAGE_NAME { name }` | Policy load | A `[[vm_images]]` entry uses a reserved alias (`"raxis-verifier-symbol-index"`). The alias is reserved per `INV-VERIFIER-12` so plan-side references resolve unambiguously to the kernel-bundled image. | `verifier-processes.md §14.3` |
 | `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE { language, alias }` | Policy load | A `[default_verifier_images].<language>` value doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"`. | `policy-plan-authority.md §4 [default_verifier_images]` |
 | `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE { language }` | Policy load | `[default_verifier_images].<language>` declares a language other than the V2 recognized set (`rust`, `node`, `python`, `go`). Non-fatal; the `@<language>` shortcut for that language won't resolve. | `policy-plan-authority.md §4 [default_verifier_images]` |
@@ -1347,6 +1356,8 @@ per `provider-model-selection.md §7.2`. All `FAIL_POLICY_*` codes
 below prevent the policy from loading; in-flight initiatives are
 unaffected because the previous-loaded policy stays active until the
 operator fixes and re-pushes.
+
+<!-- spec-graph:cross-ref -->
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|

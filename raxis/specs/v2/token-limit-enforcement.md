@@ -17,6 +17,8 @@ only stores the hash. The hash allows an operator to verify that any externally 
 bytes have not been tampered with. External integration specs (V3) will define the
 webhook/push mechanism for raw byte export.
 
+<!-- spec-graph:cross-ref -->
+
 ```rust
 AuditEventKind::InferenceCompleted {
     session_id:         Uuid,

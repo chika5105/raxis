@@ -2664,7 +2664,7 @@ Kernel boot-time admission:
 
 ### §14.6 Integration tests
 
-Per the level-of-detail benchmark from `raxis/specs/v1/cli-ceremony.md §13`, every behavioural commitment in §3–§9 needs an integration test, and the spec MUST name the test file. The matrix:
+Per the level-of-detail benchmark from `raxis/specs/v1/cli-ceremony.md §4.3` (Integration Test Fixtures), every behavioural commitment in §3–§9 needs an integration test, and the spec MUST name the test file. The matrix:
 
 | Test file (NEW)                                                                    | Asserts                                                                                                                                  | Spec section |
 | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------ |

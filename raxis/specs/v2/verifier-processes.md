@@ -39,7 +39,7 @@
 >   routing for both `block_review` and `block_merge` verifiers.
 > - `operator-ergonomics.md §16.3` — setup wizard's language-stack
 >   phase that registers tiered verifier starters.
-> - `invariants.md §11.4 INV-VERIFIER-*` — invariant family.
+> - `invariants.md §11 INV-VERIFIER-*` — invariant family.
 
 ---
 
@@ -859,7 +859,7 @@ Operators with heavy pre-merge verification should size
 Verifier VMs consume the same host budget as planner VMs.
 Specifically, each active verifier VM counts against:
 
-- `max_concurrent_vms` (per `host-capacity.md §5.1`) — the global
+- `max_concurrent_vms` (per `host-capacity.md §4`) — the global
   VM cap, shared with planner VMs
 - `max_aggregate_vm_memory_mb` — verifier VMs' memory caps add to
   the aggregate

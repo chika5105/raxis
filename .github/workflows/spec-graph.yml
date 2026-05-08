@@ -2,11 +2,15 @@
 #
 # Normative reference: raxis/specs/v2/v2-deep-spec.md §Spec-Graph Lint.
 #
-# Runs `cargo xtask spec-graph` on every PR that touches a spec file.
-# The lint currently runs in non-strict mode (informational only)
-# because the corpus has 116 pre-existing findings that need to be
-# cleaned up in a follow-up PR train. Once the baseline is clean,
-# flip the `--strict` flag below.
+# Runs `cargo xtask spec-graph --strict` on every PR that touches a
+# spec file or the lint itself, and on every push to main. Strict
+# mode means the job exits non-zero on any finding; merge to main is
+# blocked until the spec graph is internally consistent.
+#
+# The corpus baseline was cleaned up across two passes (cross-ref
+# annotation extension + canonical-home assignments). New findings
+# are kept fresh by this lint plus the additional gates wired into
+# the `build-images.yml` PR check.
 
 name: spec-graph
 
@@ -15,11 +19,13 @@ on:
     paths:
       - 'raxis/specs/**'
       - 'raxis/xtask/**'
+      - '.github/workflows/spec-graph.yml'
   push:
     branches: [main]
     paths:
       - 'raxis/specs/**'
       - 'raxis/xtask/**'
+      - '.github/workflows/spec-graph.yml'
 
 jobs:
   spec-graph:
@@ -33,7 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: raxis -> target
-      # Informational mode: surfaces findings without failing the
-      # PR. Flip to `cargo xtask spec-graph --strict` once the
-      # baseline is clean.
-      - run: cargo xtask spec-graph
+      # Strict mode: any spec-graph finding (duplicate failure
+      # code, duplicate audit kind, dangling section ref, etc.)
+      # fails the job and blocks the merge.
+      - run: cargo xtask spec-graph --strict

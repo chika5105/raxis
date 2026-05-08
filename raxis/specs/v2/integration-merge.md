@@ -10,7 +10,7 @@
 > - `planner-harness.md §4.7` — Canonical Orchestrator Image (`INV-PLANNER-HARNESS-05`); the source of `bash`, `git`, `ripgrep`, and `edit_file` for V2 semantic conflict resolution  
 > - `planner-harness.md §4.8` — Orchestrator Not Operator-Configurable (`INV-PLANNER-HARNESS-06`); explains why §8's workflow lives in kernel-pinned NNSP bytes rather than operator configuration  
 > - `kernel-mechanics-prompt.md §3.2` — **normative** Orchestrator NNSP including the `[KERNEL: INTEGRATION MERGE PROTOCOL]` and `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks  
-> - `policy-plan-authority.md §4.5 [orchestrator]` — operator-tunable policy knobs (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`)  
+> - `policy-plan-authority.md §4` `[orchestrator]` — operator-tunable policy knobs (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`)  
 > - `agent-disagreement.md` — sub-task `CompleteTask` admission gates (`FAIL_CIRCULAR_REVISION`, `FAIL_REVIEW_LOOP_EXCEEDED`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`) that fire **before** sub-tasks reach the merge pipeline. `IntegrationMerge` itself is unchanged by that spec; what changes is which sub-tasks ever satisfy Check 4's `state = 'Completed'` precondition.  
 > - `extensibility-traits.md §2` — `DomainAdapter` trait. **`IntegrationMerge` is the SE-domain instantiation of `DomainAdapter::commit`**. The admission pipeline (Checks 1–7), the audit emissions, and the SQLite/git transactional boundary specified here are *paradigm-layer* and stay in the kernel binary. The git-specific cherry-pick / fetch / update-ref / push sequence in Phase 2 of Check 8 (and the touched-paths derivation in Check 5) is *implementation-layer* and lives in `crates/raxis-domain-git`. Other domains (trading, healthcare) reuse this entire spec verbatim and just plug a different adapter into the same Phase 2 call site.  
 >
@@ -230,7 +230,7 @@ Check 5b is a no-op. Proceed to Check 5c.
 
 Runs **immediately after Check 5b** when the policy bundle's
 `[orchestrator]` section sets `all_merges_require_approval = true`
-(per `policy-plan-authority.md §4.5 [orchestrator]`,
+(per `policy-plan-authority.md §4` `[orchestrator]`,
 `INV-PLANNER-HARNESS-06`).
 
 When `all_merges_require_approval = true` AND `operator_approval_id`
@@ -279,7 +279,7 @@ await KernelPush::EscalationResolved; re-submit with operator_approval_id`).
 
 > **Implementation status (V2 GA):** The plan-author and operator-global
 > surfaces below are **not yet wired** in the kernel. Until the
-> `raxis-verifier-runtime` crate (per `verifier-processes.md §17.5`)
+> `raxis-verifier-runtime` crate (per `verifier-processes.md §19.1`)
 > lands, the kernel rejects any plan or policy that declares
 > `[[plan.integration_merge_verifiers]]` or `[[integration_merge_verifiers]]`
 > at the earliest gate (plan-approve / policy-load), with
@@ -289,9 +289,9 @@ await KernelPush::EscalationResolved; re-submit with operator_approval_id`).
 > existing plans and policies.
 >
 > **Tracker.** The full Check 5d implementation is a multi-day phase
-> (per `verifier-processes.md §17.5 Phased Rollout — Phase 4`). It depends on:
+> (per `verifier-processes.md §19` Implementation Plan — Phase 4). It depends on:
 >
-> - The `raxis-verifier-runtime` crate (`§17.5.1`).
+> - The `raxis-verifier-runtime` crate (`§19.1`).
 > - `DDL Migration 11` for `integration_merge_attempts` (§11.10.1).
 >   (Originally drafted as Migration 10 but bumped to 11 because
 >   Migration 10 was consumed by `task_credential_proxies` —

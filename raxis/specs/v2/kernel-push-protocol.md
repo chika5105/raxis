@@ -2,7 +2,7 @@
 
 > **Status:** V2 Specified
 > **Cross-references:**
-> - `specs/v1/peripherals.md §1` — Wire format (length prefix + bincode); **canonical**
+> - `specs/v1/peripherals.md §3.2` — Gateway wire format (length prefix + bincode); **canonical**
 > - `specs/v1/peripherals.md §3.1` — Planner IPC contract (request/response baseline)
 > - `guides/security/raxis-security-model.md Part 3` — VM/host VSock channel; **discrepancy: that doc says big-endian length; this spec corrects to little-endian to match peripherals.md**
 > - `specs/v2/integration-merge.md §12` — Operator approval flow (relies on EscalationResolved push)
@@ -64,7 +64,7 @@ Every frame on the VSock connection follows this layout:
 
 **bincode version pin.** All frame bodies use `bincode = "=2.0.1"` exactly, with the default little-endian, fixed-int encoding. Version drift between Kernel and planner is a binary-compat break and must be caught at handshake (see §5.2).
 
-**Endianness.** All multi-byte integers in both the framing layer and the bincode body are little-endian. This matches `bincode`'s default and `specs/v1/peripherals.md §1`. (The mention of big-endian in `raxis-security-model.md Part 3` is a documentation error and will be corrected in that document; this spec is the authority.)
+**Endianness.** All multi-byte integers in both the framing layer and the bincode body are little-endian. This matches `bincode`'s default and `specs/v1/peripherals.md §3.2`. (The mention of big-endian in `raxis-security-model.md Part 3` is a documentation error and will be corrected in that document; this spec is the authority.)
 
 ---
 
@@ -801,7 +801,7 @@ Bundle pending pushes inside the `IntentResponse` for the planner's next intent.
 ### Alt E — Big-endian length prefix (matching the security model doc)
 
 Rejected because:
-- `peripherals.md §1` is the canonical wire-format spec and says little-endian.
+- `peripherals.md §3.2` is the canonical wire-format spec and says little-endian.
 - bincode's default is little-endian; matching the framing layer to the body avoids byte-order context switches.
 - The "network byte order = big-endian" convention is for IP-layer protocols, not application-layer over local IPC.
 

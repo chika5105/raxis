@@ -8,14 +8,15 @@
 >
 > **Cross-references:**
 >
-> - `v2-deep-spec.md §1.6 / §Distribution` — `[[vm_images]]` entries,
->   `oci_digest` pinning, kernel provisioning flow at session
->   activation (the seed text for §3 below).
+> - `v2-deep-spec.md §17` (Step 17 — `approve_plan` shift-left
+>   validation) — `[[vm_images]]` admit-list handling, `oci_digest`
+>   recording on the initiative row, kernel provisioning flow at
+>   session activation (the seed text for §3 below).
 > - `planner-harness.md §10.4–§10.7` — the three RAXIS-canonical
 >   images that bypass this resolver (they are kernel-version-locked
 >   on-disk artefacts, never pulled).
-> - `policy-plan-authority.md §9` — `[[vm_images]]` admit list and
->   `oci_digest` field semantics.
+> - `policy-plan-authority.md §4` — `[[vm_images]] role_restriction`
+>   admit list and `oci_digest` field semantics.
 > - `release-and-distribution.md §10` — operator-published images
 >   are out of scope for the RAXIS release pipeline; they are
 >   exclusively this resolver's concern.
