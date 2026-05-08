@@ -263,11 +263,19 @@ async fn main() {
     //     operator runs `raxis doctor canonical-images`); logged at
     //     warn level. The kernel boots; activations that need the
     //     image will fail-closed at `IsolationBackend::launch` time.
-    //   * `DigestUnpopulated` — kernel binary was built before the
-    //     matching image artefact landed (placeholder constants in
-    //     `raxis-canonical-images`). Logged at warn level. Once
-    //     `raxis-image-builder` ships, this branch becomes a hard
-    //     mismatch by construction.
+    //   * `ManifestMissing` — the `.img` is on disk but the sibling
+    //     `<role>-<kernel_version>.manifest.toml` is not. Logged at
+    //     warn level; activations that need the image fail-closed at
+    //     launch time.
+    //   * `TrustAnchorUnpopulated` — kernel binary was built before
+    //     the release pipeline committed the
+    //     `EXPECTED_KERNEL_SIGNING_KEY_BYTES` trust anchor (all-zero
+    //     placeholder). Logged at warn level; activations fail-closed
+    //     until the kernel is rebuilt against a populated trust anchor.
+    //   * `ManifestRejected` — the manifest signature failed to verify
+    //     against the trust anchor, was malformed, or did not match
+    //     the on-disk image bytes. Treated as `Tampered` and emits
+    //     `SecurityViolationDetected`.
     //   * `Tampered` — digest mismatch is real. The preflight emits
     //     `SecurityViolationDetected { violation_kind:
     //     "ReviewerImageDigestMismatch" | "OrchestratorImageDigestMismatch",

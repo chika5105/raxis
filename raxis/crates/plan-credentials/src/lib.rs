@@ -109,9 +109,13 @@ pub enum ProxyDecl {
         /// Single pinned upstream relay `host:port` (no scheme).
         upstream_host_port: String,
         /// Whether the proxy MUST establish an outbound TLS session
-        /// to the upstream relay before issuing AUTH (V2 deferred —
-        /// the wire driver currently uses cleartext upstream and
-        /// surfaces a startup warning when `true`).
+        /// (via STARTTLS upgrade) to the upstream relay before
+        /// issuing AUTH. When `true` the wire driver drives
+        /// `EHLO → STARTTLS → tokio-rustls handshake → re-EHLO over
+        /// TLS → AUTH`, fails closed on any STARTTLS rejection or
+        /// handshake error, and rejects builds whose proxy crate has
+        /// `IS_TLS_WIRED = false` at bind time. When `false` the
+        /// upstream hop is plain TCP.
         #[serde(default)]
         require_upstream_tls: bool,
         /// Restrictions clause (`[tasks.credentials.restrictions]`).
