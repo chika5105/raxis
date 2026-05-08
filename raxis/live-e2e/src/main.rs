@@ -54,6 +54,14 @@
 //!     SNI receives `Deny`, both with byte-exact bincode wire frames
 //!     identical to what the in-guest `raxis-tproxy` writes.
 //!
+//!   * `smtp-proxy` — start the real `SmtpProxy` from
+//!     `crates/credential-proxy-smtp/`, point its `upstream_host_port`
+//!     at an in-process SMTP listener, drive a raw SMTP submission
+//!     through the proxy, and assert that the upstream observed the
+//!     *proxy's* AUTH-PLAIN payload (real credential bytes from the
+//!     `CredentialBackend`) — never the agent's submitted junk
+//!     bytes — plus the envelope and DATA body verbatim.
+//!
 //!   * `all` — run every slice in order; any slice failure aborts
 //!     with non-zero exit.
 //!
@@ -84,6 +92,7 @@ mod slice_http_proxy_restrictions;
 mod slice_postgres_proxy;
 mod slice_postgres_proxy_restrictions;
 mod slice_session_spawn;
+mod slice_smtp_proxy;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -131,6 +140,12 @@ enum Slice {
     /// the spec's fixed order, plus byte-shape verdicts on the
     /// admission wire (Admit + Deny).
     SessionSpawn,
+    /// Real `SmtpProxy` + an in-process upstream SMTP relay. Asserts
+    /// that the proxy strips the agent's AUTH PLAIN payload and
+    /// injects the real `CredentialBackend`-resolved credentials
+    /// into the upstream conversation, and that the envelope (MAIL
+    /// FROM, RCPT TO, DATA body) reaches upstream verbatim.
+    SmtpProxy,
     /// Run every slice in order.
     All,
 }
@@ -192,6 +207,7 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::HttpProxyBearer            => slice_http_proxy_bearer::run(env).await,
         Slice::HttpProxyRestrictions      => slice_http_proxy_restrictions::run(env).await,
         Slice::SessionSpawn               => slice_session_spawn::run().await,
+        Slice::SmtpProxy                  => slice_smtp_proxy::run().await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
@@ -207,6 +223,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice http-proxy-restrictions")?;
             slice_session_spawn::run().await
                 .context("slice session-spawn")?;
+            slice_smtp_proxy::run().await
+                .context("slice smtp-proxy")?;
             Ok(())
         }
     }

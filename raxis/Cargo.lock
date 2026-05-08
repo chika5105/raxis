@@ -3169,6 +3169,7 @@ name = "raxis-live-e2e"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "clap",
  "ed25519-dalek",
  "hex",
@@ -3176,6 +3177,7 @@ dependencies = [
  "raxis-credential-proxy-http",
  "raxis-credential-proxy-manager",
  "raxis-credential-proxy-postgres",
+ "raxis-credential-proxy-smtp",
  "raxis-credentials",
  "raxis-credentials-file",
  "raxis-egress-admission",

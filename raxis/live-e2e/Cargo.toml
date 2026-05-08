@@ -17,6 +17,7 @@ raxis-credentials          = { path = "../crates/raxis-credentials" }
 raxis-credentials-file     = { path = "../crates/raxis-credentials-file" }
 raxis-credential-proxy-postgres = { path = "../crates/credential-proxy-postgres" }
 raxis-credential-proxy-http     = { path = "../crates/credential-proxy-http" }
+raxis-credential-proxy-smtp     = { path = "../crates/credential-proxy-smtp" }
 raxis-credential-proxy-manager  = { path = "../crates/credential-proxy-manager" }
 raxis-egress-admission     = { path = "../crates/egress-admission" }
 raxis-isolation            = { path = "../crates/isolation" }
@@ -39,3 +40,4 @@ clap        = { version = "4", features = ["derive"] }
 anyhow      = "1"
 tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+base64      = "0.22"
