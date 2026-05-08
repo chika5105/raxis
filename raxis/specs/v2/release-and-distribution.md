@@ -651,8 +651,8 @@ machine after RAXIS is removed.
   reinvestigate after operator feedback.
 * **Operator-published image registry.** Operator-built Executor
   / verifier images are pinned by `oci_digest` in `policy.toml` and
-  pulled by the OCI image cache (`image-cache.md`, in flight at
-  the time of writing). Their distribution is not RAXIS's concern.
+  pulled by the OCI image cache ([`image-cache.md`](image-cache.md)).
+  Their distribution is not RAXIS's concern.
 * **`raxis-tproxy` macOS replacement.** A future iteration may
   ship a userspace shim that uses macOS's `pktap` / `pf` for the
   same egress-pinning role; tracked separately.

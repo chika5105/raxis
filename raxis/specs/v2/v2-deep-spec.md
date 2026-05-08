@@ -2708,6 +2708,15 @@ referencing an unpermitted image is rejected at approval time, not at runtime.
 6. raxis-planner starts as PID 1; reads /raxis/session.env + /raxis/system_prompt.txt
 ```
 
+> **Normative cross-reference for step 2.** The image resolver
+> trait, on-disk cache layout under `$RAXIS_DATA_DIR/oci-cache/`,
+> the pull-and-verify pipeline (lock → stage → verify → atomic
+> rename → extract), concurrency control across racing sessions,
+> GC, and the failure-mode taxonomy live in
+> [`image-cache.md`](image-cache.md). The six-step flow above
+> remains authoritative for INTENT; that spec is authoritative for
+> IMPLEMENTATION.
+
 **Why operator-built images rather than runtime package installation:**
 Declaring `packages = ["cargo", "npm"]` and installing at session activation is rejected:
 (1) network-dependent — pulls from package registries at runtime, can fail or take
