@@ -1,0 +1,25 @@
+[package]
+name        = "raxis-credential-proxy-redis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RAXIS V2 — Redis (RESP) credential proxy. The agent dials a localhost Redis-shaped listener; the proxy strips the agent-supplied AUTH payload and authenticates upstream with the credential resolved through `CredentialBackend`. Per-task command allowlist enforced at the RESP boundary."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raxis-credentials = { workspace = true }
+
+tokio    = { workspace = true }
+bytes    = "1"
+sha2     = { workspace = true }
+hex      = { workspace = true }
+
+serde     = { workspace = true }
+thiserror = { workspace = true }
+tracing   = "0.1"
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

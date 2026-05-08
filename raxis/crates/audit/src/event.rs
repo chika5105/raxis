@@ -1243,6 +1243,32 @@ pub enum AuditEventKind {
         blocked:         bool,
     },
 
+    /// Emitted by the Redis credential proxy on every audited
+    /// command (forwarded or blocked). Carries the SHA-256 of the
+    /// rendered RESP request frame the upstream would have seen
+    /// (always present), the uppercased command verb, and a
+    /// `blocked` flag. Single-class observability event paired
+    /// with the `CredentialProxyStarted` / `CredentialProxyStopped`
+    /// lifecycle pair.
+    ///
+    /// Spec reference: `credential-proxy.md §4.5` (RESP proxy);
+    /// the `frame_sha256` lets reviewers cross-correlate against
+    /// the upstream Redis logs without putting the command
+    /// arguments on the audit chain.
+    RedisCommandExecuted {
+        /// Session whose VM submitted the command.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Uppercased command verb (e.g. `"GET"`, `"AUTH"`).
+        command:         String,
+        /// SHA-256 of the rendered RESP request frame the upstream
+        /// would have seen. Always present.
+        frame_sha256:    String,
+        /// True if the proxy refused the command under restrictions.
+        blocked:         bool,
+    },
+
     /// Emitted by the SMTP credential proxy when an envelope passes
     /// every restriction gate and is forwarded to the upstream
     /// relay. Carries the SHA-256 of the canonical
@@ -1371,6 +1397,7 @@ impl AuditEventKind {
             Self::CredentialProxyStopped { .. } => "CredentialProxyStopped",
             Self::DatabaseQueryExecuted { .. } => "DatabaseQueryExecuted",
             Self::HttpProxyRequestExecuted { .. } => "HttpProxyRequestExecuted",
+            Self::RedisCommandExecuted { .. } => "RedisCommandExecuted",
             Self::SmtpMessageRelayed { .. } => "SmtpMessageRelayed",
             Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",
         }

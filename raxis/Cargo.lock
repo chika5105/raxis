@@ -2904,6 +2904,7 @@ dependencies = [
  "raxis-audit-tools",
  "raxis-credential-proxy-http",
  "raxis-credential-proxy-postgres",
+ "raxis-credential-proxy-redis",
  "raxis-credential-proxy-smtp",
  "raxis-credentials",
  "raxis-credentials-file",
@@ -2930,6 +2931,21 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tokio-postgres",
+ "tracing",
+]
+
+[[package]]
+name = "raxis-credential-proxy-redis"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "raxis-credentials",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 

@@ -122,6 +122,19 @@ pub enum ProxyDecl {
         #[serde(default)]
         restrictions: SmtpRestrictions,
     },
+    /// `proxy_type = "redis"` — see `credential-proxy.md §4.5`.
+    /// The Redis proxy intercepts the agent-issued `AUTH` /
+    /// `HELLO` commands, authenticates upstream with the real
+    /// credential resolved through `CredentialBackend`, and
+    /// forwards every other command verbatim subject to the
+    /// allowlist in `[tasks.credentials.restrictions]`.
+    Redis {
+        /// Single pinned upstream Redis `host:port` (no scheme).
+        upstream_host_port: String,
+        /// Restrictions clause (`[tasks.credentials.restrictions]`).
+        #[serde(default)]
+        restrictions: RedisRestrictions,
+    },
     /// Catch-all for proxy types declared in policy but not yet
     /// implemented. The parser preserves the literal `proxy_type`
     /// string so the validator can map it to a clear "not
@@ -229,6 +242,19 @@ pub struct SmtpRestrictions {
     /// 60-second window). `None` = unrestricted.
     #[serde(default)]
     pub max_messages_per_minute: Option<u32>,
+}
+
+/// Redis restrictions
+/// (`[tasks.credentials.restrictions]` for `proxy_type = "redis"`).
+///
+/// Mirrors `raxis_credential_proxy_redis::Restrictions`. The proxy
+/// always intercepts `AUTH` and `HELLO`; `allowed_commands` gates
+/// every other verb. Empty allowlist = unrestricted.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedisRestrictions {
+    /// Case-insensitive command allowlist. Empty = unrestricted.
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -497,6 +523,55 @@ mod tests {
                 assert_eq!(restrictions.allowed_methods, vec!["GET".to_owned()]);
             }
             other => panic!("expected K8s, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_redis_decl_with_default_restrictions() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name               = "redis-staging"
+              proxy_type         = "redis"
+              mount_as           = "REDIS_URL"
+              upstream_host_port = "redis.example.com:6379"
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Redis { upstream_host_port, restrictions } => {
+                assert_eq!(upstream_host_port, "redis.example.com:6379");
+                assert_eq!(restrictions, &RedisRestrictions::default());
+            }
+            other => panic!("expected Redis, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_redis_decl_with_command_allowlist() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name               = "redis-prod"
+              proxy_type         = "redis"
+              mount_as           = "REDIS_URL"
+              upstream_host_port = "cache.internal:6379"
+
+                [tasks.credentials.restrictions]
+                allowed_commands = ["GET", "MGET", "EXISTS"]
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Redis { restrictions, .. } => {
+                assert_eq!(
+                    restrictions.allowed_commands,
+                    vec!["GET".to_owned(), "MGET".to_owned(), "EXISTS".to_owned()],
+                );
+            }
+            other => panic!("expected Redis, got {other:?}"),
         }
     }
 

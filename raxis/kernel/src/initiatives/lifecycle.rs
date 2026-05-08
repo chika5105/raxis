@@ -2527,9 +2527,9 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
                         "task `{}` declares credential `{}` with a \
                          `proxy_type` this kernel build does not \
                          implement. Valid values in V2: \
-                         `postgres`, `http`, `k8s`, `smtp`. Drop \
-                         the credential block or upgrade the kernel \
-                         build to one that ships the matching \
+                         `postgres`, `http`, `k8s`, `smtp`, `redis`. \
+                         Drop the credential block or upgrade the \
+                         kernel build to one that ships the matching \
                          proxy.",
                         pt.task_id,
                         decl.name.as_str(),
@@ -2558,6 +2558,7 @@ fn proxy_type_label_for_storage(
         ProxyDecl::Http { .. }     => "http",
         ProxyDecl::K8s { .. }      => "k8s",
         ProxyDecl::Smtp { .. }     => "smtp",
+        ProxyDecl::Redis { .. }    => "redis",
         ProxyDecl::Unknown => {
             return Err(LifecycleError::Store(
                 raxis_store::StoreError::Invariant(

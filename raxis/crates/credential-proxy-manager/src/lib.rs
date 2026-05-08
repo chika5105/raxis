@@ -95,8 +95,8 @@ use std::sync::Arc;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credentials::CredentialBackend;
 use raxis_plan_credentials::{
-    HttpAuthMode, HttpRestrictions, PostgresRestrictions, ProxyDecl, SmtpAuthMode,
-    SmtpRestrictions, TaskCredentialDecl,
+    HttpAuthMode, HttpRestrictions, PostgresRestrictions, ProxyDecl, RedisRestrictions,
+    SmtpAuthMode, SmtpRestrictions, TaskCredentialDecl,
 };
 
 use raxis_credential_proxy_http::{
@@ -110,6 +110,12 @@ use raxis_credential_proxy_postgres::{
     OwnedConsumer as PgOwnedConsumer, PostgresProxy, ProxyConfig as PgProxyConfig,
     ProxyError as PgProxyError, ProxyStats as PgProxyStats,
     Restrictions as PgProxyRestrictions,
+};
+use raxis_credential_proxy_redis::{
+    AuditChannel as RedisAuditChannel, AuditEvent as RedisAuditEvent,
+    OwnedConsumer as RedisOwnedConsumer, ProxyConfig as RedisProxyConfig,
+    ProxyError as RedisProxyError, ProxyStats as RedisProxyStats, RedisProxy,
+    Restrictions as RedisProxyRestrictions,
 };
 use raxis_credential_proxy_smtp::{
     AuthMode as SmtpAuthModeImpl, EnvelopeAudit, EnvelopeAuditSink, EnvelopeOutcome,
@@ -173,6 +179,16 @@ pub enum ManagerError {
         source: SmtpProxyError,
     },
 
+    /// Redis proxy failed to bind / start.
+    #[error("redis proxy bind failed for `{credential_name}`: {source}")]
+    RedisBind {
+        /// Credential name whose proxy bind failed.
+        credential_name: String,
+        /// Source error from the redis-proxy crate.
+        #[source]
+        source: RedisProxyError,
+    },
+
     /// `local_addr()` on a freshly-bound listener failed (very rare;
     /// signals a race against listener shutdown, or that the OS lost
     /// our binding mid-construction).
@@ -200,6 +216,7 @@ fn proxy_type_str(decl: &ProxyDecl) -> &'static str {
         ProxyDecl::Http { .. } => "http",
         ProxyDecl::K8s { .. } => "k8s",
         ProxyDecl::Smtp { .. } => "smtp",
+        ProxyDecl::Redis { .. } => "redis",
         ProxyDecl::Unknown => "unknown",
     }
 }
@@ -362,6 +379,48 @@ impl EnvelopeAuditSink for SmtpKernelAuditAdapter {
     }
 }
 
+struct RedisKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl RedisAuditChannel for RedisKernelAuditAdapter {
+    fn emit(&self, event: RedisAuditEvent) {
+        match event {
+            RedisAuditEvent::RedisCommandExecuted {
+                consumer: _,
+                credential,
+                command,
+                frame_sha256,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::RedisCommandExecuted {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    command,
+                    frame_sha256,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "RedisCommandExecuted audit emit failed; per-command audit chain entry skipped",
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Map the proxy-side `EnvelopeAudit::rejection_reason` (which
 /// typically embeds the SMTP refusal reply text after a stable
 /// `audit_summary` prefix) into the short stable reason string the
@@ -416,6 +475,7 @@ enum ProxyStatsHandle {
     Postgres(Arc<PgProxyStats>),
     Http(Arc<HttpProxyStats>),
     Smtp(Arc<SmtpProxyStats>),
+    Redis(Arc<RedisProxyStats>),
 }
 
 impl ProxyStatsHandle {
@@ -443,6 +503,14 @@ impl ProxyStatsHandle {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.messages_relayed,
                     forwards_blocked:   snap.messages_rejected,
+                }
+            }
+            ProxyStatsHandle::Redis(s) => {
+                let snap = s.snapshot();
+                StoppedCounters {
+                    connections_served: snap.connections_served,
+                    forwards_completed: snap.commands_forwarded,
+                    forwards_blocked:   snap.commands_blocked,
                 }
             }
         }
@@ -743,6 +811,17 @@ impl CredentialProxyManager {
                     )
                     .await?
                 }
+                ProxyDecl::Redis { upstream_host_port, restrictions } => {
+                    self.bind_redis(
+                        session_id,
+                        task_id,
+                        &decl.name,
+                        &decl.mount_as,
+                        upstream_host_port,
+                        restrictions,
+                    )
+                    .await?
+                }
                 ProxyDecl::Unknown => {
                     return Err(ManagerError::UnknownProxyType {
                         credential_name,
@@ -996,6 +1075,57 @@ impl CredentialProxyManager {
             mount_as:        mount_as.to_owned(),
             addr,
             stats:           ProxyStatsHandle::Smtp(stats_handle),
+            join,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_redis(
+        &self,
+        session_id:         &str,
+        task_id:            &str,
+        name:               &raxis_credentials::CredentialName,
+        mount_as:           &str,
+        upstream_host_port: &str,
+        restrictions:       &RedisRestrictions,
+    ) -> Result<ActiveProxy, ManagerError> {
+        let cfg = RedisProxyConfig {
+            listen_addr:        "127.0.0.1:0".to_owned(),
+            upstream_host_port: upstream_host_port.to_owned(),
+            credential_name:    name.clone(),
+            consumer:           RedisOwnedConsumer::new(
+                "session",
+                session_id.to_owned(),
+            ),
+            restrictions: RedisProxyRestrictions {
+                allowed_commands: restrictions.allowed_commands.clone(),
+            },
+        };
+        let audit_channel: Arc<dyn RedisAuditChannel> = Arc::new(RedisKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = RedisProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
+            .await
+            .map_err(|source| ManagerError::RedisBind {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
+        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let stats_handle = proxy.stats_handle();
+        let join = tokio::spawn(async move {
+            proxy.serve().await;
+        });
+        Ok(ActiveProxy {
+            proxy_type:      "redis",
+            credential_name: name.as_str().to_owned(),
+            mount_as:        mount_as.to_owned(),
+            addr,
+            stats:           ProxyStatsHandle::Redis(stats_handle),
             join,
         })
     }
