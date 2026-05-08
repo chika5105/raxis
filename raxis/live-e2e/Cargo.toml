@@ -19,6 +19,9 @@ raxis-credential-proxy-postgres = { path = "../crates/credential-proxy-postgres"
 raxis-credential-proxy-http     = { path = "../crates/credential-proxy-http" }
 raxis-credential-proxy-smtp     = { path = "../crates/credential-proxy-smtp" }
 raxis-credential-proxy-redis    = { path = "../crates/credential-proxy-redis" }
+raxis-credential-proxy-aws      = { path = "../crates/credential-proxy-aws" }
+raxis-credential-proxy-gcp      = { path = "../crates/credential-proxy-gcp" }
+raxis-credential-proxy-azure    = { path = "../crates/credential-proxy-azure" }
 raxis-credential-proxy-manager  = { path = "../crates/credential-proxy-manager" }
 raxis-egress-admission     = { path = "../crates/egress-admission" }
 raxis-isolation            = { path = "../crates/isolation" }

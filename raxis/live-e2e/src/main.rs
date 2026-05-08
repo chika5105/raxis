@@ -71,6 +71,28 @@
 //!     verbs (PING/SET/GET) reached upstream in order, and a
 //!     denied verb (FLUSHDB) was rejected at the proxy boundary.
 //!
+//!   * `aws-proxy` — start the real `AwsProxy` from
+//!     `crates/credential-proxy-aws/` and drive raw HTTP/1.1
+//!     `GET /creds` requests through it. Asserts the canonical
+//!     IMDS JSON envelope is emitted, the path allowlist denies
+//!     non-`/creds` requests with `403`, and that querystrings
+//!     are stripped before allowlist comparison.
+//!
+//!   * `gcp-proxy` — start the real `GcpProxy` from
+//!     `crates/credential-proxy-gcp/` and drive raw HTTP/1.1
+//!     requests through it. Asserts the canonical metadata-server
+//!     JSON envelope is emitted, the `Metadata-Flavor: Google`
+//!     header is enforced (403 when missing), and non-allowlisted
+//!     paths get `404`.
+//!
+//!   * `azure-proxy` — start the real `AzureProxy` from
+//!     `crates/credential-proxy-azure/` and drive raw HTTP/1.1
+//!     requests through it. Asserts the canonical IMDS body is
+//!     emitted with stringified numeric fields, the `Metadata: true`
+//!     header is enforced (400 when missing), and resources outside
+//!     `allowed_resources` get `400` even when the header is
+//!     present.
+//!
 //!   * `all` — run every slice in order; any slice failure aborts
 //!     with non-zero exit.
 //!
@@ -94,8 +116,11 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
 mod env_file;
+mod slice_aws_proxy;
+mod slice_azure_proxy;
 mod slice_egress_enforcement;
 mod slice_gateway_anthropic;
+mod slice_gcp_proxy;
 mod slice_http_proxy_bearer;
 mod slice_http_proxy_restrictions;
 mod slice_postgres_proxy;
@@ -162,6 +187,24 @@ enum Slice {
     /// allow-listed verbs verbatim (PING/SET/GET), and rejects
     /// disallowed verbs (FLUSHDB) at the proxy boundary.
     RedisProxy,
+    /// Real `AwsProxy` + a raw HTTP/1.1 client. Asserts that the
+    /// canonical `/creds` endpoint returns the IMDS-shaped JSON body
+    /// with the `CredentialBackend`-resolved keys, that
+    /// non-allowlisted paths get `403 Forbidden`, and that the
+    /// counters reflect the served / blocked decisions.
+    AwsProxy,
+    /// Real `GcpProxy` + a raw HTTP/1.1 client. Asserts that the
+    /// canonical `/computeMetadata/v1/...` endpoints return the
+    /// metadata-server JSON body, that requests missing
+    /// `Metadata-Flavor: Google` get `403`, and that
+    /// non-allowlisted paths get `404`.
+    GcpProxy,
+    /// Real `AzureProxy` + a raw HTTP/1.1 client. Asserts that
+    /// `/metadata/identity/oauth2/token?resource=...` for an allowed
+    /// resource returns the IMDS body with stringified numeric
+    /// fields, and that requests missing `Metadata: true` or naming
+    /// a disallowed resource get `400`.
+    AzureProxy,
     /// Run every slice in order.
     All,
 }
@@ -225,6 +268,9 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::SessionSpawn               => slice_session_spawn::run().await,
         Slice::SmtpProxy                  => slice_smtp_proxy::run().await,
         Slice::RedisProxy                 => slice_redis_proxy::run().await,
+        Slice::AwsProxy                   => slice_aws_proxy::run().await,
+        Slice::GcpProxy                   => slice_gcp_proxy::run().await,
+        Slice::AzureProxy                 => slice_azure_proxy::run().await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
@@ -244,6 +290,12 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice smtp-proxy")?;
             slice_redis_proxy::run().await
                 .context("slice redis-proxy")?;
+            slice_aws_proxy::run().await
+                .context("slice aws-proxy")?;
+            slice_gcp_proxy::run().await
+                .context("slice gcp-proxy")?;
+            slice_azure_proxy::run().await
+                .context("slice azure-proxy")?;
             Ok(())
         }
     }
