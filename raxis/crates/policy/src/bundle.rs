@@ -117,6 +117,18 @@ pub(crate) struct RawPolicy {
     /// `"pkcs11"`; `extensibility-traits.md §4.4`.
     #[serde(default)]
     pub(crate) credential_backend: Option<CredentialBackendSection>,
+
+    /// `[[integration_merge_verifiers]]` — V2 operator-side pre-merge
+    /// verifier gates per `policy-plan-authority.md §4
+    /// [[integration_merge_verifiers]]`. **Optional**: omitted
+    /// section means "operator declares no global pre-merge
+    /// verifiers" (the typical default). Validation enforces the
+    /// operator-side discipline (`on_failure = "block_merge"` only,
+    /// name uniqueness, `applies_to ∈ {all, task_set, last}`, and
+    /// the structural caps shared with the plan-side parser); see
+    /// `PolicyBundle::validate`.
+    #[serde(default, rename = "integration_merge_verifiers")]
+    pub(crate) integration_merge_verifiers: Vec<IntegrationMergeVerifierEntry>,
 }
 
 /// `[credential_backend]` — selector for the active credential
@@ -419,6 +431,149 @@ pub struct GateEntry {
     pub max_memory_bytes: u64,
     /// Advisory only in v1 — not enforced at the OS level (kernel-store.md §2.5.6).
     pub network_allowed: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Pre-merge verifier entries (V2 — operator-side surface)
+// ---------------------------------------------------------------------------
+
+/// Scope filter for an `[[integration_merge_verifiers]]` entry.
+/// Documented in `verifier-processes.md §16.3` and consumed at
+/// `integration-merge.md §4 Check 5d.1`.
+///
+/// `Last` is the singular sentinel for "the FINAL IntegrationMerge of
+/// the DAG"; `TaskSet` constrains the verifier to merges whose
+/// `merged_task_ids` intersect a specific set; `All` (the default)
+/// fires on every merge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationMergeVerifierAppliesTo {
+    /// `applies_to = "all"` — fires on every IntegrationMerge.
+    All,
+    /// `applies_to = "task_set"` — fires only when this merge's
+    /// `merged_task_ids` intersects the verifier's `task_set`.
+    TaskSet,
+    /// `applies_to = "last"` — fires only on the merge that drains
+    /// the final remaining `Completed` task in the plan.
+    Last,
+}
+
+impl Default for IntegrationMergeVerifierAppliesTo {
+    fn default() -> Self {
+        Self::All
+    }
+}
+
+/// Failure routing for an `[[integration_merge_verifiers]]` entry.
+/// Documented in `verifier-processes.md §5 (block_merge / warn_only)`.
+///
+/// Operator-side declarations MUST be `BlockMerge` (the operator path
+/// cannot downgrade to `warn_only`; that is enforced at validate
+/// time). Plan-side declarations may freely choose either; the plan
+/// parser reuses this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationMergeVerifierOnFailure {
+    /// `on_failure = "block_merge"` — non-passing verdict discards
+    /// the candidate merged tree; main is NOT advanced; Orchestrator
+    /// receives `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`.
+    BlockMerge,
+    /// `on_failure = "warn_only"` — non-passing verdict surfaces in
+    /// audit but the merge proceeds. Plan-side only; rejected at
+    /// validate time on the operator surface.
+    WarnOnly,
+}
+
+/// One declared `[[integration_merge_verifiers]]` entry.
+///
+/// **Schema parity.** Mirrors the `policy.toml` operator-side schema
+/// in `policy-plan-authority.md §4 [[integration_merge_verifiers]]`
+/// and the plan-side `[[plan.integration_merge_verifiers]]` schema in
+/// `verifier-processes.md §15.1` — both use this struct so the
+/// downstream Check 5d dispatcher (per `integration-merge.md §4
+/// Check 5d.1`) operates on a single typed surface.
+///
+/// **Operator-only fields.** `required_for_environments` is
+/// operator-side only per `policy-plan-authority.md §4
+/// [[integration_merge_verifiers]]`; the plan-side parser sets it to
+/// `None` and the cross-source validator rejects any plan-side entry
+/// that populates it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IntegrationMergeVerifierEntry {
+    /// Identifier for the verifier within the (plan-source ∪
+    /// policy-source) union. Validated at policy/plan load to be
+    /// non-empty `[a-z][a-z0-9_]{0,31}`.
+    pub name: String,
+
+    /// VM image alias resolving against `[[vm_images]]`. Validated
+    /// at policy load to point at an image whose `role_restriction`
+    /// contains `"Verifier"` (cross-spec, deferred to the kernel
+    /// admission step).
+    pub image: String,
+
+    /// Shell command run inside the verifier VM by the
+    /// `raxis-verifier` PID-1 via `sh -lc`.
+    pub command: String,
+
+    /// Wall-clock timeout duration string (`"30s"`, `"10m"`, `"1h"`).
+    /// Validated at load time against the kernel hard cap
+    /// (`max_verifier_timeout_seconds`).
+    pub timeout: String,
+
+    /// Failure routing per `verifier-processes.md §5`. Operator-side
+    /// declarations MUST be `BlockMerge`; plan-side declarations may
+    /// be either `BlockMerge` or `WarnOnly`.
+    pub on_failure: IntegrationMergeVerifierOnFailure,
+
+    /// Scope filter per `verifier-processes.md §16.3`. Defaults to
+    /// `All` when the operator omits the field.
+    #[serde(default)]
+    pub applies_to: IntegrationMergeVerifierAppliesTo,
+
+    /// Required iff `applies_to = TaskSet`. Each entry is validated
+    /// to be a declared `[[plan.tasks]] task_id` at `approve_plan`
+    /// time (cross-source — the policy load itself cannot validate
+    /// against tasks because tasks live in the plan, not the
+    /// policy bundle).
+    #[serde(default)]
+    pub task_set: Vec<String>,
+
+    /// Optional artifact path that the kernel stages into
+    /// `staging/merge/<integration_merge_id>/<verifier_name>/` after
+    /// a passing run. Must start with `/raxis/` per
+    /// `verifier-processes.md §6`.
+    #[serde(default)]
+    pub artifact: Option<String>,
+
+    /// Optional cap on staged artifact bytes. Validated against the
+    /// kernel hard cap (`max_artifact_bytes`).
+    #[serde(default)]
+    pub artifact_max_bytes: Option<u64>,
+
+    /// Optional environment variables exposed to the verifier
+    /// command. Operator-side validation rejects keys starting with
+    /// `RAXIS_` (reserved for kernel-injected scope keys) and caps
+    /// the count and total size.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+
+    /// Optional per-verifier egress allowlist. Empty by default per
+    /// `INV-VERIFIER-11`. Operator-side egress entries are stored as
+    /// raw strings here; the egress-admission crate validates the
+    /// shape at policy load time (cross-spec; the policy bundle
+    /// keeps the strings opaque so the egress vocabulary can evolve
+    /// without churning this struct).
+    #[serde(default)]
+    pub allowed_egress: Vec<String>,
+
+    /// Operator-only: bind the verifier to a subset of declared
+    /// `[environments.<label>]` entries per
+    /// `environment-access-control.md §5b`. Plan-side parsers MUST
+    /// reject any plan-source entry that populates this field; the
+    /// policy validator additionally checks that every entry resolves
+    /// to a declared environment label.
+    #[serde(default)]
+    pub required_for_environments: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,6 +1285,311 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
 ///    dropped.
 /// 7. **For Email/Webhook channels**, validate target is non-empty;
 ///    the kernel emits a one-line warning at boot per spec §5.6.2.
+
+// ---------------------------------------------------------------------------
+// `[[integration_merge_verifiers]]` operator-side validator (V2).
+// ---------------------------------------------------------------------------
+
+/// Operator-side environment-key reservation prefix. Mirrors the
+/// per-task verifier validator's discipline (`policy-plan-authority.md
+/// §4 step 3.6 / 3.7`): keys starting with `RAXIS_` are reserved for
+/// kernel-injected scope keys (`RAXIS_VERIFIER_HOOK_KIND`,
+/// `RAXIS_INTEGRATION_MERGE_ID`, …) and operator declarations MUST
+/// NOT collide.
+const RAXIS_RESERVED_ENV_PREFIX: &str = "RAXIS_";
+
+/// Hard cap on `[[integration_merge_verifiers.env]]` entry count.
+/// Matches per-task verifier discipline; `policy-plan-authority.md §4
+/// [[integration_merge_verifiers]] env`.
+const VERIFIER_ENV_MAX_ENTRIES: usize = 32;
+
+/// Hard cap on the combined size of every `key=value` byte-pair in
+/// `[[integration_merge_verifiers.env]]`. 16 KiB is the operator-
+/// ergonomic ceiling agreed in `policy-plan-authority.md §4
+/// [[integration_merge_verifiers]] env`.
+const VERIFIER_ENV_MAX_TOTAL_BYTES: usize = 16 * 1024;
+
+/// Hard cap on a `[[integration_merge_verifiers]] artifact` path.
+/// Pinned to 256 chars per `verifier-processes.md §6` (mirrors the
+/// per-task verifier limit).
+const VERIFIER_ARTIFACT_MAX_PATH_CHARS: usize = 256;
+
+/// Lower bound on `timeout` strings, in seconds. Below this the
+/// kernel cannot reliably distinguish a verifier from a startup
+/// glitch. Mirrors the per-task verifier floor in
+/// `verifier-processes.md §3 [[plan.tasks.<id>.verifiers]] timeout`.
+const VERIFIER_TIMEOUT_MIN_SECS: u64 = 5;
+
+/// Validate an operator-side `[[integration_merge_verifiers]]` array.
+///
+/// **Operator-side discipline.** This validator enforces every rule
+/// that does NOT require cross-spec context (vm_images resolution,
+/// host_capacity hard cap, environment-label resolution, plan-side
+/// task_id intersection). Cross-spec checks land in `approve_plan`
+/// (Step 2 of the pre-merge-verifier track) once the relevant
+/// surfaces are stitched together.
+///
+/// ### Rules enforced here
+///
+/// 1. `name` non-empty, `[a-z][a-z0-9_]{0,31}`, unique across the
+///    section.
+/// 2. `image` and `command` non-empty.
+/// 3. `timeout` parses as a duration string (`"30s"`, `"10m"`, …)
+///    that resolves to ≥ 5 seconds. The full upper-bound check
+///    (`max_verifier_timeout_seconds` from `[host_capacity]`) is
+///    deferred to admission time per `verifier-processes.md §17.5`.
+/// 4. `on_failure = "block_merge"` only — the operator surface
+///    cannot be downgraded to `warn_only` per
+///    `policy-plan-authority.md §4 [[integration_merge_verifiers]]`.
+/// 5. `applies_to = "task_set"` ⇒ `task_set` is non-empty;
+///    `applies_to ∈ {"all", "last"}` ⇒ `task_set` is empty (any
+///    operator entry that mixes the two is rejected with a clear
+///    diagnostic).
+/// 6. `artifact` (when set) starts with `/raxis/` and is ≤ 256 chars.
+/// 7. `env` cap: ≤ 32 entries, total key+value bytes ≤ 16 KiB, no
+///    key starts with `RAXIS_`.
+/// 8. `required_for_environments` (when set) is non-empty and has
+///    no duplicate entries; resolution against the
+///    `[environments.<label>]` section is deferred (the bundle does
+///    not yet hold an environments map — that section lands with the
+///    environment-access-control step).
+///
+/// ### Returned slice
+///
+/// Returns the validated entries unchanged. The caller stores the
+/// `Vec<IntegrationMergeVerifierEntry>` on the `PolicyBundle`.
+fn validate_integration_merge_verifiers_operator_side(
+    raw: &[IntegrationMergeVerifierEntry],
+) -> Result<(), PolicyError> {
+    use std::collections::HashSet;
+
+    let mut seen_names: HashSet<&str> = HashSet::with_capacity(raw.len());
+
+    for entry in raw {
+        // Rule 1 — name shape + uniqueness.
+        if !is_valid_verifier_name(&entry.name) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_NAME_INVALID: \
+                 [[integration_merge_verifiers]] entry name `{}` must \
+                 match `[a-z][a-z0-9_]{{0,31}}` (operator surface; \
+                 mirrors verifier-processes.md §3 schema).",
+                entry.name,
+            )));
+        }
+        if !seen_names.insert(entry.name.as_str()) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_NAME_COLLISION: \
+                 duplicate [[integration_merge_verifiers]] name `{}` \
+                 within the operator-side section (cross-source \
+                 collision against plan-side is checked at \
+                 approve_plan).",
+                entry.name,
+            )));
+        }
+
+        // Rule 2 — image / command non-empty.
+        if entry.image.trim().is_empty() {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_IMAGE_REQUIRED: \
+                 [[integration_merge_verifiers]] `{}` must declare a \
+                 non-empty `image` (resolved against [[vm_images]] at \
+                 admission time).",
+                entry.name,
+            )));
+        }
+        if entry.command.trim().is_empty() {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_COMMAND_REQUIRED: \
+                 [[integration_merge_verifiers]] `{}` must declare a \
+                 non-empty `command`.",
+                entry.name,
+            )));
+        }
+
+        // Rule 3 — timeout parses and is ≥ 5s.
+        let timeout_secs = parse_verifier_timeout_secs(&entry.timeout)
+            .ok_or_else(|| {
+                PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_INVALID: \
+                     [[integration_merge_verifiers]] `{}` has unparseable \
+                     `timeout = {:?}` — expected a duration string like \
+                     \"30s\", \"10m\", or \"1h\".",
+                    entry.name, entry.timeout,
+                ))
+            })?;
+        if timeout_secs < VERIFIER_TIMEOUT_MIN_SECS {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_TOO_SHORT: \
+                 [[integration_merge_verifiers]] `{}` has \
+                 `timeout = {}s`, must be ≥ {} seconds.",
+                entry.name, timeout_secs, VERIFIER_TIMEOUT_MIN_SECS,
+            )));
+        }
+
+        // Rule 4 — on_failure = block_merge (operator-side only).
+        if entry.on_failure != IntegrationMergeVerifierOnFailure::BlockMerge {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_VERIFIER_INVALID_ON_FAILURE: \
+                 [[integration_merge_verifiers]] `{}` declared \
+                 `on_failure = \"warn_only\"`; operator-side \
+                 declarations cannot be downgraded \
+                 (policy-plan-authority.md §4 \
+                 [[integration_merge_verifiers]]).",
+                entry.name,
+            )));
+        }
+
+        // Rule 5 — applies_to / task_set coherence.
+        match entry.applies_to {
+            IntegrationMergeVerifierAppliesTo::TaskSet => {
+                if entry.task_set.is_empty() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_VERIFIER_TASK_SET_EMPTY: \
+                         [[integration_merge_verifiers]] `{}` declared \
+                         `applies_to = \"task_set\"` but `task_set` is \
+                         empty (must list at least one task id; \
+                         resolution against declared tasks is checked \
+                         at approve_plan).",
+                        entry.name,
+                    )));
+                }
+            }
+            IntegrationMergeVerifierAppliesTo::All
+            | IntegrationMergeVerifierAppliesTo::Last => {
+                if !entry.task_set.is_empty() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TASK_SET_INCONSISTENT: \
+                         [[integration_merge_verifiers]] `{}` populated \
+                         `task_set` but `applies_to = {:?}` does not \
+                         consume it; either set `applies_to = \"task_set\"` \
+                         or drop the `task_set = [...]` field.",
+                        entry.name, entry.applies_to,
+                    )));
+                }
+            }
+        }
+
+        // Rule 6 — artifact path shape.
+        if let Some(path) = entry.artifact.as_ref() {
+            if !path.starts_with("/raxis/") {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ARTIFACT_PATH_INVALID: \
+                     [[integration_merge_verifiers]] `{}` declared \
+                     `artifact = {:?}`; path must start with `/raxis/` \
+                     (verifier-processes.md §6).",
+                    entry.name, path,
+                )));
+            }
+            if path.chars().count() > VERIFIER_ARTIFACT_MAX_PATH_CHARS {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ARTIFACT_PATH_TOO_LONG: \
+                     [[integration_merge_verifiers]] `{}` `artifact` \
+                     path exceeds {} chars.",
+                    entry.name, VERIFIER_ARTIFACT_MAX_PATH_CHARS,
+                )));
+            }
+        }
+
+        // Rule 7 — env cap + reserved-prefix.
+        if entry.env.len() > VERIFIER_ENV_MAX_ENTRIES {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ENV_TOO_MANY_ENTRIES: \
+                 [[integration_merge_verifiers]] `{}` declared {} env \
+                 entries; max is {}.",
+                entry.name, entry.env.len(), VERIFIER_ENV_MAX_ENTRIES,
+            )));
+        }
+        let mut env_byte_total = 0usize;
+        for (k, v) in &entry.env {
+            if k.starts_with(RAXIS_RESERVED_ENV_PREFIX) {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_CUSTOM_TOOL_ENV_RESERVED_KEY: \
+                     [[integration_merge_verifiers]] `{}` env key \
+                     `{}` collides with the reserved `{}*` prefix \
+                     (kernel-injected scope keys).",
+                    entry.name, k, RAXIS_RESERVED_ENV_PREFIX,
+                )));
+            }
+            env_byte_total = env_byte_total
+                .saturating_add(k.len())
+                .saturating_add(v.len());
+        }
+        if env_byte_total > VERIFIER_ENV_MAX_TOTAL_BYTES {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ENV_TOO_LARGE: \
+                 [[integration_merge_verifiers]] `{}` env entries sum \
+                 to {} bytes; max is {} bytes.",
+                entry.name, env_byte_total, VERIFIER_ENV_MAX_TOTAL_BYTES,
+            )));
+        }
+
+        // Rule 8 — required_for_environments coherence (resolution
+        // deferred until the environments-section lands).
+        if let Some(envs) = entry.required_for_environments.as_ref() {
+            if envs.is_empty() {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_REQUIRED_ENVS_EMPTY: \
+                     [[integration_merge_verifiers]] `{}` declared an \
+                     empty `required_for_environments = []`; either \
+                     drop the field or list at least one environment \
+                     label.",
+                    entry.name,
+                )));
+            }
+            let mut seen_envs: HashSet<&str> = HashSet::with_capacity(envs.len());
+            for label in envs {
+                if !seen_envs.insert(label.as_str()) {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_REQUIRED_ENVS_DUPLICATE: \
+                         [[integration_merge_verifiers]] `{}` lists \
+                         `{}` twice in `required_for_environments`.",
+                        entry.name, label,
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate a verifier `name` against the operator-ergonomic
+/// `[a-z][a-z0-9_]{0,31}` shape pinned in
+/// `policy-plan-authority.md §4 [[integration_merge_verifiers]] name`.
+fn is_valid_verifier_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes.len() > 32 {
+        return false;
+    }
+    if !bytes[0].is_ascii_lowercase() {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_')
+}
+
+/// Parse a verifier `timeout = "Ns"|"Nm"|"Nh"` shape into seconds.
+/// Returns `None` for unparseable strings or for values that
+/// overflow a `u64` second count.
+fn parse_verifier_timeout_secs(s: &str) -> Option<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_str, unit) = if let Some(stripped) = s.strip_suffix('s') {
+        (stripped, 1u64)
+    } else if let Some(stripped) = s.strip_suffix('m') {
+        (stripped, 60u64)
+    } else if let Some(stripped) = s.strip_suffix('h') {
+        (stripped, 3_600u64)
+    } else {
+        return None;
+    };
+    let n: u64 = num_str.parse().ok()?;
+    n.checked_mul(unit)
+}
+
 fn validate_notifications(
     raw: &NotificationsSection,
 ) -> Result<
@@ -1362,6 +1822,17 @@ pub struct PolicyBundle {
     /// (`kernel/src/main.rs`) to construct the
     /// `Arc<dyn CredentialBackend>` injected into `HandlerContext`.
     credential_backend: CredentialBackendKind,
+
+    /// V2 operator-side pre-merge verifier gates per
+    /// `policy-plan-authority.md §4 [[integration_merge_verifiers]]`.
+    /// Each entry passed structural validation in
+    /// `validate_integration_merge_verifiers_operator_side`. Read at
+    /// `IntegrationMerge` admission (Check 5d) by the kernel; the
+    /// plan-side `[[plan.integration_merge_verifiers]]` is unioned
+    /// with this list at dispatch time per
+    /// `verifier-processes.md §15`. Empty when the operator omits
+    /// the section (the default).
+    integration_merge_verifiers: Vec<IntegrationMergeVerifierEntry>,
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -1549,6 +2020,10 @@ impl PolicyBundle {
         let (notification_channels, notification_routes, default_notification_channels) =
             validate_notifications(&raw.notifications)?;
 
+        validate_integration_merge_verifiers_operator_side(
+            &raw.integration_merge_verifiers,
+        )?;
+
         Ok(Self {
             epoch: raw.meta.epoch,
             authority_pubkey_hex: raw.authority.authority_pubkey,
@@ -1606,6 +2081,7 @@ impl PolicyBundle {
                 .credential_backend
                 .map(|s| s.kind)
                 .unwrap_or_default(),
+            integration_merge_verifiers: raw.integration_merge_verifiers,
         })
     }
 
@@ -1624,6 +2100,22 @@ impl PolicyBundle {
     /// `[credential_backend]` section.
     pub fn credential_backend_kind(&self) -> CredentialBackendKind {
         self.credential_backend
+    }
+
+    /// Operator-side `[[integration_merge_verifiers]]` entries, in
+    /// declaration order. Empty when the operator omits the section
+    /// (the typical default — most operators don't run any
+    /// pre-merge gates).
+    ///
+    /// The kernel's IntegrationMerge admission step (Check 5d, per
+    /// `integration-merge.md §4`) UNIONs this slice with the
+    /// plan-side `[[plan.integration_merge_verifiers]]` array at
+    /// dispatch time and applies the per-merge `applies_to` filter.
+    /// Cross-source name collisions are caught at `approve_plan`
+    /// (Step 2 of the pre-merge-verifier track); this accessor
+    /// surfaces only operator-side entries.
+    pub fn integration_merge_verifiers(&self) -> &[IntegrationMergeVerifierEntry] {
+        &self.integration_merge_verifiers
     }
 
     // ── Key accessors ───────────────────────────────────────────────────────
@@ -1757,6 +2249,7 @@ impl PolicyBundle {
             default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
             bypassed_cert_misconfigs: Vec::new(),
             credential_backend: CredentialBackendKind::default(),
+            integration_merge_verifiers: Vec::new(),
         }
     }
 
@@ -2284,6 +2777,7 @@ mod tests {
             default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
             bypassed_cert_misconfigs: Vec::new(),
             credential_backend: CredentialBackendKind::default(),
+            integration_merge_verifiers: Vec::new(),
         }
     }
 
@@ -3760,5 +4254,285 @@ permitted_ops      = ["AbortTask"]   # ignored — cert is the authority
             "cert-driven permitted_ops must be installed (entry's AbortTask discarded)");
         assert_eq!(op.cert.pubkey_hex, test_pubkey_hex(),
             "cert pubkey must round-trip through TOML intact");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pre-merge verifier validator tests (V2 — operator surface only).
+//
+// Step 1 of the pre-merge-verifier track: the typed config has landed
+// in PolicyBundle. These tests pin every rule the operator-side
+// validator enforces TODAY (cross-spec checks — vm_image resolution,
+// host-capacity timeout cap, environment-label resolution, plan-side
+// task_id intersection — land in Step 2 / Step 4).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod integration_merge_verifiers_tests {
+    use super::*;
+
+    fn entry(name: &str) -> IntegrationMergeVerifierEntry {
+        IntegrationMergeVerifierEntry {
+            name:                       name.to_owned(),
+            image:                      "operator/deploy-smoke@sha256:aaaa".to_owned(),
+            command:                    "./scripts/smoke.sh".to_owned(),
+            timeout:                    "10m".to_owned(),
+            on_failure:                 IntegrationMergeVerifierOnFailure::BlockMerge,
+            applies_to:                 IntegrationMergeVerifierAppliesTo::All,
+            task_set:                   Vec::new(),
+            artifact:                   None,
+            artifact_max_bytes:         None,
+            env:                        HashMap::new(),
+            allowed_egress:             Vec::new(),
+            required_for_environments:  None,
+        }
+    }
+
+    /// Empty operator surface is the typical default — must validate.
+    #[test]
+    fn empty_section_is_valid() {
+        validate_integration_merge_verifiers_operator_side(&[])
+            .expect("empty section must be valid");
+    }
+
+    /// Happy path — single canonical entry passes.
+    #[test]
+    fn single_entry_with_canonical_fields_is_valid() {
+        let entries = vec![entry("production_deploy_smoke")];
+        validate_integration_merge_verifiers_operator_side(&entries)
+            .expect("single canonical entry must validate");
+    }
+
+    /// Names must match `[a-z][a-z0-9_]{0,31}`.
+    #[test]
+    fn name_with_uppercase_is_rejected() {
+        let entries = vec![entry("Bad_Name")];
+        let err = validate_integration_merge_verifiers_operator_side(&entries)
+            .expect_err("uppercase name must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_NAME_INVALID"),
+            "diagnostic must surface the failure code, got: {msg}");
+    }
+
+    #[test]
+    fn name_starting_with_digit_is_rejected() {
+        let entries = vec![entry("9foo")];
+        let err = validate_integration_merge_verifiers_operator_side(&entries)
+            .expect_err("digit-leading name must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_NAME_INVALID"));
+    }
+
+    #[test]
+    fn empty_name_is_rejected() {
+        let entries = vec![entry("")];
+        let err = validate_integration_merge_verifiers_operator_side(&entries)
+            .expect_err("empty name must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_NAME_INVALID"));
+    }
+
+    #[test]
+    fn duplicate_names_within_section_are_rejected() {
+        let entries = vec![entry("smoke"), entry("smoke")];
+        let err = validate_integration_merge_verifiers_operator_side(&entries)
+            .expect_err("duplicate name must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_NAME_COLLISION"));
+    }
+
+    #[test]
+    fn empty_image_is_rejected() {
+        let mut e = entry("smoke");
+        e.image = "  ".to_owned();
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("blank image must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_IMAGE_REQUIRED"));
+    }
+
+    #[test]
+    fn empty_command_is_rejected() {
+        let mut e = entry("smoke");
+        e.command = String::new();
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("blank command must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_COMMAND_REQUIRED"));
+    }
+
+    /// Operator surface MUST NOT downgrade to `warn_only`.
+    #[test]
+    fn warn_only_on_failure_is_rejected_on_operator_surface() {
+        let mut e = entry("smoke");
+        e.on_failure = IntegrationMergeVerifierOnFailure::WarnOnly;
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("warn_only must be rejected on operator surface");
+        assert!(format!("{err}").contains("FAIL_VERIFIER_INVALID_ON_FAILURE"),
+            "must surface the canonical FAIL_VERIFIER_INVALID_ON_FAILURE code");
+    }
+
+    /// `applies_to = "task_set"` requires a non-empty `task_set`.
+    #[test]
+    fn task_set_applies_with_empty_task_set_is_rejected() {
+        let mut e = entry("smoke");
+        e.applies_to = IntegrationMergeVerifierAppliesTo::TaskSet;
+        e.task_set   = Vec::new();
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("empty task_set must be rejected");
+        assert!(format!("{err}").contains("FAIL_VERIFIER_TASK_SET_EMPTY"));
+    }
+
+    /// `applies_to = "all"` MUST NOT carry a populated `task_set`.
+    #[test]
+    fn all_applies_with_populated_task_set_is_rejected() {
+        let mut e = entry("smoke");
+        e.applies_to = IntegrationMergeVerifierAppliesTo::All;
+        e.task_set   = vec!["task-a".to_owned()];
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("populated task_set with applies_to=all must be rejected");
+        assert!(format!("{err})").contains("INTEGRATION_MERGE_VERIFIER_TASK_SET_INCONSISTENT")
+            || format!("{err}").contains("INTEGRATION_MERGE_VERIFIER_TASK_SET_INCONSISTENT"));
+    }
+
+    /// Timeout strings must be parseable into the `Ns|Nm|Nh` shape.
+    #[test]
+    fn timeout_unparseable_is_rejected() {
+        let mut e = entry("smoke");
+        e.timeout = "10minutes".to_owned();
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("unparseable timeout must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_INVALID"));
+    }
+
+    /// Timeout below 5 seconds is rejected.
+    #[test]
+    fn timeout_too_short_is_rejected() {
+        let mut e = entry("smoke");
+        e.timeout = "4s".to_owned();
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("4s timeout must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_TOO_SHORT"));
+    }
+
+    /// Timeout exactly at the floor (5s) is accepted.
+    #[test]
+    fn timeout_at_floor_is_accepted() {
+        let mut e = entry("smoke");
+        e.timeout = "5s".to_owned();
+        validate_integration_merge_verifiers_operator_side(&[e])
+            .expect("5s timeout must be accepted");
+    }
+
+    /// Artifact paths must start with `/raxis/`.
+    #[test]
+    fn artifact_path_outside_raxis_is_rejected() {
+        let mut e = entry("smoke");
+        e.artifact = Some("/var/run/secrets/x".to_owned());
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("non-/raxis artifact path must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ARTIFACT_PATH_INVALID"));
+    }
+
+    #[test]
+    fn artifact_path_too_long_is_rejected() {
+        let mut e = entry("smoke");
+        e.artifact = Some(format!("/raxis/{}", "x".repeat(VERIFIER_ARTIFACT_MAX_PATH_CHARS)));
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("oversize artifact path must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ARTIFACT_PATH_TOO_LONG"));
+    }
+
+    #[test]
+    fn env_with_raxis_prefix_key_is_rejected() {
+        let mut e = entry("smoke");
+        e.env.insert("RAXIS_VERIFIER_HOOK_KIND".to_owned(), "spoof".to_owned());
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("RAXIS_-prefixed env key must be rejected");
+        assert!(format!("{err}").contains("FAIL_CUSTOM_TOOL_ENV_RESERVED_KEY"));
+    }
+
+    #[test]
+    fn env_with_too_many_entries_is_rejected() {
+        let mut e = entry("smoke");
+        for i in 0..(VERIFIER_ENV_MAX_ENTRIES + 1) {
+            e.env.insert(format!("KEY_{i}"), "v".to_owned());
+        }
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("too many env entries must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ENV_TOO_MANY_ENTRIES"));
+    }
+
+    #[test]
+    fn env_total_size_above_cap_is_rejected() {
+        let mut e = entry("smoke");
+        e.env.insert("BIG".to_owned(), "x".repeat(VERIFIER_ENV_MAX_TOTAL_BYTES));
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("env total above 16 KiB must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ENV_TOO_LARGE"));
+    }
+
+    #[test]
+    fn empty_required_for_environments_is_rejected() {
+        let mut e = entry("smoke");
+        e.required_for_environments = Some(Vec::new());
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("empty required_for_environments must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_REQUIRED_ENVS_EMPTY"));
+    }
+
+    #[test]
+    fn duplicate_required_for_environments_is_rejected() {
+        let mut e = entry("smoke");
+        e.required_for_environments = Some(vec!["prod".to_owned(), "prod".to_owned()]);
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("duplicate environments entry must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_REQUIRED_ENVS_DUPLICATE"));
+    }
+
+    /// End-to-end TOML round-trip exercising every accepted shape:
+    /// applies_to=all (default), applies_to=task_set with task_set
+    /// populated, and applies_to=last; required_for_environments
+    /// populated.
+    #[test]
+    fn toml_round_trip_validates_three_canonical_entries() {
+        let toml = r#"
+[[integration_merge_verifiers]]
+name        = "production_deploy_smoke"
+image       = "operator/deploy-smoke@sha256:aaaa"
+command     = "./scripts/prod_smoke.sh"
+timeout     = "20m"
+on_failure  = "block_merge"
+required_for_environments = ["production"]
+
+[[integration_merge_verifiers]]
+name        = "auth_integration"
+image       = "operator/auth-it@sha256:bbbb"
+command     = "./scripts/auth_smoke.sh"
+timeout     = "15m"
+on_failure  = "block_merge"
+applies_to  = "task_set"
+task_set    = ["implement_auth", "implement_session"]
+
+[[integration_merge_verifiers]]
+name        = "deploy_smoke_last_only"
+image       = "operator/deploy-smoke@sha256:cccc"
+command     = "./scripts/deploy_smoke.sh"
+timeout     = "10m"
+on_failure  = "block_merge"
+applies_to  = "last"
+"#;
+        let parsed: HashMap<String, Vec<IntegrationMergeVerifierEntry>> =
+            toml::from_str(toml).expect("toml parse");
+        let entries = parsed.get("integration_merge_verifiers")
+            .expect("section present");
+        assert_eq!(entries.len(), 3);
+        validate_integration_merge_verifiers_operator_side(entries)
+            .expect("all three canonical entries must validate");
+
+        // Per-entry sanity checks.
+        assert_eq!(entries[0].applies_to, IntegrationMergeVerifierAppliesTo::All);
+        assert_eq!(
+            entries[0].required_for_environments.as_deref(),
+            Some(&["production".to_owned()][..]),
+        );
+        assert_eq!(entries[1].applies_to, IntegrationMergeVerifierAppliesTo::TaskSet);
+        assert_eq!(entries[1].task_set,
+            vec!["implement_auth".to_owned(), "implement_session".to_owned()]);
+        assert_eq!(entries[2].applies_to, IntegrationMergeVerifierAppliesTo::Last);
     }
 }
