@@ -932,20 +932,18 @@ impl CredentialProxyManager {
         require_upstream_tls: bool,
         restrictions:         &SmtpRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
-        if require_upstream_tls {
-            // The wire driver currently uses cleartext upstream;
-            // STARTTLS / implicit TLS via `tokio-rustls` is the
-            // matching follow-up checklist item in
-            // `credential-proxy.md §22`. Surface a structured warning
-            // so operators know their `require_upstream_tls = true`
-            // declaration is policy-pinned but not yet enforced; the
-            // policy MUST already restrict the upstream to a trusted
-            // host:port for this to be safe.
-            tracing::warn!(
-                target: "raxis::credential_proxy::manager",
-                credential_name = %name.as_str(),
-                "smtp proxy declared `require_upstream_tls = true` but tokio-rustls upstream is deferred (cleartext upstream is used until that lands)",
-            );
+        if require_upstream_tls && !raxis_credential_proxy_smtp::wire::Outbound::IS_TLS_WIRED {
+            // Defence-in-depth: if a future build ever ships with the
+            // TLS-wiring disabled, refuse to bind a proxy whose
+            // policy demands TLS rather than silently dropping back
+            // to cleartext. The current build always has IS_TLS_WIRED
+            // = true (tokio-rustls is wired), so this is a tripwire.
+            return Err(ManagerError::SmtpBind {
+                credential_name: name.as_str().to_owned(),
+                source: SmtpProxyError::BadUpstream(
+                    "this kernel build does not have tokio-rustls upstream wired, but the proxy declaration requires TLS".to_owned(),
+                ),
+            });
         }
         let cfg = SmtpProxyConfig {
             listen_addr:           "127.0.0.1:0".to_owned(),

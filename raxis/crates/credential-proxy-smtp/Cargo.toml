@@ -22,6 +22,17 @@ tracing   = "0.1"
 # workspace's "minimal exposed API" stance for crypto-adjacent
 # encodings.
 base64    = "0.21"
+# Upstream SMTP TLS (STARTTLS / implicit TLS). `tokio-rustls 0.26`
+# pairs with `rustls 0.23`, both already in the workspace dep tree
+# via `reqwest` so we share the same TLS implementation across the
+# whole kernel rather than dragging in a second one. `webpki-roots`
+# provides Mozilla's CA bundle so the proxy doesn't need to read
+# the host trust store at runtime; this keeps the agent VM's
+# behaviour byte-identical regardless of the host OS.
+tokio-rustls   = { version = "0.26", default-features = false, features = ["ring"] }
+rustls         = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pki-types = "1"
+webpki-roots   = "1"
 
 [dev-dependencies]
 tokio    = { workspace = true, features = ["test-util", "macros"] }

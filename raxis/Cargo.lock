@@ -2883,12 +2883,16 @@ dependencies = [
  "base64 0.21.7",
  "hex",
  "raxis-credentials",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "tracing",
+ "webpki-roots",
 ]
 
 [[package]]

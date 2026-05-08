@@ -31,10 +31,18 @@
 //!     `MAIL FROM` boundary with `421 4.7.0 rate limit exceeded`.
 //!   * **Outbound forwarding**. Messages that pass envelope
 //!     checks are submitted to the upstream relay via a fresh
-//!     SMTP-over-TLS dial (the upstream's host + port + AUTH
-//!     credential bytes resolve through the
-//!     `Arc<dyn CredentialBackend>` per submission so rotations
-//!     land mid-session).
+//!     SMTP dial (the upstream's host + port + AUTH credential
+//!     bytes resolve through the `Arc<dyn CredentialBackend>` per
+//!     submission so rotations land mid-session).
+//!   * **Outbound TLS via STARTTLS**. When `require_upstream_tls =
+//!     true` is set on the proxy declaration, the dial drives
+//!     `EHLO → STARTTLS → tokio-rustls handshake → re-EHLO over
+//!     TLS → AUTH/...`. The TLS root store is Mozilla's bundled CA
+//!     set (`webpki-roots`) so the same trust anchors are used
+//!     regardless of the host OS, and the dial fails closed on any
+//!     STARTTLS rejection or handshake error rather than
+//!     transparently falling back to cleartext. See
+//!     [`wire::Outbound::IS_TLS_WIRED`].
 //!   * **Audit emission**. `SmtpMessageAccepted`, `SmtpMessageRejected`,
 //!     and `SmtpMessageRelayed` are produced with the consumer
 //!     identity, the recipient hash, and the byte-count.
@@ -42,17 +50,20 @@
 //! # What is deferred
 //!
 //!   * **STARTTLS on the inbound listener**. Out of scope; the
-//!     listener is loopback-only and the upstream hop is over TLS.
+//!     listener is loopback-only and the upstream hop is over TLS
+//!     (see above).
+//!   * **Implicit TLS (port 465 SMTPS)**. The current dial speaks
+//!     plaintext-then-STARTTLS; if a future operator policy requires
+//!     dialling implicit TLS on the upstream socket the change is
+//!     localised to `wire::Outbound::submit` (wrap the freshly-dialled
+//!     `TcpStream` in `TlsConnector::connect` before any byte is
+//!     written, instead of dialling cleartext first).
 //!   * **DKIM / DMARC signing**. The upstream relay is expected to
 //!     handle these; transparent SMTP relays (AWS SES, SendGrid,
 //!     Postmark) do this for the operator.
 //!   * **`AUTH SCRAM-SHA-256`**. The MVP supports `AUTH PLAIN` and
 //!     `AUTH LOGIN`; SCRAM-SHA-256 lands when an upstream relay
 //!     requires it.
-//!   * **`SUBMIT` (port 587) vs `SMTPS` (port 465) vs `SMTP` (25)
-//!     selection**. The upstream `host:port` is policy-configured,
-//!     so the operator picks the submission mode; the proxy speaks
-//!     STARTTLS when the upstream advertises it.
 //!   * **Pipelining**. The MVP processes one envelope at a time
 //!     across the inbound socket; pipelining (RFC 2920) is not
 //!     advertised.

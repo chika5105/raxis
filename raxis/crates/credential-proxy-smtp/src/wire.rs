@@ -43,20 +43,29 @@
 //! recorded as `Rejected` with the upstream's response code as the
 //! reason.
 //!
-//! For the MVP the outbound dial is implemented with raw `TcpStream`
-//! + line-buffered I/O; STARTTLS support is structured but the TLS
-//! handshake itself is wired through `tokio-rustls` in a follow-up
-//! commit (see `# What is deferred` in `lib.rs`). The MVP marker
-//! [`Outbound::IS_TLS_WIRED`] is `false`; tests that exercise the
-//! end-to-end relay use the in-process [`FakeUpstream`] fixture.
+//! The outbound dial is implemented with raw `TcpStream` for cleartext
+//! relays plus a real `STARTTLS` upgrade path through `tokio-rustls`
+//! (sharing the same `ring`-backed `rustls` already pulled into the
+//! workspace by `reqwest`). [`Outbound::IS_TLS_WIRED`] is now `true`,
+//! and `submit` consults [`crate::ProxyConfig::require_upstream_tls`]:
+//! when set, the proxy issues `STARTTLS`, performs the TLS handshake
+//! against [`crate::ProxyConfig::upstream_host_port`]'s host name with
+//! Mozilla's CA bundle (via `webpki-roots`), re-issues `EHLO` over
+//! TLS, and refuses to fall back to cleartext on any handshake or
+//! status failure. The end-to-end TLS path is exercised in the
+//! integration tests with a real `tokio-rustls` server fixture.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use rustls::ClientConfig;
+use rustls_pki_types::ServerName;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
+use tokio_rustls::TlsConnector;
 
 use raxis_credentials::CredentialBackend;
 
@@ -523,26 +532,37 @@ fn validate_upstream(host_port: &str) -> Option<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Outbound dial — V1 in-process dial; STARTTLS lands in a follow-up.
+// Outbound dial — TCP greet/EHLO, optional STARTTLS upgrade via
+// `tokio-rustls`, AUTH/MAIL FROM/RCPT TO/DATA over the upgraded stream.
 // ---------------------------------------------------------------------------
 
-/// Outbound SMTP dial. The MVP performs a plain-TCP `EHLO`/`AUTH`/
-/// `MAIL FROM`/`RCPT TO`/`DATA` against the configured upstream. TLS
-/// support is structured but the actual STARTTLS handshake lands in
-/// a follow-up (see `lib.rs` "What is deferred").
+/// Outbound SMTP dial. Performs `EHLO`/(`STARTTLS`)?/`AUTH`/`MAIL
+/// FROM`/`RCPT TO`/`DATA` against the configured upstream. The TLS
+/// upgrade is wired through `tokio-rustls`; see [`Outbound::IS_TLS_WIRED`].
 pub struct Outbound;
 
 impl Outbound {
-    /// Whether the outbound dial currently performs the STARTTLS
-    /// handshake. False until the `tokio-rustls` integration lands;
-    /// kernel-side wiring should refuse to instantiate this proxy
-    /// when `require_upstream_tls = true` and `IS_TLS_WIRED == false`.
-    pub const IS_TLS_WIRED: bool = false;
+    /// Whether the outbound dial performs the `STARTTLS` handshake
+    /// when `require_upstream_tls = true`. The kernel-side wiring
+    /// can consult this constant in tests / preflight to confirm the
+    /// proxy build supports TLS.
+    pub const IS_TLS_WIRED: bool = true;
 
     /// Dial the upstream, run the SMTP submission, and return on
     /// success. Errors are flattened to a single `String` for
     /// audit-surface stability — the upstream's response codes are
     /// the operator's diagnostic surface, not the inbound agent's.
+    ///
+    /// Flow:
+    ///   1. TCP-connect to `config.upstream_host_port`.
+    ///   2. Read 220 greeting, send `EHLO`, read multi-line 250.
+    ///   3. If `config.require_upstream_tls`: send `STARTTLS`, expect
+    ///      220, perform TLS handshake using `tokio-rustls` + Mozilla
+    ///      CA bundle (`webpki-roots`), re-issue `EHLO` over TLS.
+    ///   4. AUTH (PLAIN or LOGIN) using the resolved credential bytes.
+    ///   5. `MAIL FROM`, `RCPT TO` (per recipient), `DATA` + body
+    ///      (RFC 5321 §4.5.2 dot-stuffing applied).
+    ///   6. `QUIT` (best-effort).
     pub async fn submit(
         backend: &Arc<dyn CredentialBackend>,
         config:  &ProxyConfig,
@@ -562,111 +582,246 @@ impl Outbound {
         let stream = TcpStream::connect(&config.upstream_host_port)
             .await
             .map_err(|e| format!("upstream_dial_failed: {e}"))?;
-        let (read, mut write) = stream.into_split();
-        let mut reader = BufReader::new(read);
 
-        // 220 greeting.
+        if config.require_upstream_tls {
+            // STARTTLS path: greet/EHLO/STARTTLS over TCP, then upgrade.
+            let stream = starttls_upgrade(stream, &config.upstream_host_port).await?;
+            drive_post_handshake(stream, config, &cred, from, rcpts, body).await
+        } else {
+            // Cleartext path: greet/EHLO inline, then AUTH/...
+            drive_cleartext(stream, config, &cred, from, rcpts, body).await
+        }
+    }
+}
+
+/// Cleartext flow: greet → EHLO → AUTH → MAIL FROM → RCPT TO → DATA
+/// → QUIT, all on plain TCP.
+async fn drive_cleartext(
+    stream:  TcpStream,
+    config:  &ProxyConfig,
+    cred:    &raxis_credentials::CredentialValue,
+    from:    &str,
+    rcpts:   &[String],
+    body:    &[u8],
+) -> Result<(), String> {
+    let (read, write) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read);
+    let mut write  = write;
+
+    // 220 greeting.
+    let _greeting = read_smtp_status(&mut reader, "greeting").await?;
+
+    // EHLO.
+    write.write_all(b"EHLO raxis-credential-proxy\r\n").await
+        .map_err(|e| format!("ehlo_write_failed: {e}"))?;
+    let _ehlo_resp = read_smtp_multi_status(&mut reader, "ehlo").await?;
+
+    drive_auth_through_quit(&mut reader, &mut write, config, cred, from, rcpts, body).await
+}
+
+/// STARTTLS upgrade: greet → EHLO → STARTTLS → tokio-rustls handshake →
+/// re-EHLO over TLS → continue with AUTH/.../QUIT over the upgraded
+/// stream.
+async fn starttls_upgrade(
+    stream: TcpStream,
+    upstream_host_port: &str,
+) -> Result<tokio_rustls::client::TlsStream<TcpStream>, String> {
+    let host = upstream_host_port
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .ok_or_else(|| "upstream_host_port_missing_colon".to_owned())?;
+    let server_name: ServerName<'static> = ServerName::try_from(host.to_owned())
+        .map_err(|e| format!("invalid_upstream_servername: {e}"))?;
+
+    let connector = TlsConnector::from(default_client_config());
+
+    // Step 1: greet/EHLO/STARTTLS over plain TCP. We need to keep the
+    // stream alive across the upgrade, so we operate on a mutable
+    // reference and drop the buf reader before handing the stream to
+    // the TLS connector.
+    let mut stream = stream;
+    {
+        let (read, write) = tokio::io::split(&mut stream);
+        let mut reader = BufReader::new(read);
+        let mut write  = write;
+
         let _greeting = read_smtp_status(&mut reader, "greeting").await?;
 
-        // EHLO.
         write.write_all(b"EHLO raxis-credential-proxy\r\n").await
             .map_err(|e| format!("ehlo_write_failed: {e}"))?;
         let _ehlo_resp = read_smtp_multi_status(&mut reader, "ehlo").await?;
 
-        // AUTH (the credential bytes never leave this future's stack —
-        // we render the wire-format payload inside `with_bytes` so the
-        // borrow scope ends before the stream write returns).
-        let auth_line = match &config.auth_mode {
-            AuthMode::Plain { user } => {
-                cred.with_bytes(|cred_bytes| {
-                    let mut payload = Vec::with_capacity(2 + user.len() + cred_bytes.len());
-                    payload.push(0u8);
-                    payload.extend_from_slice(user.as_bytes());
-                    payload.push(0u8);
-                    payload.extend_from_slice(cred_bytes);
-                    let b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
-                    format!("AUTH PLAIN {b64}\r\n")
-                })
-            }
-            AuthMode::Login { user } => {
-                // For the MVP we send AUTH LOGIN as a single-shot
-                // (RFC 4954 §4 allows the user-line to be supplied
-                // in the same command for IMF clients that prefer
-                // it; many production relays accept it).
-                let user_b64 = base64::engine::general_purpose::STANDARD.encode(user.as_bytes());
-                format!("AUTH LOGIN {user_b64}\r\n")
-            }
-        };
-        write.write_all(auth_line.as_bytes()).await
-            .map_err(|e| format!("auth_write_failed: {e}"))?;
-        let auth_status = read_smtp_status(&mut reader, "auth").await?;
-        if auth_status >= 400 {
-            return Err(format!("auth_rejected status={auth_status}"));
+        write.write_all(b"STARTTLS\r\n").await
+            .map_err(|e| format!("starttls_write_failed: {e}"))?;
+        let s = read_smtp_status(&mut reader, "starttls").await?;
+        if s != 220 {
+            return Err(format!("starttls_rejected status={s}"));
         }
-        // Login may need a second password line if status was 334.
-        if matches!(&config.auth_mode, AuthMode::Login { .. }) && auth_status == 334 {
-            let pw_b64 = cred.with_bytes(|cred_bytes| {
-                base64::engine::general_purpose::STANDARD.encode(cred_bytes)
-            });
-            write.write_all(pw_b64.as_bytes()).await
-                .map_err(|e| format!("auth_login_pw_write_failed: {e}"))?;
-            write.write_all(b"\r\n").await.ok();
-            let s = read_smtp_status(&mut reader, "auth-login-pw").await?;
-            if s >= 400 {
-                return Err(format!("auth_rejected status={s}"));
-            }
-        }
-
-        // MAIL FROM.
-        write.write_all(format!("MAIL FROM:{from}\r\n").as_bytes()).await
-            .map_err(|e| format!("mail_from_write_failed: {e}"))?;
-        let s = read_smtp_status(&mut reader, "mail_from").await?;
-        if s >= 400 { return Err(format!("mail_from_rejected status={s}")); }
-
-        // RCPT TO (one at a time).
-        for r in rcpts {
-            write.write_all(format!("RCPT TO:{r}\r\n").as_bytes()).await
-                .map_err(|e| format!("rcpt_to_write_failed: {e}"))?;
-            let s = read_smtp_status(&mut reader, "rcpt_to").await?;
-            if s >= 400 { return Err(format!("rcpt_to_rejected status={s}")); }
-        }
-
-        // DATA.
-        write.write_all(b"DATA\r\n").await
-            .map_err(|e| format!("data_write_failed: {e}"))?;
-        let s = read_smtp_status(&mut reader, "data").await?;
-        if s != 354 {
-            return Err(format!("data_rejected status={s}"));
-        }
-        // Apply RFC 5321 §4.5.2 dot-stuffing on the way out.
-        for line in body.split_inclusive(|&b| b == b'\n') {
-            if line.starts_with(b".") {
-                write.write_all(b".").await
-                    .map_err(|e| format!("data_body_dot_stuff_write_failed: {e}"))?;
-            }
-            write.write_all(line).await
-                .map_err(|e| format!("data_body_write_failed: {e}"))?;
-        }
-        // Ensure the body ends with CRLF before the terminator, then
-        // send `.\r\n`.
-        if !body.ends_with(b"\r\n") {
-            write.write_all(b"\r\n").await.ok();
-        }
-        write.write_all(b".\r\n").await
-            .map_err(|e| format!("data_terminator_write_failed: {e}"))?;
-        let s = read_smtp_status(&mut reader, "data_done").await?;
-        if s >= 400 { return Err(format!("data_done_rejected status={s}")); }
-
-        // QUIT (best-effort; we don't fail the relay if the upstream
-        // hangs up before responding).
-        write.write_all(b"QUIT\r\n").await.ok();
-        let _ = tokio::time::timeout(
-            Duration::from_secs(2),
-            read_smtp_status(&mut reader, "quit"),
-        ).await;
-
-        Ok(())
     }
+
+    // Step 2: TLS handshake.
+    let mut tls_stream = connector.connect(server_name, stream).await
+        .map_err(|e| format!("tls_handshake_failed: {e}"))?;
+
+    // Step 3: re-issue EHLO over TLS so the upstream advertises its
+    // post-TLS capability set (some relays only advertise AUTH inside
+    // the TLS-protected EHLO).
+    {
+        let (read, write) = tokio::io::split(&mut tls_stream);
+        let mut reader = BufReader::new(read);
+        let mut write  = write;
+        write.write_all(b"EHLO raxis-credential-proxy\r\n").await
+            .map_err(|e| format!("ehlo_tls_write_failed: {e}"))?;
+        let _ehlo_resp = read_smtp_multi_status(&mut reader, "ehlo_tls").await?;
+        // Drop the split halves; ownership returns to the outer
+        // tls_stream via the borrow lifetime.
+    }
+
+    Ok(tls_stream)
+}
+
+/// Continue the SMTP submission on a (post-handshake) TLS stream.
+async fn drive_post_handshake<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream:  S,
+    config:  &ProxyConfig,
+    cred:    &raxis_credentials::CredentialValue,
+    from:    &str,
+    rcpts:   &[String],
+    body:    &[u8],
+) -> Result<(), String> {
+    let (read, write) = tokio::io::split(stream);
+    let mut reader = BufReader::new(read);
+    let mut write  = write;
+
+    drive_auth_through_quit(&mut reader, &mut write, config, cred, from, rcpts, body).await
+}
+
+/// Shared AUTH/MAIL FROM/RCPT TO/DATA/QUIT body — generic over the
+/// stream halves so the cleartext path and the TLS path share the
+/// same code.
+async fn drive_auth_through_quit<R, W>(
+    reader: &mut BufReader<R>,
+    write:  &mut W,
+    config: &ProxyConfig,
+    cred:   &raxis_credentials::CredentialValue,
+    from:   &str,
+    rcpts:  &[String],
+    body:   &[u8],
+) -> Result<(), String>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    // AUTH (the credential bytes never leave this future's stack —
+    // we render the wire-format payload inside `with_bytes` so the
+    // borrow scope ends before the stream write returns).
+    let auth_line = match &config.auth_mode {
+        AuthMode::Plain { user } => {
+            cred.with_bytes(|cred_bytes| {
+                let mut payload = Vec::with_capacity(2 + user.len() + cred_bytes.len());
+                payload.push(0u8);
+                payload.extend_from_slice(user.as_bytes());
+                payload.push(0u8);
+                payload.extend_from_slice(cred_bytes);
+                let b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+                format!("AUTH PLAIN {b64}\r\n")
+            })
+        }
+        AuthMode::Login { user } => {
+            // RFC 4954 §4 allows the user-line to be supplied in the
+            // same command for IMF clients that prefer it; many
+            // production relays accept it.
+            let user_b64 = base64::engine::general_purpose::STANDARD.encode(user.as_bytes());
+            format!("AUTH LOGIN {user_b64}\r\n")
+        }
+    };
+    write.write_all(auth_line.as_bytes()).await
+        .map_err(|e| format!("auth_write_failed: {e}"))?;
+    let auth_status = read_smtp_status(reader, "auth").await?;
+    if auth_status >= 400 {
+        return Err(format!("auth_rejected status={auth_status}"));
+    }
+    // Login may need a second password line if status was 334.
+    if matches!(&config.auth_mode, AuthMode::Login { .. }) && auth_status == 334 {
+        let pw_b64 = cred.with_bytes(|cred_bytes| {
+            base64::engine::general_purpose::STANDARD.encode(cred_bytes)
+        });
+        write.write_all(pw_b64.as_bytes()).await
+            .map_err(|e| format!("auth_login_pw_write_failed: {e}"))?;
+        write.write_all(b"\r\n").await.ok();
+        let s = read_smtp_status(reader, "auth-login-pw").await?;
+        if s >= 400 {
+            return Err(format!("auth_rejected status={s}"));
+        }
+    }
+
+    // MAIL FROM.
+    write.write_all(format!("MAIL FROM:{from}\r\n").as_bytes()).await
+        .map_err(|e| format!("mail_from_write_failed: {e}"))?;
+    let s = read_smtp_status(reader, "mail_from").await?;
+    if s >= 400 { return Err(format!("mail_from_rejected status={s}")); }
+
+    // RCPT TO (one at a time).
+    for r in rcpts {
+        write.write_all(format!("RCPT TO:{r}\r\n").as_bytes()).await
+            .map_err(|e| format!("rcpt_to_write_failed: {e}"))?;
+        let s = read_smtp_status(reader, "rcpt_to").await?;
+        if s >= 400 { return Err(format!("rcpt_to_rejected status={s}")); }
+    }
+
+    // DATA.
+    write.write_all(b"DATA\r\n").await
+        .map_err(|e| format!("data_write_failed: {e}"))?;
+    let s = read_smtp_status(reader, "data").await?;
+    if s != 354 {
+        return Err(format!("data_rejected status={s}"));
+    }
+    // Apply RFC 5321 §4.5.2 dot-stuffing on the way out.
+    for line in body.split_inclusive(|&b| b == b'\n') {
+        if line.starts_with(b".") {
+            write.write_all(b".").await
+                .map_err(|e| format!("data_body_dot_stuff_write_failed: {e}"))?;
+        }
+        write.write_all(line).await
+            .map_err(|e| format!("data_body_write_failed: {e}"))?;
+    }
+    // Ensure the body ends with CRLF before the terminator, then
+    // send `.\r\n`.
+    if !body.ends_with(b"\r\n") {
+        write.write_all(b"\r\n").await.ok();
+    }
+    write.write_all(b".\r\n").await
+        .map_err(|e| format!("data_terminator_write_failed: {e}"))?;
+    let s = read_smtp_status(reader, "data_done").await?;
+    if s >= 400 { return Err(format!("data_done_rejected status={s}")); }
+
+    // QUIT (best-effort; we don't fail the relay if the upstream
+    // hangs up before responding).
+    write.write_all(b"QUIT\r\n").await.ok();
+    let _ = tokio::time::timeout(
+        Duration::from_secs(2),
+        read_smtp_status(reader, "quit"),
+    ).await;
+
+    Ok(())
+}
+
+/// Construct (or reuse) a `rustls::ClientConfig` backed by Mozilla's
+/// CA bundle (via `webpki-roots`). The config is built once per
+/// process and cached behind a `OnceLock` so per-envelope dials
+/// don't re-parse the trust anchors.
+fn default_client_config() -> Arc<ClientConfig> {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let cfg = ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Arc::new(cfg)
+        })
+        .clone()
 }
 
 /// Read a single SMTP status response line, return its 3-digit code.
