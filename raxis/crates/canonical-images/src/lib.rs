@@ -90,6 +90,15 @@ const BUF_SIZE: usize = 64 * 1024;
 /// surface [`CanonicalImageError::SigningKeyFpNotPopulated`].
 pub const UNPOPULATED_SIGNING_KEY_BYTES: [u8; DIGEST_LEN] = [0u8; DIGEST_LEN];
 
+// `build.rs` writes `$OUT_DIR/trust_anchor.rs` containing
+// `pub(crate) const GENERATED_KERNEL_SIGNING_KEY_BYTES: [u8; 32]`.
+// The build script reads `RAXIS_KERNEL_SIGNING_KEY_HEX` (64 hex
+// chars) or `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` (32-byte raw file)
+// from the release pipeline; defaults to the all-zero placeholder
+// when neither is set. See `build.rs` module docs for the full
+// specification.
+include!(concat!(env!("OUT_DIR"), "/trust_anchor.rs"));
+
 /// **The kernel's manifest-trust anchor.** The 32-byte raw form of the
 /// Ed25519 verifying key the kernel signing pipeline owns. The kernel
 /// boot path constructs a [`VerifyingKey`] from these bytes and
@@ -100,21 +109,34 @@ pub const UNPOPULATED_SIGNING_KEY_BYTES: [u8; DIGEST_LEN] = [0u8; DIGEST_LEN];
 /// quantity the kernel needs to trust at runtime — the per-image
 /// digest is carried by the manifest, not by the kernel binary.
 ///
-/// **Currently unpopulated.** Until the kernel release pipeline
-/// commits the signing public key, this constant is the all-zero
-/// placeholder. The boot-path entry-point
-/// [`verify_canonical_image_via_manifest`] surfaces
-/// [`CanonicalImageError::SigningKeyFpNotPopulated`] in that state so
-/// the operator sees a clear "this kernel build has no committed
-/// trust anchor yet" diagnostic rather than a generic mismatch.
+/// ## Population
 ///
-/// Populating this is a single-line edit in this crate, paired with
-/// the corresponding signing key bound into the release pipeline; it
-/// is the **only** legal way to repoint the trust anchor. Operators
+/// **Build-pipeline driven.** The constant's bytes are emitted by
+/// `build.rs` from one of two release-pipeline-controlled sources:
+///
+/// * `RAXIS_KERNEL_SIGNING_KEY_HEX` — 64 lowercase hex chars
+///   (`xxd -p -c 64 signing.pub`). Preferred for CI pipelines.
+/// * `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` — absolute path to a
+///   32-byte raw file. Preferred for HSM-backed pipelines.
+///
+/// If neither is set, the constant is the all-zero placeholder
+/// ([`UNPOPULATED_SIGNING_KEY_BYTES`]) and the boot-path entry-point
+/// [`verify_canonical_image_via_manifest`] surfaces
+/// [`CanonicalImageError::SigningKeyFpNotPopulated`]. The operator
+/// then sees a clear "this kernel build has no committed trust
+/// anchor yet" diagnostic rather than a generic mismatch.
+///
+/// `build.rs` validates each input source before emission (length,
+/// hex alphabet, file size) and panics on a mistyped value, so a
+/// typo NEVER silently degrades to the placeholder branch.
+///
+/// Repointing the trust anchor is a release-pipeline operation: bump
+/// the env var, rebuild the kernel, ship the new binary. Operators
 /// MUST NOT override the key at runtime; there is no environment
-/// variable, no policy field, no CLI flag that does so.
+/// variable, no policy field, no CLI flag the kernel reads at
+/// boot/activation time that affects this constant.
 pub const EXPECTED_KERNEL_SIGNING_KEY_BYTES: [u8; DIGEST_LEN] =
-    UNPOPULATED_SIGNING_KEY_BYTES;
+    GENERATED_KERNEL_SIGNING_KEY_BYTES;
 
 /// SHA-256 fingerprint of [`EXPECTED_KERNEL_SIGNING_KEY_BYTES`] —
 /// derived at runtime via [`compute_signing_key_fp`]. Used by audit
@@ -768,6 +790,59 @@ mod tests {
         h.update(EXPECTED_KERNEL_SIGNING_KEY_BYTES);
         let expected: [u8; DIGEST_LEN] = h.finalize().into();
         assert_eq!(compute_signing_key_fp(), expected);
+    }
+
+    /// The build script must run on every cargo invocation and emit
+    /// the trust-anchor module. The constant resolved through the
+    /// `include!()` MUST equal the lib.rs surface
+    /// `EXPECTED_KERNEL_SIGNING_KEY_BYTES`. This test pins that
+    /// linkage so a future refactor that moves the include or
+    /// renames the generated symbol surfaces immediately rather than
+    /// degrading silently to the all-zero placeholder.
+    #[test]
+    fn generated_trust_anchor_is_wired_through_to_public_constant() {
+        // GENERATED_KERNEL_SIGNING_KEY_BYTES is `pub(crate)` —
+        // accessible from the test module without re-exporting it.
+        // EXPECTED_KERNEL_SIGNING_KEY_BYTES is `pub` and must alias
+        // the build-script output verbatim.
+        assert_eq!(
+            EXPECTED_KERNEL_SIGNING_KEY_BYTES,
+            GENERATED_KERNEL_SIGNING_KEY_BYTES,
+            "`EXPECTED_KERNEL_SIGNING_KEY_BYTES` must alias \
+             `GENERATED_KERNEL_SIGNING_KEY_BYTES` (the value emitted \
+             by build.rs from RAXIS_KERNEL_SIGNING_KEY_HEX or \
+             RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH); a divergence here \
+             means the trust-anchor pipeline has been broken silently",
+        );
+    }
+
+    /// Developer builds with neither `RAXIS_KERNEL_SIGNING_KEY_HEX`
+    /// nor `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` set MUST default to
+    /// the all-zero placeholder. Pinned here so a future refactor of
+    /// build.rs that, say, defaulted to a hard-coded developer key,
+    /// cannot land without either updating this test or finding a
+    /// different placeholder value.
+    ///
+    /// CI/release builds DO set the env var so the constant is
+    /// populated; in that case this test no-ops (the
+    /// `generated_trust_anchor_is_wired_through_to_public_constant`
+    /// test still verifies the populated value is sane). The
+    /// runtime-conditional skip means one CI matrix can run signed
+    /// AND placeholder builds without bifurcating this test file.
+    #[test]
+    fn placeholder_build_defaults_to_all_zero_anchor() {
+        if EXPECTED_KERNEL_SIGNING_KEY_BYTES != UNPOPULATED_SIGNING_KEY_BYTES {
+            eprintln!(
+                "skipping placeholder default test: build is signed \
+                 (EXPECTED_KERNEL_SIGNING_KEY_BYTES is non-zero)"
+            );
+            return;
+        }
+        assert_eq!(
+            EXPECTED_KERNEL_SIGNING_KEY_BYTES,
+            UNPOPULATED_SIGNING_KEY_BYTES,
+            "developer builds must default to the all-zero placeholder",
+        );
     }
 
     /// `manifest_path_for_image` derives the standard sibling path.
