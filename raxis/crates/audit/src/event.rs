@@ -598,6 +598,64 @@ pub enum AuditEventKind {
         gate_type: String,
     },
 
+    /// V2 Step 25 — emitted after a `SubmitReview` SQLite commit, when
+    /// the cross-Reviewer aggregator
+    /// (`raxis-kernel::initiatives::review_aggregation::
+    /// compute_aggregate_review_verdict`) has reached a TERMINAL
+    /// outcome for the Executor task that the just-completed Reviewer
+    /// depends on.
+    ///
+    /// **Class.** Single-class (pure observability). The aggregator
+    /// performs no SQLite mutation; the underlying state transition
+    /// (Reviewer's `tasks.review_verdict` write + `Running →
+    /// Completed`) was already paired with `TaskStateChanged` inside
+    /// the `SubmitReview` transaction. This event is the
+    /// audit-replay-side anchor that records the *aggregated*
+    /// (logical-AND across N parallel Reviewers) verdict the kernel
+    /// observed once every sibling Reviewer had submitted.
+    ///
+    /// **Emission rule.** Emitted at most once per `SubmitReview`
+    /// commit, AND only when the aggregator transitions out of
+    /// `Pending` — i.e. when the just-completed Reviewer was the
+    /// LAST sibling to submit. Earlier submissions (still
+    /// `Pending`) are silent. `NoSuccessors` is impossible here
+    /// (the calling Reviewer is itself a successor) but is
+    /// surfaced as a defense-in-depth verdict for malformed plans.
+    ///
+    /// **Why this is single-class.** Per
+    /// `audit-paired-writes.md §4`, paired-class events MUST mutate
+    /// SQLite state. The aggregator is a pure read predicate; the
+    /// only state mutation it observes is the Reviewer's own
+    /// `tasks.review_verdict` row, which was already paired with
+    /// `TaskStateChanged` inside the SubmitReview transaction. The
+    /// downstream consequences (`KernelPush::AllReviewersPassed` /
+    /// `KernelPush::ReviewRejected`) are deferred to gap §12.1
+    /// (push transport); this audit row is the kernel-side anchor
+    /// the future emitter call site reads.
+    ///
+    /// Defined in `v2-deep-spec.md §Step 25` and
+    /// `verifier-processes.md §11`.
+    ReviewAggregationCompleted {
+        /// Executor task whose Reviewer set was aggregated. Joins
+        /// `task_dag_edges` to find every sibling Reviewer.
+        executor_task_id: String,
+        /// The Reviewer whose `SubmitReview` triggered the
+        /// aggregator (i.e. the LAST sibling to submit). Provides
+        /// the causal anchor between this event and its preceding
+        /// `TaskStateChanged { state: Completed }` for the same
+        /// Reviewer task.
+        triggered_by_reviewer_task_id: String,
+        /// Number of Reviewer successors aggregated. Always ≥ 1
+        /// (the triggering Reviewer is itself counted); 0 implies
+        /// `NoSuccessors` (defense-in-depth, malformed plan).
+        reviewer_count: u32,
+        /// Stable string verdict — exactly one of:
+        /// `"AllPassed"` / `"AtLeastOneRejected"` / `"NoSuccessors"`.
+        /// `"Pending"` is NEVER emitted (the aggregator is silent
+        /// while any Reviewer is still pending).
+        verdict: String,
+    },
+
     // --- Escalation ---
     EscalationSubmitted {
         escalation_id: String,
@@ -1558,6 +1616,7 @@ impl AuditEventKind {
             Self::WitnessAccepted { .. } => "WitnessAccepted",
             Self::WitnessRejected { .. } => "WitnessRejected",
             Self::VerifierProcessFailed { .. } => "VerifierProcessFailed",
+            Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
             Self::EscalationSubmitted { .. } => "EscalationSubmitted",
             Self::EscalationApproved { .. } => "EscalationApproved",
             Self::EscalationDenied { .. } => "EscalationDenied",

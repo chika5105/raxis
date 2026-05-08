@@ -1146,8 +1146,19 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
   plan-bundle-sealing.** The push channel itself is implemented in
   `raxis_types::push::KernelPush` (Step 16) but the wire from kernel to planner has
   no producer yet — that arrives with the operator/planner subtask-activation flow
-  (Plan Bundle Sealing). Until then the aggregator is an observable predicate that
-  the future emitter call site can consume directly.
+  (Plan Bundle Sealing).
+
+  **The aggregator IS wired today** (V2 gap §12.2,
+  `handlers/intent::handle_submit_review`). After every `SubmitReview`
+  commit, the kernel calls
+  `compute_aggregate_review_outcome` for each Executor predecessor of the
+  just-completed Reviewer and emits a single-class
+  `AuditEventKind::ReviewAggregationCompleted` event when the aggregator
+  reaches a terminal state (`AllPassed` / `AtLeastOneRejected` /
+  `NoSuccessors`). `Pending` is silent. The audit row is the kernel-side
+  anchor the future `KernelPush` emitter will read; it is also the
+  forensic record auditors need to confirm "the cross-Reviewer
+  logical-AND was computed exactly once per Executor advancement".
 
 ---
 

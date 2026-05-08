@@ -952,6 +952,7 @@ All `FAIL_*` codes here are home-cataloged in
 | `VerifierImageDigestUnavailable` | At spawn time, the image is no longer in policy `[[vm_images]]` | Scope keys + `image_pinned_digest`, `policy_epoch_at_spawn` |
 | `CandidateMergeTreeCreated` | Pre-merge verifier hook computed the candidate merge | `integration_merge_id`, `candidate_merge_sha`, `merged_task_ids` |
 | `CandidateMergeTreeDiscarded` | Pre-merge verifier failed; candidate was discarded | `integration_merge_id`, `candidate_merge_sha`, `discard_reason` (`"verifier_blocked"` \| `"crash_recovery"` \| `"merge_aborted"`) |
+| `ReviewAggregationCompleted` | After every `SubmitReview` commit, when the cross-Reviewer logical-AND aggregator transitions out of `Pending` (the just-completed Reviewer was the LAST sibling to submit). Single-class observability event per `audit-paired-writes.md §4`; the underlying state mutation (`tasks.review_verdict` write + `Running → Completed` transition) is already paired via `TaskStateChanged`. | `executor_task_id`, `triggered_by_reviewer_task_id`, `reviewer_count`, `verdict` ∈ `{"AllPassed", "AtLeastOneRejected", "NoSuccessors"}` |
 
 All events are bound to the audit chain via the existing kernel
 audit emission path; no new audit-side infrastructure is needed.

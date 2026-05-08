@@ -745,20 +745,48 @@ referenced in doc-comments like `review_aggregation.rs:42` and
 that the kernel writes `KernelPushFrame` messages to when lifecycle
 events fire. ~200 lines (session registry + write path).
 
-### 12.2 Review aggregation: Module exists, never wired
+### 12.2 Review aggregation: Module exists, never wired ✅ CLOSED (V2.2)
 
-`kernel/src/initiatives/review_aggregation.rs` (403 lines) implements
-the Step 25 logical-AND verdict aggregation — pure functions that
-aggregate reviewer verdicts for an executor task.
+**Original gap:** `kernel/src/initiatives/review_aggregation.rs`
+(~470 lines) implements the Step 25 logical-AND verdict aggregation,
+but no caller in the kernel ever invoked it. The module was
+registered in `mod.rs` but never reached at the `SubmitReview`
+intent handling point where the spec requires it.
 
-But `lifecycle.rs` (the only caller candidate) has **zero references**
-to `review_aggregation`. The module is registered in `mod.rs` but
-never invoked at the `CompleteTask` or `SubmitReview` intent handling
-points where the spec requires it.
+**Resolution (commit landing this gap entry).**
+`handlers/intent::handle_submit_review` now:
 
-**What's missing:** Wire `review_aggregation::aggregate_verdict()` into
-the `SubmitReview` handler in `lifecycle.rs`. ~50 lines (call site +
-state transition on aggregated result).
+1. Performs the predecessor lookup unconditionally (the rejection
+   path uses it for critique routing; the new wiring needs it for
+   aggregation across both verdict directions).
+2. After the SQLite commit, calls
+   `compute_aggregate_review_outcome` for every Executor predecessor.
+3. Emits exactly one `AuditEventKind::ReviewAggregationCompleted`
+   per Executor when the aggregator transitions out of `Pending`
+   (terminal verdict `AllPassed` / `AtLeastOneRejected` /
+   `NoSuccessors`); silent while still `Pending` (waiting on a
+   sibling).
+
+The audit row is the kernel-side anchor that the future
+`KernelPush::AllReviewersPassed` / `KernelPush::ReviewRejected`
+emitter (gap §12.1, push transport) will read. Ahead of that
+transport landing, the aggregator's terminal verdicts are observable
+from the audit chain.
+
+**Spec updates.** `audit-paired-writes.md §4.3` (single-class
+roster), `verifier-processes.md §11` (audit-event table), and
+`v2-deep-spec.md §Step 25` ("aggregator IS wired today" subsection)
+were updated in the same commit.
+
+**Tests.** Three new
+`handlers/intent::tests::submit_review_*_aggregation*` cases pin
+the (Pending → silent) / (AllPassed → emit) / (AtLeastOneRejected →
+emit) behaviour, and two new
+`initiatives/review_aggregation::tests::outcome_*` cases pin the
+`AggregateOutcome { verdict, count }` lock-step contract. The
+existing 8 aggregator unit tests continue to pass; the existing
+12 SubmitReview handler tests continue to pass after the
+`ctx: &HandlerContext` signature update.
 
 ### 12.3 Notification channels: Shell + File only
 

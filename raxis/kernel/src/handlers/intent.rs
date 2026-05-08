@@ -502,7 +502,7 @@ fn run_phase_a(
             };
         }
         IntentKind::SubmitReview => {
-            return match handle_submit_review(req, task_state, &session_id, seq, store, policy) {
+            return match handle_submit_review(req, task_state, &session_id, seq, store, policy, ctx.as_ref()) {
                 Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
                 Err((code, st))  => PreGateOutcome::Reject(code, st),
             };
@@ -1298,10 +1298,11 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 fn handle_submit_review(
     req: IntentRequest,
     task_state: TaskState,
-    _session_id: &SessionId,
+    session_id: &SessionId,
     seq: u64,
     store: &Store,
     policy: &raxis_policy::PolicyBundle,
+    ctx: &HandlerContext,
 ) -> HandlerResult {
     // ── 1. Task-state gate ────────────────────────────────────────────────
     if task_state != TaskState::Running {
@@ -1347,37 +1348,48 @@ fn handle_submit_review(
     // between the critique append and the Running → Completed update
     // cannot leave the Reviewer in `Running` with a stale critique on
     // the Executor's row (INV-STORE-02 atomicity, Pattern B).
-    {
+    //
+    // **Why predecessor lookup happens for BOTH approved and rejected
+    // submissions** (V2 Step 25 wiring, gap §12.2). Even on the
+    // approval path the kernel needs the Executor task_id so the
+    // post-commit aggregator can fold this Reviewer's verdict into
+    // the cross-Reviewer logical-AND. The rejection path additionally
+    // uses the predecessor list to append the formatted critique
+    // (Step 22). One join per SubmitReview, two consumers.
+    let predecessors: Vec<String> = {
         let mut conn = store.lock_sync();
         let tx = conn.transaction()
             .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
-        if let Some(formatted) = formatted_critique.as_deref() {
-            // Reverse-DAG: find every predecessor task_id of this
-            // Reviewer. In the canonical Step 23 sequential model
-            // there is exactly one (the Executor); we tolerate
-            // multiple at the kernel layer and append to each.
-            let predecessors: Vec<String> = {
-                let mut stmt = tx.prepare(
-                    &format!(
-                        "SELECT predecessor_task_id FROM {dag_edges}
-                         WHERE successor_task_id = ?1",
-                        dag_edges = Table::TaskDagEdges.as_str(),
-                    )
-                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
-                let rows = stmt.query_map(
-                    rusqlite::params![reviewer_task_id.as_str()],
-                    |r| r.get::<_, String>(0),
-                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
-                rows.filter_map(Result::ok).collect()
-            };
+        // Reverse-DAG: find every predecessor task_id of this
+        // Reviewer. In the canonical Step 23 sequential model
+        // there is exactly one (the Executor); we tolerate
+        // multiple at the kernel layer and append to each.
+        let predecessors: Vec<String> = {
+            let mut stmt = tx.prepare(
+                &format!(
+                    "SELECT predecessor_task_id FROM {dag_edges}
+                     WHERE successor_task_id = ?1",
+                    dag_edges = Table::TaskDagEdges.as_str(),
+                )
+            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+            let rows = stmt.query_map(
+                rusqlite::params![reviewer_task_id.as_str()],
+                |r| r.get::<_, String>(0),
+            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+            rows.filter_map(Result::ok).collect()
+        };
 
-            // No predecessors: a Reviewer task without any `depends_on`
-            // edge is malformed at the plan layer (Step 17 DAG validation
-            // would have rejected it on approve_plan, but defense in
-            // depth — also reject here). We surface INVALID_REQUEST to
-            // the planner so the Reviewer harness retries via the
-            // operator. INV-08 — coarse code, no detail.
+        if let Some(formatted) = formatted_critique.as_deref() {
+            // No predecessors on the rejection path: a Reviewer task
+            // without any `depends_on` edge is malformed at the plan
+            // layer (Step 17 DAG validation would have rejected it on
+            // approve_plan, but defense in depth — also reject here).
+            // We surface INVALID_REQUEST to the planner so the
+            // Reviewer harness retries via the operator. INV-08 —
+            // coarse code, no detail. (On the approval path we
+            // tolerate empty predecessors and let the post-commit
+            // aggregator surface `NoSuccessors`.)
             if predecessors.is_empty() {
                 return Err((PlannerErrorCode::InvalidRequest, task_state));
             }
@@ -1440,11 +1452,13 @@ fn handle_submit_review(
 
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
-    }
+
+        predecessors
+    };
 
     // Structured log for forensic traceability. INV-08 means the wire
     // returns the coarse outcome only; the kernel logs carry the
-    // structured detail (audit chain entry follows in a future task).
+    // structured detail.
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"ReviewSubmitted\",\
          \"reviewer_task_id\":\"{}\",\"approved\":{}}}",
@@ -1452,11 +1466,103 @@ fn handle_submit_review(
         approved,
     );
 
+    // ── 6. Step 25 cross-Reviewer aggregation (V2 gap §12.2) ──────────────
+    //
+    // For every Executor predecessor of this Reviewer, fold the full
+    // sibling-Reviewer set into the logical-AND verdict per
+    // `v2-deep-spec.md §Step 25`. The aggregator is a pure read
+    // predicate that runs AFTER the SubmitReview commit has fixed
+    // this Reviewer's `tasks.review_verdict` row, so it observes the
+    // canonical "did everyone vote yet?" state.
+    //
+    // Emission contract (single-class observability, per
+    // `audit-paired-writes.md §4`):
+    //   * `Pending`         → silent. We are still waiting on a
+    //                         sibling Reviewer; emitting now would
+    //                         flood the audit chain with N-1
+    //                         partial-state rows.
+    //   * `AllPassed`       → emit `ReviewAggregationCompleted`.
+    //                         When the push transport lands (gap
+    //                         §12.1), this audit row is the anchor
+    //                         the future emitter reads to issue
+    //                         `KernelPush::AllReviewersPassed`.
+    //   * `AtLeastOneRejected` → emit `ReviewAggregationCompleted`.
+    //                         Same pattern as `AllPassed` but for
+    //                         the `KernelPush::ReviewRejected`
+    //                         direction.
+    //   * `NoSuccessors`    → emit `ReviewAggregationCompleted` for
+    //                         defense in depth (a malformed plan
+    //                         this kernel let in must surface in
+    //                         the audit chain even though the push
+    //                         never fires; operators can grep the
+    //                         audit segment for forensic recovery).
+    //
+    // Fail-soft on aggregator errors: a SQLite read failure here
+    // does NOT roll back the SubmitReview commit (it's already
+    // durable). We log the error and continue so the Reviewer
+    // harness still observes its `Accepted` response.
+    let task = load_task(req.task_id.as_str(), store)
+        .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Completed))?;
+    let session_id_str    = session_id.as_str().to_owned();
+    let initiative_id_str = task.initiative_id.clone();
+    for predecessor in &predecessors {
+        let outcome = match crate::initiatives::review_aggregation
+            ::compute_aggregate_review_outcome(predecessor.as_str(), store)
+        {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"ReviewAggregationFailed\",\
+                     \"executor_task_id\":\"{predecessor}\",\
+                     \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                     \"error\":\"{e}\"}}",
+                );
+                continue;
+            }
+        };
+
+        let verdict_str = match outcome.verdict {
+            // Silent: not yet at terminal state.
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::Pending => continue,
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::AllPassed
+                => "AllPassed",
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected
+                => "AtLeastOneRejected",
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::NoSuccessors
+                => "NoSuccessors",
+        };
+
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"ReviewAggregationCompleted\",\
+             \"executor_task_id\":\"{predecessor}\",\
+             \"reviewer_task_id\":\"{reviewer_task_id}\",\
+             \"reviewer_count\":{count},\"verdict\":\"{verdict_str}\"}}",
+            count = outcome.count,
+        );
+
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted {
+                executor_task_id:               predecessor.clone(),
+                triggered_by_reviewer_task_id:  reviewer_task_id.clone(),
+                reviewer_count:                 outcome.count,
+                verdict:                        verdict_str.to_owned(),
+            },
+            Some(session_id_str.as_str()),
+            Some(reviewer_task_id.as_str()),
+            Some(initiative_id_str.as_str()),
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"ReviewAggregationCompleted\",\
+                 \"audit_emit_failed\":\"{e}\",\
+                 \"executor_task_id\":\"{predecessor}\",\
+                 \"reviewer_task_id\":\"{reviewer_task_id}\"}}",
+            );
+        }
+    }
+
     // Lane budget snapshot (lane unchanged on review submission — the
     // Reviewer's admission cost was charged at activation; SubmitReview
     // itself consumes nothing).
-    let task = load_task(req.task_id.as_str(), store)
-        .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Completed))?;
     let remaining = lane_budget_snapshot(&task.lane_id, policy, store);
 
     Ok(IntentResponse {
@@ -2584,19 +2690,58 @@ mod tests {
         SessionId::parse("11111111-1111-1111-1111-111111111111").unwrap()
     }
 
+    /// Build a minimal `HandlerContext` over the supplied store + a
+    /// `FakeAuditSink`, returning both so the SubmitReview tests can
+    /// assert on the `ReviewAggregationCompleted` audit emission
+    /// path (V2 gap §12.2 wiring). The ctx carries no orchestrator,
+    /// no live gateway, and a fail-closed isolation backend — the
+    /// `handle_submit_review` code path uses only `ctx.audit`, so
+    /// the rest of the dependencies are placeholders.
+    fn build_review_test_ctx(
+        store:  Arc<Store>,
+        policy: raxis_policy::PolicyBundle,
+    ) -> (Arc<HandlerContext>, Arc<raxis_test_support::FakeAuditSink>) {
+        let sink = Arc::new(raxis_test_support::FakeAuditSink::new());
+        let data_dir = std::path::PathBuf::from("/tmp/raxis-submit-review-test");
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            &data_dir,
+            sink.clone(),
+        );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
+        let domain = crate::ipc::context::build_default_test_domain(&data_dir);
+        let ctx = Arc::new(HandlerContext::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
+            Arc::new(crate::authority::keys::KeyRegistry::stub_for_tests()),
+            store,
+            sink.clone(),
+            data_dir,
+            Arc::new(crate::initiatives::PlanRegistry::new()),
+            Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
+            isolation,
+            orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
+            domain,
+        ));
+        (ctx, sink)
+    }
+
     /// Approval path: the handler transitions the Reviewer from
     /// Running → Completed, leaves `tasks.last_critique` untouched on
     /// the predecessor, persists `review_verdict = 'Approved'` on
     /// the Reviewer's own row, and returns Accepted.
     #[test]
     fn submit_review_approved_transitions_reviewer_to_completed() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let req = make_submit_review_request("rev1", Some(true), None);
         let resp = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect("approval must be Accepted");
 
         assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
@@ -2614,7 +2759,8 @@ mod tests {
     /// and the Executor's `last_critique` stays NULL.
     #[test]
     fn submit_review_approved_silently_drops_supplied_critique() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
@@ -2624,7 +2770,7 @@ mod tests {
             Some("kernel must drop this — approval path"),
         );
         let resp = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect("approval must be Accepted");
 
         assert_eq!(resp.task_state, TaskState::Completed);
@@ -2637,7 +2783,8 @@ mod tests {
     /// the Reviewer to Completed.
     #[test]
     fn submit_review_rejected_writes_formatted_critique_to_predecessor() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
@@ -2647,7 +2794,7 @@ mod tests {
             Some("auth check missing on /admin"),
         );
         let resp = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect("rejection must be Accepted (the handler accepts the verdict)");
 
         assert_eq!(resp.task_state, TaskState::Completed);
@@ -2670,7 +2817,8 @@ mod tests {
     /// arrival order; the Executor's column carries every entry.
     #[test]
     fn submit_review_rejected_aggregates_across_multiple_reviewers() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
 
         // Insert 1 Executor + 2 Reviewers, both rejecting in turn.
@@ -2709,7 +2857,7 @@ mod tests {
             "revA", Some(false), Some("missing input validation"),
         );
         handle_submit_review(
-            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect("first rejection accepted");
 
         // Second reviewer rejects.
@@ -2717,7 +2865,7 @@ mod tests {
             "revB", Some(false), Some("uses deprecated tokio API"),
         );
         handle_submit_review(
-            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy,
+            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy, &ctx,
         ).expect("second rejection accepted");
 
         // Both critiques visible on the Executor's row, in arrival order.
@@ -2735,13 +2883,14 @@ mod tests {
     /// NOT touch `tasks.last_critique` or the Reviewer's FSM.
     #[test]
     fn submit_review_missing_approved_returns_invalid_request() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let req = make_submit_review_request("rev1", None, None);
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect_err("missing approved must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
@@ -2753,13 +2902,14 @@ mod tests {
     /// Rejection with missing critique (None) → INVALID_REQUEST.
     #[test]
     fn submit_review_rejected_missing_critique_returns_invalid_request() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let req = make_submit_review_request("rev1", Some(false), None);
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect_err("missing critique on rejection must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
@@ -2773,13 +2923,14 @@ mod tests {
     /// accepting a meaningless verdict.
     #[test]
     fn submit_review_rejected_empty_critique_returns_invalid_request() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let req = make_submit_review_request("rev1", Some(false), Some(""));
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect_err("empty critique on rejection must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
@@ -2791,7 +2942,8 @@ mod tests {
     /// the entire point of the cap (context-flooding DoS prevention).
     #[test]
     fn submit_review_rejected_oversized_critique_is_not_persisted() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
@@ -2799,7 +2951,7 @@ mod tests {
         let oversized = "x".repeat(raxis_types::MAX_CRITIQUE_BYTES + 1);
         let req = make_submit_review_request("rev1", Some(false), Some(&oversized));
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect_err("oversized critique must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
@@ -2813,14 +2965,15 @@ mod tests {
     /// flips `>` to `>=` regresses loudly.
     #[test]
     fn submit_review_rejected_critique_at_cap_is_accepted() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let at_cap = "y".repeat(raxis_types::MAX_CRITIQUE_BYTES);
         let req = make_submit_review_request("rev1", Some(false), Some(&at_cap));
         let resp = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect("critique at cap must be Accepted");
 
         assert_eq!(resp.task_state, TaskState::Completed);
@@ -2837,7 +2990,8 @@ mod tests {
     /// short-circuited.
     #[test]
     fn submit_review_rejects_non_running_reviewer() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
@@ -2847,7 +3001,7 @@ mod tests {
             "rev1", Some(false), Some("auth missing"),
         );
         let err = handle_submit_review(
-            req, TaskState::Admitted, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Admitted, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect_err("non-Running reviewer must reject");
 
         assert_eq!(err.0, PlannerErrorCode::FailTaskNotRunning);
@@ -2861,7 +3015,8 @@ mod tests {
     /// SubmitReview that has nowhere to route the critique.
     #[test]
     fn submit_review_rejected_with_no_predecessor_returns_invalid_request() {
-        let store  = Store::open_in_memory().unwrap();
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         // Insert a Reviewer task with NO `task_dag_edges` row.
         let conn = store.lock_sync();
@@ -2892,13 +3047,205 @@ mod tests {
             "orphan-rev", Some(false), Some("no predecessor — defensive case"),
         );
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy,
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
         ).expect_err("orphan reviewer must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
         // Reviewer FSM unchanged.
         assert_eq!(task_state_of(&store, "orphan-rev"),
                    TaskState::Running.as_sql_str());
+    }
+
+    /// V2 gap §12.2 — when the LAST sibling Reviewer submits
+    /// `Approved`, the kernel emits exactly ONE
+    /// `ReviewAggregationCompleted { verdict = "AllPassed" }` audit
+    /// event addressed to the Executor predecessor.
+    #[test]
+    fn submit_review_emits_all_passed_aggregation_audit_when_last_reviewer_approves() {
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let policy = default_test_policy();
+
+        // Two Reviewers (revA, revB) of one Executor (exe1).
+        seed_reviewer_with_executor_predecessor(&store, "revA", "exe1");
+        {
+            let conn = store.lock_sync();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES ('revB', 'init-rev', 'default', ?1, 'kernel',
+                             1, ?2, ?2, 0)"
+                ),
+                rusqlite::params![TaskState::Running.as_sql_str(), now],
+            ).unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {dag_edges}
+                        (initiative_id, predecessor_task_id, successor_task_id,
+                         predecessor_satisfied)
+                     VALUES ('init-rev', 'exe1', 'revB', 1)",
+                    dag_edges = Table::TaskDagEdges.as_str(),
+                ),
+                [],
+            ).unwrap();
+        }
+
+        // First reviewer approves — aggregator must still be Pending,
+        // NO audit emission expected.
+        let req_a = make_submit_review_request("revA", Some(true), None);
+        handle_submit_review(
+            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
+        ).unwrap();
+        assert!(
+            sink.events().iter().all(|e| !matches!(
+                e.kind,
+                raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
+            )),
+            "Pending aggregator must NOT emit ReviewAggregationCompleted (silent until terminal)",
+        );
+
+        // Second reviewer approves — aggregator now AllPassed, ONE
+        // audit emission expected addressed to exe1.
+        let req_b = make_submit_review_request("revB", Some(true), None);
+        handle_submit_review(
+            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy, &ctx,
+        ).unwrap();
+
+        let agg_events: Vec<_> = sink.events()
+            .into_iter()
+            .filter(|e| matches!(
+                e.kind,
+                raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
+            ))
+            .collect();
+        assert_eq!(agg_events.len(), 1, "exactly one terminal aggregation event");
+        match &agg_events[0].kind {
+            raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted {
+                executor_task_id,
+                triggered_by_reviewer_task_id,
+                reviewer_count,
+                verdict,
+            } => {
+                assert_eq!(executor_task_id, "exe1");
+                assert_eq!(triggered_by_reviewer_task_id, "revB");
+                assert_eq!(*reviewer_count, 2);
+                assert_eq!(verdict, "AllPassed");
+            }
+            _ => unreachable!("filtered above"),
+        }
+    }
+
+    /// V2 gap §12.2 — single Reviewer approving terminates the
+    /// aggregator immediately. The audit row carries `count = 1`.
+    #[test]
+    fn submit_review_single_reviewer_approval_emits_terminal_aggregation() {
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let policy = default_test_policy();
+        seed_reviewer_with_executor_predecessor(&store, "rev-only", "exe1");
+
+        let req = make_submit_review_request("rev-only", Some(true), None);
+        handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
+        ).unwrap();
+
+        let agg_events: Vec<_> = sink.events()
+            .into_iter()
+            .filter(|e| matches!(
+                e.kind,
+                raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
+            ))
+            .collect();
+        assert_eq!(agg_events.len(), 1, "single-reviewer approval terminates the aggregator");
+        match &agg_events[0].kind {
+            raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted {
+                reviewer_count,
+                verdict,
+                ..
+            } => {
+                assert_eq!(*reviewer_count, 1);
+                assert_eq!(verdict, "AllPassed");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// V2 gap §12.2 — when the aggregator transitions out of
+    /// `Pending` because at least one Reviewer rejected, the audit
+    /// emission carries `verdict = "AtLeastOneRejected"`.
+    #[test]
+    fn submit_review_emits_at_least_one_rejected_aggregation() {
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let policy = default_test_policy();
+
+        // Two Reviewers; revA approves, revB rejects.
+        seed_reviewer_with_executor_predecessor(&store, "revA", "exe1");
+        {
+            let conn = store.lock_sync();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES ('revB', 'init-rev', 'default', ?1, 'kernel',
+                             1, ?2, ?2, 0)"
+                ),
+                rusqlite::params![TaskState::Running.as_sql_str(), now],
+            ).unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {dag_edges}
+                        (initiative_id, predecessor_task_id, successor_task_id,
+                         predecessor_satisfied)
+                     VALUES ('init-rev', 'exe1', 'revB', 1)",
+                    dag_edges = Table::TaskDagEdges.as_str(),
+                ),
+                [],
+            ).unwrap();
+        }
+
+        // revA approves → still Pending, no audit row.
+        let req_a = make_submit_review_request("revA", Some(true), None);
+        handle_submit_review(
+            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
+        ).unwrap();
+
+        // revB rejects → aggregator terminates AtLeastOneRejected.
+        let req_b = make_submit_review_request(
+            "revB", Some(false), Some("missing test coverage"),
+        );
+        handle_submit_review(
+            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy, &ctx,
+        ).unwrap();
+
+        let agg_events: Vec<_> = sink.events()
+            .into_iter()
+            .filter(|e| matches!(
+                e.kind,
+                raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
+            ))
+            .collect();
+        assert_eq!(agg_events.len(), 1);
+        match &agg_events[0].kind {
+            raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted {
+                triggered_by_reviewer_task_id,
+                reviewer_count,
+                verdict,
+                ..
+            } => {
+                assert_eq!(triggered_by_reviewer_task_id, "revB");
+                assert_eq!(*reviewer_count, 2);
+                assert_eq!(verdict, "AtLeastOneRejected");
+            }
+            _ => unreachable!(),
+        }
     }
 
     #[test]

@@ -82,22 +82,61 @@ pub enum AggregateReviewVerdict {
     NoSuccessors,
 }
 
+/// Aggregator outcome plus the cardinality the kernel observed.
+///
+/// `count` is the number of Reviewer successor rows folded in; it is
+/// surfaced alongside `verdict` so the post-commit audit emitter
+/// (`AuditEventKind::ReviewAggregationCompleted`) can record it
+/// without re-running the join. `count == 0` if and only if the
+/// verdict is `NoSuccessors` (defense-in-depth on a malformed plan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AggregateOutcome {
+    /// The folded verdict; see [`AggregateReviewVerdict`].
+    pub verdict: AggregateReviewVerdict,
+    /// Number of Reviewer successor rows the aggregator inspected.
+    /// Equal to the count of `task_dag_edges` rows whose
+    /// `predecessor_task_id == executor_task_id`.
+    pub count:   u32,
+}
+
 /// Compute the Step 25 logical-AND verdict for an Executor task.
 ///
-/// Reads `tasks.review_verdict` for every successor of `executor_task_id`
-/// in `task_dag_edges` and folds them into `AggregateReviewVerdict`.
-/// Pure read path — does NOT mutate the database; safe to call from
-/// any read-write context that needs the predicate.
+/// Convenience shim that drops the cardinality field; equivalent to
+/// `compute_aggregate_review_outcome(...).map(|o| o.verdict)`. New
+/// call sites that need the count for audit emission MUST call
+/// [`compute_aggregate_review_outcome`] directly.
+pub fn compute_aggregate_review_verdict(
+    executor_task_id: &str,
+    store:            &Store,
+) -> Result<AggregateReviewVerdict, rusqlite::Error> {
+    compute_aggregate_review_outcome(executor_task_id, store)
+        .map(|o| o.verdict)
+}
+
+/// Compute the Step 25 logical-AND verdict AND the successor count.
+///
+/// Reads `tasks.review_verdict` for every successor of
+/// `executor_task_id` in `task_dag_edges` and folds them into a
+/// [`AggregateOutcome`]. Pure read path — does NOT mutate the
+/// database; safe to call from any read-write context that needs the
+/// predicate.
+///
+/// **Why a separate count.** The audit event
+/// `ReviewAggregationCompleted` carries the cardinality so operators
+/// can confirm the aggregator inspected the expected number of
+/// Reviewer rows (catches a malformed `task_dag_edges` join that
+/// silently drops rows). Returning it from the same query removes a
+/// second SELECT in the hot post-commit path.
 ///
 /// Returns a SQLite error only when the DB layer itself fails (rare
 /// — typically a malformed schema or a poisoned mutex). The verdict
 /// path itself is total: every (NULL | Approved | Rejected | unknown
 /// CHECK-constraint-rejected) input row maps to exactly one
 /// `AggregateReviewVerdict` variant.
-pub fn compute_aggregate_review_verdict(
+pub fn compute_aggregate_review_outcome(
     executor_task_id: &str,
     store:            &Store,
-) -> Result<AggregateReviewVerdict, rusqlite::Error> {
+) -> Result<AggregateOutcome, rusqlite::Error> {
     let conn = store.lock_sync();
 
     // Pull every successor's verdict in a single query. NULL is
@@ -113,13 +152,13 @@ pub fn compute_aggregate_review_verdict(
 
     let mut rows = stmt.query(rusqlite::params![executor_task_id])?;
 
-    let mut any_successor   = false;
+    let mut count           = 0u32;
     let mut any_pending     = false;
     let mut any_rejected    = false;
     let mut all_approved    = true;
 
     while let Some(row) = rows.next()? {
-        any_successor = true;
+        count += 1;
         let raw: Option<String> = row.get(0)?;
         match raw.as_deref().and_then(ReviewVerdict::from_sql_str) {
             None => {
@@ -141,17 +180,18 @@ pub fn compute_aggregate_review_verdict(
         }
     }
 
-    if !any_successor {
-        return Ok(AggregateReviewVerdict::NoSuccessors);
-    }
-    if any_pending {
-        return Ok(AggregateReviewVerdict::Pending);
-    }
-    if any_rejected {
-        return Ok(AggregateReviewVerdict::AtLeastOneRejected);
-    }
-    debug_assert!(all_approved);
-    Ok(AggregateReviewVerdict::AllPassed)
+    let verdict = if count == 0 {
+        AggregateReviewVerdict::NoSuccessors
+    } else if any_pending {
+        AggregateReviewVerdict::Pending
+    } else if any_rejected {
+        AggregateReviewVerdict::AtLeastOneRejected
+    } else {
+        debug_assert!(all_approved);
+        AggregateReviewVerdict::AllPassed
+    };
+
+    Ok(AggregateOutcome { verdict, count })
 }
 
 #[cfg(test)]
@@ -399,5 +439,59 @@ mod tests {
         let _exe = seed_executor_with_n_reviewers(&store, 0);
         let v = compute_aggregate_review_verdict("does-not-exist", &store).unwrap();
         assert_eq!(v, AggregateReviewVerdict::NoSuccessors);
+    }
+
+    /// `compute_aggregate_review_outcome` returns the same verdict
+    /// the bare `compute_aggregate_review_verdict` shim returns AND
+    /// reports the cardinality the audit emitter consumes. Pins the
+    /// (verdict, count) contract so the audit row's `reviewer_count`
+    /// field cannot silently drift from the join the aggregator
+    /// performs.
+    #[test]
+    fn outcome_returns_verdict_and_count_in_lock_step() {
+        let store = Store::open_in_memory().unwrap();
+        let exe = seed_executor_with_n_reviewers(&store, 4);
+        set_verdict(&store, "rev-0", ReviewVerdict::Approved);
+        set_verdict(&store, "rev-1", ReviewVerdict::Approved);
+        set_verdict(&store, "rev-2", ReviewVerdict::Approved);
+        set_verdict(&store, "rev-3", ReviewVerdict::Approved);
+
+        let outcome = compute_aggregate_review_outcome(&exe, &store).unwrap();
+        assert_eq!(outcome.verdict, AggregateReviewVerdict::AllPassed);
+        assert_eq!(outcome.count, 4);
+
+        // Shim must agree with the rich variant.
+        let bare = compute_aggregate_review_verdict(&exe, &store).unwrap();
+        assert_eq!(bare, outcome.verdict);
+    }
+
+    /// `count == 0` if and only if the verdict is `NoSuccessors`.
+    /// The audit emitter relies on this invariant to skip the
+    /// `ReviewAggregationCompleted` event for malformed plans
+    /// without re-running a count query.
+    #[test]
+    fn outcome_count_is_zero_iff_no_successors() {
+        let store = Store::open_in_memory().unwrap();
+        let exe = seed_executor_with_n_reviewers(&store, 0);
+
+        let outcome = compute_aggregate_review_outcome(&exe, &store).unwrap();
+        assert_eq!(outcome.verdict, AggregateReviewVerdict::NoSuccessors);
+        assert_eq!(outcome.count, 0);
+    }
+
+    /// Pending verdicts still report the full successor count — the
+    /// aggregator inspected every row, it just hasn't reached a
+    /// terminal AND yet. This pins that the count is not gated on
+    /// the verdict.
+    #[test]
+    fn outcome_count_is_total_even_when_pending() {
+        let store = Store::open_in_memory().unwrap();
+        let exe = seed_executor_with_n_reviewers(&store, 3);
+        set_verdict(&store, "rev-0", ReviewVerdict::Approved);
+        // rev-1, rev-2 NULL.
+
+        let outcome = compute_aggregate_review_outcome(&exe, &store).unwrap();
+        assert_eq!(outcome.verdict, AggregateReviewVerdict::Pending);
+        assert_eq!(outcome.count, 3);
     }
 }
