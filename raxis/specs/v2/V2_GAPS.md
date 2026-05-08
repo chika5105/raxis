@@ -116,7 +116,7 @@ validation, `INV-PLANNER-HARNESS-04` (reviewer ban), and
 
 ### B3: Real Database Proxy Forwarding
 
-**Spec:** `credential-proxy.md §7`
+**Spec:** `credential-proxy.md §14`
 **Estimate:** ~1,200 lines
 
 All 6 database proxies (Postgres, MySQL, MSSQL, MongoDB, Redis, SMTP)
