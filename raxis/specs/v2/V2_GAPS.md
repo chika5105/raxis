@@ -513,6 +513,7 @@ The proxy:
 | 3 | **C6** — Kernel push protocol | 500 | Merged code must reach the remote |
 | 4 | **B2** — Custom tools | 600 | Operators need domain-specific utilities |
 | 5 | **ORM** — Extended query protocol | 500 | Every ORM in every language works transparently |
+| 6 | Configurable `target_ref` (policy + plan) | 80 | PR branch workflow; unblocks teams with branch protection (see §12.8) |
 
 ### Phase 2: Production readiness (~2,700 lines)
 
@@ -727,3 +728,142 @@ but the spec positions it as the recommended first-run experience.
 client."* The planner binaries boot and park but cannot communicate
 with the kernel. The VSock frame reader/writer (guest-side) is a
 prerequisite for B1 (planner agent loop).
+
+### 12.8 Target branch ref: hardcoded to `refs/heads/main`
+
+`domain-git/src/lib.rs` hardcodes `refs/heads/main` in 9 locations
+including `update_main_ref()`, `find_reference()`, and the recovery
+path. There is no policy or plan field to override it.
+
+**Impact:** Repos using `master`, `develop`, `trunk`, or any
+non-`main` default branch cannot use RAXIS without renaming their
+branch. More critically, operators who want RAXIS to push to a
+**PR branch** (e.g., `refs/heads/raxis/initiative-<id>`) so the
+merged code goes through normal SDLC review (CI, code review, merge
+approval) before landing on the production branch have no mechanism
+to do so.
+
+**Proposed design:**
+
+```toml
+# policy.toml — operator default for all initiatives
+[git]
+default_target_ref = "refs/heads/main"     # default if omitted
+
+# plan.toml — per-initiative override
+[workspace]
+target_ref = "refs/heads/raxis/auth-refactor"  # overrides policy default
+```
+
+Resolution order: `plan.toml [workspace] target_ref` → `policy.toml
+[git] default_target_ref` → `"refs/heads/main"` (hardcoded fallback).
+
+**PR branch workflow.** When `target_ref` points at a non-default
+branch (e.g., `refs/heads/raxis/<initiative-name>`), the kernel:
+
+1. Creates the branch at `initial_sha` during `approve_plan`
+2. Fast-forwards the **PR branch** (not `main`) on `IntegrationMerge`
+3. Pushes the **PR branch** to the remote (per §14 push protocol)
+4. The operator's existing CI pipeline runs on the PR branch
+5. A human reviewer approves and merges the PR into `main`/`master`
+   via the team's normal merge process (GitHub PR, GitLab MR, etc.)
+
+This separates RAXIS's authority (structural correctness,
+path-allowlist enforcement, reviewer verdicts) from the team's SDLC
+authority (human code review, CI gates, merge approval). RAXIS
+guarantees the code is correct; the team decides when it lands.
+
+**Why this matters.** Many teams will not adopt an autonomous agent
+that pushes directly to `main`. The PR branch workflow gives them
+a familiar approval layer on top of RAXIS's structural guarantees,
+making adoption incrementally safe.
+
+**Alternatives rejected:**
+
+| Alternative | Why rejected |
+|---|---|
+| Always push to `main` directly | Blocks adoption in teams with branch protection and mandatory reviews |
+| Let the agent create PRs via GitHub API | Couples RAXIS to a specific forge (GitHub/GitLab/Bitbucket); the kernel should be forge-agnostic. The push protocol already handles the transport; the PR creation is a post-push hook the operator can wire via notification channels |
+| Hard-fork `domain-git` per branch convention | Unnecessary complexity; a single `target_ref` field threads through cleanly |
+
+**Estimate:** ~80 lines (policy field, plan field, thread through
+`domain-git`, update recovery path, update ancestry check).
+
+### 12.9 Policy vs Plan Configuration: Precedence Rules
+
+The `target_ref` gap (§12.8) surfaces a broader tension that applies
+across every field where both `policy.toml` (operator-authored,
+signed) and `plan.toml` (agent/submitter-authored, signed separately)
+can declare a value. The kernel must resolve conflicts
+deterministically and securely.
+
+**The tension:**
+
+- **Policy** represents the operator's structural authority — hard
+  limits, security floors, and organizational defaults. The operator
+  signs it; agents never see or modify it.
+- **Plan** represents the submitter's intent — what they want for
+  this specific initiative. The plan is signed by the submitter
+  (who may be an operator or an external contributor).
+- **The agent** may have authored the plan content (via `plan prepare`
+  or a tool-assisted flow), so plan values cannot be unconditionally
+  trusted to be secure.
+
+**Precedence model (enforced at admission):**
+
+| Category | Policy role | Plan role | Resolution |
+|---|---|---|---|
+| **Hard ceilings** (e.g., `max_cost_per_task`, `max_concurrent_tasks`, `max_wall_seconds`) | Sets the maximum | Plan may request ≤ policy ceiling | `min(plan_value, policy_ceiling)` — plan cannot exceed policy |
+| **Hard floors** (e.g., `min_reviewers`, security settings) | Sets the minimum | Plan may request ≥ policy floor | `max(plan_value, policy_floor)` — plan cannot weaken policy |
+| **Defaults with override** (e.g., `target_ref`, `default_verifier_images`, `default_executor_image`) | Sets the default | Plan may override | Plan value wins **unless** policy has `locked = true` on the field |
+| **Locked fields** (e.g., `[git] target_ref_locked = true`) | Immutable | Plan override rejected | `FAIL_POLICY_LOCKED_FIELD { field, plan_value, policy_value }` |
+| **Policy-only** (e.g., `[[environment_gates]]`, `[[vm_images]] oci_digest`, credential store config) | Sole authority | Plan cannot declare | Plan field is ignored or rejected at admission |
+| **Plan-only** (e.g., `[[tasks]]`, `path_allowlist`, `task_id`) | Not applicable | Sole authority | Policy constrains via ceilings/floors, not direct values |
+
+**Applied to `target_ref`:**
+
+```toml
+# policy.toml
+[git]
+default_target_ref = "refs/heads/main"
+target_ref_locked  = false               # default; plan may override
+
+# plan.toml
+[workspace]
+target_ref = "refs/heads/raxis/auth-refactor"
+```
+
+- If `target_ref_locked = false`: plan's `target_ref` wins
+- If `target_ref_locked = true`: plan's override is rejected with
+  `FAIL_POLICY_LOCKED_FIELD`
+- If plan omits `target_ref`: policy default applies
+- If both omit: hardcoded fallback `"refs/heads/main"`
+
+**Why `locked` rather than just "policy always wins":** Operators
+who run RAXIS for internal teams want plans to target feature
+branches freely. Operators who run RAXIS for external contributors
+want to lock the target branch so a malicious plan can't redirect
+merged code to an attacker-controlled ref. The `locked` flag gives
+the operator the choice.
+
+**Invariant:** `INV-PLAN-POLICY-PRECEDENCE-01` — at admission time,
+for every field where both policy and plan declare a value, the
+kernel's resolved value must satisfy the precedence category above.
+A plan can never weaken a policy floor, exceed a policy ceiling,
+or override a locked field.
+
+**Current enforcement status:**
+
+| Category | Enforced | Where |
+|---|---|---|
+| Hard ceilings | ✅ Already | `budget.rs:194` — `min(raw, policy.max_cost_per_task())`; `budget.rs:52` — cost cap; `budget.rs:43` — concurrency cap |
+| Hard floors | 🟡 No concrete floor fields exist yet | Would apply to `min_reviewers`, security settings when added |
+| Defaults with override | ❌ Not implemented | No override-capable fields exist (e.g., `target_ref`) |
+| Locked fields | ❌ Not implemented | No `_locked` mechanism; no `FAIL_POLICY_LOCKED_FIELD` code |
+| Policy-only | ✅ Already | `[[vm_images]] oci_digest`, `[[environment_gates]]`, credential store config |
+| Plan-only | ✅ Already | `path_allowlist`, `[[tasks]]`, `task_id` — policy constrains via ceilings |
+
+The invariant codifies the existing ceiling/policy-only/plan-only
+pattern and extends it to cover the three missing categories
+(floors, defaults-with-override, locked fields) needed for
+`target_ref` and future configurable fields.
