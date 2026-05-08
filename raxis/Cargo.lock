@@ -3025,6 +3025,7 @@ name = "raxis-credential-proxy-postgres"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "futures",
  "hex",
  "raxis-credentials",
  "serde",

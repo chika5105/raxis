@@ -31,9 +31,13 @@ serde      = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = "0.1"
 
+# Real upstream Postgres driver: handles SCRAM-SHA-256 / MD5 /
+# cleartext auth + connection lifecycle. See
+# `credential-proxy.md §14.3 / §14.8.1` for why the proxy crate
+# does NOT reimplement Postgres auth flavours from scratch.
+tokio-postgres = "0.7"
+futures = "0.3"
+
 [dev-dependencies]
 tokio          = { workspace = true, features = ["test-util", "macros"] }
 tempfile       = "3"
-# Real upstream Postgres driver used in integration tests; see
-# tests/proxy_handshake.rs.
-tokio-postgres = "0.7"

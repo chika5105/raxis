@@ -150,6 +150,110 @@ pub fn error_response(severity: &[u8], sqlstate: &[u8], message: &str) -> Vec<u8
     })
 }
 
+/// Single column descriptor for a `'T'` `RowDescription` frame.
+///
+/// The proxy minted these from the upstream's column metadata when
+/// re-encoding a forwarded result-set into Postgres wire format. Every
+/// row that follows must agree on the field count and ordering; the
+/// upstream Postgres driver enforces that for us, so the proxy only
+/// has to copy the `name` field and use safe defaults for the rest.
+#[derive(Debug, Clone)]
+pub struct FieldDescriptor {
+    /// Column name as the upstream returned it (UTF-8). The proxy
+    /// truncates names longer than 255 bytes since libpq's wire
+    /// format implicitly assumes short identifiers.
+    pub name: String,
+    /// OID of the source table the column came from, or 0 if the
+    /// upstream did not surface one (e.g. `SELECT 1`).
+    pub table_oid: i32,
+    /// Attribute number within the source table (1-indexed), or 0.
+    pub attribute_num: i16,
+    /// Column type OID — `25` (`text`) is a safe default when the
+    /// proxy has no better information; the agent's libpq will
+    /// surface every value as a `text`.
+    pub type_oid: i32,
+    /// Column type size in bytes (`-1` = variable-length).
+    pub type_size: i16,
+    /// Type modifier (`-1` if absent).
+    pub type_modifier: i32,
+    /// Format code: `0` = text, `1` = binary. The proxy emits
+    /// `text` because tokio-postgres's `simple_query_raw` API
+    /// returns text-encoded values.
+    pub format_code: i16,
+}
+
+impl FieldDescriptor {
+    /// Construct a `text`-format column descriptor with the given
+    /// name. Used by the proxy's upstream re-encoder when the
+    /// upstream metadata doesn't carry a richer type OID.
+    pub fn text(name: impl Into<String>) -> Self {
+        Self {
+            name:          name.into(),
+            table_oid:     0,
+            attribute_num: 0,
+            type_oid:      25, // text
+            type_size:     -1,
+            type_modifier: -1,
+            format_code:   0,  // text
+        }
+    }
+}
+
+/// `'T'` RowDescription frame.
+///
+/// Body layout (per Postgres protocol):
+///
+/// * `i16` field count
+/// * for each field:
+///   * C-string column name
+///   * `i32` table OID
+///   * `i16` attribute number
+///   * `i32` data type OID
+///   * `i16` data type size
+///   * `i32` type modifier
+///   * `i16` format code (0 = text, 1 = binary)
+pub fn row_description(fields: &[FieldDescriptor]) -> Vec<u8> {
+    put_tagged(b'T', |b| {
+        b.put_i16(fields.len() as i16);
+        for f in fields {
+            // Truncate names defensively — the wire field is
+            // implicitly bounded by `i16::MAX` total bytes per
+            // RowDescription, which 255 keeps comfortably under.
+            let name_bytes = f.name.as_bytes();
+            let name = if name_bytes.len() > 255 { &name_bytes[..255] } else { name_bytes };
+            b.put_slice(name);
+            b.put_u8(0);
+            b.put_i32(f.table_oid);
+            b.put_i16(f.attribute_num);
+            b.put_i32(f.type_oid);
+            b.put_i16(f.type_size);
+            b.put_i32(f.type_modifier);
+            b.put_i16(f.format_code);
+        }
+    })
+}
+
+/// `'D'` DataRow frame.
+///
+/// Each value is `Some(bytes)` for the column's text-format payload
+/// or `None` for SQL `NULL` (encoded as length `-1` in Postgres wire).
+pub fn data_row(values: &[Option<&[u8]>]) -> Vec<u8> {
+    put_tagged(b'D', |b| {
+        b.put_i16(values.len() as i16);
+        for v in values {
+            match v {
+                Some(bytes) => {
+                    b.put_i32(bytes.len() as i32);
+                    b.put_slice(bytes);
+                }
+                None => {
+                    b.put_i32(-1);
+                }
+            }
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -208,5 +312,45 @@ mod tests {
         assert_eq!(bytes[0], b'E');
         let body = std::str::from_utf8(&bytes[5..]).unwrap();
         assert!(body.contains("blocked"), "body = {body:?}");
+    }
+
+    #[test]
+    fn row_description_layout_two_fields() {
+        let fields = [
+            FieldDescriptor::text("id"),
+            FieldDescriptor::text("name"),
+        ];
+        let bytes = row_description(&fields);
+        assert_eq!(bytes[0], b'T');
+        let len = i32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]);
+        assert_eq!(len as usize, bytes.len() - 1);
+        let body = &bytes[5..];
+        let count = i16::from_be_bytes([body[0], body[1]]);
+        assert_eq!(count, 2);
+        // Field 1: name = "id\0" then 18 bytes of metadata.
+        let name1_end = 2 + body[2..].iter().position(|&b| b == 0).unwrap();
+        assert_eq!(&body[2..name1_end], b"id");
+        // Skip the metadata block (4+2+4+2+4+2 = 18 bytes), then "name\0".
+        let after_meta1 = name1_end + 1 + 18;
+        let name2_end = after_meta1 + body[after_meta1..].iter().position(|&b| b == 0).unwrap();
+        assert_eq!(&body[after_meta1..name2_end], b"name");
+    }
+
+    #[test]
+    fn data_row_with_null_and_text_values() {
+        let v_a: &[u8] = b"hello";
+        let bytes = data_row(&[Some(v_a), None, Some(b"")]);
+        assert_eq!(bytes[0], b'D');
+        let body = &bytes[5..];
+        let count = i16::from_be_bytes([body[0], body[1]]);
+        assert_eq!(count, 3);
+        // First value: i32 length 5, then bytes.
+        assert_eq!(i32::from_be_bytes([body[2], body[3], body[4], body[5]]), 5);
+        assert_eq!(&body[6..11], b"hello");
+        // Second value: i32 length -1 (NULL).
+        assert_eq!(i32::from_be_bytes([body[11], body[12], body[13], body[14]]), -1);
+        // Third value: i32 length 0, no bytes.
+        assert_eq!(i32::from_be_bytes([body[15], body[16], body[17], body[18]]), 0);
+        assert_eq!(body.len(), 19);
     }
 }
