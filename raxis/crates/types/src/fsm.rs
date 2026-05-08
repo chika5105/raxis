@@ -561,6 +561,229 @@ impl fmt::Display for SubtaskActivationState {
 }
 
 // ---------------------------------------------------------------------------
+// IntegrationMergeAttemptState — V2 pre-merge verifier attempt lifecycle.
+// integration-merge.md §11.10.1; verifier-processes.md §16.
+// DDL: integration_merge_attempts.state TEXT NOT NULL CHECK (...).
+//
+// Why a separate FSM from `initiatives.git_apply_pending`:
+//   - `git_apply_pending` is a single-bit gate at the
+//     SQLite-intent → git-apply boundary for the *eventual* main
+//     advance (integration-merge.md §11.1).
+//   - This enum governs the strictly *earlier* candidate-merge-tree
+//     → pre-merge-verifier boundary (integration-merge.md §11.10).
+//     It needs richer states (block-merge vs. warn-only verdict,
+//     candidate-only failure vs. crash-recovery discard) than a
+//     single bit can express.
+// ---------------------------------------------------------------------------
+
+/// Pre-merge verifier attempt lifecycle. One row in
+/// `integration_merge_attempts` per `IntegrationMerge` intent that
+/// reaches Check 5d.
+///
+/// Transitions (`integration-merge.md §4 Check 5d` and `§11.10`):
+///   `AwaitingPreMergeVerifiers` → `PreMergeVerifiersPassed`
+///                                  (all `block_merge` verifiers passed)
+///   `AwaitingPreMergeVerifiers` → `BlockedByPreMergeVerifier`
+///                                  (any `block_merge` verifier failed)
+///   `AwaitingPreMergeVerifiers` → `DiscardedCandidateOnly`
+///                                  (Check 5d.2 candidate-merge-tree
+///                                   computation failed; verifiers
+///                                   never spawned)
+///   `AwaitingPreMergeVerifiers` → `DiscardedCrashRecovery`
+///                                  (kernel restart sweep — VM
+///                                   verdicts unrecoverable)
+///   `PreMergeVerifiersPassed`   → `CompletedAdvanceApplied`
+///                                  (§11.1 phase 3 finalize ran)
+///   `PreMergeVerifiersPassed`   → `DiscardedCrashRecovery`
+///                                  (kernel restart sweep before
+///                                   §11.1 phase 3 ran — the
+///                                   recovery flow rebuilds the
+///                                   candidate per §11.10.4)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum IntegrationMergeAttemptState {
+    /// Inserted at Check 5d.1 in the same `BEGIN IMMEDIATE`
+    /// transaction that admits the `IntegrationMerge` intent.
+    /// Pre-merge verifier VMs are spawned right after.
+    AwaitingPreMergeVerifiers,
+    /// All `block_merge` verifiers passed. The candidate is now an
+    /// input to the §11.1 phase 1 main-advance pipeline. Warn-only
+    /// failures DO NOT gate this transition.
+    PreMergeVerifiersPassed,
+    /// At least one `block_merge` verifier failed. Terminal — the
+    /// candidate is discarded, no main advance happens, the
+    /// `IntegrationMerge` intent returns failure to the orchestrator.
+    BlockedByPreMergeVerifier,
+    /// Phase 3 (`§11.1`) finalize ran: `initiatives.current_sha`
+    /// updated and `git_apply_pending = 0`. Terminal success.
+    CompletedAdvanceApplied,
+    /// Check 5d.2 candidate-merge-tree computation failed (e.g.
+    /// merge conflict). Terminal — the candidate was never spawned;
+    /// the `IntegrationMerge` intent returns failure.
+    DiscardedCandidateOnly,
+    /// The kernel was killed mid-flight. The boot-time recovery
+    /// sweep (§11.10.4) folded a non-terminal row to this terminal
+    /// state because the candidate worktree was missing or the
+    /// verifier-VM cgroups had already been killed.
+    DiscardedCrashRecovery,
+}
+
+impl IntegrationMergeAttemptState {
+    /// All variants — referenced by the
+    /// `integration_merge_attempts.state` SQL CHECK constraint
+    /// (`integration-merge.md §11.10.1`, store migration 11).
+    pub const ALL: [Self; 6] = [
+        Self::AwaitingPreMergeVerifiers,
+        Self::PreMergeVerifiersPassed,
+        Self::BlockedByPreMergeVerifier,
+        Self::CompletedAdvanceApplied,
+        Self::DiscardedCandidateOnly,
+        Self::DiscardedCrashRecovery,
+    ];
+
+    /// Canonical SQL string used in CHECK constraints and at-rest
+    /// storage. The recovery sweep at boot (§11.10.4) compares
+    /// `state` against the literal strings emitted here using
+    /// `IN ('AwaitingPreMergeVerifiers','PreMergeVerifiersPassed')`,
+    /// so any rename here MUST be backed by a migration that
+    /// rewrites the CHECK constraint and the recovery query.
+    pub fn as_sql_str(self) -> &'static str {
+        match self {
+            Self::AwaitingPreMergeVerifiers => "AwaitingPreMergeVerifiers",
+            Self::PreMergeVerifiersPassed   => "PreMergeVerifiersPassed",
+            Self::BlockedByPreMergeVerifier => "BlockedByPreMergeVerifier",
+            Self::CompletedAdvanceApplied   => "CompletedAdvanceApplied",
+            Self::DiscardedCandidateOnly    => "DiscardedCandidateOnly",
+            Self::DiscardedCrashRecovery    => "DiscardedCrashRecovery",
+        }
+    }
+
+    /// Parse from the SQL at-rest string.
+    pub fn from_sql_str(s: &str) -> Option<Self> {
+        match s {
+            "AwaitingPreMergeVerifiers" => Some(Self::AwaitingPreMergeVerifiers),
+            "PreMergeVerifiersPassed"   => Some(Self::PreMergeVerifiersPassed),
+            "BlockedByPreMergeVerifier" => Some(Self::BlockedByPreMergeVerifier),
+            "CompletedAdvanceApplied"   => Some(Self::CompletedAdvanceApplied),
+            "DiscardedCandidateOnly"    => Some(Self::DiscardedCandidateOnly),
+            "DiscardedCrashRecovery"    => Some(Self::DiscardedCrashRecovery),
+            _ => None,
+        }
+    }
+
+    /// True for states whose `finalized_at` column MUST be set
+    /// (i.e. no further FSM transition is legal). Inverse of the
+    /// recovery sweep's `IN (...)` predicate at §11.10.4.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::BlockedByPreMergeVerifier
+                | Self::CompletedAdvanceApplied
+                | Self::DiscardedCandidateOnly
+                | Self::DiscardedCrashRecovery
+        )
+    }
+}
+
+impl fmt::Display for IntegrationMergeAttemptState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_sql_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IntegrationMergeAttemptDiscardReason — populates `discard_reason`
+// on terminal-discard transitions of `IntegrationMergeAttemptState`.
+// integration-merge.md §11.10.3.
+// DDL: integration_merge_attempts.discard_reason TEXT (NULLABLE);
+//      NULL ⟺ state ∈ { AwaitingPreMergeVerifiers,
+//                        PreMergeVerifiersPassed,
+//                        CompletedAdvanceApplied }.
+// ---------------------------------------------------------------------------
+
+/// Why a candidate-merge-tree was discarded. Persisted only on
+/// transitions to `BlockedByPreMergeVerifier`, `DiscardedCandidateOnly`,
+/// or `DiscardedCrashRecovery`. The fourth value `MergeAbortedByOperator`
+/// is reserved for a later operator-driven abort path
+/// (`integration-merge.md §11.10.3`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IntegrationMergeAttemptDiscardReason {
+    /// At least one `block_merge` pre-merge verifier failed
+    /// (`integration-merge.md §11.10` Check 5d.4).
+    VerifierBlocked,
+    /// Check 5d.2 candidate-merge-tree computation failed
+    /// (e.g. textual merge conflict, three-way ancestor missing).
+    CandidateComputationFailed,
+    /// Kernel restart sweep folded a non-terminal row to terminal
+    /// because the candidate worktree was missing or the verifier
+    /// VMs had already been killed (`integration-merge.md §11.10.4`).
+    CrashRecovery,
+    /// Operator explicitly aborted an in-flight merge attempt
+    /// (reserved — not yet wired in V2).
+    MergeAbortedByOperator,
+}
+
+impl IntegrationMergeAttemptDiscardReason {
+    /// All variants — referenced by the
+    /// `integration_merge_attempts.discard_reason` SQL CHECK
+    /// constraint (store migration 11).
+    pub const ALL: [Self; 4] = [
+        Self::VerifierBlocked,
+        Self::CandidateComputationFailed,
+        Self::CrashRecovery,
+        Self::MergeAbortedByOperator,
+    ];
+
+    /// Canonical SQL string used in CHECK constraints and at-rest
+    /// storage. Matches the `DiscardReason` value list at
+    /// `integration-merge.md §11.10.3`.
+    pub fn as_sql_str(self) -> &'static str {
+        match self {
+            Self::VerifierBlocked            => "verifier_blocked",
+            Self::CandidateComputationFailed => "candidate_computation_failed",
+            Self::CrashRecovery              => "crash_recovery",
+            Self::MergeAbortedByOperator     => "merge_aborted_by_operator",
+        }
+    }
+
+    /// Parse from the SQL at-rest string.
+    pub fn from_sql_str(s: &str) -> Option<Self> {
+        match s {
+            "verifier_blocked"            => Some(Self::VerifierBlocked),
+            "candidate_computation_failed" => Some(Self::CandidateComputationFailed),
+            "crash_recovery"              => Some(Self::CrashRecovery),
+            "merge_aborted_by_operator"   => Some(Self::MergeAbortedByOperator),
+            _ => None,
+        }
+    }
+
+    /// The terminal `IntegrationMergeAttemptState` this reason
+    /// implies. Used by `discard_candidate_merge_tree`
+    /// (`integration-merge.md §11.10.3`) to compute the FSM target
+    /// from the reason without a separate parameter.
+    pub fn terminal_state(self) -> IntegrationMergeAttemptState {
+        match self {
+            Self::VerifierBlocked => {
+                IntegrationMergeAttemptState::BlockedByPreMergeVerifier
+            }
+            Self::CandidateComputationFailed => {
+                IntegrationMergeAttemptState::DiscardedCandidateOnly
+            }
+            Self::CrashRecovery | Self::MergeAbortedByOperator => {
+                IntegrationMergeAttemptState::DiscardedCrashRecovery
+            }
+        }
+    }
+}
+
+impl fmt::Display for IntegrationMergeAttemptDiscardReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_sql_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TerminalCriteria — the initiative terminal policy in force.
 // kernel-core.md §2.4 "evaluate_terminal_criteria" and §4.5.
 // DDL: initiatives.terminal_criteria TEXT NOT NULL.

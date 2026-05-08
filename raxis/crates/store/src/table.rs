@@ -211,6 +211,41 @@ pub enum Table {
     /// admits the parent `tasks` row (INV-STORE-02). Foreign key on
     /// `task_id` references `tasks(task_id)`.
     TaskCredentialProxies,
+
+    // ── v2: Pre-Integration-Merge attempt tracking
+    //        (verifier-processes.md §16, integration-merge.md §11.10) ─
+    /// **Pre-merge verifier attempt rows** for the `IntegrationMerge`
+    /// candidate-merge-tree → pre-merge-verifier → main-advance
+    /// pipeline. One row per `IntegrationMerge` intent that reaches
+    /// Check 5d.
+    ///
+    /// Distinct from `initiatives.git_apply_pending` (which gates the
+    /// SQLite-intent → git-apply boundary for the actual main advance
+    /// per `integration-merge.md §11.1`); this table governs the
+    /// *strictly earlier* candidate-merge-tree → pre-merge-verifier
+    /// boundary in `integration-merge.md §11.10`.
+    ///
+    /// **State machine.**
+    /// ```text
+    ///   AwaitingPreMergeVerifiers ─┬─→ PreMergeVerifiersPassed ─→ CompletedAdvanceApplied
+    ///                              ├─→ BlockedByPreMergeVerifier  (terminal, candidate discarded)
+    ///                              ├─→ DiscardedCandidateOnly      (Check 5d.2 failed; candidate never spawned)
+    ///                              └─→ DiscardedCrashRecovery      (kernel restart sweep)
+    /// ```
+    ///
+    /// **Crash recovery.** The recovery sweep at boot scans this
+    /// table for non-terminal rows (`AwaitingPreMergeVerifiers` /
+    /// `PreMergeVerifiersPassed`) per
+    /// `integration-merge.md §11.10.4`. Rows whose
+    /// `candidate_merge_sha` worktree is missing are folded to
+    /// `DiscardedCrashRecovery`.
+    ///
+    /// **Atomicity.** Inserted at Check 5d.1 inside the same
+    /// `BEGIN IMMEDIATE` transaction that records the
+    /// `IntegrationMerge` intent acceptance, so a concurrent
+    /// re-submission of the same merge cannot race past the check.
+    /// Foreign key on `initiative_id` references `initiatives(id)`.
+    IntegrationMergeAttempts,
 }
 
 impl Table {
@@ -254,6 +289,7 @@ impl Table {
             Self::PlanBundleArtifacts       => "plan_bundle_artifacts",
             Self::PlanBundleNoncesSeen      => "plan_bundle_nonces_seen",
             Self::TaskCredentialProxies     => "task_credential_proxies",
+            Self::IntegrationMergeAttempts  => "integration_merge_attempts",
         }
     }
 }
@@ -281,6 +317,7 @@ mod tests {
             Table::SubtaskActivations,
             Table::PlanBundles, Table::PlanBundleArtifacts, Table::PlanBundleNoncesSeen,
             Table::TaskCredentialProxies,
+            Table::IntegrationMergeAttempts,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
@@ -322,6 +359,18 @@ mod tests {
         assert_eq!(
             Table::TaskCredentialProxies.as_str(),
             "task_credential_proxies",
+        );
+    }
+
+    /// V2 pre-merge verifier attempt table name is wire-stable
+    /// (read by the recovery sweep using its literal name in
+    /// production SQL — see `integration-merge.md §11.10.4`).
+    /// Pinning the literal here surfaces any rename in code review.
+    #[test]
+    fn integration_merge_attempts_table_name_is_pinned() {
+        assert_eq!(
+            Table::IntegrationMergeAttempts.as_str(),
+            "integration_merge_attempts",
         );
     }
 

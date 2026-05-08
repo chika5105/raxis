@@ -34,7 +34,8 @@
 use crate::table::Table;
 use crate::StoreError;
 use raxis_types::{
-    CloneStrategy, DelegationStatus, EscalationStatus, InitiativeState, PlanBundleNonceOutcome,
+    CloneStrategy, DelegationStatus, EscalationStatus, InitiativeState,
+    IntegrationMergeAttemptDiscardReason, IntegrationMergeAttemptState, PlanBundleNonceOutcome,
     ReviewVerdict, SessionAgentType, SubtaskActivationState, TaskState, WitnessResultClass,
 };
 use rusqlite::Connection;
@@ -54,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -99,6 +100,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 10 {
         apply_migration_10(conn)?;
+    }
+    if current_version < 11 {
+        apply_migration_11(conn)?;
     }
 
     Ok(())
@@ -1634,6 +1638,164 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 11 — V2 pre-merge verifier attempt tracking.
+// integration-merge.md §11.10.1 + §11.10.4; verifier-processes.md §16.
+//
+// Adds one new table:
+//
+//   integration_merge_attempts — one row per IntegrationMerge intent
+//                                 that reaches Check 5d. Tracks the
+//                                 candidate-merge-tree → pre-merge-verifier
+//                                 → main-advance pipeline FSM and is
+//                                 swept at boot per §11.10.4.
+//
+// The table is **strictly distinct** from `initiatives.git_apply_pending`
+// (which gates the §11.1 phase 1→2 boundary for the actual main advance);
+// `integration_merge_attempts` governs the strictly *earlier* candidate-
+// merge-tree → pre-merge-verifier boundary (§11.10).
+//
+// Atomicity: rows are inserted at Check 5d.1 in the same `BEGIN
+// IMMEDIATE` transaction that records the IntegrationMerge intent
+// acceptance, so a concurrent re-submission of the same merge cannot
+// race past the check. The `as_str()` literal for this table appears
+// in the recovery sweep at §11.10.4 — `Table::IntegrationMergeAttempts`
+// is the single point of truth (INV-STORE-03).
+// ---------------------------------------------------------------------------
+
+fn apply_migration_11(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_11_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 11 failed: {e}"))
+    })
+}
+
+/// The complete migration-11 DDL. Same INV-STORE-03 contract as
+/// earlier migrations: every table identifier is rendered through
+/// `Table::...as_str()` and every CHECK-constraint enum list is
+/// rendered through `check_in_clause` over the corresponding
+/// `raxis_types` enum. Drift between the Rust enums and the rendered
+/// CHECK constraints is caught by the
+/// `tests::migration_11_*_check_pins_known_variants` guards below.
+pub fn render_migration_11_ddl() -> String {
+    let initiatives                = Table::Initiatives.as_str();
+    let integration_merge_attempts = Table::IntegrationMergeAttempts.as_str();
+    let schema_version             = Table::SchemaVersion.as_str();
+
+    let attempt_state_check =
+        check_in_clause(&IntegrationMergeAttemptState::ALL, IntegrationMergeAttemptState::as_sql_str);
+    let discard_reason_check =
+        check_in_clause(
+            &IntegrationMergeAttemptDiscardReason::ALL,
+            IntegrationMergeAttemptDiscardReason::as_sql_str,
+        );
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── Table: integration_merge_attempts ────────────────────────────────────
+-- One row per IntegrationMerge intent that reaches Check 5d. Tracks
+-- the candidate-merge-tree → pre-merge-verifier → main-advance
+-- pipeline FSM and is swept at boot per integration-merge.md §11.10.4.
+--
+-- ⚠ Distinct from initiatives.git_apply_pending. The existing flag
+--   gates the SQLite-intent → git-apply boundary for the eventual
+--   main advance (§11.1); this table governs the strictly *earlier*
+--   candidate-merge-tree → pre-merge-verifier boundary (§11.10).
+--
+--   * id                       — uuid; matches the IntegrationMerge
+--                                  intent's request_id. PK.
+--   * initiative_id            — FK to initiatives(initiative_id).
+--   * orchestrator_session_id  — the Orchestrator session that
+--                                  submitted the IntegrationMerge intent.
+--   * requested_commit_sha     — the head sha the orchestrator wants
+--                                  fast-forwarded onto main.
+--   * candidate_merge_sha      — orphan commit that would become main
+--                                  if all block_merge verifiers pass.
+--                                  NULL until Check 5d.2 succeeds.
+--   * state                    — IntegrationMergeAttemptState
+--                                  (CHECK-pinned).
+--   * discard_reason           — IntegrationMergeAttemptDiscardReason
+--                                  (CHECK-pinned). NULL when state ∈
+--                                  {{ AwaitingPreMergeVerifiers,
+--                                     PreMergeVerifiersPassed,
+--                                     CompletedAdvanceApplied }}.
+--   * created_at               — Unix epoch ms; set on insert.
+--   * finalized_at             — Unix epoch ms; set on transition to
+--                                  any terminal state. NULL ⟺ state
+--                                  is non-terminal (the recovery
+--                                  sweep at §11.10.4 keys off this).
+CREATE TABLE IF NOT EXISTS {integration_merge_attempts} (
+    id                       TEXT    NOT NULL PRIMARY KEY,
+    initiative_id            TEXT    NOT NULL
+        REFERENCES {initiatives}(initiative_id),
+    orchestrator_session_id  TEXT    NOT NULL,
+    requested_commit_sha     TEXT    NOT NULL,
+    candidate_merge_sha      TEXT,
+    state                    TEXT    NOT NULL
+        CHECK (state IN {attempt_state_check}),
+    discard_reason           TEXT
+        CHECK (discard_reason IS NULL
+               OR discard_reason IN {discard_reason_check}),
+    created_at               INTEGER NOT NULL,
+    finalized_at             INTEGER,
+    -- Cross-column invariants:
+    --   * Non-terminal rows always have NULL finalized_at and NULL
+    --     discard_reason.
+    --   * BlockedByPreMergeVerifier / DiscardedCandidateOnly /
+    --     DiscardedCrashRecovery rows always have NON-NULL
+    --     discard_reason and finalized_at.
+    --   * CompletedAdvanceApplied rows always have NULL discard_reason
+    --     and NON-NULL finalized_at + candidate_merge_sha.
+    --   * PreMergeVerifiersPassed rows have a candidate_merge_sha set
+    --     (Check 5d.2 succeeded by definition of the transition).
+    CHECK (
+        (state = 'AwaitingPreMergeVerifiers'
+            AND discard_reason IS NULL
+            AND finalized_at IS NULL)
+        OR (state = 'PreMergeVerifiersPassed'
+            AND discard_reason IS NULL
+            AND finalized_at IS NULL
+            AND candidate_merge_sha IS NOT NULL)
+        OR (state = 'CompletedAdvanceApplied'
+            AND discard_reason IS NULL
+            AND finalized_at IS NOT NULL
+            AND candidate_merge_sha IS NOT NULL)
+        OR (state IN ('BlockedByPreMergeVerifier',
+                      'DiscardedCandidateOnly',
+                      'DiscardedCrashRecovery')
+            AND discard_reason IS NOT NULL
+            AND finalized_at IS NOT NULL)
+    )
+);
+
+-- Lookup: \"every pre-merge attempt for this initiative\" — joins
+-- through audit replay and operator forensics. Keeps the per-
+-- initiative scan O(rows-for-this-initiative) without a full
+-- table scan.
+CREATE INDEX IF NOT EXISTS idx_imerge_attempts_initiative
+    ON {integration_merge_attempts} (initiative_id);
+
+-- Lookup: \"every non-terminal attempt for this initiative\" — the
+-- boot-time recovery sweep at integration-merge.md §11.10.4 reads
+-- this index to fold mid-flight verifier runs whose VMs were killed
+-- with the kernel. Partial index keeps the sweep O(non-terminal
+-- rows) rather than O(all rows ever).
+CREATE INDEX IF NOT EXISTS idx_imerge_attempts_open
+    ON {integration_merge_attempts} (initiative_id)
+    WHERE state IN ('AwaitingPreMergeVerifiers',
+                    'PreMergeVerifiersPassed');
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (11, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -1902,6 +2064,12 @@ mod tests {
             //                    stored in kernel.db).
             //                    See credential-proxy.md §3.
             Table::TaskCredentialProxies,
+            // Migration 11 — v2: pre-merge verifier attempt tracking
+            //                    (integration-merge.md §11.10.1 + §11.10.4;
+            //                    verifier-processes.md §16). Rows are
+            //                    swept at boot per §11.10.4 to fold
+            //                    crashed mid-flight verifier runs.
+            Table::IntegrationMergeAttempts,
         ]
         .iter()
         .map(|t| t.as_str().to_owned())
@@ -3949,5 +4117,506 @@ mod tests {
         );
         assert!(r2.is_err(),
             "second insert with same (task_id, credential_name) must violate PK");
+    }
+
+    // ── Migration 11: integration_merge_attempts (V2 pre-merge verifier
+    //                  attempt tracking — integration-merge.md §11.10.1
+    //                  & §11.10.4; verifier-processes.md §16) ─────────────
+
+    /// Migration 11 creates the `integration_merge_attempts` table on
+    /// a fresh DB after `apply_pending` runs.
+    #[test]
+    fn migration_11_creates_integration_merge_attempts_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [Table::IntegrationMergeAttempts.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "integration_merge_attempts table must exist after migration 11",
+        );
+    }
+
+    /// The CHECK clause on `state` accepts every canonical
+    /// `IntegrationMergeAttemptState` variant and rejects everything
+    /// else. Using `INSERT OR REPLACE` to round-trip the same row id
+    /// lets us reuse one parent initiative for each variant probe.
+    #[test]
+    fn migration_11_state_check_pins_known_variants() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let initiative_id = "init-mig11-state";
+        let now           = 1_700_000_000_i64;
+
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives}
+                 (initiative_id, state, terminal_criteria_json,
+                  plan_artifact_sha256, created_at)
+             VALUES ('{initiative_id}', 'Draft', '{{}}',
+                     'deadbeef', {now});",
+            initiatives = Table::Initiatives.as_str(),
+            now         = now,
+        )).unwrap();
+
+        let imerge = Table::IntegrationMergeAttempts.as_str();
+
+        for variant in &IntegrationMergeAttemptState::ALL {
+            let (discard, finalized, candidate_merge_sha): (
+                Option<&str>, Option<i64>, Option<&str>,
+            ) = match variant {
+                IntegrationMergeAttemptState::AwaitingPreMergeVerifiers => {
+                    (None, None, None)
+                }
+                IntegrationMergeAttemptState::PreMergeVerifiersPassed => {
+                    (None, None, Some("c0ffee"))
+                }
+                IntegrationMergeAttemptState::CompletedAdvanceApplied => {
+                    (None, Some(now + 100), Some("c0ffee"))
+                }
+                IntegrationMergeAttemptState::BlockedByPreMergeVerifier => {
+                    (Some("verifier_blocked"), Some(now + 100), Some("c0ffee"))
+                }
+                IntegrationMergeAttemptState::DiscardedCandidateOnly => {
+                    (Some("candidate_computation_failed"), Some(now + 100), None)
+                }
+                IntegrationMergeAttemptState::DiscardedCrashRecovery => {
+                    (Some("crash_recovery"), Some(now + 100), Some("c0ffee"))
+                }
+            };
+
+            let sql = format!(
+                "INSERT OR REPLACE INTO {imerge}
+                     (id, initiative_id, orchestrator_session_id,
+                      requested_commit_sha, candidate_merge_sha,
+                      state, discard_reason,
+                      created_at, finalized_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            );
+            let r = conn.execute(
+                &sql,
+                rusqlite::params![
+                    "imerge-1",
+                    initiative_id,
+                    "session-orch",
+                    "deadbeef",
+                    candidate_merge_sha,
+                    variant.as_sql_str(),
+                    discard,
+                    now,
+                    finalized,
+                ],
+            );
+            assert!(r.is_ok(),
+                "CHECK constraint must accept canonical state {variant:?} (got {r:?})");
+        }
+
+        let bogus_sql = format!(
+            "INSERT INTO {imerge}
+                 (id, initiative_id, orchestrator_session_id,
+                  requested_commit_sha, candidate_merge_sha,
+                  state, discard_reason,
+                  created_at, finalized_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        );
+        for bogus in [
+            "Awaiting", "awaitingPremergeVerifiers", "Completed", "",
+        ] {
+            let r = conn.execute(
+                &bogus_sql,
+                rusqlite::params![
+                    format!("imerge-bogus-{bogus}"),
+                    initiative_id,
+                    "session-orch",
+                    "deadbeef",
+                    Option::<&str>::None,
+                    bogus,
+                    Option::<&str>::None,
+                    now,
+                    Option::<i64>::None,
+                ],
+            );
+            assert!(r.is_err(),
+                "CHECK constraint must reject non-canonical state {bogus:?}");
+        }
+    }
+
+    /// The CHECK clause on `discard_reason` accepts NULL plus every
+    /// canonical `IntegrationMergeAttemptDiscardReason` variant and
+    /// rejects everything else.
+    #[test]
+    fn migration_11_discard_reason_check_pins_known_variants() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let initiative_id = "init-mig11-discard";
+        let now           = 1_700_000_000_i64;
+
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives}
+                 (initiative_id, state, terminal_criteria_json,
+                  plan_artifact_sha256, created_at)
+             VALUES ('{initiative_id}', 'Draft', '{{}}',
+                     'deadbeef', {now});",
+            initiatives = Table::Initiatives.as_str(),
+            now         = now,
+        )).unwrap();
+
+        let imerge = Table::IntegrationMergeAttempts.as_str();
+        let ins_sql = format!(
+            "INSERT INTO {imerge}
+                 (id, initiative_id, orchestrator_session_id,
+                  requested_commit_sha, candidate_merge_sha,
+                  state, discard_reason,
+                  created_at, finalized_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        );
+
+        for variant in &IntegrationMergeAttemptDiscardReason::ALL {
+            let id = format!("imerge-discard-{}", variant.as_sql_str());
+            let r = conn.execute(
+                &ins_sql,
+                rusqlite::params![
+                    id,
+                    initiative_id,
+                    "session-orch",
+                    "deadbeef",
+                    "c0ffee",
+                    variant.terminal_state().as_sql_str(),
+                    variant.as_sql_str(),
+                    now,
+                    now + 100,
+                ],
+            );
+            assert!(r.is_ok(),
+                "CHECK constraint must accept canonical discard_reason \
+                 {variant:?} (got {r:?})");
+        }
+
+        for bogus in ["Verifier_Blocked", "VERIFIER_BLOCKED", "rejected", "abort"] {
+            let r = conn.execute(
+                &ins_sql,
+                rusqlite::params![
+                    format!("imerge-discard-bogus-{bogus}"),
+                    initiative_id,
+                    "session-orch",
+                    "deadbeef",
+                    "c0ffee",
+                    "BlockedByPreMergeVerifier",
+                    bogus,
+                    now,
+                    now + 100,
+                ],
+            );
+            assert!(r.is_err(),
+                "CHECK constraint must reject non-canonical discard_reason {bogus:?}");
+        }
+    }
+
+    /// V2 enum-driven CHECK clauses are pinned at the SQL level so a
+    /// future variant addition forces a migration rather than slipping
+    /// through silently.
+    #[test]
+    fn migration_11_enum_check_clauses_match_spec() {
+        assert_eq!(
+            check_in_clause(
+                &IntegrationMergeAttemptState::ALL,
+                IntegrationMergeAttemptState::as_sql_str,
+            ),
+            "('AwaitingPreMergeVerifiers', 'PreMergeVerifiersPassed', \
+              'BlockedByPreMergeVerifier', 'CompletedAdvanceApplied', \
+              'DiscardedCandidateOnly', 'DiscardedCrashRecovery')"
+                .replace("              ", ""),
+        );
+        assert_eq!(
+            check_in_clause(
+                &IntegrationMergeAttemptDiscardReason::ALL,
+                IntegrationMergeAttemptDiscardReason::as_sql_str,
+            ),
+            "('verifier_blocked', 'candidate_computation_failed', \
+              'crash_recovery', 'merge_aborted_by_operator')"
+                .replace("              ", ""),
+        );
+    }
+
+    /// The cross-column CHECK clause enforces the four valid (state,
+    /// discard_reason, finalized_at, candidate_merge_sha) shapes from
+    /// `integration-merge.md §11.10.1`. Pin a representative
+    /// failing case for each shape so a future relaxation can't slip
+    /// through.
+    #[test]
+    fn migration_11_cross_column_check_rejects_invalid_shapes() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let initiative_id = "init-mig11-cross";
+        let now           = 1_700_000_000_i64;
+
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives}
+                 (initiative_id, state, terminal_criteria_json,
+                  plan_artifact_sha256, created_at)
+             VALUES ('{initiative_id}', 'Draft', '{{}}',
+                     'deadbeef', {now});",
+            initiatives = Table::Initiatives.as_str(),
+            now         = now,
+        )).unwrap();
+
+        let imerge = Table::IntegrationMergeAttempts.as_str();
+        let ins_sql = format!(
+            "INSERT INTO {imerge}
+                 (id, initiative_id, orchestrator_session_id,
+                  requested_commit_sha, candidate_merge_sha,
+                  state, discard_reason,
+                  created_at, finalized_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        );
+
+        // 1. AwaitingPreMergeVerifiers with finalized_at set → reject.
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                "x1",
+                initiative_id,
+                "sess",
+                "deadbeef",
+                Option::<&str>::None,
+                "AwaitingPreMergeVerifiers",
+                Option::<&str>::None,
+                now,
+                Some(now + 1),
+            ],
+        );
+        assert!(r.is_err(),
+            "AwaitingPreMergeVerifiers with finalized_at must be rejected");
+
+        // 2. PreMergeVerifiersPassed without candidate_merge_sha → reject.
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                "x2",
+                initiative_id,
+                "sess",
+                "deadbeef",
+                Option::<&str>::None,
+                "PreMergeVerifiersPassed",
+                Option::<&str>::None,
+                now,
+                Option::<i64>::None,
+            ],
+        );
+        assert!(r.is_err(),
+            "PreMergeVerifiersPassed without candidate_merge_sha must be rejected");
+
+        // 3. CompletedAdvanceApplied with discard_reason set → reject.
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                "x3",
+                initiative_id,
+                "sess",
+                "deadbeef",
+                "c0ffee",
+                "CompletedAdvanceApplied",
+                Some("verifier_blocked"),
+                now,
+                Some(now + 1),
+            ],
+        );
+        assert!(r.is_err(),
+            "CompletedAdvanceApplied with discard_reason must be rejected");
+
+        // 4. BlockedByPreMergeVerifier without discard_reason → reject.
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                "x4",
+                initiative_id,
+                "sess",
+                "deadbeef",
+                "c0ffee",
+                "BlockedByPreMergeVerifier",
+                Option::<&str>::None,
+                now,
+                Some(now + 1),
+            ],
+        );
+        assert!(r.is_err(),
+            "BlockedByPreMergeVerifier without discard_reason must be rejected");
+
+        // 5. DiscardedCrashRecovery without finalized_at → reject.
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                "x5",
+                initiative_id,
+                "sess",
+                "deadbeef",
+                "c0ffee",
+                "DiscardedCrashRecovery",
+                Some("crash_recovery"),
+                now,
+                Option::<i64>::None,
+            ],
+        );
+        assert!(r.is_err(),
+            "DiscardedCrashRecovery without finalized_at must be rejected");
+    }
+
+    /// The partial open-attempts index is created and is the one
+    /// the recovery sweep at §11.10.4 uses.
+    #[test]
+    fn migration_11_creates_open_attempts_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='index' AND name='idx_imerge_attempts_open'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "idx_imerge_attempts_open partial index must exist after migration 11",
+        );
+    }
+
+    /// The FK on `initiative_id` rejects rows whose initiative does
+    /// not exist. Foreign-key enforcement requires `PRAGMA
+    /// foreign_keys = ON` on the *connection* — same way we set it
+    /// in production via `Store::open_with_clock`.
+    #[test]
+    fn migration_11_rejects_orphan_initiative_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        apply_pending(&conn).unwrap();
+
+        let imerge = Table::IntegrationMergeAttempts.as_str();
+        let ins_sql = format!(
+            "INSERT INTO {imerge}
+                 (id, initiative_id, orchestrator_session_id,
+                  requested_commit_sha, candidate_merge_sha,
+                  state, discard_reason,
+                  created_at, finalized_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        );
+        let r = conn.execute(
+            &ins_sql,
+            rusqlite::params![
+                "imerge-orphan",
+                "no-such-initiative",
+                "sess",
+                "deadbeef",
+                Option::<&str>::None,
+                "AwaitingPreMergeVerifiers",
+                Option::<&str>::None,
+                1_i64,
+                Option::<i64>::None,
+            ],
+        );
+        assert!(r.is_err(),
+            "FK on initiative_id must reject orphan rows when foreign_keys=ON");
+    }
+
+    /// Migration 11 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_11_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, SCHEMA_VERSION as i64);
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='table' AND name=?1",
+                [Table::IntegrationMergeAttempts.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1,
+            "integration_merge_attempts must appear exactly once after \
+             repeated apply_pending");
+    }
+
+    /// Upgrade scenario: a database at v=10 must pick up migration 11
+    /// cleanly when `apply_pending` runs.
+    #[test]
+    fn migration_11_applies_to_a_v10_database() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        apply_migration_6(&conn).unwrap();
+        apply_migration_7(&conn).unwrap();
+        apply_migration_8(&conn).unwrap();
+        apply_migration_9(&conn).unwrap();
+        apply_migration_10(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 10);
+
+        let pre_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='table' AND name=?1",
+                [Table::IntegrationMergeAttempts.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pre_count, 0,
+            "integration_merge_attempts must not yet exist at v=10",
+        );
+
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let post_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='table' AND name=?1",
+                [Table::IntegrationMergeAttempts.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            post_count, 1,
+            "migration 11 must add integration_merge_attempts",
+        );
+    }
+
+    /// Migration 11 wraps the table+index creation in a single
+    /// `BEGIN EXCLUSIVE; ... COMMIT;`.
+    #[test]
+    fn migration_11_is_a_single_transaction() {
+        let ddl = render_migration_11_ddl();
+        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
+            "migration 11 must open exactly one transaction (BEGIN EXCLUSIVE)");
+        assert_eq!(ddl.matches("COMMIT").count(), 1,
+            "migration 11 must commit exactly once");
+        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
+                < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT");
     }
 }

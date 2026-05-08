@@ -292,7 +292,10 @@ await KernelPush::EscalationResolved; re-submit with operator_approval_id`).
 > (per `verifier-processes.md §17.5 Phased Rollout — Phase 4`). It depends on:
 >
 > - The `raxis-verifier-runtime` crate (`§17.5.1`).
-> - `DDL Migration 10` for `integration_merge_attempts` (§11.10.1).
+> - `DDL Migration 11` for `integration_merge_attempts` (§11.10.1).
+>   (Originally drafted as Migration 10 but bumped to 11 because
+>   Migration 10 was consumed by `task_credential_proxies` —
+>   `credential-proxy.md §1.1`.)
 > - The candidate-merge-tree creation primitive (`§16.2`).
 > - VM-spawn integration with `RAXIS_VERIFIER_HOOK_KIND = "pre_merge"`
 >   (`verifier-processes.md §11`).
@@ -1364,7 +1367,21 @@ The IntegrationMerge handler is rewritten on top of the `DomainAdapter` trait
 
 - [ ] Implement Check 5d in `handle_integration_merge` between Check 5c and Check 6a
       per §4 Check 5d.1–5d.6
-- [ ] Add `integration_merge_attempts` SQLite table per §11.10.1; DDL migration
+- [x] Add `integration_merge_attempts` SQLite table per §11.10.1; DDL migration
+      shipped as **Migration 11** in `raxis-store/src/migration.rs`
+      (`render_migration_11_ddl`) — table identifier rendered through
+      `Table::IntegrationMergeAttempts.as_str()` (INV-STORE-03);
+      `state` and `discard_reason` CHECK constraints rendered through
+      `IntegrationMergeAttemptState::ALL` /
+      `IntegrationMergeAttemptDiscardReason::ALL` (`raxis-types::fsm`);
+      cross-column CHECK enforces the four valid (state,
+      discard_reason, finalized_at, candidate_merge_sha) shapes;
+      partial index `idx_imerge_attempts_open` keys the §11.10.4
+      recovery sweep. Seven dedicated migration tests
+      (`migration_11_*`) pin: table creation, both CHECK clauses,
+      cross-column shapes, partial-index existence, FK rejection of
+      orphan rows, idempotency, single-transaction wrapping, and
+      v=10→v=11 upgrade behaviour.
 - [ ] Implement `compute_candidate_merge_tree(initiative_id, commit_sha, merged_task_ids)
       → Result<CandidateMergeSha, FailReason>` producing an orphan commit at
       `$RAXIS_DATA_DIR/candidate_merges/<integration_merge_id>/`
