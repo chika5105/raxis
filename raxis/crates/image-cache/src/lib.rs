@@ -11,12 +11,7 @@
 //! `raxis-isolation-firecracker`) hands to its
 //! `IsolationBackend::spawn(image_path = ...)` API.
 //!
-//! ## What this crate does NOT yet do (deferred to next iteration)
-//!
-//! The skeleton iteration deliberately omits the registry-pull side
-//! of the spec (`image-cache.md §6` "pull-and-verify pipeline") and
-//! the in-process mutex-map concurrency (`§7`). Both land in the
-//! follow-up iteration. The skeleton ships:
+//! ## What this crate ships in V2
 //!
 //! * [`OciDigest`] — typed wrapper with `FromStr` validation
 //!   (`sha256:<64 lowercase hex>`).
@@ -34,16 +29,14 @@
 //!   client.
 //! * [`PrePopulatedResolver`] — `cfg(test)`-friendly impl that
 //!   resolves only digests already present in the cache; surfaces
-//!   `RegistryUnreachable` for any miss. This is what
-//!   `raxis-kernel`'s integration tests will wire into
-//!   `HandlerContext::image_resolver` until the production
-//!   resolver lands.
-//!
-//! Together these are enough to wire the kernel-side trait
-//! consumer (`HandlerContext`) and write the integration tests for
-//! `session-spawn → isolation-backend` against deterministic
-//! pre-populated cache state, **without** committing to a registry
-//! client this iteration.
+//!   `RegistryUnreachable` for any miss. Re-hashes on every call
+//!   because it has no §6 phase-3 verification step.
+//! * [`ProductionResolver`] — registry-pull-backed impl that
+//!   wires `pull.rs` (phases 1–4) and `extract.rs` (phase 5)
+//!   together with the §7 in-memory mutex map keyed by digest.
+//!   Talks the OCI distribution-spec v2 wire format
+//!   (`GET /v2/<repo>/blobs/sha256:<hex>`); supports a single
+//!   shared bearer token for authenticated registries.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -51,7 +44,10 @@
 mod cache_layout;
 mod digest;
 mod error;
+mod extract;
 mod pre_populated;
+mod production;
+mod pull;
 mod registry;
 mod resolver;
 mod resolved_image;
@@ -60,6 +56,8 @@ pub use cache_layout::CacheLayout;
 pub use digest::OciDigest;
 pub use error::ImageResolverError;
 pub use pre_populated::PrePopulatedResolver;
+pub use production::ProductionResolver;
+pub use pull::build_blob_url;
 pub use registry::RegistryRef;
 pub use resolved_image::ResolvedImage;
 pub use resolver::ImageResolver;
