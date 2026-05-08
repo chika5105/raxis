@@ -193,7 +193,7 @@ fn check_in_clause<E: Copy>(variants: &[E], to_sql: impl Fn(E) -> &'static str) 
 /// value lists come from each enum's `ALL` (or `STORED`) array — there
 /// are NO raw SQL identifier or enum-value literals in this function
 /// (kernel-store.md §2.5.1 INV-STORE-03).
-fn render_migration_1_ddl() -> String {
+pub fn render_migration_1_ddl() -> String {
     // ── Table-name substitutions (Table::X is the authoritative registry) ──
     let schema_version              = Table::SchemaVersion.as_str();
     let initiatives                 = Table::Initiatives.as_str();
@@ -624,7 +624,7 @@ fn apply_migration_2(conn: &Connection) -> Result<(), StoreError> {
 /// The complete migration-2 DDL — adds `operator_certificates` plus
 /// its lookup indexes. Same INV-STORE-03 contract as migration 1:
 /// no raw table-name literals.
-fn render_migration_2_ddl() -> String {
+pub fn render_migration_2_ddl() -> String {
     let operator_certificates = Table::OperatorCertificates.as_str();
     let policy_epoch_history  = Table::PolicyEpochHistory.as_str();
     let schema_version        = Table::SchemaVersion.as_str();
@@ -741,7 +741,7 @@ fn apply_migration_3(conn: &Connection) -> Result<(), StoreError> {
 /// signed the plan (needed by `quarantine-plans-by`'s sweep query).
 /// Same INV-STORE-03 contract as earlier migrations: no raw table-name
 /// literals.
-fn render_migration_3_ddl() -> String {
+pub fn render_migration_3_ddl() -> String {
     let initiative_quarantines = Table::InitiativeQuarantines.as_str();
     let initiatives            = Table::Initiatives.as_str();
     let signed_plan_artifacts  = Table::SignedPlanArtifacts.as_str();
@@ -865,7 +865,7 @@ fn apply_migration_4(conn: &Connection) -> Result<(), StoreError> {
 /// The complete migration-4 DDL — one new index, identical column
 /// shape and naming to the spec's §2.5.8 DDL block. Same INV-STORE-03
 /// contract as earlier migrations: no raw table-name literals.
-fn render_migration_4_ddl() -> String {
+pub fn render_migration_4_ddl() -> String {
     let initiative_quarantines = Table::InitiativeQuarantines.as_str();
     let schema_version         = Table::SchemaVersion.as_str();
 
@@ -939,7 +939,7 @@ fn apply_migration_5(conn: &Connection) -> Result<(), StoreError> {
 /// migrations: every table identifier is rendered through `Table::...
 /// .as_str()` and every CHECK-constraint enum list is rendered through
 /// `check_in_clause` over the corresponding `raxis_types` enum.
-fn render_migration_5_ddl() -> String {
+pub fn render_migration_5_ddl() -> String {
     let sessions             = Table::Sessions.as_str();
     let tasks                = Table::Tasks.as_str();
     let initiatives          = Table::Initiatives.as_str();
@@ -1140,7 +1140,7 @@ fn apply_migration_6(conn: &Connection) -> Result<(), StoreError> {
 
 /// The complete migration-6 DDL. INV-STORE-03: every table identifier
 /// is rendered through `Table::...as_str()`.
-fn render_migration_6_ddl() -> String {
+pub fn render_migration_6_ddl() -> String {
     let tasks          = Table::Tasks.as_str();
     let schema_version = Table::SchemaVersion.as_str();
 
@@ -1206,7 +1206,7 @@ fn apply_migration_7(conn: &Connection) -> Result<(), StoreError> {
 /// The complete migration-7 DDL. INV-STORE-03: every table identifier
 /// is rendered through `Table::...as_str()`; the CHECK clause is
 /// rendered through the `ReviewVerdict` enum.
-fn render_migration_7_ddl() -> String {
+pub fn render_migration_7_ddl() -> String {
     let tasks          = Table::Tasks.as_str();
     let schema_version = Table::SchemaVersion.as_str();
     let review_verdict_check =
@@ -1284,7 +1284,7 @@ fn apply_migration_8(conn: &Connection) -> Result<(), StoreError> {
 /// The complete migration-8 DDL. INV-STORE-03: every table identifier
 /// is rendered through `Table::...as_str()`; the CHECK clause is
 /// rendered through the `PlanBundleNonceOutcome` enum.
-fn render_migration_8_ddl() -> String {
+pub fn render_migration_8_ddl() -> String {
     let initiatives              = Table::Initiatives.as_str();
     let plan_bundles             = Table::PlanBundles.as_str();
     let plan_bundle_artifacts    = Table::PlanBundleArtifacts.as_str();
@@ -1463,7 +1463,7 @@ fn apply_migration_9(conn: &Connection) -> Result<(), StoreError> {
 /// The complete migration-9 DDL. INV-STORE-03: every table identifier
 /// is rendered through `Table::...as_str()`; the CHECK clause is
 /// rendered through the `CloneStrategy` enum's `ALL` array.
-fn render_migration_9_ddl() -> String {
+pub fn render_migration_9_ddl() -> String {
     let tasks          = Table::Tasks.as_str();
     let schema_version = Table::SchemaVersion.as_str();
     let clone_strategy_check =
@@ -1572,7 +1572,7 @@ fn apply_migration_10(conn: &Connection) -> Result<(), StoreError> {
 /// variants declared by `raxis-plan-credentials::ProxyDecl` —
 /// drift-protected by
 /// `tests::migration_10_proxy_type_check_pins_known_variants`.
-fn render_migration_10_ddl() -> String {
+pub fn render_migration_10_ddl() -> String {
     let tasks                  = Table::Tasks.as_str();
     let task_credential_proxies = Table::TaskCredentialProxies.as_str();
     let schema_version         = Table::SchemaVersion.as_str();
