@@ -356,22 +356,40 @@ in the same policy generation; this is shift-left of a runtime
 
 ## §11 — Implementation roadmap
 
-| File / dir                                            | Action  | Purpose                                                                                                  |
-| ----------------------------------------------------- | ------- | -------------------------------------------------------------------------------------------------------- |
-| `raxis/crates/image-cache/Cargo.toml`                 | NEW     | Crate manifest                                                                                           |
-| `raxis/crates/image-cache/src/lib.rs`                 | NEW     | `ImageResolver` trait + `OciDigest` / `RegistryRef` types + `ImageResolverError`                         |
-| `raxis/crates/image-cache/src/cache_layout.rs`        | NEW     | On-disk path scheme (§4), `flock`-based locking primitives                                               |
-| `raxis/crates/image-cache/src/pull.rs`                | NEW     | Production registry-pull pipeline (§6); reqwest + sha2 + tokio                                            |
-| `raxis/crates/image-cache/src/extract.rs`             | NEW     | OCI-layer extraction; EROFS-mediatype dispatch                                                            |
-| `raxis/crates/image-cache/src/resolver.rs`            | NEW     | `ProductionResolver` impl + in-memory mutex map (§7)                                                     |
-| `raxis/crates/image-cache/src/test_support.rs`        | NEW     | `PrePopulatedResolver` for kernel integration tests; deterministic                                       |
-| `raxis/kernel/src/session_spawn_orchestrator.rs`      | MODIFY  | Replace direct `image_path` resolution with a call to `ctx.image_resolver.resolve(...)`                  |
-| `raxis/kernel/src/ipc/context.rs`                     | MODIFY  | Add `image_resolver: Arc<dyn ImageResolver>` to `HandlerContext`                                          |
-| `raxis/cli/src/commands/doctor.rs`                    | MODIFY  | New `cache prune` subcommand exercising `prune_unreferenced` (§8 foreground)                             |
-| `raxis/specs/v2/image-cache.md`                       | THIS    | (you are here)                                                                                           |
+| File / dir                                            | Action  | Status   | Purpose                                                                                                  |
+| ----------------------------------------------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `raxis/crates/image-cache/Cargo.toml`                 | NEW     | LANDED   | Crate manifest                                                                                           |
+| `raxis/crates/image-cache/src/lib.rs`                 | NEW     | LANDED   | Module wiring + public re-exports                                                                        |
+| `raxis/crates/image-cache/src/digest.rs`              | NEW     | LANDED   | `OciDigest` typed wrapper + `OciDigestParseError`                                                        |
+| `raxis/crates/image-cache/src/registry.rs`            | NEW     | LANDED   | `RegistryRef` value type                                                                                 |
+| `raxis/crates/image-cache/src/error.rs`               | NEW     | LANDED   | Full `ImageResolverError` taxonomy per §9                                                                |
+| `raxis/crates/image-cache/src/resolved_image.rs`      | NEW     | LANDED   | `ResolvedImage` return type                                                                              |
+| `raxis/crates/image-cache/src/resolver.rs`            | NEW     | LANDED   | `ImageResolver` async trait per §5                                                                       |
+| `raxis/crates/image-cache/src/cache_layout.rs`        | NEW     | LANDED   | On-disk path scheme (§4); pure derivation, no I/O                                                        |
+| `raxis/crates/image-cache/src/pre_populated.rs`       | NEW     | LANDED   | `PrePopulatedResolver` impl (resolve = lookup + verify; prune = real walk-and-unlink); kernel-test target |
+| `raxis/crates/image-cache/src/pull.rs`                | NEW     | DEFERRED | Production registry-pull pipeline (§6); reqwest + sha2 + tokio                                           |
+| `raxis/crates/image-cache/src/extract.rs`             | NEW     | DEFERRED | OCI-layer extraction; EROFS-mediatype dispatch                                                           |
+| `raxis/crates/image-cache/src/production.rs`          | NEW     | DEFERRED | `ProductionResolver` impl + in-memory mutex map (§7)                                                     |
+| `raxis/kernel/src/session_spawn_orchestrator.rs`      | MODIFY  | DEFERRED | Replace direct `image_path` resolution with a call to `ctx.image_resolver.resolve(...)`                  |
+| `raxis/kernel/src/ipc/context.rs`                     | MODIFY  | DEFERRED | Add `image_resolver: Arc<dyn ImageResolver>` to `HandlerContext`                                          |
+| `raxis/cli/src/commands/doctor.rs`                    | MODIFY  | DEFERRED | New `cache prune` subcommand exercising `prune_unreferenced` (§8 foreground)                             |
+| `raxis/specs/v2/image-cache.md`                       | THIS    | LANDED   | (you are here)                                                                                           |
 
-The skeleton lands first (trait + cache layout + digest verification
-for already-staged blobs, no registry pull yet). The pull pipeline
-follows in a second iteration — that one is heavier (`reqwest` +
-EROFS extraction) and benefits from being its own PR with its own
-test fixtures.
+The skeleton iteration above (LANDED rows) ships the trait surface,
+the cache layout, the failure-mode taxonomy, and a `PrePopulatedResolver`
+that resolves only digests pre-staged in the cache. 27 unit tests
+pin the contracts: digest parsing (canonical form, wrong algorithm,
+length errors, lowercase enforcement, hex-charset enforcement,
+serde round-trip, hash-equality), registry-ref construction (empty
+host / repository), cache-layout path derivation (shard prefix,
+extracted-dir layout, lockfile suffix, distinct-digest separation),
+and the resolver itself (cache hit, cache miss → registry-unreachable,
+on-disk digest mismatch, GC of dead digests, GC idempotency, missing
+cache root).
+
+The DEFERRED rows are the next iteration: `pull.rs` + `extract.rs` +
+`production.rs` for the registry side, then the kernel-side wiring
+in `session_spawn_orchestrator.rs` and `ipc/context.rs`. The
+production resolver is heavier (`reqwest` + EROFS extraction) and
+benefits from being its own PR with its own test fixtures
+(integration tests against a registry-shaped HTTP test server).

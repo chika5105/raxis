@@ -41,6 +41,7 @@ members = [
     "crates/worktree-provision",
     "crates/worktree-staging",
     "crates/session-spawn",
+    "crates/image-cache",
     "crates/planner-core",
     "crates/planner-orchestrator",
     "crates/planner-executor",
@@ -166,6 +167,7 @@ raxis-image-manifest    = { path = "crates/image-manifest" }
 raxis-image-builder     = { path = "crates/image-builder" }
 raxis-worktree-provision = { path = "crates/worktree-provision" }
 raxis-worktree-staging  = { path = "crates/worktree-staging" }
+raxis-image-cache        = { path = "crates/image-cache" }
 raxis-planner-core       = { path = "crates/planner-core" }
 
 # Host-side git operations for V2 Step 24 / 24b worktree provisioning

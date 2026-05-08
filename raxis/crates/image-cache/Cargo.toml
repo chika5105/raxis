@@ -1,0 +1,20 @@
+[package]
+name        = "raxis-image-cache"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — OCI image-resolver trait + on-disk cache layout. Turns a policy-/plan-pinned `oci_digest` into a `&Path` the isolation backend can boot. Skeleton only in this iteration: trait + cache layout + digest verification for already-staged blobs; production registry pull lands in a follow-up per `image-cache.md §11`."
+
+[dependencies]
+async-trait = { workspace = true }
+hex         = { workspace = true }
+serde       = { workspace = true }
+sha2        = { workspace = true }
+thiserror   = { workspace = true }
+tokio       = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile   = "3"
