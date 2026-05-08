@@ -1221,6 +1221,102 @@ pub enum AuditEventKind {
         blocked:         bool,
     },
 
+    /// Emitted by a database credential proxy (Postgres, MySQL,
+    /// MSSQL, MongoDB, Redis) when the upstream returns the terminal
+    /// frame for a forwarded query (`ReadyForQuery` / final
+    /// `OK_Packet` / `DONE` / `OP_MSG response` / RESP terminal
+    /// frame). Pairs with the prior `DatabaseQueryExecuted` event
+    /// (same `sql_sha256`) so an audit reader can compute the round-
+    /// trip duration and compare the agent's observed result against
+    /// the proxy-captured row count. Single-class observability event;
+    /// see `credential-proxy.md §14.5.1`.
+    DatabaseQueryCompleted {
+        /// Session whose VM submitted the query.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Proxy type (`"postgres" | "mysql" | "mssql" | "mongodb" |
+        /// "redis"`).
+        proxy_type:      String,
+        /// SHA-256 of the SQL / command text. Matches the prior
+        /// `DatabaseQueryExecuted` event so an audit reader can pair
+        /// the two without indexing on `(session_id, seq)`.
+        sql_sha256:      String,
+        /// Number of rows returned by the upstream (`0` for write
+        /// statements / commands that produce no result set).
+        rows_returned:   u64,
+        /// Number of payload bytes relayed upstream→agent for this
+        /// query (RowDescription + DataRow + CommandComplete +
+        /// ReadyForQuery, or the protocol equivalent).
+        bytes_returned:  u64,
+        /// Wall-clock duration from agent's first byte of the query
+        /// to the upstream's terminal frame, in milliseconds.
+        duration_ms:     u32,
+        /// `Some(<sqlstate or errno>)` if the upstream returned an
+        /// error response; `None` on success.
+        upstream_error:  Option<String>,
+    },
+
+    /// Emitted by a TCP-protocol credential proxy (Postgres, MySQL,
+    /// MSSQL, MongoDB, Redis, SMTP) once the first allowed-query
+    /// upstream connection has completed its protocol-level
+    /// authentication handshake. Pairs (`Started` ↔ `Connected` ↔
+    /// `Stopped`) with the proxy's `CredentialProxyStarted` /
+    /// `CredentialProxyStopped` lifecycle. Single-class observability
+    /// event. See `credential-proxy.md §14.5.2`.
+    CredentialProxyUpstreamConnected {
+        /// Session whose VM holds the agent connection that triggered
+        /// upstream contact.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Proxy type (`"postgres" | ... | "smtp"`).
+        proxy_type:      String,
+        /// Upstream **hostname from the credential URL** (NOT a
+        /// resolved IP) so dashboards can group events by upstream
+        /// cluster without leaking DNS-resolution noise.
+        upstream_host:   String,
+        /// Upstream port from the credential URL (after default-port
+        /// substitution if the URL omitted it).
+        upstream_port:   u16,
+        /// True if the upstream connection negotiated TLS
+        /// (`?sslmode=require` / `?ssl-mode=REQUIRED` / `?tls=true` /
+        /// `?encrypt=true` / `smtps:` scheme).
+        tls:             bool,
+        /// Wall-clock from `TcpStream::connect()` start to first
+        /// usable session, in milliseconds.
+        handshake_ms:    u32,
+    },
+
+    /// Emitted by a TCP-protocol credential proxy on every upstream-
+    /// connect attempt that did NOT reach a usable session
+    /// (DNS / TCP / TLS / protocol-level authentication / timeout).
+    /// Single-class observability event; see
+    /// `credential-proxy.md §14.5.3`. The `detail` field carries a
+    /// short, redacted message — the proxy implementation MUST strip
+    /// any substring matching `password=…` / `:secret@` /
+    /// `?password=` from upstream error text before it reaches this
+    /// envelope.
+    CredentialProxyUpstreamFailed {
+        /// Session whose VM holds the agent connection that triggered
+        /// upstream contact.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Proxy type (`"postgres" | ... | "smtp"`).
+        proxy_type:      String,
+        /// Upstream hostname from the credential URL.
+        upstream_host:   String,
+        /// Upstream port from the credential URL.
+        upstream_port:   u16,
+        /// Failure category. One of `"DnsResolveFailed" |
+        /// "TcpConnectFailed" | "TlsHandshakeFailed" |
+        /// "ProtocolHandshakeFailed" | "AuthRejected" | "Timeout"`.
+        reason:          String,
+        /// Short redacted message; never carries credential bytes.
+        detail:          String,
+    },
+
     /// Emitted by the HTTP credential proxy on every forwarded
     /// (or rejected) request. Carries the SHA-256 of `<METHOD>
     /// <path>`, the status code returned to the agent, and a
@@ -1498,6 +1594,9 @@ impl AuditEventKind {
             Self::CredentialProxyStarted { .. } => "CredentialProxyStarted",
             Self::CredentialProxyStopped { .. } => "CredentialProxyStopped",
             Self::DatabaseQueryExecuted { .. } => "DatabaseQueryExecuted",
+            Self::DatabaseQueryCompleted { .. } => "DatabaseQueryCompleted",
+            Self::CredentialProxyUpstreamConnected { .. } => "CredentialProxyUpstreamConnected",
+            Self::CredentialProxyUpstreamFailed { .. } => "CredentialProxyUpstreamFailed",
             Self::HttpProxyRequestExecuted { .. } => "HttpProxyRequestExecuted",
             Self::RedisCommandExecuted { .. } => "RedisCommandExecuted",
             Self::AwsCredentialServed { .. } => "AwsCredentialServed",
