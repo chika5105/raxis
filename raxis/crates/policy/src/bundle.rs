@@ -1296,29 +1296,38 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
 /// kernel-injected scope keys (`RAXIS_VERIFIER_HOOK_KIND`,
 /// `RAXIS_INTEGRATION_MERGE_ID`, …) and operator declarations MUST
 /// NOT collide.
-const RAXIS_RESERVED_ENV_PREFIX: &str = "RAXIS_";
+///
+/// Exposed `pub` so the kernel-side plan validator
+/// (`approve_plan` Step 2) can apply the same rule to plan-source
+/// `[[plan.integration_merge_verifiers]]` entries without
+/// duplicating the literal.
+pub const RAXIS_RESERVED_ENV_PREFIX: &str = "RAXIS_";
 
 /// Hard cap on `[[integration_merge_verifiers.env]]` entry count.
 /// Matches per-task verifier discipline; `policy-plan-authority.md §4
-/// [[integration_merge_verifiers]] env`.
-const VERIFIER_ENV_MAX_ENTRIES: usize = 32;
+/// [[integration_merge_verifiers]] env`. `pub` for kernel re-use
+/// (see `RAXIS_RESERVED_ENV_PREFIX`).
+pub const VERIFIER_ENV_MAX_ENTRIES: usize = 32;
 
 /// Hard cap on the combined size of every `key=value` byte-pair in
 /// `[[integration_merge_verifiers.env]]`. 16 KiB is the operator-
 /// ergonomic ceiling agreed in `policy-plan-authority.md §4
-/// [[integration_merge_verifiers]] env`.
-const VERIFIER_ENV_MAX_TOTAL_BYTES: usize = 16 * 1024;
+/// [[integration_merge_verifiers]] env`. `pub` for kernel re-use
+/// (see `RAXIS_RESERVED_ENV_PREFIX`).
+pub const VERIFIER_ENV_MAX_TOTAL_BYTES: usize = 16 * 1024;
 
 /// Hard cap on a `[[integration_merge_verifiers]] artifact` path.
 /// Pinned to 256 chars per `verifier-processes.md §6` (mirrors the
-/// per-task verifier limit).
-const VERIFIER_ARTIFACT_MAX_PATH_CHARS: usize = 256;
+/// per-task verifier limit). `pub` for kernel re-use (see
+/// `RAXIS_RESERVED_ENV_PREFIX`).
+pub const VERIFIER_ARTIFACT_MAX_PATH_CHARS: usize = 256;
 
 /// Lower bound on `timeout` strings, in seconds. Below this the
 /// kernel cannot reliably distinguish a verifier from a startup
 /// glitch. Mirrors the per-task verifier floor in
 /// `verifier-processes.md §3 [[plan.tasks.<id>.verifiers]] timeout`.
-const VERIFIER_TIMEOUT_MIN_SECS: u64 = 5;
+/// `pub` for kernel re-use (see `RAXIS_RESERVED_ENV_PREFIX`).
+pub const VERIFIER_TIMEOUT_MIN_SECS: u64 = 5;
 
 /// Validate an operator-side `[[integration_merge_verifiers]]` array.
 ///
@@ -1556,7 +1565,12 @@ fn validate_integration_merge_verifiers_operator_side(
 /// Validate a verifier `name` against the operator-ergonomic
 /// `[a-z][a-z0-9_]{0,31}` shape pinned in
 /// `policy-plan-authority.md §4 [[integration_merge_verifiers]] name`.
-fn is_valid_verifier_name(s: &str) -> bool {
+///
+/// `pub` so the kernel-side plan validator
+/// (`approve_plan` Step 2) can apply the same shape rule to
+/// plan-source `[[plan.integration_merge_verifiers]]` entries
+/// without duplicating the literal.
+pub fn is_valid_verifier_name(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.is_empty() || bytes.len() > 32 {
         return false;
@@ -1572,7 +1586,12 @@ fn is_valid_verifier_name(s: &str) -> bool {
 /// Parse a verifier `timeout = "Ns"|"Nm"|"Nh"` shape into seconds.
 /// Returns `None` for unparseable strings or for values that
 /// overflow a `u64` second count.
-fn parse_verifier_timeout_secs(s: &str) -> Option<u64> {
+///
+/// `pub` so the kernel-side plan validator
+/// (`approve_plan` Step 2) can parse plan-source
+/// `[[plan.integration_merge_verifiers]] timeout` strings against
+/// the same rules without duplicating the helper.
+pub fn parse_verifier_timeout_secs(s: &str) -> Option<u64> {
     let s = s.trim();
     if s.is_empty() {
         return None;

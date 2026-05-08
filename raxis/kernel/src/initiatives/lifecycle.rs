@@ -236,6 +236,64 @@ pub enum LifecycleError {
         suggestion:     String,
     },
 
+    /// **V2 (`verifier-processes.md §15` / `§10.3` operator-side
+    /// failures) — plan-source `[[plan.integration_merge_verifiers]]`
+    /// shift-left validation.** A plan-author pre-merge verifier
+    /// declaration is structurally invalid:
+    ///
+    ///   * `"name_invalid"` — `name` empty or violates the operator-
+    ///     ergonomic `[a-z][a-z0-9_]{0,31}` shape pinned in
+    ///     `policy-plan-authority.md §4` (shared with the operator-
+    ///     side validator via `raxis_policy::is_valid_verifier_name`).
+    ///   * `"name_collision_within_plan"` — two `[[plan.integration_merge_verifiers]]`
+    ///     entries declare the same `name`.
+    ///   * `"image_required"` / `"command_required"` — missing or
+    ///     empty mandatory field.
+    ///   * `"timeout_invalid"` / `"timeout_too_short"` —
+    ///     `timeout` does not parse as a duration string, or
+    ///     resolves to fewer than 5 seconds.
+    ///   * `"on_failure_invalid"` — `on_failure` is neither
+    ///     `block_merge` nor `warn_only`.
+    ///   * `"applies_to_invalid"` — `applies_to` is neither `all`,
+    ///     `task_set`, nor `last`.
+    ///   * `"task_set_empty"` — `applies_to = "task_set"` declared
+    ///     with an empty `task_set` array.
+    ///   * `"task_set_inconsistent"` — `task_set` populated but
+    ///     `applies_to ∈ {"all", "last"}`.
+    ///   * `"task_set_unknown_task"` — a `task_set` entry does not
+    ///     reference any declared `[[tasks]]` `task_id`.
+    ///   * `"artifact_path_invalid"` /
+    ///     `"artifact_path_too_long"` — `artifact` does not start
+    ///     with `/raxis/` or exceeds 256 chars.
+    ///   * `"env_too_many_entries"` / `"env_too_large"` — `env` map
+    ///     exceeds the 32-entry / 16-KiB total cap.
+    ///   * `"env_reserved_key"` — an `env` key starts with the
+    ///     reserved `RAXIS_*` prefix.
+    ///
+    /// Cross-source rules (collision against operator-side
+    /// `[[integration_merge_verifiers]]`, image resolution against
+    /// `[[vm_images]]` with `Verifier` role_restriction, hard-cap
+    /// timeout enforcement against `max_verifier_timeout_seconds`)
+    /// are **deferred** to a follow-up step that plumbs the
+    /// `PolicyBundle` into `approve_plan`. The structural rules
+    /// covered here run today, before `BEGIN TRANSACTION`.
+    ///
+    /// Surfaced by `validate_plan_integration_merge_verifiers` at
+    /// `approve_plan` time. Sister-of `PlanDagInvalid` — shift-left
+    /// validation per `v2-deep-spec.md §Step 17`.
+    #[error("plan [[plan.integration_merge_verifiers]] invalid (rule={rule}, verifier={offending_verifier}): {suggestion}")]
+    PlanIntegrationMergeVerifierInvalid {
+        /// One of the rule strings listed in the variant doc.
+        rule:               &'static str,
+        /// The `name` field on the offending verifier, or the
+        /// literal `"<unparsed>"` if the parser failed before the
+        /// name was reached.
+        offending_verifier: String,
+        /// Operator-facing remediation hint per Step 17 ("must
+        /// always include a concrete remediation suggestion").
+        suggestion:         String,
+    },
+
     /// **V2 (Step 17 / `credential-proxy.md §3`) —
     /// `INVALID_PLAN_SCHEMA` task-credentials family.** A
     /// `[[tasks.credentials]]` block declared by an operator is
@@ -506,6 +564,11 @@ pub fn approve_plan(
     // V2 §Step 28 — read `[workspace] lane_id` (or surface the
     // missing/empty/override error below).
     let workspace_lane_raw  = parse_plan_workspace_lane(&plan_toml_str)?;
+    // V2 (`verifier-processes.md §15`) — parse plan-source pre-merge
+    // verifiers. Empty `Vec` for plans that don't declare any.
+    // Structural per-field rules run inside the validator below.
+    let plan_pre_merge_verifiers =
+        parse_plan_integration_merge_verifiers(&plan_toml_str)?;
 
     // V2 Step 17 — shift-left plan validation. Each helper runs BEFORE
     // `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
@@ -531,6 +594,12 @@ pub fn approve_plan(
     validate_plan_dag(&plan_tasks)?;
     validate_path_allowlist_v2_format(&plan_tasks)?;
     validate_cross_cutting_artifacts(&orchestrator_fields)?;
+    // V2 (`verifier-processes.md §15`) — shift-left validation of
+    // plan-source pre-merge verifier declarations. Cross-source rules
+    // (collision against operator-side `[[integration_merge_verifiers]]`,
+    // image resolution against `[[vm_images]]`, hard-cap timeout
+    // enforcement) run at IntegrationMerge admission (Check 5d).
+    validate_plan_integration_merge_verifiers(&plan_pre_merge_verifiers, &plan_tasks)?;
     // V2 `credential-proxy.md §3` shift-left: any
     // `[[tasks.credentials]]` block declaring an unknown
     // `proxy_type` (or a structurally malformed entry — already
@@ -1558,6 +1627,418 @@ fn parse_plan_workspace_lane(plan_toml: &str)
         .map(str::to_owned);
 
     Ok(raw)
+}
+
+// ---------------------------------------------------------------------------
+// V2 (verifier-processes.md §15) — plan-source pre-merge verifier parse +
+// shift-left validation.
+// ---------------------------------------------------------------------------
+
+/// Parse the `[[plan.integration_merge_verifiers]]` array from
+/// `plan.toml`. Returns an empty `Vec` when the array is absent
+/// (V1 plans and V2 plans without pre-merge gates round-trip
+/// unchanged).
+///
+/// Structurally a missing required field (`name`, `image`,
+/// `command`, `timeout`) at parse time is an `InvalidPlanSchema`
+/// failure surfaced through `LifecycleError::PlanInvalid`. The
+/// per-rule shift-left validator
+/// (`validate_plan_integration_merge_verifiers`) surfaces semantic
+/// failures (`name_invalid`, `task_set_unknown_task`, …) through
+/// `LifecycleError::PlanIntegrationMergeVerifierInvalid` so the
+/// operator's diagnostic carries a structured `rule` discriminant
+/// instead of a generic TOML-parse error.
+///
+/// Mirrors the operator-side `[[integration_merge_verifiers]]`
+/// parsing in `raxis_policy::PolicyBundle::load`; we re-use the
+/// same `IntegrationMergeVerifierEntry` type so the validators
+/// share the same struct shape.
+fn parse_plan_integration_merge_verifiers(
+    plan_toml: &str,
+) -> Result<Vec<raxis_policy::IntegrationMergeVerifierEntry>, LifecycleError> {
+    use raxis_policy::{
+        IntegrationMergeVerifierAppliesTo, IntegrationMergeVerifierEntry,
+        IntegrationMergeVerifierOnFailure,
+    };
+
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("TOML parse error: {e}"),
+    })?;
+
+    let plan_table = match doc.get("plan").and_then(|v| v.as_table()) {
+        Some(t) => t,
+        None => return Ok(Vec::new()),
+    };
+    let array = match plan_table
+        .get("integration_merge_verifiers")
+        .and_then(|v| v.as_array())
+    {
+        Some(a) => a,
+        None => return Ok(Vec::new()),
+    };
+
+    let mut entries = Vec::with_capacity(array.len());
+    for (i, entry) in array.iter().enumerate() {
+        let table = entry.as_table().ok_or_else(|| LifecycleError::PlanInvalid {
+            reason: format!(
+                "[[plan.integration_merge_verifiers]][{i}] is not a TOML table"
+            ),
+        })?;
+
+        let name = required_string(table, "name", "[[plan.integration_merge_verifiers]]", i)?;
+        let image = required_string(table, "image", "[[plan.integration_merge_verifiers]]", i)?;
+        let command =
+            required_string(table, "command", "[[plan.integration_merge_verifiers]]", i)?;
+        let timeout =
+            required_string(table, "timeout", "[[plan.integration_merge_verifiers]]", i)?;
+        let on_failure_str = required_string(
+            table,
+            "on_failure",
+            "[[plan.integration_merge_verifiers]]",
+            i,
+        )?;
+        let on_failure = match on_failure_str.as_str() {
+            "block_merge" => IntegrationMergeVerifierOnFailure::BlockMerge,
+            "warn_only" => IntegrationMergeVerifierOnFailure::WarnOnly,
+            // `block_review` is rejected at the validator (per spec
+            // §10.3 row "Pre-merge verifier with on_failure =
+            // block_review"). The parser tags any other string as
+            // `BlockMerge` and lets the validator emit the structured
+            // diagnostic so the operator gets a single failure path.
+            other => {
+                return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                    rule:               "on_failure_invalid",
+                    offending_verifier: name.clone(),
+                    suggestion: format!(
+                        "value `{other}` is not a valid `on_failure` for a pre-merge \
+                         verifier. Valid values: `block_merge`, `warn_only`. \
+                         (verifier-processes.md §15.3 + §10.3)",
+                    ),
+                });
+            }
+        };
+
+        let applies_to = match table.get("applies_to").and_then(|v| v.as_str()) {
+            None | Some("all") => IntegrationMergeVerifierAppliesTo::All,
+            Some("task_set") => IntegrationMergeVerifierAppliesTo::TaskSet,
+            Some("last") => IntegrationMergeVerifierAppliesTo::Last,
+            Some(other) => {
+                return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                    rule:               "applies_to_invalid",
+                    offending_verifier: name,
+                    suggestion: format!(
+                        "value `{other}` is not a valid `applies_to`. Valid \
+                         values: `all`, `task_set`, `last` (default `all`). \
+                         (verifier-processes.md §15.3 / §16.3)",
+                    ),
+                });
+            }
+        };
+
+        let task_set = string_array(entry, "task_set");
+
+        let artifact = table
+            .get("artifact")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let artifact_max_bytes = table
+            .get("artifact_max_bytes")
+            .and_then(|v| v.as_integer())
+            .and_then(|n| u64::try_from(n).ok());
+
+        let env = match table.get("env") {
+            None => std::collections::HashMap::new(),
+            Some(toml::Value::Table(t)) => {
+                let mut map = std::collections::HashMap::new();
+                for (k, v) in t {
+                    let v_str = v.as_str().ok_or_else(|| LifecycleError::PlanInvalid {
+                        reason: format!(
+                            "[[plan.integration_merge_verifiers]][{i}].env.{k} must be a string"
+                        ),
+                    })?;
+                    map.insert(k.clone(), v_str.to_owned());
+                }
+                map
+            }
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[plan.integration_merge_verifiers]][{i}].env must be a TOML table"
+                    ),
+                })
+            }
+        };
+
+        let allowed_egress = string_array(entry, "allowed_egress");
+
+        let required_for_environments = table
+            .get("required_for_environments")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect::<Vec<String>>()
+            });
+
+        entries.push(IntegrationMergeVerifierEntry {
+            name,
+            image,
+            command,
+            timeout,
+            on_failure,
+            applies_to,
+            task_set,
+            artifact,
+            artifact_max_bytes,
+            env,
+            allowed_egress,
+            required_for_environments,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Helper for `parse_plan_integration_merge_verifiers`: extract a
+/// required string field from a TOML table, surfacing a structured
+/// `PlanInvalid` error when the field is missing or not a string.
+fn required_string(
+    table:    &toml::value::Table,
+    field:    &str,
+    section:  &str,
+    index:    usize,
+) -> Result<String, LifecycleError> {
+    table
+        .get(field)
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| LifecycleError::PlanInvalid {
+            reason: format!("{section}[{index}] missing required `{field}` (string)"),
+        })
+}
+
+/// V2 (`verifier-processes.md §15`) — shift-left structural
+/// validation for plan-source pre-merge verifiers.
+///
+/// Runs at `approve_plan` time, **before** `BEGIN TRANSACTION`,
+/// alongside the other Step 17 validators. Each rule is documented
+/// on the matching variant of
+/// [`LifecycleError::PlanIntegrationMergeVerifierInvalid`].
+///
+/// **Cross-source rules deferred.** Name-collision against the
+/// operator-side `[[integration_merge_verifiers]]`, `image`
+/// resolution against `[[vm_images]]` with the `Verifier`
+/// role_restriction, and the hard-cap timeout enforcement against
+/// `max_verifier_timeout_seconds` are deferred to a follow-up step
+/// that plumbs the active `PolicyBundle` snapshot into
+/// `approve_plan`. Until then the structural rules covered here
+/// run; the cross-source rules run at `IntegrationMerge`
+/// admission (Check 5d) where the kernel has access to the
+/// snapshot.
+fn validate_plan_integration_merge_verifiers(
+    plan_verifiers: &[raxis_policy::IntegrationMergeVerifierEntry],
+    plan_tasks:     &[PlanTask],
+) -> Result<(), LifecycleError> {
+    use raxis_policy::{
+        is_valid_verifier_name, parse_verifier_timeout_secs, IntegrationMergeVerifierAppliesTo,
+        IntegrationMergeVerifierOnFailure, RAXIS_RESERVED_ENV_PREFIX,
+        VERIFIER_ARTIFACT_MAX_PATH_CHARS, VERIFIER_ENV_MAX_ENTRIES, VERIFIER_ENV_MAX_TOTAL_BYTES,
+        VERIFIER_TIMEOUT_MIN_SECS,
+    };
+    use std::collections::HashSet;
+
+    let mut seen_names: HashSet<&str> = HashSet::with_capacity(plan_verifiers.len());
+    let declared_task_ids: HashSet<&str> =
+        plan_tasks.iter().map(|t| t.task_id.as_str()).collect();
+
+    for entry in plan_verifiers {
+        // Rule — name shape + uniqueness within plan-source.
+        if !is_valid_verifier_name(&entry.name) {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule:               "name_invalid",
+                offending_verifier: entry.name.clone(),
+                suggestion: format!(
+                    "verifier name `{}` must match `[a-z][a-z0-9_]{{0,31}}` \
+                     (mirrors verifier-processes.md §3 schema; same shape as \
+                     the operator-side validator).",
+                    entry.name,
+                ),
+            });
+        }
+        if !seen_names.insert(entry.name.as_str()) {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule:               "name_collision_within_plan",
+                offending_verifier: entry.name.clone(),
+                suggestion: format!(
+                    "duplicate `[[plan.integration_merge_verifiers]]` name \
+                     `{}` within the plan-source section. Cross-source \
+                     collisions against operator-side \
+                     `[[integration_merge_verifiers]]` are checked at \
+                     IntegrationMerge admission (Check 5d).",
+                    entry.name,
+                ),
+            });
+        }
+
+        // Rule — image / command non-empty.
+        if entry.image.trim().is_empty() {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule:               "image_required",
+                offending_verifier: entry.name.clone(),
+                suggestion: "declare a non-empty `image` (resolved against \
+                             `[[vm_images]]` at IntegrationMerge admission)."
+                    .to_owned(),
+            });
+        }
+        if entry.command.trim().is_empty() {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule:               "command_required",
+                offending_verifier: entry.name.clone(),
+                suggestion: "declare a non-empty `command` (run via `sh -lc` \
+                             inside the verifier VM)."
+                    .to_owned(),
+            });
+        }
+
+        // Rule — timeout parses and is ≥ 5s.
+        let timeout_secs = parse_verifier_timeout_secs(&entry.timeout)
+            .ok_or_else(|| LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule:               "timeout_invalid",
+                offending_verifier: entry.name.clone(),
+                suggestion: format!(
+                    "value `{}` is not a valid duration. Valid shapes: \
+                     `\"30s\"`, `\"10m\"`, `\"1h\"`.",
+                    entry.timeout,
+                ),
+            })?;
+        if timeout_secs < VERIFIER_TIMEOUT_MIN_SECS {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule:               "timeout_too_short",
+                offending_verifier: entry.name.clone(),
+                suggestion: format!(
+                    "`timeout = {timeout_secs}s` is below the {VERIFIER_TIMEOUT_MIN_SECS}-second \
+                     floor. Below this the kernel cannot reliably distinguish \
+                     a real verifier from a startup glitch."
+                ),
+            });
+        }
+
+        // Rule — on_failure ∈ {block_merge, warn_only}. The parser
+        // already rejected anything outside this set; this block is a
+        // defense-in-depth backstop. Plan-source allows both; only
+        // operator-source is restricted to `block_merge`.
+        match entry.on_failure {
+            IntegrationMergeVerifierOnFailure::BlockMerge
+            | IntegrationMergeVerifierOnFailure::WarnOnly => {}
+        }
+
+        // Rule — applies_to / task_set coherence.
+        match entry.applies_to {
+            IntegrationMergeVerifierAppliesTo::TaskSet => {
+                if entry.task_set.is_empty() {
+                    return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                        rule:               "task_set_empty",
+                        offending_verifier: entry.name.clone(),
+                        suggestion: "`applies_to = \"task_set\"` requires a \
+                                     non-empty `task_set = [...]` array \
+                                     listing the contributing task IDs."
+                            .to_owned(),
+                    });
+                }
+                for task_id in &entry.task_set {
+                    if !declared_task_ids.contains(task_id.as_str()) {
+                        return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                            rule:               "task_set_unknown_task",
+                            offending_verifier: entry.name.clone(),
+                            suggestion: format!(
+                                "`task_set` entry `{task_id}` does not match any declared \
+                                 `[[tasks]]` task_id in this plan. Either remove the entry \
+                                 or declare the task."
+                            ),
+                        });
+                    }
+                }
+            }
+            IntegrationMergeVerifierAppliesTo::All
+            | IntegrationMergeVerifierAppliesTo::Last => {
+                if !entry.task_set.is_empty() {
+                    return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                        rule:               "task_set_inconsistent",
+                        offending_verifier: entry.name.clone(),
+                        suggestion: "`task_set = [...]` was populated but \
+                                     `applies_to` is `all` or `last`. Either \
+                                     set `applies_to = \"task_set\"` or drop \
+                                     the `task_set` field."
+                            .to_owned(),
+                    });
+                }
+            }
+        }
+
+        // Rule — artifact path shape (per `verifier-processes.md §6`).
+        if let Some(path) = entry.artifact.as_ref() {
+            if !path.starts_with("/raxis/") {
+                return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                    rule:               "artifact_path_invalid",
+                    offending_verifier: entry.name.clone(),
+                    suggestion: format!(
+                        "`artifact = {path:?}` — path must start with `/raxis/` \
+                         (verifier-processes.md §6 staging discipline)."
+                    ),
+                });
+            }
+            if path.chars().count() > VERIFIER_ARTIFACT_MAX_PATH_CHARS {
+                return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                    rule:               "artifact_path_too_long",
+                    offending_verifier: entry.name.clone(),
+                    suggestion: format!(
+                        "`artifact` path exceeds {VERIFIER_ARTIFACT_MAX_PATH_CHARS} chars."
+                    ),
+                });
+            }
+        }
+
+        // Rule — env cap + reserved-prefix.
+        if entry.env.len() > VERIFIER_ENV_MAX_ENTRIES {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule:               "env_too_many_entries",
+                offending_verifier: entry.name.clone(),
+                suggestion: format!(
+                    "declared {} env entries; max is {VERIFIER_ENV_MAX_ENTRIES}.",
+                    entry.env.len(),
+                ),
+            });
+        }
+        let mut env_byte_total = 0usize;
+        for (k, v) in &entry.env {
+            if k.starts_with(RAXIS_RESERVED_ENV_PREFIX) {
+                return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                    rule:               "env_reserved_key",
+                    offending_verifier: entry.name.clone(),
+                    suggestion: format!(
+                        "env key `{k}` collides with the reserved \
+                         `{RAXIS_RESERVED_ENV_PREFIX}*` prefix \
+                         (kernel-injected scope keys)."
+                    ),
+                });
+            }
+            env_byte_total = env_byte_total
+                .saturating_add(k.len())
+                .saturating_add(v.len());
+        }
+        if env_byte_total > VERIFIER_ENV_MAX_TOTAL_BYTES {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule:               "env_too_large",
+                offending_verifier: entry.name.clone(),
+                suggestion: format!(
+                    "env entries sum to {env_byte_total} bytes; max is \
+                     {VERIFIER_ENV_MAX_TOTAL_BYTES} bytes."
+                ),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// V2 §Step 28 — Reject malformed single-lane plans before
@@ -3688,6 +4169,434 @@ task_id = "x"
             other => panic!("expected PlanInvalid for malformed creds, got {other:?}"),
         }
         assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+    }
+
+    // ─── plan-source [[plan.integration_merge_verifiers]] shift-left ────
+    //
+    // V2 (`verifier-processes.md §15`) plan-side validator. The
+    // operator-side mirror lives in `raxis_policy::PolicyBundle::load`
+    // and shares the helpers (`is_valid_verifier_name`,
+    // `parse_verifier_timeout_secs`, the env / artifact / timeout
+    // constants) re-exported from `raxis_policy` for parity.
+    //
+    // Each test exercises one rule and pins the (rule, offending_verifier)
+    // pair in the surfaced LifecycleError.
+
+    fn task_for_pre_merge_test(task_id: &str) -> PlanTask {
+        PlanTask {
+            task_id:                   task_id.to_owned(),
+            name:                      task_id.to_owned(),
+            lane_id:                   String::new(),
+            predecessors:              Vec::new(),
+            path_allowlist:            Vec::new(),
+            path_export_to_successors: false,
+            path_export_globs:         Vec::new(),
+            path_scope_override:       false,
+            clone_strategy:            CloneStrategy::Full,
+            session_agent_type:        SessionAgentType::Executor,
+            credentials:               Vec::new(),
+        }
+    }
+
+    fn pre_merge_verifier_template(
+        name: &str,
+    ) -> raxis_policy::IntegrationMergeVerifierEntry {
+        raxis_policy::IntegrationMergeVerifierEntry {
+            name:                      name.to_owned(),
+            image:                     "raxis-verifier-rust-starter".to_owned(),
+            command:                   "cargo test --quiet".to_owned(),
+            timeout:                   "10m".to_owned(),
+            on_failure:                raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge,
+            applies_to:                raxis_policy::IntegrationMergeVerifierAppliesTo::All,
+            task_set:                  Vec::new(),
+            artifact:                  None,
+            artifact_max_bytes:        None,
+            env:                       std::collections::HashMap::new(),
+            allowed_egress:            Vec::new(),
+            required_for_environments: None,
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_accepts_minimal_valid() {
+        let entries = vec![pre_merge_verifier_template("e2e_smoke")];
+        let tasks = vec![task_for_pre_merge_test("t1")];
+        validate_plan_integration_merge_verifiers(&entries, &tasks)
+            .expect("a minimal valid pre-merge verifier must pass");
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_invalid_name() {
+        let mut e = pre_merge_verifier_template("BadName");
+        e.name = "BadName".to_owned();
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).expect_err("uppercase name must be rejected");
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, offending_verifier, .. } => {
+                assert_eq!(rule, "name_invalid");
+                assert_eq!(offending_verifier, "BadName");
+            }
+            other => panic!("expected PlanIntegrationMergeVerifierInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_duplicate_names() {
+        let entries = vec![
+            pre_merge_verifier_template("twin"),
+            pre_merge_verifier_template("twin"),
+        ];
+        let err = validate_plan_integration_merge_verifiers(
+            &entries, &[task_for_pre_merge_test("t1")],
+        ).expect_err("duplicate names must be rejected");
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "name_collision_within_plan");
+            }
+            other => panic!("expected name_collision_within_plan, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_empty_image() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.image = "".to_owned();
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "image_required");
+            }
+            other => panic!("expected image_required, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_empty_command() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.command = "   ".to_owned();
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "command_required");
+            }
+            other => panic!("expected command_required, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_unparseable_timeout() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.timeout = "fortnight".to_owned();
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "timeout_invalid");
+            }
+            other => panic!("expected timeout_invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_too_short_timeout() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.timeout = "1s".to_owned();
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "timeout_too_short");
+            }
+            other => panic!("expected timeout_too_short, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_task_set_empty() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.applies_to = raxis_policy::IntegrationMergeVerifierAppliesTo::TaskSet;
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "task_set_empty");
+            }
+            other => panic!("expected task_set_empty, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_task_set_unknown_task() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.applies_to = raxis_policy::IntegrationMergeVerifierAppliesTo::TaskSet;
+        e.task_set   = vec!["not-declared".to_owned()];
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, suggestion, .. } => {
+                assert_eq!(rule, "task_set_unknown_task");
+                assert!(suggestion.contains("not-declared"));
+            }
+            other => panic!("expected task_set_unknown_task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_task_set_inconsistent() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.applies_to = raxis_policy::IntegrationMergeVerifierAppliesTo::All;
+        e.task_set   = vec!["t1".to_owned()];
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "task_set_inconsistent");
+            }
+            other => panic!("expected task_set_inconsistent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_artifact_path_not_under_raxis() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.artifact = Some("/etc/passwd".to_owned());
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "artifact_path_invalid");
+            }
+            other => panic!("expected artifact_path_invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_artifact_path_too_long() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.artifact = Some(format!(
+            "/raxis/{}",
+            "x".repeat(raxis_policy::VERIFIER_ARTIFACT_MAX_PATH_CHARS),
+        ));
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "artifact_path_too_long");
+            }
+            other => panic!("expected artifact_path_too_long, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_env_too_many_entries() {
+        let mut e = pre_merge_verifier_template("e2e");
+        for i in 0..(raxis_policy::VERIFIER_ENV_MAX_ENTRIES + 1) {
+            e.env.insert(format!("k{i}"), "v".to_owned());
+        }
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "env_too_many_entries");
+            }
+            other => panic!("expected env_too_many_entries, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_env_too_large() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.env.insert(
+            "BIG".to_owned(),
+            "x".repeat(raxis_policy::VERIFIER_ENV_MAX_TOTAL_BYTES),
+        );
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "env_too_large");
+            }
+            other => panic!("expected env_too_large, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_plan_pre_merge_verifiers_rejects_reserved_env_key() {
+        let mut e = pre_merge_verifier_template("e2e");
+        e.env.insert("RAXIS_INJECTED".to_owned(), "1".to_owned());
+        let err = validate_plan_integration_merge_verifiers(
+            &[e], &[task_for_pre_merge_test("t1")],
+        ).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "env_reserved_key");
+            }
+            other => panic!("expected env_reserved_key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_plan_pre_merge_verifiers_returns_empty_for_v1_plans() {
+        // V1 plans have no `[[plan.integration_merge_verifiers]]`
+        // section; the parser MUST return an empty Vec without error.
+        let toml = r#"[workspace]
+lane_id = "x"
+
+[[tasks]]
+task_id = "t1"
+"#;
+        let entries = parse_plan_integration_merge_verifiers(toml).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_plan_pre_merge_verifiers_round_trips_full_entry() {
+        let toml = r#"
+[workspace]
+lane_id = "x"
+
+[[tasks]]
+task_id = "t1"
+
+[[plan.integration_merge_verifiers]]
+name        = "e2e_smoke"
+image       = "raxis-verifier-node-starter"
+command     = "npm run test:e2e"
+timeout     = "30m"
+on_failure  = "block_merge"
+applies_to  = "task_set"
+task_set    = ["t1"]
+artifact    = "/raxis/e2e.json"
+
+[plan.integration_merge_verifiers.env]
+CI = "true"
+"#;
+        let entries = parse_plan_integration_merge_verifiers(toml).unwrap();
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.name, "e2e_smoke");
+        assert_eq!(e.image, "raxis-verifier-node-starter");
+        assert_eq!(e.timeout, "30m");
+        assert_eq!(
+            e.on_failure,
+            raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge,
+        );
+        assert_eq!(
+            e.applies_to,
+            raxis_policy::IntegrationMergeVerifierAppliesTo::TaskSet,
+        );
+        assert_eq!(e.task_set, vec!["t1".to_owned()]);
+        assert_eq!(e.artifact.as_deref(), Some("/raxis/e2e.json"));
+        assert_eq!(e.env.get("CI"), Some(&"true".to_owned()));
+    }
+
+    #[test]
+    fn parse_plan_pre_merge_verifiers_rejects_invalid_on_failure_at_parse_time() {
+        let toml = r#"
+[workspace]
+lane_id = "x"
+
+[[tasks]]
+task_id = "t1"
+
+[[plan.integration_merge_verifiers]]
+name        = "bad"
+image       = "raxis-verifier-rust-starter"
+command     = "true"
+timeout     = "10s"
+on_failure  = "block_review"
+"#;
+        let err = parse_plan_integration_merge_verifiers(toml).unwrap_err();
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
+                assert_eq!(rule, "on_failure_invalid");
+            }
+            other => panic!("expected on_failure_invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn approve_plan_rejects_pre_merge_verifier_with_unknown_task_in_task_set() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "implement_auth"
+
+[[plan.integration_merge_verifiers]]
+name        = "auth_integration"
+image       = "raxis-verifier-rust-starter"
+command     = "cargo test --test auth_integration"
+timeout     = "20m"
+on_failure  = "block_merge"
+applies_to  = "task_set"
+task_set    = ["implement_auth", "implement_session"]
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).expect_err("plan referencing undeclared task in task_set must be rejected");
+
+        match err {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule, offending_verifier, suggestion,
+            } => {
+                assert_eq!(rule, "task_set_unknown_task");
+                assert_eq!(offending_verifier, "auth_integration");
+                assert!(suggestion.contains("implement_session"));
+            }
+            other => panic!("expected task_set_unknown_task, got {other:?}"),
+        }
+        // Initiative MUST stay Draft and MUST NOT have allocated rows.
+        assert_eq!(read_initiative_state(&store, &init_id), "Draft");
+        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
+    }
+
+    #[test]
+    fn approve_plan_accepts_plan_with_valid_pre_merge_verifier() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "t1"
+
+[[plan.integration_merge_verifiers]]
+name        = "smoke"
+image       = "raxis-verifier-rust-starter"
+command     = "cargo test --quiet"
+timeout     = "10m"
+on_failure  = "warn_only"
+applies_to  = "all"
+"#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+        approve_plan(
+            &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).expect("a structurally valid plan with a pre-merge verifier must approve");
     }
 
     #[test]
