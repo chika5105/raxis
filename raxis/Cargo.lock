@@ -3257,6 +3257,7 @@ dependencies = [
  "raxis-credential-proxy-http",
  "raxis-credential-proxy-manager",
  "raxis-credential-proxy-postgres",
+ "raxis-credential-proxy-redis",
  "raxis-credential-proxy-smtp",
  "raxis-credentials",
  "raxis-credentials-file",

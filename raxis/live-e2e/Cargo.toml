@@ -18,6 +18,7 @@ raxis-credentials-file     = { path = "../crates/raxis-credentials-file" }
 raxis-credential-proxy-postgres = { path = "../crates/credential-proxy-postgres" }
 raxis-credential-proxy-http     = { path = "../crates/credential-proxy-http" }
 raxis-credential-proxy-smtp     = { path = "../crates/credential-proxy-smtp" }
+raxis-credential-proxy-redis    = { path = "../crates/credential-proxy-redis" }
 raxis-credential-proxy-manager  = { path = "../crates/credential-proxy-manager" }
 raxis-egress-admission     = { path = "../crates/egress-admission" }
 raxis-isolation            = { path = "../crates/isolation" }

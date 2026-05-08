@@ -62,6 +62,15 @@
 //!     `CredentialBackend`) — never the agent's submitted junk
 //!     bytes — plus the envelope and DATA body verbatim.
 //!
+//!   * `redis-proxy` — start the real `RedisProxy` from
+//!     `crates/credential-proxy-redis/`, point its
+//!     `upstream_host_port` at an in-process RESP listener, drive a
+//!     raw RESP2 conversation through the proxy with a junk agent
+//!     `AUTH`, and assert that the upstream observed the proxy's
+//!     real AUTH password (never the agent's junk), allow-listed
+//!     verbs (PING/SET/GET) reached upstream in order, and a
+//!     denied verb (FLUSHDB) was rejected at the proxy boundary.
+//!
 //!   * `all` — run every slice in order; any slice failure aborts
 //!     with non-zero exit.
 //!
@@ -91,6 +100,7 @@ mod slice_http_proxy_bearer;
 mod slice_http_proxy_restrictions;
 mod slice_postgres_proxy;
 mod slice_postgres_proxy_restrictions;
+mod slice_redis_proxy;
 mod slice_session_spawn;
 mod slice_smtp_proxy;
 
@@ -146,6 +156,12 @@ enum Slice {
     /// into the upstream conversation, and that the envelope (MAIL
     /// FROM, RCPT TO, DATA body) reaches upstream verbatim.
     SmtpProxy,
+    /// Real `RedisProxy` + an in-process upstream RESP relay. Asserts
+    /// that the proxy strips the agent's AUTH payload, injects the
+    /// real `CredentialBackend`-resolved password, forwards
+    /// allow-listed verbs verbatim (PING/SET/GET), and rejects
+    /// disallowed verbs (FLUSHDB) at the proxy boundary.
+    RedisProxy,
     /// Run every slice in order.
     All,
 }
@@ -208,6 +224,7 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::HttpProxyRestrictions      => slice_http_proxy_restrictions::run(env).await,
         Slice::SessionSpawn               => slice_session_spawn::run().await,
         Slice::SmtpProxy                  => slice_smtp_proxy::run().await,
+        Slice::RedisProxy                 => slice_redis_proxy::run().await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
@@ -225,6 +242,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice session-spawn")?;
             slice_smtp_proxy::run().await
                 .context("slice smtp-proxy")?;
+            slice_redis_proxy::run().await
+                .context("slice redis-proxy")?;
             Ok(())
         }
     }
