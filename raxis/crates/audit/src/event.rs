@@ -1342,6 +1342,35 @@ pub enum AuditEventKind {
         blocked:         bool,
     },
 
+    /// Emitted by the MongoDB credential proxy on every classified
+    /// (or blocked) command issued through the `OP_MSG` wire
+    /// protocol. Mirrors the `RedisCommandExecuted` shape so
+    /// downstream consumers handle Redis and MongoDB commands
+    /// through a single switch. Carries the command name (e.g.
+    /// `"find"`, `"insert"`), the SHA-256 of the rendered
+    /// `OP_MSG` body the upstream would have seen, and the
+    /// `blocked` flag.
+    ///
+    /// Spec reference: `credential-proxy.md` (MongoDB proxy
+    /// section); the `frame_sha256` lets reviewers
+    /// cross-correlate against the upstream MongoDB logs
+    /// without putting BSON document bodies on the audit chain.
+    MongoCommandExecuted {
+        /// Session whose VM submitted the command.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// MongoDB command name (e.g. `"find"`, `"insert"`,
+        /// `"hello"`). Lower-cased to match the wire protocol.
+        command:         String,
+        /// SHA-256 (hex-encoded) of the rendered `OP_MSG` body
+        /// the upstream would have seen. Always present.
+        body_sha256:     String,
+        /// True if the proxy refused the command under
+        /// restrictions.
+        blocked:         bool,
+    },
+
     /// Emitted by the SMTP credential proxy when an envelope passes
     /// every restriction gate and is forwarded to the upstream
     /// relay. Carries the SHA-256 of the canonical
@@ -1474,6 +1503,7 @@ impl AuditEventKind {
             Self::AwsCredentialServed { .. } => "AwsCredentialServed",
             Self::GcpMetadataServed { .. } => "GcpMetadataServed",
             Self::AzureTokenServed { .. } => "AzureTokenServed",
+            Self::MongoCommandExecuted { .. } => "MongoCommandExecuted",
             Self::SmtpMessageRelayed { .. } => "SmtpMessageRelayed",
             Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",
         }

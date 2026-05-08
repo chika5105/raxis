@@ -207,6 +207,27 @@ pub enum ProxyDecl {
         #[serde(default)]
         restrictions: AzureRestrictions,
     },
+    /// `proxy_type = "mysql"` — see `credential-proxy.md §4.2`.
+    /// MySQL wire-protocol handshake-tier proxy.
+    Mysql {
+        /// Restrictions clause.
+        #[serde(default)]
+        restrictions: MysqlRestrictions,
+    },
+    /// `proxy_type = "mssql"` — see `credential-proxy.md §4.3`.
+    /// Microsoft SQL Server TDS handshake-tier proxy.
+    Mssql {
+        /// Restrictions clause.
+        #[serde(default)]
+        restrictions: MssqlRestrictions,
+    },
+    /// `proxy_type = "mongodb"` — see `credential-proxy.md §4.4`.
+    /// MongoDB OP_MSG handshake-tier proxy.
+    Mongodb {
+        /// Restrictions clause.
+        #[serde(default)]
+        restrictions: MongodbRestrictions,
+    },
     /// Catch-all for proxy types declared in policy but not yet
     /// implemented. The parser preserves the literal `proxy_type`
     /// string so the validator can map it to a clear "not
@@ -389,6 +410,54 @@ fn default_gcp_allowed_paths() -> Vec<String> {
         "/computeMetadata/v1/project/project-id".to_owned(),
         "/computeMetadata/v1/project/numeric-project-id".to_owned(),
     ]
+}
+
+/// MySQL restrictions
+/// (`[tasks.credentials.restrictions]` for `proxy_type = "mysql"`).
+///
+/// Mirrors `raxis_credential_proxy_mysql::Restrictions`. The
+/// `allow_only_select` flag is the only V2 MVP knob — when set,
+/// every COM_QUERY whose first statement is not a `SELECT` /
+/// `WITH … SELECT` / `SHOW` / `EXPLAIN … SELECT` is rejected with
+/// an `ERR_Packet { code = 1142, sqlstate = "42501" }`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MysqlRestrictions {
+    /// If `true`, only `SELECT`-shaped statements pass; everything
+    /// else is rejected at the proxy.
+    #[serde(default)]
+    pub allow_only_select: bool,
+}
+
+/// MSSQL restrictions
+/// (`[tasks.credentials.restrictions]` for `proxy_type = "mssql"`).
+///
+/// Mirrors `raxis_credential_proxy_mssql::Restrictions`. Behaves
+/// identically to `MysqlRestrictions` — the V2 wire surface for
+/// both is "classify the first SQL token; reject DML/DDL when
+/// `allow_only_select` is true".
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MssqlRestrictions {
+    /// If `true`, only `SELECT`-shaped statements pass; everything
+    /// else is rejected at the proxy with an `ERROR` token.
+    #[serde(default)]
+    pub allow_only_select: bool,
+}
+
+/// MongoDB restrictions
+/// (`[tasks.credentials.restrictions]` for `proxy_type = "mongodb"`).
+///
+/// Mirrors `raxis_credential_proxy_mongodb::Restrictions`. The
+/// `allow_read_only` flag is the only V2 MVP knob — when set,
+/// every command document whose first field name is not a known
+/// MongoDB read command is rejected with
+/// `{ ok: 0, code: 13, codeName: "Unauthorized" }`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MongodbRestrictions {
+    /// If `true`, only read-only command names pass; everything
+    /// else (insert / update / delete / findAndModify / etc.) is
+    /// rejected at the proxy.
+    #[serde(default)]
+    pub allow_read_only: bool,
 }
 
 /// Azure restrictions
@@ -896,6 +965,75 @@ mod tests {
                 assert_eq!(*lease_seconds, 1800);
             }
             other => panic!("expected Azure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_mysql_decl_with_allow_only_select() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name       = "mysql-staging"
+              proxy_type = "mysql"
+              mount_as   = "MYSQL_DSN"
+
+                [tasks.credentials.restrictions]
+                allow_only_select = true
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Mysql { restrictions } => {
+                assert!(restrictions.allow_only_select);
+            }
+            other => panic!("expected Mysql, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_mssql_decl_with_allow_only_select() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name       = "mssql-staging"
+              proxy_type = "mssql"
+              mount_as   = "MSSQL_DSN"
+
+                [tasks.credentials.restrictions]
+                allow_only_select = true
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Mssql { restrictions } => {
+                assert!(restrictions.allow_only_select);
+            }
+            other => panic!("expected Mssql, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_mongodb_decl_with_allow_read_only() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name       = "mongo-staging"
+              proxy_type = "mongodb"
+              mount_as   = "MONGO_URI"
+
+                [tasks.credentials.restrictions]
+                allow_read_only = true
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Mongodb { restrictions } => {
+                assert!(restrictions.allow_read_only);
+            }
+            other => panic!("expected Mongodb, got {other:?}"),
         }
     }
 

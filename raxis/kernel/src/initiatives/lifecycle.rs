@@ -2562,7 +2562,10 @@ fn proxy_type_label_for_storage(
         ProxyDecl::Aws { .. }      => "aws",
         ProxyDecl::Gcp { .. }      => "gcp",
         ProxyDecl::Azure { .. }    => "azure",
-        ProxyDecl::Unknown => {
+        ProxyDecl::Mysql { .. }    => "mysql",
+        ProxyDecl::Mssql { .. }    => "mssql",
+        ProxyDecl::Mongodb { .. }  => "mongodb",
+        ProxyDecl::Unknown         => {
             return Err(LifecycleError::Store(
                 raxis_store::StoreError::Invariant(
                     "ProxyDecl::Unknown reached the persistence \

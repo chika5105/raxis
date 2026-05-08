@@ -93,6 +93,30 @@
 //!     `allowed_resources` get `400` even when the header is
 //!     present.
 //!
+//!   * `mysql-proxy` — start the real `MysqlProxy` from
+//!     `crates/credential-proxy-mysql/` and drive a raw MySQL
+//!     wire conversation through it. Asserts that the V2
+//!     handshake-tier MVP reaches `OK_Packet`, that `SELECT`
+//!     yields a synthetic `OK_Packet` (allow path), and that
+//!     `INSERT` yields the canonical
+//!     `ERR_Packet { code = 1142, sqlstate = "42501" }` (deny
+//!     path under `allow_only_select`).
+//!
+//!   * `mssql-proxy` — start the real `MssqlProxy` from
+//!     `crates/credential-proxy-mssql/` and drive a raw TDS
+//!     conversation through it. Asserts that PRELOGIN +
+//!     LOGIN7 reach a synthetic `LOGINACK + DONE`, that
+//!     `SELECT` yields a clean `DONE` (allow path), and that
+//!     `INSERT` yields an `ERROR` token followed by `DONE`
+//!     (deny path under `allow_only_select`).
+//!
+//!   * `mongodb-proxy` — start the real `MongodbProxy` from
+//!     `crates/credential-proxy-mongodb/` and drive a raw
+//!     `OP_MSG` conversation through it. Asserts that
+//!     `hello` / `ping` / `find` return `ok: 1.0` (read
+//!     path under `allow_read_only`), and that `insert`
+//!     returns `ok: 0.0` with `code: 13` (deny path).
+//!
 //!   * `all` — run every slice in order; any slice failure aborts
 //!     with non-zero exit.
 //!
@@ -123,6 +147,9 @@ mod slice_gateway_anthropic;
 mod slice_gcp_proxy;
 mod slice_http_proxy_bearer;
 mod slice_http_proxy_restrictions;
+mod slice_mongodb_proxy;
+mod slice_mssql_proxy;
+mod slice_mysql_proxy;
 mod slice_postgres_proxy;
 mod slice_postgres_proxy_restrictions;
 mod slice_redis_proxy;
@@ -205,6 +232,23 @@ enum Slice {
     /// fields, and that requests missing `Metadata: true` or naming
     /// a disallowed resource get `400`.
     AzureProxy,
+    /// Real `MysqlProxy` + a raw MySQL client. Asserts the
+    /// handshake-tier MVP reaches `OK_Packet`, that `SELECT` is
+    /// allowed and `INSERT` is blocked under `allow_only_select`
+    /// with a canonical `ERR_Packet { code = 1142, sqlstate =
+    /// "42501" }`, and that counters reflect the audit decisions.
+    MysqlProxy,
+    /// Real `MssqlProxy` + a raw TDS client. Asserts the
+    /// handshake-tier MVP reaches `LOGINACK + DONE`, that `SELECT`
+    /// yields a clean `DONE` and `INSERT` yields an `ERROR` token
+    /// under `allow_only_select`, and that counters reflect the
+    /// audit decisions.
+    MssqlProxy,
+    /// Real `MongodbProxy` + a raw OP_MSG client. Asserts the
+    /// handshake-tier MVP returns `ok: 1.0` for `hello`, `ping`,
+    /// and `find` (read path) under `allow_read_only`, and
+    /// `ok: 0.0` with `code: 13` for `insert` (deny path).
+    MongodbProxy,
     /// Run every slice in order.
     All,
 }
@@ -271,6 +315,9 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::AwsProxy                   => slice_aws_proxy::run().await,
         Slice::GcpProxy                   => slice_gcp_proxy::run().await,
         Slice::AzureProxy                 => slice_azure_proxy::run().await,
+        Slice::MysqlProxy                 => slice_mysql_proxy::run().await,
+        Slice::MssqlProxy                 => slice_mssql_proxy::run().await,
+        Slice::MongodbProxy               => slice_mongodb_proxy::run().await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
@@ -296,6 +343,12 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice gcp-proxy")?;
             slice_azure_proxy::run().await
                 .context("slice azure-proxy")?;
+            slice_mysql_proxy::run().await
+                .context("slice mysql-proxy")?;
+            slice_mssql_proxy::run().await
+                .context("slice mssql-proxy")?;
+            slice_mongodb_proxy::run().await
+                .context("slice mongodb-proxy")?;
             Ok(())
         }
     }

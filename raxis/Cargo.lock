@@ -2957,6 +2957,9 @@ dependencies = [
  "raxis-credential-proxy-azure",
  "raxis-credential-proxy-gcp",
  "raxis-credential-proxy-http",
+ "raxis-credential-proxy-mongodb",
+ "raxis-credential-proxy-mssql",
+ "raxis-credential-proxy-mysql",
  "raxis-credential-proxy-postgres",
  "raxis-credential-proxy-redis",
  "raxis-credential-proxy-smtp",
@@ -2969,6 +2972,51 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "raxis-credential-proxy-mongodb"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "raxis-credentials",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "raxis-credential-proxy-mssql"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "raxis-credentials",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "raxis-credential-proxy-mysql"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "raxis-credentials",
+ "serde",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
  "tracing",
 ]
 
@@ -3313,6 +3361,9 @@ dependencies = [
  "raxis-credential-proxy-gcp",
  "raxis-credential-proxy-http",
  "raxis-credential-proxy-manager",
+ "raxis-credential-proxy-mongodb",
+ "raxis-credential-proxy-mssql",
+ "raxis-credential-proxy-mysql",
  "raxis-credential-proxy-postgres",
  "raxis-credential-proxy-redis",
  "raxis-credential-proxy-smtp",

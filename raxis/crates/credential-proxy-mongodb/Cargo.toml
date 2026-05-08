@@ -1,0 +1,24 @@
+[package]
+name        = "raxis-credential-proxy-mongodb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MongoDB OP_MSG credential proxy. Drives the hello → SASL SCRAM-SHA-256 → conversation handshake on its own bytes (the agent's SASL conversation is discarded; the proxy authenticates upstream with the kernel-resolved credential), then classifies command documents so allow_read_only blocks insert / update / delete / findAndModify."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raxis-credentials = { workspace = true }
+
+tokio     = { workspace = true }
+bytes     = "1"
+sha2      = { workspace = true }
+hex       = { workspace = true }
+serde     = { workspace = true }
+thiserror = { workspace = true }
+tracing   = "0.1"
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

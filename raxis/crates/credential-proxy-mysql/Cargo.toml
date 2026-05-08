@@ -1,0 +1,24 @@
+[package]
+name        = "raxis-credential-proxy-mysql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MySQL wire-protocol credential proxy. Drives the Protocol::HandshakeV10 → HandshakeResponse41 → OK_Packet handshake on its own bytes (the agent's HandshakeResponse is discarded; the proxy authenticates upstream with the kernel-resolved credential), then classifies COM_QUERY statements through the same SQL-classifier the Postgres proxy uses so allow_only_select works end-to-end."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raxis-credentials = { workspace = true }
+
+tokio     = { workspace = true }
+bytes     = "1"
+sha2      = { workspace = true }
+hex       = { workspace = true }
+serde     = { workspace = true }
+thiserror = { workspace = true }
+tracing   = "0.1"
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

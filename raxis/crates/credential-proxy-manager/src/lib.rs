@@ -96,8 +96,8 @@ use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credentials::CredentialBackend;
 use raxis_plan_credentials::{
     AwsRestrictions, AzureRestrictions, GcpRestrictions, HttpAuthMode, HttpRestrictions,
-    PostgresRestrictions, ProxyDecl, RedisRestrictions, SmtpAuthMode, SmtpRestrictions,
-    TaskCredentialDecl,
+    MongodbRestrictions, MssqlRestrictions, MysqlRestrictions, PostgresRestrictions, ProxyDecl,
+    RedisRestrictions, SmtpAuthMode, SmtpRestrictions, TaskCredentialDecl,
 };
 
 use raxis_credential_proxy_http::{
@@ -129,6 +129,24 @@ use raxis_credential_proxy_azure::{
     OwnedConsumer as AzureOwnedConsumer, ProxyConfig as AzureProxyConfig,
     ProxyError as AzureProxyError, ProxyStats as AzureProxyStats,
     Restrictions as AzureProxyRestrictions,
+};
+use raxis_credential_proxy_mysql::{
+    AuditChannel as MysqlAuditChannel, AuditEvent as MysqlAuditEvent, MysqlProxy,
+    OwnedConsumer as MysqlOwnedConsumer, ProxyConfig as MysqlProxyConfig,
+    ProxyError as MysqlProxyError, ProxyStats as MysqlProxyStats,
+    Restrictions as MysqlProxyRestrictions,
+};
+use raxis_credential_proxy_mssql::{
+    AuditChannel as MssqlAuditChannel, AuditEvent as MssqlAuditEvent, MssqlProxy,
+    OwnedConsumer as MssqlOwnedConsumer, ProxyConfig as MssqlProxyConfig,
+    ProxyError as MssqlProxyError, ProxyStats as MssqlProxyStats,
+    Restrictions as MssqlProxyRestrictions,
+};
+use raxis_credential_proxy_mongodb::{
+    AuditChannel as MongodbAuditChannel, AuditEvent as MongodbAuditEvent, MongodbProxy,
+    OwnedConsumer as MongodbOwnedConsumer, ProxyConfig as MongodbProxyConfig,
+    ProxyError as MongodbProxyError, ProxyStats as MongodbProxyStats,
+    Restrictions as MongodbProxyRestrictions,
 };
 use raxis_credential_proxy_redis::{
     AuditChannel as RedisAuditChannel, AuditEvent as RedisAuditEvent,
@@ -238,6 +256,36 @@ pub enum ManagerError {
         source: AzureProxyError,
     },
 
+    /// MySQL proxy failed to bind / start.
+    #[error("mysql proxy bind failed for `{credential_name}`: {source}")]
+    MysqlBind {
+        /// Credential name whose proxy bind failed.
+        credential_name: String,
+        /// Source error from the mysql-proxy crate.
+        #[source]
+        source: MysqlProxyError,
+    },
+
+    /// MSSQL proxy failed to bind / start.
+    #[error("mssql proxy bind failed for `{credential_name}`: {source}")]
+    MssqlBind {
+        /// Credential name whose proxy bind failed.
+        credential_name: String,
+        /// Source error from the mssql-proxy crate.
+        #[source]
+        source: MssqlProxyError,
+    },
+
+    /// MongoDB proxy failed to bind / start.
+    #[error("mongodb proxy bind failed for `{credential_name}`: {source}")]
+    MongodbBind {
+        /// Credential name whose proxy bind failed.
+        credential_name: String,
+        /// Source error from the mongodb-proxy crate.
+        #[source]
+        source: MongodbProxyError,
+    },
+
     /// `local_addr()` on a freshly-bound listener failed (very rare;
     /// signals a race against listener shutdown, or that the OS lost
     /// our binding mid-construction).
@@ -269,6 +317,9 @@ fn proxy_type_str(decl: &ProxyDecl) -> &'static str {
         ProxyDecl::Aws { .. } => "aws",
         ProxyDecl::Gcp { .. } => "gcp",
         ProxyDecl::Azure { .. } => "azure",
+        ProxyDecl::Mysql { .. } => "mysql",
+        ProxyDecl::Mssql { .. } => "mssql",
+        ProxyDecl::Mongodb { .. } => "mongodb",
         ProxyDecl::Unknown => "unknown",
     }
 }
@@ -604,6 +655,159 @@ impl AzureAuditChannel for AzureKernelAuditAdapter {
     }
 }
 
+struct MysqlKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl MysqlAuditChannel for MysqlKernelAuditAdapter {
+    fn emit(&self, event: MysqlAuditEvent) {
+        match event {
+            MysqlAuditEvent::DatabaseQueryExecuted {
+                credential,
+                sql_sha256,
+                sql_text,
+                operation,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::DatabaseQueryExecuted {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    operation:       mysql_operation_label(&operation).to_owned(),
+                    sql_sha256,
+                    sql_plaintext:   sql_text,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "DatabaseQueryExecuted (mysql) audit emit failed",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn mysql_operation_label(
+    op: &raxis_credential_proxy_mysql::OperationKind,
+) -> &'static str {
+    use raxis_credential_proxy_mysql::OperationKind as K;
+    match op {
+        K::Select   => "SELECT",
+        K::Insert   => "INSERT",
+        K::Update   => "UPDATE",
+        K::Delete   => "DELETE",
+        K::Other(_) => "OTHER",
+    }
+}
+
+struct MssqlKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl MssqlAuditChannel for MssqlKernelAuditAdapter {
+    fn emit(&self, event: MssqlAuditEvent) {
+        match event {
+            MssqlAuditEvent::DatabaseQueryExecuted {
+                credential,
+                sql_sha256,
+                sql_text,
+                operation,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::DatabaseQueryExecuted {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    operation:       mssql_operation_label(&operation).to_owned(),
+                    sql_sha256,
+                    sql_plaintext:   sql_text,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "DatabaseQueryExecuted (mssql) audit emit failed",
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn mssql_operation_label(
+    op: &raxis_credential_proxy_mssql::OperationKind,
+) -> &'static str {
+    use raxis_credential_proxy_mssql::OperationKind as K;
+    match op {
+        K::Select   => "SELECT",
+        K::Insert   => "INSERT",
+        K::Update   => "UPDATE",
+        K::Delete   => "DELETE",
+        K::Other(_) => "OTHER",
+    }
+}
+
+struct MongodbKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl MongodbAuditChannel for MongodbKernelAuditAdapter {
+    fn emit(&self, event: MongodbAuditEvent) {
+        match event {
+            MongodbAuditEvent::MongoCommandExecuted {
+                credential,
+                command,
+                body_sha256,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::MongoCommandExecuted {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    command,
+                    body_sha256,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "MongoCommandExecuted audit emit failed",
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// Map the proxy-side `EnvelopeAudit::rejection_reason` (which
 /// typically embeds the SMTP refusal reply text after a stable
 /// `audit_summary` prefix) into the short stable reason string the
@@ -662,6 +866,9 @@ enum ProxyStatsHandle {
     Aws(Arc<AwsProxyStats>),
     Gcp(Arc<GcpProxyStats>),
     Azure(Arc<AzureProxyStats>),
+    Mysql(Arc<MysqlProxyStats>),
+    Mssql(Arc<MssqlProxyStats>),
+    Mongodb(Arc<MongodbProxyStats>),
 }
 
 impl ProxyStatsHandle {
@@ -723,9 +930,34 @@ impl ProxyStatsHandle {
                     forwards_blocked:   snap.requests_blocked,
                 }
             }
+            ProxyStatsHandle::Mysql(s) => {
+                let snap = s.snapshot();
+                StoppedCounters {
+                    connections_served: snap.connections_served,
+                    forwards_completed: snap.queries_audited.saturating_sub(snap.queries_blocked),
+                    forwards_blocked:   snap.queries_blocked,
+                }
+            }
+            ProxyStatsHandle::Mssql(s) => {
+                let snap = s.snapshot();
+                StoppedCounters {
+                    connections_served: snap.connections_served,
+                    forwards_completed: snap.queries_audited.saturating_sub(snap.queries_blocked),
+                    forwards_blocked:   snap.queries_blocked,
+                }
+            }
+            ProxyStatsHandle::Mongodb(s) => {
+                let snap = s.snapshot();
+                StoppedCounters {
+                    connections_served: snap.connections_served,
+                    forwards_completed: snap.commands_audited.saturating_sub(snap.commands_blocked),
+                    forwards_blocked:   snap.commands_blocked,
+                }
+            }
         }
     }
 }
+
 
 /// Plain-data view of the counter columns that get serialised into
 /// `CredentialProxyStopped`. Public so tests can read a
@@ -1066,6 +1298,36 @@ impl CredentialProxyManager {
                         tenant_id,
                         client_id.as_deref(),
                         *lease_seconds,
+                        restrictions,
+                    )
+                    .await?
+                }
+                ProxyDecl::Mysql { restrictions } => {
+                    self.bind_mysql(
+                        session_id,
+                        task_id,
+                        &decl.name,
+                        &decl.mount_as,
+                        restrictions,
+                    )
+                    .await?
+                }
+                ProxyDecl::Mssql { restrictions } => {
+                    self.bind_mssql(
+                        session_id,
+                        task_id,
+                        &decl.name,
+                        &decl.mount_as,
+                        restrictions,
+                    )
+                    .await?
+                }
+                ProxyDecl::Mongodb { restrictions } => {
+                    self.bind_mongodb(
+                        session_id,
+                        task_id,
+                        &decl.name,
+                        &decl.mount_as,
                         restrictions,
                     )
                     .await?
@@ -1537,6 +1799,154 @@ impl CredentialProxyManager {
             mount_as:        mount_as.to_owned(),
             addr,
             stats:           ProxyStatsHandle::Azure(stats_handle),
+            join,
+        })
+    }
+
+    async fn bind_mysql(
+        &self,
+        session_id:   &str,
+        task_id:      &str,
+        name:         &raxis_credentials::CredentialName,
+        mount_as:     &str,
+        restrictions: &MysqlRestrictions,
+    ) -> Result<ActiveProxy, ManagerError> {
+        let cfg = MysqlProxyConfig {
+            listen_addr:     "127.0.0.1:0".to_owned(),
+            credential_name: name.clone(),
+            consumer:        MysqlOwnedConsumer::new(
+                "session",
+                session_id.to_owned(),
+            ),
+            server_version:  "8.0.0-raxis-handshake".to_owned(),
+            restrictions: MysqlProxyRestrictions {
+                allow_only_select: restrictions.allow_only_select,
+            },
+            log_content:     false,
+        };
+        let audit_channel: Arc<dyn MysqlAuditChannel> = Arc::new(MysqlKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = MysqlProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
+            .await
+            .map_err(|source| ManagerError::MysqlBind {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
+        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let stats_handle = proxy.stats_handle();
+        let join = tokio::spawn(async move {
+            proxy.serve().await;
+        });
+        Ok(ActiveProxy {
+            proxy_type:      "mysql",
+            credential_name: name.as_str().to_owned(),
+            mount_as:        mount_as.to_owned(),
+            addr,
+            stats:           ProxyStatsHandle::Mysql(stats_handle),
+            join,
+        })
+    }
+
+    async fn bind_mssql(
+        &self,
+        session_id:   &str,
+        task_id:      &str,
+        name:         &raxis_credentials::CredentialName,
+        mount_as:     &str,
+        restrictions: &MssqlRestrictions,
+    ) -> Result<ActiveProxy, ManagerError> {
+        let cfg = MssqlProxyConfig {
+            listen_addr:     "127.0.0.1:0".to_owned(),
+            credential_name: name.clone(),
+            consumer:        MssqlOwnedConsumer::new(
+                "session",
+                session_id.to_owned(),
+            ),
+            server_version:  "16.0.1000.6-raxis-handshake".to_owned(),
+            restrictions: MssqlProxyRestrictions {
+                allow_only_select: restrictions.allow_only_select,
+            },
+            log_content:     false,
+        };
+        let audit_channel: Arc<dyn MssqlAuditChannel> = Arc::new(MssqlKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = MssqlProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
+            .await
+            .map_err(|source| ManagerError::MssqlBind {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
+        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let stats_handle = proxy.stats_handle();
+        let join = tokio::spawn(async move {
+            proxy.serve().await;
+        });
+        Ok(ActiveProxy {
+            proxy_type:      "mssql",
+            credential_name: name.as_str().to_owned(),
+            mount_as:        mount_as.to_owned(),
+            addr,
+            stats:           ProxyStatsHandle::Mssql(stats_handle),
+            join,
+        })
+    }
+
+    async fn bind_mongodb(
+        &self,
+        session_id:   &str,
+        task_id:      &str,
+        name:         &raxis_credentials::CredentialName,
+        mount_as:     &str,
+        restrictions: &MongodbRestrictions,
+    ) -> Result<ActiveProxy, ManagerError> {
+        let cfg = MongodbProxyConfig {
+            listen_addr:     "127.0.0.1:0".to_owned(),
+            credential_name: name.clone(),
+            consumer:        MongodbOwnedConsumer::new(
+                "session",
+                session_id.to_owned(),
+            ),
+            restrictions: MongodbProxyRestrictions {
+                allow_read_only: restrictions.allow_read_only,
+            },
+        };
+        let audit_channel: Arc<dyn MongodbAuditChannel> = Arc::new(MongodbKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = MongodbProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
+            .await
+            .map_err(|source| ManagerError::MongodbBind {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
+        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let stats_handle = proxy.stats_handle();
+        let join = tokio::spawn(async move {
+            proxy.serve().await;
+        });
+        Ok(ActiveProxy {
+            proxy_type:      "mongodb",
+            credential_name: name.as_str().to_owned(),
+            mount_as:        mount_as.to_owned(),
+            addr,
+            stats:           ProxyStatsHandle::Mongodb(stats_handle),
             join,
         })
     }
