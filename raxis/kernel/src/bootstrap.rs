@@ -1067,6 +1067,10 @@ mod integration {
         );
         assert_eq!(report.swept_tasks, 0,    "fresh genesis has no in-flight tasks");
         assert_eq!(report.expired_tokens, 0, "fresh genesis has no live tokens");
+        assert_eq!(
+            report.folded_integration_merge_attempts, 0,
+            "fresh genesis has no in-flight integration_merge_attempts rows",
+        );
     }
 
     #[test]

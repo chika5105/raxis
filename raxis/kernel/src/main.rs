@@ -159,6 +159,20 @@ async fn main() {
                         result.swept_tasks
                     );
                 }
+                if result.folded_integration_merge_attempts > 0 {
+                    // V2 pre-merge verifier attempt rows folded by the
+                    // §11.10.4 boot-time sweep. Surfaced separately
+                    // from `swept_tasks` because they live in a
+                    // strictly earlier pipeline phase (candidate-merge-
+                    // tree → pre-merge-verifier) than the eventual
+                    // main advance the V1 task FSM tracks.
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"message\":\"recovery folded integration merge attempts\",\
+                         \"count\":{}}}",
+                        result.folded_integration_merge_attempts
+                    );
+                }
             }
             Err(e) => exit_with_code(e),
         }

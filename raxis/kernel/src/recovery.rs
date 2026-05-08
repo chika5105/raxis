@@ -15,16 +15,20 @@
 use std::path::Path;
 
 use raxis_store::{Store, Table};
-use raxis_types::{unix_now_secs, InitiativeState, TaskState};
+use raxis_types::{
+    unix_now_secs, InitiativeState, IntegrationMergeAttemptDiscardReason,
+    IntegrationMergeAttemptState, TaskState,
+};
 
 use crate::errors::KernelError;
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers and FSM state
 // strings flow through typed constants/enums; no raw SQL identifiers in
 // this file (production OR tests).
-const TASKS:                &str = Table::Tasks.as_str();
-const VERIFIER_RUN_TOKENS:  &str = Table::VerifierRunTokens.as_str();
-const INITIATIVES:          &str = Table::Initiatives.as_str();
+const TASKS:                       &str = Table::Tasks.as_str();
+const VERIFIER_RUN_TOKENS:         &str = Table::VerifierRunTokens.as_str();
+const INITIATIVES:                 &str = Table::Initiatives.as_str();
+const INTEGRATION_MERGE_ATTEMPTS:  &str = Table::IntegrationMergeAttempts.as_str();
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -37,6 +41,14 @@ pub struct ReconciliationResult {
     pub swept_tasks: usize,
     /// Number of verifier tokens expired during sweep.
     pub expired_tokens: usize,
+    /// Number of `integration_merge_attempts` rows folded from a
+    /// non-terminal state (`AwaitingPreMergeVerifiers` /
+    /// `PreMergeVerifiersPassed`) to `DiscardedCrashRecovery` per
+    /// `integration-merge.md §11.10.4`. Distinct from `swept_tasks`
+    /// because those rows live in a separate table and gate a strictly
+    /// earlier pipeline phase (candidate-merge-tree → pre-merge-verifier)
+    /// than the eventual main advance the V1 task FSM tracks.
+    pub folded_integration_merge_attempts: usize,
     /// Whether the audit chain verified cleanly.
     pub chain_ok: bool,
 }
@@ -46,6 +58,15 @@ pub struct ReconciliationResult {
 pub struct ReconciliationReport {
     pub swept_tasks: usize,
     pub expired_tokens: usize,
+}
+
+/// A lightweight report from reconcile_integration_merge_attempts.
+#[derive(Debug, Default)]
+pub struct IntegrationMergeReconciliationReport {
+    /// Rows folded from `AwaitingPreMergeVerifiers` /
+    /// `PreMergeVerifiersPassed` to `DiscardedCrashRecovery`
+    /// (`integration-merge.md §11.10.4`).
+    pub folded_attempts: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -58,25 +79,36 @@ pub struct ReconciliationReport {
 ///   1. verify_audit_chain — fatal on failure → KernelError::AuditChainBroken
 ///   2. reconcile_tasks — sweep in-flight tasks to BlockedRecoveryPending
 ///   3. expire_orphan_verifier_tokens — for swept task IDs
+///   4. reconcile_integration_merge_attempts — fold non-terminal
+///      pre-merge verifier attempts to `DiscardedCrashRecovery`
+///      (`integration-merge.md §11.10.4`). Pre-merge verifier VMs
+///      themselves are killed by the generic verifier-VM orphan
+///      cleanup (`kernel-lifecycle.md §7`); this sweep is only the
+///      SQLite-row finalisation half of the recovery flow.
 ///
 /// Returns ReconciliationResult on success. Propagates KernelError on
 /// audit chain failure (step 1 only; task sweep failures are non-fatal and
 /// logged).
 pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult, KernelError> {
-    // Step 1: Verify audit chain integrity.
     let chain_ok = verify_audit_chain(audit_dir)?;
 
-    // Step 2 + 3: Sweep in-flight tasks, expire orphan tokens.
-    let report = reconcile_tasks(store);
+    let task_report  = reconcile_tasks(store);
+    let imerge_report = reconcile_integration_merge_attempts(store);
 
     eprintln!(
-        "{{\"level\":\"info\",\"step\":\"recovery\",\"swept_tasks\":{},\"expired_tokens\":{},\"chain_ok\":{}}}",
-        report.swept_tasks, report.expired_tokens, chain_ok
+        "{{\"level\":\"info\",\"step\":\"recovery\",\
+         \"swept_tasks\":{},\"expired_tokens\":{},\
+         \"folded_integration_merge_attempts\":{},\"chain_ok\":{}}}",
+        task_report.swept_tasks,
+        task_report.expired_tokens,
+        imerge_report.folded_attempts,
+        chain_ok,
     );
 
     Ok(ReconciliationResult {
-        swept_tasks: report.swept_tasks,
-        expired_tokens: report.expired_tokens,
+        swept_tasks:                       task_report.swept_tasks,
+        expired_tokens:                    task_report.expired_tokens,
+        folded_integration_merge_attempts: imerge_report.folded_attempts,
         chain_ok,
     })
 }
@@ -306,6 +338,115 @@ fn terminal_task_states_sql() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Step 4 — Reconcile in-flight `integration_merge_attempts` rows.
+// integration-merge.md §11.10.4 "Crash-recovery cleanup at startup".
+// ---------------------------------------------------------------------------
+
+/// Fold every `integration_merge_attempts` row whose `state` is
+/// non-terminal (`AwaitingPreMergeVerifiers` |
+/// `PreMergeVerifiersPassed`) to `DiscardedCrashRecovery` with
+/// `discard_reason = 'crash_recovery'` and `finalized_at = now`.
+///
+/// **Why fold rather than salvage.** The candidate-merge-tree
+/// pipeline at `integration-merge.md §11.10` is structured so that a
+/// kernel restart between Check 5d and §11.1 phase 3 invalidates all
+/// in-flight verifier verdicts: the verifier VMs were killed by the
+/// generic verifier-VM orphan cleanup at boot
+/// (`kernel-lifecycle.md §7`), and the candidate worktree may or may
+/// not still exist on disk. The specced recovery flow treats this as
+/// a soft failure: the row is folded to a terminal-discard state, the
+/// orphan worktree is GC'd by the periodic `git_maintenance_main`
+/// sweep (`kernel-lifecycle.md §10.5.3`), and the orchestrator's
+/// `IntegrationMerge` intent surfaces the failure on the next
+/// admission attempt — which the orchestrator may retry. **No
+/// attempt is made to salvage the verifier verdicts**; the kernel
+/// re-runs verifiers conservatively because the per-VM artefacts may
+/// not have been atomically staged before the kill.
+///
+/// **INV-STORE-02.** The sweep is a single bulk
+/// `UPDATE … WHERE state IN (…)` inside one `BEGIN`/`COMMIT`. A
+/// re-crash mid-recovery cannot leave the table half-folded; the
+/// next reconcile sees the same set and re-runs the bulk update
+/// (idempotent — already-folded rows fall outside the WHERE clause).
+///
+/// **INV-STORE-03.** Both the table identifier and every `state` /
+/// `discard_reason` SQL string come from
+/// `Table::IntegrationMergeAttempts.as_str()` /
+/// `IntegrationMergeAttemptState::*.as_sql_str()` /
+/// `IntegrationMergeAttemptDiscardReason::CrashRecovery.as_sql_str()`.
+/// A future variant rename forces a compile error here, not silent
+/// SQL drift.
+fn reconcile_integration_merge_attempts(
+    store: &Store,
+) -> IntegrationMergeReconciliationReport {
+    let mut report = IntegrationMergeReconciliationReport::default();
+
+    let mut conn = store.lock_sync();
+    let now      = unix_now_secs();
+
+    let awaiting   = IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str();
+    let passed     = IntegrationMergeAttemptState::PreMergeVerifiersPassed.as_sql_str();
+    let discarded  = IntegrationMergeAttemptState::DiscardedCrashRecovery.as_sql_str();
+    let crash_rsn  = IntegrationMergeAttemptDiscardReason::CrashRecovery.as_sql_str();
+
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"recovery\",\
+                 \"action\":\"begin_imerge_tx_failed\",\"error\":\"{e}\"}}",
+            );
+            return report;
+        }
+    };
+
+    // Single bulk UPDATE — INV-STORE-02. The CHECK constraint on
+    // `integration_merge_attempts` enforces that a transition INTO
+    // any terminal state requires `discard_reason IS NOT NULL` AND
+    // `finalized_at IS NOT NULL`, so we set both atomically.
+    let folded = match tx.execute(
+        &format!(
+            "UPDATE {INTEGRATION_MERGE_ATTEMPTS}
+                SET state          = '{discarded}',
+                    discard_reason = '{crash_rsn}',
+                    finalized_at   = ?1
+              WHERE state IN ('{awaiting}', '{passed}')
+                AND finalized_at IS NULL"
+        ),
+        rusqlite::params![now],
+    ) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"recovery\",\
+                 \"action\":\"bulk_fold_imerge_failed\",\"error\":\"{e}\"}}",
+            );
+            return report;
+        }
+    };
+
+    if let Err(e) = tx.commit() {
+        eprintln!(
+            "{{\"level\":\"error\",\"step\":\"recovery\",\
+             \"action\":\"commit_imerge_failed\",\"error\":\"{e}\"}}",
+        );
+        return report;
+    }
+
+    report.folded_attempts = folded;
+
+    if folded > 0 {
+        eprintln!(
+            "{{\"level\":\"warn\",\"step\":\"recovery\",\
+             \"action\":\"folded_integration_merge_attempts\",\
+             \"count\":{folded}}}",
+        );
+    }
+
+    report
+}
+
+// ---------------------------------------------------------------------------
 // Tests — reconcile_tasks atomicity (INV-STORE-02)
 // ---------------------------------------------------------------------------
 //
@@ -474,6 +615,286 @@ mod tests {
         let report = reconcile_tasks(&store);
         assert_eq!(report.swept_tasks, 0);
         assert_eq!(report.expired_tokens, 0);
+    }
+
+    // ─── reconcile_integration_merge_attempts — INV-STORE-02 fold ─────────
+    //
+    // integration-merge.md §11.10.4 requires every non-terminal
+    // `integration_merge_attempts` row at boot to be folded to
+    // `DiscardedCrashRecovery` with `discard_reason = 'crash_recovery'`
+    // and `finalized_at = now`. The sweep is bulk and idempotent —
+    // already-finalised rows fall outside the WHERE clause.
+
+    /// Insert one initiative + an `integration_merge_attempts` row in
+    /// the requested state. Returns the row id.
+    fn seed_imerge_attempt(
+        store: &Store,
+        id: &str,
+        state: IntegrationMergeAttemptState,
+        candidate_merge_sha: Option<&str>,
+        discard_reason: Option<IntegrationMergeAttemptDiscardReason>,
+        finalized_at: Option<i64>,
+    ) -> String {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        // Idempotent insert into the parent initiative — multiple
+        // attempts in the same test seed against the same initiative.
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-recon-imerge', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
+        ).unwrap();
+
+        conn.execute(
+            &format!(
+                "INSERT INTO {INTEGRATION_MERGE_ATTEMPTS}
+                    (id, initiative_id, orchestrator_session_id,
+                     requested_commit_sha, candidate_merge_sha,
+                     state, discard_reason,
+                     created_at, finalized_at)
+                 VALUES (?1, 'init-recon-imerge', 'session-orch',
+                         'deadbeef', ?2, ?3, ?4, ?5, ?6)"
+            ),
+            rusqlite::params![
+                id,
+                candidate_merge_sha,
+                state.as_sql_str(),
+                discard_reason.map(|r| r.as_sql_str()),
+                now,
+                finalized_at,
+            ],
+        ).unwrap();
+        id.to_string()
+    }
+
+    fn imerge_state(store: &Store, id: &str) -> String {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!("SELECT state FROM {INTEGRATION_MERGE_ATTEMPTS} WHERE id=?1"),
+            rusqlite::params![id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    fn imerge_discard_reason(store: &Store, id: &str) -> Option<String> {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT discard_reason FROM {INTEGRATION_MERGE_ATTEMPTS} WHERE id=?1",
+            ),
+            rusqlite::params![id],
+            |r| r.get::<_, Option<String>>(0),
+        ).unwrap()
+    }
+
+    fn imerge_finalized_at(store: &Store, id: &str) -> Option<i64> {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT finalized_at FROM {INTEGRATION_MERGE_ATTEMPTS} WHERE id=?1",
+            ),
+            rusqlite::params![id],
+            |r| r.get::<_, Option<i64>>(0),
+        ).unwrap()
+    }
+
+    /// A row in `AwaitingPreMergeVerifiers` (Check 5d.1 inserted, no
+    /// candidate computed yet) MUST fold to `DiscardedCrashRecovery`
+    /// with `discard_reason = 'crash_recovery'` and `finalized_at` set.
+    #[test]
+    fn imerge_recon_folds_awaiting_rows_to_discarded_crash_recovery() {
+        let store = Store::open_in_memory().unwrap();
+        seed_imerge_attempt(
+            &store,
+            "imerge-await",
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers,
+            None,
+            None,
+            None,
+        );
+
+        let report = reconcile_integration_merge_attempts(&store);
+        assert_eq!(report.folded_attempts, 1, "the one open row must fold");
+
+        assert_eq!(imerge_state(&store, "imerge-await"), "DiscardedCrashRecovery");
+        assert_eq!(
+            imerge_discard_reason(&store, "imerge-await").as_deref(),
+            Some("crash_recovery"),
+        );
+        assert!(
+            imerge_finalized_at(&store, "imerge-await").is_some(),
+            "finalized_at must be populated on terminal-discard transition",
+        );
+    }
+
+    /// A row in `PreMergeVerifiersPassed` (verifiers passed but the
+    /// kernel restarted before §11.1 phase 3 could finalize) MUST also
+    /// fold to `DiscardedCrashRecovery` — the spec deliberately
+    /// chooses re-run-conservatively over salvage-aggressively.
+    #[test]
+    fn imerge_recon_folds_passed_rows_to_discarded_crash_recovery() {
+        let store = Store::open_in_memory().unwrap();
+        seed_imerge_attempt(
+            &store,
+            "imerge-pass",
+            IntegrationMergeAttemptState::PreMergeVerifiersPassed,
+            Some("c0ffee"),
+            None,
+            None,
+        );
+
+        let report = reconcile_integration_merge_attempts(&store);
+        assert_eq!(report.folded_attempts, 1);
+
+        assert_eq!(imerge_state(&store, "imerge-pass"), "DiscardedCrashRecovery");
+        assert_eq!(
+            imerge_discard_reason(&store, "imerge-pass").as_deref(),
+            Some("crash_recovery"),
+        );
+    }
+
+    /// Already-terminal rows (CompletedAdvanceApplied,
+    /// BlockedByPreMergeVerifier, DiscardedCandidateOnly,
+    /// DiscardedCrashRecovery) MUST NOT be touched. Their
+    /// discard_reason and state must round-trip exactly.
+    #[test]
+    fn imerge_recon_leaves_terminal_rows_untouched() {
+        let store = Store::open_in_memory().unwrap();
+        let now = unix_now_secs();
+
+        seed_imerge_attempt(
+            &store,
+            "imerge-completed",
+            IntegrationMergeAttemptState::CompletedAdvanceApplied,
+            Some("c0ffee"),
+            None,
+            Some(now),
+        );
+        seed_imerge_attempt(
+            &store,
+            "imerge-blocked",
+            IntegrationMergeAttemptState::BlockedByPreMergeVerifier,
+            Some("c0ffee"),
+            Some(IntegrationMergeAttemptDiscardReason::VerifierBlocked),
+            Some(now),
+        );
+        seed_imerge_attempt(
+            &store,
+            "imerge-discarded-cand",
+            IntegrationMergeAttemptState::DiscardedCandidateOnly,
+            None,
+            Some(IntegrationMergeAttemptDiscardReason::CandidateComputationFailed),
+            Some(now),
+        );
+        seed_imerge_attempt(
+            &store,
+            "imerge-prior-crash",
+            IntegrationMergeAttemptState::DiscardedCrashRecovery,
+            Some("c0ffee"),
+            Some(IntegrationMergeAttemptDiscardReason::CrashRecovery),
+            Some(now),
+        );
+
+        let report = reconcile_integration_merge_attempts(&store);
+        assert_eq!(report.folded_attempts, 0,
+            "no terminal rows should be folded a second time");
+
+        assert_eq!(imerge_state(&store, "imerge-completed"), "CompletedAdvanceApplied");
+        assert_eq!(imerge_discard_reason(&store, "imerge-completed"), None);
+
+        assert_eq!(imerge_state(&store, "imerge-blocked"), "BlockedByPreMergeVerifier");
+        assert_eq!(
+            imerge_discard_reason(&store, "imerge-blocked").as_deref(),
+            Some("verifier_blocked"),
+        );
+
+        assert_eq!(imerge_state(&store, "imerge-discarded-cand"), "DiscardedCandidateOnly");
+        assert_eq!(
+            imerge_discard_reason(&store, "imerge-discarded-cand").as_deref(),
+            Some("candidate_computation_failed"),
+        );
+
+        assert_eq!(imerge_state(&store, "imerge-prior-crash"), "DiscardedCrashRecovery");
+        assert_eq!(
+            imerge_discard_reason(&store, "imerge-prior-crash").as_deref(),
+            Some("crash_recovery"),
+        );
+    }
+
+    /// The sweep is idempotent: running it twice on the same store
+    /// folds rows on the first pass and is a no-op on the second.
+    #[test]
+    fn imerge_recon_is_idempotent() {
+        let store = Store::open_in_memory().unwrap();
+        seed_imerge_attempt(
+            &store,
+            "imerge-await",
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers,
+            None,
+            None,
+            None,
+        );
+        seed_imerge_attempt(
+            &store,
+            "imerge-pass",
+            IntegrationMergeAttemptState::PreMergeVerifiersPassed,
+            Some("c0ffee"),
+            None,
+            None,
+        );
+
+        let r1 = reconcile_integration_merge_attempts(&store);
+        assert_eq!(r1.folded_attempts, 2);
+
+        let r2 = reconcile_integration_merge_attempts(&store);
+        assert_eq!(r2.folded_attempts, 0,
+            "second pass must be a no-op (rows are already terminal)");
+    }
+
+    /// Mixed seed: the sweep folds open rows AND leaves terminal rows
+    /// alone in the same pass. Pins the §11.10.4 contract: terminal
+    /// rows are out of scope; the WHERE clause filter is the only
+    /// admission-side gate.
+    #[test]
+    fn imerge_recon_mixed_seed_only_folds_non_terminal() {
+        let store = Store::open_in_memory().unwrap();
+        let now = unix_now_secs();
+
+        seed_imerge_attempt(
+            &store,
+            "imerge-await",
+            IntegrationMergeAttemptState::AwaitingPreMergeVerifiers,
+            None,
+            None,
+            None,
+        );
+        seed_imerge_attempt(
+            &store,
+            "imerge-completed",
+            IntegrationMergeAttemptState::CompletedAdvanceApplied,
+            Some("c0ffee"),
+            None,
+            Some(now),
+        );
+
+        let r = reconcile_integration_merge_attempts(&store);
+        assert_eq!(r.folded_attempts, 1, "exactly one open row must fold");
+
+        assert_eq!(imerge_state(&store, "imerge-await"), "DiscardedCrashRecovery");
+        assert_eq!(imerge_state(&store, "imerge-completed"), "CompletedAdvanceApplied");
+    }
+
+    /// Empty store: the sweep returns zero folded attempts and never
+    /// errors on the empty result set.
+    #[test]
+    fn imerge_recon_on_empty_store_is_zero() {
+        let store = Store::open_in_memory().unwrap();
+        let r = reconcile_integration_merge_attempts(&store);
+        assert_eq!(r.folded_attempts, 0);
     }
 
     // ─── verify_audit_chain — fail-closed semantics ───────────────────────
