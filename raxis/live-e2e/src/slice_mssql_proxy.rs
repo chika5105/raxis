@@ -1,20 +1,30 @@
-//! Slice — real `MssqlProxy` driving the V2 handshake-tier MVP.
+//! Slice — real `MssqlProxy` driving the V2.1 real-upstream-forwarding
+//! contract.
 //!
-//! Why no in-process upstream MSSQL: per `credential-proxy.md §4.3`,
-//! the V2 MVP for MSSQL is a handshake-tier integration. The proxy
-//! drives `PRELOGIN → LOGIN7 → LOGINACK + DONE` on its own bytes
-//! (no `sqlservr` is contacted). What the live-e2e slice asserts is
-//! the proxy's *visible* behaviour to a real TDS client:
+//! ## Two modes
 //!
-//!   1. PRELOGIN reaches the synthetic VERSION + ENCRYPTION reply.
-//!   2. LOGIN7 yields a Tabular Result with a LOGINACK + DONE.
-//!   3. SQLBatch "SELECT 1" yields a DONE token (allow path).
-//!   4. SQLBatch "INSERT INTO t VALUES (1)" yields an ERROR token
-//!      followed by DONE (deny path under `allow_only_select`).
-//!   5. Counters reflect 1 connection_served, 2 queries_audited,
-//!      1 queries_blocked.
-//!   6. The `CredentialBackend` is asked at least once per
-//!      connection.
+//! 1. **Hermetic (default)** — no real SQL Server required. The
+//!    proxy is configured with an unreachable upstream URL
+//!    (`mssql://demo:demo@127.0.0.1:1/demo`) so the V2.1 upstream
+//!    forwarding path can be exercised without an external service:
+//!      * The agent's PRELOGIN ↔ LOGIN7 ↔ LOGINACK+DONE succeeds
+//!        (the proxy answers locally — these are NOT forwarded).
+//!      * `SQLBatch "SELECT 1"` triggers an upstream connect to
+//!        127.0.0.1:1, which fails — the agent receives an
+//!        ERROR + DONE_ERROR token sequence. We assert on the
+//!        ERROR token's presence.
+//!      * `SQLBatch "INSERT INTO t VALUES (1)"` short-circuits at
+//!        the restriction layer (BEFORE upstream) with an
+//!        ERROR + DONE_ERROR.
+//!
+//! 2. **Real upstream (`RAXIS_LIVE_MSSQL_URL=mssql://...`)** — when
+//!    the env var is set, the SELECT round-trips real result-set
+//!    tokens (COLMETADATA / ROW / DONE) from a live SQL Server.
+//!    Plaintext TDS only — `?encrypt=true` is rejected at
+//!    `connect()`.
+//!
+//! Either mode validates the proxy's local handshake, restriction
+//! enforcement, audit emission, and credential resolution.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -33,7 +43,7 @@ use raxis_credential_proxy_mssql::{
     wire::{frame_packet, PacketHeader, pkt as tds_pkt, HEADER_LEN},
 };
 
-const UPSTREAM_PASS: &str = "live-e2e-mssql-creds-bytes";
+const HERMETIC_UPSTREAM_URL: &str = "mssql://demo:demo@127.0.0.1:1/demo";
 
 struct LiveBackend {
     value:    Vec<u8>,
@@ -66,8 +76,19 @@ impl CredentialBackend for LiveBackend {
 }
 
 pub async fn run() -> Result<()> {
+    let real_upstream = std::env::var("RAXIS_LIVE_MSSQL_URL").ok();
+    let upstream_url = match real_upstream.as_deref() {
+        Some(u) if !u.is_empty() => u.to_owned(),
+        _ => HERMETIC_UPSTREAM_URL.to_owned(),
+    };
+    let hermetic = real_upstream.as_deref().is_none_or(str::is_empty);
+    tracing::info!(
+        mode = if hermetic { "hermetic" } else { "real-upstream" },
+        "slice mssql-proxy: starting",
+    );
+
     let backend = Arc::new(LiveBackend {
-        value:    UPSTREAM_PASS.as_bytes().to_vec(),
+        value:    upstream_url.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
@@ -145,7 +166,11 @@ pub async fn run() -> Result<()> {
         ));
     }
 
-    // 3. SQLBatch "SELECT 1" — should yield DONE (no ERROR).
+    // 3. SQLBatch "SELECT 1" — exercises upstream-forwarding path.
+    //    Hermetic mode: upstream is unreachable, so the proxy
+    //    surfaces an ERROR (0xAA) + DONE_ERROR token sequence to
+    //    the agent. Real-upstream mode: COLMETADATA + ROW + DONE
+    //    flow through verbatim.
     let select_body = build_sql_batch_body("SELECT 1");
     sock.write_all(&frame_packet(tds_pkt::SQL_BATCH, &select_body)).await
         .context("write SQLBatch SELECT")?;
@@ -153,11 +178,31 @@ pub async fn run() -> Result<()> {
     let sel_reply = read_packet(&mut sock).await
         .context("read SELECT reply")?
         .ok_or_else(|| anyhow!("EOF after SELECT"))?;
-    if sel_reply.1.iter().any(|&b| b == 0xAA) {
-        return Err(anyhow!("SELECT reply contained ERROR token"));
-    }
-    if !sel_reply.1.iter().any(|&b| b == 0xFD) {
-        return Err(anyhow!("SELECT reply missing DONE token"));
+    let has_error = sel_reply.1.iter().any(|&b| b == 0xAA);
+    let has_done  = sel_reply.1.iter().any(|&b| b == 0xFD);
+    if hermetic {
+        if !has_error {
+            return Err(anyhow!(
+                "hermetic mode: SELECT reply missing ERROR token (0xAA) for unreachable upstream"
+            ));
+        }
+        if !has_done {
+            return Err(anyhow!(
+                "hermetic mode: SELECT reply missing DONE token (0xFD) after ERROR"
+            ));
+        }
+        tracing::info!("slice mssql-proxy: hermetic SELECT got ERROR+DONE (upstream unreachable, expected)");
+    } else {
+        if has_error {
+            return Err(anyhow!(
+                "real-upstream mode: SELECT reply contained ERROR token — upstream may have rejected the query"
+            ));
+        }
+        if !has_done {
+            return Err(anyhow!(
+                "real-upstream mode: SELECT reply missing DONE token (0xFD)"
+            ));
+        }
     }
 
     // 4. SQLBatch "INSERT INTO t VALUES (1)" — must yield ERROR + DONE.

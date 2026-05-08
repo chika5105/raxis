@@ -73,9 +73,19 @@ impl CredentialBackend for LiveBackend {
 }
 
 pub(crate) async fn run() -> Result<()> {
-    tracing::info!("slice postgres-proxy-restrictions: starting");
+    let real_upstream = std::env::var("RAXIS_LIVE_POSTGRES_URL").ok();
+    let upstream_url: Vec<u8> = match real_upstream.as_deref() {
+        Some(u) if !u.is_empty() => u.as_bytes().to_vec(),
+        _ => b"postgresql://demo:demo@127.0.0.1:1/demo".to_vec(),
+    };
+    let hermetic = real_upstream.as_deref().is_none_or(str::is_empty);
+    tracing::info!(
+        mode = if hermetic { "hermetic" } else { "real-upstream" },
+        "slice postgres-proxy-restrictions: starting",
+    );
+
     let backend = Arc::new(LiveBackend {
-        value:    b"postgresql://demo:demo@127.0.0.1:5432/demo".to_vec(),
+        value:    upstream_url,
         resolves: AtomicU32::new(0),
     });
     let cfg = ProxyConfig {
@@ -99,12 +109,44 @@ pub(crate) async fn run() -> Result<()> {
         return Err(anyhow!("handshake did not end at ReadyForQuery"));
     }
 
-    // ── Allow path: SELECT 1 — must reach CommandComplete ──
+    // ── Allow path: SELECT 1 — reaches upstream (real or unreachable). ──
+    //   In hermetic mode the upstream is unreachable so the SELECT
+    //   surfaces an ErrorResponse with sqlstate `08006` instead of
+    //   reaching CommandComplete. The deny-path assertions below are
+    //   what this slice actually validates; the SELECT is bookkeeping
+    //   to prove the SELECT class is NOT blocked at the proxy layer
+    //   (i.e. the proxy made it past the restriction check and tried
+    //   to forward — which is exactly what `08006` proves).
     write_query(&mut s, "SELECT 1").await?;
     let msgs = drain_until_ready(&mut s).await?;
-    if !msgs.iter().any(|(t, _)| *t == b'C') {
+    if hermetic {
+        // The proxy must NOT have rejected this with 42501 — that
+        // would mean SELECT was wrongly classified as DML.
+        let err_state = first_error_sqlstate(&msgs);
+        if err_state.as_deref() == Some("42501") {
+            return Err(anyhow!(
+                "allow path: SELECT was misclassified as DML (sqlstate 42501) — \
+                 the restriction layer must let SELECT pass through to upstream",
+            ));
+        }
+        // Either CommandComplete (if some test-mode upstream answers)
+        // or an `08`-class connection-exception sqlstate (upstream
+        // unreachable / handshake failed in hermetic mode) is
+        // acceptable. Postgres `08000`/`08006`/`08001`/`08004` all
+        // map to `connection_exception`.
+        let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
+        let connection_exc = err_state
+            .as_deref()
+            .map(|s| s.starts_with("08"))
+            .unwrap_or(false);
+        if !tags.contains(&b'C') && !connection_exc {
+            return Err(anyhow!(
+                "allow path: expected CommandComplete or sqlstate 08*, got tags={tags:?}, sqlstate={err_state:?}",
+            ));
+        }
+    } else if !msgs.iter().any(|(t, _)| *t == b'C') {
         return Err(anyhow!(
-            "allow path: SELECT did not reach CommandComplete; tags={:?}",
+            "allow path (real upstream): SELECT did not reach CommandComplete; tags={:?}",
             msgs.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
         ));
     }
@@ -140,12 +182,24 @@ pub(crate) async fn run() -> Result<()> {
         return Err(anyhow!("queries_blocked did not increment after DELETE rejection"));
     }
 
-    // ── Persistence: another SELECT after rejections must still succeed ──
+    // ── Persistence: another SELECT after rejections — proxy must
+    //    keep the session alive even when upstream is unreachable
+    //    (the audit chain depends on session continuity).
     write_query(&mut s, "SELECT 2").await?;
     let msgs = drain_until_ready(&mut s).await?;
-    if !msgs.iter().any(|(t, _)| *t == b'C') {
+    let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
+    if tags.last() != Some(&b'Z') {
         return Err(anyhow!(
-            "post-rejection SELECT failed; the proxy must keep the session alive after a denied DML",
+            "post-rejection SELECT did not end at ReadyForQuery: tags={tags:?}",
+        ));
+    }
+    if hermetic {
+        // Upstream unreachable → ErrorResponse, but the session
+        // stayed open (we got 'Z') — that's the persistence
+        // assertion.
+    } else if !msgs.iter().any(|(t, _)| *t == b'C') {
+        return Err(anyhow!(
+            "post-rejection SELECT (real upstream) failed to reach CommandComplete; tags={tags:?}",
         ));
     }
 
@@ -163,6 +217,24 @@ pub(crate) async fn run() -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Returns the SQLSTATE field of the first `ErrorResponse` in
+/// `msgs`, if any.
+fn first_error_sqlstate(msgs: &[(u8, Vec<u8>)]) -> Option<String> {
+    let body = msgs.iter().find(|(t, _)| *t == b'E').map(|(_, b)| b)?;
+    let mut i = 0;
+    while i < body.len() && body[i] != 0 {
+        let field_tag = body[i];
+        i += 1;
+        let mut end = i;
+        while end < body.len() && body[end] != 0 { end += 1; }
+        if field_tag == b'C' {
+            return Some(std::str::from_utf8(&body[i..end]).unwrap_or("").to_owned());
+        }
+        i = end + 1;
+    }
+    None
 }
 
 /// Verify that `msgs` contains an `ErrorResponse` ('E') frame whose

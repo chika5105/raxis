@@ -1,28 +1,25 @@
-//! Slice — real `MongodbProxy` driving the V2 handshake-tier MVP.
+//! Slice — real `MongodbProxy` driving the V2.1 real-upstream-forwarding
+//! contract (no-auth tier).
 //!
-//! Why no in-process upstream MongoDB: per `credential-proxy.md
-//! §4.4`, the V2 MVP for MongoDB is a handshake-tier integration.
-//! The proxy reads `OP_MSG` frames, classifies the first BSON
-//! command name, and synthesises one of:
+//! ## Two modes
 //!
-//!   * `hello` / `isMaster` → IMDS-style topology reply with
-//!     `ok: 1.0`.
-//!   * `ping`               → `{ok: 1.0}`.
-//!   * Allow-listed read    → `{ok: 1.0}`.
-//!   * Restricted write     → `{ok: 0.0, code: 13, codeName:
-//!     "Unauthorized"}` under `allow_read_only`.
+//! 1. **Hermetic (default)** — no real MongoDB required. The proxy
+//!    is configured with an unreachable upstream URL
+//!    (`mongodb://127.0.0.1:1/demo`) so the V2.1 path can be
+//!    exercised without an external service:
+//!      * `hello` / `ping` / `isMaster` / `buildInfo` are answered
+//!        LOCALLY by the proxy with `ok: 1.0` — these never go
+//!        upstream, so they succeed regardless of upstream reachability.
+//!      * `find` (allowed read) triggers an upstream connect to
+//!        127.0.0.1:1 which fails — the proxy synthesises an error
+//!        doc with `ok: 0.0`.
+//!      * `insert` (blocked under `allow_read_only`) short-circuits
+//!        at the restriction layer with `ok: 0.0, code: 13`.
 //!
-//! What the slice asserts:
-//!
-//!   1. `hello` returns `ok: 1.0` — the client sees a fully
-//!      reachable primary.
-//!   2. `ping` returns `ok: 1.0`.
-//!   3. `find` returns `ok: 1.0` (read path under `allow_read_only`).
-//!   4. `insert` returns `ok: 0.0` with `code: 13` (deny path).
-//!   5. Counters reflect 1 connection_served, 4 commands_audited,
-//!      1 commands_blocked.
-//!   6. The `CredentialBackend` is asked at least once per
-//!      connection.
+//! 2. **Real upstream (`RAXIS_LIVE_MONGODB_URL=mongodb://...`)** —
+//!    when the env var is set (must be a `--noauth` mongod —
+//!    SCRAM-SHA-256 is V2.2), `find` round-trips real `nReturned`
+//!    values. The slice asserts `ok: 1.0` in that case.
 //!
 //! The client side speaks the wire protocol directly using the
 //! proxy's `BsonBuilder` so the slice has zero external
@@ -45,7 +42,7 @@ use raxis_credential_proxy_mongodb::{
     wire::{first_bson_field_name, MsgHeader, BsonBuilder, HEADER_LEN, OP_MSG},
 };
 
-const UPSTREAM_BYTES: &str = "live-e2e-mongodb-creds-bytes";
+const HERMETIC_UPSTREAM_URL: &str = "mongodb://127.0.0.1:1/demo";
 
 struct LiveBackend {
     value:    Vec<u8>,
@@ -78,8 +75,19 @@ impl CredentialBackend for LiveBackend {
 }
 
 pub async fn run() -> Result<()> {
+    let real_upstream = std::env::var("RAXIS_LIVE_MONGODB_URL").ok();
+    let upstream_url = match real_upstream.as_deref() {
+        Some(u) if !u.is_empty() => u.to_owned(),
+        _ => HERMETIC_UPSTREAM_URL.to_owned(),
+    };
+    let hermetic = real_upstream.as_deref().is_none_or(str::is_empty);
+    tracing::info!(
+        mode = if hermetic { "hermetic" } else { "real-upstream" },
+        "slice mongodb-proxy: starting",
+    );
+
     let backend = Arc::new(LiveBackend {
-        value:    UPSTREAM_BYTES.as_bytes().to_vec(),
+        value:    upstream_url.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
@@ -116,27 +124,32 @@ pub async fn run() -> Result<()> {
     drive_command(&mut sock, 2, "ping").await
         .context("ping")?;
 
-    // 3. find → ok: 1.0
-    drive_command(&mut sock, 3, "find").await
+    // 3. find — exercises upstream-forwarding path.
+    //    Hermetic: upstream connect fails → proxy synthesises
+    //    `ok: 0.0` error doc. Real-upstream: `ok: 1.0` from real mongod.
+    let find_reply = drive_command_raw(&mut sock, 3, "find").await
         .context("find")?;
-
-    // 4. insert → ok: 0.0 (blocked)
-    let reply_doc = drive_command_raw(&mut sock, 4, "insert").await
-        .context("insert")?;
-    let first = first_bson_field_name(&reply_doc)
-        .ok_or_else(|| anyhow!("insert reply has no first field"))?;
-    if first != "ok" {
+    let find_ok = read_ok_field(&find_reply)
+        .ok_or_else(|| anyhow!("find reply missing ok field"))?;
+    if hermetic {
+        if find_ok != 0.0 {
+            return Err(anyhow!(
+                "hermetic mode: find reply ok={find_ok} != 0.0 (upstream unreachable should produce 0.0)",
+            ));
+        }
+        tracing::info!("slice mongodb-proxy: hermetic find got ok:0.0 (upstream unreachable, expected)");
+    } else if find_ok != 1.0 {
         return Err(anyhow!(
-            "insert reply first field {:?} != 'ok'", first,
+            "real-upstream mode: find reply ok={find_ok} != 1.0",
         ));
     }
-    // ok value is double; it sits at offset 4 (length) + 1 (type) + 3
-    // ("ok\0") = 8 bytes after the doc start.
-    let ok_bytes = &reply_doc[8..16];
-    let ok_val   = f64::from_le_bytes([
-        ok_bytes[0], ok_bytes[1], ok_bytes[2], ok_bytes[3],
-        ok_bytes[4], ok_bytes[5], ok_bytes[6], ok_bytes[7],
-    ]);
+
+    // 4. insert → ok: 0.0 (blocked at the restriction layer, BEFORE
+    //    upstream — same in both modes).
+    let reply_doc = drive_command_raw(&mut sock, 4, "insert").await
+        .context("insert")?;
+    let ok_val = read_ok_field(&reply_doc)
+        .ok_or_else(|| anyhow!("insert reply missing ok field"))?;
     if ok_val != 0.0 {
         return Err(anyhow!(
             "insert reply ok={} != 0.0 (proxy did not block)", ok_val,
@@ -207,6 +220,20 @@ async fn drive_command(
         ));
     }
     Ok(())
+}
+
+/// Pull the `ok` field from a BSON reply doc. The ok field is a
+/// double immediately after the document length (4 bytes), the type
+/// byte (1), and the field name `"ok\0"` (3 bytes).
+fn read_ok_field(reply_doc: &[u8]) -> Option<f64> {
+    let first = first_bson_field_name(reply_doc)?;
+    if first != "ok" { return None; }
+    if reply_doc.len() < 16 { return None; }
+    let ok_bytes = &reply_doc[8..16];
+    Some(f64::from_le_bytes([
+        ok_bytes[0], ok_bytes[1], ok_bytes[2], ok_bytes[3],
+        ok_bytes[4], ok_bytes[5], ok_bytes[6], ok_bytes[7],
+    ]))
 }
 
 /// Issue a one-field BSON command and return the reply BSON doc.

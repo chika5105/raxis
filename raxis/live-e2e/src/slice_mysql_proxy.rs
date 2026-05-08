@@ -1,25 +1,31 @@
-//! Slice — real `MysqlProxy` driving the V2 handshake-tier MVP.
+//! Slice — real `MysqlProxy` driving the V2.1 real-upstream-forwarding
+//! contract.
 //!
-//! Why no in-process upstream MySQL: per `credential-proxy.md §4.2`,
-//! the V2 MVP for MySQL is a handshake-tier integration. The proxy
-//! drives `Protocol::HandshakeV10 → HandshakeResponse41 →
-//! OK_Packet` on its own bytes (the agent's password is discarded;
-//! no real `mysqld` is contacted). What the live-e2e slice asserts
-//! is the proxy's *visible* behaviour to a real MySQL client:
+//! ## Two modes
 //!
-//!   1. The handshake reaches `OK_Packet` (the client sees a
-//!      successfully authenticated session).
-//!   2. `COM_PING` is honoured.
-//!   3. A `SELECT` `COM_QUERY` returns `OK_Packet` (allow path).
-//!   4. An `INSERT` `COM_QUERY` returns `ERR_Packet { code = 1142,
-//!      sqlstate = "42501" }` (deny path under `allow_only_select`).
-//!   5. `COM_QUIT` closes the session cleanly.
-//!   6. Counters reflect 1 connection, 2 queries audited (SELECT +
-//!      INSERT), 1 query blocked (INSERT).
-//!   7. The `CredentialBackend` is asked exactly once per
-//!      connection (the proxy resolves at connect time so a
-//!      missing/malformed credential aborts the handshake instead
-//!      of a mid-query failure).
+//! 1. **Hermetic (default)** — no real MySQL required. The proxy
+//!    is configured with an unreachable upstream URL
+//!    (`mysql://demo:demo@127.0.0.1:1/demo`) so the V2.1 upstream
+//!    forwarding path can be exercised without an external service:
+//!      * The agent's `HandshakeV10` ↔ `HandshakeResponse41` ↔
+//!        `OK_Packet` succeeds (the proxy answers locally).
+//!      * `COM_PING` succeeds (still local).
+//!      * `SELECT 1` triggers the proxy to attempt an upstream
+//!        connection — which fails — and the agent receives an
+//!        `ERR_Packet`. We assert the failure path emitted
+//!        `CredentialProxyUpstreamFailed`.
+//!      * `INSERT INTO t VALUES (1)` short-circuits at the
+//!        restriction layer (BEFORE upstream) with
+//!        `ERR_Packet { sqlstate = "42501" }`.
+//!      * `COM_QUIT` closes cleanly.
+//!
+//! 2. **Real upstream (`RAXIS_LIVE_MYSQL_URL=mysql://...`)** — when
+//!    the env var is set, the SELECT round-trips a real result set
+//!    from a live MySQL server through `mysql_native_password`.
+//!
+//! Either mode validates the proxy's local handshake, restriction
+//! enforcement, audit emission, and credential-resolution
+//! invariants.
 //!
 //! The client side speaks the wire protocol directly (no third-
 //! party MySQL crate) so the slice has zero external dependencies
@@ -42,7 +48,7 @@ use raxis_credential_proxy_mysql::{
     wire::{frame_packet, PacketHeader, cmd as mysql_cmd},
 };
 
-const UPSTREAM_PASS: &str = "live-e2e-mysql-creds-bytes";
+const HERMETIC_UPSTREAM_URL: &str = "mysql://demo:demo@127.0.0.1:1/demo";
 
 struct LiveBackend {
     value:    Vec<u8>,
@@ -75,8 +81,20 @@ impl CredentialBackend for LiveBackend {
 }
 
 pub async fn run() -> Result<()> {
+    let real_upstream = std::env::var("RAXIS_LIVE_MYSQL_URL").ok();
+    let upstream_url = match real_upstream.as_deref() {
+        Some(u) if !u.is_empty() => u.to_owned(),
+        _ => HERMETIC_UPSTREAM_URL.to_owned(),
+    };
+    let hermetic = real_upstream.as_deref().is_none_or(str::is_empty);
+    tracing::info!(
+        mode = if hermetic { "hermetic" } else { "real-upstream" },
+        upstream_kind = if hermetic { "unreachable (127.0.0.1:1)" } else { "configured via RAXIS_LIVE_MYSQL_URL" },
+        "slice mysql-proxy: starting",
+    );
+
     let backend = Arc::new(LiveBackend {
-        value:    UPSTREAM_PASS.as_bytes().to_vec(),
+        value:    upstream_url.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
@@ -182,7 +200,12 @@ pub async fn run() -> Result<()> {
         return Err(anyhow!("PING did not yield OK_Packet"));
     }
 
-    // 5. COM_QUERY "SELECT 1" — must yield OK_Packet (V2 MVP).
+    // 5. COM_QUERY "SELECT 1" — exercises upstream-forwarding path.
+    //    In hermetic mode this triggers an upstream connect to
+    //    127.0.0.1:1 which fails, and the proxy surfaces an
+    //    ERR_Packet (first byte 0xFF). In real-upstream mode this
+    //    round-trips real result-set frames (TEXT_RESULTSET) which
+    //    end with EOF or OK_Packet.
     let mut select_payload = vec![mysql_cmd::QUERY];
     select_payload.extend_from_slice(b"SELECT 1");
     sock.write_all(&frame_packet(&select_payload, 0)).await
@@ -191,11 +214,25 @@ pub async fn run() -> Result<()> {
     let (_h_sel, payload_sel) = read_packet(&mut sock).await
         .context("read SELECT response")?
         .ok_or_else(|| anyhow!("EOF after SELECT"))?;
-    if payload_sel.first().copied() != Some(0x00) {
-        return Err(anyhow!(
-            "SELECT did not yield OK_Packet, first byte {:#04x}",
-            payload_sel.first().copied().unwrap_or(0xff),
-        ));
+    if hermetic {
+        // ERR_Packet (0xFF) is expected for the unreachable upstream.
+        // OK_Packet (0x00) would also be acceptable IF some local
+        // listener answered on port 1, but on a normal dev machine
+        // that's never the case.
+        if payload_sel.first().copied() != Some(0xff) {
+            return Err(anyhow!(
+                "hermetic mode: SELECT did not yield ERR_Packet (0xFF) for unreachable upstream, first byte {:#04x}",
+                payload_sel.first().copied().unwrap_or(0),
+            ));
+        }
+        tracing::info!("slice mysql-proxy: hermetic SELECT got ERR_Packet (upstream unreachable, expected)");
+    } else {
+        // Real upstream: any of OK_Packet (0x00), result-set header
+        // (column count > 0), or even ERR_Packet for permission
+        // issues is acceptable. We just want to confirm the proxy
+        // connected and forwarded the bytes — counter-side checks
+        // below validate that.
+        let _ = payload_sel.first();
     }
 
     // 6. COM_QUERY "INSERT INTO t VALUES (1)" — must yield

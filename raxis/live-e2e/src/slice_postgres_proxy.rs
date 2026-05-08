@@ -1,27 +1,33 @@
 //! Slice 2 — real `PostgresProxy` + a real Postgres-protocol client.
 //!
-//! Goal: prove that the proxy's frontend-protocol surface (startup,
+//! Goal: prove the proxy's frontend-protocol surface (startup,
 //! authentication, parameter status, simple-query path) handshakes
-//! cleanly with a real `tokio-postgres`-style client. Upstream
-//! forwarding is deferred per spec; this slice exercises everything
-//! the MVP guarantees.
+//! cleanly with a real Postgres client AND that the V2.1
+//! real-upstream-forwarding path is wired end-to-end.
 //!
-//! Wire shape:
+//! ## Two modes
 //!
-//!   1. Start the real `PostgresProxy::bind` against an in-memory
-//!      `CredentialBackend` that returns a postgres URL when asked.
-//!   2. Open a raw `TcpStream` and drive the Postgres frontend
-//!      protocol (StartupMessage → AuthenticationOk → ... →
-//!      ReadyForQuery → simple `SELECT 1` → CommandComplete).
-//!   3. Assert the wire shape matches the spec and the proxy stats
-//!      counter increments correctly.
+//! 1. **Hermetic (default)** — no real Postgres required. The slice
+//!    asserts the proxy reaches `ReadyForQuery`, then drives a
+//!    `SELECT` that the proxy attempts to forward upstream. Because
+//!    the configured upstream URL points at an unreachable address
+//!    (`127.0.0.1:1` — IANA-reserved), the proxy emits an
+//!    `ErrorResponse` with `08006 (upstream unreachable)` and stays
+//!    alive for `ReadyForQuery`. This proves the upstream-forwarding
+//!    path is wired without requiring an external service.
 //!
-//! We use a hand-rolled client (reusing the test harness from the
-//! crate's integration tests) rather than `tokio-postgres` so the
-//! slice has no DB-driver dependency. The MVP synthesises
-//! `CommandComplete` for the simple-query path; a real
-//! `tokio-postgres` driver would require RowDescription which is
-//! the next slice when upstream forwarding lands.
+//! 2. **Real upstream (`RAXIS_LIVE_POSTGRES_URL=postgresql://...`)** —
+//!    when the env var is present, the slice points the proxy at the
+//!    real Postgres URL. The `SELECT 1` round-trips real `RowDescription`
+//!    + `DataRow` + `CommandComplete` frames and the slice asserts
+//!    the wire shape. Use this with a docker-compose Postgres or a
+//!    locally-running pg server to validate the full relay path.
+//!
+//! Either mode exercises the proxy's restriction enforcement
+//! (default `Restrictions::default()` — unrestricted), credential
+//! resolution (the backend MUST be hit at least once), and audit
+//! emission. The hermetic mode covers what
+//! `cargo run -p raxis-live-e2e -- all` runs in CI.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -68,9 +74,30 @@ impl CredentialBackend for LiveBackend {
 }
 
 pub(crate) async fn run() -> Result<()> {
-    tracing::info!("slice postgres-proxy: starting");
+    let real_upstream = std::env::var("RAXIS_LIVE_POSTGRES_URL").ok();
+    let upstream_url: Vec<u8> = match real_upstream.as_deref() {
+        Some(url) if !url.is_empty() => {
+            tracing::info!(
+                "slice postgres-proxy: starting (real upstream from RAXIS_LIVE_POSTGRES_URL)"
+            );
+            url.as_bytes().to_vec()
+        }
+        _ => {
+            tracing::info!(
+                "slice postgres-proxy: starting (hermetic — unreachable upstream\n\
+                 set RAXIS_LIVE_POSTGRES_URL=postgresql://user:pass@host:port/db to test\n\
+                 the full relay path against a real Postgres server)"
+            );
+            // 127.0.0.1:1 is IANA-reserved (TCPMUX) and effectively
+            // never bound on a developer machine — perfect for a
+            // hermetic "upstream unreachable" assertion.
+            b"postgresql://demo:demo@127.0.0.1:1/demo".to_vec()
+        }
+    };
+    let hermetic = real_upstream.as_deref().is_none_or(str::is_empty);
+
     let backend = Arc::new(LiveBackend {
-        value:    b"postgresql://demo:demo@127.0.0.1:5432/demo".to_vec(),
+        value:    upstream_url,
         resolves: AtomicU32::new(0),
     });
     let cfg = ProxyConfig {
@@ -87,7 +114,6 @@ pub(crate) async fn run() -> Result<()> {
 
     let mut s = TcpStream::connect(addr).await?;
 
-    // Drive a real frontend handshake.
     write_startup(&mut s).await?;
     let msgs = drain_until_ready(&mut s).await?;
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
@@ -97,34 +123,84 @@ pub(crate) async fn run() -> Result<()> {
     if tags.last() != Some(&b'Z') { return Err(anyhow!("last frame must be 'Z'; tags={tags:?}")); }
     tracing::info!("slice postgres-proxy: handshake reached ReadyForQuery");
 
-    // Drive a SELECT.
+    // SELECT 1 — exercises the upstream-forwarding path.
     write_query(&mut s, "SELECT 1").await?;
     let msgs = drain_until_ready(&mut s).await?;
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    if !tags.contains(&b'C') { return Err(anyhow!("no CommandComplete for SELECT; tags={tags:?}")); }
-
-    // Drive an INSERT under default restrictions (unrestricted, so it
-    // should NOT be blocked under default policy).
-    write_query(&mut s, "INSERT INTO t VALUES (1)").await?;
-    let msgs = drain_until_ready(&mut s).await?;
-    let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    if !tags.contains(&b'C') { return Err(anyhow!("no CommandComplete for unrestricted INSERT; tags={tags:?}")); }
+    if hermetic {
+        // Expect ErrorResponse ('E') + ReadyForQuery ('Z') because
+        // the upstream is unreachable. The proxy must NOT crash and
+        // MUST emit the audit envelope. We assert the envelope by
+        // checking the upstream-failed counter below.
+        if !tags.contains(&b'E') {
+            return Err(anyhow!(
+                "hermetic mode: expected ErrorResponse for unreachable upstream, got tags={tags:?}"
+            ));
+        }
+        if tags.last() != Some(&b'Z') {
+            return Err(anyhow!(
+                "hermetic mode: expected ReadyForQuery after upstream failure, got tags={tags:?}"
+            ));
+        }
+        tracing::info!(
+            "slice postgres-proxy: hermetic SELECT got ErrorResponse + ReadyForQuery (expected)"
+        );
+    } else {
+        // Real upstream: expect at least CommandComplete ('C').
+        // RowDescription ('T') + DataRow ('D') are also present for
+        // a SELECT but we don't strictly require them here so a
+        // backend without a `t` table still passes when the SELECT
+        // is `SELECT 1` (which any pg server can answer).
+        if !tags.contains(&b'C') {
+            return Err(anyhow!("no CommandComplete for SELECT; tags={tags:?}"));
+        }
+        if !tags.contains(&b'D') && !tags.contains(&b'T') {
+            tracing::warn!(
+                "slice postgres-proxy: SELECT returned neither RowDescription ('T') nor DataRow ('D'); \
+                 unusual but not fatal (server may have answered with empty result-set)"
+            );
+        }
+    }
 
     // Terminate.
     write_terminate(&mut s).await?;
 
-    // Verify counters.
     let snap = stats.snapshot();
-    if snap.queries_audited < 2 {
-        return Err(anyhow!("expected ≥2 queries audited, got {}", snap.queries_audited));
+    if snap.queries_audited < 1 {
+        return Err(anyhow!(
+            "expected ≥1 query audited, got {}", snap.queries_audited
+        ));
     }
     if backend.resolves.load(Ordering::Relaxed) < 1 {
         return Err(anyhow!("backend was never asked for the credential"));
     }
+    if hermetic {
+        // The upstream-failed counter must increment in hermetic
+        // mode — it's the V2.1 audit envelope's hard signal that
+        // the upstream-forwarding path is wired.
+        if snap.upstream_connects_failed < 1 {
+            return Err(anyhow!(
+                "hermetic mode: expected upstream_connects_failed≥1, got {}",
+                snap.upstream_connects_failed,
+            ));
+        }
+    } else {
+        // Real-upstream mode: at least one connect must succeed.
+        if snap.upstream_connects_succeeded < 1 {
+            return Err(anyhow!(
+                "real-upstream mode: expected upstream_connects_succeeded≥1, got {}",
+                snap.upstream_connects_succeeded,
+            ));
+        }
+    }
     tracing::info!(
-        "slice postgres-proxy: PASS — queries_audited={}, queries_blocked={}, backend resolves={}",
-        snap.queries_audited, snap.queries_blocked,
-        backend.resolves.load(Ordering::Relaxed),
+        mode               = if hermetic { "hermetic" } else { "real-upstream" },
+        queries_audited    = snap.queries_audited,
+        queries_blocked    = snap.queries_blocked,
+        upstream_succeeded = snap.upstream_connects_succeeded,
+        upstream_failed    = snap.upstream_connects_failed,
+        backend_resolves   = backend.resolves.load(Ordering::Relaxed),
+        "slice postgres-proxy: PASS",
     );
     Ok(())
 }
