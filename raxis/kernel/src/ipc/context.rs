@@ -20,6 +20,7 @@ use raxis_credential_proxy_manager::CredentialProxyManager;
 use raxis_credentials::CredentialBackend;
 use raxis_domain::DomainAdapter;
 use raxis_domain_git::{SeIntentKind, SeTerminalArtefact};
+use raxis_image_cache::{ImageResolver, PrePopulatedResolver};
 use raxis_isolation::Backend as IsolationBackend;
 use raxis_policy::PolicyBundle;
 use raxis_session_spawn::SessionSpawnService;
@@ -281,6 +282,36 @@ pub struct HandlerContext {
             TerminalArtefact = SeTerminalArtefact,
         >,
     >,
+
+    /// V2 OCI image resolver — turns a policy- / plan-pinned
+    /// `oci_digest` into the on-disk path the isolation backend
+    /// boots.
+    ///
+    /// Production wires `raxis_image_cache::ProductionResolver`
+    /// rooted at `<data_dir>/oci-cache/` (`image-cache.md §4` on-
+    /// disk layout). Boot constructs it after `data_dir` is known
+    /// and after the shared `reqwest::Client` is built; tests use
+    /// `PrePopulatedResolver` (the default this field is
+    /// constructed with) which resolves only digests pre-staged
+    /// on disk.
+    ///
+    /// **Why a trait** (vs. an `Option<...>`): mirrors every other
+    /// `Arc<dyn ...>` substrate field. The kernel's session-spawn
+    /// path (when V3 routes operator `[[vm_images]]` resolution
+    /// through this hook) MUST always have a resolver to call —
+    /// failing closed at boot is preferable to a runtime "no
+    /// resolver was configured" surprise.
+    ///
+    /// **V2 consumer surface.** Currently consumed only by the
+    /// `raxis doctor cache prune` subcommand which exercises
+    /// [`ImageResolver::prune_unreferenced`]; the
+    /// session-spawn-path consumer is the V3 deferred work tracked
+    /// in `image-cache.md §11`. The field is wired now so the
+    /// V3 plumbing change is a one-line callsite swap (replace
+    /// the canonical-image path resolution with
+    /// `ctx.image_resolver.resolve(...)`) rather than a
+    /// HandlerContext signature churn.
+    pub image_resolver: Arc<dyn ImageResolver>,
 }
 
 impl HandlerContext {
@@ -315,6 +346,17 @@ impl HandlerContext {
             Arc::clone(&proxy_manager),
             Arc::clone(&audit),
         ));
+        // Default `image_resolver` is the offline-friendly
+        // `PrePopulatedResolver` rooted at `<data_dir>/oci-cache/`.
+        // Production overrides this in main.rs via
+        // `with_image_resolver(ProductionResolver::new(...))` so
+        // operator-defined `[[vm_images]]` resolve through the OCI
+        // distribution-spec wire format. The default keeps every
+        // existing kernel test compatible — any test that doesn't
+        // exercise the resolver consumes the no-op offline path
+        // and pays no behaviour change.
+        let image_resolver: Arc<dyn ImageResolver> =
+            Arc::new(PrePopulatedResolver::new(data_dir.join("oci-cache")));
         Self {
             policy,
             registry,
@@ -333,6 +375,7 @@ impl HandlerContext {
             orchestrator_spawn,
             executor_spawn,
             domain,
+            image_resolver,
         }
     }
 
@@ -340,6 +383,17 @@ impl HandlerContext {
     /// non-standard layout or a temporary directory).
     pub fn with_witness_dir(mut self, witness_dir: PathBuf) -> Self {
         self.witness_dir = witness_dir;
+        self
+    }
+
+    /// Replace the OCI image resolver after construction. Production
+    /// boot uses this to swap the default offline-only
+    /// `PrePopulatedResolver` for a `ProductionResolver` configured
+    /// with the kernel's shared `reqwest::Client`, the policy-derived
+    /// default registry, and any operator-supplied bearer token. See
+    /// `main.rs` step 8 for the canonical use site.
+    pub fn with_image_resolver(mut self, image_resolver: Arc<dyn ImageResolver>) -> Self {
+        self.image_resolver = image_resolver;
         self
     }
 

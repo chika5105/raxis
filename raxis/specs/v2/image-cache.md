@@ -372,8 +372,8 @@ in the same policy generation; this is shift-left of a runtime
 | `raxis/crates/image-cache/src/extract.rs`             | NEW     | LANDED   | OCI-layer extraction; EROFS-mediatype dispatch                                                           |
 | `raxis/crates/image-cache/src/production.rs`          | NEW     | LANDED   | `ProductionResolver` impl + in-memory mutex map (§7)                                                     |
 | `raxis/kernel/src/session_spawn_orchestrator.rs`      | MODIFY  | DEFERRED | Replace direct `image_path` resolution with a call to `ctx.image_resolver.resolve(...)`                  |
-| `raxis/kernel/src/ipc/context.rs`                     | MODIFY  | DEFERRED | Add `image_resolver: Arc<dyn ImageResolver>` to `HandlerContext`                                          |
-| `raxis/cli/src/commands/doctor.rs`                    | MODIFY  | DEFERRED | New `cache prune` subcommand exercising `prune_unreferenced` (§8 foreground)                             |
+| `raxis/kernel/src/ipc/context.rs`                     | MODIFY  | LANDED   | `image_resolver: Arc<dyn ImageResolver>` field + `with_image_resolver` swap; default = `PrePopulatedResolver` rooted at `<data_dir>/oci-cache/` |
+| `raxis/cli/src/commands/doctor.rs`                    | MODIFY  | LANDED   | `raxis doctor cache prune [--dry-run] [--json]` subcommand exercising `prune_unreferenced` (§8 foreground) |
 | `raxis/specs/v2/image-cache.md`                       | THIS    | LANDED   | (you are here)                                                                                           |
 
 The crate now ships the full V2 surface (LANDED rows): trait + on-disk

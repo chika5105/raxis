@@ -51,6 +51,13 @@ raxis-credentials-file = { workspace = true }
 # from this crate. The CLI does not write anything; it only renders
 # the post-install verification result.
 raxis-canonical-images = { workspace = true }
+# `raxis doctor cache prune` (image-cache.md §8) consumes the
+# production resolver's `prune_unreferenced` walker over both
+# `images/sha256/` and `blobs/sha256/`. The CLI builds a fresh
+# `reqwest::Client` for the resolver constructor; prune is local
+# I/O only so the client is never used for HTTP.
+raxis-image-cache      = { workspace = true }
+reqwest                = { workspace = true }
 
 serde        = { workspace = true }
 serde_json   = { workspace = true }

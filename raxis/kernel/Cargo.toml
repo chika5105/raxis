@@ -37,6 +37,7 @@ raxis-runtime       = { workspace = true }
 # the matching `[target.'cfg(target_os = ...)']` blocks per
 # `extensibility-traits.md §3.8`.
 raxis-isolation     = { workspace = true }
+raxis-image-cache   = { workspace = true }
 # V2 Step 10 host-side worktree staging — produces the
 # `WorkspaceMount` the substrate consumes. Lives in its own crate
 # so kernel integration tests can drive the same staging path.

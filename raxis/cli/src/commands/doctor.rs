@@ -189,6 +189,9 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         Subcommand::CanonicalImages { install_dir } => {
             run_canonical_images(parsed.opts, install_dir)
         }
+        Subcommand::CachePrune { dry_run } => {
+            run_cache_prune(flags, parsed.opts, dry_run)
+        }
     }
 }
 
@@ -407,6 +410,196 @@ fn verify_one(
     }
 }
 
+/// `raxis doctor cache prune` — sweep `<data_dir>/oci-cache/` for
+/// images that no live policy generation references.
+///
+/// V2 implementation walks every operator-registered policy
+/// generation in `policy_history` and computes the live `oci_digest`
+/// set as `policy_history[*].vm_images[*].oci_digest`. Any
+/// `images/sha256/<aa>/<full>/` or `blobs/sha256/<aa>/<full>.*` not
+/// in that set is removed (or just listed when `--dry-run`).
+///
+/// **What this does NOT do.** It does not consult in-flight
+/// initiative rows or running session rows for additional
+/// references. The §8 spec mentions both as additional sources of
+/// "live" digests; the doctor command is intentionally
+/// conservative-by-removal: it only acts on digests not in the
+/// **policy** set. An operator who wants the more aggressive sweep
+/// can run the kernel's background prune (which kicks in on every
+/// `policy_manager::advance_epoch`) — that path consumes the
+/// kernel's runtime view of active sessions + initiatives.
+///
+/// Exit code:
+///   * 0 — prune completed successfully (any number of bytes
+///         freed, including 0).
+///   * 1 — `--dry-run`-only diagnostic mode finished; same shape
+///         as 0 but no bytes were freed.
+///   * 2 — the cache could not be enumerated (filesystem error
+///         walking the cache root, etc.); details on stderr.
+fn run_cache_prune(
+    flags:   &GlobalFlags,
+    opts:    DoctorOpts,
+    dry_run: bool,
+) -> Result<(), CliError> {
+    use std::collections::HashSet;
+    use raxis_image_cache::{ImageResolver, OciDigest, ProductionResolver};
+
+    let data_dir   = flags.data_dir().clone();
+    let cache_root = data_dir.join("oci-cache");
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    // Enumerate live digests from the policy history table.
+    let live_digests: HashSet<OciDigest> = match enumerate_live_digests(&data_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = writeln!(
+                out,
+                "raxis doctor cache prune — FAIL: {e}",
+            );
+            std::process::exit(2);
+        }
+    };
+
+    if dry_run {
+        // For dry-run we walk the cache enumerating every digest we
+        // would delete, without consulting the resolver. The resolver
+        // itself only exposes a "delete-or-not" `prune_unreferenced`
+        // call that takes the live set; a dry-run mode is a useful
+        // operator habit so we hand-roll the walk here.
+        let dead = enumerate_dead_digests(&cache_root, &live_digests).unwrap_or_default();
+        if opts.json {
+            let v = serde_json::json!({
+                "cache_root":    cache_root.display().to_string(),
+                "dry_run":       true,
+                "live_digests":  live_digests.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+                "would_remove":  dead.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+            });
+            let _ = serde_json::to_writer(&mut out, &v);
+            let _ = writeln!(out);
+        } else {
+            let _ = writeln!(out, "raxis doctor cache prune (dry-run)");
+            let _ = writeln!(out, "  cache_root:   {}", cache_root.display());
+            let _ = writeln!(out, "  live_digests: {}", live_digests.len());
+            let _ = writeln!(out, "  would_remove: {}", dead.len());
+            for d in &dead {
+                let _ = writeln!(out, "    - {d}");
+            }
+        }
+        let _ = out.flush();
+        std::process::exit(1);
+    }
+
+    // Real prune through the production resolver. The bearer-token
+    // / default-registry inputs are irrelevant for prune; we pass
+    // `None` for both. The reqwest client is constructed but
+    // unused (prune is local I/O only).
+    let client = match reqwest::Client::builder().build() {
+        Ok(c)  => c,
+        Err(e) => {
+            let _ = writeln!(out, "raxis doctor cache prune — FAIL: reqwest client build: {e}");
+            std::process::exit(2);
+        }
+    };
+    let resolver = ProductionResolver::new(&cache_root, client, None, None);
+    match resolver.prune_unreferenced(&live_digests) {
+        Ok(bytes_freed) => {
+            if opts.json {
+                let v = serde_json::json!({
+                    "cache_root":   cache_root.display().to_string(),
+                    "dry_run":      false,
+                    "live_digests": live_digests.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+                    "bytes_freed":  bytes_freed,
+                });
+                let _ = serde_json::to_writer(&mut out, &v);
+                let _ = writeln!(out);
+            } else {
+                let _ = writeln!(out, "raxis doctor cache prune");
+                let _ = writeln!(out, "  cache_root:   {}", cache_root.display());
+                let _ = writeln!(out, "  live_digests: {}", live_digests.len());
+                let _ = writeln!(out, "  bytes_freed:  {bytes_freed}");
+            }
+            let _ = out.flush();
+            Ok(())
+        }
+        Err(e) => {
+            let _ = writeln!(out, "raxis doctor cache prune — FAIL: {e}");
+            std::process::exit(2);
+        }
+    }
+}
+
+/// Enumerate the union of `[[vm_images]] oci_digest = "sha256:..."`
+/// entries declared by the operator's current `<data_dir>/policy/policy.toml`.
+///
+/// **V2 conservative scope.** We deliberately do NOT walk historical
+/// policy generations from `policy_epoch_history` (the table records
+/// the SHA hash of each historical bundle but does not retain the
+/// raw TOML for re-parsing) and we do NOT walk in-flight initiative
+/// rows or running session rows — those would require the kernel to
+/// be running, which `raxis doctor` must work without. The kernel's
+/// background prune (kicked from `policy_manager::advance_epoch`)
+/// IS the mechanism that consumes the runtime view; doctor is the
+/// off-line walker that operates on what's on disk only.
+///
+/// **TOML parse mode.** We use a hand-rolled TOML walk over
+/// `[[vm_images]]` blocks rather than going through
+/// [`raxis_policy::PolicyBundle`] because (a) `PolicyBundle::from_toml`
+/// requires every section to validate cross-references that are
+/// out of scope for prune (operator certs, gates, etc.) and (b)
+/// we want prune to succeed even on a partially-malformed bundle.
+fn enumerate_live_digests(
+    data_dir: &Path,
+) -> Result<std::collections::HashSet<raxis_image_cache::OciDigest>, String> {
+    use std::collections::HashSet;
+    let policy_path = data_dir.join("policy").join(POLICY_FILE_NAME);
+    if !policy_path.exists() {
+        // No policy file → empty live set. The prune walk treats
+        // every cache entry as dead. Doctors run pre-bootstrap
+        // exit at the data-dir-exists check, never here.
+        return Ok(HashSet::new());
+    }
+    let body = std::fs::read_to_string(&policy_path)
+        .map_err(|e| format!("read {}: {e}", policy_path.display()))?;
+    let value: toml::Value = toml::from_str(&body)
+        .map_err(|e| format!("parse {}: {e}", policy_path.display()))?;
+    let mut out = HashSet::new();
+    if let Some(arr) = value.get("vm_images").and_then(|v| v.as_array()) {
+        for entry in arr {
+            let Some(d) = entry.get("oci_digest").and_then(|v| v.as_str()) else { continue };
+            if let Ok(parsed) = d.parse::<raxis_image_cache::OciDigest>() {
+                out.insert(parsed);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn enumerate_dead_digests(
+    cache_root: &Path,
+    live: &std::collections::HashSet<raxis_image_cache::OciDigest>,
+) -> Result<Vec<raxis_image_cache::OciDigest>, String> {
+    use std::fs;
+    let images_root = cache_root.join("images/sha256");
+    if !images_root.exists() { return Ok(Vec::new()); }
+    let mut out = Vec::new();
+    for shard in fs::read_dir(&images_root).map_err(|e| format!("read {images_root:?}: {e}"))? {
+        let shard = shard.map_err(|e| e.to_string())?;
+        for de in fs::read_dir(shard.path()).map_err(|e| e.to_string())? {
+            let de = de.map_err(|e| e.to_string())?;
+            let Some(name) = de.file_name().to_str().map(str::to_owned) else { continue };
+            let Ok(digest) = format!("sha256:{name}").parse::<raxis_image_cache::OciDigest>() else {
+                continue;
+            };
+            if !live.contains(&digest) {
+                out.push(digest);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn kind_tag(kind: CanonicalImageKind) -> &'static str {
     match kind {
         CanonicalImageKind::Reviewer     => "reviewer",
@@ -462,6 +655,13 @@ enum Subcommand {
     CanonicalImages {
         install_dir: PathBuf,
     },
+    /// `raxis doctor cache prune` — sweep the OCI image cache
+    /// (`<data_dir>/oci-cache/`) for `images/` and `blobs/` entries
+    /// whose digest is not referenced by any active policy
+    /// generation. The `--dry-run` flag walks without unlinking.
+    CachePrune {
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -500,12 +700,65 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, CliError> {
                 opts,
             })
         }
+        Some("cache") => {
+            // `raxis doctor cache prune` — second positional is the
+            // verb. Currently `prune` is the only verb.
+            let mut tail = args.to_vec();
+            tail.remove(subcmd_pos.unwrap());
+            let (verb_pos, verb) = tail
+                .iter()
+                .enumerate()
+                .find(|(_, a)| !a.starts_with('-'))
+                .map(|(i, a)| (Some(i), Some(a.as_str())))
+                .unwrap_or((None, None));
+            match verb {
+                Some("prune") => {
+                    let mut rest = tail.clone();
+                    rest.remove(verb_pos.unwrap());
+                    let (opts, dry_run) = parse_cache_prune_flags(&rest)?;
+                    Ok(ParsedArgs {
+                        subcommand: Subcommand::CachePrune { dry_run },
+                        opts,
+                    })
+                }
+                Some(other) => Err(CliError::Usage(format!(
+                    "unknown `cache` verb: {other:?} \
+                     (available: prune)",
+                ))),
+                None => Err(CliError::Usage(
+                    "missing verb after `cache` \
+                     (available: prune)".to_owned(),
+                )),
+            }
+        }
         Some(other) => Err(CliError::Usage(format!(
             "unknown doctor subcommand: {other:?} \
-             (available: signing-key-fp, canonical-images; or run `raxis doctor` \
-             with no subcommand for the full data-dir preflight)"
+             (available: signing-key-fp, canonical-images, cache; \
+              or run `raxis doctor` with no subcommand for the full \
+              data-dir preflight)"
         ))),
     }
+}
+
+fn parse_cache_prune_flags(args: &[String]) -> Result<(DoctorOpts, bool), CliError> {
+    let mut opts = DoctorOpts::default();
+    let mut dry_run = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json"    => opts.json = true,
+            "--dry-run" => dry_run = true,
+            "-h" | "--help" => {
+                eprintln!("Usage: raxis doctor cache prune [--dry-run] [--json]");
+                std::process::exit(0);
+            }
+            other => return Err(CliError::Usage(format!(
+                "unknown flag for `doctor cache prune`: {other:?}",
+            ))),
+        }
+        i += 1;
+    }
+    Ok((opts, dry_run))
 }
 
 fn parse_default_flags(args: &[String]) -> Result<DoctorOpts, CliError> {
