@@ -216,8 +216,8 @@ GitHub Secrets the release workflow consumes:
 
 | Secret                                              | Format                                         | Source                            |
 | --------------------------------------------------- | ---------------------------------------------- | --------------------------------- |
-| `RAXIS_KERNEL_SIGNING_KEY_HEX`                      | 64 lowercase hex chars                         | Production HSM (release lead)     |
-| `RAXIS_KERNEL_SIGNING_KEY_PRIV_PEM`                 | Ed25519 PEM                                    | Production HSM (release lead)     |
+| `RAXIS_KERNEL_SIGNING_KEY_HEX`                      | 64 lowercase hex chars (PUBLIC half)           | Production HSM (release lead)     |
+| `RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX`                 | 64 lowercase hex chars (PRIVATE half)          | Production HSM (release lead)     |
 | `RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX`          | 64 lowercase hex chars                         | Computed by `build-images` job    |
 | `RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX`      | 64 lowercase hex chars                         | Computed by `build-images` job    |
 | `APPLE_DEVELOPER_ID_APPLICATION_P12`                | base64 of a `.p12` codesigning bundle          | Apple Developer account           |
@@ -231,11 +231,14 @@ Three principles govern this list:
 1. **The kernel signing keypair is split.** The public half lives
    in `RAXIS_KERNEL_SIGNING_KEY_HEX` and is read by `build.rs` to
    bake `EXPECTED_KERNEL_SIGNING_KEY_BYTES` into the kernel binary.
-   The private half lives in `RAXIS_KERNEL_SIGNING_KEY_PRIV_PEM`
-   and is read by `raxis-image-builder --signing-key` to sign the
-   three `<role>.manifest.toml` files. **The private half NEVER
-   reaches the kernel build job** — the kernel job only gets the
-   public hex; the manifest-signing job only gets the private PEM.
+   The private half lives in `RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX`
+   and is materialised on the `build-images` runner only, where
+   `raxis-image-builder` reads it via `RAXIS_IMAGE_SIGNING_KEY` (a
+   path to a 32-byte hex file). **The private half NEVER reaches
+   the kernel build job** — the kernel job only gets the public
+   hex; the manifest-signing job only gets the private hex.
+   Both halves are 64-char lowercase-hex strings (matching the
+   format `cargo xtask dev-keys init` emits, see §8.1).
 2. **No secret is materialised on disk.** Each secret is read from
    the GitHub Actions environment, used in-process, and never
    `echo`'d, never written to a workflow log, never persisted as
@@ -441,10 +444,14 @@ The corresponding **secret half** of the signing keypair never
 enters any kernel build. It is materialised only in the manifest-
 signing step and only on the `build-images` job, which:
 
-1. Reads `RAXIS_KERNEL_SIGNING_KEY_PRIV_PEM` from the workflow
+1. Reads `RAXIS_KERNEL_SIGNING_KEY_PRIV_HEX` from the workflow
    environment.
-2. Pipes it directly into `raxis-image-builder --signing-key /dev/stdin`.
-3. Discards the file descriptor at job end.
+2. Writes it to a `0600` tmpfile under `$RUNNER_TEMP/` and exports
+   `RAXIS_IMAGE_SIGNING_KEY=$tmpfile`.
+3. Invokes `raxis-image-builder build <role> ...` which reads the
+   key via the env var (matching the local-development flow from
+   §8.2).
+4. Removes the tmpfile at job end.
 
 The image-builder process is the ONLY place in the pipeline where
 the secret material lives in process memory, and it lives there

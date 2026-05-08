@@ -1,0 +1,88 @@
+# PR + main reproducibility / build check.
+#
+# Normative reference: raxis/specs/v2/release-and-distribution.md §5.1
+# ("Trigger model"). This workflow runs on every PR and every push
+# to main and explicitly does NOT have access to release secrets —
+# the kernel signing key, the Apple Developer ID, and the GPG key
+# are all unavailable here. A contributor sending a PR therefore
+# cannot cause anything signed-by-RAXIS to be produced.
+#
+# What the job does today:
+#
+#   1. cargo check --workspace --all-targets    (compile every crate)
+#   2. cargo test  --workspace --all-targets    (unit + integration tests)
+#   3. cargo xtask spec-graph                   (cross-spec consistency)
+#   4. cargo xtask license-check --strict       (SSPL-1.0 enforcement)
+#
+# What the job WILL do once the canonical-image-build pipeline is
+# fully wired (the mkfs.erofs side):
+#
+#   5. Build the three canonical-image archives twice and assert
+#      byte-equality between runs (reproducibility check).
+#
+# Item 5 is currently a TODO (see release-and-distribution.md §11
+# implementation roadmap) and is intentionally omitted here rather
+# than landing as a stub-that-passes — false-positive reproducibility
+# evidence is worse than no evidence.
+
+name: build-images
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel older in-flight runs on the same PR so a force-push doesn't
+# pile up redundant pending builds.
+concurrency:
+  group:               build-images-${{ github.ref }}
+  cancel-in-progress:  true
+
+# No release secrets are made available to this workflow. The
+# release pipeline (release.yml) inherits its own permissions
+# explicitly; everything here runs on the GitHub-Actions-default
+# read-only token.
+permissions:
+  contents: read
+
+jobs:
+  workspace-check:
+    name:    cargo check + test
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, macos-14]
+    defaults:
+      run:
+        working-directory: raxis
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: raxis -> target
+
+      # Build everything before any test. cargo check alone is
+      # cheaper but does not surface link-time issues (e.g. a
+      # missing C dep on Linux) which we want to see at PR time.
+      - name: cargo build (workspace)
+        run: cargo build --workspace --all-targets
+
+      - name: cargo test (workspace)
+        run: cargo test  --workspace --all-targets
+
+      # Spec-graph + license check run on Linux only — they are
+      # platform-independent text-corpus walks and double-running
+      # them on macOS adds 60s for no incremental signal.
+      - name: spec-graph (informational)
+        if:   matrix.runner == 'ubuntu-22.04'
+        run:  cargo xtask spec-graph
+
+      - name: license-check (strict)
+        if:   matrix.runner == 'ubuntu-22.04'
+        run:  cargo xtask license-check --strict
