@@ -73,6 +73,14 @@ jobs:
       - name: cargo build (workspace)
         run: cargo build --workspace --all-targets
 
+      # GitHub Actions Ubuntu runners ship /dev/kvm but the runner
+      # user lacks permission. Open it so the kernel's Firecracker
+      # substrate probe succeeds and e2e tests run against real
+      # hardware-isolated VMs rather than the fallback shim.
+      - name: enable KVM (Linux)
+        if:   runner.os == 'Linux'
+        run:  sudo chmod 666 /dev/kvm
+
       - name: cargo test (workspace)
         run: cargo test  --workspace --all-targets
 
