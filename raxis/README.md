@@ -581,6 +581,89 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 | [`configuring-witnesses.md`](configuring-witnesses.md) | `[[gates]]` TOML schema, `VerifierSpawnEnvelope` env vars, exit codes, resource caps |
 | [`kernel-feedback-flows.md`](kernel-feedback-flows.md) | Audit events, escalation notifications, gate outcomes, operator UDS socket protocol |
 
+### Multi-Environment Deployments (Recommended)
+
+> **Author's recommendation — Chika Jinanwa, RAXIS creator**
+
+The recommended approach for environment isolation (staging, production,
+etc.) is **one kernel per environment**:
+
+```
+staging-kernel (policy: permissive, staging creds)
+    └── staging sessions
+
+prod-kernel (policy: strict, prod creds)
+    └── prod sessions
+```
+
+Each kernel instance is fully self-contained via `--data-dir`: separate
+SQLite store, separate credential directory, separate policy bundle,
+separate audit chain, separate operator socket. A staging plan
+**literally cannot access production credentials** because they do not
+exist on that kernel's filesystem.
+
+```bash
+# Staging kernel — permissive policy, staging credentials
+raxis-kernel --data-dir /var/lib/raxis/staging
+
+# Production kernel — strict policy, production credentials
+raxis-kernel --data-dir /var/lib/raxis/prod
+```
+
+Target a specific kernel from the CLI:
+
+```bash
+raxis --socket /var/lib/raxis/staging/sockets/operator.sock status
+raxis --socket /var/lib/raxis/prod/sockets/operator.sock status
+```
+
+This requires **zero additional code** — every kernel resource (store,
+credentials, sockets, audit segments, heartbeat, images) is scoped to
+its data directory. Credential proxy ports are OS-assigned ephemeral
+ports, so multiple kernels on the same host never conflict.
+
+The one operational consideration is **host resource contention**: two
+kernels don't know about each other's VM count. Size each kernel's
+`max_concurrent_vms` policy to fit within the host's capacity, or run
+staging and production on separate hosts.
+
+**Note:** RAXIS fully supports managing multiple environments within a
+single kernel instance — the `environment` field on credentials,
+`[[environment_gates]]` in `policy.toml`, and admission-time coherence
+checks are all specified and enforced per
+[`environment-access-control.md`](specs/v2/environment-access-control.md).
+The recommendation for separate kernels is not a technical limitation
+but a **human-factors decision**: security failures in production
+systems most often originate at the human and configuration layer — a
+misnamed credential, a copy-pasted plan pointing at the wrong
+environment, a policy update that accidentally widens a gate. Separating
+concerns across kernel instances makes these mistakes structurally
+impossible rather than relying on operators to always get the
+configuration right under pressure.
+
+**Why this model.** Environment isolation is a credential-boundary
+problem: the strongest guarantee that staging code cannot touch
+production data is that production credentials do not exist in staging's
+trust domain. A separate kernel per environment achieves this through
+filesystem separation — the same mechanism the OS already enforces —
+rather than adding a new kernel-internal abstraction. The isolation
+property is verifiable by inspection (`ls /var/lib/raxis/staging/credentials/`
+shows no production files) and requires no kernel code changes, no
+schema additions, and no new invariants.
+
+**Alternatives considered and rejected:**
+
+| Alternative | Why rejected |
+|---|---|
+| **Single kernel with `environment` field on credentials** (Option B in [`environment-access-control.md`](specs/v2/environment-access-control.md)) | The kernel would need to enforce credential-environment coherence at admission time — a new check that must be bug-free to prevent cross-environment credential leakage. A single misconfigured credential name or a validator regression silently exposes production. With separate kernels, the failure mode is "credential not found" (hard fail), not "wrong credential served" (silent data breach). Option B is supported for operators who accept the trade-off, but it relies on **naming convention discipline** rather than **structural isolation**. |
+| **Namespace / tenant abstraction inside one kernel** | Adds a multi-tenant authority layer (tenant-scoped stores, per-tenant policy bundles, tenant-scoped audit chains) to a system whose security model assumes a single operator. The complexity cost is high: every store query gains a `WHERE tenant_id = ?` predicate, the audit chain must fork per tenant, and the policy bundle format needs a tenant hierarchy. All of this to avoid running a second process — which the OS already supports trivially. |
+| **Container-per-environment (Docker / Kubernetes)** | Viable, but adds orchestration complexity that most RAXIS deployments don't need. A RAXIS kernel is a single statically-linked binary with a SQLite database — it runs as a systemd unit or launchd service without a container runtime. Containerization is useful for fleet management at scale (10+ environments), not for the typical 2–3 environment split. Operators who want container isolation can still use it — `raxis-kernel` runs cleanly in a container with `--data-dir` pointed at a mounted volume — but it is not the recommended default. |
+| **Environment variable / runtime flag on a single kernel** (`raxis-kernel --env staging`) | Creates a false sense of isolation: the kernel process has access to all credential files on disk regardless of the `--env` flag, so a bug in the flag-checking code path silently exposes all environments. The `--data-dir` model is stronger because the kernel literally cannot `open()` a file that doesn't exist in its directory tree. |
+
+For formal per-environment enforcement within a single kernel (credential
+coherence checks, `[[environment_gates]]` in `policy.toml`), see
+[`specs/v2/environment-access-control.md`](specs/v2/environment-access-control.md).
+
 ### v1 Implementation Specifications
 
 > **Authority rule:** DDL in `kernel-store.md` wins over prose in `kernel-core.md` for representation details. FSM semantics in `kernel-core.md` win when `kernel-store.md` is silent. §2.5.8 in `kernel-store.md` supersedes any conflicting VCS prose in `kernel-core.md`.
