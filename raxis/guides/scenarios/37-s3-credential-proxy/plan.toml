@@ -1,8 +1,8 @@
-# Scenario 37 — S3 credential proxy.
+# Scenario 37 — AWS / S3 credential proxy.
 
 [workspace]
-name        = "S3 credential proxy"
-lane_id     = "s3-cred-lane"
+name        = "AWS credential proxy"
+lane_id     = "aws-cred-lane"
 
 [[tasks]]
 task_id            = "fetch-object"
@@ -11,12 +11,20 @@ clone_strategy     = "blobless"
 path_allowlist     = ["data/"]
 allowed_egress     = ["mybucket.s3.amazonaws.com:443"]
 context = """
-  Use the aws_main credential to GET
-  https://mybucket.s3.amazonaws.com/example.txt and save to
-  data/example.txt.
+  Use the aws_main credential (mounted as
+  AWS_CONTAINER_CREDENTIALS_FULL_URI) to GET
+  https://mybucket.s3.amazonaws.com/example.txt and write the
+  body to data/example.txt. Use boto3 / aws-sdk-rust / aws s3 cp
+  — they all dial the proxy automatically when the env var is
+  set, so the agent never needs to read a long-lived access key
+  pair.
 """
 
 [[tasks.credentials]]
-name           = "aws_main"
-kind           = "http_basic"
-egress_allowed = false
+name          = "aws_main"
+proxy_type    = "aws"
+mount_as      = "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+lease_seconds = 900
+
+[tasks.credentials.restrictions]
+allowed_paths = ["/creds"]

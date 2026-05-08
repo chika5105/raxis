@@ -6,11 +6,16 @@ The Executor connects to a PostgreSQL server through the credential
 proxy without ever seeing the actual password. Demonstrates the full
 credential proxy pipeline: declaration → wire-protocol → audit.
 
-> **Note (current state):** The Postgres proxy wire-protocol is in
-> progress. Until it lands, plans declaring
-> `kind = "postgres"` credentials are admitted but the proxy
-> rejects connections with `FAIL_PROXY_NOT_IMPLEMENTED`. The
-> declaration surface is complete.
+> **Note (V2 status):** The Postgres proxy is implemented as a
+> handshake-tier MVP. The agent sees a real Postgres
+> handshake reach `ReadyForQuery`, simple-query `SELECT`
+> statements return `CommandComplete`, and `INSERT` /
+> `UPDATE` / `DELETE` are blocked with sqlstate `42501`
+> when `allow_only_select = true`. Real upstream forwarding
+> (so the agent can actually round-trip rows from a live
+> `postgres:16` instance) is the V3 patch; until it lands,
+> the proxy synthesises `CommandComplete` for every allowed
+> statement so the wire path is observable end-to-end.
 
 ---
 
