@@ -129,9 +129,68 @@ connecting to a real upstream database.
 | Postgres | `TcpStream::connect`, relay `DataRow`/`CommandComplete` | ~200 |
 | MySQL | Connect, relay `ResultSetHeader` + `ColumnDef` + `Row` + `EOF` | ~250 |
 | MSSQL | Connect, relay `COLMETADATA` + `ROW` + `DONE` tokens | ~250 |
-| MongoDB | Connect, relay `OP_MSG` response bodies | ~150 |
+| MongoDB | Connect, relay `OP_MSG` response bodies + **SCRAM auth** | ~300 |
 | Redis | Connect, relay RESP2 responses | ~150 |
 | SMTP | Connect, relay multi-line SMTP responses, `STARTTLS` | ~200 |
+
+**Per-proxy upstream auth status:**
+
+| Proxy | Agent-side auth (accept dummy creds) | Upstream auth (real creds to DB) | Auth method | Notes |
+|---|---|---|---|---|
+| **Postgres** | ✅ `AuthenticationOk` (accepts anything) | ✅ via `tokio-postgres` | SCRAM-SHA-256, MD5, cleartext, trust | **Fully implemented** in `upstream.rs`. The only proxy with real upstream auth today. |
+| **Redis** | ✅ Intercepts `AUTH` command | ✅ Sends real `AUTH <password>` upstream | `AUTH <password>` (RESP2) | Working. Missing: ACL-form `AUTH user password` (~30 lines, V2 Phase 2), TLS to upstream (~40 lines, V2 Phase 2 — required by Elasticache/Memorystore/Azure Cache). |
+| **SMTP** | ✅ Accepts `AUTH PLAIN`/`AUTH LOGIN` | ✅ Sends real `AUTH PLAIN` upstream | `AUTH PLAIN` over STARTTLS | Working. Missing: `AUTH SCRAM-SHA-256` (rare for SMTP). |
+| **MySQL** | ✅ `mysql_native_password` handshake | ❌ Synthesizes responses | Would use `mysql_async` | Handshake code exists; upstream connect deferred. Missing: `caching_sha2_password` (MySQL 8.0 default). |
+| **MSSQL** | ✅ PRELOGIN + LOGINACK | ❌ Synthesizes responses | Would use `tiberius` | Handshake code exists; upstream connect deferred. |
+| **MongoDB** | ⚠️ **No auth at all** | ❌ Synthesizes responses | Would need SCRAM-SHA-256 | **Critical gap.** The proxy advertises empty `saslSupportedMechs` so drivers skip auth. Any MongoDB deployment with auth enabled (i.e., all production deployments) will reject connections. SCRAM-SHA-256 requires PBKDF2 + HMAC state machine (~150 lines). |
+
+**MongoDB auth gap detail:** The proxy's `hello` response sets
+`saslSupportedMechs: []` to prevent drivers from attempting auth.
+This works for unauthenticated local dev databases but fails against
+any Atlas, DocumentDB, or self-hosted MongoDB with `--auth` enabled.
+The upstream module (`upstream.rs`) exists but contains only the
+`ForwardOutcome` types — no connection or auth code. The SCRAM
+handshake for MongoDB is a 4-message SASL exchange:
+`SASLStart → ServerFirst → SASLContinue → ServerFinal`. Estimate:
+~150 lines for SCRAM + ~150 lines for upstream relay = ~300 total
+(revised up from ~150).
+
+**Cloud proxy restriction gaps:**
+
+The spec (`credential-proxy.md §3.2–3.4`) defines richer
+restrictions than the code implements. The current code only enforces
+**path-level allowlists** (`allowed_paths` for AWS/GCP,
+`allowed_resources` for Azure). The spec envisions service-level,
+action-level, and region-level confinement:
+
+| Cloud | Restriction | Spec'd | Implemented | Impact if missing |
+|---|---|---|---|---|
+| **AWS** | `allowed_services` (e.g., `["s3", "sqs"]`) | ✅ §3.2 | ❌ | Agent with S3 credentials can call EC2, IAM, Lambda — full account access |
+| **AWS** | `allowed_regions` (e.g., `["us-east-1"]`) | ✅ §3.2 | ❌ | Agent can provision resources in any region |
+| **AWS** | `role_arn` scoping (STS AssumeRole) | ✅ §3.2 | 🟡 In plan schema | Role ARN is declared but proxy doesn't call STS yet |
+| **GCP** | `allowed_scopes` (OAuth scope restriction) | ✅ §3.3 | ❌ | Agent gets a token with all scopes the service account has |
+| **GCP** | Project-level pinning | ✅ §3.3 | 🟡 In plan schema | `project` is declared but not enforced at the proxy |
+| **Azure** | Per-resource action filtering | ✅ §3.4 | ❌ | `allowed_resources` controls which service but not which operations |
+
+These restrictions require the proxy to **inspect request
+signatures** (AWS SigV4 headers contain the service and region) or
+**scope the token** (GCP/Azure token endpoints accept scope
+parameters). This is distinct from the upstream forwarding gap
+(B3) — it's about restricting *what the token allows*, not
+*whether the proxy connects upstream*.
+
+**`CredentialBackend` trait update required:** The
+`CredentialBackend::resolve()` method currently returns a single
+opaque `CredentialValue`. For cloud proxies with STS/token-exchange,
+the resolved value must include metadata:
+
+- AWS: `role_arn`, `external_id`, `session_duration`
+- GCP: `scopes`, `target_audience` (for identity tokens)
+- Azure: `client_id`, `tenant_id`, `resource`
+
+The `extensibility-traits.md §4` spec for `CredentialBackend` must
+be updated to reflect these structured return types. See §12.10 for
+the full list of spec files affected.
 
 ---
 
@@ -524,6 +583,8 @@ The proxy:
 | 8 | **C4** — Notification channels | 500 | Escalations are silent without this |
 | 9 | **D2** — Host capacity management | 500 | Multi-session safety |
 | 10 | **C7** — Credential CLI (`add`/`remove`) | 400 | Operator onboarding friction |
+| 11 | Redis ACL-form `AUTH user password` | 30 | Redis ≥ 6.0 with named users; requires `CredentialBackend` to return username + password |
+| 12 | Redis TLS-to-upstream | 40 | Required by Elasticache, Memorystore, Azure Cache; `tokio-rustls` already in deps |
 
 ### Phase 3: GA polish (~2,800 lines)
 
@@ -867,3 +928,26 @@ The invariant codifies the existing ceiling/policy-only/plan-only
 pattern and extends it to cover the three missing categories
 (floors, defaults-with-override, locked fields) needed for
 `target_ref` and future configurable fields.
+
+### 12.10 Spec files requiring updates for proxy auth changes
+
+Several V2 gaps (MongoDB SCRAM auth, Redis ACL-form AUTH, Redis
+TLS-to-upstream, MySQL `caching_sha2_password`) require changes to
+the `CredentialBackend` trait and the credential declaration schema.
+When these land, the following spec files must be updated in the
+same PR to maintain spec-graph consistency:
+
+| Spec file | What changes |
+|---|---|
+| `credential-proxy.md §14` | Add per-proxy auth method documentation; update the upstream forwarding contract to cover SCRAM/ACL/TLS |
+| `credential-proxy.md §12` | Update `raxis credential add` schema to accept `username` field for Redis ACL, `tls = true` for Redis/MySQL TLS |
+| `extensibility-traits.md §4` | `CredentialBackend::resolve()` return type must carry optional `username` alongside the credential value |
+| `policy-plan-authority.md` | Add `upstream_tls` and `auth_method` to proxy declaration validation rules |
+| `audit-paired-writes.md §4` | Classify new audit events (`RedisUpstreamTlsNegotiated`, `MongoScramAuthCompleted`) as paired or single |
+
+**Why this matters:** The spec-graph lint (`cargo xtask spec-graph
+--strict`) will catch dangling section references, but it cannot
+detect when a spec's prose description no longer matches the code's
+behavior. Maintaining the spec files alongside the code prevents
+silent spec drift — the same problem `INV-PLAN-POLICY-PRECEDENCE-01`
+prevents for policy-vs-plan configuration.

@@ -173,6 +173,20 @@ pub enum ManagerError {
         credential_name: String,
     },
 
+    /// Two credentials in the same task declared the same `mount_as`
+    /// env-var name. The second would silently overwrite the first
+    /// in `loopback_env()`, leaving one proxy unreachable. Fail
+    /// closed at session start instead.
+    #[error("duplicate mount_as `{mount_as}`: credentials `{first}` and `{second}` collide")]
+    DuplicateMountAs {
+        /// The colliding env-var name.
+        mount_as: String,
+        /// Credential name of the first declaration.
+        first:    String,
+        /// Credential name of the second declaration.
+        second:   String,
+    },
+
     /// A `K8s` declaration named a credential whose body could not
     /// be resolved into a kubeconfig with a `cluster.server` URL.
     /// Either the credential resolution failed, the body was not
@@ -1008,6 +1022,103 @@ impl MssqlAuditChannel for MssqlKernelAuditAdapter {
                     );
                 }
             }
+            // V2.1 upstream-forwarding events. See
+            // `credential-proxy.md §14.5`.
+            MssqlAuditEvent::DatabaseQueryCompleted {
+                credential,
+                sql_sha256,
+                rows_returned,
+                bytes_returned,
+                duration_ms,
+                upstream_error,
+                ..
+            } => {
+                let kind = AuditEventKind::DatabaseQueryCompleted {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type:      "mssql".to_owned(),
+                    sql_sha256,
+                    rows_returned,
+                    bytes_returned,
+                    duration_ms,
+                    upstream_error,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "DatabaseQueryCompleted (mssql) audit emit failed",
+                    );
+                }
+            }
+            MssqlAuditEvent::CredentialProxyUpstreamConnected {
+                credential,
+                upstream_host,
+                upstream_port,
+                tls,
+                handshake_ms,
+                ..
+            } => {
+                let kind = AuditEventKind::CredentialProxyUpstreamConnected {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type:      "mssql".to_owned(),
+                    upstream_host,
+                    upstream_port,
+                    tls,
+                    handshake_ms,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "CredentialProxyUpstreamConnected (mssql) audit emit failed",
+                    );
+                }
+            }
+            MssqlAuditEvent::CredentialProxyUpstreamFailed {
+                credential,
+                upstream_host,
+                upstream_port,
+                reason,
+                detail,
+                ..
+            } => {
+                let kind = AuditEventKind::CredentialProxyUpstreamFailed {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    proxy_type:      "mssql".to_owned(),
+                    upstream_host,
+                    upstream_port,
+                    reason,
+                    detail,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "CredentialProxyUpstreamFailed (mssql) audit emit failed",
+                    );
+                }
+            }
         }
     }
 }
@@ -1337,7 +1448,11 @@ pub struct StartedProxy {
     /// Policy-declared credential name (never the value).
     pub credential_name: String,
     /// `mount_as` env-var name from the plan TOML
-    /// (e.g. `DATABASE_URL`, `KUBECONFIG`).
+    /// (e.g. `DATABASE_URL`, `KUBECONFIG`). When a task declares
+    /// multiple credentials of the same proxy type (e.g. two
+    /// Postgres databases), each MUST have a distinct `mount_as`
+    /// value — use explicit names like `USERS_DATABASE_URL` and
+    /// `ANALYTICS_DATABASE_URL` rather than a generic `DATABASE_URL`.
     pub mount_as: String,
     /// Loopback address the listener is bound to.
     pub addr: SocketAddr,
@@ -1404,7 +1519,14 @@ impl SessionProxyHandles {
     /// Mapping from `mount_as` env-var name → loopback URL string
     /// the agent's environment should bind to. The kernel
     /// session-spawn path consumes this to fill `env: {
-    /// DATABASE_URL: ..., ... }` in the VM spec.
+    /// USERS_DATABASE_URL: ..., ANALYTICS_DATABASE_URL: ..., ... }`
+    /// in the VM spec.
+    ///
+    /// Each credential's `mount_as` field is the map key. When a
+    /// task has multiple credentials of the same proxy type, the
+    /// operator MUST choose distinct `mount_as` names — a generic
+    /// `DATABASE_URL` is ambiguous and should only be used when
+    /// exactly one database credential is declared.
     ///
     /// The URL shape is per-proxy: postgres proxies emit
     /// `postgresql://raxis@<host>:<port>/`, HTTP/k8s proxies emit
@@ -1533,6 +1655,26 @@ impl CredentialProxyManager {
         task_id:    &str,
         decls:      &[TaskCredentialDecl],
     ) -> Result<SessionProxyHandles, ManagerError> {
+        // ── Defense-in-depth: mount_as uniqueness ────────────────────
+        // The primary check is in `parse_for_task()` at plan
+        // admission (shift-left). This backstop should never fire
+        // in practice — if it does, the admission pipeline has a
+        // bug. Kept as a fail-closed guard because silently
+        // overwriting env vars is a correctness violation.
+        {
+            let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+            for decl in decls {
+                if let Some(first_cred) = seen.get(decl.mount_as.as_str()) {
+                    return Err(ManagerError::DuplicateMountAs {
+                        mount_as: decl.mount_as.clone(),
+                        first:    first_cred.to_string(),
+                        second:   decl.name.as_str().to_owned(),
+                    });
+                }
+                seen.insert(&decl.mount_as, decl.name.as_str());
+            }
+        }
+
         let mut proxies = Vec::with_capacity(decls.len());
 
         for decl in decls {

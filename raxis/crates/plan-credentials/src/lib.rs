@@ -51,8 +51,18 @@ pub struct TaskCredentialDecl {
     /// time. NEVER the value.
     pub name:       CredentialName,
     /// Environment variable name the agent VM gets injected with;
-    /// the value is the loopback URL the kernel-bound proxy listens
-    /// on (e.g. `DATABASE_URL`, `KUBECONFIG`, `STRIPE_API_KEY`).
+    /// the value is the proxy's loopback URL (e.g.
+    /// `postgresql://raxis@127.0.0.1:54321/` for Postgres,
+    /// `http://127.0.0.1:54322` for HTTP proxies). The actual
+    /// credential value is never exposed — only the proxy address.
+    ///
+    /// When a task declares multiple credentials of the same proxy
+    /// type (e.g. two Postgres databases), each MUST have a distinct
+    /// `mount_as` name. Use explicit, descriptive names:
+    ///   - `USERS_DATABASE_URL` / `ANALYTICS_DATABASE_URL` (not `DATABASE_URL`)
+    ///   - `CACHE_REDIS_URL` / `QUEUE_REDIS_URL` (not `REDIS_URL`)
+    /// A generic name like `DATABASE_URL` is only appropriate when
+    /// exactly one credential of that type is declared.
     pub mount_as:   String,
     /// Concrete proxy shape — determines which proxy implementation
     /// the kernel binds for this credential.
@@ -495,6 +505,22 @@ pub enum ParseError {
         /// Free-form diagnostic.
         detail:  String,
     },
+    /// Two `[[tasks.credentials]]` entries in the same task declare
+    /// the same `mount_as` env-var name. The second would overwrite
+    /// the first in the agent's environment, silently making one
+    /// proxy unreachable. Caught at plan admission (shift-left) so
+    /// the operator gets an immediate, actionable diagnostic.
+    #[error("task {task_id:?}: duplicate mount_as `{mount_as}` on credentials `{first}` and `{second}`")]
+    DuplicateMountAs {
+        /// Owning task id.
+        task_id:  String,
+        /// The colliding env-var name.
+        mount_as: String,
+        /// Credential name of the first declaration.
+        first:    String,
+        /// Credential name of the second declaration.
+        second:   String,
+    },
     /// The TOML value carrying the task block is not actually a table.
     #[error("[[tasks]] entry is not a table")]
     TaskNotTable,
@@ -541,6 +567,27 @@ pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl
         })?;
         out.push(parsed);
     }
+
+    // ── Shift-left: validate mount_as uniqueness at parse time ────
+    // Duplicate mount_as values would silently overwrite each other
+    // in the agent's env. Catch it here at plan admission so the
+    // operator gets an immediate diagnostic, not a mysterious
+    // "proxy unreachable" at session runtime.
+    {
+        let mut seen = std::collections::BTreeMap::<&str, &str>::new();
+        for decl in &out {
+            if let Some(&first_name) = seen.get(decl.mount_as.as_str()) {
+                return Err(ParseError::DuplicateMountAs {
+                    task_id:  task_id.clone(),
+                    mount_as: decl.mount_as.clone(),
+                    first:    first_name.to_owned(),
+                    second:   decl.name.as_str().to_owned(),
+                });
+            }
+            seen.insert(&decl.mount_as, decl.name.as_str());
+        }
+    }
+
     Ok(out)
 }
 
@@ -1218,5 +1265,83 @@ mod tests {
         assert_eq!(decls.len(), 2);
         assert!(matches!(decls[0].proxy, ProxyDecl::Postgres { .. }));
         assert!(matches!(decls[1].proxy, ProxyDecl::K8s     { .. }));
+    }
+
+    // ── mount_as uniqueness tests ────────────────────────────────────
+
+    #[test]
+    fn duplicate_mount_as_rejected_at_parse_time() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name       = "users-db"
+              proxy_type = "postgres"
+              mount_as   = "DATABASE_URL"
+
+              [[tasks.credentials]]
+              name       = "analytics-db"
+              proxy_type = "postgres"
+              mount_as   = "DATABASE_URL"
+        "#;
+        let err = parse(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate mount_as"),
+            "expected DuplicateMountAs error, got: {msg}"
+        );
+        assert!(msg.contains("DATABASE_URL"), "error should name the colliding env var: {msg}");
+        assert!(msg.contains("users-db"), "error should name the first credential: {msg}");
+        assert!(msg.contains("analytics-db"), "error should name the second credential: {msg}");
+    }
+
+    #[test]
+    fn distinct_mount_as_across_same_proxy_type_is_valid() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name       = "users-db"
+              proxy_type = "postgres"
+              mount_as   = "USERS_DATABASE_URL"
+
+              [[tasks.credentials]]
+              name       = "analytics-db"
+              proxy_type = "postgres"
+              mount_as   = "ANALYTICS_DATABASE_URL"
+        "#;
+        let decls = parse(toml).unwrap();
+        assert_eq!(decls.len(), 2);
+        assert_eq!(decls[0].mount_as, "USERS_DATABASE_URL");
+        assert_eq!(decls[1].mount_as, "ANALYTICS_DATABASE_URL");
+    }
+
+    #[test]
+    fn duplicate_mount_as_across_different_proxy_types_rejected() {
+        // Even if proxy types differ, the env-var collision is the
+        // same problem — the agent's environment can only hold one
+        // value per key.
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name       = "prod-db"
+              proxy_type = "postgres"
+              mount_as   = "SERVICE_URL"
+
+              [[tasks.credentials]]
+              name       = "cache"
+              proxy_type = "redis"
+              upstream_host_port = "redis:6379"
+              mount_as   = "SERVICE_URL"
+        "#;
+        let err = parse(toml).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate mount_as"),
+            "cross-type collision should still be caught: {err}"
+        );
     }
 }
