@@ -102,7 +102,13 @@ class RaxisKernel < Formula
     # compiled-in trust anchor + per-role digest. Failure here
     # aborts the install rather than letting an unverifiable
     # binary land on PATH (release-and-distribution.md §9.2).
-    system bin/"raxis-cli", "doctor", "canonical-images"
+    #
+    # We pass --install-dir explicitly rather than relying on
+    # $RAXIS_INSTALL_DIR so the post_install verification is
+    # independent of any operator-set env var that might already
+    # point at a different directory on this machine.
+    system bin/"raxis-cli", "doctor", "canonical-images",
+                            "--install-dir", pkgshare.to_s
     system bin/"raxis-cli", "doctor", "signing-key-fp"
   end
 

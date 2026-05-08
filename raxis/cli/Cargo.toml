@@ -45,6 +45,12 @@ raxis-audit-tools    = { workspace = true }
 # kernel IPC. The CLI never opens the operator socket for these ops.
 raxis-credentials      = { workspace = true }
 raxis-credentials-file = { workspace = true }
+# `raxis doctor signing-key-fp` and `raxis doctor canonical-images`
+# (release-and-distribution.md §9.2) consume the kernel-pinned trust
+# anchor and the per-role canonical-image verification entry points
+# from this crate. The CLI does not write anything; it only renders
+# the post-install verification result.
+raxis-canonical-images = { workspace = true }
 
 serde        = { workspace = true }
 serde_json   = { workspace = true }

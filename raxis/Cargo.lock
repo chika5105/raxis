@@ -2800,6 +2800,7 @@ dependencies = [
  "hex",
  "libc",
  "raxis-audit-tools",
+ "raxis-canonical-images",
  "raxis-credentials",
  "raxis-credentials-file",
  "raxis-crypto",

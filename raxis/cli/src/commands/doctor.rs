@@ -53,11 +53,39 @@
 //!    Plus `WARN` for any operator entry with
 //!    `force_misconfig_bypass = true` so the operator is reminded
 //!    they have an audited structural override active.
+//!
+//! # Distribution-specific subcommands
+//!
+//! Two additional subcommands are dispatched by name as the first
+//! positional argument; both are referenced by the Homebrew formula's
+//! `post_install` block (`release-and-distribution.md §9.2`):
+//!
+//! * `raxis doctor signing-key-fp` — print the kernel binary's
+//!   compiled-in trust-anchor fingerprint
+//!   (`EXPECTED_KERNEL_SIGNING_KEY_BYTES`). Exit code 0 when a real
+//!   key is baked in; 1 with a loud warning when the binary is in
+//!   the all-zero placeholder state. Useful for confirming a
+//!   notarized release binary actually has a kernel signing key
+//!   compiled in (vs. a `cargo build` of unsigned source which
+//!   would have all zeros).
+//! * `raxis doctor canonical-images` — for the kernel-version-
+//!   matched Reviewer + Orchestrator + Executor-starter canonical
+//!   images under `<install_dir>/images/`, verify each one against
+//!   the kernel's compiled-in trust anchor + signed sibling
+//!   manifest. Exit code 0 when every image verifies. The formula's
+//!   `post_install` aborts the install on failure (§9.2). The
+//!   `--install-dir` flag accepts an explicit override; default is
+//!   `$RAXIS_INSTALL_DIR` env var, falling back to
+//!   `/usr/local/lib/raxis`.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use raxis_audit_tools::{quick_chain_check, ChainQuickCheck};
+use raxis_canonical_images::{
+    compute_signing_key_fp, manifest_path_for_image, verify_canonical_image_via_manifest,
+    CanonicalImageError, CanonicalImageKind, EXPECTED_KERNEL_SIGNING_KEY_BYTES,
+};
 use raxis_crypto::cert::{cert_status, CertStatus};
 use raxis_policy::load_policy;
 use raxis_runtime::{read as read_heartbeat, ReadError as HeartbeatReadError};
@@ -68,6 +96,12 @@ use raxis_types::unix_now_secs;
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
+
+/// Default install dir when `--install-dir` and `RAXIS_INSTALL_DIR`
+/// are both unset. Pinned by `system-requirements.md §1` install-
+/// dir layout; matches what the Homebrew formula deposits via
+/// `share/raxis/`.
+const DEFAULT_INSTALL_DIR: &str = "/usr/local/lib/raxis";
 
 const POLICY_FILE_NAME: &str = "policy.toml";
 const AUDIT_DIR_NAME:   &str = "audit";
@@ -148,9 +182,18 @@ impl Report {
 // ────────────────────────────────────────────────────────────────────
 
 pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let opts = parse_args(args)?;
-    let data_dir = flags.data_dir().clone();
+    let parsed = parse_args(args)?;
+    match parsed.subcommand {
+        Subcommand::Default => run_default(flags, parsed.opts),
+        Subcommand::SigningKeyFp => run_signing_key_fp(parsed.opts),
+        Subcommand::CanonicalImages { install_dir } => {
+            run_canonical_images(parsed.opts, install_dir)
+        }
+    }
+}
 
+fn run_default(flags: &GlobalFlags, opts: DoctorOpts) -> Result<(), CliError> {
+    let data_dir = flags.data_dir().clone();
     let report = collect(&data_dir);
 
     let stdout = std::io::stdout();
@@ -164,6 +207,239 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     std::process::exit(report.exit_code());
 }
 
+/// `raxis doctor signing-key-fp` — print the kernel binary's
+/// compiled-in trust-anchor fingerprint.
+///
+/// Exit code:
+///   * 0 — a real (non-placeholder) key is baked in.
+///   * 1 — the binary was built without `RAXIS_KERNEL_SIGNING_KEY_HEX`
+///         (or the matching bytes path) set; surfaced loudly so an
+///         operator who installed an unsigned `cargo build` knows
+///         their kernel cannot verify any image manifest.
+///
+/// The compiled-in `EXPECTED_KERNEL_SIGNING_KEY_BYTES` constant is
+/// the public half of the kernel signing keypair; this command is
+/// therefore safe to run on any host, the output reveals nothing
+/// secret. Pinned by `release-and-distribution.md §9.2`.
+fn run_signing_key_fp(opts: DoctorOpts) -> Result<(), CliError> {
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    let bytes = EXPECTED_KERNEL_SIGNING_KEY_BYTES;
+    let is_placeholder = bytes == [0u8; 32];
+    let fp = compute_signing_key_fp();
+    let fp_hex = hex::encode(fp);
+
+    if opts.json {
+        let v = serde_json::json!({
+            "signing_key_fingerprint":  fp_hex,
+            "trust_anchor_populated":   !is_placeholder,
+        });
+        let _ = serde_json::to_writer(&mut out, &v);
+        let _ = writeln!(out);
+    } else if is_placeholder {
+        let _ = writeln!(
+            out,
+            "raxis doctor — signing key fingerprint\n  \
+             FAIL: trust anchor is the all-zero placeholder.\n  \
+             This kernel binary was built without RAXIS_KERNEL_SIGNING_KEY_HEX\n  \
+             (or RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH) set. It cannot verify\n  \
+             any signed canonical-image manifest. See\n  \
+             raxis/specs/v2/release-and-distribution.md §7 (production)\n  \
+             or §8 (local-build) for the populating recipe."
+        );
+    } else {
+        let _ = writeln!(out, "raxis doctor — signing key fingerprint");
+        let _ = writeln!(out, "  signing key fingerprint: {fp_hex}");
+        let _ = writeln!(out, "  trust anchor: populated");
+    }
+    let _ = out.flush();
+    if is_placeholder {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `raxis doctor canonical-images` — verify every shipped canonical
+/// image against the kernel's compile-time trust anchor.
+///
+/// Walks Reviewer, Orchestrator, and Executor-starter (when
+/// present) under `<install_dir>/images/`. Each verification calls
+/// the same entry point the kernel boot path uses
+/// (`verify_canonical_image_via_manifest`), so this command's verdict
+/// matches what the kernel itself will see at boot — if doctor says
+/// OK, the kernel will boot OK; if doctor says FAIL, the kernel
+/// would refuse to spawn the matching role's VMs.
+///
+/// Exit code:
+///   * 0 — every present image verifies.
+///   * 1 — at least one image is missing on disk (Warn). Doctor
+///         does NOT distinguish "not yet installed" from "deleted",
+///         so the formula's `post_install` treats this as
+///         non-fatal but still surfaces it.
+///   * 2 — at least one image's manifest signature failed, the
+///         streamed SHA-256 disagreed with the manifest's signed
+///         digest, or the trust anchor is unpopulated. The formula's
+///         `post_install` aborts the install in this case.
+fn run_canonical_images(opts: DoctorOpts, install_dir: PathBuf) -> Result<(), CliError> {
+    let kernel_version = env!("CARGO_PKG_VERSION");
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+
+    // We verify the two kernel-canonical image roles
+    // (`INV-PLANNER-HARNESS-02` Reviewer and `-05` Orchestrator).
+    //
+    // The Executor-starter image (`v2-deep-spec.md §Canonical
+    // Images`) ships in the same install dir but is intentionally
+    // NOT a CanonicalImageKind: operators may replace it with
+    // their own `[[vm_images]]` entries, so a "missing executor-
+    // starter" is not a doctor-actionable failure. We surface its
+    // presence/absence as an informational Warn-or-Ok at the end,
+    // without invoking the kernel-trust path.
+    let images = [
+        (CanonicalImageKind::Reviewer,     "raxis-reviewer-core"),
+        (CanonicalImageKind::Orchestrator, "raxis-orchestrator-core"),
+    ];
+
+    let mut report = Report::default();
+    let images_dir = install_dir.join("images");
+    if !images_dir.exists() {
+        report.push(
+            "canonical_images.dir",
+            Outcome::Fail,
+            format!(
+                "{} does not exist — install dir is missing the canonical-image \
+                 layout entirely (see system-requirements.md §1)",
+                images_dir.display(),
+            ),
+        );
+    } else {
+        report.push("canonical_images.dir", Outcome::Ok, format!("{}", images_dir.display()));
+
+        for (kind, file_prefix) in images {
+            let image_path = images_dir.join(format!("{file_prefix}-{kernel_version}.img"));
+            verify_one(&mut report, kind, &image_path, kernel_version);
+        }
+
+        // Executor-starter informational row.
+        let exec_path = images_dir.join(format!("raxis-executor-starter-{kernel_version}.img"));
+        if exec_path.exists() {
+            report.push(
+                "canonical_images.executor_starter.exists",
+                Outcome::Ok,
+                format!("{} present (operator-replaceable; not kernel-trust-verified here)",
+                    exec_path.display()),
+            );
+        } else {
+            report.push(
+                "canonical_images.executor_starter.exists",
+                Outcome::Warn,
+                format!(
+                    "{} not present (V2 GA opt-in image; OK if operator brings their own)",
+                    exec_path.display(),
+                ),
+            );
+        }
+    }
+
+    if opts.json {
+        render_json(&mut out, &install_dir, &report);
+    } else {
+        render_canonical_images_human(&mut out, &install_dir, kernel_version, &report);
+    }
+    let _ = out.flush();
+    std::process::exit(report.exit_code());
+}
+
+fn verify_one(
+    report:         &mut Report,
+    kind:           CanonicalImageKind,
+    image_path:     &Path,
+    kernel_version: &str,
+) {
+    let id_exists = leak_subdir_id_owned(format!("canonical_images.{}.exists", kind_tag(kind)));
+    let id_verify = leak_subdir_id_owned(format!("canonical_images.{}.verify", kind_tag(kind)));
+
+    if !image_path.exists() {
+        report.push(
+            id_exists,
+            Outcome::Fail,
+            format!("{} not present", image_path.display()),
+        );
+        return;
+    }
+    report.push(id_exists, Outcome::Ok, format!("{}", image_path.display()));
+
+    let manifest_path = manifest_path_for_image(image_path);
+    if !manifest_path.exists() {
+        report.push(
+            id_verify,
+            Outcome::Fail,
+            format!(
+                "manifest missing at {} — image cannot be verified",
+                manifest_path.display(),
+            ),
+        );
+        return;
+    }
+
+    match verify_canonical_image_via_manifest(image_path, &manifest_path, kind, kernel_version) {
+        Ok(()) => {
+            report.push(
+                id_verify,
+                Outcome::Ok,
+                format!("manifest signature + image digest verify against trust anchor"),
+            );
+        }
+        Err(CanonicalImageError::SigningKeyFpNotPopulated) => {
+            report.push(
+                id_verify,
+                Outcome::Fail,
+                "trust anchor is the all-zero placeholder; this kernel binary \
+                 was built without RAXIS_KERNEL_SIGNING_KEY_HEX set (see \
+                 release-and-distribution.md §7 / §8)"
+                    .to_string(),
+            );
+        }
+        Err(e) => {
+            report.push(id_verify, Outcome::Fail, format!("{e}"));
+        }
+    }
+}
+
+fn kind_tag(kind: CanonicalImageKind) -> &'static str {
+    match kind {
+        CanonicalImageKind::Reviewer     => "reviewer",
+        CanonicalImageKind::Orchestrator => "orchestrator",
+    }
+}
+
+fn leak_subdir_id_owned(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+fn render_canonical_images_human<W: Write>(
+    out:            &mut W,
+    install_dir:    &Path,
+    kernel_version: &str,
+    report:         &Report,
+) {
+    let _ = writeln!(out, "raxis doctor — canonical images");
+    let _ = writeln!(out, "  install_dir:    {}", install_dir.display());
+    let _ = writeln!(out, "  kernel_version: {kernel_version}");
+    let _ = writeln!(out, "  worst:          {}", report.worst().label());
+    let _ = writeln!(out);
+    for c in &report.checks {
+        let _ = writeln!(
+            out,
+            "  [{lvl:<4}] {id:<48} {detail}",
+            lvl    = c.outcome.label(),
+            id     = c.id,
+            detail = c.detail,
+        );
+    }
+}
+
 // ────────────────────────────────────────────────────────────────────
 // Argument parsing
 // ────────────────────────────────────────────────────────────────────
@@ -173,7 +449,66 @@ struct DoctorOpts {
     json: bool,
 }
 
-fn parse_args(args: &[String]) -> Result<DoctorOpts, CliError> {
+#[derive(Debug, Clone)]
+enum Subcommand {
+    /// `raxis doctor` — full data-dir preflight (the existing
+    /// pre-V2 entry point).
+    Default,
+    /// `raxis doctor signing-key-fp` — print the kernel binary's
+    /// compiled-in trust-anchor fingerprint.
+    SigningKeyFp,
+    /// `raxis doctor canonical-images` — verify shipped canonical
+    /// images under `<install_dir>/images/`.
+    CanonicalImages {
+        install_dir: PathBuf,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct ParsedArgs {
+    subcommand: Subcommand,
+    opts:       DoctorOpts,
+}
+
+fn parse_args(args: &[String]) -> Result<ParsedArgs, CliError> {
+    // First non-flag arg, if any, is the subcommand selector. The
+    // remaining args are subcommand-specific.
+    let (subcmd_pos, subcmd_name): (Option<usize>, Option<&str>) = args
+        .iter()
+        .enumerate()
+        .find(|(_, a)| !a.starts_with('-'))
+        .map(|(i, a)| (Some(i), Some(a.as_str())))
+        .unwrap_or((None, None));
+
+    match subcmd_name {
+        None => {
+            let opts = parse_default_flags(args)?;
+            Ok(ParsedArgs { subcommand: Subcommand::Default, opts })
+        }
+        Some("signing-key-fp") => {
+            let mut tail = args.to_vec();
+            tail.remove(subcmd_pos.unwrap());
+            let opts = parse_default_flags(&tail)?;
+            Ok(ParsedArgs { subcommand: Subcommand::SigningKeyFp, opts })
+        }
+        Some("canonical-images") => {
+            let mut tail = args.to_vec();
+            tail.remove(subcmd_pos.unwrap());
+            let (opts, install_dir) = parse_canonical_images_flags(&tail)?;
+            Ok(ParsedArgs {
+                subcommand: Subcommand::CanonicalImages { install_dir },
+                opts,
+            })
+        }
+        Some(other) => Err(CliError::Usage(format!(
+            "unknown doctor subcommand: {other:?} \
+             (available: signing-key-fp, canonical-images; or run `raxis doctor` \
+             with no subcommand for the full data-dir preflight)"
+        ))),
+    }
+}
+
+fn parse_default_flags(args: &[String]) -> Result<DoctorOpts, CliError> {
     let mut opts = DoctorOpts::default();
     let mut i = 0;
     while i < args.len() {
@@ -194,21 +529,65 @@ fn parse_args(args: &[String]) -> Result<DoctorOpts, CliError> {
     Ok(opts)
 }
 
+fn parse_canonical_images_flags(args: &[String]) -> Result<(DoctorOpts, PathBuf), CliError> {
+    let mut opts        = DoctorOpts::default();
+    let mut install_dir: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => opts.json = true,
+            "-h" | "--help" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "--install-dir" => {
+                let v = args.get(i + 1).ok_or_else(|| CliError::Usage(
+                    "missing value for --install-dir".to_owned(),
+                ))?;
+                if v.is_empty() {
+                    return Err(CliError::Usage("--install-dir cannot be empty".to_owned()));
+                }
+                install_dir = Some(PathBuf::from(v));
+                i += 1;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown doctor canonical-images flag: {other:?} \
+                     (try --install-dir <PATH>, --json, or --help)"
+                )));
+            }
+        }
+        i += 1;
+    }
+
+    // Resolve install dir: --install-dir > $RAXIS_INSTALL_DIR > default.
+    let install_dir = install_dir.or_else(|| {
+        std::env::var("RAXIS_INSTALL_DIR").ok().map(PathBuf::from)
+    }).unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_DIR));
+
+    Ok((opts, install_dir))
+}
+
 fn print_help() {
     println!(
-        "raxis doctor — preflight checks against <data_dir>\n\
+        "raxis doctor — preflight + post-install verification\n\
          \n\
          USAGE:\n\
-         \traxis doctor [--json]\n\
+         \traxis doctor [--json]                                  # full data-dir preflight\n\
+         \traxis doctor signing-key-fp [--json]                   # print kernel trust anchor\n\
+         \traxis doctor canonical-images [--install-dir P] [--json]\n\
          \n\
          FLAGS:\n\
-         \t--json    Emit one JSON object instead of a human report.\n\
+         \t--json                   Emit one JSON object instead of a human report.\n\
+         \t--install-dir <PATH>     (canonical-images) Override install dir; defaults\n\
+         \t                         to $RAXIS_INSTALL_DIR or {default}.\n\
          \n\
          EXIT CODES:\n\
          \t0   every check OK\n\
          \t1   at least one WARN, no FAIL\n\
          \t2   at least one FAIL (kernel likely won't boot cleanly)\n\
-         "
+         ",
+        default = DEFAULT_INSTALL_DIR,
     );
 }
 
@@ -716,8 +1095,87 @@ mod tests {
 
     #[test]
     fn parse_args_accepts_json() {
-        let o = parse_args(&["--json".to_owned()]).unwrap();
-        assert!(o.json);
+        let parsed = parse_args(&["--json".to_owned()]).unwrap();
+        assert!(parsed.opts.json);
+        assert!(matches!(parsed.subcommand, Subcommand::Default));
+    }
+
+    #[test]
+    fn parse_args_dispatches_signing_key_fp_subcommand() {
+        let parsed = parse_args(&["signing-key-fp".to_owned()]).unwrap();
+        assert!(matches!(parsed.subcommand, Subcommand::SigningKeyFp));
+        assert!(!parsed.opts.json);
+    }
+
+    #[test]
+    fn parse_args_signing_key_fp_accepts_trailing_json_flag() {
+        let parsed = parse_args(&[
+            "signing-key-fp".to_owned(),
+            "--json".to_owned(),
+        ]).unwrap();
+        assert!(matches!(parsed.subcommand, Subcommand::SigningKeyFp));
+        assert!(parsed.opts.json);
+    }
+
+    #[test]
+    fn parse_args_dispatches_canonical_images_subcommand_with_default_dir() {
+        // Clear any pre-existing env var for determinism.
+        // SAFETY: tests in this module run single-threaded by default
+        // but we use `set_var` only inside #[test] fns; concurrent
+        // tests in this module that touch RAXIS_INSTALL_DIR would
+        // need to serialise.
+        let saved = std::env::var("RAXIS_INSTALL_DIR").ok();
+        std::env::remove_var("RAXIS_INSTALL_DIR");
+
+        let parsed = parse_args(&["canonical-images".to_owned()]).unwrap();
+        match parsed.subcommand {
+            Subcommand::CanonicalImages { install_dir } => {
+                assert_eq!(install_dir, PathBuf::from(DEFAULT_INSTALL_DIR));
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+
+        if let Some(v) = saved { std::env::set_var("RAXIS_INSTALL_DIR", v); }
+    }
+
+    #[test]
+    fn parse_args_canonical_images_explicit_install_dir_wins() {
+        let parsed = parse_args(&[
+            "canonical-images".to_owned(),
+            "--install-dir".to_owned(),
+            "/tmp/raxis-test-install".to_owned(),
+        ]).unwrap();
+        match parsed.subcommand {
+            Subcommand::CanonicalImages { install_dir } => {
+                assert_eq!(install_dir, PathBuf::from("/tmp/raxis-test-install"));
+            }
+            other => panic!("unexpected subcommand: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_args_canonical_images_install_dir_requires_value() {
+        let err = parse_args(&[
+            "canonical-images".to_owned(),
+            "--install-dir".to_owned(),
+        ]).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn parse_args_canonical_images_install_dir_rejects_empty_value() {
+        let err = parse_args(&[
+            "canonical-images".to_owned(),
+            "--install-dir".to_owned(),
+            "".to_owned(),
+        ]).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn parse_args_rejects_unknown_subcommand() {
+        let err = parse_args(&["bogus-subcommand".to_owned()]).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
     }
 
     #[test]
