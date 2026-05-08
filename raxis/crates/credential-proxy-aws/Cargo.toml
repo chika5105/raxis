@@ -1,0 +1,26 @@
+[package]
+name        = "raxis-credential-proxy-aws"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AWS IMDS-compatible credential proxy. Implements the AWS_CONTAINER_CREDENTIALS_FULL_URI provider shape so AWS SDKs (boto3, aws-sdk-rust, terraform-aws) authenticate against the kernel's CredentialBackend without ever seeing raw IAM keys."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raxis-credentials = { workspace = true }
+
+tokio     = { workspace = true }
+httparse  = "1"
+bytes     = "1"
+serde     = { workspace = true }
+serde_json = { workspace = true }
+sha2      = { workspace = true }
+hex       = { workspace = true }
+thiserror = { workspace = true }
+tracing   = "0.1"
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util", "macros"] }
+tempfile = "3"

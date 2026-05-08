@@ -135,6 +135,28 @@ pub enum ProxyDecl {
         #[serde(default)]
         restrictions: RedisRestrictions,
     },
+    /// `proxy_type = "aws"` — see `credential-proxy.md §3.2`. The
+    /// AWS proxy implements the
+    /// `AWS_CONTAINER_CREDENTIALS_FULL_URI` provider shape so AWS
+    /// SDKs (boto3, aws-sdk-rust, terraform-aws) authenticate
+    /// against the kernel's `CredentialBackend` without the IAM
+    /// access key bytes ever crossing the VM boundary.
+    Aws {
+        /// Optional IAM role ARN echoed in the SDK response body.
+        /// V2 does NOT call `sts:AssumeRole`; this field is
+        /// audit/observability only.
+        #[serde(default)]
+        role_arn: Option<String>,
+        /// Lease length the proxy advertises in the SDK response's
+        /// `Expiration` field. SDKs will refresh shortly before
+        /// this window closes. Defaults to 900 seconds (15 min)
+        /// matching the AWS SDK default.
+        #[serde(default = "default_aws_lease_seconds")]
+        lease_seconds: u64,
+        /// Restrictions clause (`[tasks.credentials.restrictions]`).
+        #[serde(default)]
+        restrictions: AwsRestrictions,
+    },
     /// Catch-all for proxy types declared in policy but not yet
     /// implemented. The parser preserves the literal `proxy_type`
     /// string so the validator can map it to a clear "not
@@ -148,6 +170,8 @@ fn default_http_auth_mode() -> HttpAuthMode { HttpAuthMode::Bearer }
 fn default_smtp_auth_mode() -> SmtpAuthMode {
     SmtpAuthMode::Plain { user: String::new() }
 }
+
+fn default_aws_lease_seconds() -> u64 { 900 }
 
 /// HTTP-proxy authentication mode (mirrors
 /// `raxis_credential_proxy_http::AuthMode`).
@@ -255,6 +279,31 @@ pub struct RedisRestrictions {
     /// Case-insensitive command allowlist. Empty = unrestricted.
     #[serde(default)]
     pub allowed_commands: Vec<String>,
+}
+
+/// AWS restrictions
+/// (`[tasks.credentials.restrictions]` for `proxy_type = "aws"`).
+///
+/// Mirrors `raxis_credential_proxy_aws::Restrictions`. The proxy
+/// only ever serves the path allowlist; everything else gets a
+/// `403 Forbidden`. Default permits the canonical `/creds`
+/// endpoint that AWS SDKs use when
+/// `AWS_CONTAINER_CREDENTIALS_FULL_URI` is set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AwsRestrictions {
+    /// Paths the proxy will serve. Defaults to `["/creds"]`.
+    #[serde(default = "default_aws_allowed_paths")]
+    pub allowed_paths: Vec<String>,
+}
+
+impl Default for AwsRestrictions {
+    fn default() -> Self {
+        Self { allowed_paths: default_aws_allowed_paths() }
+    }
+}
+
+fn default_aws_allowed_paths() -> Vec<String> {
+    vec!["/creds".to_owned()]
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +572,58 @@ mod tests {
                 assert_eq!(restrictions.allowed_methods, vec!["GET".to_owned()]);
             }
             other => panic!("expected K8s, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_aws_decl_with_default_restrictions() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name       = "aws-staging"
+              proxy_type = "aws"
+              mount_as   = "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+              role_arn   = "arn:aws:iam::123456789:role/raxis-staging-agent"
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Aws { role_arn, lease_seconds, restrictions } => {
+                assert_eq!(role_arn.as_deref(),
+                    Some("arn:aws:iam::123456789:role/raxis-staging-agent"));
+                assert_eq!(*lease_seconds, 900);
+                assert_eq!(restrictions, &AwsRestrictions::default());
+            }
+            other => panic!("expected Aws, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_aws_decl_with_custom_lease_and_path_allowlist() {
+        let toml = r#"
+            [[tasks]]
+            task_id = "demo"
+
+              [[tasks.credentials]]
+              name           = "aws-prod"
+              proxy_type     = "aws"
+              mount_as       = "AWS_CONTAINER_CREDENTIALS_FULL_URI"
+              lease_seconds  = 1800
+
+                [tasks.credentials.restrictions]
+                allowed_paths = ["/creds", "/creds/v2"]
+        "#;
+        let decls = parse(toml).unwrap();
+        match &decls[0].proxy {
+            ProxyDecl::Aws { lease_seconds, restrictions, .. } => {
+                assert_eq!(*lease_seconds, 1800);
+                assert_eq!(
+                    restrictions.allowed_paths,
+                    vec!["/creds".to_owned(), "/creds/v2".to_owned()],
+                );
+            }
+            other => panic!("expected Aws, got {other:?}"),
         }
     }
 

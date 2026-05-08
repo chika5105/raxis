@@ -20,6 +20,7 @@ members = [
     "crates/credential-proxy-http",
     "crates/credential-proxy-smtp",
     "crates/credential-proxy-redis",
+    "crates/credential-proxy-aws",
     "crates/credential-proxy-manager",
     "crates/plan-credentials",
     "crates/tproxy-protocol",

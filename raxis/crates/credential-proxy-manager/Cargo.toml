@@ -29,6 +29,7 @@ raxis-credential-proxy-postgres = { path = "../credential-proxy-postgres" }
 raxis-credential-proxy-http     = { path = "../credential-proxy-http" }
 raxis-credential-proxy-smtp     = { path = "../credential-proxy-smtp" }
 raxis-credential-proxy-redis    = { path = "../credential-proxy-redis" }
+raxis-credential-proxy-aws      = { path = "../credential-proxy-aws" }
 
 [dev-dependencies]
 raxis-credentials-file = { workspace = true }

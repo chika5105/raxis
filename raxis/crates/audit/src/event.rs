@@ -1269,6 +1269,34 @@ pub enum AuditEventKind {
         blocked:         bool,
     },
 
+    /// Emitted by the AWS credential proxy on every served (or
+    /// blocked) IAM container-credential-provider request.
+    /// Carries the request path, SHA-256 of `<METHOD> <path>`, the
+    /// declared role ARN (or empty), and a `blocked` flag.
+    /// Single-class observability event paired with the
+    /// `CredentialProxyStarted` / `CredentialProxyStopped`
+    /// lifecycle pair.
+    ///
+    /// Spec reference: `credential-proxy.md §3.2` (AWS proxy);
+    /// the proxy issues a synthetic IAM credential JSON envelope
+    /// per request, so each event corresponds to one cached SDK
+    /// credential window.
+    AwsCredentialServed {
+        /// Session whose VM made the request.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// Request path (`/creds`, etc.).
+        path:            String,
+        /// SHA-256 of `"<METHOD> <path>"`.
+        path_sha256:     String,
+        /// Operator-declared IAM role ARN. Empty when the decl
+        /// does not declare one.
+        role_arn:        String,
+        /// True if a restriction blocked the request.
+        blocked:         bool,
+    },
+
     /// Emitted by the SMTP credential proxy when an envelope passes
     /// every restriction gate and is forwarded to the upstream
     /// relay. Carries the SHA-256 of the canonical
@@ -1398,6 +1426,7 @@ impl AuditEventKind {
             Self::DatabaseQueryExecuted { .. } => "DatabaseQueryExecuted",
             Self::HttpProxyRequestExecuted { .. } => "HttpProxyRequestExecuted",
             Self::RedisCommandExecuted { .. } => "RedisCommandExecuted",
+            Self::AwsCredentialServed { .. } => "AwsCredentialServed",
             Self::SmtpMessageRelayed { .. } => "SmtpMessageRelayed",
             Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",
         }

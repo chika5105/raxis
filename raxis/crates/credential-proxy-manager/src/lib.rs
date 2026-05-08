@@ -95,8 +95,8 @@ use std::sync::Arc;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credentials::CredentialBackend;
 use raxis_plan_credentials::{
-    HttpAuthMode, HttpRestrictions, PostgresRestrictions, ProxyDecl, RedisRestrictions,
-    SmtpAuthMode, SmtpRestrictions, TaskCredentialDecl,
+    AwsRestrictions, HttpAuthMode, HttpRestrictions, PostgresRestrictions, ProxyDecl,
+    RedisRestrictions, SmtpAuthMode, SmtpRestrictions, TaskCredentialDecl,
 };
 
 use raxis_credential_proxy_http::{
@@ -110,6 +110,12 @@ use raxis_credential_proxy_postgres::{
     OwnedConsumer as PgOwnedConsumer, PostgresProxy, ProxyConfig as PgProxyConfig,
     ProxyError as PgProxyError, ProxyStats as PgProxyStats,
     Restrictions as PgProxyRestrictions,
+};
+use raxis_credential_proxy_aws::{
+    AuditChannel as AwsAuditChannel, AuditEvent as AwsAuditEvent, AwsProxy,
+    OwnedConsumer as AwsOwnedConsumer, ProxyConfig as AwsProxyConfig,
+    ProxyError as AwsProxyError, ProxyStats as AwsProxyStats,
+    Restrictions as AwsProxyRestrictions,
 };
 use raxis_credential_proxy_redis::{
     AuditChannel as RedisAuditChannel, AuditEvent as RedisAuditEvent,
@@ -189,6 +195,16 @@ pub enum ManagerError {
         source: RedisProxyError,
     },
 
+    /// AWS proxy failed to bind / start.
+    #[error("aws proxy bind failed for `{credential_name}`: {source}")]
+    AwsBind {
+        /// Credential name whose proxy bind failed.
+        credential_name: String,
+        /// Source error from the aws-proxy crate.
+        #[source]
+        source: AwsProxyError,
+    },
+
     /// `local_addr()` on a freshly-bound listener failed (very rare;
     /// signals a race against listener shutdown, or that the OS lost
     /// our binding mid-construction).
@@ -217,6 +233,7 @@ fn proxy_type_str(decl: &ProxyDecl) -> &'static str {
         ProxyDecl::K8s { .. } => "k8s",
         ProxyDecl::Smtp { .. } => "smtp",
         ProxyDecl::Redis { .. } => "redis",
+        ProxyDecl::Aws { .. } => "aws",
         ProxyDecl::Unknown => "unknown",
     }
 }
@@ -379,6 +396,49 @@ impl EnvelopeAuditSink for SmtpKernelAuditAdapter {
     }
 }
 
+struct AwsKernelAuditAdapter {
+    audit_sink: Arc<dyn AuditSink>,
+    session_id: String,
+    task_id:    String,
+}
+
+impl AwsAuditChannel for AwsKernelAuditAdapter {
+    fn emit(&self, event: AwsAuditEvent) {
+        match event {
+            AwsAuditEvent::AwsCredentialServed {
+                credential,
+                path,
+                path_sha256,
+                role_arn,
+                blocked,
+                ..
+            } => {
+                let kind = AuditEventKind::AwsCredentialServed {
+                    session_id:      self.session_id.clone(),
+                    credential_name: credential.as_str().to_owned(),
+                    path,
+                    path_sha256,
+                    role_arn,
+                    blocked,
+                };
+                if let Err(e) = self.audit_sink.emit(
+                    kind,
+                    Some(&self.session_id),
+                    Some(&self.task_id),
+                    None,
+                ) {
+                    tracing::warn!(
+                        target:     "raxis::credential_proxy::manager",
+                        session_id = %self.session_id,
+                        error      = %e,
+                        "AwsCredentialServed audit emit failed; per-request audit chain entry skipped",
+                    );
+                }
+            }
+        }
+    }
+}
+
 struct RedisKernelAuditAdapter {
     audit_sink: Arc<dyn AuditSink>,
     session_id: String,
@@ -476,6 +536,7 @@ enum ProxyStatsHandle {
     Http(Arc<HttpProxyStats>),
     Smtp(Arc<SmtpProxyStats>),
     Redis(Arc<RedisProxyStats>),
+    Aws(Arc<AwsProxyStats>),
 }
 
 impl ProxyStatsHandle {
@@ -511,6 +572,14 @@ impl ProxyStatsHandle {
                     connections_served: snap.connections_served,
                     forwards_completed: snap.commands_forwarded,
                     forwards_blocked:   snap.commands_blocked,
+                }
+            }
+            ProxyStatsHandle::Aws(s) => {
+                let snap = s.snapshot();
+                StoppedCounters {
+                    connections_served: snap.connections_served,
+                    forwards_completed: snap.credentials_served,
+                    forwards_blocked:   snap.requests_blocked,
                 }
             }
         }
@@ -822,6 +891,18 @@ impl CredentialProxyManager {
                     )
                     .await?
                 }
+                ProxyDecl::Aws { role_arn, lease_seconds, restrictions } => {
+                    self.bind_aws(
+                        session_id,
+                        task_id,
+                        &decl.name,
+                        &decl.mount_as,
+                        role_arn.as_deref(),
+                        *lease_seconds,
+                        restrictions,
+                    )
+                    .await?
+                }
                 ProxyDecl::Unknown => {
                     return Err(ManagerError::UnknownProxyType {
                         credential_name,
@@ -1126,6 +1207,59 @@ impl CredentialProxyManager {
             mount_as:        mount_as.to_owned(),
             addr,
             stats:           ProxyStatsHandle::Redis(stats_handle),
+            join,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn bind_aws(
+        &self,
+        session_id:    &str,
+        task_id:       &str,
+        name:          &raxis_credentials::CredentialName,
+        mount_as:      &str,
+        role_arn:      Option<&str>,
+        lease_seconds: u64,
+        restrictions:  &AwsRestrictions,
+    ) -> Result<ActiveProxy, ManagerError> {
+        let cfg = AwsProxyConfig {
+            listen_addr:     "127.0.0.1:0".to_owned(),
+            credential_name: name.clone(),
+            consumer:        AwsOwnedConsumer::new(
+                "session",
+                session_id.to_owned(),
+            ),
+            lease_seconds,
+            role_arn:        role_arn.map(|s| s.to_owned()),
+            restrictions: AwsProxyRestrictions {
+                allowed_paths: restrictions.allowed_paths.clone(),
+            },
+        };
+        let audit_channel: Arc<dyn AwsAuditChannel> = Arc::new(AwsKernelAuditAdapter {
+            audit_sink: Arc::clone(&self.audit),
+            session_id: session_id.to_owned(),
+            task_id:    task_id.to_owned(),
+        });
+        let proxy = AwsProxy::bind(Arc::clone(&self.backend), cfg, audit_channel)
+            .await
+            .map_err(|source| ManagerError::AwsBind {
+                credential_name: name.as_str().to_owned(),
+                source,
+            })?;
+        let addr = proxy.local_addr().map_err(|source| ManagerError::LocalAddr {
+            credential_name: name.as_str().to_owned(),
+            source,
+        })?;
+        let stats_handle = proxy.stats_handle();
+        let join = tokio::spawn(async move {
+            proxy.serve().await;
+        });
+        Ok(ActiveProxy {
+            proxy_type:      "aws",
+            credential_name: name.as_str().to_owned(),
+            mount_as:        mount_as.to_owned(),
+            addr,
+            stats:           ProxyStatsHandle::Aws(stats_handle),
             join,
         })
     }
