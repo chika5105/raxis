@@ -1725,6 +1725,292 @@ methods    = ["GET", "PUT", "DELETE"]
 
 ---
 
+### 11.5.1 — Example E: Local Docker Dev Setup (Postgres + Redis)
+
+The most common starting point. You have Postgres and Redis running
+in Docker on your development machine, and you want an agent to
+build a feature against them.
+
+**Why this works:** The RAXIS proxy runs on the kernel host (your
+machine), not inside the agent's VM. Docker's `-p` flag exposes
+database ports on `localhost` — the proxy connects to them like any
+local client. The agent never sees your Docker network, your
+database password, or even the real hostname.
+
+#### Step 1: Start databases in Docker
+
+```bash
+# Postgres
+docker run -d --name dev-pg \
+  -p 5432:5432 \
+  -e POSTGRES_USER=devuser \
+  -e POSTGRES_PASSWORD=devpass \
+  -e POSTGRES_DB=myapp \
+  postgres:16
+
+# Redis
+docker run -d --name dev-redis \
+  -p 6379:6379 \
+  redis:7 --requirepass redispass
+```
+
+#### Step 2: Store credentials
+
+```bash
+# Postgres credential — the real connection string with real password
+printf "PGHOST=localhost\nPGPORT=5432\nPGUSER=devuser\nPGPASSWORD=devpass" | \
+  raxis credential add dev-pg --type postgres --stdin
+
+# Redis credential — the real password
+printf "REDIS_HOST=localhost\nREDIS_PORT=6379\nREDIS_PASSWORD=redispass" | \
+  raxis credential add dev-redis --type redis --stdin
+
+# Verify both are reachable
+raxis credential verify dev-pg
+raxis credential verify dev-redis
+```
+
+Credentials are stored in `~/.config/raxis/credentials/dev-pg.env`
+and `dev-redis.env` with `0600` perms. They never leave the kernel
+host.
+
+#### Step 3: plan.toml
+
+```toml
+[workspace]
+lane_id = "feature-work"
+
+[[tasks]]
+task_id = "implement-user-api"
+name    = "Implement REST API with database + caching"
+
+  [[tasks.credentials]]
+  name       = "dev-pg"
+  proxy_type = "postgres"
+  mount_as   = "DATABASE_URL"
+  # Agent sees: DATABASE_URL=postgresql://raxis@127.0.0.1:<random-port>/
+  # Proxy connects to: localhost:5432 with real devuser/devpass
+
+  [[tasks.credentials]]
+  name             = "dev-redis"
+  proxy_type       = "redis"
+  upstream_host_port = "localhost:6379"
+  mount_as         = "REDIS_URL"
+  # Agent sees: REDIS_URL=127.0.0.1:<random-port>
+  # Proxy connects to: localhost:6379 with real redispass
+
+  [tasks.credentials.restrictions]
+  # Optional: restrict Redis commands the agent can use
+  # allowed_commands = ["GET", "SET", "DEL", "EXPIRE", "TTL", "EXISTS"]
+```
+
+> **Multi-database naming:** If you had two Postgres databases (e.g.
+> users + analytics), use distinct `mount_as` names:
+> `USERS_DATABASE_URL` and `ANALYTICS_DATABASE_URL`. Using a generic
+> `DATABASE_URL` for both is a plan admission error
+> (`DuplicateMountAs`).
+
+#### Step 4: What the agent sees inside the VM
+
+```bash
+# Environment variables (injected by kernel)
+DATABASE_URL=postgresql://raxis@127.0.0.1:54321/
+REDIS_URL=127.0.0.1:54322
+
+# No password in DATABASE_URL — the proxy handles auth
+# No real hostname visible — agent cannot discover Docker network
+# No egress to localhost:5432 — VM firewall blocks everything
+#   except the proxy ports (54321, 54322)
+```
+
+The agent's code works with standard libraries:
+
+```python
+import os, psycopg2, redis
+
+# Postgres — standard psycopg2, no password needed
+conn = psycopg2.connect(os.environ["DATABASE_URL"])
+cur = conn.cursor()
+cur.execute("CREATE TABLE users (id SERIAL, name TEXT)")
+conn.commit()
+
+# Redis — standard redis-py
+host, port = os.environ["REDIS_URL"].split(":")
+r = redis.Redis(host=host, port=int(port))
+r.set("session:abc", "user-data")  # proxy handles AUTH upstream
+```
+
+#### What happens under the hood
+
+```
+Agent writes:                 Proxy does:
+─────────────                ──────────
+psycopg2.connect(            1. Agent connects to :54321
+  DATABASE_URL)              2. Proxy sends AuthenticationOk (no password needed)
+                             3. Agent sends: CREATE TABLE users ...
+                             4. Proxy checks restrictions (allow_only_select? no)
+                             5. Proxy emits audit event: QueryAudited
+                             6. Proxy resolves "dev-pg" → reads devuser/devpass
+                             7. Proxy connects to localhost:5432 with real creds
+                             8. Real Postgres executes CREATE TABLE
+                             9. Proxy relays CommandComplete back to agent
+
+r.set("session:abc", ...)    1. Agent connects to :54322
+                             2. Agent sends AUTH (any password)
+                             3. Proxy intercepts AUTH, sends OK to agent
+                             4. Proxy resolves "dev-redis" → reads redispass
+                             5. Proxy sends AUTH redispass to localhost:6379
+                             6. Agent sends SET session:abc user-data
+                             7. Proxy relays to Redis, relays +OK back
+```
+
+#### Common issues
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Proxy can't connect upstream | Docker not running or port not mapped | `docker ps` — verify `-p 5432:5432` |
+| Agent gets "connection refused" | VM firewall blocking | Check that `mount_as` env var matches what the agent's code reads |
+| Wrong database | Credential file has wrong `PGHOST` | `raxis credential rotate dev-pg` with corrected values |
+| `DuplicateMountAs` error | Two credentials share the same `mount_as` name | Use distinct names: `USERS_DATABASE_URL`, `CACHE_REDIS_URL` |
+
+---
+
+### 11.5.2 — Docker and Container Scenarios
+
+Operators frequently ask: "What if the agent needs Docker?" The
+answer depends on *why* the agent needs it. RAXIS handles each
+scenario differently.
+
+#### Scenario 1: Agent needs to build container images
+
+**Solution: `buildah` or `kaniko` (rootless, no daemon).**
+
+The agent does not need a Docker daemon to build OCI images.
+Include `buildah` in the operator's executor image:
+
+```bash
+# Inside the agent VM — no dockerd, no socket, no root
+buildah build -t myapp:latest -f Dockerfile .
+buildah push myapp:latest registry.example.com/myapp:latest
+```
+
+The registry push goes through an HTTP credential proxy:
+
+```toml
+[[tasks.credentials]]
+name         = "registry-staging"
+proxy_type   = "http"
+auth_mode    = "basic"
+upstream_url = "https://registry.example.com"
+mount_as     = "REGISTRY_URL"
+
+[tasks.credentials.auth_mode]
+basic = { user = "ci-bot" }
+```
+
+The agent pushes to the proxy URL; the proxy injects the registry
+password on the wire. The agent never sees the registry credentials.
+
+**Why not Docker daemon?** `dockerd` requires root privileges and
+either a Linux kernel with overlay2 support or `--privileged` mode.
+Both violate the VM isolation model. `buildah` runs entirely in
+userspace and produces identical OCI images.
+
+#### Scenario 2: Agent needs services for integration tests
+
+**Solution: Operator provisions the services; agent connects via
+credential proxies.**
+
+Instead of the agent running `docker-compose up` to start Postgres,
+Redis, Elasticsearch, etc., the operator pre-provisions the services
+(in Docker, Kubernetes, or managed cloud) and declares them in
+`plan.toml`:
+
+```toml
+# operator provisions these OUTSIDE the VM
+[[tasks.credentials]]
+name       = "test-pg"
+proxy_type = "postgres"
+mount_as   = "DATABASE_URL"
+
+[[tasks.credentials]]
+name             = "test-redis"
+proxy_type       = "redis"
+upstream_host_port = "localhost:6379"
+mount_as         = "REDIS_URL"
+
+[[tasks.credentials]]
+name         = "test-elasticsearch"
+proxy_type   = "http"
+auth_mode    = "basic"
+upstream_url = "http://localhost:9200"
+mount_as     = "ELASTICSEARCH_URL"
+
+[tasks.credentials.auth_mode]
+basic = { user = "elastic" }
+```
+
+The agent's test suite uses standard env vars:
+
+```python
+DATABASE_URL = os.environ["DATABASE_URL"]       # proxied Postgres
+REDIS_URL    = os.environ["REDIS_URL"]           # proxied Redis
+ES_URL       = os.environ["ELASTICSEARCH_URL"]   # proxied ES
+```
+
+**Why not docker-compose inside the VM?** Three reasons:
+1. No Docker daemon in the VM (see Scenario 3)
+2. Proxy architecture ensures every query is audited and restricted
+3. The operator controls which services are available — the agent
+   cannot spin up arbitrary containers
+
+**Operator workflow for local dev:**
+
+```bash
+# Start services on your machine
+docker compose up -d   # postgres, redis, elasticsearch
+
+# Store credentials
+raxis credential add test-pg --type postgres --stdin < pg-creds.env
+raxis credential add test-redis --type redis --stdin < redis-creds.env
+raxis credential add test-elasticsearch --type http --stdin < es-creds.env
+
+# Agent connects through proxies — zero docker-compose needed inside VM
+```
+
+#### Scenario 3: Agent needs a running Docker daemon
+
+**Not supported in V2.** Running `dockerd` inside the agent's
+microVM is architecturally incompatible with the RAXIS isolation
+model:
+
+| Constraint | Why Docker daemon violates it |
+|---|---|
+| **INV-VM-CAP-03** (operator-controlled images) | A Docker daemon lets the agent pull and run arbitrary images — the operator loses control of what code runs |
+| **R-2** (mediated I/O) | Containers started by the agent bypass the credential proxy entirely — unaudited network access |
+| **R-5** (bounded capabilities) | `dockerd` requires root or `--privileged`; the VM runs unprivileged |
+| **Egress firewall** | Docker containers inside the VM could bind ports and reach the host network, bypassing the proxy-only egress rule |
+| **Nested virtualization** | MicroVMs don't expose `/dev/kvm` to guests; Docker-in-VM would fall back to QEMU emulation (~10x slower) |
+
+**What to do instead:**
+
+| Agent wants to... | Operator provides... |
+|---|---|
+| Build a Docker image | `buildah` in the executor image (Scenario 1) |
+| Run `docker-compose up` for tests | Pre-provisioned services via proxies (Scenario 2) |
+| Deploy to Kubernetes | K8s credential proxy (`proxy_type = "k8s"`) with `kubectl` in the VM |
+| Push to a registry | HTTP credential proxy with registry auth |
+| Run a one-off service | Custom tool (`custom-tools.md`) or operator-managed sidecar (V3) |
+
+**V3 consideration:** A future operator-managed sidecar model could
+allow the operator to declare additional service containers that run
+alongside the agent VM (similar to Kubernetes pod sidecars). These
+would be operator-controlled, proxy-mediated, and pre-declared in
+`plan.toml` — not agent-initiated. This is tracked as a V3
+exploration, not a V2 deliverable.
+
+---
+
 ### 11.6 — Credential Files in `$RAXIS_DATA_DIR/credentials/`
 
 The operator is responsible for pre-populating credentials on the Kernel host.
