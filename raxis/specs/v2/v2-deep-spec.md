@@ -157,6 +157,15 @@ and peer credential verification (`getpeereid()`) on every accepted connection.
 execution, distributed via `brew` (`aegis-ai/tap/raxis`). The `raxis-kernel` formula depends
 on `raxis-planner` so that a single `brew install raxis-kernel` brings the complete stack.
 
+> **Normative cross-reference.** Concrete release-pipeline structure
+> (GitHub Actions matrix, Apple Developer ID + notarization gate,
+> `RAXIS_KERNEL_SIGNING_KEY_HEX` build-time bake, Homebrew formula
+> shape, image-asset publishing, local-build self-signed flow,
+> operator install / upgrade UX) lives in
+> [`release-and-distribution.md`](release-and-distribution.md).
+> The two-line summary above remains authoritative for INTENT; that
+> spec is authoritative for IMPLEMENTATION.
+
 ---
 
 ### 1.4 Git Object Integrity: Bundle-Based SHA Preservation

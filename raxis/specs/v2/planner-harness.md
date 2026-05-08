@@ -2629,6 +2629,16 @@ Build-time CI:
 - The matching **public** half of the kernel signing keypair is embedded in the kernel binary at `EXPECTED_KERNEL_SIGNING_KEY_BYTES` (`raxis-canonical-images`). Population is handled by `raxis/crates/canonical-images/build.rs`, which reads either `RAXIS_KERNEL_SIGNING_KEY_HEX` (64 lowercase hex chars) or `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` (32-byte raw file) from the release pipeline and emits the constant into `$OUT_DIR/trust_anchor.rs`. Developer builds with neither variable set default to the all-zero placeholder; the boot-path verifier (`verify_canonical_image_via_manifest`) detects the placeholder and surfaces `CanonicalImageError::SigningKeyFpNotPopulated` so "I forgot to set the env var" is loud and obvious in production. Validation failure (length or hex-alphabet) is a hard `cargo build` error so a mistyped value never silently degrades to the placeholder branch. **The release pipeline owns the secret half** (HSM / GitHub Secrets); only the public half ever crosses the build-time trust boundary into the kernel binary.
 - The same `build.rs` also emits the V1-fallback per-role image digests (`EXPECTED_REVIEWER_IMAGE_DIGEST`, `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`) from `RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX` and `RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX` respectively (each 64 lowercase hex chars). These are not consulted by the V2 boot path (the manifest is) but are surfaced by `verify_canonical_image_pinned`, by `raxis doctor` audits, and as the stable kind-tagged digest in `CanonicalImageKind::expected_digest()` audit payloads — populating them turns "all-zero placeholder" telemetry into real values without touching the V2 manifest-trust path.
 
+> **End-to-end release-pipeline structure** for these env vars (the
+> `release.yml` workflow, the GitHub-Secrets layout, the macOS
+> notarization gate that lets the resulting kernel actually call
+> `Virtualization.framework`, and the developer-facing local-build
+> signing flow) is captured in
+> [`release-and-distribution.md`](release-and-distribution.md). This
+> section pins only the `build.rs` contract (which env vars exist,
+> what they mean, what failure modes they surface); how those vars
+> get populated is the release spec's concern.
+
 Kernel boot-time admission:
 
 - `kernel/src/main.rs` calls `raxis_image_manifest::verify(&embedded_reviewer_manifest, &kernel_signing_pubkey)?` and `verify(&embedded_orchestrator_manifest, ...)?` immediately after `IsolationBackend::verify_isolation_guarantee` (boot-order step 6a per `extensibility-traits.md §9.1`). A signature failure aborts boot with `BootError::ImageManifestSignatureMismatch { role }`.
