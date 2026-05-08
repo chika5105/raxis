@@ -517,10 +517,82 @@ The proxy:
 | 14 | **E1** — Environment access control enforcement | 200 | Prevent cross-env credential mixing |
 | 15 | `raxis init` project scaffolding | 200 | New-operator onboarding |
 | 16 | Remaining `INV-` invariant enforcement (48 of 89) | 300 | Formal spec compliance |
+| 17 | Gateway binary integrity (embedded binary) | 90 | Eliminates file-on-disk tampering surface |
 
 ---
 
-## §10 — Reconciliation Notes
+## §10 — Gateway Binary Integrity
+
+### The gap
+
+The kernel verifies VM images (Reviewer, Orchestrator, Symbol-Index
+Verifier) via compiled-in SHA-256 digests checked at every spawn.
+The gateway binary has **no integrity verification** — it is spawned
+via `Command::new(cfg.binary_path)` with only a one-time auth token
+to authenticate the IPC connection.
+
+A compromised gateway binary could intercept all inference traffic,
+exfiltrate prompts, or return manipulated model responses. The token
+auth prevents a rogue *external* process from connecting but does not
+prevent a tampered binary that the kernel itself spawns.
+
+### V2 approach: Embedded binary (~90 lines)
+
+Compile the gateway binary into the kernel binary as a `&[u8]` blob.
+At startup, the kernel writes it to memory (Linux: `memfd_create`;
+macOS: temp file in `0700` kernel-owned directory), sets `+x`, and
+spawns from there. The gateway bytes never exist as an independent
+file on disk that an attacker can swap.
+
+### Dev ergonomics
+
+During development, rebuilding the kernel every time you touch the
+gateway is unacceptable — it adds a full gateway recompile + kernel
+re-link to every edit cycle. The feature flag solves this:
+
+```rust
+#[cfg(feature = "embedded-gateway")]
+const GATEWAY_BYTES: &[u8] = include_bytes!(env!("RAXIS_GATEWAY_BINARY"));
+
+#[cfg(not(feature = "embedded-gateway"))]
+// Falls back to the existing Command::new(cfg.binary_path) path —
+// gateway is a separate binary on disk, iterated independently.
+```
+
+| Build mode | Flag | Gateway source | Use case |
+|---|---|---|---|
+| `cargo build` (dev) | feature off | External binary on `$PATH` | Fast iteration — change gateway, rebuild gateway only |
+| `cargo build --release --features embedded-gateway` | feature on | Embedded `&[u8]` blob | Release builds — tamper-proof, single distributable |
+
+Build pipeline for release:
+
+```bash
+# Phase 1: compile the gateway
+cargo build --release -p raxis-gateway
+
+# Phase 2: compile the kernel with embedded gateway
+RAXIS_GATEWAY_BINARY=target/release/raxis-gateway \
+  cargo build --release -p raxis-kernel --features embedded-gateway
+```
+
+CI runs both phases; developers never need `--features embedded-gateway`
+locally.
+
+### V3 (deferred): OS-native code signing
+
+- **macOS:** `SecStaticCodeCheckValidity` on the gateway binary
+  before spawn; same Apple Developer ID as the kernel.
+- **Linux:** `dm-verity` / `fsverity` on the install directory, or
+  IMA (Integrity Measurement Architecture) requiring signed ELF
+  binaries.
+
+Deferred because it depends on deployment-environment assumptions
+(code signing infrastructure, kernel IMA policy) that V2 does not
+require.
+
+---
+
+## §11 — Reconciliation Notes
 
 Corrections made during the cross-check passes:
 
