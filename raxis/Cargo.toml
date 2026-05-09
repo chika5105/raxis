@@ -94,6 +94,10 @@ rand_core     = "0.6"
 # (required for `#[from]` on our thiserror enum).
 getrandom   = { version = "0.2", features = ["std"] }
 sha2        = "0.10"
+# HMAC-SHA256 for the C5 sidecar protocol's per-request authentication
+# (extensibility-traits.md §9A.7A). Pinned to the RustCrypto-aligned
+# 0.12 line which uses the same `digest::Mac` traits as `sha2`.
+hmac        = "0.12"
 hex         = "0.4"
 uuid        = { version = "1", features = ["v4", "v7", "serde"] }
 toml        = "0.8"

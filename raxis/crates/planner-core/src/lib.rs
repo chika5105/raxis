@@ -83,6 +83,7 @@ pub mod model;
 pub mod openai_client;
 pub mod provider_model;
 pub mod retry;
+pub mod sidecar_client;
 pub mod tools;
 pub mod transport;
 
@@ -117,6 +118,10 @@ pub use gemini_client::GeminiClient;
 pub use openai_client::OpenAiClient;
 pub use retry::{
     is_retryable, FallbackModelClient, RetryConfig, RetryingModelClient,
+};
+pub use sidecar_client::{
+    SidecarConstructError, SidecarMessage, SidecarModelClient, SidecarRequest,
+    SidecarResponse, SidecarToolCall, SidecarToolDecl,
 };
 pub use tools::{
     build_executor_registry, build_orchestrator_registry, build_reviewer_registry, BashTool,

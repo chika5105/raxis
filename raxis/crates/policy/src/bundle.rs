@@ -1322,6 +1322,43 @@ pub struct ProviderEntry {
     /// `error: "ResponseTooLarge"`. Capped at 64 MiB. Default: 16 MiB.
     #[serde(default = "default_max_response_bytes")]
     pub max_response_bytes: u64,
+
+    // ── V2_GAPS §C5 sidecar fields ──────────────────────────────────────
+    //
+    // Extended set used only when `kind = "http_sidecar"` per
+    // `extensibility-traits.md §9A.4`. Validation enforces every
+    // sidecar provider declares both `sidecar_endpoint` and
+    // `sidecar_hmac_secret`; non-sidecar providers MUST leave both
+    // unset (PolicyBundle::validate rejects anything else).
+
+    /// **Sidecar only.** Base URL of the operator-run sidecar process
+    /// (e.g. `"http://127.0.0.1:9100"`). Plumbed to
+    /// `SidecarModelClient::new` at planner-binary boot. Unset for
+    /// every other provider kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar_endpoint: Option<String>,
+
+    /// **Sidecar only.** 32-byte hex (64 hex chars) HMAC-SHA256
+    /// shared secret. Stored verbatim in the operator-signed
+    /// `policy.toml` so the planner cannot read it (R-2). The
+    /// gateway resolves the same secret from the policy bundle and
+    /// stamps it into every outbound request to the sidecar
+    /// (`extensibility-traits.md §9A.7A`). Validated at policy-load
+    /// time: must be non-empty and an even hex length when
+    /// `kind = "http_sidecar"`.
+    ///
+    /// **NEVER** logged through `ProviderEntry`'s `Debug` output
+    /// (the field is plain `Option<String>` but operator tooling
+    /// MUST redact it before printing — same convention as
+    /// `[[credentials]]` rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar_hmac_secret: Option<String>,
+
+    /// **Sidecar only.** Health-check path appended to
+    /// `sidecar_endpoint` for `raxis doctor sidecar` and the C2
+    /// circuit-breaker probe. Default: `"/health"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar_health_check_path: Option<String>,
 }
 
 fn default_inference_timeout_ms() -> u32 { 30_000 }
@@ -2730,6 +2767,83 @@ impl PolicyBundle {
                     p.provider_id, p.max_response_bytes, MAX_RESPONSE_BYTES_CEILING
                 )));
             }
+
+            // V2_GAPS §C5 — `kind = "http_sidecar"` validation.
+            //
+            // `extensibility-traits.md §9A.4` requires sidecar
+            // providers declare `sidecar_endpoint` (the localhost
+            // base URL) and `sidecar_hmac_secret` (the 32-byte hex
+            // shared secret). Non-sidecar providers MUST leave both
+            // unset so a typo on `kind` cannot accidentally activate
+            // sidecar codepaths.
+            let is_sidecar = p.kind == "http_sidecar";
+            if is_sidecar {
+                let endpoint = p.sidecar_endpoint.as_deref().unwrap_or("");
+                if endpoint.is_empty() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} kind=\"http_sidecar\" but sidecar_endpoint \
+                         is empty/missing — required by extensibility-traits.md §9A.4",
+                        p.provider_id
+                    )));
+                }
+                if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} sidecar_endpoint={:?} must start with \
+                         `http://` or `https://`",
+                        p.provider_id, endpoint
+                    )));
+                }
+                let secret = p.sidecar_hmac_secret.as_deref().unwrap_or("");
+                if secret.is_empty() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} kind=\"http_sidecar\" but sidecar_hmac_secret \
+                         is empty/missing — operators MUST mint a 32-byte hex secret \
+                         (use `raxis policy generate-sidecar-secret`)",
+                        p.provider_id
+                    )));
+                }
+                if secret.len() % 2 != 0 || !secret.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} sidecar_hmac_secret must be even-length \
+                         lowercase hex (got {} chars)",
+                        p.provider_id, secret.len()
+                    )));
+                }
+                // Recommend (but do not require) ≥32 bytes (64 hex
+                // chars) for operator-grade HMAC security. We only
+                // *reject* < 16 bytes; everything else is the
+                // operator's call.
+                if secret.len() < 32 {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} sidecar_hmac_secret is {} hex chars; \
+                         minimum is 32 (16 bytes) for HMAC-SHA256 security. \
+                         Operator-grade is 64 hex chars (32 bytes).",
+                        p.provider_id, secret.len()
+                    )));
+                }
+            } else {
+                // Non-sidecar providers MUST NOT carry sidecar fields.
+                if p.sidecar_endpoint.is_some() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} declares sidecar_endpoint but kind={:?}; \
+                         sidecar fields are valid only when kind=\"http_sidecar\"",
+                        p.provider_id, p.kind
+                    )));
+                }
+                if p.sidecar_hmac_secret.is_some() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} declares sidecar_hmac_secret but kind={:?}; \
+                         sidecar fields are valid only when kind=\"http_sidecar\"",
+                        p.provider_id, p.kind
+                    )));
+                }
+                if p.sidecar_health_check_path.is_some() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} declares sidecar_health_check_path but kind={:?}",
+                        p.provider_id, p.kind
+                    )));
+                }
+            }
         }
 
         // ── Validate `[notifications]` ───────────────────────────────
@@ -4055,6 +4169,129 @@ priority             = 100
         );
         let bundle = write_and_load(&t).expect("unknown kind must load");
         assert_eq!(bundle.providers()[0].kind, "NotAValidKindYet");
+    }
+
+    // ── V2_GAPS §C5 sidecar provider validation ───────────────────────────
+
+    /// 32-byte hex secret used by the sidecar tests.
+    const SIDECAR_TEST_SECRET: &str =
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+    #[test]
+    fn sidecar_provider_with_required_fields_loads() {
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id              = \"kombai\"\n\
+             kind                     = \"http_sidecar\"\n\
+             credentials_file         = \"kombai.toml\"\n\
+             sidecar_endpoint         = \"http://127.0.0.1:9100\"\n\
+             sidecar_hmac_secret      = \"{SIDECAR_TEST_SECRET}\"\n\
+             sidecar_health_check_path = \"/health\"\n",
+        ));
+        let bundle = write_and_load(&t).expect("valid sidecar provider must load");
+        let p = bundle.provider("kombai").expect("lookup by id works");
+        assert_eq!(p.kind, "http_sidecar");
+        assert_eq!(p.sidecar_endpoint.as_deref(), Some("http://127.0.0.1:9100"));
+        assert_eq!(p.sidecar_hmac_secret.as_deref(), Some(SIDECAR_TEST_SECRET));
+        assert_eq!(p.sidecar_health_check_path.as_deref(), Some("/health"));
+    }
+
+    #[test]
+    fn sidecar_provider_missing_endpoint_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id         = \"kombai\"\n\
+             kind                = \"http_sidecar\"\n\
+             credentials_file    = \"kombai.toml\"\n\
+             sidecar_hmac_secret = \"{SIDECAR_TEST_SECRET}\"\n",
+        ));
+        let err = write_and_load(&t).expect_err("missing endpoint must fail");
+        let s = format!("{err}");
+        assert!(s.contains("sidecar_endpoint"), "got: {s}");
+    }
+
+    #[test]
+    fn sidecar_provider_missing_secret_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"kombai\"\n\
+             kind             = \"http_sidecar\"\n\
+             credentials_file = \"kombai.toml\"\n\
+             sidecar_endpoint = \"http://127.0.0.1:9100\"\n",
+        );
+        let err = write_and_load(&t).expect_err("missing secret must fail");
+        let s = format!("{err}");
+        assert!(s.contains("sidecar_hmac_secret"), "got: {s}");
+    }
+
+    #[test]
+    fn sidecar_endpoint_without_http_scheme_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id         = \"kombai\"\n\
+             kind                = \"http_sidecar\"\n\
+             credentials_file    = \"kombai.toml\"\n\
+             sidecar_endpoint    = \"127.0.0.1:9100\"\n\
+             sidecar_hmac_secret = \"{SIDECAR_TEST_SECRET}\"\n",
+        ));
+        let err = write_and_load(&t).expect_err("scheme-less endpoint must fail");
+        let s = format!("{err}");
+        assert!(s.contains("http://"), "got: {s}");
+    }
+
+    #[test]
+    fn sidecar_secret_too_short_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id         = \"kombai\"\n\
+             kind                = \"http_sidecar\"\n\
+             credentials_file    = \"kombai.toml\"\n\
+             sidecar_endpoint    = \"http://127.0.0.1:9100\"\n\
+             sidecar_hmac_secret = \"deadbeef\"\n",
+        );
+        let err = write_and_load(&t).expect_err("short secret must fail");
+        let s = format!("{err}");
+        assert!(s.contains("sidecar_hmac_secret"), "got: {s}");
+    }
+
+    #[test]
+    fn sidecar_secret_with_non_hex_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id         = \"kombai\"\n\
+             kind                = \"http_sidecar\"\n\
+             credentials_file    = \"kombai.toml\"\n\
+             sidecar_endpoint    = \"http://127.0.0.1:9100\"\n\
+             sidecar_hmac_secret = \"GGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGGG\"\n",
+        );
+        let err = write_and_load(&t).expect_err("non-hex secret must fail");
+        let s = format!("{err}");
+        assert!(s.contains("hex"), "got: {s}");
+    }
+
+    #[test]
+    fn non_sidecar_provider_with_sidecar_fields_is_rejected() {
+        // Defence-in-depth: a typo on `kind` (e.g. `Anthropic` instead
+        // of `http_sidecar`) MUST NOT silently accept the sidecar
+        // fields and let the planner skip the sidecar codepath.
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id         = \"oops\"\n\
+             kind                = \"Anthropic\"\n\
+             credentials_file    = \"oops.toml\"\n\
+             sidecar_endpoint    = \"http://127.0.0.1:9100\"\n\
+             sidecar_hmac_secret = \"{SIDECAR_TEST_SECRET}\"\n",
+        ));
+        let err = write_and_load(&t).expect_err("non-sidecar with sidecar fields must fail");
+        let s = format!("{err}");
+        assert!(s.contains("sidecar_endpoint"), "got: {s}");
     }
 }
 

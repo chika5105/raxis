@@ -29,6 +29,11 @@ raxis-types = { path = "../types" }
 uuid        = { workspace = true }
 async-trait = { workspace = true }
 reqwest     = { workspace = true, features = ["json"] }
+# HMAC-SHA256 for the C5 sidecar router's per-request authentication
+# (`extensibility-traits.md §9A.7A`).
+sha2        = { workspace = true }
+hmac        = { workspace = true }
+hex         = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "io-util", "fs", "process"] }
