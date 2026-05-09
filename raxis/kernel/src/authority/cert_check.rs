@@ -58,9 +58,11 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
-use raxis_crypto::cert::{cert_status, CertStatus};
+use raxis_crypto::cert::{cert_status_with_revocation, CertStatus};
 use raxis_policy::PolicyBundle;
-use raxis_types::operator_cert::{CertKind, OperatorCert};
+use raxis_types::operator_cert::{CertKind, OperatorCert, RevocationReason};
+
+use crate::authority::revocations::RevocationStore;
 
 // ---------------------------------------------------------------------------
 // CertGuard — allow / deny outcome of one cert-check call.
@@ -112,6 +114,16 @@ pub struct CertEnforcer {
     /// audit for. Cleared on epoch advance is NOT necessary because
     /// the epoch_id changes — old entries become unreachable.
     warned: Mutex<HashSet<(String, u64)>>,
+
+    /// V2_GAPS §D1 — revocation store. Loaded at kernel boot from
+    /// `<data_dir>/revocations/<pubkey_hex>.toml`; each record is
+    /// the operator-signed revocation of a cert. The enforcer
+    /// consults this BEFORE the four-zone state machine so a
+    /// revoked cert short-circuits to `CertStatus::Revoked`
+    /// regardless of its validity window. `None` means "no
+    /// revocation file directory exists" — the enforcer treats
+    /// it as an empty store.
+    revocations: Option<RevocationStore>,
 }
 
 impl Default for CertEnforcer {
@@ -120,7 +132,19 @@ impl Default for CertEnforcer {
 
 impl CertEnforcer {
     pub fn new() -> Self {
-        Self { warned: Mutex::new(HashSet::new()) }
+        Self {
+            warned:      Mutex::new(HashSet::new()),
+            revocations: None,
+        }
+    }
+
+    /// V2_GAPS §D1 — install a revocation store. Called once at
+    /// kernel boot after the store loads `<data_dir>/revocations/`.
+    /// Subsequent `enforce` calls will consult this store before
+    /// computing the four-zone state.
+    pub fn with_revocation_store(mut self, store: RevocationStore) -> Self {
+        self.revocations = Some(store);
+        self
     }
 
     /// Drive the cert check for one operator IPC request.
@@ -165,7 +189,12 @@ impl CertEnforcer {
         // should not have started in the first place.
         let cert = &entry.cert;
 
-        match cert_status(cert, now_unix_secs) {
+        let store = self.revocations.as_ref();
+        let status = cert_status_with_revocation(cert, now_unix_secs, |pk_hex| {
+            store.and_then(|s| s.lookup(pk_hex))
+        });
+
+        match status {
             CertStatus::Active => CertGuard::Allow,
 
             CertStatus::Expiring { secs_until_expiry } => {
@@ -251,6 +280,33 @@ impl CertEnforcer {
                 }, "EmergencyOperatorUsed");
                 let _ = cert;  // suppress unused-binding when debug_asserts off
                 CertGuard::Allow
+            }
+
+            CertStatus::Revoked { reason, revoked_at } => {
+                // V2_GAPS §D1 — admission-time revocation gate.
+                // Every denied op is audited (NOT deduped) so a
+                // forensic timeline can reconstruct exactly when an
+                // attacker tried to reuse a revoked cert. Same
+                // shape as `OperatorCertExpiredOpDenied` for ease
+                // of pattern-matching in operator dashboards.
+                emit_or_log(audit, AuditEventKind::OperatorCertRevokedOpDenied {
+                    pubkey_fingerprint: operator_fingerprint.to_owned(),
+                    epoch_id,
+                    op:                 op_name.to_owned(),
+                    reason:             match reason {
+                        RevocationReason::Rotation   => "Rotation".into(),
+                        RevocationReason::Compromise => "Compromise".into(),
+                    },
+                    revoked_at,
+                }, "OperatorCertRevokedOpDenied");
+                CertGuard::Deny {
+                    wire_code:   "FAIL_CERT_REVOKED",
+                    wire_detail: format!(
+                        "operator cert for {operator_fingerprint} was revoked \
+                         (reason={reason:?}, revoked_at={revoked_at}); rotate by minting \
+                         a NEW key + cert and pushing a new policy epoch",
+                    ),
+                }
             }
         }
     }

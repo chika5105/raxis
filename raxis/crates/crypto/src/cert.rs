@@ -64,7 +64,7 @@ use crate::verify::{verify_ed25519, CryptoError};
 // this crate. We re-export here for ergonomics — most callers only
 // deal with `raxis-crypto::cert` (sign/verify/status) and want the
 // types in the same namespace.
-pub use raxis_types::operator_cert::{CertKind, OperatorCert};
+pub use raxis_types::operator_cert::{CertKind, OperatorCert, RevocationReason, RevocationRecord};
 
 // ---------------------------------------------------------------------------
 // CertError — failure modes for cert construction / verification.
@@ -392,27 +392,49 @@ pub enum CertStatus {
     /// active because it's an emergency cert" from "active and
     /// will eventually expire". Carries no timestamp.
     AlwaysActiveEmergency,
+
+    /// V2_GAPS §D1 — the cert has been revoked. All ops denied
+    /// regardless of `not_before` / `not_after`. The operator
+    /// must mint a new cert (and a new signing key) to resume.
+    /// Carries the revocation reason (rotation vs compromise) and
+    /// a one-line operator-supplied reference for forensic
+    /// attribution.
+    Revoked {
+        /// Reason for revocation. `Compromise` is treated identically
+        /// to `Rotation` at the admission gate (both deny the op);
+        /// the distinction is preserved for downstream tooling
+        /// (audit replay, kernel-side session-termination — V3).
+        reason:     RevocationReason,
+        /// Unix seconds at which the revocation took effect.
+        revoked_at: i64,
+    },
 }
 
 impl CertStatus {
     /// Whether the cert is currently allowed to perform new
     /// commitments (`CreateInitiative`, `ApprovePlan`, etc.).
     /// Recovery ops are governed by [`CertStatus::allows_recovery_ops`].
+    /// Revoked certs deny ALL ops regardless of zone.
     pub fn allows_new_commitments(&self) -> bool {
-        matches!(self, CertStatus::Active | CertStatus::Expiring { .. } | CertStatus::AlwaysActiveEmergency)
+        matches!(
+            self,
+            CertStatus::Active
+                | CertStatus::Expiring { .. }
+                | CertStatus::AlwaysActiveEmergency,
+        )
     }
 
     /// Whether the cert is currently allowed to perform recovery ops
     /// (`AbortTask`, `AbortInitiative`, `RevokeSession`, `DenyEscalation`,
     /// `RotateEpoch`). Active / Expiring / Grace all allow these;
-    /// Expired and NotYetValid do not.
+    /// Expired, NotYetValid, and Revoked do not.
     pub fn allows_recovery_ops(&self) -> bool {
         matches!(
             self,
             CertStatus::Active
                 | CertStatus::Expiring { .. }
                 | CertStatus::Grace { .. }
-                | CertStatus::AlwaysActiveEmergency
+                | CertStatus::AlwaysActiveEmergency,
         )
     }
 
@@ -426,6 +448,7 @@ impl CertStatus {
             CertStatus::Expired { .. }        => "expired",
             CertStatus::NotYetValid { .. }    => "not_yet_valid",
             CertStatus::AlwaysActiveEmergency => "always_active_emergency",
+            CertStatus::Revoked { .. }        => "revoked",
         }
     }
 }
@@ -467,6 +490,136 @@ pub fn cert_status(cert: &OperatorCert, now: i64) -> CertStatus {
             secs_since_expiry: now - cert.not_after,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// V2_GAPS §D1 — Revocation: canonical signing input + verifier
+// ---------------------------------------------------------------------------
+//
+// The revocation record carries a self-contained Ed25519 signature
+// over a canonical byte string so the kernel can verify the record
+// at boot without consulting the issuing CLI's audit trail. The
+// signing input mirrors the cert-signing input shape (`raxis-cert/v1|...`)
+// for ergonomic consistency: one byte-layout style across the
+// crate so the kernel ↔ CLI contract is uniform.
+//
+// **Signing input (UTF-8, ASCII pipe separators):**
+//
+//   raxis-cert-revocation/v1|<subject_pubkey_hex>|<reason>|<revoked_at>|<reference>
+//
+// where:
+//   - `<subject_pubkey_hex>` — 64-char lowercase hex of the cert
+//     being revoked.
+//   - `<reason>`             — `RevocationReason::as_str()`
+//     (`"Rotation"` | `"Compromise"`).
+//   - `<revoked_at>`         — Unix seconds, signed integer.
+//   - `<reference>`          — operator-supplied free-form string
+//     (incident id, ticket, etc.). Linted by the issuing CLI to
+//     forbid pipes / newlines.
+//
+// The signing key is the operator's plan-signing key (the same key
+// that signs `policy.toml` and `plan.toml`). The verifier MUST
+// confirm that the signing key is a known operator entry in the
+// active policy bundle BEFORE accepting the revocation; this gate
+// is implemented in the kernel side, not in this crate.
+
+/// Canonical signing input for a revocation record. Same byte-layout
+/// style as `cert_canonical_signing_input` so the contract is
+/// uniform within the crate.
+pub fn revocation_canonical_signing_input(
+    subject_pubkey_hex: &str,
+    reason:             RevocationReason,
+    revoked_at:         i64,
+    reference:          &str,
+) -> Vec<u8> {
+    format!(
+        "raxis-cert-revocation/v1|{}|{}|{}|{}",
+        subject_pubkey_hex,
+        reason.as_str(),
+        revoked_at,
+        reference,
+    )
+    .into_bytes()
+}
+
+/// Sign a revocation record's canonical input with `signing_key`.
+/// Returns the 128-char hex signature. The caller writes it into
+/// `record.revoked_by_signature_hex`.
+pub fn sign_revocation(
+    subject_pubkey_hex: &str,
+    reason:             RevocationReason,
+    revoked_at:         i64,
+    reference:          &str,
+    signing_key:        &SigningKey,
+) -> String {
+    let msg = revocation_canonical_signing_input(
+        subject_pubkey_hex,
+        reason,
+        revoked_at,
+        reference,
+    );
+    let sig = signing_key.sign(&msg);
+    hex::encode(sig.to_bytes())
+}
+
+/// Verify the signature on a revocation record. Returns `Ok(())` on
+/// a valid signature; `Err(CertError::*)` on malformed hex or
+/// signature mismatch. The caller is still responsible for
+/// confirming that `record.revoked_by_pubkey_hex` corresponds to a
+/// trusted operator entry in the active policy bundle.
+///
+/// This function does NOT mutate state and does NOT consult the
+/// filesystem; it is pure-input → pure-output by the same crate
+/// rules as `verify_cert_self_signature`.
+pub fn verify_revocation_signature(record: &RevocationRecord) -> Result<(), CertError> {
+    if record.signing_input_version != "raxis-cert-revocation/v1" {
+        return Err(CertError::SelfSignatureInvalid(format!(
+            "unknown signing_input_version {:?} (expected \"raxis-cert-revocation/v1\")",
+            record.signing_input_version,
+        )));
+    }
+    if !is_valid_lowercase_hex(&record.revoked_by_pubkey_hex, 64) {
+        return Err(CertError::MalformedPubkey(record.revoked_by_pubkey_hex.clone()));
+    }
+    if !is_valid_lowercase_hex(&record.revoked_by_signature_hex, 128) {
+        return Err(CertError::MalformedSelfSig(record.revoked_by_signature_hex.clone()));
+    }
+    if !is_valid_lowercase_hex(&record.subject_pubkey_hex, 64) {
+        return Err(CertError::MalformedPubkey(record.subject_pubkey_hex.clone()));
+    }
+
+    let pubkey = hex::decode(&record.revoked_by_pubkey_hex)
+        .map_err(|e| CertError::HexDecode(e.to_string()))?;
+    let sig    = hex::decode(&record.revoked_by_signature_hex)
+        .map_err(|e| CertError::HexDecode(e.to_string()))?;
+    let msg = revocation_canonical_signing_input(
+        &record.subject_pubkey_hex,
+        record.reason,
+        record.revoked_at,
+        &record.reference,
+    );
+    verify_ed25519(&pubkey, &msg, &sig)?;
+    Ok(())
+}
+
+/// `cert_status` extension that consults a revocation lookup BEFORE
+/// computing the four-zone state machine. Returns `Revoked` whenever
+/// the supplied closure returns `Some`; otherwise delegates to
+/// `cert_status`.
+///
+/// V2_GAPS §D1 — admission-time revocation gate.
+pub fn cert_status_with_revocation<F>(
+    cert: &OperatorCert,
+    now:  i64,
+    revocation_lookup: F,
+) -> CertStatus
+where
+    F: FnOnce(&str) -> Option<(RevocationReason, i64)>,
+{
+    if let Some((reason, revoked_at)) = revocation_lookup(&cert.pubkey_hex) {
+        return CertStatus::Revoked { reason, revoked_at };
+    }
+    cert_status(cert, now)
 }
 
 // ---------------------------------------------------------------------------
@@ -895,6 +1048,145 @@ mod tests {
         assert_eq!(CertStatus::Expired { secs_since_expiry: 0 }.tag(),       "expired");
         assert_eq!(CertStatus::NotYetValid { secs_until_active: 0 }.tag(),   "not_yet_valid");
         assert_eq!(CertStatus::AlwaysActiveEmergency.tag(),                  "always_active_emergency");
+        assert_eq!(
+            CertStatus::Revoked {
+                reason:     RevocationReason::Compromise,
+                revoked_at: 1_700_000_000,
+            }.tag(),
+            "revoked",
+        );
+    }
+
+    // ── V2_GAPS §D1 — revocation ──────────────────────────────────────
+
+    #[test]
+    fn revocation_canonical_signing_input_byte_layout_is_pinned() {
+        let bytes = revocation_canonical_signing_input(
+            "aa".repeat(32).as_str(),
+            RevocationReason::Compromise,
+            1_700_000_000,
+            "INC-2026-04-15-laptop-theft",
+        );
+        let s = std::str::from_utf8(&bytes).unwrap();
+        assert_eq!(
+            s,
+            "raxis-cert-revocation/v1|\
+             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|\
+             Compromise|1700000000|INC-2026-04-15-laptop-theft",
+        );
+    }
+
+    #[test]
+    fn revocation_signature_round_trips() {
+        let signing = test_signing_key();
+        let pubkey  = test_pubkey_hex();
+        let now     = 1_700_000_000_i64;
+        let sig_hex = sign_revocation(
+            &pubkey,
+            RevocationReason::Rotation,
+            now,
+            "ticket-7",
+            &signing,
+        );
+        let record = RevocationRecord {
+            subject_pubkey_hex:        "bb".repeat(32),
+            subject_fingerprint:       "00".repeat(16),
+            reason:                    RevocationReason::Rotation,
+            revoked_at:                now,
+            reference:                 "ticket-7".into(),
+            revoked_by_pubkey_hex:     "cc".repeat(32),
+            revoked_by_signature_hex:  sig_hex.clone(),
+            signing_input_version:     "raxis-cert-revocation/v1".into(),
+        };
+        // Mismatched subject — verification fails because the
+        // canonical input includes the subject pubkey and the
+        // signer / pubkey-on-record disagree.
+        let err = verify_revocation_signature(&record).unwrap_err();
+        assert!(matches!(err, CertError::SelfSignatureInvalid(_) | CertError::HexDecode(_)),
+            "expected SelfSignatureInvalid, got {err:?}");
+
+        // Now build a record whose subject + signing-key are
+        // consistent with the actual signed bytes.
+        let consistent = RevocationRecord {
+            subject_pubkey_hex:        pubkey.clone(),
+            subject_fingerprint:       "00".repeat(16),
+            reason:                    RevocationReason::Rotation,
+            revoked_at:                now,
+            reference:                 "ticket-7".into(),
+            revoked_by_pubkey_hex:     pubkey.clone(),
+            revoked_by_signature_hex:  sign_revocation(
+                &pubkey,
+                RevocationReason::Rotation,
+                now,
+                "ticket-7",
+                &signing,
+            ),
+            signing_input_version:     "raxis-cert-revocation/v1".into(),
+        };
+        verify_revocation_signature(&consistent).expect("valid sig");
+    }
+
+    #[test]
+    fn revocation_signature_rejects_unknown_version() {
+        let mut record = RevocationRecord {
+            subject_pubkey_hex:        test_pubkey_hex(),
+            subject_fingerprint:       "00".repeat(16),
+            reason:                    RevocationReason::Rotation,
+            revoked_at:                0,
+            reference:                 "x".into(),
+            revoked_by_pubkey_hex:     test_pubkey_hex(),
+            revoked_by_signature_hex:  "00".repeat(64),
+            signing_input_version:     "raxis-cert-revocation/v9".into(),
+        };
+        record.revoked_by_signature_hex = sign_revocation(
+            &record.subject_pubkey_hex,
+            record.reason,
+            record.revoked_at,
+            &record.reference,
+            &test_signing_key(),
+        );
+        let err = verify_revocation_signature(&record).unwrap_err();
+        assert!(matches!(err, CertError::SelfSignatureInvalid(_)),
+            "unknown version must reject: {err:?}");
+    }
+
+    #[test]
+    fn cert_status_with_revocation_returns_revoked_when_lookup_hits() {
+        let now  = 1_700_000_000_i64;
+        let cert = fixture_standard_cert(now);
+        let status = cert_status_with_revocation(
+            &cert,
+            now,
+            |pk| {
+                assert_eq!(pk, cert.pubkey_hex);
+                Some((RevocationReason::Compromise, now - 86_400))
+            },
+        );
+        match status {
+            CertStatus::Revoked { reason, revoked_at } => {
+                assert_eq!(reason, RevocationReason::Compromise);
+                assert_eq!(revoked_at, now - 86_400);
+            }
+            other => panic!("expected Revoked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cert_status_with_revocation_falls_through_when_lookup_misses() {
+        let now  = 1_700_000_000_i64;
+        let cert = fixture_standard_cert(now);
+        let status = cert_status_with_revocation(&cert, now, |_| None);
+        assert_eq!(status, CertStatus::Active);
+    }
+
+    #[test]
+    fn revoked_status_denies_all_ops() {
+        let s = CertStatus::Revoked {
+            reason:     RevocationReason::Rotation,
+            revoked_at: 0,
+        };
+        assert!(!s.allows_new_commitments());
+        assert!(!s.allows_recovery_ops());
     }
 
     // ── CertKind round-trip ───────────────────────────────────────────

@@ -57,6 +57,8 @@ pub fn run_show(flags: &GlobalFlags, args: &[String])           -> Result<(), Cl
 pub fn run_verify(flags: &GlobalFlags, args: &[String])         -> Result<(), CliError> { verify::run(flags, args) }
 pub fn run_list(flags: &GlobalFlags, args: &[String])           -> Result<(), CliError> { list::run(flags, args) }
 pub fn run_install(flags: &GlobalFlags, args: &[String])        -> Result<(), CliError> { install::run(flags, args) }
+pub fn run_revoke(flags: &GlobalFlags, args: &[String])         -> Result<(), CliError> { revoke::run(flags, args) }
+pub fn run_list_revocations(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> { revoke::run_list(flags, args) }
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -1121,5 +1123,532 @@ permitted_ops      = ["AbortTask"]
 
         run_show(&empty_flags(), &make_args(&[out.to_str().unwrap()])).unwrap();
         run_show(&empty_flags(), &make_args(&[out.to_str().unwrap(), "--json"])).unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// V2_GAPS §D1 — `raxis cert revoke` / `raxis cert list-revocations`
+// ---------------------------------------------------------------------------
+//
+// `revoke <cert>` writes a signed `RevocationRecord` to
+// `<data-dir>/revocations/<subject_pubkey_hex>.toml`. The kernel
+// loads the directory at boot and short-circuits cert status to
+// `Revoked` for any cert whose pubkey matches a record. The CLI
+// is intentionally local-only: it does NOT open the kernel's
+// operator socket. The kernel re-reads the directory on its next
+// restart; live updates while the kernel is running require V3's
+// `KernelPush::CertRevocationApplied` envelope, which is not
+// shipped in V2.3.
+//
+// Input discipline:
+//   * The `<cert>` positional argument is the path to the cert
+//     TOML the operator wishes to revoke. The CLI verifies the
+//     cert's self-signature before writing the revocation so a
+//     corrupted cert cannot be used as the trigger for a
+//     ceremony that the kernel will then reject.
+//   * `--reason` is `rotation` or `compromise` — the only two
+//     values the spec allows.
+//   * `--reference` is a free-form short string (incident id /
+//     change-management ticket). Pipes and newlines are rejected
+//     so they don't break the canonical signing input layout.
+//   * `--operator-key` is the operator's plan-signing key path.
+//     The same key the kernel trusts via `policy.toml [meta].signed_by`.
+
+mod revoke {
+    use super::*;
+    use std::collections::HashMap;
+    use std::io::Write;
+
+    use raxis_crypto::cert::{
+        sign_revocation, validate_cert_structurally, verify_cert_self_signature,
+        verify_revocation_signature,
+    };
+    use raxis_types::operator_cert::{RevocationReason, RevocationRecord};
+
+    fn arg<'a>(args: &'a [String], i: usize, flag: &str) -> Result<&'a str, CliError> {
+        args.get(i).map(|s| s.as_str()).ok_or_else(|| {
+            CliError::Usage(format!("flag {flag} expects an argument"))
+        })
+    }
+
+    pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+        let mut cert_path: Option<PathBuf> = None;
+        let mut reason:    Option<String>  = None;
+        let mut reference: Option<String>  = None;
+        let mut force      = false;
+
+        let mut i = 0;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--help" | "-h" => { print_help(); return Ok(()); }
+                "--cert" => { i += 1; cert_path = Some(PathBuf::from(arg(args, i, "--cert")?)); }
+                "--reason" => { i += 1; reason = Some(arg(args, i, "--reason")?.to_owned()); }
+                "--reference" => { i += 1; reference = Some(arg(args, i, "--reference")?.to_owned()); }
+                "--force" => { force = true; }
+                other if other.starts_with("--") =>
+                    return Err(CliError::Usage(format!("unknown cert revoke flag: {other:?}"))),
+                other => {
+                    if cert_path.is_some() {
+                        return Err(CliError::Usage(format!(
+                            "cert revoke: unexpected positional {other:?} (one <cert path> only)"
+                        )));
+                    }
+                    cert_path = Some(PathBuf::from(other));
+                }
+            }
+            i += 1;
+        }
+
+        let cert_path = cert_path.or(None).ok_or_else(|| CliError::Usage(
+            "cert revoke requires a <cert path> positional or --cert <path>".into(),
+        ))?;
+        let reason_str = reason.ok_or_else(|| CliError::Usage(
+            "cert revoke requires --reason <rotation|compromise>".into(),
+        ))?;
+        let reference = reference.ok_or_else(|| CliError::Usage(
+            "cert revoke requires --reference <id> for forensic attribution".into(),
+        ))?;
+        if reference.contains('|') || reference.contains('\n') || reference.contains('\r') {
+            return Err(CliError::Usage(
+                "cert revoke: --reference must not contain pipe, CR, or LF characters \
+                 (the canonical signing input is pipe-delimited; embedding a pipe would \
+                 cause kernel-side verification to fail). Pick a short ASCII id.".into(),
+            ));
+        }
+
+        let reason = match reason_str.as_str() {
+            "rotation"   => RevocationReason::Rotation,
+            "compromise" => RevocationReason::Compromise,
+            other => return Err(CliError::Usage(format!(
+                "cert revoke: --reason must be \"rotation\" or \"compromise\"; got {other:?}"
+            ))),
+        };
+
+        let cert = read_cert_toml(&cert_path)?;
+        let viol = validate_cert_structurally(&cert);
+        if !viol.is_empty() && !force {
+            return Err(CliError::Usage(format!(
+                "cert revoke: cert at {} is structurally invalid ({} violations); \
+                 pass --force to revoke anyway: {viol:?}",
+                cert_path.display(), viol.len(),
+            )));
+        }
+        if let Err(e) = verify_cert_self_signature(&cert) {
+            if !force {
+                return Err(CliError::Usage(format!(
+                    "cert revoke: cert at {} self-signature verification failed: {e}; \
+                     pass --force to revoke anyway",
+                    cert_path.display(),
+                )));
+            }
+        }
+
+        let signing_key = crate::signing::load_operator_key(
+            flags.operator_key_path
+                .as_ref()
+                .ok_or_else(|| CliError::Usage(
+                    "cert revoke requires --operator-key <path> (the plan-signing key authorising the revocation)".into(),
+                ))?,
+        )?;
+        let revoked_by_pubkey_hex = pubkey_hex_of(&signing_key);
+
+        let now = now_unix_secs();
+        let signature_hex = sign_revocation(
+            &cert.pubkey_hex,
+            reason,
+            now,
+            &reference,
+            &signing_key,
+        );
+
+        let record = RevocationRecord {
+            subject_pubkey_hex:        cert.pubkey_hex.clone(),
+            subject_fingerprint:       fingerprint_of(&cert.pubkey_hex)?,
+            reason,
+            revoked_at:                now,
+            reference:                 reference.clone(),
+            revoked_by_pubkey_hex,
+            revoked_by_signature_hex:  signature_hex,
+            signing_input_version:     "raxis-cert-revocation/v1".into(),
+        };
+
+        // Defensive: round-trip through verify before writing so a
+        // bug in the signing path surfaces here, not at kernel boot.
+        verify_revocation_signature(&record).map_err(|e| {
+            CliError::Key(format!("post-sign verification failed: {e} (this is a bug)"))
+        })?;
+
+        let dir = flags.data_dir().join("revocations");
+        std::fs::create_dir_all(&dir).map_err(|e| CliError::Io {
+            path: dir.display().to_string(),
+            source: e,
+        })?;
+        let out_path = dir.join(format!("{}.toml", cert.pubkey_hex));
+        if out_path.exists() && !force {
+            return Err(CliError::Usage(format!(
+                "cert revoke: {} already exists (cert is already revoked) — pass --force \
+                 to overwrite (e.g. to re-record with a different reference)",
+                out_path.display(),
+            )));
+        }
+
+        let s = toml::to_string(&record).map_err(|e| CliError::Key(format!(
+            "revocation TOML serialise failed: {e}"
+        )))?;
+        write_revocation_atomic(&out_path, s.as_bytes()).map_err(|e| CliError::Io {
+            path: out_path.display().to_string(),
+            source: e,
+        })?;
+
+        // V2_GAPS §D1 — operator-local audit trail. The CLI cannot
+        // append to the kernel's hash-chained audit segments
+        // (single-writer invariant), so a parallel `cert-cli.jsonl`
+        // is written under `<data_dir>/audit/`. `raxis audit verify`
+        // already merges any well-formed JSONL trail discovered in
+        // that directory; V3 will also forward the record over the
+        // operator socket so the kernel persists it inside the
+        // hash-chained segment.
+        let _ = append_local_cert_cli_event(
+            &flags.data_dir(),
+            &serde_json::json!({
+                "kind":               "OperatorCertRevoked",
+                "subject_fingerprint": record.subject_fingerprint,
+                "subject_pubkey_hex":  record.subject_pubkey_hex,
+                "reason":              record.reason.as_str(),
+                "revoked_at":          record.revoked_at,
+                "reference":           record.reference,
+                "revoked_by_pubkey_hex": record.revoked_by_pubkey_hex,
+                "emitted_at":          now,
+            }),
+        );
+
+        println!("Revoked: {} ({})", cert.display_name, fingerprint_of(&cert.pubkey_hex)?);
+        println!("  reason:                {}", reason.as_str());
+        println!("  reference:             {reference}");
+        println!("  revoked_at:            {now}");
+        println!("  revoked_by_fp:         {}", fingerprint_of(&record.revoked_by_pubkey_hex)?);
+        println!("  on-disk path:          {}", out_path.display());
+        println!();
+        println!("Restart the kernel for the revocation to take effect.");
+        Ok(())
+    }
+
+    pub fn run_list(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+        let mut json = false;
+        for a in args {
+            match a.as_str() {
+                "--help" | "-h" => { print_list_help(); return Ok(()); }
+                "--json" => json = true,
+                other => return Err(CliError::Usage(format!(
+                    "cert list-revocations: unknown flag {other:?}"
+                ))),
+            }
+        }
+
+        let dir = flags.data_dir().join("revocations");
+        let mut rows: Vec<RevocationRecord> = Vec::new();
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("(no revocations registered)");
+                println!("  expected layout: {}/<pubkey_hex>.toml", dir.display());
+                return Ok(());
+            }
+            Err(e) => return Err(CliError::Io {
+                path: dir.display().to_string(),
+                source: e,
+            }),
+        };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") { continue; }
+            let bytes = std::fs::read(&path).map_err(|e| CliError::Io {
+                path: path.display().to_string(),
+                source: e,
+            })?;
+            let text = String::from_utf8_lossy(&bytes);
+            match toml::from_str::<RevocationRecord>(&text) {
+                Ok(rec) => rows.push(rec),
+                Err(e) => eprintln!(
+                    "warning: skipping {} (parse failed: {e})",
+                    path.display(),
+                ),
+            }
+        }
+        rows.sort_by(|a, b| b.revoked_at.cmp(&a.revoked_at));
+
+        if json {
+            let arr: Vec<serde_json::Value> = rows.iter()
+                .map(|r| serde_json::json!({
+                    "subject_pubkey_hex":   r.subject_pubkey_hex,
+                    "subject_fingerprint":  r.subject_fingerprint,
+                    "reason":               r.reason.as_str(),
+                    "revoked_at":           r.revoked_at,
+                    "reference":            r.reference,
+                    "revoked_by_pubkey_hex": r.revoked_by_pubkey_hex,
+                }))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&serde_json::Value::Array(arr))
+                .map_err(CliError::from)?);
+            return Ok(());
+        }
+
+        if rows.is_empty() {
+            println!("(no revocations registered)");
+            return Ok(());
+        }
+
+        // Verify each record's signature so the operator sees a clear
+        // ✓/✗ in the listing. We don't fail the command on a bad
+        // signature; we just mark the row.
+        let mut sig_ok: HashMap<String, bool> = HashMap::new();
+        for r in &rows {
+            sig_ok.insert(r.subject_pubkey_hex.clone(), verify_revocation_signature(r).is_ok());
+        }
+
+        println!(
+            "{:<32}  {:<10}  {:>12}  {:<32}  {:<3}",
+            "FINGERPRINT", "REASON", "REVOKED_AT", "REFERENCE", "SIG",
+        );
+        for r in &rows {
+            let ok = *sig_ok.get(&r.subject_pubkey_hex).unwrap_or(&false);
+            println!(
+                "{:<32}  {:<10}  {:>12}  {:<32}  {:<3}",
+                &r.subject_fingerprint,
+                r.reason.as_str(),
+                r.revoked_at,
+                truncate(&r.reference, 32),
+                if ok { "OK" } else { "BAD" },
+            );
+        }
+        Ok(())
+    }
+
+    fn append_local_cert_cli_event(
+        data_dir: &Path,
+        record: &serde_json::Value,
+    ) -> std::io::Result<()> {
+        let dir  = data_dir.join("audit");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join("cert-cli.jsonl");
+        let mut line = serde_json::to_string(record)
+            .unwrap_or_else(|_| "{}".into());
+        line.push('\n');
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .append(true).create(true).mode(0o600).open(&path)?;
+            f.write_all(line.as_bytes())?;
+            f.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .append(true).create(true).open(&path)?;
+            f.write_all(line.as_bytes())?;
+            f.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn write_revocation_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
+        let parent = path.parent().ok_or_else(|| {
+            std::io::Error::other("revocation path has no parent")
+        })?;
+        let tmp = parent.join(format!(
+            "{}.tmp.{}.{}",
+            path.file_name().and_then(|s| s.to_str()).unwrap_or("rev"),
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true).create_new(true).mode(0o600).open(&tmp)?;
+            f.write_all(body)?;
+            f.sync_all()?;
+        }
+        #[cfg(not(unix))]
+        {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            f.write_all(body)?;
+            f.sync_all()?;
+        }
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        #[cfg(unix)]
+        {
+            let f = std::fs::OpenOptions::new().read(true).open(parent)?;
+            f.sync_all()?;
+        }
+        Ok(())
+    }
+
+    fn truncate(s: &str, n: usize) -> &str {
+        if s.len() <= n { s } else { &s[..n] }
+    }
+
+    fn print_help() {
+        println!(
+            r#"raxis cert revoke — revoke an operator certificate (V2_GAPS §D1).
+
+USAGE:
+    raxis [--data-dir <path>] [--operator-key <path>] cert revoke <cert>
+        --reason <rotation|compromise>
+        --reference <id>
+        [--force]
+
+ARGUMENTS:
+    <cert>           Path to the cert TOML to revoke (or pass via --cert).
+
+FLAGS:
+    --reason         Required. Either "rotation" (forward-only;
+                     plans signed before revoked_at remain valid)
+                     or "compromise" (retroactive; key is treated
+                     as untrusted from now on).
+    --reference      Required. Short operator-supplied id
+                     (incident, ticket). Pipes / newlines rejected.
+    --force          Allow revoking a structurally-invalid cert
+                     and overwriting an existing revocation
+                     record.
+
+The revoke path:
+  1. Validates the cert's self-signature (skip with --force).
+  2. Signs a RevocationRecord with --operator-key over the
+     canonical input `raxis-cert-revocation/v1|...`.
+  3. Round-trips through verify_revocation_signature.
+  4. Writes <data-dir>/revocations/<subject_pubkey_hex>.toml with
+     mode 0600 + atomic rename + parent fsync.
+
+The kernel does not need to be running to write the revocation,
+but a kernel restart is required for the revocation to take
+effect (V2.3 — V3 will add `KernelPush::CertRevocationApplied`
+for live updates).
+"#,
+        );
+    }
+
+    fn print_list_help() {
+        println!(
+            r#"raxis cert list-revocations — list installed revocation records.
+
+USAGE:
+    raxis [--data-dir <path>] cert list-revocations [--json]
+
+Each row carries the subject's fingerprint, the revocation
+reason, the Unix timestamp the record was signed, the operator-
+supplied reference, and a signature-verification flag (OK/BAD).
+"#,
+        );
+    }
+
+    // ── Tests ──────────────────────────────────────────────────────────
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use ed25519_dalek::SigningKey;
+
+        fn write_key(dir: &Path, name: &str, key: &SigningKey) -> PathBuf {
+            // `load_operator_key` accepts a 64-char hex seed for test
+            // convenience (see `cli::signing`), so we round-trip the
+            // signing key's seed bytes through hex rather than building
+            // a real PKCS#8 PEM.
+            let mut p = dir.join(name);
+            p.set_extension("key");
+            std::fs::write(&p, hex::encode(key.to_bytes())).unwrap();
+            p
+        }
+
+        fn empty_flags(data_dir: PathBuf, key: PathBuf) -> GlobalFlags {
+            GlobalFlags {
+                data_dir,
+                socket_path: None,
+                operator_key_path: Some(key),
+            }
+        }
+
+        #[test]
+        fn revoke_writes_a_signed_record_under_data_dir_revocations() {
+            let tmp = tempfile::tempdir().unwrap();
+            let key = SigningKey::from_bytes(&[3u8; 32]);
+            let key_path = write_key(tmp.path(), "op", &key);
+
+            // Mint a cert by hand so we don't take a dep on `mint::run` here.
+            let mut cert = OperatorCert {
+                kind:                    raxis_types::operator_cert::CertKind::Standard,
+                display_name:            "Chika".into(),
+                pubkey_hex:               hex::encode(key.verifying_key().to_bytes()),
+                not_before:              0,
+                not_after:               i64::MAX / 2,
+                warn_before_expiry_days: 30,
+                grace_period_days:       7,
+                permitted_ops:           vec!["AbortTask".into()],
+                contact_info:            None,
+                self_sig_hex:            String::new(),
+            };
+            cert.self_sig_hex = raxis_crypto::cert::sign_cert(&cert, &key);
+            let cert_path = tmp.path().join("op.cert.toml");
+            std::fs::write(&cert_path, toml::to_string(&cert).unwrap()).unwrap();
+
+            let flags = empty_flags(tmp.path().to_path_buf(), key_path);
+            let args = vec![
+                cert_path.to_string_lossy().to_string(),
+                "--reason".into(), "rotation".into(),
+                "--reference".into(), "ticket-123".into(),
+            ];
+            super::run(&flags, &args).expect("revoke");
+
+            let out = tmp.path().join("revocations").join(format!("{}.toml", cert.pubkey_hex));
+            assert!(out.exists());
+            let body = std::fs::read_to_string(&out).unwrap();
+            let rec: RevocationRecord = toml::from_str(&body).unwrap();
+            assert_eq!(rec.subject_pubkey_hex, cert.pubkey_hex);
+            assert_eq!(rec.reason, RevocationReason::Rotation);
+            verify_revocation_signature(&rec).unwrap();
+        }
+
+        #[test]
+        fn revoke_refuses_pipe_in_reference() {
+            let tmp = tempfile::tempdir().unwrap();
+            let key = SigningKey::from_bytes(&[5u8; 32]);
+            let key_path = write_key(tmp.path(), "op", &key);
+            let cert_path = tmp.path().join("c.toml");
+            std::fs::write(&cert_path, "kind = \"Standard\"\n").unwrap();
+            let flags = empty_flags(tmp.path().to_path_buf(), key_path);
+            let args = vec![
+                cert_path.to_string_lossy().to_string(),
+                "--reason".into(), "rotation".into(),
+                "--reference".into(), "bad|ref".into(),
+            ];
+            let err = super::run(&flags, &args).unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("pipe"), "{msg}");
+        }
+
+        #[test]
+        fn revoke_refuses_unknown_reason() {
+            let tmp = tempfile::tempdir().unwrap();
+            let key = SigningKey::from_bytes(&[6u8; 32]);
+            let key_path = write_key(tmp.path(), "op", &key);
+            let cert_path = tmp.path().join("c.toml");
+            std::fs::write(&cert_path, "kind = \"Standard\"\n").unwrap();
+            let flags = empty_flags(tmp.path().to_path_buf(), key_path);
+            let args = vec![
+                cert_path.to_string_lossy().to_string(),
+                "--reason".into(), "expired".into(),
+                "--reference".into(), "x".into(),
+            ];
+            let err = super::run(&flags, &args).unwrap_err();
+            let msg = format!("{err:?}");
+            assert!(msg.contains("rotation") && msg.contains("compromise"), "{msg}");
+        }
     }
 }

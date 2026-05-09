@@ -66,6 +66,8 @@ const EPOCH_SUBCOMMANDS:       &[&str] = &["advance"];
 const AUDIT_SUBCOMMANDS:       &[&str] = &["verify"];
 const CERT_SUBCOMMANDS:        &[&str] = &[
     "mint", "mint-emergency", "show", "verify", "list", "install",
+    // V2_GAPS §D1 — operator-cert revocation (admission-time MVP).
+    "revoke", "list-revocations",
 ];
 /// V2 §extensibility-traits.md §4 — local-only credential ops.
 /// MVP scope (V2 GA) is the seven-command catalogue from
@@ -289,12 +291,14 @@ fn run() -> Result<(), CliError> {
         "cert" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "mint"           => commands::cert::run_mint(&flags, &rest[1..]),
-                "mint-emergency" => commands::cert::run_mint_emergency(&flags, &rest[1..]),
-                "show"           => commands::cert::run_show(&flags, &rest[1..]),
-                "verify"         => commands::cert::run_verify(&flags, &rest[1..]),
-                "list"           => commands::cert::run_list(&flags, &rest[1..]),
-                "install"        => commands::cert::run_install(&flags, &rest[1..]),
+                "mint"             => commands::cert::run_mint(&flags, &rest[1..]),
+                "mint-emergency"   => commands::cert::run_mint_emergency(&flags, &rest[1..]),
+                "show"             => commands::cert::run_show(&flags, &rest[1..]),
+                "verify"           => commands::cert::run_verify(&flags, &rest[1..]),
+                "list"             => commands::cert::run_list(&flags, &rest[1..]),
+                "install"          => commands::cert::run_install(&flags, &rest[1..]),
+                "revoke"           => commands::cert::run_revoke(&flags, &rest[1..]),
+                "list-revocations" => commands::cert::run_list_revocations(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "cert sub-command", sub2, CERT_SUBCOMMANDS,
                 ))),

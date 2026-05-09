@@ -1309,6 +1309,8 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "InitiativeQuarantined", "OperatorQuarantineSwept",
     // V2_GAPS §C7 — credential CLI ceremony events
     "CredentialRegistered", "CredentialRemoved", "CredentialVerified",
+    // V2_GAPS §D1 — operator-cert revocation ceremony events
+    "OperatorCertRevoked", "OperatorCertRevokedOpDenied",
 ];
 
 /// Validate the raw `[notifications]` section and produce the final
@@ -4158,6 +4160,22 @@ channels   = []
                 latency_ms:         0,
                 actor_fingerprint:  "x".into(),
                 backend_kind:       "x".into(),
+            }.as_str(),
+            // V2_GAPS §D1 — cert-revocation ceremony events.
+            AuditEventKind::OperatorCertRevoked {
+                subject_pubkey_fingerprint:    "x".into(),
+                subject_display_name:          None,
+                reason:                        "Rotation".into(),
+                revoked_at:                    0,
+                reference:                     "x".into(),
+                revoked_by_pubkey_fingerprint: "x".into(),
+            }.as_str(),
+            AuditEventKind::OperatorCertRevokedOpDenied {
+                pubkey_fingerprint: "x".into(),
+                epoch_id:           0,
+                op:                 "x".into(),
+                reason:             "Rotation".into(),
+                revoked_at:         0,
             }.as_str(),
         ];
 

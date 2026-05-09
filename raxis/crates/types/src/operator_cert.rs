@@ -76,6 +76,93 @@ impl CertKind {
 // added by `raxis-policy::bundle` in step 3).
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// RevocationReason — V2_GAPS §D1 key/cert revocation taxonomy.
+//
+// `Rotation` is forward-only: the cert was retired in the normal course
+// of operations. Plans signed before `revoked_at` remain valid, but
+// new plan-signing operations under this cert are denied.
+//
+// `Compromise` is retroactive: the cert's private half may have been
+// exposed. New operations are denied; live sessions admitted under
+// the cert are terminated by the kernel.
+//
+// V2 supports exactly two values; the spec
+// (`specs/v2/key-revocation.md §3.3`) explicitly forbids additional
+// values without an epoch-advance ceremony.
+// ---------------------------------------------------------------------------
+
+/// Reason for a certificate revocation. Wire-stable PascalCase serde
+/// projection (matches `key-revocation.md §3`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RevocationReason {
+    /// Cert is being retired in the normal course of operations.
+    /// Plans signed before `revoked_at` remain valid; new plans
+    /// must be signed by a non-revoked cert.
+    Rotation,
+    /// Cert's private half has been or may have been exposed. New
+    /// operations are denied permanently; in-flight sessions are
+    /// torn down (V3 — V2 ships the admission-time gate only).
+    Compromise,
+}
+
+impl RevocationReason {
+    /// Wire-canonical name. PascalCase. MUST match the serde
+    /// representation byte-for-byte.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RevocationReason::Rotation   => "Rotation",
+            RevocationReason::Compromise => "Compromise",
+        }
+    }
+
+    /// Inverse of [`RevocationReason::as_str`].
+    pub fn parse(s: &str) -> Option<RevocationReason> {
+        match s {
+            "Rotation"   => Some(RevocationReason::Rotation),
+            "Compromise" => Some(RevocationReason::Compromise),
+            _            => None,
+        }
+    }
+}
+
+/// Persistent record of a single operator-cert revocation. One file
+/// per record under `<data_dir>/revocations/<fingerprint>.toml`.
+///
+/// Field semantics:
+///   * `subject_pubkey_hex` — 64-char lowercase hex of the revoked
+///     cert's `pubkey_hex`. Used as the on-disk filename (so a
+///     single cert has at most one revocation record on disk).
+///   * `subject_fingerprint` — SHA-256[:16]-byte 32-hex-char
+///     fingerprint of `subject_pubkey_hex` bytes (matches
+///     `policy.toml [meta].signed_by` and the `actor_fingerprint`
+///     audit field).
+///   * `reason` — see [`RevocationReason`].
+///   * `revoked_at` — Unix seconds. Plans/ops attempted at or after
+///     this instant are denied; for `Compromise` the time of
+///     revocation is informational because rejection is
+///     unconditional.
+///   * `reference` — short operator-supplied string (incident id,
+///     change-management ticket). Surfaces in audit logs.
+///   * `revoked_by_pubkey_hex` — operator-key pubkey hex (64-char)
+///     that signed the revocation. Must be a real operator entry
+///     in the active policy bundle.
+///   * `revoked_by_signature_hex` — Ed25519 signature over the
+///     canonical signing input (`raxis-crypto::cert::revocation_canonical_signing_input`).
+///   * `signing_input_version` — version tag for the canonical
+///     signing input. Pinned to `"raxis-cert-revocation/v1"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationRecord {
+    pub subject_pubkey_hex:        String,
+    pub subject_fingerprint:       String,
+    pub reason:                    RevocationReason,
+    pub revoked_at:                i64,
+    pub reference:                 String,
+    pub revoked_by_pubkey_hex:     String,
+    pub revoked_by_signature_hex:  String,
+    pub signing_input_version:     String,
+}
+
 /// On-disk representation of a single operator certificate.
 ///
 /// Round-trips through TOML losslessly; the `permitted_ops` field

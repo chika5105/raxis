@@ -1392,15 +1392,78 @@ their first initiative.
 
 ## §5 — Tier D: Schema/Skeleton Only
 
-### D1: Key Revocation
+### D1: Key Revocation — **CLOSED (V2.3, MVP)**
 
 **Spec:** `key-revocation.md` (77KB)
-**Estimate:** ~400 lines
+**Estimate:** ~400 lines (V2 MVP delivered ~600 lines incl. tests)
 
-`operator_certificates` table exists. `operator_cert.rs` types exist.
-`cert.rs` CLI command exists (1,125 lines) with cert issuance. Missing:
-revocation check at IPC auth time, CRL distribution, `raxis cert
-revoke` subcommand, grace-period handling for in-flight sessions.
+V2.3 ships the **admission-time operator-certificate revocation MVP**:
+
+* **Wire types** (`crates/types/src/operator_cert.rs`): new
+  `RevocationReason` (`rotation`/`compromise`) and `RevocationRecord`
+  with subject pubkey hex + fingerprint, reason, `revoked_at`,
+  operator-supplied reference, revoking pubkey hex + signature, and
+  `signing_input_version = "raxis-cert-revocation/v1"`.
+* **Crypto** (`crates/crypto/src/cert.rs`): added
+  `CertStatus::Revoked { reason, revoked_at }` (denies new
+  commitments and recovery ops),
+  `revocation_canonical_signing_input` (byte-exact pipe-delimited
+  layout), `sign_revocation`, `verify_revocation_signature`, and
+  `cert_status_with_revocation` for short-circuit evaluation.
+* **Kernel store** (`kernel/src/authority/revocations.rs`):
+  `RevocationStore` loads `<data_dir>/revocations/*.toml` at boot,
+  signature-verifies each record, indexes by subject pubkey hex,
+  and tolerates a missing directory or malformed entries (logged,
+  not fatal). Stats are emitted as `RevocationStoreLoaded`.
+* **Kernel enforcement** (`kernel/src/authority/cert_check.rs`):
+  `CertEnforcer::with_revocation_store` injects the store; the
+  `enforce` path now uses `cert_status_with_revocation`. A revoked
+  cert emits `OperatorCertRevokedOpDenied` and returns
+  `CertGuard::Deny` with `FAIL_CERT_REVOKED` for every operator op.
+* **CLI** (`cli/src/commands/cert.rs`):
+  * `raxis cert revoke <cert> --reason <rotation|compromise> --reference <id>`:
+    validates the cert structurally and self-signs, prompts the
+    operator key for the revocation signature, round-trips through
+    `verify_revocation_signature`, and writes
+    `<data_dir>/revocations/<subject_pubkey_hex>.toml` atomically
+    (mode 0600 + parent fsync). `--force` bypasses corrupted-cert
+    checks and overwrites existing records. Pipes / CR / LF in
+    `--reference` are rejected so the canonical signing input
+    cannot be ambiguified.
+  * `raxis cert list-revocations [--json]`: enumerates
+    `<data_dir>/revocations/`, signature-verifies each record, and
+    renders a fingerprint / reason / revoked_at / reference / SIG
+    table (or pretty JSON).
+* **Doctor** (`cli/src/commands/doctor.rs`): cert health check
+  reports `CertStatus::Revoked` with a `Fail` outcome telling the
+  operator to mint a fresh cert and advance the policy epoch.
+* **Audit** (`crates/audit/src/event.rs`,
+  `crates/policy/src/bundle.rs`): added `OperatorCertRevoked`
+  (successful CLI revocation) and `OperatorCertRevokedOpDenied`
+  (admission-time deny). Both kinds are present in
+  `KNOWN_AUDIT_EVENT_KINDS` and the drift-guard fixture.
+
+**V2 design choices (deferred to V3):**
+
+* **Admission-time only.** Revocation takes effect on kernel
+  restart; live in-flight sessions are not torn down. V3 adds the
+  `KernelPush::CertRevocationApplied` envelope plus
+  per-session-supervisor purge for `compromise`-class revocations.
+* **No `key_trust_state` SQL table.** Revocations are stored as
+  per-key TOML files on disk rather than the full
+  `key_trust_state` / `emergency_key_revocations` SQL schema from
+  the spec. The TOML layout is forward-compatible (the kernel
+  ingests records by pubkey, not by file path) and can be
+  populated from a future SQL upgrade migration.
+* **No CRL distribution.** V2 is single-host; cross-host
+  distribution of the revocation set is V3 (CRL bundle signed by
+  the policy author, gossiped or pulled).
+* **Grace-period handling.** Plans signed before `revoked_at`
+  remain valid for `rotation`-class revocations (the kernel still
+  honours the cert's `not_after` and grace window). For
+  `compromise`, the cert is treated as untrusted retroactively at
+  admission time, but in-flight tasks ride out their commitments
+  until kernel restart — hardened in V3.
 
 ### D2: Host Capacity Management
 

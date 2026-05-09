@@ -357,6 +357,25 @@ impl HandlerContext {
         // and pays no behaviour change.
         let image_resolver: Arc<dyn ImageResolver> =
             Arc::new(PrePopulatedResolver::new(data_dir.join("oci-cache")));
+
+        // V2_GAPS §D1 — load the operator-cert revocation store
+        // from `<data_dir>/revocations/`. A missing directory
+        // returns an empty store; tampered records are skipped
+        // with a stderr warning. Both signals propagate to the
+        // operator via `raxis status`.
+        let cert_enforcer = {
+            let (rev_store, rev_stats) =
+                crate::authority::revocations::RevocationStore::open(data_dir.as_path());
+            if rev_stats.loaded > 0 || rev_stats.rejected > 0 {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"RevocationStoreLoaded\",\
+                     \"loaded\":{},\"rejected\":{}}}",
+                    rev_stats.loaded, rev_stats.rejected,
+                );
+            }
+            Arc::new(CertEnforcer::new().with_revocation_store(rev_store))
+        };
+
         Self {
             policy,
             registry,
@@ -367,7 +386,7 @@ impl HandlerContext {
             plan_registry,
             gateway,
             epoch_binding,
-            cert_enforcer: Arc::new(CertEnforcer::new()),
+            cert_enforcer,
             isolation,
             credentials,
             proxy_manager,

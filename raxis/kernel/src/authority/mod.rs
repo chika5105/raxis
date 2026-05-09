@@ -32,6 +32,7 @@ pub mod approval;
 pub mod escalation;
 pub mod cert_check;
 pub mod dispatch_matrix;
+pub mod revocations;
 
 // Re-export the public API surface per kernel-core.md §2.3 authority/mod.rs.
 pub use keys::{authority_pubkey_fingerprint, load_key_registry};

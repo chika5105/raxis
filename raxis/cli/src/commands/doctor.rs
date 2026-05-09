@@ -1158,6 +1158,19 @@ fn check_operator_certs(
                     ),
                 );
             }
+            CertStatus::Revoked { reason, revoked_at } => {
+                r.push(
+                    id,
+                    Outcome::Fail,
+                    format!(
+                        "{display} ({fp}) REVOKED ({reason:?}, revoked_at={revoked_at}) \
+                         — all ops denied. Mint a fresh cert with a new signing \
+                         key, install it, and advance the policy epoch.",
+                        display = row.display_name,
+                        fp      = row.pubkey_fingerprint,
+                    ),
+                );
+            }
         }
     }
 }

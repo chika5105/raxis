@@ -1260,6 +1260,33 @@ pub enum AuditEventKind {
         forced:             bool,
     },
 
+    /// V2_GAPS §D1 — emitted when `raxis cert revoke` writes a
+    /// signed revocation record under `<data_dir>/revocations/`.
+    /// The record itself is the durable artifact; this audit event
+    /// is the wire-stable signal that other observability paths
+    /// (`raxis log`, the operator inbox) match on.
+    OperatorCertRevoked {
+        subject_pubkey_fingerprint:    String,
+        subject_display_name:          Option<String>,
+        reason:                        String,
+        revoked_at:                    i64,
+        reference:                     String,
+        revoked_by_pubkey_fingerprint: String,
+    },
+
+    /// V2_GAPS §D1 — emitted EVERY TIME the kernel denies an
+    /// operator op because the operator cert has been revoked.
+    /// Not deduped: every rejection is a forensic breadcrumb so
+    /// a forensic timeline can reconstruct exactly when an
+    /// attacker tried to reuse a revoked cert.
+    OperatorCertRevokedOpDenied {
+        pubkey_fingerprint: String,
+        epoch_id:           u64,
+        op:                 String,
+        reason:             String,
+        revoked_at:         i64,
+    },
+
     /// V2_GAPS §C7 — emitted when `raxis credential verify` runs.
     /// V2 verification is structural-only (file presence, mode 0600,
     /// uid match, non-empty body, optional `KEY=VALUE` parse).
@@ -1764,6 +1791,8 @@ impl AuditEventKind {
             Self::CredentialRegistered { .. } => "CredentialRegistered",
             Self::CredentialRemoved { .. } => "CredentialRemoved",
             Self::CredentialVerified { .. } => "CredentialVerified",
+            Self::OperatorCertRevoked { .. } => "OperatorCertRevoked",
+            Self::OperatorCertRevokedOpDenied { .. } => "OperatorCertRevokedOpDenied",
             Self::TransparentProxyAdmitted { .. } => "TransparentProxyAdmitted",
             Self::TransparentProxyDenied { .. } => "TransparentProxyDenied",
             Self::CredentialProxyStarted { .. } => "CredentialProxyStarted",
