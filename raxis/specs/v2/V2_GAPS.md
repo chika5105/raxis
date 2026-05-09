@@ -1719,21 +1719,33 @@ design constraint from the V2 BLOCKER entry below:
   `dry_run_submission`, `first_launch`) so a V3 upgrade does
   not need a state-file format migration.
 
-**V3 (still deferred):**
+**V2.x candidates (no hard blockers — can land incrementally):**
 
-* Phase 1 (`raxis genesis` orchestration) — needs an
-  air-gapped or interactive operator-cert paste flow.
-* Phase 3 (`raxis credential add` orchestration) — V2 prints
-  the recipe; V3 will pipe key material through a TTY-aware
-  loader.
-* Phase 4 (VM image registry-list fetch + OCI digest
-  picker).
-* Phase 5 (interactive credential-proxy declaration emitter).
+* Phase 1 (`raxis genesis` orchestration) — wraps the
+  existing `raxis genesis` command with guided prompts.
+  No new infrastructure needed; TTY secret input is not
+  required (keypair generation has no secret input).
+* Phase 3 (`raxis credential add` orchestration) — wraps
+  the existing credential CLI. TTY-aware secret input is
+  a convenience, not a blocker; operators already paste
+  keys into `.env` files today.
 * Phase 7 (egress-allowlist auto-populate from
-  `policy.tproxy_allowlist`).
-* Phase 9 (`raxis plan submit --dry-run`) — depends on the
-  V3 `DryRunAdmit` IPC type listed in `V2_GAPS.md §11`.
-* Phase 10 (`raxis plan submit` orchestration on success).
+  `policy.tproxy_allowlist`) — straightforward policy
+  read + template emit. ~50 lines.
+* Phase 10 (`raxis plan submit` orchestration) — wraps
+  the existing `plan submit` command. No new dependencies.
+
+**V3 (hard blockers — depend on unimplemented features):**
+
+* Phase 4 (VM image registry-list fetch + OCI digest
+  picker) — requires an OCI registry client not in the
+  workspace.
+* Phase 5 (interactive credential-proxy declaration
+  emitter) — the proxy declaration schema exists but the
+  wizard form requires the full proxy type vocabulary to
+  be stabilized.
+* Phase 9 (`raxis plan submit --dry-run`) — depends on
+  the `DryRunAdmit` IPC type (not yet implemented).
 
 **Tests** (`commands::setup::tests`):
 `render_policy_substitutes_all_placeholders`,
@@ -1743,16 +1755,18 @@ design constraint from the V2 BLOCKER entry below:
 
 #### C10 (historical, full spec)
 
-> **Status note (V2.4).** The full ten-phase interactive wizard
-> remains a V3 ergonomic enhancement; the V2.3 MVP above
+> **Status note (V2.4).** Phases 1, 3, 7, and 10 are V2.x
+> candidates (no hard blockers). Phases 4, 5, and 9 remain V3
+> (depend on OCI client, proxy vocabulary stabilization, and
+> `DryRunAdmit` IPC respectively). The V2.3 MVP above
 > (non-interactive scaffolding for phases 2 and 6, recipes for the
 > rest) closes the V2 BLOCKER end of this gap. The historical
 > design notes below are preserved as the normative reference for
-> the V3 interactive flow.
+> the remaining interactive flow.
 
 **Spec:** `operator-ergonomics.md §16`
-**Status:** 🟡 V2.3 MVP (phases 2/6); V3 owns the full ten-phase
-interactive flow.
+**Status:** 🟡 V2.3 MVP (phases 2/6); phases 1/3/7/10 are V2.x
+candidates; phases 4/5/9 are V3.
 **Estimate:** ~800 lines (CLI interactive flow + phase orchestration)
 
 The spec positions the setup wizard as the **recommended first-run
