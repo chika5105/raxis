@@ -23,6 +23,15 @@ use std::fmt;
 /// INV-08: the kernel never returns more detail than this code to the planner,
 /// except the fixed PlannerErrorTemplate set for FAIL_POLICY_VIOLATION.
 /// Full remediation actions are in planner-api.md.
+///
+/// **INV-09** (opaque rejection codes) is **structurally enforced** by
+/// the variant set defined here: each variant is a coarse, named
+/// failure class — no variant carries a free-form payload that
+/// could leak which sub-check fired (e.g.,
+/// `FailPolicyViolation` does not name the specific allowlist
+/// rule that rejected it). Adding new variants requires a spec
+/// update; this is the only widening surface. V2_GAPS.md §13
+/// Category 1 — annotation-only enforcement site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlannerErrorCode {
     /// One or more committed files are outside the path allowlist. Retryable.

@@ -7,6 +7,13 @@
 // authority logic. Only: step sequencing + signal handling + error dispatch.
 // Each step calls a subsystem function; this file is the call list.
 //
+// **INV-LIFECYCLE-01..07** (boot sequence, kernel-core.md §2.2)
+// are **structurally enforced** by the linear ordering below: the
+// 9-step startup sequence runs as one synchronous chain, so each
+// invariant ("disk verified before keys loaded", "audit chain
+// opened before any audit emission", etc.) holds by construction.
+// V2_GAPS.md §13 Category 1 — annotation-only enforcement site.
+//
 // V2 scaffolding note: many sibling modules expose structs / enum
 // variants / functions that the V2 hot path does not call yet
 // (V3 reachability — orchestrator restart, witness recovery,

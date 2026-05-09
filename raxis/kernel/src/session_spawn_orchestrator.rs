@@ -14,6 +14,15 @@
 //!   are read from `task_credential_proxies` at spawn time and
 //!   handed to the spawn service.
 //!
+//! **INV-02A** (single-tenant VM) and **INV-02B** (no virtual NIC)
+//! are **structurally enforced** here: every call into
+//! `SpawnRequest` constructs a fresh per-session VM (one
+//! `spawn_session()` call per session — never shared across
+//! sessions), and the SpawnRequest's machine config never
+//! includes a `NetworkInterface` block (see `firecracker_config`
+//! / AVF substrate construction). V2_GAPS.md §13 Category 1 —
+//! annotation-only enforcement site.
+//!
 //! # Why a kernel-side bridge crate (not an IPC handler module)
 //!
 //! Three callers eventually reach the same SpawnRequest:

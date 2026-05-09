@@ -42,6 +42,25 @@
 //! and `crates/test-support/src/workspace_guard.rs`. It cannot reach a
 //! release binary. The `RealClock` / `FakeClock` split (`philosophy.md`
 //! §1.6) is the canonical pattern this follows.
+//!
+//! # Invariants (annotation-only, V2_GAPS.md §13 Category 1)
+//!
+//! * **INV-GATEWAY-01** (gateway trust boundary) — structurally
+//!   enforced: the gateway is a separate OS process on a private
+//!   UDS, and the kernel-side handshake validates the
+//!   `RAXIS_GATEWAY_TOKEN` (32 random bytes minted at spawn) on
+//!   the `GatewayReady` message before accepting any
+//!   `FetchRequest`. Any process that did not inherit the token
+//!   cannot impersonate the gateway. See `runtime::run_gateway`
+//!   for the handshake call site and the kernel's
+//!   `handlers/gateway` for the matching token check.
+//! * **INV-GATEWAY-STATELESS** — structurally enforced: this
+//!   crate exposes no session store, queue, or cache for
+//!   request-derived state. Each `FetchRequest` is handled by a
+//!   stateless `Backend` call (`http_backend::HttpBackend`)
+//!   whose only mutable state is the policy snapshot reloaded on
+//!   `EpochAdvanced`. There is no `HashMap<SessionId, _>`
+//!   anywhere in this crate.
 
 pub mod backend;
 pub mod dispatch;

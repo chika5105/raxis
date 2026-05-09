@@ -2680,12 +2680,21 @@ This does **not** mean 75 invariants are unenforced. The gap
 breaks down into four categories with very different remediation
 costs.
 
-### Category 1: Structurally enforced, not annotated (~30 invariants)
+### Category 1: Structurally enforced, annotated in V2.3 (~30 invariants)
+
+> **STATUS:** CLOSED in V2.3 — annotation pass landed. Each row
+> below now has a one-paragraph comment at the cited enforcement
+> site explaining why the invariant holds without runtime
+> assertion. Future code changes that would weaken structural
+> enforcement (e.g., adding a worktree-cleanup-on-merge path,
+> sharing a VM across sessions, or introducing a streaming model
+> client) MUST also remove or update the matching annotation in
+> the same PR.
 
 These invariants hold because the architecture makes violations
-impossible, but no code comment says `// INV-FOO: enforced here`.
-The only work needed is a mechanical annotation pass — one-line
-comments at the enforcement site.
+impossible, but no code comment said `// INV-FOO: enforced here`.
+A mechanical annotation pass — one-paragraph comments at the
+enforcement site — closed this gap in V2.3.
 
 | Invariant | Why it holds without annotation | Enforcement site |
 |---|---|---|

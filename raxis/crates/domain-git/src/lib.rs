@@ -74,6 +74,25 @@
 //! would have produced. The kernel's recovery path
 //! (`integration-merge.md §11.3`) re-invokes both calls on next
 //! boot if Phase 2 was incomplete; both are safe to retry.
+//!
+//! ## Invariants (annotation-only, V2_GAPS.md §13 Category 1)
+//!
+//! * **INV-MERGE-CONSISTENCY** — structurally enforced by the
+//!   gix-driven object-copy + ref-update sequence: the
+//!   ref-update is performed via
+//!   `gix-ref::file::Transaction::commit` with the prior tip
+//!   set as the precondition, so two concurrent merge attempts
+//!   either both observe the same prior tip and one wins, or
+//!   one observes a newer tip and aborts. There is no path that
+//!   advances the target ref past an unfetched commit because
+//!   `fetch_into_main` runs first and copies the full commit
+//!   graph before `update_target_ref` is invoked.
+//! * **INV-MERGE-WORKTREE-RETAIN** — structurally enforced by
+//!   absence: this crate exposes no worktree cleanup or
+//!   removal entry point. Successful Phase 2 leaves
+//!   `<data_dir>/worktrees/<orch_uuid>/` exactly where the
+//!   provisioner placed it. Worktree GC is a separate, explicit
+//!   sub-task (V3) and never piggybacks on merge.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

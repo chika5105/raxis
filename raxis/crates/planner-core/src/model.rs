@@ -49,6 +49,16 @@
 //!   responses — the planner waits for the full response before
 //!   running tool dispatch. Streaming changes the dispatch-loop
 //!   shape (mid-stream `tool_use` events) and is deferred.
+//!
+//!   This is the **structural enforcement of
+//!   `INV-GATEWAY-STREAM-ATOMICITY`** (V2_GAPS.md §13 Category 1):
+//!   because the V2 [`ModelClient::create_message`] call is one
+//!   request → one fully-buffered response, every assistant
+//!   turn (`stop_reason`, `content`, `usage`) is observed
+//!   atomically by the dispatch loop. There is no partial-frame
+//!   or interleaved-tool-use code path that could violate
+//!   atomicity. When streaming is added in V3, this annotation
+//!   must move to the streaming aggregator.
 //! * **No vision / files.** `content` blocks are text-only; tool
 //!   outputs are bytes (UTF-8 strings). The Anthropic schema
 //!   supports image blocks; the planner does not emit them.
