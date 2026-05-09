@@ -1421,8 +1421,24 @@ fn collect_policy(data_dir: &Path, r: &mut Report) {
 
 /// V2.3 — `raxis doctor providers`. Lists every entry in
 /// `policy.providers` with structural validity (V2 MVP — no live
-/// API call; that path is V3 once the CLI can talk to the gateway
-/// without piggybacking on the operator-IPC socket).
+/// API call against upstream provider clouds; that path is V3 once
+/// the CLI can talk to the gateway without piggybacking on the
+/// operator-IPC socket).
+///
+/// **V2_GAPS §C5 — `sidecar.health`.** For every provider whose
+/// `kind = "http_sidecar"` we additionally probe TCP reachability
+/// of `sidecar_endpoint`. This is the same fidelity as the
+/// `network.connect` row in `collect_network`: a successful TCP
+/// handshake means the sidecar process is bound to the configured
+/// port; the full HMAC-authenticated `/health` round-trip is
+/// performed by the planner at boot via
+/// `SidecarModelClient::health_check` (see
+/// `extensibility-traits.md §9A.7B`). We deliberately do NOT
+/// perform the HMAC-authenticated probe here because the CLI does
+/// not have an async runtime and the sidecar shared secret is
+/// loaded by the planner only — exposing it to the doctor
+/// command-line context would broaden the attack surface for
+/// negligible diagnostic gain.
 fn collect_providers(data_dir: &Path, r: &mut Report) {
     let policy_path = data_dir.join("policy/policy.toml");
     let bundle = match raxis_policy::load_policy(&policy_path) {
@@ -1441,9 +1457,137 @@ fn collect_providers(data_dir: &Path, r: &mut Report) {
     for p in bundle.providers() {
         r.push("providers.entry", Outcome::Ok,
             format!("{} ({:?})", p.provider_id, p.kind));
+
+        if p.kind == "http_sidecar" {
+            collect_sidecar_health(p, r);
+        }
     }
     r.push("providers.live_check", Outcome::Warn,
         "live one-token completion check is V3 (see V2_GAPS.md §12.5)");
+}
+
+/// V2_GAPS §C5 — TCP reachability probe for one `http_sidecar`
+/// provider. Emits exactly one `sidecar.health` row per provider.
+///
+/// **Outcomes:**
+/// * `Ok`   — TCP handshake completed within the 3 s timeout.
+/// * `Fail` — `sidecar_endpoint` parse error, DNS resolution
+///   failure, or TCP connection refused/timed out. The sidecar
+///   subsystem is non-functional and the planner will reject every
+///   FetchRequest routed to this provider with `UpstreamUnavailable`.
+/// * `Warn` — never used; reachability is binary.
+fn collect_sidecar_health(p: &raxis_policy::ProviderEntry, r: &mut Report) {
+    let endpoint = match p.sidecar_endpoint.as_deref() {
+        Some(e) => e,
+        None => {
+            r.push("sidecar.health", Outcome::Fail,
+                format!("provider {:?}: kind=\"http_sidecar\" but \
+                    sidecar_endpoint is missing (policy validate \
+                    should have rejected this)", p.provider_id));
+            return;
+        }
+    };
+
+    let (host, port) = match parse_sidecar_host_port(endpoint) {
+        Ok(hp) => hp,
+        Err(e) => {
+            r.push("sidecar.health", Outcome::Fail,
+                format!("provider {:?}: cannot parse \
+                    sidecar_endpoint={endpoint:?}: {e}",
+                    p.provider_id));
+            return;
+        }
+    };
+
+    let target = format!("{host}:{port}");
+    let addr = match (host.as_str(), port).to_socket_addrs() {
+        Ok(mut iter) => match iter.next() {
+            Some(a) => a,
+            None => {
+                r.push("sidecar.health", Outcome::Fail,
+                    format!("provider {:?}: DNS for {host} returned \
+                        no addresses", p.provider_id));
+                return;
+            }
+        },
+        Err(e) => {
+            r.push("sidecar.health", Outcome::Fail,
+                format!("provider {:?}: DNS for {host} failed: {e}",
+                    p.provider_id));
+            return;
+        }
+    };
+
+    match std::net::TcpStream::connect_timeout(
+        &addr,
+        std::time::Duration::from_secs(3),
+    ) {
+        Ok(_) => r.push("sidecar.health", Outcome::Ok,
+            format!("provider {:?}: TCP {target} reachable \
+                (full HMAC /health probe runs at planner boot)",
+                p.provider_id)),
+        Err(e) => r.push("sidecar.health", Outcome::Fail,
+            format!("provider {:?}: TCP {target}: {e}",
+                p.provider_id)),
+    }
+}
+
+/// V2_GAPS §C5 — minimal URL parse for sidecar endpoints. The
+/// sidecar protocol mandates `http://` or `https://` (validated by
+/// `PolicyBundle::validate`), so we do not need a full URL parser
+/// here. We extract `(host, port)` and default `port` to 80 / 443
+/// when the URL omits it.
+fn parse_sidecar_host_port(endpoint: &str) -> Result<(String, u16), String> {
+    let (scheme, rest, default_port) =
+        if let Some(rest) = endpoint.strip_prefix("http://") {
+            ("http", rest, 80u16)
+        } else if let Some(rest) = endpoint.strip_prefix("https://") {
+            ("https", rest, 443u16)
+        } else {
+            return Err(format!(
+                "missing http:// or https:// prefix; got {endpoint:?}"
+            ));
+        };
+    let _ = scheme;
+
+    // Strip path / query / fragment.
+    let authority = rest
+        .split_once('/')
+        .map(|(a, _)| a)
+        .unwrap_or(rest)
+        .split_once('?')
+        .map(|(a, _)| a)
+        .unwrap_or_else(|| rest.split_once('/').map(|(a, _)| a).unwrap_or(rest));
+
+    if authority.is_empty() {
+        return Err("empty host".into());
+    }
+
+    // host:port — preserve IPv6 bracket form.
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let (h, tail) = bracketed
+            .split_once(']')
+            .ok_or_else(|| "unterminated IPv6 bracket".to_owned())?;
+        let port = if tail.is_empty() {
+            default_port
+        } else if let Some(p) = tail.strip_prefix(':') {
+            p.parse::<u16>()
+                .map_err(|e| format!("bad port {p:?}: {e}"))?
+        } else {
+            return Err(format!("trailing garbage after IPv6 host: {tail:?}"));
+        };
+        return Ok((h.to_owned(), port));
+    }
+
+    match authority.rsplit_once(':') {
+        Some((h, p)) => {
+            let port = p
+                .parse::<u16>()
+                .map_err(|e| format!("bad port {p:?}: {e}"))?;
+            Ok((h.to_owned(), port))
+        }
+        None => Ok((authority.to_owned(), default_port)),
+    }
 }
 
 /// V2.3 — `raxis doctor host`. Disk-free check + best-effort cgroup
@@ -2051,5 +2195,64 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let r = collect_category(tmp.path(), DoctorCategory::Bundles);
         assert!(r.checks.iter().any(|c| c.id == "bundles.db"));
+    }
+
+    // V2_GAPS §C5 — sidecar URL parser tests. These are pure-function
+    // tests; the live TCP-probe path is exercised by the
+    // `cli/tests/doctor_sidecar.rs` integration test (where we can
+    // bind a real listener).
+
+    #[test]
+    fn parse_sidecar_host_port_default_http_port() {
+        let (h, p) = parse_sidecar_host_port("http://127.0.0.1").unwrap();
+        assert_eq!(h, "127.0.0.1");
+        assert_eq!(p, 80);
+    }
+
+    #[test]
+    fn parse_sidecar_host_port_default_https_port() {
+        let (h, p) = parse_sidecar_host_port("https://sidecar.lan").unwrap();
+        assert_eq!(h, "sidecar.lan");
+        assert_eq!(p, 443);
+    }
+
+    #[test]
+    fn parse_sidecar_host_port_explicit_port() {
+        let (h, p) = parse_sidecar_host_port("http://127.0.0.1:9100").unwrap();
+        assert_eq!(h, "127.0.0.1");
+        assert_eq!(p, 9100);
+    }
+
+    #[test]
+    fn parse_sidecar_host_port_strips_path() {
+        let (h, p) = parse_sidecar_host_port("http://127.0.0.1:9100/foo/bar").unwrap();
+        assert_eq!(h, "127.0.0.1");
+        assert_eq!(p, 9100);
+    }
+
+    #[test]
+    fn parse_sidecar_host_port_ipv6_bracketed() {
+        let (h, p) = parse_sidecar_host_port("http://[::1]:9100").unwrap();
+        assert_eq!(h, "::1");
+        assert_eq!(p, 9100);
+    }
+
+    #[test]
+    fn parse_sidecar_host_port_ipv6_default_port() {
+        let (h, p) = parse_sidecar_host_port("https://[fe80::1]").unwrap();
+        assert_eq!(h, "fe80::1");
+        assert_eq!(p, 443);
+    }
+
+    #[test]
+    fn parse_sidecar_host_port_rejects_missing_scheme() {
+        let e = parse_sidecar_host_port("127.0.0.1:9100").unwrap_err();
+        assert!(e.contains("missing http:// or https://"), "got: {e}");
+    }
+
+    #[test]
+    fn parse_sidecar_host_port_rejects_bad_port() {
+        let e = parse_sidecar_host_port("http://127.0.0.1:notaport").unwrap_err();
+        assert!(e.contains("bad port"), "got: {e}");
     }
 }

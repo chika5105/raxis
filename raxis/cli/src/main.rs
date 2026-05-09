@@ -52,7 +52,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "setup",
 ];
 
-const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
+const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff", "generate-sidecar-secret"];
 const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject", "validate", "fmt", "init"];
 /// V2.1 atomic plan-bundle submit. Spec: plan-bundle-sealing.md §4.
 /// Currently exposes only `plan`; future sub-commands (`policy`,
@@ -191,6 +191,9 @@ fn run() -> Result<(), CliError> {
                 "sign" => commands::policy::run_sign(&flags, &rest[1..]),
                 "show" => commands::policy_show::run(&flags, &rest[1..]),
                 "diff" => commands::policy_diff::run(&flags, &rest[1..]),
+                "generate-sidecar-secret" => {
+                    commands::policy::run_generate_sidecar_secret(&flags, &rest[1..])
+                }
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "policy sub-command", sub2, POLICY_SUBCOMMANDS,
                 ))),

@@ -23,7 +23,7 @@ closed**, **both Tier D items are closed**, and **Tier E is closed**.
 |---|---|---|
 | A — Fully shipped | 17/17 | Spec, code, and tests aligned |
 | B — Infrastructure + logic | 3/3 | All closed (V2.3) |
-| C — Spec complete | 8/10 | C5 (HTTP sidecar) and C9 (streaming) remain |
+| C — Spec complete | 9/10 | C9 (streaming) remains |
 | D — Schema/skeleton | 2/2 | Both closed (V2.3) |
 | E — Deferred/partial | 1/1 | Closed (V2.3) |
 
@@ -680,34 +680,71 @@ are V2).**
   multi-provider chain rewrite when a second API key is added).
 * `override_reviewer_alias` per-environment override.
 
-### C5: Third-Party Provider Integration (HTTP Sidecar)
+### C5: Third-Party Provider Integration (HTTP Sidecar) — **CLOSED (V2.4, MVP)**
 
 **Spec:** `extensibility-traits.md §9A`
-**Status:** ❌ Not implemented
-**Severity:** Medium — blocks operators who want non-built-in providers
+**Status:** ✅ Implemented as a `ModelClient` impl rather than a
+new `InferenceRouter` variant — see "Architectural decision" below.
+**Severity (closed):** previously blocked operators who wanted
+non-built-in providers; the sidecar path is now general-purpose.
 
-The V2 boot site uses a closed `InferenceRouterKind` enum. Adding
-Kombai, Cohere, or any non-built-in provider requires a kernel
-code change (new enum variant + match arm).
+**Architectural decision (V2.4).** The original spec proposed a
+new `HttpSidecarRouter` impl alongside `HttpsGatewayRouter`. The
+real V2 codebase routes inference through `Arc<dyn ModelClient>`
+(see `crates/planner-core/src/model.rs`) rather than the `InferenceRouter`
+trait described in `extensibility-traits.md §9`. Introducing a
+parallel router-trait surface in V2 would be a duplicative
+refactor. We chose instead to land **`SidecarModelClient`** as a
+peer of `AnthropicClient` / `OpenAiClient` / `GeminiClient` /
+`BedrockClient` in `planner-core` — same `ModelClient` trait, same
+`FallbackModelClient` / `RetryingModelClient` / `CircuitBreaker`
+wrappers (the integration paragraph below applies verbatim).
+`InferenceRouter` remains as future-proofing for V3 if the
+gateway substrate is ever rewritten to be the single dispatch
+entry point.
 
-**Resolution (specced, not yet implemented):** `HttpSidecarRouter` —
-a built-in `InferenceRouter` impl that forwards
-`ResolvedInferenceRequest` as JSON over localhost HTTP to an
-operator-run sidecar process. The sidecar translates RAXIS's
-fixed schema to the provider's native API and back. Process
-isolation ensures no foreign code runs in the kernel.
+**Delivered (V2.4):**
 
-**What's needed:**
+- `crates/planner-core/src/sidecar_client.rs` — ~520 lines,
+  `SidecarModelClient` (the V2 successor to `HttpSidecarRouter`),
+  HMAC-SHA256 request/response signing per
+  `extensibility-traits.md §9A.7A`, 30 s replay window, custom
+  `Debug` redacts the secret. 16 unit tests including a local
+  mock-server happy path and HMAC-tampering reject path.
+- `crates/policy/src/bundle.rs` — `ProviderEntry` extended with
+  `sidecar_endpoint`, `sidecar_hmac_secret`, and
+  `sidecar_health_check_path`. `PolicyBundle::validate` enforces
+  that `kind = "http_sidecar"` providers declare the sidecar
+  fields and that non-sidecar providers leave them unset; rejects
+  malformed endpoints (must start with `http://` or `https://`),
+  rejects short / non-hex / odd-length secrets (`< 16 bytes`).
+- `cli/src/commands/doctor.rs` — `[CHECK] sidecar.health` row
+  emitted for every `http_sidecar` provider; performs a 3-second
+  TCP-reachability probe to the configured `sidecar_endpoint`.
+  Pure URL-parsing tests cover IPv6 brackets, default-port
+  inference, missing scheme, and malformed port. The full
+  HMAC-authenticated `/health` round-trip runs at planner boot
+  via `SidecarModelClient::health_check`; doctor uses TCP probe
+  only (the CLI does not load the shared secret).
+- `cli/src/commands/policy.rs` — `raxis policy generate-sidecar-secret`
+  mints a 32-byte CSPRNG secret and prints it as 64-hex (default),
+  `--json` (`{"sidecar_hmac_secret":"…"}`), or `--annotated`
+  (paste-into-`policy.toml` form with a SHA-256-derived 8-hex
+  fingerprint so operators can disambiguate which secret is
+  active without exposing the secret itself).
 
-- `crates/raxis-inference-router-sidecar/` — ~400 lines
-  (`HttpSidecarRouter`, `SidecarRequest`, `SidecarResponse`)
-- `InferenceRouterKind::HttpSidecar` variant in `policy/src/bundle.rs`
-- `"http_sidecar"` match arm in `kernel/src/main.rs` boot site
-- `[CHECK] sidecar.health` in `cli/src/commands/doctor.rs`
-- `specs/v2/sidecar-protocol.yaml` — OpenAPI schema
-- HMAC-SHA256 mutual authentication (boot-time challenge-response
-  + per-request HMAC headers) per `extensibility-traits.md §9A.7A`
-- `raxis policy generate-sidecar-secret` CLI command
+**Deferred to V3 (intentionally):**
+
+- `specs/v2/sidecar-protocol.yaml` (OpenAPI schema). The wire
+  shape is normatively defined by the in-tree types in
+  `crates/planner-core/src/sidecar_client.rs`; an OpenAPI emitter
+  is V3 ergonomics only and does not block operators.
+- Boot-time challenge-response handshake. Per-request HMAC plus
+  the `Replay-Window` invariant (`30 s`) is sufficient for the
+  loopback threat model (`extensibility-traits.md §9A.6`); the
+  bidirectional handshake is a defence-in-depth refinement.
+- `InferenceRouterKind::HttpSidecar` variant. Subsumed by the
+  `ModelClient` chain decision above.
 
 **Invariant safety:** all R-* invariants hold trivially. The
 sidecar is downstream of admission, upstream of audit, in a
