@@ -77,6 +77,7 @@ pub mod dispatch;
 pub mod intent;
 pub mod ksb;
 pub mod model;
+pub mod retry;
 pub mod tools;
 pub mod transport;
 
@@ -97,6 +98,9 @@ pub use ksb::{
 pub use model::{
     AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse, MockModelClient,
     ModelClient, ModelError, ToolSpec, Usage,
+};
+pub use retry::{
+    is_retryable, FallbackModelClient, RetryConfig, RetryingModelClient,
 };
 pub use tools::{
     build_executor_registry, build_orchestrator_registry, build_reviewer_registry, BashTool,

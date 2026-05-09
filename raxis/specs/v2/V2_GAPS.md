@@ -246,27 +246,60 @@ deferred to V3.
   ceilings flow through `DispatchConfig` (constructed by the role
   binary's `main`) rather than the plan parser.
 
-### C2: Provider Failure Handling
+### C2: Provider Failure Handling — CLOSED (V2.3, MVP)
 
-**Spec:** `provider-failure-handling.md` (130KB)
-**Estimate:** ~800 lines
+**Spec:** `provider-failure-handling.md` (130KB) — full surface
+**Status:** **CLOSED for V2 — retry shell + fallback chain.**
+**Delivered:** ~280 lines (planner-core retry + tests)
 
-Retry budget per provider (exponential backoff with jitter). Fallback
-provider chain (`Anthropic → OpenAI → Bedrock`). Circuit breaker
-(per-provider error rate threshold). Partial-response recovery
-(streaming failure mid-response). `ProviderExhausted` escalation.
+V2.3 lands the operator-grade default of the spec's per-provider
+retry / fallback story so a transient upstream failure (network
+blip, 429, 5xx) does NOT bubble up as a hard `DispatchError::Model`
+in the planner's first turn.
 
-**Per-provider failover status:**
+| Component | Crate | Status |
+|---|---|---|
+| `RetryConfig { max_retries, base_delay, multiplier, jitter, total_deadline, call_timeout }` | `planner-core/src/retry.rs` | Configurable; ships `anthropic_default()` (3 retries, 500ms × 2.0, 25% jitter, 90s ceiling) |
+| `is_retryable(&ModelError)` classifier | `planner-core/src/retry.rs` | Public for tests / observability; retries on Transport, Timeout, 408/425/429/5xx; rejects 4xx-other and Json |
+| `RetryingModelClient` (one provider, exponential backoff with jitter) | `planner-core/src/retry.rs` | Bounded by `total_deadline`; sleep clamped to remaining budget |
+| `FallbackModelClient` (provider chain) | `planner-core/src/retry.rs` | Walks chain in declaration order; only advances on retryable errors |
+| 9 unit tests (retry budget, non-retryable short-circuit, fallback advance, fallback-non-retryable, empty-chain, backoff growth, classifier sanity) | `planner-core/src/retry.rs` | All passing |
 
-| Provider | Spec'd as failover target | Code | Spec section |
-|---|---|---|---|
-| **Anthropic** | ✅ Primary in most chains | ❌ No HTTP client | `provider-failure-handling.md §3.1, §4` |
-| **OpenAI** | ✅ Cross-provider fallback | ❌ No HTTP client | `provider-failure-handling.md §3.1, §4` |
-| **Google Gemini** | ✅ Tier-3 fallback | ❌ No HTTP client | `provider-failure-handling.md §4` |
-| **AWS Bedrock** | ✅ Referenced as alternative | ❌ No HTTP client | `provider-failure-handling.md §4` |
+**Per-provider failover.** The retry+fallback machinery is
+provider-agnostic — every `Arc<dyn ModelClient>` plugs into both
+shells. Wiring the actual provider chains
+(`Anthropic → OpenAI → Bedrock`) is a per-binary `main()` change
+once additional `OpenAiClient` / `BedrockClient` impls land; the
+`AnthropicClient` is the only V2 provider implementation, so the
+production chain is `RetryingModelClient(AnthropicClient)` only.
 
-Zero references to `provider_failure`, `RetryBudget`,
-`fallback_provider`, `circuit_breaker` in any crate.
+**V2 design choices.**
+
+* **Retryability classifier is public.** Operators / tests can
+  call `is_retryable(&err)` directly to predict the wrapper's
+  behaviour without instantiating it.
+* **No circuit breaker.** A persistent provider outage just
+  exhausts the retry budget and surfaces the last error verbatim.
+  Adding a per-provider error-rate threshold + half-open state is
+  a V3 follow-up (the spec's §6 circuit breaker).
+* **No partial-response recovery.** V2's dispatch loop is
+  non-streaming, so a mid-response failure can only surface as a
+  full-call retry (the entire request body is replayed). Streaming
+  recovery is deferred alongside the streaming dispatch shape
+  itself (see §38 of `provider-failure-handling.md`).
+* **No `ProviderExhausted` typed escalation.** A budget-exhausted
+  retry surfaces as the last `ModelError`; the role binary
+  converts that into a `ReportFailure` IPC intent. Promoting
+  exhaustion to a typed escalation is a V3 follow-up alongside
+  the kernel-side `EscalationKind::ProviderExhausted` audit
+  variant.
+
+**Deferred to V3.**
+
+* OpenAI / Gemini / Bedrock client impls (each ≈ 200 lines).
+* Per-provider circuit breaker + half-open probe.
+* Streaming partial-response recovery.
+* `ProviderExhausted` typed audit kind + escalation flow.
 
 ### C3: Provider Model Selection
 
