@@ -666,47 +666,80 @@ pub async fn spawn_executor_for_task(
     extra_env:        BTreeMap<String, String>,
     service:          Arc<SessionSpawnService>,
     store:            &Arc<Store>,
+    // V2.5 §13 — operator-published `[[vm_images]]` override.
+    // When `Some`, the spawn path uses this image instead of the
+    // canonical Executor-starter / Reviewer-core. The activation
+    // handler is responsible for resolving the alias against the
+    // active policy, fetching the rootfs blob via
+    // `ImageResolver`, and constructing the [`VerifiedImage`]
+    // with the resolved path + the alias as `image_id`. Reviewer
+    // tasks MUST NOT supply an override (the validator rejects
+    // any `vm_image` on a Reviewer per
+    // `INV-PLANNER-HARNESS-02`); this function still enforces
+    // that defensively to avoid a regression upstream from
+    // booting a non-canonical Reviewer.
+    image_override:   Option<VerifiedImage>,
 ) -> Result<SpawnHandle, OrchestratorSpawnError> {
-    // ── Step 1: resolve canonical image path for the agent. ──────
-    let (image_path, image_id, missing_err): (PathBuf, String, fn(PathBuf) -> OrchestratorSpawnError) =
-        match agent_kind {
-            ExecutorAgentKind::Executor => {
-                let p = crate::canonical_images_preflight::executor_starter_image_path(
-                    &spawn_ctx.install_dir,
-                    &spawn_ctx.kernel_version,
-                );
-                (
-                    p,
-                    format!(
-                        "raxis-executor-starter-{kernel_version}",
-                        kernel_version = spawn_ctx.kernel_version,
-                    ),
-                    |path| OrchestratorSpawnError::ExecutorStarterImageMissing { path },
-                )
-            }
-            ExecutorAgentKind::Reviewer => {
-                let p = crate::canonical_images_preflight::reviewer_image_path(
-                    &spawn_ctx.install_dir,
-                    &spawn_ctx.kernel_version,
-                );
-                (
-                    p,
-                    format!(
-                        "raxis-reviewer-core-{kernel_version}",
-                        kernel_version = spawn_ctx.kernel_version,
-                    ),
-                    |path| OrchestratorSpawnError::ReviewerImageMissing { path },
-                )
-            }
-        };
-    if !image_path.exists() {
-        return Err(missing_err(image_path));
-    }
-    let verified_image = VerifiedImage {
-        kind:      ImageKind::RootfsErofs,
-        body:      ImageBody::Path(image_path),
-        signature: ImageSignature(Vec::new()),
-        image_id,
+    // ── Step 1: resolve image path for the agent. ─────────────────
+    //
+    // V2.5: when the activation handler hands us an
+    // `image_override`, that replaces the canonical-starter
+    // resolution below. We still defensively reject overrides on
+    // Reviewer kinds (operator-published Reviewer images are
+    // structurally forbidden per `INV-PLANNER-HARNESS-02`).
+    let verified_image = if let Some(override_img) = image_override {
+        if matches!(agent_kind, ExecutorAgentKind::Reviewer) {
+            return Err(OrchestratorSpawnError::Substrate(SpawnError::Audit(format!(
+                "reviewer task `{task_id}` received an operator-published \
+                 vm_image override `{image_id}`; the Reviewer image is \
+                 kernel-canonical (INV-PLANNER-HARNESS-02). The plan-side \
+                 validator should have rejected this; failing closed at \
+                 spawn time.",
+                image_id = override_img.image_id,
+            ))));
+        }
+        override_img
+    } else {
+        let (image_path, image_id, missing_err): (PathBuf, String, fn(PathBuf) -> OrchestratorSpawnError) =
+            match agent_kind {
+                ExecutorAgentKind::Executor => {
+                    let p = crate::canonical_images_preflight::executor_starter_image_path(
+                        &spawn_ctx.install_dir,
+                        &spawn_ctx.kernel_version,
+                    );
+                    (
+                        p,
+                        format!(
+                            "raxis-executor-starter-{kernel_version}",
+                            kernel_version = spawn_ctx.kernel_version,
+                        ),
+                        |path| OrchestratorSpawnError::ExecutorStarterImageMissing { path },
+                    )
+                }
+                ExecutorAgentKind::Reviewer => {
+                    let p = crate::canonical_images_preflight::reviewer_image_path(
+                        &spawn_ctx.install_dir,
+                        &spawn_ctx.kernel_version,
+                    );
+                    (
+                        p,
+                        format!(
+                            "raxis-reviewer-core-{kernel_version}",
+                            kernel_version = spawn_ctx.kernel_version,
+                        ),
+                        |path| OrchestratorSpawnError::ReviewerImageMissing { path },
+                    )
+                }
+            };
+        if !image_path.exists() {
+            return Err(missing_err(image_path));
+        }
+        VerifiedImage {
+            kind:      ImageKind::RootfsErofs,
+            body:      ImageBody::Path(image_path),
+            signature: ImageSignature(Vec::new()),
+            image_id,
+        }
     };
 
     // ── Step 2: rehydrate credential decls. ──────────────────────

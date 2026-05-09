@@ -1722,6 +1722,77 @@ fn handle_submit_review(
 // The substrate spawn proceeds with an empty `workspace_mounts`
 // vector for now; an Executor that needs a worktree at boot will
 // surface a `BackendInternal` error from the substrate.
+/// V2.5 §13 — resolve an operator-published `[[vm_images]]` alias
+/// to a [`raxis_isolation::VerifiedImage`] the spawn path can boot.
+///
+/// The activation handler calls this once per sub-task activation
+/// when the admission validator stamped a non-empty
+/// `vm_image` on the task's [`crate::initiatives::plan_registry::TaskPlanFields`].
+/// The resolver:
+///
+///   1. Looks up the alias against the *current* policy bundle
+///      (so a policy rotation between admission and activation is
+///      observed).
+///   2. Parses the entry's `oci_digest` into [`raxis_image_cache::OciDigest`].
+///   3. Calls [`raxis_image_cache::ImageResolver::resolve`] with
+///      no registry hint (the production resolver consults its
+///      configured default registry; the offline-friendly
+///      `PrePopulatedResolver` reads from `<data_dir>/oci-cache/`).
+///   4. Wraps the resolved rootfs path in a [`raxis_isolation::VerifiedImage`]
+///      whose `image_id` is the alias (so audit events name the
+///      operator-facing alias rather than the digest hex).
+///
+/// **Failure modes** (all surface as `Err(String)` for the caller
+/// to log structurally):
+///
+///   * Alias dropped from policy at the current epoch → "alias
+///     `{name}` is no longer declared in `[[vm_images]]`".
+///   * Stored `oci_digest` is malformed (impossible after
+///     `validate_vm_images`, but defensive) → parse error.
+///   * Resolver failure (registry pull, byte mismatch, GC race)
+///     → forwarded `ImageResolverError::to_string()`.
+///
+/// The caller (the activation handler) maps any `Err` to a
+/// `FAIL_POLICY_VIOLATION` and parks the activation row in
+/// `PendingActivation` so the operator sees the failure and can
+/// retry once policy is healed.
+async fn resolve_vm_image_override(
+    policy: &raxis_policy::PolicyBundle,
+    alias:  &str,
+    ctx:    &Arc<HandlerContext>,
+) -> Result<raxis_isolation::VerifiedImage, String> {
+    use std::str::FromStr;
+
+    let entry = policy.vm_image_by_name(alias).ok_or_else(|| {
+        format!(
+            "alias `{alias}` is no longer declared in [[vm_images]] \
+             (policy rotation between admission and activation?); \
+             admission stamped this alias against an earlier epoch"
+        )
+    })?;
+    let digest = raxis_image_cache::OciDigest::from_str(&entry.oci_digest)
+        .map_err(|e| format!(
+            "[[vm_images]] entry `{alias}` carries malformed oci_digest \
+             {value:?}: {e}",
+            value = entry.oci_digest,
+        ))?;
+    let resolved = ctx
+        .image_resolver
+        .resolve(&digest, None)
+        .await
+        .map_err(|e| format!(
+            "ImageResolver::resolve failed for alias `{alias}` \
+             (digest {digest}): {e}",
+            digest = entry.oci_digest,
+        ))?;
+    Ok(raxis_isolation::VerifiedImage {
+        kind:      raxis_isolation::ImageKind::RootfsErofs,
+        body:      raxis_isolation::ImageBody::Path(resolved.rootfs_image_path),
+        signature: raxis_isolation::ImageSignature(Vec::new()),
+        image_id:  alias.to_owned(),
+    })
+}
+
 async fn handle_activate_sub_task(
     req:        IntentRequest,
     _session:   authority::session::SessionRow,
@@ -1840,6 +1911,15 @@ async fn handle_activate_sub_task(
         new_session_id: String,
         new_lineage_id: String,
         activation_id: String,
+        /// V2.5 §13 — operator-published `[[vm_images]]` alias the
+        /// admission validator stamped on this task's
+        /// `TaskPlanFields`. Empty when the plan omitted `vm_image`
+        /// AND no `[default_executor_image]` back-fill applied;
+        /// the spawn path then falls back to the canonical
+        /// starter image. Reviewer tasks always carry the empty
+        /// string (the validator rejects any `vm_image` on a
+        /// Reviewer per INV-PLANNER-HARNESS-02).
+        vm_image_alias: String,
     }
 
     let lookup: ActivationLookup = {
@@ -1891,8 +1971,9 @@ async fn handle_activate_sub_task(
             // The plan registry holds the typed `session_agent_type`
             // (the `tasks` DDL stores it as a string column on
             // older migrations; the in-memory plan registry is the
-            // canonical V2 source).
-            let agent_kind = {
+            // canonical V2 source). The same registry entry carries
+            // the V2.5 `vm_image` alias chosen at admission time.
+            let (agent_kind, vm_image_alias) = {
                 let key = crate::initiatives::plan_registry::TaskKey::new(
                     &initiative_id, &task_id,
                 );
@@ -1900,7 +1981,7 @@ async fn handle_activate_sub_task(
                     Some(f) => f,
                     None    => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
                 };
-                match fields.session_agent_type {
+                let kind = match fields.session_agent_type {
                     raxis_types::SessionAgentType::Executor =>
                         crate::session_spawn_orchestrator::ExecutorAgentKind::Executor,
                     raxis_types::SessionAgentType::Reviewer =>
@@ -1913,7 +1994,8 @@ async fn handle_activate_sub_task(
                         // violation rather than a substrate error.
                         return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
                     }
-                }
+                };
+                (kind, fields.vm_image)
             };
 
             // 2c. Mint the new Executor / Reviewer session row.
@@ -1968,6 +2050,7 @@ async fn handle_activate_sub_task(
                 new_session_id: new_session_str,
                 new_lineage_id,
                 activation_id,
+                vm_image_alias,
             })
         })
         .await
@@ -1989,6 +2072,40 @@ async fn handle_activate_sub_task(
         credential_proxy_real_targets: Default::default(),
     };
 
+    // V2.5 §13 — resolve the operator-published `[[vm_images]]`
+    // alias the admission path stamped on this task. Empty alias
+    // ⇒ fall back to canonical starter image (V1 forward-compat
+    // and Reviewer tasks). Non-empty alias ⇒ resolve against the
+    // *current* policy bundle (so a credential rotation between
+    // admission and activation is observed) and pull the rootfs
+    // blob via the wired `ImageResolver`. The spawn helper
+    // re-checks `INV-PLANNER-HARNESS-02` defensively.
+    let image_override = if !lookup.vm_image_alias.is_empty() {
+        match resolve_vm_image_override(
+            &policy_snapshot,
+            &lookup.vm_image_alias,
+            ctx,
+        ).await {
+            Ok(verified) => Some(verified),
+            Err(e) => {
+                // The resolver surfaced a structured error
+                // (alias dropped from policy at this epoch, OCI
+                // pull failed, digest mismatch, etc.). Fail the
+                // activation — the activation row stays
+                // `PendingActivation` so the operator can
+                // observe and retry once policy is healed.
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"VmImageResolveFailed\",\
+                     \"task_id\":\"{}\",\"alias\":\"{}\",\"error\":\"{}\"}}",
+                    task_id_owned, lookup.vm_image_alias, e,
+                );
+                return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+            }
+        }
+    } else {
+        None
+    };
+
     let spawn_handle = match crate::session_spawn_orchestrator::spawn_executor_for_task(
         &ctx.executor_spawn,
         lookup.agent_kind,
@@ -2000,6 +2117,7 @@ async fn handle_activate_sub_task(
         std::collections::BTreeMap::new(),
         Arc::clone(&ctx.session_spawn),
         &ctx.store,
+        image_override,
     )
     .await
     {
