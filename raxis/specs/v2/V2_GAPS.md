@@ -758,9 +758,11 @@ subcommands:
 **Spec:** `planner-harness.md §3` (tool surface table),
 `kernel-mediated-egress.md` (DEPRECATED — superseded by unified
 egress), `custom-tools.md §5` (reserved name list)
-**Status:** ❌ Not implemented — **spec gap for WebFetch / WebSearch**
-**Severity:** High — these are reserved tool names with no spec
-defining how they work under the V2 unified egress model
+**Status:** ❌ Not implemented — **V2 BLOCKER (spec-first)**
+**Scope:** `WebFetch`, `WebSearch`, and `Sleep` are **V2 deliverables**
+— no deferral to V3. `StructuredOutput` is excluded from V2 (no
+DAG consumer). V2 does not ship without spec + impl for the first
+three.
 
 These four tool names are reserved in `custom_tools_validator.rs`
 (line 63–66) and appear in `custom-tools.md §5`'s reserved-name
