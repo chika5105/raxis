@@ -35,16 +35,48 @@
 //!
 //! # What is deferred (documented in the spec as gaps)
 //!
-//!   * Extended-query protocol (`Parse`/`Bind`/`Execute`/`Describe`/
-//!     `Sync`/`Close`). The MVP rejects with `ErrorResponse` directing
-//!     the client to use the simple-query path; full extended support
-//!     lands when prepared-statement audit-keying is wired through.
 //!   * SSL request preface — the proxy answers `'N'` (no SSL) and
 //!     the agent uses cleartext on the loopback interface; loopback
 //!     is jail-internal so this is safe per spec §1.
 //!   * Cancel-request preface — out of scope for the MVP.
 //!   * Connection multiplexing per the spec §4.7 "connection pooling"
 //!     — the MVP is 1-connection-in to 1-connection-out per accept.
+//!
+//! # Extended-query protocol (V2.4)
+//!
+//! The proxy supports the Postgres Extended Query path
+//! (`Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close`/`Flush`) used
+//! by every modern ORM (SQLAlchemy, Django, asyncpg, Diesel, sqlx,
+//! Prisma, ActiveRecord, GORM). Implementation strategy:
+//!
+//!   1. **`Parse`**: classify the SQL via `classify_first_operation`,
+//!      apply `Restrictions::is_blocked`, audit-emit
+//!      `DatabaseQueryExecuted`. On allow, lazily call upstream
+//!      `prepare(sql)` and cache the resulting
+//!      [`upstream::UpstreamPreparedMeta`]; replies `ParseComplete`
+//!      (or `ErrorResponse` on prepare failure / restriction block).
+//!   2. **`Bind`**: store the bound portal (statement name + raw
+//!      parameter bytes + format codes); replies `BindComplete`.
+//!   3. **`Describe('S')`**: replies `ParameterDescription` (OIDs
+//!      from upstream prepare) + `RowDescription` (or `NoData`).
+//!   4. **`Describe('P')`**: replies `RowDescription` (or `NoData`).
+//!   5. **`Execute`**: substitutes parameter values into the SQL
+//!      using dollar-quoted text literals (binary-format values for
+//!      common OIDs are decoded inline), then forwards via the
+//!      simple-query path. Re-frames the upstream's response as
+//!      DataRow + CommandComplete in extended-query order. Audits
+//!      `DatabaseQueryCompleted`.
+//!   6. **`Sync`**: replies `ReadyForQuery`.
+//!   7. **`Close('S' | 'P')`**: drops the cached entry; replies
+//!      `CloseComplete`.
+//!   8. **`Flush`**: no-op (the proxy does not buffer).
+//!
+//! Binary-format parameters are decoded for the canonical OID set
+//! (int2, int4, int8, float4, float8, bool, text/varchar/bpchar,
+//! bytea, uuid). Unknown binary OIDs surface as a structured
+//! `ErrorResponse` with `FAIL_PROXY_EXT_QUERY_BINARY_PARAM_UNSUPPORTED`
+//! so the operator can choose to reconfigure the driver to use
+//! text-format parameters until V3 widens the type support.
 //!
 //! All deferred items are noted in the spec under §22 Implementation
 //! Checklist.
@@ -89,13 +121,14 @@ impl OwnedConsumer {
     }
 }
 
+pub mod extended;
 pub mod restriction;
 pub mod upstream;
 pub mod wire;
 
 pub use restriction::{Restrictions, OperationKind, classify_first_operation};
 pub use upstream::{
-    ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamSession,
+    ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamPreparedMeta, UpstreamSession,
     redact_for_audit, resolve_upstream_url,
 };
 
@@ -415,6 +448,7 @@ async fn serve_one(
 
     let mut upstream_session: Option<UpstreamSession> = None;
     let mut upstream_connected_emitted: bool = false;
+    let mut ext_state = crate::extended::ExtendedState::default();
 
     loop {
         use tokio::io::AsyncReadExt;
@@ -583,12 +617,279 @@ async fn serve_one(
                 }
             }
             b'X' => break,
+            b'P' => {
+                // Parse: capture SQL + classify, restriction-check.
+                let body = read_message_body(&mut client_stream).await
+                    .map_err(|e| ProxyError::AuditSink(format!("read body (Parse): {e}")))?;
+                let parsed = match parse_parse_message(&body) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Parse message: {e}")).await?;
+                        continue;
+                    }
+                };
+                let op = classify_first_operation(&parsed.sql);
+                stats.queries_audited.fetch_add(1, Ordering::Relaxed);
+                let blocked = config.restrictions.is_blocked(&op);
+                audit.emit(audit_query_executed(&config, &parsed.sql, &op, blocked));
+                if blocked {
+                    stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
+                    send_extended_error(
+                        &mut client_stream,
+                        "42501",
+                        "operation blocked by RAXIS policy",
+                    ).await?;
+                    continue;
+                }
+                ext_state.prepared.insert(
+                    parsed.statement_name.clone(),
+                    crate::extended::ParsedStatement {
+                        sql:              parsed.sql.clone(),
+                        agent_param_oids: parsed.param_oids.clone(),
+                        upstream_meta:    None,
+                    },
+                );
+                client_stream.write_all(&parse_complete()).await
+                    .map_err(|e| ProxyError::AuditSink(format!("ParseComplete: {e}")))?;
+            }
+            b'B' => {
+                // Bind: store portal.
+                let body = read_message_body(&mut client_stream).await
+                    .map_err(|e| ProxyError::AuditSink(format!("read body (Bind): {e}")))?;
+                let bind = match parse_bind_message(&body) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Bind message: {e}")).await?;
+                        continue;
+                    }
+                };
+                if !ext_state.prepared.contains_key(&bind.statement_name) {
+                    send_extended_error(
+                        &mut client_stream,
+                        "26000",
+                        &format!("RAXIS proxy: prepared statement '{}' does not exist", bind.statement_name),
+                    ).await?;
+                    continue;
+                }
+                ext_state.portals.insert(
+                    bind.portal_name.clone(),
+                    crate::extended::BoundPortal {
+                        statement_name: bind.statement_name.clone(),
+                        bind,
+                    },
+                );
+                client_stream.write_all(&bind_complete()).await
+                    .map_err(|e| ProxyError::AuditSink(format!("BindComplete: {e}")))?;
+            }
+            b'D' => {
+                // Describe (statement or portal).
+                let body = read_message_body(&mut client_stream).await
+                    .map_err(|e| ProxyError::AuditSink(format!("read body (Describe): {e}")))?;
+                let desc = match parse_describe_message(&body) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Describe message: {e}")).await?;
+                        continue;
+                    }
+                };
+                let stmt_name = match desc.kind {
+                    b'S' => desc.name.clone(),
+                    b'P' => match ext_state.portals.get(&desc.name) {
+                        Some(p) => p.statement_name.clone(),
+                        None => {
+                            send_extended_error(
+                                &mut client_stream,
+                                "26000",
+                                &format!("RAXIS proxy: portal '{}' does not exist", desc.name),
+                            ).await?;
+                            continue;
+                        }
+                    },
+                    _ => unreachable!("parse_describe_message validated kind"),
+                };
+                if !ensure_upstream_meta(
+                    &mut client_stream,
+                    &mut upstream_session,
+                    upstream_url.as_ref(),
+                    &mut ext_state,
+                    &stmt_name,
+                    &config,
+                    &stats,
+                    &audit,
+                    &mut upstream_connected_emitted,
+                ).await? {
+                    // ensure_upstream_meta wrote an ErrorResponse;
+                    // continue to the Sync.
+                    continue;
+                }
+                let stmt = ext_state.prepared.get(&stmt_name).expect("ensured above");
+                let meta = stmt.upstream_meta.as_ref().expect("ensured above");
+                if desc.kind == b'S' {
+                    client_stream.write_all(&parameter_description(&meta.param_oids)).await
+                        .map_err(|e| ProxyError::AuditSink(format!("ParameterDescription: {e}")))?;
+                }
+                match crate::extended::row_description_for(meta) {
+                    Some(frame) => {
+                        client_stream.write_all(&frame).await
+                            .map_err(|e| ProxyError::AuditSink(format!("RowDescription: {e}")))?;
+                    }
+                    None => {
+                        client_stream.write_all(&no_data()).await
+                            .map_err(|e| ProxyError::AuditSink(format!("NoData: {e}")))?;
+                    }
+                }
+            }
+            b'E' => {
+                // Execute portal.
+                let body = read_message_body(&mut client_stream).await
+                    .map_err(|e| ProxyError::AuditSink(format!("read body (Execute): {e}")))?;
+                let exec = match parse_execute_message(&body) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Execute message: {e}")).await?;
+                        continue;
+                    }
+                };
+                let portal = match ext_state.portals.get(&exec.portal_name) {
+                    Some(p) => p.clone(),
+                    None => {
+                        send_extended_error(
+                            &mut client_stream,
+                            "26000",
+                            &format!("RAXIS proxy: portal '{}' does not exist", exec.portal_name),
+                        ).await?;
+                        continue;
+                    }
+                };
+                if !ensure_upstream_meta(
+                    &mut client_stream,
+                    &mut upstream_session,
+                    upstream_url.as_ref(),
+                    &mut ext_state,
+                    &portal.statement_name,
+                    &config,
+                    &stats,
+                    &audit,
+                    &mut upstream_connected_emitted,
+                ).await? {
+                    continue;
+                }
+                let stmt = ext_state.prepared.get(&portal.statement_name).expect("ensured above").clone();
+                let meta = stmt.upstream_meta.as_ref().expect("ensured above");
+                let substituted = match crate::extended::substitute(&stmt.sql, &portal.bind, &meta.param_oids) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let (sqlstate, msg) = e.to_wire();
+                        send_extended_error(&mut client_stream, sqlstate, &msg).await?;
+                        continue;
+                    }
+                };
+                let session = upstream_session.as_mut().expect("upstream connected above");
+                let sql_sha = {
+                    use sha2::{Digest, Sha256};
+                    let mut h = Sha256::new();
+                    h.update(stmt.sql.as_bytes());
+                    hex::encode(h.finalize())
+                };
+                match session.forward_simple_query(&substituted).await {
+                    Ok(outcome) => {
+                        // The simple-query outcome carries
+                        // RowDescription + DataRow + CommandComplete.
+                        // Per the extended-query protocol, the
+                        // RowDescription was already emitted by
+                        // Describe — drop it from the relay so the
+                        // agent doesn't see it twice.
+                        for frame in &outcome.frames {
+                            if frame.first().copied() == Some(b'T') {
+                                continue;
+                            }
+                            client_stream.write_all(frame).await
+                                .map_err(|e| ProxyError::AuditSink(format!("relay frame: {e}")))?;
+                        }
+                        // No ReadyForQuery here — Sync sends it.
+                        stats.upstream_bytes_forwarded.fetch_add(
+                            outcome.bytes_returned.min(u32::MAX as u64) as u32,
+                            Ordering::Relaxed,
+                        );
+                        audit.emit(AuditEvent::DatabaseQueryCompleted {
+                            timestamp_unix_seconds: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_secs()).unwrap_or(0),
+                            consumer:       config.consumer.clone(),
+                            credential:     config.credential_name.clone(),
+                            sql_sha256:     sql_sha,
+                            rows_returned:  outcome.rows_returned,
+                            bytes_returned: outcome.bytes_returned,
+                            duration_ms:    outcome.duration_ms,
+                            upstream_error: None,
+                        });
+                    }
+                    Err(e) => {
+                        let (sqlstate, message) = match &e {
+                            UpstreamError::QueryFailed { sqlstate, message } => {
+                                (sqlstate.clone(), message.clone())
+                            }
+                            other => ("XX000".to_owned(), other.audit_detail()),
+                        };
+                        client_stream.write_all(&error_response(
+                            b"ERROR",
+                            sqlstate.as_bytes(),
+                            &message,
+                        )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
+                        audit.emit(AuditEvent::DatabaseQueryCompleted {
+                            timestamp_unix_seconds: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_secs()).unwrap_or(0),
+                            consumer:       config.consumer.clone(),
+                            credential:     config.credential_name.clone(),
+                            sql_sha256:     sql_sha,
+                            rows_returned:  0,
+                            bytes_returned: 0,
+                            duration_ms:    0,
+                            upstream_error: Some(sqlstate),
+                        });
+                    }
+                }
+            }
+            b'C' => {
+                // Close ('C' frontend) — extended-query close, not to
+                // be confused with CommandComplete (which is also
+                // tagged 'C' but on the BACKEND wire).
+                let body = read_message_body(&mut client_stream).await
+                    .map_err(|e| ProxyError::AuditSink(format!("read body (Close): {e}")))?;
+                let close = match parse_close_message(&body) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        send_extended_error(&mut client_stream, "08P01", &format!("malformed Close message: {e}")).await?;
+                        continue;
+                    }
+                };
+                match close.kind {
+                    b'S' => { ext_state.prepared.remove(&close.name); }
+                    b'P' => { ext_state.portals.remove(&close.name); }
+                    _ => unreachable!("parse_close_message validated kind"),
+                }
+                client_stream.write_all(&close_complete()).await
+                    .map_err(|e| ProxyError::AuditSink(format!("CloseComplete: {e}")))?;
+            }
+            b'S' => {
+                // Sync: empty body. Reply ReadyForQuery.
+                let _ = read_message_body(&mut client_stream).await
+                    .map_err(|e| ProxyError::AuditSink(format!("read body (Sync): {e}")))?;
+                client_stream.write_all(&ready_for_query(b'I')).await
+                    .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
+            }
+            b'H' => {
+                // Flush: empty body. Proxy does not buffer; no-op.
+                let _ = read_message_body(&mut client_stream).await
+                    .map_err(|e| ProxyError::AuditSink(format!("read body (Flush): {e}")))?;
+            }
             other => {
                 let _ = read_message_body(&mut client_stream).await;
                 client_stream.write_all(&error_response(
                     b"ERROR",
                     b"0A000",
-                    &format!("RAXIS proxy MVP does not yet support frontend message {other:?} (extended-query path)"),
+                    &format!("RAXIS proxy does not yet support frontend message tag {other:?}"),
                 )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
                 client_stream.write_all(&ready_for_query(b'I')).await
                     .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
@@ -598,6 +899,130 @@ async fn serve_one(
 
     let _ = upstream_connected_emitted; // captured for future Stopped event richening
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Extended-query helper: send an ErrorResponse without RFQ
+// ---------------------------------------------------------------------------
+//
+// In the extended-query path the proxy MUST NOT emit ReadyForQuery
+// after an error — the agent will issue Sync, at which point the
+// proxy responds with ReadyForQuery. Sending RFQ here would put the
+// agent's driver into a state machine error.
+async fn send_extended_error(
+    client_stream: &mut tokio::net::TcpStream,
+    sqlstate: &str,
+    message: &str,
+) -> Result<(), ProxyError> {
+    use crate::wire::error_response;
+    use tokio::io::AsyncWriteExt;
+    client_stream
+        .write_all(&error_response(b"ERROR", sqlstate.as_bytes(), message))
+        .await
+        .map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Extended-query helper: lazy upstream connect + prepare metadata
+// ---------------------------------------------------------------------------
+//
+// Returns `Ok(true)` when the prepared metadata is now cached on the
+// statement, `Ok(false)` when an `ErrorResponse` was written instead
+// (caller should fall through to wait for Sync).
+#[allow(clippy::too_many_arguments)]
+async fn ensure_upstream_meta(
+    client_stream: &mut tokio::net::TcpStream,
+    upstream_session: &mut Option<UpstreamSession>,
+    upstream_url:    Option<&ParsedUpstreamUrl>,
+    ext_state: &mut crate::extended::ExtendedState,
+    statement_name: &str,
+    config: &ProxyConfig,
+    stats:  &Arc<ProxyStats>,
+    audit:  &Arc<dyn AuditChannel>,
+    upstream_connected_emitted: &mut bool,
+) -> Result<bool, ProxyError> {
+    let stmt = match ext_state.prepared.get(statement_name) {
+        Some(s) => s,
+        None => {
+            send_extended_error(
+                client_stream,
+                "26000",
+                &format!("RAXIS proxy: prepared statement '{statement_name}' does not exist"),
+            ).await?;
+            return Ok(false);
+        }
+    };
+    if stmt.upstream_meta.is_some() {
+        return Ok(true);
+    }
+    // Need an upstream session; lazily open one.
+    if upstream_session.is_none() {
+        let url = match upstream_url {
+            Some(u) => u,
+            None => {
+                send_extended_error(
+                    client_stream,
+                    "08000",
+                    "RAXIS proxy: upstream credential could not be resolved (FAIL_PROXY_UPSTREAM_URL_INVALID)",
+                ).await?;
+                return Ok(false);
+            }
+        };
+        let host = url.host.clone();
+        let port = url.port;
+        stats.upstream_connects_attempted.fetch_add(1, Ordering::Relaxed);
+        match UpstreamSession::connect(url, std::time::Duration::from_secs(8)).await {
+            Ok(sess) => {
+                stats.upstream_connects_succeeded.fetch_add(1, Ordering::Relaxed);
+                audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
+                    timestamp_unix_seconds: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs()).unwrap_or(0),
+                    consumer:      config.consumer.clone(),
+                    credential:    config.credential_name.clone(),
+                    upstream_host: sess.host.clone(),
+                    upstream_port: sess.port,
+                    tls:           sess.tls,
+                    handshake_ms:  sess.handshake_ms,
+                });
+                *upstream_connected_emitted = true;
+                *upstream_session = Some(sess);
+            }
+            Err(e) => {
+                stats.upstream_connects_failed.fetch_add(1, Ordering::Relaxed);
+                audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
+                    timestamp_unix_seconds: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs()).unwrap_or(0),
+                    consumer:      config.consumer.clone(),
+                    credential:    config.credential_name.clone(),
+                    upstream_host: host,
+                    upstream_port: port,
+                    reason:        e.audit_reason().to_owned(),
+                    detail:        e.audit_detail(),
+                });
+                let (sqlstate, msg) = crate::extended::prepare_error_to_wire(&e);
+                send_extended_error(client_stream, &sqlstate, &msg).await?;
+                return Ok(false);
+            }
+        }
+    }
+    let session = upstream_session.as_mut().expect("connected above");
+    let sql = stmt.sql.clone();
+    match session.prepare_statement(&sql).await {
+        Ok(meta) => {
+            if let Some(s) = ext_state.prepared.get_mut(statement_name) {
+                s.upstream_meta = Some(meta);
+            }
+            Ok(true)
+        }
+        Err(e) => {
+            let (sqlstate, msg) = crate::extended::prepare_error_to_wire(&e);
+            send_extended_error(client_stream, &sqlstate, &msg).await?;
+            Ok(false)
+        }
+    }
 }
 
 fn audit_query_executed(

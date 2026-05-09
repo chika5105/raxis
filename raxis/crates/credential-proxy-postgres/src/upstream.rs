@@ -561,6 +561,64 @@ impl UpstreamSession {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Extended Query Protocol — V2.4
+// ---------------------------------------------------------------------------
+
+/// Metadata returned by the upstream when the proxy `prepare()`s a
+/// statement. The proxy uses this to synthesize
+/// `ParameterDescription` (from `param_oids`) and `RowDescription`
+/// (from `columns`) responses to a `Describe` frontend message.
+#[derive(Debug, Clone)]
+pub struct UpstreamPreparedMeta {
+    /// Server-resolved parameter type OIDs. Length ≥ the number of
+    /// `$N` placeholders the proxy parsed; positions are 1:1 with
+    /// `$1`, `$2`, etc.
+    pub param_oids: Vec<i32>,
+    /// Result-set column descriptors in declaration order. Empty
+    /// for write statements that produce no rows (DML/DDL).
+    pub columns: Vec<crate::wire::FieldDescriptor>,
+}
+
+impl UpstreamSession {
+    /// `PREPARE`-leg of the extended-query path. The proxy hands the
+    /// SQL to the upstream so we get authoritative parameter and
+    /// column metadata back; we use that to fulfil the agent's
+    /// `Describe('S' | 'P')` requests with the right OIDs and column
+    /// list.
+    ///
+    /// The upstream prepare itself is restriction-free (the SQL has
+    /// already been classified + restriction-checked at the agent's
+    /// `Parse` step). Failures map to the same audit reasons as
+    /// query forwards via `classify_query_error`.
+    pub async fn prepare_statement(
+        &mut self,
+        sql: &str,
+    ) -> Result<UpstreamPreparedMeta, UpstreamError> {
+        use crate::wire::FieldDescriptor;
+        let stmt = self
+            .client
+            .prepare(sql)
+            .await
+            .map_err(|e| classify_query_error(&e))?;
+        let param_oids: Vec<i32> = stmt.params().iter().map(|t| t.oid() as i32).collect();
+        let columns: Vec<FieldDescriptor> = stmt
+            .columns()
+            .iter()
+            .map(|c| FieldDescriptor {
+                name:          c.name().to_owned(),
+                table_oid:     c.table_oid().unwrap_or(0) as i32,
+                attribute_num: c.column_id().unwrap_or(0) as i16,
+                type_oid:      c.type_().oid() as i32,
+                type_size:     -1,
+                type_modifier: -1,
+                format_code:   0,
+            })
+            .collect();
+        Ok(UpstreamPreparedMeta { param_oids, columns })
+    }
+}
+
 /// Map a `tokio_postgres::Error` from `connect()` to one of the
 /// `UpstreamError` discriminants the proxy reports in audit.
 fn classify_connect_error(e: &tokio_postgres::Error) -> UpstreamError {
