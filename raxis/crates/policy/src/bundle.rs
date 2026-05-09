@@ -170,6 +170,50 @@ pub(crate) struct RawPolicy {
     /// is consumed by the INV-ENV-01 binding algorithm only.
     #[serde(default, rename = "permitted_credentials")]
     pub(crate) permitted_credentials: Vec<PermittedCredentialEntry>,
+
+    /// `[[vm_images]]` — V2_GAPS §13 Cat-4 + V2.5 BLOCKER per
+    /// `policy-plan-authority.md §4`. Operator-published
+    /// declarations of OCI-pinned VM images plan tasks may
+    /// reference. **Optional**: an omitted section keeps the
+    /// V2.4 behaviour where every Executor activation resolves
+    /// to the kernel-bundled `raxis-executor-starter-<v>.img` and
+    /// every Reviewer/Orchestrator to its kernel-canonical image.
+    /// When the section IS present, plan tasks' `vm_image` field
+    /// MUST resolve into it (`FAIL_VM_IMAGE_NOT_REGISTERED`) and
+    /// the image's `role_restriction` MUST permit the task's role
+    /// (`FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`).
+    ///
+    /// V2.5 invariants this section enforces:
+    /// * `INV-PLANNER-HARNESS-03` — `kernel_version_min ≥ "5.14"`
+    ///   is required (operator-declared; full OCI introspection
+    ///   remains a V3 deferral, recorded in V2_GAPS §13).
+    /// * `INV-PLANNER-HARNESS-02` — Reviewer images cannot be
+    ///   operator-published; any entry with `role_restriction`
+    ///   containing `"Reviewer"` is rejected at policy load with
+    ///   `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`.
+    /// * `INV-PLANNER-HARNESS-05` — Orchestrator images cannot
+    ///   be operator-published; same rejection shape under
+    ///   `FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED`.
+    /// * `INV-VERIFIER-12` — the alias `"raxis-verifier-symbol-index"`
+    ///   is reserved for the kernel-canonical symbol-index image
+    ///   and rejected at policy load with
+    ///   `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`.
+    #[serde(default, rename = "vm_images")]
+    pub(crate) vm_images: Vec<VmImageEntry>,
+
+    /// `[default_executor_image]` — V2.5 per `operator-ergonomics.md
+    /// §3 D1`. When present, `alias` is the `[[vm_images]]` name
+    /// the kernel uses as the implicit executor image for any
+    /// `[[tasks]]` whose `vm_image` field is omitted (the operator-
+    /// ergonomics defaulting target). **Optional**: an omitted
+    /// section keeps the V2.4 hardcoded fallback to
+    /// `raxis-executor-starter-<v>.img`. The `alias` MUST resolve
+    /// to a `[[vm_images]]` entry whose `role_restriction`
+    /// includes `"Executor"`; mismatch surfaces
+    /// `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` at
+    /// policy load.
+    #[serde(default, rename = "default_executor_image")]
+    pub(crate) default_executor_image: Option<DefaultExecutorImageSection>,
 }
 
 /// `[environments.<label>]` — operator-declared environment
@@ -225,6 +269,333 @@ pub(crate) struct PermittedCredentialEntry {
     /// Optional human-readable description (forward-compat).
     #[serde(default)]
     pub(crate) description: Option<String>,
+}
+
+/// `[[vm_images]]` — raw TOML mapping for a single operator-
+/// declared OCI-pinned VM image. Validated by
+/// [`validate_vm_images`] into [`VmImageConfig`].
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct VmImageEntry {
+    /// Required. Operator-chosen alias used by plan tasks'
+    /// `vm_image` field. Matches `^[a-z][a-z0-9-]{0,63}$`.
+    pub(crate) name: String,
+
+    /// Required. `sha256:<64-hex>`-shape digest of the bundled
+    /// rootfs erofs image bytes. The kernel verifies the digest
+    /// at every spawn (defense-in-depth against a tampered image
+    /// on disk; matches the existing canonical-image preflight
+    /// shape).
+    pub(crate) oci_digest: String,
+
+    /// Required. Non-empty list of role names this image is
+    /// authorised to back. Each entry MUST be one of
+    /// `"Executor"`, `"Verifier"`. Per V2 invariants, `"Reviewer"`
+    /// and `"Orchestrator"` are NOT allowed in operator-published
+    /// `[[vm_images]]` (those images are kernel-canonical and
+    /// hardcoded; any operator entry attempting to back them is
+    /// rejected at policy load).
+    #[serde(default, rename = "role_restriction")]
+    pub(crate) role_restriction: Vec<String>,
+
+    /// Required. Operator-declared minimum **Linux** guest kernel
+    /// version, shape `"<major>.<minor>"`. Validated to be ≥ `"5.14"`
+    /// per `INV-PLANNER-HARNESS-03` (cgroup v2 guest kernel floor).
+    /// Renamed from `kernel_version_min` to disambiguate from the
+    /// RAXIS kernel binary. The RAXIS kernel does **not** introspect
+    /// the image bytes to verify this declaration in V2.5 — that's
+    /// the V3 OCI introspection PR; until then the trust boundary
+    /// is the operator's signature on `policy.toml` (which is the
+    /// same trust boundary as `oci_digest`).
+    #[serde(default, rename = "linux_kernel_version_min")]
+    pub(crate) linux_kernel_version_min: Option<String>,
+
+    /// Optional human-readable description; surfaced in
+    /// `raxis-cli plan explain` / audit-log inspectors. Not
+    /// security-sensitive.
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+}
+
+/// `[default_executor_image]` — raw TOML mapping for the
+/// operator-ergonomics defaulting target. Validated against the
+/// `[[vm_images]]` registry (alias must resolve, role must
+/// include `"Executor"`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct DefaultExecutorImageSection {
+    /// Required. Alias of a `[[vm_images]]` entry.
+    pub(crate) alias: String,
+}
+
+/// V2.5 — validated, public-API shape of a `[[vm_images]]` entry.
+/// Returned by [`PolicyBundle::vm_images`] for admission-time
+/// alias resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VmImageConfig {
+    /// Operator-declared alias.
+    pub name:               String,
+    /// `sha256:<64-hex>` digest. Lower-case, validated.
+    pub oci_digest:         String,
+    /// Roles this image may back. Always non-empty after
+    /// validation; never contains `"Reviewer"` or `"Orchestrator"`.
+    pub role_restriction:   Vec<String>,
+    /// `(major, minor)` parsed from `linux_kernel_version_min`.
+    /// Always ≥ `(5, 14)` after validation per
+    /// `INV-PLANNER-HARNESS-03`. Refers to the **Linux** kernel
+    /// inside the guest VM, not the RAXIS kernel.
+    pub linux_kernel_version_min: (u32, u32),
+    /// Operator description, trimmed; empty when omitted.
+    pub description:        String,
+}
+
+impl VmImageConfig {
+    /// Whether this image's `role_restriction` includes the
+    /// requested role token. Comparison is case-sensitive
+    /// (`"Executor"`, `"Verifier"`); a non-canonical token never
+    /// matches because [`validate_vm_images`] already rejects
+    /// such entries at policy load.
+    pub fn permits_role(&self, role: &str) -> bool {
+        self.role_restriction.iter().any(|r| r == role)
+    }
+}
+
+/// V2.5 — validated `[default_executor_image]` shape. Returned by
+/// [`PolicyBundle::default_executor_image`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultExecutorImageConfig {
+    /// `[[vm_images]]` alias the policy wants
+    /// `[[tasks]]` blocks without an explicit `vm_image` to bind
+    /// to. Validated to resolve and to permit `"Executor"`.
+    pub alias: String,
+}
+
+/// Validate the operator-supplied `[[vm_images]]` array. Mirrors
+/// `validate_environments` / `validate_permitted_credentials` for
+/// shape; emits stable `FAIL_*` codes per §13 / §INV-VM-CAP-03.
+fn validate_vm_images(
+    raw: &[VmImageEntry],
+) -> Result<Vec<VmImageConfig>, PolicyError> {
+    use std::collections::HashSet;
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let name = entry.name.trim();
+        if !is_valid_vm_image_name(name) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_VM_IMAGE_NAME_INVALID: \
+                 [[vm_images]] name {:?} does not match \
+                 ^[a-z][a-z0-9-]{{0,63}}$ \
+                 (policy-plan-authority.md §4)",
+                entry.name,
+            )));
+        }
+        // Reserved alias for kernel-canonical symbol-index image
+        // (INV-VERIFIER-12). Any operator entry with this alias
+        // is structurally ambiguous — refuse it shift-left.
+        if name == RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_RESERVED_VM_IMAGE_NAME: \
+                 [[vm_images]] name {:?} is reserved for the \
+                 kernel-canonical symbol-index image \
+                 (INV-VERIFIER-12)",
+                entry.name,
+            )));
+        }
+        if !seen.insert(name) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_VM_IMAGE_DUPLICATE: \
+                 [[vm_images]] name {name:?} declared more than once"
+            )));
+        }
+        let oci_digest = entry.oci_digest.trim();
+        if !is_valid_oci_digest(oci_digest) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_VM_IMAGE_DIGEST_INVALID: \
+                 [[vm_images]] name = {name:?} oci_digest must \
+                 match `sha256:<64 lower-hex>`; got {:?}",
+                entry.oci_digest,
+            )));
+        }
+        if entry.role_restriction.is_empty() {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_VM_IMAGE_ROLE_RESTRICTION_REQUIRED: \
+                 [[vm_images]] name = {name:?} role_restriction must \
+                 be a non-empty array of role tokens"
+            )));
+        }
+        for role in &entry.role_restriction {
+            match role.as_str() {
+                "Executor" | "Verifier" => {}
+                "Reviewer" => {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED: \
+                         [[vm_images]] name = {name:?} declares \
+                         role_restriction = \"Reviewer\"; the \
+                         Reviewer image is kernel-canonical and \
+                         cannot be operator-published \
+                         (INV-PLANNER-HARNESS-02)"
+                    )));
+                }
+                "Orchestrator" => {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED: \
+                         [[vm_images]] name = {name:?} declares \
+                         role_restriction = \"Orchestrator\"; the \
+                         Orchestrator image is kernel-canonical and \
+                         cannot be operator-published \
+                         (INV-PLANNER-HARNESS-05)"
+                    )));
+                }
+                other => {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_POLICY_INVALID_ROLE_RESTRICTION: \
+                         [[vm_images]] name = {name:?} declares \
+                         unknown role {other:?}; expected \
+                         \"Executor\" or \"Verifier\""
+                    )));
+                }
+            }
+        }
+        let linux_kernel_version_min = match entry.linux_kernel_version_min.as_deref() {
+            Some(v) => parse_and_check_linux_kernel_version_min(name, v)?,
+            None => {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_VM_IMAGE_LINUX_KERNEL_VERSION_MIN_REQUIRED: \
+                     [[vm_images]] name = {name:?} linux_kernel_version_min \
+                     is required (INV-PLANNER-HARNESS-03)"
+                )));
+            }
+        };
+        out.push(VmImageConfig {
+            name: name.to_owned(),
+            oci_digest: oci_digest.to_owned(),
+            role_restriction: entry.role_restriction.clone(),
+            linux_kernel_version_min,
+            description: entry
+                .description
+                .as_deref()
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_default(),
+        });
+    }
+    Ok(out)
+}
+
+/// Validate the operator-supplied `[default_executor_image]`
+/// section against the `[[vm_images]]` registry. Returns
+/// `Ok(None)` when omitted, `Ok(Some(config))` when it resolves
+/// to an Executor-permitted entry, and a typed
+/// `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` otherwise.
+fn validate_default_executor_image(
+    raw:        Option<&DefaultExecutorImageSection>,
+    vm_images:  &[VmImageConfig],
+) -> Result<Option<DefaultExecutorImageConfig>, PolicyError> {
+    let Some(section) = raw else {
+        return Ok(None);
+    };
+    let alias = section.alias.trim();
+    if alias.is_empty() {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE: \
+             [default_executor_image] alias must be non-empty \
+             (operator-ergonomics.md §3 D1)".to_owned(),
+        ));
+    }
+    let entry = vm_images.iter().find(|e| e.name == alias).ok_or_else(|| {
+        PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE: \
+             [default_executor_image] alias = {alias:?} does not \
+             resolve to any [[vm_images]] entry"
+        ))
+    })?;
+    if !entry.permits_role("Executor") {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE: \
+             [default_executor_image] alias = {alias:?} resolves \
+             to a [[vm_images]] entry whose role_restriction = \
+             {restriction:?} does not include \"Executor\" \
+             (INV-VM-CAP-03)",
+            restriction = entry.role_restriction,
+        )));
+    }
+    Ok(Some(DefaultExecutorImageConfig {
+        alias: alias.to_owned(),
+    }))
+}
+
+/// Reserved alias for the kernel-canonical symbol-index verifier
+/// image (`INV-VERIFIER-12`). Any `[[vm_images]]` entry attempting
+/// to use this name is rejected at policy load.
+pub const RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME: &str = "raxis-verifier-symbol-index";
+
+/// Minimum Linux guest kernel version pinned by
+/// `INV-PLANNER-HARNESS-03` (cgroup v2 controller availability).
+/// Surfaced as a constant so the `validate_vm_images` rejection
+/// message names the floor and `system-requirements.md §2.5`
+/// references stay in sync. Refers to the Linux kernel inside the
+/// guest VM, not the RAXIS kernel binary.
+pub const MIN_GUEST_LINUX_KERNEL_MAJOR: u32 = 5;
+pub const MIN_GUEST_LINUX_KERNEL_MINOR: u32 = 14;
+
+/// Maximum length of a `[[vm_images]]` alias. Matches the docker /
+/// OCI repo-name length conventions; long enough for
+/// `raxis-executor-starter`-style aliases but bounded.
+const VM_IMAGE_NAME_MAX_LEN: usize = 64;
+
+fn is_valid_vm_image_name(s: &str) -> bool {
+    if s.is_empty() || s.len() > VM_IMAGE_NAME_MAX_LEN {
+        return false;
+    }
+    let mut chars = s.chars();
+    let first = match chars.next() {
+        Some(c) => c,
+        None    => return false,
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+fn is_valid_oci_digest(s: &str) -> bool {
+    let Some(hex) = s.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+}
+
+fn parse_and_check_linux_kernel_version_min(
+    image_name: &str,
+    raw:        &str,
+) -> Result<(u32, u32), PolicyError> {
+    let trimmed = raw.trim();
+    let (maj_str, min_str) = trimmed.split_once('.').ok_or_else(|| {
+        PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VM_IMAGE_LINUX_KERNEL_VERSION_MIN_INVALID: \
+             [[vm_images]] name = {image_name:?} linux_kernel_version_min \
+             must match `<major>.<minor>`; got {raw:?}"
+        ))
+    })?;
+    let parse_u32 = |label: &str, s: &str| -> Result<u32, PolicyError> {
+        s.parse::<u32>().map_err(|_| {
+            PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_VM_IMAGE_LINUX_KERNEL_VERSION_MIN_INVALID: \
+                 [[vm_images]] name = {image_name:?} linux_kernel_version_min \
+                 {label} segment {s:?} is not a non-negative integer"
+            ))
+        })
+    };
+    let major = parse_u32("major", maj_str.trim())?;
+    let minor = parse_u32("minor", min_str.trim())?;
+    if (major, minor) < (MIN_GUEST_LINUX_KERNEL_MAJOR, MIN_GUEST_LINUX_KERNEL_MINOR) {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_VM_GUEST_LINUX_KERNEL_TOO_OLD: \
+             [[vm_images]] name = {image_name:?} linux_kernel_version_min = \
+             \"{major}.{minor}\" is below the floor \
+             \"{MIN_GUEST_LINUX_KERNEL_MAJOR}.{MIN_GUEST_LINUX_KERNEL_MINOR}\" \
+             (INV-PLANNER-HARNESS-03)"
+        )));
+    }
+    Ok((major, minor))
 }
 
 /// `[host_capacity]` — operator-side host-capacity configuration.
@@ -2592,6 +2963,24 @@ pub struct PolicyBundle {
     /// `name` is unique and every non-empty `environment` field
     /// resolves to an [`environments`] key.
     permitted_credentials: Vec<PermittedCredentialConfig>,
+
+    /// V2.5 — validated `[[vm_images]]` registry. Empty when the
+    /// operator omits the section (the V2.4 hardcoded-canonical
+    /// behaviour applies to every spawn). When non-empty, every
+    /// `name` is unique, `oci_digest` is shape-valid,
+    /// `role_restriction` contains only `"Executor"` /
+    /// `"Verifier"`, and `kernel_version_min ≥ 5.14`. Reviewer
+    /// and Orchestrator roles are structurally rejected per
+    /// `INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`.
+    vm_images: Vec<VmImageConfig>,
+
+    /// V2.5 — validated `[default_executor_image]` section.
+    /// `None` means the operator omits the section (the kernel
+    /// uses the canonical `raxis-executor-starter` for tasks
+    /// without an explicit `vm_image`). `Some` carries an alias
+    /// guaranteed to resolve to an `[[vm_images]]` entry whose
+    /// `role_restriction` includes `"Executor"`.
+    default_executor_image: Option<DefaultExecutorImageConfig>,
 }
 
 /// V2 effective `[environments.<label>]` config. Validated mirror
@@ -2664,6 +3053,15 @@ impl PolicyBundle {
                 "[[operators.entries]] is empty — at least one operator required".to_owned(),
             ));
         }
+
+        // V2.5 — pre-validate `[[vm_images]]` once so the
+        // `[default_executor_image]` resolver can borrow it and
+        // the struct-init block reuses the same validated list.
+        let vm_images_validated = validate_vm_images(&raw.vm_images)?;
+        let default_executor_image_validated = validate_default_executor_image(
+            raw.default_executor_image.as_ref(),
+            &vm_images_validated,
+        )?;
 
         // Per-entry cert validation. Mutates `entries` in place to:
         //   - Apply structural pinning to emergency certs (force
@@ -3019,6 +3417,10 @@ impl PolicyBundle {
                 &raw.permitted_credentials,
                 &raw.environments,
             )?,
+            // V2.5 — pre-validated above so this is a move, not
+            // a re-walk of the input array.
+            vm_images: vm_images_validated,
+            default_executor_image: default_executor_image_validated,
         })
     }
 
@@ -3144,6 +3546,45 @@ impl PolicyBundle {
     /// [`git_auto_push`]: PolicyBundle::git_auto_push
     pub fn git_push_remote(&self) -> &str {
         &self.git_push_remote
+    }
+
+    // ── V2.5 `[[vm_images]]` accessors ──────────────────────────────────────
+
+    /// V2_GAPS §13 (V2.5 BLOCKER) — declared `[[vm_images]]` entries.
+    /// Empty when the operator omits the entire section, in which case
+    /// admission relies on per-task `vm_image` paths only (legacy V1
+    /// behavior — see `paradigm.md §10` and `INV-PLANNER-HARNESS-03`).
+    pub fn vm_images(&self) -> &[VmImageConfig] {
+        &self.vm_images
+    }
+
+    /// V2_GAPS §13 (V2.5 BLOCKER) — alias resolution for an admitted
+    /// task's `vm_image` field. Returns `None` when the alias is not
+    /// declared in `[[vm_images]]`. Callers in the admission path
+    /// MUST translate `None` into `FAIL_PLAN_VM_IMAGE_UNKNOWN` so
+    /// operators get a deterministic rejection rather than a
+    /// silent fallback to whatever path the planner produced.
+    pub fn vm_image_by_name(&self, name: &str) -> Option<&VmImageConfig> {
+        self.vm_images.iter().find(|img| img.name == name)
+    }
+
+    /// V2_GAPS §13 (V2.5 BLOCKER) — declared `[default_executor_image]`,
+    /// or `None` when the section is omitted. The kernel falls back
+    /// to the per-task `vm_image` field when this returns `None`.
+    pub fn default_executor_image(&self) -> Option<&DefaultExecutorImageConfig> {
+        self.default_executor_image.as_ref()
+    }
+
+    /// V2_GAPS §13 (V2.5 BLOCKER) — convenience: resolves the
+    /// `[default_executor_image] alias` (when present) against
+    /// `[[vm_images]]`. Returns `None` if the section is absent. The
+    /// `Some` case always points at a real entry because the
+    /// `[default_executor_image]` validator already proved the alias
+    /// resolves at policy load time.
+    pub fn default_executor_image_resolved(&self) -> Option<&VmImageConfig> {
+        self.default_executor_image
+            .as_ref()
+            .and_then(|d| self.vm_image_by_name(&d.alias))
     }
 
     // ── Key accessors ───────────────────────────────────────────────────────
@@ -3286,6 +3727,8 @@ impl PolicyBundle {
             host_capacity:          HostCapacityConfig::default(),
             environments:           HashMap::new(),
             permitted_credentials:  Vec::new(),
+            vm_images:              Vec::new(),
+            default_executor_image: None,
         }
     }
 
@@ -3822,6 +4265,8 @@ mod tests {
             host_capacity:          HostCapacityConfig::default(),
             environments:           HashMap::new(),
             permitted_credentials:  Vec::new(),
+            vm_images:              Vec::new(),
+            default_executor_image: None,
         }
     }
 
@@ -6019,5 +6464,237 @@ mod environment_tests {
         ];
         let err = validate_permitted_credentials(&raw, &envs).expect_err("must reject");
         assert!(err.to_string().contains("FAIL_POLICY_PERMITTED_CRED_INVALID"));
+    }
+
+    // ── V2.5 `[[vm_images]]` tests ──────────────────────────────────────────
+
+    fn vm_image_entry(
+        name:                     &str,
+        digest_hex:               &str,
+        roles:                    &[&str],
+        linux_kernel_version_min: Option<&str>,
+    ) -> VmImageEntry {
+        VmImageEntry {
+            name: name.to_owned(),
+            oci_digest: format!("sha256:{digest_hex}"),
+            role_restriction: roles.iter().map(|r| (*r).to_owned()).collect(),
+            linux_kernel_version_min: linux_kernel_version_min.map(|s| s.to_owned()),
+            description: None,
+        }
+    }
+
+    /// 64-char lowercase-hex stub used by the validator tests so they
+    /// don't depend on real image digests.
+    const STUB_DIGEST_HEX: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn validate_vm_images_accepts_minimal_entry() {
+        let raw = vec![vm_image_entry(
+            "raxis-executor-starter",
+            STUB_DIGEST_HEX,
+            &["Executor"],
+            Some("5.14"),
+        )];
+        let out = validate_vm_images(&raw).expect("must validate");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].name, "raxis-executor-starter");
+        assert_eq!(out[0].linux_kernel_version_min, (5, 14));
+        assert!(out[0].permits_role("Executor"));
+        assert!(!out[0].permits_role("Verifier"));
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_uppercase_name() {
+        let raw = vec![vm_image_entry(
+            "Executor-Starter",
+            STUB_DIGEST_HEX,
+            &["Executor"],
+            Some("5.14"),
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string().contains("FAIL_POLICY_VM_IMAGE_NAME_INVALID"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_reserved_alias() {
+        let raw = vec![vm_image_entry(
+            RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME,
+            STUB_DIGEST_HEX,
+            &["Verifier"],
+            Some("5.14"),
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_POLICY_RESERVED_VM_IMAGE_NAME"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_duplicate_names() {
+        let raw = vec![
+            vm_image_entry("img-a", STUB_DIGEST_HEX, &["Executor"], Some("5.14")),
+            vm_image_entry("img-a", STUB_DIGEST_HEX, &["Verifier"], Some("5.14")),
+        ];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string().contains("FAIL_POLICY_VM_IMAGE_DUPLICATE"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_invalid_digest() {
+        let mut entry = vm_image_entry(
+            "img-a", STUB_DIGEST_HEX, &["Executor"], Some("5.14"),
+        );
+        entry.oci_digest = "sha256:NOTHEX".to_owned();
+        let err = validate_vm_images(&[entry]).expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_POLICY_VM_IMAGE_DIGEST_INVALID"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_missing_role_restriction() {
+        let raw = vec![vm_image_entry(
+            "img-a", STUB_DIGEST_HEX, &[], Some("5.14"),
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_POLICY_VM_IMAGE_ROLE_RESTRICTION_REQUIRED"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_reviewer_role_restriction() {
+        let raw = vec![vm_image_entry(
+            "img-rev", STUB_DIGEST_HEX, &["Reviewer"], Some("5.14"),
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_orchestrator_role_restriction() {
+        let raw = vec![vm_image_entry(
+            "img-orch", STUB_DIGEST_HEX, &["Orchestrator"], Some("5.14"),
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_unknown_role() {
+        let raw = vec![vm_image_entry(
+            "img-x", STUB_DIGEST_HEX, &["Frobnitz"], Some("5.14"),
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_POLICY_INVALID_ROLE_RESTRICTION"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_kernel_version_below_floor() {
+        let raw = vec![vm_image_entry(
+            "img-a", STUB_DIGEST_HEX, &["Executor"], Some("5.4"),
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string().contains("FAIL_VM_GUEST_LINUX_KERNEL_TOO_OLD"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_vm_images_rejects_missing_kernel_version() {
+        let raw = vec![vm_image_entry(
+            "img-a", STUB_DIGEST_HEX, &["Executor"], None,
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string().contains(
+                "FAIL_POLICY_VM_IMAGE_LINUX_KERNEL_VERSION_MIN_REQUIRED"
+            ),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_default_executor_image_returns_none_when_omitted() {
+        let out = validate_default_executor_image(None, &[])
+            .expect("must accept omission");
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn validate_default_executor_image_resolves_alias() {
+        let registry = validate_vm_images(&[vm_image_entry(
+            "primary-exec", STUB_DIGEST_HEX, &["Executor"], Some("5.14"),
+        )])
+        .expect("registry must validate");
+        let section = DefaultExecutorImageSection {
+            alias: "primary-exec".to_owned(),
+        };
+        let out = validate_default_executor_image(Some(&section), &registry)
+            .expect("must validate")
+            .expect("must be Some");
+        assert_eq!(out.alias, "primary-exec");
+    }
+
+    #[test]
+    fn validate_default_executor_image_rejects_unknown_alias() {
+        let registry = validate_vm_images(&[vm_image_entry(
+            "primary-exec", STUB_DIGEST_HEX, &["Executor"], Some("5.14"),
+        )])
+        .expect("registry must validate");
+        let section = DefaultExecutorImageSection {
+            alias: "missing".to_owned(),
+        };
+        let err = validate_default_executor_image(Some(&section), &registry)
+            .expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn validate_default_executor_image_rejects_non_executor_alias() {
+        let registry = validate_vm_images(&[vm_image_entry(
+            "ver-only", STUB_DIGEST_HEX, &["Verifier"], Some("5.14"),
+        )])
+        .expect("registry must validate");
+        let section = DefaultExecutorImageSection {
+            alias: "ver-only".to_owned(),
+        };
+        let err = validate_default_executor_image(Some(&section), &registry)
+            .expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE"),
+            "{err}"
+        );
     }
 }
