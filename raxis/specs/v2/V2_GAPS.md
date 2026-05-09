@@ -575,16 +575,58 @@ failures by class.
 * `OperatorNotificationChannel` trait extraction (V3 trait crate;
   V2 keeps the impls inside the kernel for boot-order simplicity).
 
-### C5: Immutable Artifact Store
+### C5: Immutable Artifact Store — CLOSED (V2.3, MVP)
 
-**Spec:** `immutable-artifact-store.md` (25KB)
-**Estimate:** ~600 lines
+**Spec:** `immutable-artifact-store.md` (25KB) — full surface
+**Status:** **CLOSED for V2 — content-addressed primitive only.**
+**Delivered:** ~470 lines (new `raxis-artifact-store` crate + tests)
 
-Content-addressed artifact storage (SHA-256 keyed). Per-task
-artifact upload/download. Artifact attestation (signed digest binding
-artifact to task). Retention policy.
+V2.3 lands the operator-grade content-addressed store primitive
+that the spec's policy/plan/key write paths build on top of: write-
+once, hash-verified, idempotent on identical bytes, fail-loud on
+tampering. Wiring the existing kernel write paths (policy push,
+plan approve, key rotate) onto this primitive is a follow-up
+because each of those touch-points is its own atomic-rename
+ceremony with unique caller-side concerns; the store itself is the
+shape they all converge on.
 
-Zero references to `ArtifactStore`, `ImmutableArtifact`.
+| Component | Crate | Status |
+|---|---|---|
+| `Category` enum (Policy / Plans / Keys) with stable `sub_dir()` + `ext()` | `crates/artifact-store/src/lib.rs` | Per `§4` storage layout |
+| `ArtifactKey` (32-byte SHA-256 + hex projection) | `crates/artifact-store/src/lib.rs` | `compute(&[u8])`, `parse_hex(&str)`, `as_hex()` |
+| `ArtifactStore::open(data_dir)` materialising `<root>/artifacts/` at mode 0700 | `crates/artifact-store/src/lib.rs` | Lazy per-category sub-dir creation on first write |
+| `ArtifactStore::write(category, body)` → `(key, path)` with `O_CREAT \| O_EXCL` | `crates/artifact-store/src/lib.rs` | Idempotent on identical bytes; surfaces `BytesDiverge` on tamper |
+| `ArtifactStore::read(category, key)` → `Vec<u8>` with on-read SHA-256 verification | `crates/artifact-store/src/lib.rs` | Surfaces `IntegrityMismatch` for the spec's §1.3 tamper-detector |
+| `ArtifactStore::write_companion(category, key, ext, body)` for `<sha256>.sig` | `crates/artifact-store/src/lib.rs` | Same idempotency contract as `write` |
+| 10 unit tests covering hex round-trip, write→read, idempotency, tamper detection (write + read), exists check, sidecar writes, cross-category collision avoidance | `crates/artifact-store/src/lib.rs` | All passing |
+
+**V2 design choices.**
+
+* **Crate, not a kernel module.** Future read sites
+  (`raxis policy history`, `raxis plan show`, `raxis keys list`)
+  link this crate from the CLI without pulling the entire kernel
+  into a CLI binary. Audit + retention pieces stay in the kernel
+  module that drives them.
+* **`O_CREAT | O_EXCL` write, not "open + read + compare".**
+  Atomic on every POSIX filesystem; eliminates a TOCTOU window
+  the simpler shape would have between the integrity check and
+  the open.
+* **0700 directory + 0600 file permissions.** Matches the spec's
+  §4 ownership table (artifact dirs are kernel-only).
+* **`fsync` on each write.** Ensures the artifact reaches stable
+  storage before the caller advances any other state (e.g. the
+  audit-event row referencing the new SHA-256).
+
+**Deferred to V3.**
+
+* Wiring the existing policy/plan/key write paths onto `ArtifactStore`
+  (each touch-point is a separate kernel-side atomic-rename
+  ceremony).
+* `policy/policy.toml` + `operator_public.pem` symlink-swap
+  helpers.
+* Retention policy GC sweep (`policy_bundles = 3650` etc).
+* CLI surfaces (`raxis policy history`, `raxis plan show
+  <sha256>`, `raxis keys list`).
 
 ### C6: Kernel Push Protocol — CLOSED (V2.3, MVP)
 
