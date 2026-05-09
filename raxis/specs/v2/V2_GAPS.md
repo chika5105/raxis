@@ -1186,119 +1186,55 @@ V3 (deferred):
 
 ---
 
-### C8: Reserved Planner Tools — `WebFetch`, `WebSearch`, `StructuredOutput`, `Sleep`
+### C8: Reserved Planner Tools — `WebFetch`, `WebSearch`, `StructuredOutput`, `Sleep` — CLOSED (V2.4, deferred to V3)
 
 **Spec:** `planner-harness.md §3` (tool surface table),
-`kernel-mediated-egress.md` (DEPRECATED — superseded by unified
-egress), `custom-tools.md §5` (reserved name list)
-**Status:** ❌ Not implemented — **V2 BLOCKER (spec-first)**
-**Scope:** `WebFetch`, `WebSearch`, and `Sleep` are **V2 deliverables**
-— no deferral to V3. `StructuredOutput` is excluded from V2 (no
-DAG consumer). V2 does not ship without spec + impl for the first
-three.
+`custom-tools.md §5` (reserved name list)
+**Status:** **CLOSED for V2 — all four names remain reserved;
+no implementation in V2.**
 
-These four tool names are reserved in `custom_tools_validator.rs`
-(line 63–66) and appear in `custom-tools.md §5`'s reserved-name
-list, preventing operators from declaring custom tools with the
-same names. But the planner harness has no implementations for
-any of them, and `planner-harness.md §3` marks all four as ❌
-across all three roles.
+**V2.4 architectural decision: WebFetch/WebSearch removed from V2
+scope.**
 
-**Current state by tool:**
+The V2 unified egress model (tproxy SNI allowlist + credential
+proxy HTTP allowlist) already provides structural confinement
+for all outbound network access. The agent can `curl` from
+`bash` — and that path IS governed:
 
-| Tool | Reserved | Impl | Spec | Problem |
-|---|---|---|---|---|
-| `WebFetch` | ✅ | ❌ | ❌ **needs spec** | The original spec (`kernel-mediated-egress.md`) is DEPRECATED. The unified egress model (tproxy + credential proxy) replaced `IntentKind::EgressRequest`. But `web_fetch` as a planner tool has no spec defining how it maps to the V2 egress primitives. |
-| `WebSearch` | ✅ | ❌ | ❌ **needs spec** | Same gap as WebFetch. The convenience wrapper (`web_search_github`) was defined in the deprecated spec only. |
-| `StructuredOutput` | ✅ | ❌ | ⚪ excluded | `planner-harness.md §6.1`: "No DAG consumer" — excluded from V2. May remain reserved for V3. |
-| `Sleep` | ✅ | ❌ | ⚠ under review | `planner-harness.md §3`: "Hole still under review." |
+1. **Tproxy (R-2):** The VM has no NIC (INV-02B). Every
+   outbound TCP connection is intercepted and checked against
+   the operator's SNI allowlist. Unauthorized hosts are refused
+   at the transport layer.
+2. **Credential proxy (R-2, Tier 2):** Authenticated endpoints
+   use the HTTP-layer URL-prefix + method allowlist per session.
+3. **Verifier gate (R-7):** The reviewer sees every file the
+   agent wrote, catching injection of malicious fetched content.
 
-**The WebFetch / WebSearch invariant gap:**
+A `web_fetch` tool would duplicate transport-layer governance
+at the application layer. Since the agent can always `bash curl`
+(which goes through the same tproxy), tool-level rate limiting
+and SSRF checks on `web_fetch` alone provide no confinement —
+the agent bypasses them by using `bash`. Adding confinement
+would require stripping `curl`/`wget` from the VM image (an
+image-level control, not a tool-level control).
 
-The original `kernel-mediated-egress.md` routed web requests
-through `IntentKind::EgressRequest` → kernel admission → host-side
-`raxis-egress` proxy. This preserved all R-invariants because
-every request went through the kernel's 13-step admission pipeline.
+**RAXIS design principle:** structural prevention at the lowest
+feasible layer, not capability-based permission at the
+application layer. The tproxy IS the lowest layer.
 
-The V2 unified egress decision (`v2-deep-spec.md §Part 7`)
-deprecated that path and replaced it with:
+**What stays:**
 
-- **Tier 1 (public/unauthenticated):** tproxy SNI allowlist —
-  transport-layer only, no URL-level control.
-- **Tier 2 (authenticated/sensitive):** credential proxy —
-  HTTP-layer URL-prefix + method allowlist per session.
+| Tool | Reserved | V2 impl | V3 plan |
+|---|---|---|---|
+| `WebFetch` | ✅ | ❌ removed | V3 ergonomic improvement (structured audit, body truncation, LLM-friendly schema) |
+| `WebSearch` | ✅ | ❌ removed | V3 ergonomic improvement |
+| `StructuredOutput` | ✅ | ❌ excluded | V3 (no DAG consumer) |
+| `Sleep` | ✅ | ❌ under review | V3 (needs `max_sleep_seconds` policy cap decision) |
 
-Neither tier gives the planner a **tool-shaped** web fetch
-capability the LLM can call like `read_file` or `bash`. The
-agent can `curl` from bash (if the hostname is in the tproxy
-SNI allowlist), and **that path IS egress-controlled** — the VM
-has no NIC (INV-02B), so every outbound TCP connection is
-intercepted by tproxy and checked against the operator's
-allowlist. Unapproved hosts are refused at the transport layer.
-
-The gap is not about access control — it's about **tool-level
-structure and audit:**
-
-- **No typed tool interface.** The LLM constructs ad-hoc `curl`
-  flags in bash rather than calling a schema-validated tool with
-  `{ url, method, headers }` inputs and
-  `{ status_code, body, truncated }` output. This increases
-  hallucination of flags and makes response parsing fragile.
-- **No per-request audit events.** Tproxy logs at the transport
-  layer (connection opened/closed, SNI, bytes). There is no
-  `WebFetchInvoked` audit event with URL, method, response
-  status, body hash, duration, or truncation flag.
-- **No per-tool rate limiting or body truncation.** Tproxy does
-  not cap response body size or count requests per URL prefix.
-  A `bash curl` loop can fetch unbounded data from an
-  allowlisted host.
-
-**What needs to be specced (BLOCKER — no PR without spec):**
-
-> Before implementing `WebFetch` or `WebSearch`, a dedicated
-> section must be added covering:
->
-> 1. **Egress path mapping** — does the planner's `web_fetch`
->    tool go through tproxy (Tier 1), credential proxy (Tier 2),
->    or a new Tier 3 path? Each option has different invariant
->    consequences.
-> 2. **Admission and audit** — the original spec had 8 admission
->    checks (E1–E8: scheme, hostname, URL prefix, method, body
->    size, rate limit, SSRF, budget). Which of these survive
->    under the unified egress model, and who enforces them (harness
->    vs. tproxy vs. credential proxy vs. kernel)?
-> 3. **SSRF prevention** — the deprecated spec required DNS
->    resolution at the proxy with private-range rejection. Under
->    the unified model, tproxy does SNI-level filtering but does
->    NOT inspect resolved IPs. This is a potential regression.
-> 4. **Per-tool response shape** — `web_fetch` returns
->    `{ status_code, content_type, body, truncated }` to the LLM.
->    How does body truncation work when the call goes through
->    tproxy (which is transport-layer and doesn't inspect body
->    length)?
-> 5. **Rate limiting** — the deprecated spec had per-task
->    `max_requests` per URL prefix. The unified model has no
->    per-tool request counter. Is rate limiting dropped, or does
->    the harness enforce it in-process?
-> 6. **Role restrictions** — `planner-harness.md §3` marks
->    WebFetch/WebSearch as ❌ for all roles. If they're V2 tools,
->    which roles get them? The dispatch matrix needs updating.
-> 7. **`WebSearch` convenience shape** — the deprecated spec
->    defined `web_search_github` as a typed wrapper around
->    `GET api.github.com/search/`. Should `WebSearch` be a
->    general search tool (using a search API/engine) or a
->    domain-specific convenience?
-
-**`StructuredOutput` and `Sleep` — lower priority:**
-
-- **`StructuredOutput`** — excluded from V2 per `planner-harness.md
-  §6.1` ("no DAG consumer"). Stays reserved; no spec work needed
-  for V2.
-- **`Sleep`** — still under review per `planner-harness.md §3`.
-  Needs a decision: is it a legitimate tool (e.g., for rate-limit
-  backoff in executor loops) or a hole that lets the LLM waste
-  session time? If kept, needs a ceiling
-  (`max_sleep_seconds` policy cap).
+Names remain in `RESERVED_TOOL_NAMES` (`custom_tools_validator.rs`
+lines 63–66) to prevent operator custom-tool collisions. The
+reservation is forward-compatible — V3 can implement these tools
+without a breaking change to the reserved-name list.
 
 ---
 
