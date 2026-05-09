@@ -100,15 +100,65 @@ coverage gap is tracked separately in `V2_GAPS.md §INV-coverage`.
 -p raxis-planner-core --lib`); the live e2e harness exercises the
 full loop end-to-end via `live-e2e/`.
 
-### B2: Custom Tools
+### B2: Custom Tools — CLOSED (V2.3, MVP)
 
 **Spec:** `custom-tools.md` (55KB)
-**Estimate:** ~600 lines | **Depends on:** B1
+**Status:** Kernel-side validation + planner-side loader/executor done.
+**Depends on:** B1
 
-Operator-declared tools in `plan.toml` that extend the agent's
-capabilities via subprocess execution. Fully specified with schema
-validation, `INV-PLANNER-HARNESS-04` (reviewer ban), and
-`policy.toml` hard caps. Zero implementing code.
+V2 ships kernel-side validation of operator-declared custom tools at
+plan-approve time, *plus* the planner-side loader and subprocess
+executor (B1) that actually runs them inside the planner Firecracker
+guest.
+
+Implementation:
+- `kernel/src/initiatives/custom_tools_validator.rs`:
+  - `RESERVED_TOOL_NAMES` — base tools and kernel-mediated intent
+    names; custom tools may not collide.
+  - `is_valid_custom_tool_name()` — `^[a-z][a-z0-9_]*$`, length ≤ 64.
+  - `validate_plan_custom_tools(plan_toml, policy_max_timeout_seconds)`
+    parses the plan TOML and enforces:
+    1. Forbids `[[plan.tasks.<id>.custom_tool]]` (custom tools live
+       only on profiles).
+    2. For each `[[profiles.<name>.custom_tool]]` block:
+       name format + length, reserved-name rejection,
+       within-profile uniqueness, description length 8–800,
+       `command[]` non-empty with absolute `command[0]`,
+       `timeout_seconds` ≤ `policy_max_timeout_seconds`.
+  - Errors lift to `LifecycleError::PlanInvalid { reason }` so plan
+    approval fails closed before BEGIN TRANSACTION.
+- `kernel/src/initiatives/lifecycle.rs::approve_plan` now invokes the
+  validator immediately after `validate_task_credentials`, ensuring
+  malformed declarations cannot round-trip into a session.
+- Planner-side execution uses `planner-core::custom_tools` + the
+  `SubprocessTool` adapter from B1 (see B1 closeout above).
+
+V2 design choices:
+- Hard cap default: 300 seconds (`DEFAULT_MAX_CUSTOM_TOOL_TIMEOUT_SECONDS`)
+  — chosen as 5 minutes so an operator-issued shell command has
+  comfortable headroom while still bounding zombie processes.
+- Schema validation is structural-only for V2 (presence + type +
+  shape). Full Draft-07 JSON Schema validation of the
+  `input_schema` block is deferred to V3 once the standalone
+  `raxis-jsonschema` crate lands.
+- Reserved-names list is colocated with the validator rather than
+  re-exported from `planner-core` because plan-approve is the
+  authoritative gate; the planner-core list is a defence-in-depth
+  echo, not the source of truth.
+
+Tests: 13 unit tests in `custom_tools_validator::tests` (`cargo test
+-p raxis-kernel --bin raxis-kernel custom_tools_validator`) covering
+canonical and adversarial names, reserved-name collisions,
+description-length bounds, relative-path commands, timeout-cap
+enforcement, profile-internal collisions, task-level rejection, and
+RESERVED_TOOL_NAMES sync with the spec.
+
+V3 (deferred):
+- Draft-07 JSON Schema validation of `input_schema` (structural only
+  today).
+- Per-tool concurrency cap (today: bounded only by global session
+  concurrency).
+- Optional preflight `command --version` smoke check at approve-time.
 
 ### B3: Real Database Proxy Forwarding
 

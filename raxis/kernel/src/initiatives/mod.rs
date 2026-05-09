@@ -12,6 +12,7 @@
 // All initiative state transitions are atomic: they must be committed with
 // their corresponding audit record in a single SQLite transaction.
 
+pub mod custom_tools_validator;
 pub mod lifecycle;
 pub mod plan_registry;
 pub mod review_aggregation;

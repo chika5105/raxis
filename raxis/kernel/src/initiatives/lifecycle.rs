@@ -688,6 +688,20 @@ pub fn approve_plan(
     // names a proxy this kernel build does not implement cannot
     // allocate a task row.
     validate_task_credentials(&plan_tasks)?;
+    // V2_GAPS §B2 (`custom-tools.md`) — kernel-side validation of
+    // operator-declared custom tools at plan-approve time. Rejects
+    // structurally malformed `[[profiles.<name>.custom_tool]]`
+    // blocks (and forbids `[[plan.tasks.<id>.custom_tool]]`) before
+    // BEGIN TRANSACTION so a typo can never round-trip into a
+    // session. Surfaced as `LifecycleError::PlanInvalid`; the typed
+    // failure-code projection is preserved through the error
+    // string (`FAIL_CUSTOM_TOOL_*`).
+    crate::initiatives::custom_tools_validator::validate_plan_custom_tools(
+        &plan_toml_str,
+        crate::initiatives::custom_tools_validator::DEFAULT_MAX_CUSTOM_TOOL_TIMEOUT_SECONDS,
+    ).map_err(|e| LifecycleError::PlanInvalid {
+        reason: e.to_string(),
+    })?;
     // V2 §Step 27 — clone-strategy + Sparse-Orchestrator exclusion +
     // Orchestrator-in-`[[tasks]]` rejection. Runs after the parser-
     // level "unknown value" rejection (which fires inside
