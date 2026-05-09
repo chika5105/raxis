@@ -576,6 +576,9 @@ pub fn approve_plan_for_test(
     audit:                           &dyn AuditSink,
     plan_registry:                   &PlanRegistry,
 ) -> Result<PlanApproved, LifecycleError> {
+    use std::collections::HashMap;
+    let empty_envs: HashMap<String, raxis_policy::EnvironmentConfig> = HashMap::new();
+    let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
     approve_plan(
         initiative_id,
         approving_operator,
@@ -584,6 +587,8 @@ pub fn approve_plan_for_test(
         policy_epoch,
         "refs/heads/main",
         false,
+        &empty_envs,
+        &empty_creds,
         store,
         audit,
         plan_registry,
@@ -591,16 +596,27 @@ pub fn approve_plan_for_test(
 }
 
 pub fn approve_plan(
-    initiative_id:                   &str,
-    approving_operator:              &str,
-    approving_operator_display_name: Option<String>,
-    operator_pubkey_bytes:           &[u8],
-    policy_epoch:                    u64,
-    policy_default_target_ref:       &str,
-    policy_target_ref_locked:        bool,
-    store:                           &Store,
-    audit:                           &dyn AuditSink,
-    plan_registry:                   &PlanRegistry,
+    initiative_id:                       &str,
+    approving_operator:                  &str,
+    approving_operator_display_name:     Option<String>,
+    operator_pubkey_bytes:               &[u8],
+    policy_epoch:                        u64,
+    policy_default_target_ref:           &str,
+    policy_target_ref_locked:            bool,
+    // V2_GAPS §E1 — `[environments.<label>]` snapshot. Empty
+    // map ⇒ environment model inert (per
+    // `environment-access-control.md §1.5.2` activation gate);
+    // the per-task INV-ENV-01 check is a no-op.
+    policy_environments:                 &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
+    // V2_GAPS §E1 — `[[permitted_credentials]]` snapshot. V2
+    // consults this only for environment-binding lookups via
+    // `validate_task_environment_consistency`; the V3 promotion
+    // to `FAIL_CREDENTIAL_NOT_PERMITTED` for absent names is
+    // deferred.
+    policy_permitted_credentials:        &[raxis_policy::PermittedCredentialConfig],
+    store:                               &Store,
+    audit:                               &dyn AuditSink,
+    plan_registry:                       &PlanRegistry,
 ) -> Result<PlanApproved, LifecycleError> {
     let mut conn = store.lock_sync();
 
@@ -702,6 +718,20 @@ pub fn approve_plan(
     ).map_err(|e| LifecycleError::PlanInvalid {
         reason: e.to_string(),
     })?;
+    // V2_GAPS §E1 (`environment-access-control.md §11`) —
+    // INV-ENV-01 Task Environment Consistency. Runs the per-task
+    // binding algorithm (§11.3) and rejects any task whose
+    // environment-bound credentials resolve to more than one
+    // declared environment. Inert when no `[environments.<label>]`
+    // is declared (§1.5.2 activation gate). The MVP enforces the
+    // credential-side limb of the algorithm; the URL-gate limb
+    // (§11.3 step B) and the same-cluster handler (§11.4) are
+    // V3 along with the `[[environment_gates]]` parser.
+    validate_task_environment_consistency(
+        &plan_tasks,
+        policy_environments,
+        policy_permitted_credentials,
+    )?;
     // V2 §Step 27 — clone-strategy + Sparse-Orchestrator exclusion +
     // Orchestrator-in-`[[tasks]]` rejection. Runs after the parser-
     // level "unknown value" rejection (which fires inside
@@ -2732,6 +2762,83 @@ fn validate_path_allowlist_v2_format(tasks: &[PlanTask]) -> Result<(), Lifecycle
 ///
 /// Sister-of `validate_path_allowlist_v2_format` /
 /// `validate_cross_cutting_artifacts` — same shift-left posture.
+/// V2_GAPS §E1 — INV-ENV-01 per-task environment consistency check
+/// (`environment-access-control.md §11`).
+///
+/// Implements step A of the §11.3 binding algorithm (credential
+/// limb): for each task, walk its `[[tasks.credentials]]` entries,
+/// look each name up in `[[permitted_credentials]]`, and union the
+/// `environment` labels into a per-task set.
+///
+/// **Cardinality rule:**
+/// * 0 → task is environment-neutral (passes trivially).
+/// * 1 → task is bound to that environment (passes).
+/// * ≥ 2 → `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (hard reject; not
+///         downgradable by `--no-strict` per §11.7).
+///
+/// **Activation gate (`§1.5.2`).** When `policy_environments` is
+/// empty, the entire check is a no-op — the operator has not
+/// opted into the environment model and INV-ENV-01 fires on
+/// zero plan tasks.
+///
+/// **V2 MVP scope.** The URL-gate limb of the algorithm
+/// (`§11.3 step B`) and the same-cluster acknowledgement handler
+/// (`§11.4`) are deferred to V3 alongside the
+/// `[[environment_gates]]` parser; this validator covers the
+/// credential limb only, which is the path that matters for
+/// "does a single VM hold credentials for two environments at
+/// once" — the canonical blast-radius property INV-ENV-01
+/// exists to prevent.
+fn validate_task_environment_consistency(
+    tasks:                  &[PlanTask],
+    policy_environments:    &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
+    policy_permitted_creds: &[raxis_policy::PermittedCredentialConfig],
+) -> Result<(), LifecycleError> {
+    if policy_environments.is_empty() {
+        return Ok(());
+    }
+    use std::collections::BTreeSet;
+    for pt in tasks {
+        let mut envs: BTreeSet<&str> = BTreeSet::new();
+        let mut sources: Vec<(String, String)> = Vec::new();
+        for decl in &pt.credentials {
+            let cred_name = decl.name.as_str();
+            let permitted = policy_permitted_creds.iter().find(|c| c.name == cred_name);
+            if let Some(p) = permitted {
+                if let Some(label) = p.environment.as_deref() {
+                    if envs.insert(label) {
+                        sources.push((label.to_owned(), format!("credential:{cred_name}")));
+                    } else {
+                        sources.push((label.to_owned(), format!("credential:{cred_name}")));
+                    }
+                }
+            }
+        }
+        if envs.len() >= 2 {
+            let labels: Vec<&str> = envs.iter().copied().collect();
+            let sources_rendered = sources.iter()
+                .map(|(label, src)| format!("{src}→{label}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "FAIL_TASK_ENVIRONMENT_INCONSISTENT: task {task:?} \
+                     binds to environments [{envs}] (sources: {sources}). \
+                     Per INV-ENV-01 (environment-access-control.md §11) a \
+                     task may bind to AT MOST ONE environment. Split this \
+                     task into separate DAG-connected tasks (one per \
+                     environment) and let the kernel mediate the artifact \
+                     handoff per §11.5.",
+                    task    = pt.task_id,
+                    envs    = labels.join(", "),
+                    sources = sources_rendered,
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     use raxis_plan_credentials::ProxyDecl;
 
@@ -6346,5 +6453,156 @@ target_ref = "refs/heads/raxis/feature"
         ).unwrap();
         assert_eq!(plan_present, 1,
             "signed_plan_artifacts row MUST commit alongside initiatives row");
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V2_GAPS §E1 — INV-ENV-01 task-environment-consistency tests
+// (`environment-access-control.md §11`).
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod env_consistency_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use raxis_credentials::CredentialName;
+    use raxis_plan_credentials::{ProxyDecl, TaskCredentialDecl, PostgresRestrictions};
+
+    fn pg_decl(name: &str, mount_as: &str) -> TaskCredentialDecl {
+        TaskCredentialDecl {
+            name:     CredentialName::new(name),
+            mount_as: mount_as.to_owned(),
+            proxy:    ProxyDecl::Postgres { restrictions: PostgresRestrictions::default() },
+        }
+    }
+
+    fn task_with(creds: Vec<TaskCredentialDecl>) -> PlanTask {
+        PlanTask {
+            task_id:                   "t1".to_owned(),
+            name:                      "t1".to_owned(),
+            lane_id:                   "main".to_owned(),
+            predecessors:              Vec::new(),
+            path_allowlist:            Vec::new(),
+            path_export_to_successors: false,
+            path_export_globs:         Vec::new(),
+            path_scope_override:       false,
+            clone_strategy:            CloneStrategy::Full,
+            session_agent_type:        SessionAgentType::Executor,
+            credentials:               creds,
+        }
+    }
+
+    fn env(label: &str) -> raxis_policy::EnvironmentConfig {
+        raxis_policy::EnvironmentConfig {
+            description: label.to_owned(),
+            same_cluster_acknowledged: false,
+        }
+    }
+
+    fn permitted(name: &str, label: Option<&str>) -> raxis_policy::PermittedCredentialConfig {
+        raxis_policy::PermittedCredentialConfig {
+            name:        name.to_owned(),
+            environment: label.map(str::to_owned),
+            description: None,
+        }
+    }
+
+    #[test]
+    fn no_environments_declared_is_no_op() {
+        // §1.5.2 activation gate — when zero `[environments.<label>]`
+        // tables are declared, the consistency check is inert even
+        // for tasks that hold many credentials.
+        let tasks = vec![task_with(vec![pg_decl("a", "A_URL"), pg_decl("b", "B_URL")])];
+        let envs:  HashMap<String, raxis_policy::EnvironmentConfig> = HashMap::new();
+        let creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
+        validate_task_environment_consistency(&tasks, &envs, &creds)
+            .expect("must be a no-op when no environments are declared");
+    }
+
+    #[test]
+    fn single_env_credential_passes() {
+        // Cardinality 1 — task is bound to "beta" via one credential.
+        let tasks = vec![task_with(vec![pg_decl("beta-pg", "BETA_DB_URL")])];
+        let mut envs = HashMap::new();
+        envs.insert("beta".to_owned(), env("beta"));
+        let creds = vec![permitted("beta-pg", Some("beta"))];
+        validate_task_environment_consistency(&tasks, &envs, &creds)
+            .expect("single-env credential must pass");
+    }
+
+    #[test]
+    fn neutral_credentials_only_passes() {
+        // §1.5.4 — neutral credentials (no `environment` field) make
+        // a task environment-neutral even when envs are declared.
+        let tasks = vec![task_with(vec![
+            pg_decl("npm-token", "NPM_TOKEN"),
+            pg_decl("cache-pg", "CACHE_DB_URL"),
+        ])];
+        let mut envs = HashMap::new();
+        envs.insert("beta".to_owned(), env("beta"));
+        let creds = vec![
+            permitted("npm-token", None),
+            permitted("cache-pg",  None),
+        ];
+        validate_task_environment_consistency(&tasks, &envs, &creds)
+            .expect("all-neutral task must pass even with envs declared");
+    }
+
+    #[test]
+    fn cross_environment_credentials_are_rejected() {
+        // §11.7 — task with credentials bound to two different
+        // environments must fail FAIL_TASK_ENVIRONMENT_INCONSISTENT.
+        let tasks = vec![task_with(vec![
+            pg_decl("beta-pg", "BETA_DB_URL"),
+            pg_decl("prod-pg", "PROD_DB_URL"),
+        ])];
+        let mut envs = HashMap::new();
+        envs.insert("beta".to_owned(),       env("beta"));
+        envs.insert("production".to_owned(), env("production"));
+        let creds = vec![
+            permitted("beta-pg", Some("beta")),
+            permitted("prod-pg", Some("production")),
+        ];
+        let err = validate_task_environment_consistency(&tasks, &envs, &creds)
+            .expect_err("cross-env credentials must fail");
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(reason.contains("FAIL_TASK_ENVIRONMENT_INCONSISTENT"),
+                    "reason should pin the structured failure code: {reason}");
+                assert!(reason.contains("beta"),       "reason must list beta:  {reason}");
+                assert!(reason.contains("production"), "reason must list prod: {reason}");
+                assert!(reason.contains("INV-ENV-01"), "reason must cite INV-ENV-01: {reason}");
+            }
+            other => panic!("expected PlanInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_credential_name_treated_as_neutral_in_v2_mvp() {
+        // V2 MVP scope: a credential not declared in
+        // `[[permitted_credentials]]` contributes nothing to the
+        // env set (V3 will promote this to FAIL_CREDENTIAL_NOT_PERMITTED).
+        let tasks = vec![task_with(vec![pg_decl("not-in-policy", "X")])];
+        let mut envs = HashMap::new();
+        envs.insert("beta".to_owned(), env("beta"));
+        let creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
+        validate_task_environment_consistency(&tasks, &envs, &creds)
+            .expect("V2 MVP: unknown credential is neutral, not a hard fail");
+    }
+
+    #[test]
+    fn neutral_plus_bound_credential_passes() {
+        // Mixed neutral + env-bound: cardinality 1 ⇒ Bound("beta").
+        let tasks = vec![task_with(vec![
+            pg_decl("npm-token", "NPM_TOKEN"),
+            pg_decl("beta-pg",   "BETA_DB_URL"),
+        ])];
+        let mut envs = HashMap::new();
+        envs.insert("beta".to_owned(), env("beta"));
+        let creds = vec![
+            permitted("npm-token", None),
+            permitted("beta-pg",   Some("beta")),
+        ];
+        validate_task_environment_consistency(&tasks, &envs, &creds)
+            .expect("neutral + bound = cardinality 1 must pass");
     }
 }

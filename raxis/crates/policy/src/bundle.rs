@@ -145,6 +145,86 @@ pub(crate) struct RawPolicy {
     /// `host-capacity.md` surface; see [`HostCapacityConfig`].
     #[serde(default)]
     pub(crate) host_capacity: Option<HostCapacitySection>,
+
+    /// `[environments.<label>]` — V2_GAPS §E1 environment-binding
+    /// declarations per `environment-access-control.md §5b.1`.
+    /// **Optional**: omitting the entire `[environments]` table
+    /// (zero declared environments) keeps the environment model
+    /// inert — no per-task INV-ENV-01 check fires (§1.5.2
+    /// activation gate). The map key is the environment label
+    /// (validated against `^[a-z][a-z0-9_-]{0,31}$`); the value
+    /// carries the per-environment knobs.
+    #[serde(default)]
+    pub(crate) environments: HashMap<String, EnvironmentSection>,
+
+    /// `[[permitted_credentials]]` — V2_GAPS §E1 policy-side
+    /// allowlist of credential names per
+    /// `environment-access-control.md §5.2`. Each entry MAY
+    /// declare an `environment` label; that label MUST resolve to
+    /// a declared `[environments.<label>]`. **Optional**: an
+    /// omitted section keeps existing behaviour where credential
+    /// names are not pre-declared in policy. When the section IS
+    /// present and non-empty, every plan-task credential reference
+    /// MUST resolve into it (INV-CRED-01 in V3 — V2 keeps the
+    /// existing per-task validation pathway). For V2 the section
+    /// is consumed by the INV-ENV-01 binding algorithm only.
+    #[serde(default, rename = "permitted_credentials")]
+    pub(crate) permitted_credentials: Vec<PermittedCredentialEntry>,
+}
+
+/// `[environments.<label>]` — operator-declared environment
+/// definition per `environment-access-control.md §5b`. V2 honours
+/// `description` (required) and `same_cluster_acknowledged`
+/// (default `false`); the §5b.4 reserved fields parse into
+/// `_reserved` and are tolerated as no-op. The kernel emits a
+/// single audit-trail warning at policy load if any reserved
+/// field is set (handled in `validate_environments`).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct EnvironmentSection {
+    /// Required. Human-readable description; surfaced in
+    /// `raxis-cli plan explain` and audit-log inspectors.
+    #[serde(default)]
+    pub(crate) description: Option<String>,
+
+    /// Operator opt-in for the same-cluster/same-host conflation
+    /// scenario (`environment-access-control.md §11.4`). When
+    /// `true`, URL gates whose conflation involves THIS
+    /// environment do not contribute environment labels to the
+    /// per-task consistency check. Default `false`. V2 MVP parses
+    /// the field but the URL-gate runtime path itself is V3 (only
+    /// the per-task credential coherence check fires in V2).
+    #[serde(default)]
+    pub(crate) same_cluster_acknowledged: bool,
+
+    /// V2.x reserved fields per §5b.4. Captured as raw TOML so
+    /// the policy parser tolerates their presence and the
+    /// validator can emit a single warning per occurrence.
+    #[serde(flatten)]
+    pub(crate) extras: HashMap<String, toml::Value>,
+}
+
+/// `[[permitted_credentials]]` — single allowlist entry for a
+/// policy-permitted credential name. V2 honours the `name`
+/// (required) and `environment` (optional, must resolve to a
+/// declared `[environments.<label>]` when non-empty) fields.
+/// `description` is parsed for forward-compat surfacing in
+/// `raxis-cli plan explain` and audit-log inspectors.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct PermittedCredentialEntry {
+    /// Required. Credential name (matches the file under
+    /// `<data_dir>/credentials/<name>.env`).
+    pub(crate) name: String,
+
+    /// Optional environment binding. Empty/absent means the
+    /// credential is **neutral** (`environment-access-control.md
+    /// §1.5.4`) and contributes nothing to the per-task
+    /// environment set.
+    #[serde(default)]
+    pub(crate) environment: Option<String>,
+
+    /// Optional human-readable description (forward-compat).
+    #[serde(default)]
+    pub(crate) description: Option<String>,
 }
 
 /// `[host_capacity]` — operator-side host-capacity configuration.
@@ -1954,6 +2034,135 @@ fn validate_host_capacity_section(
     Ok(cfg)
 }
 
+/// V2_GAPS §E1 — environment label syntax per §5b.3. Lowercase
+/// ASCII letters, digits, hyphens, underscores; 1–32 characters;
+/// must start with a letter.
+fn is_valid_env_label(label: &str) -> bool {
+    let bytes = label.as_bytes();
+    if bytes.is_empty() || bytes.len() > 32 {
+        return false;
+    }
+    let first = bytes[0];
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    bytes.iter().all(|&b| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
+    })
+}
+
+/// V2_GAPS §E1 — list of fields the parser TOLERATES on
+/// `[environments.<label>]` per §5b.4 ("reserved for V2.x").
+/// Operators MAY set them; the V2 kernel ignores them and emits
+/// no kernel-side effect. (V3 will graduate them to normative
+/// fields.) Anything not on this list and not consumed by V2 is
+/// `FAIL_POLICY_ENV_UNKNOWN_FIELD`.
+const RESERVED_ENV_FIELDS: &[&str] = &[
+    "require_review_signoff",
+    "blast_radius",
+    "audit_retention_days",
+    "require_two_party_sign",
+    "escalation_default_class",
+    "override_reviewer_alias",
+];
+
+/// V2_GAPS §E1 (`environment-access-control.md §5b.3`).
+/// Validate every `[environments.<label>]` table:
+/// - Label syntax `^[a-z][a-z0-9_-]{0,31}$` (§5b.3 rule 4).
+/// - `description` is required and non-empty.
+/// - Unknown fields are rejected unless they appear in the
+///   §5b.4 reserved list, in which case they are tolerated.
+fn validate_environments(
+    raw: &HashMap<String, EnvironmentSection>,
+) -> Result<HashMap<String, EnvironmentConfig>, PolicyError> {
+    let mut out = HashMap::with_capacity(raw.len());
+    for (label, section) in raw {
+        if !is_valid_env_label(label) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_ENV_LABEL_INVALID: \
+                 [environments.{label}] label does not match \
+                 ^[a-z][a-z0-9_-]{{0,31}}$ (environment-access-control.md §5b.3)"
+            )));
+        }
+        let description = match section.description.as_deref() {
+            Some(d) if !d.trim().is_empty() => d.trim().to_owned(),
+            _ => {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_ENV_UNKNOWN_FIELD: \
+                     [environments.{label}] missing required `description` \
+                     (environment-access-control.md §5b.2)"
+                )));
+            }
+        };
+        for unknown in section.extras.keys() {
+            if !RESERVED_ENV_FIELDS.contains(&unknown.as_str()) {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_POLICY_ENV_UNKNOWN_FIELD: \
+                     [environments.{label}] unknown field {unknown:?} \
+                     (environment-access-control.md §5b.3 / §5b.4)"
+                )));
+            }
+        }
+        out.insert(label.clone(), EnvironmentConfig {
+            description,
+            same_cluster_acknowledged: section.same_cluster_acknowledged,
+        });
+    }
+    Ok(out)
+}
+
+/// V2_GAPS §E1 (`environment-access-control.md §5.2 / §5b.5`).
+/// Validate `[[permitted_credentials]]`:
+/// - `name` is required and non-empty.
+/// - Names are unique across the section.
+/// - Every non-empty `environment` field resolves to a declared
+///   `[environments.<label>]` (`FAIL_POLICY_ENV_LABEL_UNDECLARED`).
+fn validate_permitted_credentials(
+    raw: &[PermittedCredentialEntry],
+    declared_envs: &HashMap<String, EnvironmentSection>,
+) -> Result<Vec<PermittedCredentialConfig>, PolicyError> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let name = entry.name.trim();
+        if name.is_empty() {
+            return Err(PolicyError::MalformedArtifact(
+                "FAIL_POLICY_PERMITTED_CRED_INVALID: \
+                 [[permitted_credentials]] name must be non-empty \
+                 (environment-access-control.md §5.2)".to_owned(),
+            ));
+        }
+        if !seen.insert(name) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_PERMITTED_CRED_INVALID: \
+                 [[permitted_credentials]] duplicate name {name:?}"
+            )));
+        }
+        let env = match entry.environment.as_deref() {
+            Some(e) if !e.trim().is_empty() => {
+                let trimmed = e.trim();
+                if !declared_envs.contains_key(trimmed) {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "FAIL_POLICY_ENV_LABEL_UNDECLARED: \
+                         [[permitted_credentials]] name = {name:?} references \
+                         environment {trimmed:?} which has no \
+                         [environments.{trimmed}] declaration \
+                         (environment-access-control.md §5b.3)"
+                    )));
+                }
+                Some(trimmed.to_owned())
+            }
+            _ => None,
+        };
+        out.push(PermittedCredentialConfig {
+            name:        name.to_owned(),
+            environment: env,
+            description: entry.description.clone(),
+        });
+    }
+    Ok(out)
+}
+
 fn validate_notifications(
     raw: &NotificationsSection,
 ) -> Result<
@@ -2232,6 +2441,52 @@ pub struct PolicyBundle {
     /// Always populated; spec defaults apply when the operator
     /// omits `[host_capacity]` from `policy.toml`.
     host_capacity: HostCapacityConfig,
+
+    /// V2_GAPS §E1 — declared environment labels and their
+    /// per-env knobs (`environment-access-control.md §5b`). The
+    /// map is empty when the operator declares no
+    /// `[environments.<label>]` tables (the activation gate per
+    /// §1.5.2). Cardinality on this map drives whether
+    /// `INV-ENV-01` runs at plan-approve time.
+    environments: HashMap<String, EnvironmentConfig>,
+
+    /// V2_GAPS §E1 — declared `[[permitted_credentials]]`
+    /// entries (`environment-access-control.md §5.2`). Empty when
+    /// the operator omits the section. When non-empty, every
+    /// `name` is unique and every non-empty `environment` field
+    /// resolves to an [`environments`] key.
+    permitted_credentials: Vec<PermittedCredentialConfig>,
+}
+
+/// V2 effective `[environments.<label>]` config. Validated mirror
+/// of the policy-side `EnvironmentSection`.
+#[derive(Debug, Clone)]
+pub struct EnvironmentConfig {
+    /// Human-readable description.
+    pub description: String,
+
+    /// `same_cluster_acknowledged` flag (§5b.2). When `true`,
+    /// URL gates whose conflation involves this environment do
+    /// not contribute env labels to the per-task consistency
+    /// check. The V2 MVP only consumes this from the
+    /// (V3-deferred) URL-gate handler; the per-task credential
+    /// coherence check is unaffected by it.
+    pub same_cluster_acknowledged: bool,
+}
+
+/// V2 effective `[[permitted_credentials]]` entry. Mirror of the
+/// policy-side `PermittedCredentialEntry`, with `environment`
+/// guaranteed to resolve to a declared environment when present.
+#[derive(Debug, Clone)]
+pub struct PermittedCredentialConfig {
+    /// Credential name (matches `<data_dir>/credentials/<name>.env`).
+    pub name: String,
+
+    /// Resolved environment binding. `None` ⇒ neutral.
+    pub environment: Option<String>,
+
+    /// Optional human-readable description.
+    pub description: Option<String>,
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -2525,6 +2780,11 @@ impl PolicyBundle {
                 .map(|g| g.target_ref_locked)
                 .unwrap_or(false),
             host_capacity: validate_host_capacity_section(&raw.host_capacity)?,
+            environments: validate_environments(&raw.environments)?,
+            permitted_credentials: validate_permitted_credentials(
+                &raw.permitted_credentials,
+                &raw.environments,
+            )?,
         })
     }
 
@@ -2597,6 +2857,51 @@ impl PolicyBundle {
     /// omits `[host_capacity]`.
     pub fn host_capacity(&self) -> &HostCapacityConfig {
         &self.host_capacity
+    }
+
+    /// V2_GAPS §E1 — declared `[environments.<label>]` entries.
+    /// Empty when the operator omits the entire section
+    /// (`environment-access-control.md §1.5.2` activation gate);
+    /// every key is a validated label (per §5b.3) and every
+    /// value carries the per-env knobs.
+    pub fn environments(&self) -> &HashMap<String, EnvironmentConfig> {
+        &self.environments
+    }
+
+    /// V2_GAPS §E1 — declared `[[permitted_credentials]]`
+    /// entries. Empty when the operator omits the section. When
+    /// present, names are unique and every `environment` field
+    /// resolves to a key in [`environments`].
+    pub fn permitted_credentials(&self) -> &[PermittedCredentialConfig] {
+        &self.permitted_credentials
+    }
+
+    /// V2_GAPS §E1 — convenience lookup. Returns the resolved
+    /// environment label for the given credential name (or
+    /// `None` for both "credential is neutral" and "credential
+    /// is not declared in `[[permitted_credentials]]`"). The
+    /// caller MUST distinguish those two cases via
+    /// [`permitted_credential`] when policy semantics require
+    /// it. The V2 INV-ENV-01 binding algorithm
+    /// (`environment-access-control.md §11.3`) treats both
+    /// cases as "contributes nothing to the env set", which
+    /// matches the §1.5.4 neutral-credential rule.
+    ///
+    /// [`permitted_credential`]: PolicyBundle::permitted_credential
+    pub fn credential_environment(&self, name: &str) -> Option<&str> {
+        self.permitted_credentials
+            .iter()
+            .find(|c| c.name == name)
+            .and_then(|c| c.environment.as_deref())
+    }
+
+    /// V2_GAPS §E1 — full lookup of a `[[permitted_credentials]]`
+    /// entry by name. Returns `None` when no entry matches; the
+    /// V2 plan-admission path treats absence as "neutral" (per
+    /// §1.5.4), but the V3 INV-CRED-01 promotion will turn
+    /// absence into `FAIL_CREDENTIAL_NOT_PERMITTED`.
+    pub fn permitted_credential(&self, name: &str) -> Option<&PermittedCredentialConfig> {
+        self.permitted_credentials.iter().find(|c| c.name == name)
     }
 
     /// V2_GAPS §C6 — operator-side `[git] push_remote`. Empty string
@@ -2744,6 +3049,8 @@ impl PolicyBundle {
             git_auto_push:          false,
             git_push_remote:        String::new(),
             host_capacity:          HostCapacityConfig::default(),
+            environments:           HashMap::new(),
+            permitted_credentials:  Vec::new(),
         }
     }
 
@@ -3277,6 +3584,8 @@ mod tests {
             git_auto_push:          false,
             git_push_remote:        String::new(),
             host_capacity:          HostCapacityConfig::default(),
+            environments:           HashMap::new(),
+            permitted_credentials:  Vec::new(),
         }
     }
 
@@ -5101,5 +5410,159 @@ applies_to  = "last"
         assert_eq!(entries[1].task_set,
             vec!["implement_auth".to_owned(), "implement_session".to_owned()]);
         assert_eq!(entries[2].applies_to, IntegrationMergeVerifierAppliesTo::Last);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// V2_GAPS §E1 — environment-binding validation tests
+// (`environment-access-control.md §5b.3`).
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod environment_tests {
+    use super::*;
+
+    fn env_section(description: &str, ack: bool) -> EnvironmentSection {
+        EnvironmentSection {
+            description:               Some(description.to_owned()),
+            same_cluster_acknowledged: ack,
+            extras:                    HashMap::new(),
+        }
+    }
+
+    fn env_section_with_extras(
+        description: &str, ack: bool, extras: Vec<(&str, toml::Value)>,
+    ) -> EnvironmentSection {
+        let mut e = HashMap::new();
+        for (k, v) in extras { e.insert(k.to_owned(), v); }
+        EnvironmentSection {
+            description:               Some(description.to_owned()),
+            same_cluster_acknowledged: ack,
+            extras:                    e,
+        }
+    }
+
+    #[test]
+    fn label_syntax_accepts_canonical_labels() {
+        for ok in &["beta", "prod-1", "staging_us", "x", "a0123456789"] {
+            assert!(is_valid_env_label(ok), "expected `{ok}` to be valid");
+        }
+    }
+
+    #[test]
+    fn label_syntax_rejects_uppercase_and_long_labels() {
+        for bad in &["", "Beta", "PROD", "1prod", "-prod",
+                     "a234567890123456789012345678901234"] {
+            assert!(!is_valid_env_label(bad), "expected `{bad}` to be rejected");
+        }
+    }
+
+    #[test]
+    fn validate_environments_accepts_minimal_section() {
+        let mut raw = HashMap::new();
+        raw.insert("beta".to_owned(), env_section("beta cluster", false));
+        let out = validate_environments(&raw).expect("must validate");
+        assert_eq!(out.len(), 1);
+        let beta = out.get("beta").unwrap();
+        assert_eq!(beta.description, "beta cluster");
+        assert!(!beta.same_cluster_acknowledged);
+    }
+
+    #[test]
+    fn validate_environments_rejects_invalid_label() {
+        let mut raw = HashMap::new();
+        raw.insert("Beta".to_owned(), env_section("beta cluster", false));
+        let err = validate_environments(&raw)
+            .expect_err("uppercase label must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("FAIL_POLICY_ENV_LABEL_INVALID"), "{msg}");
+    }
+
+    #[test]
+    fn validate_environments_rejects_missing_description() {
+        let mut raw = HashMap::new();
+        raw.insert("beta".to_owned(), EnvironmentSection {
+            description: None, same_cluster_acknowledged: false,
+            extras: HashMap::new(),
+        });
+        let err = validate_environments(&raw)
+            .expect_err("missing description must be rejected");
+        assert!(err.to_string().contains("FAIL_POLICY_ENV_UNKNOWN_FIELD"));
+    }
+
+    #[test]
+    fn validate_environments_tolerates_reserved_extra_fields() {
+        let mut raw = HashMap::new();
+        raw.insert("beta".to_owned(), env_section_with_extras(
+            "beta cluster", false,
+            vec![("blast_radius", toml::Value::String("high".into()))],
+        ));
+        validate_environments(&raw)
+            .expect("reserved fields must be tolerated (V2.x forward-compat)");
+    }
+
+    #[test]
+    fn validate_environments_rejects_unknown_extra_field() {
+        let mut raw = HashMap::new();
+        raw.insert("beta".to_owned(), env_section_with_extras(
+            "beta cluster", false,
+            vec![("frobnitz", toml::Value::String("x".into()))],
+        ));
+        let err = validate_environments(&raw)
+            .expect_err("unknown field must be rejected");
+        assert!(err.to_string().contains("FAIL_POLICY_ENV_UNKNOWN_FIELD"));
+    }
+
+    #[test]
+    fn validate_permitted_credentials_resolves_known_environment() {
+        let mut envs = HashMap::new();
+        envs.insert("beta".to_owned(), env_section("beta", false));
+        let raw = vec![PermittedCredentialEntry {
+            name:        "k8s-beta".to_owned(),
+            environment: Some("beta".to_owned()),
+            description: None,
+        }];
+        let out = validate_permitted_credentials(&raw, &envs).expect("must validate");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].environment.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn validate_permitted_credentials_rejects_undeclared_environment() {
+        let envs = HashMap::new();
+        let raw = vec![PermittedCredentialEntry {
+            name:        "k8s-prod".to_owned(),
+            environment: Some("production".to_owned()),
+            description: None,
+        }];
+        let err = validate_permitted_credentials(&raw, &envs).expect_err("must reject");
+        assert!(err.to_string().contains("FAIL_POLICY_ENV_LABEL_UNDECLARED"));
+    }
+
+    #[test]
+    fn validate_permitted_credentials_accepts_neutral_credential() {
+        let envs = HashMap::new();
+        let raw = vec![PermittedCredentialEntry {
+            name:        "npm-registry".to_owned(),
+            environment: None,
+            description: Some("public npm read token".to_owned()),
+        }];
+        let out = validate_permitted_credentials(&raw, &envs).expect("must validate");
+        assert_eq!(out.len(), 1);
+        assert!(out[0].environment.is_none());
+    }
+
+    #[test]
+    fn validate_permitted_credentials_rejects_duplicate_names() {
+        let envs = HashMap::new();
+        let raw = vec![
+            PermittedCredentialEntry {
+                name: "tok".to_owned(), environment: None, description: None,
+            },
+            PermittedCredentialEntry {
+                name: "tok".to_owned(), environment: None, description: None,
+            },
+        ];
+        let err = validate_permitted_credentials(&raw, &envs).expect_err("must reject");
+        assert!(err.to_string().contains("FAIL_POLICY_PERMITTED_CRED_INVALID"));
     }
 }

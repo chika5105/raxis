@@ -1181,6 +1181,19 @@ async fn handle_approve_plan(
     let policy_default_target_ref =
         policy_snapshot.git_default_target_ref().to_owned();
     let policy_target_ref_locked = policy_snapshot.git_target_ref_locked();
+    // V2_GAPS §E1 — snapshot the operator-declared
+    // `[environments.<label>]` map and `[[permitted_credentials]]`
+    // list at approval time so the lifecycle validator can run
+    // INV-ENV-01 (`environment-access-control.md §11`) against
+    // the same epoch the plan was submitted under. Cloning the
+    // small map+vec keeps the lifecycle entry point ownership-clean
+    // (the kernel later runs the heavy work inside
+    // `spawn_blocking`, so `'static` data avoids cross-thread
+    // borrow gymnastics).
+    let policy_environments_snapshot: std::collections::HashMap<String, raxis_policy::EnvironmentConfig> =
+        policy_snapshot.environments().clone();
+    let policy_permitted_credentials_snapshot: Vec<raxis_policy::PermittedCredentialConfig> =
+        policy_snapshot.permitted_credentials().to_vec();
     // Snapshot the operator's display name from the same bundle we
     // resolved the pubkey from, so the audit event records the name
     // that was authoritative at approval time. See
@@ -1200,6 +1213,8 @@ async fn handle_approve_plan(
             policy_epoch,
             &policy_default_target_ref,
             policy_target_ref_locked,
+            &policy_environments_snapshot,
+            &policy_permitted_credentials_snapshot,
             &store_for_blocking,
             &*audit_for_blocking,
             &plan_registry_for_blocking,

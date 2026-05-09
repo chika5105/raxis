@@ -1563,22 +1563,56 @@ operational complexity of full queueing.
 
 ## §6 — Tier E: Partially Implemented
 
-### E1: Environment Access Control
+### E1: Environment Access Control — `CLOSED (V2.3, MVP)`
 
 **Spec:** `environment-access-control.md` (82KB)
-**Estimate:** ~200 lines to close
+**Status:** V2.3 MVP — INV-ENV-01 credential limb enforced.
 
-The `environment` field exists in the credential proxy spec and is
-used in examples (`environment = "staging"`). Policy bundle code
-references `required_for_environments`. However:
+V2.3 lands the structural invariant that prevents one VM from
+holding credentials for two compliance boundaries
+simultaneously (the canonical "blast radius" failure mode the
+spec exists to defeat). The V3 follow-up extends the same
+algorithm with the URL-gate limb.
 
-| Feature | Spec section | Code status |
+| Feature | Spec section | V2.3 status |
 |---|---|---|
-| `environment` field on credential declarations | `credential-proxy.md §11` | 🟡 Parsed, not enforced |
-| Environment coherence (single task can't mix envs) | `environment-access-control.md §3` | ❌ Not implemented |
-| `[[environment_gates]]` in `policy.toml` | `environment-access-control.md §5` | ❌ Not implemented |
-| Cross-env isolation (structural) | §6 | ✅ Already works (VMs are isolated) |
-| Reserved V2.x fields (`blast_radius`, `require_two_party_sign`) | §9 | ⚪ Future |
+| `[environments.<label>]` policy parsing | §5b.1 | ✅ Implemented (`raxis-policy::EnvironmentConfig`); label syntax `^[a-z][a-z0-9_-]{0,31}$`, `description` required, `same_cluster_acknowledged` parsed, §5b.4 reserved fields tolerated. |
+| `[[permitted_credentials]]` policy parsing | §5.2 / §5b.5 | ✅ Implemented (`raxis-policy::PermittedCredentialConfig`); `name` required + unique, optional `environment` cross-reference-checked. |
+| Label cross-reference validation | §5b.3 | ✅ `FAIL_POLICY_ENV_LABEL_UNDECLARED` / `FAIL_POLICY_ENV_LABEL_INVALID` / `FAIL_POLICY_ENV_UNKNOWN_FIELD` at policy load. |
+| INV-ENV-01 per-task credential coherence | §11.3 step A / §11.7 | ✅ `validate_task_environment_consistency` runs at `approve_plan` BEFORE BEGIN TRANSACTION; rejects cross-env tasks with `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (`LifecycleError::PlanInvalid`). Inert when zero envs declared (§1.5.2 activation gate). |
+| Cross-env isolation (structural) | §6 | ✅ Already works (VMs are isolated). |
+| `[[environment_gates]]` in `policy.toml` | §5 / §11.3 step B | ❌ Deferred to V3 along with the URL-gate runtime path (`block_all`, `write_requires_approval`, `same_cluster_acknowledged` handler, `approval_match_mode`). |
+| `WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT` | §7 | ❌ Deferred to V3 (depends on URL-gate matching). |
+| Reserved V2.x fields (`blast_radius`, `require_two_party_sign`) | §5b.4 | 🟡 Parsed but inert (no `WARN_ENVIRONMENT_RESERVED_FIELD_SET` audit yet — defer). |
+| `TaskEnvironmentBinding` audit attribution | §11.9 | ❌ Deferred to V3 (binding is computed during validation but not yet emitted as a distinct audit event). |
+
+**V2.3 design notes.** The MVP enforces the credential limb of
+the §11.3 algorithm because that is the one path that, when
+violated, produces a single VM with credentials for two
+environments at once — the actual security invariant. The
+URL-gate limb without `[[environment_gates]]` parsing produces
+no false negatives for that property (a task whose URL
+allowlist spans two environments still passes the credential
+coherence check trivially if its credentials are neutral or
+homogeneous; the runtime egress proxy denies the prod URL via
+the existing plan-level allowlist). Adding the URL-gate limb
+is purely additive and lands in V3 without breaking V2.3
+plans.
+
+**V2.3 deferred work (V3 scope):**
+1. `[[environment_gates]]` policy parser, URL canonicalisation
+   (§6.1), and the `block_all` / `write_requires_approval`
+   admission steps (§4 Step 2 / Step 4).
+2. Same-cluster acknowledgement handler (§11.4) and the
+   `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` failure mode.
+3. `TaskEnvironmentBinding` audit event in `InitiativeCreated`
+   for forensic attribution of "which initiatives ever ran in
+   production?" queries.
+4. `WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT` (§7) — fires when
+   a task declares an env-bound credential but no `allowed_egress`
+   URL matches any gate for that environment.
+5. `WARN_ENVIRONMENT_RESERVED_FIELD_SET` for §5b.4 reserved
+   fields.
 
 ---
 
