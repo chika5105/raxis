@@ -13,22 +13,23 @@
 ## §1 — Implementation Status Overview
 
 RAXIS V2 has **30 specification documents** totaling 56,485 lines of
-normative markdown. Of these, **17 are fully shipped**, **3 have
-infrastructure implemented but application logic missing**, **7 have
-complete specifications but zero implementing code**, and **3 have
-partial or schema-only implementations**.
+normative markdown. Of these, **17 are fully shipped** (Tier A),
+**all 3 Tier B items are closed** (B1 planner loop, B2 custom tools,
+B3 database forwarding — upstream forwarding shipped for
+Postgres/MySQL/MSSQL/Redis/SMTP), **8 of 10 Tier C items are
+closed**, **both Tier D items are closed**, and **Tier E is closed**.
 
 | Tier | Count | Status |
 |---|---|---|
-| A — Fully shipped | 17 | Spec, code, and tests aligned |
-| B — Infrastructure done, logic missing | 3 | Real code compiles; key spec behaviors unwired |
-| C — Spec complete, zero code | 7 | Full specification documents, no Rust |
-| D — Schema/skeleton only | 2 | Store tables or trait stubs exist |
-| E — Deferred/partial | 1 | Confirmed post-V2 or partially done |
+| A — Fully shipped | 17/17 | Spec, code, and tests aligned |
+| B — Infrastructure + logic | 3/3 | All closed (V2.3) |
+| C — Spec complete | 8/10 | C5 (HTTP sidecar) and C9 (streaming) remain |
+| D — Schema/skeleton | 2/2 | Both closed (V2.3) |
+| E — Deferred/partial | 1/1 | Closed (V2.3) |
 
-**Total lines remaining:** ~11,000 lines of Rust to close all V2 gaps
-(revised up from ~10,300 after pass 2 identified additional unwired
-subsystems).
+**Total lines remaining:** ~3,800 lines of Rust to close all V2 gaps
+(revised down from ~11,000 after V2.3/V2.4 closures and the C8
+WebFetch/WebSearch deferral to V3).
 
 ---
 
@@ -160,15 +161,15 @@ V3 (deferred):
   concurrency).
 - Optional preflight `command --version` smoke check at approve-time.
 
-### B3: Real Database Proxy Forwarding
+### B3: Real Database Proxy Forwarding — CLOSED (V2.3)
 
 **Spec:** `credential-proxy.md §14`
-**Estimate:** ~1,200 lines
+**Delivered:** ~3,500 lines across 6 `upstream.rs` modules
 
-All 6 database proxies (Postgres, MySQL, MSSQL, MongoDB, Redis, SMTP)
-parse the wire protocol, classify commands, enforce restrictions, and
-emit audit events — but synthesize empty success responses instead of
-connecting to a real upstream database.
+Five of 6 database proxies (Postgres, MySQL, MSSQL, Redis, SMTP)
+have real upstream forwarding — `TcpStream::connect`, upstream auth,
+and bidirectional frame relay. MongoDB relay is deferred to V3
+alongside SCRAM-SHA-256 auth (see rationale below).
 
 | Proxy | What to add | Est. lines |
 |---|---|---|
