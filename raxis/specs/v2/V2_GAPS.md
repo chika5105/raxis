@@ -192,17 +192,59 @@ the full list of spec files affected.
 
 ## §4 — Tier C: Spec Complete, Zero Implementation
 
-### C1: Token Limit Enforcement
+### C1: Token Limit Enforcement — CLOSED (V2.3, MVP — coarse)
 
-**Spec:** `token-limit-enforcement.md` (52KB)
-**Estimate:** ~600 lines
+**Spec:** `token-limit-enforcement.md` (52KB) — full surface
+**Status:** **CLOSED for V2 — coarse per-session ceilings only.**
+**Delivered:** ~210 lines (planner-core dispatch + tests)
 
-Per-task token budget tracking (input + output tokens). Budget
-ceiling enforcement at the gateway level. Token-aware context window
-management. Budget exhaustion triggers task failure → escalation.
+V2.3 lands the coarse per-session-cumulative leg of the
+`token-limit-enforcement.md §2 Coarse table`: every dispatch loop
+folds the Anthropic `Usage` counters into running totals and
+terminates with a structured outcome the moment a configured
+ceiling is crossed. Pre-admission char-proxy enforcement, the
+granular per-request limits, and the
+`InferenceCompleted`/`TokenLimitExceeded` audit events stay
+deferred to V3.
 
-Zero references to `token_limit`, `TokenBudget`, `context_window` in
-any crate.
+| Component | Crate | Status |
+|---|---|---|
+| `DispatchConfig::{max_tokens_input_total, max_tokens_output_total, max_tokens_total}` | `planner-core/src/dispatch.rs` | `Option<u64>`; `None` ⇒ uncapped |
+| Cumulative `(input + output)` tracking inside `DispatchLoop::run` | `planner-core/src/dispatch.rs` | Folds `Usage::input_tokens + cache_creation + cache_read` and `Usage::output_tokens` per turn |
+| `DispatchOutcome::TokensExceeded { which, input_tokens, output_tokens, ceiling }` | `planner-core/src/dispatch.rs` | Stable wire shape (`which ∈ {"total", "input", "output"}`) |
+| Tests: `input_total_ceiling_surfaces_tokens_exceeded`, `total_ceiling_takes_precedence_over_input_only_ceiling`, `no_ceiling_means_uncapped_…`, `cumulative_input_includes_cache_tokens` | `planner-core/src/dispatch.rs` | All passing |
+
+**V2 design choices.**
+
+* **Order of checks: `total → input → output`.** Most operators
+  set `max_tokens_total` to bound spend; we surface the most-
+  restrictive ceiling first so the role binary's reported reason
+  matches the operator's mental model.
+* **Coarse ceilings checked post-turn, not pre-turn.** The model
+  already returned the offending response; the loop just refuses
+  to issue the next request. This is the simplest shape that
+  preserves the full audit trail of every call the kernel/router
+  saw and prevents an off-by-one where the ceiling fires right at
+  the boundary and the operator loses the call's response.
+* **`saturating_add` semantics.** Cumulative counters are `u64`,
+  so a runaway model can't wrap around the ceiling check.
+
+**Deferred to V3 (full token-limit-enforcement.md surface).**
+
+* Per-request ceilings (`max_tokens_input_per_request`,
+  `max_tokens_output_per_request`, `max_tokens_total_per_request`).
+* Pre-admission char-proxy estimation
+  (`len(prompt_bytes) / 4 ≤ max_tokens_input_per_request`).
+* `InferenceCompleted` audit event with full attribution chain
+  (`prompt_sha256`, `response_sha256`, `ksb_sha256`, `actual_units`).
+* `TokenLimitExceeded` typed audit event + escalation path
+  (`fail_request` / `escalate` / `fail_session` per
+  `[tasks.token_policy.limit_behavior]`).
+* `WARN_UNCAPPED_TOKEN_LIMIT` plan-admission diagnostic when an
+  operator omits a ceiling.
+* Plan parser for `[tasks.token_policy]` — currently the
+  ceilings flow through `DispatchConfig` (constructed by the role
+  binary's `main`) rather than the plan parser.
 
 ### C2: Provider Failure Handling
 

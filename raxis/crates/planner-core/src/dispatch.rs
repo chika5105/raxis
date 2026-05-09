@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::model::{ContentBlock, Message, MessageRequest, ModelClient, ModelError};
+use crate::model::{ContentBlock, Message, MessageRequest, ModelClient, ModelError, Usage};
 use crate::tools::{ToolContext, ToolError, ToolOutput, ToolRegistry};
 
 // ---------------------------------------------------------------------------
@@ -82,6 +82,30 @@ pub struct DispatchConfig {
     /// Per-tool deadline. Planner-side bound; the kernel-side budget
     /// is enforced separately.
     pub tool_deadline: Option<Duration>,
+    /// V2_GAPS §C1 — coarse per-session cumulative *input* token
+    /// ceiling (counts every Anthropic `usage.input_tokens` +
+    /// `cache_creation_input_tokens` + `cache_read_input_tokens`).
+    /// `None` ⇒ uncapped (matches plan.toml default — strict-by-
+    /// default policy emits `WARN_UNCAPPED_TOKEN_LIMIT` at
+    /// `approve_plan`; the dispatch loop itself does not duplicate
+    /// that warning here).
+    ///
+    /// When the cumulative input-token total *after* a turn exceeds
+    /// this ceiling, the loop terminates with
+    /// [`DispatchOutcome::TokensExceeded`] before issuing the next
+    /// model call. The role binary surfaces this as a structured
+    /// failure (`ReportFailure` on the executor; review-aborted on
+    /// the reviewer).
+    pub max_tokens_input_total:  Option<u64>,
+    /// V2_GAPS §C1 — coarse per-session cumulative *output* token
+    /// ceiling (counts every Anthropic `usage.output_tokens`).
+    /// `None` ⇒ uncapped.
+    pub max_tokens_output_total: Option<u64>,
+    /// V2_GAPS §C1 — coarse per-session cumulative *combined* token
+    /// ceiling (input + output). `None` ⇒ uncapped. Cheaper to set
+    /// when an operator only cares about total spend rather than
+    /// the input/output split.
+    pub max_tokens_total:        Option<u64>,
 }
 
 impl DispatchConfig {
@@ -94,6 +118,9 @@ impl DispatchConfig {
             max_tokens:    4096,
             temperature:   Some(0.7),
             tool_deadline: Some(Duration::from_secs(120)),
+            max_tokens_input_total:  None,
+            max_tokens_output_total: None,
+            max_tokens_total:        None,
         }
     }
 }
@@ -127,6 +154,28 @@ pub enum DispatchOutcome {
     MaxTurnsExceeded {
         /// Number of turns the loop ran.
         turns: u32,
+    },
+    /// V2_GAPS §C1 — cumulative session token total exceeded one of
+    /// the configured per-session ceilings. The loop terminates
+    /// post-turn (the model already returned the offending response;
+    /// the loop just refuses to issue the next request). Role
+    /// binaries surface this as a structured `ReportFailure`
+    /// (executor) or `submit_review { rejected, reason: "tokens
+    /// exhausted" }` (reviewer).
+    TokensExceeded {
+        /// Stable-wire short string identifying which ceiling fired.
+        /// One of: `"input"`, `"output"`, `"total"`. Maps directly
+        /// to the policy/plan keys from `token-limit-enforcement.md
+        /// §2 Coarse table` (`max_tokens_input_total`,
+        /// `max_tokens_output_total`, `max_tokens_total`).
+        which:        &'static str,
+        /// Cumulative input tokens consumed across all turns so far.
+        input_tokens:  u64,
+        /// Cumulative output tokens consumed across all turns.
+        output_tokens: u64,
+        /// Configured ceiling that was hit (so the role binary can
+        /// surface a clean operator-facing message).
+        ceiling:       u64,
     },
 }
 
@@ -214,6 +263,12 @@ impl DispatchLoop {
         }];
         let tool_specs = self.registry.to_specs();
 
+        // V2_GAPS §C1 — cumulative session token totals. Updated
+        // post-turn from `MessageResponse::usage` and checked against
+        // the per-session ceilings before issuing the next request.
+        let mut cum_in:  u64 = 0;
+        let mut cum_out: u64 = 0;
+
         for turn in 0..self.config.max_turns {
             let req = MessageRequest {
                 model:       self.config.model.clone(),
@@ -224,6 +279,19 @@ impl DispatchLoop {
                 temperature: self.config.temperature,
             };
             let resp = self.model.create_message(&req).await?;
+            // V2_GAPS §C1 — fold this turn's `Usage` into the
+            // running totals before any other side effect, so a
+            // ceiling that fires post-turn still records the call.
+            let Usage {
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+            } = resp.usage;
+            cum_in  = cum_in.saturating_add(
+                u64::from(input_tokens)
+                    .saturating_add(u64::from(cache_creation_input_tokens))
+                    .saturating_add(u64::from(cache_read_input_tokens))
+            );
+            cum_out = cum_out.saturating_add(u64::from(output_tokens));
 
             // Append the assistant turn to the history (verbatim so
             // tool_use blocks correlate with our tool_result reply).
@@ -301,6 +369,43 @@ impl DispatchLoop {
                 content: next_user_blocks,
             });
             let _ = turn; // turn is implicit in the for-loop counter.
+
+            // V2_GAPS §C1 — coarse per-session ceiling check. Runs
+            // after the turn's `Usage` is folded into the running
+            // totals so a ceiling firing on the FIRST request still
+            // records the call. Order is `total → input → output`:
+            // most operators set `max_tokens_total` for spend, and
+            // we want the most-restrictive ceiling to surface first.
+            if let Some(ceiling) = self.config.max_tokens_total {
+                if cum_in.saturating_add(cum_out) > ceiling {
+                    return Ok(DispatchOutcome::TokensExceeded {
+                        which:         "total",
+                        input_tokens:  cum_in,
+                        output_tokens: cum_out,
+                        ceiling,
+                    });
+                }
+            }
+            if let Some(ceiling) = self.config.max_tokens_input_total {
+                if cum_in > ceiling {
+                    return Ok(DispatchOutcome::TokensExceeded {
+                        which:         "input",
+                        input_tokens:  cum_in,
+                        output_tokens: cum_out,
+                        ceiling,
+                    });
+                }
+            }
+            if let Some(ceiling) = self.config.max_tokens_output_total {
+                if cum_out > ceiling {
+                    return Ok(DispatchOutcome::TokensExceeded {
+                        which:         "output",
+                        input_tokens:  cum_in,
+                        output_tokens: cum_out,
+                        ceiling,
+                    });
+                }
+            }
         }
 
         Ok(DispatchOutcome::MaxTurnsExceeded {
@@ -513,6 +618,169 @@ mod tests {
                 assert_eq!(turns, 3);
             }
             other => panic!("expected MaxTurnsExceeded, got {other:?}"),
+        }
+    }
+
+    /// Build a `tool_use` response with explicit token-usage counters
+    /// so the §C1 cumulative-tracking tests can drive ceiling crossings
+    /// deterministically.
+    fn tool_use_response_with_usage(
+        tool_use_id:   &str,
+        name:          &str,
+        input:         serde_json::Value,
+        input_tokens:  u32,
+        output_tokens: u32,
+    ) -> MessageResponse {
+        MessageResponse {
+            id:    format!("msg-call-{tool_use_id}"),
+            kind:  "message".to_owned(),
+            role:  "assistant".to_owned(),
+            content: vec![ContentBlock::ToolUse {
+                id:    tool_use_id.to_owned(),
+                name:  name.to_owned(),
+                input,
+            }],
+            stop_reason: Some("tool_use".to_owned()),
+            usage: Usage {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens:    0,
+            },
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+        }
+    }
+
+    /// V2_GAPS §C1 — `max_tokens_input_total` ceiling fires post-turn
+    /// and surfaces a structured `TokensExceeded` outcome with the
+    /// `which = "input"` discriminant.
+    #[tokio::test]
+    async fn input_total_ceiling_surfaces_tokens_exceeded() {
+        let r1 = tool_use_response_with_usage(
+            "tu1", "read_file",
+            serde_json::json!({ "path": "hello.txt" }),
+            150, // input
+            10,  // output
+        );
+        let r2 = empty_response_end_turn("done");
+        let model    = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws       = fixture_workspace();
+        let mut cfg  = DispatchConfig::new("test-model");
+        cfg.max_tokens_input_total = Some(100);
+        let mut d = DispatchLoop::new(
+            model, registry, cfg,
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        match out {
+            DispatchOutcome::TokensExceeded {
+                which, input_tokens, output_tokens, ceiling,
+            } => {
+                assert_eq!(which, "input");
+                assert_eq!(input_tokens,  150);
+                assert_eq!(output_tokens, 10);
+                assert_eq!(ceiling, 100);
+            }
+            other => panic!("expected TokensExceeded(input), got {other:?}"),
+        }
+    }
+
+    /// V2_GAPS §C1 — `max_tokens_total` (input + output) is checked
+    /// FIRST so an operator-set overall budget always wins over the
+    /// granular `input/output` ceilings.
+    #[tokio::test]
+    async fn total_ceiling_takes_precedence_over_input_only_ceiling() {
+        let r1 = tool_use_response_with_usage(
+            "tu1", "read_file",
+            serde_json::json!({ "path": "hello.txt" }),
+            60, 60,
+        );
+        let r2 = empty_response_end_turn("done");
+        let model    = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws       = fixture_workspace();
+        let mut cfg  = DispatchConfig::new("test-model");
+        // Both ceilings would fire, but `total` is the first
+        // post-turn check.
+        cfg.max_tokens_total       = Some(100);
+        cfg.max_tokens_input_total = Some(50);
+        let mut d = DispatchLoop::new(
+            model, registry, cfg,
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        match out {
+            DispatchOutcome::TokensExceeded { which, .. } => {
+                assert_eq!(which, "total",
+                    "total ceiling fires before input ceiling per V2_GAPS §C1");
+            }
+            other => panic!("expected TokensExceeded(total), got {other:?}"),
+        }
+    }
+
+    /// V2_GAPS §C1 — None ceilings ⇒ uncapped; the loop must run to
+    /// its natural terminal outcome with no token-related early exit.
+    #[tokio::test]
+    async fn no_ceiling_means_uncapped_dispatch_runs_to_natural_terminal() {
+        let r1 = empty_response_end_turn("done");
+        let model    = Arc::new(MockModelClient::new(vec![r1]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws       = fixture_workspace();
+        let cfg      = DispatchConfig::new("test-model");
+        assert!(cfg.max_tokens_input_total.is_none());
+        assert!(cfg.max_tokens_output_total.is_none());
+        assert!(cfg.max_tokens_total.is_none());
+        let mut d = DispatchLoop::new(
+            model, registry, cfg,
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        assert!(matches!(out, DispatchOutcome::Idle { .. }),
+            "uncapped dispatch must surface Idle, got {out:?}");
+    }
+
+    /// V2_GAPS §C1 — cumulative tracking must include cache-read +
+    /// cache-creation input tokens, not just `input_tokens`.
+    #[tokio::test]
+    async fn cumulative_input_includes_cache_tokens() {
+        let r1 = MessageResponse {
+            id:    "msg-1".to_owned(),
+            kind:  "message".to_owned(),
+            role:  "assistant".to_owned(),
+            content: vec![ContentBlock::ToolUse {
+                id:    "tu1".to_owned(),
+                name:  "read_file".to_owned(),
+                input: serde_json::json!({ "path": "hello.txt" }),
+            }],
+            stop_reason: Some("tool_use".to_owned()),
+            usage: Usage {
+                input_tokens: 30,
+                output_tokens: 5,
+                cache_creation_input_tokens: 40,
+                cache_read_input_tokens:     35,
+            },
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+        };
+        let r2 = empty_response_end_turn("done");
+        let model    = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws       = fixture_workspace();
+        let mut cfg  = DispatchConfig::new("test-model");
+        // 30 + 40 + 35 = 105; threshold 100 must fire.
+        cfg.max_tokens_input_total = Some(100);
+        let mut d = DispatchLoop::new(
+            model, registry, cfg,
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        match out {
+            DispatchOutcome::TokensExceeded { which, input_tokens, .. } => {
+                assert_eq!(which, "input");
+                assert_eq!(input_tokens, 105,
+                    "cumulative input must fold input + cache-creation + cache-read");
+            }
+            other => panic!("expected TokensExceeded, got {other:?}"),
         }
     }
 }
