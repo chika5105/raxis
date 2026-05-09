@@ -3011,7 +3011,7 @@ every activation is locked to the canonical starter.
 
 | Invariant | Status | Enforcement site (or deferral) |
 |---|---|---|
-| `INV-PLANNER-HARNESS-03` + `INV-VM-CAP-03` | 🔴 **V2.5 BLOCKER** | The `[[vm_images]]` policy schema (`name`, `oci_digest`, `role_restriction`, `kernel_version_min`) is not wired into `crates/policy`. Without it: (a) operators cannot set custom executor images — every activation resolves to the canonical `raxis-executor-starter-<v>.img` hardcoded in `session_spawn_orchestrator.rs:674`, violating `INV-VM-CAP-03` (operator-published, OCI-pinned executor images); (b) the kernel cannot enforce `role_restriction` on verifier `image` fields; (c) `[default_executor_image] alias` resolution has no registry to resolve against (`FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` has no backing implementation); (d) the guest kernel version check (`FAIL_VM_GUEST_KERNEL_TOO_OLD`) has no enforcement path. Estimate: ~630 lines (policy parser + admission-time alias resolution + `oci_digest` enforcement + role_restriction check + operator-declared kernel-version validation). |
+| `INV-PLANNER-HARNESS-03` + `INV-VM-CAP-03` | 🔴 **V2.5 BLOCKER** | The `[[vm_images]]` policy schema (`name`, `oci_digest`, `role_restriction`, `linux_kernel_version_min`) is not wired into `crates/policy`. Without it: (a) operators cannot set custom executor images — every activation resolves to the canonical `raxis-executor-starter-<v>.img` hardcoded in `session_spawn_orchestrator.rs:674`, violating `INV-VM-CAP-03` (operator-published, OCI-pinned executor images); (b) the kernel cannot enforce `role_restriction` on verifier `image` fields; (c) `[default_executor_image] alias` resolution has no registry to resolve against (`FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` has no backing implementation); (d) the guest kernel version check (`FAIL_VM_GUEST_KERNEL_TOO_OLD`) has no enforcement path. Estimate: ~630 lines (policy parser + admission-time alias resolution + `oci_digest` enforcement + role_restriction check + operator-declared kernel-version validation). |
 | `INV-ENV-01` | ✅ **CLOSED V2.3** | `kernel/src/initiatives/lifecycle.rs::validate_task_environment_consistency` (commit `bd0a28c`). Walks `[[tasks.credentials]]` ∩ `[[permitted_credentials]]` per task, unions environment labels, fails closed on cardinality ≥ 2 with `FAIL_TASK_ENVIRONMENT_INCONSISTENT`. Activation-gated by non-empty `policy_environments`. Implements step A of the §11.3 binding algorithm; URL-gate limb (step B) still V3 per E1 disposition. |
 | `INV-CRED-KERNEL-01` | ✅ **CLOSED V2.2** | `kernel/src/initiatives/lifecycle.rs::validate_task_credentials` rejects every `ProxyDecl::Unknown` at `approve_plan` shift-left with `LifecycleError::PlanTaskCredentialsInvalid { rule: "unknown_proxy_type", … }` BEFORE `BEGIN TRANSACTION`. The defense-in-depth `Unknown` arm in the persistence helper surfaces an `Invariant` store error if the validator is ever bypassed, so the closure has a fail-safe. |
 | `INV-INIT-04` (shutdown sweep) | ✅ **CLOSED V1** | `kernel/src/recovery.rs::reconcile_tasks` runs at every kernel boot, transitions in-flight `Running` / `Admitted` / `GatesPending` tasks to `BlockedRecoveryPending` with `RecoveryPendingOperatorAction`, and propagates affected initiatives to `Blocked` via `evaluate_terminal_criteria`. The recovery sweep is the architectural answer; an additional shutdown-time sweep would be a redundant write that the next-boot reconcile would re-do anyway. The V2_GAPS row mislabel as `INV-INIT-06` (plan immutability) was a transcription error during the original audit; both the immutability limb (Plan Bundle Sealing, `kernel-store.md §2.5.8`) and the recovery limb (this row) are closed. |
@@ -3032,7 +3032,7 @@ violates `INV-VM-CAP-03` ("Executor image operator-published,
 OCI-pinned"). The V2.5 scope is:
 
 1. **Policy schema.** `[[vm_images]]` parser with `name`,
-   `oci_digest`, `role_restriction`, `kernel_version_min` (operator-
+   `oci_digest`, `role_restriction`, `linux_kernel_version_min` (operator-
    declared). Wire into `crates/policy/src/bundle.rs` as a new
    `VmImageEntry` struct + `vm_images: Vec<VmImageEntry>` on
    `PolicyBundle`. ~150 lines.
@@ -3053,10 +3053,10 @@ OCI-pinned"). The V2.5 scope is:
    `oci_digest`. Mismatch → `FAIL_VM_IMAGE_DIGEST_MISMATCH`.
    ~120 lines.
 6. **Kernel-version check.** Trust the operator-declared
-   `kernel_version_min` on the `[[vm_images]]` entry rather than
+   `linux_kernel_version_min` on the `[[vm_images]]` entry rather than
    introspecting the image. The operator already pins the image by
    `oci_digest` — they are asserting trust in the image contents.
-   At admission, the RAXIS kernel validates `kernel_version_min >= 5.14`
+   At admission, the RAXIS kernel validates `linux_kernel_version_min >= 5.14`
    (Linux kernel 5.14 is the floor for cgroup v2 with `cpu`, `memory`,
    controllers delegated to `subtree_control`, per
    `INV-PLANNER-HARNESS-03` / `planner-harness.md §4.3`)
