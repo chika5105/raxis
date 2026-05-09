@@ -595,17 +595,106 @@ plugin runs in kernel address space with full memory access — no
 conformance check can prevent memory corruption or invariant
 bypass. See `extensibility-traits.md §9A.2`.
 
-### C4: Email & Notification Channels ✅ CLOSED (V2.3)
+### C4: Email & Notification Channels ✅ CLOSED (V2.3, MVP)
 
 **Spec:** `email-and-notification-channels.md` (61KB)
 **Delivered:** ~700 lines (handler crates + tests)
+**Architecture change (V2.4):** Webhook handler **removed from
+kernel**. Third-party notification integrations use the **HTTP
+sidecar pattern** (same architecture as C5 provider sidecar).
 
 | Channel kind | Policy parsed | Handler impl | Status |
 |---|---|---|---|
 | `Shell`   | ✅ | ✅ `handler/file.rs`    | V1 carryover |
 | `File`    | ✅ | ✅ `handler/file.rs`    | V1 carryover |
 | `Email`   | ✅ | ✅ `handler/email.rs`   | V2.3 — SMTP submission with STARTTLS or implicit TLS, AUTH PLAIN, password from sidecar `.notify-cred` file |
-| `Webhook` | ✅ | ✅ `handler/webhook.rs` | V2.3 — HTTPS POST with `X-RAXIS-Event-{Kind,Seq,Id}` headers, JSON body |
+| `Webhook` | ✅ | ❌ **removed** — use sidecar | V2.4 — see sidecar architecture below |
+
+**V2.4 design decision: sidecar for third-party integrations.**
+
+The original V2.3 design embedded a Webhook handler in the kernel
+(`handler/webhook.rs`). This violates the kernel-light principle:
+every new integration (Slack, PagerDuty, Teams, Discord, Opsgenie,
+custom internal tools) would require a new kernel handler, a new
+auth method, and a new failure mode inside the kernel's process
+boundary.
+
+The HTTP sidecar pattern (already established for provider
+integration in C5) solves this cleanly:
+
+```toml
+# policy.toml — notification sidecar configuration
+[[notification_channels]]
+name     = "slack-escalations"
+kind     = "Sidecar"
+endpoint = "http://localhost:9200/notify"
+events   = ["EscalationRequest", "ReviewRejected", "InitiativeCompleted"]
+
+[[notification_channels]]
+name     = "pagerduty-security"
+kind     = "Sidecar"
+endpoint = "http://localhost:9201/notify"
+events   = ["SecurityViolation", "CredentialCompromise"]
+
+[[notification_channels]]
+name     = "ops-email"
+kind     = "Email"
+smtp_host = "smtp.example.com"
+smtp_port = 587
+to        = ["ops@example.com"]
+events    = ["EscalationRequest"]
+```
+
+**How it works:**
+
+1. The kernel emits a notification event (escalation raised,
+   review rejected, initiative completed, security violation).
+2. For `kind = "Email"`: the kernel's built-in SMTP handler sends
+   the email directly. This stays in-kernel because email is
+   universal and the SMTP protocol is stable.
+3. For `kind = "Sidecar"`: the kernel POSTs a JSON payload to the
+   sidecar's `endpoint`:
+
+   ```json
+   {
+     "event_kind": "EscalationRequest",
+     "event_id": "550e8400-e29b-41d4-a716-446655440000",
+     "initiative_id": "...",
+     "session_id": "...",
+     "timestamp": "2026-05-08T19:00:00Z",
+     "payload": { ... }
+   }
+   ```
+
+4. The sidecar translates this into the target platform's API
+   (Slack `chat.postMessage`, PagerDuty Events API v2, Teams
+   Incoming Webhook, etc.) and returns `200 OK` or an error.
+5. The kernel records the delivery result in the audit chain
+   (`NotificationDelivered` / `NotificationDeliveryFailed`).
+
+**Why this is better than in-kernel handlers:**
+
+| Concern | In-kernel | Sidecar |
+|---|---|---|
+| New integrations | Kernel code change + release | Operator deploys a new sidecar container |
+| Auth methods | Kernel must support each (OAuth, API keys, HMAC) | Sidecar handles its own auth |
+| Failure blast radius | Bug in Slack handler can panic the kernel | Sidecar crash doesn't affect kernel |
+| Rate limiting | Kernel must implement per-platform rate limits | Sidecar handles its own rate limiting |
+| Testing | Requires mocking each platform's API | Operator tests their own sidecar |
+| Kernel binary size | Grows with each integration | Stays constant |
+
+**Event filtering.** The `events` field in the sidecar declaration
+controls which notification events are routed to which sidecar.
+This is admission-validated — unknown event kinds are rejected
+at policy-load time. The kernel dispatches to all matching
+channels for each event (fan-out, not routing).
+
+**Retry semantics.** The kernel retries sidecar delivery with the
+same retry policy as provider sidecar calls (C5): 3 attempts with
+exponential backoff, 5-second timeout per attempt. After 3
+failures the event is marked `DeliveryFailed` in the audit chain
+and the kernel moves on (fire-and-forget — notifications are not
+on the critical path).
 
 **Failure taxonomy** is extended with `Network`, `UpstreamRejected`,
 and `CredentialUnavailable` variants of `DeliveryError`; each maps
@@ -613,17 +702,25 @@ to a stable `category()` short-string that lands in
 `NotificationDeliveryFailed.reason` so operator dashboards can group
 failures by class.
 
+**V2 remaining work — sidecar notification dispatch:**
+
+| Component | Est. lines |
+|---|---|
+| `kernel/src/notifications/handler/sidecar.rs` — HTTP POST to sidecar endpoint with retry | ~150 |
+| Sidecar notification wire type (`NotificationPayload` JSON schema) | ~50 |
+| Event filtering at dispatch (match `events` list against emitted event kind) | ~30 |
+| Update `policy.toml` parser to accept `kind = "Sidecar"` + `endpoint` + `events` | ~40 |
+
 **V2 deferrals (V3 work, tracked separately):**
 
 * Persistent SMTP keep-alive connections (V2 opens one connection per
   send — fine for the typical event volume).
 * Idempotency table `notification_dispatch` (`§6.5` of the spec) —
   V2 is best-effort fire-and-forget.
-* HMAC-SHA256 webhook signing (`§2.3.4`) — V2 treats the URL itself
-  as the shared secret (matches Slack/GitHub webhook UX).
 * AUTH XOAUTH2 — V2 ships AUTH PLAIN only.
-* `OperatorNotificationChannel` trait extraction (V3 trait crate;
-  V2 keeps the impls inside the kernel for boot-order simplicity).
+* HMAC-SHA256 webhook signing — the sidecar handles its own auth;
+  kernel-to-sidecar trust is localhost-only (same host boundary as
+  provider sidecars).
 
 ### C5: Immutable Artifact Store — CLOSED (V2.3, MVP)
 
