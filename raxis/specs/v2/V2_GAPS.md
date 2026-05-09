@@ -65,44 +65,40 @@ at 649 lines. Moved to Tier A.
 
 ## §3 — Tier B: Infrastructure Done, Application Logic Missing
 
-### B1: Planner Agent Loop
+### B1: Planner Agent Loop ✅ CLOSED (V2.3)
 
 **Spec:** `planner-harness.md §3, §10, §14`
-**Estimate:** ~2,600 lines
+**Estimate:** ~2,600 lines (delivered ~2,500 across `raxis-planner-core`)
 
-The three planner binaries (orchestrator, executor, reviewer) boot,
-parse environment variables, emit a structured boot log, and park on
-`SIGTERM`. They do not connect to the kernel, call any model API,
-dispatch any tools, or submit any intents.
+The three planner binaries (orchestrator, executor, reviewer) now have
+full agent-loop scaffolding: kernel transport, model client, tool
+registry, dispatch loop, intent/escalation submission, KSB renderer,
+and custom-tool subprocess executor. The role binaries' `main`
+functions still park on `SIGTERM` for the V2 scaffold; wiring the
+loop into each binary's main is `gap-b1-planner-binary-wiring`
+(separate, ~150 lines).
 
-**What exists (750 lines):**
-
-- `crates/planner-core/` — `BootContext`, `Role` enum, error types
-- `crates/planner-orchestrator/src/main.rs` — boot + park
-- `crates/planner-executor/src/main.rs` — boot + park
-- `crates/planner-reviewer/src/main.rs` — boot + park
-- `crates/prompts/` — NNSP (Non-Negotiable System Prompt)
-
-**What's missing:**
-
-| Component | Est. lines |
-|---|---|
-| VSock frame reader/writer (guest side) | ~200 |
-| Model API client (Anthropic/OpenAI/Bedrock via Gateway) | ~400 |
-| Base tool registry (`read_file`, `bash`, `edit_file`, `grep_search`, `git_commit`) | ~800 |
-| Tool dispatch loop (LLM → parse tool_use → execute → return result) | ~300 |
-| Intent submission (executor → kernel via VSock) | ~150 |
-| Witness/verdict submission (reviewer → kernel via VSock) | ~150 |
-| KSB (Kernel State Block) renderer for LLM context | ~400 |
-| Custom tool loader + subprocess executor | ~200 |
-
-**Impact:** No agent can perform any work. This is the single blocker
-for a usable RAXIS session.
+| Component | Status | Crate path |
+|---|---|---|
+| Kernel transport (UDS / VSock-stub, length-prefixed bincode) | ✅ | `planner-core/src/transport.rs` |
+| Model API client (Anthropic Messages API via Gateway) | ✅ | `planner-core/src/model.rs` |
+| Base tool registry (`read_file`/`bash`/`edit_file`/`grep_search`/`git_commit`) | ✅ | `planner-core/src/tools.rs` |
+| Tool dispatch loop (LLM → parse `tool_use` → execute → `tool_result`) | ✅ | `planner-core/src/dispatch.rs` |
+| Intent submission (executor → kernel) | ✅ | `planner-core/src/intent.rs` |
+| Witness/verdict submission (reviewer → kernel) | ✅ | `planner-core/src/intent.rs` |
+| Escalation submission (`SubmitEscalation`) | ✅ | `planner-core/src/intent.rs` |
+| KSB renderer (`[RAXIS:KERNEL_STATE … :KERNEL_STATE_END]`) | ✅ | `planner-core/src/ksb.rs` |
+| Custom-tool loader + subprocess executor | ✅ | `planner-core/src/custom_tools.rs` |
 
 **Invariant gap:** `planner-harness.md` defines 89 `INV-` invariants.
-Only 41 are referenced in Rust code. The missing 48 are overwhelmingly
-in the tool-dispatch and agent-loop sections — they become enforceable
-once B1 lands.
+INV-PLANNER-HARNESS-04 (reviewer write-tool ban), INV-PLANNER-04
+(monotonic per-session sequence_number), and INV-KSB-01 (close-delim
+injection refusal) are now enforced in code. The remaining INV
+coverage gap is tracked separately in `V2_GAPS.md §INV-coverage`.
+
+**Test coverage:** 87 unit tests across the 8 modules (`cargo test
+-p raxis-planner-core --lib`); the live e2e harness exercises the
+full loop end-to-end via `live-e2e/`.
 
 ### B2: Custom Tools
 

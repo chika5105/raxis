@@ -72,18 +72,27 @@ use std::ffi::OsString;
 use std::fmt;
 
 mod error;
+pub mod custom_tools;
 pub mod dispatch;
 pub mod intent;
+pub mod ksb;
 pub mod model;
 pub mod tools;
 pub mod transport;
 
+pub use custom_tools::{
+    load_custom_tools, validate_custom_tool, CustomToolDecl, CustomToolError, SubprocessTool,
+};
 pub use dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
 pub use error::PlannerError;
 pub use intent::{
     executor_terminal_tool_to_intent_kind, orchestrator_terminal_tool_to_intent_kind,
     reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError, SubmitReviewInput,
     TaskCompleteInput,
+};
+pub use ksb::{
+    assemble_system_prompt, render_ksb, DagRow, KsbError, KsbSnapshot, KSB_DELIMITER_CLOSE,
+    KSB_DELIMITER_OPEN,
 };
 pub use model::{
     AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse, MockModelClient,
