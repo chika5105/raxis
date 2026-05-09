@@ -141,6 +141,14 @@ pub enum ProxyDecl {
     Redis {
         /// Single pinned upstream Redis `host:port` (no scheme).
         upstream_host_port: String,
+        /// Wrap the upstream TCP socket in TLS before AUTH.
+        /// Required by managed Redis offerings (AWS Elasticache,
+        /// GCP Memorystore, Azure Cache for Redis). Defaults to
+        /// `false` so self-hosted deployments where the upstream
+        /// is a sibling on a private bridge network keep the
+        /// historical plaintext path.
+        #[serde(default)]
+        require_upstream_tls: bool,
         /// Restrictions clause (`[tasks.credentials.restrictions]`).
         #[serde(default)]
         restrictions: RedisRestrictions,
@@ -859,8 +867,9 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Redis { upstream_host_port, restrictions } => {
+            ProxyDecl::Redis { upstream_host_port, require_upstream_tls, restrictions } => {
                 assert_eq!(upstream_host_port, "redis.example.com:6379");
+                assert!(!*require_upstream_tls);
                 assert_eq!(restrictions, &RedisRestrictions::default());
             }
             other => panic!("expected Redis, got {other:?}"),

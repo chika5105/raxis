@@ -20,6 +20,15 @@ serde     = { workspace = true }
 thiserror = { workspace = true }
 tracing   = "0.1"
 
+# V2_GAPS §9 (Phase 2) — Redis TLS-to-upstream. Required by managed
+# Redis offerings (AWS Elasticache, GCP Memorystore, Azure Cache).
+# Pinned to the same versions as the SMTP proxy so the workspace
+# uses one TLS implementation.
+tokio-rustls     = { version = "0.26", default-features = false, features = ["ring"] }
+rustls           = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pki-types = "1"
+webpki-roots     = "1"
+
 [dev-dependencies]
 tokio    = { workspace = true, features = ["test-util", "macros"] }
 tempfile = "3"

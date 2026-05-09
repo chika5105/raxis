@@ -40,11 +40,6 @@
 //!
 //! # What is deferred
 //!
-//!   * **TLS to upstream.** V3 lands `RESP-over-TLS` for managed
-//!     Redis (Elasticache, Memorystore). Rationale: the upstream
-//!     hop is loopback in the typical operator deployment (Redis
-//!     in the same VPC as the kernel), and TLS adds CA bundle +
-//:    SNI plumbing without security gain in that posture.
 //!   * **`MULTI/EXEC` transactional grouping for the audit
 //!     trail.** Each command in the transaction is audited as a
 //!     standalone row; the audit chain is byte-stable but
@@ -58,11 +53,56 @@
 //!     end-to-end (the proxy is a transparent byte forwarder
 //!     once the AUTH handshake has completed) but multi-client
 //!     fan-out across multiple agent sessions is not supported.
-//!   * **`AUTH SCAN` / username+password ACL form** — the proxy
-//!     currently emits `AUTH <password>`; ACL form (`AUTH user
-//!     pass`) lands when the ConsumerIdentity carries a user
-//!     name. The credential resolver returns just the password
-//!     in V2.
+//!   * **`AUTH SCAN`**: subscribe-and-scan workflows; the proxy
+//!     forwards the underlying primitive commands so this works
+//!     end-to-end.
+//!
+//! # Redis TLS-to-upstream
+//!
+//! Managed Redis offerings (AWS Elasticache for Redis, GCP
+//! Memorystore for Redis, Azure Cache for Redis) terminate TLS
+//! at the cluster front-door and refuse cleartext connections.
+//! `ProxyConfig::upstream_tls = true` opts the proxy into the
+//! TLS dial: after `TcpStream::connect`, the proxy wraps the
+//! socket in a `tokio_rustls::TlsConnector` configured with
+//! Mozilla's CA bundle (via `webpki-roots`, the same trust store
+//! used by the SMTP proxy and the gateway), validates the
+//! upstream certificate against the credential's hostname, and
+//! authenticates / forwards every subsequent frame over the TLS
+//! tunnel. The agent VM still speaks plaintext RESP to the
+//! loopback listener; only the kernel↔upstream hop is encrypted.
+//!
+//! When `upstream_tls = false` (the historical default) the
+//! proxy speaks cleartext RESP to the upstream — preserving
+//! byte-identical behaviour for self-hosted deployments where
+//! the upstream is a sibling container on a private bridge
+//! network. The audit envelope's `tls` field reflects the
+//! actual transport so dashboards can confirm the policy
+//! decision was honoured.
+//!
+//! # Redis ACL-form AUTH (Redis 6+)
+//!
+//! Per `credential-proxy.md §4.5`, Redis ACL adds usernames so
+//! the same upstream serves multiple distinct identities (a
+//! pattern adopted by Elasticache, Memorystore, and Azure Cache
+//! for Redis when "users" are configured). The proxy supports
+//! both forms transparently by parsing the credential bytes:
+//!
+//!   * **Single-line**: a credential file whose first non-empty
+//!     line does NOT contain an `=` sign is treated as the raw
+//!     password (Redis ≤ 5 / Redis 6+ default `default` user).
+//!     Wire form: `AUTH <password>`.
+//!   * **`.env`-style**: a credential file that contains
+//!     `RAXIS_REDIS_USER=<name>` AND
+//!     `RAXIS_REDIS_PASSWORD=<password>` (one per line; quotes
+//!     and inline comments stripped) emits the ACL form.
+//!     Wire form: `AUTH <user> <password>`.
+//!
+//! Both shapes share the same `CredentialBackend::resolve()`
+//! return type — no trait change is needed (per the V2.3 design
+//! decision logged in `V2_GAPS.md §12.10`). Operators select the
+//! ACL form by adding the second key=value line to
+//! `<data_dir>/credentials/<name>.env`.
 //!
 //! # Threat model
 //!
@@ -76,12 +116,14 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use rustls::ClientConfig;
+use rustls_pki_types::ServerName;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
 pub mod resp;
@@ -136,6 +178,14 @@ pub struct ProxyConfig {
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
     pub restrictions:       Restrictions,
+    /// Wrap the upstream TCP stream in TLS before the AUTH
+    /// handshake. Required by managed Redis offerings (AWS
+    /// Elasticache, GCP Memorystore, Azure Cache for Redis).
+    /// Default `false` for self-hosted / sidecar deployments.
+    /// The kernel-side `CredentialProxyManager` populates this
+    /// from `[[credentials]].upstream_tls = true|false` in the
+    /// operator's policy.
+    pub upstream_tls:       bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -383,13 +433,14 @@ async fn serve_one(
     let cred = backend.resolve(&config.credential_name, config.consumer.as_ref())
         .map_err(|e| std::io::Error::other(format!("credential resolve: {e}")))?;
     let cred_str = match cred.as_utf8() {
-        Some(s) => s.to_owned(),
+        Some(s) => s,
         None    => {
             // Treat non-UTF-8 credentials as a hard error — Redis
             // AUTH wire takes a UTF-8 string. We surface as IO.
             return Err(std::io::Error::other("credential is not valid UTF-8"));
         }
     };
+    let auth_creds = parse_redis_credential(&cred_str);
 
     // Dial upstream. Per `credential-proxy.md §14.3` the proxy
     // emits CredentialProxyUpstreamConnected on a successful TCP+
@@ -400,7 +451,7 @@ async fn serve_one(
     // without DNS noise.
     let (upstream_host, upstream_port) = parse_host_port(&config.upstream_host_port);
     let connect_started = std::time::Instant::now();
-    let upstream = match TcpStream::connect(&config.upstream_host_port).await {
+    let tcp = match TcpStream::connect(&config.upstream_host_port).await {
         Ok(s) => s,
         Err(e) => {
             audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
@@ -420,9 +471,37 @@ async fn serve_one(
             return Err(std::io::Error::other(format!("upstream dial: {e}")));
         }
     };
+
+    // Optionally upgrade to TLS. The wrapper trait-object lets the
+    // rest of the function stay protocol-agnostic — both halves of
+    // the upstream stream are owned through `tokio::io::split`,
+    // which is generic over `AsyncRead + AsyncWrite + Unpin`.
+    let upstream: Box<dyn UpstreamIo> = if config.upstream_tls {
+        match tls_handshake(tcp, &upstream_host).await {
+            Ok(stream) => Box::new(stream),
+            Err(e) => {
+                audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
+                    timestamp_unix_seconds: SystemTime::now()
+                        .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+                    consumer:      config.consumer.clone(),
+                    credential:    config.credential_name.clone(),
+                    upstream_host: upstream_host.clone(),
+                    upstream_port,
+                    reason:        "TlsHandshakeFailed".into(),
+                    detail:        e.to_string(),
+                });
+                let mut client = client_stream;
+                client.write_all(b"-ERR upstream TLS handshake failed\r\n").await?;
+                return Err(std::io::Error::other(format!("upstream tls: {e}")));
+            }
+        }
+    } else {
+        Box::new(tcp)
+    };
+
     // Authenticate upstream.
     let mut upstream_reader = BufReader::new(upstream);
-    write_auth(&mut upstream_reader, &cred_str).await?;
+    write_auth(&mut upstream_reader, &auth_creds).await?;
     let auth_resp = read_simple_response(&mut upstream_reader).await?;
     if !is_ok_or_unauth_already(&auth_resp) {
         // Upstream rejected our credential. Surface a generic
@@ -452,7 +531,7 @@ async fn serve_one(
         credential:    config.credential_name.clone(),
         upstream_host,
         upstream_port,
-        tls:           false,
+        tls:           config.upstream_tls,
         handshake_ms,
     });
 
@@ -461,7 +540,7 @@ async fn serve_one(
     let client_write = Arc::new(tokio::sync::Mutex::new(client_write));
 
     let upstream_inner = upstream_reader.into_inner();
-    let (upstream_read, mut upstream_write) = upstream_inner.into_split();
+    let (upstream_read, mut upstream_write) = tokio::io::split(upstream_inner);
 
     // Upstream-to-client forwarder. Holds the client-write
     // mutex for one chunk at a time so the inbound parser can
@@ -539,35 +618,203 @@ async fn serve_one(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Upstream stream abstraction (plaintext TCP or TLS-wrapped TCP).
+// ---------------------------------------------------------------------------
+
+/// Marker trait the upstream-stream trait-object satisfies. Both
+/// `tokio::net::TcpStream` and `tokio_rustls::client::TlsStream<TcpStream>`
+/// implement `AsyncRead + AsyncWrite + Send + Unpin`, so the proxy
+/// can hold a single `Box<dyn UpstreamIo>` regardless of which
+/// flavour the operator selected via `ProxyConfig::upstream_tls`.
+trait UpstreamIo: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> UpstreamIo for T {}
+
+async fn tls_handshake(
+    tcp:  TcpStream,
+    host: &str,
+) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    // The hostname goes into the SNI/cert-name check; we strip
+    // any IPv6 brackets the operator may have included in the
+    // upstream URL since rustls's `ServerName` parser rejects
+    // them.
+    let server_name: ServerName<'static> = ServerName::try_from(host.to_owned())
+        .map_err(|e| std::io::Error::other(format!("invalid_servername: {e}")))?;
+    let connector = tokio_rustls::TlsConnector::from(default_client_config());
+    connector.connect(server_name, tcp).await
+}
+
+/// Construct (or reuse) a `rustls::ClientConfig` backed by Mozilla's
+/// CA bundle (via `webpki-roots`). The config is built once per
+/// process and cached behind a `OnceLock` so per-connection dials
+/// don't re-parse the trust anchors.
+fn default_client_config() -> Arc<ClientConfig> {
+    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            let mut roots = rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let cfg = ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Arc::new(cfg)
+        })
+        .clone()
+}
+
 // Helper writers / readers for the AUTH dance with the upstream.
 
-async fn write_auth(
-    upstream: &mut BufReader<TcpStream>,
-    password: &str,
-) -> std::io::Result<()> {
+/// Parsed shape of the bytes returned by `CredentialBackend::resolve`
+/// for a Redis credential. The proxy deliberately keeps both shapes
+/// behind the same `CredentialValue` so the trait stays
+/// pre-V3-stable (`V2_GAPS.md §12.10`). The selection rule lives in
+/// `parse_redis_credential` below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AuthCredentials {
+    /// Pre-Redis-6 / single-tenant: just a password. Wire form
+    /// is `AUTH <password>`.
+    Password(String),
+    /// Redis 6+ ACL form. Wire form is `AUTH <user> <password>`.
+    UserPassword {
+        user:     String,
+        password: String,
+    },
+}
+
+/// Parse the bytes returned by `CredentialBackend::resolve` into
+/// either a single-secret password or an ACL `(user, password)`
+/// pair. The parsing rule is documented in the crate-root
+/// `# Redis ACL-form AUTH` section.
+///
+/// Behaviour, in order of precedence:
+///   1. If the trimmed input contains BOTH `RAXIS_REDIS_USER=...`
+///      and `RAXIS_REDIS_PASSWORD=...` lines, return ACL form.
+///   2. If the trimmed input contains `RAXIS_REDIS_PASSWORD=...`
+///      (with or without user), return single-password form (the
+///      operator may declare just the password line in `.env`
+///      style).
+///   3. Otherwise treat the WHOLE input (after trimming a
+///      trailing newline) as the raw password — the historical
+///      single-line shape.
+fn parse_redis_credential(raw: &str) -> AuthCredentials {
+    // Quick reject of the all-whitespace case so we don't parse
+    // the empty string into an empty password by accident.
+    let trimmed = raw.trim_end_matches(['\n', '\r']);
+    if trimmed.is_empty() {
+        return AuthCredentials::Password(String::new());
+    }
+
+    // Detect `.env`-style: at least one line of the form `KEY=...`.
+    let has_kv = trimmed.lines().any(|line| {
+        let stripped = strip_comment(line.trim());
+        stripped.contains('=')
+            && stripped
+                .split_once('=')
+                .is_some_and(|(k, _)| !k.is_empty() && k.chars().all(is_env_key_char))
+    });
+    if !has_kv {
+        return AuthCredentials::Password(trimmed.to_owned());
+    }
+
+    let mut user:     Option<String> = None;
+    let mut password: Option<String> = None;
+    for line in trimmed.lines() {
+        let stripped = strip_comment(line.trim());
+        if stripped.is_empty() { continue; }
+        if let Some((k, v)) = stripped.split_once('=') {
+            let key = k.trim();
+            let val = unquote_value(v.trim());
+            match key {
+                "RAXIS_REDIS_USER"     => user     = Some(val),
+                "RAXIS_REDIS_PASSWORD" => password = Some(val),
+                _ => {} // Other keys ignored — credentials are scoped per-proxy.
+            }
+        }
+    }
+    match (user, password) {
+        (Some(u), Some(p)) => AuthCredentials::UserPassword { user: u, password: p },
+        // Password-only env file: still emit the canonical `AUTH password` form.
+        (None,    Some(p)) => AuthCredentials::Password(p),
+        // No structured `RAXIS_REDIS_*` keys present despite the
+        // file looking env-shaped — fall back to literal-bytes
+        // password to avoid silently dropping the operator's
+        // intent.
+        _ => AuthCredentials::Password(trimmed.to_owned()),
+    }
+}
+
+fn is_env_key_char(c: char) -> bool {
+    c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'
+}
+
+fn strip_comment(line: &str) -> &str {
+    line.find('#').map(|i| &line[..i]).unwrap_or(line).trim_end()
+}
+
+fn unquote_value(v: &str) -> String {
+    if v.len() >= 2
+        && ((v.starts_with('"') && v.ends_with('"'))
+            || (v.starts_with('\'') && v.ends_with('\'')))
+    {
+        v[1..v.len() - 1].to_owned()
+    } else {
+        v.to_owned()
+    }
+}
+
+async fn write_auth<S>(
+    upstream: &mut BufReader<S>,
+    creds:    &AuthCredentials,
+) -> std::io::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let inner = upstream.get_mut();
-    let frame = build_auth_frame(password);
+    let frame = build_auth_frame(creds);
     inner.write_all(&frame).await
 }
 
-fn build_auth_frame(password: &str) -> Vec<u8> {
-    // `*2\r\n$4\r\nAUTH\r\n$<n>\r\n<password>\r\n` — RESP array
-    // form, version-stable across Redis 5.x → 7.x.
-    let pw = password.as_bytes();
-    let mut out = Vec::with_capacity(20 + pw.len());
-    out.extend_from_slice(b"*2\r\n$4\r\nAUTH\r\n$");
-    out.extend_from_slice(pw.len().to_string().as_bytes());
-    out.extend_from_slice(b"\r\n");
-    out.extend_from_slice(pw);
-    out.extend_from_slice(b"\r\n");
-    out
+fn build_auth_frame(creds: &AuthCredentials) -> Vec<u8> {
+    // RESP array form, version-stable across Redis 5.x → 7.x.
+    // Single-secret form is `*2\r\n$4\r\nAUTH\r\n$<n>\r\n<pw>\r\n`.
+    // ACL form is `*3\r\n$4\r\nAUTH\r\n$<m>\r\n<user>\r\n$<n>\r\n<pw>\r\n`.
+    match creds {
+        AuthCredentials::Password(pw) => {
+            let pw = pw.as_bytes();
+            let mut out = Vec::with_capacity(20 + pw.len());
+            out.extend_from_slice(b"*2\r\n$4\r\nAUTH\r\n$");
+            out.extend_from_slice(pw.len().to_string().as_bytes());
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(pw);
+            out.extend_from_slice(b"\r\n");
+            out
+        }
+        AuthCredentials::UserPassword { user, password } => {
+            let user = user.as_bytes();
+            let pw   = password.as_bytes();
+            let mut out = Vec::with_capacity(28 + user.len() + pw.len());
+            out.extend_from_slice(b"*3\r\n$4\r\nAUTH\r\n$");
+            out.extend_from_slice(user.len().to_string().as_bytes());
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(user);
+            out.extend_from_slice(b"\r\n$");
+            out.extend_from_slice(pw.len().to_string().as_bytes());
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(pw);
+            out.extend_from_slice(b"\r\n");
+            out
+        }
+    }
 }
 
 /// Read one simple response frame from upstream (`+OK\r\n` or
 /// `-ERR ...\r\n` or `:NUMBER\r\n`).
-async fn read_simple_response(
-    upstream: &mut BufReader<TcpStream>,
-) -> std::io::Result<Vec<u8>> {
+async fn read_simple_response<S>(
+    upstream: &mut BufReader<S>,
+) -> std::io::Result<Vec<u8>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let mut acc = Vec::with_capacity(64);
     let mut byte = [0u8; 1];
     loop {
@@ -699,7 +946,7 @@ mod tests {
 
     #[test]
     fn auth_frame_uses_canonical_resp_array_form() {
-        let f = build_auth_frame("hunter2");
+        let f = build_auth_frame(&AuthCredentials::Password("hunter2".into()));
         assert_eq!(
             std::str::from_utf8(&f).unwrap(),
             "*2\r\n$4\r\nAUTH\r\n$7\r\nhunter2\r\n",
@@ -708,7 +955,7 @@ mod tests {
 
     #[test]
     fn auth_frame_handles_empty_password_canonically() {
-        let f = build_auth_frame("");
+        let f = build_auth_frame(&AuthCredentials::Password(String::new()));
         // Empty password is `$0\r\n\r\n` — well-formed even if
         // useless. Operators with no password set should not be
         // declaring a Redis credential proxy in the first place.
@@ -716,6 +963,80 @@ mod tests {
             std::str::from_utf8(&f).unwrap(),
             "*2\r\n$4\r\nAUTH\r\n$0\r\n\r\n",
         );
+    }
+
+    #[test]
+    fn auth_frame_emits_acl_form_for_user_password() {
+        let f = build_auth_frame(&AuthCredentials::UserPassword {
+            user:     "alice".into(),
+            password: "p4ssw0rd".into(),
+        });
+        // *3\r\n$4\r\nAUTH\r\n$5\r\nalice\r\n$8\r\np4ssw0rd\r\n
+        assert_eq!(
+            std::str::from_utf8(&f).unwrap(),
+            "*3\r\n$4\r\nAUTH\r\n$5\r\nalice\r\n$8\r\np4ssw0rd\r\n",
+        );
+    }
+
+    #[test]
+    fn parse_redis_credential_treats_single_line_as_password() {
+        let parsed = parse_redis_credential("hunter2");
+        assert_eq!(parsed, AuthCredentials::Password("hunter2".into()));
+    }
+
+    #[test]
+    fn parse_redis_credential_strips_trailing_newline() {
+        let parsed = parse_redis_credential("hunter2\n");
+        assert_eq!(parsed, AuthCredentials::Password("hunter2".into()));
+    }
+
+    #[test]
+    fn parse_redis_credential_returns_acl_form_when_both_keys_present() {
+        let raw = "RAXIS_REDIS_USER=alice\nRAXIS_REDIS_PASSWORD=p4ssw0rd\n";
+        let parsed = parse_redis_credential(raw);
+        assert_eq!(
+            parsed,
+            AuthCredentials::UserPassword {
+                user:     "alice".into(),
+                password: "p4ssw0rd".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn parse_redis_credential_returns_password_form_when_only_password_key_present() {
+        let raw = "# managed by raxis credential add\nRAXIS_REDIS_PASSWORD=hunter2\n";
+        let parsed = parse_redis_credential(raw);
+        assert_eq!(parsed, AuthCredentials::Password("hunter2".into()));
+    }
+
+    #[test]
+    fn parse_redis_credential_strips_quotes_and_inline_comments() {
+        let raw = "RAXIS_REDIS_USER=\"alice\"  # primary user\nRAXIS_REDIS_PASSWORD='p4ssw0rd'\n";
+        let parsed = parse_redis_credential(raw);
+        assert_eq!(
+            parsed,
+            AuthCredentials::UserPassword {
+                user:     "alice".into(),
+                password: "p4ssw0rd".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn parse_redis_credential_falls_back_to_literal_when_env_keys_absent() {
+        // Operator put a `=` inside the password (legal Redis, e.g. base64).
+        let raw = "abc=def";
+        let parsed = parse_redis_credential(raw);
+        // We still treat it as env-shaped (`abc=def`) but no
+        // RAXIS_REDIS_* keys, so we fall back to literal bytes.
+        assert_eq!(parsed, AuthCredentials::Password("abc=def".into()));
+    }
+
+    #[test]
+    fn parse_redis_credential_empty_input_yields_empty_password() {
+        let parsed = parse_redis_credential("");
+        assert_eq!(parsed, AuthCredentials::Password(String::new()));
     }
 
     #[test]

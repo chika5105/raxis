@@ -338,6 +338,7 @@ pub async fn run() -> Result<()> {
         restrictions: Restrictions {
             allowed_commands: vec!["PING".into(), "SET".into(), "GET".into()],
         },
+        upstream_tls: false,
     };
     let proxy = RedisProxy::bind(
         Arc::clone(&backend) as Arc<dyn CredentialBackend>,

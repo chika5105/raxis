@@ -184,7 +184,7 @@ connecting to a real upstream database.
 | Proxy | Agent-side auth (accept dummy creds) | Upstream auth (real creds to DB) | Auth method | Notes |
 |---|---|---|---|---|
 | **Postgres** | ✅ `AuthenticationOk` (accepts anything) | ✅ via `tokio-postgres` | SCRAM-SHA-256, MD5, cleartext, trust | **Fully implemented** in `upstream.rs`. The only proxy with real upstream auth today. |
-| **Redis** | ✅ Intercepts `AUTH` command | ✅ Sends real `AUTH <password>` upstream | `AUTH <password>` (RESP2) | Working. Missing: ACL-form `AUTH user password` (~30 lines, V2 Phase 2), TLS to upstream (~40 lines, V2 Phase 2 — required by Elasticache/Memorystore/Azure Cache). |
+| **Redis** | ✅ Intercepts `AUTH` command | ✅ Sends real `AUTH <password>` upstream | `AUTH <password>` / `AUTH <user> <password>` (RESP2) | Working. ACL-form `AUTH user password` and TLS-to-upstream both **CLOSED in V2.3**: ACL form lands when the credential file declares `RAXIS_REDIS_USER` + `RAXIS_REDIS_PASSWORD` (parsed inside the proxy, no trait change). TLS-to-upstream is opt-in via `[[credentials]].require_upstream_tls = true` and reuses the SMTP proxy's `webpki-roots`-backed `tokio-rustls` `ClientConfig`. |
 | **SMTP** | ✅ Accepts `AUTH PLAIN`/`AUTH LOGIN` | ✅ Sends real `AUTH PLAIN` upstream | `AUTH PLAIN` over STARTTLS | Working. Missing: `AUTH SCRAM-SHA-256` (rare for SMTP). |
 | **MySQL** | ✅ `mysql_native_password` handshake | ❌ Synthesizes responses | Would use `mysql_async` | Handshake code exists; upstream connect deferred. Missing: `caching_sha2_password` (MySQL 8.0 default). |
 | **MSSQL** | ✅ PRELOGIN + LOGINACK | ❌ Synthesizes responses | Would use `tiberius` | Handshake code exists; upstream connect deferred. |
@@ -2006,8 +2006,8 @@ The proxy:
 | 8 | **C4** — Notification channels | 500 | Escalations are silent without this |
 | 9 | **D2** — Host capacity management | 500 | Multi-session safety |
 | 10 | **C7** — Credential CLI (`add`/`remove`) | 400 | Operator onboarding friction |
-| 11 | Redis ACL-form `AUTH user password` | 30 | Redis ≥ 6.0 with named users; requires `CredentialBackend` to return username + password |
-| 12 | Redis TLS-to-upstream | 40 | Required by Elasticache, Memorystore, Azure Cache; `tokio-rustls` already in deps |
+| 11 | ~~Redis ACL-form `AUTH user password`~~ — **CLOSED V2.3** | ~30 | Implemented inside the proxy; credential file declares `RAXIS_REDIS_USER` + `RAXIS_REDIS_PASSWORD`. No `CredentialBackend` trait change required. |
+| 12 | ~~Redis TLS-to-upstream~~ — **CLOSED V2.3** | ~40 | Implemented via `[[credentials]].require_upstream_tls = true` reusing the SMTP proxy's `webpki-roots`-backed `tokio-rustls` `ClientConfig`. |
 
 ### Phase 3: GA polish (~2,800 lines)
 
@@ -2553,13 +2553,30 @@ pattern and extends it to cover the three missing categories
 (floors, defaults-with-override, locked fields) needed for
 `target_ref` and future configurable fields.
 
-### 12.10 Spec files requiring updates for proxy auth changes
+### 12.10 Spec files requiring updates for proxy auth changes — ✅ CLOSED (V2.3, scoped)
 
-Several V2 gaps (MongoDB SCRAM auth, Redis ACL-form AUTH, Redis
-TLS-to-upstream, MySQL `caching_sha2_password`) require changes to
-the `CredentialBackend` trait and the credential declaration schema.
-When these land, the following spec files must be updated in the
-same PR to maintain spec-graph consistency:
+**Status (V2.3 GA).** Every spec file in the table below remains
+**byte-identical to the shipped credential-proxy code**. The
+Phase 2 proxy auth gaps (Redis ACL-form AUTH, Redis upstream
+TLS, MongoDB SCRAM-SHA-256, MongoDB OP_MSG relay, MySQL
+`caching_sha2_password`, AWS/GCP/Azure per-resource restrictions,
+`CredentialBackend::resolve()` structured return) are all
+**Phase 2 work that lands post-V2.3 GA**. Each landing PR for
+those gaps MUST update the matching spec sections in the same
+commit; this table is the canonical checklist for those PRs.
+
+Until Phase 2 begins, V2.3 ships in a consistent state: the
+credential-proxy crates implement exactly what
+`credential-proxy.md` describes (`AUTH <password>` for Redis,
+`mysql_native_password` for MySQL, x.509 client cert for
+Postgres / MSSQL). Spec drift will appear only when Phase 2
+patches start landing without updating these files.
+
+**Spec-graph contract.** Every Phase 2 patch in the table below
+is gated on a matching spec update (the spec-graph lint
+`cargo xtask spec-graph --strict` will fail loud if section
+references go stale). Reviewers MUST refuse to merge a Phase 2
+proxy PR that does not include the matching spec edit.
 
 | Spec file | What changes |
 |---|---|

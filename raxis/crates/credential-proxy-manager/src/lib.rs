@@ -1750,13 +1750,18 @@ impl CredentialProxyManager {
                     )
                     .await?
                 }
-                ProxyDecl::Redis { upstream_host_port, restrictions } => {
+                ProxyDecl::Redis {
+                    upstream_host_port,
+                    require_upstream_tls,
+                    restrictions,
+                } => {
                     self.bind_redis(
                         session_id,
                         task_id,
                         &decl.name,
                         &decl.mount_as,
                         upstream_host_port,
+                        *require_upstream_tls,
                         restrictions,
                     )
                     .await?
@@ -2087,14 +2092,16 @@ impl CredentialProxyManager {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     async fn bind_redis(
         &self,
-        session_id:         &str,
-        task_id:            &str,
-        name:               &raxis_credentials::CredentialName,
-        mount_as:           &str,
-        upstream_host_port: &str,
-        restrictions:       &RedisRestrictions,
+        session_id:           &str,
+        task_id:              &str,
+        name:                 &raxis_credentials::CredentialName,
+        mount_as:             &str,
+        upstream_host_port:   &str,
+        require_upstream_tls: bool,
+        restrictions:         &RedisRestrictions,
     ) -> Result<ActiveProxy, ManagerError> {
         let cfg = RedisProxyConfig {
             listen_addr:        "127.0.0.1:0".to_owned(),
@@ -2107,6 +2114,7 @@ impl CredentialProxyManager {
             restrictions: RedisProxyRestrictions {
                 allowed_commands: restrictions.allowed_commands.clone(),
             },
+            upstream_tls:       require_upstream_tls,
         };
         let audit_channel: Arc<dyn RedisAuditChannel> = Arc::new(RedisKernelAuditAdapter {
             audit_sink: Arc::clone(&self.audit),
