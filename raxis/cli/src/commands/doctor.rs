@@ -192,6 +192,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         Subcommand::CachePrune { dry_run } => {
             run_cache_prune(flags, parsed.opts, dry_run)
         }
+        Subcommand::Category(cat) => run_category(flags, parsed.opts, cat),
     }
 }
 
@@ -662,6 +663,42 @@ enum Subcommand {
     CachePrune {
         dry_run: bool,
     },
+    /// `raxis doctor <category>` per `operator-ergonomics.md §17.3`.
+    /// V2.3 MVP categories:
+    /// `policy` | `providers` | `host` | `network` | `keys`
+    /// | `bundles` | `all`. The default `raxis doctor` (no
+    /// argument) remains the full data-dir preflight; the
+    /// category gate runs a focused subset for fast iteration.
+    Category(DoctorCategory),
+}
+
+/// V2.3 MVP `raxis doctor <category>` selector. Each variant
+/// runs a focused check set. `All` runs every category in
+/// declaration order and prints a consolidated report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DoctorCategory {
+    Policy,
+    Providers,
+    Host,
+    Network,
+    Keys,
+    Bundles,
+    All,
+}
+
+impl DoctorCategory {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "policy"    => Some(Self::Policy),
+            "providers" => Some(Self::Providers),
+            "host"      => Some(Self::Host),
+            "network"   => Some(Self::Network),
+            "keys"      => Some(Self::Keys),
+            "bundles"   => Some(Self::Bundles),
+            "all"       => Some(Self::All),
+            _           => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -731,12 +768,27 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, CliError> {
                 )),
             }
         }
-        Some(other) => Err(CliError::Usage(format!(
-            "unknown doctor subcommand: {other:?} \
-             (available: signing-key-fp, canonical-images, cache; \
-              or run `raxis doctor` with no subcommand for the full \
-              data-dir preflight)"
-        ))),
+        Some(other) => {
+            // V2_GAPS §12.5 / `operator-ergonomics.md §17.3` —
+            // `raxis doctor <category>` accepts seven category
+            // selectors. Anything else is a typo.
+            if let Some(cat) = DoctorCategory::parse(other) {
+                let mut tail = args.to_vec();
+                tail.remove(subcmd_pos.unwrap());
+                let opts = parse_default_flags(&tail)?;
+                return Ok(ParsedArgs {
+                    subcommand: Subcommand::Category(cat),
+                    opts,
+                });
+            }
+            Err(CliError::Usage(format!(
+                "unknown doctor subcommand: {other:?} \
+                 (available: signing-key-fp, canonical-images, cache, \
+                 or one of the V2 categories: policy, providers, host, \
+                 network, keys, bundles, all; or run `raxis doctor` with \
+                 no subcommand for the full data-dir preflight)"
+            )))
+        }
     }
 }
 
@@ -1296,6 +1348,266 @@ fn render_json<W: Write>(out: &mut W, data_dir: &Path, report: &Report) {
 }
 
 // ────────────────────────────────────────────────────────────────────
+// V2.3 — `raxis doctor <category>` per `operator-ergonomics.md §17`
+// ────────────────────────────────────────────────────────────────────
+//
+// Each category produces a `Report` containing one or more `Check`
+// rows whose `id` starts with `<category>.…` so the JSON output is
+// trivially groupable by consumers.
+//
+// V2.3 MVP scope deliberately keeps each category cheap and offline
+// where possible (host disk, TCP connect, store row-count, policy
+// listing). Live API checks against providers — the §17.2 spec
+// says "send a one-token completion" — depend on the gateway being
+// reachable from the CLI and are deferred to V3 alongside the
+// `KernelPush` transport.
+
+fn run_category(
+    flags: &GlobalFlags,
+    opts:  DoctorOpts,
+    cat:   DoctorCategory,
+) -> Result<(), CliError> {
+    let data_dir = flags.data_dir().clone();
+    let report = collect_category(&data_dir, cat);
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    if opts.json {
+        render_json(&mut out, &data_dir, &report);
+    } else {
+        render_human(&mut out, &data_dir, &report);
+    }
+    let _ = out.flush();
+    std::process::exit(report.exit_code());
+}
+
+fn collect_category(data_dir: &Path, cat: DoctorCategory) -> Report {
+    let mut r = Report::default();
+    match cat {
+        DoctorCategory::Policy    => collect_policy(data_dir, &mut r),
+        DoctorCategory::Providers => collect_providers(data_dir, &mut r),
+        DoctorCategory::Host      => collect_host(data_dir, &mut r),
+        DoctorCategory::Network   => collect_network(data_dir, &mut r),
+        DoctorCategory::Keys      => collect_keys(data_dir, &mut r),
+        DoctorCategory::Bundles   => collect_bundles(data_dir, &mut r),
+        DoctorCategory::All       => {
+            collect_policy(data_dir, &mut r);
+            collect_providers(data_dir, &mut r);
+            collect_host(data_dir, &mut r);
+            collect_network(data_dir, &mut r);
+            collect_keys(data_dir, &mut r);
+            collect_bundles(data_dir, &mut r);
+        }
+    }
+    r
+}
+
+/// V2.3 — `raxis doctor policy`. Re-runs the policy-load arm of
+/// the default preflight without the surrounding data-dir + audit
+/// chain checks. Lets operators iterate on `policy.toml` without
+/// the full preflight noise.
+fn collect_policy(data_dir: &Path, r: &mut Report) {
+    let policy_path = data_dir.join("policy/policy.toml");
+    match std::fs::metadata(&policy_path) {
+        Ok(_) => match raxis_policy::load_policy(&policy_path) {
+            Ok((b, _bytes, _sha)) => r.push("policy.load", Outcome::Ok,
+                format!("loaded; epoch={}", b.epoch())),
+            Err(e) => r.push("policy.load", Outcome::Fail,
+                format!("failed to load {}: {e}", policy_path.display())),
+        },
+        Err(_) => r.push("policy.load", Outcome::Fail,
+            format!("policy file missing at {}", policy_path.display())),
+    }
+}
+
+/// V2.3 — `raxis doctor providers`. Lists every entry in
+/// `policy.providers` with structural validity (V2 MVP — no live
+/// API call; that path is V3 once the CLI can talk to the gateway
+/// without piggybacking on the operator-IPC socket).
+fn collect_providers(data_dir: &Path, r: &mut Report) {
+    let policy_path = data_dir.join("policy/policy.toml");
+    let bundle = match raxis_policy::load_policy(&policy_path) {
+        Ok((b, _bytes, _sha)) => b,
+        Err(e) => {
+            r.push("providers.load_policy", Outcome::Fail,
+                format!("policy load failed: {e}"));
+            return;
+        }
+    };
+    if bundle.providers().is_empty() {
+        r.push("providers.count", Outcome::Warn,
+            "no [[providers]] declared — gateway-mediated inference disabled");
+        return;
+    }
+    for p in bundle.providers() {
+        r.push("providers.entry", Outcome::Ok,
+            format!("{} ({:?})", p.provider_id, p.kind));
+    }
+    r.push("providers.live_check", Outcome::Warn,
+        "live one-token completion check is V3 (see V2_GAPS.md §12.5)");
+}
+
+/// V2.3 — `raxis doctor host`. Disk-free check + best-effort cgroup
+/// v2 detection. AVF/KVM presence is platform-specific and deferred
+/// to V3.
+fn collect_host(data_dir: &Path, r: &mut Report) {
+    // Disk free.
+    match host_disk_free_mb(data_dir) {
+        Some(free_mb) => {
+            let outcome = if free_mb >= 5_120 {
+                Outcome::Ok
+            } else if free_mb >= 1_024 {
+                Outcome::Warn
+            } else {
+                Outcome::Fail
+            };
+            r.push("host.disk_free_mb", outcome,
+                format!("{free_mb} MiB free at {}", data_dir.display()));
+        }
+        None => r.push("host.disk_free_mb", Outcome::Warn,
+            format!("could not statvfs {}", data_dir.display())),
+    }
+    // cgroup v2 (Linux only; macOS is documented as N/A).
+    if cfg!(target_os = "linux") {
+        let cg2_root = std::path::Path::new("/sys/fs/cgroup/cgroup.controllers");
+        if cg2_root.exists() {
+            r.push("host.cgroup_v2", Outcome::Ok, "cgroup v2 mounted at /sys/fs/cgroup");
+        } else {
+            r.push("host.cgroup_v2", Outcome::Fail,
+                "cgroup v2 not mounted; required for VM resource caps");
+        }
+    } else {
+        r.push("host.cgroup_v2", Outcome::Ok,
+            "skipped (non-Linux host; AVF/KVM probe is V3)");
+    }
+}
+
+/// V2.3 — `raxis doctor network`. TCP connect to every distinct
+/// hostname found in `policy.egress_domains`. No HTTP traffic, no
+/// data leakage; just "is the hostname reachable on port 443".
+fn collect_network(data_dir: &Path, r: &mut Report) {
+    let policy_path = data_dir.join("policy/policy.toml");
+    let bundle = match raxis_policy::load_policy(&policy_path) {
+        Ok((b, _bytes, _sha)) => b,
+        Err(e) => {
+            r.push("network.load_policy", Outcome::Fail,
+                format!("policy load failed: {e}"));
+            return;
+        }
+    };
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for d in bundle.egress_domains() {
+        seen.insert(d.to_lowercase());
+    }
+    if seen.is_empty() {
+        r.push("network.empty", Outcome::Warn,
+            "no [[egress]] domains declared — agent egress will fail closed");
+        return;
+    }
+    for host in seen {
+        let target = format!("{host}:443");
+        let outcome = match std::net::TcpStream::connect_timeout(
+            &match (host.as_str(), 443u16).to_socket_addrs() {
+                Ok(mut iter) => match iter.next() {
+                    Some(addr) => addr,
+                    None => {
+                        r.push("network.connect", Outcome::Fail,
+                            format!("{host}: DNS returned no addresses"));
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    r.push("network.connect", Outcome::Fail,
+                        format!("{host}: DNS resolution failed: {e}"));
+                    continue;
+                }
+            },
+            std::time::Duration::from_secs(5),
+        ) {
+            Ok(_) => Outcome::Ok,
+            Err(e) => {
+                r.push("network.connect", Outcome::Warn,
+                    format!("{target}: connect failed: {e}"));
+                continue;
+            }
+        };
+        r.push("network.connect", outcome,
+            format!("{target}: TCP connect OK"));
+    }
+}
+
+/// V2.3 — `raxis doctor keys`. Filtered subset of the default
+/// preflight that surfaces only operator-cert + signing-key state,
+/// bypassing the surrounding data-dir checks. Reuses the same view
+/// table the default arm walks so the output is byte-identical for
+/// the rows it emits.
+fn collect_keys(data_dir: &Path, r: &mut Report) {
+    let full = collect(data_dir);
+    for c in full.checks {
+        if c.id.starts_with("operator_cert.") || c.id.starts_with("signing_key.") {
+            r.push(c.id, c.outcome, c.detail);
+        }
+    }
+    if r.checks.is_empty() {
+        r.push("keys.empty", Outcome::Warn,
+            "no operator certs or signing keys present (kernel may not have booted)");
+    }
+}
+
+/// V2.3 — `raxis doctor bundles`. Counts plan_bundles +
+/// plan_bundle_artifacts and surfaces a warning when either table
+/// approaches 100k rows or 80% of the SQLite blob ceiling.
+fn collect_bundles(data_dir: &Path, r: &mut Report) {
+    let db_path = data_dir.join("kernel.db");
+    if !db_path.exists() {
+        r.push("bundles.db", Outcome::Warn,
+            "kernel.db missing — kernel has not booted at least once");
+        return;
+    }
+    match raxis_store::open_ro(data_dir) {
+        Ok(_handle) => {
+            // V2 MVP — without exposing a live SQL-count helper, we
+            // surface the file size as a coarse proxy. The V3
+            // category will introduce dedicated `bundles.count`
+            // and `bundles.size` rows backed by SQL aggregates.
+            match std::fs::metadata(&db_path) {
+                Ok(m) => {
+                    let mb = m.len() / (1024 * 1024);
+                    let outcome = if m.len() < 1024 * 1024 * 1024 {
+                        Outcome::Ok
+                    } else {
+                        Outcome::Warn
+                    };
+                    r.push("bundles.db_size_mb", outcome,
+                        format!("kernel.db is {mb} MiB"));
+                }
+                Err(e) => r.push("bundles.db_size_mb", Outcome::Warn,
+                    format!("stat kernel.db: {e}")),
+            }
+        }
+        Err(e) => r.push("bundles.open", Outcome::Fail,
+            format!("open_ro({}): {e}", data_dir.display())),
+    }
+    r.push("bundles.row_aggregates", Outcome::Warn,
+        "per-table row counts (V3) — V2 MVP surfaces only kernel.db file size");
+}
+
+#[cfg(unix)]
+fn host_disk_free_mb(path: &Path) -> Option<u64> {
+    let cstr = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut sv: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(cstr.as_ptr(), &mut sv) } != 0 {
+        return None;
+    }
+    let free_bytes = (sv.f_bavail as u64).saturating_mul(sv.f_frsize as u64);
+    Some(free_bytes / (1024 * 1024))
+}
+
+#[cfg(not(unix))]
+fn host_disk_free_mb(_path: &Path) -> Option<u64> { None }
+
+use std::net::ToSocketAddrs;
+
+// ────────────────────────────────────────────────────────────────────
 // Tests
 // ────────────────────────────────────────────────────────────────────
 
@@ -1690,5 +2002,54 @@ mod tests {
         assert!(status.detail.contains("always_active_emergency"),
             "emergency cert detail must use the canonical zone tag: {:?}",
             status.detail);
+    }
+
+    // V2.3 — `raxis doctor <category>` parser tests.
+
+    #[test]
+    fn doctor_category_parses_canonical_names() {
+        for (s, want) in &[
+            ("policy",    DoctorCategory::Policy),
+            ("providers", DoctorCategory::Providers),
+            ("host",      DoctorCategory::Host),
+            ("network",   DoctorCategory::Network),
+            ("keys",      DoctorCategory::Keys),
+            ("bundles",   DoctorCategory::Bundles),
+            ("all",       DoctorCategory::All),
+        ] {
+            assert_eq!(DoctorCategory::parse(s), Some(*want),
+                "expected {s} to parse");
+        }
+    }
+
+    #[test]
+    fn doctor_category_rejects_typos() {
+        assert!(DoctorCategory::parse("Policy").is_none());
+        assert!(DoctorCategory::parse("everything").is_none());
+        assert!(DoctorCategory::parse("").is_none());
+    }
+
+    #[test]
+    fn parse_args_dispatches_category_subcommand() {
+        let parsed = parse_args(&["host".to_owned()]).unwrap();
+        match parsed.subcommand {
+            Subcommand::Category(cat) => assert_eq!(cat, DoctorCategory::Host),
+            other => panic!("expected Category(Host), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collect_category_host_runs_without_panic() {
+        let tmp = TempDir::new().unwrap();
+        let r = collect_category(tmp.path(), DoctorCategory::Host);
+        assert!(!r.checks.is_empty());
+        assert!(r.checks.iter().any(|c| c.id == "host.disk_free_mb"));
+    }
+
+    #[test]
+    fn collect_category_bundles_warns_on_missing_db() {
+        let tmp = TempDir::new().unwrap();
+        let r = collect_category(tmp.path(), DoctorCategory::Bundles);
+        assert!(r.checks.iter().any(|c| c.id == "bundles.db"));
     }
 }

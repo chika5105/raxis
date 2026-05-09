@@ -2058,7 +2058,7 @@ These are not blockers for Phase 1 (agent loop) but are required for
 the operator-ergonomics CLI commands (`plan prepare`, `plan cost-estimate`,
 `submit plan --dry-run`, `initiative watch`, `initiative resume`).
 
-### 12.5 `raxis doctor`: categories missing
+### 12.5 `raxis doctor`: categories — `CLOSED (V2.3, MVP)`
 
 The spec (`operator-ergonomics.md §17`) defines 6 doctor categories:
 `policy`, `providers`, `host`, `network`, `keys`, `bundles`. The CLI
@@ -2070,12 +2070,19 @@ implements:
 | `signing-key-fp` | ✅ | Operator key check |
 | `cache-prune` | ✅ | Image cache management |
 | (default) | ✅ | Subdirectory perms, cert check, policy parse |
-| `policy` (standalone) | ❌ | Covered partially by default run |
-| `providers` | ❌ | No live credential smoke-test |
-| `host` | ❌ | No OS version / cgroup / KVM check |
-| `network` | ❌ | No egress-host reachability probe |
-| `keys` | ❌ | No CRL / revocation check |
-| `bundles` | ❌ | No storage utilization check |
+| `policy` (standalone) | ✅ (V2.3) | `policy.load` row only — re-runs the policy-load arm of the default preflight without the surrounding noise. |
+| `providers` | ✅ (V2.3) | Lists every `[[providers]]` entry; the live "send a one-token completion" smoke-test is V3 (depends on CLI ↔ gateway IPC). |
+| `host` | ✅ (V2.3) | `host.disk_free_mb` (statvfs); `host.cgroup_v2` (Linux only — macOS skips with OK). AVF/KVM probe is V3. |
+| `network` | ✅ (V2.3) | TCP-connect each `policy.egress_domains` host on :443 with a 5s timeout. No HTTP traffic. |
+| `keys` | ✅ (V2.3) | Filters the existing operator-cert + signing-key checks from the default preflight; CRL distribution check is V3 (covered by D1 admission-time path). |
+| `bundles` | ✅ (V2.3) | `bundles.db_size_mb` (file-size proxy); per-table row aggregates are V3. |
+
+**Invocation.** `raxis doctor <category>` runs a single category;
+`raxis doctor all` runs every category in declaration order. Both
+share the `--json` flag and the same `Outcome::{Ok,Warn,Fail}`
+worst-of exit-code logic as the legacy default arm. The default
+`raxis doctor` (no argument) continues to run the full data-dir
+preflight unchanged.
 
 ### 12.6 `setup wizard`: not started — promoted to V2 (C10)
 
