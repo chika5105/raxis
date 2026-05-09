@@ -1556,6 +1556,46 @@ streaming behavior:
   all buffered content. The retry replays the entire request body.
   Partial recovery is V3 work alongside resumable streams.
 
+**Per-provider `stream_idle_timeout` (reasoning model support).**
+
+The gateway's `STREAM_IDLE_TIMEOUT` (30 seconds) is the per-chunk
+idle deadline — if no SSE event arrives within this window, the
+connection is considered stalled and killed with
+`BackendError::Timeout`. 30 seconds is correct for standard
+generation models (inter-chunk gaps are sub-second) but **breaks
+reasoning-tier models**:
+
+| Model class | Streams thinking tokens? | Typical silent gap | 30s safe? |
+|---|---|---|---|
+| Claude (standard) | n/a (sub-second chunks) | <1s | ✅ Yes |
+| Claude (extended thinking) | Yes — `thinking` content block deltas flow during reasoning | 1–5s between thinking deltas | ✅ Yes |
+| OpenAI o1 / o3 | **No** — reasoning tokens are not streamed; first visible output arrives after full reasoning | **30–120+ seconds** | ❌ No |
+| Gemini (thinking mode) | Partially — depends on API version | 10–60s gaps observed | ⚠️ Marginal |
+
+**Requirement:** `stream_idle_timeout` MUST be configurable
+per-provider in `policy.toml`. The 30-second constant becomes the
+default; operators using reasoning-tier models widen the value for
+those providers:
+
+```toml
+[providers.anthropic]
+stream_idle_timeout = "30s"     # default; fine for Claude
+
+[providers.openai]
+stream_idle_timeout = "120s"    # required for o1/o3 reasoning models
+
+[providers.gemini]
+stream_idle_timeout = "60s"     # conservative for thinking mode
+```
+
+**Validation:** `PolicyBundle::validate` enforces
+`stream_idle_timeout` parses as a valid duration in `[5s, 600s]`.
+Values below 5s risk false positives on busy providers; values above
+600s defeat the purpose (the per-provider `inference_timeout_ms` is
+the outer ceiling). The gateway reads the per-provider value from
+`ProviderConfig` at dispatch time. If the field is absent, the
+gateway falls back to the 30-second default.
+
 **Sidecar (C5) streaming support.**
 
 HTTP sidecar providers (C5) must support streaming on equal
@@ -2160,7 +2200,7 @@ The proxy:
 | 2 | ~~**B3** — Real DB proxy forwarding~~ — **CLOSED V2.3** | 1,200 | Postgres / MySQL / MSSQL upstream forwarding shipped. MongoDB SCRAM + OP_MSG real relay deferred to V3 — see "Mongo crypto auth" rationale. |
 | 3 | ~~**C6** — Kernel push protocol~~ — **CLOSED V2.3** | 500 | `git push` to upstream remote after `IntegrationMerge` shipped; `KernelPush` transport closed in §12.1. |
 | 4 | ~~**B2** — Custom tools~~ — **CLOSED V2.3** | 600 | Custom-tool loader + subprocess executor + kernel-side validation shipped. |
-| 5 | **ORM** — Extended query protocol | 500 | **V3 deferral** — V2.3 ships simple-query path; ORMs fall back to text protocol. See "ORM Extended Query (Postgres)" rationale. |
+| 5 | ~~**ORM** — Extended query protocol (Postgres `Parse`/`Bind`/`Describe`/`Execute`/`Sync`/`Close` + MySQL `COM_STMT_*`)~~ — **CLOSED V2.4** | 500 | Reclassified from V3 deferral to V2 BLOCKER per §3; restriction check at `Parse` / `COM_STMT_PREPARE` time, transparent forwarding for the rest of the cycle. SQLAlchemy / Django / asyncpg / Prisma / Diesel / SQLx now run end-to-end against the proxy without driver reconfiguration. |
 | 6 | ~~Configurable `target_ref`~~ — **CLOSED V2.3** | 80 | Policy + plan layered with INV-PLAN-POLICY-PRECEDENCE-01 framework. |
 
 ### Phase 2: Production readiness (~2,700 lines) — ✅ Substantively closed in V2.3
