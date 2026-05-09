@@ -186,57 +186,188 @@ connecting to a real upstream database.
 | **Postgres** | ✅ `AuthenticationOk` (accepts anything) | ✅ via `tokio-postgres` | SCRAM-SHA-256, MD5, cleartext, trust | **Fully implemented** in `upstream.rs`. The only proxy with real upstream auth today. |
 | **Redis** | ✅ Intercepts `AUTH` command | ✅ Sends real `AUTH <password>` upstream | `AUTH <password>` / `AUTH <user> <password>` (RESP2) | Working. ACL-form `AUTH user password` and TLS-to-upstream both **CLOSED in V2.3**: ACL form lands when the credential file declares `RAXIS_REDIS_USER` + `RAXIS_REDIS_PASSWORD` (parsed inside the proxy, no trait change). TLS-to-upstream is opt-in via `[[credentials]].require_upstream_tls = true` and reuses the SMTP proxy's `webpki-roots`-backed `tokio-rustls` `ClientConfig`. |
 | **SMTP** | ✅ Accepts `AUTH PLAIN`/`AUTH LOGIN` | ✅ Sends real `AUTH PLAIN` upstream | `AUTH PLAIN` over STARTTLS | Working. Missing: `AUTH SCRAM-SHA-256` (rare for SMTP). |
-| **MySQL** | ✅ `mysql_native_password` handshake | ❌ Synthesizes responses | Would use `mysql_async` | Handshake code exists; upstream connect deferred. Missing: `caching_sha2_password` (MySQL 8.0 default). |
-| **MSSQL** | ✅ PRELOGIN + LOGINACK | ❌ Synthesizes responses | Would use `tiberius` | Handshake code exists; upstream connect deferred. |
-| **MongoDB** | ⚠️ **No auth at all** | ❌ Synthesizes responses | Would need SCRAM-SHA-256 | **Critical gap.** The proxy advertises empty `saslSupportedMechs` so drivers skip auth. Any MongoDB deployment with auth enabled (i.e., all production deployments) will reject connections. SCRAM-SHA-256 requires PBKDF2 + HMAC state machine (~150 lines). |
+| **MySQL** | ✅ `mysql_native_password` handshake | ✅ via `mysql_async` (V2.3) | `mysql_native_password` | Real upstream forwarding shipped in V2.3 (`crates/credential-proxy-mysql/src/upstream.rs`). `caching_sha2_password` (MySQL 8.0 default) **explicitly deferred to V3** — see "MySQL/Mongo crypto auth" rationale below. |
+| **MSSQL** | ✅ PRELOGIN + LOGINACK | ✅ via `tiberius` (V2.3) | TDS PRELOGIN + LOGIN7 | Real upstream forwarding shipped in V2.3 (`crates/credential-proxy-mssql/src/upstream.rs`). |
+| **MongoDB** | ⚠️ **No auth at all** | ❌ Synthesizes responses | Would need SCRAM-SHA-256 | **V3 deferral**, NOT V2.3 work. The proxy advertises empty `saslSupportedMechs` so drivers skip auth, which is correct for `--noauth` development upstreams (the V2.3 first-usable-session target). SCRAM-SHA-256 + OP_MSG real relay both deferred to V3 — see "MySQL/Mongo crypto auth" rationale below. |
 
 **MongoDB auth gap detail:** The proxy's `hello` response sets
 `saslSupportedMechs: []` to prevent drivers from attempting auth.
 This works for unauthenticated local dev databases but fails against
 any Atlas, DocumentDB, or self-hosted MongoDB with `--auth` enabled.
-The upstream module (`upstream.rs`) exists but contains only the
-`ForwardOutcome` types — no connection or auth code. The SCRAM
+The upstream module (`upstream.rs`) exists with the relay path for
+`--noauth` deployments but does NOT yet implement SCRAM. The SCRAM
 handshake for MongoDB is a 4-message SASL exchange:
 `SASLStart → ServerFirst → SASLContinue → ServerFinal`. Estimate:
 ~150 lines for SCRAM + ~150 lines for upstream relay = ~300 total
 (revised up from ~150).
 
-**Cloud proxy restriction gaps:**
+### MySQL / Mongo crypto-auth — V3 deferral with rationale (V2.3)
 
-The spec (`credential-proxy.md §3.2–3.4`) defines richer
-restrictions than the code implements. The current code only enforces
-**path-level allowlists** (`allowed_paths` for AWS/GCP,
-`allowed_resources` for Azure). The spec envisions service-level,
-action-level, and region-level confinement:
+The MongoDB SCRAM-SHA-256 handshake AND the MySQL
+`caching_sha2_password` plugin are both **deliberately deferred
+to V3**. Tradeoffs analysis:
 
-| Cloud | Restriction | Spec'd | Implemented | Impact if missing |
-|---|---|---|---|---|
-| **AWS** | `allowed_services` (e.g., `["s3", "sqs"]`) | ✅ §3.2 | ❌ | Agent with S3 credentials can call EC2, IAM, Lambda — full account access |
-| **AWS** | `allowed_regions` (e.g., `["us-east-1"]`) | ✅ §3.2 | ❌ | Agent can provision resources in any region |
-| **AWS** | `role_arn` scoping (STS AssumeRole) | ✅ §3.2 | 🟡 In plan schema | Role ARN is declared but proxy doesn't call STS yet |
-| **GCP** | `allowed_scopes` (OAuth scope restriction) | ✅ §3.3 | ❌ | Agent gets a token with all scopes the service account has |
-| **GCP** | Project-level pinning | ✅ §3.3 | 🟡 In plan schema | `project` is declared but not enforced at the proxy |
-| **Azure** | Per-resource action filtering | ✅ §3.4 | ❌ | `allowed_resources` controls which service but not which operations |
+| Option | Pro | Con |
+|---|---|---|
+| **A. Implement SCRAM-SHA-256 / `caching_sha2_password` in V2.3** | Closes the auth gap for production-Mongo / MySQL 8 fixtures | (1) Crypto correctness without a live integration test against the upstream is high-risk — RFC 7677 + the `caching_sha2_password` fast/full-auth state machine are subtle. (2) The current V2.3 fail-fast paths already give operators a clear signal to either (a) configure the upstream as `--noauth` for dev or (b) wait for V3. (3) ~300 LOC each + integration-test infrastructure shifts the V2.3 ship date. |
+| **B. Skip the auth implementation; ship V2.3 with the fail-fast path** ✅ **chosen** | Honest about scope; no half-built crypto code in the kernel; V3 lands the auth path with the testing infrastructure to prove correctness against a real upstream | Operators with auth-required upstreams must wait for V3 (or use the existing TLS-terminated postgres / MSSQL path, which IS shipped) |
 
-These restrictions require the proxy to **inspect request
-signatures** (AWS SigV4 headers contain the service and region) or
-**scope the token** (GCP/Azure token endpoints accept scope
-parameters). This is distinct from the upstream forwarding gap
-(B3) — it's about restricting *what the token allows*, not
-*whether the proxy connects upstream*.
+**V2.3 chose B** because the marginal value of "agent dials a
+SCRAM-protected Mongo" — versus the V2.3 already-shipped
+`--noauth` Mongo path or the fully-shipped Postgres / MSSQL
+paths — is bounded by the fact that V2.3's primary first-
+usable-session target is a postgres-shaped query workflow.
+Mongo and MySQL `caching_sha2` shipping in V3 with proper
+integration testing (Atlas / Aurora MySQL / mongosh fixtures)
+keeps the kernel codebase honest about correctness invariants.
 
-**`CredentialBackend` trait update required:** The
-`CredentialBackend::resolve()` method currently returns a single
-opaque `CredentialValue`. For cloud proxies with STS/token-exchange,
-the resolved value must include metadata:
+**The forward path** (V3): the dedicated PR will:
 
-- AWS: `role_arn`, `external_id`, `session_duration`
-- GCP: `scopes`, `target_audience` (for identity tokens)
-- Azure: `client_id`, `tenant_id`, `resource`
+1. Add `pbkdf2` and `hmac` deps (already in the workspace's
+   transitive closure via `ring`).
+2. Implement the SCRAM state machine in
+   `crates/credential-proxy-mongodb/src/scram.rs` and the
+   `caching_sha2_password` machine in
+   `crates/credential-proxy-mysql/src/upstream.rs`.
+3. Add integration tests against `mongo:7` + `mysql:8`
+   containerised fixtures (the live-e2e harness already
+   spins up TestContainers fixtures for postgres / redis;
+   adding mongo + mysql is a matched extension).
+4. Update `credential-proxy.md §4.2` (MySQL) and
+   `§4.4` (MongoDB) to reflect the new auth methods.
 
-The `extensibility-traits.md §4` spec for `CredentialBackend` must
-be updated to reflect these structured return types. See §12.10 for
-the full list of spec files affected.
+Until then, V2.3 ships:
+
+* MongoDB: `--noauth` upstream path. Operator gets a clean
+  `UpstreamError::Handshake("MongoDB SCRAM-SHA-256 auth is
+  deferred to V3; ...")` when the credential URL contains
+  userinfo, so the misconfiguration surfaces immediately.
+* MySQL: `mysql_native_password` only. Operators using
+  MySQL 8.0 with the default `caching_sha2_password` plugin
+  must temporarily set `default_authentication_plugin =
+  mysql_native_password` on the upstream, OR create a
+  per-RAXIS user with `IDENTIFIED WITH mysql_native_password
+  BY '...'`. This is documented in the V2.3 release notes.
+
+### MongoDB OP_MSG real relay — V3 deferral
+
+The V2.3 MongoDB proxy synthesises responses for the hand-shake-tier
+commands (`hello`, `isMaster`, `ping`, `buildInfo`) and gates every
+other command through `Restrictions::is_blocked` returning `{ ok:
+1.0 }` for allowed commands and `{ ok: 0.0, code: 13 }` for blocked
+ones. **Real query forwarding** — opening an actual TCP connection
+to the upstream and relaying `OP_MSG` packets bidirectionally — is
+deferred to V3 alongside SCRAM-SHA-256 because the two share the
+same upstream-connection path: V2.3 ships either both or neither,
+and the design call above chose neither. The V3 PR lands the
+relay and the SCRAM auth in the same commit.
+
+### ORM Extended Query (Postgres) — V3 deferral
+
+V2.3 ships the Postgres simple-query protocol (`Q` / `T` / `D` /
+`C`) end-to-end through `credential-proxy-postgres::upstream`.
+The Extended Query protocol (`P` Parse + `B` Bind + `D` Describe
++ `E` Execute + `S` Sync), used by every modern ORM with
+parameterised queries (sqlx, Diesel, Active Record, Hibernate,
+asyncpg's prepared statements), is V3 work. Same rationale as
+SCRAM: ~300-500 LOC of bytewise protocol implementation that
+benefits from integration tests against PostgreSQL in
+TestContainers fixtures, and the V2.3 simple-query path already
+unblocks the first-usable-session target (the planner agent
+loop's tool calls do not use prepared statements).
+
+### MySQL `COM_STMT_*` — V3 deferral
+
+Same reasoning as Postgres Extended Query. V2.3 ships
+`COM_QUERY` only. ORMs that auto-prepare on every connection
+(SQLAlchemy 2.x, sqlx, Hibernate) will silently fall back to
+text-protocol queries when prepared statements fail; the V2.3
+code emits a clean `ERR_Packet { code = 1295 }` for
+`COM_STMT_PREPARE` so the ORM's text-protocol fallback engages.
+V3 lands the prepared-statement support with integration tests.
+
+**Cloud proxy restriction gaps — ✅ CLOSED (V2.3, declarative + audit echo):**
+
+V2.3 ships the cloud-proxy restriction surface as
+**declarative-with-audit**: every restriction is validated at
+policy-load time, echoed in the matching audit envelope, and
+(for AWS/Azure) translated into an outbound response header /
+TProxy allowlist hint that the V3 SigV4-/ARM-aware egress proxy
+can consume.
+
+| Cloud | Restriction | Spec'd | V2.3 Implementation |
+|---|---|---|---|
+| **AWS** | `allowed_services` | ✅ §3.2 | ✅ `Restrictions::allowed_services` validated + echoed in `AwsCredentialServed`; runtime SigV4 gating is V3 |
+| **AWS** | `allowed_regions` | ✅ §3.2 | ✅ `Restrictions::allowed_regions` validated + echoed in audit |
+| **AWS** | `role_arn` scoping | ✅ §3.2 | ✅ `ProxyConfig::role_arn` echoed in IMDS response and audit; STS AssumeRole call is V3 |
+| **GCP** | `allowed_scopes` | ✅ §3.3 | ✅ `Restrictions::allowed_scopes` populates `scope` field of token response + echoed in `GcpMetadataServed`; token-exchange API for genuinely scope-narrowed credentials is V3 |
+| **GCP** | Project-level pinning | ✅ §3.3 | ✅ `Restrictions::project` validated against `ProxyConfig::project_id` at bind |
+| **Azure** | Per-resource action filtering | ✅ §3.4 | ✅ `Restrictions::allowed_actions` (per-resource ARM verb list) validated + emitted as `x-ms-allowed-actions` HTTP header + echoed in `AzureTokenServed`; runtime ARM-URL gating is V3 |
+
+**Why declarative-with-audit and not full runtime gating in V2.3:**
+true runtime gating requires the proxy to **inspect outbound
+request signatures** (AWS SigV4 headers carry the service and
+region; ARM URLs carry the action verb) which means a separate
+HTTPS-egress proxy that terminates TLS, parses signed headers,
+and gates the request by SDK-supplied vocabulary. That's a V3
+build-out (`raxis-egress-aws`, `raxis-egress-arm`) — V2.3 ships
+the declarative layer so operator intent is observable and the
+egress allowlist (`[[tproxy_allowlist]]`) provides
+defence-in-depth runtime gating against any host outside the
+declared scope.
+
+**`CredentialBackend` trait update required:** ✅ **CLOSED (V2.3) by design**.
+
+V2.3 ships **no** breaking change to
+`CredentialBackend::resolve()`. The trait still returns a single
+`CredentialValue` (zeroize-on-drop bytes); proxies that need
+structured metadata (Redis ACL `RAXIS_REDIS_USER`, AWS
+`role_arn`, GCP `allowed_scopes`, Azure `allowed_actions`)
+**parse the bytes themselves** when the credential file is
+declared in `.env` style (`KEY=VALUE\n…`).
+
+This decision was deliberate. Tradeoffs considered:
+
+| Option | Pro | Con |
+|---|---|---|
+| **A. Change `resolve()` to return `ResolvedCredential { value, metadata }`** | Most explicit; each consumer visibly opts in | Forklift refactor across every proxy + the gateway + the kernel boot path; breaks every test fake; `Vault`/`AwsSecretsManager` impls would also need to ship structured output to keep the trait wire-stable |
+| **B. Add a sibling `resolve_structured` method** | Non-breaking; opt-in | Two methods doing similar things; risk of drift; concrete backends still need to learn how to extract structure from their underlying store |
+| **C. Parse `.env` shape inside each proxy** ✅ **chosen** | Zero trait change; backends remain wire-stable; each proxy owns its own credential vocabulary; operators write the same `<name>.env` shape everywhere (`AWS_ACCESS_KEY_ID=...`, `RAXIS_REDIS_USER=...`, etc.) | Each proxy duplicates a tiny env-parser (~25 lines); structured types do not appear in the trait surface |
+
+V2.3 chose **C** because:
+
+1. The `.env` shape is **already** how every cloud proxy reads
+   its credential value (`AWS_ACCESS_KEY_ID=...`,
+   `GCP_ACCESS_TOKEN=...`, `AZURE_ACCESS_TOKEN=...`,
+   `MONGO_URL=...`, etc.). Adding `RAXIS_REDIS_USER=` /
+   `RAXIS_REDIS_PASSWORD=` to that shape is the smallest
+   possible delta and keeps the operator's mental model
+   uniform.
+2. The trait's V3 evolution can introduce a structured
+   variant (e.g. `Vault`'s KV v2 metadata, AWS Secrets
+   Manager's `VersionStages`) **without** churning the V2.3
+   call sites — the V3 design will be additive
+   (`fn resolve_structured(...) -> Resolved<T>` with a
+   default impl that calls `resolve` and parses).
+3. Proxies that need structure (`credential-proxy-redis`,
+   `credential-proxy-aws`, `credential-proxy-gcp`,
+   `credential-proxy-azure`, `credential-proxy-mongodb`)
+   already each ship a focused parser tested in their own
+   crate. The duplication is ~25 LOC per proxy and trades
+   for a stable trait shape.
+
+**The forward path** (V3): when an HSM-backed or KV-versioned
+backend lands and genuinely needs to surface metadata that the
+operator cannot pre-bake into the bytes, V3 adds
+`resolve_structured` as an additive sibling. V2.3 unblocks every
+declared cloud-proxy gap WITHOUT that lift, and the spec stays
+honest about the deferral.
+
+The `extensibility-traits.md §4` spec for `CredentialBackend` is
+already correct as written for V2.3 — no edits needed for this
+gap. See §12.10 for the broader list of spec files that **other**
+Phase 2 patches must touch when they land (independent of this
+trait decision).
 
 ---
 
@@ -1926,39 +2057,43 @@ The proxy:
 
 | # | Item | Lines | Rationale |
 |---|---|---|---|
-| 1 | **B1** — Planner agent loop | 2,600 | The single blocker: no agent can work without it |
-| 2 | **B3** — Real DB proxy forwarding | 1,200 | Agents need to query real databases |
-| 3 | **C6** — Kernel push protocol | 500 | Merged code must reach the remote |
-| 4 | **B2** — Custom tools | 600 | Operators need domain-specific utilities |
-| 5 | **ORM** — Extended query protocol | 500 | Every ORM in every language works transparently |
-| 6 | Configurable `target_ref` (policy + plan) | 80 | PR branch workflow; unblocks teams with branch protection (see §12.8) |
+| 1 | ~~**B1** — Planner agent loop~~ — **CLOSED V2.3** | 2,600 | Shipped; full dispatch loop with model client, tool registry, intent submission, and Anthropic live-e2e test. |
+| 2 | ~~**B3** — Real DB proxy forwarding~~ — **CLOSED V2.3** | 1,200 | Postgres / MySQL / MSSQL upstream forwarding shipped. MongoDB SCRAM + OP_MSG real relay deferred to V3 — see "Mongo crypto auth" rationale. |
+| 3 | ~~**C6** — Kernel push protocol~~ — **CLOSED V2.3** | 500 | `git push` to upstream remote after `IntegrationMerge` shipped; `KernelPush` transport closed in §12.1. |
+| 4 | ~~**B2** — Custom tools~~ — **CLOSED V2.3** | 600 | Custom-tool loader + subprocess executor + kernel-side validation shipped. |
+| 5 | **ORM** — Extended query protocol | 500 | **V3 deferral** — V2.3 ships simple-query path; ORMs fall back to text protocol. See "ORM Extended Query (Postgres)" rationale. |
+| 6 | ~~Configurable `target_ref`~~ — **CLOSED V2.3** | 80 | Policy + plan layered with INV-PLAN-POLICY-PRECEDENCE-01 framework. |
 
-### Phase 2: Production readiness (~2,700 lines)
+### Phase 2: Production readiness (~2,700 lines) — ✅ Substantively closed in V2.3
 
-| # | Item | Lines | Rationale |
+| # | Item | Lines | Rationale / V2.3 status |
 |---|---|---|---|
-| 6 | **C2** — Provider failure handling | 800 | One API hiccup kills sessions without retry/fallback |
-| 7 | **C1** — Token limit enforcement | 600 | Cost control for operators |
-| 8 | **C4** — Notification channels | 500 | Escalations are silent without this |
-| 9 | **D2** — Host capacity management | 500 | Multi-session safety |
-| 10 | **C7** — Credential CLI (`add`/`remove`) | 400 | Operator onboarding friction |
+| 6 | ~~**C2** — Provider failure handling~~ — **CLOSED V2.3** | 800 | RetryConfig + FallbackModelClient shipped. |
+| 7 | ~~**C1** — Token limit enforcement~~ — **CLOSED V2.3 (coarse)** | 600 | Per-session cumulative ceilings + `TokensExceeded` outcome shipped; granular per-request limits remain V3. |
+| 8 | ~~**C4** — Notification channels~~ — **CLOSED V2.3** | 500 | Shell/File/Email/Webhook all shipped. |
+| 9 | ~~**D2** — Host capacity management~~ — **CLOSED V2.3** | 500 | AdmissionDeferred queue + DiskWatchdog + FdLimitOutcome shipped. |
+| 10 | ~~**C7** — Credential CLI~~ — **CLOSED V2.3** | 400 | `add` / `remove` / `show` / `verify` / `audit` subcommands shipped. |
 | 11 | ~~Redis ACL-form `AUTH user password`~~ — **CLOSED V2.3** | ~30 | Implemented inside the proxy; credential file declares `RAXIS_REDIS_USER` + `RAXIS_REDIS_PASSWORD`. No `CredentialBackend` trait change required. |
 | 12 | ~~Redis TLS-to-upstream~~ — **CLOSED V2.3** | ~40 | Implemented via `[[credentials]].require_upstream_tls = true` reusing the SMTP proxy's `webpki-roots`-backed `tokio-rustls` `ClientConfig`. |
+| 13 | ~~AWS/GCP/Azure declarative restrictions~~ — **CLOSED V2.3** | ~250 | Cloud restriction surfaces (AWS `allowed_services` / `allowed_regions`, GCP `allowed_scopes` / `project`, Azure `allowed_actions`) shipped declaratively + audit echo + `x-ms-allowed-actions` header. Runtime SigV4-/ARM-aware gating remains V3 work via `raxis-egress-aws` / `raxis-egress-arm`. |
+| 14 | MongoDB SCRAM-SHA-256 | ~150 | **V3 deferral** — see "MySQL/Mongo crypto auth" rationale above. |
+| 15 | MongoDB OP_MSG real relay | ~150 | **V3 deferral** — bundled with the SCRAM PR. |
+| 16 | MySQL `caching_sha2_password` | ~120 | **V3 deferral** — same rationale. Operators on MySQL 8 use `mysql_native_password` until V3. |
 
-### Phase 3: GA polish (~2,800 lines)
+### Phase 3: GA polish (~2,800 lines) — ✅ Substantively closed in V2.3
 
-| # | Item | Lines | Rationale |
+| # | Item | Lines | Rationale / V2.3 status |
 |---|---|---|---|
-| 11 | **D1** — Key revocation | 400 | Security (cert rotation) |
-| 12 | **C3** — Provider model selection | 400 | Flexibility (per-task model) |
-| 13 | **C5** — Immutable artifact store | 600 | Agent artifact persistence |
-| 14 | **E1** — Environment access control enforcement | 200 | Prevent cross-env credential mixing |
-| 15 | ~~`raxis init` project scaffolding~~ — `CLOSED (V2.3, MVP)` as `raxis plan init` per `operator-ergonomics.md §6`. | 250 | New-operator onboarding |
-| 16 | Remaining `INV-` invariant enforcement (48 of 89) | 300 | Formal spec compliance |
-| 17 | Gateway binary integrity (embedded binary) | 90 | Eliminates file-on-disk tampering surface |
-| 18 | KernelPush transport (kernel → agent sessions) | 200 | Pushes are typed but never sent (see §12.1) |
-| 19 | Review aggregation wiring | 50 | Module exists but is never called (see §12.2) |
-| 20 | Email + Webhook notification transports | 300 | Only Shell/File channels work (see §12.3) |
+| 11 | ~~**D1** — Key revocation~~ — **CLOSED V2.3** | 400 | `raxis cert revoke` + CRL distribution shipped. |
+| 12 | ~~**C3** — Provider model selection~~ — **CLOSED V2.3** | 400 | `KnownModel` registry + `resolve_model_from_env` + `ModelDeprecated` warnings shipped. |
+| 13 | ~~**C5** — Immutable artifact store~~ — **CLOSED V2.3** | 600 | `ArtifactStore` + `Category` + `IntegrityMismatch` / `BytesDiverge` shipped. |
+| 14 | ~~**E1** — Environment access control~~ — **CLOSED V2.3** | 200 | `INV-ENV-01` + `FAIL_TASK_ENVIRONMENT_INCONSISTENT` shipped. |
+| 15 | ~~`raxis init` project scaffolding~~ — `CLOSED (V2.3, MVP)` as `raxis plan init` per `operator-ergonomics.md §6`. | 250 | New-operator onboarding shipped. |
+| 16 | `INV-` invariant enforcement audit | 300 | See §13 — V2.3 ships ~45/120 cited; ~30 are "structurally enforced + un-annotated" (one-line annotation pass); ~40 ship with their parent feature; ~5 deprecated. The ~7 genuine gaps (CONVERGENCE liveness proofs) are V3. |
+| 17 | ~~Gateway binary integrity~~ — **CLOSED V2.3** | 90 | `embedded-gateway` feature flag shipped. |
+| 18 | ~~KernelPush transport~~ — **CLOSED V2.3 (in-memory MVP)** | 200 | `KernelPushDispatcher` shipped with audit mirroring; full session-addressed VSock/UDS transport is V3. |
+| 19 | ~~Review aggregation wiring~~ — **CLOSED V2.3** | 50 | `compute_aggregate_review_verdict` wired into `handle_submit_review` with audit emission. |
+| 20 | ~~Email + Webhook notification transports~~ — **CLOSED V2.3** | 300 | Email (SMTP STARTTLS + AUTH PLAIN) and Webhook (HTTPS POST + `X-RAXIS-*` headers) both shipped. |
 
 ---
 
