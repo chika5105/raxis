@@ -208,10 +208,26 @@ impl Tool for SubprocessTool {
             ))),
         };
         if !out.status.success() {
+            let exit_info = match out.status.code() {
+                Some(code) => format!("exit code {code}"),
+                None => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::process::ExitStatusExt;
+                        match out.status.signal() {
+                            Some(sig) => format!("killed by signal {sig}"),
+                            None      => "unknown exit status".to_owned(),
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        "unknown exit status".to_owned()
+                    }
+                }
+            };
             return Ok(ToolOutput::err(format!(
-                "{name}: exit {code:?}\nstderr:\n{stderr}",
+                "{name}: {exit_info}\nstderr:\n{stderr}",
                 name   = self.name,
-                code   = out.status.code(),
                 stderr = String::from_utf8_lossy(&out.stderr),
             )));
         }
@@ -424,7 +440,8 @@ mod tests {
         let ctx  = ToolContext::for_workspace(ws.path());
         let out  = tool.execute(&serde_json::json!({}), &ctx).await.unwrap();
         assert_eq!(out.is_error, Some(true));
-        assert!(out.content.contains("exit Some(7)"));
+        assert!(out.content.contains("exit code 7"),
+            "expected 'exit code 7' in output, got: {}", out.content);
         assert!(out.content.contains("oh no"));
     }
 }
