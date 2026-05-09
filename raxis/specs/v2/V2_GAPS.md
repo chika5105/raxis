@@ -1465,15 +1465,99 @@ V2.3 ships the **admission-time operator-certificate revocation MVP**:
   admission time, but in-flight tasks ride out their commitments
   until kernel restart — hardened in V3.
 
-### D2: Host Capacity Management
+### D2: Host Capacity Management — **CLOSED (V2.3, MVP)**
 
 **Spec:** `host-capacity.md` (79KB)
-**Estimate:** ~500 lines
+**Estimate:** ~500 lines (V2 MVP delivered ~700 lines incl. tests)
 
-`MaxConcurrentVms` referenced in policy bundle. Session-spawn
-orchestrator notes "deferred to follow-up." Missing:
-`AdmissionDeferred` queue (spec §4.2), capacity probe at spawn time,
-VM count enforcement, resource reservation lifecycle.
+V2.3 ships the **cap-enforcement + watchdog MVP** of host capacity:
+
+* **Policy** (`crates/policy/src/bundle.rs`): new
+  `[host_capacity]` parser — `max_concurrent_vms` (default 16),
+  `min_free_disk_mb` (default 5120), `disk_full_behavior` (V2
+  accepts only `"halt_admit"`), `required_min_fd_limit` (default
+  4096, ≥ 1024 hard floor), `admission_queue_depth` (default 64),
+  optional `disk_root` override. Effective config is exposed via
+  `PolicyBundle::host_capacity() -> &HostCapacityConfig`.
+* **Errors** (`crates/types/src/error.rs`): new
+  `PlannerErrorCode::FailVmConcurrencyAtCap` and
+  `PlannerErrorCode::FailDiskFull`. Both retryable.
+* **Capacity module** (`kernel/src/capacity/`):
+  * `vm_admission` — `check_vm_concurrency_cap(running, cap)`
+    returns `AdmissionDecision::{Allow, Deferred}`. INV-CAPACITY-01
+    pure-function helper.
+  * `fd_limit` — `check_fd_limit_at_boot(required)` reads
+    `RLIMIT_NOFILE`; returns `FdLimitOutcome::{Ok, Insufficient,
+    Unknown}`. Insufficient is fatal at boot.
+  * `disk_watchdog` — atomic `DiskState` (`Pending → Healthy ↔
+    Halted`) updated by a 5-second tokio task that polls
+    `statvfs(disk_root)`. Emits `DiskFullHaltEntered` on the
+    Healthy → Halted transition and `DiskHealthyAfterFull` on the
+    reverse, plus an `OperatorAttentionRequired { attention_kind:
+    "DiskFull" }` companion. Tolerates `statvfs` failure
+    (transient unmount → log + skip; never crashes the kernel).
+  * `refuse_if_disk_full(watchdog) -> Result<(), ()>` helper for
+    write-class intent handlers.
+* **Boot** (`kernel/src/main.rs`):
+  * Boot-time FD limit check. Insufficient FDs exit with the new
+    `BOOT_ERR_HOST_CAPACITY` (code 18).
+  * Disk-full watchdog spawned just after the audit sink opens,
+    polling the operator-configured `disk_root` (defaults to
+    `data_dir`).
+* **Handler integration** (`kernel/src/handlers/intent.rs`):
+  `handle_activate_sub_task` now performs both Step 1.4
+  (refuse-if-disk-full) and Step 1.5 (VM concurrency cap) BEFORE
+  inserting the new session row. Both decisions emit the
+  appropriate audit event and surface a typed
+  `PlannerErrorCode` to the caller.
+* **HandlerContext** (`kernel/src/ipc/context.rs`): new
+  `disk_watchdog: Option<Arc<DiskWatchdog>>` field with a
+  fluent `with_disk_watchdog` setter. Production wires it; tests
+  default to `None` (treated as "always healthy").
+* **Audit** (`crates/audit/src/event.rs`,
+  `crates/policy/src/bundle.rs`): new variants
+  `AdmissionDeferredAtCap`, `AdmissionQueueFull`,
+  `DiskFullHaltEntered`, `DiskHealthyAfterFull`,
+  `OperatorAttentionRequired { attention_kind, details }`.
+  All five are present in `KNOWN_AUDIT_EVENT_KINDS` and the
+  drift-guard fixture. `OperatorAttentionRequired` uses
+  `attention_kind` (not `kind`) because the audit-event enum
+  already reserves `kind` as the variant discriminator.
+
+**V2 MVP scope decisions (deferred to V3):**
+
+* **No persistent admission queue.** V2 returns
+  `FAIL_VM_CONCURRENCY_AT_CAP` immediately rather than queueing
+  with `sessions.state = 'Queued'`. V3 will add the full queue
+  with `queued_at`, drain-on-terminate, and round-robin
+  fairness (host-capacity.md §9, §10).
+* **Single cap kind enforced.** V2 ships only the
+  `max_concurrent_vms` cap; aggregate VM memory cap
+  (`max_aggregate_vm_memory_mb`) and per-initiative cap
+  (`max_per_initiative_concurrent_vms`) are V3.
+* **Single disk-full behavior.** Only `halt_admit` is wired;
+  `gc_then_retry` (immutable artifact GC + VACUUM) and
+  `halt_all` are V3 (host-capacity.md §7.2).
+* **No per-operator queue caps.** The default
+  (`admission_queue_per_operator_default`) and the
+  `[[host_capacity.operator_quota_overrides]]` machinery are
+  V3 (host-capacity.md §10.2).
+* **No WAL pressure / VACUUM scheduling.** WAL is left at
+  SQLite defaults; the periodic checkpoint trigger from
+  host-capacity.md §11 is V3.
+* **No worktree quota soft enforcement.** The 30-second `du`
+  scan and `KernelPush::DiskQuotaWarning` /
+  `KernelPush::DiskQuotaExceeded` flow (host-capacity.md §6.1)
+  is V3.
+* **No audit reserve / total-halt mode.** The
+  `audit_reserved_mb` budget and the `AuditWriteImpossible`
+  total-halt response (host-capacity.md §7.5–§7.6) are V3.
+
+The V2 surface delivers the highest-impact safety properties
+(strict VM cap → kernel survives host OOM; FD floor → kernel
+survives per-VM FD growth; disk watchdog with audit visibility →
+operator can size disk before catastrophic failure) without the
+operational complexity of full queueing.
 
 ---
 

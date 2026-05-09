@@ -136,6 +136,104 @@ pub(crate) struct RawPolicy {
     /// `target_ref_locked = false`). See `V2_GAPS.md §12.8`.
     #[serde(default)]
     pub(crate) git: Option<GitSection>,
+
+    /// `[host_capacity]` — V2_GAPS §D2 host-capacity caps and
+    /// watchdog config. **Optional**: omitted section means
+    /// "kernel uses the spec defaults" (16 concurrent VMs, 5 GiB
+    /// disk headroom, 4096 FD floor, halt_admit behavior). The
+    /// V2 MVP only enforces a subset of the full
+    /// `host-capacity.md` surface; see [`HostCapacityConfig`].
+    #[serde(default)]
+    pub(crate) host_capacity: Option<HostCapacitySection>,
+}
+
+/// `[host_capacity]` — operator-side host-capacity configuration.
+/// V2 MVP scope per `V2_GAPS.md §D2`: the kernel enforces strict
+/// VM concurrency caps, polls free disk every 5 seconds, and
+/// refuses to boot when the FD limit is below floor. Memory caps,
+/// per-initiative caps, round-robin fairness, per-operator queue
+/// overrides, WAL pressure, and audit-reserve tracking are
+/// deferred to V3.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct HostCapacitySection {
+    /// Maximum number of microVMs that can be active at once
+    /// (`host-capacity.md §4`). Default 16.
+    #[serde(default)]
+    pub(crate) max_concurrent_vms: Option<u32>,
+
+    /// Free-disk floor in MiB. Below this the watchdog enters
+    /// `DiskFullHalt` and refuses new write-class admissions
+    /// (`host-capacity.md §7.1`). Default 5120 (5 GiB).
+    #[serde(default)]
+    pub(crate) min_free_disk_mb: Option<u64>,
+
+    /// Behavior on disk full. V2 only accepts `"halt_admit"`;
+    /// `"gc_then_retry"` and `"halt_all"` parse but produce a
+    /// validation error (`FAIL_HOST_CAPACITY_BEHAVIOR_V3_ONLY`)
+    /// because their machinery is V3.
+    #[serde(default)]
+    pub(crate) disk_full_behavior: Option<String>,
+
+    /// FD-limit floor checked at kernel boot
+    /// (`host-capacity.md §12.1`). Default 4096; values below
+    /// 1024 are rejected at policy load.
+    #[serde(default)]
+    pub(crate) required_min_fd_limit: Option<u32>,
+
+    /// Global admission-queue depth — the V2 MVP rejects beyond
+    /// this with `FAIL_ADMISSION_QUEUE_FULL` (the queue itself
+    /// is V3; V2 returns the cap immediately so the operator
+    /// can size). Default 64.
+    #[serde(default)]
+    pub(crate) admission_queue_depth: Option<u32>,
+
+    /// `disk_root` — the path the watchdog statvfs's. Defaults
+    /// to the kernel's data directory if omitted. The kernel
+    /// resolves it at boot via `HostCapacityConfig::disk_root`.
+    #[serde(default)]
+    pub(crate) disk_root: Option<String>,
+}
+
+/// V2 effective host-capacity config. Mirrors the policy-side
+/// `HostCapacitySection` but with every field resolved to a
+/// concrete value (defaults applied) and validated. Read by the
+/// kernel at intent admission and at the disk-watchdog poll.
+#[derive(Debug, Clone)]
+pub struct HostCapacityConfig {
+    /// Strict cap — enforced at admission per
+    /// `host-capacity.md §4.2`. INV-CAPACITY-01.
+    pub max_concurrent_vms: u32,
+
+    /// Free-disk floor in MiB (`host-capacity.md §7.1`).
+    /// INV-CAPACITY-02.
+    pub min_free_disk_mb: u64,
+
+    /// Always `"halt_admit"` in V2.
+    pub disk_full_behavior: String,
+
+    /// Boot-time FD limit floor (`host-capacity.md §12.1`).
+    pub required_min_fd_limit: u32,
+
+    /// V2 MVP admission cap (no real queue; rejection beyond is
+    /// `FAIL_ADMISSION_QUEUE_FULL`).
+    pub admission_queue_depth: u32,
+
+    /// Optional override for the path the watchdog polls. When
+    /// `None`, the kernel uses its `data_dir`.
+    pub disk_root: Option<String>,
+}
+
+impl Default for HostCapacityConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_vms:    16,
+            min_free_disk_mb:      5120,
+            disk_full_behavior:    "halt_admit".to_owned(),
+            required_min_fd_limit: 4096,
+            admission_queue_depth: 64,
+            disk_root:             None,
+        }
+    }
 }
 
 /// `[git]` — operator default + lock for the per-initiative
@@ -1311,6 +1409,10 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "CredentialRegistered", "CredentialRemoved", "CredentialVerified",
     // V2_GAPS §D1 — operator-cert revocation ceremony events
     "OperatorCertRevoked", "OperatorCertRevokedOpDenied",
+    // V2_GAPS §D2 — host-capacity admission + watchdogs
+    "AdmissionDeferredAtCap", "AdmissionQueueFull",
+    "DiskFullHaltEntered", "DiskHealthyAfterFull",
+    "OperatorAttentionRequired",
 ];
 
 /// Validate the raw `[notifications]` section and produce the final
@@ -1762,6 +1864,96 @@ pub fn parse_verifier_timeout_secs(s: &str) -> Option<u64> {
     n.checked_mul(unit)
 }
 
+/// V2_GAPS §D2 — validate `[host_capacity]` and produce the
+/// effective `HostCapacityConfig`. Defaults apply for any field
+/// the operator omits (or for the whole section). V2 only
+/// accepts `disk_full_behavior = "halt_admit"`; the other two
+/// variants from the spec are V3.
+fn validate_host_capacity_section(
+    raw: &Option<HostCapacitySection>,
+) -> Result<HostCapacityConfig, PolicyError> {
+    let mut cfg = HostCapacityConfig::default();
+    let Some(s) = raw else { return Ok(cfg); };
+
+    if let Some(v) = s.max_concurrent_vms {
+        if v == 0 {
+            return Err(PolicyError::MalformedArtifact(
+                "FAIL_HOST_CAPACITY_INVALID: \
+                 [host_capacity] max_concurrent_vms must be ≥ 1 \
+                 (host-capacity.md §4)".to_owned(),
+            ));
+        }
+        cfg.max_concurrent_vms = v;
+    }
+
+    if let Some(v) = s.min_free_disk_mb {
+        cfg.min_free_disk_mb = v;
+    }
+
+    if let Some(b) = s.disk_full_behavior.as_deref() {
+        match b {
+            "halt_admit" => cfg.disk_full_behavior = "halt_admit".to_owned(),
+            "gc_then_retry" | "halt_all" => {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_HOST_CAPACITY_BEHAVIOR_V3_ONLY: \
+                     [host_capacity] disk_full_behavior = {b:?} is V3-only; \
+                     V2 ships only \"halt_admit\" (host-capacity.md §7.2; \
+                     V2_GAPS.md §D2)"
+                )));
+            }
+            other => {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_HOST_CAPACITY_INVALID: \
+                     [host_capacity] disk_full_behavior must be \"halt_admit\" \
+                     in V2; got {other:?}"
+                )));
+            }
+        }
+    }
+
+    if let Some(v) = s.required_min_fd_limit {
+        if v < 1024 {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_HOST_CAPACITY_INVALID: \
+                 [host_capacity] required_min_fd_limit = {v} is below the \
+                 hard floor of 1024 (host-capacity.md §12.1)"
+            )));
+        }
+        cfg.required_min_fd_limit = v;
+    }
+
+    if let Some(v) = s.admission_queue_depth {
+        if v == 0 {
+            return Err(PolicyError::MalformedArtifact(
+                "FAIL_HOST_CAPACITY_INVALID: \
+                 [host_capacity] admission_queue_depth must be ≥ 1".to_owned(),
+            ));
+        }
+        cfg.admission_queue_depth = v;
+    }
+
+    if let Some(d) = s.disk_root.as_deref() {
+        let trimmed = d.trim();
+        if trimmed.is_empty() {
+            return Err(PolicyError::MalformedArtifact(
+                "FAIL_HOST_CAPACITY_INVALID: \
+                 [host_capacity] disk_root must be a non-empty path \
+                 when present".to_owned(),
+            ));
+        }
+        if !std::path::Path::new(trimmed).is_absolute() {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_HOST_CAPACITY_INVALID: \
+                 [host_capacity] disk_root = {trimmed:?} must be an \
+                 absolute path"
+            )));
+        }
+        cfg.disk_root = Some(trimmed.to_owned());
+    }
+
+    Ok(cfg)
+}
+
 fn validate_notifications(
     raw: &NotificationsSection,
 ) -> Result<
@@ -2035,6 +2227,11 @@ pub struct PolicyBundle {
     ///
     /// [`git_auto_push`]: PolicyBundle::git_auto_push
     git_push_remote: String,
+
+    /// V2_GAPS §D2 — host-capacity caps and watchdog config.
+    /// Always populated; spec defaults apply when the operator
+    /// omits `[host_capacity]` from `policy.toml`.
+    host_capacity: HostCapacityConfig,
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -2327,6 +2524,7 @@ impl PolicyBundle {
                 .as_ref()
                 .map(|g| g.target_ref_locked)
                 .unwrap_or(false),
+            host_capacity: validate_host_capacity_section(&raw.host_capacity)?,
         })
     }
 
@@ -2392,6 +2590,13 @@ impl PolicyBundle {
     /// [`git_push_remote`]: PolicyBundle::git_push_remote
     pub fn git_auto_push(&self) -> bool {
         self.git_auto_push
+    }
+
+    /// V2_GAPS §D2 — host-capacity caps and watchdog config.
+    /// Always populated; spec defaults apply when the operator
+    /// omits `[host_capacity]`.
+    pub fn host_capacity(&self) -> &HostCapacityConfig {
+        &self.host_capacity
     }
 
     /// V2_GAPS §C6 — operator-side `[git] push_remote`. Empty string
@@ -2538,6 +2743,7 @@ impl PolicyBundle {
             git_target_ref_locked: false,
             git_auto_push:          false,
             git_push_remote:        String::new(),
+            host_capacity:          HostCapacityConfig::default(),
         }
     }
 
@@ -3070,6 +3276,7 @@ mod tests {
             git_target_ref_locked: false,
             git_auto_push:          false,
             git_push_remote:        String::new(),
+            host_capacity:          HostCapacityConfig::default(),
         }
     }
 
@@ -4176,6 +4383,33 @@ channels   = []
                 op:                 "x".into(),
                 reason:             "Rotation".into(),
                 revoked_at:         0,
+            }.as_str(),
+            // V2_GAPS §D2 — host-capacity admission + watchdogs.
+            AuditEventKind::AdmissionDeferredAtCap {
+                cap_kind:        "VmCount".into(),
+                current_running: 0,
+                cap:             0,
+                initiative_id:   None,
+                task_id:         None,
+            }.as_str(),
+            AuditEventKind::AdmissionQueueFull {
+                intent_kind:        "x".into(),
+                operator:           None,
+                rejected_at_depth:  0,
+            }.as_str(),
+            AuditEventKind::DiskFullHaltEntered {
+                free_mb:  0,
+                cap_mb:   0,
+                behavior: "halt_admit".into(),
+            }.as_str(),
+            AuditEventKind::DiskHealthyAfterFull {
+                previous_free_mb:      0,
+                current_free_mb:       0,
+                halt_duration_seconds: 0,
+            }.as_str(),
+            AuditEventKind::OperatorAttentionRequired {
+                attention_kind: "DiskFull".into(),
+                details:        "x".into(),
             }.as_str(),
         ];
 

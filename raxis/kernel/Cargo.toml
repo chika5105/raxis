@@ -114,6 +114,12 @@ rustls-pki-types = "1"
 webpki-roots    = "1"
 base64          = "0.22"
 
+# V2_GAPS §D2 host-capacity — `getrlimit` (FD-floor check) and
+# `statvfs` (disk watchdog). The wider workspace already pulls
+# libc transitively; pinning it here makes the dependency
+# explicit so the kernel is self-contained.
+libc            = "0.2"
+
 # Concrete isolation substrates — platform-gated. The kernel's
 # `select_isolation_backend` (`isolation_select.rs`) builds the
 # correct one at boot per `extensibility-traits.md §3.8`.
@@ -129,7 +135,3 @@ tempfile    = "3"
 # stay in `[dev-dependencies]`, never `[dependencies]` (per
 # `raxis-test-support` crate-level docs).
 raxis-test-support = { path = "../crates/test-support" }
-# Dev-only — used by `kernel/tests/kernel_signal_shutdown.rs` to deliver
-# SIGTERM via `libc::kill`. Not used by production kernel code (Tokio
-# `signal::unix::signal` wraps libc internally already).
-libc        = "0.2"

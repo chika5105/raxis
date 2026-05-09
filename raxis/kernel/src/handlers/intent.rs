@@ -1762,6 +1762,65 @@ async fn handle_activate_sub_task(
         }
     }
 
+    // ── Step 1.4: V2_GAPS §D2 — disk-full watchdog gate. ───────────────
+    //
+    // INV-CAPACITY-02 (`host-capacity.md §7.1`): refuse new
+    // write-class admissions when the watchdog has flipped to
+    // `Halted` (free space < `[host_capacity] min_free_disk_mb`).
+    // Spawning a microVM is the most disk-intensive admission path
+    // in the kernel — a SubTask activation provisions a worktree,
+    // a credential proxy state file, and a substrate VM image
+    // copy-on-write base — so we want this fence as early in the
+    // path as possible.
+    if crate::capacity::refuse_if_disk_full(
+        ctx.disk_watchdog.as_deref(),
+    ).is_err() {
+        return Err((PlannerErrorCode::FailDiskFull, TaskState::Admitted));
+    }
+
+    // ── Step 1.5: V2_GAPS §D2 — pre-admission cap check. ───────────────
+    //
+    // INV-CAPACITY-01 (`host-capacity.md §4.2`): refuse to spawn
+    // another microVM if the strict `[host_capacity]
+    // max_concurrent_vms` would be exceeded. The check is stateless;
+    // it consults the `SessionSpawnService::active_count` (in-memory
+    // table of live `Box<dyn IsolationSession>` handles) and the
+    // policy-resolved cap.
+    //
+    // The decision is made BEFORE Step 2 so we never insert a
+    // session row that needs to be revoked when we hit cap. V2
+    // surfaces the rejection as `FAIL_VM_CONCURRENCY_AT_CAP` and
+    // emits `AdmissionDeferredAtCap`. The agent retries by
+    // re-issuing `ActivateSubTask` after the kernel signals
+    // capacity availability (V3 will deliver
+    // `KernelPush::CapacityFreed`; V2 expects polling).
+    {
+        let policy_snapshot = ctx.policy.load();
+        let cap = policy_snapshot.host_capacity().max_concurrent_vms;
+        let running = u32::try_from(ctx.session_spawn.active_count().await)
+            .unwrap_or(u32::MAX);
+        if let crate::capacity::AdmissionDecision::Deferred {
+            reason, current_running, cap: observed_cap,
+        } = crate::capacity::check_vm_concurrency_cap(running, cap) {
+            let _ = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::AdmissionDeferredAtCap {
+                    cap_kind:        reason.cap_kind().to_owned(),
+                    current_running,
+                    cap:             observed_cap,
+                    initiative_id:   None,
+                    task_id:         Some(req.task_id.as_str().to_owned()),
+                },
+                Some(session_id.as_str()),
+                Some(req.task_id.as_str()),
+                None,
+            );
+            return Err((
+                PlannerErrorCode::FailVmConcurrencyAtCap,
+                TaskState::Admitted,
+            ));
+        }
+    }
+
     // ── Step 2: activation-row + task lookup; mint session row. ────────
     //
     // We do steps 2a (read activation row), 2b (read task agent type

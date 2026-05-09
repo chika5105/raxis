@@ -1287,6 +1287,79 @@ pub enum AuditEventKind {
         revoked_at:         i64,
     },
 
+    // ── V2_GAPS §D2 — host-capacity admission + watchdogs ──────────────
+    //
+    // V2 ships the *cap-enforcement* slice of `host-capacity.md` plus a
+    // basic disk-full watchdog. The full admission queue with `Queued`
+    // session state, round-robin fairness, per-operator overrides, and
+    // WAL pressure monitoring is deferred to V3 (see
+    // `V2_GAPS.md §D2`).
+
+    /// Emitted when an `ActivateSubTask` (or first-task spawn) is
+    /// refused because a host-capacity cap would be exceeded. V2
+    /// returns `FAIL_VM_CONCURRENCY_AT_CAP` to the caller; the
+    /// in-flight work continues, and the agent is expected to retry
+    /// after the kernel signals capacity availability.
+    ///
+    /// `cap_kind` is one of `"VmCount"`, `"VmMemory"`,
+    /// `"PerInitiativeVm"`. V2 only emits `"VmCount"`; the other
+    /// variants are reserved for V3's full admission queue.
+    AdmissionDeferredAtCap {
+        /// Cap that fired (`"VmCount"`, `"VmMemory"`, …).
+        cap_kind:        String,
+        /// `running` count at the moment of the decision.
+        current_running: u32,
+        /// The cap configured in `policy.toml [host_capacity]`.
+        cap:             u32,
+        /// Optional initiative the deferred sub-task belongs to.
+        initiative_id:   Option<String>,
+        /// Optional task id the deferral applies to.
+        task_id:         Option<String>,
+    },
+
+    /// Emitted when the global admission queue is at depth and a
+    /// new intent must be rejected outright. V2 uses this when
+    /// `admission_queue_depth` is exhausted (see
+    /// `host-capacity.md §10.1`).
+    AdmissionQueueFull {
+        intent_kind:        String,
+        operator:           Option<String>,
+        rejected_at_depth:  u32,
+    },
+
+    /// Emitted when the disk-full watchdog (5-second poll on
+    /// `statvfs(disk_root)`) transitions from `DiskHealthy` to
+    /// `DiskFullHalt`. V2 only implements `disk_full_behavior =
+    /// "halt_admit"`; `gc_then_retry` and `halt_all` are V3.
+    DiskFullHaltEntered {
+        free_mb:  u64,
+        cap_mb:   u64,
+        behavior: String,
+    },
+
+    /// Emitted when the disk-full watchdog transitions from
+    /// `DiskFullHalt` back to `DiskHealthy`. Records how long the
+    /// halt lasted so operators can size disk capacity from the
+    /// audit trail.
+    DiskHealthyAfterFull {
+        previous_free_mb:      u64,
+        current_free_mb:       u64,
+        halt_duration_seconds: u64,
+    },
+
+    /// Emitted when the kernel needs an operator to take action
+    /// (disk pressure, FD limit insufficient, initiative
+    /// starvation, …). `attention_kind` is a free-form short
+    /// string for V2 (`"DiskFull"`, `"FdLimitInsufficient"`,
+    /// `"InitiativeStarvation"`, …); future invariants may pin
+    /// specific values per `host-capacity.md §13`. The field is
+    /// not named `kind` because the audit-event enum already uses
+    /// `#[serde(tag = "kind")]` for its variant discriminator.
+    OperatorAttentionRequired {
+        attention_kind: String,
+        details:        String,
+    },
+
     /// V2_GAPS §C7 — emitted when `raxis credential verify` runs.
     /// V2 verification is structural-only (file presence, mode 0600,
     /// uid match, non-empty body, optional `KEY=VALUE` parse).
@@ -1793,6 +1866,11 @@ impl AuditEventKind {
             Self::CredentialVerified { .. } => "CredentialVerified",
             Self::OperatorCertRevoked { .. } => "OperatorCertRevoked",
             Self::OperatorCertRevokedOpDenied { .. } => "OperatorCertRevokedOpDenied",
+            Self::AdmissionDeferredAtCap { .. } => "AdmissionDeferredAtCap",
+            Self::AdmissionQueueFull { .. } => "AdmissionQueueFull",
+            Self::DiskFullHaltEntered { .. } => "DiskFullHaltEntered",
+            Self::DiskHealthyAfterFull { .. } => "DiskHealthyAfterFull",
+            Self::OperatorAttentionRequired { .. } => "OperatorAttentionRequired",
             Self::TransparentProxyAdmitted { .. } => "TransparentProxyAdmitted",
             Self::TransparentProxyDenied { .. } => "TransparentProxyDenied",
             Self::CredentialProxyStarted { .. } => "CredentialProxyStarted",

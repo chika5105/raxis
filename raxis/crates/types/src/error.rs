@@ -111,6 +111,27 @@ pub enum PlannerErrorCode {
     /// Retryable. v2-deep-spec.md §Step 21.
     #[serde(rename = "DEPENDENCY_NOT_MET")]
     DependencyNotMet,
+
+    /// **V2_GAPS §D2 — host-capacity admission cap.** The kernel
+    /// refuses to spawn another microVM because
+    /// `running_vm_count >= [host_capacity] max_concurrent_vms`
+    /// (`host-capacity.md §4.2`). Retryable: the agent should
+    /// resubmit `ActivateSubTask` after observing capacity
+    /// availability. V3 will deliver `KernelPush::CapacityFreed`
+    /// proactively; V2 expects the planner to poll.
+    #[serde(rename = "FAIL_VM_CONCURRENCY_AT_CAP")]
+    FailVmConcurrencyAtCap,
+
+    /// **V2_GAPS §D2 — disk pressure halt.** A write-class intent
+    /// arrived while the disk-full watchdog was in `Halted` state
+    /// (free space below `[host_capacity] min_free_disk_mb`).
+    /// `disk_full_behavior = "halt_admit"` (V2 default) refuses
+    /// the intent at admission. Retryable: the operator must
+    /// expand disk or wait for natural drain; the watchdog
+    /// re-polls every 5 seconds and re-admits when free space
+    /// recovers (`host-capacity.md §7.1`, INV-CAPACITY-02).
+    #[serde(rename = "FAIL_DISK_FULL")]
+    FailDiskFull,
 }
 
 impl PlannerErrorCode {
@@ -146,6 +167,8 @@ impl fmt::Display for PlannerErrorCode {
             Self::FailApprovalTokenInvalid => "FAIL_APPROVAL_TOKEN_INVALID",
             Self::FailInitiativeQuarantined => "FAIL_INITIATIVE_QUARANTINED",
             Self::DependencyNotMet => "DEPENDENCY_NOT_MET",
+            Self::FailVmConcurrencyAtCap => "FAIL_VM_CONCURRENCY_AT_CAP",
+            Self::FailDiskFull => "FAIL_DISK_FULL",
         };
         f.write_str(s)
     }

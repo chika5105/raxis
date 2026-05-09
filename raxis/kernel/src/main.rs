@@ -20,6 +20,7 @@ mod errors;
 mod bootstrap;
 mod authority;
 mod canonical_images_preflight;
+mod capacity;
 mod ipc;
 mod recovery;
 mod initiatives;
@@ -107,6 +108,41 @@ async fn main() {
     // (kernel-core.md §`policy_manager.rs`). Every reader goes through
     // `policy.load()` which is wait-free.
     let policy_epoch_at_boot = policy.epoch();
+    // V2_GAPS §D2 — boot-time FD limit check (host-capacity.md §12.1).
+    //
+    // The check runs BEFORE we wrap the policy in `ArcSwap` so we can
+    // touch `policy.host_capacity()` directly without going through
+    // a snapshot. Refusing to boot here is far cheaper than letting
+    // the kernel start and discover the floor breach when the 17th
+    // microVM tries (and fails) to grab a FD.
+    {
+        let cap = policy.host_capacity();
+        match capacity::check_fd_limit_at_boot(cap.required_min_fd_limit) {
+            capacity::FdLimitOutcome::Ok { current_soft, required } => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"FdLimitCheckOk\",\
+                     \"current_soft\":{current_soft},\"required\":{required}}}",
+                );
+            }
+            capacity::FdLimitOutcome::Insufficient { current_soft, required } => {
+                exit_with_code(KernelError::HostCapacity {
+                    reason: format!(
+                        "FAIL_INSUFFICIENT_FD_LIMIT: RLIMIT_NOFILE soft \
+                         limit {current_soft} is below floor {required}; \
+                         raise via service manager (`LimitNOFILE=` for \
+                         systemd) or `ulimit -n` before launching \
+                         (host-capacity.md §12.1)"
+                    ),
+                });
+            }
+            capacity::FdLimitOutcome::Unknown => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"FdLimitCheckUnknown\",\
+                     \"message\":\"getrlimit unavailable; skipping FD floor check\"}}",
+                );
+            }
+        }
+    }
     let policy: Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>> =
         Arc::new(arc_swap::ArcSwap::from_pointee(policy));
     eprintln!(
@@ -271,6 +307,29 @@ async fn main() {
             "{{\"level\":\"error\",\"event\":\"KernelStarted\",\"audit_emit_failed\":\"{e}\"}}"
         );
     }
+
+    // Step 8a': V2_GAPS §D2 — start the disk-full watchdog. The
+    // watchdog polls `statvfs(disk_root)` every 5 seconds and
+    // updates an atomic `DiskState` read by every write-class
+    // intent handler. V2 ships only `halt_admit` behavior; the
+    // watchdog therefore only flips the atomic state and emits
+    // transition audit events — actual `FAIL_DISK_FULL` rejection
+    // is handled by the intent handlers consulting
+    // `DiskWatchdog::is_full()`. (Operators using V2 must size
+    // disk capacity explicitly; the watchdog does not GC.)
+    let disk_watchdog = {
+        let cap = policy.load().host_capacity().clone();
+        let root = cap.disk_root.clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| data_dir.clone());
+        let w = capacity::DiskWatchdog::new(
+            root,
+            cap.min_free_disk_mb,
+            cap.disk_full_behavior.clone(),
+        );
+        w.spawn(Arc::clone(&audit));
+        Arc::new(w)
+    };
 
     // Step 8b: V2 canonical-image digest preflight per
     // `INV-PLANNER-HARNESS-02` (Reviewer image) and
@@ -768,7 +827,13 @@ async fn main() {
             ),
         ),
         Arc::clone(&domain),
-    );
+    )
+    // V2_GAPS §D2 — install the disk-full watchdog so write-class
+    // intent handlers see disk pressure on every poll. Tests that
+    // do NOT spawn through the production boot path leave this
+    // `None` and the handlers treat that as "always healthy"
+    // (`HandlerContext::disk_watchdog`).
+    .with_disk_watchdog(Arc::clone(&disk_watchdog));
     let ctx = Arc::new(ctx_inner);
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a

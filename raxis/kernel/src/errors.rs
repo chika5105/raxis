@@ -30,6 +30,9 @@ pub const BOOT_ERR_SOCKET_BIND: i32 = 14;
 pub const BOOT_ERR_BOOTSTRAP_FAILED: i32 = 15;
 pub const BOOT_ERR_AUDIT_WRITE: i32 = 16;
 pub const BOOT_ERR_VCS_ROOT: i32 = 17;
+/// V2_GAPS §D2 — kernel refuses to boot when the FD limit is below
+/// `[host_capacity] required_min_fd_limit` (host-capacity.md §12.1).
+pub const BOOT_ERR_HOST_CAPACITY: i32 = 18;
 
 // ---------------------------------------------------------------------------
 // KernelError
@@ -73,6 +76,13 @@ pub enum KernelError {
     #[error("BOOT_ERR_VCS_ROOT: {reason}")]
     VcsRoot { reason: String },
 
+    /// V2_GAPS §D2 — host-capacity boot-time invariant violation
+    /// (`required_min_fd_limit` floor not met). The kernel refuses
+    /// to boot rather than start with insufficient FDs and OOM
+    /// later under per-VM growth.
+    #[error("BOOT_ERR_HOST_CAPACITY: {reason}")]
+    HostCapacity { reason: String },
+
     /// Generic I/O error (wraps std::io::Error variants not covered above).
     #[error("kernel I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -90,6 +100,7 @@ impl KernelError {
             Self::BootstrapFailed { .. } => BOOT_ERR_BOOTSTRAP_FAILED,
             Self::AuditWrite { .. } => BOOT_ERR_AUDIT_WRITE,
             Self::VcsRoot { .. } => BOOT_ERR_VCS_ROOT,
+            Self::HostCapacity { .. } => BOOT_ERR_HOST_CAPACITY,
             Self::Io(_) => 1,
         }
     }

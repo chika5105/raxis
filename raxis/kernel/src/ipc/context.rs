@@ -312,6 +312,20 @@ pub struct HandlerContext {
     /// `ctx.image_resolver.resolve(...)`) rather than a
     /// HandlerContext signature churn.
     pub image_resolver: Arc<dyn ImageResolver>,
+
+    /// V2_GAPS §D2 — host-capacity disk-full watchdog.
+    ///
+    /// `None` means "no watchdog wired" — the production boot path
+    /// in `kernel/src/main.rs` always wires one (defaulting to a
+    /// 5-second poll on `<data_dir>` per `host-capacity.md §7.1`),
+    /// but the in-process unit-test fixtures can opt out by leaving
+    /// this `None` and the write-class handlers treat that as
+    /// "always healthy" (the watchdog otherwise refuses
+    /// write-class admission below `min_free_disk_mb`). Set after
+    /// construction via [`with_disk_watchdog`].
+    ///
+    /// [`with_disk_watchdog`]: HandlerContext::with_disk_watchdog
+    pub disk_watchdog: Option<Arc<crate::capacity::DiskWatchdog>>,
 }
 
 impl HandlerContext {
@@ -395,7 +409,17 @@ impl HandlerContext {
             executor_spawn,
             domain,
             image_resolver,
+            disk_watchdog: None,
         }
+    }
+
+    /// V2_GAPS §D2 — install the boot-time disk-full watchdog.
+    /// Production wires this from `main.rs` after the audit sink
+    /// is open; tests can leave the field `None` to opt out of
+    /// disk-pressure gating.
+    pub fn with_disk_watchdog(mut self, w: Arc<crate::capacity::DiskWatchdog>) -> Self {
+        self.disk_watchdog = Some(w);
+        self
     }
 
     /// Construct with an explicit witness_dir (useful in tests that use a
