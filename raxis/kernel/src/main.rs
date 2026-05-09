@@ -862,7 +862,13 @@ async fn main() {
                     crate::session_spawn_orchestrator::OrchestratorSpawnContext::new(
                         install_dir.clone(),
                         kernel_version.to_owned(),
-                    ),
+                    )
+                    // V2_GAPS §B1 — wire data_dir so the spawn path
+                    // can stamp `RAXIS_KERNEL_PLANNER_SOCKET` into
+                    // the guest env (otherwise the planner binary
+                    // has no transport to dial back to the kernel
+                    // and falls through to scaffold/park mode).
+                    .with_data_dir(data_dir.clone()),
                     session_spawn_for_orch,
                     Arc::clone(&store),
                 ),
@@ -879,7 +885,12 @@ async fn main() {
             crate::session_spawn_orchestrator::ExecutorSpawnContext::new(
                 install_dir.clone(),
                 kernel_version.to_owned(),
-            ),
+            )
+            // V2_GAPS §B1 — same data_dir wire-through for the
+            // executor / reviewer path so activations carry the
+            // planner UDS env stamp without each IPC handler having
+            // to thread the path itself.
+            .with_data_dir(data_dir.clone()),
         ),
         Arc::clone(&domain),
     )

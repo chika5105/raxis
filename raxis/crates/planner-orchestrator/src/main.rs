@@ -1,7 +1,7 @@
 //! `raxis-orchestrator` — guest-side planner-harness binary for the
 //! [`Role::Orchestrator`](raxis_planner_core::Role::Orchestrator) role.
 //!
-//! ## Lifecycle
+//! ## Lifecycle (V2.4)
 //!
 //! 1. Kernel session-spawn lands the canonical orchestrator image,
 //!    `execve`s `/usr/local/bin/raxis-orchestrator --initiative-id <ID>`
@@ -9,16 +9,26 @@
 //! 2. This `main` reduces argv + env to a [`raxis_planner_core::BootContext`].
 //! 3. It emits one `planner-boot` structured log line on stderr (the
 //!    kernel-side log scraper keys on `step:"planner-boot"`).
-//! 4. **Minimum-bootable behaviour:** the process then waits on
-//!    Ctrl-C / SIGTERM. This satisfies the kernel's "session-VM stays
-//!    alive long enough for the lifecycle FSM to observe `Running`"
-//!    invariant without yet implementing any orchestrator logic.
+//! 4. **Live mode** — when `RAXIS_PLANNER_TASK_PROMPT` is populated,
+//!    the binary calls
+//!    [`raxis_planner_core::run_role_session`] which runs the full
+//!    dispatch loop end-to-end (model client → tool registry →
+//!    [`raxis_planner_core::DispatchLoop`] → terminal intent
+//!    submission via UDS) and exits with a structured exit code on
+//!    completion / failure. Closes V2_GAPS.md §B1 substep
+//!    `gap-b1-planner-binary-wiring`.
+//! 5. **Scaffold mode** — when the live-mode contract is unmet (the
+//!    V2.3 default for the kernel mock-planner harness), the binary
+//!    parks on Ctrl-C / SIGTERM exactly like the V2.3 scaffold did.
+//!    The behaviour is bit-for-bit identical, so no kernel
+//!    integration test changes were required to land V2.4.
 //!
-//! Future iterations layer the VSock control plane, model-API loop,
-//! and the orchestrator-specific tool registry on top of this
-//! scaffold without changing any of the above wire contracts.
+//! See `raxis-planner-core/src/driver.rs` for the env contract.
 
-use raxis_planner_core::{render_boot_log, BootContext, PlannerError, Role};
+use raxis_planner_core::{
+    park_on_signal, render_boot_log, run_role_session, BootContext, DriverError, DriverOutcome,
+    PlannerError, Role,
+};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -41,10 +51,57 @@ async fn run() -> Result<(), PlannerError> {
     let ctx = BootContext::from_process(Role::Orchestrator)?;
     eprintln!("{}", render_boot_log(&ctx));
 
-    // Park the process. tokio::signal::ctrl_c covers SIGINT;
-    // the production substrate sends SIGTERM on session teardown
-    // and the tokio runtime translates that into the same future
-    // resolution path on Unix.
-    let _ = tokio::signal::ctrl_c().await;
-    Ok(())
+    let outcome = run_role_session(ctx.role, ctx.args.clone(), ctx.env.clone())
+        .await
+        .map_err(driver_to_planner_error)?;
+
+    match outcome {
+        DriverOutcome::Scaffold => {
+            // V2.3 scaffold behaviour preserved when the kernel did
+            // not stamp `RAXIS_PLANNER_TASK_PROMPT`. The kernel
+            // mock-planner harness depends on this — do not remove
+            // without coordinating with `kernel/tests/mock_planner_*`.
+            park_on_signal().await;
+            Ok(())
+        }
+        DriverOutcome::Completed { tool_name } => {
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"planner-completed\",\
+                  \"role\":\"orchestrator\",\"terminal_tool\":{:?}}}",
+                tool_name,
+            );
+            Ok(())
+        }
+        DriverOutcome::Idle { final_text } => {
+            // Orchestrator dispatch ran but emitted no terminal
+            // tool — surface as a non-zero exit so the kernel sees
+            // a structured failure (the orchestrator is expected to
+            // always pick a DAG action).
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"planner-idle\",\
+                  \"role\":\"orchestrator\",\"final_text_len\":{len}}}",
+                len = final_text.len(),
+            );
+            Err(PlannerError::DispatchIdle)
+        }
+        DriverOutcome::MaxTurnsExceeded { turns } => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"planner-max-turns\",\
+                  \"role\":\"orchestrator\",\"turns\":{turns}}}",
+            );
+            Err(PlannerError::MaxTurnsExceeded { turns })
+        }
+        DriverOutcome::TokensExceeded { which, ceiling } => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"planner-tokens-exceeded\",\
+                  \"role\":\"orchestrator\",\"which\":{:?},\"ceiling\":{ceiling}}}",
+                which,
+            );
+            Err(PlannerError::TokensExceeded { which, ceiling })
+        }
+    }
+}
+
+fn driver_to_planner_error(e: DriverError) -> PlannerError {
+    PlannerError::DriverFailure(e.to_string())
 }

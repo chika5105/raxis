@@ -142,6 +142,13 @@ pub struct OrchestratorSpawnContext {
     pub vcpu_count: u32,
     /// Memory ceiling in MiB. Same rationale as `vcpu_count`.
     pub mem_mib:    u32,
+    /// V2_GAPS §B1 — kernel data-dir, used to derive the planner
+    /// UDS socket path stamped into the guest env at spawn so
+    /// `raxis-planner-core::run_role_session` can connect back via
+    /// `RAXIS_KERNEL_PLANNER_SOCKET`. `None` ⇒ the env var is not
+    /// stamped (live-mode planner contract is not populated;
+    /// matches the V2.3 scaffold path).
+    pub data_dir:   Option<PathBuf>,
 }
 
 impl OrchestratorSpawnContext {
@@ -157,7 +164,17 @@ impl OrchestratorSpawnContext {
             kernel_version,
             vcpu_count: 1,
             mem_mib:    256,
+            data_dir:   None,
         }
+    }
+
+    /// Builder: attach the kernel `data_dir` so the spawn path can
+    /// stamp `RAXIS_KERNEL_PLANNER_SOCKET=<data_dir>/sockets/planner.sock`
+    /// into the guest env. Production wires this from
+    /// `kernel/src/main.rs::data_dir()`.
+    pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
+        self.data_dir = Some(data_dir);
+        self
     }
 }
 
@@ -439,6 +456,24 @@ async fn spawn_orchestrator_for_initiative(
     // consumes credentials runs in Executor VMs), but it MAY make
     // outbound LLM calls (gateway path) and so still needs the
     // tproxy admission gate.
+    // V2_GAPS §B1 — stamp the planner UDS env contract into the
+    // guest env so `raxis-planner-core::run_role_session` can
+    // connect back. Only `RAXIS_KERNEL_PLANNER_SOCKET` is set
+    // unconditionally; `RAXIS_PLANNER_TASK_PROMPT` is left
+    // empty/absent here because the orchestrator role does not yet
+    // have a per-initiative seed prompt plumbed end-to-end (the
+    // toggle into "live mode" is the kernel choosing to populate
+    // it via a future call site; absent ⇒ the binary parks, which
+    // matches the V2.3 scaffold behaviour bit-for-bit). See
+    // `crates/planner-core/src/driver.rs` for the contract table.
+    let mut env: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(data_dir) = &spawn_ctx.data_dir {
+        let sock = data_dir.join("sockets").join("planner.sock");
+        env.insert(
+            "RAXIS_KERNEL_PLANNER_SOCKET".to_owned(),
+            sock.display().to_string(),
+        );
+    }
     let vm_spec = VmSpec {
         vcpu_count:       spawn_ctx.vcpu_count,
         mem_mib:          spawn_ctx.mem_mib,
@@ -457,7 +492,7 @@ async fn spawn_orchestrator_for_initiative(
         session_token:    SessionToken(format!("orch-{}", session_id)),
         vsock_cid:        None,
         virtio_fs_mounts: Vec::new(),
-        env:              BTreeMap::new(),
+        env,
     };
 
     let req = SpawnRequest {
@@ -522,6 +557,11 @@ pub struct ExecutorSpawnContext {
     pub reviewer_vcpu_count: u32,
     /// Memory ceiling in MiB for Reviewer VMs.
     pub reviewer_mem_mib:    u32,
+    /// V2_GAPS §B1 — kernel data-dir, used to derive the planner
+    /// UDS socket path stamped into the guest env so
+    /// `raxis-planner-core::run_role_session` can connect back via
+    /// `RAXIS_KERNEL_PLANNER_SOCKET`. `None` ⇒ env var not stamped.
+    pub data_dir: Option<PathBuf>,
 }
 
 impl ExecutorSpawnContext {
@@ -535,7 +575,15 @@ impl ExecutorSpawnContext {
             executor_mem_mib:    1024,
             reviewer_vcpu_count: 1,
             reviewer_mem_mib:    512,
+            data_dir:            None,
         }
+    }
+
+    /// Builder: attach the kernel `data_dir` for planner-socket env
+    /// stamping. See [`OrchestratorSpawnContext::with_data_dir`].
+    pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
+        self.data_dir = Some(data_dir);
+        self
     }
 }
 
@@ -724,6 +772,23 @@ pub async fn spawn_executor_for_task(
         ),
     };
 
+    // V2_GAPS §B1 — merge planner UDS env contract into `extra_env`
+    // so the spawned planner binary can reach the kernel. The call
+    // site (`handlers/intent.rs::handle_activate_subtask`) passes
+    // `BTreeMap::new()` today; this is the single chokepoint that
+    // owns the env stamp without forcing every IPC handler to know
+    // the kernel's socket layout. Per `crates/planner-core/src/
+    // driver.rs` Live-mode env contract, presence of
+    // `RAXIS_KERNEL_PLANNER_SOCKET` is required for live mode but
+    // absence of `RAXIS_PLANNER_TASK_PROMPT` keeps the binary in
+    // scaffold/park mode — so populating only the socket here is
+    // backward-compatible with every existing kernel test.
+    let mut env = extra_env;
+    if let Some(data_dir) = &spawn_ctx.data_dir {
+        let sock = data_dir.join("sockets").join("planner.sock");
+        env.entry("RAXIS_KERNEL_PLANNER_SOCKET".to_owned())
+            .or_insert(sock.display().to_string());
+    }
     let vm_spec = VmSpec {
         vcpu_count,
         mem_mib,
@@ -745,7 +810,7 @@ pub async fn spawn_executor_for_task(
         )),
         vsock_cid:        None,
         virtio_fs_mounts: Vec::new(),
-        env:              extra_env,
+        env,
     };
 
     let req = SpawnRequest {
@@ -1003,5 +1068,44 @@ mod tests {
             ],
         );
         assert_eq!(fake.terminate_calls(), vec!["sess-A".to_owned()]);
+    }
+
+    /// V2_GAPS §B1 — `with_data_dir` is the only path through which
+    /// the spawn helpers can derive the planner UDS env stamp. If
+    /// the builder regresses (drops the path, ignores it, etc.) the
+    /// guest binary loses its kernel transport and silently falls
+    /// back to scaffold/park mode. Lock the contract here so the
+    /// regression surfaces at compile/unit-test time rather than in
+    /// a downstream live-e2e debugging session.
+    #[test]
+    fn orchestrator_spawn_context_with_data_dir_is_recorded() {
+        let ctx = OrchestratorSpawnContext::new(
+            std::path::PathBuf::from("/tmp/install"),
+            "v2-test".to_owned(),
+        );
+        assert!(ctx.data_dir.is_none());
+        let dd = std::path::PathBuf::from("/var/lib/raxis-test");
+        let ctx = ctx.with_data_dir(dd.clone());
+        assert_eq!(ctx.data_dir.as_ref(), Some(&dd));
+        // Defaults survive the builder.
+        assert_eq!(ctx.vcpu_count, 1);
+        assert_eq!(ctx.mem_mib, 256);
+    }
+
+    #[test]
+    fn executor_spawn_context_with_data_dir_is_recorded() {
+        let ctx = ExecutorSpawnContext::new(
+            std::path::PathBuf::from("/tmp/install"),
+            "v2-test".to_owned(),
+        );
+        assert!(ctx.data_dir.is_none());
+        let dd = std::path::PathBuf::from("/var/lib/raxis-test");
+        let ctx = ctx.with_data_dir(dd.clone());
+        assert_eq!(ctx.data_dir.as_ref(), Some(&dd));
+        // Defaults survive the builder.
+        assert_eq!(ctx.executor_vcpu_count, 2);
+        assert_eq!(ctx.executor_mem_mib, 1024);
+        assert_eq!(ctx.reviewer_vcpu_count, 1);
+        assert_eq!(ctx.reviewer_mem_mib, 512);
     }
 }

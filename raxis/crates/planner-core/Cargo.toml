@@ -23,7 +23,7 @@ orchestrator = []
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 thiserror   = { workspace = true }
-tokio       = { workspace = true, features = ["fs", "process", "io-util"] }
+tokio       = { workspace = true, features = ["fs", "process", "io-util", "signal", "net", "rt-multi-thread", "time", "macros", "sync"] }
 raxis-ipc   = { path = "../ipc" }
 raxis-types = { path = "../types" }
 uuid        = { workspace = true }

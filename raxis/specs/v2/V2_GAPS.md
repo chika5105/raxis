@@ -16,8 +16,13 @@ RAXIS V2 has **30 specification documents** totaling 56,485 lines of
 normative markdown. Of these, **17 are fully shipped** (Tier A),
 **all 3 Tier B items are closed** (B1 planner loop, B2 custom tools,
 B3 database forwarding — upstream forwarding shipped for
-Postgres/MySQL/MSSQL/Redis/SMTP), **8 of 10 Tier C items are
+Postgres/MySQL/MSSQL/Redis/SMTP), **all 10 Tier C items are
 closed**, **both Tier D items are closed**, and **Tier E is closed**.
+The §12 newly-discovered gaps from Pass 2 are also all closed for
+V2 (the §12.4 operator-ergonomics IPC handlers were promoted from
+wire-shape stubs to real read-only handlers in V2.4; only
+`SubscribeInitiative` remains a stub awaiting the V3 KernelPush
+wire transport).
 
 | Tier | Count | Status |
 |---|---|---|
@@ -26,6 +31,7 @@ closed**, **both Tier D items are closed**, and **Tier E is closed**.
 | C — Spec complete | 10/10 | All V2 BLOCKER items closed (V2.4) |
 | D — Schema/skeleton | 2/2 | Both closed (V2.3) |
 | E — Deferred/partial | 1/1 | Closed (V2.3) |
+| §12 newly-discovered gaps | 10/10 | All V2 BLOCKER items closed (V2.4) |
 
 **Total lines remaining:** 0 (every V2 BLOCKER closed in V2.4; V3
 items remain documented per the deferral notes per category)
@@ -76,10 +82,21 @@ at 649 lines. Moved to Tier A.
 The three planner binaries (orchestrator, executor, reviewer) now have
 full agent-loop scaffolding: kernel transport, model client, tool
 registry, dispatch loop, intent/escalation submission, KSB renderer,
-and custom-tool subprocess executor. The role binaries' `main`
-functions still park on `SIGTERM` for the V2 scaffold; wiring the
-loop into each binary's main is `gap-b1-planner-binary-wiring`
-(separate, ~150 lines).
+and custom-tool subprocess executor. **`gap-b1-planner-binary-wiring`
+is CLOSED V2.4** — the binaries' `main` functions are now wired
+through `planner-core::driver::run_role_session`, which detects
+"live mode" via `RAXIS_PLANNER_TASK_PROMPT` and either drives the
+full `DispatchLoop` end-to-end or falls back to scaffold/park
+behaviour bit-for-bit. The kernel-side `session_spawn_orchestrator`
+stamps `RAXIS_KERNEL_PLANNER_SOCKET=<data_dir>/sockets/planner.sock`
+into both orchestrator and executor/reviewer guest envs at spawn
+(see `OrchestratorSpawnContext::with_data_dir` /
+`ExecutorSpawnContext::with_data_dir`), so live-mode planners can
+reach the kernel UDS without each IPC handler having to thread
+the data-dir layout. The driver exposes a hermetic
+`run_role_session_with_env_fn` test seam so unit tests don't have
+to mutate process-global env (the workspace's `unsafe_code = deny`
+lint forbids the legacy `std::env::set_var` approach).
 
 | Component | Status | Crate path |
 |---|---|---|
@@ -2511,54 +2528,62 @@ existing 8 aggregator unit tests continue to pass; the existing
 12 SubmitReview handler tests continue to pass after the
 `ctx: &HandlerContext` signature update.
 
-### 12.3 Notification channels: Shell + File only
+### 12.3 Notification channels: ✅ CLOSED (V2.4 — see §C4 above)
 
-See updated C4 above. The policy parser accepts all four channel kinds
-(`Shell`, `File`, `Email`, `Webhook`), but the dispatch handler only
-implements Shell and File. Email and Webhook configurations are parsed
-at policy load but produce runtime errors at dispatch.
+Historical entry — superseded by §C4's V2.4 closure. The policy
+parser accepts all five channel kinds (`Shell`, `File`, `Email`,
+`Webhook` legacy, `Sidecar`); every kind has a real dispatch
+handler:
 
-### 12.4 Operator-ergonomics IPC: 5 of 5 V2 wire-shape stubs ✅ CLOSED (V2.3, MVP)
+* `Shell` / `File` shipped at V1.
+* `Email` (SMTP STARTTLS + `AUTH PLAIN`, sidecar `.notify-cred`)
+  shipped V2.3 in `kernel/src/notifications/handler/email.rs`.
+* `Webhook` (HTTPS POST + `X-RAXIS-*` headers) shipped V2.3 in
+  `kernel/src/notifications/handler/webhook.rs` and is retained
+  for backwards compatibility — operators are encouraged to
+  migrate to `Sidecar` for new third-party integrations.
+* `Sidecar` (HTTP POST + concurrency cap + circuit breaker +
+  `NotificationDelivered` audit emission with upstream
+  `trace_id`) shipped V2.4 in
+  `kernel/src/notifications/handler/sidecar.rs`.
+
+No notification kind produces a runtime error at dispatch.
+
+### 12.4 Operator-ergonomics IPC: 4 of 5 real handlers ✅ CLOSED (V2.4)
 
 The `operator-ergonomics.md` spec defines 5 new `OperatorRequest`
-variants. V2.3 ships the **wire-shape stub MVP**: every variant
-is fully defined on both wire envelopes
-(`crates/types/src/operator.rs` bincode + `operator_wire.rs`
-JSON), the kernel dispatcher has a fall-through arm, and the
-shared error code `FAIL_NOT_YET_IMPLEMENTED` (with detail
-`NotYetImplemented { feature, since_version }`) is returned at
-admission time. Wire-shape regression is pinned by 10 round-trip
-tests in `operator_wire::tests`.
+variants. V2.3 shipped the wire-shape stubs; V2.4 promotes four of
+the five to real read-only handlers backed by
+`kernel/src/ipc/operator_ergonomics.rs` (~675 lines incl. tests).
+Wire-shape regression is pinned by 10 round-trip tests in
+`operator_wire::tests`; per-handler unit tests cover the cost
+heuristic, plan parser, DAG validator, and read-only conn lookups.
 
-| IPC variant | Spec section | Wire (V2.3) | Handler (V2.3) | Real handler |
+| IPC variant | Spec section | Wire | Handler (V2.4) | Notes |
 |---|---|---|---|---|
-| `ProposeDefaults` | §5.3 | ✅ | stub | V3 |
-| `EstimateCost` | §11.3 | ✅ | stub | V3 |
-| `DryRunAdmit` | §12.3 | ✅ | stub | V3 |
-| `SubscribeInitiative` | §13.4 | ✅ | stub | V3 (depends on §12.1 KernelPush) |
-| `DescribeInitiativePause` | §14.3 | ✅ | stub | V3 |
+| `ProposeDefaults` | §5.3 | ✅ | ✅ Real | Returns JSON snapshot of the active policy's defaulting surface (providers, plan-signing freshness, plan-bundle-limits, host-capacity, `[git]` target-ref defaults, gateway timing). Pure function of the live policy epoch. |
+| `EstimateCost` | §11.3 | ✅ | ✅ Real | Parses `plan_toml`, applies a conservative 200k-tokens/task heuristic at $0.005/1k tokens, adds the policy's `max_cost_per_task` admission overhead, returns a per-task breakdown. |
+| `DryRunAdmit` | §12.3 | ✅ | ✅ Real | Parses the plan, validates `[workspace]` + `[[tasks]]`, runs DAG cohesion + acyclicity checks, resolves the would-be `target_ref` against `[git]` precedence, collects non-fatal warnings, and emits a single `DryRunAdmitted` audit event (registered in `KNOWN_AUDIT_EVENT_KINDS`). |
+| `DescribeInitiativePause` | §14.3 | ✅ | ✅ Real | `spawn_blocking` read-only `RoConn` open to query `initiatives`, `initiative_quarantines`, and pending escalations. Pause is union of `quarantine || terminal_state || pending_escalations`. |
+| `SubscribeInitiative` | §13.4 | ✅ | 🟡 Stub | Returns `FAIL_NOT_YET_IMPLEMENTED` because the operator UDS is single-shot request/response — bidirectional streaming requires the per-session VSock/UDS push transport (§12.1) which lands in V3. |
 
-Why a wire stub instead of full handlers in V2.3:
+**INV-OPERATOR-ERG-01.** Every real handler above is **read-only**:
+no row inserts, no budget reservation, no state mutation. The
+single `DryRunAdmitted` audit event is the
+`operator-ergonomics.md §12.3` allowance for forensic traceability;
+all other handlers leave the kernel chain untouched.
 
-* **None are admission blockers.** The agent loop (B1) and the
-  initiative lifecycle (`CreateInitiative`, `ApprovePlan`,
-  `IntegrationMerge`) work without these.
-* **Wire stability matters more than functionality.** Operators
-  build CLI integrations (`raxis plan prepare`, `raxis plan
-  cost-estimate`, `raxis submit plan --dry-run`, `raxis
-  initiative watch`, `raxis initiative resume`) against the V2
-  wire shape; a V3 patch that lands real handlers cannot reshape
-  the JSON envelope without breaking those integrations.
-* **`SubscribeInitiative`** specifically depends on the V3
-  `KernelPush` transport (§12.1) and so could not ship a real
-  handler in V2.3 even with effort.
-
-Each stub variant emits the canonical
-`Error { code: "FAIL_NOT_YET_IMPLEMENTED", detail: <feature, since_version> }`
-envelope so CLIs can surface a uniform "this lands in a future
-release" message and keep the wire format identical to the V3
-target. The kernel admits a real handler with a one-arm
-dispatcher swap once the underlying functionality lands.
+**Why `SubscribeInitiative` stays a stub.** The other four
+handlers complete inside one IPC round-trip and read state from
+the snapshot conn. `SubscribeInitiative` requires the kernel to
+push frames to the operator on its own schedule (initiative
+state changes, escalation arrivals, push id allocations). The
+existing operator UDS is single-shot per `peripherals.md §3.1`;
+bidirectional streaming requires the per-session VSock/UDS push
+transport described in §12.1. The stub returns the canonical
+`FAIL_NOT_YET_IMPLEMENTED` envelope so CLI integrations
+(`raxis initiative watch`) compile against the same wire shape
+they will use in V3.
 
 ### 12.5 `raxis doctor`: categories — `CLOSED (V2.3, MVP)`
 
@@ -2599,12 +2624,29 @@ persistence + parameter-fingerprint drift guard live in
 `<data_dir>/.setup_state.json`. See C10 above for the full
 disposition.
 
-### 12.7 VSock IPC client: not implemented
+### 12.7 VSock IPC client: ✅ CLOSED (V2.3, UDS path) + 🟡 V3 (VSock connect)
 
-`planner-core/src/lib.rs` explicitly states: *"No VSock kernel-IPC
-client."* The planner binaries boot and park but cannot communicate
-with the kernel. The VSock frame reader/writer (guest-side) is a
-prerequisite for B1 (planner agent loop).
+**V2.3 resolution.** `crates/planner-core/src/transport.rs`
+(~535 lines) ships the transport-agnostic `KernelTransport` trait
++ length-prefixed bincode frames + UDS connector for the
+subprocess-isolation path (the default `Subprocess` backend used
+in `raxis-live-e2e`). The kernel-side spawn path stamps
+`RAXIS_KERNEL_PLANNER_SOCKET` into the child's environment so the
+planner connects without baking the data-dir layout into the
+binary.
+
+**V3 still deferred.** The actual VSock socket connect (when the
+guest detects `RAXIS_KERNEL_VSOCK_CID` + `RAXIS_KERNEL_VSOCK_PORT`)
+is gated behind the `vsock-transport` Cargo feature with a
+fail-loud `TransportError::VsockUnavailable` envelope when the
+feature is off. The CID/port detection, env-precedence rules
+(`UDS path > VSock vars`), and the host-side VSock-to-UDS proxy
+substrate are scaffolded; the missing piece is the
+`tokio-vsock`-backed implementation of `KernelTransport::connect`
+when `vsock-transport = on`. The planner agent loop (B1) and
+every dispatch / intent / escalation test runs against the UDS
+path today, so V3's VSock landing is purely the
+production-Firecracker leg.
 
 ### 12.8 Target branch ref: configurable via [git] / [workspace] ✅ CLOSED (V2.2)
 

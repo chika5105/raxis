@@ -489,7 +489,7 @@ impl Tool for BashTool {
                 reason: "missing or non-string `command`".to_owned(),
             }
         })?;
-        let mut child = match tokio::process::Command::new("bash")
+        let child = match tokio::process::Command::new("bash")
             .arg("-lc")
             .arg(cmd)
             .current_dir(&ctx.workspace_root)

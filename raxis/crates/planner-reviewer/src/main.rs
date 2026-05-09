@@ -11,8 +11,21 @@
 //!     `git_commit`, `git_push`, and `network_*` tools by linkage.
 //!   * egress tier the kernel pre-stamps on the VM
 //!     (`EgressTier::None` per `raxis-kernel::session_spawn_orchestrator`).
+//!
+//! V2.4 lifecycle: the driver delegates to
+//! [`raxis_planner_core::run_role_session`] which runs the full
+//! dispatch loop end-to-end when `RAXIS_PLANNER_TASK_PROMPT` is
+//! set. Otherwise the binary parks on signal exactly like the V2.3
+//! scaffold. Note: an `Idle` outcome on the reviewer is *acceptable*
+//! (the model declined to deliver a verdict) — the kernel records
+//! it but does not synthesise a `submit_review` on the model's
+//! behalf; the reviewer's session times out via the verifier
+//! deadline path.
 
-use raxis_planner_core::{render_boot_log, BootContext, PlannerError, Role};
+use raxis_planner_core::{
+    park_on_signal, render_boot_log, run_role_session, BootContext, DriverError, DriverOutcome,
+    PlannerError, Role,
+};
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
@@ -32,6 +45,55 @@ async fn main() -> std::process::ExitCode {
 async fn run() -> Result<(), PlannerError> {
     let ctx = BootContext::from_process(Role::Reviewer)?;
     eprintln!("{}", render_boot_log(&ctx));
-    let _ = tokio::signal::ctrl_c().await;
-    Ok(())
+
+    let outcome = run_role_session(ctx.role, ctx.args.clone(), ctx.env.clone())
+        .await
+        .map_err(driver_to_planner_error)?;
+
+    match outcome {
+        DriverOutcome::Scaffold => {
+            park_on_signal().await;
+            Ok(())
+        }
+        DriverOutcome::Completed { tool_name } => {
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"planner-completed\",\
+                  \"role\":\"reviewer\",\"terminal_tool\":{:?}}}",
+                tool_name,
+            );
+            Ok(())
+        }
+        DriverOutcome::Idle { final_text } => {
+            // Reviewer Idle is informational. The kernel-side
+            // verifier deadline + admission semantics treat
+            // missing-verdict as the same failure class as a
+            // session crash, so we exit 0 here and let the
+            // kernel observe absence of `SubmitReview`.
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"planner-idle\",\
+                  \"role\":\"reviewer\",\"final_text_len\":{len}}}",
+                len = final_text.len(),
+            );
+            Ok(())
+        }
+        DriverOutcome::MaxTurnsExceeded { turns } => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"planner-max-turns\",\
+                  \"role\":\"reviewer\",\"turns\":{turns}}}",
+            );
+            Err(PlannerError::MaxTurnsExceeded { turns })
+        }
+        DriverOutcome::TokensExceeded { which, ceiling } => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"planner-tokens-exceeded\",\
+                  \"role\":\"reviewer\",\"which\":{:?},\"ceiling\":{ceiling}}}",
+                which,
+            );
+            Err(PlannerError::TokensExceeded { which, ceiling })
+        }
+    }
+}
+
+fn driver_to_planner_error(e: DriverError) -> PlannerError {
+    PlannerError::DriverFailure(e.to_string())
 }

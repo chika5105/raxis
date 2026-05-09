@@ -76,6 +76,7 @@ pub mod bedrock_client;
 pub mod circuit;
 pub mod custom_tools;
 pub mod dispatch;
+pub mod driver;
 pub mod gemini_client;
 pub mod intent;
 pub mod ksb;
@@ -92,6 +93,11 @@ pub use custom_tools::{
     load_custom_tools, validate_custom_tool, CustomToolDecl, CustomToolError, SubprocessTool,
 };
 pub use dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
+pub use driver::{
+    park_on_signal, run_role_session, run_role_session_with_model, DriverError, DriverOutcome,
+    DEFAULT_PLANNER_BASE_URL, DEFAULT_PLANNER_MAX_TOKENS, DEFAULT_PLANNER_MAX_TURNS,
+    DEFAULT_WORKSPACE_PATH,
+};
 pub use error::PlannerError;
 pub use intent::{
     executor_terminal_tool_to_intent_kind, orchestrator_terminal_tool_to_intent_kind,
