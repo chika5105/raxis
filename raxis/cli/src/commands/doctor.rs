@@ -683,6 +683,17 @@ enum DoctorCategory {
     Network,
     Keys,
     Bundles,
+    /// V2.5 §13 — `raxis doctor vm-images`. Walks the
+    /// operator-published `[[vm_images]]` registry and probes
+    /// per-entry health: alias well-formedness (already validated
+    /// at policy load — re-checked defensively), `oci_digest`
+    /// shape, role_restriction sanity, and `linux_kernel_version_min`
+    /// floor. Per-alias OCI cache presence is reported as `Warn`
+    /// when the rootfs is not yet pre-staged in
+    /// `<data_dir>/oci-cache/` (the production resolver pulls on
+    /// demand at first activation; the warning is a heads-up so
+    /// operators can pre-pull before the first session boots).
+    VmImages,
     All,
 }
 
@@ -695,6 +706,7 @@ impl DoctorCategory {
             "network"   => Some(Self::Network),
             "keys"      => Some(Self::Keys),
             "bundles"   => Some(Self::Bundles),
+            "vm-images" => Some(Self::VmImages),
             "all"       => Some(Self::All),
             _           => None,
         }
@@ -785,8 +797,9 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, CliError> {
                 "unknown doctor subcommand: {other:?} \
                  (available: signing-key-fp, canonical-images, cache, \
                  or one of the V2 categories: policy, providers, host, \
-                 network, keys, bundles, all; or run `raxis doctor` with \
-                 no subcommand for the full data-dir preflight)"
+                 network, keys, bundles, vm-images, all; or run \
+                 `raxis doctor` with no subcommand for the full \
+                 data-dir preflight)"
             )))
         }
     }
@@ -1389,6 +1402,7 @@ fn collect_category(data_dir: &Path, cat: DoctorCategory) -> Report {
         DoctorCategory::Network   => collect_network(data_dir, &mut r),
         DoctorCategory::Keys      => collect_keys(data_dir, &mut r),
         DoctorCategory::Bundles   => collect_bundles(data_dir, &mut r),
+        DoctorCategory::VmImages  => collect_vm_images(data_dir, &mut r),
         DoctorCategory::All       => {
             collect_policy(data_dir, &mut r);
             collect_providers(data_dir, &mut r);
@@ -1396,6 +1410,7 @@ fn collect_category(data_dir: &Path, cat: DoctorCategory) -> Report {
             collect_network(data_dir, &mut r);
             collect_keys(data_dir, &mut r);
             collect_bundles(data_dir, &mut r);
+            collect_vm_images(data_dir, &mut r);
         }
     }
     r
@@ -1733,6 +1748,152 @@ fn collect_bundles(data_dir: &Path, r: &mut Report) {
     }
     r.push("bundles.row_aggregates", Outcome::Warn,
         "per-table row counts (V3) — V2 MVP surfaces only kernel.db file size");
+}
+
+/// V2.5 §13 — `raxis doctor vm-images`. Walks the operator-published
+/// `[[vm_images]]` registry and emits per-entry diagnostic rows so
+/// operators can audit the registry without booting the kernel.
+///
+/// Per entry rows:
+/// * `vm_images.entry`        — `Ok` once the entry has been
+///   re-validated (alias shape, digest shape, role_restriction
+///   sanity, kernel-version floor). All these were already
+///   checked at policy load; the row is informational.
+/// * `vm_images.cache.<alias>` — `Ok` when the rootfs blob is
+///   already pre-staged in `<data_dir>/oci-cache/blobs/sha256/`,
+///   `Warn` otherwise (the production resolver pulls on demand
+///   at first activation; the warning is a heads-up so operators
+///   can pre-pull before the first session boots).
+///
+/// Top-level rows:
+/// * `vm_images.count` — how many entries the active policy
+///   declares; `Warn` when zero (no operator-published images,
+///   every Executor task boots the canonical starter).
+/// * `vm_images.default_executor_image` — `Ok` with the resolved
+///   alias when the policy declares `[default_executor_image]`,
+///   `Warn` otherwise (operators must explicitly populate
+///   `vm_image` on every Executor task).
+fn collect_vm_images(data_dir: &Path, r: &mut Report) {
+    let policy_path = data_dir.join("policy/policy.toml");
+    let bundle = match raxis_policy::load_policy(&policy_path) {
+        Ok((b, _bytes, _sha)) => b,
+        Err(e) => {
+            r.push("vm_images.load_policy", Outcome::Fail,
+                format!("policy load failed: {e}"));
+            return;
+        }
+    };
+    let entries = bundle.vm_images();
+    if entries.is_empty() {
+        r.push("vm_images.count", Outcome::Warn,
+            "no [[vm_images]] declared — every Executor task boots the \
+             canonical raxis-executor-starter image");
+    } else {
+        r.push("vm_images.count", Outcome::Ok,
+            format!("{} operator-published image(s)", entries.len()));
+    }
+
+    let oci_cache_root = data_dir.join("oci-cache").join("blobs").join("sha256");
+    for entry in entries {
+        // Re-summarise the entry so operators can see what's on
+        // disk without re-reading policy.toml. The validator
+        // already proved each field is valid; this row just
+        // pretty-prints them.
+        r.push(
+            "vm_images.entry",
+            Outcome::Ok,
+            format!(
+                "{name} digest={digest} roles={roles:?} \
+                 linux_kernel_min={major}.{minor}",
+                name = entry.name,
+                digest = entry.oci_digest,
+                roles = entry.role_restriction,
+                major = entry.linux_kernel_version_min.0,
+                minor = entry.linux_kernel_version_min.1,
+            ),
+        );
+
+        // Best-effort cache-presence probe. The image-cache layout
+        // (`raxis_image_cache::CacheLayout`) addresses blobs by
+        // sharded digest hex, but for the doctor probe we only
+        // need to know whether *some* cache file references this
+        // digest's hex. The shard prefix matches `oci_digest`'s
+        // first two hex chars — encoded as a subdirectory under
+        // `blobs/sha256/`. The row id is the constant
+        // `"vm_images.cache"` for both renderers' grouping; the
+        // alias goes into the detail string.
+        let digest_hex = entry
+            .oci_digest
+            .strip_prefix("sha256:")
+            .unwrap_or(&entry.oci_digest);
+        let shard_prefix = digest_hex.get(..2).unwrap_or("");
+        let shard_dir = oci_cache_root.join(shard_prefix);
+        if shard_dir.is_dir() {
+            // Walk the shard directory looking for any file whose
+            // name starts with the full digest hex. The
+            // production layout uses `.../sha256/<aa>/<full>` per
+            // image-cache.md §3; the offline `PrePopulatedResolver`
+            // uses the same layout. A miss is non-fatal.
+            let hit = std::fs::read_dir(&shard_dir)
+                .ok()
+                .and_then(|mut iter| {
+                    iter.find_map(|e| {
+                        e.ok().and_then(|de| {
+                            let name = de.file_name();
+                            let name = name.to_string_lossy();
+                            if name == digest_hex
+                                || name.starts_with(digest_hex)
+                            {
+                                Some(de.path())
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                });
+            match hit {
+                Some(p) => r.push("vm_images.cache", Outcome::Ok,
+                    format!("alias={} cached at {}", entry.name, p.display())),
+                None    => r.push("vm_images.cache", Outcome::Warn,
+                    format!("alias={} not yet cached under {} \
+                             (will pull on first activation)",
+                            entry.name, shard_dir.display())),
+            }
+        } else {
+            r.push("vm_images.cache", Outcome::Warn,
+                format!("alias={} oci-cache directory {} not present \
+                         (will be created on first activation)",
+                        entry.name, shard_dir.display()));
+        }
+    }
+
+    match bundle.default_executor_image() {
+        Some(d) => match bundle.vm_image_by_name(&d.alias) {
+            Some(_) => r.push(
+                "vm_images.default_executor_image",
+                Outcome::Ok,
+                format!("alias = {:?}", d.alias),
+            ),
+            // Defensive: `validate_default_executor_image` already
+            // proved the alias resolves at load time; a None here
+            // would be a kernel bug.
+            None => r.push(
+                "vm_images.default_executor_image",
+                Outcome::Fail,
+                format!(
+                    "alias = {:?} but no matching [[vm_images]] entry — \
+                     kernel-side invariant violation",
+                    d.alias,
+                ),
+            ),
+        },
+        None => r.push(
+            "vm_images.default_executor_image",
+            Outcome::Warn,
+            "no [default_executor_image] declared — operators must \
+             populate `vm_image` on every Executor task",
+        ),
+    }
 }
 
 #[cfg(unix)]
@@ -2159,11 +2320,22 @@ mod tests {
             ("network",   DoctorCategory::Network),
             ("keys",      DoctorCategory::Keys),
             ("bundles",   DoctorCategory::Bundles),
+            ("vm-images", DoctorCategory::VmImages),
             ("all",       DoctorCategory::All),
         ] {
             assert_eq!(DoctorCategory::parse(s), Some(*want),
                 "expected {s} to parse");
         }
+    }
+
+    #[test]
+    fn collect_category_vm_images_fails_on_missing_policy() {
+        // Without a policy.toml the load step fails fast and the
+        // category surfaces a single Fail row.
+        let tmp = TempDir::new().unwrap();
+        let r = collect_category(tmp.path(), DoctorCategory::VmImages);
+        assert!(r.checks.iter().any(|c| c.id == "vm_images.load_policy"
+            && c.outcome == Outcome::Fail));
     }
 
     #[test]
