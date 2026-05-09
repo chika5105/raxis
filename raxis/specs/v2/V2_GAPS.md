@@ -722,6 +722,152 @@ failures by class.
   kernel-to-sidecar trust is localhost-only (same host boundary as
   provider sidecars).
 
+**Error handling and edge cases — notifications must never affect
+normal kernel operations:**
+
+Notifications are **strictly non-critical**. A notification failure
+— whether Email SMTP timeout, sidecar crash, DNS failure, or
+malformed sidecar response — must NEVER:
+
+- Block the kernel's main event loop or delay intent processing.
+- Cause a kernel panic, crash, or restart.
+- Stall, delay, or roll back an in-flight initiative.
+- Prevent session spawn, plan approval, or any admission pipeline
+  step.
+
+The kernel's notification dispatch runs on a **dedicated
+`tokio::spawn` task** with its own error boundary. Errors are
+caught, logged, and recorded as `NotificationDeliveryFailed`
+audit events. The kernel's main loop never `await`s notification
+delivery.
+
+| Edge case | Kernel behavior |
+|---|---|
+| Sidecar endpoint unreachable | 3 retries with exponential backoff (1s, 2s, 4s). After 3 failures: `DeliveryFailed{Network}` audit event. Kernel moves on. |
+| Sidecar returns non-2xx | Treated as `UpstreamRejected`. Retry on 5xx only; 4xx is terminal (bad payload). Audit event emitted. |
+| Sidecar returns malformed response | Treated as `UpstreamRejected`. No retry. Audit event includes response body (truncated to 1 KiB). |
+| Sidecar hangs (no response) | 5-second per-attempt timeout. After timeout: connection dropped, retry with next attempt. |
+| All notification channels fail | Kernel continues operating normally. `raxis status` shows degraded notification health. No escalation — the operator monitors notification health via the audit chain, not via notifications (circular dependency). |
+| SMTP authentication failure | `CredentialUnavailable` audit event. No retry (wrong password won't fix itself). |
+| Policy declares sidecar but sidecar is not running | Kernel starts normally. First notification to that channel fails with `Network` error. Kernel does not block boot waiting for sidecars. |
+| `events` filter matches no emitted events | Silent — the sidecar is never called. No error, no warning. This is valid configuration (operator may enable events later). |
+| Notification payload serialization error | Programming bug — `unreachable!()` in release, `debug_assert!` in test. The kernel skips this channel for this event and emits a `SecurityEventKind::NotificationSerializationFailure` audit event. |
+
+**Spec files requiring updates for the sidecar notification
+pattern:**
+
+The following spec files must be updated in the same PR that
+implements the sidecar notification dispatch to maintain
+spec-graph consistency:
+
+| Spec file | What changes |
+|---|---|
+| `email-and-notification-channels.md` | **Major update.** Remove the `Webhook` channel kind from the kernel-implemented set. Add `Sidecar` channel kind with `endpoint`, `events`, and retry semantics. Update the channel-kind table, wire shapes, and failure taxonomy. Add the `NotificationPayload` JSON schema. |
+| `policy-plan-authority.md` | Add `kind = "Sidecar"` to `[[notification_channels]]` validation. Add `events` field validation (must be known event kinds). Add admission failure code `FAIL_NOTIFICATION_UNKNOWN_EVENT_KIND`. |
+| `audit-paired-writes.md §4` | Classify `NotificationDelivered` and `NotificationDeliveryFailed` for sidecar channels (same shape as existing webhook audit events, with `channel_kind = "Sidecar"` and `endpoint` added). |
+| `extensibility-traits.md` | Remove `OperatorNotificationChannel` trait extraction from V3 roadmap — the sidecar pattern replaces trait-based extensibility for notifications. The kernel's notification surface is now: Email (built-in) + Sidecar (HTTP contract). |
+| `operator-ergonomics.md` | Update `raxis doctor` to include a `notifications` check category that verifies sidecar endpoints are reachable (HTTP GET health check). |
+| `invariants.md` | Add `INV-NOTIFY-07`: "Notification dispatch failures MUST NOT block, crash, delay, or roll back any kernel operation. Notification delivery is fire-and-forget with audit." |
+
+**Sidecar boilerplate examples.**
+
+The sidecar contract is intentionally minimal: accept a JSON POST,
+do your thing, return 2xx. Below are complete working examples
+that operators can copy as starting points.
+
+**Example 1 — Slack sidecar (Python, ~30 lines):**
+
+```python
+# slack_notify.py — run with: uvicorn slack_notify:app --port 9200
+import os, httpx
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+SLACK_WEBHOOK = os.environ["SLACK_WEBHOOK_URL"]
+
+@app.post("/notify")
+async def notify(request: Request):
+    event = await request.json()
+    kind = event["event_kind"]
+    init_id = event["initiative_id"]
+    payload = event.get("payload", {})
+
+    # Format a Slack message from the RAXIS event
+    text = f":rotating_light: *{kind}*\nInitiative: `{init_id}`"
+    if kind == "EscalationRequest":
+        text += f"\nReason: {payload.get('reason', 'unknown')}"
+        text += f"\nSession: `{event.get('session_id', 'N/A')}`"
+    elif kind == "ReviewRejected":
+        text += f"\nCritique: {payload.get('critique', '')[:200]}"
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(SLACK_WEBHOOK, json={"text": text})
+        resp.raise_for_status()
+
+    return {"ok": True}
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+```
+
+**Example 2 — PagerDuty sidecar (Node.js, ~35 lines):**
+
+```javascript
+// pagerduty_notify.js — run with: node pagerduty_notify.js
+const express = require("express");
+const app = express();
+app.use(express.json());
+
+const PD_ROUTING_KEY = process.env.PD_ROUTING_KEY;
+const PD_EVENTS_URL = "https://events.pagerduty.com/v2/enqueue";
+
+app.post("/notify", async (req, res) => {
+  const event = req.body;
+  const severity =
+    event.event_kind === "SecurityViolation" ? "critical" :
+    event.event_kind === "CredentialCompromise" ? "critical" :
+    event.event_kind === "EscalationRequest" ? "warning" : "info";
+
+  const pdPayload = {
+    routing_key: PD_ROUTING_KEY,
+    event_action: "trigger",
+    payload: {
+      summary: `RAXIS ${event.event_kind} — initiative ${event.initiative_id}`,
+      severity,
+      source: "raxis-kernel",
+      custom_details: event.payload || {},
+    },
+  };
+
+  const resp = await fetch(PD_EVENTS_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(pdPayload),
+  });
+
+  if (!resp.ok) return res.status(502).json({ error: await resp.text() });
+  res.json({ ok: true });
+});
+
+app.get("/health", (_, res) => res.json({ status: "ok" }));
+app.listen(9201, () => console.log("PagerDuty sidecar on :9201"));
+```
+
+**The contract the kernel expects:**
+
+| Aspect | Requirement |
+|---|---|
+| **Method** | `POST` |
+| **Path** | Whatever `endpoint` is set to in `policy.toml` (e.g., `/notify`) |
+| **Content-Type** | `application/json` |
+| **Request body** | `{ "event_kind": string, "event_id": uuid, "initiative_id": uuid, "session_id": uuid \| null, "timestamp": iso8601, "payload": object }` |
+| **Success** | Any `2xx` status code. Body is ignored by the kernel. |
+| **Retryable failure** | `5xx` status code or connection error → kernel retries (up to 3). |
+| **Terminal failure** | `4xx` status code → kernel does NOT retry (bad payload). |
+| **Health check** | `GET /health` returning `2xx` — used by `raxis doctor notifications`. Optional but recommended. |
+| **Timeout** | Sidecar must respond within 5 seconds per attempt. |
+
 ### C5: Immutable Artifact Store — CLOSED (V2.3, MVP)
 
 **Spec:** `immutable-artifact-store.md` (25KB) — full surface
