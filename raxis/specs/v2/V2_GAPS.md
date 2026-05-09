@@ -578,17 +578,15 @@ failures by class.
 ### C5: Immutable Artifact Store — CLOSED (V2.3, MVP)
 
 **Spec:** `immutable-artifact-store.md` (25KB) — full surface
-**Status:** **CLOSED for V2 — content-addressed primitive only.**
+**Status:** **Primitive delivered; kernel wiring is V2 BLOCKER.**
 **Delivered:** ~470 lines (new `raxis-artifact-store` crate + tests)
 
 V2.3 lands the operator-grade content-addressed store primitive
 that the spec's policy/plan/key write paths build on top of: write-
 once, hash-verified, idempotent on identical bytes, fail-loud on
-tampering. Wiring the existing kernel write paths (policy push,
-plan approve, key rotate) onto this primitive is a follow-up
-because each of those touch-points is its own atomic-rename
-ceremony with unique caller-side concerns; the store itself is the
-shape they all converge on.
+tampering. The crate compiles and its tests pass, but **nothing
+depends on it yet** — the kernel, CLI, and policy crates do not
+import it. V2 does not ship without the wiring.
 
 | Component | Crate | Status |
 |---|---|---|
@@ -599,6 +597,20 @@ shape they all converge on.
 | `ArtifactStore::read(category, key)` → `Vec<u8>` with on-read SHA-256 verification | `crates/artifact-store/src/lib.rs` | Surfaces `IntegrityMismatch` for the spec's §1.3 tamper-detector |
 | `ArtifactStore::write_companion(category, key, ext, body)` for `<sha256>.sig` | `crates/artifact-store/src/lib.rs` | Same idempotency contract as `write` |
 | 10 unit tests covering hex round-trip, write→read, idempotency, tamper detection (write + read), exists check, sidecar writes, cross-category collision avoidance | `crates/artifact-store/src/lib.rs` | All passing |
+
+**V2 remaining work — kernel wiring (BLOCKER):**
+
+The store primitive is useless without the kernel actually calling
+it. These are V2 blockers, not V3 deferrals:
+
+| Wiring point | Kernel call site | What it does | Est. lines |
+|---|---|---|---|
+| **Policy push** | `kernel/src/handlers/policy.rs` | On `PolicyEpochAdvanced`: write new `policy.toml` bytes to `ArtifactStore::write(Category::Policy, ...)` before updating the active symlink | ~40 |
+| **Plan approve** | `kernel/src/initiatives/lifecycle.rs` | On `approve_plan`: write plan bytes + operator signature to `write(Plans, ...)` + `write_companion(Plans, key, "sig", ...)` | ~40 |
+| **Key rotate** | `kernel/src/handlers/operator.rs` | On operator key rotation: write new public key PEM to `write(Keys, ...)` | ~30 |
+| **Symlink swap** | `kernel/src/handlers/policy.rs` | After artifact write: atomically swap `policy/policy.toml` → `policy/<sha256>.toml` | ~50 |
+| **Boot-time open** | `kernel/src/main.rs` | Open `ArtifactStore` at kernel boot; pass `Arc<ArtifactStore>` to handlers | ~10 |
+| **`raxis-artifact-store` dep** | `kernel/Cargo.toml` | Add workspace dependency | ~1 |
 
 **V2 design choices.**
 
@@ -619,11 +631,6 @@ shape they all converge on.
 
 **Deferred to V3.**
 
-* Wiring the existing policy/plan/key write paths onto `ArtifactStore`
-  (each touch-point is a separate kernel-side atomic-rename
-  ceremony).
-* `policy/policy.toml` + `operator_public.pem` symlink-swap
-  helpers.
 * Retention policy GC sweep (`policy_bundles = 3650` etc).
 * CLI surfaces (`raxis policy history`, `raxis plan show
   <sha256>`, `raxis keys list`).
