@@ -72,11 +72,19 @@ use std::ffi::OsString;
 use std::fmt;
 
 mod error;
+pub mod dispatch;
+pub mod intent;
 pub mod model;
 pub mod tools;
 pub mod transport;
 
+pub use dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
 pub use error::PlannerError;
+pub use intent::{
+    executor_terminal_tool_to_intent_kind, orchestrator_terminal_tool_to_intent_kind,
+    reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError, SubmitReviewInput,
+    TaskCompleteInput,
+};
 pub use model::{
     AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse, MockModelClient,
     ModelClient, ModelError, ToolSpec, Usage,
