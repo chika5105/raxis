@@ -102,21 +102,32 @@ async fn read_op_msg(s: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 
 /// Find the value of an `int32` field by name in an OP_MSG body's
 /// kind-0 BSON section.
+///
+/// Wire layout (after the 16-byte header):
+///   - flag bits (i32, 4 bytes)
+///   - one or more sections: each begins with a 1-byte kind, then
+///     either a BSON document (kind=0) or a sequence (kind=1).
+///
+/// The OP_MSG bodies the test cares about (`hello`, `ping`,
+/// `isMaster`) always place a single kind-0 section as their first
+/// section, so this helper looks at exactly one section. A kind
+/// other than 0 is treated as "not the shape we expect" and surfaces
+/// as `None` rather than panicking.
 fn op_msg_int32_field(frame: &[u8], field: &str) -> Option<i32> {
-    if frame.len() < 16 + 5 { return None; }
-    let body = &frame[16..];
-    let mut i = 4;
-    while i < body.len() {
-        let kind = body[i];
-        i += 1;
-        if kind == 0 {
-            // BSON doc starts here.
-            let doc = &body[i..];
-            return bson_lookup_int32(doc, field);
-        }
+    if frame.len() < 16 + 5 {
         return None;
     }
-    None
+    let body = &frame[16..];
+    let kind_off = 4;
+    if kind_off >= body.len() {
+        return None;
+    }
+    let kind = body[kind_off];
+    if kind != 0 {
+        return None;
+    }
+    let doc = &body[kind_off + 1..];
+    bson_lookup_int32(doc, field)
 }
 
 fn bson_lookup_int32(doc: &[u8], field: &str) -> Option<i32> {
