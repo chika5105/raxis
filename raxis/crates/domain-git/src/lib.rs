@@ -562,6 +562,13 @@ fn parse_oid(sha: &str) -> Result<gix::ObjectId, MainMergeError> {
 // V2_GAPS §C6 — kernel push protocol (minimum-viable)
 // ---------------------------------------------------------------------------
 
+/// Format an `Option<i32>` exit code as a human-readable string.
+/// `Some(128)` → `"128"`, `None` → `"<signalled>"`.
+fn display_exit_code(code: Option<i32>) -> String {
+    code.map(|c| c.to_string())
+        .unwrap_or_else(|| "<signalled>".to_owned())
+}
+
 /// Outcome of a successful [`push_to_remote`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushOutcome {
@@ -588,7 +595,7 @@ pub enum PushError {
     },
     /// `git push` exited non-zero. The stderr is captured verbatim
     /// for the audit-record `failure_reason` slot.
-    #[error("push: `git push {remote} {refspec}` exited {code:?}: {stderr}")]
+    #[error("push: `git push {remote} {refspec}` exited {}: {stderr}", display_exit_code(*.code))]
     PushFailed {
         /// Remote name.
         remote:   String,

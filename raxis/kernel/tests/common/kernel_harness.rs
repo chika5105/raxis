@@ -129,8 +129,8 @@ fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
 
     assert!(
         output.status.success(),
-        "kernel bootstrap failed (exit code {:?}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        output.status.code(),
+        "kernel bootstrap failed (exit code {}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

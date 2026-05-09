@@ -1160,8 +1160,8 @@ mod stub_round_trip {
             .output()
             .expect("spawn raxis-verifier-stub");
         assert!(stub_exit.status.success(),
-            "stub exited non-zero (code {:?}); stderr: {}",
-            stub_exit.status.code(),
+            "stub exited non-zero (code {}); stderr: {}",
+            stub_exit.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
             String::from_utf8_lossy(&stub_exit.stderr));
 
         // Step 8: wait for the server's accept→handle→ack cycle to complete.
@@ -1338,8 +1338,8 @@ mod stub_round_trip {
         // kernel mistakenly accepted a SHA-mismatched submission,
         // which would break the gate-binding contract.
         assert_eq!(stub_exit.status.code(), Some(1),
-            "stub MUST exit Rejected(1) on SHA mismatch, got {:?}; stderr: {}",
-            stub_exit.status.code(),
+            "stub MUST exit Rejected(1) on SHA mismatch, got {}; stderr: {}",
+            stub_exit.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
             String::from_utf8_lossy(&stub_exit.stderr));
 
         // Server-side ack must be Rejected with the EvaluationShaMismatch reason.

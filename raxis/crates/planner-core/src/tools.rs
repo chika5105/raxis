@@ -689,8 +689,8 @@ impl Tool for GitCommitTool {
         };
         if !add.status.success() {
             return Ok(ToolOutput::err(format!(
-                "git_commit: `git add -A` exit {:?}\n{}",
-                add.status.code(),
+                "git_commit: `git add -A` exit {}\n{}",
+                add.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
                 String::from_utf8_lossy(&add.stderr)
             )));
         }
@@ -708,8 +708,8 @@ impl Tool for GitCommitTool {
         };
         if !commit.status.success() {
             return Ok(ToolOutput::err(format!(
-                "git_commit: `git commit` exit {:?}\nstdout: {}\nstderr: {}",
-                commit.status.code(),
+                "git_commit: `git commit` exit {}\nstdout: {}\nstderr: {}",
+                commit.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
                 String::from_utf8_lossy(&commit.stdout),
                 String::from_utf8_lossy(&commit.stderr)
             )));
