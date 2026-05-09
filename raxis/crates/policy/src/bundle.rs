@@ -1323,6 +1323,33 @@ pub struct ProviderEntry {
     #[serde(default = "default_max_response_bytes")]
     pub max_response_bytes: u64,
 
+    /// **V2_GAPS §C9 — per-provider streaming idle timeout.**
+    ///
+    /// Per-chunk silence deadline applied to inference requests that
+    /// return `text/event-stream` bodies. A provider that opens the
+    /// connection but stalls mid-body fails fast at this boundary
+    /// rather than dragging out to `inference_timeout_ms`.
+    ///
+    /// **Why per-provider.** The 30-second default is correct for
+    /// generation-tier models (Claude 3.5/4, GPT-4) where inter-chunk
+    /// gaps are sub-second. Reasoning-tier models (OpenAI o1/o3) emit
+    /// no SSE chunks for the full chain-of-thought duration —
+    /// observed silent gaps of 30–120 seconds are normal. Setting a
+    /// 30-second cap on those providers triggers spurious aborts
+    /// every time the model starts thinking.
+    ///
+    /// **Validation.** When set, must parse as a duration in
+    /// `[5_000, 600_000]` ms. The kernel-side `PolicyBundle::validate`
+    /// rejects anything outside the band (5s lower bound prevents
+    /// pathologically tight values that flake under network jitter;
+    /// 600s upper bound is the same outer ceiling as the
+    /// `inference_timeout_ms` cap).
+    ///
+    /// **Default.** `None` ⇒ the gateway falls back to its
+    /// hard-coded `STREAM_IDLE_TIMEOUT` (30 s).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_idle_timeout_ms: Option<u32>,
+
     // ── V2_GAPS §C5 sidecar fields ──────────────────────────────────────
     //
     // Extended set used only when `kind = "http_sidecar"` per
@@ -1369,6 +1396,16 @@ fn default_max_response_bytes() -> u64 { 16 * 1024 * 1024 }
 pub const MAX_INFERENCE_TIMEOUT_MS: u32 = 120_000;
 /// Hard cap on data-fetch timeout, normative per peripherals.md §3.2.
 pub const MAX_DATA_FETCH_TIMEOUT_MS: u32 = 60_000;
+/// V2_GAPS §C9 — minimum value (in ms) for the per-provider
+/// `stream_idle_timeout_ms`. Anything below 5 s flakes on a busy
+/// provider's first chunk after TLS handshake.
+pub const STREAM_IDLE_TIMEOUT_FLOOR_MS: u32 = 5_000;
+/// V2_GAPS §C9 — maximum value (in ms) for the per-provider
+/// `stream_idle_timeout_ms`. Anything above 600 s defeats the
+/// purpose; the per-request `inference_timeout_ms` is the outer
+/// ceiling and dragging the idle deadline above that boundary
+/// merely waits for the request-level cap to fire.
+pub const STREAM_IDLE_TIMEOUT_CEILING_MS: u32 = 600_000;
 /// Hard cap on response body size, normative per peripherals.md §3.2
 /// ("v1 constraint: 16 MiB ... configurable in `[[providers]]`"). The
 /// configurable knob has its own ceiling so a malicious or misconfigured
@@ -2768,6 +2805,27 @@ impl PolicyBundle {
                 )));
             }
 
+            // V2_GAPS §C9 — `stream_idle_timeout_ms` band check.
+            //
+            // The 5-second floor prevents pathologically tight values
+            // that flake on a busy provider's first chunk after TLS
+            // setup. The 600-second ceiling matches the same outer
+            // ceiling we use for `inference_timeout_ms` — anything
+            // above that defeats the purpose (the per-request
+            // ceiling is the meaningful boundary).
+            if let Some(ms) = p.stream_idle_timeout_ms {
+                if !(STREAM_IDLE_TIMEOUT_FLOOR_MS..=STREAM_IDLE_TIMEOUT_CEILING_MS)
+                    .contains(&ms)
+                {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} stream_idle_timeout_ms ({}) must be in \
+                         [{}, {}] ms (V2_GAPS §C9)",
+                        p.provider_id, ms,
+                        STREAM_IDLE_TIMEOUT_FLOOR_MS, STREAM_IDLE_TIMEOUT_CEILING_MS,
+                    )));
+                }
+            }
+
             // V2_GAPS §C5 — `kind = "http_sidecar"` validation.
             //
             // `extensibility-traits.md §9A.4` requires sidecar
@@ -4153,6 +4211,85 @@ priority             = 100
         );
         let err = write_and_load(&t).expect_err("zero timeout must fail");
         assert!(format!("{err}").contains("must be > 0"));
+    }
+
+    /// V2_GAPS §C9 — pin the lower bound of the per-provider
+    /// `stream_idle_timeout_ms` band. 4 999 is one ms below the
+    /// 5_000 floor; the validator MUST reject it so a typo can't
+    /// accidentally produce sub-second flake-on-jitter behaviour.
+    #[test]
+    fn stream_idle_timeout_below_floor_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id            = \"p1\"\n\
+             kind                   = \"Anthropic\"\n\
+             credentials_file       = \"p1.toml\"\n\
+             stream_idle_timeout_ms = 4999\n",
+        );
+        let err = write_and_load(&t).expect_err("idle < 5s must fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("stream_idle_timeout_ms"), "msg = {msg}");
+        assert!(msg.contains("4999"), "msg = {msg}");
+    }
+
+    /// Pin the upper bound of the per-provider
+    /// `stream_idle_timeout_ms` band. 600_001 is one ms above the
+    /// 600_000 ceiling.
+    #[test]
+    fn stream_idle_timeout_above_ceiling_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id            = \"p1\"\n\
+             kind                   = \"Anthropic\"\n\
+             credentials_file       = \"p1.toml\"\n\
+             stream_idle_timeout_ms = 600001\n",
+        );
+        let err = write_and_load(&t).expect_err("idle > 600s must fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("stream_idle_timeout_ms"), "msg = {msg}");
+        assert!(msg.contains("600001"), "msg = {msg}");
+    }
+
+    /// 120 s (typical OpenAI o1/o3 reasoning-tier setting) MUST
+    /// load cleanly — it's the central use case for this knob.
+    #[test]
+    fn stream_idle_timeout_120s_loads_cleanly_for_reasoning_models() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id            = \"openai-o1\"\n\
+             kind                   = \"OpenAI\"\n\
+             credentials_file       = \"openai.toml\"\n\
+             stream_idle_timeout_ms = 120000\n",
+        );
+        let bundle = write_and_load(&t)
+            .expect("120s must load — primary o1/o3 use case");
+        assert_eq!(
+            bundle.providers()[0].stream_idle_timeout_ms,
+            Some(120_000),
+        );
+    }
+
+    /// Absent field MUST default to `None` (gateway-side fallback
+    /// to the 30s constant). A future refactor that flipped the
+    /// default to `Some(30_000)` would silently change behaviour
+    /// for every existing policy.toml in the wild.
+    #[test]
+    fn stream_idle_timeout_absent_field_is_none() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"p1\"\n\
+             kind             = \"Anthropic\"\n\
+             credentials_file = \"p1.toml\"\n",
+        );
+        let bundle = write_and_load(&t).expect("default policy must load");
+        assert!(
+            bundle.providers()[0].stream_idle_timeout_ms.is_none(),
+            "absent field MUST surface as None (V2_GAPS §C9)",
+        );
     }
 
     #[test]

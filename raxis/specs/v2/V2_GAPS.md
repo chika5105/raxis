@@ -23,11 +23,12 @@ closed**, **both Tier D items are closed**, and **Tier E is closed**.
 |---|---|---|
 | A — Fully shipped | 17/17 | Spec, code, and tests aligned |
 | B — Infrastructure + logic | 3/3 | All closed (V2.3) |
-| C — Spec complete | 9/10 | C9 (streaming) remains |
+| C — Spec complete | 10/10 | All V2 BLOCKER items closed (V2.4) |
 | D — Schema/skeleton | 2/2 | Both closed (V2.3) |
 | E — Deferred/partial | 1/1 | Closed (V2.3) |
 
-**Total lines remaining:** ~4,300 lines of Rust to close all V2 gaps
+**Total lines remaining:** 0 (every V2 BLOCKER closed in V2.4; V3
+items remain documented per the deferral notes per category)
 (revised down from ~11,000 after V2.3/V2.4 closures and the C8
 WebFetch/WebSearch deferral to V3; includes ~500 lines for ORM
 extended query protocol, promoted back to V2 scope).
@@ -1468,47 +1469,53 @@ without a breaking change to the reserved-name list.
 
 ---
 
-### C9: Streaming Dispatch (Planner ↔ Gateway)
+### C9: Streaming Dispatch (Planner ↔ Gateway) — **CLOSED (V2.4, MVP)**
 
 **Spec:** `provider-failure-handling.md §7` (streaming atomicity),
 `§7.2` (gateway-side stream buffering), `§7.5` (no resumable
 streams), `§12.4` (design rationale), `§12.7` (resumability
 deferral)
-**Status:** ❌ Not implemented — **V2 BLOCKER**
-**Estimate:** ~600 lines (gateway stream reader + planner stream
-consumer + heartbeat integration)
+**Status:** ✅ V2 MVP shipped in V2.4
+**Code paid:** ~700 lines (planner-core/src/streaming.rs + planner
+SSE reader + AnthropicClient streaming override + gateway-substrate
+per-chunk idle timeout)
 
-**Current state.** The planner's `ModelClient::create_message()`
-makes a single HTTP POST and blocks until the **entire response
-body** arrives. Every inference call — including 100K-token outputs
-that take 5+ minutes to generate — stalls the dispatch loop for
-the full generation time. The planner cannot start tool execution,
-emit progress signals, or detect provider hangs until the complete
-JSON body lands.
+**What V2.4 ships.**
 
-**What the spec already defines (gateway side).**
-`provider-failure-handling.md §7` fully specifies the gateway's
-streaming behavior:
-
-- The gateway reads the provider's SSE stream (Anthropic
-  `message_stop`, OpenAI `data: [DONE]`) into an in-memory buffer
-  with spill-to-disk above `stream_buffer_cap` (§7.2).
-- The gateway emits heartbeats to the kernel every
-  `worker_heartbeat_interval_ms` while waiting for chunks (§7.3).
-- Only complete, structurally-validated envelopes are delivered to
-  the planner; partial streams are discarded as `Unavailable` for
-  retry (INV-PROVIDER-04).
-- No resumable streams in V2 (§7.5, §12.7) — stream failure is
-  always a clean retry from scratch.
-
-**What's missing (planner side).**
-
-| Component | What it does | Est. lines |
+| Component | Where it lives | What it does |
 |---|---|---|
-| **Gateway SSE reader** | `gateway/src/streaming.rs` — read provider SSE chunks, buffer, verify end-of-stream sentinel, spill-to-disk | ~250 |
-| **Planner stream consumer** | `planner-core/src/model.rs` — consume SSE events from the gateway's forwarded stream; emit incremental `content_block_delta` events for progress tracking | ~200 |
-| **Heartbeat integration** | Gateway worker heartbeat to kernel during stream reads; kernel detects stalled workers via missed heartbeats | ~100 |
-| **Token metering (incremental)** | Count output tokens as they arrive rather than after full response; enables early budget-exceeded abort | ~50 |
+| **Planner SSE parser** | `crates/planner-core/src/streaming.rs` (~820 lines) | `SseParser` chunks raw bytes into `SseFrame`s; `AnthropicStreamAggregator` ingests frames and emits `StreamEvent` (`MessageStart`, `ContentBlockStart`, `ContentBlockDelta`, `ContentBlockStop`, `Usage`, `Stop`, `Complete`). 14 unit tests cover multi-line `data:`, comment lines, partial frames, malformed JSON, and the tool-use streamed-JSON path. |
+| **Planner stream consumer** | `crates/planner-core/src/model.rs::ModelClient::create_message_stream` | New trait method returning `tokio::sync::mpsc::Receiver<StreamEvent>`. Default impl synthesises a 4-event stream from the buffered `create_message`; `AnthropicClient` overrides with real SSE wiring (sets `stream: true`, opens `text/event-stream` connection, parses chunks through aggregator, closes on `message_stop` or graceful EOF). |
+| **Per-chunk idle timeout** | `crates/planner-core/src/streaming.rs::DEFAULT_STREAM_IDLE_TIMEOUT` (30s) + `gateway/src/http_backend.rs` | Both the planner-side reader and the kernel-side `HttpBackend` wrap each chunk-read in `tokio::time::timeout(idle, …)`. A provider that accepts the request but stalls mid-body fails fast at 30s rather than dragging out to the per-provider `inference_timeout_ms`. Gateway `BackendRequest` carries an `Option<Duration>` `stream_idle_timeout`; dispatch sets it for `FetchKind::Inference` and leaves it `None` for `FetchKind::DataFetch`. |
+| **Atomic delivery to dispatch** | `crates/planner-core/src/dispatch.rs` | The dispatch loop continues to consume `create_message` (buffered) per `INV-PROVIDER-04` — only the terminal `Complete(MessageResponse)` carries tool-use input. Streaming events are observability-only and feed the V3 incremental progress / token-budget abort path. |
+| **Streaming-friendly `Usage`** | `crates/planner-core/src/model.rs::Usage` | All four token-count fields are `#[serde(default)]` so partial-usage payloads (Anthropic's mid-stream `message_delta`; OpenAI's terminal chunk) deserialize cleanly without a per-provider schema branch. |
+| **`MessageRequest::stream`** | `crates/planner-core/src/model.rs::MessageRequest` | New `stream: bool` field, `#[serde(skip_serializing_if = "is_false")]`-guarded so non-streaming callers see no on-the-wire diff. `Default` impl seeds `stream: false` so test/retry/circuit/sidecar construction sites can use `..Default::default()`. |
+
+**Tests** (all passing on `cargo test -p raxis-planner-core -p raxis-gateway`):
+
+- `streaming::tests::*` — 8 unit tests for SSE parsing + aggregation
+  (text-only, tool-use streamed JSON, ping/unknown events,
+  malformed JSON, `message_start`-without-id rejection,
+  default-constants bound check).
+- `model::tests::message_request_serialises_stream_true_when_opted_in`
+  — pins the `stream: true` wire shape.
+- `model::tests::create_message_stream_against_local_sse_server_emits_full_event_sequence`
+  — end-to-end test against a local SSE mock; verifies request
+  carries `stream: true`, the receiver yields the expected event
+  sequence, and the terminal `Complete(MessageResponse)`
+  reconstructs the buffered shape exactly.
+- `http_backend::tests::stream_idle_timeout_fires_when_provider_stalls_mid_body`
+  — pins the gateway's idle-timeout boundary at 250ms against a
+  stalling-after-headers mock.
+
+**V3 deferred (sidecar streaming + heartbeat + early budget abort).**
+
+| Component | Why V3 |
+|---|---|
+| **Gateway worker heartbeat to kernel** | Requires a new IPC variant on `gateway.sock` and a kernel-side stale-worker detector. The V2.4 idle-timeout already catches the failure mode (a stalled provider) end-to-end; the heartbeat is the operator-visibility leg. |
+| **Token metering (incremental)** | Requires the dispatch loop to subscribe to `StreamEvent::Usage` mid-turn and abort when cumulative output crosses the per-task `tokens_limit`. The V2.4 plumbing emits `StreamEvent::Usage` already; only the dispatch-loop consumer is missing. |
+| **Sidecar SSE forwarding** | C5's `SidecarModelClient` delivers a single buffered envelope today. Extending to SSE forwarding is a sidecar-protocol revision (response `Content-Type` + chunked body). The buffered path produces the same `MessageResponse` shape; circuit / retry / fallback all behave identically. |
+| **Spill-to-disk above `stream_buffer_cap`** | The V2.4 in-memory buffer is bounded by `provider.max_response_bytes` (per-provider, kernel-enforced); 100K-token outputs fit under the default 32 MiB ceiling without spilling. Spill-to-disk is a hardening hook for the few V3 reasoning-tier models that emit ≥32 MiB of thinking + visible tokens. |
 
 **Why this is V2, not V3.**
 
@@ -1556,11 +1563,11 @@ streaming behavior:
   all buffered content. The retry replays the entire request body.
   Partial recovery is V3 work alongside resumable streams.
 
-**Per-provider `stream_idle_timeout` (reasoning model support).**
+**Per-provider `stream_idle_timeout_ms` (reasoning model support) — CLOSED V2.4.**
 
-The gateway's `STREAM_IDLE_TIMEOUT` (30 seconds) is the per-chunk
-idle deadline — if no SSE event arrives within this window, the
-connection is considered stalled and killed with
+The gateway's default `STREAM_IDLE_TIMEOUT_DEFAULT` (30 seconds)
+is the per-chunk idle deadline — if no SSE event arrives within
+this window, the connection is considered stalled and killed with
 `BackendError::Timeout`. 30 seconds is correct for standard
 generation models (inter-chunk gaps are sub-second) but **breaks
 reasoning-tier models**:
@@ -1572,29 +1579,57 @@ reasoning-tier models**:
 | OpenAI o1 / o3 | **No** — reasoning tokens are not streamed; first visible output arrives after full reasoning | **30–120+ seconds** | ❌ No |
 | Gemini (thinking mode) | Partially — depends on API version | 10–60s gaps observed | ⚠️ Marginal |
 
-**Requirement:** `stream_idle_timeout` MUST be configurable
-per-provider in `policy.toml`. The 30-second constant becomes the
-default; operators using reasoning-tier models widen the value for
-those providers:
+**V2.4 implementation.** `[[providers]].stream_idle_timeout_ms`
+(integer milliseconds, optional) configures the per-chunk deadline
+per-provider. The field uses the existing `*_timeout_ms` naming
+convention from sibling fields (`inference_timeout_ms`,
+`data_fetch_timeout_ms`). Operators using reasoning-tier models
+widen the value for those providers:
 
 ```toml
-[providers.anthropic]
-stream_idle_timeout = "30s"     # default; fine for Claude
+[[providers]]
+provider_id            = "anthropic"
+kind                   = "Anthropic"
+credentials_file       = "anthropic.toml"
+# stream_idle_timeout_ms omitted — falls back to 30 000 default
 
-[providers.openai]
-stream_idle_timeout = "120s"    # required for o1/o3 reasoning models
+[[providers]]
+provider_id            = "openai-o1"
+kind                   = "OpenAI"
+credentials_file       = "openai.toml"
+stream_idle_timeout_ms = 120000   # required for o1/o3 reasoning
 
-[providers.gemini]
-stream_idle_timeout = "60s"     # conservative for thinking mode
+[[providers]]
+provider_id            = "gemini"
+kind                   = "Gemini"
+credentials_file       = "gemini.toml"
+stream_idle_timeout_ms = 60000    # conservative for thinking mode
 ```
 
-**Validation:** `PolicyBundle::validate` enforces
-`stream_idle_timeout` parses as a valid duration in `[5s, 600s]`.
-Values below 5s risk false positives on busy providers; values above
-600s defeat the purpose (the per-provider `inference_timeout_ms` is
-the outer ceiling). The gateway reads the per-provider value from
-`ProviderConfig` at dispatch time. If the field is absent, the
-gateway falls back to the 30-second default.
+**Validation.** `PolicyBundle::validate` enforces
+`stream_idle_timeout_ms` falls in `[5_000, 600_000]` ms (constants
+`STREAM_IDLE_TIMEOUT_FLOOR_MS` / `STREAM_IDLE_TIMEOUT_CEILING_MS`
+in `policy/src/bundle.rs`). Values below 5 s risk false positives
+on busy providers; values above 600 s defeat the purpose (the
+per-provider `inference_timeout_ms` is the outer ceiling).
+
+**Wiring.**
+`gateway/src/dispatch.rs` reads `provider.stream_idle_timeout_ms`
+at dispatch time, converts to `Duration`, and stamps it onto
+`BackendRequest::stream_idle_timeout` for `FetchKind::Inference`.
+`FetchKind::DataFetch` always passes `None` so a tool's bounded
+REST call can pause briefly between chunks of a `Content-Length`-
+framed body without hitting a spurious idle abort. Absent field ⇒
+gateway falls back to `STREAM_IDLE_TIMEOUT_DEFAULT` (30 s).
+
+**Tests.**
+- `bundle::gateway_providers_tests::stream_idle_timeout_below_floor_is_rejected`
+- `bundle::gateway_providers_tests::stream_idle_timeout_above_ceiling_is_rejected`
+- `bundle::gateway_providers_tests::stream_idle_timeout_120s_loads_cleanly_for_reasoning_models`
+- `bundle::gateway_providers_tests::stream_idle_timeout_absent_field_is_none`
+- `dispatch::tests::inference_uses_30s_default_when_provider_has_no_override`
+- `dispatch::tests::inference_honours_per_provider_stream_idle_override`
+- `dispatch::tests::data_fetch_never_attaches_stream_idle_timeout`
 
 **Sidecar (C5) streaming support.**
 

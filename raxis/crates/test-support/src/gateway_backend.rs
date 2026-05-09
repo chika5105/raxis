@@ -155,6 +155,7 @@ mod tests {
             inference_timeout_ms: 30_000,
             data_fetch_timeout_ms: 10_000,
             max_response_bytes: max_bytes,
+            stream_idle_timeout_ms: None,
             credentials: ProviderCredentials {
                 api_key:     "sk-test".to_owned(),
                 auth_header: "Authorization".to_owned(),
@@ -174,6 +175,7 @@ mod tests {
             headers: &[],
             body: b"{}",
             timeout: Duration::from_secs(30),
+            stream_idle_timeout: None,
         };
         let resp = backend.call(req).await.unwrap();
         assert_eq!(resp.status_code, 200);
@@ -191,6 +193,7 @@ mod tests {
             headers: &[],
             body: b"{}",
             timeout: Duration::from_millis(250),
+            stream_idle_timeout: None,
         };
         let err = backend.call(req).await.unwrap_err();
         match err {
@@ -213,6 +216,7 @@ mod tests {
             headers: &[],
             body: b"{}",
             timeout: Duration::from_secs(30),
+            stream_idle_timeout: None,
         };
         let err = backend.call(req).await.unwrap_err();
         match err {
@@ -239,6 +243,7 @@ mod tests {
             headers: &[],
             body: b"{}",
             timeout: Duration::from_secs(30),
+            stream_idle_timeout: None,
         };
         let resp = backend.call(req).await.unwrap();
         assert_eq!(resp.status_code, 429);

@@ -84,6 +84,7 @@ pub mod openai_client;
 pub mod provider_model;
 pub mod retry;
 pub mod sidecar_client;
+pub mod streaming;
 pub mod tools;
 pub mod transport;
 
@@ -122,6 +123,10 @@ pub use retry::{
 pub use sidecar_client::{
     SidecarConstructError, SidecarMessage, SidecarModelClient, SidecarRequest,
     SidecarResponse, SidecarToolCall, SidecarToolDecl,
+};
+pub use streaming::{
+    AnthropicStreamAggregator, ContentBlockDeltaPayload, StreamEvent,
+    DEFAULT_STREAM_CHANNEL_CAP, DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 pub use tools::{
     build_executor_registry, build_orchestrator_registry, build_reviewer_registry, BashTool,

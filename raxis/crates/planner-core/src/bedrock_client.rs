@@ -169,6 +169,7 @@ mod tests {
                 content: vec![ContentBlock::Text { text: "hello".to_owned() }],
             }],
             tools: vec![],
+            stream: false,
         }
     }
 

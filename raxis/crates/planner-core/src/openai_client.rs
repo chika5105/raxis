@@ -486,6 +486,7 @@ mod tests {
                     "required": ["expr"],
                 }),
             }],
+            stream: false,
         }
     }
 

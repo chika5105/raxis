@@ -71,6 +71,13 @@ pub struct ProviderEntryView {
     pub inference_timeout_ms:  u32,
     pub data_fetch_timeout_ms: u32,
     pub max_response_bytes:    u64,
+    /// V2_GAPS §C9 — per-provider streaming idle timeout (ms).
+    /// `None` means the gateway falls back to its hard-coded
+    /// 30-second `STREAM_IDLE_TIMEOUT` default. Operators using
+    /// reasoning-tier models (OpenAI o1/o3) widen this to 60–120 s
+    /// for those providers; standard generation-tier providers
+    /// (Claude, GPT-4) leave it `None`.
+    pub stream_idle_timeout_ms: Option<u32>,
     pub credentials:           ProviderCredentials,
 }
 
@@ -133,6 +140,20 @@ pub struct BackendRequest<'a> {
     pub headers:   &'a [(String, String)],
     pub body:      &'a [u8],
     pub timeout:   Duration,
+    /// V2_GAPS §C9 — per-chunk idle timeout for streaming responses.
+    ///
+    /// When `Some(d)`, the gateway's chunk-read loop wraps each
+    /// `Response::chunk()` await in `tokio::time::timeout(d, …)`.
+    /// A provider that accepts the request but stalls mid-body
+    /// surfaces as `BackendError::Timeout` after `d`, well below
+    /// the request-level `timeout` ceiling. This is the gateway leg
+    /// of the C9 "provider hang detection" benefit.
+    ///
+    /// When `None`, no per-chunk deadline applies; the request is
+    /// bounded only by the request-level `timeout`. The dispatch
+    /// layer sets this for `FetchKind::Inference` (where streaming
+    /// is expected) and leaves it `None` for `FetchKind::DataFetch`.
+    pub stream_idle_timeout: Option<Duration>,
 }
 
 /// Raw upstream response, ready for the gateway to wrap in a

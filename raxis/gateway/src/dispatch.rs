@@ -19,6 +19,26 @@ use uuid::Uuid;
 use crate::backend::{Backend, BackendError, BackendRequest};
 use crate::policy_view::{PolicyView, ProviderEntryView};
 
+/// V2_GAPS §C9 / `provider-failure-handling.md §7.3` — default
+/// per-chunk idle deadline for streaming inference responses.
+///
+/// Used as the fallback when a provider's
+/// `stream_idle_timeout_ms` is `None` in policy.toml (the standard
+/// case for generation-tier providers like Claude / GPT-4). A
+/// provider that opens the connection but stalls mid-body fails
+/// fast at this boundary rather than dragging out the per-provider
+/// `inference_timeout_ms` (often 5 min). The kernel surfaces the
+/// boundary as `BackendError::Timeout` → `error: "Timeout"` on the
+/// wire `FetchResponse`.
+///
+/// **Reasoning-tier override.** OpenAI o1/o3 emit no SSE chunks for
+/// the full chain-of-thought duration; the operator MUST widen
+/// `[providers.<id>].stream_idle_timeout_ms` to 60_000–120_000 in
+/// policy.toml to avoid spurious aborts. The 30-second default
+/// stays correct for everything else (Claude including extended
+/// thinking, where thinking-token deltas flow with sub-5s gaps).
+const STREAM_IDLE_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
+
 /// Why a single `FetchRequest` could not be answered. These map 1:1 to
 /// `peripherals.md` §3.2 "FetchResponse error strings". Anything that
 /// should land in the response's `error` field comes through this enum
@@ -221,6 +241,31 @@ async fn dispatch(
 
     // 6. Backend call. Backend is responsible for credential injection
     //    and per-call enforcement of `provider.max_response_bytes`.
+    //
+    //    V2_GAPS §C9 — for `FetchKind::Inference`, attach a per-chunk
+    //    idle timeout so a provider that accepts the request but
+    //    stalls mid-body fails fast at the configured boundary
+    //    rather than dragging the request out to the
+    //    `inference_timeout_ms` ceiling. The per-provider override
+    //    (`provider.stream_idle_timeout_ms`) takes precedence when
+    //    set; otherwise the hard-coded `STREAM_IDLE_TIMEOUT_DEFAULT`
+    //    (30 s) applies. Reasoning-tier providers (OpenAI o1/o3)
+    //    must widen this to 60–120 s in policy.toml — see
+    //    `V2_GAPS.md §C9 "Per-provider stream_idle_timeout"`.
+    //
+    //    `FetchKind::DataFetch` (tools' bounded HTTP fetches) keeps
+    //    the buffered shape because legitimate REST calls can pause
+    //    briefly between a big `Content-Length` body's chunks and
+    //    we don't want spurious timeouts there.
+    let stream_idle_timeout = match fetch_kind {
+        FetchKind::Inference => Some(
+            provider
+                .stream_idle_timeout_ms
+                .map(|ms| Duration::from_millis(u64::from(ms)))
+                .unwrap_or(STREAM_IDLE_TIMEOUT_DEFAULT),
+        ),
+        FetchKind::DataFetch => None,
+    };
     let backend_resp = backend
         .call(BackendRequest {
             provider,
@@ -229,6 +274,7 @@ async fn dispatch(
             headers,
             body: body_bytes,
             timeout: Duration::from_millis(timeout_ms as u64),
+            stream_idle_timeout,
         })
         .await?;
 
@@ -332,6 +378,7 @@ mod tests {
             inference_timeout_ms: 30_000,
             data_fetch_timeout_ms: 10_000,
             max_response_bytes: 16 * 1024 * 1024,
+            stream_idle_timeout_ms: None,
             credentials: ProviderCredentials {
                 api_key: "sk-ant-x".to_owned(),
                 auth_header: "x-api-key".to_owned(),
@@ -364,6 +411,117 @@ mod tests {
             session_id: None,
             task_id: None,
         }
+    }
+
+    /// V2_GAPS §C9 — pin the per-provider `stream_idle_timeout_ms`
+    /// override path. A `Backend` that captures the inbound
+    /// `BackendRequest::stream_idle_timeout` lets us prove that
+    /// dispatch reads `provider.stream_idle_timeout_ms` and converts
+    /// it to the right `Duration` for the `Inference` path,
+    /// AND that the `DataFetch` path is unconditionally `None`
+    /// (so a tool's bounded HTTP fetch doesn't get spuriously aborted
+    /// on legitimate inter-chunk pauses).
+    #[derive(Default, Clone)]
+    struct CapturingBackend {
+        // Outer Option = "was the backend called at all"; inner
+        // Option<Duration> mirrors `BackendRequest::stream_idle_timeout`
+        // so we can distinguish "called with None" from "not called".
+        seen_stream_idle: std::sync::Arc<std::sync::Mutex<Option<Option<Duration>>>>,
+    }
+
+    impl Backend for CapturingBackend {
+        fn call<'a>(
+            &'a self,
+            req: BackendRequest<'a>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<raxis_gateway_substrate::BackendResponse, BackendError>> + Send + 'a>,
+        > {
+            *self.seen_stream_idle.lock().unwrap() = Some(req.stream_idle_timeout);
+            Box::pin(async move {
+                Ok(raxis_gateway_substrate::BackendResponse {
+                    status_code: 200,
+                    headers:     vec![],
+                    body:        b"{}".to_vec(),
+                    latency_ms:  1,
+                })
+            })
+        }
+    }
+
+    /// Default provider (no `stream_idle_timeout_ms`) MUST surface a
+    /// 30-second per-chunk deadline on `Inference` so generation-tier
+    /// providers (Claude / GPT-4) detect a stalled provider quickly.
+    #[tokio::test]
+    async fn inference_uses_30s_default_when_provider_has_no_override() {
+        let view    = view_with_anthropic();
+        let backend = CapturingBackend::default();
+        let req     = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            30_000,
+            FetchKind::Inference,
+        );
+        let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
+        let observed = backend.seen_stream_idle.lock().unwrap().clone()
+            .expect("backend must have been called");
+        assert_eq!(
+            observed,
+            Some(Duration::from_secs(30)),
+            "default per-chunk idle MUST be 30s (V2_GAPS §C9 fallback)",
+        );
+    }
+
+    /// A provider with `stream_idle_timeout_ms = 120_000` (typical
+    /// OpenAI o1/o3 setting) MUST surface a 120-second per-chunk
+    /// deadline. This is the central use case for the per-provider
+    /// override.
+    #[tokio::test]
+    async fn inference_honours_per_provider_stream_idle_override() {
+        let mut view = view_with_anthropic();
+        let p = view.providers.get_mut("anthropic-prod").unwrap();
+        p.stream_idle_timeout_ms = Some(120_000);
+
+        let backend = CapturingBackend::default();
+        let req     = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            30_000,
+            FetchKind::Inference,
+        );
+        let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
+        let observed = backend.seen_stream_idle.lock().unwrap().clone()
+            .expect("backend must have been called");
+        assert_eq!(
+            observed,
+            Some(Duration::from_millis(120_000)),
+            "per-provider override MUST flow through to BackendRequest",
+        );
+    }
+
+    /// `FetchKind::DataFetch` MUST NOT carry a per-chunk deadline
+    /// even if the provider's policy declares one — a tool's
+    /// bounded REST call can legitimately pause between chunks of
+    /// a `Content-Length`-framed body and we don't want spurious
+    /// idle-timeout aborts there.
+    #[tokio::test]
+    async fn data_fetch_never_attaches_stream_idle_timeout() {
+        let mut view = view_with_anthropic();
+        let p = view.providers.get_mut("anthropic-prod").unwrap();
+        p.stream_idle_timeout_ms = Some(60_000);
+
+        let backend = CapturingBackend::default();
+        let req     = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            5_000,
+            FetchKind::DataFetch,
+        );
+        let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
+        let observed = backend.seen_stream_idle.lock().unwrap().clone()
+            .expect("backend must have been called");
+        // After the outer `expect` the value type is `Option<Duration>`;
+        // `None` means "no per-chunk idle deadline attached".
+        assert_eq!(
+            observed, None,
+            "DataFetch MUST NOT carry a per-chunk idle timeout (V2_GAPS §C9)",
+        );
     }
 
     #[tokio::test]

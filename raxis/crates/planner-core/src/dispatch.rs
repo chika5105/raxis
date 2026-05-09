@@ -277,6 +277,7 @@ impl DispatchLoop {
                 messages:    messages.clone(),
                 tools:       tool_specs.clone(),
                 temperature: self.config.temperature,
+                stream:      false,
             };
             let resp = self.model.create_message(&req).await?;
             // V2_GAPS §C1 — fold this turn's `Usage` into the

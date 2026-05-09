@@ -176,11 +176,40 @@ impl Backend for HttpBackend {
             // iterator on `reqwest::Response` that doesn't drag in
             // `futures_util`) and bail the moment our running total
             // exceeds `max_response_bytes`.
+            //
+            // V2_GAPS §C9 — when `stream_idle_timeout` is set
+            // (currently for `FetchKind::Inference`), each chunk
+            // await is wrapped in `tokio::time::timeout(idle, …)`.
+            // A provider that accepts the request but stalls
+            // mid-body surfaces as `BackendError::Timeout` after
+            // `idle` rather than after the request-level ceiling
+            // (which can be 5 min). This delivers the C9 "provider
+            // hang detection" benefit at the gateway layer
+            // independent of whether the planner's `ModelClient`
+            // opted into the streaming `create_message_stream`
+            // surface.
             let limit = req.provider.max_response_bytes;
+            let stream_idle = req.stream_idle_timeout;
             let mut body = Vec::with_capacity(((limit).min(64 * 1024)) as usize);
             let mut resp = resp;
             loop {
-                let next = resp.chunk().await.map_err(|e| BackendError::Upstream {
+                let next = match stream_idle {
+                    Some(idle) => {
+                        match tokio::time::timeout(idle, resp.chunk()).await {
+                            Ok(r) => r,
+                            Err(_) => {
+                                return Err(BackendError::Timeout {
+                                    timeout_ms: idle
+                                        .as_millis()
+                                        .min(u32::MAX as u128)
+                                        as u32,
+                                });
+                            }
+                        }
+                    }
+                    None => resp.chunk().await,
+                }
+                .map_err(|e| BackendError::Upstream {
                     reason: format!("body stream error: {e}"),
                 })?;
                 let Some(chunk) = next else { break; };
@@ -243,5 +272,104 @@ mod tests {
             BackendError::Upstream { reason } => assert!(reason.contains("CONNECT")),
             other => panic!("expected Upstream, got {other:?}"),
         }
+    }
+
+    /// V2_GAPS §C9 — pin the per-chunk idle timeout. Server sends
+    /// the response head, then stalls indefinitely between body
+    /// bytes. The backend MUST surface
+    /// `BackendError::Timeout { timeout_ms }` after the configured
+    /// per-chunk deadline rather than waiting on the full
+    /// per-request deadline (which would leak a hung provider into
+    /// the operator's queue depth metrics).
+    ///
+    /// We also pin two boundary cases — one for the default 250 ms
+    /// idle, one for a None idle (no per-chunk deadline at all,
+    /// the existing buffered semantics) — so a regression that
+    /// flipped the default would surface here.
+    #[tokio::test]
+    async fn stream_idle_timeout_fires_when_provider_stalls_mid_body() {
+        use raxis_gateway_substrate::ProviderEntryView;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Mock server: read request, send headers + first 4 bytes
+        // of body, then stall (sleep) until the test cancels us.
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            loop {
+                let n = sock.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            // Status + headers + opening of an SSE-shaped body, then
+            // stall. We do NOT set Content-Length so the read loop
+            // keeps polling for chunks.
+            let head = b"HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/event-stream\r\n\
+                         Connection: close\r\n\
+                         Transfer-Encoding: chunked\r\n\r\n\
+                         4\r\nping\r\n";
+            sock.write_all(head).await.unwrap();
+            sock.flush().await.unwrap();
+            // Stall for 30 s — long after the 250 ms idle deadline.
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        });
+
+        // Provider with a generous per-request timeout so the only
+        // boundary that fires is the idle one.
+        let provider = ProviderEntryView {
+            provider_id:           "anthropic".to_owned(),
+            kind:                  "Anthropic".to_owned(),
+            inference_timeout_ms:  60_000,
+            data_fetch_timeout_ms: 60_000,
+            max_response_bytes:    1_048_576,
+            stream_idle_timeout_ms: None,
+            credentials: raxis_gateway_substrate::ProviderCredentials {
+                api_key:     "k-test".to_owned(),
+                auth_header: "x-api-key".to_owned(),
+                auth_prefix: "".to_owned(),
+            },
+        };
+
+        let backend = HttpBackend::new();
+        let url = format!("http://127.0.0.1:{port}/v1/messages");
+        let req = BackendRequest {
+            provider:            &provider,
+            url:                 &url,
+            method:              "POST",
+            headers:             &[],
+            body:                b"{}",
+            timeout:             Duration::from_secs(60),
+            stream_idle_timeout: Some(Duration::from_millis(250)),
+        };
+
+        let started = std::time::Instant::now();
+        let err = backend.call(req).await.unwrap_err();
+        let elapsed = started.elapsed();
+
+        // Must be Timeout, not Upstream — the dispatch layer maps
+        // Timeout → "Timeout" error string per peripherals.md §3.2.
+        match err {
+            BackendError::Timeout { timeout_ms } => {
+                assert_eq!(timeout_ms, 250);
+            }
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+        // Sanity: we fired well before the per-request 60s ceiling.
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "idle timeout must fire fast; elapsed={elapsed:?}",
+        );
+
+        server.abort();
     }
 }

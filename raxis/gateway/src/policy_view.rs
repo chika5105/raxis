@@ -172,6 +172,7 @@ pub fn load_policy_view_with_credential_backend(
                 inference_timeout_ms: entry.inference_timeout_ms,
                 data_fetch_timeout_ms: entry.data_fetch_timeout_ms,
                 max_response_bytes: entry.max_response_bytes,
+                stream_idle_timeout_ms: entry.stream_idle_timeout_ms,
                 credentials: creds,
             },
         );

@@ -231,6 +231,49 @@ pub struct MessageRequest {
     /// `provider-model-selection.md §6.2`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+
+    /// V2_GAPS §C9 — opt into Anthropic's SSE streaming endpoint.
+    ///
+    /// When `true`, the upstream returns a `text/event-stream`
+    /// body with incremental events; consumers go through
+    /// [`ModelClient::create_message_stream`] (see also
+    /// `crate::streaming`). When `false` (default), the upstream
+    /// returns a single buffered JSON envelope and consumers go
+    /// through [`ModelClient::create_message`].
+    ///
+    /// `#[serde(skip_serializing_if = "is_false")]` keeps the
+    /// on-the-wire shape stable for callers that haven't opted into
+    /// streaming — adding the field would otherwise change the
+    /// serialized JSON for every request and risk breaking the
+    /// `request_serialises_to_anthropic_wire_shape` golden test.
+    #[serde(skip_serializing_if = "is_false", default)]
+    pub stream:      bool,
+}
+
+/// Helper: matches the `MessageRequest::stream` skip predicate.
+/// Free function so the `#[serde(skip_serializing_if)]` attribute
+/// can name it without leaking trait surface.
+#[inline]
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+impl Default for MessageRequest {
+    /// V2_GAPS §C9 — convenience constructor used by tests + the
+    /// retry / fallback / circuit breaker shells. `..Default::default()`
+    /// at construction sites avoids cascade-edit churn whenever a
+    /// new optional field lands.
+    fn default() -> Self {
+        Self {
+            model:       String::new(),
+            max_tokens:  4096,
+            system:      None,
+            messages:    Vec::new(),
+            tools:       Vec::new(),
+            temperature: None,
+            stream:      false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -270,11 +313,24 @@ pub struct MessageResponse {
 
 /// Token-usage counters from one Anthropic response. Wire shape
 /// matches the Anthropic API exactly.
+///
+/// **Streaming-friendly defaults.** All four fields carry
+/// `#[serde(default)]` so partial-usage payloads (Anthropic's
+/// mid-stream `message_delta` event surfaces only `output_tokens`;
+/// OpenAI's terminal chunk surfaces `prompt_tokens` /
+/// `completion_tokens` mapped onto these names) deserialize
+/// cleanly into a `Usage` struct without us having to branch on
+/// the provider's incremental schema. The aggregator in
+/// `crate::streaming::AnthropicStreamAggregator` carries the
+/// authoritative pre-stream values forward across deltas, so a
+/// missing field reads as "unchanged" rather than "zero".
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Usage {
     /// Input tokens consumed (system + user history).
+    #[serde(default)]
     pub input_tokens:               u32,
     /// Output tokens emitted (assistant content this turn).
+    #[serde(default)]
     pub output_tokens:              u32,
     /// Cache-read input tokens (Anthropic prompt-caching). 0
     /// when caching is disabled (V2 default).
@@ -338,11 +394,69 @@ impl From<reqwest::Error> for ModelError {
 #[async_trait::async_trait]
 pub trait ModelClient: Send + Sync {
     /// Send one Messages API request and read the full response
-    /// (non-streaming). The dispatch loop calls this once per turn.
+    /// (buffered). The dispatch loop calls this once per turn.
     async fn create_message(
         &self,
         req: &MessageRequest,
     ) -> Result<MessageResponse, ModelError>;
+
+    /// V2_GAPS §C9 — start a streaming Messages API request and
+    /// return a [`tokio::sync::mpsc::Receiver`] that yields
+    /// [`crate::streaming::StreamEvent`]s as the upstream
+    /// generates content.
+    ///
+    /// The terminal event on a successful stream is always
+    /// [`crate::streaming::StreamEvent::Complete`] carrying the
+    /// fully-aggregated [`MessageResponse`]. Intermediate events
+    /// (`MessageStart`, `ContentBlockDelta`, `Usage`, `Stop`) are
+    /// observability-only — the dispatch loop's tool-execution
+    /// logic consumes only the terminal `Complete` (per
+    /// `INV-PROVIDER-04`).
+    ///
+    /// **Default impl.** Calls [`Self::create_message`] and emits
+    /// a synthetic four-event stream
+    /// (`MessageStart`, `Usage`, `Stop`, `Complete`). Providers
+    /// that support real SSE streaming (V2.4: AnthropicClient)
+    /// override this to wire the upstream chunk reader.
+    ///
+    /// **Idle-timeout.** Implementors that override this method
+    /// MUST surface
+    /// [`ModelError::Timeout`] when no chunk arrives for longer
+    /// than [`crate::streaming::DEFAULT_STREAM_IDLE_TIMEOUT`]
+    /// (default 30 s) so a stalled provider does not park the
+    /// dispatch loop for the full request_timeout ceiling.
+    async fn create_message_stream(
+        &self,
+        req: &MessageRequest,
+    ) -> Result<
+        tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>,
+        ModelError,
+    > {
+        // Default forwarder: buffered call, then synthesize a
+        // four-event stream so the consumer can use the same
+        // event-loop shape regardless of whether the impl
+        // really supports streaming.
+        let resp = self.create_message(req).await?;
+        let (tx, rx) = tokio::sync::mpsc::channel(crate::streaming::DEFAULT_STREAM_CHANNEL_CAP);
+        let _ = tx
+            .send(crate::streaming::StreamEvent::MessageStart {
+                id:    resp.id.clone(),
+                model: resp.model.clone(),
+            })
+            .await;
+        let _ = tx
+            .send(crate::streaming::StreamEvent::Usage(resp.usage.clone()))
+            .await;
+        let _ = tx
+            .send(crate::streaming::StreamEvent::Stop {
+                stop_reason: resp.stop_reason.clone(),
+            })
+            .await;
+        let _ = tx
+            .send(crate::streaming::StreamEvent::Complete(resp))
+            .await;
+        Ok(rx)
+    }
 }
 
 /// Production Anthropic Messages API client. POSTs to
@@ -454,6 +568,185 @@ impl ModelClient for AnthropicClient {
             .map_err(|e| ModelError::Json(e.to_string()))?;
         Ok(parsed)
     }
+
+    /// V2_GAPS §C9 — real Anthropic SSE streaming.
+    ///
+    /// Sets `stream: true` on the outbound request, opens an SSE
+    /// connection to `<base_url>/v1/messages`, and reads chunks
+    /// through the [`crate::streaming::SseParser`] /
+    /// [`crate::streaming::AnthropicStreamAggregator`] pair on a
+    /// dedicated `tokio::spawn`ed reader task. Per-chunk idle
+    /// timeout is [`crate::streaming::DEFAULT_STREAM_IDLE_TIMEOUT`]
+    /// (30 s); silence beyond that closes the channel cleanly with
+    /// a final `Stop { stop_reason: "stream_idle_timeout_after_30_s" }`
+    /// event so the buffered consumer sees a deterministic close
+    /// shape rather than a torn channel.
+    ///
+    /// The reader task closes the receiver cleanly on:
+    ///
+    /// * Anthropic emitting `event: message_stop` (normal close).
+    /// * The HTTP connection ending (graceful upstream EOF).
+    ///
+    /// And surfaces a synthesized terminal `Stop` event then closes on:
+    ///
+    /// * Per-chunk idle timeout.
+    /// * Transport / connection errors.
+    /// * Aggregator rejecting a malformed frame.
+    ///
+    /// Pre-stream errors (non-2xx response, transport refusal)
+    /// surface synchronously as `Err(ModelError::*)` from this
+    /// function; the consumer never sees a half-open receiver in
+    /// that case.
+    async fn create_message_stream(
+        &self,
+        req: &MessageRequest,
+    ) -> Result<
+        tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>,
+        ModelError,
+    > {
+        // Force the stream flag on the outbound request — Anthropic
+        // returns SSE only when `stream: true` is explicitly set.
+        let mut streaming_req = req.clone();
+        streaming_req.stream = true;
+
+        let url = format!("{}/v1/messages", self.base_url);
+        let body = serde_json::to_vec(&streaming_req)
+            .map_err(|e| ModelError::Json(e.to_string()))?;
+
+        let mut resp = self
+            .http
+            .post(&url)
+            .timeout(self.request_timeout)
+            .header("content-type", "application/json")
+            .header("anthropic-version", self.anthropic_version)
+            .header("accept", "text/event-stream")
+            .body(body)
+            .send()
+            .await?;
+
+        // Pre-stream status check — Anthropic returns an SSE body
+        // only on a 2xx. Errors arrive as a single JSON envelope
+        // with the same buffered shape we already know how to
+        // surface.
+        let status = resp.status();
+        if !status.is_success() {
+            let bytes = resp
+                .bytes()
+                .await
+                .map_err(|e| ModelError::Transport(e.to_string()))?;
+            let snippet = if bytes.len() <= 4096 {
+                String::from_utf8_lossy(&bytes).into_owned()
+            } else {
+                format!(
+                    "{}…<truncated {} bytes>",
+                    String::from_utf8_lossy(&bytes[..4096]),
+                    bytes.len() - 4096,
+                )
+            };
+            return Err(ModelError::Upstream {
+                status: status.as_u16(),
+                body:   snippet,
+            });
+        }
+
+        let (tx, rx) = tokio::sync::mpsc::channel(
+            crate::streaming::DEFAULT_STREAM_CHANNEL_CAP,
+        );
+        let idle = crate::streaming::DEFAULT_STREAM_IDLE_TIMEOUT;
+
+        tokio::spawn(async move {
+            let mut parser   = crate::streaming::SseParser::new();
+            let mut agg      = crate::streaming::AnthropicStreamAggregator::new();
+            let mut saw_stop = false;
+
+            loop {
+                let chunk = tokio::time::timeout(idle, resp.chunk()).await;
+                match chunk {
+                    Err(_) => {
+                        // Idle timeout — synthesize a terminal Stop
+                        // event so consumers see a deterministic
+                        // close shape.
+                        let _ = tx
+                            .send(crate::streaming::StreamEvent::Stop {
+                                stop_reason: Some(format!(
+                                    "stream_idle_timeout_after_{}_s",
+                                    idle.as_secs(),
+                                )),
+                            })
+                            .await;
+                        return;
+                    }
+                    Ok(Err(e)) => {
+                        let _ = tx
+                            .send(crate::streaming::StreamEvent::Stop {
+                                stop_reason: Some(format!(
+                                    "stream_transport_error: {e}"
+                                )),
+                            })
+                            .await;
+                        return;
+                    }
+                    Ok(Ok(None)) => break, // graceful EOF
+                    Ok(Ok(Some(bytes))) => {
+                        for frame in parser.push(&bytes) {
+                            match agg.ingest(&frame) {
+                                Ok(events) => {
+                                    for ev in events {
+                                        if matches!(
+                                            ev,
+                                            crate::streaming::StreamEvent::Stop { .. }
+                                        ) {
+                                            saw_stop = true;
+                                        }
+                                        if tx.send(ev).await.is_err() {
+                                            // Consumer dropped the
+                                            // receiver — bail rather
+                                            // than keep an orphaned
+                                            // upstream connection
+                                            // pinned open.
+                                            return;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = tx
+                                        .send(crate::streaming::StreamEvent::Stop {
+                                            stop_reason: Some(format!(
+                                                "stream_aggregator_error: {e}"
+                                            )),
+                                        })
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Stream EOF reached. If the aggregator collected a
+            // complete response, emit Complete; otherwise emit a
+            // terminal Stop with `stream_eof_before_message_stop`
+            // so the buffered consumer can distinguish a clean
+            // close from a torn one without reading channel state.
+            if !saw_stop {
+                let _ = tx
+                    .send(crate::streaming::StreamEvent::Stop {
+                        stop_reason: Some("stream_eof_before_message_stop".to_owned()),
+                    })
+                    .await;
+            }
+            if agg.is_complete() {
+                if let Ok(resp) = agg.into_response() {
+                    let _ = tx
+                        .send(crate::streaming::StreamEvent::Complete(resp))
+                        .await;
+                }
+            }
+        });
+
+        Ok(rx)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +834,7 @@ mod tests {
             }],
             tools:       vec![],
             temperature: Some(0.7),
+            stream:      false,
         };
         let json = serde_json::to_value(&req).unwrap();
         // Pin the on-the-wire shape against the Anthropic API
@@ -556,6 +850,25 @@ mod tests {
         // `skip_serializing_if = "Vec::is_empty"` attribute.
         assert!(json.get("tools").is_none(),
             "empty tools array MUST be omitted (matches Anthropic schema)");
+        // `stream: false` is the default and MUST be skipped from
+        // the wire so existing call sites that opted-out of
+        // streaming see no on-the-wire diff (V2_GAPS §C9).
+        assert!(json.get("stream").is_none(),
+            "stream=false (default) MUST be omitted from the wire");
+    }
+
+    /// Pin the streaming-on wire shape: when callers opt in by
+    /// setting `stream = true`, the serialized JSON must surface
+    /// the field so Anthropic returns SSE rather than a buffered
+    /// envelope.
+    #[test]
+    fn message_request_serialises_stream_true_when_opted_in() {
+        let req = MessageRequest {
+            stream: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["stream"], true);
     }
 
     #[test]
@@ -620,6 +933,7 @@ mod tests {
             messages:    vec![],
             tools:       vec![],
             temperature: None,
+            stream:      false,
         };
         let resp = client.create_message(&req).await.unwrap();
         assert_eq!(resp.id, "msg_01");
@@ -642,5 +956,155 @@ mod tests {
     #[test]
     fn anthropic_client_constructor_takes_no_credential() {
         let _client = AnthropicClient::new("https://api.anthropic.com");
+    }
+
+    /// V2_GAPS §C9 — drive AnthropicClient::create_message_stream
+    /// end-to-end against a local SSE mock. Verifies that:
+    ///
+    /// 1. The outgoing request carries `stream: true` (so Anthropic
+    ///    returns SSE rather than a buffered JSON envelope).
+    /// 2. The receiver yields the expected sequence of events
+    ///    (`MessageStart`, deltas, `Stop`, `Complete`).
+    /// 3. The terminal `Complete(MessageResponse)` reconstructs the
+    ///    exact wire shape a buffered call would have returned, so
+    ///    consumers that read only the terminal event stay
+    ///    bug-compatible with the non-streaming path
+    ///    (INV-PROVIDER-04).
+    #[tokio::test]
+    async fn create_message_stream_against_local_sse_server_emits_full_event_sequence() {
+        use crate::streaming::{ContentBlockDeltaPayload, StreamEvent};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Mock server: respond with an Anthropic-shaped SSE stream
+        // (message_start → content_block_start → two deltas →
+        // content_block_stop → message_delta with stop_reason →
+        // message_stop). Pin both the request shape (stream=true)
+        // and the response shape (full event sequence) so a future
+        // refactor of either side flags as a P0.
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf   = vec![0u8; 16384];
+            let mut total = 0;
+            loop {
+                let n = sock.read(&mut buf[total..]).await.unwrap();
+                if n == 0 { break; }
+                total += n;
+                if total > 64
+                    && buf[..total].windows(4).any(|w| w == b"\r\n\r\n")
+                {
+                    break;
+                }
+            }
+            let req_str = String::from_utf8_lossy(&buf[..total]);
+            assert!(
+                req_str.contains("\"stream\":true"),
+                "outgoing request must set stream=true; req body={req_str}",
+            );
+
+            let head = b"HTTP/1.1 200 OK\r\n\
+                         Content-Type: text/event-stream\r\n\
+                         Cache-Control: no-cache\r\n\
+                         Connection: close\r\n\r\n";
+            sock.write_all(head).await.unwrap();
+
+            let body = "\
+event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_test_01\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-sonnet-4-5-20250929\",\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":7,\"output_tokens\":1}}}\n\
+\n\
+event: content_block_start\n\
+data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi \"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"there\"}}\n\
+\n\
+event: content_block_stop\n\
+data: {\"type\":\"content_block_stop\",\"index\":0}\n\
+\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":3}}\n\
+\n\
+event: message_stop\n\
+data: {\"type\":\"message_stop\"}\n\
+\n";
+            sock.write_all(body.as_bytes()).await.unwrap();
+            sock.flush().await.unwrap();
+        });
+
+        let client = AnthropicClient::new(format!("http://127.0.0.1:{port}"));
+        let req = MessageRequest {
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: vec![ContentBlock::Text {
+                    text: "say hi".to_owned(),
+                }],
+            }],
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            max_tokens: 64,
+            ..Default::default()
+        };
+        let mut rx = client.create_message_stream(&req).await.unwrap();
+
+        let mut saw_message_start = false;
+        let mut saw_block_start   = false;
+        let mut deltas            = Vec::new();
+        let mut saw_block_stop    = false;
+        let mut saw_stop          = false;
+        let mut final_resp:        Option<MessageResponse> = None;
+
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                StreamEvent::MessageStart { id, model } => {
+                    assert_eq!(id, "msg_test_01");
+                    assert_eq!(model, "claude-sonnet-4-5-20250929");
+                    saw_message_start = true;
+                }
+                StreamEvent::ContentBlockStart { index, block_kind } => {
+                    assert_eq!(index, 0);
+                    assert_eq!(block_kind, "text");
+                    saw_block_start = true;
+                }
+                StreamEvent::ContentBlockDelta { delta, .. } => {
+                    if let ContentBlockDeltaPayload::TextDelta { text } = delta {
+                        deltas.push(text);
+                    }
+                }
+                StreamEvent::ContentBlockStop { index } => {
+                    assert_eq!(index, 0);
+                    saw_block_stop = true;
+                }
+                StreamEvent::Usage(_) => {}
+                StreamEvent::Stop { stop_reason } => {
+                    assert_eq!(stop_reason.as_deref(), Some("end_turn"));
+                    saw_stop = true;
+                }
+                StreamEvent::Complete(resp) => {
+                    final_resp = Some(resp);
+                }
+            }
+        }
+
+        assert!(saw_message_start, "MessageStart must arrive");
+        assert!(saw_block_start,   "ContentBlockStart must arrive");
+        assert_eq!(deltas, vec!["hi ".to_owned(), "there".to_owned()]);
+        assert!(saw_block_stop,    "ContentBlockStop must arrive");
+        assert!(saw_stop,          "Stop must arrive");
+
+        let resp = final_resp.expect("Complete must arrive on a successful stream");
+        assert_eq!(resp.id, "msg_test_01");
+        assert_eq!(resp.model, "claude-sonnet-4-5-20250929");
+        assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            ContentBlock::Text { text } => assert_eq!(text, "hi there"),
+            other => panic!("expected Text block, got {other:?}"),
+        }
+
+        server.await.unwrap();
     }
 }

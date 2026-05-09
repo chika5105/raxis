@@ -405,6 +405,7 @@ mod tests {
             messages:   vec![],
             tools:      vec![],
             temperature: None,
+            stream:     false,
         }
     }
 

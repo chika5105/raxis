@@ -449,6 +449,7 @@ mod tests {
                 },
             ],
             tools: vec![],
+            stream: false,
         }
     }
 
