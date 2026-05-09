@@ -89,7 +89,7 @@ pub async fn spawn_and_supervise(
     client: Arc<crate::gateway::client::GatewayClient>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> SupervisorShutdown {
-    let cfg = match gateway_section {
+    let mut cfg = match gateway_section {
         Some(c) => c,
         None => {
             eprintln!(
@@ -100,10 +100,52 @@ pub async fn spawn_and_supervise(
         }
     };
 
+    // V2_GAPS §10 — embedded gateway. When the kernel was built
+    // with `--features embedded-gateway`, materialise the bytes
+    // baked into the kernel binary to a kernel-private directory
+    // and override `cfg.binary_path` so the spawn loop below
+    // dispatches against the kernel-controlled file rather than
+    // the operator-supplied path. When the feature is off (default)
+    // `materialize` returns `Ok(None)` and the supervisor keeps
+    // using `cfg.binary_path` — the historical fast-iteration path.
+    match crate::gateway::embedded::materialize(&data_dir) {
+        Ok(Some(p)) => {
+            let canonical = p.to_string_lossy().into_owned();
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"gateway_embedded_materialized\",\
+                 \"binary_path\":\"{}\"}}",
+                canonical
+            );
+            cfg.binary_path = canonical;
+        }
+        Ok(None) => {}
+        Err(e) => {
+            // Fail-closed: if we cannot materialise the embedded
+            // bytes there is no safe fallback (the trust assumption
+            // for a release build is "kernel-controlled binary").
+            // Mirror the token-mint failure path so `main.rs`
+            // observes a clean `Quarantined`.
+            let reason = format!("embedded gateway materialise failure: {e}");
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"gateway_embedded_materialize_failed\",\
+                 \"reason\":\"{e}\"}}"
+            );
+            let _ = audit.emit(
+                AuditEventKind::GatewayQuarantined {
+                    reason: reason.clone(),
+                    total_attempts: 0,
+                },
+                None, None, None,
+            );
+            return SupervisorShutdown::Quarantined { reason, total_attempts: 0 };
+        }
+    }
+
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"gateway_supervisor_start\",\
-         \"binary_path\":\"{}\",\"max_respawns\":{}}}",
+         \"binary_path\":\"{}\",\"max_respawns\":{},\"embedded\":{}}}",
         cfg.binary_path, cfg.max_consecutive_respawns,
+        crate::gateway::embedded::is_embedded(),
     );
 
     let mut attempt: u32 = 0;

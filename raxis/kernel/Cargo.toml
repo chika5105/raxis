@@ -14,6 +14,16 @@ license.workspace = true
 name = "raxis-kernel"
 path = "src/main.rs"
 
+[features]
+# V2_GAPS §10 — embed the `raxis-gateway` binary into the kernel
+# at compile time so the bytes never exist as a separately-tampered
+# file on disk. Off by default so `cargo build` (dev) keeps the
+# fast-iteration path where the gateway is a separate binary on
+# the operator's `$PATH`. CI release builds enable the feature
+# and provide the bytes via the `RAXIS_GATEWAY_BINARY` env var
+# (path to the just-built `target/release/raxis-gateway`).
+embedded-gateway = []
+
 [dependencies]
 # Workspace support crates (the six listed in Part 2.1)
 raxis-types       = { workspace = true }

@@ -1876,9 +1876,42 @@ The proxy:
 
 ---
 
-## §10 — Gateway Binary Integrity
+## §10 — Gateway Binary Integrity — **CLOSED (V2.3, MVP)**
 
-### The gap
+V2.3 ships the embedded-gateway feature flag exactly as the
+"V2 approach" subsection below describes. Implementation lives
+in `kernel/src/gateway/embedded.rs` (~150 lines including the
+`#[cfg]`-gated `include_bytes!` selector, `materialize`, and
+unit tests) and the supervisor wiring in
+`kernel/src/gateway/supervisor.rs::spawn_and_supervise`.
+
+When the kernel was compiled with `--features embedded-gateway`,
+the supervisor calls `embedded::materialize(&data_dir)` once at
+startup, which writes the bytes to
+`<data_dir>/runtime/embedded-gateway/raxis-gateway` (mode `0500`
+inside a `0700` parent), then overrides `cfg.binary_path` so the
+spawn loop dispatches against the kernel-controlled file. When
+the feature is **off** (default for `cargo build`),
+`materialize` returns `Ok(None)` and the supervisor keeps using
+the configured external `binary_path` — the historical
+fast-iteration path.
+
+`gateway_supervisor_start` log lines now carry an `embedded:
+true|false` field so operators can confirm which build mode is
+running. Boot quarantines on materialise I/O failure (treated
+identically to a token-mint failure: `GatewayQuarantined` audit
+event + `SupervisorShutdown::Quarantined`) — there is no safe
+fallback once the operator has opted into the embedded build.
+
+### V3 (still deferred)
+
+- `memfd_create` / macOS equivalent to avoid the on-disk hop
+  entirely.
+- OS-native code signing (`SecStaticCodeCheckValidity`,
+  dm-verity, fsverity, IMA) layered on top of the embedded
+  bytes.
+
+### The gap (historical)
 
 The kernel verifies VM images (Reviewer, Orchestrator, Symbol-Index
 Verifier) via compiled-in SHA-256 digests checked at every spawn.

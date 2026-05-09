@@ -36,6 +36,7 @@
 
 pub mod accept;
 pub mod client;
+pub mod embedded;
 pub mod supervisor;
 
 pub use client::GatewayCallError;
