@@ -2984,7 +2984,7 @@ but is missing one check, one guard, or one assertion.
 | `INV-PLANNER-HARNESS-03` | cgroup v2 guest kernel version check at session boot — the harness assumes Linux 5.14+ but never verifies | ~20 |
 | `INV-ENV-01` | Environment coherence check at admission — tasks can currently mix credentials from different environments | ~40 |
 | `INV-CRED-KERNEL-01` | Credential proxy kernel-side validation — kernel accepts proxy declarations without verifying the proxy type is supported | ~30 |
-| `INV-INIT-06` | Initiative cleanup on kernel shutdown — kernel shuts down cleanly but does not mark in-flight initiatives as `interrupted` | ~30 |
+| `INV-INIT-04` | Initiative cleanup on kernel shutdown — kernel shuts down cleanly but does not mark in-flight initiatives as `interrupted` (previously mislabeled as `INV-INIT-06`; plan artifact immutability is fully implemented via Plan Bundle Sealing) | ~30 |
 | `INV-PLAN-BUNDLE-FRESH` | Already referenced in code but the staleness check is a no-op (always returns fresh) | ~20 |
 | `INV-CERT-01` | Certificate expiry check at IPC auth time — certificates are validated at issuance but not re-checked at connection time | ~30 |
 
