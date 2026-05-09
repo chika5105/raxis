@@ -752,6 +752,106 @@ delivery.
 | Policy declares sidecar but sidecar is not running | Kernel starts normally. First notification to that channel fails with `Network` error. Kernel does not block boot waiting for sidecars. |
 | `events` filter matches no emitted events | Silent — the sidecar is never called. No error, no warning. This is valid configuration (operator may enable events later). |
 | Notification payload serialization error | Programming bug — `unreachable!()` in release, `debug_assert!` in test. The kernel skips this channel for this event and emits a `SecurityEventKind::NotificationSerializationFailure` audit event. |
+| **Malicious/hanging sidecar (infinite loop)** | See backpressure design below. |
+
+**Backpressure: concurrency cap + per-channel circuit breaker.**
+
+A sidecar that hangs indefinitely (malicious `while true` loop,
+deadlock, or simply overwhelmed) is not just a timeout problem.
+If the kernel spawns a new `tokio::spawn` task for every
+notification event and each task blocks for 15 seconds (3 × 5s
+timeout), a burst of 100 events/second produces 1,500 concurrent
+tasks — each holding a TCP connection and a tokio task slot.
+Without a bound, this is unbounded resource accumulation.
+
+V2 prevents this with two mechanisms:
+
+**1. Per-channel concurrency semaphore.**
+
+Each `[[notification_channels]]` entry gets a
+`tokio::sync::Semaphore` with `max_in_flight` permits (default 8,
+configurable in `policy.toml`):
+
+```toml
+[[notification_channels]]
+name          = "slack-escalations"
+kind          = "Sidecar"
+endpoint      = "http://localhost:9200/notify"
+events        = ["EscalationRequest"]
+max_in_flight = 8    # default; cap concurrent dispatch tasks
+```
+
+When all 8 permits are held (i.e., 8 tasks are blocked waiting on
+the sidecar), the 9th notification **drops immediately** with a
+`DeliveryFailed{Backpressure}` audit event. The kernel does NOT
+queue — it drops and moves on. This bounds the maximum resource
+consumption per channel to `max_in_flight × 15s` worth of tasks
+regardless of event rate.
+
+**2. Per-channel circuit breaker.**
+
+If a channel accumulates 5 consecutive failures (timeout, 5xx,
+connection refused) within a 60-second window, the channel enters
+**open** state. While open:
+
+- All notifications to that channel are dropped immediately with
+  `DeliveryFailed{CircuitOpen}`.
+- No TCP connections are attempted (zero resource cost).
+- After 60 seconds, the circuit enters **half-open** and allows
+  one probe delivery through. If it succeeds, the circuit closes
+  and normal dispatch resumes. If it fails, the circuit re-opens
+  for another 60 seconds.
+
+This prevents a permanently-hanging sidecar from consuming even
+the `max_in_flight` permit slots — after the first 5 failures
+hit the timeout, the circuit opens and the kernel stops trying.
+
+```
+Normal:   event → semaphore.acquire → POST → 2xx → release
+Backpressure: event → semaphore full → drop (audit: Backpressure)
+Circuit open: event → circuit check → drop (audit: CircuitOpen)
+Half-open:    event → circuit check → one probe → success → close circuit
+                                                → failure → re-open
+```
+
+**Worst-case resource consumption per channel:**
+
+| Parameter | Value |
+|---|---|
+| `max_in_flight` | 8 (default) |
+| Per-attempt timeout | 5 seconds |
+| Max attempts | 3 |
+| Max wall-clock per task | 15 seconds |
+| Max concurrent TCP connections | 8 |
+| Max tokio tasks | 8 |
+| Circuit breaker trip threshold | 5 consecutive failures |
+| Circuit open duration | 60 seconds |
+
+With 10 configured channels and all of them hanging: **80 tokio
+tasks, 80 TCP connections** — bounded and predictable. After the
+circuit breakers trip (~75 seconds), consumption drops to **zero**.
+
+**`raxis status` visibility:**
+
+```json
+{
+  "notifications": {
+    "channels": [
+      {
+        "name": "slack-escalations",
+        "kind": "Sidecar",
+        "state": "circuit_open",
+        "in_flight": 0,
+        "dropped_backpressure": 47,
+        "dropped_circuit_open": 312,
+        "last_success_at": null,
+        "last_failure_at": "2026-05-08T20:05:00Z",
+        "circuit_reopens_at": "2026-05-08T20:06:00Z"
+      }
+    ]
+  }
+}
+```
 
 **Spec files requiring updates for the sidecar notification
 pattern:**
