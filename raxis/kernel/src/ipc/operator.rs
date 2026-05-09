@@ -694,49 +694,30 @@ async fn handle_request(
         }
 
         // ----------------------------------------------------------------
-        // V2_GAPS §12.4 — Operator-ergonomics IPC. V2 ships the wire
-        // shape and a fail-closed stub so the CLI can be written
-        // against the final contract; the concrete handler ships in
-        // V3. The unused-binding `let _ = (...);` calls below pin the
-        // payload field set so a wire-shape change forces a refactor.
+        // V2_GAPS §12.4 — Operator-ergonomics IPC. V2.4 lands real
+        // handlers for ProposeDefaults / EstimateCost / DryRunAdmit /
+        // DescribeInitiativePause. SubscribeInitiative remains a
+        // wire-stub because it requires bidirectional streaming on
+        // the operator socket (lands with V3 KernelPush transport,
+        // V2_GAPS §12.1). All five handlers live in
+        // `crate::ipc::operator_ergonomics` and uphold
+        // `INV-OPERATOR-ERG-01` — read-only kernel operations.
         // ----------------------------------------------------------------
         OperatorRequest::ProposeDefaults { initiative_id } => {
-            let _ = initiative_id;
-            stub_not_yet_implemented("ProposeDefaults")
+            crate::ipc::operator_ergonomics::handle_propose_defaults(initiative_id, ctx).await
         }
         OperatorRequest::EstimateCost { plan_toml, plan_sig_hex } => {
-            let _ = (plan_toml, plan_sig_hex);
-            stub_not_yet_implemented("EstimateCost")
+            crate::ipc::operator_ergonomics::handle_estimate_cost(plan_toml, plan_sig_hex, ctx).await
         }
         OperatorRequest::DryRunAdmit { plan_toml, plan_sig_hex, submitted_by } => {
-            let _ = (plan_toml, plan_sig_hex, submitted_by);
-            stub_not_yet_implemented("DryRunAdmit")
+            crate::ipc::operator_ergonomics::handle_dry_run_admit(plan_toml, plan_sig_hex, submitted_by, ctx).await
         }
         OperatorRequest::SubscribeInitiative { initiative_id } => {
-            let _ = initiative_id;
-            stub_not_yet_implemented("SubscribeInitiative")
+            crate::ipc::operator_ergonomics::handle_subscribe_initiative(initiative_id, ctx).await
         }
         OperatorRequest::DescribeInitiativePause { initiative_id } => {
-            let _ = initiative_id;
-            stub_not_yet_implemented("DescribeInitiativePause")
+            crate::ipc::operator_ergonomics::handle_describe_initiative_pause(initiative_id, ctx).await
         }
-    }
-}
-
-/// V2_GAPS §12.4 — every operator-ergonomics IPC variant lands here.
-/// We return the canonical `FAIL_NOT_YET_IMPLEMENTED` envelope with a
-/// human-readable detail naming the requested feature plus the
-/// target release. The CLI is expected to surface both fields
-/// verbatim so operators see the same message shape they will see
-/// once V3 lands a real handler.
-fn stub_not_yet_implemented(feature: &str) -> OperatorResponse {
-    OperatorResponse::Error {
-        code:   "FAIL_NOT_YET_IMPLEMENTED".into(),
-        detail: format!(
-            "operator-ergonomics IPC `{feature}` is V3 work. Wire shape \
-             is stable in V2.3 (V2_GAPS.md §12.4); the kernel will land \
-             the concrete handler in a future release."
-        ),
     }
 }
 

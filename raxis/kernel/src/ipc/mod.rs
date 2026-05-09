@@ -17,6 +17,7 @@ pub mod cid_blocklist;
 pub mod log;
 pub mod server;
 pub mod operator;
+pub mod operator_ergonomics;
 
 // V2 Step 15 — pre-auth CID blocklist. Re-exported here because the
 // accept layer consults it BEFORE any authenticated session lookup

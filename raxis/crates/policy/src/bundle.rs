@@ -1526,6 +1526,8 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "DiskFullHaltEntered", "DiskHealthyAfterFull",
     "OperatorAttentionRequired",
     "KernelPushEnqueued",
+    // V2_GAPS §12.4 — operator-ergonomics IPC dry-run audit event.
+    "DryRunAdmitted",
 ];
 
 /// Validate the raw `[notifications]` section and produce the final
@@ -4788,6 +4790,16 @@ channels   = []
                 push_kind:     "SubTaskActivated".into(),
                 initiative_id: None,
                 task_id:       None,
+            }.as_str(),
+            // V2_GAPS §12.4 — operator-ergonomics IPC dry-run audit event.
+            AuditEventKind::DryRunAdmitted {
+                submitted_by:   "x".into(),
+                policy_epoch:   0,
+                plan_sha256:    "x".into(),
+                target_ref:     "x".into(),
+                warnings_count: 0,
+                lane_id:        "x".into(),
+                task_count:     0,
             }.as_str(),
         ];
 

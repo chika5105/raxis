@@ -361,6 +361,40 @@ pub enum AuditEventKind {
     PlanRejected {
         initiative_id: String,
     },
+    /// V2_GAPS §12.4 — `OperatorRequest::DryRunAdmit` (V2.4) emits
+    /// exactly one `DryRunAdmitted` audit event per call so the
+    /// operator's local audit chain reflects which plan was
+    /// dry-run admitted at which time. This is the **only**
+    /// write side-effect of `DryRunAdmit`; per
+    /// `operator-ergonomics.md §12.3` (low-priority informational
+    /// audit allowance) the handler is otherwise read-only.
+    ///
+    /// The event is intentionally **rate-limit-free** in V2.4
+    /// (operators almost always run dry-run by hand or under CI
+    /// gating). V3 will layer per-operator rate limiting onto the
+    /// kernel's audit-rate-limit table; the wire shape below is
+    /// forward-compatible.
+    DryRunAdmitted {
+        /// Operator-supplied submitter id (mirrors
+        /// `CreateInitiative::submitted_by`).
+        submitted_by:   String,
+        /// Active policy epoch at the moment of dry-run; lets a
+        /// later forensic query line dry-run results up against
+        /// the epoch the live submission ran under.
+        policy_epoch:   u64,
+        /// SHA-256 hex of the `plan_toml` bytes — the same
+        /// digest the kernel would compute at live submission.
+        plan_sha256:    String,
+        /// The would-be `target_ref` resolved from the plan and
+        /// the policy `[git]` section.
+        target_ref:     String,
+        /// Number of non-fatal warnings the handler returned.
+        warnings_count: u32,
+        /// Workspace lane the plan declared.
+        lane_id:        String,
+        /// Number of `[[tasks]]` entries in the plan.
+        task_count:     u32,
+    },
     /// kernel-store.md §2.5.8 `path_scope_override` semantics:
     /// emitted by `approve_plan` for **every** task in the plan that has
     /// `path_scope_override = true`. Records the override at the moment
@@ -1964,6 +1998,7 @@ impl AuditEventKind {
             Self::MongoCommandExecuted { .. } => "MongoCommandExecuted",
             Self::SmtpMessageRelayed { .. } => "SmtpMessageRelayed",
             Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",
+            Self::DryRunAdmitted { .. } => "DryRunAdmitted",
         }
     }
 }
