@@ -1255,9 +1255,15 @@ async fn handle_approve_plan(
     // V2_GAPS §13 (V2.5 BLOCKER) — snapshot the operator-published
     // `[[vm_images]]` registry under the same epoch the plan was
     // submitted against so `validate_task_vm_images` resolves
-    // every alias against a stable view of the policy.
+    // every alias against a stable view of the policy. The
+    // `[default_executor_image]` snapshot rides alongside it so
+    // the kernel-side back-fill (when an Executor task omits
+    // `vm_image`) targets the same stable epoch view.
     let policy_vm_images_snapshot: Vec<raxis_policy::VmImageConfig> =
         policy_snapshot.vm_images().to_vec();
+    let policy_default_executor_image_snapshot:
+        Option<raxis_policy::DefaultExecutorImageConfig> =
+        policy_snapshot.default_executor_image().cloned();
     // Snapshot the operator's display name from the same bundle we
     // resolved the pubkey from, so the audit event records the name
     // that was authoritative at approval time. See
@@ -1281,6 +1287,7 @@ async fn handle_approve_plan(
             &policy_environments_snapshot,
             &policy_permitted_credentials_snapshot,
             &policy_vm_images_snapshot,
+            policy_default_executor_image_snapshot.as_ref(),
             &store_for_blocking,
             &*audit_for_blocking,
             &plan_registry_for_blocking,

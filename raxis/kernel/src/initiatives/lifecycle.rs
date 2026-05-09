@@ -634,6 +634,7 @@ pub fn approve_plan_for_test(
         &empty_envs,
         &empty_creds,
         &empty_vm_images,
+        None,
         store,
         audit,
         plan_registry,
@@ -668,6 +669,15 @@ pub fn approve_plan(
     // permitted (legacy V1 behavior — every Executor task boots
     // the canonical starter image).
     policy_vm_images:                    &[raxis_policy::VmImageConfig],
+    // V2_GAPS §13 (V2.5 BLOCKER) — operator-side
+    // `[default_executor_image] alias`. When `Some`, Executor
+    // tasks that omit `vm_image` are transparently back-filled
+    // with `alias` so the spawn path always sees an
+    // operator-pinned image. The validator already proved the
+    // alias resolves and is Executor-permitted; absence is
+    // equivalent to "no kernel-side defaulting" (matches V1
+    // behavior).
+    policy_default_executor_image:       Option<&raxis_policy::DefaultExecutorImageConfig>,
     store:                               &Store,
     audit:                               &dyn AuditSink,
     plan_registry:                       &PlanRegistry,
@@ -740,7 +750,7 @@ pub fn approve_plan(
     }
 
     let plan_toml_str    = String::from_utf8_lossy(&plan_bytes);
-    let plan_tasks       = parse_plan_tasks(&plan_toml_str)?;
+    let mut plan_tasks   = parse_plan_tasks(&plan_toml_str)?;
     let orchestrator_fields = parse_plan_orchestrator(&plan_toml_str)?;
     // V2 §Step 28 — read `[workspace] lane_id` (or surface the
     // missing/empty/override error below).
@@ -798,7 +808,11 @@ pub fn approve_plan(
     // tasks whose `vm_image` does not resolve to an operator-
     // published `[[vm_images]]` entry whose `role_restriction`
     // permits "Executor". Inert when the registry is empty.
-    validate_task_vm_images(&plan_tasks, policy_vm_images)?;
+    validate_task_vm_images(
+        &mut plan_tasks,
+        policy_vm_images,
+        policy_default_executor_image,
+    )?;
     // V2_GAPS §B2 (`custom-tools.md`) — kernel-side validation of
     // operator-declared custom tools at plan-approve time. Rejects
     // structurally malformed `[[profiles.<name>.custom_tool]]`
@@ -3025,13 +3039,17 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
 ///      registry. Unknown alias → `FAIL_VM_IMAGE_NOT_PERMITTED`.
 ///      `role_restriction` not including `"Executor"` →
 ///      `FAIL_VM_IMAGE_ROLE_RESTRICTION_MISMATCH`.
+///   3. For Executor tasks that **omit** `vm_image` AND the policy
+///      declares `[default_executor_image]`, the kernel transparently
+///      back-fills the task's `vm_image` with the resolved alias.
+///      The defaulter is idempotent on plans that `raxis-cli plan
+///      prepare` already filled (it only fires when the field is
+///      empty), and inert when no `[default_executor_image]` is
+///      declared.
 ///
-/// Tasks that omit `vm_image` are admitted unchanged. The
-/// `[default_executor_image]` defaulting (see V2.5 §13 step 3) is
-/// done by `raxis-cli plan prepare` BEFORE the plan is signed, so
-/// by the time the kernel sees the plan the field is already
-/// either explicitly populated by the operator or explicitly
-/// omitted — both are accepted here.
+/// Tasks that omit `vm_image` AND have no policy default are
+/// admitted unchanged — the spawn path falls back to the
+/// canonical starter image (V1 forward-compat).
 ///
 /// **Inert when the registry is empty.** A policy with no
 /// `[[vm_images]]` entries is treated as "no operator-published
@@ -3041,8 +3059,9 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
 /// `image_not_registered` so a half-rolled-out registry doesn't
 /// silently fall through.
 fn validate_task_vm_images(
-    tasks:     &[PlanTask],
-    vm_images: &[raxis_policy::VmImageConfig],
+    tasks:                  &mut [PlanTask],
+    vm_images:              &[raxis_policy::VmImageConfig],
+    default_executor_image: Option<&raxis_policy::DefaultExecutorImageConfig>,
 ) -> Result<(), LifecycleError> {
     use crate::initiatives::lifecycle::SessionAgentType;
 
@@ -3068,6 +3087,16 @@ fn validate_task_vm_images(
             }
             SessionAgentType::Executor => {
                 if pt.vm_image.is_empty() {
+                    // V2.5 §13 step 3: kernel-side back-fill from
+                    // `[default_executor_image]`. The
+                    // `validate_default_executor_image` helper
+                    // already proved the alias resolves against
+                    // `[[vm_images]]` and that the entry permits
+                    // "Executor", so we can mutate the task in
+                    // place without re-checking.
+                    if let Some(default) = default_executor_image {
+                        pt.vm_image = default.alias.clone();
+                    }
                     continue;
                 }
                 let entry = vm_images
@@ -5711,6 +5740,7 @@ target_ref = "refs/heads/raxis/feature"
             &empty_envs,
             &empty_creds,
             &empty_vm_images,
+            None,
             &store,
             &audit,
             &registry,
@@ -7001,18 +7031,18 @@ mod vm_image_admission_tests {
 
     #[test]
     fn empty_registry_admits_tasks_omitting_vm_image() {
-        let tasks = vec![
+        let mut tasks = vec![
             task("t1", SessionAgentType::Executor, ""),
             task("t2", SessionAgentType::Reviewer, ""),
         ];
-        validate_task_vm_images(&tasks, &[])
+        validate_task_vm_images(&mut tasks, &[], None)
             .expect("omitted vm_image must be admitted with empty registry");
     }
 
     #[test]
     fn empty_registry_rejects_executor_with_alias() {
-        let tasks = vec![task("t1", SessionAgentType::Executor, "ghost-image")];
-        let err = validate_task_vm_images(&tasks, &[]).expect_err("must reject");
+        let mut tasks = vec![task("t1", SessionAgentType::Executor, "ghost-image")];
+        let err = validate_task_vm_images(&mut tasks, &[], None).expect_err("must reject");
         match err {
             LifecycleError::PlanTaskVmImageInvalid { rule, offending_task, offending_image, .. } => {
                 assert_eq!(rule, "image_not_registered");
@@ -7026,8 +7056,8 @@ mod vm_image_admission_tests {
     #[test]
     fn reviewer_with_vm_image_is_rejected() {
         let registry = vec![registry_entry("rev-img", &["Verifier"])];
-        let tasks = vec![task("rt", SessionAgentType::Reviewer, "rev-img")];
-        let err = validate_task_vm_images(&tasks, &registry).expect_err("must reject");
+        let mut tasks = vec![task("rt", SessionAgentType::Reviewer, "rev-img")];
+        let err = validate_task_vm_images(&mut tasks, &registry, None).expect_err("must reject");
         match err {
             LifecycleError::PlanTaskVmImageInvalid { rule, offending_task, offending_image, suggestion } => {
                 assert_eq!(rule, "reviewer_image_not_allowed");
@@ -7043,8 +7073,8 @@ mod vm_image_admission_tests {
     #[test]
     fn executor_with_unregistered_alias_is_rejected() {
         let registry = vec![registry_entry("real-img", &["Executor"])];
-        let tasks = vec![task("t1", SessionAgentType::Executor, "ghost-image")];
-        let err = validate_task_vm_images(&tasks, &registry).expect_err("must reject");
+        let mut tasks = vec![task("t1", SessionAgentType::Executor, "ghost-image")];
+        let err = validate_task_vm_images(&mut tasks, &registry, None).expect_err("must reject");
         match err {
             LifecycleError::PlanTaskVmImageInvalid { rule, .. } => {
                 assert_eq!(rule, "image_not_registered");
@@ -7056,8 +7086,8 @@ mod vm_image_admission_tests {
     #[test]
     fn executor_with_verifier_only_alias_is_rejected() {
         let registry = vec![registry_entry("ver-only", &["Verifier"])];
-        let tasks = vec![task("t1", SessionAgentType::Executor, "ver-only")];
-        let err = validate_task_vm_images(&tasks, &registry).expect_err("must reject");
+        let mut tasks = vec![task("t1", SessionAgentType::Executor, "ver-only")];
+        let err = validate_task_vm_images(&mut tasks, &registry, None).expect_err("must reject");
         match err {
             LifecycleError::PlanTaskVmImageInvalid { rule, suggestion, .. } => {
                 assert_eq!(rule, "role_restriction_mismatch");
@@ -7074,19 +7104,65 @@ mod vm_image_admission_tests {
             registry_entry("primary-exec", &["Executor"]),
             registry_entry("polyglot",     &["Executor", "Verifier"]),
         ];
-        let tasks = vec![
+        let mut tasks = vec![
             task("t1", SessionAgentType::Executor, "primary-exec"),
             task("t2", SessionAgentType::Executor, "polyglot"),
         ];
-        validate_task_vm_images(&tasks, &registry)
+        validate_task_vm_images(&mut tasks, &registry, None)
             .expect("Executor-permitted alias must admit");
     }
 
     #[test]
     fn reviewer_without_vm_image_is_admitted() {
         let registry = vec![registry_entry("primary-exec", &["Executor"])];
-        let tasks = vec![task("rt", SessionAgentType::Reviewer, "")];
-        validate_task_vm_images(&tasks, &registry)
+        let mut tasks = vec![task("rt", SessionAgentType::Reviewer, "")];
+        validate_task_vm_images(&mut tasks, &registry, None)
             .expect("Reviewer omitting vm_image must admit");
+    }
+
+    #[test]
+    fn default_executor_image_back_fills_omitted_alias() {
+        // V2.5 §13 step 3 — when the operator declares
+        // `[default_executor_image] alias = "primary-exec"` and a
+        // plan task omits `vm_image`, the kernel transparently
+        // populates the field at admission time.
+        let registry = vec![registry_entry("primary-exec", &["Executor"])];
+        let default = raxis_policy::DefaultExecutorImageConfig {
+            alias: "primary-exec".to_owned(),
+        };
+        let mut tasks = vec![task("t1", SessionAgentType::Executor, "")];
+        validate_task_vm_images(&mut tasks, &registry, Some(&default))
+            .expect("default-executor back-fill must admit");
+        assert_eq!(tasks[0].vm_image, "primary-exec",
+            "kernel must have back-filled the alias");
+    }
+
+    #[test]
+    fn default_executor_image_does_not_overwrite_explicit_alias() {
+        let registry = vec![
+            registry_entry("primary-exec", &["Executor"]),
+            registry_entry("custom-exec",  &["Executor"]),
+        ];
+        let default = raxis_policy::DefaultExecutorImageConfig {
+            alias: "primary-exec".to_owned(),
+        };
+        let mut tasks = vec![task("t1", SessionAgentType::Executor, "custom-exec")];
+        validate_task_vm_images(&mut tasks, &registry, Some(&default))
+            .expect("explicit alias must admit");
+        assert_eq!(tasks[0].vm_image, "custom-exec",
+            "explicit operator-declared alias must not be overwritten by the default");
+    }
+
+    #[test]
+    fn default_executor_image_does_not_back_fill_reviewer() {
+        let registry = vec![registry_entry("primary-exec", &["Executor"])];
+        let default = raxis_policy::DefaultExecutorImageConfig {
+            alias: "primary-exec".to_owned(),
+        };
+        let mut tasks = vec![task("rt", SessionAgentType::Reviewer, "")];
+        validate_task_vm_images(&mut tasks, &registry, Some(&default))
+            .expect("Reviewer omitting vm_image must admit");
+        assert!(tasks[0].vm_image.is_empty(),
+            "Reviewer tasks must NOT receive a default vm_image (INV-PLANNER-HARNESS-02)");
     }
 }
