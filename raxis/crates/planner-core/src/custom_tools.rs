@@ -189,10 +189,19 @@ impl Tool for SubprocessTool {
                     "{}: stdin JSON encode failed: {e}", self.name,
                 ))),
             };
-            if let Err(e) = stdin.write_all(&body).await {
-                return Ok(ToolOutput::err(format!(
-                    "{}: stdin write failed: {e}", self.name,
-                )));
+            match stdin.write_all(&body).await {
+                Ok(()) => {}
+                // EPIPE / BrokenPipe means the subprocess exited (or
+                // closed its stdin) before consuming input. This is
+                // normal — many tools ignore stdin entirely. Drop the
+                // writer and fall through to wait_with_output so the
+                // real exit code and stderr are captured.
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                Err(e) => {
+                    return Ok(ToolOutput::err(format!(
+                        "{}: stdin write failed: {e}", self.name,
+                    )));
+                }
             }
             // Drop closes stdin so the subprocess sees EOF.
             drop(stdin);
