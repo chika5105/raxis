@@ -73,12 +73,18 @@ use std::fmt;
 
 mod error;
 pub mod model;
+pub mod tools;
 pub mod transport;
 
 pub use error::PlannerError;
 pub use model::{
     AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse, MockModelClient,
     ModelClient, ModelError, ToolSpec, Usage,
+};
+pub use tools::{
+    build_executor_registry, build_orchestrator_registry, build_reviewer_registry, BashTool,
+    EditFileTool, GitCommitTool, GrepSearchTool, ReadFileTool, Tool, ToolContext, ToolError,
+    ToolOutput, ToolRegistry,
 };
 pub use transport::{
     connect, KernelTransport, KernelTransportConfig, StreamTransport, TransportError,
