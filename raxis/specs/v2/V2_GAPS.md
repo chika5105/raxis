@@ -1424,7 +1424,67 @@ regardless of streaming mode.
 
 ---
 
-### C10: Setup Wizard (`raxis setup`) — 10-Phase Interactive First-Run
+### C10: Setup Wizard (`raxis setup`) — **CLOSED (V2.3, MVP)**
+
+V2.3 ships a non-interactive scaffolding wizard at
+`cli/src/commands/setup.rs` (~520 lines including tests) that
+covers phases **2** (`policy_authoring`) and **6**
+(`plan_template`) end-to-end and prints recipes for the
+remaining phases (1, 3, 4, 5, 7, 8). The MVP honours every
+design constraint from the V2 BLOCKER entry below:
+
+* **Non-interactive only** — every input is a flag; no TTY
+  abstraction, fully scriptable for CI and for operators on
+  headless hosts.
+* **Idempotent re-entry** — `<data_dir>/.setup_state.json`
+  records `phase_label -> ISO-8601 timestamp` for each
+  completed phase. Re-runs skip completed phases unless
+  `--force` is passed.
+* **Drift guard** — a SHA-256 fingerprint of the operator-
+  supplied parameters (`operator-name`, `provider`,
+  `provider-id`, `budget-usd`, `max-concurrency`) is stored
+  alongside the phase log; a re-run with different inputs
+  fails with `FAIL_SETUP_PARAMS_DRIFT` unless `--force` is
+  supplied.
+* **No overwrite without confirmation** — an existing
+  `policy/policy.toml` triggers `FAIL_SETUP_POLICY_EXISTS`
+  unless `--force` is set, mirroring `plan init`.
+* **Composable with existing commands** — Phase 6 calls
+  `commands::plan_init::run` directly (no template
+  re-implementation). Phase 8 prints `raxis doctor --data-dir
+  …` rather than running it in-process so the operator sees
+  the exact command to re-run later when verifying drift.
+* **Phase enum reserves all ten slots** — the
+  `.setup_state.json` schema pre-allocates slots for V3
+  phases (`provider_credentials`, `vm_images`,
+  `credential_proxy`, `network_allowlist`,
+  `dry_run_submission`, `first_launch`) so a V3 upgrade does
+  not need a state-file format migration.
+
+**V3 (still deferred):**
+
+* Phase 1 (`raxis genesis` orchestration) — needs an
+  air-gapped or interactive operator-cert paste flow.
+* Phase 3 (`raxis credential add` orchestration) — V2 prints
+  the recipe; V3 will pipe key material through a TTY-aware
+  loader.
+* Phase 4 (VM image registry-list fetch + OCI digest
+  picker).
+* Phase 5 (interactive credential-proxy declaration emitter).
+* Phase 7 (egress-allowlist auto-populate from
+  `policy.tproxy_allowlist`).
+* Phase 9 (`raxis plan submit --dry-run`) — depends on the
+  V3 `DryRunAdmit` IPC type listed in `V2_GAPS.md §11`.
+* Phase 10 (`raxis plan submit` orchestration on success).
+
+**Tests** (`commands::setup::tests`):
+`render_policy_substitutes_all_placeholders`,
+`fingerprint_changes_with_inputs`, `state_round_trips`,
+`phase_labels_are_distinct`. All four pass on a clean
+`cargo test -p raxis-cli`.
+
+#### C10 (historical, full spec)
+
 
 **Spec:** `operator-ergonomics.md §16`
 **Status:** ❌ Not implemented — **V2 BLOCKER**
@@ -2207,13 +2267,18 @@ worst-of exit-code logic as the legacy default arm. The default
 `raxis doctor` (no argument) continues to run the full data-dir
 preflight unchanged.
 
-### 12.6 `setup wizard`: not started — promoted to V2 (C10)
+### 12.6 `setup wizard`: ✅ CLOSED (V2.3, MVP via `raxis setup`)
 
-The `operator-ergonomics.md §16` defines a 10-phase interactive setup
-wizard. Zero code exists in the CLI. **Promoted to V2 BLOCKER (C10)**
-— the wizard is the spec-recommended first-run experience and
-directly impacts operator adoption velocity. See C10 above for
-the full gap entry.
+**Resolution.** Implemented as a non-interactive scaffolding
+flow in `cli/src/commands/setup.rs`. Covers the 10-phase
+catalog from `operator-ergonomics.md §16` by running phases 2
+(`policy_authoring`) and 6 (`plan_template`) and printing
+explicit recipes for the remaining phases that V2 cannot
+automate (key ceremony, credential add, VM image picking,
+network allowlist, doctor, dry-run, first launch). State
+persistence + parameter-fingerprint drift guard live in
+`<data_dir>/.setup_state.json`. See C10 above for the full
+disposition.
 
 ### 12.7 VSock IPC client: not implemented
 

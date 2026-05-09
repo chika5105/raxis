@@ -71,6 +71,11 @@ toml         = { workspace = true }
 # round-trip; `toml_edit` exposes the document-preserving API we need.
 toml_edit    = "0.22"
 thiserror    = { workspace = true }
+# `raxis setup` (V2_GAPS §C10) computes a SHA-256 fingerprint of the
+# operator-supplied parameters and stores it in `.setup_state.json`
+# so subsequent runs can detect drift in inputs without rolling
+# forward stale phases.
+sha2         = { workspace = true }
 # Used by `commands::status::is_pid_alive` for `kill(pid, 0)` —
 # POSIX existence check that doesn't deliver a signal. Already a
 # dev-dep on the workspace; promoted to prod here because the
@@ -82,10 +87,6 @@ libc         = "0.2"
 # (`tests/genesis_emitter_round_trip.rs`), which writes the emitted policy
 # to a tempdir and reads it back through the production loader.
 tempfile     = "3"
-# Used by `commands::log::tests` to hand-build a byte-correct
-# audit segment that exercises the audit-tools chain reader's
-# prev_sha256 link verification end-to-end.
-sha2         = { workspace = true }
 # Used by `reveal::tests` to seed a `kernel.db` with a fixture
 # initiative + signed_plan_artifacts row so the audit-on-reveal
 # path can be exercised end-to-end without standing up the kernel.

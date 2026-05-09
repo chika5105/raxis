@@ -42,6 +42,7 @@ pub mod policy_show;
 pub mod queue;
 pub mod session;
 pub mod sessions;
+pub mod setup;
 pub mod status;
 pub mod submit;
 pub mod task;

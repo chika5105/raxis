@@ -48,6 +48,8 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "status", "log", "verify-chain", "queue", "inspect", "inspect-initiative",
     "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
     "budget", "explain", "top",
+    // V2_GAPS §C10 / §12.6 — non-interactive first-run scaffolding.
+    "setup",
 ];
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
@@ -354,6 +356,7 @@ fn run() -> Result<(), CliError> {
         "budget" => commands::budget::run(&flags, rest),
         "explain" => commands::explain::run(&flags, rest),
         "top" => commands::top::run(&flags, rest),
+        "setup" => commands::setup::run(&flags, rest),
         "" | "--help" | "-h" => {
             print_help();
             Ok(())
