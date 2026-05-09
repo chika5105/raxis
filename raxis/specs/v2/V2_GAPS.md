@@ -265,9 +265,9 @@ same upstream-connection path: V2.3 ships either both or neither,
 and the design call above chose neither. The V3 PR lands the
 relay and the SCRAM auth in the same commit.
 
-### ORM Extended Query (Postgres) — V2 BLOCKER
+### ORM Extended Query (Postgres) — **CLOSED V2.4**
 
-**Estimate:** ~300 lines
+**Estimate:** ~300 lines (delivered)
 
 V2.3 ships the Postgres simple-query protocol (`Q` / `T` / `D` /
 `C`) end-to-end through `credential-proxy-postgres::upstream`.
@@ -300,9 +300,9 @@ target for any database-backed agent workflow.
 checks at `Parse` time; `Bind`/`Execute`/`Sync` forwarded as
 opaque frames.
 
-### MySQL `COM_STMT_*` — V2 BLOCKER
+### MySQL `COM_STMT_*` — **CLOSED V2.4**
 
-**Estimate:** ~200 lines
+**Estimate:** ~200 lines (delivered)
 
 Same reasoning as Postgres Extended Query. V2.3 ships
 `COM_QUERY` only. Every MySQL ORM in every language uses
@@ -1726,9 +1726,16 @@ design constraint from the V2 BLOCKER entry below:
 
 #### C10 (historical, full spec)
 
+> **Status note (V2.4).** The full ten-phase interactive wizard
+> remains a V3 ergonomic enhancement; the V2.3 MVP above
+> (non-interactive scaffolding for phases 2 and 6, recipes for the
+> rest) closes the V2 BLOCKER end of this gap. The historical
+> design notes below are preserved as the normative reference for
+> the V3 interactive flow.
 
 **Spec:** `operator-ergonomics.md §16`
-**Status:** ❌ Not implemented — **V2 BLOCKER**
+**Status:** 🟡 V2.3 MVP (phases 2/6); V3 owns the full ten-phase
+interactive flow.
 **Estimate:** ~800 lines (CLI interactive flow + phase orchestration)
 
 The spec positions the setup wizard as the **recommended first-run
@@ -2035,13 +2042,15 @@ implemented in `cli/src/commands/`:
 | `raxis verifiers` | ✅ | ✅ | ~200 | Verifier status |
 | `raxis witnesses` | ✅ | ✅ | ~200 | Witness listing |
 | `raxis plan init` | ✅ | ✅ | ~250 | V2.3 MVP: 5 bundled templates (`feature`, `bugfix`, `dependency-upgrade`, `migration`, `experiment`) embedded in CLI binary; per `operator-ergonomics.md §6`. |
-| `raxis credential add` | ✅ | ❌ | — | Blocked on per-type validators |
-| `raxis credential remove` | ✅ | ❌ | — | Needs orphan-check |
-| `raxis credential show` | ✅ | ❌ | — | Low priority (`list --json`) |
-| `raxis credential verify` | ✅ | ❌ | — | Needs proxy runtime |
-| `raxis cert revoke` | ✅ | ❌ | — | Part of D1 (key revocation) |
+| `raxis credential add` | ✅ | ✅ | ~340 | V2.3: per-type validators + atomic file write; `cli/src/commands/credential.rs::run_add`. |
+| `raxis credential remove` | ✅ | ✅ | ~150 | V2.3: orphan check via `--force` flag; `run_remove`. |
+| `raxis credential show` | ✅ | ✅ | ~110 | V2.3: respects `--json`; `run_show`. |
+| `raxis credential verify` | ✅ | ✅ | ~250 | V2.3: per-proxy-type round-trip (Postgres / MySQL / Redis / k8s / AWS); `run_verify`. |
+| `raxis cert revoke` | ✅ | ✅ | ~600 | V2.3 D1 MVP: shipped alongside `raxis cert list-revocations`; `cli/src/commands/cert.rs::run_revoke`. |
 
-**CLI total:** 20 of 26 spec'd commands implemented (77%).
+**CLI total:** 25 of 26 spec'd commands implemented (96%). The
+remaining slot (`raxis credential rotate --multi-tenant`) is V3
+work (depends on credential generations).
 
 ---
 
@@ -2788,8 +2797,8 @@ or override a locked field.
 |---|---|---|
 | Hard ceilings | ✅ Already | `budget.rs:194` — `min(raw, policy.max_cost_per_task())`; `budget.rs:52` — cost cap; `budget.rs:43` — concurrency cap |
 | Hard floors | 🟡 No concrete floor fields exist yet | Would apply to `min_reviewers`, security settings when added |
-| Defaults with override | ❌ Not implemented | No override-capable fields exist (e.g., `target_ref`) |
-| Locked fields | ❌ Not implemented | No `_locked` mechanism; no `FAIL_POLICY_LOCKED_FIELD` code |
+| Defaults with override | ✅ V2.3 | First concrete field: `target_ref` (plan overrides `[git].default_target_ref` unless `target_ref_locked = true`). Resolution lives in `kernel/src/initiatives/lifecycle.rs::resolve_target_ref`. |
+| Locked fields | ✅ V2.3 | `[git].target_ref_locked` shipped; `FAIL_POLICY_LOCKED_FIELD` registered in `raxis_types::OperatorErrorCode`; `approve_plan` IPC surfaces `{ rule, field, plan_value, policy_value, suggestion }` JSON detail when triggered. |
 | Policy-only | ✅ Already | `[[vm_images]] oci_digest`, `[[environment_gates]]`, credential store config |
 | Plan-only | ✅ Already | `path_allowlist`, `[[tasks]]`, `task_id` — policy constrains via ceilings |
 
@@ -2894,7 +2903,7 @@ workstream.
 
 | Invariants | Parent feature | V2 status |
 |---|---|---|
-| `INV-PROVIDER-01..10` (10) | Multi-provider `ModelClient` impls + circuit breaker (C2/C3) | **V2 BLOCKER** — ships with provider impls |
+| `INV-PROVIDER-01..10` (10) | Multi-provider `ModelClient` impls + circuit breaker (C2/C3) | ✅ **CLOSED V2.4** — Anthropic/OpenAI/Gemini/Bedrock + circuit breaker + sidecar shipped; SSE streaming added under C9 |
 | `INV-CAPACITY-01..06` (6) | Host capacity management (D2) | V2 scope — ships with capacity admission |
 | `INV-KEY-01..08` (8) | Key revocation (D1) | V2 scope — ships with revocation impl |
 | `INV-NOTIFY-01..06` (6) | Email + Webhook notification channels (C4) | V2 scope — ships with transport impl |
