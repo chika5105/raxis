@@ -27,9 +27,10 @@ closed**, **both Tier D items are closed**, and **Tier E is closed**.
 | D — Schema/skeleton | 2/2 | Both closed (V2.3) |
 | E — Deferred/partial | 1/1 | Closed (V2.3) |
 
-**Total lines remaining:** ~3,800 lines of Rust to close all V2 gaps
+**Total lines remaining:** ~4,300 lines of Rust to close all V2 gaps
 (revised down from ~11,000 after V2.3/V2.4 closures and the C8
-WebFetch/WebSearch deferral to V3).
+WebFetch/WebSearch deferral to V3; includes ~500 lines for ORM
+extended query protocol, promoted back to V2 scope).
 
 ---
 
@@ -263,29 +264,52 @@ same upstream-connection path: V2.3 ships either both or neither,
 and the design call above chose neither. The V3 PR lands the
 relay and the SCRAM auth in the same commit.
 
-### ORM Extended Query (Postgres) — V3 deferral
+### ORM Extended Query (Postgres) — V2 BLOCKER
+
+**Estimate:** ~300 lines
 
 V2.3 ships the Postgres simple-query protocol (`Q` / `T` / `D` /
 `C`) end-to-end through `credential-proxy-postgres::upstream`.
 The Extended Query protocol (`P` Parse + `B` Bind + `D` Describe
 + `E` Execute + `S` Sync), used by every modern ORM with
 parameterised queries (sqlx, Diesel, Active Record, Hibernate,
-asyncpg's prepared statements), is V3 work. Same rationale as
-SCRAM: ~300-500 LOC of bytewise protocol implementation that
-benefits from integration tests against PostgreSQL in
-TestContainers fixtures, and the V2.3 simple-query path already
-unblocks the first-usable-session target (the planner agent
-loop's tool calls do not use prepared statements).
+asyncpg's prepared statements), must land in V2.
 
-### MySQL `COM_STMT_*` — V3 deferral
+**Why this was previously deferred (and why that was wrong):**
+
+The V2.3 deferral assumed ORMs would "silently fall back to
+text-protocol queries when prepared statements fail." This is
+**incorrect for all major ORMs:**
+
+| ORM | Behavior on Parse/COM_STMT rejection | Falls back? |
+|---|---|---|
+| asyncpg | `InterfaceError` — only uses extended query | ❌ No |
+| SQLAlchemy 2.x | `OperationalError` | ❌ No |
+| Prisma | connection error → retry loop → crash | ❌ No |
+| Diesel | `ConnectionError` | ❌ No |
+| SQLx (Rust) | `ProtocolError` | ❌ No |
+| Django (psycopg2) | configurable, default is extended | ⚠️ Must reconfigure |
+
+Any agent using an ORM inside the VM will get hard errors, waste
+cycles debugging, and may not be able to recover without manual
+driver reconfiguration. This breaks the first-usable-session
+target for any database-backed agent workflow.
+
+**Implementation:** see §8 for the full strategy. Restriction
+checks at `Parse` time; `Bind`/`Execute`/`Sync` forwarded as
+opaque frames.
+
+### MySQL `COM_STMT_*` — V2 BLOCKER
+
+**Estimate:** ~200 lines
 
 Same reasoning as Postgres Extended Query. V2.3 ships
-`COM_QUERY` only. ORMs that auto-prepare on every connection
-(SQLAlchemy 2.x, sqlx, Hibernate) will silently fall back to
-text-protocol queries when prepared statements fail; the V2.3
-code emits a clean `ERR_Packet { code = 1295 }` for
-`COM_STMT_PREPARE` so the ORM's text-protocol fallback engages.
-V3 lands the prepared-statement support with integration tests.
+`COM_QUERY` only. Every MySQL ORM in every language uses
+`COM_STMT_PREPARE` / `COM_STMT_EXECUTE` by default. The V2.3
+proxy returns `ERR_Packet { code = 1235 }` for unsupported
+commands, which **does not trigger a text-protocol fallback** —
+it triggers a connection error. Restriction checks at `PREPARE`
+time; binary result set relay for `EXECUTE`.
 
 **Cloud proxy restriction gaps — ✅ CLOSED (V2.3, declarative + audit echo):**
 
