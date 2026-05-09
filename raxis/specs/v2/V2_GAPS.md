@@ -869,6 +869,128 @@ structure and audit:**
 
 ---
 
+### C9: Streaming Dispatch (Planner ↔ Gateway)
+
+**Spec:** `provider-failure-handling.md §7` (streaming atomicity),
+`§7.2` (gateway-side stream buffering), `§7.5` (no resumable
+streams), `§12.4` (design rationale), `§12.7` (resumability
+deferral)
+**Status:** ❌ Not implemented — **V2 BLOCKER**
+**Estimate:** ~600 lines (gateway stream reader + planner stream
+consumer + heartbeat integration)
+
+**Current state.** The planner's `ModelClient::create_message()`
+makes a single HTTP POST and blocks until the **entire response
+body** arrives. Every inference call — including 100K-token outputs
+that take 5+ minutes to generate — stalls the dispatch loop for
+the full generation time. The planner cannot start tool execution,
+emit progress signals, or detect provider hangs until the complete
+JSON body lands.
+
+**What the spec already defines (gateway side).**
+`provider-failure-handling.md §7` fully specifies the gateway's
+streaming behavior:
+
+- The gateway reads the provider's SSE stream (Anthropic
+  `message_stop`, OpenAI `data: [DONE]`) into an in-memory buffer
+  with spill-to-disk above `stream_buffer_cap` (§7.2).
+- The gateway emits heartbeats to the kernel every
+  `worker_heartbeat_interval_ms` while waiting for chunks (§7.3).
+- Only complete, structurally-validated envelopes are delivered to
+  the planner; partial streams are discarded as `Unavailable` for
+  retry (INV-PROVIDER-04).
+- No resumable streams in V2 (§7.5, §12.7) — stream failure is
+  always a clean retry from scratch.
+
+**What's missing (planner side).**
+
+| Component | What it does | Est. lines |
+|---|---|---|
+| **Gateway SSE reader** | `gateway/src/streaming.rs` — read provider SSE chunks, buffer, verify end-of-stream sentinel, spill-to-disk | ~250 |
+| **Planner stream consumer** | `planner-core/src/model.rs` — consume SSE events from the gateway's forwarded stream; emit incremental `content_block_delta` events for progress tracking | ~200 |
+| **Heartbeat integration** | Gateway worker heartbeat to kernel during stream reads; kernel detects stalled workers via missed heartbeats | ~100 |
+| **Token metering (incremental)** | Count output tokens as they arrive rather than after full response; enables early budget-exceeded abort | ~50 |
+
+**Why this is V2, not V3.**
+
+1. **Latency is untenable.** A complex tool-use response from
+   Claude or GPT-4 can take 60–120 seconds to generate. Without
+   streaming, the planner sits idle for the entire duration. With
+   streaming, the planner can parse the first tool call as soon as
+   the `tool_use` block closes — often 10–20 seconds into the
+   stream — and begin executing while the model finishes
+   generating subsequent content blocks.
+
+2. **Provider hang detection.** Without streaming, a provider that
+   accepts the request but never responds is indistinguishable
+   from a provider generating a very long response. The planner
+   blocks until `worker_invoke_timeout_ms` (default 10 minutes).
+   With streaming, a gap between chunks exceeding
+   `stream_idle_timeout_ms` triggers an immediate abort and retry
+   on the next provider.
+
+3. **Operator visibility.** Without streaming, the operator's
+   `raxis status` shows the session as "inferring" with no
+   progress indication for minutes. With streaming, the gateway
+   heartbeat carries `bytes_received` so the operator can see
+   generation is progressing.
+
+4. **Early budget abort.** Without streaming, a model that
+   generates 50K output tokens when the session has budget for
+   10K completes the entire generation before the planner
+   discovers the budget is blown. With streaming, the planner
+   counts tokens incrementally and can abort the stream early,
+   saving provider cost.
+
+**V2 design constraints (carried from spec).**
+
+* **Atomic delivery to the planner.** Even with streaming, the
+  planner's `ModelClient` delivers only complete, validated
+  envelopes (INV-PROVIDER-04). The streaming path is gateway →
+  buffer → validate → deliver. The planner never sees partial
+  JSON or half-formed tool calls.
+* **No resumable streams.** Stream failure = clean retry from
+  scratch (§7.5). No continuation tokens, no partial-buffer
+  salvage. This simplifies retry/fallback logic and keeps budget
+  accounting unambiguous.
+* **No partial-response recovery.** A mid-stream failure discards
+  all buffered content. The retry replays the entire request body.
+  Partial recovery is V3 work alongside resumable streams.
+
+**Sidecar (C5) streaming support.**
+
+HTTP sidecar providers (C5) must support streaming on equal
+footing with built-in providers — but not all custom provider APIs
+support SSE. The sidecar protocol must allow the operator to
+configure per-provider whether the sidecar returns a streaming
+SSE response or a single buffered JSON response:
+
+```toml
+# policy.toml — sidecar provider declaration
+[[providers.sidecar]]
+name     = "cohere"
+endpoint = "http://localhost:9100"
+stream   = true    # sidecar returns SSE chunks (preferred)
+
+[[providers.sidecar]]
+name     = "internal-llm"
+endpoint = "http://localhost:9101"
+stream   = false   # sidecar returns a single JSON response body
+```
+
+When `stream = true` (the default and preferred mode), the sidecar
+responds with `Content-Type: text/event-stream` and the gateway's
+`SidecarModelClient` reads it through the same SSE buffering path
+as built-in providers. When `stream = false`, the gateway reads
+the full response body and wraps it as a single-delivery envelope.
+
+Both modes produce the same `ModelClient` output — the dispatch
+loop and `FallbackModelClient` chain see no difference. The
+circuit breaker, retry, and half-open probe all work identically
+regardless of streaming mode.
+
+---
+
 ## §5 — Tier D: Schema/Skeleton Only
 
 ### D1: Key Revocation
