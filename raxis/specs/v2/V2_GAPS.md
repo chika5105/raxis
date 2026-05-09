@@ -477,7 +477,7 @@ shells. Wiring the actual provider chains
 (`Anthropic → OpenAI → Bedrock`) is a per-binary `main()` change
 once the remaining `ModelClient` impls land.
 
-**V2 remaining work — multi-provider `ModelClient` impls (BLOCKER):**
+**V2 multi-provider `ModelClient` impls — CLOSED V2.4:**
 
 All four `ProviderId` variants MUST have wired `ModelClient`
 implementations before V2 ships. Single-provider Anthropic-only
@@ -485,12 +485,12 @@ is not acceptable for production — the `FallbackModelClient`
 chain is useless without receivers for every provider in the
 fallback chain.
 
-| Provider | `ModelClient` impl | Est. lines | Wire shape | Status |
+| Provider | `ModelClient` impl | Lines | Wire shape | Status |
 |---|---|---|---|---|
 | **Anthropic** | `AnthropicClient` | ✅ delivered | Anthropic Messages API | ✅ V2.3 |
-| **OpenAI** | `OpenAiClient` | ~200 | OpenAI Chat Completions API | ❌ **V2 BLOCKER** |
-| **Google Gemini** | `GeminiClient` | ~200 | Gemini `generateContent` API | ❌ **V2 BLOCKER** |
-| **AWS Bedrock** | `BedrockClient` | ~250 | Bedrock `InvokeModel` + SigV4 | ❌ **V2 BLOCKER** |
+| **OpenAI** | `OpenAiClient` | ~500 (incl. tests) | OpenAI Chat Completions API | ✅ V2.4 |
+| **Google Gemini** | `GeminiClient` | ~470 (incl. tests) | Gemini `generateContent` API | ✅ V2.4 |
+| **AWS Bedrock** | `BedrockClient` (Anthropic-on-Bedrock) | ~270 (incl. tests) | Bedrock `InvokeModel` (+ SigV4 gateway leg) | ✅ V2.4 |
 
 Each impl follows the same pattern as `AnthropicClient`: implements
 `ModelClient` trait, POSTs to the provider's URL, does NOT inject
@@ -634,23 +634,29 @@ planner-role binary at boot:
   constructs the dispatch chain by hand if a fallback shell is
   desired.
 
-**V2 remaining work — multi-provider `ModelClient` wiring (BLOCKER):**
+**V2 multi-provider `ModelClient` wiring — CLOSED V2.4:**
 
-The `ProviderId` enum has four variants. All four MUST have wired
-`ModelClient` impls and gateway forwarding before V2 ships. The
-registry validates model ids; the `FallbackModelClient` chains
-providers; but without the actual client impls, the chain has
-no receivers to fall back to.
+All four [`ProviderId`] variants now have wired `ModelClient` impls
+that translate the canonical Anthropic-flavoured request/response
+shape to/from the upstream's wire format.
 
 | Provider | Registry coverage | `ModelClient` impl | Gateway forwarding | Status |
 |---|---|---|---|---|
-| **Anthropic** | ✅ 5 supported + 2 deprecated | ✅ `AnthropicClient` | ✅ | ✅ V2.3 |
-| **OpenAI** | ✅ 2 entries | ❌ `OpenAiClient` needed | 🟡 gateway-only | ❌ **V2 BLOCKER** |
-| **Google Gemini** | ✅ 2 entries | ❌ `GeminiClient` needed | 🟡 gateway-only | ❌ **V2 BLOCKER** |
-| **AWS Bedrock** | ⚪ no registry entries yet | ❌ `BedrockClient` needed | 🟡 SigV4 gateway leg | ❌ **V2 BLOCKER** |
+| **Anthropic** | ✅ 5 supported + 2 deprecated | ✅ `AnthropicClient` | ✅ direct | ✅ V2.3 |
+| **OpenAI** | ✅ 2 entries | ✅ `OpenAiClient` (`src/openai_client.rs`, ~500 lines incl. tests) | ✅ via gateway `Authorization: Bearer` injection | ✅ V2.4 |
+| **Google Gemini** | ✅ 2 entries | ✅ `GeminiClient` (`src/gemini_client.rs`, ~470 lines incl. tests) | ✅ via gateway query-string / `Authorization` injection | ✅ V2.4 |
+| **AWS Bedrock** | ✅ 2 entries (Anthropic-on-Bedrock) | ✅ `BedrockClient` (`src/bedrock_client.rs`, ~270 lines incl. tests) | 🟡 SigV4 gateway leg required (planner emits unsigned body; gateway signs at egress) | ✅ V2.4 |
 
-See `V2_GAPS §C2` for the per-provider `ModelClient` impl estimates
-and wire-shape details.
+**Spec reference:** `provider-client-impls.md` (the canonical
+translation table for each provider).
+
+**Test coverage:** 20 new unit tests
+(8 OpenAI: request/response translation + tool-result splitting +
+finish-reason mapping + happy-path local server + transport-error
+classification; 8 Gemini: synthetic-id stability, role mapping,
+function-call translation, finish-reason, happy-path; 4 Bedrock:
+URL-path model routing, `anthropic_version` body field,
+local-server happy-path, 4xx classification).
 
 **Deployment tiers** (from `provider-model-selection.md §4`) —
 all three tiers are V2 targets:

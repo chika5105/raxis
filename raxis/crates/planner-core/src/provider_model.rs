@@ -54,7 +54,7 @@ pub enum ProviderId {
     Anthropic,
     /// OpenAI Chat Completions API. V2 maps the model id to the
     /// gateway's outbound endpoint; no in-process `ModelClient`
-    /// impl yet (deferred to V3 per `V2_GAPS §C3`).
+    /// impl yet.
     OpenAi,
     /// Google Gemini Generative Language API. V2 forwards to the
     /// gateway; no in-process impl yet.
@@ -178,6 +178,19 @@ pub const KNOWN_MODELS: &[KnownModel] = &[
         provider:       ProviderId::Gemini,
         deprecated:     None,
         context_window: Some(1_000_000),
+    },
+    // --- AWS Bedrock (Anthropic-on-Bedrock; V2_GAPS §C2 BedrockClient) ---
+    KnownModel {
+        name:           "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        provider:       ProviderId::Bedrock,
+        deprecated:     None,
+        context_window: Some(200_000),
+    },
+    KnownModel {
+        name:           "anthropic.claude-3-5-haiku-20241022-v1:0",
+        provider:       ProviderId::Bedrock,
+        deprecated:     None,
+        context_window: Some(200_000),
     },
 ];
 

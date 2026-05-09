@@ -72,12 +72,15 @@ use std::ffi::OsString;
 use std::fmt;
 
 mod error;
+pub mod bedrock_client;
 pub mod circuit;
 pub mod custom_tools;
 pub mod dispatch;
+pub mod gemini_client;
 pub mod intent;
 pub mod ksb;
 pub mod model;
+pub mod openai_client;
 pub mod provider_model;
 pub mod retry;
 pub mod tools;
@@ -109,6 +112,9 @@ pub use provider_model::{
 pub use circuit::{
     CircuitBreakerModelClient, CircuitConfig, CircuitSnapshot, CircuitState,
 };
+pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
+pub use gemini_client::GeminiClient;
+pub use openai_client::OpenAiClient;
 pub use retry::{
     is_retryable, FallbackModelClient, RetryConfig, RetryingModelClient,
 };
