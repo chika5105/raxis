@@ -601,10 +601,12 @@ pub(crate) mod dispatch_log {
             OperatorResponse::InitiativeQuarantined { .. } => "InitiativeQuarantined",
             OperatorResponse::QuarantineSwept { .. }    => "QuarantineSwept",
             // V2_GAPS §12.4 — operator-ergonomics IPC success
-            // envelopes. V2 dispatchers always emit `Error{
-            // FAIL_NOT_YET_IMPLEMENTED }`, so these arms are not
-            // reached today; they are present so a future V3 patch
-            // need only swap the dispatcher arm.
+            // envelopes. As of V2.4 four of the five handlers emit
+            // these arms for real (`ProposeDefaults`, `EstimateCost`,
+            // `DryRunAdmit`, `DescribeInitiativePause`); only
+            // `SubscribeInitiative` still answers with
+            // `Error{FAIL_NOT_YET_IMPLEMENTED}` because it depends on
+            // the V3 KernelPush bidirectional transport.
             OperatorResponse::ProposedDefaults { .. }       => "ProposedDefaults",
             OperatorResponse::CostEstimated { .. }          => "CostEstimated",
             OperatorResponse::DryRunAdmitted { .. }         => "DryRunAdmitted",

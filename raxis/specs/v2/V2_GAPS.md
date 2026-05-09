@@ -1739,23 +1739,39 @@ design constraint from the V2 BLOCKER entry below:
   the existing credential CLI. TTY-aware secret input is
   a convenience, not a blocker; operators already paste
   keys into `.env` files today.
+* Phase 4 (VM-image inventory rendering, no fetch) —
+  V2.5 reclassification: with `[[vm_images]]` shipped,
+  the wizard can list operator-declared images and prompt
+  for `oci_digest` pinning by reading the existing policy
+  bundle. The original V3 deferral assumed the wizard
+  needed to fetch a list from a remote registry; in
+  practice it only needs to render what the operator
+  declares, and `image-cache::registry::pull_blob` can
+  back the optional digest verification step.
 * Phase 7 (egress-allowlist auto-populate from
   `policy.tproxy_allowlist`) — straightforward policy
   read + template emit. ~50 lines.
+* Phase 9 (`raxis plan submit --dry-run`) — V2.5
+  reclassification: the `DryRunAdmit` IPC type is
+  implemented (`kernel/src/ipc/operator_ergonomics.rs::
+  handle_dry_run_admit`) and audited as `DryRunAdmitted`;
+  the only remaining work is wiring a `--dry-run` flag
+  on the existing `plan submit` CLI. No new infrastructure
+  needed.
 * Phase 10 (`raxis plan submit` orchestration) — wraps
   the existing `plan submit` command. No new dependencies.
 
 **V3 (hard blockers — depend on unimplemented features):**
 
-* Phase 4 (VM image registry-list fetch + OCI digest
-  picker) — requires an OCI registry client not in the
-  workspace.
+* Phase 4 (interactive remote-registry image picker) —
+  the inventory-rendering limb is V2.x per above; the
+  remote-registry browse/fetch flow still requires a UX
+  surface for credentialled OCI registries that V3 will
+  ship.
 * Phase 5 (interactive credential-proxy declaration
   emitter) — the proxy declaration schema exists but the
   wizard form requires the full proxy type vocabulary to
   be stabilized.
-* Phase 9 (`raxis plan submit --dry-run`) — depends on
-  the `DryRunAdmit` IPC type (not yet implemented).
 
 **Tests** (`commands::setup::tests`):
 `render_policy_substitutes_all_placeholders`,
