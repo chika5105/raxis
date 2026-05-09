@@ -1360,6 +1360,35 @@ pub enum AuditEventKind {
         details:        String,
     },
 
+    /// V2_GAPS §12.1 — emitted by `kernel/src/push/dispatcher.rs`
+    /// when a `KernelPush` variant is enqueued for delivery to a
+    /// session. V2.3 ships an in-memory `tokio::sync::broadcast`
+    /// fan-out so internal subscribers (review-aggregation hooks,
+    /// future operator subscribers) receive the push synchronously,
+    /// AND mirrors every push to the audit chain so the trail is
+    /// durably observable even when no live subscriber is attached.
+    /// The full session-addressed VSock/UDS transport with the
+    /// `pending_pushes` SQL queue is V3.
+    KernelPushEnqueued {
+        /// Recipient session.
+        session_id: String,
+        /// Per-session monotonic push counter (matches
+        /// `KernelPushFrame::push_id`).
+        push_id: u64,
+        /// Tag of the inner `KernelPush` variant
+        /// (`SubTaskActivated`, `SubTaskCompleted`, etc.) so the
+        /// audit trail can be filtered without parsing the body.
+        push_kind: String,
+        /// Originating initiative_id when the push relates to a
+        /// specific initiative. None for variants that aren't
+        /// initiative-scoped.
+        initiative_id: Option<String>,
+        /// Optional task_id surfaced on the audit row for grep-
+        /// friendliness; the full payload is reconstructible from
+        /// the kernel's push log.
+        task_id: Option<String>,
+    },
+
     /// V2_GAPS §C7 — emitted when `raxis credential verify` runs.
     /// V2 verification is structural-only (file presence, mode 0600,
     /// uid match, non-empty body, optional `KEY=VALUE` parse).
@@ -1871,6 +1900,7 @@ impl AuditEventKind {
             Self::DiskFullHaltEntered { .. } => "DiskFullHaltEntered",
             Self::DiskHealthyAfterFull { .. } => "DiskHealthyAfterFull",
             Self::OperatorAttentionRequired { .. } => "OperatorAttentionRequired",
+            Self::KernelPushEnqueued { .. } => "KernelPushEnqueued",
             Self::TransparentProxyAdmitted { .. } => "TransparentProxyAdmitted",
             Self::TransparentProxyDenied { .. } => "TransparentProxyDenied",
             Self::CredentialProxyStarted { .. } => "CredentialProxyStarted",

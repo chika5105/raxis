@@ -1493,6 +1493,7 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "AdmissionDeferredAtCap", "AdmissionQueueFull",
     "DiskFullHaltEntered", "DiskHealthyAfterFull",
     "OperatorAttentionRequired",
+    "KernelPushEnqueued",
 ];
 
 /// Validate the raw `[notifications]` section and produce the final
@@ -4719,6 +4720,13 @@ channels   = []
             AuditEventKind::OperatorAttentionRequired {
                 attention_kind: "DiskFull".into(),
                 details:        "x".into(),
+            }.as_str(),
+            AuditEventKind::KernelPushEnqueued {
+                session_id:    "sess-1".into(),
+                push_id:       1,
+                push_kind:     "SubTaskActivated".into(),
+                initiative_id: None,
+                task_id:       None,
             }.as_str(),
         ];
 

@@ -2156,22 +2156,63 @@ Corrections made during cross-check passes:
 
 ## §12 — Newly Discovered Gaps (Pass 2)
 
-### 12.1 KernelPush: Types defined, transport missing
+### 12.1 KernelPush dispatcher: ✅ CLOSED (V2.3, MVP) — wire transport still V3
 
-`KernelPush` is defined in `crates/types/src/push.rs` with 6 variants:
-`SubTaskActivated`, `SubTaskCompleted`, `AllReviewersPassed`,
-`ReviewRejected`, `SubTaskSecurityViolation`, and the framing type
-`KernelPushFrame`.
+**V2.3 MVP — in-memory dispatcher + audit mirror.**
+`kernel/src/push/mod.rs` (~340 lines incl. tests) ships an
+in-process `KernelPushDispatcher`:
 
-However, **zero push messages are ever sent.** No function in
-`kernel/src/` calls any send/dispatch/push method with a `KernelPush`.
-The kernel knows what it *would* push (the types are well-defined and
-referenced in doc-comments like `review_aggregation.rs:42` and
-`intent.rs:1276`), but the transport layer does not exist.
+* **Per-session monotonic `push_id`** allocator (matches
+  `kernel-push-protocol.md §9` line 539).
+* **`tokio::sync::broadcast` fan-out** to all `Subscriber`s
+  bound to a session_id. V3 will attach the per-session VSock
+  delivery loop here without changing the publisher API.
+* **Audit mirror.** Every `enqueue` emits an
+  `AuditEventKind::KernelPushEnqueued { session_id, push_id,
+  push_kind, initiative_id, task_id }` event so the push trail
+  is durably observable from the audit chain even when no live
+  subscriber is attached. The audit chain becomes the V2.3
+  substitute for the spec's `pending_pushes` SQL queue
+  (operators can replay the chain to reconstruct what would
+  have been delivered).
+* **`HandlerContext::push_dispatcher`** is constructed at
+  `HandlerContext::new` so every kernel handler (now and V3)
+  can publish without re-injecting the registry.
 
-**What's missing:** A session-addressed push channel (VSock or UDS)
-that the kernel writes `KernelPushFrame` messages to when lifecycle
-events fire. ~200 lines (session registry + write path).
+**V3 (still deferred):**
+
+* **Per-session VSock/UDS transport.** A delivery loop attached
+  to each session that consumes from the dispatcher's broadcast
+  channel and writes `KernelPushFrame` to the wire. Approx ~150
+  lines.
+* **`pending_pushes` SQL queue** with at-least-once redelivery
+  on session reconnect (INV-PUSH-02). The audit chain is the
+  forward-compatible base — V3 can backfill from it.
+* **Wiring at the spec-correct call sites.** The V2.3
+  dispatcher exposes the publish API but the
+  `handle_activate_sub_task` / `handle_complete_subtask` /
+  `handle_submit_review` / session-supervisor security-violation
+  call sites still need the lookup-orchestrator-session-from-
+  initiative wiring. Each is a `dispatcher.enqueue(session,
+  KernelPush::*, now_unix())` plus the orchestrator-session
+  lookup (~30 lines per site). The audit emission for each
+  variant already lands today via the existing handler
+  audit calls (`SubTaskActivated → TaskStateChanged`,
+  `AllReviewersPassed → ReviewAggregationCompleted`, etc.) so
+  V2.3 operators can already grep the chain for the same
+  signal.
+
+**Tests** (`push::tests`):
+`enqueue_allocates_monotonic_push_ids_per_session`,
+`enqueue_mirrors_to_audit_chain`,
+`enqueue_broadcasts_to_live_subscribers`,
+`enqueue_succeeds_when_no_subscribers`,
+`subscriber_count_reflects_attached_receivers`. All five pass.
+
+**Spec updates.** Audit-event registry
+(`crates/policy/src/bundle.rs::KNOWN_AUDIT_EVENT_KINDS`) gained
+`KernelPushEnqueued` and the drift-guard fixture asserts the
+new kind round-trips.
 
 ### 12.2 Review aggregation: Module exists, never wired ✅ CLOSED (V2.2)
 

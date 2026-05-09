@@ -35,6 +35,7 @@ mod notifications;
 mod path_scope;
 mod policy_manager;
 mod prompt;
+mod push;
 mod runtime;
 mod session_spawn_orchestrator;
 

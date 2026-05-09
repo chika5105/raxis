@@ -326,6 +326,17 @@ pub struct HandlerContext {
     ///
     /// [`with_disk_watchdog`]: HandlerContext::with_disk_watchdog
     pub disk_watchdog: Option<Arc<crate::capacity::DiskWatchdog>>,
+
+    /// V2_GAPS §12.1 — Kernel-side `KernelPush` dispatcher
+    /// (V2.3 in-memory MVP). Handlers call
+    /// `push_dispatcher.enqueue(session_id, KernelPush::*, now)`
+    /// at the spec-correct call sites; the dispatcher allocates
+    /// the per-session monotonic `push_id`, mirrors the push to
+    /// the audit chain (`AuditEventKind::KernelPushEnqueued`), and
+    /// fans out to any `Subscriber` currently bound to the
+    /// session. The full session-addressed VSock/UDS transport
+    /// with the `pending_pushes` SQL queue is V3 (§12.1).
+    pub push_dispatcher: Arc<crate::push::KernelPushDispatcher>,
 }
 
 impl HandlerContext {
@@ -390,6 +401,7 @@ impl HandlerContext {
             Arc::new(CertEnforcer::new().with_revocation_store(rev_store))
         };
 
+        let push_dispatcher = crate::push::KernelPushDispatcher::new(Arc::clone(&audit));
         Self {
             policy,
             registry,
@@ -410,6 +422,7 @@ impl HandlerContext {
             domain,
             image_resolver,
             disk_watchdog: None,
+            push_dispatcher,
         }
     }
 
