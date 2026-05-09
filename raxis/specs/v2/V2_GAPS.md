@@ -94,7 +94,7 @@ loop into each binary's main is `gap-b1-planner-binary-wiring`
 INV-PLANNER-HARNESS-04 (reviewer write-tool ban), INV-PLANNER-04
 (monotonic per-session sequence_number), and INV-KSB-01 (close-delim
 injection refusal) are now enforced in code. The remaining INV
-coverage gap is tracked separately in `V2_GAPS.md §INV-coverage`.
+coverage gap is tracked in `V2_GAPS.md §13 — INV-Coverage`.
 
 **Test coverage:** 87 unit tests across the 8 modules (`cargo test
 -p raxis-planner-core --lib`); the live e2e harness exercises the
@@ -1612,3 +1612,132 @@ detect when a spec's prose description no longer matches the code's
 behavior. Maintaining the spec files alongside the code prevents
 silent spec drift — the same problem `INV-PLAN-POLICY-PRECEDENCE-01`
 prevents for policy-vs-plan configuration.
+
+---
+
+## §13 — INV-Coverage: Invariant Enforcement Audit
+
+### The numbers
+
+The V2 spec corpus defines **~120 named invariants** (unique
+`INV-*` identifiers across the 30 spec documents). Of these, **~45
+appear in the Rust codebase** (in comments, doc-strings, or test
+names). The remaining **~75 invariant IDs** have no reference
+in any `.rs` file.
+
+This does **not** mean 75 invariants are unenforced. The gap
+breaks down into four categories with very different remediation
+costs.
+
+### Category 1: Structurally enforced, not annotated (~30 invariants)
+
+These invariants hold because the architecture makes violations
+impossible, but no code comment says `// INV-FOO: enforced here`.
+The only work needed is a mechanical annotation pass — one-line
+comments at the enforcement site.
+
+| Invariant | Why it holds without annotation | Enforcement site |
+|---|---|---|
+| `INV-02A` (single-tenant VM) | Firecracker spawns one VM per session; the kernel never shares a VM across sessions | `session_spawn_orchestrator.rs` — one `spawn()` call per session |
+| `INV-02B` (no virtual NIC) | The Firecracker machine config never includes a `NetworkInterface` block; the VM literally has no NIC | `session_spawn_orchestrator.rs` — machine config builder |
+| `INV-09` (opaque rejection codes) | `PlannerErrorCode` enum variants are coarse by construction — `FailPolicyViolation` never leaks which admission check fired | `crates/types/src/planner_error.rs` |
+| `INV-GATEWAY-01` (gateway trust boundary) | Gateway binary is a separate process with `getpeereid()` on the UDS; already enforced | `gateway/src/main.rs` — connection acceptance |
+| `INV-GATEWAY-STATELESS` | Gateway holds no session state; it forwards requests to providers and returns responses | Architectural — gateway has no database or session store |
+| `INV-GATEWAY-STREAM-ATOMICITY` | Non-streaming dispatch in V2 means each request/response is atomic by construction | `planner-core/src/model.rs` — single `create_message()` call |
+| `INV-LIFECYCLE-01..07` (boot sequence) | Kernel boot sequence in `main.rs` already follows the spec's 7-phase startup | `kernel/src/main.rs` — boot sequence |
+| `INV-MERGE-CONSISTENCY` | `domain-git`'s merge logic already ensures consistency | `domain-git/src/lib.rs` — merge path |
+| `INV-MERGE-WORKTREE-RETAIN` | Worktree is preserved after merge; the kernel never deletes it mid-session | `domain-git/src/lib.rs` — no cleanup-on-merge path |
+| `INV-AUDIT-PAIRED-01..04,06,07` | Audit paired-writes crate enforces transactional audit semantics; just not cross-referenced by INV name | `crates/audit/src/` — paired write logic |
+
+**Remediation:** ~30 one-line `// INV-FOO: enforced by <this logic>` comments. Mechanical grep-and-annotate pass. No code changes.
+
+### Category 2: Ships with the parent feature (~40 invariants)
+
+These invariants describe behavior for features that are themselves
+V2 blockers (or V3 deferrals). The invariant is enforced **when the
+feature is built** — there is no separate "invariant enforcement"
+workstream.
+
+| Invariants | Parent feature | V2 status |
+|---|---|---|
+| `INV-PROVIDER-01..10` (10) | Multi-provider `ModelClient` impls + circuit breaker (C2/C3) | **V2 BLOCKER** — ships with provider impls |
+| `INV-CAPACITY-01..06` (6) | Host capacity management (D2) | V2 scope — ships with capacity admission |
+| `INV-KEY-01..08` (8) | Key revocation (D1) | V2 scope — ships with revocation impl |
+| `INV-NOTIFY-01..06` (6) | Email + Webhook notification channels (C4) | V2 scope — ships with transport impl |
+| `INV-VM-CAP-01..03, 05` (4) | VM capacity admission queue (D2) | V2 scope — ships with capacity management |
+| `INV-PUSH-01, 03..05` (4) | Full push protocol (C6 — only auto-push shipped) | Partial V2 — push attestation is V3 |
+| `INV-VERIFIER-01..10, 12..15` (14) | Verifier runtime enforcement (A8 — dispatch done, runtime partial) | V2 scope — most ship with verifier wiring |
+| `INV-CONVERGENCE-01..07` (7) | DAG convergence / liveness analysis | **V3** — the DAG is structural (no cycles by construction); convergence proofs are post-V2 |
+| `INV-SMTP-PROXY-01..05` (5) | SMTP proxy crate | **V3** — no SMTP proxy in V2 |
+
+**Remediation:** None separately. Each invariant's enforcement
+code lands in the same PR as the feature it describes. The
+invariant ID is cited in the commit message and annotated in the
+new code.
+
+### Category 3: Deprecated (~5 invariants)
+
+These invariants belonged to specs that have been deprecated and
+superseded. They no longer apply.
+
+| Invariant | Original spec | Why deprecated |
+|---|---|---|
+| `INV-EGRESS-01` | `kernel-mediated-egress.md` | Spec is DEPRECATED; no `egress.sock` exists under the V2 unified egress model (tproxy + credential proxy) |
+| `INV-EGRESS-INTENT-01` | `kernel-mediated-egress.md` | `IntentKind::EgressRequest` was removed; the `require_intent` field is vestigial |
+
+**Remediation:** None. These invariants should be marked
+`DEPRECATED` in `invariants.md` (if not already) and excluded
+from coverage counts.
+
+### Category 4: Single missing enforcement point (~10 invariants)
+
+These invariants describe behavior that the code *almost* enforces
+but is missing one check, one guard, or one assertion.
+
+| Invariant | What's missing | Est. lines |
+|---|---|---|
+| `INV-PLANNER-HARNESS-03` | cgroup v2 guest kernel version check at session boot — the harness assumes Linux 5.14+ but never verifies | ~20 |
+| `INV-ENV-01` | Environment coherence check at admission — tasks can currently mix credentials from different environments | ~40 |
+| `INV-CRED-KERNEL-01` | Credential proxy kernel-side validation — kernel accepts proxy declarations without verifying the proxy type is supported | ~30 |
+| `INV-INIT-06` | Initiative cleanup on kernel shutdown — kernel shuts down cleanly but does not mark in-flight initiatives as `interrupted` | ~30 |
+| `INV-PLAN-BUNDLE-FRESH` | Already referenced in code but the staleness check is a no-op (always returns fresh) | ~20 |
+| `INV-CERT-01` | Certificate expiry check at IPC auth time — certificates are validated at issuance but not re-checked at connection time | ~30 |
+
+**Remediation:** ~170 lines total across 6 enforcement sites.
+Each is a self-contained guard or assertion that can land as an
+independent PR.
+
+### Why the invariants are not a separate workstream
+
+The common misunderstanding is that "48 unenforced invariants"
+implies ~48 tickets of work. It does not. The invariants are
+**properties of features**, not independent units of work:
+
+1. **Category 1** (structurally enforced): Zero code changes.
+   Annotation pass only. One PR, ~30 comments.
+2. **Category 2** (ships with feature): Zero incremental work.
+   The invariant is part of the feature's definition; it ships
+   when the feature ships.
+3. **Category 3** (deprecated): Zero work. Remove from coverage
+   count.
+4. **Category 4** (single guard): ~170 lines total. Six small
+   PRs, each independently mergeable.
+
+**Updated coverage after this analysis:**
+
+| Category | Count | V2 code needed |
+|---|---|---|
+| Already enforced in code (annotated) | ~45 | — |
+| Structurally enforced (needs annotation only) | ~30 | 0 lines (comments only) |
+| Ships with parent feature (V2 scope) | ~25 | Ships with feature |
+| Ships with parent feature (V3 scope) | ~12 | None for V2 |
+| Deprecated | ~5 | None |
+| Single enforcement point | ~10 | ~170 lines |
+| **Total** | **~120** | **~170 lines incremental** |
+
+The V2 invariant gap is not a line-count problem. It is a
+discipline problem: every feature PR must cite the invariant IDs
+it enforces, and the annotation pass for Category 1 should land
+as a dedicated "INV-audit" commit early in the sprint cycle so
+the coverage tooling (`cargo xtask inv-coverage`) has an accurate
+baseline.
