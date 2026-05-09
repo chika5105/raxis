@@ -1,6 +1,6 @@
 # RAXIS V2 — Specification Gaps & ORM Strategy
 
-> **Last updated:** 2026-05-08 (pass 2)
+> **Last updated:** 2026-05-09 (pass 3 — V2.5 `[[vm_images]]` closure)
 > **Method:** Systematic audit of all 30 V2 specification documents
 > against 140,010 lines of Rust, with five cross-check passes
 > covering CLI subcommand completeness, invariant coverage,
@@ -23,13 +23,15 @@ also all closed for V2 (the §12.4 operator-ergonomics IPC handlers
 were promoted from wire-shape stubs to real read-only handlers in
 V2.4; only `SubscribeInitiative` remains a stub awaiting the V3
 KernelPush wire transport). **§13 Category 4** (single-enforcement-
-point invariants) was reconciled in V2.4: 5 of 6 entries were
-discovered to already be in shipped code. The remaining one
-(`INV-PLANNER-HARNESS-03` + `INV-VM-CAP-03`) was originally
-deferred to V3 but has been **promoted back to V2.5** because
-the `[[vm_images]]` subsystem is a functional requirement:
-without it, operators cannot set custom executor images and
-every activation is locked to the canonical starter.
+point invariants) is fully closed: 5 of 6 entries were
+discovered already-implemented in the V2.4 audit pass, and the
+remaining one (`INV-PLANNER-HARNESS-03` + `INV-VM-CAP-03`,
+the `[[vm_images]]` subsystem) shipped end-to-end in V2.5
+(policy schema, admission alias resolution,
+`[default_executor_image]` back-fill, spawn-path integration,
+`oci_digest` enforcement via `image-cache::ImageResolver`,
+operator-declared kernel-version floor, and
+`raxis doctor vm-images`).
 
 | Tier | Count | Status |
 |---|---|---|
@@ -39,7 +41,7 @@ every activation is locked to the canonical starter.
 | D — Schema/skeleton | 2/2 | Both closed (V2.3) |
 | E — Deferred/partial | 1/1 | Closed (V2.3) |
 | §12 newly-discovered gaps | 10/10 | All V2 BLOCKER items closed (V2.4) |
-| §13 Cat 4 single-enforcement | 5/6 | Closed (V2.4); 1 promoted to V2.5 |
+| §13 Cat 4 single-enforcement | 6/6 | All closed (5 in V2.4, `[[vm_images]]` in V2.5) |
 
 **Total lines remaining:** 0 (every V2 BLOCKER closed in V2.4; V3
 items remain documented per the deferral notes per category)
@@ -2996,22 +2998,23 @@ superseded. They no longer apply.
 `DEPRECATED` in `invariants.md` (if not already) and excluded
 from coverage counts.
 
-### Category 4: Single missing enforcement point — **5 of 6 closed in V2.4**, 1 deferred to V3
+### Category 4: Single missing enforcement point — **6 of 6 closed in V2.4 / V2.5**
 
 These invariants describe behavior that the code *almost* enforces
 but is missing one check, one guard, or one assertion. The V2.4
-re-audit (this pass) reconciled the table against the shipped code
-and found that **5 of the 6 gaps were already implemented** before
-the table was last refreshed; the remaining one — the full
-`[[vm_images]]` subsystem (`INV-PLANNER-HARNESS-03` kernel-version
-check + `INV-VM-CAP-03` operator-pinned executor images) — was
-originally deferred to V3 but has been **promoted back to V2.5**
-because without it operators cannot set custom executor images and
-every activation is locked to the canonical starter.
+re-audit reconciled the table against the shipped code and found
+that **5 of the 6 gaps were already implemented** before the table
+was last refreshed. The remaining one — the full `[[vm_images]]`
+subsystem (`INV-PLANNER-HARNESS-03` kernel-version check +
+`INV-VM-CAP-03` operator-pinned executor images) — was promoted
+from V3 to V2.5 BLOCKER because without it operators cannot set
+custom executor images. **V2.5 closes this last item across the
+policy parser, admission-time alias resolver, spawn-path
+integration, and `raxis doctor vm-images` category.**
 
 | Invariant | Status | Enforcement site (or deferral) |
 |---|---|---|
-| `INV-PLANNER-HARNESS-03` + `INV-VM-CAP-03` | 🔴 **V2.5 BLOCKER** | The `[[vm_images]]` policy schema (`name`, `oci_digest`, `role_restriction`, `linux_kernel_version_min`) is not wired into `crates/policy`. Without it: (a) operators cannot set custom executor images — every activation resolves to the canonical `raxis-executor-starter-<v>.img` hardcoded in `session_spawn_orchestrator.rs:674`, violating `INV-VM-CAP-03` (operator-published, OCI-pinned executor images); (b) the kernel cannot enforce `role_restriction` on verifier `image` fields; (c) `[default_executor_image] alias` resolution has no registry to resolve against (`FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` has no backing implementation); (d) the guest kernel version check (`FAIL_VM_GUEST_KERNEL_TOO_OLD`) has no enforcement path. Estimate: ~630 lines (policy parser + admission-time alias resolution + `oci_digest` enforcement + role_restriction check + operator-declared kernel-version validation). |
+| `INV-PLANNER-HARNESS-03` + `INV-VM-CAP-03` | ✅ **CLOSED V2.5** | `[[vm_images]]` registry now resolves alias → digest at `approve_plan` (`crates/policy/src/bundle.rs::validate_vm_images` + `kernel/src/initiatives/lifecycle.rs::validate_task_vm_images`) and the activation handler re-resolves under the *current* policy bundle before passing the resolved `VerifiedImage` to `spawn_executor_for_task` (`kernel/src/handlers/intent.rs::resolve_vm_image_override`). Reviewer images stay kernel-canonical (`INV-PLANNER-HARNESS-02`, double-checked at admission AND at spawn). `[default_executor_image]` back-fill applied to Executor tasks that omit `vm_image`. `oci_digest` byte-equality is verified by `image-cache::ImageResolver::resolve` (image-cache.md §6); a mismatch refuses to populate the cache and surfaces as `FAIL_POLICY_VIOLATION` at activation. Operator-declared `linux_kernel_version_min ≥ 5.14` is validated at policy load with `FAIL_VM_GUEST_LINUX_KERNEL_TOO_OLD`. Operator visibility via `raxis doctor vm-images` (count, per-entry pretty-print, cache-presence probe, default-executor-image resolution). |
 | `INV-ENV-01` | ✅ **CLOSED V2.3** | `kernel/src/initiatives/lifecycle.rs::validate_task_environment_consistency` (commit `bd0a28c`). Walks `[[tasks.credentials]]` ∩ `[[permitted_credentials]]` per task, unions environment labels, fails closed on cardinality ≥ 2 with `FAIL_TASK_ENVIRONMENT_INCONSISTENT`. Activation-gated by non-empty `policy_environments`. Implements step A of the §11.3 binding algorithm; URL-gate limb (step B) still V3 per E1 disposition. |
 | `INV-CRED-KERNEL-01` | ✅ **CLOSED V2.2** | `kernel/src/initiatives/lifecycle.rs::validate_task_credentials` rejects every `ProxyDecl::Unknown` at `approve_plan` shift-left with `LifecycleError::PlanTaskCredentialsInvalid { rule: "unknown_proxy_type", … }` BEFORE `BEGIN TRANSACTION`. The defense-in-depth `Unknown` arm in the persistence helper surfaces an `Invariant` store error if the validator is ever bypassed, so the closure has a fail-safe. |
 | `INV-INIT-04` (shutdown sweep) | ✅ **CLOSED V1** | `kernel/src/recovery.rs::reconcile_tasks` runs at every kernel boot, transitions in-flight `Running` / `Admitted` / `GatesPending` tasks to `BlockedRecoveryPending` with `RecoveryPendingOperatorAction`, and propagates affected initiatives to `Blocked` via `evaluate_terminal_criteria`. The recovery sweep is the architectural answer; an additional shutdown-time sweep would be a redundant write that the next-boot reconcile would re-do anyway. The V2_GAPS row mislabel as `INV-INIT-06` (plan immutability) was a transcription error during the original audit; both the immutability limb (Plan Bundle Sealing, `kernel-store.md §2.5.8`) and the recovery limb (this row) are closed. |
@@ -3020,56 +3023,74 @@ every activation is locked to the canonical starter.
 
 **Remediation realised:** 0 lines of new code for the 5 closed
 items. The `[[vm_images]]` subsystem (`INV-PLANNER-HARNESS-03` +
-`INV-VM-CAP-03`) is ~630 lines of new code, promoted to V2.5.
+`INV-VM-CAP-03`) landed in V2.5 across the policy parser,
+admission-time alias resolver, spawn-path integration, and
+`raxis doctor vm-images` category.
 
-**`[[vm_images]]` V2.5 implementation plan.**
-The subsystem was originally deferred to V3 under the assumption
-that the kernel-version introspection was the only gap. The V2.5
-audit revealed a deeper problem: without `[[vm_images]]`, operators
-cannot set custom executor images at all — every activation is
-locked to the canonical `raxis-executor-starter` image. This
-violates `INV-VM-CAP-03` ("Executor image operator-published,
-OCI-pinned"). The V2.5 scope is:
+**`[[vm_images]]` V2.5 — what shipped.** The subsystem was
+originally deferred to V3 under the assumption that kernel-version
+introspection was the only gap. The V2.5 audit revealed a deeper
+problem: without `[[vm_images]]`, operators could not set custom
+executor images at all — every activation was locked to the
+canonical `raxis-executor-starter` image, violating `INV-VM-CAP-03`
+("Executor image operator-published, OCI-pinned"). V2.5 closes
+the gap across seven sites:
 
 1. **Policy schema.** `[[vm_images]]` parser with `name`,
-   `oci_digest`, `role_restriction`, `linux_kernel_version_min` (operator-
-   declared). Wire into `crates/policy/src/bundle.rs` as a new
-   `VmImageEntry` struct + `vm_images: Vec<VmImageEntry>` on
-   `PolicyBundle`. ~150 lines.
-2. **Alias resolution at admission.** `approve_plan` resolves
-   every task's `vm_image` field (and every verifier's `image`
-   field) against the `[[vm_images]]` registry. Unresolvable alias
-   → `FAIL_VM_IMAGE_NOT_REGISTERED`. Wrong role → 
-   `FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`. ~100 lines.
-3. **`[default_executor_image]` section.** Policy-side
-   `alias` → `[[vm_images]]` resolution with `role_restriction`
-   check. `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` at
-   policy load. ~50 lines.
-4. **Spawn-path integration.** `spawn_executor_for_task` reads
-   the resolved image path from the admission result instead of
-   hardcoding `executor_starter_image_path()`. ~80 lines.
-5. **`oci_digest` enforcement.** At activation, the spawned
-   image's SHA-256 is verified against the `[[vm_images]]` entry's
-   `oci_digest`. Mismatch → `FAIL_VM_IMAGE_DIGEST_MISMATCH`.
-   ~120 lines.
-6. **Kernel-version check.** Trust the operator-declared
-   `linux_kernel_version_min` on the `[[vm_images]]` entry rather than
-   introspecting the image. The operator already pins the image by
-   `oci_digest` — they are asserting trust in the image contents.
-   At admission, the RAXIS kernel validates `linux_kernel_version_min >= 5.14`
-   (Linux kernel 5.14 is the floor for cgroup v2 with `cpu`, `memory`,
-   controllers delegated to `subtree_control`, per
-   `INV-PLANNER-HARNESS-03` / `planner-harness.md §4.3`)
-   and rejects with `FAIL_VM_GUEST_KERNEL_TOO_OLD` if below.
-   This avoids pulling an OCI client into the kernel's address
-   space. ~30 lines.
-7. **`raxis doctor` integration.** `vm-images` category at
-   install time. ~100 lines.
-
-**V2.4 mitigation (still in effect until V2.5 lands).** The
-substrate refuses to boot a kernel that cannot mount cgroup v2.
-This is correctness-preserving but yields a substrate-specific
-error code rather than the spec's `FAIL_VM_GUEST_KERNEL_TOO_OLD`.
+   `oci_digest`, `role_restriction`, `linux_kernel_version_min`
+   (operator-declared). Implemented as `VmImageConfig` /
+   `VmImageEntry` on `RawPolicy` with full validation
+   (`crates/policy/src/bundle.rs::validate_vm_images`):
+   lowercase ASCII alias, sha256-digest format, non-empty
+   role-restriction set, no Reviewer / Orchestrator override,
+   `linux_kernel_version_min ≥ 5.14`, no duplicate aliases,
+   reserved alias guard for `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME`.
+2. **Alias resolution at admission.** `approve_plan` calls
+   `validate_task_vm_images` after task parsing
+   (`kernel/src/initiatives/lifecycle.rs`):
+   - Reviewer / Orchestrator tasks may not declare `vm_image`
+     (`FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`,
+      `INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`).
+   - Executor tasks resolve `vm_image` against the registry,
+     emitting `FAIL_VM_IMAGE_NOT_PERMITTED` for unknown aliases
+     and `FAIL_VM_IMAGE_ROLE_RESTRICTION_MISMATCH` for
+     non-Executor entries.
+3. **`[default_executor_image]` back-fill.** A new
+   `DefaultExecutorImageConfig` is parsed and resolved at policy
+   load (`validate_default_executor_image`). When an Executor
+   task omits `vm_image`, `validate_task_vm_images` substitutes
+   the configured alias instead of failing. Reviewer tasks are
+   *not* back-filled.
+4. **Spawn-path integration.** `spawn_executor_for_task` now
+   accepts an `Option<VerifiedImage>` override. Activation
+   (`kernel/src/handlers/intent.rs::handle_activate_sub_task`)
+   reads `TaskPlanFields::vm_image` from the in-memory plan
+   registry, re-resolves it against the *current* policy bundle
+   via `resolve_vm_image_override`, and feeds the resulting
+   `VerifiedImage` into the spawn path. Reviewer tasks
+   defensively reject any override
+   (`INV-PLANNER-HARNESS-02`).
+5. **`oci_digest` enforcement.** Byte-equality of the cached
+   rootfs against the operator-declared digest is enforced inside
+   `image-cache::ImageResolver::resolve`
+   (`image-cache.md §6`); a mismatch refuses to populate the
+   cache and surfaces as `FAIL_POLICY_VIOLATION` at activation.
+6. **Kernel-version check.** The kernel trusts the operator-
+   declared `linux_kernel_version_min` on the `[[vm_images]]`
+   entry rather than introspecting the rootfs. The operator
+   already pins the image by `oci_digest`, so this is a
+   trust-equivalent surface. Validation is performed at policy
+   load (`parse_and_check_linux_kernel_version_min`) and rejects
+   anything below the cgroup-v2 floor (`5.14`) with
+   `FAIL_POLICY_VM_GUEST_LINUX_KERNEL_TOO_OLD`. The substrate
+   continues to refuse to boot a kernel that cannot mount cgroup
+   v2 as a defense-in-depth limb.
+7. **`raxis doctor vm-images`.** A new diagnostic category prints
+   per-entry summaries (alias, digest, roles, kernel floor),
+   probes the OCI cache for presence (warns when not yet
+   populated), and reports `[default_executor_image]` resolution
+   status. Wired into `raxis doctor all` and surfaced in the CLI
+   help.
 
 ### Why the invariants are not a separate workstream
 

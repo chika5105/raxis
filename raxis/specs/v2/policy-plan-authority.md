@@ -816,26 +816,29 @@ role.
 
 ---
 
-### FAIL_VM_GUEST_KERNEL_TOO_OLD
+### FAIL_POLICY_VM_GUEST_LINUX_KERNEL_TOO_OLD
 
-**Phase:** `approve_plan` (when the operator's `policy.toml` includes per-image
-manifest data) OR at first activation of an image not previously inspected
-(when no manifest data is available).
+**Phase:** Policy load (V2.5 closure of `INV-PLANNER-HARNESS-03`).
 
-**Trigger:** A `[[vm_images]]` entry whose introspection (via `raxis doctor`'s
-`vm-images` category at install time, or at first activation) reports a Linux
-guest kernel version below 5.14.
+**Trigger:** A `[[vm_images]]` entry's operator-declared
+`linux_kernel_version_min` is below 5.14 (the cgroup-v2 floor; see
+`planner-harness.md §4.3`).
 
-**Kernel behavior:** Plan rejected at `approve_plan`, OR — if the image was
-not pre-validated — first activation aborted with `SecurityViolationDetected
-{ kind: "VmGuestKernelTooOld", image, observed_kernel_version }`.
+**Kernel behavior:** Policy bundle rejected at `epoch advance`.
 
-**Recommended fix:** Rebuild the image with a kernel ≥ 5.14, or switch to a
-distribution base that ships ≥ 5.14 (Ubuntu 22.04+, Debian 12+, RHEL 9+,
-Fedora 36+, Alpine 3.18+).
+**Recommended fix:** Rebuild the image with a kernel ≥ 5.14 — or
+switch to a distribution base that ships ≥ 5.14 (Ubuntu 22.04+,
+Debian 12+, RHEL 9+, Fedora 36+, Alpine 3.18+) — and update
+`linux_kernel_version_min` accordingly. The operator already pins the
+image by `oci_digest`, so the field is a trust-equivalent surface;
+the kernel does not introspect the rootfs.
 
-**Canonical home:** `system-requirements.md §2.5`, `planner-harness.md §10.2`,
-`INV-PLANNER-HARNESS-03`.
+**Canonical home:** `system-requirements.md §2.5`,
+`planner-harness.md §4.3`, `INV-PLANNER-HARNESS-03`.
+
+(The legacy spelling `FAIL_VM_GUEST_KERNEL_TOO_OLD` is retained as an
+alias in audit/event payloads for operator scripts that grep on the
+older name; new code paths emit the V2.5 spelling.)
 
 ---
 
@@ -1462,40 +1465,62 @@ configure lenient mode as the default, removing the need for operators to pass
 trade-off: it means plans with policy-plan divergences will be approved without explicit
 operator acknowledgment. Not recommended for production.
 
-### `[[vm_images]] role_restriction` (V2 addition)
+### `[[vm_images]]` (V2 addition; closed in V2.5)
 
 V2 makes the existing `[[vm_images]]` schema's `role_restriction` field
 load-bearing for plan admission. Each operator-published image declares
-which planner / verifier roles may use it:
+which planner / verifier roles may use it. V2.5 closes the subsystem
+end-to-end (policy parser, admission alias resolution,
+`[default_executor_image]` back-fill, spawn-path integration,
+`oci_digest` enforcement via `image-cache::ImageResolver`,
+`linux_kernel_version_min` floor, and `raxis doctor vm-images`).
 
 ```toml
 # policy.toml — V2 schema for [[vm_images]]
 
 [[vm_images]]
-name             = "raxis/rust-build:1.87"
-oci_digest       = "sha256:e3b0c44298fc1c149afbf4c8996fb924..."
-role_restriction = ["Executor", "Orchestrator"]   # required field; non-empty array
+name                       = "raxis/rust-build:1.87"
+oci_digest                 = "sha256:e3b0c44298fc1c149afbf4c8996fb924..."
+role_restriction           = ["Executor", "Orchestrator"]   # required; non-empty
+linux_kernel_version_min   = "5.14"                         # required; ≥ 5.14
 
 [[vm_images]]
-name             = "raxis/parsers:1"
-oci_digest       = "sha256:c057a3e7ea75c2aef3c1cd95fa1aac84..."
-role_restriction = ["Verifier"]                   # only usable for V2 task verifiers
+name                       = "raxis/parsers:1"
+oci_digest                 = "sha256:c057a3e7ea75c2aef3c1cd95fa1aac84..."
+role_restriction           = ["Verifier"]                   # only usable for V2 task verifiers
+linux_kernel_version_min   = "5.14"
 
 [[vm_images]]
-name             = "raxis/multipurpose:2"
-oci_digest       = "sha256:..."
-role_restriction = ["Executor", "Orchestrator", "Verifier"]   # acceptable; useful when image
-                                                              # truly serves multiple roles
+name                       = "raxis/multipurpose:2"
+oci_digest                 = "sha256:..."
+role_restriction           = ["Executor", "Orchestrator", "Verifier"]   # acceptable
+linux_kernel_version_min   = "5.14"
 ```
 
 **Permitted values in `role_restriction`:**
 
 | Value | Meaning |
 |---|---|
-| `"Orchestrator"` | Image may boot for an Orchestrator task |
+| `"Orchestrator"` | **Disallowed.** The Orchestrator role uses the kernel-bundled `raxis-orchestrator-core` image only (`INV-PLANNER-HARNESS-05`); operator-published Orchestrator images are explicitly prohibited. Any `[[vm_images]]` entry whose `role_restriction` contains `"Orchestrator"` is REJECTED at policy load with `FAIL_POLICY_INVALID_ROLE_RESTRICTION` (alias `FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED` for messaging). |
 | `"Executor"` | Image may boot for an Executor task |
 | `"Verifier"` | Image may boot for a V2 task verifier (per `verifier-processes.md`) |
 | `"Reviewer"` | **Disallowed.** The Reviewer role uses the kernel-bundled `raxis-reviewer-core` image only (`INV-PLANNER-HARNESS-02`); operator-published Reviewer images are explicitly prohibited. Any `[[vm_images]]` entry whose `role_restriction` contains `"Reviewer"` is REJECTED at policy load with `FAIL_POLICY_INVALID_ROLE_RESTRICTION` and a remediation message. |
+
+**`linux_kernel_version_min` (V2.5 addition).** The operator declares
+the minimum guest Linux kernel version baked into the image. The
+kernel validates `linux_kernel_version_min ≥ 5.14` at policy load and
+rejects with `FAIL_POLICY_VM_GUEST_LINUX_KERNEL_TOO_OLD` otherwise.
+The 5.14 floor matches the cgroup-v2 (`cpu`, `memory`, `io`)
+delegation contract documented in
+`planner-harness.md §4.3` (`INV-PLANNER-HARNESS-03`). The operator
+already pins the image by `oci_digest`, so the field is a trust-
+equivalent surface; the kernel does not introspect the rootfs.
+
+**Reserved aliases.** The alias `raxis-verifier-symbol-index` is
+reserved per `INV-VERIFIER-12` (the symbol-index image is kernel-
+bundled and not operator-published). Operator policy that declares a
+`[[vm_images]]` entry with this alias is REJECTED at policy load with
+`FAIL_POLICY_RESERVED_VM_IMAGE_NAME { name }`.
 
 **Migration from V1:** V1 policies without `role_restriction` are migrated by
 the `epoch advance` flow with a permissive default of
@@ -1730,40 +1755,51 @@ authoring of the chain in every plan.
 
 ---
 
-### `[default_executor_image]` (V2 addition)
+### `[default_executor_image]` (V2 addition; closed in V2.5)
 
-The defaulting target consumed by `raxis-cli plan prepare` per
-`operator-ergonomics.md §4` and `§18.1`. When an operator omits
-`vm_image` on an Executor task, `plan prepare` fills it with the OCI
-digest of the `[[vm_images]]` entry resolved from this alias.
+The defaulting target consumed at admission. When an operator omits
+`vm_image` on an Executor task, `approve_plan` fills it from the
+`[[vm_images]]` entry resolved from this alias. (The CLI
+`raxis plan prepare` may pre-fill the same field client-side; both
+sites converge on the same alias.)
 
 ```toml
 # policy.toml — V2 schema for [default_executor_image]
 
 [default_executor_image]
-alias    = "raxis-executor-starter"   # the canonical starter image alias
-fallback = "skip"                     # what plan prepare does if the alias is absent:
-                                       #   "skip"  — leave vm_image unfilled; submit fails with FAIL_PLAN_REQUIRES_PREPARE
-                                       #   "error" — plan prepare itself fails with FAIL_POLICY_DEFAULT_UNRESOLVABLE
+alias = "raxis-executor-starter"   # the [[vm_images]] alias to substitute when an
+                                   # Executor task omits vm_image. Must resolve to a
+                                   # [[vm_images]] entry whose role_restriction includes
+                                   # "Executor"; otherwise FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE
+                                   # is raised at policy load.
 ```
 
 | Field | Default | Purpose |
 |---|---|---|
 | `alias` | (none; section absent → no defaulting) | The `[[vm_images]] name` of the image to use as the Executor default. The image's `role_restriction` MUST include `"Executor"`. |
-| `fallback` | `"skip"` | Behaviour when the alias does not resolve to a valid `[[vm_images]]` entry. |
 
 **Validation at policy load.** `[default_executor_image] alias` MUST
 resolve to a `[[vm_images]]` entry whose `role_restriction` contains
-`"Executor"`. Otherwise → `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE`
-(hard error). This guarantees the CLI's `plan prepare` will succeed
-when it consults this field.
+`"Executor"`. Otherwise →
+`FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` (hard error). This
+guarantees that admission can always back-fill `vm_image` for
+Executor tasks when the section is present.
+
+**Back-fill is admission-side.** When the section is present and a
+plan task is Executor-typed with an empty `vm_image`, the kernel
+substitutes `[default_executor_image].alias` *before*
+`validate_task_vm_images` runs. The substitution is performed in
+`kernel/src/initiatives/lifecycle.rs::validate_task_vm_images` so a
+single resolution path is exercised in all cases. Reviewer /
+Orchestrator tasks are *never* back-filled (they remain kernel-
+canonical per `INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`).
 
 **Absence is permitted.** If the section is omitted entirely,
 defaulting of `vm_image` is disabled. Operators must declare
-`vm_image` explicitly on every Executor task; submission of a task
-omitting `vm_image` fails with the existing `FAIL_VM_IMAGE_NOT_PERMITTED`
-(or its V2 equivalent). This matches the V1 behavior and preserves it
-for operators who never want kernel-side image defaulting.
+`vm_image` explicitly on every Executor task; an Executor task that
+omits `vm_image` is rejected with `FAIL_VM_IMAGE_NOT_PERMITTED`. This
+matches the V1 behaviour and preserves it for operators who never
+want kernel-side image defaulting.
 
 **Cross-reference:** `planner-harness.md §10.6` describes the
 canonical `raxis-executor-starter` image manifest that the typical

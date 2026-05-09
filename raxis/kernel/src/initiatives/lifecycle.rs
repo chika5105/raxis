@@ -609,6 +609,7 @@ pub fn create_initiative(
 /// `policy_target_ref_locked = false` — the behaviour all V2.0
 /// tests previously assumed.
 #[cfg(any(debug_assertions, test))]
+#[allow(clippy::too_many_arguments)]
 pub fn approve_plan_for_test(
     initiative_id:                   &str,
     approving_operator:              &str,

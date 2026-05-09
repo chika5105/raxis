@@ -13,7 +13,7 @@
 //!   * 0 — every check is `Ok`.
 //!   * 1 — at least one `Warn`, no `Fail`.
 //!   * 2 — at least one `Fail`. The kernel is unlikely to boot
-//!         (or has booted into a broken state).
+//!     (or has booted into a broken state).
 //!
 //! # What this command does NOT do
 //!
