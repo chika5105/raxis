@@ -795,9 +795,28 @@ deprecated that path and replaced it with:
 
 Neither tier gives the planner a **tool-shaped** web fetch
 capability the LLM can call like `read_file` or `bash`. The
-agent can `curl` from bash (if the URL is in the tproxy
-allowlist), but that's unstructured and unaudited at the
-tool level.
+agent can `curl` from bash (if the hostname is in the tproxy
+SNI allowlist), and **that path IS egress-controlled** — the VM
+has no NIC (INV-02B), so every outbound TCP connection is
+intercepted by tproxy and checked against the operator's
+allowlist. Unapproved hosts are refused at the transport layer.
+
+The gap is not about access control — it's about **tool-level
+structure and audit:**
+
+- **No typed tool interface.** The LLM constructs ad-hoc `curl`
+  flags in bash rather than calling a schema-validated tool with
+  `{ url, method, headers }` inputs and
+  `{ status_code, body, truncated }` output. This increases
+  hallucination of flags and makes response parsing fragile.
+- **No per-request audit events.** Tproxy logs at the transport
+  layer (connection opened/closed, SNI, bytes). There is no
+  `WebFetchInvoked` audit event with URL, method, response
+  status, body hash, duration, or truncation flag.
+- **No per-tool rate limiting or body truncation.** Tproxy does
+  not cap response body size or count requests per URL prefix.
+  A `bash curl` loop can fetch unbounded data from an
+  allowlisted host.
 
 **What needs to be specced (BLOCKER — no PR without spec):**
 
