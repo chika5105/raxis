@@ -54,27 +54,6 @@ use uuid::Uuid;
 
 use common::kernel_harness::KernelInstance;
 
-/// On Linux, `ExitStatus::success()` returns `false` when a process is
-/// terminated by a signal — even if the kernel's own signal handler would
-/// have called `exit(0)`. This is a race between tokio's async signal
-/// handler and the OS default signal disposition. On macOS, tokio's handler
-/// wins consistently; on Ubuntu CI, the default disposition sometimes fires
-/// first, reporting the process as "killed by signal 15" (SIGTERM).
-///
-/// For graceful-shutdown tests, BOTH outcomes are acceptable:
-///   * `exit(0)` — tokio caught SIGTERM, drove the graceful shutdown path.
-///   * killed by signal 15 — the OS killed the process before tokio could
-///     react, but the SIGTERM was the expected signal we sent.
-#[cfg(unix)]
-fn is_clean_exit(status: &std::process::ExitStatus) -> bool {
-    use std::os::unix::process::ExitStatusExt;
-    if status.success() {
-        return true;
-    }
-    // signal() returns the signal number that killed the process, if any.
-    matches!(status.signal(), Some(libc::SIGTERM))
-}
-
 const READY_DEADLINE:    Duration = Duration::from_secs(10);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 
@@ -220,10 +199,7 @@ async fn heartbeat_is_fresh_and_well_formed_after_boot() {
     );
 
     let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
-    assert!(
-        is_clean_exit(&status),
-        "kernel must exit cleanly (exit(0) or killed-by-SIGTERM); got: {status:?}"
-    );
+    assert!(status.success(), "kernel must exit cleanly");
 }
 
 fn poll_for_heartbeat(
@@ -276,10 +252,7 @@ async fn audit_chain_resumes_monotonically_across_restart() {
         fire_one_intent(&planner, seq).await;
     }
     let status1 = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
-    assert!(
-        is_clean_exit(&status1),
-        "boot 1 must exit cleanly; got: {status1:?}"
-    );
+    assert!(status1.success(), "boot 1 must exit cleanly");
 
     // Capture the highest-seq value at the boot-1 boundary so we can
     // assert on monotonicity across the boundary explicitly later.
@@ -299,10 +272,7 @@ async fn audit_chain_resumes_monotonically_across_restart() {
         fire_one_intent(&planner, seq).await;
     }
     let status2 = kernel2.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
-    assert!(
-        is_clean_exit(&status2),
-        "boot 2 must exit cleanly; got: {status2:?}"
-    );
+    assert!(status2.success(), "boot 2 must exit cleanly");
 
     // ── Final chain walk ─────────────────────────────────────────────
     let final_chain = walk_chain_or_panic(&data_dir);
@@ -459,8 +429,5 @@ async fn raxis_status_json_against_live_kernel_reports_running() {
     );
 
     let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
-    assert!(
-        is_clean_exit(&status),
-        "kernel must exit cleanly; got: {status:?}"
-    );
+    assert!(status.success(), "kernel must exit cleanly");
 }

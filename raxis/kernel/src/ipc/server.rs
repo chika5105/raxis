@@ -121,6 +121,36 @@ pub async fn start(
         })?;
     set_socket_permissions(&gateway_path, 0o660);
 
+    // Register signal handlers BEFORE logging `sockets_bound`.
+    //
+    // `tokio::signal::unix::signal(SignalKind::terminate())` calls
+    // `sigaction(2)` to replace SIGTERM's default disposition (process
+    // termination) with a handler that writes to an internal pipe.
+    // This MUST happen before `sockets_bound` is logged because
+    // integration tests use that log line as the "kernel is ready"
+    // signal and immediately send SIGTERM. If the handler isn't
+    // installed yet, the default disposition kills the process and
+    // the test sees a signal-terminated exit status instead of
+    // exit(0).
+    //
+    // The streams are passed into `wait_for_shutdown` so they are
+    // polled inside `tokio::select!` alongside the accept tasks.
+    use tokio::signal::unix::{signal, SignalKind};
+    let sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            server_log::signal_handler_install_failed("SIGTERM", &e.to_string());
+            None
+        }
+    };
+    let sigint = match signal(SignalKind::interrupt()) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            server_log::signal_handler_install_failed("SIGINT", &e.to_string());
+            None
+        }
+    };
+
     server_log::sockets_bound(
         &operator_path.display().to_string(),
         &planner_path.display().to_string(),
@@ -146,7 +176,7 @@ pub async fn start(
     // step 9 "Signal handler registration"). On non-unix targets we have no
     // SIGTERM equivalent, but the kernel is unix-only by spec
     // (`UnixListener` already gates everything to `cfg(unix)`).
-    let reason = wait_for_shutdown(op_task, pl_task, gw_task).await;
+    let reason = wait_for_shutdown(sigterm, sigint, op_task, pl_task, gw_task).await;
 
     // Cleanup: unbind sockets by removing files. Best-effort — if the
     // operator wiped `<data_dir>` mid-shutdown the removes will simply ENOENT.
@@ -168,40 +198,44 @@ pub async fn start(
 /// Race the three accept tasks against SIGTERM and SIGINT. The first
 /// terminating arm wins; the others are aborted when this function returns
 /// (the `JoinHandle`s are dropped together with the parent task in `start`).
+///
+/// Signal streams are created in `start()` BEFORE `sockets_bound` is
+/// logged so the `sigaction` disposition is in place before any external
+/// observer can send a signal. If either stream failed to create (extremely
+/// rare — out-of-fd or kernel without signalfd), the corresponding
+/// `Option` is `None` and we degrade to "wait for accept loop exit only"
+/// for that signal.
 async fn wait_for_shutdown(
+    sigterm: Option<tokio::signal::unix::Signal>,
+    sigint: Option<tokio::signal::unix::Signal>,
     op_task: tokio::task::JoinHandle<()>,
     pl_task: tokio::task::JoinHandle<()>,
     gw_task: tokio::task::JoinHandle<()>,
 ) -> ShutdownReason {
-    use tokio::signal::unix::{signal, SignalKind};
-
-    // Set up signal streams. If `signal()` itself fails (extremely rare —
-    // out-of-fd or kernel without signalfd), log and degrade to "wait for
-    // accept loop exit only" — Ctrl-C will still tear the process down via
-    // the default SIGINT handler.
-    let mut sigterm = match signal(SignalKind::terminate()) {
-        Ok(s) => s,
-        Err(e) => {
-            server_log::signal_handler_install_failed("SIGTERM", &e.to_string());
-            // Still tee SIGINT below; if both fail the process is still alive
-            // and `tokio::select!` will fall through to the accept-loop arms.
-            return wait_for_accept_exit_only(op_task, pl_task, gw_task).await;
+    // Wrap the optional streams in futures that pend forever if the
+    // stream was `None` (degraded — that signal won't trigger graceful
+    // shutdown, but the OS default handler still kills the process).
+    let mut sigterm = sigterm;
+    let mut sigint = sigint;
+    let sigterm_fut = async {
+        match sigterm.as_mut() {
+            Some(s) => s.recv().await,
+            None => std::future::pending().await,
         }
     };
-    let mut sigint = match signal(SignalKind::interrupt()) {
-        Ok(s) => s,
-        Err(e) => {
-            server_log::signal_handler_install_failed("SIGINT", &e.to_string());
-            return wait_for_accept_exit_only(op_task, pl_task, gw_task).await;
+    let sigint_fut = async {
+        match sigint.as_mut() {
+            Some(s) => s.recv().await,
+            None => std::future::pending().await,
         }
     };
 
     tokio::select! {
-        _ = sigterm.recv() => {
+        _ = sigterm_fut => {
             server_log::signal_received("SIGTERM");
             ShutdownReason::SigTerm
         }
-        _ = sigint.recv() => {
+        _ = sigint_fut => {
             server_log::signal_received("SIGINT");
             ShutdownReason::SigInt
         }
@@ -215,30 +249,6 @@ async fn wait_for_shutdown(
         }
         result = gw_task => {
             server_log::accept_loop_exited("gateway", &format!("{result:?}"), true);
-            ShutdownReason::AcceptLoopExited { which: "gateway" }
-        }
-    }
-}
-
-/// Degraded path: SIGTERM/SIGINT installation failed. Wait only on the three
-/// accept loops; the OS default signal disposition still tears the process
-/// down on Ctrl-C, just without our `KernelStopped` audit hook.
-async fn wait_for_accept_exit_only(
-    op_task: tokio::task::JoinHandle<()>,
-    pl_task: tokio::task::JoinHandle<()>,
-    gw_task: tokio::task::JoinHandle<()>,
-) -> ShutdownReason {
-    tokio::select! {
-        result = op_task => {
-            server_log::accept_loop_exited("operator", &format!("{result:?}"), false);
-            ShutdownReason::AcceptLoopExited { which: "operator" }
-        }
-        result = pl_task => {
-            server_log::accept_loop_exited("planner", &format!("{result:?}"), false);
-            ShutdownReason::AcceptLoopExited { which: "planner" }
-        }
-        result = gw_task => {
-            server_log::accept_loop_exited("gateway", &format!("{result:?}"), false);
             ShutdownReason::AcceptLoopExited { which: "gateway" }
         }
     }
