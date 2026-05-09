@@ -338,17 +338,55 @@ artifact to task). Retention policy.
 
 Zero references to `ArtifactStore`, `ImmutableArtifact`.
 
-### C6: Kernel Push Protocol
+### C6: Kernel Push Protocol — CLOSED (V2.3, MVP)
 
-**Spec:** `kernel-push-protocol.md` (63KB)
-**Estimate:** ~500 lines
+**Spec:** `kernel-push-protocol.md` (63KB) — full surface
+**Status:** **CLOSED for V2 — minimum-viable auto-push only.**
+**Delivered:** ~250 lines
 
-`git push` to upstream remote after IntegrationMerge. Push
-attestation (signed record of what was pushed). Force-push
-prohibition enforcement. Branch protection verification.
+V2.3 lands the auto-push leg of the kernel push protocol so a
+successful `IntegrationMerge` reaches the operator's upstream
+remote without manual intervention. The implementation is
+deliberately scoped to the operator-grade default; the full
+push-approval gate (push attestation, force-push prohibition,
+branch protection verification, escalation flow) stays a V3
+follow-up.
 
-`domain-git/src/lib.rs` explicitly states: *"It does not push to
-upstream remotes"* (line 55). Zero push handler in kernel.
+| Component | Crate | Status |
+|---|---|---|
+| `push_to_remote(main_repo_root, remote, refspec, deadline)` | `domain-git/src/lib.rs` | Bounded subprocess `git push` with stderr capture + deadline |
+| `[git] auto_push: bool` + `push_remote: String` policy fields | `policy/src/bundle.rs` | Parsed, validated (`auto_push=true ⇒ push_remote required`) |
+| `PushAttempted` / `PushCompleted` / `PushFailed` audit events | `audit/src/event.rs` | Wire-stable kinds; failure category one of `push_failed`, `spawn_failed`, `deadline_exceeded`, `unopenable_repo` |
+| Auto-push wiring after `IntegrationMergeCompleted` | `kernel/src/handlers/intent.rs` | Inline: push runs synchronously inside `run_phase_c`, post-commit, fail-open (does not roll back the merge) |
+
+**V2 design choices.**
+
+* **No kernel-side credential injection.** The kernel invokes
+  `git push` and lets the host's git credential helpers / SSH
+  config supply auth. This keeps the V2 push wire-shape identical
+  to `integration-merge.md §14`'s `git push origin main` example
+  and avoids opening a credential-proxy fan-in for what is
+  effectively a host-administered remote.
+* **Refspec defaults to `<target_ref>:<target_ref>`.** Push
+  always targets the operator-configured `[git] default_target_ref`
+  (V2.0: `refs/heads/main`; per-initiative overrides via
+  `[workspace] target_ref` in plan.toml become a follow-up
+  alongside the `initiatives.target_ref` column work in §12.8).
+* **Push failure is informational.** The merge already committed
+  durably; a network outage / auth prompt / branch-protection
+  rejection emits `PushFailed` and the operator sees it on the
+  next `raxis log` poll. Re-running `raxis push <initiative>`
+  (V3 CLI) or hand-running `git push` from the operator host is
+  the recovery path.
+
+**Deferred to V3 (full push-protocol spec).**
+
+* `PushApproval` escalation flow (kernel-push-protocol.md §3, §6).
+* Force-push detection + prohibition (`§4.2`).
+* Branch-protection probe before pushing (`§4.4`).
+* Push-attestation record (signed receipt of pushed sha-set).
+* Per-initiative `[push]` block in `plan.toml` (rate limits,
+  remotes per ref, etc.).
 
 ### C7: Credential CLI: `add`, `remove`, `show`, `verify`
 

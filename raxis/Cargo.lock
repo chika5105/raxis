@@ -3309,6 +3309,7 @@ name = "raxis-kernel"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "base64 0.22.1",
  "ed25519-dalek",
  "glob",
  "hex",
@@ -3336,16 +3337,21 @@ dependencies = [
  "raxis-test-support",
  "raxis-types",
  "raxis-worktree-staging",
+ "reqwest",
  "rusqlite",
  "rustc-hash 1.1.0",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-rustls",
  "toml",
  "uuid",
+ "webpki-roots",
 ]
 
 [[package]]

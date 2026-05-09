@@ -164,6 +164,18 @@ pub(crate) struct GitSection {
     /// `INV-PLAN-POLICY-PRECEDENCE-01`).
     #[serde(default)]
     pub(crate) target_ref_locked: bool,
+
+    /// V2_GAPS §C6 — auto-push to upstream remote after a successful
+    /// `IntegrationMerge` Phase 3. Default `false`; the kernel never
+    /// pushes unless the operator opts in.
+    #[serde(default)]
+    pub(crate) auto_push: bool,
+
+    /// V2_GAPS §C6 — remote name to push to (e.g. `"origin"`).
+    /// Required when `auto_push = true`; the policy validator
+    /// rejects an empty value as `FAIL_GIT_PUSH_REMOTE_REQUIRED`.
+    #[serde(default)]
+    pub(crate) push_remote: Option<String>,
 }
 
 /// `[credential_backend]` — selector for the active credential
@@ -1262,6 +1274,8 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // intent
     "IntentAccepted", "IntentRejected",
     "IntegrationMergeCompleted",
+    // V2_GAPS §C6 — kernel push protocol
+    "PushAttempted", "PushCompleted", "PushFailed",
     // session
     "SessionCreated", "SessionRevoked",
     // delegation
@@ -2002,6 +2016,21 @@ pub struct PolicyBundle {
     /// `[workspace] target_ref` differs from `git_default_target_ref`
     /// is rejected at admission with `FAIL_POLICY_LOCKED_FIELD`.
     git_target_ref_locked: bool,
+
+    /// V2_GAPS §C6 — operator-side `[git] auto_push`. When `true`,
+    /// the kernel pushes to [`git_push_remote`] after every
+    /// successful `IntegrationMerge` Phase 3. Default `false`.
+    ///
+    /// [`git_push_remote`]: PolicyBundle::git_push_remote
+    git_auto_push: bool,
+
+    /// V2_GAPS §C6 — operator-side `[git] push_remote`. Required when
+    /// [`git_auto_push`] is `true`. Empty string when auto-push is
+    /// disabled (the kernel reads [`git_auto_push`] first and
+    /// short-circuits without consulting this field).
+    ///
+    /// [`git_auto_push`]: PolicyBundle::git_auto_push
+    git_push_remote: String,
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -2265,6 +2294,30 @@ impl PolicyBundle {
                 })?;
                 raw_value.to_owned()
             },
+            git_auto_push: raw
+                .git
+                .as_ref()
+                .map(|g| g.auto_push)
+                .unwrap_or(false),
+            git_push_remote: {
+                let auto = raw.git.as_ref().map(|g| g.auto_push).unwrap_or(false);
+                let remote = raw
+                    .git
+                    .as_ref()
+                    .and_then(|g| g.push_remote.as_deref())
+                    .unwrap_or("");
+                if auto && remote.trim().is_empty() {
+                    return Err(PolicyError::MalformedArtifact(
+                        "[git] auto_push = true requires a non-empty \
+                         [git] push_remote (V2_GAPS §C6)".to_owned(),
+                    ));
+                }
+                if !auto {
+                    String::new()
+                } else {
+                    remote.trim().to_owned()
+                }
+            },
             git_target_ref_locked: raw
                 .git
                 .as_ref()
@@ -2326,6 +2379,23 @@ impl PolicyBundle {
     /// [`git_default_target_ref`]: PolicyBundle::git_default_target_ref
     pub fn git_target_ref_locked(&self) -> bool {
         self.git_target_ref_locked
+    }
+
+    /// V2_GAPS §C6 — operator-side `[git] auto_push`. The kernel
+    /// pushes to [`git_push_remote`] after every successful
+    /// `IntegrationMerge` Phase 3 when this is `true`.
+    ///
+    /// [`git_push_remote`]: PolicyBundle::git_push_remote
+    pub fn git_auto_push(&self) -> bool {
+        self.git_auto_push
+    }
+
+    /// V2_GAPS §C6 — operator-side `[git] push_remote`. Empty string
+    /// when [`git_auto_push`] is `false`.
+    ///
+    /// [`git_auto_push`]: PolicyBundle::git_auto_push
+    pub fn git_push_remote(&self) -> &str {
+        &self.git_push_remote
     }
 
     // ── Key accessors ───────────────────────────────────────────────────────
@@ -2462,6 +2532,8 @@ impl PolicyBundle {
             integration_merge_verifiers: Vec::new(),
             git_default_target_ref: "refs/heads/main".to_owned(),
             git_target_ref_locked: false,
+            git_auto_push:          false,
+            git_push_remote:        String::new(),
         }
     }
 
@@ -2992,6 +3064,8 @@ mod tests {
             integration_merge_verifiers: Vec::new(),
             git_default_target_ref: "refs/heads/main".to_owned(),
             git_target_ref_locked: false,
+            git_auto_push:          false,
+            git_push_remote:        String::new(),
         }
     }
 
@@ -4001,6 +4075,9 @@ channels   = []
             AuditEventKind::IntentAccepted { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), base_sha: None, head_sha: None, sequence_number: 0, remaining_units: 0 }.as_str(),
             AuditEventKind::IntentRejected { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), error_code: "x".into(), sequence_number: 0 }.as_str(),
             AuditEventKind::IntegrationMergeCompleted { initiative_id: "x".into(), session_id: "x".into(), commit_sha: "x".into(), previous_sha: "x".into(), operator_assisted: false, escalation_id: None }.as_str(),
+            AuditEventKind::PushAttempted { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into() }.as_str(),
+            AuditEventKind::PushCompleted { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into(), summary: "x".into() }.as_str(),
+            AuditEventKind::PushFailed    { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into(), category: "x".into(), reason: "x".into() }.as_str(),
             AuditEventKind::SessionCreated { session_id: "x".into(), role: "x".into(), lineage_id: "x".into(), worktree_root: None, initiative_id: None, plan_bundle_sha256: None, policy_epoch: None, session_agent_type: None }.as_str(),
             AuditEventKind::SessionRevoked { session_id: "x".into(), revoked_by: "x".into(), revoked_by_display_name: None }.as_str(),
             AuditEventKind::DelegationGranted { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), expires_at: 0, granted_by: "x".into(), granted_by_display_name: None }.as_str(),

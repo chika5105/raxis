@@ -491,6 +491,63 @@ pub enum AuditEventKind {
         escalation_id: Option<String>,
     },
 
+    /// V2_GAPS §C6 — emitted when the kernel begins a push to the
+    /// configured upstream remote after a successful Phase 3 of
+    /// `IntegrationMerge`. The matching success → `PushCompleted` or
+    /// failure → `PushFailed` follows.
+    PushAttempted {
+        /// Initiative the push belongs to.
+        initiative_id: String,
+        /// Commit SHA being pushed.
+        commit_sha:    String,
+        /// Remote name (`"origin"` typically).
+        remote:        String,
+        /// Refspec (`"refs/heads/main:refs/heads/main"` typically).
+        refspec:       String,
+    },
+
+    /// V2_GAPS §C6 — emitted on `git push` exit-0. Carries the
+    /// short summary line from `git push`'s stderr so an operator
+    /// querying audit can see the upstream's confirmation message
+    /// without re-running.
+    PushCompleted {
+        /// Initiative the push belongs to.
+        initiative_id: String,
+        /// Commit SHA that was pushed.
+        commit_sha:    String,
+        /// Remote name.
+        remote:        String,
+        /// Refspec.
+        refspec:       String,
+        /// First-line summary of the push (`git push` stderr).
+        summary:       String,
+    },
+
+    /// V2_GAPS §C6 — emitted on `git push` exit-non-zero or on
+    /// deadline / spawn failure. The kernel's parent transaction is
+    /// already committed; `PushFailed` is purely informational and
+    /// does NOT roll back the merge.
+    PushFailed {
+        /// Initiative the push belongs to.
+        initiative_id: String,
+        /// Commit SHA the kernel attempted to push.
+        commit_sha:    String,
+        /// Remote name (or `""` if the failure happened before a
+        /// remote was selected — e.g. policy misconfiguration).
+        remote:        String,
+        /// Refspec (or `""` for early failures).
+        refspec:       String,
+        /// Stable-wire short string for the failure class. One of:
+        /// `"push_failed"` (non-zero exit), `"spawn_failed"`
+        /// (subprocess could not start), `"deadline_exceeded"`
+        /// (wall-clock timeout), `"unopenable_repo"` (main repo
+        /// missing).
+        category:      String,
+        /// Free-form reason captured from the failure path.
+        /// Truncated at 4 KiB to keep audit rows bounded.
+        reason:        String,
+    },
+
     // --- Session management ---
     /// Emitted when the kernel creates a new planner session row.
     ///
@@ -1609,6 +1666,9 @@ impl AuditEventKind {
             Self::IntentAccepted { .. } => "IntentAccepted",
             Self::IntentRejected { .. } => "IntentRejected",
             Self::IntegrationMergeCompleted { .. } => "IntegrationMergeCompleted",
+            Self::PushAttempted { .. }            => "PushAttempted",
+            Self::PushCompleted { .. }            => "PushCompleted",
+            Self::PushFailed    { .. }            => "PushFailed",
             Self::SessionCreated { .. } => "SessionCreated",
             Self::SessionRevoked { .. } => "SessionRevoked",
             Self::DelegationGranted { .. } => "DelegationGranted",

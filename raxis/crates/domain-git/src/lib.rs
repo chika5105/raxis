@@ -559,6 +559,141 @@ fn parse_oid(sha: &str) -> Result<gix::ObjectId, MainMergeError> {
 }
 
 // ---------------------------------------------------------------------------
+// V2_GAPS §C6 — kernel push protocol (minimum-viable)
+// ---------------------------------------------------------------------------
+
+/// Outcome of a successful [`push_to_remote`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PushOutcome {
+    /// The remote name pushed to (e.g. `"origin"`).
+    pub remote:    String,
+    /// The refspec used (e.g. `"refs/heads/main:refs/heads/main"`).
+    pub refspec:   String,
+    /// First-line summary of the push, captured from `git push`'s
+    /// stderr. Useful for the audit-record `transport_id` slot.
+    pub summary:   String,
+}
+
+/// Errors specific to the `push_to_remote` operation.
+#[derive(Debug, thiserror::Error)]
+pub enum PushError {
+    /// The main repo could not be opened (path missing, not a git
+    /// repo, etc.).
+    #[error("push: main repo {path} unopenable: {reason}")]
+    MainRepoUnopenable {
+        /// Repository path the kernel asked to push from.
+        path:   PathBuf,
+        /// Underlying error.
+        reason: String,
+    },
+    /// `git push` exited non-zero. The stderr is captured verbatim
+    /// for the audit-record `failure_reason` slot.
+    #[error("push: `git push {remote} {refspec}` exited {code:?}: {stderr}")]
+    PushFailed {
+        /// Remote name.
+        remote:   String,
+        /// Refspec.
+        refspec:  String,
+        /// Exit code from `git push`.
+        code:     Option<i32>,
+        /// Captured stderr (truncated at 4 KiB to keep audit rows
+        /// bounded).
+        stderr:   String,
+    },
+    /// `git push` could not be spawned (PATH / permission issue).
+    #[error("push: `git push` spawn failed: {0}")]
+    SpawnFailed(String),
+    /// `git push` exceeded the wall-clock deadline.
+    #[error("push: deadline exceeded after {0:?}")]
+    DeadlineExceeded(std::time::Duration),
+}
+
+/// Push the current `target_ref` of `main_repo_root` to a configured
+/// remote, using the operator's local git credential helpers / SSH
+/// config (the kernel does NOT inject credentials directly — the
+/// V2 push uses whatever auth the host has wired into git, which
+/// is the operator-grade outcome and matches `integration-merge.md
+/// §14`'s "git push origin main" wire shape).
+///
+/// `deadline` bounds the subprocess so a hung push (network outage,
+/// auth prompt) cannot wedge the kernel commit path.
+///
+/// Returns [`PushOutcome`] on push success; the caller is
+/// responsible for emitting the matching `PushCompleted` audit
+/// event. Any non-zero exit surfaces as
+/// [`PushError::PushFailed`] and the caller emits `PushFailed`.
+pub fn push_to_remote(
+    main_repo_root: &Path,
+    remote:         &str,
+    refspec:        &str,
+    deadline:       std::time::Duration,
+) -> Result<PushOutcome, PushError> {
+    if !main_repo_root.exists() {
+        return Err(PushError::MainRepoUnopenable {
+            path:   main_repo_root.to_path_buf(),
+            reason: "path does not exist".to_owned(),
+        });
+    }
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(main_repo_root)
+       .arg("push")
+       .arg(remote)
+       .arg(refspec)
+       .stdin (std::process::Stdio::null())
+       .stdout(std::process::Stdio::piped())
+       .stderr(std::process::Stdio::piped());
+
+    // Bound the subprocess by spawning + polling. Avoids the
+    // platform-specific timeout APIs `Command` doesn't ship with.
+    let started = std::time::Instant::now();
+    let mut child = cmd.spawn().map_err(|e| PushError::SpawnFailed(e.to_string()))?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout = String::new();
+                let mut stderr = String::new();
+                if let Some(mut s) = child.stdout.take() {
+                    use std::io::Read;
+                    let _ = s.read_to_string(&mut stdout);
+                }
+                if let Some(mut s) = child.stderr.take() {
+                    use std::io::Read;
+                    let _ = s.read_to_string(&mut stderr);
+                }
+                const CAP: usize = 4096;
+                let stderr = if stderr.len() > CAP {
+                    let mut t = stderr[..CAP].to_owned();
+                    t.push_str(&format!("\n... <truncated {} bytes>", stderr.len() - CAP));
+                    t
+                } else { stderr };
+                if status.success() {
+                    let summary = stderr.lines().next().unwrap_or(&stdout).to_owned();
+                    return Ok(PushOutcome {
+                        remote:  remote.to_owned(),
+                        refspec: refspec.to_owned(),
+                        summary,
+                    });
+                }
+                return Err(PushError::PushFailed {
+                    remote:  remote.to_owned(),
+                    refspec: refspec.to_owned(),
+                    code:    status.code(),
+                    stderr,
+                });
+            }
+            Ok(None) => {
+                if started.elapsed() > deadline {
+                    let _ = child.kill();
+                    return Err(PushError::DeadlineExceeded(deadline));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(PushError::SpawnFailed(e.to_string())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests — exercise main-advancement against real gix repositories.
 // ---------------------------------------------------------------------------
 
@@ -873,5 +1008,123 @@ mod tests {
             MainMergeError::InvalidSha { sha, .. } => assert_eq!(sha, "nothex"),
             other => panic!("expected InvalidSha, got {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------
+    // V2_GAPS §C6 — push_to_remote tests
+    // -------------------------------------------------------------
+
+    /// Build a fixture where `main` is the main repo and `bare` is
+    /// a freshly-init'd bare repository acting as the upstream
+    /// remote. The main repo has `bare` configured as `origin`.
+    fn fixture_main_with_bare_remote(tmp: &Path)
+        -> Option<(PathBuf, PathBuf)>
+    {
+        if Command::new("git").arg("--version").output().is_err() {
+            return None;
+        }
+        let main = tmp.join("main");
+        let bare = tmp.join("upstream.git");
+        std::fs::create_dir_all(&main).ok()?;
+        let run = |args: &[&str], cwd: &Path| {
+            let s = Command::new("git")
+                .args(args)
+                .current_dir(cwd)
+                .env("GIT_AUTHOR_NAME", "RAXIS Test")
+                .env("GIT_AUTHOR_EMAIL", "test@raxis.local")
+                .env("GIT_COMMITTER_NAME", "RAXIS Test")
+                .env("GIT_COMMITTER_EMAIL", "test@raxis.local")
+                .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+                .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+                .output()
+                .expect("git invocation");
+            assert!(s.status.success(),
+                "git {args:?} in {} failed: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&s.stderr),
+            );
+        };
+        // Bare upstream.
+        run(&["init", "-q", "--bare", bare.to_str()?], tmp);
+        // Main repo with one commit.
+        run(&["init", "-q"], &main);
+        run(&["symbolic-ref", "HEAD", "refs/heads/main"], &main);
+        run(&["config", "user.name", "RAXIS Test"], &main);
+        run(&["config", "user.email", "test@raxis.local"], &main);
+        run(&["config", "commit.gpgsign", "false"], &main);
+        std::fs::write(main.join("README.md"), "v1\n").ok()?;
+        run(&["add", "README.md"], &main);
+        run(&["commit", "-q", "-m", "initial"], &main);
+        // Wire `origin → bare`.
+        run(&["remote", "add", "origin", bare.to_str()?], &main);
+        Some((main, bare))
+    }
+
+    #[test]
+    fn push_to_remote_succeeds_against_local_bare() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((main, bare)) = fixture_main_with_bare_remote(tmp.path()) else {
+            eprintln!("skipping: git CLI not available"); return;
+        };
+        let outcome = push_to_remote(
+            &main, "origin",
+            "refs/heads/main:refs/heads/main",
+            std::time::Duration::from_secs(30),
+        ).expect("push must succeed against a fresh bare upstream");
+        assert_eq!(outcome.remote,  "origin");
+        assert_eq!(outcome.refspec, "refs/heads/main:refs/heads/main");
+
+        // Verify the bare repo now has the same SHA the main has.
+        let main_head = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "refs/heads/main"])
+                .current_dir(&main)
+                .output().unwrap().stdout,
+        ).unwrap().trim().to_owned();
+        let bare_head = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "refs/heads/main"])
+                .current_dir(&bare)
+                .output().unwrap().stdout,
+        ).unwrap().trim().to_owned();
+        assert_eq!(main_head, bare_head,
+            "bare upstream MUST now point at the main repo's HEAD");
+    }
+
+    #[test]
+    fn push_to_remote_returns_push_failed_for_unknown_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((main, _bare)) = fixture_main_with_bare_remote(tmp.path()) else {
+            eprintln!("skipping: git CLI not available"); return;
+        };
+        // `nonexistent-remote` is not configured → `git push` fails.
+        let err = push_to_remote(
+            &main, "nonexistent-remote", "refs/heads/main:refs/heads/main",
+            std::time::Duration::from_secs(15),
+        ).unwrap_err();
+        match err {
+            PushError::PushFailed { remote, code, stderr, .. } => {
+                assert_eq!(remote, "nonexistent-remote");
+                assert!(code.is_some(),
+                    "git push to a missing remote must produce a numeric \
+                     exit code, got: {code:?}");
+                assert!(
+                    stderr.contains("nonexistent-remote")
+                        || stderr.contains("does not appear to be a git repository"),
+                    "stderr should mention the bad remote name; got: {stderr}",
+                );
+            }
+            other => panic!("expected PushFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn push_to_remote_unopenable_main_repo_surfaces_typed_error() {
+        let nonexistent = Path::new("/nonexistent/raxis-push-test/main");
+        let err = push_to_remote(
+            nonexistent, "origin", "refs/heads/main:refs/heads/main",
+            std::time::Duration::from_secs(5),
+        ).unwrap_err();
+        assert!(matches!(err, PushError::MainRepoUnopenable { .. }));
     }
 }

@@ -878,6 +878,101 @@ fn run_phase_c(
                  \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
             );
         }
+
+        // V2_GAPS §C6 — kernel push protocol. After IntegrationMerge,
+        // if `[git] auto_push = true`, push the configured target_ref
+        // to the configured remote using the host's git credential
+        // helpers / SSH config. The merge already committed; push
+        // failure is informational and emits `PushFailed` without
+        // rolling back the merge.
+        if policy.git_auto_push() {
+            let remote  = policy.git_push_remote().to_owned();
+            let target  = policy.git_default_target_ref().to_owned();
+            let refspec = format!("{target}:{target}");
+            let main_repo_root = ctx.data_dir.join("repositories").join("main");
+
+            if let Err(e) = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::PushAttempted {
+                    initiative_id: initiative_id_owned.clone(),
+                    commit_sha:    pre_state.head_sha_raw.clone(),
+                    remote:        remote.clone(),
+                    refspec:       refspec.clone(),
+                },
+                Some(session_id_str.as_str()),
+                Some(task_id_owned.as_str()),
+                Some(initiative_id_owned.as_str()),
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"PushAttempted\",\
+                     \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                );
+            }
+
+            const KERNEL_PUSH_DEADLINE: std::time::Duration =
+                std::time::Duration::from_secs(30);
+            let result = raxis_domain_git::push_to_remote(
+                &main_repo_root,
+                &remote,
+                &refspec,
+                KERNEL_PUSH_DEADLINE,
+            );
+
+            match result {
+                Ok(outcome) => {
+                    if let Err(e) = ctx.audit.emit(
+                        raxis_audit_tools::AuditEventKind::PushCompleted {
+                            initiative_id: initiative_id_owned.clone(),
+                            commit_sha:    pre_state.head_sha_raw.clone(),
+                            remote:        outcome.remote,
+                            refspec:       outcome.refspec,
+                            summary:       outcome.summary,
+                        },
+                        Some(session_id_str.as_str()),
+                        Some(task_id_owned.as_str()),
+                        Some(initiative_id_owned.as_str()),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"PushCompleted\",\
+                             \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                        );
+                    }
+                }
+                Err(err) => {
+                    let (category, reason): (&str, String) = match &err {
+                        raxis_domain_git::PushError::PushFailed { stderr, .. } =>
+                            ("push_failed", stderr.clone()),
+                        raxis_domain_git::PushError::SpawnFailed(r) =>
+                            ("spawn_failed", r.clone()),
+                        raxis_domain_git::PushError::DeadlineExceeded(d) =>
+                            ("deadline_exceeded", format!("{d:?}")),
+                        raxis_domain_git::PushError::MainRepoUnopenable { reason, .. } =>
+                            ("unopenable_repo", reason.clone()),
+                    };
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"PushFailed\",\
+                         \"category\":\"{category}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                    );
+                    if let Err(e) = ctx.audit.emit(
+                        raxis_audit_tools::AuditEventKind::PushFailed {
+                            initiative_id: initiative_id_owned.clone(),
+                            commit_sha:    pre_state.head_sha_raw.clone(),
+                            remote:        remote.clone(),
+                            refspec:       refspec.clone(),
+                            category:      category.to_owned(),
+                            reason,
+                        },
+                        Some(session_id_str.as_str()),
+                        Some(task_id_owned.as_str()),
+                        Some(initiative_id_owned.as_str()),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"PushFailed\",\
+                             \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                        );
+                    }
+                }
+            }
+        }
     }
 
     let remaining = lane_budget_snapshot(&pre_state.task.lane_id, policy, store);
