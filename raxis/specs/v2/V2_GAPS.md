@@ -491,6 +491,55 @@ sidecar responses → `InferenceError::MalformedResponse` →
 fail-closed (R-3). See `extensibility-traits.md §9A.6` for the
 full invariant analysis.
 
+**Integration with existing provider infrastructure:**
+
+A sidecar-backed provider is **not special** — it participates in
+the exact same `FallbackModelClient` chain, `RetryingModelClient`
+wrapper, `CircuitBreaker`, and half-open probe as every built-in
+provider. The sidecar is just another `Arc<dyn ModelClient>`:
+
+```
+FallbackModelClient [
+  RetryingModelClient(CircuitBreaker(AnthropicClient)),   ← built-in
+  RetryingModelClient(CircuitBreaker(SidecarModelClient)), ← sidecar
+]
+```
+
+The planner's `model.rs` defines `trait ModelClient` with one
+method: `create_message(&self, req) -> Result<MessageResponse>`.
+A `SidecarModelClient` impl would:
+
+1. Translate `MessageRequest` (Anthropic-shaped) → RAXIS sidecar
+   protocol JSON (`SidecarRequest`).
+2. POST to the sidecar's `/v1/complete` endpoint with HMAC auth.
+3. Translate `SidecarResponse` → `MessageResponse` (Anthropic-shaped
+   types the dispatch loop already understands).
+4. Map sidecar HTTP errors → `ModelError` variants the
+   `is_retryable` classifier already handles.
+
+Because it implements the same `ModelClient` trait:
+
+- **Retry** works: `RetryingModelClient` wraps it and retries
+  on `is_retryable` errors with exponential backoff.
+- **Fallback** works: `FallbackModelClient` walks the chain;
+  if the sidecar's `CircuitBreaker` opens, the chain falls to
+  the next provider.
+- **Half-open probe** works: the `CircuitBreaker` periodically
+  sends one request to the sidecar; if it succeeds, the circuit
+  closes and the sidecar re-enters the chain at its original
+  priority position.
+- **Token tracking** works: `SidecarResponse` carries
+  `tokens_in`/`tokens_out` which the `SidecarModelClient`
+  translates to `Usage` fields; the dispatch loop's cumulative
+  budget tracking (C1) sees no difference.
+- **Health check** works: the sidecar's `GET /health` endpoint
+  maps to `provider_health()` in the circuit breaker's probe.
+
+The operator wires the chain in `policy.toml` by declaring the
+sidecar as a provider entry in `[providers]` alongside the
+built-in providers. The role binary's `main()` constructs the
+`FallbackModelClient` from the declared chain order.
+
 **Rejected alternative:** `.so`/`.dylib` plugin loading. A native
 plugin runs in kernel address space with full memory access — no
 conformance check can prevent memory corruption or invariant
