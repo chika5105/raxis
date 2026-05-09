@@ -991,6 +991,62 @@ regardless of streaming mode.
 
 ---
 
+### C10: Setup Wizard (`raxis setup`) — 10-Phase Interactive First-Run
+
+**Spec:** `operator-ergonomics.md §16`
+**Status:** ❌ Not implemented — **V2 BLOCKER**
+**Estimate:** ~800 lines (CLI interactive flow + phase orchestration)
+
+The spec positions the setup wizard as the **recommended first-run
+experience** for new operators. Without it, onboarding requires
+reading multiple spec documents and manually running 8+ CLI
+commands in the correct order. This is an adoption barrier that
+V2 cannot ship with — operators who fail at setup never reach
+their first initiative.
+
+**The 10 phases (from `operator-ergonomics.md §16`):**
+
+| Phase | What it does | Depends on |
+|---|---|---|
+| 1. **Key ceremony** | Runs `raxis genesis` — generates operator signing keypair, writes to `$RAXIS_DATA_DIR/keys/` | — |
+| 2. **Policy authoring** | Interactive prompts for provider selection, budget limits, concurrency caps → generates `policy.toml` | Phase 1 |
+| 3. **Provider credentials** | Prompts for API keys (Anthropic, OpenAI, Gemini, Bedrock) → writes to credential store | Phase 2 |
+| 4. **VM image selection** | Lists available executor/reviewer images, prompts for OCI digest pinning → updates `policy.toml [[vm_images]]` | Phase 2 |
+| 5. **Credential proxy setup** | If the operator's tasks need DB/API access, interactive proxy configuration → writes proxy declarations | Phase 3 |
+| 6. **Plan template** | Generates a starter `plan.toml` with tasks, profiles, and path allowlists based on the repo structure | Phase 2 |
+| 7. **Network allowlist** | Prompts for egress hosts (npm, cargo, pip registries, GitHub API) → updates `policy.toml [[tproxy_allowlist]]` | Phase 2 |
+| 8. **Doctor validation** | Runs `raxis doctor` against the generated config — surfaces any misconfigurations before the operator commits | Phases 1-7 |
+| 9. **Dry-run submission** | Runs `raxis plan submit --dry-run` to validate the plan against the signed policy without creating an initiative | Phases 1-7 |
+| 10. **First launch** | Prompts to submit the plan for real and launch the first initiative | Phase 9 pass |
+
+**Design constraints:**
+
+* **Non-interactive fallback.** Every phase must also work as a
+  standalone CLI flag (`raxis setup --phase=3 --non-interactive
+  --provider=anthropic --key-file=./key.txt`) for CI/automation.
+* **Idempotent re-entry.** The wizard detects existing state
+  (keys already generated, policy already signed) and skips
+  completed phases. An operator who crashes at phase 5 can re-run
+  `raxis setup` and resume from phase 5.
+* **No overwrite without confirmation.** If `policy.toml` already
+  exists, the wizard prompts before overwriting. This prevents
+  accidental config destruction on re-runs.
+* **Composable with existing commands.** Each phase delegates to
+  the existing CLI command (`raxis genesis`, `raxis policy sign`,
+  `raxis credential add`, `raxis doctor`). The wizard is
+  orchestration, not reimplementation.
+
+**What's missing:**
+
+| Component | Est. lines |
+|---|---|
+| `cli/src/commands/setup.rs` — phase orchestration + interactive prompts | ~400 |
+| Phase state persistence (`$RAXIS_DATA_DIR/.setup_state.json`) for idempotent re-entry | ~100 |
+| Template generators (policy, plan, proxy config) | ~200 |
+| Non-interactive flag parsing + CI mode | ~100 |
+
+---
+
 ## §5 — Tier D: Schema/Skeleton Only
 
 ### D1: Key Revocation
@@ -1497,12 +1553,13 @@ implements:
 | `keys` | ❌ | No CRL / revocation check |
 | `bundles` | ❌ | No storage utilization check |
 
-### 12.6 `setup wizard`: not started
+### 12.6 `setup wizard`: not started — promoted to V2 (C10)
 
 The `operator-ergonomics.md §16` defines a 10-phase interactive setup
-wizard. Zero code exists in the CLI. This is a convenience feature
-(operators can manually run genesis + policy sign + credential add),
-but the spec positions it as the recommended first-run experience.
+wizard. Zero code exists in the CLI. **Promoted to V2 BLOCKER (C10)**
+— the wizard is the spec-recommended first-run experience and
+directly impacts operator adoption velocity. See C10 above for
+the full gap entry.
 
 ### 12.7 VSock IPC client: not implemented
 
