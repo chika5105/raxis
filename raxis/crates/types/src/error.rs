@@ -287,6 +287,20 @@ pub enum OperatorErrorCode {
     /// offending TOML field.
     #[serde(rename = "FAIL_WORKSPACE_TARGET_REF_INVALID")]
     FailWorkspaceTargetRefInvalid,
+
+    /// **V2_GAPS §12.4 — Operator-ergonomics IPC stub.** The
+    /// operator submitted one of the five `OperatorRequest`
+    /// variants whose handler is V3 work
+    /// (`ProposeDefaults`, `EstimateCost`, `DryRunAdmit`,
+    /// `SubscribeInitiative`, `DescribeInitiativePause`). The
+    /// kernel accepts the wire shape so the IPC contract is
+    /// stable across V2 → V3, but fails closed at admission
+    /// time with this code. The matching
+    /// `OperatorErrorDetail::NotYetImplemented` carries the
+    /// `feature` label and the `since_version` slot indicating
+    /// which release will land the handler.
+    #[serde(rename = "FAIL_NOT_YET_IMPLEMENTED")]
+    FailNotYetImplemented,
 }
 
 impl fmt::Display for OperatorErrorCode {
@@ -317,6 +331,7 @@ impl fmt::Display for OperatorErrorCode {
             Self::FailEscalationNotPending => "FAIL_ESCALATION_NOT_PENDING",
             Self::FailPolicyLockedField => "FAIL_POLICY_LOCKED_FIELD",
             Self::FailWorkspaceTargetRefInvalid => "FAIL_WORKSPACE_TARGET_REF_INVALID",
+            Self::FailNotYetImplemented => "FAIL_NOT_YET_IMPLEMENTED",
         };
         f.write_str(s)
     }

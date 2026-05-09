@@ -2223,23 +2223,47 @@ See updated C4 above. The policy parser accepts all four channel kinds
 implements Shell and File. Email and Webhook configurations are parsed
 at policy load but produce runtime errors at dispatch.
 
-### 12.4 Operator-ergonomics IPC: 5 of 5 V2 handlers missing
+### 12.4 Operator-ergonomics IPC: 5 of 5 V2 wire-shape stubs ✅ CLOSED (V2.3, MVP)
 
 The `operator-ergonomics.md` spec defines 5 new `OperatorRequest`
-variants. None exist in `crates/types/src/operator.rs` or in the
-kernel's IPC dispatcher:
+variants. V2.3 ships the **wire-shape stub MVP**: every variant
+is fully defined on both wire envelopes
+(`crates/types/src/operator.rs` bincode + `operator_wire.rs`
+JSON), the kernel dispatcher has a fall-through arm, and the
+shared error code `FAIL_NOT_YET_IMPLEMENTED` (with detail
+`NotYetImplemented { feature, since_version }`) is returned at
+admission time. Wire-shape regression is pinned by 10 round-trip
+tests in `operator_wire::tests`.
 
-| IPC variant | Spec section | Type defined | Handler |
-|---|---|---|---|
-| `ProposeDefaults` | §5.3 | ❌ | ❌ |
-| `EstimateCost` | §11.3 | ❌ | ❌ |
-| `DryRunAdmit` | §12.3 | ❌ | ❌ (CLI flag exists) |
-| `SubscribeInitiative` | §13.4 | ❌ | ❌ |
-| `DescribeInitiativePause` | §14.3 | ❌ | ❌ |
+| IPC variant | Spec section | Wire (V2.3) | Handler (V2.3) | Real handler |
+|---|---|---|---|---|
+| `ProposeDefaults` | §5.3 | ✅ | stub | V3 |
+| `EstimateCost` | §11.3 | ✅ | stub | V3 |
+| `DryRunAdmit` | §12.3 | ✅ | stub | V3 |
+| `SubscribeInitiative` | §13.4 | ✅ | stub | V3 (depends on §12.1 KernelPush) |
+| `DescribeInitiativePause` | §14.3 | ✅ | stub | V3 |
 
-These are not blockers for Phase 1 (agent loop) but are required for
-the operator-ergonomics CLI commands (`plan prepare`, `plan cost-estimate`,
-`submit plan --dry-run`, `initiative watch`, `initiative resume`).
+Why a wire stub instead of full handlers in V2.3:
+
+* **None are admission blockers.** The agent loop (B1) and the
+  initiative lifecycle (`CreateInitiative`, `ApprovePlan`,
+  `IntegrationMerge`) work without these.
+* **Wire stability matters more than functionality.** Operators
+  build CLI integrations (`raxis plan prepare`, `raxis plan
+  cost-estimate`, `raxis submit plan --dry-run`, `raxis
+  initiative watch`, `raxis initiative resume`) against the V2
+  wire shape; a V3 patch that lands real handlers cannot reshape
+  the JSON envelope without breaking those integrations.
+* **`SubscribeInitiative`** specifically depends on the V3
+  `KernelPush` transport (§12.1) and so could not ship a real
+  handler in V2.3 even with effort.
+
+Each stub variant emits the canonical
+`Error { code: "FAIL_NOT_YET_IMPLEMENTED", detail: <feature, since_version> }`
+envelope so CLIs can surface a uniform "this lands in a future
+release" message and keep the wire format identical to the V3
+target. The kernel admits a real handler with a one-arm
+dispatcher swap once the underlying functionality lands.
 
 ### 12.5 `raxis doctor`: categories — `CLOSED (V2.3, MVP)`
 

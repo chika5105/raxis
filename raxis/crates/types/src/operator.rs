@@ -105,6 +105,63 @@ pub enum OperatorRequest {
         policy_path: PathBuf,
         sig_path: PathBuf,
     },
+
+    // -----------------------------------------------------------------
+    // V2_GAPS §12.4 — Operator-ergonomics IPC. Wire shape is stable
+    // for V2; handlers fail closed with FailNotYetImplemented until
+    // V3 lands the concrete logic. Documented in
+    // `specs/v2/operator-ergonomics.md` §5.3, §11.3, §12.3, §13.4,
+    // §14.3.
+    // -----------------------------------------------------------------
+    /// `operator-ergonomics.md §5.3`. Asks the kernel to surface the
+    /// recommended defaults (token budget, max-turns, model selection,
+    /// timeouts) derived from the active policy + provider catalog.
+    /// Used by `raxis plan prepare` to seed `plan.toml` with values
+    /// the operator can review before signing.
+    ProposeDefaults {
+        /// Optional initiative scope so the kernel can specialise the
+        /// defaults to an in-flight policy epoch (e.g. when the
+        /// caller is amending an existing plan).
+        initiative_id: Option<InitiativeId>,
+    },
+
+    /// `operator-ergonomics.md §11.3`. Returns a heuristic upper bound
+    /// on the dollar cost of admitting + executing the plan at
+    /// `plan_toml_path` against the active policy.
+    EstimateCost {
+        plan_toml_path: PathBuf,
+        plan_sig_path:  PathBuf,
+    },
+
+    /// `operator-ergonomics.md §12.3`. Runs the same admission
+    /// validation pipeline as `CreateInitiative`/`ApprovePlan` but
+    /// without committing any rows or starting a session. Returns the
+    /// would-be `initial_target_ref`, resolved provider, and any
+    /// admission errors a real submission would raise.
+    DryRunAdmit {
+        plan_toml_path: PathBuf,
+        plan_sig_path:  PathBuf,
+    },
+
+    /// `operator-ergonomics.md §13.4`. Streams `KernelPush` events for
+    /// a single initiative back to the requesting operator over the
+    /// existing operator socket. V2 returns
+    /// `FAIL_NOT_YET_IMPLEMENTED` because the `KernelPush` transport
+    /// is itself V3 (V2_GAPS §12.1). The shape lives here so the
+    /// CLI's `raxis initiative watch` command can be written against
+    /// the final wire form ahead of time.
+    SubscribeInitiative {
+        initiative_id: InitiativeId,
+    },
+
+    /// `operator-ergonomics.md §14.3`. Reports whether `initiative_id`
+    /// is currently paused (operator quarantine, escalation hold,
+    /// budget cap), the timestamp of the pause transition, and any
+    /// outstanding escalation IDs the operator must clear before
+    /// resume becomes legal.
+    DescribeInitiativePause {
+        initiative_id: InitiativeId,
+    },
 }
 
 /// The approval scope granted by an operator for an escalation.
@@ -182,6 +239,33 @@ pub enum OperatorResponse {
         n_delegations_marked_stale: u64,
         n_sessions_invalidated: u64,
         policy_sha256: String,
+    },
+
+    // -----------------------------------------------------------------
+    // V2_GAPS §12.4 — Operator-ergonomics IPC success envelopes. Each
+    // matches a request variant 1:1; V2 handlers always emit
+    // `Error { code: FailNotYetImplemented, ... }` on the operator
+    // socket so the success variants are wired but not yet reached.
+    // -----------------------------------------------------------------
+    ProposedDefaults {
+        defaults_json: String,
+    },
+    CostEstimated {
+        upper_bound_usd_cents: i64,
+        breakdown_json: String,
+    },
+    DryRunAdmitted {
+        target_ref: String,
+        warnings:   Vec<String>,
+    },
+    InitiativeSubscribed {
+        initiative_id: InitiativeId,
+    },
+    InitiativePauseDescribed {
+        initiative_id: InitiativeId,
+        is_paused: bool,
+        paused_at: Option<crate::id::UnixSeconds>,
+        outstanding_escalations: Vec<EscalationId>,
     },
 
     // --- error envelope (single canonical shape for ALL operator errors) ---
@@ -285,5 +369,15 @@ pub enum OperatorErrorDetail {
     // escalation errors
     EscalationNotPending {
         current_status: String,
+    },
+
+    /// V2_GAPS §12.4 — wire-stub for the operator-ergonomics IPC
+    /// handlers (`ProposeDefaults`, `EstimateCost`, `DryRunAdmit`,
+    /// `SubscribeInitiative`, `DescribeInitiativePause`). Carries the
+    /// human-readable feature label and the target release the
+    /// operator should expect the handler in.
+    NotYetImplemented {
+        feature: String,
+        since_version: String,
     },
 }

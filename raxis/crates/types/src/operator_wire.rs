@@ -248,6 +248,58 @@ pub enum OperatorRequest {
         /// Same shape as the single-initiative `reason` field.
         reason:             Option<String>,
     },
+
+    // -----------------------------------------------------------------
+    // V2_GAPS §12.4 — Operator-ergonomics IPC. The wire shape is
+    // pinned in V2.3 so the CLI can be written against the final
+    // contract; the kernel-side handlers fail closed with
+    // `FAIL_NOT_YET_IMPLEMENTED` until V3 lands the concrete logic.
+    // Defined in `operator-ergonomics.md` §5.3, §11.3, §12.3, §13.4,
+    // §14.3 (linked from `V2_GAPS.md §12.4`).
+    // -----------------------------------------------------------------
+    /// `operator-ergonomics.md §5.3` (`raxis plan prepare`).
+    /// Returns the kernel-recommended defaults (token budget,
+    /// max-turns, model selection, timeouts) derived from the
+    /// active policy. V2 stub responds with
+    /// `FAIL_NOT_YET_IMPLEMENTED`; CLI consumers can still
+    /// build against the wire shape.
+    ProposeDefaults {
+        /// Optional initiative scope so the kernel can specialise
+        /// the defaults to an in-flight policy epoch (e.g. when the
+        /// caller is amending an existing plan).
+        initiative_id: Option<String>,
+    },
+
+    /// `operator-ergonomics.md §11.3` (`raxis plan cost-estimate`).
+    /// Heuristic upper-bound dollar cost. V2 stub.
+    EstimateCost {
+        plan_toml:        String,
+        plan_sig_hex:     String,
+    },
+
+    /// `operator-ergonomics.md §12.3`
+    /// (`raxis submit plan --dry-run`). Runs admission validation
+    /// pipeline without persisting state. V2 stub.
+    DryRunAdmit {
+        plan_toml:        String,
+        plan_sig_hex:     String,
+        submitted_by:     String,
+    },
+
+    /// `operator-ergonomics.md §13.4` (`raxis initiative watch`).
+    /// Subscribes to `KernelPush` events for one initiative.
+    /// V2 stub — depends on the V3 KernelPush transport
+    /// (`V2_GAPS.md §12.1`).
+    SubscribeInitiative {
+        initiative_id: String,
+    },
+
+    /// `operator-ergonomics.md §14.3`
+    /// (`raxis initiative resume`). Reports pause status and
+    /// outstanding escalations. V2 stub.
+    DescribeInitiativePause {
+        initiative_id: String,
+    },
 }
 
 /// Scope of an approval token issued for a `Pending` escalation.
@@ -374,6 +426,49 @@ pub enum OperatorResponse {
         newly_quarantined_ids:  Vec<String>,
         quarantined_at:         i64,
     },
+    // -----------------------------------------------------------------
+    // V2_GAPS §12.4 — Operator-ergonomics IPC success envelopes. Wire
+    // shape pinned for V3 forward compatibility; V2 dispatchers always
+    // emit `Error { code: "FAIL_NOT_YET_IMPLEMENTED", ... }` so these
+    // variants are never produced today. CLI consumers may still
+    // pattern-match against them when targeting V3.
+    // -----------------------------------------------------------------
+    /// Response to `ProposeDefaults`. `defaults_json` carries the
+    /// recommended values as a free-form JSON document so the
+    /// schema can evolve without breaking the wire shape; the CLI
+    /// pretty-prints it for the operator.
+    ProposedDefaults {
+        defaults_json: String,
+    },
+    /// Response to `EstimateCost`. `breakdown_json` is a free-form
+    /// JSON document detailing per-task cost contributions.
+    /// `upper_bound_usd_cents` is integer cents to preserve `Eq`
+    /// on the wire envelope; the CLI divides by 100 for display.
+    CostEstimated {
+        upper_bound_usd_cents: i64,
+        breakdown_json:        String,
+    },
+    /// Response to `DryRunAdmit`. `target_ref` is the resolved
+    /// initial integration ref; `warnings` are non-fatal admission
+    /// warnings the operator should review before the real submit.
+    DryRunAdmitted {
+        target_ref: String,
+        warnings:   Vec<String>,
+    },
+    /// Response to `SubscribeInitiative`. The kernel ack'd the
+    /// subscription; subsequent `KernelPush` frames flow over the
+    /// same socket per `V2_GAPS.md §12.1`.
+    InitiativeSubscribed {
+        initiative_id: String,
+    },
+    /// Response to `DescribeInitiativePause`.
+    InitiativePauseDescribed {
+        initiative_id:           String,
+        is_paused:               bool,
+        paused_at:               Option<i64>,
+        outstanding_escalations: Vec<String>,
+    },
+
     /// Single canonical error envelope. `code` is an opaque short string
     /// the CLI keys off (e.g. `"FAIL_APPROVE_PLAN"`); `detail` is a
     /// human-readable explanation.
@@ -961,6 +1056,166 @@ mod tests {
                     "initiative_id":           "init-abc",
                     "quarantined_at":          1_700_000_000_i64,
                     "was_already_quarantined": false
+                }
+            }),
+        );
+    }
+
+    // ── V2_GAPS §12.4 — Operator-ergonomics IPC stubs ─────────────────
+    //
+    // Wire-shape pinning for the five V2.3 stubs. Locking the byte
+    // layout in V2 means the V3 patch that lands real handlers cannot
+    // accidentally re-shape the JSON envelope and break operator CLIs
+    // shipped against V2.
+
+    #[test]
+    fn propose_defaults_request_wire_shape() {
+        round_trip(
+            &OperatorRequest::ProposeDefaults {
+                initiative_id: Some("init-1".into()),
+            },
+            json!({
+                "op": "ProposeDefaults",
+                "payload": { "initiative_id": "init-1" }
+            }),
+        );
+    }
+
+    #[test]
+    fn estimate_cost_request_wire_shape() {
+        round_trip(
+            &OperatorRequest::EstimateCost {
+                plan_toml: "[[tasks]]".into(),
+                plan_sig_hex: "ab".into(),
+            },
+            json!({
+                "op": "EstimateCost",
+                "payload": { "plan_toml": "[[tasks]]", "plan_sig_hex": "ab" }
+            }),
+        );
+    }
+
+    #[test]
+    fn dry_run_admit_request_wire_shape() {
+        round_trip(
+            &OperatorRequest::DryRunAdmit {
+                plan_toml: "[[tasks]]".into(),
+                plan_sig_hex: "ab".into(),
+                submitted_by: "op-prime".into(),
+            },
+            json!({
+                "op": "DryRunAdmit",
+                "payload": {
+                    "plan_toml": "[[tasks]]",
+                    "plan_sig_hex": "ab",
+                    "submitted_by": "op-prime"
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn subscribe_initiative_request_wire_shape() {
+        round_trip(
+            &OperatorRequest::SubscribeInitiative {
+                initiative_id: "init-1".into(),
+            },
+            json!({
+                "op": "SubscribeInitiative",
+                "payload": { "initiative_id": "init-1" }
+            }),
+        );
+    }
+
+    #[test]
+    fn describe_initiative_pause_request_wire_shape() {
+        round_trip(
+            &OperatorRequest::DescribeInitiativePause {
+                initiative_id: "init-1".into(),
+            },
+            json!({
+                "op": "DescribeInitiativePause",
+                "payload": { "initiative_id": "init-1" }
+            }),
+        );
+    }
+
+    #[test]
+    fn proposed_defaults_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::ProposedDefaults {
+                defaults_json: r#"{"max_turns":12}"#.into(),
+            },
+            json!({
+                "status": "ProposedDefaults",
+                "payload": { "defaults_json": r#"{"max_turns":12}"# }
+            }),
+        );
+    }
+
+    #[test]
+    fn cost_estimated_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::CostEstimated {
+                upper_bound_usd_cents: 12_345,
+                breakdown_json: r#"{"by_task":[]}"#.into(),
+            },
+            json!({
+                "status": "CostEstimated",
+                "payload": {
+                    "upper_bound_usd_cents": 12_345_i64,
+                    "breakdown_json": r#"{"by_task":[]}"#
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn dry_run_admitted_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::DryRunAdmitted {
+                target_ref: "refs/heads/main".into(),
+                warnings: vec!["TODO_IMAGE_DIGEST_PLACEHOLDER".into()],
+            },
+            json!({
+                "status": "DryRunAdmitted",
+                "payload": {
+                    "target_ref": "refs/heads/main",
+                    "warnings": ["TODO_IMAGE_DIGEST_PLACEHOLDER"]
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn initiative_subscribed_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::InitiativeSubscribed {
+                initiative_id: "init-1".into(),
+            },
+            json!({
+                "status": "InitiativeSubscribed",
+                "payload": { "initiative_id": "init-1" }
+            }),
+        );
+    }
+
+    #[test]
+    fn initiative_pause_described_response_wire_shape() {
+        round_trip(
+            &OperatorResponse::InitiativePauseDescribed {
+                initiative_id: "init-1".into(),
+                is_paused: true,
+                paused_at: Some(1_700_000_000),
+                outstanding_escalations: vec!["esc-1".into(), "esc-2".into()],
+            },
+            json!({
+                "status": "InitiativePauseDescribed",
+                "payload": {
+                    "initiative_id": "init-1",
+                    "is_paused": true,
+                    "paused_at": 1_700_000_000_i64,
+                    "outstanding_escalations": ["esc-1", "esc-2"]
                 }
             }),
         );

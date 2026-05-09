@@ -307,6 +307,28 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
         OperatorRequest::QuarantinePlansBy { target_fingerprint, .. } => vec![
             ("target_fingerprint", target_fingerprint.clone()),
         ],
+        // V2_GAPS §12.4 — operator-ergonomics IPC stubs. Identifier
+        // fields are surfaced so audit grep flows behave the same
+        // shape as the V3 wired handlers.
+        OperatorRequest::ProposeDefaults { initiative_id } => {
+            let id = initiative_id.clone().unwrap_or_else(|| "<unscoped>".into());
+            vec![("initiative_id", id), ("feature", "ProposeDefaults".into())]
+        }
+        OperatorRequest::EstimateCost { .. } => {
+            vec![("feature", "EstimateCost".into())]
+        }
+        OperatorRequest::DryRunAdmit { submitted_by, .. } => vec![
+            ("submitted_by", submitted_by.clone()),
+            ("feature", "DryRunAdmit".into()),
+        ],
+        OperatorRequest::SubscribeInitiative { initiative_id } => vec![
+            ("initiative_id", initiative_id.clone()),
+            ("feature", "SubscribeInitiative".into()),
+        ],
+        OperatorRequest::DescribeInitiativePause { initiative_id } => vec![
+            ("initiative_id", initiative_id.clone()),
+            ("feature", "DescribeInitiativePause".into()),
+        ],
     }
 }
 
@@ -578,6 +600,16 @@ pub(crate) mod dispatch_log {
             OperatorResponse::Error { .. }              => "Error",
             OperatorResponse::InitiativeQuarantined { .. } => "InitiativeQuarantined",
             OperatorResponse::QuarantineSwept { .. }    => "QuarantineSwept",
+            // V2_GAPS §12.4 — operator-ergonomics IPC success
+            // envelopes. V2 dispatchers always emit `Error{
+            // FAIL_NOT_YET_IMPLEMENTED }`, so these arms are not
+            // reached today; they are present so a future V3 patch
+            // need only swap the dispatcher arm.
+            OperatorResponse::ProposedDefaults { .. }       => "ProposedDefaults",
+            OperatorResponse::CostEstimated { .. }          => "CostEstimated",
+            OperatorResponse::DryRunAdmitted { .. }         => "DryRunAdmitted",
+            OperatorResponse::InitiativeSubscribed { .. }   => "InitiativeSubscribed",
+            OperatorResponse::InitiativePauseDescribed { .. } => "InitiativePauseDescribed",
         }
     }
 }
@@ -660,6 +692,51 @@ async fn handle_request(
         OperatorRequest::QuarantinePlansBy { target_fingerprint, reason } => {
             handle_quarantine_plans_by(target_fingerprint, reason, operator, ctx).await
         }
+
+        // ----------------------------------------------------------------
+        // V2_GAPS §12.4 — Operator-ergonomics IPC. V2 ships the wire
+        // shape and a fail-closed stub so the CLI can be written
+        // against the final contract; the concrete handler ships in
+        // V3. The unused-binding `let _ = (...);` calls below pin the
+        // payload field set so a wire-shape change forces a refactor.
+        // ----------------------------------------------------------------
+        OperatorRequest::ProposeDefaults { initiative_id } => {
+            let _ = initiative_id;
+            stub_not_yet_implemented("ProposeDefaults")
+        }
+        OperatorRequest::EstimateCost { plan_toml, plan_sig_hex } => {
+            let _ = (plan_toml, plan_sig_hex);
+            stub_not_yet_implemented("EstimateCost")
+        }
+        OperatorRequest::DryRunAdmit { plan_toml, plan_sig_hex, submitted_by } => {
+            let _ = (plan_toml, plan_sig_hex, submitted_by);
+            stub_not_yet_implemented("DryRunAdmit")
+        }
+        OperatorRequest::SubscribeInitiative { initiative_id } => {
+            let _ = initiative_id;
+            stub_not_yet_implemented("SubscribeInitiative")
+        }
+        OperatorRequest::DescribeInitiativePause { initiative_id } => {
+            let _ = initiative_id;
+            stub_not_yet_implemented("DescribeInitiativePause")
+        }
+    }
+}
+
+/// V2_GAPS §12.4 — every operator-ergonomics IPC variant lands here.
+/// We return the canonical `FAIL_NOT_YET_IMPLEMENTED` envelope with a
+/// human-readable detail naming the requested feature plus the
+/// target release. The CLI is expected to surface both fields
+/// verbatim so operators see the same message shape they will see
+/// once V3 lands a real handler.
+fn stub_not_yet_implemented(feature: &str) -> OperatorResponse {
+    OperatorResponse::Error {
+        code:   "FAIL_NOT_YET_IMPLEMENTED".into(),
+        detail: format!(
+            "operator-ergonomics IPC `{feature}` is V3 work. Wire shape \
+             is stable in V2.3 (V2_GAPS.md §12.4); the kernel will land \
+             the concrete handler in a future release."
+        ),
     }
 }
 
@@ -2205,6 +2282,12 @@ fn op_name(req: &OperatorRequest) -> &'static str {
         OperatorRequest::RotateEpoch { .. }     => "RotateEpoch",
         OperatorRequest::QuarantineInitiative { .. } => "QuarantineInitiative",
         OperatorRequest::QuarantinePlansBy { .. }    => "QuarantinePlansBy",
+        // V2_GAPS §12.4 — operator-ergonomics stubs.
+        OperatorRequest::ProposeDefaults { .. }            => "ProposeDefaults",
+        OperatorRequest::EstimateCost { .. }               => "EstimateCost",
+        OperatorRequest::DryRunAdmit { .. }                => "DryRunAdmit",
+        OperatorRequest::SubscribeInitiative { .. }        => "SubscribeInitiative",
+        OperatorRequest::DescribeInitiativePause { .. }    => "DescribeInitiativePause",
     }
 }
 
