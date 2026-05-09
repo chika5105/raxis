@@ -269,19 +269,66 @@ in the planner's first turn.
 provider-agnostic — every `Arc<dyn ModelClient>` plugs into both
 shells. Wiring the actual provider chains
 (`Anthropic → OpenAI → Bedrock`) is a per-binary `main()` change
-once additional `OpenAiClient` / `BedrockClient` impls land; the
-`AnthropicClient` is the only V2 provider implementation, so the
-production chain is `RetryingModelClient(AnthropicClient)` only.
+once the remaining `ModelClient` impls land.
+
+**V2 remaining work — multi-provider `ModelClient` impls (BLOCKER):**
+
+All four `ProviderId` variants MUST have wired `ModelClient`
+implementations before V2 ships. Single-provider Anthropic-only
+is not acceptable for production — the `FallbackModelClient`
+chain is useless without receivers for every provider in the
+fallback chain.
+
+| Provider | `ModelClient` impl | Est. lines | Wire shape | Status |
+|---|---|---|---|---|
+| **Anthropic** | `AnthropicClient` | ✅ delivered | Anthropic Messages API | ✅ V2.3 |
+| **OpenAI** | `OpenAiClient` | ~200 | OpenAI Chat Completions API | ❌ **V2 BLOCKER** |
+| **Google Gemini** | `GeminiClient` | ~200 | Gemini `generateContent` API | ❌ **V2 BLOCKER** |
+| **AWS Bedrock** | `BedrockClient` | ~250 | Bedrock `InvokeModel` + SigV4 | ❌ **V2 BLOCKER** |
+
+Each impl follows the same pattern as `AnthropicClient`: implements
+`ModelClient` trait, POSTs to the provider's URL, does NOT inject
+credentials (gateway handles that), translates the provider's
+response shape to `MessageResponse`. The gateway already knows
+how to route and credential-inject for each provider; the missing
+piece is the planner-side wire-shape translation.
+
+> **PREREQUISITE: spec before code.** Before implementing any
+> `ModelClient`, a dedicated subsection MUST be added to
+> `provider-model-selection.md` (or a new
+> `specs/v2/provider-client-impls.md`) covering, for each provider:
+>
+> 1. **Wire shape** — exact HTTP method, URL path, required headers,
+>    request body JSON schema, response body JSON schema.
+> 2. **Tool-use mapping** — how the provider's tool-call format
+>    maps to/from RAXIS's `ContentBlock::ToolUse` /
+>    `ContentBlock::ToolResult`. (Anthropic, OpenAI, and Gemini each
+>    use different tool-call shapes.)
+> 3. **Error taxonomy** — which HTTP status codes / error bodies map
+>    to `ModelError::Upstream` vs. `ModelError::Transport`, and which
+>    are retryable (feeds into `is_retryable` classifier).
+> 4. **Auth delegation** — how the gateway injects credentials for
+>    this provider (header name, SigV4 for Bedrock, OAuth for
+>    Gemini, `Authorization: Bearer` for OpenAI).
+> 5. **Stop-reason mapping** — how the provider's stop/finish reason
+>    maps to `MessageResponse::stop_reason` values the dispatch loop
+>    pattern-matches on (`"end_turn"`, `"tool_use"`, `"max_tokens"`).
+> 6. **Token-usage mapping** — which response fields map to
+>    `Usage::input_tokens`, `output_tokens`,
+>    `cache_creation_input_tokens`, `cache_read_input_tokens`.
+> 7. **Test fixtures** — at least one golden request/response pair
+>    per provider, captured from the real API, committed as
+>    `planner-core/tests/fixtures/<provider>_*.json`.
+>
+> This spec work is the **first deliverable** of the provider impl
+> work — no PR containing a `ModelClient` impl should land without
+> the corresponding spec section reviewed and merged first.
 
 **V2 design choices.**
 
 * **Retryability classifier is public.** Operators / tests can
   call `is_retryable(&err)` directly to predict the wrapper's
   behaviour without instantiating it.
-* **No circuit breaker.** A persistent provider outage just
-  exhausts the retry budget and surfaces the last error verbatim.
-  Adding a per-provider error-rate threshold + half-open state is
-  a V3 follow-up (the spec's §6 circuit breaker).
 * **No partial-response recovery.** V2's dispatch loop is
   non-streaming, so a mid-response failure can only surface as a
   full-call retry (the entire request body is replayed). Streaming
@@ -294,10 +341,32 @@ production chain is `RetryingModelClient(AnthropicClient)` only.
   the kernel-side `EscalationKind::ProviderExhausted` audit
   variant.
 
+**V2 remaining work — per-provider circuit breaker (BLOCKER):**
+
+Without a circuit breaker + half-open probe, a `FallbackModelClient`
+chain that falls through to a lower-priority provider can never
+return to the higher-priority provider once it recovers. The chain
+is sticky-on-failure — every subsequent request goes straight to
+the fallback, wasting cost and latency.
+
+The circuit breaker (`provider-failure-handling.md §6`) tracks
+per-provider error rate over a sliding window. When the rate
+exceeds the threshold, the circuit opens and the `FallbackModelClient`
+skips that provider. Periodically, a **half-open probe** sends a
+single request to the failed provider; if it succeeds, the circuit
+closes and the provider re-enters the chain at its original
+priority position.
+
+| Component | Est. lines | Spec section |
+|---|---|---|
+| `CircuitBreaker { state, error_window, threshold, half_open_interval }` | ~120 | `provider-failure-handling.md §6.1` |
+| `CircuitState` enum (`Closed`, `Open`, `HalfOpen`) | ~30 | `provider-failure-handling.md §6.2` |
+| Half-open probe (single request on timer) | ~60 | `provider-failure-handling.md §6.3` |
+| `FallbackModelClient` integration (skip open circuits) | ~40 | `provider-failure-handling.md §6.4` |
+| Tests (open on threshold, half-open recovery, priority restoration) | ~100 | — |
+
 **Deferred to V3.**
 
-* OpenAI / Gemini / Bedrock client impls (each ≈ 200 lines).
-* Per-provider circuit breaker + half-open probe.
 * Streaming partial-response recovery.
 * `ProviderExhausted` typed audit kind + escalation flow.
 
@@ -346,40 +415,45 @@ planner-role binary at boot:
   constructs the dispatch chain by hand if a fallback shell is
   desired.
 
-**Deferred to V3 (full provider-model-selection.md surface).**
+**V2 remaining work — multi-provider `ModelClient` wiring (BLOCKER):**
+
+The `ProviderId` enum has four variants. All four MUST have wired
+`ModelClient` impls and gateway forwarding before V2 ships. The
+registry validates model ids; the `FallbackModelClient` chains
+providers; but without the actual client impls, the chain has
+no receivers to fall back to.
+
+| Provider | Registry coverage | `ModelClient` impl | Gateway forwarding | Status |
+|---|---|---|---|---|
+| **Anthropic** | ✅ 5 supported + 2 deprecated | ✅ `AnthropicClient` | ✅ | ✅ V2.3 |
+| **OpenAI** | ✅ 2 entries | ❌ `OpenAiClient` needed | 🟡 gateway-only | ❌ **V2 BLOCKER** |
+| **Google Gemini** | ✅ 2 entries | ❌ `GeminiClient` needed | 🟡 gateway-only | ❌ **V2 BLOCKER** |
+| **AWS Bedrock** | ⚪ no registry entries yet | ❌ `BedrockClient` needed | 🟡 SigV4 gateway leg | ❌ **V2 BLOCKER** |
+
+See `V2_GAPS §C2` for the per-provider `ModelClient` impl estimates
+and wire-shape details.
+
+**Deployment tiers** (from `provider-model-selection.md §4`) —
+all three tiers are V2 targets:
+
+- **§4.1** — Single-provider (Anthropic only): works today.
+  `RAXIS_MODEL_ID` defaults to `claude-sonnet-4-5-20250929`.
+- **§4.2** — Two-provider (Anthropic + OpenAI): cross-provider
+  fallback chains per role. **V2 target.** Requires `OpenAiClient`
+  impl + per-binary `main()` chain wiring.
+- **§4.3** — Three-provider (Anthropic + OpenAI + Gemini): per-role
+  model chains with tiered fallback. Reviewer uses `gemini-flash`
+  at tier-3 for cost efficiency. **V2 target.** Requires
+  `GeminiClient` impl.
+
+**Deferred to V3 (policy ergonomics only — providers themselves
+are V2).**
 
 * `[provider_aliases_defaults]` policy schema + `plan prepare`
   fill-in.
 * `setup wizard` auto-diversification (single-provider →
   multi-provider chain rewrite when a second API key is added).
 * `override_reviewer_alias` per-environment override.
-* OpenAI / Gemini / Bedrock `ModelClient` impls (each ≈ 200
-  lines) so the gateway-side fallback chain has wire-compatible
-  receivers.
-
-**Per-provider implementation status (after V2.3):**
-
-| Provider | Registry coverage | `ModelClient` impl | Gateway forwarding |
-|---|---|---|---|
-| **Anthropic** | ✅ 5 supported + 2 deprecated | ✅ `AnthropicClient` | ✅ |
-| **OpenAI** | ✅ 2 entries | ❌ deferred V3 | 🟡 gateway-only |
-| **Google Gemini** | ✅ 2 entries | ❌ deferred V3 | 🟡 gateway-only |
-| **AWS Bedrock** | ⚪ no entries (uses Anthropic ids) | ❌ deferred V3 | 🟡 gateway-only |
-
-**Deployment tiers** (from `provider-model-selection.md §4`) —
-operator-facing guidance the V2 spec preserves:
-
-- **§4.1** — Single-provider (Anthropic only): all three roles use
-  `anthropic:claude-*`. No failover if Anthropic has an outage.
-  V2 supports this out of the box: `RAXIS_MODEL_ID` defaults to
-  `claude-sonnet-4-5-20250929`.
-- **§4.2** — Two-provider (Anthropic + OpenAI): cross-provider
-  fallback chains per role. Recommended for production. V2's
-  `FallbackModelClient` (V2_GAPS §C2) is the chain primitive;
-  wiring it up requires the V3 OpenAI `ModelClient` impl.
-- **§4.3** — Three-provider (Anthropic + OpenAI + Gemini): per-role
-  model chains with tiered fallback. Reviewer uses `gemini-flash`
-  at tier-3 for cost efficiency. V3 follow-up.
 
 ### C5: Third-Party Provider Integration (HTTP Sidecar)
 
