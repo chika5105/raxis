@@ -222,18 +222,14 @@ pub enum DriverError {
 /// 1. If `RAXIS_PLANNER_TASK_PROMPT` is **unset or empty**, returns
 ///    `Ok(`[`DriverOutcome::Scaffold`]`)` immediately. The role
 ///    binary's `main` parks on signal.
-/// 2. Otherwise, runs the full dispatch loop end-to-end:
-///    a. Resolves the model id (`RAXIS_MODEL_ID` or
-///       [`crate::DEFAULT_MODEL`]) through the registry; emits
-///       `ModelDeprecated` warnings as the spec describes.
-///    b. Connects to the kernel UDS at
-///       `RAXIS_KERNEL_PLANNER_SOCKET`.
-///    c. Builds the role-specific [`ToolRegistry`] +
-///       [`DispatchLoop`].
-///    d. Renders the role-specific seed system prompt.
-///    e. Runs the loop and converts the terminal outcome to
-///       a [`DriverOutcome`] + (when applicable) submits the
-///       matching IPC intent.
+/// 2. Otherwise, runs the full dispatch loop end-to-end. The loop
+///    resolves the model id (`RAXIS_MODEL_ID` or
+///    [`crate::DEFAULT_MODEL`]) through the registry, connects to
+///    the kernel UDS at `RAXIS_KERNEL_PLANNER_SOCKET`, builds the
+///    role-specific [`ToolRegistry`] + [`DispatchLoop`], renders
+///    the role-specific seed system prompt, runs the loop, and
+///    converts the terminal outcome to a [`DriverOutcome`] +
+///    (when applicable) submits the matching IPC intent.
 pub async fn run_role_session(
     role: Role,
     args: BootArgs,
