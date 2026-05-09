@@ -862,11 +862,40 @@ app.listen(9201, () => console.log("PagerDuty sidecar on :9201"));
 | **Path** | Whatever `endpoint` is set to in `policy.toml` (e.g., `/notify`) |
 | **Content-Type** | `application/json` |
 | **Request body** | `{ "event_kind": string, "event_id": uuid, "initiative_id": uuid, "session_id": uuid \| null, "timestamp": iso8601, "payload": object }` |
-| **Success** | Any `2xx` status code. Body is ignored by the kernel. |
+| **Success response** | `2xx` status code with JSON body: `{ "ok": true, "trace_id": "<upstream-id>" }` |
+| **`trace_id` field** | **Required on success.** An opaque string the sidecar returns — the ID from the upstream system (Slack `ts`, PagerDuty `dedup_key`, Teams `id`, etc.). The kernel stores this verbatim in the `NotificationDelivered` audit event so operators can trace from RAXIS → their notification platform. |
 | **Retryable failure** | `5xx` status code or connection error → kernel retries (up to 3). |
 | **Terminal failure** | `4xx` status code → kernel does NOT retry (bad payload). |
 | **Health check** | `GET /health` returning `2xx` — used by `raxis doctor notifications`. Optional but recommended. |
 | **Timeout** | Sidecar must respond within 5 seconds per attempt. |
+
+**`NotificationDelivered` audit event shape:**
+
+```rust
+AuditEventKind::NotificationDelivered {
+    /// Which channel delivered the notification (matches
+    /// `name` in `[[notification_channels]]` policy declaration).
+    channel_name:      String,
+    /// Channel kind: "Email", "Shell", "File", or "Sidecar".
+    channel_kind:      String,
+    /// The `trace_id` returned by the sidecar (Sidecar channels)
+    /// or the SMTP Message-ID (Email channels). Allows operators
+    /// to correlate this RAXIS audit event with the notification
+    /// platform's internal logs.
+    /// None for Shell/File channels (no upstream system).
+    upstream_trace_id: Option<String>,
+    /// The event kind that triggered this notification.
+    source_event_kind: String,
+    /// The event ID that triggered this notification.
+    source_event_id:   Uuid,
+    /// Initiative context.
+    initiative_id:     Uuid,
+    /// Delivery latency (wall-clock, including retries).
+    delivery_ms:       u64,
+    /// Number of attempts (1 = first try succeeded).
+    attempts:          u32,
+}
+```
 
 ### C5: Immutable Artifact Store — CLOSED (V2.3, MVP)
 
