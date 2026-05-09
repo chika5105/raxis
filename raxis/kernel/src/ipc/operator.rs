@@ -1281,6 +1281,7 @@ async fn handle_approve_plan(
     let plan_registry_for_blocking  = Arc::clone(&ctx.plan_registry);
     let initiative_id_for_blocking  = initiative_id.clone();
     let approving_op_for_blocking   = approving_operator.clone();
+    let artifact_store_for_blocking = ctx.artifact_store.as_ref().map(Arc::clone);
     let join_result = tokio::task::spawn_blocking(move || {
         lifecycle::approve_plan(
             &initiative_id_for_blocking,
@@ -1295,6 +1296,7 @@ async fn handle_approve_plan(
             &store_for_blocking,
             &*audit_for_blocking,
             &plan_registry_for_blocking,
+            artifact_store_for_blocking.as_deref(),
         )
     }).await;
     let outcome = match join_result {
@@ -2092,6 +2094,7 @@ async fn handle_rotate_epoch(
     let audit_for_blocking    = Arc::clone(&ctx.audit);
     let policy_for_blocking   = Arc::clone(&ctx.policy);
     let binding_for_blocking  = Arc::clone(&ctx.epoch_binding);
+    let artifact_for_blocking = ctx.artifact_store.as_ref().map(Arc::clone);
     let triggered_by          = operator.fingerprint.clone();
     let policy_path_blocking  = policy_path_buf.clone();
     let sig_path_blocking     = sig_path_buf.clone();
@@ -2106,6 +2109,7 @@ async fn handle_rotate_epoch(
             &store_for_blocking,
             &audit_for_blocking,
             &binding_for_blocking,
+            artifact_for_blocking.as_deref(),
         )
     })
     .await;

@@ -96,6 +96,13 @@ raxis-domain-git        = { workspace = true }
 # `SecurityViolationDetected { kind: "ReviewerImageDigestMismatch" |
 # "OrchestratorImageDigestMismatch" }` audit events on mismatch.
 raxis-canonical-images  = { workspace = true }
+# V2_GAPS §C5 — content-addressed immutable artifact store
+# (`<data_dir>/artifacts/{policy,plans,keys}/<sha256>.<ext>`).
+# Wired at kernel boot via `HandlerContext::artifact_store` and
+# called from `policy_manager::advance_epoch` (policy bytes),
+# `initiatives::lifecycle::approve_plan` (plan bytes + `.sig`),
+# and the operator-cert install path (operator public keys).
+raxis-artifact-store    = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }

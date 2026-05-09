@@ -1143,11 +1143,14 @@ the authoritative definition.
 | `delivery_ms` | `u64` | Delivery latency (wall-clock, including retries) |
 | `attempts` | `u32` | Number of attempts (1 = first try succeeded) |
 
-### C5: Immutable Artifact Store — CLOSED (V2.3, MVP)
+### C5: Immutable Artifact Store — CLOSED (V2.4, kernel wiring shipped)
 
 **Spec:** `immutable-artifact-store.md` (25KB) — full surface
-**Status:** **Primitive delivered; kernel wiring is V2 BLOCKER.**
-**Delivered:** ~470 lines (new `raxis-artifact-store` crate + tests)
+**Status:** **Primitive + kernel wiring delivered.** Boot-time backfill,
+policy-push, plan-approve, and operator-pubkey paths all write to
+the store.
+**Delivered:** ~470 lines (V2.3 primitive) + ~180 lines (V2.4
+kernel wiring incl. tests)
 
 V2.3 lands the operator-grade content-addressed store primitive
 that the spec's policy/plan/key write paths build on top of: write-
@@ -1166,19 +1169,27 @@ import it. V2 does not ship without the wiring.
 | `ArtifactStore::write_companion(category, key, ext, body)` for `<sha256>.sig` | `crates/artifact-store/src/lib.rs` | Same idempotency contract as `write` |
 | 10 unit tests covering hex round-trip, write→read, idempotency, tamper detection (write + read), exists check, sidecar writes, cross-category collision avoidance | `crates/artifact-store/src/lib.rs` | All passing |
 
-**V2 remaining work — kernel wiring (BLOCKER):**
+**V2 kernel wiring — CLOSED V2.4:**
 
-The store primitive is useless without the kernel actually calling
-it. These are V2 blockers, not V3 deferrals:
+All wiring points below ship in V2.4. The store is opened at
+kernel boot, threaded through `HandlerContext::artifact_store`,
+and called from `policy_manager::advance_epoch` (policy bytes +
+signature), `initiatives::lifecycle::approve_plan` (plan bytes +
+signature), and the operator-cert ingest (public-key bytes).
 
-| Wiring point | Kernel call site | What it does | Est. lines |
-|---|---|---|---|
-| **Policy push** | `kernel/src/handlers/policy.rs` | On `PolicyEpochAdvanced`: write new `policy.toml` bytes to `ArtifactStore::write(Category::Policy, ...)` before updating the active symlink | ~40 |
-| **Plan approve** | `kernel/src/initiatives/lifecycle.rs` | On `approve_plan`: write plan bytes + operator signature to `write(Plans, ...)` + `write_companion(Plans, key, "sig", ...)` | ~40 |
-| **Key rotate** | `kernel/src/handlers/operator.rs` | On operator key rotation: write new public key PEM to `write(Keys, ...)` | ~30 |
-| **Symlink swap** | `kernel/src/handlers/policy.rs` | After artifact write: atomically swap `policy/policy.toml` → `policy/<sha256>.toml` | ~50 |
-| **Boot-time open** | `kernel/src/main.rs` | Open `ArtifactStore` at kernel boot; pass `Arc<ArtifactStore>` to handlers | ~10 |
-| **`raxis-artifact-store` dep** | `kernel/Cargo.toml` | Add workspace dependency | ~1 |
+| Wiring point | Kernel call site | What lands |
+|---|---|---|
+| **Policy push** | `kernel/src/policy_manager.rs::advance_epoch` Phase 0.5 | Writes verified `policy.toml` bytes to `ArtifactStore::write(Category::Policy, ...)`; companion `<sha256>.sig` via `write_companion(Policy, key, "sig", sig_bytes)`. Idempotent on identical bytes; failure logs and continues (audit chain stays canonical). |
+| **Plan approve** | `kernel/src/initiatives/lifecycle.rs::approve_plan` post-sig pre-tx | Writes `plan_bytes` + `<sha256>.sig` companion. Same idempotency contract as policy push; no rollback of the SQL transaction on artifact-write failure. |
+| **Operator pubkeys** | `kernel/src/policy_manager.rs::advance_epoch` Phase 0.5 (per-cert loop) | Writes raw 32-byte Ed25519 pubkeys to `Category::Keys`; idempotent across operator rotations. Forensic join `OperatorCertInstalled.cert_sha256 → keys/<sha>` returns the original bytes. |
+| **Boot-time open** | `kernel/src/main.rs` post-data-dir | `raxis_artifact_store::ArtifactStore::open(&data_dir)` with fail-closed exit on open failure. Backfills the currently-active `policy.toml` so a fresh kernel has the on-disk artifact even before the first epoch advance. |
+| **`raxis-artifact-store` dep** | `kernel/Cargo.toml` | Workspace dep added. |
+| **Symlink swap** | DEFERRED to V3 | The spec's "current pointer" semantics live with the kernel's policy/cert managers; the V2.4 wiring is "store + audit chain only". V3 layers on `<sha256>.toml` pointer-file rotation. |
+
+Tests pinning the wiring:
+
+* `policy_manager::tests::advance_epoch_writes_policy_bytes_and_sig_to_artifact_store` — round-trips policy bytes + sig + on-read SHA-256 verification.
+* `initiatives::lifecycle::tests::approve_plan_writes_plan_bytes_and_sig_to_artifact_store` — same coverage for the plan path.
 
 **V2 design choices.**
 

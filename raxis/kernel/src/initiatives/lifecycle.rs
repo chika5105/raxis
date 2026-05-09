@@ -592,9 +592,11 @@ pub fn approve_plan_for_test(
         store,
         audit,
         plan_registry,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn approve_plan(
     initiative_id:                       &str,
     approving_operator:                  &str,
@@ -617,6 +619,12 @@ pub fn approve_plan(
     store:                               &Store,
     audit:                               &dyn AuditSink,
     plan_registry:                       &PlanRegistry,
+    // V2_GAPS §C5 — content-addressed plan-bytes / signature
+    // store. `None` for tests; production passes
+    // `ctx.artifact_store.as_deref()`. Writes happen AFTER
+    // signature verification and BEFORE BEGIN TRANSACTION so
+    // a malformed plan never lands an artifact.
+    artifact_store:                      Option<&raxis_artifact_store::ArtifactStore>,
 ) -> Result<PlanApproved, LifecycleError> {
     let mut conn = store.lock_sync();
 
@@ -650,6 +658,34 @@ pub fn approve_plan(
         .map_err(|e| LifecycleError::PlanSignatureInvalid {
             reason: e.to_string(),
         })?;
+
+    // V2_GAPS §C5 — content-address the verified plan + signature
+    // BEFORE BEGIN TRANSACTION so the on-disk artifacts exist by
+    // the time the SQL commit lands. Idempotent on identical bytes.
+    // Failure to write is logged and does NOT block plan approval —
+    // the SQLite `signed_plan_artifacts` row remains the canonical
+    // record; the artifact store is the forensic mirror.
+    if let Some(astore) = artifact_store {
+        if let Err(e) = astore.write(raxis_artifact_store::Category::Plans, &plan_bytes) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"PlanArtifactWriteFailed\",\
+                 \"initiative\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
+            );
+        } else {
+            let key = raxis_artifact_store::ArtifactKey::compute(&plan_bytes);
+            if let Err(e) = astore.write_companion(
+                raxis_artifact_store::Category::Plans,
+                &key,
+                "sig",
+                &plan_sig,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"PlanArtifactSigWriteFailed\",\
+                     \"initiative\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
+                );
+            }
+        }
+    }
 
     let plan_toml_str    = String::from_utf8_lossy(&plan_bytes);
     let plan_tasks       = parse_plan_tasks(&plan_toml_str)?;
@@ -5412,6 +5448,90 @@ target_ref = "refs/heads/raxis/feature"
             "vsock_cid must be NULL until hypervisor returns it");
         assert_eq!(row.7, 1,
             "can_delegate must be 1 for Orchestrator (INV-DELEGATE-01)");
+    }
+
+    /// V2_GAPS §C5 — `approve_plan` MUST write the verified plan
+    /// bytes AND the operator signature companion to the
+    /// content-addressed artifact store BEFORE BEGIN TRANSACTION.
+    /// Pin the on-disk artifacts and the SHA-256 round-trip.
+    #[test]
+    fn approve_plan_writes_plan_bytes_and_sig_to_artifact_store() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id = "only"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let astore = raxis_artifact_store::ArtifactStore::open(tmp.path()).unwrap();
+
+        let empty_envs: std::collections::HashMap<String, raxis_policy::EnvironmentConfig>
+            = std::collections::HashMap::new();
+        let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
+        approve_plan(
+            &init_id,
+            "op",
+            None,
+            &pk_bytes,
+            1,
+            "refs/heads/main",
+            false,
+            &empty_envs,
+            &empty_creds,
+            &store,
+            &audit,
+            &registry,
+            Some(&astore),
+        ).unwrap();
+
+        // The plan bytes the test fixture wrote to the SQLite
+        // signed_plan_artifacts row are the same bytes
+        // approve_plan re-reads, verifies, and persists to the
+        // artifact store. We recompute them here.
+        let conn = store.lock_sync();
+        let plan_bytes: Vec<u8> = conn.query_row(
+            &format!(
+                "SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"
+            ),
+            rusqlite::params![&init_id],
+            |r| r.get(0),
+        ).unwrap();
+        let plan_sig: Vec<u8> = conn.query_row(
+            &format!(
+                "SELECT plan_sig FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"
+            ),
+            rusqlite::params![&init_id],
+            |r| r.get(0),
+        ).unwrap();
+        drop(conn);
+
+        let key = raxis_artifact_store::ArtifactKey::compute(&plan_bytes);
+        assert!(
+            astore.exists(raxis_artifact_store::Category::Plans, &key),
+            "approve_plan must content-address plan bytes",
+        );
+
+        // On-read SHA-256 verification round-trip.
+        let read_back = astore
+            .read(raxis_artifact_store::Category::Plans, &key)
+            .expect("artifact must read back cleanly");
+        assert_eq!(read_back, plan_bytes,
+            "artifact bytes must equal the verified plan bytes");
+
+        // The companion `<sha256>.sig` must match the verified
+        // operator signature byte-for-byte.
+        let sig_path = astore.companion_path(
+            raxis_artifact_store::Category::Plans,
+            &key,
+            "sig",
+        );
+        let sig_on_disk = std::fs::read(&sig_path).expect("sig companion must exist");
+        assert_eq!(sig_on_disk, plan_sig,
+            "companion .sig artifact must equal the verified signature");
     }
 
     /// Two independently-approved initiatives MUST receive two distinct

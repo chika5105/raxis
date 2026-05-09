@@ -773,6 +773,44 @@ async fn main() {
         ))
     };
 
+    // V2_GAPS §C5 — open the content-addressed artifact store
+    // rooted at `<data_dir>/artifacts/`. The store is `O_CREAT |
+    // O_EXCL` write-once and on-read SHA-256 verified; consumers
+    // are `policy_manager::advance_epoch` (policy bytes),
+    // `initiatives::lifecycle::approve_plan` (plan bytes + `.sig`),
+    // and the operator-cert install path (operator pubkeys). On
+    // open failure we exit closed — the artifact store is a
+    // forensic backbone, and starting without it would silently
+    // disable every spec-mandated write site.
+    let artifact_store = match raxis_artifact_store::ArtifactStore::open(&data_dir) {
+        Ok(s) => Arc::new(s),
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"ArtifactStoreOpenFailed\",\
+                 \"data_dir\":\"{}\",\"reason\":\"{e}\"}}",
+                data_dir.display(),
+            );
+            std::process::exit(64);
+        }
+    };
+    // Boot-time backfill: write the currently-active policy bytes
+    // to the store so a fresh kernel has the matching artifact on
+    // disk even before the first `advance_epoch`. Idempotent on
+    // identical bytes; logs and continues on I/O failure (the
+    // operator may be in a degraded `0700` state and we don't want
+    // to refuse boot for an artifact-store hiccup).
+    if let Ok(policy_bytes) = std::fs::read(&policy_path) {
+        if let Err(e) = artifact_store.write(
+            raxis_artifact_store::Category::Policy,
+            &policy_bytes,
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"ArtifactStoreBackfillFailed\",\
+                 \"category\":\"policy\",\"reason\":\"{e}\"}}",
+            );
+        }
+    }
+
     let ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -841,7 +879,11 @@ async fn main() {
     // do NOT spawn through the production boot path leave this
     // `None` and the handlers treat that as "always healthy"
     // (`HandlerContext::disk_watchdog`).
-    .with_disk_watchdog(Arc::clone(&disk_watchdog));
+    .with_disk_watchdog(Arc::clone(&disk_watchdog))
+    // V2_GAPS §C5 — install the content-addressed immutable
+    // artifact store so policy-push / plan-approve / cert-install
+    // call sites land their bytes under `<data_dir>/artifacts/`.
+    .with_artifact_store(Arc::clone(&artifact_store));
     let ctx = Arc::new(ctx_inner);
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a

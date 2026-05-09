@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use raxis_artifact_store::ArtifactStore;
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_manager::CredentialProxyManager;
 use raxis_credentials::CredentialBackend;
@@ -337,6 +338,37 @@ pub struct HandlerContext {
     /// session. The full session-addressed VSock/UDS transport
     /// with the `pending_pushes` SQL queue is V3 (§12.1).
     pub push_dispatcher: Arc<crate::push::KernelPushDispatcher>,
+
+    /// V2_GAPS §C5 — content-addressed immutable artifact store
+    /// rooted at `<data_dir>/artifacts/`. Writes are
+    /// `<root>/<category>/<sha256>.<ext>` with `O_CREAT|O_EXCL`
+    /// and on-read SHA-256 verification (the spec's §1.3 tamper
+    /// detector).
+    ///
+    /// Wired call sites:
+    /// * `policy_manager::advance_epoch` writes the verified
+    ///   policy bytes to `Category::Policy` AFTER signature
+    ///   verification and BEFORE the SQL transaction. The store's
+    ///   idempotency contract makes this safe to retry; the
+    ///   chain entry that the same epoch advance emits is the
+    ///   audit-side anchor that points at the on-disk artifact.
+    /// * `initiatives::lifecycle::approve_plan` writes the plan
+    ///   bytes to `Category::Plans` and the operator signature
+    ///   as a companion `.sig` AFTER signature verification and
+    ///   BEFORE BEGIN TRANSACTION. Both writes are idempotent
+    ///   on identical bytes.
+    /// * Operator-cert ingest in the same `advance_epoch` path
+    ///   writes each operator public key to `Category::Keys`
+    ///   so a future `raxis keys list` can enumerate every
+    ///   public key the kernel ever trusted, byte-for-byte.
+    ///
+    /// **Why `Option`:** test fixtures that don't exercise the
+    /// store leave this `None`; the production boot path always
+    /// wires it. The `advance_epoch` / `approve_plan` callsites
+    /// degrade silently (skip the artifact write) when this is
+    /// `None` so that test handlers continue to pass without a
+    /// per-test tempdir for the artifact root.
+    pub artifact_store: Option<Arc<ArtifactStore>>,
 }
 
 impl HandlerContext {
@@ -423,7 +455,19 @@ impl HandlerContext {
             image_resolver,
             disk_watchdog: None,
             push_dispatcher,
+            artifact_store: None,
         }
+    }
+
+    /// V2_GAPS §C5 — install the boot-time artifact store after
+    /// `HandlerContext::new`. Production boot in `main.rs` opens
+    /// the store at `<data_dir>/artifacts/` and calls this
+    /// setter; tests that exercise the store wire it from a
+    /// `tempfile::tempdir`. Tests that don't touch the store
+    /// leave the field `None`.
+    pub fn with_artifact_store(mut self, store: Arc<ArtifactStore>) -> Self {
+        self.artifact_store = Some(store);
+        self
     }
 
     /// V2_GAPS §D2 — install the boot-time disk-full watchdog.

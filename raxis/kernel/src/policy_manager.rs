@@ -380,11 +380,88 @@ pub fn advance_epoch(
     store:          &Store,
     audit:          &Arc<dyn AuditSink>,
     epoch_binding:  &EpochBinding,
+    // V2_GAPS §C5 — content-addressed artifact store. `None` for
+    // tests that don't exercise the persistent on-disk store; the
+    // production callsite always passes `Some(&ctx.artifact_store)`.
+    artifact_store: Option<&raxis_artifact_store::ArtifactStore>,
 ) -> Result<AdvanceOutcome, PolicyError> {
     // ── Phase 0: verification (cold, read-only) ──────────────────────
-    let VerifiedPolicyArtifact { bundle: new_bundle, raw_bytes: _, sha256_hex } =
+    let VerifiedPolicyArtifact { bundle: new_bundle, raw_bytes, sha256_hex } =
         load_and_verify(policy_path, sig_path, registry, store)?;
     let new_epoch_id        = new_bundle.epoch();
+
+    // ── Phase 0.5: content-address the verified policy bytes ─────────
+    // V2_GAPS §C5 — write the freshly-verified policy artifact to
+    // `<data_dir>/artifacts/policy/<sha256>.toml` BEFORE the SQL
+    // transaction so the on-disk artifact exists by the time
+    // `PolicyEpochAdvanced` lands in the audit chain (the chain
+    // entry references the same `policy_sha256`). The store is
+    // idempotent on identical bytes — repeated advance_epoch calls
+    // for the same artifact are no-ops. A write failure is logged
+    // and the advance continues: the audit chain stays the
+    // authoritative ledger, and the missing artifact surfaces on
+    // the next `raxis policy history` read.
+    if let Some(astore) = artifact_store {
+        match astore.write(raxis_artifact_store::Category::Policy, &raw_bytes) {
+            Ok((written_key, _)) => {
+                debug_assert_eq!(written_key.as_hex(), sha256_hex,
+                    "ArtifactStore::write must hash to the same SHA-256 as load_and_verify");
+            }
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"PolicyArtifactWriteFailed\",\
+                     \"sha256\":\"{sha256_hex}\",\"reason\":\"{e}\"}}",
+                );
+            }
+        }
+        // Companion: the operator-supplied detached signature lives
+        // alongside the policy bytes for forensic verifiability.
+        if let Ok(sig_bytes) = std::fs::read(sig_path) {
+            let key = raxis_artifact_store::ArtifactKey::compute(&raw_bytes);
+            if let Err(e) = astore.write_companion(
+                raxis_artifact_store::Category::Policy,
+                &key,
+                "sig",
+                &sig_bytes,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"PolicyArtifactSigWriteFailed\",\
+                     \"sha256\":\"{sha256_hex}\",\"reason\":\"{e}\"}}",
+                );
+            }
+        }
+        // Operator public keys: write each entry's raw 32-byte
+        // pubkey bytes to `Category::Keys` so a future
+        // `raxis keys list` enumerates every public key the
+        // kernel ever trusted. We store the raw 32-byte form
+        // (the same bytes verifiers ingest) rather than a PEM
+        // wrapping; the artifact store is content-addressed by
+        // SHA-256 so the form chosen is the one stable across
+        // runs. PEM rendering is a CLI concern.
+        for op in new_bundle.operators() {
+            match hex::decode(&op.pubkey_hex) {
+                Ok(pubkey_bytes) => {
+                    if let Err(e) = astore.write(
+                        raxis_artifact_store::Category::Keys,
+                        &pubkey_bytes,
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"OperatorPubkeyArtifactWriteFailed\",\
+                             \"fingerprint\":\"{}\",\"reason\":\"{e}\"}}",
+                            op.pubkey_fingerprint,
+                        );
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"OperatorPubkeyHexInvalid\",\
+                         \"fingerprint\":\"{}\",\"reason\":\"{e}\"}}",
+                        op.pubkey_fingerprint,
+                    );
+                }
+            }
+        }
+    }
     let signed_by_authority = raxis_genesis_tools::pubkey_fingerprint(
         authority_verifying_key(registry).as_bytes(),
     );
@@ -1098,7 +1175,7 @@ mod tests {
         let binding = EpochBinding::new();
         let outcome = advance_epoch(
             &policy_path, &sig_path, "op-prime",
-            &registry, &swap, &store, &audit, &binding,
+            &registry, &swap, &store, &audit, &binding, None,
         ).unwrap();
 
         assert_eq!(outcome.new_epoch_id, 2);
@@ -1139,7 +1216,7 @@ mod tests {
         let binding = EpochBinding::new();
         advance_epoch(
             &policy_path, &sig_path, "op-prime",
-            &registry, &swap, &store, &audit, &binding,
+            &registry, &swap, &store, &audit, &binding, None,
         ).unwrap();
 
         let kinds = sink.event_kinds();
@@ -1210,7 +1287,7 @@ mod tests {
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &sk);
         let binding = EpochBinding::new();
         let outcome = advance_epoch(
-            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding, None,
         ).unwrap();
         assert_eq!(outcome.n_delegations_marked_stale, 1);
 
@@ -1278,7 +1355,7 @@ mod tests {
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &sk);
         let binding = EpochBinding::new();
         let outcome = advance_epoch(
-            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding, None,
         ).unwrap();
 
         assert_eq!(outcome.n_sessions_invalidated, 2,
@@ -1301,7 +1378,7 @@ mod tests {
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 1, &sk);
         let binding = EpochBinding::new();
         let result = advance_epoch(
-            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding, None,
         );
         assert!(matches!(result, Err(PolicyError::EpochReplay { .. })));
         // No store mutation, no in-memory swap.
@@ -1320,7 +1397,7 @@ mod tests {
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &other_sk);
         let binding = EpochBinding::new();
         let result = advance_epoch(
-            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding, None,
         );
         assert!(matches!(result, Err(PolicyError::SignatureInvalid { .. })));
         assert_eq!(read_current_epoch(&store).unwrap(), 1, "no store mutation");
@@ -1372,7 +1449,7 @@ mod tests {
         }
         let binding = EpochBinding::new();
         let result = advance_epoch(
-            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding,
+            &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding, None,
         );
         assert!(matches!(result, Err(PolicyError::PolicyArtifactAlreadyInstalled { .. })),
             "expected PolicyArtifactAlreadyInstalled, got {result:?}");
@@ -1414,5 +1491,47 @@ mod tests {
             PolicyError::ArtifactReadFailed { reason: "x".into() }.error_code(),
             "FAIL_POLICY_ARTIFACT_READ",
         );
+    }
+
+    /// V2_GAPS §C5 — `advance_epoch` MUST write the verified
+    /// policy bytes to `Category::Policy` and the operator
+    /// signature companion to the artifact store. Pin the SHA-256
+    /// matches and the `.sig` companion is byte-identical.
+    #[test]
+    fn advance_epoch_writes_policy_bytes_and_sig_to_artifact_store() {
+        let (registry, sk, store, swap, audit, _sink) = boot_state();
+        let tmp = tempfile::tempdir().unwrap();
+        let (policy_path, sig_path) = write_signed_policy_artifact(tmp.path(), 2, &sk);
+
+        let astore_dir = tempfile::tempdir().unwrap();
+        let astore = raxis_artifact_store::ArtifactStore::open(astore_dir.path()).unwrap();
+
+        let binding = EpochBinding::new();
+        let outcome = advance_epoch(
+            &policy_path, &sig_path, "op-prime",
+            &registry, &swap, &store, &audit, &binding,
+            Some(&astore),
+        ).unwrap();
+
+        // The artifact key must equal the audit-event sha256.
+        let key = raxis_artifact_store::ArtifactKey::parse_hex(&outcome.policy_sha256)
+            .expect("policy_sha256 must be hex");
+        assert!(
+            astore.exists(raxis_artifact_store::Category::Policy, &key),
+            "advance_epoch must content-address the verified policy bytes",
+        );
+
+        // Read-back round-trip with on-read SHA-256 verification.
+        let read = astore
+            .read(raxis_artifact_store::Category::Policy, &key)
+            .expect("policy artifact must round-trip");
+        assert_eq!(read, std::fs::read(&policy_path).unwrap());
+
+        // Signature companion equals the on-disk sig file.
+        let sig_path_in_store = astore.companion_path(
+            raxis_artifact_store::Category::Policy, &key, "sig",
+        );
+        let sig_bytes = std::fs::read(&sig_path_in_store).expect(".sig companion must exist");
+        assert_eq!(sig_bytes, std::fs::read(&sig_path).unwrap());
     }
 }

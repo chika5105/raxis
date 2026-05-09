@@ -3328,6 +3328,7 @@ dependencies = [
  "glob",
  "hex",
  "libc",
+ "raxis-artifact-store",
  "raxis-audit-tools",
  "raxis-canonical-images",
  "raxis-credential-proxy-manager",
