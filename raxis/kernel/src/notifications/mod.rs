@@ -46,6 +46,7 @@ pub mod sink;
 pub mod summary;
 
 pub use sink::NotifyingAuditSink;
+pub use handler::sidecar::SidecarRegistry;
 
 // ---------------------------------------------------------------------------
 // Public dispatch
@@ -61,11 +62,20 @@ pub use sink::NotifyingAuditSink;
 /// the audit emit succeeds, with the SAME `AuditEvent` you just wrote
 /// to the audit chain. The notification record's `event_seq` matches
 /// the audit chain's `seq` so a downstream tail can correlate the two.
+///
+/// `sidecar_registry` is the per-kernel registry of `Sidecar` channel
+/// runtime state (per-channel `Semaphore` + circuit breaker). It is
+/// `Option` so legacy callers (file-only test fixtures) can pass
+/// `None`; a `None` registry causes Sidecar dispatches to materialise
+/// a temporary registry and emit `NotificationDeliveryFailed
+/// { reason: "no_sidecar_registry" }`. Production wires the
+/// `HandlerContext.sidecar_registry`.
 pub fn dispatch(
-    event:    AuditEvent,
-    bundle:   Arc<PolicyBundle>,
-    data_dir: PathBuf,
-    audit:    Arc<dyn AuditSink>,
+    event:            AuditEvent,
+    bundle:           Arc<PolicyBundle>,
+    data_dir:         PathBuf,
+    audit:            Arc<dyn AuditSink>,
+    sidecar_registry: Option<Arc<SidecarRegistry>>,
 ) {
     // Resolve the channel id list ONCE on the calling thread; fan out
     // to per-channel spawns. Cloning the channel id list is cheap
@@ -90,6 +100,7 @@ pub fn dispatch(
         let bundle_for_spawn   = Arc::clone(&bundle);
         let data_dir_for_spawn = data_dir.clone();
         let audit_for_spawn    = Arc::clone(&audit);
+        let registry_for_spawn = sidecar_registry.clone();
 
         tokio::spawn(async move {
             dispatch_one(
@@ -98,6 +109,7 @@ pub fn dispatch(
                 bundle_for_spawn.as_ref(),
                 &data_dir_for_spawn,
                 audit_for_spawn,
+                registry_for_spawn.as_deref(),
             )
             .await;
         });
@@ -115,6 +127,19 @@ pub async fn dispatch_blocking_for_tests(
     data_dir: &std::path::Path,
     audit:    Arc<dyn AuditSink>,
 ) {
+    dispatch_blocking_for_tests_with_registry(event, bundle, data_dir, audit, None).await
+}
+
+/// Variant of `dispatch_blocking_for_tests` that takes an explicit
+/// sidecar registry — for tests that exercise Sidecar channels.
+#[cfg(any(debug_assertions, test))]
+pub async fn dispatch_blocking_for_tests_with_registry(
+    event:            AuditEvent,
+    bundle:           &PolicyBundle,
+    data_dir:         &std::path::Path,
+    audit:            Arc<dyn AuditSink>,
+    sidecar_registry: Option<&SidecarRegistry>,
+) {
     let channel_ids: Vec<String> = match bundle.notification_route(&event.event_kind) {
         Some(explicit) if explicit.is_empty() => return,
         Some(explicit) => explicit.iter().cloned().collect(),
@@ -127,6 +152,7 @@ pub async fn dispatch_blocking_for_tests(
             bundle,
             data_dir,
             Arc::clone(&audit),
+            sidecar_registry,
         )
         .await;
     }
@@ -135,13 +161,16 @@ pub async fn dispatch_blocking_for_tests(
 /// Dispatch `event` to the channel with id `channel_id`, mapping the
 /// channel's kind to the right per-handler call. Failures are
 /// translated to `NotificationDeliveryFailed` audit events; this fn
-/// does not bubble errors.
+/// does not bubble errors. Successful Sidecar deliveries also emit
+/// a `NotificationDelivered` audit event carrying the upstream
+/// trace id (Slack `ts`, PagerDuty `dedup_key`, etc.) — V2_GAPS §C4.
 async fn dispatch_one(
-    channel_id: &str,
-    event:      AuditEvent,
-    bundle:     &PolicyBundle,
-    data_dir:   &std::path::Path,
-    audit:      Arc<dyn AuditSink>,
+    channel_id:       &str,
+    event:            AuditEvent,
+    bundle:           &PolicyBundle,
+    data_dir:         &std::path::Path,
+    audit:            Arc<dyn AuditSink>,
+    sidecar_registry: Option<&SidecarRegistry>,
 ) {
     let Some(channel): Option<&NotificationChannel> =
         bundle.notification_channel(channel_id)
@@ -159,34 +188,147 @@ async fn dispatch_one(
         return;
     };
 
-    let outcome: Result<(), DeliveryError> = match channel.kind {
+    match channel.kind {
         NotificationChannelKind::Shell | NotificationChannelKind::File => {
             // Shell + File share a code path — they are both "append
             // a JSON line to a file". Shell channels with empty
             // `target` resolve to `<data_dir>/notifications/inbox.jsonl`.
-            handler::file::deliver(channel, &event, data_dir).await
+            let started_at = std::time::Instant::now();
+            let outcome = handler::file::deliver(channel, &event, data_dir).await;
+            handle_simple_outcome(
+                audit.as_ref(),
+                channel,
+                &event,
+                outcome,
+                started_at,
+            );
         }
         NotificationChannelKind::Webhook => {
-            // V2 §C4 — HTTPS POST to operator-supplied URL.
-            handler::webhook::deliver(channel, &event).await
+            let started_at = std::time::Instant::now();
+            let outcome = handler::webhook::deliver(channel, &event).await;
+            handle_simple_outcome(
+                audit.as_ref(),
+                channel,
+                &event,
+                outcome,
+                started_at,
+            );
         }
         NotificationChannelKind::Email => {
-            // V2 §C4 — direct SMTP submission. Credentials read from a
-            // sidecar `.notify-cred` file at
-            // `<data_dir>/notifications/credentials/<channel.id>.notify-cred`.
-            handler::email::deliver(channel, &event, data_dir).await
+            let started_at = std::time::Instant::now();
+            let outcome = handler::email::deliver(channel, &event, data_dir).await;
+            handle_simple_outcome(
+                audit.as_ref(),
+                channel,
+                &event,
+                outcome,
+                started_at,
+            );
+        }
+        NotificationChannelKind::Sidecar => {
+            // V2_GAPS §C4 — Sidecar handler with concurrency cap +
+            // circuit breaker. Emits `NotificationDelivered` on
+            // success (carrying upstream trace id) and
+            // `NotificationDeliveryFailed` on Backpressure /
+            // CircuitOpen / Failed.
+            let Some(registry) = sidecar_registry else {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"sidecar_registry_missing\",\
+                     \"channel_id\":\"{}\",\"event_kind\":\"{}\"}}",
+                    channel.id, event.event_kind,
+                );
+                emit_delivery_failed(
+                    audit.as_ref(), &channel.id, &event.event_kind,
+                    "no_sidecar_registry",
+                );
+                return;
+            };
+            let state = registry.get_or_create(channel);
+            let outcome = handler::sidecar::deliver(&state, channel, &event).await;
+            match outcome {
+                handler::sidecar::SidecarOutcome::Delivered {
+                    upstream_trace_id, attempts, delivery_ms,
+                } => {
+                    emit_delivered(
+                        audit.as_ref(),
+                        &channel.id,
+                        "Sidecar",
+                        &event,
+                        upstream_trace_id,
+                        delivery_ms,
+                        attempts,
+                    );
+                }
+                handler::sidecar::SidecarOutcome::Backpressure => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"sidecar_backpressure\",\
+                         \"channel_id\":\"{}\",\"event_kind\":\"{}\"}}",
+                        channel.id, event.event_kind,
+                    );
+                    emit_delivery_failed(
+                        audit.as_ref(), &channel.id, &event.event_kind, "backpressure",
+                    );
+                }
+                handler::sidecar::SidecarOutcome::CircuitOpen => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"sidecar_circuit_open\",\
+                         \"channel_id\":\"{}\",\"event_kind\":\"{}\"}}",
+                        channel.id, event.event_kind,
+                    );
+                    emit_delivery_failed(
+                        audit.as_ref(), &channel.id, &event.event_kind, "circuit_open",
+                    );
+                }
+                handler::sidecar::SidecarOutcome::Failed(e, _attempts) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"notification_handler_failed\",\
+                         \"channel_id\":\"{}\",\"event_kind\":\"{}\",\"reason\":\"{}\"}}",
+                        channel.id, event.event_kind, e.category(),
+                    );
+                    emit_delivery_failed(
+                        audit.as_ref(), &channel.id, &event.event_kind, e.category(),
+                    );
+                }
+            }
         }
     };
+}
 
-    if let Err(e) = outcome {
-        eprintln!(
-            "{{\"level\":\"warn\",\"event\":\"notification_handler_failed\",\
-             \"channel_id\":\"{}\",\"event_kind\":\"{}\",\"reason\":\"{}\"}}",
-            channel.id, event.event_kind, e.category(),
-        );
-        emit_delivery_failed(
-            audit.as_ref(), &channel.id, &event.event_kind, e.category(),
-        );
+/// Common path for Shell/File/Webhook/Email handlers — emit a
+/// `NotificationDelivered` on `Ok`, `NotificationDeliveryFailed` on
+/// `Err`. Sidecar has its own outcome type so it does not flow through
+/// here.
+fn handle_simple_outcome(
+    audit:      &dyn AuditSink,
+    channel:    &NotificationChannel,
+    event:      &AuditEvent,
+    outcome:    Result<(), DeliveryError>,
+    started_at: std::time::Instant,
+) {
+    let kind_str = match channel.kind {
+        NotificationChannelKind::Shell   => "Shell",
+        NotificationChannelKind::File    => "File",
+        NotificationChannelKind::Webhook => "Webhook",
+        NotificationChannelKind::Email   => "Email",
+        NotificationChannelKind::Sidecar => "Sidecar",
+    };
+    match outcome {
+        Ok(()) => {
+            let delivery_ms = started_at.elapsed().as_millis() as u64;
+            emit_delivered(
+                audit, &channel.id, kind_str, event, None, delivery_ms, 1,
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"notification_handler_failed\",\
+                 \"channel_id\":\"{}\",\"event_kind\":\"{}\",\"reason\":\"{}\"}}",
+                channel.id, event.event_kind, e.category(),
+            );
+            emit_delivery_failed(
+                audit, &channel.id, &event.event_kind, e.category(),
+            );
+        }
     }
 }
 
@@ -278,6 +420,38 @@ fn emit_delivery_failed(
             "{{\"level\":\"error\",\"event\":\"NotificationDeliveryFailed\",\
              \"audit_emit_failed\":\"{e}\",\"channel_id\":\"{channel_id}\",\
              \"event_kind\":\"{event_kind}\",\"reason\":\"{reason}\"}}",
+        );
+    }
+}
+
+fn emit_delivered(
+    audit:             &dyn AuditSink,
+    channel_id:        &str,
+    channel_kind:      &str,
+    event:             &AuditEvent,
+    upstream_trace_id: Option<String>,
+    delivery_ms:       u64,
+    attempts:          u32,
+) {
+    if let Err(e) = audit.emit(
+        AuditEventKind::NotificationDelivered {
+            channel_id:        channel_id.to_owned(),
+            channel_kind:      channel_kind.to_owned(),
+            event_kind:        event.event_kind.clone(),
+            source_event_id:   event.event_id.to_string(),
+            upstream_trace_id,
+            delivery_ms,
+            attempts,
+        },
+        event.session_id.as_deref(),
+        event.task_id.as_deref(),
+        event.initiative_id.as_deref(),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"NotificationDelivered\",\
+             \"audit_emit_failed\":\"{e}\",\"channel_id\":\"{channel_id}\",\
+             \"event_kind\":\"{}\"}}",
+            event.event_kind,
         );
     }
 }
@@ -432,7 +606,7 @@ mod tests {
         }));
 
         let start = std::time::Instant::now();
-        dispatch(event, bundle, tmp.path().to_path_buf(), audit);
+        dispatch(event, bundle, tmp.path().to_path_buf(), audit, None);
         let elapsed = start.elapsed();
         assert!(elapsed.as_millis() < 50,
             "dispatch must be near-instant; took {:?}", elapsed);

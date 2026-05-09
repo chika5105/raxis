@@ -154,6 +154,7 @@ mod tests {
             id: "shell".into(),
             kind: NotificationChannelKind::Shell,
             target: String::new(),
+            max_in_flight: 8,
         }
     }
 
@@ -224,6 +225,7 @@ mod tests {
             id: "shell".into(),
             kind: NotificationChannelKind::Shell,
             target: custom.to_string_lossy().into_owned(),
+            max_in_flight: 8,
         };
         let e = make_event("EscalationApproved", 1, json!({
             "escalation_id": "esc-x",
@@ -247,6 +249,7 @@ mod tests {
             id: "audit-mirror".into(),
             kind: NotificationChannelKind::File,
             target: p.to_string_lossy().into_owned(),
+            max_in_flight: 8,
         };
         let e = make_event("EscalationDenied", 1, json!({
             "escalation_id": "esc-d",
@@ -270,6 +273,7 @@ mod tests {
             id: "broken".into(),
             kind: NotificationChannelKind::File,
             target: String::new(),
+            max_in_flight: 8,
         };
         let e = make_event("KernelStarted", 1, json!({}));
         let result = deliver(&chan, &e, std::path::Path::new("/tmp")).await;
@@ -287,6 +291,7 @@ mod tests {
             id: "broken".into(),
             kind: NotificationChannelKind::File,
             target: "/nonexistent/dir/that/does/not/exist/x.jsonl".into(),
+            max_in_flight: 8,
         };
         let e = make_event("KernelStarted", 1, json!({}));
         let result = deliver(&chan, &e, std::path::Path::new("/tmp")).await;

@@ -285,11 +285,20 @@ async fn main() {
     //            through the wrapped sink without remembering to call
     //            `notifications::dispatch` themselves.
     let inner_audit: Arc<dyn AuditSink> = Arc::new(FileAuditSink::new(writer));
-    let audit: Arc<dyn AuditSink> = Arc::new(notifications::NotifyingAuditSink::new(
-        Arc::clone(&inner_audit),
-        Arc::clone(&policy),
-        data_dir.clone(),
-    ));
+    // V2_GAPS §C4 — the per-kernel `SidecarRegistry` lives here so the
+    // notification dispatcher and `HandlerContext` share the same
+    // per-channel state (concurrency caps, circuit breakers, drop
+    // counters). Owned by an `Arc` so both the audit sink decorator
+    // and the IPC context point at the same registry.
+    let sidecar_registry = Arc::new(notifications::SidecarRegistry::new());
+    let audit: Arc<dyn AuditSink> = Arc::new(
+        notifications::NotifyingAuditSink::new(
+            Arc::clone(&inner_audit),
+            Arc::clone(&policy),
+            data_dir.clone(),
+        )
+        .with_sidecar_registry(Arc::clone(&sidecar_registry)),
+    );
 
     // Step 8: Emit the canonical KernelStarted record. This is the very
     // first event in this kernel-process lifetime; with the v1 reset
@@ -883,7 +892,12 @@ async fn main() {
     // V2_GAPS §C5 — install the content-addressed immutable
     // artifact store so policy-push / plan-approve / cert-install
     // call sites land their bytes under `<data_dir>/artifacts/`.
-    .with_artifact_store(Arc::clone(&artifact_store));
+    .with_artifact_store(Arc::clone(&artifact_store))
+    // V2_GAPS §C4 — share the per-kernel `SidecarRegistry`
+    // between the audit-sink dispatcher and `HandlerContext`. One
+    // semaphore per channel, one circuit breaker per channel, one
+    // counter set surfaced to `raxis status`.
+    .with_sidecar_registry(Arc::clone(&sidecar_registry));
     let ctx = Arc::new(ctx_inner);
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a

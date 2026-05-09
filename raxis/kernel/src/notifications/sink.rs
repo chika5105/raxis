@@ -39,13 +39,16 @@ use arc_swap::ArcSwap;
 use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink, AuditWriterError};
 use raxis_policy::PolicyBundle;
 
+use super::SidecarRegistry;
+
 /// Wraps any `AuditSink` (typically `FileAuditSink` in production,
 /// `FakeAuditSink` in integration tests) and routes every emitted
 /// event through `notifications::dispatch`.
 pub struct NotifyingAuditSink {
-    inner:    Arc<dyn AuditSink>,
-    policy:   Arc<ArcSwap<PolicyBundle>>,
-    data_dir: PathBuf,
+    inner:            Arc<dyn AuditSink>,
+    policy:           Arc<ArcSwap<PolicyBundle>>,
+    data_dir:         PathBuf,
+    sidecar_registry: Option<Arc<SidecarRegistry>>,
 }
 
 impl NotifyingAuditSink {
@@ -58,7 +61,14 @@ impl NotifyingAuditSink {
         policy:   Arc<ArcSwap<PolicyBundle>>,
         data_dir: PathBuf,
     ) -> Self {
-        Self { inner, policy, data_dir }
+        Self { inner, policy, data_dir, sidecar_registry: None }
+    }
+
+    /// Builder-style: attach the per-kernel `SidecarRegistry` so
+    /// Sidecar-kind channels can be dispatched.
+    pub fn with_sidecar_registry(mut self, reg: Arc<SidecarRegistry>) -> Self {
+        self.sidecar_registry = Some(reg);
+        self
     }
 }
 
@@ -93,6 +103,7 @@ impl AuditSink for NotifyingAuditSink {
             bundle,
             self.data_dir.clone(),
             Arc::clone(&self.inner),
+            self.sidecar_registry.clone(),
         );
 
         Ok(event)

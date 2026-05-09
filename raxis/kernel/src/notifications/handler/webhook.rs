@@ -168,6 +168,7 @@ mod tests {
             id:     "wh".into(),
             kind:   NotificationChannelKind::Webhook,
             target: target.into(),
+            max_in_flight: 8,
         }
     }
 

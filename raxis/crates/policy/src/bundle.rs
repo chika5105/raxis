@@ -1349,14 +1349,32 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 // ("declared but its handler is not implemented in v1").
 // ---------------------------------------------------------------------------
 
-/// Channel-kind discriminator. v1 implements Shell + File only;
-/// Email and Webhook are forward-compat schema slots (per spec §5.6.6).
+/// Channel-kind discriminator.
+///
+/// V2.4 surface:
+/// * `Shell` / `File` — local JSONL append.
+/// * `Email` — direct SMTP submission (V2.3 closeout).
+/// * `Webhook` — HTTPS POST to operator-supplied URL (V2.3
+///   closeout). Retained for backward-compat. **Prefer `Sidecar`
+///   for new deployments** — see V2_GAPS.md §C4 architecture
+///   note.
+/// * `Sidecar` — V2.4 HTTP-sidecar pattern. Posts a structured
+///   `NotificationPayload` (see `notifications/sidecar_protocol.rs`
+///   in the kernel) to an operator-run sidecar process which
+///   translates to the target platform's API (Slack, PagerDuty,
+///   Teams, etc.) and returns `2xx` with an opaque
+///   `upstream_trace_id`. Localhost-only by convention; the
+///   sidecar handles its own auth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum NotificationChannelKind {
     Shell,
     File,
     Email,
     Webhook,
+    /// V2.4 — HTTP sidecar (V2_GAPS.md §C4). The kernel POSTs a
+    /// structured payload to `target` and the sidecar converts
+    /// to the platform's API.
+    Sidecar,
 }
 
 /// One `[[notifications.channels]]` entry.
@@ -1380,8 +1398,22 @@ pub struct NotificationChannel {
     /// `PolicyBundle::shell_inbox_path_for`).
     /// For `Email`: the recipient address (validated only as non-empty in v1).
     /// For `Webhook`: the destination URL (validated only as non-empty in v1).
+    /// For `Sidecar`: the HTTP endpoint URL the kernel POSTs the
+    ///   structured payload to (e.g. `http://localhost:9200/notify`).
     pub target: String,
+
+    /// V2.4 — `Sidecar` channels: maximum concurrent in-flight
+    /// dispatches per channel. When all permits are held, further
+    /// notifications drop immediately with
+    /// `DeliveryFailed{Backpressure}`. Bounded resource ceiling
+    /// per channel = `max_in_flight × per_attempt_timeout × max_attempts`.
+    /// Default 8 (per V2_GAPS.md §C4 worst-case table). Ignored for
+    /// non-Sidecar kinds.
+    #[serde(default = "default_max_in_flight")]
+    pub max_in_flight: u32,
 }
+
+fn default_max_in_flight() -> u32 { 8 }
 
 /// One `[[notifications.routes]]` entry: which channels receive
 /// notifications for a given audit event-kind.
@@ -2220,6 +2252,32 @@ fn validate_notifications(
                     ch.id, ch.kind,
                 );
             }
+            NotificationChannelKind::Sidecar => {
+                // V2.4 §C4 — the sidecar endpoint URL must be
+                // present and look like an HTTP(S) URL. Localhost
+                // is the convention but not required (some
+                // operators run sidecars on a private VPC IP
+                // reachable from the kernel host).
+                if ch.target.trim().is_empty() {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[notifications.channels]] id={:?} kind=Sidecar requires a non-empty target URL",
+                        ch.id
+                    )));
+                }
+                let t = ch.target.trim();
+                if !t.starts_with("http://") && !t.starts_with("https://") {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[notifications.channels]] id={:?} kind=Sidecar target must be http:// or https://",
+                        ch.id
+                    )));
+                }
+                if ch.max_in_flight == 0 {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[notifications.channels]] id={:?} kind=Sidecar max_in_flight must be >= 1",
+                        ch.id
+                    )));
+                }
+            }
         }
     }
 
@@ -2232,6 +2290,7 @@ fn validate_notifications(
             id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
             kind:   NotificationChannelKind::Shell,
             target: String::new(),
+            max_in_flight: default_max_in_flight(),
         });
     }
 
@@ -3039,6 +3098,7 @@ impl PolicyBundle {
                 id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
                 kind:   NotificationChannelKind::Shell,
                 target: String::new(),
+                max_in_flight: default_max_in_flight(),
             }],
             notification_routes: HashMap::new(),
             default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
@@ -3574,6 +3634,7 @@ mod tests {
                 id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
                 kind:   NotificationChannelKind::Shell,
                 target: String::new(),
+                max_in_flight: default_max_in_flight(),
             }],
             notification_routes: HashMap::new(),
             default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],

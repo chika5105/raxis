@@ -339,6 +339,15 @@ pub struct HandlerContext {
     /// with the `pending_pushes` SQL queue is V3 (§12.1).
     pub push_dispatcher: Arc<crate::push::KernelPushDispatcher>,
 
+    /// V2_GAPS §C4 — per-channel `SidecarChannelState` registry for
+    /// the V2.4 `Sidecar` notification kind. Each
+    /// `[[notifications.channels]]` of kind `Sidecar` lazily
+    /// allocates one entry on first dispatch; the entry holds the
+    /// concurrency permit pool (semaphore), the circuit-breaker
+    /// state, and observability counters surfaced through
+    /// `raxis status`. See `notifications::handler::sidecar`.
+    pub sidecar_registry: Arc<crate::notifications::handler::sidecar::SidecarRegistry>,
+
     /// V2_GAPS §C5 — content-addressed immutable artifact store
     /// rooted at `<data_dir>/artifacts/`. Writes are
     /// `<root>/<category>/<sha256>.<ext>` with `O_CREAT|O_EXCL`
@@ -434,6 +443,9 @@ impl HandlerContext {
         };
 
         let push_dispatcher = crate::push::KernelPushDispatcher::new(Arc::clone(&audit));
+        let sidecar_registry = Arc::new(
+            crate::notifications::handler::sidecar::SidecarRegistry::new(),
+        );
         Self {
             policy,
             registry,
@@ -455,6 +467,7 @@ impl HandlerContext {
             image_resolver,
             disk_watchdog: None,
             push_dispatcher,
+            sidecar_registry,
             artifact_store: None,
         }
     }
@@ -467,6 +480,20 @@ impl HandlerContext {
     /// leave the field `None`.
     pub fn with_artifact_store(mut self, store: Arc<ArtifactStore>) -> Self {
         self.artifact_store = Some(store);
+        self
+    }
+
+    /// V2_GAPS §C4 — replace the auto-allocated `SidecarRegistry`
+    /// with one shared from `main.rs`. Production calls this so the
+    /// `NotifyingAuditSink` and the `HandlerContext` point at the
+    /// same registry (one set of counters, one circuit-breaker
+    /// state per channel). Tests that don't exercise sidecars can
+    /// omit the call.
+    pub fn with_sidecar_registry(
+        mut self,
+        registry: Arc<crate::notifications::handler::sidecar::SidecarRegistry>,
+    ) -> Self {
+        self.sidecar_registry = registry;
         self
     }
 

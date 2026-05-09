@@ -927,12 +927,32 @@ pub enum AuditEventKind {
     /// active policy. `event_kind` is the `AuditEventKind` discriminant
     /// of the event we tried to deliver. `reason` is a short, stable
     /// classification string (`"io"`, `"target_invalid"`,
-    /// `"unimplemented_v1"`); the verbose error text goes to the
-    /// kernel stderr log.
+    /// `"unimplemented_v1"`, `"backpressure"`, `"circuit_open"`); the
+    /// verbose error text goes to the kernel stderr log.
     NotificationDeliveryFailed {
         channel_id: String,
         event_kind: String,
         reason:     String,
+    },
+
+    /// V2_GAPS §C4 — successful notification delivery.
+    ///
+    /// `channel_kind` is one of `"Shell" | "File" | "Email" |
+    /// "Webhook" | "Sidecar"` (the wire enum's variant string).
+    /// `upstream_trace_id` is `Some(_)` only for kinds that surface
+    /// an upstream id (Sidecar `trace_id`, SMTP `Message-ID`,
+    /// Webhook `X-Trace-Id` if present); `None` for Shell/File which
+    /// have no upstream. `delivery_ms` is wall-clock latency including
+    /// retries; `attempts` counts how many retries the dispatcher
+    /// did (1 for first-try success).
+    NotificationDelivered {
+        channel_id:        String,
+        channel_kind:      String,
+        event_kind:        String,
+        source_event_id:   String,
+        upstream_trace_id: Option<String>,
+        delivery_ms:       u64,
+        attempts:          u32,
     },
 
     // --- Operator certificates (kernel-store.md §2.5.7, security-model.md §cert-lifecycle) ---
@@ -1904,6 +1924,7 @@ impl AuditEventKind {
             Self::GatewayQuarantined { .. } => "GatewayQuarantined",
             Self::GatewaySignalFailed { .. } => "GatewaySignalFailed",
             Self::NotificationDeliveryFailed { .. } => "NotificationDeliveryFailed",
+            Self::NotificationDelivered { .. } => "NotificationDelivered",
             Self::OperatorCertInstalled { .. } => "OperatorCertInstalled",
             Self::OperatorCertMisconfigBypassed { .. } => "OperatorCertMisconfigBypassed",
             Self::OperatorCertExpiringSoon { .. } => "OperatorCertExpiringSoon",

@@ -676,6 +676,7 @@ mod tests {
             kind:   NotificationChannelKind::Email,
             target: "smtp://ops@smtp.example.com:587\
                      ?from=ops@example.com&to=alerts@example.com".into(),
+            max_in_flight: 8,
         };
         let e = make_event("EscalationApproved", 1, json!({}));
         match deliver(&chan, &e, tmp.path()).await {
@@ -698,6 +699,7 @@ mod tests {
             kind:   NotificationChannelKind::Email,
             target: "smtp://ops@smtp.example.com:587\
                      ?from=ops@example.com&to=alerts@example.com".into(),
+            max_in_flight: 8,
         };
         let e = make_event("EscalationApproved", 1, json!({}));
         match deliver(&chan, &e, tmp.path()).await {
@@ -713,6 +715,7 @@ mod tests {
             id:     "broken".into(),
             kind:   NotificationChannelKind::Email,
             target: "this-is-not-an-smtp-url".into(),
+            max_in_flight: 8,
         };
         let e = make_event("EscalationApproved", 1, json!({}));
         // NB: we read the password sidecar AFTER parsing the URL,
@@ -741,6 +744,7 @@ mod tests {
             id:     "ops-email".into(),
             kind:   NotificationChannelKind::Email,
             target: String::new(),
+            max_in_flight: 8,
         };
         let e = make_event("EscalationApproved", 7, json!({"k":"v"}));
         let body = render_message_body(&chan, &e, &tgt);
@@ -769,6 +773,7 @@ mod tests {
             id: "x".into(),
             kind: NotificationChannelKind::Email,
             target: String::new(),
+            max_in_flight: 8,
         };
         let mut payload = json!({});
         payload["body"] = json!(".dotted-line\nnormal\n.also-dotted");

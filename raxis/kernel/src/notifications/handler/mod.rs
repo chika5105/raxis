@@ -14,4 +14,5 @@
 
 pub mod email;
 pub mod file;
+pub mod sidecar;
 pub mod webhook;

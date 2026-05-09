@@ -751,20 +751,25 @@ plugin runs in kernel address space with full memory access — no
 conformance check can prevent memory corruption or invariant
 bypass. See `extensibility-traits.md §9A.2`.
 
-### C4: Email & Notification Channels ✅ CLOSED (V2.3, MVP)
+### C4: Email & Notification Channels ✅ CLOSED (V2.4)
 
 **Spec:** `email-and-notification-channels.md` (61KB)
-**Delivered:** ~700 lines (handler crates + tests)
-**Architecture change (V2.4):** Webhook handler **removed from
-kernel**. Third-party notification integrations use the **HTTP
-sidecar pattern** (same architecture as C5 provider sidecar).
+**Delivered:** ~1,000 lines (handler crates + tests + sidecar +
+NotificationDelivered audit event)
+**V2.4 update:** Sidecar dispatch handler shipped with concurrency
+cap, circuit breaker, and `NotificationDelivered` audit event. The
+legacy in-kernel Webhook handler is RETAINED for backwards
+compatibility but operators are encouraged to migrate to the
+Sidecar kind for any new third-party integration (Slack,
+PagerDuty, Teams, Discord, Opsgenie, custom).
 
 | Channel kind | Policy parsed | Handler impl | Status |
 |---|---|---|---|
 | `Shell`   | ✅ | ✅ `handler/file.rs`    | V1 carryover |
 | `File`    | ✅ | ✅ `handler/file.rs`    | V1 carryover |
 | `Email`   | ✅ | ✅ `handler/email.rs`   | V2.3 — SMTP submission with STARTTLS or implicit TLS, AUTH PLAIN, password from sidecar `.notify-cred` file |
-| `Webhook` | ✅ | ❌ **removed** — use sidecar | V2.4 — see sidecar architecture below |
+| `Webhook` | ✅ | ✅ `handler/webhook.rs` (legacy) | V2.3 — kept for backwards compatibility; new integrations should use `Sidecar` |
+| `Sidecar` | ✅ | ✅ `handler/sidecar.rs` | V2.4 — HTTP POST + concurrency cap (semaphore) + 3-state circuit breaker (closed/open/half-open) + `NotificationDelivered` audit emit with upstream `trace_id` |
 
 **V2.4 design decision: sidecar for third-party integrations.**
 
@@ -858,14 +863,16 @@ to a stable `category()` short-string that lands in
 `NotificationDeliveryFailed.reason` so operator dashboards can group
 failures by class.
 
-**V2 remaining work — sidecar notification dispatch:**
+**V2 sidecar notification dispatch — CLOSED V2.4:**
 
-| Component | Est. lines |
+| Component | Status |
 |---|---|
-| `kernel/src/notifications/handler/sidecar.rs` — HTTP POST to sidecar endpoint with retry | ~150 |
-| Sidecar notification wire type (`NotificationPayload` JSON schema) | ~50 |
-| Event filtering at dispatch (match `events` list against emitted event kind) | ~30 |
-| Update `policy.toml` parser to accept `kind = "Sidecar"` + `endpoint` + `events` | ~40 |
+| `kernel/src/notifications/handler/sidecar.rs` — HTTP POST with retry, circuit breaker, concurrency cap | ✅ shipped |
+| `NotificationPayload` JSON wire type + `SidecarSuccessResponse` envelope | ✅ shipped |
+| `NotificationChannelKind::Sidecar` variant with `max_in_flight` field validation | ✅ shipped |
+| `SidecarRegistry` per-kernel registry, threaded through `HandlerContext` and `NotifyingAuditSink` | ✅ shipped |
+| `NotificationDelivered` + `NotificationDeliveryFailed` audit emission with `category: "backpressure"`, `"circuit_open"`, etc. | ✅ shipped |
+| Event filtering at dispatch (existing `notification_routes` mechanism handles per-kind routing) | ✅ shipped (route table) |
 
 **V2 deferrals (V3 work, tracked separately):**
 
