@@ -1,0 +1,33 @@
+# RAXIS plan template — `experiment`
+# DAG: setup → run → cleanup
+#
+# Time-bounded exploratory work that does not produce a merge.  See
+# `specs/v2/operator-ergonomics.md §6.3`.
+
+[meta]
+version = 1
+
+[plan.initiative]
+description = "@@INITIATIVE_NAME@@"
+
+[workspace]
+lane_id    = "main"
+target_ref = "refs/heads/main"
+
+[[tasks]]
+task_id            = "setup"
+name               = "Set up experiment environment"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+
+[[tasks]]
+task_id            = "run"
+name               = "Run the experiment"
+session_agent_type = "Executor"
+predecessors       = ["setup"]
+
+[[tasks]]
+task_id            = "cleanup"
+name               = "Tear down experiment artefacts"
+session_agent_type = "Executor"
+predecessors       = ["run"]

@@ -34,6 +34,7 @@ pub mod log;
 pub mod operator;
 pub mod plan;
 pub mod plan_fmt;
+pub mod plan_init;
 pub mod plan_validate;
 pub mod policy;
 pub mod policy_diff;

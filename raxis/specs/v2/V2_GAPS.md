@@ -1643,7 +1643,7 @@ implemented in `cli/src/commands/`:
 | `raxis sessions` | ✅ | ✅ | ~200 | Active session listing |
 | `raxis verifiers` | ✅ | ✅ | ~200 | Verifier status |
 | `raxis witnesses` | ✅ | ✅ | ~200 | Witness listing |
-| `raxis init` | ✅ | ❌ | — | No `init` command; `genesis` covers key ceremony but not project scaffolding |
+| `raxis plan init` | ✅ | ✅ | ~250 | V2.3 MVP: 5 bundled templates (`feature`, `bugfix`, `dependency-upgrade`, `migration`, `experiment`) embedded in CLI binary; per `operator-ergonomics.md §6`. |
 | `raxis credential add` | ✅ | ❌ | — | Blocked on per-type validators |
 | `raxis credential remove` | ✅ | ❌ | — | Needs orphan-check |
 | `raxis credential show` | ✅ | ❌ | — | Low priority (`list --json`) |
@@ -1867,7 +1867,7 @@ The proxy:
 | 12 | **C3** — Provider model selection | 400 | Flexibility (per-task model) |
 | 13 | **C5** — Immutable artifact store | 600 | Agent artifact persistence |
 | 14 | **E1** — Environment access control enforcement | 200 | Prevent cross-env credential mixing |
-| 15 | `raxis init` project scaffolding | 200 | New-operator onboarding |
+| 15 | ~~`raxis init` project scaffolding~~ — `CLOSED (V2.3, MVP)` as `raxis plan init` per `operator-ergonomics.md §6`. | 250 | New-operator onboarding |
 | 16 | Remaining `INV-` invariant enforcement (48 of 89) | 300 | Formal spec compliance |
 | 17 | Gateway binary integrity (embedded binary) | 90 | Eliminates file-on-disk tampering surface |
 | 18 | KernelPush transport (kernel → agent sessions) | 200 | Pushes are typed but never sent (see §12.1) |
@@ -1958,7 +1958,7 @@ Corrections made during cross-check passes:
 | Heartbeat writer | "Not wired, ~30 lines" | ✅ Shipped, wired in `main.rs:532` | `grep heartbeat_loop` | 1 |
 | Gateway supervisor | "~200 lines missing" | ✅ Shipped (715 lines) | `gateway/supervisor.rs` | 1 |
 | Credential CLI | "Fully shipped" | 🟡 Partial (2 of 7 subcommands) | CLI code header comments | 1 |
-| `raxis init` | Not tracked | ❌ Missing | CLI subcommand grep | 1 |
+| `raxis plan init` | Not tracked | ✅ Shipped (V2.3) | `cli/src/commands/plan_init.rs` | 1 |
 | Env access control | Not tracked (Tier E) | 🟡 Schema parsed, enforcement missing | `credential-proxy.md §11` examples | 1 |
 | Invariant coverage | Not tracked | 46% (41 of 89 `INV-` refs in code) | `grep -c INV-` | 1 |
 | Notification channels (C4) | "Zero code" | 🟡 Partial (Shell+File only, 1,327 lines) | `kernel/src/notifications/` grep | 2 |

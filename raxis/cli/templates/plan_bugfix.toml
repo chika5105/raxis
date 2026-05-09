@@ -1,0 +1,34 @@
+# RAXIS plan template — `bugfix`
+# DAG: reproduce → fix → regression-test → merge
+#
+# The reproduce task generates a failing test; the fix task makes it
+# pass; the regression-test task verifies the fix did not break adjacent
+# behaviour. See `specs/v2/operator-ergonomics.md §6.3`.
+
+[meta]
+version = 1
+
+[plan.initiative]
+description = "@@INITIATIVE_NAME@@"
+
+[workspace]
+lane_id    = "main"
+target_ref = "refs/heads/main"
+
+[[tasks]]
+task_id            = "reproduce"
+name               = "Reproduce bug with a failing test"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+
+[[tasks]]
+task_id            = "fix"
+name               = "Apply the fix"
+session_agent_type = "Executor"
+predecessors       = ["reproduce"]
+
+[[tasks]]
+task_id            = "regression_test"
+name               = "Run the regression test suite"
+session_agent_type = "Reviewer"
+predecessors       = ["fix"]

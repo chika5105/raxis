@@ -1,0 +1,27 @@
+# RAXIS plan template — `dependency-upgrade`
+# DAG: upgrade → test → merge
+#
+# Bumping a dependency version with regression-test verification. See
+# `specs/v2/operator-ergonomics.md §6.3`.
+
+[meta]
+version = 1
+
+[plan.initiative]
+description = "@@INITIATIVE_NAME@@"
+
+[workspace]
+lane_id    = "main"
+target_ref = "refs/heads/main"
+
+[[tasks]]
+task_id            = "upgrade"
+name               = "Bump dependency version"
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
+
+[[tasks]]
+task_id            = "test"
+name               = "Run regression suite against the upgrade"
+session_agent_type = "Reviewer"
+predecessors       = ["upgrade"]

@@ -51,7 +51,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
 ];
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff"];
-const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject", "validate", "fmt"];
+const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject", "validate", "fmt", "init"];
 /// V2.1 atomic plan-bundle submit. Spec: plan-bundle-sealing.md §4.
 /// Currently exposes only `plan`; future sub-commands (`policy`,
 /// `operator-cert`) will plug in here without a third rename.
@@ -202,6 +202,7 @@ fn run() -> Result<(), CliError> {
                 "reject" => commands::plan::run_reject(&flags, &rest[1..]),
                 "validate" => commands::plan_validate::run(&flags, &rest[1..]),
                 "fmt"      => commands::plan_fmt::run(&flags, &rest[1..]),
+                "init"     => commands::plan_init::run(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "plan sub-command", sub2, PLAN_SUBCOMMANDS,
                 ))),
