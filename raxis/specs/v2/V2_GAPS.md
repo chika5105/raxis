@@ -3056,8 +3056,8 @@ OCI-pinned"). The V2.5 scope is:
    `kernel_version_min` on the `[[vm_images]]` entry rather than
    introspecting the image. The operator already pins the image by
    `oci_digest` — they are asserting trust in the image contents.
-   At admission, the kernel validates `kernel_version_min >= 5.14`
-   (the floor for cgroup v2 with `cpu`, `memory`, `io`, and `pids`
+   At admission, the RAXIS kernel validates `kernel_version_min >= 5.14`
+   (Linux kernel 5.14 is the floor for cgroup v2 with `cpu`, `memory`,
    controllers delegated to `subtree_control`, per
    `INV-PLANNER-HARNESS-03` / `planner-harness.md §4.3`)
    and rejects with `FAIL_VM_GUEST_KERNEL_TOO_OLD` if below.
