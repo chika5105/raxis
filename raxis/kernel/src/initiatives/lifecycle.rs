@@ -329,6 +329,49 @@ pub enum LifecycleError {
         suggestion:           String,
     },
 
+    /// **V2.5 (`V2_GAPS.md §13`) — INV-VM-CAP-03 / INV-PLANNER-HARNESS-03.**
+    /// A `[[plan.tasks.X]] vm_image` declaration violates the
+    /// operator-published `[[vm_images]]` registry contract.
+    ///
+    /// * `rule = "reviewer_image_not_allowed"` — a Reviewer task
+    ///   declared a non-empty `vm_image`; the Reviewer image is
+    ///   kernel-canonical and operators cannot override it
+    ///   (`INV-PLANNER-HARNESS-02`,
+    ///   `policy-plan-authority.md §3b`).
+    ///   Surfaced as `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`.
+    /// * `rule = "image_not_registered"` — the alias does not
+    ///   resolve against any `[[vm_images]]` entry in the active
+    ///   policy. Surfaced as `FAIL_VM_IMAGE_NOT_PERMITTED` (the
+    ///   spec also accepts `FAIL_VM_IMAGE_NOT_REGISTERED`; we use
+    ///   the former because it is the V1 code that already
+    ///   threads through the operator UX).
+    /// * `rule = "role_restriction_mismatch"` — the alias
+    ///   resolves but the entry's `role_restriction` does not
+    ///   include the task's role. Surfaced as
+    ///   `FAIL_VM_IMAGE_ROLE_RESTRICTION_MISMATCH`.
+    ///
+    /// Surfaces as `LifecycleError::PlanTaskVmImageInvalid` and
+    /// is emitted before BEGIN TRANSACTION so a malformed plan
+    /// never allocates a row.
+    #[error("plan task vm_image invalid (rule={rule}, task={offending_task}, image={offending_image:?}): {suggestion}")]
+    PlanTaskVmImageInvalid {
+        /// One of `"reviewer_image_not_allowed"`,
+        /// `"image_not_registered"`,
+        /// `"role_restriction_mismatch"`.
+        rule:             &'static str,
+        /// The task whose `vm_image` field was rejected.
+        offending_task:   String,
+        /// The alias declared by the plan, or the empty string
+        /// when the rule is `"reviewer_image_not_allowed"` and
+        /// the operator declared `vm_image = ""` (which still
+        /// counts as "field present" because the parser only
+        /// produces non-empty strings here — see the
+        /// `vm_image.trim().is_empty()` short-circuit).
+        offending_image:  String,
+        /// Operator-facing remediation hint.
+        suggestion:       String,
+    },
+
     /// **V2 (V2_GAPS.md §12.8 / §12.9, INV-PLAN-POLICY-PRECEDENCE-01).**
     /// The plan-side `[workspace] target_ref` declared a value that
     /// is not legal under the operator's `[git]` policy section:
@@ -579,6 +622,7 @@ pub fn approve_plan_for_test(
     use std::collections::HashMap;
     let empty_envs: HashMap<String, raxis_policy::EnvironmentConfig> = HashMap::new();
     let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
+    let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
     approve_plan(
         initiative_id,
         approving_operator,
@@ -589,6 +633,7 @@ pub fn approve_plan_for_test(
         false,
         &empty_envs,
         &empty_creds,
+        &empty_vm_images,
         store,
         audit,
         plan_registry,
@@ -616,6 +661,13 @@ pub fn approve_plan(
     // to `FAIL_CREDENTIAL_NOT_PERMITTED` for absent names is
     // deferred.
     policy_permitted_credentials:        &[raxis_policy::PermittedCredentialConfig],
+    // V2_GAPS §13 (V2.5 BLOCKER) — operator-published
+    // `[[vm_images]]` registry. The shift-left validator
+    // `validate_task_vm_images` resolves each task's
+    // `vm_image` alias against this slice; an empty registry is
+    // permitted (legacy V1 behavior — every Executor task boots
+    // the canonical starter image).
+    policy_vm_images:                    &[raxis_policy::VmImageConfig],
     store:                               &Store,
     audit:                               &dyn AuditSink,
     plan_registry:                       &PlanRegistry,
@@ -740,6 +792,13 @@ pub fn approve_plan(
     // names a proxy this kernel build does not implement cannot
     // allocate a task row.
     validate_task_credentials(&plan_tasks)?;
+    // V2_GAPS §13 (V2.5 BLOCKER) — INV-VM-CAP-03 +
+    // INV-PLANNER-HARNESS-03. Reject Reviewer tasks that try to
+    // override the kernel-canonical Reviewer image and Executor
+    // tasks whose `vm_image` does not resolve to an operator-
+    // published `[[vm_images]]` entry whose `role_restriction`
+    // permits "Executor". Inert when the registry is empty.
+    validate_task_vm_images(&plan_tasks, policy_vm_images)?;
     // V2_GAPS §B2 (`custom-tools.md`) — kernel-side validation of
     // operator-declared custom tools at plan-approve time. Rejects
     // structurally malformed `[[profiles.<name>.custom_tool]]`
@@ -882,6 +941,14 @@ pub fn approve_plan(
             // V2 §Step 27 — typed clone strategy + agent type.
             clone_strategy:            pt.clone_strategy,
             session_agent_type:        pt.session_agent_type,
+            // V2.5 §13 — operator-published `[[vm_images]]` alias the
+            // spawn path consults at activation. Always the
+            // plan-author-declared value at this point (the
+            // validator already vetted it against the active
+            // policy registry); the kernel re-resolves at
+            // activation against the *current* policy bundle so a
+            // mid-flight policy rotation is observed.
+            vm_image:                  pt.vm_image.clone(),
         };
         path_scope_snapshots.push((
             pt.task_id.clone(),
@@ -1290,6 +1357,11 @@ pub fn repopulate_plan_registry(
                     // agent type from the immutable signed plan bytes.
                     clone_strategy:            pt.clone_strategy,
                     session_agent_type:        pt.session_agent_type,
+                    // V2.5 §13 — re-hydrate operator-published
+                    // `[[vm_images]]` alias from the immutable
+                    // signed plan bytes. Empty when the plan
+                    // omitted the field.
+                    vm_image:                  pt.vm_image,
                 },
             );
             inserted += 1;
@@ -1574,6 +1646,23 @@ struct PlanTask {
     /// vector once a session-spawn callsite hands it the
     /// per-task decls (see `kernel/src/ipc/context.rs proxy_manager`).
     credentials:               Vec<raxis_plan_credentials::TaskCredentialDecl>,
+
+    /// **V2.5 §13 — `[[plan.tasks.X]] vm_image`.** Operator-published
+    /// `[[vm_images]]` alias selecting the executor image to spawn
+    /// for this task. Empty `""` when the plan omits the field; the
+    /// admission-time validator
+    /// (`validate_task_vm_images`) translates that into:
+    ///
+    /// * For `Executor` tasks: the policy
+    ///   `[default_executor_image] alias` (when present) is used as
+    ///   a fallback. If neither is declared the task is admitted
+    ///   without a per-task override and the spawn path uses the
+    ///   canonical starter image.
+    /// * For `Reviewer` tasks: an empty `vm_image` is required
+    ///   (the Reviewer image is kernel-canonical per
+    ///   `INV-PLANNER-HARNESS-02`); a non-empty value is rejected
+    ///   with `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`.
+    vm_image:                  String,
 }
 
 /// Parse `[[tasks]]` array from plan TOML.
@@ -1700,6 +1789,22 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 reason: format!("[[tasks.credentials]] (task `{task_id}`): {e}"),
             })?;
 
+        // V2.5 §13 — `vm_image` selects the operator-published
+        // [[vm_images]] alias for this task. Empty string means
+        // "operator omitted the field"; the validator decides
+        // whether that's permitted (Reviewer must omit; Executor
+        // can fall back to [default_executor_image] or be
+        // admitted with no alias for V1 compatibility). Non-string
+        // values silently fall back to empty so the validator can
+        // emit the same diagnostic shape as the other Step 17
+        // checks.
+        let vm_image = entry
+            .get("vm_image")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_owned();
+
         tasks.push(PlanTask {
             task_id,
             name,
@@ -1712,6 +1817,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             clone_strategy,
             session_agent_type,
             credentials,
+            vm_image,
         });
     }
 
@@ -2904,6 +3010,122 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     Ok(())
 }
 
+/// **V2.5 §13** — INV-VM-CAP-03 / INV-PLANNER-HARNESS-03 shift-left
+/// admission validator for `[[plan.tasks.X]] vm_image`.
+///
+/// Runs BEFORE BEGIN TRANSACTION so a malformed plan never allocates
+/// a row. Walks every task and:
+///
+///   1. Refuses any non-empty `vm_image` on a Reviewer task.
+///      Reviewer images are kernel-canonical
+///      (`INV-PLANNER-HARNESS-02`), so even a syntactically-valid
+///      alias must be rejected here.
+///   2. For Executor tasks that declare a `vm_image`, resolves the
+///      alias against the operator-published `[[vm_images]]`
+///      registry. Unknown alias → `FAIL_VM_IMAGE_NOT_PERMITTED`.
+///      `role_restriction` not including `"Executor"` →
+///      `FAIL_VM_IMAGE_ROLE_RESTRICTION_MISMATCH`.
+///
+/// Tasks that omit `vm_image` are admitted unchanged. The
+/// `[default_executor_image]` defaulting (see V2.5 §13 step 3) is
+/// done by `raxis-cli plan prepare` BEFORE the plan is signed, so
+/// by the time the kernel sees the plan the field is already
+/// either explicitly populated by the operator or explicitly
+/// omitted — both are accepted here.
+///
+/// **Inert when the registry is empty.** A policy with no
+/// `[[vm_images]]` entries is treated as "no operator-published
+/// image registry", and tasks omitting `vm_image` continue to
+/// boot the canonical starter image. Tasks declaring a non-empty
+/// `vm_image` against an empty registry are still rejected with
+/// `image_not_registered` so a half-rolled-out registry doesn't
+/// silently fall through.
+fn validate_task_vm_images(
+    tasks:     &[PlanTask],
+    vm_images: &[raxis_policy::VmImageConfig],
+) -> Result<(), LifecycleError> {
+    use crate::initiatives::lifecycle::SessionAgentType;
+
+    for pt in tasks {
+        match pt.session_agent_type {
+            SessionAgentType::Reviewer => {
+                if !pt.vm_image.is_empty() {
+                    return Err(LifecycleError::PlanTaskVmImageInvalid {
+                        rule:            "reviewer_image_not_allowed",
+                        offending_task:  pt.task_id.clone(),
+                        offending_image: pt.vm_image.clone(),
+                        suggestion: format!(
+                            "task `{}` is `session_agent_type = \"Reviewer\"` and \
+                             declares `vm_image = {:?}`; the Reviewer image is \
+                             kernel-canonical (`raxis-reviewer-core`) and \
+                             cannot be operator-overridden \
+                             (INV-PLANNER-HARNESS-02). Drop the `vm_image` \
+                             field from this task.",
+                            pt.task_id, pt.vm_image,
+                        ),
+                    });
+                }
+            }
+            SessionAgentType::Executor => {
+                if pt.vm_image.is_empty() {
+                    continue;
+                }
+                let entry = vm_images
+                    .iter()
+                    .find(|img| img.name == pt.vm_image);
+                let entry = match entry {
+                    Some(e) => e,
+                    None => {
+                        return Err(LifecycleError::PlanTaskVmImageInvalid {
+                            rule:            "image_not_registered",
+                            offending_task:  pt.task_id.clone(),
+                            offending_image: pt.vm_image.clone(),
+                            suggestion: format!(
+                                "task `{}` declares `vm_image = {:?}`, \
+                                 which does not match any operator-published \
+                                 `[[vm_images]]` entry in the active policy. \
+                                 Either declare the image in `policy.toml` \
+                                 (with `oci_digest`, `role_restriction`, \
+                                 `linux_kernel_version_min`) or change the \
+                                 task's `vm_image` to a registered alias.",
+                                pt.task_id, pt.vm_image,
+                            ),
+                        });
+                    }
+                };
+                if !entry.permits_role("Executor") {
+                    return Err(LifecycleError::PlanTaskVmImageInvalid {
+                        rule:            "role_restriction_mismatch",
+                        offending_task:  pt.task_id.clone(),
+                        offending_image: pt.vm_image.clone(),
+                        suggestion: format!(
+                            "task `{}` declares `vm_image = {:?}`, but \
+                             that image's `role_restriction = {:?}` does \
+                             NOT include \"Executor\". Update the task to \
+                             reference an Executor-permitted alias, or \
+                             extend the image's `role_restriction` in \
+                             `policy.toml` (operators only).",
+                            pt.task_id, pt.vm_image, entry.role_restriction,
+                        ),
+                    });
+                }
+            }
+            SessionAgentType::Orchestrator => {
+                // Orchestrator tasks are never operator-declared (the
+                // kernel auto-creates the singleton). The
+                // `validate_sparse_orchestrator_exclusion` validator
+                // already refuses to admit a plan that names an
+                // Orchestrator in `[[tasks]]`, so this arm is
+                // effectively unreachable; we match exhaustively
+                // anyway so a future role addition fails the
+                // typechecker rather than silently bypassing this
+                // check.
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Wire label for `task_credential_proxies.proxy_type`. Kept in
 /// lock-step with the SQL CHECK clause in
 /// `raxis_store::migration::render_migration_10_ddl`. The
@@ -3390,6 +3612,7 @@ lane_id = "rogue-lane"
             clone_strategy:            CloneStrategy::Blobless,
             session_agent_type:        SessionAgentType::Executor,
             credentials:               vec![],
+            vm_image:                  String::new(),
         }
     }
 
@@ -3560,6 +3783,7 @@ lane_id = "rogue-lane"
             clone_strategy:            CloneStrategy::Blobless,
             session_agent_type:        SessionAgentType::Executor,
             credentials:               vec![],
+            vm_image:                  String::new(),
         }
     }
 
@@ -3750,6 +3974,7 @@ lane_id = "rogue-lane"
             clone_strategy: CloneStrategy::Blobless,
             session_agent_type: SessionAgentType::Executor,
             credentials: vec![],
+            vm_image: String::new(),
         }
     }
 
@@ -3935,6 +4160,7 @@ session_agent_type = "Coordinator"
             clone_strategy: strategy,
             session_agent_type: agent,
             credentials: vec![],
+            vm_image: String::new(),
         }
     }
 
@@ -4571,6 +4797,7 @@ task_id = "x"
             clone_strategy:            CloneStrategy::Full,
             session_agent_type:        SessionAgentType::Executor,
             credentials:               Vec::new(),
+            vm_image:                  String::new(),
         }
     }
 
@@ -5472,6 +5699,7 @@ target_ref = "refs/heads/raxis/feature"
         let empty_envs: std::collections::HashMap<String, raxis_policy::EnvironmentConfig>
             = std::collections::HashMap::new();
         let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
+        let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
         approve_plan(
             &init_id,
             "op",
@@ -5482,6 +5710,7 @@ target_ref = "refs/heads/raxis/feature"
             false,
             &empty_envs,
             &empty_creds,
+            &empty_vm_images,
             &store,
             &audit,
             &registry,
@@ -6608,6 +6837,7 @@ mod env_consistency_tests {
             clone_strategy:            CloneStrategy::Full,
             session_agent_type:        SessionAgentType::Executor,
             credentials:               creds,
+            vm_image:                  String::new(),
         }
     }
 
@@ -6724,5 +6954,139 @@ mod env_consistency_tests {
         ];
         validate_task_environment_consistency(&tasks, &envs, &creds)
             .expect("neutral + bound = cardinality 1 must pass");
+    }
+}
+
+// V2.5 §13 — `[[vm_images]]` admission validator unit tests.
+#[cfg(test)]
+mod vm_image_admission_tests {
+    use super::*;
+
+    fn task(
+        task_id:  &str,
+        agent:    SessionAgentType,
+        vm_image: &str,
+    ) -> PlanTask {
+        PlanTask {
+            task_id:                   task_id.to_owned(),
+            name:                      task_id.to_owned(),
+            lane_id:                   "default".to_owned(),
+            predecessors:              Vec::new(),
+            path_allowlist:            Vec::new(),
+            path_export_to_successors: false,
+            path_export_globs:         Vec::new(),
+            path_scope_override:       false,
+            clone_strategy:            CloneStrategy::Blobless,
+            session_agent_type:        agent,
+            credentials:               Vec::new(),
+            vm_image:                  vm_image.to_owned(),
+        }
+    }
+
+    fn registry_entry(
+        name:  &str,
+        roles: &[&str],
+    ) -> raxis_policy::VmImageConfig {
+        raxis_policy::VmImageConfig {
+            name:                     name.to_owned(),
+            oci_digest: format!(
+                "sha256:{}",
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            ),
+            role_restriction:         roles.iter().map(|r| (*r).to_owned()).collect(),
+            linux_kernel_version_min: (5, 14),
+            description:              String::new(),
+        }
+    }
+
+    #[test]
+    fn empty_registry_admits_tasks_omitting_vm_image() {
+        let tasks = vec![
+            task("t1", SessionAgentType::Executor, ""),
+            task("t2", SessionAgentType::Reviewer, ""),
+        ];
+        validate_task_vm_images(&tasks, &[])
+            .expect("omitted vm_image must be admitted with empty registry");
+    }
+
+    #[test]
+    fn empty_registry_rejects_executor_with_alias() {
+        let tasks = vec![task("t1", SessionAgentType::Executor, "ghost-image")];
+        let err = validate_task_vm_images(&tasks, &[]).expect_err("must reject");
+        match err {
+            LifecycleError::PlanTaskVmImageInvalid { rule, offending_task, offending_image, .. } => {
+                assert_eq!(rule, "image_not_registered");
+                assert_eq!(offending_task, "t1");
+                assert_eq!(offending_image, "ghost-image");
+            }
+            other => panic!("expected PlanTaskVmImageInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reviewer_with_vm_image_is_rejected() {
+        let registry = vec![registry_entry("rev-img", &["Verifier"])];
+        let tasks = vec![task("rt", SessionAgentType::Reviewer, "rev-img")];
+        let err = validate_task_vm_images(&tasks, &registry).expect_err("must reject");
+        match err {
+            LifecycleError::PlanTaskVmImageInvalid { rule, offending_task, offending_image, suggestion } => {
+                assert_eq!(rule, "reviewer_image_not_allowed");
+                assert_eq!(offending_task, "rt");
+                assert_eq!(offending_image, "rev-img");
+                assert!(suggestion.contains("INV-PLANNER-HARNESS-02"),
+                        "suggestion must cite the invariant: {suggestion}");
+            }
+            other => panic!("expected PlanTaskVmImageInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn executor_with_unregistered_alias_is_rejected() {
+        let registry = vec![registry_entry("real-img", &["Executor"])];
+        let tasks = vec![task("t1", SessionAgentType::Executor, "ghost-image")];
+        let err = validate_task_vm_images(&tasks, &registry).expect_err("must reject");
+        match err {
+            LifecycleError::PlanTaskVmImageInvalid { rule, .. } => {
+                assert_eq!(rule, "image_not_registered");
+            }
+            other => panic!("expected PlanTaskVmImageInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn executor_with_verifier_only_alias_is_rejected() {
+        let registry = vec![registry_entry("ver-only", &["Verifier"])];
+        let tasks = vec![task("t1", SessionAgentType::Executor, "ver-only")];
+        let err = validate_task_vm_images(&tasks, &registry).expect_err("must reject");
+        match err {
+            LifecycleError::PlanTaskVmImageInvalid { rule, suggestion, .. } => {
+                assert_eq!(rule, "role_restriction_mismatch");
+                assert!(suggestion.contains("Executor"),
+                        "suggestion must mention the missing role: {suggestion}");
+            }
+            other => panic!("expected PlanTaskVmImageInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn executor_with_executor_alias_is_admitted() {
+        let registry = vec![
+            registry_entry("primary-exec", &["Executor"]),
+            registry_entry("polyglot",     &["Executor", "Verifier"]),
+        ];
+        let tasks = vec![
+            task("t1", SessionAgentType::Executor, "primary-exec"),
+            task("t2", SessionAgentType::Executor, "polyglot"),
+        ];
+        validate_task_vm_images(&tasks, &registry)
+            .expect("Executor-permitted alias must admit");
+    }
+
+    #[test]
+    fn reviewer_without_vm_image_is_admitted() {
+        let registry = vec![registry_entry("primary-exec", &["Executor"])];
+        let tasks = vec![task("rt", SessionAgentType::Reviewer, "")];
+        validate_task_vm_images(&tasks, &registry)
+            .expect("Reviewer omitting vm_image must admit");
     }
 }

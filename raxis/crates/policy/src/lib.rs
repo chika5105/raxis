@@ -18,17 +18,19 @@ pub mod error;
 pub mod loader;
 
 pub use bundle::{
-    EnvironmentConfig, GateEntry, GatewaySection, HostCapacityConfig,
+    DefaultExecutorImageConfig, EnvironmentConfig, GateEntry, GatewaySection, HostCapacityConfig,
     IntegrationMergeVerifierAppliesTo, IntegrationMergeVerifierEntry,
     IntegrationMergeVerifierOnFailure, LaneEntry,
     NotificationChannel, NotificationChannelKind, NotificationRoute, OperatorEntry,
     PermittedCredentialConfig, PlanBundleLimitsSection, PlanSigningSection, PolicyBundle,
-    ProviderEntry,
+    ProviderEntry, VmImageConfig,
     IMPLICIT_SHELL_CHANNEL_ID, IMPLICIT_SHELL_INBOX_FILENAME,
     KNOWN_AUDIT_EVENT_KINDS, MAX_DATA_FETCH_TIMEOUT_MS, MAX_INFERENCE_TIMEOUT_MS,
-    MAX_RESPONSE_BYTES_CEILING, PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS,
+    MAX_RESPONSE_BYTES_CEILING, MIN_GUEST_LINUX_KERNEL_MAJOR, MIN_GUEST_LINUX_KERNEL_MINOR,
+    PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS,
     PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING, PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING,
     PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING, PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS,
+    RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME,
 };
 // Verifier-validation helpers exposed for kernel re-use (approve_plan
 // Step 2 — `[[plan.integration_merge_verifiers]]` shift-left

@@ -1252,6 +1252,12 @@ async fn handle_approve_plan(
         policy_snapshot.environments().clone();
     let policy_permitted_credentials_snapshot: Vec<raxis_policy::PermittedCredentialConfig> =
         policy_snapshot.permitted_credentials().to_vec();
+    // V2_GAPS §13 (V2.5 BLOCKER) — snapshot the operator-published
+    // `[[vm_images]]` registry under the same epoch the plan was
+    // submitted against so `validate_task_vm_images` resolves
+    // every alias against a stable view of the policy.
+    let policy_vm_images_snapshot: Vec<raxis_policy::VmImageConfig> =
+        policy_snapshot.vm_images().to_vec();
     // Snapshot the operator's display name from the same bundle we
     // resolved the pubkey from, so the audit event records the name
     // that was authoritative at approval time. See
@@ -1274,6 +1280,7 @@ async fn handle_approve_plan(
             policy_target_ref_locked,
             &policy_environments_snapshot,
             &policy_permitted_credentials_snapshot,
+            &policy_vm_images_snapshot,
             &store_for_blocking,
             &*audit_for_blocking,
             &plan_registry_for_blocking,

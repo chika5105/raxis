@@ -97,6 +97,25 @@ pub struct TaskPlanFields {
     pub clone_strategy:            CloneStrategy,
     // V2 §Step 6 / §Step 27 check #6 — agent type for this task.
     pub session_agent_type:        SessionAgentType,
+
+    /// V2.5 §13 — `[[plan.tasks.X]] vm_image` resolved at admission
+    /// against the operator-published `[[vm_images]]` registry.
+    /// Empty `""` when:
+    ///
+    /// * The plan omits `vm_image` (legacy V1 behaviour — spawn
+    ///   uses the canonical starter image).
+    /// * The task is a Reviewer (which is structurally forbidden
+    ///   from declaring an alias per `INV-PLANNER-HARNESS-02`).
+    ///
+    /// The activation handler reads this through
+    /// [`PlanRegistry::get`] to decide whether to spawn the
+    /// canonical starter image or an operator-published one. The
+    /// alias is the trust anchor the operator signed; the kernel
+    /// re-resolves it against the *current* policy at activation
+    /// (re-checking `oci_digest` and `linux_kernel_version_min`)
+    /// so a credential rotation between admission and activation
+    /// does not silently drift the image bytes.
+    pub vm_image:                  String,
 }
 
 impl Default for TaskPlanFields {
@@ -108,6 +127,7 @@ impl Default for TaskPlanFields {
             path_scope_override:       false,
             clone_strategy:            CloneStrategy::Blobless,
             session_agent_type:        SessionAgentType::Executor,
+            vm_image:                  String::new(),
         }
     }
 }
@@ -465,6 +485,7 @@ mod tests {
             path_scope_override:       false,
             clone_strategy:            CloneStrategy::Sparse,
             session_agent_type:        SessionAgentType::Executor,
+            vm_image:                  String::new(),
         };
         r.insert(TaskKey::new("init-A", "t1"), f.clone());
         let snapshot = r.tasks_in_initiative("init-A");
