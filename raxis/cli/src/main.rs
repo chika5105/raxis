@@ -68,12 +68,15 @@ const CERT_SUBCOMMANDS:        &[&str] = &[
     "mint", "mint-emergency", "show", "verify", "list", "install",
 ];
 /// V2 §extensibility-traits.md §4 — local-only credential ops.
-/// MVP scope (V2 GA) is `list` + `rotate`; `add` / `show` /
-/// `remove` / `verify` / `audit` from credential-proxy.md §12 are
-/// deferred — they depend on the per-proxy-type validators and
-/// the credential-proxy runtime (Postgres / k8s / AWS / GCP /
-/// Azure / Redis / MongoDB / MySQL / MSSQL / SMTP).
-const CREDENTIAL_SUBCOMMANDS:  &[&str] = &["list", "rotate"];
+/// MVP scope (V2 GA) is the seven-command catalogue from
+/// credential-proxy.md §12: `list`, `rotate`, `add`, `show`,
+/// `remove`, `verify`, `audit`. The full per-proxy-type
+/// validators (kubeconfig / AWS JSON / postgres URI parse) and
+/// live-network `verify` probes are V3 — V2 stores bytes
+/// verbatim and verifies structurally.
+const CREDENTIAL_SUBCOMMANDS:  &[&str] = &[
+    "list", "rotate", "add", "show", "remove", "verify", "audit",
+];
 /// V2 §kernel-lifecycle.md §3 — daemon mode. The MVP ships
 /// `install` and `uninstall` (template + place / remove the
 /// platform unit file). The full surface (`start --daemon`,
@@ -309,8 +312,13 @@ fn run() -> Result<(), CliError> {
         "credential" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "list"   => commands::credential::run_list(&flags, &rest[1..]),
+                "list"   => commands::credential::run_list  (&flags, &rest[1..]),
                 "rotate" => commands::credential::run_rotate(&flags, &rest[1..]),
+                "add"    => commands::credential::run_add   (&flags, &rest[1..]),
+                "show"   => commands::credential::run_show  (&flags, &rest[1..]),
+                "remove" => commands::credential::run_remove(&flags, &rest[1..]),
+                "verify" => commands::credential::run_verify(&flags, &rest[1..]),
+                "audit"  => commands::credential::run_audit (&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "credential sub-command", sub2, CREDENTIAL_SUBCOMMANDS,
                 ))),
@@ -549,6 +557,31 @@ SUBCOMMANDS:
         temp-write + rename ceremony. The new value is read via
         stdin (default), a file on disk, or a hidden terminal prompt.
         --value <bytes> is REJECTED — secrets must never enter argv.
+
+    credential add <name> [--type <label>] [--env <label>] [--desc <text>]
+        [--stdin | --file <path> | --interactive]
+        Register a NEW credential (refuses if the credential
+        already exists; use `rotate` to update). V2 stores the
+        bytes verbatim; per-type validators are V3.
+
+    credential show <name> [--json]
+        Print metadata for a single credential (size, mode, uid,
+        mtime). Values are NEVER printed.
+
+    credential remove <name> --force
+        Unlink a credential file. V2 requires --force because the
+        CLI cannot probe active sessions without a live kernel
+        IPC. Emits a CredentialRemoved{{forced=true}} record.
+
+    credential verify <name> [--type <label>] [--timeout <ms>]
+        V2 structural verification (mode 0600, uid match, body
+        non-empty, env-form parse). Live network verification
+        is V3. Emits CredentialVerified{{success=...,latency_ms=...}}.
+
+    credential audit <name> [--limit <n>] [--since <duration>] [--json]
+        Show the audit history for a credential, merging the
+        operator-local CLI trail (<data-dir>/audit/credential-cli.jsonl)
+        with the kernel main audit chain segments.
 
     kernel install [--system] [--binary <path>] [--force]
         Install RAXIS as a platform-native daemon. Writes a systemd

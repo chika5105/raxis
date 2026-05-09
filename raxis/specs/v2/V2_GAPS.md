@@ -735,21 +735,92 @@ follow-up.
 * Per-initiative `[push]` block in `plan.toml` (rate limits,
   remotes per ref, etc.).
 
-### C7: Credential CLI: `add`, `remove`, `show`, `verify`
+### C7: Credential CLI: `add`, `remove`, `show`, `verify`, `audit` — CLOSED (V2.3, MVP)
 
 **Spec:** `credential-proxy.md §12`
-**Estimate:** ~400 lines
+**Status:** Seven-command catalogue shipped (`list`, `rotate`, `add`,
+`show`, `remove`, `verify`, `audit`). Per-proxy-type validators and
+the live-network `verify` probe are V3.
 
-The CLI ships `list` and `rotate`. The spec calls for five additional
-subcommands:
+Implementation:
+- `cli/src/commands/credential.rs`:
+  - `run_add` writes a NEW credential to `<data_dir>/credentials/<name>.env`
+    (or `<data_dir>/providers/<id>.toml` for the `providers.<id>` form)
+    via `O_CREAT|O_EXCL` + `fsync` + `rename` + parent-dir `fsync`,
+    refusing to overwrite existing files. `--type` / `--env` /
+    `--desc` are recorded in the audit event for forensic queries
+    but are NOT used to dispatch a per-type validator yet.
+    `--value <bytes>` is rejected (`INV-CRED-CLI-01`).
+  - `run_show` prints `stat(2)` metadata only — never the value.
+  - `run_remove` requires `--force` (V2 cannot probe active
+    sessions from CLI without a live kernel IPC). Emits
+    `CredentialRemoved{forced=true}`.
+  - `run_verify` runs structural-only verification: file present,
+    mode 0600, uid match, body non-empty, `KEY=VALUE` parse for
+    `.env` form. Emits `CredentialVerified{success,latency_ms}`.
+  - `run_audit` merges `<data_dir>/audit/credential-cli.jsonl`
+    (operator-local trail) with the kernel's main audit segments
+    (`<data_dir>/audit/segment-NNN.jsonl`) and prints the records
+    whose payload mentions `<name>`.
+- `crates/audit/src/event.rs`: three new audit-event variants —
+  `CredentialRegistered`, `CredentialRemoved`, `CredentialVerified`
+  — with the wire shape called out in `credential-proxy.md §12.3`
+  (extended with `actor_fingerprint` and `backend_kind` for
+  consistency with `CredentialAccessed`/`CredentialRotated`).
+- `crates/policy/src/bundle.rs`: `KNOWN_AUDIT_EVENT_KINDS` extended
+  with the three new variants; `known_event_kinds_list_is_in_lockstep_with_audit_crate`
+  drift-guard updated.
 
-| Subcommand | Status | Why missing |
-|---|---|---|
-| `raxis credential add` | ❌ | Requires per-proxy-type validators (Postgres URI, kubeconfig YAML, AWS JSON) |
-| `raxis credential show` | ❌ | Overlaps `list --json`; deprioritized |
-| `raxis credential remove` | ❌ | Needs orphan-check (reject removal of in-use credentials) |
-| `raxis credential verify` | ❌ | Requires credential proxy runtime for live connection test |
-| `raxis credential audit` | ❌ | `raxis log` with a filter; convenience alias |
+V2 design choices:
+- **Per-type validators are V3.** The kubeconfig YAML check, the
+  AWS JSON parse, the Postgres URI sniff — all of these require
+  per-proxy validator crates that several proxies (MongoDB, MSSQL,
+  Postgres-extended) don't have yet. V2 stores bytes verbatim and
+  records the operator-supplied `--type` label in the audit event
+  so V3's validator dispatch is a non-breaking add.
+- **Verify is structural-only.** Live probes (Postgres `SELECT 1`,
+  Redis `PING`, K8s `GET /api/v1/namespaces`) require the
+  credential-proxy runtime which is partially implemented. V2's
+  structural verification catches the most common operator
+  mistakes (mode != 0600, wrong UID, empty file, truncated env
+  parse) and records the outcome in the same audit-event shape
+  V3 will use for live probes. Forward-compatible.
+- **Operator-local audit trail vs. kernel chain.** The CLI cannot
+  recompute `prev_sha256` safely while the kernel is mutating
+  segments. We therefore append to a separate JSONL file at
+  `<data_dir>/audit/credential-cli.jsonl` rather than tearing
+  through the chain. `audit` reads both. V3 will introduce a
+  `raxis credential audit submit` IPC handler so the kernel
+  ingests the trail at boot and folds it into the chain.
+- **`remove` requires `--force`.** Without a live kernel IPC the
+  CLI cannot probe active sessions; `--force` makes the operator
+  state intent explicitly. The audit event records `forced=true`
+  so future detection of "removed-while-active" is a join, not a
+  retroactive reconstruction.
+- **Wire-shape fidelity.** All three new audit events share the
+  `actor_fingerprint` + `backend_kind` columns with
+  `CredentialAccessed`/`CredentialRotated`, so forensic queries
+  and the kernel chain reader treat them uniformly.
+
+Tests: 29 integration tests in `cli/tests/credential_cli.rs`
+(`cargo test -p raxis-cli --test credential_cli`) covering all
+seven subcommands — `list` / `rotate` (12 pre-existing) plus 17
+new tests for `add` / `show` / `remove` / `verify` / `audit`
+covering happy path, refusal of overwrite, refusal of `--value`
+on argv, refusal of path traversal, mode 0600 enforcement, audit
+trail emission, JSON output, and the merge between local trail
+and kernel chain.
+
+V3 (deferred):
+- Per-type validators (`add --type postgres` parses URIs;
+  `add --type k8s --from-kubeconfig` validates YAML; `add --type aws`
+  parses JSON env).
+- Live-network `verify` probes (`SELECT 1` / `PING` / `sts:GetCallerIdentity` / etc).
+- `remove` orphan-check via kernel IPC (reject removal of
+  in-use credentials without `--force`).
+- `raxis credential audit submit` IPC handler so the kernel
+  folds the operator-local trail into the chained audit segment
+  on next boot.
 
 ---
 

@@ -277,3 +277,254 @@ fn unknown_credential_subcommand_suggests_list_or_rotate() {
         "closeness suggester should mention list/rotate. stderr: {stderr}",
     );
 }
+
+// ---------------------------------------------------------------------------
+// V2_GAPS §C7 — `credential add`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn add_writes_a_new_credential_with_mode_0600() {
+    let tmp = make_data_dir();
+    let out = run_raxis_with_stdin(
+        &["credential", "add", "newpg", "--type", "postgres", "--env", "staging", "--stdin"],
+        tmp.path(),
+        b"PGHOST=db\nPGPASSWORD=hunter2\n",
+    );
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let on_disk = std::fs::read(tmp.path().join("credentials/newpg.env")).unwrap();
+    assert_eq!(on_disk, b"PGHOST=db\nPGPASSWORD=hunter2");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::metadata(tmp.path().join("credentials/newpg.env")).unwrap();
+        assert_eq!(md.mode() & 0o777, 0o600, "add must write 0600");
+    }
+}
+
+#[test]
+fn add_emits_a_credential_registered_record_in_the_local_trail() {
+    let tmp = make_data_dir();
+    let out = run_raxis_with_stdin(
+        &["credential", "add", "trailpg", "--type", "postgres", "--env", "staging", "--stdin"],
+        tmp.path(),
+        b"hello",
+    );
+    assert!(out.status.success());
+
+    let trail = std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl"))
+        .expect("trail file");
+    let line = trail.lines().last().expect("at least one line");
+    let v: serde_json::Value = serde_json::from_str(line).expect("valid json");
+    assert_eq!(v["kind"], "CredentialRegistered");
+    assert_eq!(v["name"], "trailpg");
+    assert_eq!(v["proxy_type"], "postgres");
+    assert_eq!(v["environment"], "staging");
+    assert_eq!(v["backend_kind"], "file");
+    assert!(v["emitted_at"].is_i64());
+}
+
+#[test]
+fn add_refuses_when_credential_already_exists() {
+    let tmp = make_data_dir();
+    write_cred_file(tmp.path(), "credentials", "dup.env", b"existing");
+    let out = run_raxis_with_stdin(
+        &["credential", "add", "dup", "--stdin"],
+        tmp.path(),
+        b"replacement",
+    );
+    assert!(!out.status.success(), "must refuse to overwrite via add");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("already exists") || stderr.contains("rotate"),
+        "stderr should redirect to rotate: {stderr}"
+    );
+    let on_disk = std::fs::read(tmp.path().join("credentials/dup.env")).unwrap();
+    assert_eq!(on_disk, b"existing", "add must not have touched the file");
+}
+
+#[test]
+fn add_rejects_value_argv_flag() {
+    let tmp = make_data_dir();
+    let out = run_raxis(
+        &["credential", "add", "x", "--value", "the-actual-secret"],
+        tmp.path(),
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--value") && stderr.contains("rejected"), "stderr: {stderr}");
+}
+
+#[test]
+fn add_refuses_path_traversal_in_name() {
+    let tmp = make_data_dir();
+    let out = run_raxis_with_stdin(
+        &["credential", "add", "../escape", "--stdin"],
+        tmp.path(),
+        b"data",
+    );
+    assert!(!out.status.success(), "must refuse traversal segments");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("traversal") || stderr.contains("path separator"), "stderr: {stderr}");
+}
+
+// ---------------------------------------------------------------------------
+// V2_GAPS §C7 — `credential show`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn show_prints_metadata_without_revealing_value() {
+    let tmp = make_data_dir();
+    write_cred_file(tmp.path(), "credentials", "shown.env", b"super-secret-value");
+    let out = run_raxis(&["credential", "show", "shown"], tmp.path());
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Name:"), "stdout: {stdout}");
+    assert!(stdout.contains("File path:"), "stdout: {stdout}");
+    assert!(stdout.contains("Permissions:"), "stdout: {stdout}");
+    assert!(!stdout.contains("super-secret-value"), "show MUST NOT reveal the value");
+}
+
+#[test]
+fn show_json_emits_metadata_object() {
+    let tmp = make_data_dir();
+    write_cred_file(tmp.path(), "credentials", "j.env", b"abc");
+    let out = run_raxis(&["credential", "show", "j", "--json"], tmp.path());
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert_eq!(v["name"], "j");
+    assert_eq!(v["kind"], "credential");
+    assert_eq!(v["size_bytes"], 3);
+}
+
+#[test]
+fn show_fails_for_unknown_credential() {
+    let tmp = make_data_dir();
+    let out = run_raxis(&["credential", "show", "missing"], tmp.path());
+    assert!(!out.status.success());
+}
+
+// ---------------------------------------------------------------------------
+// V2_GAPS §C7 — `credential remove`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn remove_without_force_refuses_and_keeps_file() {
+    let tmp = make_data_dir();
+    write_cred_file(tmp.path(), "credentials", "keep.env", b"keep-me");
+    let out = run_raxis(&["credential", "remove", "keep"], tmp.path());
+    assert!(!out.status.success(), "remove without --force must fail");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--force"), "stderr should explain --force: {stderr}");
+    assert!(tmp.path().join("credentials/keep.env").exists(), "file must still exist");
+}
+
+#[test]
+fn remove_with_force_deletes_file_and_emits_audit_record() {
+    let tmp = make_data_dir();
+    write_cred_file(tmp.path(), "credentials", "gone.env", b"goodbye");
+    let out = run_raxis(&["credential", "remove", "gone", "--force"], tmp.path());
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(!tmp.path().join("credentials/gone.env").exists(), "file must be unlinked");
+
+    let trail = std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl"))
+        .expect("trail file");
+    let line = trail.lines().last().expect("at least one line");
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(v["kind"], "CredentialRemoved");
+    assert_eq!(v["name"], "gone");
+    assert_eq!(v["forced"], true);
+}
+
+#[test]
+fn remove_unknown_credential_fails() {
+    let tmp = make_data_dir();
+    let out = run_raxis(&["credential", "remove", "ghost", "--force"], tmp.path());
+    assert!(!out.status.success());
+}
+
+// ---------------------------------------------------------------------------
+// V2_GAPS §C7 — `credential verify`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verify_passes_for_well_formed_env_credential() {
+    let tmp = make_data_dir();
+    write_cred_file(tmp.path(), "credentials", "vpg.env", b"PGHOST=x\nPGPASSWORD=y\n");
+    let out = run_raxis(&["credential", "verify", "vpg"], tmp.path());
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("Status:") && stdout.contains("OK"), "stdout: {stdout}");
+}
+
+#[test]
+fn verify_fails_for_empty_body() {
+    let tmp = make_data_dir();
+    write_cred_file(tmp.path(), "credentials", "empty.env", b"");
+    let out = run_raxis(&["credential", "verify", "empty"], tmp.path());
+    assert!(!out.status.success(), "empty body must fail verification");
+}
+
+#[test]
+fn verify_emits_audit_record_with_success_field() {
+    let tmp = make_data_dir();
+    write_cred_file(tmp.path(), "credentials", "v.env", b"hello");
+    let out = run_raxis(&["credential", "verify", "v"], tmp.path());
+    assert!(out.status.success());
+    let trail = std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl"))
+        .expect("trail file");
+    let line = trail.lines().last().expect("at least one line");
+    let v: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(v["kind"], "CredentialVerified");
+    assert_eq!(v["name"], "v");
+    assert_eq!(v["success"], true);
+    assert!(v["latency_ms"].is_u64() || v["latency_ms"].is_i64());
+}
+
+// ---------------------------------------------------------------------------
+// V2_GAPS §C7 — `credential audit`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn audit_shows_records_for_a_credential() {
+    let tmp = make_data_dir();
+    // Seed by adding + verifying.
+    let _ = run_raxis_with_stdin(
+        &["credential", "add", "trail", "--type", "postgres", "--env", "staging", "--stdin"],
+        tmp.path(),
+        b"PGHOST=h\n",
+    );
+    let _ = run_raxis(&["credential", "verify", "trail"], tmp.path());
+
+    let out = run_raxis(&["credential", "audit", "trail"], tmp.path());
+    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("CredentialRegistered"), "stdout: {stdout}");
+    assert!(stdout.contains("CredentialVerified"),   "stdout: {stdout}");
+}
+
+#[test]
+fn audit_for_unknown_credential_returns_zero_lines() {
+    let tmp = make_data_dir();
+    let out = run_raxis(&["credential", "audit", "ghost"], tmp.path());
+    assert!(out.status.success(), "no-events case must exit zero");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("(no audit events found"), "stdout: {stdout}");
+}
+
+#[test]
+fn audit_json_output_is_array() {
+    let tmp = make_data_dir();
+    let _ = run_raxis_with_stdin(
+        &["credential", "add", "j2", "--type", "postgres", "--stdin"],
+        tmp.path(),
+        b"PGHOST=h\n",
+    );
+    let out = run_raxis(&["credential", "audit", "j2", "--json"], tmp.path());
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid json");
+    assert!(v.is_array());
+    let arr = v.as_array().unwrap();
+    assert!(arr.iter().any(|e| e["kind"] == "CredentialRegistered"));
+}

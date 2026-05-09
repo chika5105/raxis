@@ -1221,6 +1221,59 @@ pub enum AuditEventKind {
         backend_kind:        String,
     },
 
+    /// V2_GAPS §C7 — emitted when `raxis credential add` writes a new
+    /// credential file. Carries the public-facing metadata only; the
+    /// credential VALUE is never recorded. Forensic queries match
+    /// on `name` to follow a credential through its lifecycle
+    /// (`CredentialRegistered` → `CredentialAccessed`* →
+    /// `CredentialRotated`* → `CredentialRemoved`).
+    ///
+    /// Field semantics:
+    ///   * `name`             — policy-declared credential name.
+    ///   * `proxy_type`       — operator-supplied `--type` label
+    ///     (`postgres`, `mysql`, `redis`, `k8s`, `aws`, `gcp`,
+    ///     `azure`, ...). Empty string when the operator did not
+    ///     pass `--type`.
+    ///   * `environment`      — operator-supplied `--env` label
+    ///     (matches `[[environment_gates]].label` in policy).
+    ///     Empty string when omitted.
+    ///   * `actor_fingerprint`— operator pubkey 32-hex prefix
+    ///     (matches `policy.toml [meta].signed_by`).
+    ///   * `backend_kind`     — concrete backend impl name (today:
+    ///     always `"file"`).
+    CredentialRegistered {
+        name:               String,
+        proxy_type:         String,
+        environment:        String,
+        actor_fingerprint:  String,
+        backend_kind:       String,
+    },
+
+    /// V2_GAPS §C7 — emitted when `raxis credential remove` deletes
+    /// a credential file. `forced` distinguishes the defensive
+    /// (`--force` was supplied) from the (V3-future) "gracefully
+    /// detected zero active sessions" path.
+    CredentialRemoved {
+        name:               String,
+        actor_fingerprint:  String,
+        backend_kind:       String,
+        forced:             bool,
+    },
+
+    /// V2_GAPS §C7 — emitted when `raxis credential verify` runs.
+    /// V2 verification is structural-only (file presence, mode 0600,
+    /// uid match, non-empty body, optional `KEY=VALUE` parse).
+    /// V3 will extend this with a live network probe per proxy type;
+    /// the audit-event shape is forward-compatible with that.
+    CredentialVerified {
+        name:               String,
+        proxy_type:         String,
+        success:            bool,
+        latency_ms:         u64,
+        actor_fingerprint:  String,
+        backend_kind:       String,
+    },
+
     // --- Tier 1 transparent egress (`vm-network-isolation.md §3.2`).
     /// Emitted when the kernel's egress admission service admits
     /// one outbound connection from the agent VM. Carries the
@@ -1708,6 +1761,9 @@ impl AuditEventKind {
             Self::SecurityViolation { .. } => "SecurityViolation",
             Self::CredentialAccessed { .. } => "CredentialAccessed",
             Self::CredentialRotated { .. } => "CredentialRotated",
+            Self::CredentialRegistered { .. } => "CredentialRegistered",
+            Self::CredentialRemoved { .. } => "CredentialRemoved",
+            Self::CredentialVerified { .. } => "CredentialVerified",
             Self::TransparentProxyAdmitted { .. } => "TransparentProxyAdmitted",
             Self::TransparentProxyDenied { .. } => "TransparentProxyDenied",
             Self::CredentialProxyStarted { .. } => "CredentialProxyStarted",

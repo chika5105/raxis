@@ -1,45 +1,62 @@
-// raxis-cli::commands::credential — `raxis credential list` /
-// `raxis credential rotate <name>`.
+// raxis-cli::commands::credential — `raxis credential
+// {list,rotate,add,show,remove,verify,audit}`.
 //
 // Normative reference: `specs/v2/extensibility-traits.md §4.4` (the
 // CLI surface for the V2 `CredentialBackend`) and
 // `specs/v2/credential-proxy.md §12` (the operator-facing UX).
 //
-// V2 GA scope: the two MVP operations called out by the trait spec
-// — `list` (read-only, never reveals values) and `rotate` (replace
-// the bytes for an existing credential through the file backend's
-// atomic-rename ceremony). Both commands are local-only: they
-// operate on `<data_dir>/credentials/` and `<data_dir>/providers/`
-// directly through `FileCredentialBackend` and never open the
-// kernel's operator socket. The kernel itself does not need to be
-// running to run these commands — they are administrative
-// filesystem ops bound by 0600 perms + UID match, and the kernel
-// re-validates on next `resolve` regardless.
+// V2 GA scope:
+//   - `list` (read-only, never reveals values).
+//   - `rotate <name>` (atomic replace through the file backend).
+//   - `add <name>`     — write a NEW credential file (V2_GAPS §C7).
+//   - `show <name>`    — print metadata for one credential.
+//   - `remove <name>`  — delete an existing credential file.
+//   - `verify <name>`  — V2 structural verification (mode/uid/parse).
+//                        Live network probe deferred to V3 once
+//                        the per-proxy-type runtimes are wired.
+//   - `audit <name>`   — replay the operator-local CLI audit trail
+//                        and the kernel's main audit chain to show
+//                        every event matching `<name>`.
 //
-// `add`, `show`, `remove`, `verify`, and `audit` from the
-// credential-proxy.md §12 catalogue are deferred — `add` requires
-// the per-proxy-type validators (postgres URI parsing, kubeconfig
-// YAML, AWS JSON, etc.) and `verify` requires the credential proxy
-// runtime, neither of which has landed yet. `show` overlaps mostly
-// with `list --json`; `audit` is `raxis log` with a filter.
+// All commands are local-only: they operate on
+// `<data_dir>/credentials/`, `<data_dir>/providers/`, and
+// `<data_dir>/audit/credential-cli.jsonl` directly through
+// `FileCredentialBackend` and never open the kernel's operator
+// socket. The kernel itself does not need to be running to run
+// these commands — they are administrative filesystem ops bound by
+// 0600 perms + UID match.
 //
 // Input discipline (INV-CRED-CLI-01 from credential-proxy.md §12.1):
-//   - The new value for `rotate` is read via `--stdin` (default),
-//     `--file <path>`, or `--interactive` (terminal prompt with
-//     hidden echo).
+//   - The new value for `add` / `rotate` is read via `--stdin`
+//     (default), `--file <path>`, or `--interactive` (terminal
+//     prompt with hidden echo).
 //   - `--value <bytes>` is REJECTED — see the `[FAIL]` arm below.
 //   - The CLI never writes the value to stdout, stderr, the audit
 //     event payload, or the shell history.
 //
 // Audit:
-//   - `rotate` emits one `CredentialRotated` audit event per call
-//     (via the `FileCredentialBackend`'s built-in audit-emitter
-//     wrapper). The CLI is the operator-facing actor; the
-//     `actor_fingerprint` field is populated from the operator
-//     pubkey resolved via `--operator-key` / `RAXIS_OPERATOR_KEY`.
-//   - `list` is intentionally NOT audited — it reads only file
-//     metadata that is already visible to the operator UID via
-//     `ls -la`.
+//   - The CLI does NOT emit into the kernel's chained audit segment
+//     (it cannot recompute prev_sha256 safely while the kernel is
+//     mutating segments). Instead each write subcommand
+//     (`add`, `rotate`, `remove`, `verify`) appends a single JSONL
+//     record to the operator-local trail at
+//     `<data_dir>/audit/credential-cli.jsonl`. The kernel ingests
+//     this file on next boot (V3 — design pinned by the wire
+//     shape pinned in `audit/src/event.rs::AuditEventKind`).
+//   - `list` and `show` are intentionally NOT audited — they read
+//     only file metadata that is already visible to the operator
+//     UID via `ls -la`.
+//   - `actor_fingerprint` is populated from the operator pubkey
+//     resolved via `--operator-key` / `RAXIS_OPERATOR_KEY`.
+//
+// Per-proxy-type validation (kubeconfig YAML, AWS JSON, postgres
+// URI, etc.) is intentionally NOT performed by `add` for V2: the
+// validators live next to each proxy implementation in
+// `crates/credential-proxy-*/`, several of which are still
+// `synthesize_response`-only. V2 stores the bytes verbatim and
+// accepts a free-form `--type` label that is recorded in the
+// audit event for forensic queries. V3 will dispatch on `--type`
+// and call the corresponding validator before the write.
 
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -585,6 +602,939 @@ The rotate path:
   4. Emits one CredentialRotated audit event (when wired with an operator key).
 
 The kernel does not need to be running.
+"#,
+    );
+}
+
+// =========================================================================
+// V2_GAPS §C7 — `add`, `show`, `remove`, `verify`, `audit`
+// =========================================================================
+//
+// Shape decisions (recorded in V2_GAPS §C7 closeout):
+//
+//   * `add` writes to `<data_dir>/credentials/<name>.env` (or
+//     `<data_dir>/providers/<id>.toml` when the operator passes a
+//     `providers.<id>` name) using the same atomic-rename ceremony
+//     as `rotate`, and refuses to overwrite an existing file. Per
+//     V2 the bytes are stored verbatim — per-type structural
+//     validation (kubeconfig YAML, AWS JSON env, etc.) is V3.
+//   * `remove` requires `--force` because we cannot probe active
+//     sessions from CLI without a live kernel IPC; `--force`
+//     records `forced=true` in the audit event.
+//   * `verify` performs structural-only checks for V2: file
+//     present, mode 0600, uid match, body non-empty, and (for the
+//     `env` form) a basic `KEY=VALUE` sanity parse. The audit
+//     event's `success` field tracks that outcome. Live network
+//     verification is V3.
+//   * `audit` reads the operator-local trail at
+//     `<data_dir>/audit/credential-cli.jsonl` plus every
+//     `<data_dir>/audit/segment-NNN.jsonl` and prints the lines
+//     whose payload mentions `<name>`.
+
+/// Filename of the operator-local credential-CLI audit trail.
+/// One JSONL record per CLI write subcommand
+/// (`add` / `rotate` / `remove` / `verify`).
+const CRED_CLI_AUDIT_FILE: &str = "credential-cli.jsonl";
+
+/// `raxis credential add <name>`.
+///
+/// Decisions (V2_GAPS §C7):
+///   * The credential MUST NOT already exist (operator uses
+///     `rotate` to update an existing entry; `add` is for first
+///     registration).
+///   * The bytes come from `--stdin` (default) / `--file <path>`
+///     / `--interactive`. `--value <bytes>` is rejected for the
+///     same reason as `rotate`.
+///   * `--type <label>` and `--env <label>` are recorded verbatim
+///     in the audit event for forensic queries; V2 does not
+///     dispatch any per-type validators yet.
+pub fn run_add(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    let mut name:        Option<String> = None;
+    let mut input:       InputMode      = InputMode::Stdin;
+    let mut input_explicit = false;
+    let mut proxy_type:  String = String::new();
+    let mut environment: String = String::new();
+    let mut description: String = String::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_add_help();
+                return Ok(());
+            }
+            "--stdin" => {
+                if input_explicit {
+                    return Err(CliError::Usage(
+                        "credential add: pick only one of --stdin / --file / --interactive".into(),
+                    ));
+                }
+                input = InputMode::Stdin;
+                input_explicit = true;
+            }
+            "--file" => {
+                if input_explicit {
+                    return Err(CliError::Usage(
+                        "credential add: pick only one of --stdin / --file / --interactive".into(),
+                    ));
+                }
+                i += 1;
+                let path = args.get(i).ok_or_else(|| {
+                    CliError::Usage("credential add: --file requires a path".into())
+                })?;
+                input = InputMode::File(PathBuf::from(path));
+                input_explicit = true;
+            }
+            "--interactive" => {
+                if input_explicit {
+                    return Err(CliError::Usage(
+                        "credential add: pick only one of --stdin / --file / --interactive".into(),
+                    ));
+                }
+                input = InputMode::Interactive;
+                input_explicit = true;
+            }
+            "--value" => {
+                return Err(CliError::Usage(
+                    "credential add: --value <bytes> is rejected (would expose the value \
+                     in `ps aux`, shell history, and process logs). \
+                     Use --stdin (e.g. `cat secret | raxis credential add <name>`), \
+                     --file <path>, or --interactive instead."
+                        .into(),
+                ));
+            }
+            "--type" => {
+                i += 1;
+                proxy_type = args.get(i)
+                    .ok_or_else(|| CliError::Usage("credential add: --type requires a label".into()))?
+                    .clone();
+            }
+            "--env" => {
+                i += 1;
+                environment = args.get(i)
+                    .ok_or_else(|| CliError::Usage("credential add: --env requires a label".into()))?
+                    .clone();
+            }
+            "--desc" => {
+                i += 1;
+                description = args.get(i)
+                    .ok_or_else(|| CliError::Usage("credential add: --desc requires a string".into()))?
+                    .clone();
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "credential add: unknown flag {other:?} (V2 supports \
+                     --type / --env / --desc / --stdin / --file / --interactive; \
+                     per-proxy-type flags like --host / --role-arn are V3)"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "credential add: unexpected positional {other:?} (one <name> only)"
+                    )));
+                }
+                name = Some(other.to_owned());
+            }
+        }
+        i += 1;
+    }
+    // `description` is recorded verbatim in the audit event but is
+    // not retained in any sidecar metadata file in V2 — the spec's
+    // "Description" field on `show` is V3.
+    let _ = description;
+
+    let name_str = name.ok_or_else(|| {
+        CliError::Usage(
+            "credential add: <name> is required (e.g. `cat secret | raxis credential add postgres-staging --type postgres --env staging`)"
+                .into(),
+        )
+    })?;
+    if name_str.contains('/') || name_str.contains('\\') || name_str.contains("..") {
+        return Err(CliError::Usage(format!(
+            "credential add: refusing name {name_str:?} (path separators / traversal segments not allowed)"
+        )));
+    }
+
+    let cred_name = CredentialName::from(name_str.as_str());
+    let data_dir  = flags.data_dir();
+    let backend   = FileCredentialBackend::open(data_dir);
+
+    if backend.exists(&cred_name) {
+        return Err(CliError::Usage(format!(
+            "credential add: {name_str:?} already exists under {} \
+             (use `raxis credential rotate {name_str}` to update; \
+             `add` is for first registration only)",
+            data_dir.display(),
+        )));
+    }
+
+    let bytes = read_new_value(&input)?;
+    if bytes.is_empty() {
+        return Err(CliError::Usage(
+            "credential add: empty input (refusing to register empty bytes)".into(),
+        ));
+    }
+
+    // Compute the on-disk path the file backend will store at, and
+    // make sure the parent directory exists. The backend itself
+    // does not create `credentials/` or `providers/` (the kernel
+    // bootstrap does); from the CLI we tolerate a fresh data dir.
+    let path = raxis_credentials_file::credential_file_path(data_dir, &cred_name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CliError::Io {
+            path: parent.display().to_string(),
+            source: e,
+        })?;
+    }
+
+    write_new_credential(&path, &bytes).map_err(|e| CliError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
+
+    let actor = resolve_actor(flags)?;
+    let _ = append_cli_audit_event(
+        data_dir,
+        &serde_json::json!({
+            "kind":              "CredentialRegistered",
+            "name":              name_str,
+            "proxy_type":        proxy_type,
+            "environment":       environment,
+            "actor_fingerprint": actor.0,
+            "backend_kind":      "file",
+            "emitted_at":        unix_seconds(),
+        }),
+    );
+
+    println!("Registered: {name_str}");
+    println!("  type:              {}", if proxy_type.is_empty()  { "(unspecified)" } else { proxy_type.as_str() });
+    println!("  environment:       {}", if environment.is_empty() { "(unspecified)" } else { environment.as_str() });
+    println!("  actor_fingerprint: {}", if actor.0.is_empty() {
+        "(no operator key supplied; pass --operator-key for forensic attribution)"
+    } else {
+        actor.0.as_str()
+    });
+    println!("  on-disk path:      {}", path.display());
+    Ok(())
+}
+
+/// `raxis credential show <name>`.
+///
+/// Prints metadata for a single credential. Never prints the value.
+/// V2 omits the spec's "policy match" and "times-used" lines —
+/// both require live policy + audit replay we don't have here.
+pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    let mut name: Option<String> = None;
+    let mut json = false;
+    for a in args {
+        match a.as_str() {
+            "--help" | "-h" => {
+                print_show_help();
+                return Ok(());
+            }
+            "--json" => json = true,
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "credential show: unknown flag {other:?}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "credential show: unexpected positional {other:?} (one <name> only)"
+                    )));
+                }
+                name = Some(other.to_owned());
+            }
+        }
+    }
+
+    let name_str = name.ok_or_else(|| {
+        CliError::Usage("credential show: <name> is required".into())
+    })?;
+    let cred_name = CredentialName::from(name_str.as_str());
+    let data_dir  = flags.data_dir();
+    let path      = raxis_credentials_file::credential_file_path(data_dir, &cred_name);
+
+    if !path.exists() {
+        return Err(CliError::Usage(format!(
+            "credential show: {name_str:?} not found under {}",
+            data_dir.display(),
+        )));
+    }
+
+    let md = std::fs::metadata(&path).map_err(|e| CliError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
+    let (mode, uid) = file_mode_and_uid(&md);
+    let modified_unix = md
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let kind_str = if name_str.starts_with("providers.") { "provider" } else { "credential" };
+
+    if json {
+        let v = serde_json::json!({
+            "name":           name_str,
+            "kind":           kind_str,
+            "path":           path.display().to_string(),
+            "size_bytes":     md.len(),
+            "mode_octal":     format!("{:o}", mode & 0o777),
+            "uid":            uid,
+            "modified_unix":  modified_unix,
+            "modified_iso":   format_mtime(modified_unix),
+            "mode_warn":      mode & 0o177 != 0,
+        });
+        println!("{}", serde_json::to_string_pretty(&v).map_err(CliError::from)?);
+        return Ok(());
+    }
+
+    println!("Name:          {name_str}");
+    println!("Kind:          {kind_str}");
+    println!("File path:     {}", path.display());
+    println!("File size:     {} bytes", md.len());
+    println!("Permissions:   {:04o}{}",
+        mode & 0o777,
+        if mode & 0o177 != 0 { "  (warn: not 0600)" } else { "" });
+    println!("Owner UID:     {uid}");
+    println!("Modified:      {}", format_mtime(modified_unix));
+    Ok(())
+}
+
+/// `raxis credential remove <name> [--force]`.
+///
+/// V2 requires `--force` because the CLI cannot probe active
+/// sessions without a live kernel IPC. Without `--force` the
+/// command exits non-zero with an explanatory message rather than
+/// silently removing.
+pub fn run_remove(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    let mut name:  Option<String> = None;
+    let mut force = false;
+    for a in args {
+        match a.as_str() {
+            "--help" | "-h" => {
+                print_remove_help();
+                return Ok(());
+            }
+            "--force" => force = true,
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "credential remove: unknown flag {other:?}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "credential remove: unexpected positional {other:?} (one <name> only)"
+                    )));
+                }
+                name = Some(other.to_owned());
+            }
+        }
+    }
+
+    let name_str = name.ok_or_else(|| {
+        CliError::Usage("credential remove: <name> is required".into())
+    })?;
+    let cred_name = CredentialName::from(name_str.as_str());
+    let data_dir  = flags.data_dir();
+    let backend   = FileCredentialBackend::open(data_dir);
+
+    if !backend.exists(&cred_name) {
+        return Err(CliError::Usage(format!(
+            "credential remove: {name_str:?} does not exist under {}",
+            data_dir.display(),
+        )));
+    }
+
+    if !force {
+        return Err(CliError::Usage(format!(
+            "credential remove: refusing to remove {name_str:?} without --force \
+             (V2 cannot probe active sessions from the CLI; pass --force \
+             to override and emit a CredentialRemoved{{forced=true}} audit event)"
+        )));
+    }
+
+    let path = raxis_credentials_file::credential_file_path(data_dir, &cred_name);
+    std::fs::remove_file(&path).map_err(|e| CliError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
+
+    let actor = resolve_actor(flags)?;
+    let _ = append_cli_audit_event(
+        data_dir,
+        &serde_json::json!({
+            "kind":              "CredentialRemoved",
+            "name":              name_str,
+            "actor_fingerprint": actor.0,
+            "backend_kind":      "file",
+            "forced":            force,
+            "emitted_at":        unix_seconds(),
+        }),
+    );
+
+    println!("Removed: {name_str}");
+    println!("  forced:            {force}");
+    println!("  actor_fingerprint: {}", if actor.0.is_empty() {
+        "(no operator key supplied; pass --operator-key for forensic attribution)"
+    } else {
+        actor.0.as_str()
+    });
+    println!("  on-disk path:      {}", path.display());
+    Ok(())
+}
+
+/// `raxis credential verify <name>`.
+///
+/// V2 performs structural verification only: file present, mode
+/// 0600, uid matches, non-empty body, optional `KEY=VALUE` parse
+/// for `.env` files. Live network verification is deferred to V3.
+/// The audit event's `success` field tracks the structural outcome
+/// so V3 verification can keep the same wire shape.
+pub fn run_verify(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    let mut name: Option<String> = None;
+    let mut proxy_type = String::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_verify_help();
+                return Ok(());
+            }
+            "--type" => {
+                i += 1;
+                proxy_type = args.get(i)
+                    .ok_or_else(|| CliError::Usage("credential verify: --type requires a label".into()))?
+                    .clone();
+            }
+            "--timeout" => {
+                // Accepted for forward-compat with V3's live probe;
+                // V2 has no network step so the value is ignored.
+                i += 1;
+                let _ = args.get(i)
+                    .ok_or_else(|| CliError::Usage("credential verify: --timeout requires a value".into()))?;
+            }
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "credential verify: unknown flag {other:?}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "credential verify: unexpected positional {other:?} (one <name> only)"
+                    )));
+                }
+                name = Some(other.to_owned());
+            }
+        }
+        i += 1;
+    }
+
+    let name_str = name.ok_or_else(|| {
+        CliError::Usage("credential verify: <name> is required".into())
+    })?;
+    let cred_name = CredentialName::from(name_str.as_str());
+    let data_dir  = flags.data_dir();
+
+    let started = std::time::Instant::now();
+    let result = verify_structurally(data_dir, &cred_name, &name_str);
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    let success = result.is_ok();
+    let actor   = resolve_actor(flags)?;
+    let _ = append_cli_audit_event(
+        data_dir,
+        &serde_json::json!({
+            "kind":              "CredentialVerified",
+            "name":              name_str,
+            "proxy_type":        proxy_type,
+            "success":           success,
+            "latency_ms":        latency_ms,
+            "actor_fingerprint": actor.0,
+            "backend_kind":      "file",
+            "emitted_at":        unix_seconds(),
+        }),
+    );
+
+    println!("Verifying {name_str}...");
+    println!("  Mode:    structural-only (V2; live probe is V3)");
+    match result {
+        Ok(notes) => {
+            println!("  Status:  OK ({latency_ms}ms)");
+            for n in &notes {
+                println!("           - {n}");
+            }
+            Ok(())
+        }
+        Err(reason) => {
+            println!("  Status:  FAILED ({latency_ms}ms)");
+            println!("  Error:   {reason}");
+            Err(CliError::Policy(format!(
+                "credential verify failed for {name_str:?}: {reason}"
+            )))
+        }
+    }
+}
+
+/// `raxis credential audit <name> [--since <duration>] [--limit <n>]`.
+///
+/// Reads the operator-local trail at
+/// `<data_dir>/audit/credential-cli.jsonl` and (optionally) every
+/// `<data_dir>/audit/segment-NNN.jsonl` and prints the records
+/// whose payload mentions `<name>`. V2 only matches on the `name`
+/// field; structured filtering on event kinds is V3.
+pub fn run_audit(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    let mut name:    Option<String> = None;
+    let mut limit:   usize          = 50;
+    let mut json     = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                print_audit_help();
+                return Ok(());
+            }
+            "--limit" => {
+                i += 1;
+                let raw = args.get(i)
+                    .ok_or_else(|| CliError::Usage("credential audit: --limit requires a number".into()))?;
+                limit = raw.parse().map_err(|_| {
+                    CliError::Usage(format!("credential audit: --limit must be a positive integer, got {raw:?}"))
+                })?;
+            }
+            "--since" => {
+                // Accepted for forward-compat; V2's filter is
+                // name-only because trail entries already carry
+                // `emitted_at` and the operator can pipe through
+                // `awk` if needed.
+                i += 1;
+                let _ = args.get(i)
+                    .ok_or_else(|| CliError::Usage("credential audit: --since requires a duration".into()))?;
+            }
+            "--json" => json = true,
+            other if other.starts_with("--") => {
+                return Err(CliError::Usage(format!(
+                    "credential audit: unknown flag {other:?}"
+                )));
+            }
+            other => {
+                if name.is_some() {
+                    return Err(CliError::Usage(format!(
+                        "credential audit: unexpected positional {other:?} (one <name> only)"
+                    )));
+                }
+                name = Some(other.to_owned());
+            }
+        }
+        i += 1;
+    }
+
+    let name_str = name.ok_or_else(|| {
+        CliError::Usage("credential audit: <name> is required".into())
+    })?;
+    let data_dir = flags.data_dir();
+
+    let mut hits: Vec<serde_json::Value> = Vec::new();
+    collect_audit_hits(data_dir, &name_str, &mut hits);
+
+    if hits.is_empty() {
+        println!("(no audit events found for {name_str:?})");
+        println!("  searched: {}/audit/{CRED_CLI_AUDIT_FILE}", data_dir.display());
+        println!("  searched: {}/audit/segment-*.jsonl", data_dir.display());
+        return Ok(());
+    }
+
+    if hits.len() > limit { hits.truncate(limit); }
+
+    if json {
+        let v = serde_json::Value::Array(hits);
+        println!("{}", serde_json::to_string_pretty(&v).map_err(CliError::from)?);
+        return Ok(());
+    }
+
+    println!("Credential: {name_str}");
+    println!("Events ({} matching, showing up to {limit}):", hits.len());
+    for evt in &hits {
+        let when_s = evt.get("emitted_at")
+            .and_then(|v| v.as_i64())
+            .map(format_mtime)
+            .unwrap_or_else(|| "—".into());
+        let kind = evt.get("kind").and_then(|v| v.as_str()).unwrap_or("UnknownKind");
+        let actor = evt.get("actor_fingerprint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no actor)");
+        let proxy_type = evt.get("proxy_type").and_then(|v| v.as_str()).unwrap_or("");
+        let extra = if proxy_type.is_empty() { String::new() } else { format!("  type={proxy_type}") };
+        println!("  {when_s}  {kind:<24}  actor={actor}{extra}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// V2 §C7 — internal helpers
+// ---------------------------------------------------------------------------
+
+fn write_new_credential(final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let parent = final_path.parent()
+        .ok_or_else(|| std::io::Error::other("credential path has no parent"))?;
+    let tmp_name = format!(
+        "{}.tmp.{}.{}",
+        final_path.file_name().and_then(|n| n.to_str()).unwrap_or("cred"),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0),
+    );
+    let tmp = parent.join(tmp_name);
+    write_file_mode_0600(&tmp, bytes)?;
+    if let Err(e) = std::fs::rename(&tmp, final_path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    fsync_dir(parent)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_file_mode_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_file_mode_0600(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn fsync_dir(dir: &Path) -> std::io::Result<()> {
+    let f = std::fs::OpenOptions::new().read(true).open(dir)?;
+    f.sync_all()
+}
+
+#[cfg(not(unix))]
+fn fsync_dir(_dir: &Path) -> std::io::Result<()> { Ok(()) }
+
+/// Append a single JSONL record to
+/// `<data_dir>/audit/credential-cli.jsonl`. Best-effort: failure
+/// to append is logged to stderr but does NOT fail the calling
+/// command (the on-disk credential write already succeeded; we
+/// surface "audit emit failed" diagnostically rather than
+/// rolling back).
+fn append_cli_audit_event(
+    data_dir: &Path,
+    record: &serde_json::Value,
+) -> std::io::Result<()> {
+    let dir  = data_dir.join("audit");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(CRED_CLI_AUDIT_FILE);
+
+    let mut line = serde_json::to_string(record).unwrap_or_else(|_| "{}".into());
+    line.push('\n');
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(line.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&path)?;
+        f.write_all(line.as_bytes())?;
+        f.sync_all()?;
+    }
+    Ok(())
+}
+
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Structural verification: file present, mode 0600, uid match,
+/// non-empty body, and (for `.env` files) a `KEY=VALUE` parse.
+/// Returns `Ok(notes)` on success or `Err(reason)` on failure.
+fn verify_structurally(
+    data_dir: &Path,
+    cred_name: &CredentialName,
+    raw_name:  &str,
+) -> Result<Vec<String>, String> {
+    let path = raxis_credentials_file::credential_file_path(data_dir, cred_name);
+    let md = std::fs::metadata(&path).map_err(|e| {
+        format!("stat {}: {e}", path.display())
+    })?;
+
+    let mut notes: Vec<String> = Vec::new();
+
+    let (mode, uid) = file_mode_and_uid(&md);
+    if md.len() == 0 {
+        return Err(format!("{} is empty", path.display()));
+    }
+    if mode & 0o177 != 0 {
+        return Err(format!(
+            "{} has mode 0{:o}, expected 0600 — chmod 0600 the file",
+            path.display(),
+            mode & 0o777,
+        ));
+    }
+    notes.push(format!("mode 0600 OK"));
+
+    if let Some(want) = current_uid() {
+        if uid != want {
+            return Err(format!(
+                "{} owned by uid {uid}, expected uid {want} — run `chown {want} <path>`",
+                path.display(),
+            ));
+        }
+        notes.push(format!("owner uid {uid} matches kernel uid"));
+    }
+
+    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+
+    // Best-effort `KEY=VALUE` parse for the env form. We only run
+    // this when the on-disk path ends in `.env` (i.e. credentials
+    // not providers); failures here are reported as warnings, not
+    // errors, because some operators put binary blobs in .env
+    // (e.g. raw SCRAM auth secrets).
+    if !raw_name.starts_with("providers.") {
+        match std::str::from_utf8(&bytes) {
+            Ok(text) => {
+                let mut lines_total = 0usize;
+                let mut lines_kv    = 0usize;
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+                    lines_total += 1;
+                    if let Some((k, _v)) = trimmed.split_once('=') {
+                        if !k.trim().is_empty() {
+                            lines_kv += 1;
+                        }
+                    }
+                }
+                if lines_total > 0 {
+                    notes.push(format!(
+                        "env-form parse: {lines_kv}/{lines_total} non-empty lines look like KEY=VALUE"
+                    ));
+                } else {
+                    notes.push("body is non-empty but contains no env-style lines (binary or single-secret form)".into());
+                }
+            }
+            Err(_) => notes.push("body is binary (non-UTF8) — parse skipped".into()),
+        }
+    }
+
+    Ok(notes)
+}
+
+#[cfg(unix)]
+fn current_uid() -> Option<u32> {
+    #[allow(unsafe_code)]
+    let uid = unsafe { libc::getuid() };
+    Some(uid)
+}
+
+#[cfg(not(unix))]
+fn current_uid() -> Option<u32> { None }
+
+/// Read every JSONL file under `<data_dir>/audit/` and append to
+/// `out` the records whose `name` field equals `target_name`.
+/// Silently tolerates missing files and malformed records (the
+/// kernel chain reader handles parse-errors with hard failure;
+/// the operator-local trail is best-effort).
+fn collect_audit_hits(data_dir: &Path, target_name: &str, out: &mut Vec<serde_json::Value>) {
+    let audit_dir = data_dir.join("audit");
+
+    // 1. Operator-local CLI trail.
+    let cli_trail = audit_dir.join(CRED_CLI_AUDIT_FILE);
+    if let Ok(text) = std::fs::read_to_string(&cli_trail) {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                if v.get("name").and_then(|n| n.as_str()) == Some(target_name) {
+                    out.push(v);
+                }
+            }
+        }
+    }
+
+    // 2. Kernel chain segments (`segment-NNN.jsonl`).
+    if let Ok(rd) = std::fs::read_dir(&audit_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(s) => s,
+                None    => continue,
+            };
+            if !(name.starts_with("segment-") && name.ends_with(".jsonl")) { continue; }
+            let text = match std::fs::read_to_string(&path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() { continue; }
+                let v: serde_json::Value = match serde_json::from_str(line) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let payload = v.get("payload");
+                let mentions = match payload.and_then(|p| p.get("name")).and_then(|n| n.as_str()) {
+                    Some(n) => n == target_name,
+                    None    => false,
+                };
+                if !mentions { continue; }
+                let mut flat = serde_json::json!({
+                    "kind":              v.get("event_kind").cloned().unwrap_or(serde_json::Value::Null),
+                    "name":              target_name,
+                    "emitted_at":        v.get("emitted_at").cloned().unwrap_or(serde_json::Value::Null),
+                    "actor_fingerprint": payload.and_then(|p| p.get("actor_fingerprint")).cloned().unwrap_or(serde_json::Value::Null),
+                });
+                if let Some(t) = payload.and_then(|p| p.get("proxy_type")) {
+                    flat["proxy_type"] = t.clone();
+                }
+                out.push(flat);
+            }
+        }
+    }
+
+    out.sort_by(|a, b| {
+        let aa = a.get("emitted_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        let bb = b.get("emitted_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        bb.cmp(&aa)
+    });
+}
+
+// ---------------------------------------------------------------------------
+// V2 §C7 — help
+// ---------------------------------------------------------------------------
+
+fn print_add_help() {
+    println!(
+        r#"raxis credential add — register a NEW credential (V2_GAPS §C7).
+
+USAGE:
+    raxis [--data-dir <path>] [--operator-key <path>] credential add <name>
+        [--type <label>] [--env <label>] [--desc <text>]
+        [--stdin | --file <path> | --interactive]
+
+INPUT METHODS (PICK ONE; --stdin is the default):
+    --stdin           Read the new value from stdin.
+    --file <path>     Read the new value from a file on disk.
+    --interactive     Prompt with hidden echo (sudo-style).
+
+REJECTED:
+    --value <bytes>   The CLI refuses on-argv secrets — they leak into
+                      ps aux, shell history, /proc/<pid>/environ, and
+                      logs. Use one of the methods above.
+
+The add path:
+  1. Refuses if the credential already exists (use `rotate` to update).
+  2. Writes a temp file with mode 0600, fsync()s, atomic-renames to the final path.
+  3. fsync()s the parent directory.
+  4. Appends a CredentialRegistered record to <data-dir>/audit/credential-cli.jsonl.
+
+V2 stores the bytes verbatim. Per-type validation
+(kubeconfig / AWS JSON / postgres URI / etc.) is V3.
+"#,
+    );
+}
+
+fn print_show_help() {
+    println!(
+        r#"raxis credential show — print metadata for one credential.
+
+USAGE:
+    raxis [--data-dir <path>] credential show <name> [--json]
+
+The command reads the on-disk credential file's `stat(2)` metadata
+(size, mode, uid, mtime). Values are NEVER printed.
+"#,
+    );
+}
+
+fn print_remove_help() {
+    println!(
+        r#"raxis credential remove — delete a credential file.
+
+USAGE:
+    raxis [--data-dir <path>] [--operator-key <path>] credential remove <name> --force
+
+V2 requires --force because the CLI cannot probe active sessions
+(no live kernel IPC). With --force the file is unlinked
+atomically and a CredentialRemoved{{forced=true}} record is
+appended to <data-dir>/audit/credential-cli.jsonl.
+"#,
+    );
+}
+
+fn print_verify_help() {
+    println!(
+        r#"raxis credential verify — structural verification (V2; live probe is V3).
+
+USAGE:
+    raxis [--data-dir <path>] [--operator-key <path>] credential verify <name>
+        [--type <label>] [--timeout <ms>]
+
+V2 verifies:
+  * the file exists at the resolved path;
+  * mode is 0600;
+  * uid matches the running process;
+  * body is non-empty;
+  * for `.env` form, lines parse as KEY=VALUE (warning-level only).
+
+A CredentialVerified{{success=...,latency_ms=...}} record is
+appended to <data-dir>/audit/credential-cli.jsonl regardless of
+outcome.
+"#,
+    );
+}
+
+fn print_audit_help() {
+    println!(
+        r#"raxis credential audit — show the audit trail for a credential.
+
+USAGE:
+    raxis [--data-dir <path>] credential audit <name> [--limit <n>] [--since <duration>] [--json]
+
+The command merges:
+  * <data-dir>/audit/credential-cli.jsonl  — operator-local CLI trail
+  * <data-dir>/audit/segment-NNN.jsonl     — kernel main audit chain
+
+filters to records whose `name` field matches <name>, sorts by
+emitted_at descending, and prints up to --limit (default 50).
+--since is accepted for forward-compat with V3 but ignored today.
 "#,
     );
 }

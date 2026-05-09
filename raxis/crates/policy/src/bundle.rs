@@ -1307,6 +1307,8 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "PathReadAccessed",
     // initiative quarantine (kernel-store.md §2.5.8)
     "InitiativeQuarantined", "OperatorQuarantineSwept",
+    // V2_GAPS §C7 — credential CLI ceremony events
+    "CredentialRegistered", "CredentialRemoved", "CredentialVerified",
 ];
 
 /// Validate the raw `[notifications]` section and produce the final
@@ -4134,6 +4136,28 @@ channels   = []
                 signal_class:  "x".into(),
                 exit_code:     0,
                 backend_error: None,
+            }.as_str(),
+            // V2_GAPS §C7 — credential CLI ceremony events.
+            AuditEventKind::CredentialRegistered {
+                name:               "x".into(),
+                proxy_type:         "x".into(),
+                environment:        "x".into(),
+                actor_fingerprint:  "x".into(),
+                backend_kind:       "x".into(),
+            }.as_str(),
+            AuditEventKind::CredentialRemoved {
+                name:               "x".into(),
+                actor_fingerprint:  "x".into(),
+                backend_kind:       "x".into(),
+                forced:             false,
+            }.as_str(),
+            AuditEventKind::CredentialVerified {
+                name:               "x".into(),
+                proxy_type:         "x".into(),
+                success:            false,
+                latency_ms:         0,
+                actor_fingerprint:  "x".into(),
+                backend_kind:       "x".into(),
             }.as_str(),
         ];
 
