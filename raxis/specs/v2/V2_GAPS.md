@@ -3057,9 +3057,12 @@ OCI-pinned"). The V2.5 scope is:
    introspecting the image. The operator already pins the image by
    `oci_digest` — they are asserting trust in the image contents.
    At admission, the kernel validates `kernel_version_min >= 5.14`
+   (the floor for cgroup v2 with `cpu`, `memory`, `io`, and `pids`
+   controllers delegated to `subtree_control`, per
+   `INV-PLANNER-HARNESS-03` / `planner-harness.md §4.3`)
    and rejects with `FAIL_VM_GUEST_KERNEL_TOO_OLD` if below.
    This avoids pulling an OCI client into the kernel's address
-   space. ~30 lines (down from ~200 with introspection).
+   space. ~30 lines.
 7. **`raxis doctor` integration.** `vm-images` category at
    install time. ~100 lines.
 
