@@ -547,29 +547,42 @@ piece is the planner-side wire-shape translation.
   the kernel-side `EscalationKind::ProviderExhausted` audit
   variant.
 
-**V2 remaining work — per-provider circuit breaker (BLOCKER):**
+**V2 per-provider circuit breaker — CLOSED V2.4:**
 
-Without a circuit breaker + half-open probe, a `FallbackModelClient`
-chain that falls through to a lower-priority provider can never
-return to the higher-priority provider once it recovers. The chain
-is sticky-on-failure — every subsequent request goes straight to
-the fallback, wasting cost and latency.
+Shipped at `crates/planner-core/src/circuit.rs`
+(~430 lines incl. tests). Composes outside the
+[`RetryingModelClient`] so the retry shell exhausts its budget
+before a single "this provider is unhealthy" signal feeds the
+breaker.
 
-The circuit breaker (`provider-failure-handling.md §6`) tracks
-per-provider error rate over a sliding window. When the rate
-exceeds the threshold, the circuit opens and the `FallbackModelClient`
-skips that provider. Periodically, a **half-open probe** sends a
-single request to the failed provider; if it succeeds, the circuit
-closes and the provider re-enters the chain at its original
-priority position.
+| Component | Status |
+|---|---|
+| `CircuitBreakerModelClient` wrapper around `Arc<dyn ModelClient>` | ✅ shipped |
+| `CircuitState` enum (`Closed` / `Open` / `HalfOpen`) with stable wire strings (`closed`, `circuit_open`, `half_open`) matching the kernel sidecar breaker | ✅ shipped |
+| Threshold trip on consecutive retryable failures (default 5; `is_retryable` from `crate::retry` is the classifier so non-retryable 4xx never opens the circuit) | ✅ shipped |
+| Lazy `Open → HalfOpen` transition on observation (no background timer) | ✅ shipped |
+| Half-open probe gate via `compare_exchange` so exactly one in-flight probe is admitted at a time | ✅ shipped |
+| Close on probe success / re-open on probe failure | ✅ shipped |
+| `CircuitSnapshot` for `raxis status` observability | ✅ shipped |
+| 6 unit tests (closed-passthrough, open-on-threshold, non-retryable-doesnt-count, half-open-success-closes, half-open-failure-reopens, wire-strings-stable) | ✅ all passing |
 
-| Component | Est. lines | Spec section |
-|---|---|---|
-| `CircuitBreaker { state, error_window, threshold, half_open_interval }` | ~120 | `provider-failure-handling.md §6.1` |
-| `CircuitState` enum (`Closed`, `Open`, `HalfOpen`) | ~30 | `provider-failure-handling.md §6.2` |
-| Half-open probe (single request on timer) | ~60 | `provider-failure-handling.md §6.3` |
-| `FallbackModelClient` integration (skip open circuits) | ~40 | `provider-failure-handling.md §6.4` |
-| Tests (open on threshold, half-open recovery, priority restoration) | ~100 | — |
+The wrapper composes naturally with `FallbackModelClient`:
+
+```text
+Fallback[
+  Circuit[Retrying[AnthropicClient]],
+  Circuit[Retrying[OpenAiClient]],
+  Circuit[Retrying[BedrockClient]],
+]
+```
+
+Per-provider state is 1:1 with each upstream, so the chain's
+"sticky-on-failure" pathology is prevented: once the primary's
+breaker opens, dispatches through the chain immediately try the
+fallback (the breaker short-circuits with the cached last error,
+which `FallbackModelClient` classifies as retryable and walks
+past). Once the primary heals (probe succeeds), the chain goes
+back to primary on the next dispatch.
 
 **Deferred to V3.**
 

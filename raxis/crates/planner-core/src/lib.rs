@@ -72,6 +72,7 @@ use std::ffi::OsString;
 use std::fmt;
 
 mod error;
+pub mod circuit;
 pub mod custom_tools;
 pub mod dispatch;
 pub mod intent;
@@ -104,6 +105,9 @@ pub use provider_model::{
     emit_model_deprecation_warning, find_known_model, resolve_model_from_env,
     resolve_model_from_env_fn, validate_model_id, KnownModel, ProviderId,
     ProviderModelError, DEFAULT_MODEL, KNOWN_MODELS,
+};
+pub use circuit::{
+    CircuitBreakerModelClient, CircuitConfig, CircuitSnapshot, CircuitState,
 };
 pub use retry::{
     is_retryable, FallbackModelClient, RetryConfig, RetryingModelClient,
