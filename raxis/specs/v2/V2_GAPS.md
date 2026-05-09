@@ -14,24 +14,32 @@
 
 RAXIS V2 has **30 specification documents** totaling 56,485 lines of
 normative markdown. Of these, **17 are fully shipped** (Tier A),
-**all 3 Tier B items are closed** (B1 planner loop, B2 custom tools,
-B3 database forwarding — upstream forwarding shipped for
-Postgres/MySQL/MSSQL/Redis/SMTP), **all 10 Tier C items are
-closed**, **both Tier D items are closed**, and **Tier E is closed**.
-The §12 newly-discovered gaps from Pass 2 are also all closed for
-V2 (the §12.4 operator-ergonomics IPC handlers were promoted from
-wire-shape stubs to real read-only handlers in V2.4; only
-`SubscribeInitiative` remains a stub awaiting the V3 KernelPush
-wire transport).
+**all 3 Tier B items are closed** (B1 planner loop **+ binary
+wiring (V2.4)**, B2 custom tools, B3 database forwarding — upstream
+forwarding shipped for Postgres/MySQL/MSSQL/Redis/SMTP), **all 10
+Tier C items are closed**, **both Tier D items are closed**, and
+**Tier E is closed**. The §12 newly-discovered gaps from Pass 2 are
+also all closed for V2 (the §12.4 operator-ergonomics IPC handlers
+were promoted from wire-shape stubs to real read-only handlers in
+V2.4; only `SubscribeInitiative` remains a stub awaiting the V3
+KernelPush wire transport). **§13 Category 4** (single-enforcement-
+point invariants) was reconciled in V2.4: 5 of 6 entries were
+discovered to already be in shipped code. The remaining one
+(`INV-PLANNER-HARNESS-03` + `INV-VM-CAP-03`) was originally
+deferred to V3 but has been **promoted back to V2.5** because
+the `[[vm_images]]` subsystem is a functional requirement:
+without it, operators cannot set custom executor images and
+every activation is locked to the canonical starter.
 
 | Tier | Count | Status |
 |---|---|---|
 | A — Fully shipped | 17/17 | Spec, code, and tests aligned |
-| B — Infrastructure + logic | 3/3 | All closed (V2.3) |
+| B — Infrastructure + logic | 3/3 | All closed (binary wiring V2.4) |
 | C — Spec complete | 10/10 | All V2 BLOCKER items closed (V2.4) |
 | D — Schema/skeleton | 2/2 | Both closed (V2.3) |
 | E — Deferred/partial | 1/1 | Closed (V2.3) |
 | §12 newly-discovered gaps | 10/10 | All V2 BLOCKER items closed (V2.4) |
+| §13 Cat 4 single-enforcement | 5/6 | Closed (V2.4); 1 promoted to V2.5 |
 
 **Total lines remaining:** 0 (every V2 BLOCKER closed in V2.4; V3
 items remain documented per the deferral notes per category)
@@ -2988,23 +2996,72 @@ superseded. They no longer apply.
 `DEPRECATED` in `invariants.md` (if not already) and excluded
 from coverage counts.
 
-### Category 4: Single missing enforcement point (~10 invariants)
+### Category 4: Single missing enforcement point — **5 of 6 closed in V2.4**, 1 deferred to V3
 
 These invariants describe behavior that the code *almost* enforces
-but is missing one check, one guard, or one assertion.
+but is missing one check, one guard, or one assertion. The V2.4
+re-audit (this pass) reconciled the table against the shipped code
+and found that **5 of the 6 gaps were already implemented** before
+the table was last refreshed; the remaining one — the full
+`[[vm_images]]` subsystem (`INV-PLANNER-HARNESS-03` kernel-version
+check + `INV-VM-CAP-03` operator-pinned executor images) — was
+originally deferred to V3 but has been **promoted back to V2.5**
+because without it operators cannot set custom executor images and
+every activation is locked to the canonical starter.
 
-| Invariant | What's missing | Est. lines |
+| Invariant | Status | Enforcement site (or deferral) |
 |---|---|---|
-| `INV-PLANNER-HARNESS-03` | cgroup v2 guest kernel version check at session boot — the harness assumes Linux 5.14+ but never verifies | ~20 |
-| `INV-ENV-01` | Environment coherence check at admission — tasks can currently mix credentials from different environments | ~40 |
-| `INV-CRED-KERNEL-01` | Credential proxy kernel-side validation — kernel accepts proxy declarations without verifying the proxy type is supported | ~30 |
-| `INV-INIT-04` | Initiative cleanup on kernel shutdown — kernel shuts down cleanly but does not mark in-flight initiatives as `interrupted` (previously mislabeled as `INV-INIT-06`; plan artifact immutability is fully implemented via Plan Bundle Sealing) | ~30 |
-| `INV-PLAN-BUNDLE-FRESH` | Already referenced in code but the staleness check is a no-op (always returns fresh) | ~20 |
-| `INV-CERT-01` | Certificate expiry check at IPC auth time — certificates are validated at issuance but not re-checked at connection time | ~30 |
+| `INV-PLANNER-HARNESS-03` + `INV-VM-CAP-03` | 🔴 **V2.5 BLOCKER** | The `[[vm_images]]` policy schema (`name`, `oci_digest`, `role_restriction`, `kernel_version_min`) is not wired into `crates/policy`. Without it: (a) operators cannot set custom executor images — every activation resolves to the canonical `raxis-executor-starter-<v>.img` hardcoded in `session_spawn_orchestrator.rs:674`, violating `INV-VM-CAP-03` (operator-published, OCI-pinned executor images); (b) the kernel cannot enforce `role_restriction` on verifier `image` fields; (c) `[default_executor_image] alias` resolution has no registry to resolve against (`FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` has no backing implementation); (d) the guest kernel version check (`FAIL_VM_GUEST_KERNEL_TOO_OLD`) has no introspection path. Estimate: ~800 lines (policy parser + admission-time alias resolution + `oci_digest` enforcement + role_restriction check + kernel-version introspection). |
+| `INV-ENV-01` | ✅ **CLOSED V2.3** | `kernel/src/initiatives/lifecycle.rs::validate_task_environment_consistency` (commit `bd0a28c`). Walks `[[tasks.credentials]]` ∩ `[[permitted_credentials]]` per task, unions environment labels, fails closed on cardinality ≥ 2 with `FAIL_TASK_ENVIRONMENT_INCONSISTENT`. Activation-gated by non-empty `policy_environments`. Implements step A of the §11.3 binding algorithm; URL-gate limb (step B) still V3 per E1 disposition. |
+| `INV-CRED-KERNEL-01` | ✅ **CLOSED V2.2** | `kernel/src/initiatives/lifecycle.rs::validate_task_credentials` rejects every `ProxyDecl::Unknown` at `approve_plan` shift-left with `LifecycleError::PlanTaskCredentialsInvalid { rule: "unknown_proxy_type", … }` BEFORE `BEGIN TRANSACTION`. The defense-in-depth `Unknown` arm in the persistence helper surfaces an `Invariant` store error if the validator is ever bypassed, so the closure has a fail-safe. |
+| `INV-INIT-04` (shutdown sweep) | ✅ **CLOSED V1** | `kernel/src/recovery.rs::reconcile_tasks` runs at every kernel boot, transitions in-flight `Running` / `Admitted` / `GatesPending` tasks to `BlockedRecoveryPending` with `RecoveryPendingOperatorAction`, and propagates affected initiatives to `Blocked` via `evaluate_terminal_criteria`. The recovery sweep is the architectural answer; an additional shutdown-time sweep would be a redundant write that the next-boot reconcile would re-do anyway. The V2_GAPS row mislabel as `INV-INIT-06` (plan immutability) was a transcription error during the original audit; both the immutability limb (Plan Bundle Sealing, `kernel-store.md §2.5.8`) and the recovery limb (this row) are closed. |
+| `INV-PLAN-BUNDLE-FRESH` | ✅ **CLOSED V2.1** | `kernel/src/initiatives/v2_admission.rs` step 10a implements the freshness window verbatim from `plan-bundle-sealing.md §3.5`: `signed_at - now()` checked against `policy.plan_signing.max_clock_skew_secs` (future) and `policy.plan_signing.max_plan_bundle_age_secs` (past), surfacing `FAIL_PLAN_BUNDLE_EXPIRED` / `FAIL_PLAN_BUNDLE_FROM_FUTURE` with structured detail. Step 10b nonce dedupe via `pb_store::record_nonce` + `nonce_status_in_tx` closes the same-window replay path. |
+| `INV-CERT-01` (runtime expiry) | ✅ **CLOSED V1** | `kernel/src/authority/cert_check.rs::CertEnforcer::enforce` runs at every operator IPC request after `is_permitted` and before handler dispatch (see `kernel/src/ipc/operator.rs:148-170`). It calls `raxis_crypto::cert::cert_status_with_revocation(now_unix, cert, &revocations)` to compute the four-zone status fresh from `now_unix` per request — there is no caching or "validate at issuance" shortcut. `Active`/`AlwaysActiveEmergency` allow; `Expiring` allows + emits deduped warning; `Grace` allows recovery ops only; `Expired`/`NotYetValid`/`Revoked` deny. (Note: V2_GAPS row description was inaccurate; the spec's V1 INV-CERT-01 — "cert mandatory" — is also enforced.) |
 
-**Remediation:** ~170 lines total across 6 enforcement sites.
-Each is a self-contained guard or assertion that can land as an
-independent PR.
+**Remediation realised:** 0 lines of new code for the 5 closed
+items. The `[[vm_images]]` subsystem (`INV-PLANNER-HARNESS-03` +
+`INV-VM-CAP-03`) is ~800 lines of new code, promoted to V2.5.
+
+**`[[vm_images]]` V2.5 implementation plan.**
+The subsystem was originally deferred to V3 under the assumption
+that the kernel-version introspection was the only gap. The V2.5
+audit revealed a deeper problem: without `[[vm_images]]`, operators
+cannot set custom executor images at all — every activation is
+locked to the canonical `raxis-executor-starter` image. This
+violates `INV-VM-CAP-03` ("Executor image operator-published,
+OCI-pinned"). The V2.5 scope is:
+
+1. **Policy schema.** `[[vm_images]]` parser with `name`,
+   `oci_digest`, `role_restriction`, `kernel_version_min` (operator-
+   declared). Wire into `crates/policy/src/bundle.rs` as a new
+   `VmImageEntry` struct + `vm_images: Vec<VmImageEntry>` on
+   `PolicyBundle`. ~150 lines.
+2. **Alias resolution at admission.** `approve_plan` resolves
+   every task's `vm_image` field (and every verifier's `image`
+   field) against the `[[vm_images]]` registry. Unresolvable alias
+   → `FAIL_VM_IMAGE_NOT_REGISTERED`. Wrong role → 
+   `FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`. ~100 lines.
+3. **`[default_executor_image]` section.** Policy-side
+   `alias` → `[[vm_images]]` resolution with `role_restriction`
+   check. `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` at
+   policy load. ~50 lines.
+4. **Spawn-path integration.** `spawn_executor_for_task` reads
+   the resolved image path from the admission result instead of
+   hardcoding `executor_starter_image_path()`. ~80 lines.
+5. **`oci_digest` enforcement.** At activation, the spawned
+   image's SHA-256 is verified against the `[[vm_images]]` entry's
+   `oci_digest`. Mismatch → `FAIL_VM_IMAGE_DIGEST_MISMATCH`.
+   ~120 lines.
+6. **Kernel-version introspection.** OCI manifest fetch + layer
+   extraction to read the guest kernel version. This is the
+   original `INV-PLANNER-HARNESS-03` check. ~200 lines.
+7. **`raxis doctor` integration.** `vm-images` category at
+   install time. ~100 lines.
+
+**V2.4 mitigation (still in effect until V2.5 lands).** The
+substrate refuses to boot a kernel that cannot mount cgroup v2.
+This is correctness-preserving but yields a substrate-specific
+error code rather than the spec's `FAIL_VM_GUEST_KERNEL_TOO_OLD`.
 
 ### Why the invariants are not a separate workstream
 
@@ -3019,24 +3076,34 @@ implies ~48 tickets of work. It does not. The invariants are
    when the feature ships.
 3. **Category 3** (deprecated): Zero work. Remove from coverage
    count.
-4. **Category 4** (single guard): ~170 lines total. Six small
-   PRs, each independently mergeable.
+4. **Category 4** (single guard): **5 of 6 already shipped** as
+   of V2.4 (the V2.4 audit pass discovered 5 of the 6 gaps had
+   already landed in earlier V2.x patches without the table being
+   refreshed). The remaining one (`INV-PLANNER-HARNESS-03`, OCI
+   image kernel introspection) is recorded as a V3 deferral with
+   architectural rationale; the substrate-level cgroup-v2 check
+   in `raxis doctor` provides correctness-preserving coverage
+   today, only the operator-ergonomics diagnostic is missing.
 
-**Updated coverage after this analysis:**
+**Updated coverage after this analysis (V2.4 GA):**
 
 | Category | Count | V2 code needed |
 |---|---|---|
 | Already enforced in code (annotated) | ~45 | — |
-| Structurally enforced (needs annotation only) | ~30 | 0 lines (comments only) |
+| Structurally enforced (annotated V2.3) | ~30 | 0 lines |
 | Ships with parent feature (V2 scope) | ~25 | Ships with feature |
 | Ships with parent feature (V3 scope) | ~12 | None for V2 |
 | Deprecated | ~5 | None |
-| Single enforcement point | ~10 | ~170 lines |
-| **Total** | **~120** | **~170 lines incremental** |
+| Single enforcement point — closed | 5 | already shipped |
+| Single enforcement point — V3 deferral | 1 | ~500 lines (V3) |
+| **Total** | **~123** | **0 lines incremental for V2** |
 
 The V2 invariant gap is not a line-count problem. It is a
 discipline problem: every feature PR must cite the invariant IDs
 it enforces, and the annotation pass for Category 1 should land
 as a dedicated "INV-audit" commit early in the sprint cycle so
 the coverage tooling (`cargo xtask inv-coverage`) has an accurate
-baseline.
+baseline. The V2.4 audit pass that closed Category 4 illustrates
+the cost of *not* maintaining that discipline: 5 of 6 invariants
+were already enforced in shipped code but the gap-tracking table
+had not been refreshed.
