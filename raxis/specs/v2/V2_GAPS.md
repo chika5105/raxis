@@ -753,6 +753,101 @@ subcommands:
 
 ---
 
+### C8: Reserved Planner Tools — `WebFetch`, `WebSearch`, `StructuredOutput`, `Sleep`
+
+**Spec:** `planner-harness.md §3` (tool surface table),
+`kernel-mediated-egress.md` (DEPRECATED — superseded by unified
+egress), `custom-tools.md §5` (reserved name list)
+**Status:** ❌ Not implemented — **spec gap for WebFetch / WebSearch**
+**Severity:** High — these are reserved tool names with no spec
+defining how they work under the V2 unified egress model
+
+These four tool names are reserved in `custom_tools_validator.rs`
+(line 63–66) and appear in `custom-tools.md §5`'s reserved-name
+list, preventing operators from declaring custom tools with the
+same names. But the planner harness has no implementations for
+any of them, and `planner-harness.md §3` marks all four as ❌
+across all three roles.
+
+**Current state by tool:**
+
+| Tool | Reserved | Impl | Spec | Problem |
+|---|---|---|---|---|
+| `WebFetch` | ✅ | ❌ | ❌ **needs spec** | The original spec (`kernel-mediated-egress.md`) is DEPRECATED. The unified egress model (tproxy + credential proxy) replaced `IntentKind::EgressRequest`. But `web_fetch` as a planner tool has no spec defining how it maps to the V2 egress primitives. |
+| `WebSearch` | ✅ | ❌ | ❌ **needs spec** | Same gap as WebFetch. The convenience wrapper (`web_search_github`) was defined in the deprecated spec only. |
+| `StructuredOutput` | ✅ | ❌ | ⚪ excluded | `planner-harness.md §6.1`: "No DAG consumer" — excluded from V2. May remain reserved for V3. |
+| `Sleep` | ✅ | ❌ | ⚠ under review | `planner-harness.md §3`: "Hole still under review." |
+
+**The WebFetch / WebSearch invariant gap:**
+
+The original `kernel-mediated-egress.md` routed web requests
+through `IntentKind::EgressRequest` → kernel admission → host-side
+`raxis-egress` proxy. This preserved all R-invariants because
+every request went through the kernel's 13-step admission pipeline.
+
+The V2 unified egress decision (`v2-deep-spec.md §Part 7`)
+deprecated that path and replaced it with:
+
+- **Tier 1 (public/unauthenticated):** tproxy SNI allowlist —
+  transport-layer only, no URL-level control.
+- **Tier 2 (authenticated/sensitive):** credential proxy —
+  HTTP-layer URL-prefix + method allowlist per session.
+
+Neither tier gives the planner a **tool-shaped** web fetch
+capability the LLM can call like `read_file` or `bash`. The
+agent can `curl` from bash (if the URL is in the tproxy
+allowlist), but that's unstructured and unaudited at the
+tool level.
+
+**What needs to be specced (BLOCKER — no PR without spec):**
+
+> Before implementing `WebFetch` or `WebSearch`, a dedicated
+> section must be added covering:
+>
+> 1. **Egress path mapping** — does the planner's `web_fetch`
+>    tool go through tproxy (Tier 1), credential proxy (Tier 2),
+>    or a new Tier 3 path? Each option has different invariant
+>    consequences.
+> 2. **Admission and audit** — the original spec had 8 admission
+>    checks (E1–E8: scheme, hostname, URL prefix, method, body
+>    size, rate limit, SSRF, budget). Which of these survive
+>    under the unified egress model, and who enforces them (harness
+>    vs. tproxy vs. credential proxy vs. kernel)?
+> 3. **SSRF prevention** — the deprecated spec required DNS
+>    resolution at the proxy with private-range rejection. Under
+>    the unified model, tproxy does SNI-level filtering but does
+>    NOT inspect resolved IPs. This is a potential regression.
+> 4. **Per-tool response shape** — `web_fetch` returns
+>    `{ status_code, content_type, body, truncated }` to the LLM.
+>    How does body truncation work when the call goes through
+>    tproxy (which is transport-layer and doesn't inspect body
+>    length)?
+> 5. **Rate limiting** — the deprecated spec had per-task
+>    `max_requests` per URL prefix. The unified model has no
+>    per-tool request counter. Is rate limiting dropped, or does
+>    the harness enforce it in-process?
+> 6. **Role restrictions** — `planner-harness.md §3` marks
+>    WebFetch/WebSearch as ❌ for all roles. If they're V2 tools,
+>    which roles get them? The dispatch matrix needs updating.
+> 7. **`WebSearch` convenience shape** — the deprecated spec
+>    defined `web_search_github` as a typed wrapper around
+>    `GET api.github.com/search/`. Should `WebSearch` be a
+>    general search tool (using a search API/engine) or a
+>    domain-specific convenience?
+
+**`StructuredOutput` and `Sleep` — lower priority:**
+
+- **`StructuredOutput`** — excluded from V2 per `planner-harness.md
+  §6.1` ("no DAG consumer"). Stays reserved; no spec work needed
+  for V2.
+- **`Sleep`** — still under review per `planner-harness.md §3`.
+  Needs a decision: is it a legitimate tool (e.g., for rate-limit
+  backoff in executor loops) or a hole that lets the LLM waste
+  session time? If kept, needs a ceiling
+  (`max_sleep_seconds` policy cap).
+
+---
+
 ## §5 — Tier D: Schema/Skeleton Only
 
 ### D1: Key Revocation
