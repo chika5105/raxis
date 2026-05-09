@@ -102,6 +102,18 @@ glob        = { workspace = true }
 rustc-hash  = { workspace = true }
 arc-swap    = { workspace = true }
 
+# V2 §C4 — operator notification transports (Webhook, Email).
+# `reqwest` carries the HTTPS POST for `WebhookChannel`; `tokio-rustls`
+# + `rustls` carry STARTTLS for `EmailChannel` SMTP submission. Both
+# follow the workspace-wide `rustls-tls` selection (no native-tls /
+# OpenSSL link) per `extensibility-traits.md §6.5`.
+reqwest         = { workspace = true, features = ["json"] }
+tokio-rustls    = { version = "0.26", default-features = false, features = ["ring"] }
+rustls          = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pki-types = "1"
+webpki-roots    = "1"
+base64          = "0.22"
+
 # Concrete isolation substrates — platform-gated. The kernel's
 # `select_isolation_backend` (`isolation_select.rs`) builds the
 # correct one at boot per `extensibility-traits.md §3.8`.

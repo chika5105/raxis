@@ -297,30 +297,35 @@ plugin runs in kernel address space with full memory access — no
 conformance check can prevent memory corruption or invariant
 bypass. See `extensibility-traits.md §9A.2`.
 
-### C4: Email & Notification Channels
+### C4: Email & Notification Channels ✅ CLOSED (V2.3)
 
 **Spec:** `email-and-notification-channels.md` (61KB)
-**Estimate:** ~500 lines
-
-**Partially implemented (1,327 lines exist but incomplete):**
-
-The kernel ships a notification subsystem (`kernel/src/notifications/`,
-1,327 lines) with `mod.rs`, `sink.rs`, `summary.rs`, and
-`handler/file.rs`. However:
+**Delivered:** ~700 lines (handler crates + tests)
 
 | Channel kind | Policy parsed | Handler impl | Status |
 |---|---|---|---|
-| `Shell` | ✅ | ✅ `file.rs` | Working — runs a shell command |
-| `File` | ✅ | ✅ `file.rs` | Working — appends to a log file |
-| `Email` | ✅ (parsed) | ❌ No SMTP handler | Parsed at policy load, rejected at dispatch |
-| `Webhook` | ✅ (parsed) | ❌ No HTTP handler | Parsed at policy load, rejected at dispatch |
+| `Shell`   | ✅ | ✅ `handler/file.rs`    | V1 carryover |
+| `File`    | ✅ | ✅ `handler/file.rs`    | V1 carryover |
+| `Email`   | ✅ | ✅ `handler/email.rs`   | V2.3 — SMTP submission with STARTTLS or implicit TLS, AUTH PLAIN, password from sidecar `.notify-cred` file |
+| `Webhook` | ✅ | ✅ `handler/webhook.rs` | V2.3 — HTTPS POST with `X-RAXIS-Event-{Kind,Seq,Id}` headers, JSON body |
 
-The spec (`email-and-notification-channels.md`) defines Email and
-Webhook as the primary operator notification paths. The Shell/File
-handlers are viable for dev/CI but insufficient for production
-deployments where operators expect Slack webhooks or email.
+**Failure taxonomy** is extended with `Network`, `UpstreamRejected`,
+and `CredentialUnavailable` variants of `DeliveryError`; each maps
+to a stable `category()` short-string that lands in
+`NotificationDeliveryFailed.reason` so operator dashboards can group
+failures by class.
 
-**Remaining:** ~300 lines (SMTP transport + HTTP webhook transport).
+**V2 deferrals (V3 work, tracked separately):**
+
+* Persistent SMTP keep-alive connections (V2 opens one connection per
+  send — fine for the typical event volume).
+* Idempotency table `notification_dispatch` (`§6.5` of the spec) —
+  V2 is best-effort fire-and-forget.
+* HMAC-SHA256 webhook signing (`§2.3.4`) — V2 treats the URL itself
+  as the shared secret (matches Slack/GitHub webhook UX).
+* AUTH XOAUTH2 — V2 ships AUTH PLAIN only.
+* `OperatorNotificationChannel` trait extraction (V3 trait crate;
+  V2 keeps the impls inside the kernel for boot-order simplicity).
 
 ### C5: Immutable Artifact Store
 

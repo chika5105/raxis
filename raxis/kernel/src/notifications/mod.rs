@@ -166,11 +166,15 @@ async fn dispatch_one(
             // `target` resolve to `<data_dir>/notifications/inbox.jsonl`.
             handler::file::deliver(channel, &event, data_dir).await
         }
-        NotificationChannelKind::Email | NotificationChannelKind::Webhook => {
-            // v1 schema-only. The boot warning has already fired in
-            // `validate_notifications`; here we record the per-event
-            // skip so operators see exactly which events were dropped.
-            Err(DeliveryError::UnimplementedV1)
+        NotificationChannelKind::Webhook => {
+            // V2 §C4 — HTTPS POST to operator-supplied URL.
+            handler::webhook::deliver(channel, &event).await
+        }
+        NotificationChannelKind::Email => {
+            // V2 §C4 — direct SMTP submission. Credentials read from a
+            // sidecar `.notify-cred` file at
+            // `<data_dir>/notifications/credentials/<channel.id>.notify-cred`.
+            handler::email::deliver(channel, &event, data_dir).await
         }
     };
 
@@ -208,21 +212,42 @@ pub enum DeliveryError {
     TargetInvalid,
 
     /// Channel kind is declared in policy but its handler is not
-    /// shipped in v1 (Email, Webhook). Per spec §5.6.6 the boot
-    /// warning has already fired; this surfaces every per-event drop
-    /// so operators can see exactly which events would have shipped
-    /// once the v2 handler lands.
+    /// shipped in v1 (deprecated — kept for one release as a
+    /// migration affordance). The V2 webhook + email handlers have
+    /// landed; this variant should never be observed in production.
+    /// Retained so older operator dashboards keying off
+    /// `reason: "unimplemented_v1"` don't crash.
     #[error("notification channel kind is not implemented in v1")]
     UnimplementedV1,
+
+    /// Network or TLS failure dispatching a Webhook / Email channel
+    /// (DNS failure, TCP refused, TLS handshake error, HTTP timeout).
+    #[error("notification network failure: {0}")]
+    Network(String),
+
+    /// Upstream returned a non-success status / SMTP error code.
+    /// Verbose detail in the `Display` text; the dispatcher records
+    /// it verbatim in `NotificationDeliveryFailed.reason`.
+    #[error("notification upstream rejected: {0}")]
+    UpstreamRejected(String),
+
+    /// Channel-config sidecar (e.g. SMTP credential file) was
+    /// missing, malformed, or unreadable. Surfaced so operators can
+    /// distinguish a misconfigured channel from an upstream outage.
+    #[error("notification channel credential is unavailable: {0}")]
+    CredentialUnavailable(String),
 }
 
 impl DeliveryError {
     /// Stable wire short-string for `NotificationDeliveryFailed.reason`.
     pub fn category(&self) -> &'static str {
         match self {
-            DeliveryError::Io(_)            => "io",
-            DeliveryError::TargetInvalid    => "target_invalid",
-            DeliveryError::UnimplementedV1  => "unimplemented_v1",
+            DeliveryError::Io(_)                   => "io",
+            DeliveryError::TargetInvalid           => "target_invalid",
+            DeliveryError::UnimplementedV1         => "unimplemented_v1",
+            DeliveryError::Network(_)              => "network",
+            DeliveryError::UpstreamRejected(_)     => "upstream_rejected",
+            DeliveryError::CredentialUnavailable(_) => "credential_unavailable",
         }
     }
 }
