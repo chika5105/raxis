@@ -228,6 +228,13 @@ pub enum AuditEvent {
         request_sha256:  String,
         /// Tenant ID associated with the proxy.
         tenant_id:       String,
+        /// V2_GAPS §9 Phase 2 — operator-declared ARM action
+        /// vocabulary for the requested resource (e.g.
+        /// `["Microsoft.Storage/storageAccounts/read"]`). Empty
+        /// when no per-resource action filter was declared. V2.3
+        /// is declarative + audit echo; runtime ARM-URL gating
+        /// lands in V3.
+        allowed_actions: Vec<String>,
         /// True if a restriction or missing header blocked this
         /// request.
         blocked:         bool,
@@ -503,11 +510,30 @@ async fn serve_one(
     let body = serde_json::to_vec(&body)
         .map_err(|e| std::io::Error::other(format!("json serialise: {e}")))?;
     let body_len = body.len();
+    // V2_GAPS §9 Phase 2 — surface the operator-declared per-resource
+    // ARM action vocabulary as an `x-ms-allowed-actions` response
+    // header so the V3 ARM-aware egress proxy (and any in-VM
+    // tooling that wants to introspect the declared scope) can read
+    // it without parsing the audit chain. Empty list ⇒ header
+    // omitted so SDKs see byte-identical responses to V2.2.
+    let allowed_actions_header = match config.restrictions.actions_for(&resource) {
+        Some(actions) if !actions.is_empty() => {
+            // JSON-encoded array, e.g.
+            // `["Microsoft.Storage/storageAccounts/read"]`. We
+            // serialise via `serde_json::to_string` so the header
+            // value is well-formed JSON regardless of the verbs.
+            let json = serde_json::to_string(actions)
+                .map_err(|e| std::io::Error::other(format!("json serialise actions: {e}")))?;
+            format!("x-ms-allowed-actions: {json}\r\n")
+        }
+        _ => String::new(),
+    };
     let header = format!(
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {len}\r\n\
          Cache-Control: no-store\r\n\
+         {allowed_actions_header}\
          Connection: close\r\n\
          \r\n",
         len = body_len,
@@ -644,6 +670,11 @@ fn audit_event(
     h.update(b"?resource=");
     h.update(resource.as_bytes());
     let request_sha256 = hex::encode(h.finalize());
+    let allowed_actions = config
+        .restrictions
+        .actions_for(resource)
+        .map(|a| a.to_vec())
+        .unwrap_or_default();
     AuditEvent::AzureTokenServed {
         timestamp_unix_seconds: SystemTime::now()
             .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
@@ -653,6 +684,7 @@ fn audit_event(
         resource:    resource.to_owned(),
         request_sha256,
         tenant_id:   config.tenant_id.clone(),
+        allowed_actions,
         blocked,
     }
 }

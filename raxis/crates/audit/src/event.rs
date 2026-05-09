@@ -1686,6 +1686,18 @@ pub enum AuditEventKind {
         /// Operator-declared IAM role ARN. Empty when the decl
         /// does not declare one.
         role_arn:        String,
+        /// V2_GAPS §9 Phase 2 — operator-declared service scope
+        /// (e.g. `["s3", "sqs"]`). Echoed in audit so reviewers
+        /// can cross-check the egress allowlist; runtime
+        /// enforcement is the V3 SigV4-aware egress proxy.
+        /// Empty list when the operator declared no scope.
+        #[serde(default)]
+        allowed_services: Vec<String>,
+        /// V2_GAPS §9 Phase 2 — operator-declared region scope
+        /// (e.g. `["us-east-1"]`). Same enforcement model as
+        /// `allowed_services`.
+        #[serde(default)]
+        allowed_regions:  Vec<String>,
         /// True if a restriction blocked the request.
         blocked:         bool,
     },
@@ -1706,6 +1718,12 @@ pub enum AuditEventKind {
         path_sha256:     String,
         /// Operator-declared GCP project ID.
         project_id:      String,
+        /// V2_GAPS §9 Phase 2 — operator-declared OAuth scopes.
+        /// Echoed in audit so reviewers can confirm the scope
+        /// narrowing the proxy applied to the token response.
+        /// Empty list when no scope-level intent was declared.
+        #[serde(default)]
+        allowed_scopes: Vec<String>,
         /// True if a restriction or missing
         /// `Metadata-Flavor: Google` header blocked the request.
         blocked:         bool,
@@ -1730,6 +1748,14 @@ pub enum AuditEventKind {
         request_sha256:  String,
         /// Operator-declared tenant ID.
         tenant_id:       String,
+        /// V2_GAPS §9 Phase 2 — operator-declared ARM action
+        /// vocabulary for the requested resource. Echoed in audit
+        /// so reviewers can confirm the declared scope. Empty list
+        /// when no per-resource action filter was declared. V2.3
+        /// is declarative + audit echo + `x-ms-allowed-actions`
+        /// response header; runtime ARM-URL gating lands in V3.
+        #[serde(default)]
+        allowed_actions: Vec<String>,
         /// True if a restriction or missing `Metadata: true`
         /// header blocked the request.
         blocked:         bool,

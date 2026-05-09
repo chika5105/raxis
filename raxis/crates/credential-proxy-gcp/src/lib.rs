@@ -225,6 +225,12 @@ pub enum AuditEvent {
         path_sha256: String,
         /// GCP project ID associated with the proxy.
         project_id:  String,
+        /// V2_GAPS §9 Phase 2 — operator-declared OAuth scopes
+        /// (e.g. `["https://www.googleapis.com/auth/devstorage.read_only"]`).
+        /// Echoed in audit so reviewers can confirm the scope
+        /// narrowing the proxy applied to the token response.
+        /// Empty list when no scope-level intent was declared.
+        allowed_scopes: Vec<String>,
         /// True if a restriction or missing header blocked this
         /// request.
         blocked:     bool,
@@ -258,6 +264,17 @@ struct TokenResponse {
     access_token: String,
     expires_in:   u64,
     token_type:   String,
+    /// Space-separated list of OAuth scopes the token grants.
+    /// V2.3 emits the operator-declared
+    /// `Restrictions::allowed_scopes` verbatim so downstream
+    /// `gcloud-auth-library` clients see the narrowed scope set
+    /// even though V2.3 does not call the GCP token-exchange
+    /// API to mint a genuinely scope-narrowed credential
+    /// (V3 work). When `allowed_scopes` is empty the field is
+    /// omitted so SDKs fall back to the credential's full
+    /// scopes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope:        Option<String>,
 }
 
 /// Internal envelope the proxy resolves the credential body into.
@@ -457,10 +474,16 @@ async fn serve_one(
                     return Ok(());
                 }
             };
+            let scope = if config.restrictions.allowed_scopes.is_empty() {
+                None
+            } else {
+                Some(config.restrictions.allowed_scopes.join(" "))
+            };
             let body = serde_json::to_vec(&TokenResponse {
                 access_token: resolved.access_token,
                 expires_in:   config.lease_seconds,
                 token_type:   "Bearer".to_owned(),
+                scope,
             }).map_err(|e| std::io::Error::other(format!("json serialise: {e}")))?;
             (body, "application/json")
         }
@@ -577,6 +600,7 @@ fn audit_event(
         credential:  config.credential_name.clone(),
         path:        path.to_owned(),
         path_sha256,
+        allowed_scopes: config.restrictions.allowed_scopes.clone(),
         project_id:  config.project_id.clone(),
         blocked,
     }

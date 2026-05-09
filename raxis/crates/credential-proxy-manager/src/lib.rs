@@ -607,6 +607,8 @@ impl AwsAuditChannel for AwsKernelAuditAdapter {
                 path,
                 path_sha256,
                 role_arn,
+                allowed_services,
+                allowed_regions,
                 blocked,
                 ..
             } => {
@@ -616,6 +618,8 @@ impl AwsAuditChannel for AwsKernelAuditAdapter {
                     path,
                     path_sha256,
                     role_arn,
+                    allowed_services,
+                    allowed_regions,
                     blocked,
                 };
                 if let Err(e) = self.audit_sink.emit(
@@ -756,6 +760,7 @@ impl GcpAuditChannel for GcpKernelAuditAdapter {
                 path,
                 path_sha256,
                 project_id,
+                allowed_scopes,
                 blocked,
                 ..
             } => {
@@ -765,6 +770,7 @@ impl GcpAuditChannel for GcpKernelAuditAdapter {
                     path,
                     path_sha256,
                     project_id,
+                    allowed_scopes,
                     blocked,
                 };
                 if let Err(e) = self.audit_sink.emit(
@@ -800,6 +806,7 @@ impl AzureAuditChannel for AzureKernelAuditAdapter {
                 resource,
                 request_sha256,
                 tenant_id,
+                allowed_actions,
                 blocked,
                 ..
             } => {
@@ -810,6 +817,7 @@ impl AzureAuditChannel for AzureKernelAuditAdapter {
                     resource,
                     request_sha256,
                     tenant_id,
+                    allowed_actions,
                     blocked,
                 };
                 if let Err(e) = self.audit_sink.emit(
@@ -2166,7 +2174,9 @@ impl CredentialProxyManager {
             lease_seconds,
             role_arn:        role_arn.map(|s| s.to_owned()),
             restrictions: AwsProxyRestrictions {
-                allowed_paths: restrictions.allowed_paths.clone(),
+                allowed_paths:    restrictions.allowed_paths.clone(),
+                allowed_services: restrictions.allowed_services.clone(),
+                allowed_regions:  restrictions.allowed_regions.clone(),
             },
         };
         let audit_channel: Arc<dyn AwsAuditChannel> = Arc::new(AwsKernelAuditAdapter {
@@ -2221,7 +2231,9 @@ impl CredentialProxyManager {
             project_id:         project.to_owned(),
             numeric_project_id: numeric_project,
             restrictions:       GcpProxyRestrictions {
-                allowed_paths: restrictions.allowed_paths.clone(),
+                allowed_paths:  restrictions.allowed_paths.clone(),
+                allowed_scopes: restrictions.allowed_scopes.clone(),
+                project:        restrictions.project.clone(),
             },
         };
         let audit_channel: Arc<dyn GcpAuditChannel> = Arc::new(GcpKernelAuditAdapter {
@@ -2277,6 +2289,14 @@ impl CredentialProxyManager {
             client_id:       client_id.map(|s| s.to_owned()),
             restrictions:    AzureProxyRestrictions {
                 allowed_resources: restrictions.allowed_resources.clone(),
+                allowed_actions:   restrictions
+                    .allowed_actions
+                    .iter()
+                    .map(|ra| raxis_credential_proxy_azure::restriction::ResourceActions {
+                        resource: ra.resource.clone(),
+                        actions:  ra.actions.clone(),
+                    })
+                    .collect(),
             },
         };
         let audit_channel: Arc<dyn AzureAuditChannel> = Arc::new(AzureKernelAuditAdapter {

@@ -382,16 +382,41 @@ pub struct RedisRestrictions {
 /// `403 Forbidden`. Default permits the canonical `/creds`
 /// endpoint that AWS SDKs use when
 /// `AWS_CONTAINER_CREDENTIALS_FULL_URI` is set.
+///
+/// `allowed_services` / `allowed_regions` carry operator-declared
+/// scope intent (e.g. `["s3", "sqs"]` / `["us-east-1"]`). V2.3
+/// enforces these declaratively (audit echo + `raxis doctor`
+/// cross-check against the egress allowlist); the V3 SigV4-aware
+/// egress proxy adds runtime enforcement. See
+/// `credential-proxy-aws::restriction` module doc for the V2.3 →
+/// V3 transition contract.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AwsRestrictions {
     /// Paths the proxy will serve. Defaults to `["/creds"]`.
     #[serde(default = "default_aws_allowed_paths")]
     pub allowed_paths: Vec<String>,
+
+    /// AWS service names (lowercase, e.g. `"s3"`, `"sqs"`,
+    /// `"dynamodb"`) the agent's tasks are intended to call.
+    /// Empty (the default) means "no service-level intent
+    /// declared".
+    #[serde(default)]
+    pub allowed_services: Vec<String>,
+
+    /// AWS region IDs (e.g. `"us-east-1"`, `"eu-west-2"`) the
+    /// agent's tasks are intended to use. Empty means "no
+    /// region scoping declared".
+    #[serde(default)]
+    pub allowed_regions: Vec<String>,
 }
 
 impl Default for AwsRestrictions {
     fn default() -> Self {
-        Self { allowed_paths: default_aws_allowed_paths() }
+        Self {
+            allowed_paths:    default_aws_allowed_paths(),
+            allowed_services: Vec::new(),
+            allowed_regions:  Vec::new(),
+        }
     }
 }
 
@@ -407,17 +432,41 @@ fn default_aws_allowed_paths() -> Vec<String> {
 /// `404 Not Found`. Default permits the four canonical GCP
 /// metadata-server endpoints (`/computeMetadata/v1/...`) that
 /// `google-auth-library` and `gcloud` walk through.
+///
+/// `allowed_scopes` and `project` carry V2.3 declarative scope
+/// intent. See `credential-proxy-gcp::restriction` module doc for
+/// the V2.3 enforcement contract (audit echo + token-response
+/// scope narrowing) and the V3 deferral story (token-exchange
+/// API for genuinely scope-narrowed credentials).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcpRestrictions {
     /// Paths the proxy will serve. Defaults to the four canonical
     /// metadata-server endpoints.
     #[serde(default = "default_gcp_allowed_paths")]
     pub allowed_paths: Vec<String>,
+
+    /// OAuth scopes the operator declares the agent will use
+    /// (e.g.
+    /// `["https://www.googleapis.com/auth/devstorage.read_only"]`).
+    /// Empty (the default) means "no scope-level intent declared".
+    #[serde(default)]
+    pub allowed_scopes: Vec<String>,
+
+    /// GCP project ID the agent's tasks are intended to operate
+    /// on. When non-empty the proxy bind step asserts equality
+    /// with the proxy's configured `project_id`. Empty means "no
+    /// project pinning declared".
+    #[serde(default)]
+    pub project: String,
 }
 
 impl Default for GcpRestrictions {
     fn default() -> Self {
-        Self { allowed_paths: default_gcp_allowed_paths() }
+        Self {
+            allowed_paths:  default_gcp_allowed_paths(),
+            allowed_scopes: Vec::new(),
+            project:        String::new(),
+        }
     }
 }
 
@@ -486,6 +535,13 @@ pub struct MongodbRestrictions {
 /// resource; scoping happens through the `?resource=...` query
 /// parameter. The proxy refuses to mint tokens for resources outside
 /// `allowed_resources`, even if the agent passes an arbitrary URI.
+///
+/// `allowed_actions` carries V2.3 declarative per-resource ARM
+/// action filtering. The proxy surfaces the matching action set in
+/// the token response's `x-ms-allowed-actions` header and the audit
+/// envelope; runtime ARM-URL gating is V3 work. See
+/// `credential-proxy-azure::restriction` module doc for the full
+/// V2.3 → V3 transition contract.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AzureRestrictions {
     /// Azure resource URIs (e.g. `"https://management.azure.com/"`,
@@ -493,6 +549,26 @@ pub struct AzureRestrictions {
     /// for. Empty list means "block everything".
     #[serde(default)]
     pub allowed_resources: Vec<String>,
+
+    /// Per-resource ARM action vocabulary. Each entry pairs a
+    /// resource URI (which MUST appear in `allowed_resources`)
+    /// with the ARM verbs the agent's task is intended to perform
+    /// (e.g. `Microsoft.Storage/storageAccounts/read`). Empty
+    /// (the default) means "no action-level intent declared".
+    #[serde(default)]
+    pub allowed_actions: Vec<AzureResourceActions>,
+}
+
+/// One `(resource, [action, action, ...])` association declared
+/// in `AzureRestrictions::allowed_actions`. Mirrors
+/// `raxis_credential_proxy_azure::restriction::ResourceActions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AzureResourceActions {
+    /// Azure resource URI this action set applies to.
+    pub resource: String,
+    /// ARM action verbs.
+    #[serde(default)]
+    pub actions: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

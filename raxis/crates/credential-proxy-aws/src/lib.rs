@@ -233,6 +233,17 @@ pub enum AuditEvent {
         /// IAM role ARN mirrored to the SDK response (or empty
         /// if not declared).
         role_arn:    String,
+        /// Operator-declared service scope. Echoed verbatim from
+        /// `Restrictions::allowed_services`. Empty when no
+        /// service-level intent was declared. Used by reviewers
+        /// and `raxis doctor` to cross-check the egress allowlist.
+        /// V2.3 enforcement is declarative + TProxy; V3 lands the
+        /// SigV4 inspector.
+        allowed_services: Vec<String>,
+        /// Operator-declared region scope. Echoed verbatim from
+        /// `Restrictions::allowed_regions`. Same enforcement
+        /// model as `allowed_services`.
+        allowed_regions:  Vec<String>,
         /// True if a restriction blocked this request.
         blocked:     bool,
     },
@@ -560,6 +571,8 @@ fn audit_event(
         path:        path.to_owned(),
         path_sha256,
         role_arn:    config.role_arn.clone().unwrap_or_default(),
+        allowed_services: config.restrictions.allowed_services.clone(),
+        allowed_regions:  config.restrictions.allowed_regions.clone(),
         blocked,
     }
 }

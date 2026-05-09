@@ -80,6 +80,7 @@ pub async fn run() -> Result<()> {
         client_id:       Some("live-e2e-client".to_owned()),
         restrictions: Restrictions {
             allowed_resources: vec!["https://management.azure.com/".to_owned()],
+            allowed_actions:   Vec::new(),
         },
     };
     let proxy = AzureProxy::bind(
