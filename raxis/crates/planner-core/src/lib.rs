@@ -77,6 +77,7 @@ pub mod dispatch;
 pub mod intent;
 pub mod ksb;
 pub mod model;
+pub mod provider_model;
 pub mod retry;
 pub mod tools;
 pub mod transport;
@@ -98,6 +99,11 @@ pub use ksb::{
 pub use model::{
     AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse, MockModelClient,
     ModelClient, ModelError, ToolSpec, Usage,
+};
+pub use provider_model::{
+    emit_model_deprecation_warning, find_known_model, resolve_model_from_env,
+    resolve_model_from_env_fn, validate_model_id, KnownModel, ProviderId,
+    ProviderModelError, DEFAULT_MODEL, KNOWN_MODELS,
 };
 pub use retry::{
     is_retryable, FallbackModelClient, RetryConfig, RetryingModelClient,

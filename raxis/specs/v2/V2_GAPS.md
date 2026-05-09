@@ -301,35 +301,85 @@ production chain is `RetryingModelClient(AnthropicClient)` only.
 * Streaming partial-response recovery.
 * `ProviderExhausted` typed audit kind + escalation flow.
 
-### C3: Provider Model Selection
+### C3: Provider Model Selection — CLOSED (V2.3, MVP)
 
-**Spec:** `provider-model-selection.md` (51KB)
-**Estimate:** ~400 lines
+**Spec:** `provider-model-selection.md` (51KB) — full surface
+**Status:** **CLOSED for V2 — env-stamped model id with registry validation.**
+**Delivered:** ~330 lines (planner-core provider_model + tests)
 
-Per-task model override (`model = "claude-sonnet-4-20250514"`). Provider
-routing based on model availability. Cost-aware routing. Model
-deprecation warnings at plan admission.
+V2.3 lands the wire-shape leg of `provider-model-selection.md` so a
+planner-role binary at boot:
 
-**Per-provider implementation status:**
+1. Reads `RAXIS_MODEL_ID` from the kernel-stamped environment, with
+   fallback to a single canonical default
+   ([`DEFAULT_MODEL = "claude-sonnet-4-5-20250929"`]).
+2. Validates the id against an append-only known-model registry
+   covering the four V2 provider vocabularies (Anthropic, OpenAI,
+   Gemini, Bedrock) — an unknown id surfaces as
+   `ProviderModelError::UnknownModel` BEFORE the dispatch loop
+   spends any tokens against the wrong model.
+3. Emits a structured `ModelDeprecated` JSON warning to stderr
+   when the resolved id has a deprecation replacement, so the
+   operator sees it in `initiative watch`.
 
-| Provider | Spec'd models | Config types | HTTP client | Wire-compatible |
-|---|---|---|---|---|
-| **Anthropic** | `claude-sonnet-4-20250514`, `claude-opus-4.7-thinking-medium` | 🟡 `api_key` + `base_url` in `gateway-substrate` | ❌ | ❌ |
-| **OpenAI** | `gpt-5.5-medium`, `gpt-5.3-codex` | ❌ | ❌ | ❌ |
-| **Google Gemini** | `gemini-2.5-pro`, `gemini-2.5-flash` | ❌ | ❌ | ❌ |
-| **AWS Bedrock** | Via Anthropic/Cohere model IDs | ❌ | ❌ | ❌ |
+| Component | Crate | Status |
+|---|---|---|
+| `KnownModel { name, provider, deprecated, context_window }` rows | `planner-core/src/provider_model.rs` | 11 entries: 5 Anthropic, 2 OpenAI, 2 Gemini, 2 Anthropic deprecated |
+| `ProviderId` enum (Anthropic, OpenAi, Gemini, Bedrock) | `planner-core/src/provider_model.rs` | Stable wire string via `ProviderId::as_str()` matches policy `[providers]` keys |
+| `validate_model_id`, `find_known_model`, `resolve_model_from_env(_fn)` | `planner-core/src/provider_model.rs` | Public for binary boot + tests |
+| `emit_model_deprecation_warning(model, replacement)` | `planner-core/src/provider_model.rs` | Stable JSON shape (`level=warn,event=ModelDeprecated`) |
+| 8 unit tests (registry uniqueness, default-in-registry, unknown rejection, env empty/unset/explicit, deprecated path, provider id wire shape) | `planner-core/src/provider_model.rs` | All passing |
 
-**Deployment tiers** (from `provider-model-selection.md §4`):
+**V2 design choices.**
+
+* **Registry, not free-form string.** The Anthropic/OpenAI APIs
+  silently route unknown ids to a default, which masks operator
+  typos. The registry is the operator-visible mismatch check.
+* **Append-only growth.** New models land as a one-line PR; old
+  models go through a deprecation cycle (set `deprecated:
+  Some(replacement)` → emit warning → eventual removal in a
+  major release).
+* **No alias-chain resolution.** Per-role alias chains
+  (`[provider_aliases.X.chain]`) and `setup wizard`
+  auto-generation stay deferred to V3. The V2 binding is
+  one-binary-one-model-id; the role binary's `main()`
+  constructs the dispatch chain by hand if a fallback shell is
+  desired.
+
+**Deferred to V3 (full provider-model-selection.md surface).**
+
+* `[provider_aliases_defaults]` policy schema + `plan prepare`
+  fill-in.
+* `setup wizard` auto-diversification (single-provider →
+  multi-provider chain rewrite when a second API key is added).
+* `override_reviewer_alias` per-environment override.
+* OpenAI / Gemini / Bedrock `ModelClient` impls (each ≈ 200
+  lines) so the gateway-side fallback chain has wire-compatible
+  receivers.
+
+**Per-provider implementation status (after V2.3):**
+
+| Provider | Registry coverage | `ModelClient` impl | Gateway forwarding |
+|---|---|---|---|
+| **Anthropic** | ✅ 5 supported + 2 deprecated | ✅ `AnthropicClient` | ✅ |
+| **OpenAI** | ✅ 2 entries | ❌ deferred V3 | 🟡 gateway-only |
+| **Google Gemini** | ✅ 2 entries | ❌ deferred V3 | 🟡 gateway-only |
+| **AWS Bedrock** | ⚪ no entries (uses Anthropic ids) | ❌ deferred V3 | 🟡 gateway-only |
+
+**Deployment tiers** (from `provider-model-selection.md §4`) —
+operator-facing guidance the V2 spec preserves:
 
 - **§4.1** — Single-provider (Anthropic only): all three roles use
   `anthropic:claude-*`. No failover if Anthropic has an outage.
+  V2 supports this out of the box: `RAXIS_MODEL_ID` defaults to
+  `claude-sonnet-4-5-20250929`.
 - **§4.2** — Two-provider (Anthropic + OpenAI): cross-provider
-  fallback chains per role. Recommended for production.
+  fallback chains per role. Recommended for production. V2's
+  `FallbackModelClient` (V2_GAPS §C2) is the chain primitive;
+  wiring it up requires the V3 OpenAI `ModelClient` impl.
 - **§4.3** — Three-provider (Anthropic + OpenAI + Gemini): per-role
   model chains with tiered fallback. Reviewer uses `gemini-flash`
-  at tier-3 for cost efficiency.
-
-Zero references to `model_selection`, `ProviderRouting` in any crate.
+  at tier-3 for cost efficiency. V3 follow-up.
 
 ### C5: Third-Party Provider Integration (HTTP Sidecar)
 
