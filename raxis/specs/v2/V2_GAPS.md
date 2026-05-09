@@ -969,33 +969,23 @@ app.listen(9201, () => console.log("PagerDuty sidecar on :9201"));
 | **Health check** | `GET /health` returning `2xx` — used by `raxis doctor notifications`. Optional but recommended. |
 | **Timeout** | Sidecar must respond within 5 seconds per attempt. |
 
-**`NotificationDelivered` audit event shape:**
+**Proposed extensions to the `NotificationDelivered` audit event
+(defined in `email-and-notification-channels.md`):**
 
-```rust
-AuditEventKind::NotificationDelivered {
-    /// Which channel delivered the notification (matches
-    /// `name` in `[[notification_channels]]` policy declaration).
-    channel_name:      String,
-    /// Channel kind: "Email", "Shell", "File", or "Sidecar".
-    channel_kind:      String,
-    /// The `trace_id` returned by the sidecar (Sidecar channels)
-    /// or the SMTP Message-ID (Email channels). Allows operators
-    /// to correlate this RAXIS audit event with the notification
-    /// platform's internal logs.
-    /// None for Shell/File channels (no upstream system).
-    upstream_trace_id: Option<String>,
-    /// The event kind that triggered this notification.
-    source_event_kind: String,
-    /// The event ID that triggered this notification.
-    source_event_id:   Uuid,
-    /// Initiative context.
-    initiative_id:     Uuid,
-    /// Delivery latency (wall-clock, including retries).
-    delivery_ms:       u64,
-    /// Number of attempts (1 = first try succeeded).
-    attempts:          u32,
-}
-```
+The following fields are added to the existing event shape for
+sidecar channels. See `email-and-notification-channels.md` for
+the authoritative definition.
+
+| Field | Type | Description |
+|---|---|---|
+| `channel_name` | `String` | Matches `name` in `[[notification_channels]]` policy declaration |
+| `channel_kind` | `String` | `"Email"`, `"Shell"`, `"File"`, or `"Sidecar"` |
+| `upstream_trace_id` | `Option<String>` | The `trace_id` returned by the sidecar (Slack `ts`, PagerDuty `dedup_key`, SMTP `Message-ID`). `None` for Shell/File channels. |
+| `source_event_kind` | `String` | The event kind that triggered this notification |
+| `source_event_id` | `Uuid` | The event ID that triggered this notification |
+| `initiative_id` | `Uuid` | Initiative context |
+| `delivery_ms` | `u64` | Delivery latency (wall-clock, including retries) |
+| `attempts` | `u32` | Number of attempts (1 = first try succeeded) |
 
 ### C5: Immutable Artifact Store — CLOSED (V2.3, MVP)
 
@@ -1682,7 +1672,7 @@ algorithm with the URL-gate limb.
 | INV-ENV-01 per-task credential coherence | §11.3 step A / §11.7 | ✅ `validate_task_environment_consistency` runs at `approve_plan` BEFORE BEGIN TRANSACTION; rejects cross-env tasks with `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (`LifecycleError::PlanInvalid`). Inert when zero envs declared (§1.5.2 activation gate). |
 | Cross-env isolation (structural) | §6 | ✅ Already works (VMs are isolated). |
 | `[[environment_gates]]` in `policy.toml` | §5 / §11.3 step B | ❌ Deferred to V3 along with the URL-gate runtime path (`block_all`, `write_requires_approval`, `same_cluster_acknowledged` handler, `approval_match_mode`). |
-| `WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT` | §7 | ❌ Deferred to V3 (depends on URL-gate matching). |
+| Warning code from `environment-access-control.md §7` | §7 | ❌ Deferred to V3 (depends on URL-gate matching). |
 | Reserved V2.x fields (`blast_radius`, `require_two_party_sign`) | §5b.4 | 🟡 Parsed but inert (no `WARN_ENVIRONMENT_RESERVED_FIELD_SET` audit yet — defer). |
 | `TaskEnvironmentBinding` audit attribution | §11.9 | ❌ Deferred to V3 (binding is computed during validation but not yet emitted as a distinct audit event). |
 
@@ -1708,7 +1698,7 @@ plans.
 3. `TaskEnvironmentBinding` audit event in `InitiativeCreated`
    for forensic attribution of "which initiatives ever ran in
    production?" queries.
-4. `WARN_CREDENTIAL_UNREACHABLE_ENVIRONMENT` (§7) — fires when
+4. The unreachable-environment warning from §7 — fires when
    a task declares an env-bound credential but no `allowed_egress`
    URL matches any gate for that environment.
 5. `WARN_ENVIRONMENT_RESERVED_FIELD_SET` for §5b.4 reserved
