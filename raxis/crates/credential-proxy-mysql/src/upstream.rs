@@ -701,6 +701,240 @@ impl UpstreamSession {
         })
     }
 
+    /// Forward a `COM_STMT_PREPARE` body to the upstream and collect
+    /// the matched response packets:
+    /// `COM_STMT_PREPARE_OK` (or ERR), then `num_params` ParamDef
+    /// packets + EOF (if `num_params > 0`), then `num_columns`
+    /// ColumnDef packets + EOF (if `num_columns > 0`).
+    ///
+    /// V2.4 ORM blocker — the SQL has already been classified +
+    /// restriction-checked + audit-emitted by `serve_one`; this
+    /// function is the byte-relay leg.
+    pub async fn forward_stmt_prepare(
+        &mut self,
+        sql: &[u8],
+    ) -> Result<ForwardOutcome, UpstreamError> {
+        let started = Instant::now();
+        let mut payload = Vec::with_capacity(1 + sql.len());
+        payload.push(wire::cmd::STMT_PREPARE);
+        payload.extend_from_slice(sql);
+        self.stream.write_all(&frame_packet(&payload, 0)).await
+            .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
+        self.stream.flush().await.ok();
+
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        let mut bytes_returned: u64 = 0;
+        let (seq0, p0) = read_packet(&mut self.stream).await
+            .map_err(|e| UpstreamError::RelayFailed(format!("read response: {e}")))?;
+        bytes_returned += 4 + p0.len() as u64;
+        if bytes_returned > MAX_RELAY_BYTES {
+            return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+        }
+
+        // ERR_Packet: terminal.
+        if !p0.is_empty() && p0[0] == 0xff {
+            let (code, sqlstate, message) = parse_err_packet(&p0);
+            frames.push(frame_packet(&p0, seq0));
+            let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            return Ok(ForwardOutcome {
+                frames, rows_returned: 0, bytes_returned, duration_ms,
+                upstream_error: Some((code, sqlstate, redact_for_audit(&message))),
+            });
+        }
+        // PREPARE_OK starts with 0x00. Layout (fixed-12 after the
+        // 0x00 header):
+        //   1 byte  status     = 0x00
+        //   4 bytes statement_id (u32 LE)
+        //   2 bytes num_columns (u16 LE)
+        //   2 bytes num_params  (u16 LE)
+        //   1 byte  reserved_1  = 0x00
+        //   2 bytes warning_count (u16 LE) [optional]
+        //   1 byte  metadata_follows [optional, only if CLIENT_OPTIONAL_RESULTSET_METADATA]
+        if p0.len() < 12 || p0[0] != 0x00 {
+            return Err(UpstreamError::Handshake(
+                "malformed COM_STMT_PREPARE_OK packet".into(),
+            ));
+        }
+        let num_columns = u16::from_le_bytes([p0[5], p0[6]]) as usize;
+        let num_params  = u16::from_le_bytes([p0[7], p0[8]]) as usize;
+        frames.push(frame_packet(&p0, seq0));
+
+        // num_params ParamDef packets, optionally followed by EOF.
+        if num_params > 0 {
+            for _ in 0..num_params {
+                let (seq, p) = read_packet(&mut self.stream).await
+                    .map_err(|e| UpstreamError::RelayFailed(format!("read paramdef: {e}")))?;
+                bytes_returned += 4 + p.len() as u64;
+                if bytes_returned > MAX_RELAY_BYTES {
+                    return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+                }
+                frames.push(frame_packet(&p, seq));
+            }
+            // EOF terminator for the param defs (only when
+            // CLIENT_DEPRECATE_EOF is NOT advertised — the proxy
+            // does not advertise it, see CLIENT_CAPS).
+            let (eof_seq, eof_p) = read_packet(&mut self.stream).await
+                .map_err(|e| UpstreamError::RelayFailed(format!("read paramdef eof: {e}")))?;
+            bytes_returned += 4 + eof_p.len() as u64;
+            if !is_eof_packet(&eof_p) {
+                return Err(UpstreamError::Handshake("expected EOF after param defs".into()));
+            }
+            frames.push(frame_packet(&eof_p, eof_seq));
+        }
+
+        // num_columns ColumnDef packets, optionally followed by EOF.
+        if num_columns > 0 {
+            for _ in 0..num_columns {
+                let (seq, p) = read_packet(&mut self.stream).await
+                    .map_err(|e| UpstreamError::RelayFailed(format!("read coldef: {e}")))?;
+                bytes_returned += 4 + p.len() as u64;
+                if bytes_returned > MAX_RELAY_BYTES {
+                    return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+                }
+                frames.push(frame_packet(&p, seq));
+            }
+            let (eof_seq, eof_p) = read_packet(&mut self.stream).await
+                .map_err(|e| UpstreamError::RelayFailed(format!("read coldef eof: {e}")))?;
+            bytes_returned += 4 + eof_p.len() as u64;
+            if !is_eof_packet(&eof_p) {
+                return Err(UpstreamError::Handshake("expected EOF after col defs".into()));
+            }
+            frames.push(frame_packet(&eof_p, eof_seq));
+        }
+
+        let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        Ok(ForwardOutcome {
+            frames, rows_returned: 0, bytes_returned, duration_ms, upstream_error: None,
+        })
+    }
+
+    /// Forward a `COM_STMT_EXECUTE` body to the upstream and collect
+    /// the matched response packets. The response shape mirrors a
+    /// `COM_QUERY` response:
+    ///
+    /// * ERR_Packet (terminal),
+    /// * OK_Packet (terminal — no result set),
+    /// * binary-format ResultSetHeader + ColumnDef* + EOF + Row* + EOF.
+    ///
+    /// V2.4 byte-relays the binary-row payloads verbatim; the proxy
+    /// does not introspect the row contents (the type metadata in
+    /// the ColumnDef packets is enough for the agent's driver to
+    /// decode).
+    pub async fn forward_stmt_execute(
+        &mut self,
+        body: &[u8],
+    ) -> Result<ForwardOutcome, UpstreamError> {
+        // body is the FULL execute payload starting with 0x17.
+        if body.is_empty() || body[0] != wire::cmd::STMT_EXECUTE {
+            return Err(UpstreamError::Handshake(
+                "forward_stmt_execute called with non-STMT_EXECUTE body".into(),
+            ));
+        }
+        forward_with_resultset_response(&mut self.stream, body).await
+    }
+
+    /// Forward a `COM_STMT_FETCH` body to the upstream and collect
+    /// the rows + EOF response.
+    pub async fn forward_stmt_fetch(
+        &mut self,
+        body: &[u8],
+    ) -> Result<ForwardOutcome, UpstreamError> {
+        if body.is_empty() || body[0] != wire::cmd::STMT_FETCH {
+            return Err(UpstreamError::Handshake(
+                "forward_stmt_fetch called with non-STMT_FETCH body".into(),
+            ));
+        }
+        let started = Instant::now();
+        self.stream.write_all(&frame_packet(body, 0)).await
+            .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
+        self.stream.flush().await.ok();
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        let mut bytes_returned: u64 = 0;
+        let mut rows_returned: u64 = 0;
+        loop {
+            let (seq, p) = read_packet(&mut self.stream).await
+                .map_err(|e| UpstreamError::RelayFailed(format!("read row: {e}")))?;
+            bytes_returned += 4 + p.len() as u64;
+            if bytes_returned > MAX_RELAY_BYTES {
+                return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+            }
+            if !p.is_empty() && p[0] == 0xff {
+                let (code, sqlstate, message) = parse_err_packet(&p);
+                frames.push(frame_packet(&p, seq));
+                let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+                return Ok(ForwardOutcome {
+                    frames, rows_returned, bytes_returned, duration_ms,
+                    upstream_error: Some((code, sqlstate, redact_for_audit(&message))),
+                });
+            }
+            frames.push(frame_packet(&p, seq));
+            if is_eof_packet(&p) {
+                break;
+            }
+            rows_returned += 1;
+        }
+        let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        Ok(ForwardOutcome { frames, rows_returned, bytes_returned, duration_ms, upstream_error: None })
+    }
+
+    /// Forward a `COM_STMT_RESET` body to the upstream and collect
+    /// the single OK or ERR reply.
+    pub async fn forward_stmt_reset(
+        &mut self,
+        body: &[u8],
+    ) -> Result<ForwardOutcome, UpstreamError> {
+        if body.is_empty() || body[0] != wire::cmd::STMT_RESET {
+            return Err(UpstreamError::Handshake(
+                "forward_stmt_reset called with non-STMT_RESET body".into(),
+            ));
+        }
+        let started = Instant::now();
+        self.stream.write_all(&frame_packet(body, 0)).await
+            .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
+        self.stream.flush().await.ok();
+        let (seq, p) = read_packet(&mut self.stream).await
+            .map_err(|e| UpstreamError::RelayFailed(format!("read reset reply: {e}")))?;
+        let bytes_returned = 4 + p.len() as u64;
+        let mut frames = Vec::new();
+        let upstream_error = if !p.is_empty() && p[0] == 0xff {
+            let (code, sqlstate, message) = parse_err_packet(&p);
+            Some((code, sqlstate, redact_for_audit(&message)))
+        } else {
+            None
+        };
+        frames.push(frame_packet(&p, seq));
+        let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        Ok(ForwardOutcome {
+            frames, rows_returned: 0, bytes_returned, duration_ms, upstream_error,
+        })
+    }
+
+    /// Forward a `COM_STMT_CLOSE` or `COM_STMT_SEND_LONG_DATA` body
+    /// to the upstream. These commands have NO reply per the MySQL
+    /// protocol; the proxy returns an empty `ForwardOutcome` so the
+    /// caller uniformly threads upstream-bytes accounting.
+    pub async fn forward_stmt_no_reply(
+        &mut self,
+        body: &[u8],
+    ) -> Result<ForwardOutcome, UpstreamError> {
+        if body.is_empty()
+            || (body[0] != wire::cmd::STMT_CLOSE && body[0] != wire::cmd::STMT_SEND_LONG_DATA)
+        {
+            return Err(UpstreamError::Handshake(
+                "forward_stmt_no_reply called with unexpected command".into(),
+            ));
+        }
+        let started = Instant::now();
+        self.stream.write_all(&frame_packet(body, 0)).await
+            .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
+        self.stream.flush().await.ok();
+        let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        Ok(ForwardOutcome {
+            frames: Vec::new(), rows_returned: 0, bytes_returned: 0,
+            duration_ms, upstream_error: None,
+        })
+    }
+
     /// Send a clean `COM_QUIT` to the upstream. Best-effort — failures
     /// are logged but not surfaced because the agent's session is
     /// already winding down by the time this fires.
@@ -712,6 +946,106 @@ impl UpstreamSession {
         let _ = self.stream.flush().await;
         let _ = self.stream.shutdown().await;
     }
+}
+
+/// Shared helper for COM_QUERY / COM_STMT_EXECUTE: write the command
+/// payload at seq=0 and collect the response state machine into a
+/// single `ForwardOutcome`. The response shape (text vs. binary
+/// result set, OK_Packet, ERR_Packet) is identical for both commands.
+async fn forward_with_resultset_response(
+    stream: &mut TcpStream,
+    body: &[u8],
+) -> Result<ForwardOutcome, UpstreamError> {
+    let started = Instant::now();
+    stream.write_all(&frame_packet(body, 0)).await
+        .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
+    stream.flush().await.ok();
+
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+    let mut bytes_returned: u64 = 0;
+    let mut rows_returned: u64 = 0;
+    let (seq0, p0) = read_packet(stream).await
+        .map_err(|e| UpstreamError::RelayFailed(format!("read response: {e}")))?;
+    bytes_returned += 4 + p0.len() as u64;
+    if bytes_returned > MAX_RELAY_BYTES {
+        return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+    }
+    if !p0.is_empty() && p0[0] == 0xff {
+        let (code, sqlstate, message) = parse_err_packet(&p0);
+        frames.push(frame_packet(&p0, seq0));
+        let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        return Ok(ForwardOutcome {
+            frames, rows_returned: 0, bytes_returned, duration_ms,
+            upstream_error: Some((code, sqlstate, redact_for_audit(&message))),
+        });
+    }
+    if !p0.is_empty() && p0[0] == 0x00 {
+        frames.push(frame_packet(&p0, seq0));
+        let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+        return Ok(ForwardOutcome {
+            frames, rows_returned: 0, bytes_returned, duration_ms, upstream_error: None,
+        });
+    }
+    if !p0.is_empty() && p0[0] == 0xfb {
+        return Err(UpstreamError::Handshake(
+            "LOCAL INFILE Request from upstream is not supported by V2.1 proxy".into(),
+        ));
+    }
+    let (column_count, _) = decode_lenenc_int(&p0)
+        .ok_or_else(|| UpstreamError::Handshake(
+            "malformed ResultSetHeader: expected lenenc column count".into(),
+        ))?;
+    if column_count == 0 || column_count > 4096 {
+        return Err(UpstreamError::Handshake(format!(
+            "implausible column count {column_count} in ResultSetHeader"
+        )));
+    }
+    frames.push(frame_packet(&p0, seq0));
+    for _ in 0..column_count {
+        let (seq, p) = read_packet(stream).await
+            .map_err(|e| UpstreamError::RelayFailed(format!("read coldef: {e}")))?;
+        bytes_returned += 4 + p.len() as u64;
+        if bytes_returned > MAX_RELAY_BYTES {
+            return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+        }
+        frames.push(frame_packet(&p, seq));
+    }
+    let (eof_seq, eof_payload) = read_packet(stream).await
+        .map_err(|e| UpstreamError::RelayFailed(format!("read eof: {e}")))?;
+    if !is_eof_packet(&eof_payload) {
+        return Err(UpstreamError::Handshake(
+            "expected EOF after column definitions".into(),
+        ));
+    }
+    bytes_returned += 4 + eof_payload.len() as u64;
+    frames.push(frame_packet(&eof_payload, eof_seq));
+    loop {
+        let (seq, p) = read_packet(stream).await
+            .map_err(|e| UpstreamError::RelayFailed(format!("read row: {e}")))?;
+        bytes_returned += 4 + p.len() as u64;
+        if bytes_returned > MAX_RELAY_BYTES {
+            return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+        }
+        if is_eof_packet(&p) {
+            frames.push(frame_packet(&p, seq));
+            break;
+        }
+        if !p.is_empty() && p[0] == 0xff {
+            let (code, sqlstate, message) = parse_err_packet(&p);
+            frames.push(frame_packet(&p, seq));
+            let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+            return Ok(ForwardOutcome {
+                frames, rows_returned, bytes_returned, duration_ms,
+                upstream_error: Some((code, sqlstate, redact_for_audit(&message))),
+            });
+        }
+        frames.push(frame_packet(&p, seq));
+        rows_returned += 1;
+    }
+    let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    Ok(ForwardOutcome {
+        frames, rows_returned, bytes_returned, duration_ms, upstream_error: None,
+    })
 }
 
 // ---------------------------------------------------------------------------

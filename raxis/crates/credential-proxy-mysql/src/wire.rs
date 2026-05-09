@@ -38,6 +38,28 @@ pub mod cmd {
     /// Reset the session connection state without re-handshaking
     /// (`COM_RESET_CONNECTION`).
     pub const RESET:   u8 = 0x1f;
+    /// Prepare a SQL statement (`COM_STMT_PREPARE`). Payload is
+    /// `0x16 + sql_bytes`.
+    pub const STMT_PREPARE: u8 = 0x16;
+    /// Execute a previously-prepared statement (`COM_STMT_EXECUTE`).
+    /// Payload is `0x17 + stmt_id (4 LE) + flags (1) + iter (4 LE) +
+    /// null_bitmap + new_params_flag (1) + (types + values)`.
+    pub const STMT_EXECUTE: u8 = 0x17;
+    /// Send a long parameter value chunk (`COM_STMT_SEND_LONG_DATA`).
+    /// Payload is `0x18 + stmt_id (4 LE) + param_id (2 LE) + data`.
+    /// No reply expected.
+    pub const STMT_SEND_LONG_DATA: u8 = 0x18;
+    /// Close a prepared statement (`COM_STMT_CLOSE`). Payload is
+    /// `0x19 + stmt_id (4 LE)`. No reply expected.
+    pub const STMT_CLOSE: u8 = 0x19;
+    /// Reset accumulated `SEND_LONG_DATA` chunks for a stmt
+    /// (`COM_STMT_RESET`). Payload is `0x1a + stmt_id (4 LE)`.
+    /// Reply is OK_Packet or ERR_Packet.
+    pub const STMT_RESET: u8 = 0x1a;
+    /// Fetch additional rows from a cursor (`COM_STMT_FETCH`).
+    /// Payload is `0x1c + stmt_id (4 LE) + nrows (4 LE)`. Reply is
+    /// rows + EOF (or ERR).
+    pub const STMT_FETCH: u8 = 0x1c;
 }
 
 /// Capability flags the proxy advertises in the `HandshakeV10`
