@@ -41,6 +41,7 @@ pub mod plan_validate;
 pub mod policy;
 pub mod policy_diff;
 pub mod policy_show;
+pub mod providers;
 pub mod queue;
 pub mod session;
 pub mod sessions;

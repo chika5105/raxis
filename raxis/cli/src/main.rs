@@ -44,7 +44,7 @@ use errors::CliError;
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "genesis", "policy", "plan", "initiative", "operator", "task", "session",
     "delegation", "escalation", "epoch", "cert", "credential", "kernel",
-    "submit",
+    "submit", "providers",
     "status", "log", "verify-chain", "queue", "inspect",
     "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
     "budget", "explain", "top",
@@ -87,6 +87,8 @@ const CREDENTIAL_SUBCOMMANDS:  &[&str] = &[
 /// enforcement) is a follow-up phase per kernel-lifecycle.md
 /// §"Implementation checklist".
 const KERNEL_SUBCOMMANDS:      &[&str] = &["install", "uninstall"];
+/// provider-failure-handling.md §6.6 — circuit breaker operator surface.
+const PROVIDERS_SUBCOMMANDS:   &[&str] = &["status", "reset"];
 
 // ---------------------------------------------------------------------------
 // Global CLI flags
@@ -332,6 +334,16 @@ fn run() -> Result<(), CliError> {
                 "uninstall" => commands::kernel::run_uninstall(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "kernel sub-command", sub2, KERNEL_SUBCOMMANDS,
+                ))),
+            }
+        }
+        "providers" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "status" => commands::providers::run_status(&flags, &rest[1..]),
+                "reset"  => commands::providers::run_reset(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "providers sub-command", sub2, PROVIDERS_SUBCOMMANDS,
                 ))),
             }
         }
@@ -598,6 +610,17 @@ SUBCOMMANDS:
         stop a currently-running kernel; print the `systemctl
         disable` / `launchctl bootout` commands the operator should
         run for full cleanup.
+
+    providers status [--json]
+        List all (provider, model) circuit breaker rows from
+        kernel.db. Shows state, consecutive failure count, last
+        failure kind, and last state change timestamp.
+
+    providers reset <provider> [<model>] [--json]
+        Force-close the circuit breaker for a provider (and optionally
+        a specific model). If <model> is omitted, resets ALL models
+        for the provider. The kernel reads state lazily, so the reset
+        takes effect on the next dispatch.
 
 READ-ONLY OBSERVATION:
 
