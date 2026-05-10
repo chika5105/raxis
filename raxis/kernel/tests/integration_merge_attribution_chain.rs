@@ -100,6 +100,7 @@ fn merge_conflict_attribution_lands_on_audit_chain() {
             operator_assisted: true,
             escalation_id:     Some(
                 "22222222-2222-2222-2222-222222222222".to_owned()),
+            target_ref:        "refs/heads/main".into(),
         },
         Some("11111111-1111-1111-1111-111111111111"),
         Some("task-9"),
@@ -154,6 +155,7 @@ fn standard_merge_emits_attribution_event_without_escalation_link() {
             previous_sha:      "f3d21a09f3d21a09f3d21a09f3d21a09f3d21a09".into(),
             operator_assisted: false,
             escalation_id:     None,
+            target_ref:        "refs/heads/main".into(),
         },
         Some("sess-orch"),
         None,
@@ -187,6 +189,7 @@ fn two_consecutive_merges_chain_through_prev_sha256() {
             previous_sha:      "0000000000000000000000000000000000000000".into(),
             operator_assisted: false,
             escalation_id:     None,
+            target_ref:        "refs/heads/main".into(),
         },
         Some("sess-orch"), None, Some("init-c"),
     ).unwrap();
@@ -199,6 +202,7 @@ fn two_consecutive_merges_chain_through_prev_sha256() {
             previous_sha:      "1111111111111111111111111111111111111111".into(),
             operator_assisted: true,
             escalation_id:     Some("esc-77".into()),
+            target_ref:        "refs/heads/main".into(),
         },
         Some("sess-orch"), None, Some("init-c"),
     ).unwrap();
@@ -265,6 +269,7 @@ fn merge_fast_forward_failed_lands_on_audit_chain_with_category_discriminator() 
             previous_sha:      "f3d21a09f3d21a09f3d21a09f3d21a09f3d21a09".into(),
             operator_assisted: false,
             escalation_id:     None,
+            target_ref:        "refs/heads/main".into(),
         },
         Some("sess-orch"),
         Some("task-merge"),

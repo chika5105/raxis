@@ -88,6 +88,14 @@ pub struct IntegrationMergeReconciliationReport {
 ///      cleanup (`kernel-lifecycle.md §7`); this sweep is only the
 ///      SQLite-row finalisation half of the recovery flow.
 ///
+/// V2.5 `integration-merge.md §11.3` — `git_apply_pending` recovery
+/// (Cases A/B/C) runs as a separate sub-step
+/// [`reconcile_git_apply_pending`] called from `main.rs` AFTER the
+/// audit writer is opened, because Case A and Case B emit typed audit
+/// events (`GitConsistencyRepaired` / `GitConsistencyVerified` /
+/// `GitStateInconsistent`) and this entry point does not have an
+/// `AuditSink` available yet.
+///
 /// Returns ReconciliationResult on success. Propagates KernelError on
 /// audit chain failure (step 1 only; task sweep failures are non-fatal and
 /// logged).
@@ -446,6 +454,500 @@ fn reconcile_integration_merge_attempts(
     }
 
     report
+}
+
+// ---------------------------------------------------------------------------
+// Step 5 — git_apply_pending recovery (integration-merge.md §11.3).
+//
+// Walks every initiative with `git_apply_pending = 1` (the partial
+// index `idx_initiatives_pending_git` from migration 16 makes this
+// O(in-flight merges), not O(initiatives)) and finalises one of three
+// outcomes:
+//
+//   * Case A — the audit log records an `IntegrationMergeCompleted`
+//     event for this initiative whose `commit_sha` differs from the
+//     current tip of `target_ref` in the main repo. Phase 1 of §11.1
+//     committed but Phase 2 (host-side fast-forward) did not finish.
+//     We re-run `commit_merge_to_target_ref` against the originating
+//     orchestrator worktree, verify the ref is now at the recorded
+//     SHA, clear the flag, and emit `GitConsistencyRepaired`.
+//
+//   * Case B — `target_ref` already points at the recorded
+//     `commit_sha`. Phase 2 fully succeeded but Phase 3 (the SQLite
+//     `clear_git_apply_pending`) did not. Idempotency: just clear
+//     the flag and emit `GitConsistencyVerified`.
+//
+//   * Case C — recovery cannot reconcile (no audit event found for
+//     the initiative, OR the orchestrator worktree referenced by the
+//     event no longer exists on disk, OR the recorded `commit_sha`
+//     is not reachable from the worktree). The flag is intentionally
+//     LEFT SET so subsequent IntegrationMerge admissions reject with
+//     `FAIL_GIT_APPLY_PENDING` until an operator intervenes. We emit
+//     `GitStateInconsistent` so the dashboard / pager surfaces the
+//     issue immediately.
+//
+// This sub-step is `pub fn reconcile_git_apply_pending` rather than
+// folded into `reconcile()` because it needs (a) `data_dir` to
+// locate `repositories/main/`, and (b) an `AuditSink` to emit the
+// outcome events. Both are only available in `main.rs` AFTER the
+// audit writer is opened (Step 7a) — the call site invokes us as
+// Step 7c, after `KernelStarted` has been emitted but before IPC
+// accept.
+// ---------------------------------------------------------------------------
+
+/// Per-initiative recovery outcome surfaced through
+/// [`GitApplyRecoveryResult`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitApplyRecoveryOutcome {
+    /// Case A — Phase 2 was re-applied successfully.
+    Repaired {
+        initiative_id:    String,
+        commit_sha:       String,
+        previous_sha:     Option<String>,
+        target_ref:       String,
+    },
+    /// Case B — `target_ref` was already at `commit_sha`; only the
+    /// pending flag needed to clear.
+    Verified {
+        initiative_id: String,
+        commit_sha:    String,
+        target_ref:    String,
+    },
+    /// Case C — unrecoverable inconsistency. Flag intentionally LEFT
+    /// SET so the kernel keeps rejecting new merges for this
+    /// initiative until an operator intervenes.
+    Inconsistent {
+        initiative_id: String,
+        db_sha:        String,
+        git_sha:       String,
+        target_ref:    String,
+        reason:        String,
+    },
+}
+
+/// Aggregate report of a single recovery sweep.
+#[derive(Debug, Clone, Default)]
+pub struct GitApplyRecoveryResult {
+    pub repaired:     usize,
+    pub verified:     usize,
+    pub inconsistent: usize,
+    pub outcomes:     Vec<GitApplyRecoveryOutcome>,
+}
+
+/// Run the boot-time `git_apply_pending` recovery (Cases A/B/C from
+/// `integration-merge.md §11.3`).
+///
+/// Idempotent: a second run on the same state observes no flagged
+/// rows (Cases A/B clear the flag) or re-emits the same Case-C
+/// outcome (the flag stays set, the operator-intervention condition
+/// has not changed).
+///
+/// **Audit contract.** Each initiative produces exactly one of
+/// `GitConsistencyRepaired` / `GitConsistencyVerified` /
+/// `GitStateInconsistent`. Audit-emit failures are logged but do not
+/// abort the sweep — losing one audit line is preferable to leaving
+/// every subsequent initiative un-recovered.
+///
+/// **Worktree retention.** This function relies on
+/// `INV-MERGE-WORKTREE-RETAIN` (`integration-merge.md §11.4`):
+/// session worktrees referenced by an initiative with
+/// `git_apply_pending = 1` MUST NOT have been GC'd. Worktree GC
+/// queries the same flag before deleting (the GC implementation
+/// lives in `crate::push` / `kernel-lifecycle.md §10.5.3`).
+pub fn reconcile_git_apply_pending(
+    store:     &Store,
+    audit:     &dyn raxis_audit_tools::AuditSink,
+    audit_dir: &Path,
+    data_dir:  &Path,
+) -> GitApplyRecoveryResult {
+    let mut report = GitApplyRecoveryResult::default();
+
+    let pending_ids: Vec<String> = {
+        let ro = match raxis_store::ro::open(data_dir) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"git_apply_recovery\",\
+                     \"action\":\"open_ro_failed\",\"error\":\"{e}\"}}",
+                );
+                return report;
+            }
+        };
+        match raxis_store::views::initiatives::pending_git_apply_ids(&ro) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"git_apply_recovery\",\
+                     \"action\":\"scan_failed\",\"error\":\"{e}\"}}",
+                );
+                return report;
+            }
+        }
+    };
+
+    if pending_ids.is_empty() {
+        return report;
+    }
+
+    eprintln!(
+        "{{\"level\":\"info\",\"step\":\"git_apply_recovery\",\
+         \"action\":\"scan\",\"pending_count\":{}}}",
+        pending_ids.len(),
+    );
+
+    let main_repo_root = data_dir.join("repositories").join("main");
+
+    for initiative_id in pending_ids {
+        let outcome = recover_one_initiative(
+            store, audit, audit_dir, &main_repo_root, &initiative_id,
+        );
+        match &outcome {
+            GitApplyRecoveryOutcome::Repaired { .. }     => report.repaired     += 1,
+            GitApplyRecoveryOutcome::Verified { .. }     => report.verified     += 1,
+            GitApplyRecoveryOutcome::Inconsistent { .. } => report.inconsistent += 1,
+        }
+        report.outcomes.push(outcome);
+    }
+
+    eprintln!(
+        "{{\"level\":\"info\",\"step\":\"git_apply_recovery\",\
+         \"repaired\":{},\"verified\":{},\"inconsistent\":{}}}",
+        report.repaired, report.verified, report.inconsistent,
+    );
+
+    report
+}
+
+/// One-initiative driver shared by the sweep above. Splits the
+/// per-initiative work into a function so the per-row error paths
+/// stay isolated from each other (a Case-C outcome on one
+/// initiative does not abort the sweep for siblings).
+fn recover_one_initiative(
+    store:          &Store,
+    audit:          &dyn raxis_audit_tools::AuditSink,
+    audit_dir:      &Path,
+    main_repo_root: &Path,
+    initiative_id:  &str,
+) -> GitApplyRecoveryOutcome {
+    // 1. Find the most recent IntegrationMergeCompleted event for
+    //    this initiative. The audit reader walks the chain from
+    //    seq 0; we keep the last match by comparing `seq` so a
+    //    multi-merge initiative recovers the LATEST attempt.
+    let last_merge = match find_last_integration_merge(audit_dir, initiative_id) {
+        Ok(Some(rec)) => rec,
+        Ok(None) => {
+            let reason = "audit_record_missing".to_owned();
+            emit_inconsistent(audit, initiative_id, "", "", "", &reason);
+            return GitApplyRecoveryOutcome::Inconsistent {
+                initiative_id: initiative_id.to_owned(),
+                db_sha:        String::new(),
+                git_sha:       String::new(),
+                target_ref:    String::new(),
+                reason,
+            };
+        }
+        Err(e) => {
+            let reason = format!("audit chain read failed: {e}");
+            emit_inconsistent(audit, initiative_id, "", "", "", &reason);
+            return GitApplyRecoveryOutcome::Inconsistent {
+                initiative_id: initiative_id.to_owned(),
+                db_sha:        String::new(),
+                git_sha:       String::new(),
+                target_ref:    String::new(),
+                reason,
+            };
+        }
+    };
+
+    let db_sha     = last_merge.commit_sha;
+    let target_ref = last_merge.target_ref;
+
+    if target_ref.is_empty() {
+        // Pre-V2.5 audit event without target_ref — this should not
+        // happen because pre-V2.5 segments wrote `git_apply_pending = 0`
+        // (column did not exist), so the recovery scan never picks them
+        // up. If we land here, the segment was hand-edited or the
+        // schema migration was skipped.
+        let reason = "audit_record_missing".to_owned();
+        emit_inconsistent(audit, initiative_id, &db_sha, "", "", &reason);
+        return GitApplyRecoveryOutcome::Inconsistent {
+            initiative_id: initiative_id.to_owned(),
+            db_sha,
+            git_sha:       String::new(),
+            target_ref:    String::new(),
+            reason,
+        };
+    }
+
+    // 2. Read the current target_ref tip in the main repo. Missing
+    //    ref / unopenable repo is Case C — we cannot proceed without
+    //    a known git_sha to compare against.
+    let git_sha_opt = match raxis_domain_git::current_target_ref_oid(main_repo_root, &target_ref) {
+        Ok(opt) => opt,
+        Err(e) => {
+            let reason = format!("main repo at {} could not be read: {e}", main_repo_root.display());
+            emit_inconsistent(audit, initiative_id, &db_sha, "", &target_ref, &reason);
+            return GitApplyRecoveryOutcome::Inconsistent {
+                initiative_id: initiative_id.to_owned(),
+                db_sha,
+                git_sha:       String::new(),
+                target_ref,
+                reason,
+            };
+        }
+    };
+
+    let git_sha = git_sha_opt.unwrap_or_default();
+
+    if git_sha == db_sha && !db_sha.is_empty() {
+        // Case B — target_ref already at db_sha. Phase 2 fully
+        // succeeded; only Phase 3 was missed. Just clear the flag.
+        if let Err(e) = clear_pending_under_lock(store, initiative_id) {
+            let reason = format!("Case B clear_git_apply_pending failed: {e}");
+            emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+            return GitApplyRecoveryOutcome::Inconsistent {
+                initiative_id: initiative_id.to_owned(),
+                db_sha,
+                git_sha,
+                target_ref,
+                reason,
+            };
+        }
+        emit_verified(audit, initiative_id, &db_sha, &target_ref);
+        return GitApplyRecoveryOutcome::Verified {
+            initiative_id: initiative_id.to_owned(),
+            commit_sha:    db_sha,
+            target_ref,
+        };
+    }
+
+    // Case A — db_sha != git_sha. Try to re-apply Phase 2.
+    // We need the originating orchestrator worktree path. Look it up
+    // from `sessions.worktree_root` keyed by the audit event's
+    // `session_id`.
+    let session_id = last_merge.session_id;
+    let worktree_path = match worktree_for_session(store, &session_id) {
+        Some(p) => p,
+        None => {
+            let reason = "orchestrator_worktree_missing".to_owned();
+            emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+            return GitApplyRecoveryOutcome::Inconsistent {
+                initiative_id: initiative_id.to_owned(),
+                db_sha,
+                git_sha,
+                target_ref,
+                reason,
+            };
+        }
+    };
+
+    if !worktree_path.exists() {
+        let reason = "orchestrator_worktree_missing".to_owned();
+        emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+        return GitApplyRecoveryOutcome::Inconsistent {
+            initiative_id: initiative_id.to_owned(),
+            db_sha,
+            git_sha,
+            target_ref,
+            reason,
+        };
+    }
+
+    // commit_merge_to_target_ref is idempotent: if target_ref
+    // already at db_sha (which we ruled out above), it short-
+    // circuits; otherwise it fetches objects from the worktree
+    // ODB and atomically advances the ref. A fetch failure when
+    // the ref does not yet have db_sha reachable is the genuine
+    // Case-C "orchestrator_worktree_unreachable_commit" case.
+    match raxis_domain_git::commit_merge_to_target_ref(
+        main_repo_root, &worktree_path, &db_sha, &target_ref,
+    ) {
+        Ok(advance) => {
+            if let Err(e) = clear_pending_under_lock(store, initiative_id) {
+                let reason = format!(
+                    "Case A re-applied Phase 2 successfully but clear_git_apply_pending failed: {e}",
+                );
+                emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+                return GitApplyRecoveryOutcome::Inconsistent {
+                    initiative_id: initiative_id.to_owned(),
+                    db_sha,
+                    git_sha,
+                    target_ref,
+                    reason,
+                };
+            }
+            emit_repaired(audit, initiative_id, &db_sha, &git_sha, &target_ref);
+            GitApplyRecoveryOutcome::Repaired {
+                initiative_id: initiative_id.to_owned(),
+                commit_sha:    db_sha,
+                previous_sha:  advance.previous_sha,
+                target_ref,
+            }
+        }
+        Err(_e) => {
+            let reason = "orchestrator_worktree_unreachable_commit".to_owned();
+            emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+            GitApplyRecoveryOutcome::Inconsistent {
+                initiative_id: initiative_id.to_owned(),
+                db_sha,
+                git_sha,
+                target_ref,
+                reason,
+            }
+        }
+    }
+}
+
+/// One IntegrationMergeCompleted record we found in the audit chain.
+struct LastIntegrationMerge {
+    commit_sha: String,
+    session_id: String,
+    target_ref: String,
+}
+
+/// Walk the audit chain and return the highest-`seq`
+/// `IntegrationMergeCompleted` event for `initiative_id`. Returns
+/// `Ok(None)` if none found (Case C).
+fn find_last_integration_merge(
+    audit_dir:     &Path,
+    initiative_id: &str,
+) -> Result<Option<LastIntegrationMerge>, raxis_audit_tools::reader::ChainReadError> {
+    let reader = raxis_audit_tools::reader::ChainReader::open(audit_dir)?;
+    let mut best: Option<(u64, LastIntegrationMerge)> = None;
+
+    for record in reader.records() {
+        let record = match record {
+            Ok(r)  => r,
+            Err(_) => continue, // skip malformed lines; they are surfaced
+                                // by the dedicated chain-walker, not here
+        };
+        if record.event_kind != "IntegrationMergeCompleted" {
+            continue;
+        }
+        if record.initiative_id.as_deref() != Some(initiative_id) {
+            continue;
+        }
+        let parsed = match record.parsed_value.as_ref() {
+            Some(v) => v,
+            None    => continue,
+        };
+        let payload = match parsed.get("payload") {
+            Some(p) => p,
+            None    => continue,
+        };
+        let commit_sha = match payload.get("commit_sha").and_then(|v| v.as_str()) {
+            Some(s) => s.to_owned(),
+            None    => continue,
+        };
+        let session_id = match payload.get("session_id").and_then(|v| v.as_str()) {
+            Some(s) => s.to_owned(),
+            None    => continue,
+        };
+        let target_ref = payload.get("target_ref")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        let entry = LastIntegrationMerge { commit_sha, session_id, target_ref };
+        match best.as_ref() {
+            Some((seq, _)) if *seq >= record.seq => {}
+            _ => { best = Some((record.seq, entry)); }
+        }
+    }
+
+    Ok(best.map(|(_, m)| m))
+}
+
+/// Look up `sessions.worktree_root` for `session_id`. Returns
+/// `None` when the row is missing or the column is NULL.
+fn worktree_for_session(store: &Store, session_id: &str) -> Option<std::path::PathBuf> {
+    let conn = store.lock_sync();
+    let path: Option<String> = conn.query_row(
+        &format!(
+            "SELECT worktree_root FROM {} WHERE session_id = ?1",
+            raxis_store::Table::Sessions.as_str(),
+        ),
+        rusqlite::params![session_id],
+        |r| r.get::<_, Option<String>>(0),
+    ).ok().flatten();
+    path.map(std::path::PathBuf::from)
+}
+
+/// Single-statement clear under the store mutex. Returns the row
+/// count from the UPDATE so the caller can assert exactly one row
+/// flipped.
+fn clear_pending_under_lock(store: &Store, initiative_id: &str) -> Result<usize, rusqlite::Error> {
+    let conn = store.lock_sync();
+    raxis_store::views::initiatives::clear_git_apply_pending(&conn, initiative_id)
+}
+
+fn emit_repaired(
+    audit:           &dyn raxis_audit_tools::AuditSink,
+    initiative_id:   &str,
+    db_sha:          &str,
+    previous_git_sha: &str,
+    target_ref:      &str,
+) {
+    let _ = audit.emit(
+        raxis_audit_tools::AuditEventKind::GitConsistencyRepaired {
+            initiative_id:    initiative_id.to_owned(),
+            db_sha:           db_sha.to_owned(),
+            previous_git_sha: previous_git_sha.to_owned(),
+            target_ref:       target_ref.to_owned(),
+        },
+        None, None, Some(initiative_id),
+    );
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"GitConsistencyRepaired\",\
+         \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
+         \"previous_git_sha\":\"{previous_git_sha}\",\"target_ref\":\"{target_ref}\"}}",
+    );
+}
+
+fn emit_verified(
+    audit:         &dyn raxis_audit_tools::AuditSink,
+    initiative_id: &str,
+    sha:           &str,
+    target_ref:    &str,
+) {
+    let _ = audit.emit(
+        raxis_audit_tools::AuditEventKind::GitConsistencyVerified {
+            initiative_id: initiative_id.to_owned(),
+            sha:           sha.to_owned(),
+            target_ref:    target_ref.to_owned(),
+        },
+        None, None, Some(initiative_id),
+    );
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"GitConsistencyVerified\",\
+         \"initiative_id\":\"{initiative_id}\",\"sha\":\"{sha}\",\
+         \"target_ref\":\"{target_ref}\"}}",
+    );
+}
+
+fn emit_inconsistent(
+    audit:         &dyn raxis_audit_tools::AuditSink,
+    initiative_id: &str,
+    db_sha:        &str,
+    git_sha:       &str,
+    target_ref:    &str,
+    reason:        &str,
+) {
+    let _ = audit.emit(
+        raxis_audit_tools::AuditEventKind::GitStateInconsistent {
+            initiative_id: initiative_id.to_owned(),
+            db_sha:        db_sha.to_owned(),
+            git_sha:       git_sha.to_owned(),
+            target_ref:    target_ref.to_owned(),
+            reason:        reason.to_owned(),
+        },
+        None, None, Some(initiative_id),
+    );
+    eprintln!(
+        "{{\"level\":\"warn\",\"event\":\"GitStateInconsistent\",\
+         \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
+         \"git_sha\":\"{git_sha}\",\"target_ref\":\"{target_ref}\",\
+         \"reason\":\"{reason}\"}}",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1491,5 +1993,440 @@ mod disk_store_integration {
         // double-applies it.)
         disk.reopen();
         assert_eq!(task_state_disk(&disk, "t-only"), "Running");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests — production `recovery::reconcile_git_apply_pending`
+// ⟷ on-disk SQLite ⟷ on-disk git ⟷ on-disk audit chain. Cases A / B / C
+// from `integration-merge.md §11.3`.
+//
+// These tests deliberately use:
+//   * `DiskStore` — real file-backed `kernel.db` so migration 16's
+//     `git_apply_pending` column + partial index are exercised on disk.
+//   * `AuditDir` — real `AuditWriter` + `FileAuditSink` writing the
+//     `IntegrationMergeCompleted` event the recovery scan reads back
+//     through `audit_tools::reader::ChainReader`.
+//   * The system `git` CLI fixture — a real `repositories/main` repo
+//     and an "orchestrator worktree" clone, so Phase-2 re-apply hits
+//     the same `commit_merge_to_target_ref` production path the
+//     IntegrationMerge handler does.
+//
+// The git fixture skips with `eprintln!` when `git` is not on PATH
+// (matches the pattern in `domain-git/src/lib.rs`).
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod git_apply_recovery_integration {
+    use super::*;
+    use std::process::Command;
+
+    use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink, AuditWriterError, FileAuditSink};
+    use raxis_test_support::{AuditDir, DiskStore};
+
+    const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
+
+    // ── Git CLI fixture ─────────────────────────────────────────────────
+
+    fn git_available() -> bool {
+        Command::new("git").arg("--version").output().is_ok()
+    }
+
+    fn run_git(args: &[&str], cwd: &Path) -> std::process::Output {
+        let s = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_AUTHOR_NAME", "RAXIS Test")
+            .env("GIT_AUTHOR_EMAIL", "test@raxis.local")
+            .env("GIT_COMMITTER_NAME", "RAXIS Test")
+            .env("GIT_COMMITTER_EMAIL", "test@raxis.local")
+            .env("GIT_AUTHOR_DATE", "1700000000 +0000")
+            .env("GIT_COMMITTER_DATE", "1700000000 +0000")
+            .output()
+            .expect("git invocation");
+        assert!(
+            s.status.success(),
+            "git {args:?} failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&s.stderr),
+        );
+        s
+    }
+
+    fn fixture_repos(data_dir: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf, String, String)> {
+        if !git_available() {
+            return None;
+        }
+        let main = data_dir.join("repositories").join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        run_git(&["init", "-q"], &main);
+        run_git(&["symbolic-ref", "HEAD", "refs/heads/main"], &main);
+        run_git(&["config", "user.name", "RAXIS Test"], &main);
+        run_git(&["config", "user.email", "test@raxis.local"], &main);
+        run_git(&["config", "commit.gpgsign", "false"], &main);
+        std::fs::write(main.join("README.md"), "v1\n").unwrap();
+        run_git(&["add", "README.md"], &main);
+        run_git(&["commit", "-q", "-m", "initial"], &main);
+        let base = String::from_utf8(run_git(&["rev-parse", "HEAD"], &main).stdout).unwrap()
+            .trim().to_owned();
+
+        let orch = data_dir.join("worktrees").join("orchestrator-1");
+        std::fs::create_dir_all(orch.parent().unwrap()).unwrap();
+        run_git(&["clone", "-q", main.to_str().unwrap(), orch.to_str().unwrap()], data_dir);
+        run_git(&["config", "user.name", "RAXIS Test"], &orch);
+        run_git(&["config", "user.email", "test@raxis.local"], &orch);
+        run_git(&["config", "commit.gpgsign", "false"], &orch);
+        std::fs::write(orch.join("README.md"), "v1\nv2\n").unwrap();
+        run_git(&["add", "README.md"], &orch);
+        run_git(&["commit", "-q", "-m", "merge: add v2"], &orch);
+        let merge = String::from_utf8(run_git(&["rev-parse", "HEAD"], &orch).stdout).unwrap()
+            .trim().to_owned();
+
+        Some((main, orch, base, merge))
+    }
+
+    fn current_main_sha(main_repo: &Path) -> String {
+        let out = run_git(&["rev-parse", "refs/heads/main"], main_repo);
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    // ── SQLite seed helpers ─────────────────────────────────────────────
+
+    fn seed_initiative_pending(disk: &DiskStore, initiative_id: &str) {
+        let conn = disk.store().lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at, git_apply_pending) \
+                 VALUES (?1, 'Executing', '{{}}', 'deadbeef', 1700000000, 1)"
+            ),
+            rusqlite::params![initiative_id],
+        ).unwrap();
+    }
+
+    fn seed_session_with_worktree(
+        disk:          &DiskStore,
+        session_id:    &str,
+        worktree_path: &Path,
+    ) {
+        let conn = disk.store().lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {SESSIONS} \
+                    (session_id, role_id, session_token, lineage_id, \
+                     worktree_root, fetch_quota, created_at, expires_at) \
+                 VALUES (?1, 'orchestrator', ?2, ?1, ?3, 0, 1700000000, 1700003600)"
+            ),
+            rusqlite::params![
+                session_id,
+                format!("tok-{session_id}"),
+                worktree_path.display().to_string(),
+            ],
+        ).unwrap();
+    }
+
+    fn pending_flag(disk: &DiskStore, initiative_id: &str) -> i64 {
+        let conn = disk.store().lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT git_apply_pending FROM {INITIATIVES} WHERE initiative_id = ?1"
+            ),
+            rusqlite::params![initiative_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    // ── Audit-event helpers ─────────────────────────────────────────────
+
+    fn write_audit_with_merge(
+        audit_dir:     &AuditDir,
+        initiative_id: &str,
+        session_id:    &str,
+        commit_sha:    &str,
+        previous_sha:  &str,
+        target_ref:    &str,
+    ) {
+        let info   = audit_dir.write_genesis_record();
+        let writer = audit_dir.open_writer_resuming_after(1, &info.raw_line_sha256);
+        let sink   = FileAuditSink::new(writer);
+        sink.emit(
+            AuditEventKind::IntegrationMergeCompleted {
+                initiative_id:     initiative_id.into(),
+                session_id:        session_id.into(),
+                commit_sha:        commit_sha.into(),
+                previous_sha:      previous_sha.into(),
+                operator_assisted: false,
+                escalation_id:     None,
+                target_ref:        target_ref.into(),
+            },
+            Some(session_id),
+            None,
+            Some(initiative_id),
+        ).unwrap();
+    }
+
+    /// In-memory audit sink for asserting the typed events recovery
+    /// emits without round-tripping through a second on-disk segment.
+    #[derive(Default)]
+    struct CapturingSink {
+        events: std::sync::Mutex<Vec<AuditEventKind>>,
+    }
+
+    impl AuditSink for CapturingSink {
+        fn emit(
+            &self,
+            kind:          AuditEventKind,
+            session_id:    Option<&str>,
+            task_id:       Option<&str>,
+            initiative_id: Option<&str>,
+        ) -> Result<AuditEvent, AuditWriterError> {
+            let event_kind_str = kind.as_str().to_owned();
+            let payload = serde_json::to_value(&kind).expect("event must serialize");
+            self.events.lock().unwrap().push(kind);
+            Ok(AuditEvent {
+                seq:            0,
+                event_id:       uuid::Uuid::nil(),
+                event_kind:     event_kind_str,
+                session_id:     session_id.map(str::to_owned),
+                task_id:        task_id.map(str::to_owned),
+                initiative_id:  initiative_id.map(str::to_owned),
+                payload,
+                emitted_at:     0,
+                prev_sha256:    String::new(),
+            })
+        }
+    }
+
+    impl CapturingSink {
+        fn captured(&self) -> Vec<AuditEventKind> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    // ── Tests ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_store_yields_empty_report() {
+        let disk = DiskStore::new();
+        let audit_dir = AuditDir::new();
+        audit_dir.write_genesis_record();
+        let sink = CapturingSink::default();
+
+        let report = reconcile_git_apply_pending(
+            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
+        );
+
+        assert_eq!(report.repaired,     0);
+        assert_eq!(report.verified,     0);
+        assert_eq!(report.inconsistent, 0);
+        assert!(report.outcomes.is_empty());
+        assert!(sink.captured().is_empty());
+    }
+
+    #[test]
+    fn case_b_clears_flag_and_emits_verified_when_target_already_at_db_sha() {
+        if !git_available() {
+            eprintln!("skipping: git CLI not available");
+            return;
+        }
+        let disk = DiskStore::new();
+        let audit_dir = AuditDir::new();
+        let (main, orch, base, merge) = fixture_repos(disk.data_dir())
+            .expect("fixture must succeed when git is available");
+        // Pre-advance main to the merge sha — the Case-B precondition
+        // (Phase 2 fully succeeded; only Phase 3 missed across the crash).
+        raxis_domain_git::commit_merge_to_target_ref(&main, &orch, &merge, "refs/heads/main")
+            .unwrap();
+        assert_eq!(current_main_sha(&main), merge);
+
+        let initiative_id = "init-case-b";
+        let session_id    = "sess-orch-b";
+        seed_initiative_pending(&disk, initiative_id);
+        seed_session_with_worktree(&disk, session_id, &orch);
+        write_audit_with_merge(&audit_dir, initiative_id, session_id, &merge, &base, "refs/heads/main");
+
+        let sink = CapturingSink::default();
+        let report = reconcile_git_apply_pending(
+            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
+        );
+
+        assert_eq!(report.repaired,     0);
+        assert_eq!(report.verified,     1);
+        assert_eq!(report.inconsistent, 0);
+        match &report.outcomes[0] {
+            GitApplyRecoveryOutcome::Verified { initiative_id: iid, commit_sha, target_ref } => {
+                assert_eq!(iid,        initiative_id);
+                assert_eq!(commit_sha, &merge);
+                assert_eq!(target_ref, "refs/heads/main");
+            }
+            other => panic!("expected Verified, got {other:?}"),
+        }
+        assert_eq!(pending_flag(&disk, initiative_id), 0);
+
+        let captured = sink.captured();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            AuditEventKind::GitConsistencyVerified { initiative_id: iid, sha, target_ref } => {
+                assert_eq!(iid,        initiative_id);
+                assert_eq!(sha,        &merge);
+                assert_eq!(target_ref, "refs/heads/main");
+            }
+            other => panic!("expected GitConsistencyVerified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn case_a_re_applies_phase_2_and_emits_repaired() {
+        if !git_available() {
+            eprintln!("skipping: git CLI not available");
+            return;
+        }
+        let disk = DiskStore::new();
+        let audit_dir = AuditDir::new();
+        let (main, orch, base, merge) = fixture_repos(disk.data_dir())
+            .expect("fixture must succeed when git is available");
+        // INTENTIONALLY do NOT pre-advance main — the Case-A precondition
+        // (Phase 1 SQLite committed, Phase 2 host-side advance never ran).
+        assert_eq!(current_main_sha(&main), base);
+
+        let initiative_id = "init-case-a";
+        let session_id    = "sess-orch-a";
+        seed_initiative_pending(&disk, initiative_id);
+        seed_session_with_worktree(&disk, session_id, &orch);
+        write_audit_with_merge(&audit_dir, initiative_id, session_id, &merge, &base, "refs/heads/main");
+
+        let sink = CapturingSink::default();
+        let report = reconcile_git_apply_pending(
+            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
+        );
+
+        assert_eq!(report.repaired,     1);
+        assert_eq!(report.verified,     0);
+        assert_eq!(report.inconsistent, 0);
+        match &report.outcomes[0] {
+            GitApplyRecoveryOutcome::Repaired { initiative_id: iid, commit_sha, target_ref, .. } => {
+                assert_eq!(iid,        initiative_id);
+                assert_eq!(commit_sha, &merge);
+                assert_eq!(target_ref, "refs/heads/main");
+            }
+            other => panic!("expected Repaired, got {other:?}"),
+        }
+        assert_eq!(current_main_sha(&main), merge,
+            "Case A MUST advance refs/heads/main to db_sha");
+        assert_eq!(pending_flag(&disk, initiative_id), 0);
+
+        let captured = sink.captured();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            AuditEventKind::GitConsistencyRepaired {
+                initiative_id: iid, db_sha, previous_git_sha, target_ref,
+            } => {
+                assert_eq!(iid,              initiative_id);
+                assert_eq!(db_sha,           &merge);
+                assert_eq!(previous_git_sha, &base);
+                assert_eq!(target_ref,       "refs/heads/main");
+            }
+            other => panic!("expected GitConsistencyRepaired, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn case_c_emits_inconsistent_when_orchestrator_worktree_missing() {
+        if !git_available() {
+            eprintln!("skipping: git CLI not available");
+            return;
+        }
+        let disk = DiskStore::new();
+        let audit_dir = AuditDir::new();
+        let (main, _orch, base, merge) = fixture_repos(disk.data_dir())
+            .expect("fixture must succeed when git is available");
+
+        let initiative_id = "init-case-c-missing";
+        let session_id    = "sess-orch-c-missing";
+        seed_initiative_pending(&disk, initiative_id);
+        // Point at a worktree path that does not exist on disk.
+        let bogus = disk.data_dir().join("worktrees").join("never-existed");
+        seed_session_with_worktree(&disk, session_id, &bogus);
+        write_audit_with_merge(&audit_dir, initiative_id, session_id, &merge, &base, "refs/heads/main");
+
+        let sink = CapturingSink::default();
+        let report = reconcile_git_apply_pending(
+            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
+        );
+
+        assert_eq!(report.inconsistent, 1);
+        match &report.outcomes[0] {
+            GitApplyRecoveryOutcome::Inconsistent { initiative_id: iid, reason, target_ref, .. } => {
+                assert_eq!(iid,        initiative_id);
+                assert_eq!(target_ref, "refs/heads/main");
+                assert_eq!(reason,     "orchestrator_worktree_missing");
+            }
+            other => panic!("expected Inconsistent, got {other:?}"),
+        }
+        assert_eq!(pending_flag(&disk, initiative_id), 1,
+            "Case C MUST leave the flag set so subsequent merges keep rejecting");
+        assert_eq!(current_main_sha(&main), base,
+            "Case C MUST NOT advance refs/heads/main");
+    }
+
+    #[test]
+    fn case_c_emits_inconsistent_when_audit_record_missing() {
+        let disk = DiskStore::new();
+        let audit_dir = AuditDir::new();
+        audit_dir.write_genesis_record();
+        let initiative_id = "init-case-c-no-audit";
+        seed_initiative_pending(&disk, initiative_id);
+
+        let sink = CapturingSink::default();
+        let report = reconcile_git_apply_pending(
+            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
+        );
+
+        assert_eq!(report.inconsistent, 1);
+        match &report.outcomes[0] {
+            GitApplyRecoveryOutcome::Inconsistent { initiative_id: iid, reason, .. } => {
+                assert_eq!(iid,    initiative_id);
+                assert_eq!(reason, "audit_record_missing");
+            }
+            other => panic!("expected Inconsistent, got {other:?}"),
+        }
+        assert_eq!(pending_flag(&disk, initiative_id), 1);
+    }
+
+    #[test]
+    fn idempotent_after_case_b_succeeds() {
+        if !git_available() {
+            eprintln!("skipping: git CLI not available");
+            return;
+        }
+        let disk = DiskStore::new();
+        let audit_dir = AuditDir::new();
+        let (main, orch, base, merge) = fixture_repos(disk.data_dir())
+            .expect("fixture must succeed when git is available");
+        raxis_domain_git::commit_merge_to_target_ref(&main, &orch, &merge, "refs/heads/main")
+            .unwrap();
+
+        let initiative_id = "init-idempotent";
+        let session_id    = "sess-orch-idem";
+        seed_initiative_pending(&disk, initiative_id);
+        seed_session_with_worktree(&disk, session_id, &orch);
+        write_audit_with_merge(&audit_dir, initiative_id, session_id, &merge, &base, "refs/heads/main");
+
+        let sink1 = CapturingSink::default();
+        let r1 = reconcile_git_apply_pending(
+            disk.store(), &sink1, audit_dir.path(), disk.data_dir(),
+        );
+        assert_eq!(r1.verified, 1);
+        assert_eq!(pending_flag(&disk, initiative_id), 0);
+
+        let sink2 = CapturingSink::default();
+        let r2 = reconcile_git_apply_pending(
+            disk.store(), &sink2, audit_dir.path(), disk.data_dir(),
+        );
+        assert_eq!(r2.verified,     0);
+        assert_eq!(r2.repaired,     0);
+        assert_eq!(r2.inconsistent, 0);
+        assert!(sink2.captured().is_empty());
     }
 }

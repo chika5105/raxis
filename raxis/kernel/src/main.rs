@@ -335,6 +335,53 @@ async fn main() {
         );
     }
 
+    // Step 8a (V2.5 `integration-merge.md §11.3`): git_apply_pending
+    // recovery sweep. Cases A/B/C — see
+    // `recovery::reconcile_git_apply_pending`. Runs AFTER the audit
+    // writer is open (so Cases A/B/C can emit
+    // `GitConsistencyRepaired` / `GitConsistencyVerified` /
+    // `GitStateInconsistent`), AFTER the canonical `KernelStarted`
+    // event (so the recovery events are chained off it), and BEFORE
+    // IPC accept (so a fresh IntegrationMerge admission cannot race
+    // recovery — the pre-flight in `handlers/intent.rs` Step 3c
+    // observes `git_apply_pending = 1` until recovery clears it).
+    //
+    // Synchronous + spawn_blocking like the existing
+    // `recovery::reconcile` entry point above (uses `lock_sync()`
+    // and synchronous git operations).
+    {
+        let store_for_git_recovery = Arc::clone(&store);
+        let inner_audit_for_git_recovery = Arc::clone(&inner_audit);
+        let audit_dir_for_git_recovery = audit_dir.clone();
+        let data_dir_for_git_recovery = data_dir.clone();
+        let recovery_outcome = tokio::task::spawn_blocking(move || {
+            recovery::reconcile_git_apply_pending(
+                &store_for_git_recovery,
+                inner_audit_for_git_recovery.as_ref(),
+                &audit_dir_for_git_recovery,
+                &data_dir_for_git_recovery,
+            )
+        })
+        .await;
+        match recovery_outcome {
+            Ok(report) => {
+                if report.repaired + report.verified + report.inconsistent > 0 {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"step\":\"git_apply_recovery\",\
+                         \"repaired\":{},\"verified\":{},\"inconsistent\":{}}}",
+                        report.repaired, report.verified, report.inconsistent,
+                    );
+                }
+            }
+            Err(join_err) => {
+                eprintln!(
+                    "{{\"level\":\"error\",\"step\":\"git_apply_recovery\",\
+                     \"error\":\"spawn_blocking join failed: {join_err}\"}}",
+                );
+            }
+        }
+    }
+
     // Step 8a': V2_GAPS §D2 — start the disk-full watchdog. The
     // watchdog polls `statvfs(disk_root)` every 5 seconds and
     // updates an atomic `DiskState` read by every write-class

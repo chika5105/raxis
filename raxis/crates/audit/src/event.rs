@@ -523,6 +523,20 @@ pub enum AuditEventKind {
         /// `operator_assisted = false`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         escalation_id: Option<String>,
+        /// V2.5 `integration-merge.md §11.3` — the fully-qualified
+        /// `target_ref` (e.g. `refs/heads/main`) the kernel attempted
+        /// to advance during Phase 2. Recorded so boot recovery can
+        /// re-run `commit_merge_to_target_ref` against the same ref
+        /// without re-resolving plan-fields (which may not be
+        /// repopulated yet at recovery time).
+        ///
+        /// `#[serde(default)]` for forensic replay only — pre-V2.5
+        /// segments lack the field; recovery filters by
+        /// `git_apply_pending = 1` (column added by migration 16),
+        /// which is `0` for those rows, so recovery never has to act
+        /// on a missing-target_ref event.
+        #[serde(default)]
+        target_ref: String,
     },
 
     /// V2 `v2_extended_gaps.md §1.2` — emitted when the kernel's
@@ -2811,13 +2825,14 @@ mod path_read_accessed_tests {
             previous_sha:      "f3d21a09".into(),
             operator_assisted: true,
             escalation_id:     Some("esc-42".into()),
+            target_ref:        "refs/heads/main".into(),
         };
         let s    = serde_json::to_string(&kind).unwrap();
         let back = serde_json::from_str::<AuditEventKind>(&s).unwrap();
         match back {
             AuditEventKind::IntegrationMergeCompleted {
                 initiative_id, session_id, commit_sha, previous_sha,
-                operator_assisted, escalation_id,
+                operator_assisted, escalation_id, target_ref,
             } => {
                 assert_eq!(initiative_id,     "init-7");
                 assert_eq!(session_id,        "sess-orch-1");
@@ -2827,6 +2842,9 @@ mod path_read_accessed_tests {
                     "operator_assisted must round-trip as true — \
                      dropping it would erase Step 30 attribution");
                 assert_eq!(escalation_id.as_deref(), Some("esc-42"));
+                assert_eq!(target_ref, "refs/heads/main",
+                    "target_ref must round-trip so boot recovery can re-run \
+                     commit_merge_to_target_ref against the same ref");
             }
             other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
         }
@@ -2846,6 +2864,7 @@ mod path_read_accessed_tests {
             previous_sha:      "f3d21a09".into(),
             operator_assisted: false,
             escalation_id:     None,
+            target_ref:        "refs/heads/main".into(),
         };
         let v = serde_json::to_value(&kind).unwrap();
         let obj = v.as_object().unwrap();
@@ -2938,8 +2957,11 @@ mod path_read_accessed_tests {
     /// Forward-compat: an older audit segment that emitted
     /// `IntegrationMergeCompleted` without the Step 30 fields MUST
     /// still deserialise — `operator_assisted` defaults to `false`,
-    /// `escalation_id` defaults to `None`. This pins the
-    /// `#[serde(default)]` contract.
+    /// `escalation_id` defaults to `None`. `target_ref` (V2.5) also
+    /// defaults to `""` — recovery filters by `git_apply_pending = 1`
+    /// (column added by migration 16, default 0 for pre-V2.5 rows),
+    /// so an empty `target_ref` from a legacy segment is never acted
+    /// on. This pins the `#[serde(default)]` contract.
     #[test]
     fn legacy_integration_merge_completed_without_step30_fields_still_deserializes() {
         let legacy = serde_json::json!({
@@ -2952,12 +2974,14 @@ mod path_read_accessed_tests {
         let parsed: AuditEventKind = serde_json::from_value(legacy).unwrap();
         match parsed {
             AuditEventKind::IntegrationMergeCompleted {
-                operator_assisted, escalation_id, ..
+                operator_assisted, escalation_id, target_ref, ..
             } => {
                 assert!(!operator_assisted,
                     "missing operator_assisted defaults to false");
                 assert!(escalation_id.is_none(),
                     "missing escalation_id defaults to None");
+                assert!(target_ref.is_empty(),
+                    "missing target_ref defaults to empty string");
             }
             other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
         }

@@ -268,11 +268,16 @@ pub fn commit_merge_to_target_ref(
     })
 }
 
-/// Backwards-compatible wrapper around [`commit_merge_to_target_ref`]
-/// pinned to `refs/heads/main`. Kept for callers that have not yet
-/// adopted the per-initiative `target_ref` resolution from
-/// `V2_GAPS.md §12.8`. New code paths SHOULD use
-/// [`commit_merge_to_target_ref`] directly.
+/// Convenience wrapper around [`commit_merge_to_target_ref`] pinned
+/// to `refs/heads/main`, the canonical fallback when the initiative
+/// did not configure a per-initiative `target_ref`
+/// (`V2_GAPS.md §12.8` policy default). The production
+/// `IntegrationMerge` handler (`raxis-kernel::handlers::intent`)
+/// resolves `target_ref` from the orchestrator plan-fields registry
+/// and calls [`commit_merge_to_target_ref`] directly; this wrapper
+/// only feeds the adapter shim ([`crate::adapter::GitDomainAdapter`])
+/// and the in-crate test helpers, both of which target
+/// `refs/heads/main` explicitly.
 pub fn commit_merge_to_main(
     main_repo_root:   &Path,
     orch_worktree_root: &Path,
@@ -543,6 +548,28 @@ pub fn update_main_ref(
     expected_previous: Option<&gix::ObjectId>,
 ) -> Result<(), MainMergeError> {
     update_target_ref(repo, oid, expected_previous, "refs/heads/main")
+}
+
+/// Read the current SHA `target_ref` points at in the repository
+/// rooted at `main_repo_root`. Returns `Ok(None)` when the ref does
+/// not exist (the repo has no tip for this ref yet — common on
+/// first merge). Errors only when the repo itself cannot be opened.
+///
+/// Used by `recovery::reconcile_git_apply_pending` (Cases A vs B
+/// dispatch in `integration-merge.md §11.3`): the recovery
+/// procedure compares the recorded `db_sha` (from the most recent
+/// `IntegrationMergeCompleted` audit event) against this value to
+/// decide whether Phase 2 was missed (Case A) or only Phase 3 was
+/// missed (Case B).
+pub fn current_target_ref_oid(
+    main_repo_root: &Path,
+    target_ref:     &str,
+) -> Result<Option<String>, MainMergeError> {
+    let repo = open_main(main_repo_root)?;
+    match current_ref_oid(&repo, target_ref) {
+        Ok(oid) => Ok(Some(oid.to_string())),
+        Err(_)  => Ok(None),
+    }
 }
 
 // ---------------------------------------------------------------------------

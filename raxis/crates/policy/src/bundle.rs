@@ -6231,7 +6231,7 @@ channels   = []
             AuditEventKind::TaskStateChanged { task_id: "x".into(), from_state: "x".into(), to_state: "x".into(), actor: "x".into(), policy_epoch: 0 }.as_str(),
             AuditEventKind::IntentAccepted { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), base_sha: None, head_sha: None, sequence_number: 0, remaining_units: 0 }.as_str(),
             AuditEventKind::IntentRejected { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), error_code: "x".into(), sequence_number: 0 }.as_str(),
-            AuditEventKind::IntegrationMergeCompleted { initiative_id: "x".into(), session_id: "x".into(), commit_sha: "x".into(), previous_sha: "x".into(), operator_assisted: false, escalation_id: None }.as_str(),
+            AuditEventKind::IntegrationMergeCompleted { initiative_id: "x".into(), session_id: "x".into(), commit_sha: "x".into(), previous_sha: "x".into(), operator_assisted: false, escalation_id: None, target_ref: "refs/heads/main".into() }.as_str(),
             AuditEventKind::PushAttempted { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into() }.as_str(),
             AuditEventKind::PushCompleted { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into(), summary: "x".into() }.as_str(),
             AuditEventKind::PushFailed    { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into(), category: "x".into(), reason: "x".into() }.as_str(),

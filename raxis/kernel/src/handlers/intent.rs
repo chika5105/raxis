@@ -1136,6 +1136,7 @@ fn run_phase_c(
                 previous_sha:  pre_state.base_sha_raw.clone(),
                 operator_assisted,
                 escalation_id,
+                target_ref:    initiative_target_ref.clone(),
             },
             Some(session_id_str.as_str()),
             Some(task_id_owned.as_str()),
