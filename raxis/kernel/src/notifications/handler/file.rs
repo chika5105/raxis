@@ -13,7 +13,7 @@
 //   - empty target → `TargetInvalid`
 //     (validate already rejects this, but defence-in-depth at runtime)
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use raxis_audit_tools::AuditEvent;
 use raxis_policy::{NotificationChannel, NotificationChannelKind};
@@ -96,6 +96,7 @@ fn resolve_target(channel: &NotificationChannel) -> Result<PathBuf, DeliveryErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use raxis_audit_tools::AuditEvent;
     use raxis_policy::NotificationChannel;
     use serde_json::json;

@@ -56,6 +56,7 @@ members = [
     "crates/planner-reviewer",
     "crates/artifact-store",
     "crates/dashboard",
+    "crates/dashboard-kernel",
     "kernel",
     "cli",
     "gateway",
@@ -213,6 +214,7 @@ raxis-image-cache        = { path = "crates/image-cache" }
 raxis-planner-core       = { path = "crates/planner-core" }
 raxis-artifact-store     = { path = "crates/artifact-store" }
 raxis-dashboard          = { path = "crates/dashboard" }
+raxis-dashboard-kernel   = { path = "crates/dashboard-kernel" }
 
 # Host-side git operations for V2 Step 24 / 24b worktree provisioning
 # (Reviewer object copy from Orchestrator's ODB; Orchestrator clone

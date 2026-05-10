@@ -1,6 +1,16 @@
-// raxis-kernel::dashboard — kernel glue for the operator dashboard.
-//
-// Normative reference: specs/v2/v2_extended_gaps.md §4.
+//! `raxis-dashboard-kernel` — kernel-side glue for the dashboard.
+//!
+//! Normative reference: specs/v2/v2_extended_gaps.md §4.
+//!
+//! Lives in its own crate (rather than `kernel/src/dashboard.rs`)
+//! so the integration suite can link the production
+//! [`KernelDashboardData`] directly and exercise it against a
+//! real on-disk store + audit chain. The kernel binary depends on
+//! this crate; the dashboard server lifecycle is otherwise
+//! identical to having the module live in `kernel/`.
+
+#![deny(unsafe_code)]
+#![warn(missing_docs)]
 //
 // What this module does
 // ─────────────────────
@@ -265,7 +275,6 @@ impl DashboardData for KernelDashboardData {
                 &conn,
                 &t.task_id,
                 raxis_store::views::tasks::EdgeDirection::Downstream,
-                100,
             ) {
                 for e in downstream {
                     edges.push(DagEdge {
@@ -514,7 +523,7 @@ impl DashboardData for KernelDashboardData {
         }
         Ok(PolicySnapshotView {
             epoch: bundle.epoch(),
-            policy_sha256: hex::encode(bundle.policy_sha256().as_bytes()),
+            policy_sha256: bundle.policy_sha256().to_owned(),
             signed_by: bundle.signed_by().to_owned(),
             signed_at: bundle.signed_at(),
             operators,

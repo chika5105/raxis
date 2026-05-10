@@ -107,8 +107,12 @@ raxis-artifact-store    = { workspace = true }
 # v2_extended_gaps.md §4 — operator dashboard HTTP backend. Linked
 # into the kernel binary (not a separate process). The
 # `[dashboard]` block in `policy.toml` controls bind / TLS / JWT /
-# challenge bounds; absence ⇒ disabled (zero runtime cost).
+# challenge bounds; absence ⇒ disabled (zero runtime cost). The
+# kernel side of the glue lives in `raxis-dashboard-kernel` (own
+# crate) so integration tests can link `KernelDashboardData`
+# directly against a real on-disk store.
 raxis-dashboard         = { workspace = true }
+raxis-dashboard-kernel  = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }
@@ -158,3 +162,10 @@ tempfile    = "3"
 # stay in `[dev-dependencies]`, never `[dependencies]` (per
 # `raxis-test-support` crate-level docs).
 raxis-test-support = { path = "../crates/test-support" }
+# Dashboard integration tests link these directly so we exercise
+# the same wiring the kernel binary uses, without spawning the
+# binary (no kernel boot ceremony in unit-test scope).
+ed25519-dalek = { workspace = true }
+sha2          = { workspace = true }
+reqwest       = { workspace = true }
+hex           = { workspace = true }

@@ -1,0 +1,31 @@
+[package]
+name        = "raxis-dashboard-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kernel-side glue for the raxis-dashboard HTTP backend. Provides the `KernelDashboardData` impl that fans out to `raxis-store::ro` views, the audit `ChainReader`, and the live policy `ArcSwap`. Linked by the kernel binary; integration-tested independently. Spec: specs/v2/v2_extended_gaps.md §4."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raxis-types         = { workspace = true }
+raxis-store         = { workspace = true }
+raxis-policy        = { workspace = true }
+raxis-audit-tools   = { workspace = true }
+raxis-dashboard     = { workspace = true }
+
+arc-swap     = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+hex          = { workspace = true }
+toml         = { workspace = true }
+tokio        = { workspace = true, features = ["sync", "rt-multi-thread", "macros"] }
+tracing      = "0.1"
+
+[dev-dependencies]
+tempfile      = "3"
+ed25519-dalek = { workspace = true }
+sha2          = { workspace = true }
+reqwest       = { workspace = true }
+raxis-test-support = { path = "../test-support" }

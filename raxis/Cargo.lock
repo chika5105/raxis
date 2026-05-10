@@ -3344,6 +3344,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-dashboard-kernel"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "ed25519-dalek",
+ "hex",
+ "raxis-audit-tools",
+ "raxis-dashboard",
+ "raxis-policy",
+ "raxis-store",
+ "raxis-test-support",
+ "raxis-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "raxis-domain"
 version = "0.1.0"
 dependencies = [
@@ -3554,6 +3577,8 @@ dependencies = [
  "raxis-credentials",
  "raxis-credentials-file",
  "raxis-crypto",
+ "raxis-dashboard",
+ "raxis-dashboard-kernel",
  "raxis-domain",
  "raxis-domain-git",
  "raxis-egress-admission",

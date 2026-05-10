@@ -28,7 +28,6 @@ mod bootstrap;
 mod authority;
 mod canonical_images_preflight;
 mod capacity;
-mod dashboard;
 mod ipc;
 mod recovery;
 mod initiatives;
@@ -970,9 +969,9 @@ async fn main() {
     // runtime cost). The handle is held until the orderly
     // shutdown path so `serve_with_shutdown` drains in-flight
     // requests cleanly.
-    let dashboard_handle = match dashboard::load_dashboard_config(&policy_path) {
+    let dashboard_handle = match raxis_dashboard_kernel::load_dashboard_config(&policy_path) {
         Ok(Some(cfg)) => {
-            match dashboard::start_dashboard(
+            match raxis_dashboard_kernel::start_dashboard(
                 cfg.clone(),
                 Arc::clone(&store),
                 Arc::clone(&policy),

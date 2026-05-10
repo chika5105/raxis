@@ -2887,7 +2887,7 @@ fn validate_notifications(
 > {
     use std::collections::HashSet;
 
-    let mut channels: Vec<NotificationChannel> = raw.channels_raw.clone();
+    let channels: Vec<NotificationChannel> = raw.channels_raw.clone();
     let mut seen: HashSet<&str> = HashSet::new();
     for ch in &channels {
         if ch.id.trim().is_empty() {
