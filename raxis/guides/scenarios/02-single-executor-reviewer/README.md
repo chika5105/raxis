@@ -57,7 +57,7 @@ raxis submit plan   "$DEMO_ROOT/plan.toml" --no-dry-run
 INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
 raxis plan approve "$INIT_ID"
 
-raxis inspect-initiative "$INIT_ID" --with-tasks
+raxis initiative show "$INIT_ID" --with-tasks
 ```
 
 Expected progression:

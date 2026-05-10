@@ -29,5 +29,5 @@ killall -9 raxis-kernel
 raxis-kernel --data-dir ~/.raxis &
 
 # Verify the initiative finishes successfully despite the crash:
-raxis inspect-initiative "$INIT_ID"
+raxis initiative show "$INIT_ID"
 ```

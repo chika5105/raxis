@@ -3,7 +3,7 @@
 //!
 //! Surface:
 //!   * [`counts_by_state`] — the second block of `raxis status`.
-//!   * [`by_id`] — `raxis inspect-initiative <initiative_id>`.
+//!   * [`by_id`] — `raxis initiative show <initiative_id>`.
 //!   * [`list`] — paged list with optional exact-state SQL filter.
 //!   * [`list_filtered`] — the bucketed list backing
 //!     `raxis initiative list` (cli-readonly.md §5.5.6b). Joins
@@ -210,7 +210,7 @@ fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeRow> {
 //                  "completed" is "tag and announce", which is wrong
 //                  for the failure terminals. Power users reach
 //                  Failed / Aborted via `--state all` + grep, or
-//                  via the forensic `raxis inspect-initiative`.
+//                  via the forensic `raxis initiative show <id>`.
 //   * Quarantined — "what is frozen for security?" = any initiative
 //                  with a row in `initiative_quarantines`,
 //                  regardless of FSM state. This bucket overlaps

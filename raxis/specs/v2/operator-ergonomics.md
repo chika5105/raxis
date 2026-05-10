@@ -1300,7 +1300,7 @@ ID                                    STATE       OPERATOR        AGE     TASKS 
 
 The v2 columns require:
 
-- **OPERATOR** column → `signed_plan_artifacts::header_by_initiative` joined into the listing query, then routed through `cli/src/operator_display::format_operator_with_lookup` (same convention as `raxis inspect-initiative`, `raxis log`, `raxis inbox`).
+- **OPERATOR** column → `signed_plan_artifacts::header_by_initiative` joined into the listing query, then routed through `cli/src/operator_display::format_operator_with_lookup` (same convention as `raxis initiative show`, `raxis log`, `raxis inbox`).
 - **TASKS** column → a `views::tasks::counts_by_initiative(initiative_id) -> (terminal: u32, total: u32)` per-row aggregate. The aggregate must be a single SQL query over the row set (a `GROUP BY initiative_id` against `tasks`), NOT a per-row `COUNT(*)`, so the listing remains O(1) DB round-trips.
 - **DESCRIPTION** column → reads `signed_plan_artifacts.plan_bytes`, parses the TOML, and surfaces the top-level `description = "..."` field. Truncated to 80 chars in the human render. Behind a TODO until `plan prepare` writes a canonical `description` field per §5.
 

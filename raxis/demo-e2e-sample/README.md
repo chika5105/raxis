@@ -307,28 +307,29 @@ the single demo task (`task-alpha`) is scheduled (`Admitted`). Confirm:
 
 ```bash
 raxis status                              # kernel-wide rollup (counts by initiative state)
-raxis inspect-initiative "$INIT_ID"       # initiative-level deep-dive: state,
-                                          # plan signature header, quarantine
-                                          # status, and task summary
-raxis inspect-initiative "$INIT_ID" \
+raxis initiative show "$INIT_ID"          # initiative-level deep-dive: state,
+                                          # plan-bundle envelope, quarantine
+                                          # status, and task count
+raxis initiative show "$INIT_ID" \
       --with-tasks                        # ↑ same, but expand the per-task table
 raxis inspect task-alpha                  # task-level deep-dive: predecessors,
                                           # gates, witnesses, plan_fields
 ```
 
-> `raxis inspect-initiative <init_id>` is the v1 read surface for "tell
+> `raxis initiative show <init_id>` is the V2 read surface for "tell
 > me everything about this initiative": it joins the `initiatives`
-> row, the `signed_plan_artifacts` header (signed_by + stored_at — the
-> sealed `plan_bytes` is **never** surfaced; cli-readonly.md §5.4.2),
-> the quarantine row (if any), and the per-task table in one snapshot.
-> Operator fingerprints (signed_by, quarantined_by) render with
-> display names per `kernel-store.md` §2.5.2 — e.g. `signed_by:
+> row, the `plan_bundles` header (signed_by + sealed_at + per-artifact
+> manifest — raw artifact bytes are NEVER printed; pass
+> `--bundle --to <dir>` to extract them, see `plan-bundle-sealing.md`
+> §8.5), the quarantine row (if any), and the per-task table in one
+> snapshot. Operator fingerprints (signed_by, quarantined_by) render
+> with display names per `kernel-store.md` §2.5.2 — e.g. `signed_by:
 > Chika (abcd1234)` — so you don't have to cross-reference
 > `raxis cert list`. Pass `--json` for a single structured object;
 > use `raxis inspect <task_id>` for task-level forensics; use
 > `raxis log <init_id>` and `raxis audit verify` for chronological
 > history. The `raxis initiative` *write* surface still only exposes
-> `abort` and `quarantine` — read goes through `inspect-initiative`,
+> `abort` and `quarantine` — read goes through `initiative show`,
 > write through `initiative <verb>`.
 
 The same `INIT_ID` is what every WRITE command keys off — `plan reject`,

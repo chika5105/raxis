@@ -83,14 +83,14 @@ echo "INIT_ID=$INIT_ID"
 raxis plan approve "$INIT_ID"
 
 # Stream live progress:
-raxis inspect-initiative "$INIT_ID" --watch --with-tasks
+watch -n 2 "raxis initiative show $INIT_ID --with-tasks"
 ```
 
 ---
 
 ## What "success" looks like
 
-- `raxis inspect-initiative "$INIT_ID"` ends with `state = Completed`.
+- `raxis initiative show "$INIT_ID"` ends with `state = Completed`.
 - `git log --oneline` in the workspace shows commits from each agent.
 - `raxis audit verify --initiative-id "$INIT_ID"` returns
   `chain ok`.

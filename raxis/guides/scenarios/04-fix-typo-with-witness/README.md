@@ -56,8 +56,8 @@ raxis submit plan   ./plan.toml --no-dry-run
 INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
 raxis plan approve "$INIT_ID"
 
-raxis inspect-initiative "$INIT_ID" --with-tasks
-raxis witnesses "$(raxis inspect-initiative "$INIT_ID" --with-tasks --json | jq -r '.tasks[0].task_id')"
+raxis initiative show "$INIT_ID" --with-tasks
+raxis witnesses "$(raxis initiative show "$INIT_ID" --with-tasks --json | jq -r '.tasks[0].task_id')"
 ```
 
 ---

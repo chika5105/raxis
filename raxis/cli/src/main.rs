@@ -45,7 +45,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "genesis", "policy", "plan", "initiative", "operator", "task", "session",
     "delegation", "escalation", "epoch", "audit", "cert", "credential", "kernel",
     "submit",
-    "status", "log", "verify-chain", "queue", "inspect", "inspect-initiative",
+    "status", "log", "verify-chain", "queue", "inspect",
     "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
     "budget", "explain", "top",
     // V2_GAPS §C10 / §12.6 — non-interactive first-run scaffolding.
@@ -348,7 +348,6 @@ fn run() -> Result<(), CliError> {
         "verify-chain" => commands::verify_chain::run(&flags, rest),
         "queue" => commands::queue::run(&flags, rest),
         "inspect" => commands::inspect::run(&flags, rest),
-        "inspect-initiative" => commands::inspect_initiative::run(&flags, rest),
         "sessions" => commands::sessions::run(&flags, rest),
         "escalations" => commands::escalations::run(&flags, rest),
         "inbox" => commands::inbox::run(&flags, rest),
@@ -495,17 +494,24 @@ SUBCOMMANDS:
         that). Reason is capped at 512 bytes server-side and mirrored
         into the audit chain.
 
-    initiative show <initiative_id> [--bundle] [--to <dir>] [--json]
-        V2 plan-bundle forensic surface (plan-bundle-sealing.md §8.5).
-        Without flags: prints the initiative's plan-bundle envelope
-        summary (sha-256 prefix, schema version, signed-by, sealed-at,
-        signed-at, artifact count, total bytes). With `--bundle`:
-        adds the per-artifact `(seq, name)` listing. With
-        `--bundle --to <dir>`: extracts every artifact under <dir>,
-        preserving artifact_name as the relative path. Refuses to
-        write into a non-empty directory. `--json` is supported in
-        the bundle-summary mode (no `--to`). Reads kernel.db
-        read-only; no kernel IPC.
+    initiative show <initiative_id>
+                    [--bundle] [--to <dir>] [--json]
+                    [--with-tasks] [--task-limit N]
+        Canonical forensic surface for one initiative
+        (plan-bundle-sealing.md §8.5). Always prints the base header
+        (initiative id / state / created-at), the plan-bundle
+        envelope summary (sha-256 prefix, schema version, signed-by
+        operator-display, sealed-at, signed-at, artifact count,
+        total bytes), and the quarantine block. Pass `--with-tasks`
+        (with optional `--task-limit N`, default 100) to expand the
+        per-task table; without it the renderer prints just the
+        task count. With `--bundle`: adds the per-artifact
+        `(seq, name)` listing. With `--bundle --to <dir>`: extracts
+        every artifact under <dir>, preserving artifact_name as the
+        relative path. Refuses to write into a non-empty directory.
+        `--json` is supported in every mode except `--to` (where the
+        side-effect IS the output). Reads kernel.db read-only; no
+        kernel IPC.
 
     operator quarantine-plans-by <target_fingerprint> [--reason <text>]
         Sweep every initiative whose plan was approved by the given
@@ -631,13 +637,6 @@ READ-ONLY OBSERVATION:
         Forensic deep-dive into a single task: state, dependencies,
         witnesses. --reveal-paths shows path_allowlist + path_export_globs
         AND appends a PathReadAccessed audit event (cli-readonly.md §5.4.2).
-
-    inspect-initiative <initiative_id> [--json] [--with-tasks] [--task-limit N]
-        Forensic deep-dive into a single initiative: state, plan
-        signature header (signed_by + stored_at), quarantine status,
-        and the per-task table. signed_by / quarantined_by render
-        with operator display names per kernel-store.md §2.5.2.
-        plan_bytes is NEVER surfaced (cli-readonly.md §5.4.2).
 
     sessions [--limit N] [--json]
         List currently-active planner / gateway / verifier sessions

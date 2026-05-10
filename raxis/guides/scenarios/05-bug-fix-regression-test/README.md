@@ -57,7 +57,7 @@ INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_i
 raxis plan approve "$INIT_ID"
 
 # Watch the DAG advance.
-watch -n 2 "raxis inspect-initiative $INIT_ID --with-tasks"
+watch -n 2 "raxis initiative show $INIT_ID --with-tasks"
 ```
 
 Expected progression:

@@ -59,7 +59,7 @@ raxis plan validate ./plan.toml
 raxis submit plan   ./plan.toml --no-dry-run
 INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_id')"
 raxis plan approve "$INIT_ID"
-raxis inspect-initiative "$INIT_ID" --with-tasks
+raxis initiative show "$INIT_ID" --with-tasks
 ```
 
 ---
@@ -69,7 +69,7 @@ raxis inspect-initiative "$INIT_ID" --with-tasks
 - `README.md` gains a new top-level section titled "Quickstart" or
   similar.
 - `git log` shows one new commit by the Executor.
-- `raxis inspect-initiative` reports `documenter: Completed`.
+- `raxis initiative show` reports `documenter: Completed`.
 - The audit chain has one `IntentAccepted` and one `TaskCompleted`
   event — no path-policy rejections.
 

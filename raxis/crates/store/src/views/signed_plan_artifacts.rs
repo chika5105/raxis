@@ -7,7 +7,7 @@
 //! that returns the **non-secret header** of a sealed plan
 //! artifact: the operator fingerprint that signed the plan and
 //! the wall-clock when the row was stored. This is the join
-//! `raxis inspect-initiative <init_id>` needs to render
+//! `raxis initiative show <init_id>` needs to render
 //! "signed_by: Chika (abc12345…)  signed_at: …" without ever
 //! reading the BLOB plan_bytes column.
 //!
@@ -74,7 +74,7 @@ pub enum SignedPlanArtifactViewError {
 
 /// Look up the header (no `plan_bytes`, no `plan_sig`) for one
 /// initiative. Returns `None` when no row exists — for example
-/// `raxis inspect-initiative` is run against an `init_id` that
+/// `raxis initiative show` is run against an `init_id` that
 /// was created but never had a plan submitted (effectively
 /// impossible in v1 because `create_initiative` and the seal
 /// share a transaction, but the function still tolerates the

@@ -248,7 +248,7 @@ fn map_ready_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadyTaskRow> {
 }
 
 /// Every task belonging to one initiative, newest-first by
-/// `admitted_at`. Used by `raxis inspect-initiative <init_id>` to
+/// `admitted_at`. Used by `raxis initiative show <init_id>` to
 /// render the per-initiative task table.
 ///
 /// `limit` caps the result set so a malformed `initiative_id` (or a
@@ -530,7 +530,7 @@ mod tests {
 
     /// `list_by_initiative` MUST return every task for the given
     /// initiative, ordered oldest-first by `admitted_at`. Pin the
-    /// ordering: it's the contract `raxis inspect-initiative`
+    /// ordering: it's the contract `raxis initiative show`
     /// renders the per-initiative task table by, and an
     /// `ORDER BY` flip would silently reorder operator-visible
     /// output.

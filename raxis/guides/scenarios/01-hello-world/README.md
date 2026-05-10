@@ -66,7 +66,7 @@ echo "INIT_ID=$INIT_ID"
 raxis plan approve "$INIT_ID"
 
 # 3. Watch.
-raxis inspect-initiative "$INIT_ID" --with-tasks
+raxis initiative show "$INIT_ID" --with-tasks
 ```
 
 The expected progression:
@@ -77,7 +77,7 @@ The expected progression:
 3. `raxis plan approve` reports `tasks_admitted: 1`.
 4. The Orchestrator boots, activates the `greeter` task.
 5. The Executor writes `HELLO.md` and submits `CompleteTask`.
-6. `raxis inspect-initiative` eventually shows `greeter: Completed`.
+6. `raxis initiative show` eventually shows `greeter: Completed`.
 
 ---
 
@@ -85,7 +85,7 @@ The expected progression:
 
 ```bash
 # Final state
-raxis inspect-initiative "$INIT_ID" --with-tasks
+raxis initiative show "$INIT_ID" --with-tasks
 # greeter: Completed
 
 # The audit chain has the lifecycle events.

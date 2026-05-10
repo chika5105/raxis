@@ -53,7 +53,7 @@ INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_i
 raxis plan approve "$INIT_ID"
 
 # Both tasks should be Running concurrently for at least a few seconds.
-watch -n 1 "raxis inspect-initiative $INIT_ID --with-tasks"
+watch -n 1 "raxis initiative show $INIT_ID --with-tasks"
 ```
 
 ---

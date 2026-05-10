@@ -170,7 +170,7 @@ fn print_help() {
          \t                                 Executing, Blocked).\n\
          \t                 - completed   = the Completed terminal only. Failed and\n\
          \t                                 Aborted are reachable via `--state all` or\n\
-         \t                                 `raxis inspect-initiative`.\n\
+         \t                                 `raxis initiative show <id>`.\n\
          \t                 - quarantined = any initiative with a row in\n\
          \t                                 `initiative_quarantines`, regardless of\n\
          \t                                 FSM state.\n\
@@ -228,7 +228,7 @@ fn render_human<W: Write>(
         let _ = writeln!(
             out,
             "  ([Q] = quarantined; \
-             see `raxis inspect-initiative <id>` for details.)",
+             see `raxis initiative show <id>` for details.)",
         );
     }
 }

@@ -82,7 +82,7 @@ INIT_ID="$(raxis initiative list --state Draft --json | jq -r '.[0].initiative_i
 raxis plan approve "$INIT_ID"
 
 # 4. Watch.
-raxis inspect-initiative "$INIT_ID" --with-tasks
+raxis initiative show "$INIT_ID" --with-tasks
 ```
 
 The expected progression: ` ... step-by-step description ...`.
@@ -111,7 +111,7 @@ raxis epoch advance \
 
 - `raxis plan validate` exits 0.
 - `raxis plan approve` reports `tasks_admitted: N`.
-- `raxis inspect-initiative <id>` eventually shows every task at
+- `raxis initiative show <id>` eventually shows every task at
   `Completed`.
 - `raxis verify-chain` exits 0 with a non-zero record count.
 
