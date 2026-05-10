@@ -2142,6 +2142,7 @@ impl AuditEventKind {
             Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",
             Self::DryRunAdmitted { .. } => "DryRunAdmitted",
             Self::StructuredOutputEmitted { .. } => "StructuredOutputEmitted",
+            Self::CircuitBreakerStateChanged { .. } => "CircuitBreakerStateChanged",
         }
     }
 }

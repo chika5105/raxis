@@ -4239,6 +4239,19 @@ impl PolicyBundle {
     /// that need to seed a non-empty lane table on top of the
     /// `for_tests_with_operators` skeleton without going through a full
     /// `policy.toml` round-trip.
+    /// Test-only override for `[sessions].allowed_worktree_roots`.
+    ///
+    /// Used by the dashboard kernel-glue integration tests
+    /// (`raxis-dashboard-kernel`) which need to surface real on-disk
+    /// git worktrees through the dashboard API without going through
+    /// a full `policy.toml` round-trip. Production code MUST NOT
+    /// call this — it bypasses the validator's
+    /// `allowed_worktree_roots is empty` rejection.
+    #[cfg(any(debug_assertions, test))]
+    pub fn set_allowed_worktree_roots_for_tests(&mut self, roots: Vec<String>) {
+        self.allowed_worktree_roots = roots;
+    }
+
     #[cfg(any(debug_assertions, test))]
     pub fn set_lanes_for_tests(&mut self, lanes: Vec<LaneEntry>) {
         self.lanes = lanes;

@@ -72,13 +72,24 @@ async fn seed_initiatives(store: &Store) {
 /// with the supplied permitted-ops set so the dashboard can map
 /// roles correctly.
 fn policy_with_operator(op_pk: [u8; 32], permitted_ops: Vec<&str>) -> Arc<ArcSwap<PolicyBundle>> {
+    policy_with_operator_and_roots(op_pk, permitted_ops, Vec::new())
+}
+
+/// Like [`policy_with_operator`] but also seeds the
+/// `[sessions].allowed_worktree_roots` set so the dashboard's
+/// worktree resolver sees roots to enumerate.
+fn policy_with_operator_and_roots(
+    op_pk: [u8; 32],
+    permitted_ops: Vec<&str>,
+    allowed_roots: Vec<String>,
+) -> Arc<ArcSwap<PolicyBundle>> {
     let pubkey_hex = hex::encode(op_pk);
     let fingerprint = {
         use sha2::Digest;
         let h = sha2::Sha256::digest(op_pk);
         hex::encode(&h[..16])
     };
-    let bundle = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
+    let mut bundle = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
         pubkey_fingerprint: fingerprint,
         display_name: "alice".into(),
         pubkey_hex: pubkey_hex.clone(),
@@ -86,6 +97,9 @@ fn policy_with_operator(op_pk: [u8; 32], permitted_ops: Vec<&str>) -> Arc<ArcSwa
         cert: stub_cert_for_pubkey(pubkey_hex),
         force_misconfig_bypass: false,
     }]);
+    if !allowed_roots.is_empty() {
+        bundle.set_allowed_worktree_roots_for_tests(allowed_roots);
+    }
     Arc::new(ArcSwap::from_pointee(bundle))
 }
 
@@ -320,4 +334,131 @@ async fn http_server_serves_initiatives_endpoint_after_jwt_handshake() {
     assert_eq!(unauth.status().as_u16(), 401);
 
     handle.shutdown().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Git-worktree (P3) — exercises a REAL on-disk git repo seeded
+// with two commits and walks every dashboard worktree endpoint.
+// ---------------------------------------------------------------------------
+
+/// Initialise a tiny git repo at `dir`, commit two files, and
+/// return `(base_sha, head_sha)`.
+fn init_repo_with_two_commits(dir: &std::path::Path) -> (String, String) {
+    use std::process::Command;
+    let run = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "raxis-test")
+            .env("GIT_AUTHOR_EMAIL", "test@raxis.local")
+            .env("GIT_COMMITTER_NAME", "raxis-test")
+            .env("GIT_COMMITTER_EMAIL", "test@raxis.local")
+            .output()
+            .expect("git spawn");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    run(&["init", "-q"]);
+    // `git init -b main` needs git 2.28+; older binaries fall
+    // through here and we set the branch name explicitly so the
+    // test does not depend on the host's `init.defaultBranch`.
+    run(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+    run(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("a.txt"), "alpha\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-q", "-m", "first"]);
+    let base = run(&["rev-parse", "HEAD"]).trim().to_owned();
+    std::fs::write(dir.join("b.txt"), "beta\n").unwrap();
+    std::fs::write(dir.join("a.txt"), "alpha + delta\n").unwrap();
+    run(&["add", "a.txt", "b.txt"]);
+    run(&["commit", "-q", "-m", "second"]);
+    let head = run(&["rev-parse", "HEAD"]).trim().to_owned();
+    (base, head)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worktree_endpoints_surface_real_git_state() {
+    let (tmp, store) = fresh_data_dir();
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let (base_sha, head_sha) = init_repo_with_two_commits(&repo);
+
+    // Build a policy whose allowed worktree roots include the
+    // freshly-initialised repo path.
+    let policy = policy_with_operator_and_roots(
+        [0x55u8; 32],
+        vec![],
+        vec![repo.display().to_string()],
+    );
+
+    let data = raxis_dashboard_kernel::KernelDashboardData::new(
+        Arc::clone(&store),
+        Arc::clone(&policy),
+        tmp.path().to_path_buf(),
+        tmp.path().join("policy/policy.toml"),
+        1_700_000_000,
+    );
+
+    // 1) Listing surfaces our root.
+    let listed = data.list_worktrees().expect("list_worktrees");
+    assert!(
+        listed.iter().any(|w| w.kind == "Main" && w.path == repo.display().to_string()),
+        "expected a Main worktree at {}, got {listed:#?}",
+        repo.display()
+    );
+    let main = listed.iter().find(|w| w.kind == "Main").unwrap().clone();
+
+    // 2) Detail returns the head SHA + branch + clean status.
+    let detail = data.get_worktree(&main.name).expect("get_worktree");
+    assert_eq!(detail.head_sha.as_deref(), Some(head_sha.as_str()));
+    assert_eq!(detail.branch.as_deref(), Some("main"));
+    assert!(
+        detail.status_lines.is_empty(),
+        "fresh commit must report clean status; got {:?}",
+        detail.status_lines
+    );
+
+    // 3) Log returns both commits in newest-first order.
+    let log = data.worktree_log(&main.name, 10).expect("worktree_log");
+    assert_eq!(log.len(), 2);
+    assert_eq!(log[0].sha, head_sha);
+    assert_eq!(log[1].sha, base_sha);
+    assert_eq!(log[0].subject, "second");
+
+    // 4) Ranged diff between the two commits surfaces both files.
+    let diff = data
+        .worktree_diff_range(&main.name, &base_sha, &head_sha)
+        .expect("worktree_diff_range");
+    assert_eq!(diff.from_sha, base_sha);
+    assert_eq!(diff.to_sha, head_sha);
+    let paths: Vec<&str> = diff.files.iter().map(|f| f.path.as_str()).collect();
+    assert!(paths.contains(&"a.txt"), "expected a.txt; got {paths:?}");
+    assert!(paths.contains(&"b.txt"), "expected b.txt; got {paths:?}");
+    let a = diff.files.iter().find(|f| f.path == "a.txt").unwrap();
+    assert_eq!(a.status, "M");
+    assert!(a.insertions >= 1);
+    assert!(!a.hunk.is_empty(), "modified file must include a hunk body");
+    let b = diff.files.iter().find(|f| f.path == "b.txt").unwrap();
+    assert_eq!(b.status, "A");
+
+    // 5) Default-diff fails when no base SHA is recorded for
+    //    the main worktree (the listing reports `base_sha = None`
+    //    for main roots — operator-recorded base SHAs only flow
+    //    through the per-session view).
+    let err = data
+        .worktree_diff_default(&main.name)
+        .expect_err("default diff requires recorded base sha");
+    assert!(
+        matches!(err, raxis_dashboard::error::ApiError::NotFound { .. }),
+        "expected NotFound; got {err:?}"
+    );
+
+    // 6) Resolution refuses paths outside `allowed_worktree_roots`.
+    let err = data.get_worktree("session-deadbeefdead").unwrap_err();
+    assert!(matches!(err, raxis_dashboard::error::ApiError::NotFound { .. }));
 }

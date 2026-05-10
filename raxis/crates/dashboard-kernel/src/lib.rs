@@ -54,11 +54,14 @@ use raxis_dashboard::data::{
     AuditEntryView, DagEdge, DashboardData, EscalationView, HealthCheck, HealthSnapshot,
     InitiativeListEntry, InitiativeView, OperatorAuthResolution, PolicyOperatorView,
     PolicySnapshotView, ReviewerVerdictView, SessionView, StructuredOutputView, TaskView,
+    WorktreeDetail, WorktreeDiff, WorktreeListEntry, WorktreeLogEntry,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
+
+mod git;
 
 /// Kernel-wired implementation of the dashboard data trait.
 ///
@@ -534,6 +537,191 @@ impl DashboardData for KernelDashboardData {
     fn policy_toml_bytes(&self) -> Result<String, ApiError> {
         std::fs::read_to_string(&self.policy_path)
             .map_err(|e| ApiError::Internal { log_only: format!("policy.toml read: {e}") })
+    }
+
+    fn list_worktrees(&self) -> Result<Vec<WorktreeListEntry>, ApiError> {
+        let worktrees = self.collect_worktrees()?;
+        Ok(worktrees.into_iter().map(|w| w.summary).collect())
+    }
+
+    fn get_worktree(&self, name: &str) -> Result<WorktreeDetail, ApiError> {
+        let resolved = self.resolve_worktree(name)?;
+        let path = std::path::PathBuf::from(&resolved.summary.path);
+        if !path.exists() {
+            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+        }
+        let head_sha = git::head_sha(&path);
+        let branch = git::branch(&path);
+        let status_lines = git::status_lines(&path);
+        let (ahead, behind) = match (&resolved.summary.base_sha, head_sha.as_ref()) {
+            (Some(base), Some(_)) => git::ahead_behind(&path, base)
+                .map(|(b, a)| (Some(a), Some(b)))
+                .unwrap_or((None, None)),
+            _ => (None, None),
+        };
+        Ok(WorktreeDetail {
+            summary: resolved.summary,
+            head_sha,
+            branch,
+            ahead,
+            behind,
+            status_lines,
+        })
+    }
+
+    fn worktree_log(
+        &self,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<WorktreeLogEntry>, ApiError> {
+        let resolved = self.resolve_worktree(name)?;
+        let path = std::path::PathBuf::from(&resolved.summary.path);
+        if !path.exists() {
+            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+        }
+        git::log_entries(&path, limit.clamp(1, 200))
+            .map_err(|e| ApiError::Internal { log_only: format!("git log: {e}") })
+    }
+
+    fn worktree_diff_default(
+        &self,
+        name: &str,
+    ) -> Result<WorktreeDiff, ApiError> {
+        let resolved = self.resolve_worktree(name)?;
+        let path = std::path::PathBuf::from(&resolved.summary.path);
+        if !path.exists() {
+            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+        }
+        let from = resolved
+            .summary
+            .base_sha
+            .clone()
+            .ok_or(ApiError::NotFound { kind: "default-diff".into() })?;
+        let to = git::head_sha(&path)
+            .ok_or(ApiError::NotFound { kind: "head-sha".into() })?;
+        let files = git::diff_files(&path, &from, &to)
+            .map_err(|e| ApiError::Internal { log_only: format!("git diff: {e}") })?;
+        Ok(WorktreeDiff {
+            name: resolved.summary.name,
+            from_sha: from,
+            to_sha: to,
+            files,
+        })
+    }
+
+    fn worktree_diff_range(
+        &self,
+        name: &str,
+        from_sha: &str,
+        to_sha: &str,
+    ) -> Result<WorktreeDiff, ApiError> {
+        let resolved = self.resolve_worktree(name)?;
+        let path = std::path::PathBuf::from(&resolved.summary.path);
+        if !path.exists() {
+            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+        }
+        let files = git::diff_files(&path, from_sha, to_sha)
+            .map_err(|e| ApiError::Internal { log_only: format!("git diff range: {e}") })?;
+        Ok(WorktreeDiff {
+            name: resolved.summary.name,
+            from_sha: from_sha.to_owned(),
+            to_sha: to_sha.to_owned(),
+            files,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worktree resolution helpers
+// ---------------------------------------------------------------------------
+
+/// Internal type the resolver returns — wraps a populated
+/// [`WorktreeListEntry`] with no extra state. Kept opaque so
+/// future fields (e.g. `path_prefix_match`) can be added
+/// without breaking call sites.
+#[derive(Debug, Clone)]
+struct ResolvedWorktree {
+    summary: WorktreeListEntry,
+}
+
+impl KernelDashboardData {
+    /// Walk `policy.allowed_worktree_roots()` (kind=Main) +
+    /// the active-session list (kind=Session) and produce a
+    /// stable, slug-keyed worktree directory for the route
+    /// layer to look up.
+    ///
+    /// Slug discipline:
+    ///   * Main roots: `main-<idx>` where `<idx>` is the
+    ///     position in `allowed_worktree_roots()`. Stable
+    ///     across reloads as long as the operator does not
+    ///     reshuffle the list.
+    ///   * Session roots: `session-<short-id>` where
+    ///     `<short-id>` is the first 12 hex chars of the
+    ///     session id (or the whole session id if shorter).
+    fn collect_worktrees(&self) -> Result<Vec<ResolvedWorktree>, ApiError> {
+        let bundle = self.policy.load_full();
+        let mut out = Vec::new();
+        for (idx, raw) in bundle.allowed_worktree_roots().iter().enumerate() {
+            let path = raw.trim_end_matches('/').to_owned();
+            let label = std::path::Path::new(&path)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone());
+            out.push(ResolvedWorktree {
+                summary: WorktreeListEntry {
+                    name: format!("main-{idx}"),
+                    label: if label.is_empty() { format!("main-{idx}") } else { label },
+                    kind: "Main".into(),
+                    path,
+                    session_id: None,
+                    task_id: None,
+                    base_sha: None,
+                },
+            });
+        }
+        // Active sessions overlay — pull worktree_root + base_sha
+        // from the read-only sessions view.
+        if let Ok(conn) = self.open_ro() {
+            if let Ok(rows) = raxis_store::views::sessions::active_list(&conn, 200) {
+                for s in rows {
+                    let Some(wt) = s.worktree_root else { continue };
+                    let short = if s.session_id.len() >= 12 {
+                        s.session_id[..12].to_owned()
+                    } else {
+                        s.session_id.clone()
+                    };
+                    out.push(ResolvedWorktree {
+                        summary: WorktreeListEntry {
+                            name: format!("session-{short}"),
+                            label: format!("{}:{short}", s.role_id),
+                            kind: "Session".into(),
+                            path: wt,
+                            session_id: Some(s.session_id),
+                            task_id: None,
+                            base_sha: None, // active_list does not surface base_sha today
+                        },
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Look one slug up in the resolved set.
+    /// Returns `Err(NotFound)` if the slug is unknown OR if the
+    /// resolved path is not under any
+    /// `policy.allowed_worktree_roots()` (defense-in-depth).
+    fn resolve_worktree(&self, name: &str) -> Result<ResolvedWorktree, ApiError> {
+        let bundle = self.policy.load_full();
+        let resolved = self
+            .collect_worktrees()?
+            .into_iter()
+            .find(|w| w.summary.name == name)
+            .ok_or(ApiError::NotFound { kind: "worktree".into() })?;
+        if !bundle.worktree_root_allowed(&resolved.summary.path) {
+            return Err(ApiError::NotFound { kind: "worktree".into() });
+        }
+        Ok(resolved)
     }
 }
 
