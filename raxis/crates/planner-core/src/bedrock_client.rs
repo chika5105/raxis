@@ -72,6 +72,12 @@ struct BedrockRequestBody<'a> {
 }
 
 impl BedrockClient {
+    /// Construct a Bedrock-compatible chat client targeting the given base URL.
+    ///
+    /// `base_url` MUST be the bedrock-runtime endpoint root (e.g.
+    /// `https://bedrock-runtime.us-east-1.amazonaws.com`); per-model paths are
+    /// appended internally.  The client uses a default 10s connect timeout and
+    /// a 300s request timeout, both overridable via [`Self::with_request_timeout`].
     pub fn new(base_url: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -85,6 +91,9 @@ impl BedrockClient {
         }
     }
 
+    /// Override the per-request timeout (default 300s).
+    ///
+    /// Bedrock long-running prompts can take >60s; tests usually shorten this.
     pub fn with_request_timeout(mut self, d: Duration) -> Self {
         self.request_timeout = d;
         self

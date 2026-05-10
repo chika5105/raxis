@@ -1103,9 +1103,7 @@ mod tests {
         // `with_tasks=false`, the render MUST surface the task count
         // and the `--with-tasks` hint, and MUST NOT enumerate task
         // IDs.
-        use raxis_types::{
-            BundleNonce, BundleSha256, OperatorFingerprint, SchemaVersion,
-        };
+        use raxis_types::{BundleSha256, OperatorFingerprint, SchemaVersion};
         let header = PlanBundleHeader {
             bundle_sha256:       BundleSha256::new([0xAAu8; 32]),
             schema_version:      SchemaVersion::V2_1,
@@ -1170,9 +1168,7 @@ mod tests {
 
     #[test]
     fn render_text_with_tasks_expands_table_and_shows_quarantine_block() {
-        use raxis_types::{
-            BundleNonce, BundleSha256, OperatorFingerprint, SchemaVersion,
-        };
+        use raxis_types::{BundleSha256, OperatorFingerprint, SchemaVersion};
         let header = PlanBundleHeader {
             bundle_sha256:       BundleSha256::new([0xAAu8; 32]),
             schema_version:      SchemaVersion::V2_1,
@@ -1241,9 +1237,7 @@ mod tests {
 
     #[test]
     fn render_json_emits_quarantine_and_task_keys() {
-        use raxis_types::{
-            BundleNonce, BundleSha256, OperatorFingerprint, SchemaVersion,
-        };
+        use raxis_types::{BundleSha256, OperatorFingerprint, SchemaVersion};
         let header = PlanBundleHeader {
             bundle_sha256:       BundleSha256::new([0xAAu8; 32]),
             schema_version:      SchemaVersion::V2_1,

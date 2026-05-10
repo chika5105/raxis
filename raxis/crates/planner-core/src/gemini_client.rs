@@ -349,6 +349,12 @@ pub struct GeminiClient {
 }
 
 impl GeminiClient {
+    /// Construct a Gemini chat client targeting the given base URL.
+    ///
+    /// `base_url` MUST be the Generative-Language API root
+    /// (e.g. `https://generativelanguage.googleapis.com/v1beta`); per-model
+    /// paths are appended internally.  The client uses a default 10s connect
+    /// timeout and a 300s request timeout.
     pub fn new(base_url: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -362,6 +368,8 @@ impl GeminiClient {
         }
     }
 
+    /// Override the per-request timeout (default 300s); tests usually
+    /// shorten this.
     pub fn with_request_timeout(mut self, d: Duration) -> Self {
         self.request_timeout = d;
         self

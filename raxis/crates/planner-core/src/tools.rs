@@ -93,13 +93,24 @@ pub enum ToolError {
     /// The model's `tool_use.input` did not parse against the
     /// tool's declared schema.
     #[error("invalid tool input for {tool}: {reason}")]
-    InvalidInput { tool: String, reason: String },
+    InvalidInput {
+        /// Tool name the model invoked.
+        tool:   String,
+        /// Human-readable schema-validation failure (surfaced to the
+        /// model as a structured tool error so it can recover).
+        reason: String,
+    },
 
     /// The tool raised an internal failure (I/O error, subprocess
     /// spawn failure, etc.). The dispatch loop converts this to a
     /// structured-error tool result so the model can recover.
     #[error("tool {tool} failed: {reason}")]
-    Internal { tool: String, reason: String },
+    Internal {
+        /// Tool name that failed.
+        tool:   String,
+        /// Human-readable reason (e.g. process spawn failure, IO error).
+        reason: String,
+    },
 }
 
 /// **The tool surface every planner-role binary speaks.** Each

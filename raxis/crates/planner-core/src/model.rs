@@ -345,6 +345,11 @@ pub struct Usage {
 // Error taxonomy
 // ---------------------------------------------------------------------------
 
+/// Errors surfaced by [`ModelClient::chat`] implementations.
+///
+/// Variants are mapped onto a stable [`crate::PlannerError::exit_code`] in
+/// the planner binary's `main`; tests assert on the discriminant rather than
+/// the wrapped error text.
 #[derive(Debug, Error)]
 pub enum ModelError {
     /// HTTP transport failure (TLS, DNS, connection refused, etc.).

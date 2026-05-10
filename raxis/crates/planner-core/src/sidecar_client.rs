@@ -450,7 +450,12 @@ pub enum SidecarConstructError {
     SecretHex(String),
     /// Decoded secret too short to provide useful HMAC security.
     #[error("sidecar_hmac_secret decoded to {actual} bytes; minimum is {min}")]
-    SecretTooShort { actual: usize, min: usize },
+    SecretTooShort {
+        /// Number of bytes the operator-supplied secret decoded to.
+        actual: usize,
+        /// Minimum acceptable HMAC-secret length, in bytes.
+        min:    usize,
+    },
 }
 
 #[async_trait]

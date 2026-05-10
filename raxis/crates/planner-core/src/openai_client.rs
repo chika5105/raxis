@@ -370,6 +370,9 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
+    /// Construct an OpenAI-compatible Responses API client targeting the
+    /// given base URL (e.g. `https://api.openai.com/v1`).  The client uses a
+    /// default 10s connect timeout and a 300s request timeout.
     pub fn new(base_url: impl Into<String>) -> Self {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
@@ -383,6 +386,8 @@ impl OpenAiClient {
         }
     }
 
+    /// Override the per-request timeout (default 300s); tests usually
+    /// shorten this.
     pub fn with_request_timeout(mut self, d: Duration) -> Self {
         self.request_timeout = d;
         self

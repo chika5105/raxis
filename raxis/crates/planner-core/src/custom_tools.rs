@@ -74,12 +74,20 @@ pub enum CustomToolError {
     EmptyCommand(String),
     /// timeout_secs exceeded the policy hard cap.
     #[error("custom-tool {tool} timeout_secs={got} exceeds the policy hard cap (300s)")]
-    TimeoutTooLong { tool: String, got: u32 },
+    TimeoutTooLong {
+        /// Offending custom-tool name.
+        tool: String,
+        /// Operator-supplied timeout (seconds) that exceeded the cap.
+        got:  u32,
+    },
     /// Name collision with an already-registered tool. The loader
     /// fails closed; operators must rename the custom tool or
     /// disable the colliding base tool via the role registry.
     #[error("custom-tool {tool} name collides with an already-registered tool")]
-    NameCollision { tool: String },
+    NameCollision {
+        /// Offending custom-tool name that collided with a built-in.
+        tool: String,
+    },
 }
 
 /// Validate one decl. Returns the decl unchanged on success.

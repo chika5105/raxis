@@ -222,10 +222,16 @@ impl DispatchOutcome {
     }
 }
 
+/// Terminal error surfaced by [`DispatchLoop::next`]; either the model client
+/// failed (HTTP, rate-limit, malformed JSON) or a tool implementation reported
+/// a hard error.  The caller maps these onto an `IntentKind::Failure` and ends
+/// the run.
 #[derive(Debug, Error)]
 pub enum DispatchError {
+    /// Upstream model client failure (HTTP, JSON parse, rate-limit, ...).
     #[error("model error: {0}")]
     Model(#[from] ModelError),
+    /// Tool execution reported a non-recoverable error.
     #[error("tool error: {0}")]
     Tool(#[from] ToolError),
 }

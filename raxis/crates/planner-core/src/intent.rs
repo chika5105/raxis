@@ -379,12 +379,20 @@ fn parse_commit_sha(field: &'static str, raw: &str) -> Result<CommitSha, SubmitE
 // SubmitError
 // ---------------------------------------------------------------------------
 
+/// Errors surfaced when shaping or submitting a terminal-tool intent to the
+/// kernel.  Variants distinguish transport failures, unexpected wire shapes
+/// from the kernel, and malformed terminal-tool argument JSON emitted by the
+/// model.
 #[derive(Debug, Error)]
 pub enum SubmitError {
+    /// Underlying UDS transport failure (framing, IO, etc.).
     #[error("transport error: {0}")]
     Transport(#[from] TransportError),
+    /// The kernel returned a response variant the planner did not expect.
     #[error("unexpected response variant: {0}")]
     UnexpectedResponse(String),
+    /// The model emitted terminal-tool arguments that did not parse against
+    /// the expected schema (e.g. wrong type, missing required field).
     #[error("malformed terminal-tool input: {0}")]
     MalformedInput(String),
 }
@@ -398,10 +406,15 @@ pub enum SubmitError {
 /// `task_complete` terminal tool fires.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskCompleteInput {
+    /// Final commit hash on the executor branch the kernel will record.
     pub head_sha: String,
 }
 
 impl TaskCompleteInput {
+    /// Parse a `task_complete` terminal-tool argument blob.
+    ///
+    /// Returns [`SubmitError::MalformedInput`] if the model did not emit a
+    /// valid object with the expected `head_sha` string field.
     pub fn parse(v: &serde_json::Value) -> Result<Self, SubmitError> {
         serde_json::from_value(v.clone()).map_err(|e| {
             SubmitError::MalformedInput(format!(
@@ -414,12 +427,19 @@ impl TaskCompleteInput {
 /// Reviewer's `submit_review` terminal-tool input shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubmitReviewInput {
+    /// Reviewer verdict: `true` => approve, `false` => reject.
     pub approved: bool,
+    /// Free-form critique text.  Required when `approved == false`; the
+    /// dispatch loop rejects rejection without a critique.
     #[serde(default)]
     pub critique: Option<String>,
 }
 
 impl SubmitReviewInput {
+    /// Parse a `submit_review` terminal-tool argument blob.
+    ///
+    /// In addition to schema validation, enforces the invariant that a
+    /// rejection MUST carry a critique.
     pub fn parse(v: &serde_json::Value) -> Result<Self, SubmitError> {
         let parsed: Self = serde_json::from_value(v.clone()).map_err(|e| {
             SubmitError::MalformedInput(format!(

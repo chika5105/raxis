@@ -104,10 +104,8 @@ use crate::intent::{
 use crate::model::{AnthropicClient, ModelClient};
 use crate::provider_model::{resolve_model_from_env_fn, ProviderModelError};
 use crate::tools::{
-    build_executor_registry, build_executor_registry_full,
-    build_executor_registry_with_sleep, build_orchestrator_registry,
-    build_orchestrator_registry_full, build_orchestrator_registry_with_sleep,
-    build_reviewer_registry, StructuredOutputTool, ToolContext,
+    build_executor_registry, build_executor_registry_full, build_orchestrator_registry,
+    build_orchestrator_registry_full, build_reviewer_registry, StructuredOutputTool, ToolContext,
     ToolRegistry,
 };
 use crate::transport::{KernelTransport, KernelTransportConfig, TransportError};
@@ -197,24 +195,36 @@ pub enum DriverOutcome {
 /// [`crate::PlannerError::exit_code`] in the binary's `main`.
 #[derive(Debug, Error)]
 pub enum DriverError {
+    /// `RAXIS_KERNEL_PLANNER_SOCKET` was not set when the driver
+    /// was launched in live mode.
     #[error("RAXIS_KERNEL_PLANNER_SOCKET is required in live mode")]
     KernelSocketMissing,
 
+    /// `RAXIS_PLANNER_BASE_URL` did not parse as an `http(s)` URL.
     #[error("RAXIS_PLANNER_BASE_URL must be a valid http(s) URL: got {got:?}")]
-    BadBaseUrl { got: String },
+    BadBaseUrl {
+        /// The raw operator-supplied value that failed to parse.
+        got: String,
+    },
 
+    /// The dispatch loop returned a terminal error (model or tool).
     #[error("dispatch loop failed: {0}")]
     Dispatch(#[from] DispatchError),
 
+    /// The kernel transport (UDS framing) failed.
     #[error("kernel transport: {0}")]
     Transport(#[from] TransportError),
 
+    /// Intent admission was rejected by the kernel.
     #[error("intent submission: {0}")]
     Submit(#[from] SubmitError),
 
+    /// `RAXIS_PROVIDER` / `RAXIS_MODEL` resolution failed.
     #[error("provider/model resolution: {0}")]
     Provider(#[from] ProviderModelError),
 
+    /// A terminal tool fired but its name does not map to any
+    /// intent kind for this role binary.
     #[error("terminal tool {tool_name:?} produced an unmappable intent for role {role:?}")]
     UnmappableTerminal {
         /// The tool that fired.
