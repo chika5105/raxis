@@ -26,6 +26,7 @@ thiserror   = { workspace = true }
 tokio       = { workspace = true, features = ["fs", "process", "io-util", "signal", "net", "rt-multi-thread", "time", "macros", "sync"] }
 raxis-ipc   = { path = "../ipc" }
 raxis-types = { path = "../types" }
+raxis-ksb   = { path = "../ksb" }
 uuid        = { workspace = true }
 async-trait = { workspace = true }
 reqwest     = { workspace = true, features = ["json"] }

@@ -54,6 +54,7 @@
 //! |--------------------------------|-------------------------|--------------------------------------|--------------------------------------------|
 //! | `RAXIS_SESSION_TOKEN`          | yes (already in [`crate::BootEnv`]) | —                          | Session-auth token for the kernel UDS      |
 //! | `RAXIS_PLANNER_TASK_PROMPT`    | **yes — toggle**        | absent ⇒ scaffold/park               | Seed user message for the dispatch loop     |
+//! | `RAXIS_PLANNER_KSB`            | no (test-only fallback) | absent ⇒ NNSP-only system prompt     | JSON-encoded [`raxis_ksb::KsbSnapshot`] §2.4 |
 //! | `RAXIS_KERNEL_PLANNER_SOCKET`  | yes (live mode only)    | —                                    | UDS path to `<data_dir>/sockets/planner.sock` |
 //! | `RAXIS_PLANNER_BASE_URL`       | no                      | `https://api.anthropic.com`          | Model API base URL — tests override         |
 //! | `RAXIS_MODEL_ID`               | no                      | [`crate::DEFAULT_MODEL`]             | Model id stamped into every request         |
@@ -211,6 +212,17 @@ pub enum DriverError {
     /// control characters).
     #[error("invalid task id: {0}")]
     InvalidTaskId(String),
+
+    /// V2 `v2_extended_gaps.md §2.4` — `raxis_ksb::assemble_system_prompt`
+    /// rejected the kernel-projected snapshot. Practically only
+    /// fires on `INV-KSB-01` violations (the kernel let through a
+    /// field containing the close delimiter) or on an empty NNSP
+    /// (a build bug). Both are kernel-side regressions surfaced
+    /// by the planner-side defense-in-depth check; the binary
+    /// fails closed rather than booting the dispatch loop with a
+    /// torn system prompt.
+    #[error("KSB assembly failed: {0}")]
+    KsbAssembleFailed(String),
 }
 
 /// **Per-role driver entry point.** Called from the role binary's
@@ -283,6 +295,24 @@ where
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(DEFAULT_PLANNER_MAX_TOKENS);
 
+    // V2 `v2_extended_gaps.md §2.4` — read the kernel-stamped KSB
+    // env var. Absent / unparseable → `None`, which the
+    // dispatch-loop seam uses to fall back to the NNSP-only system
+    // prompt (test-only fallback path; in production every
+    // kernel-spawned session has a parseable snapshot stamped).
+    let ksb_snapshot = var(raxis_ksb::PLANNER_KSB_ENV).and_then(|raw| {
+        match serde_json::from_str::<raxis_ksb::KsbSnapshot>(&raw) {
+            Ok(snap) => Some(snap),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"planner_ksb_parse_failed\",\
+                     \"err\":\"{e}\"}}",
+                );
+                None
+            }
+        }
+    });
+
     let model: Arc<dyn ModelClient> = Arc::new(AnthropicClient::new(base_url));
     run_role_session_with_model(
         role,
@@ -295,6 +325,7 @@ where
         max_turns,
         max_tokens,
         model,
+        ksb_snapshot,
     )
     .await
 }
@@ -306,6 +337,14 @@ where
 ///
 /// All other inputs are pre-resolved (no further env reads), so
 /// this entry point is fully deterministic.
+///
+/// V2 `v2_extended_gaps.md §2.4` — `ksb_snapshot` carries the
+/// kernel-projected per-turn KSB. When `Some(snap)`, the system
+/// prompt is composed by `raxis_ksb::assemble_system_prompt(NNSP,
+/// snap)` so the model sees authoritative kernel state inside the
+/// `[RAXIS:KERNEL_STATE … :KERNEL_STATE_END]` delimiters every
+/// turn. When `None` (test fixtures / legacy fallback), the system
+/// prompt is the NNSP-only blurb.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_role_session_with_model(
     role: Role,
@@ -318,6 +357,7 @@ pub async fn run_role_session_with_model(
     max_turns: u32,
     max_tokens: u32,
     model: Arc<dyn ModelClient>,
+    ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
     // ── Step 1: connect to the kernel UDS. ──────────────────────────
     let cfg = KernelTransportConfig::Uds {
@@ -337,8 +377,16 @@ pub async fn run_role_session_with_model(
     let mut loop_ = DispatchLoop::new(model, Arc::clone(&registry), config, ctx)
         .with_terminal_tools(terminal_tools.clone());
 
-    // ── Step 4: render system prompt. ───────────────────────────────
-    let system_prompt = render_system_prompt_for_role(role, &args);
+    // ── Step 4: render system prompt. V2 §2.4 — fold the KSB into
+    //    the role-specific NNSP via `assemble_system_prompt` when
+    //    the kernel stamped a snapshot. Falls back to NNSP-only when
+    //    the env var is absent or failed to parse (logged upstream).
+    let role_nnsp = render_system_prompt_for_role(role, &args);
+    let system_prompt = match ksb_snapshot.as_ref() {
+        Some(snap) => raxis_ksb::assemble_system_prompt(&role_nnsp, snap)
+            .map_err(|e| DriverError::KsbAssembleFailed(e.to_string()))?,
+        None => role_nnsp,
+    };
 
     // ── Step 5: run the loop. ───────────────────────────────────────
     let outcome = loop_.run(system_prompt, task_prompt).await?;
@@ -584,6 +632,156 @@ mod tests {
         assert_eq!(pick_str(&nested, "k"), None); // not a string
     }
 
+    /// V2 `v2_extended_gaps.md §2.4` — when the kernel stamps
+    /// `RAXIS_PLANNER_KSB`, the driver folds the snapshot into the
+    /// system prompt via `assemble_system_prompt`. The recorded
+    /// `MockModelClient` request MUST contain the
+    /// `[RAXIS:KERNEL_STATE … :KERNEL_STATE_END]` block + the
+    /// snapshot's specific field values verbatim.
+    #[tokio::test]
+    async fn run_role_session_with_model_folds_ksb_snapshot_into_system_prompt() {
+        use raxis_ksb::KsbSnapshot;
+
+        let model = Arc::new(MockModelClient::new(vec![MessageResponse {
+            id: "msg_1".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
+            model: "mock".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "ack".to_owned(),
+            }],
+            stop_reason: Some("end_turn".to_owned()),
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        }]));
+        let model_for_inspect: Arc<MockModelClient> = Arc::clone(&model);
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("planner.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        tokio::spawn(async move {
+            while let Ok((_s, _)) = listener.accept().await {}
+        });
+
+        let snap = KsbSnapshot {
+            version:                       raxis_ksb::KSB_SCHEMA_VERSION,
+            initiative_id:                 "init-FOLD".to_owned(),
+            task_id:                       Some("task-FOLD".to_owned()),
+            role:                          "executor".to_owned(),
+            evaluation_sha:                "eval-sha-fold".to_owned(),
+            path_allowlist:                vec!["src/fold.rs".to_owned()],
+            token_budget_remaining:        77_777,
+            wallclock_budget_remaining_s:  333,
+            dag_rows:                      vec![],
+            task_description:              "fold-test description".to_owned(),
+            target_ref:                    "refs/heads/feature/fold".to_owned(),
+            reviewer_verdicts:             vec![],
+            pending_escalations:           vec![],
+            credential_ports:              vec![],
+        };
+
+        let _ = run_role_session_with_model(
+            Role::Executor,
+            BootArgs {
+                initiative_id: "init-FOLD".to_owned(),
+                task_id: Some("task-FOLD".to_owned()),
+            },
+            BootEnv { session_token: "tok".to_owned() },
+            "fold prompt".to_owned(),
+            sock_path.display().to_string(),
+            dir.path().to_path_buf(),
+            "mock".to_owned(),
+            5,
+            512,
+            model as Arc<dyn ModelClient>,
+            Some(snap),
+        )
+        .await
+        .unwrap();
+
+        let seen = model_for_inspect.seen.lock().await;
+        let last = seen.last().expect("model received a request");
+        let sys = last.system.as_deref().expect("system prompt populated");
+        assert!(sys.contains(raxis_ksb::KSB_DELIMITER_OPEN),
+            "system prompt MUST carry the KSB open delimiter; got: {sys}");
+        assert!(sys.contains(raxis_ksb::KSB_DELIMITER_CLOSE),
+            "system prompt MUST carry the KSB close delimiter; got: {sys}");
+        assert!(sys.contains("initiative_id=init-FOLD"),
+            "KSB block MUST stamp initiative_id verbatim; got: {sys}");
+        assert!(sys.contains("task_id=task-FOLD"),
+            "KSB block MUST stamp task_id verbatim; got: {sys}");
+        assert!(sys.contains("target_ref=refs/heads/feature/fold"),
+            "KSB block MUST stamp resolved target_ref; got: {sys}");
+        assert!(sys.contains("- src/fold.rs"),
+            "KSB block MUST stamp the per-task path allowlist; got: {sys}");
+        assert!(sys.contains("token_budget_remaining=77777"),
+            "KSB block MUST stamp the budget; got: {sys}");
+        assert!(sys.contains("fold-test description"),
+            "KSB block MUST stamp the task_description; got: {sys}");
+    }
+
+    /// V2 `v2_extended_gaps.md §2.4` — when no KSB snapshot is
+    /// supplied (test fixtures, legacy boot path), the driver falls
+    /// back to the NNSP-only system prompt. The KSB delimiters MUST
+    /// NOT appear, otherwise downstream parsers would mistake an
+    /// empty placeholder for a real kernel-state block.
+    #[tokio::test]
+    async fn run_role_session_with_model_uses_nnsp_only_when_no_ksb_supplied() {
+        let model = Arc::new(MockModelClient::new(vec![MessageResponse {
+            id: "msg_1".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
+            model: "mock".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "ack".to_owned(),
+            }],
+            stop_reason: Some("end_turn".to_owned()),
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        }]));
+        let model_for_inspect: Arc<MockModelClient> = Arc::clone(&model);
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("planner.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        tokio::spawn(async move {
+            while let Ok((_s, _)) = listener.accept().await {}
+        });
+
+        let _ = run_role_session_with_model(
+            Role::Executor,
+            BootArgs {
+                initiative_id: "init-NO-KSB".to_owned(),
+                task_id: Some("task-NO-KSB".to_owned()),
+            },
+            BootEnv { session_token: "tok".to_owned() },
+            "no-ksb prompt".to_owned(),
+            sock_path.display().to_string(),
+            dir.path().to_path_buf(),
+            "mock".to_owned(),
+            5,
+            512,
+            model as Arc<dyn ModelClient>,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let seen = model_for_inspect.seen.lock().await;
+        let last = seen.last().expect("model received a request");
+        let sys = last.system.as_deref().unwrap_or("");
+        assert!(!sys.contains(raxis_ksb::KSB_DELIMITER_OPEN),
+            "without a snapshot, system prompt MUST NOT contain KSB delimiters; got: {sys}");
+    }
+
     /// Driver returns `Scaffold` when `RAXIS_PLANNER_TASK_PROMPT`
     /// is unset — the kernel's V2.3 mock-planner harness keeps
     /// working bit-for-bit. Hermetic via `_with_env_fn` so the
@@ -661,6 +859,7 @@ mod tests {
             5,
             512,
             model,
+            None,
         )
         .await
         .unwrap();

@@ -27,6 +27,7 @@ embedded-gateway = []
 [dependencies]
 # Workspace support crates (the six listed in Part 2.1)
 raxis-types       = { workspace = true }
+raxis-ksb         = { workspace = true }
 raxis-crypto      = { workspace = true }
 raxis-ipc         = { workspace = true }
 raxis-policy      = { workspace = true }

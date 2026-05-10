@@ -279,22 +279,25 @@ pub trait OrchestratorSpawn: Send + Sync {
 ///
 /// Holds the boot-time install-dir + kernel-version (via
 /// [`OrchestratorSpawnContext`]) plus the kernel's
-/// `Arc<SessionSpawnService>` and `Arc<Store>`. Constructed once at
+/// `Arc<SessionSpawnService>`, `Arc<Store>`, and
+/// `Arc<PlanRegistry>` (V2 §2.4 KSB assembly). Constructed once at
 /// `main.rs` boot and cloned into `HandlerContext`.
 pub struct LiveOrchestratorSpawn {
-    ctx:     OrchestratorSpawnContext,
-    service: Arc<SessionSpawnService>,
-    store:   Arc<Store>,
+    ctx:           OrchestratorSpawnContext,
+    service:       Arc<SessionSpawnService>,
+    store:         Arc<Store>,
+    plan_registry: Arc<crate::initiatives::PlanRegistry>,
 }
 
 impl LiveOrchestratorSpawn {
     /// Construct the production impl.
     pub fn new(
-        ctx:     OrchestratorSpawnContext,
-        service: Arc<SessionSpawnService>,
-        store:   Arc<Store>,
+        ctx:           OrchestratorSpawnContext,
+        service:       Arc<SessionSpawnService>,
+        store:         Arc<Store>,
+        plan_registry: Arc<crate::initiatives::PlanRegistry>,
     ) -> Self {
-        Self { ctx, service, store }
+        Self { ctx, service, store, plan_registry }
     }
 }
 
@@ -315,6 +318,7 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
                 task_prompt,
                 Arc::clone(&self.service),
                 &self.store,
+                &self.plan_registry,
             )
             .await
         })
@@ -457,6 +461,7 @@ async fn spawn_orchestrator_for_initiative(
     task_prompt:      String,
     service:          Arc<SessionSpawnService>,
     store:            &Arc<Store>,
+    plan_registry:    &Arc<crate::initiatives::PlanRegistry>,
 ) -> Result<SpawnHandle, OrchestratorSpawnError> {
     // ── Step 1: locate canonical orchestrator image. ─────────────
     // We don't re-verify the digest here; the boot-time preflight
@@ -536,6 +541,54 @@ async fn spawn_orchestrator_for_initiative(
         );
     }
     env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), task_prompt);
+
+    // V2 `v2_extended_gaps.md §2.4` — assemble the KSB snapshot
+    // from the live kernel state and stamp it into
+    // `RAXIS_PLANNER_KSB`. The driver reads the env var and renders
+    // it via `raxis_ksb::assemble_system_prompt(NNSP, snap)` so the
+    // model sees authoritative kernel context inside the
+    // `[RAXIS:KERNEL_STATE … :KERNEL_STATE_END]` delimiters every
+    // turn. Failure here is non-fatal — the spawn proceeds with a
+    // fallback snapshot so a transient SQLite lock contention does
+    // not block initiative activation; the absence of the live KSB
+    // is logged so an operator can correlate.
+    let ksb_snapshot = {
+        let store_for_ksb     = Arc::clone(store);
+        let registry_for_ksb  = Arc::clone(plan_registry);
+        let initiative_owned  = initiative_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store_for_ksb.lock_sync();
+            crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
+                &*conn,
+                &registry_for_ksb,
+                &crate::initiatives::ksb_assembly::KsbInputs {
+                    initiative_id: &initiative_owned,
+                    task_id:       None,
+                    role:          crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
+                    token_budget_remaining:        0,
+                    wallclock_budget_remaining_s:  0,
+                    credential_ports:              Vec::new(),
+                },
+            )
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_else(|| {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"orchestrator_ksb_assembly_fallback\",\
+                 \"initiative_id\":\"{initiative_id}\",\"session_id\":\"{session_id}\"}}",
+            );
+            crate::initiatives::ksb_assembly::fallback_snapshot(
+                initiative_id,
+                None,
+                crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
+            )
+        })
+    };
+    let ksb_json = serde_json::to_string(&ksb_snapshot)
+        .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
+    env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
     let vm_spec = VmSpec {
         vcpu_count:       spawn_ctx.vcpu_count,
         mem_mib:          spawn_ctx.mem_mib,
@@ -727,6 +780,7 @@ pub async fn spawn_executor_for_task(
     workspace_mounts: Vec<raxis_isolation::WorkspaceMount>,
     extra_env:        BTreeMap<String, String>,
     service:          Arc<SessionSpawnService>,
+    plan_registry:    &Arc<crate::initiatives::PlanRegistry>,
     store:            &Arc<Store>,
     // V2.5 §13 — operator-published `[[vm_images]]` override.
     // When `Some`, the spawn path uses this image instead of the
@@ -884,6 +938,57 @@ pub async fn spawn_executor_for_task(
         env.entry("RAXIS_KERNEL_PLANNER_SOCKET".to_owned())
             .or_insert(sock.display().to_string());
     }
+
+    // V2 `v2_extended_gaps.md §2.4` — assemble the per-task KSB
+    // and stamp into `RAXIS_PLANNER_KSB`. Same fallback policy as
+    // the orchestrator path: if the SQLite read fails the spawn
+    // proceeds with a minimum-bootable snapshot so a transient
+    // contention does not block task activation. Reviewers and
+    // executors get the same DAG view (per-initiative tasks) so
+    // the model can reason about predecessor / successor state.
+    let role = match agent_kind {
+        ExecutorAgentKind::Executor => crate::initiatives::ksb_assembly::KsbRole::Executor,
+        ExecutorAgentKind::Reviewer => crate::initiatives::ksb_assembly::KsbRole::Reviewer,
+    };
+    let ksb_snapshot = {
+        let store_for_ksb     = Arc::clone(store);
+        let registry_for_ksb  = Arc::clone(plan_registry);
+        let initiative_owned  = initiative_id.to_owned();
+        let task_owned        = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store_for_ksb.lock_sync();
+            crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
+                &*conn,
+                &registry_for_ksb,
+                &crate::initiatives::ksb_assembly::KsbInputs {
+                    initiative_id: &initiative_owned,
+                    task_id:       Some(&task_owned),
+                    role,
+                    token_budget_remaining:        0,
+                    wallclock_budget_remaining_s:  0,
+                    credential_ports:              Vec::new(),
+                },
+            )
+        })
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_else(|| {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"executor_ksb_assembly_fallback\",\
+                 \"initiative_id\":\"{initiative_id}\",\"task_id\":\"{task_id}\",\
+                 \"session_id\":\"{session_id}\"}}",
+            );
+            crate::initiatives::ksb_assembly::fallback_snapshot(
+                initiative_id,
+                Some(task_id),
+                role,
+            )
+        })
+    };
+    let ksb_json = serde_json::to_string(&ksb_snapshot)
+        .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
+    env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
     let vm_spec = VmSpec {
         vcpu_count,
         mem_mib,
@@ -1032,7 +1137,12 @@ mod tests {
 
         // Drive the production trait impl exactly as `handle_approve_plan` does.
         let live: Arc<dyn OrchestratorSpawn> = Arc::new(
-            LiveOrchestratorSpawn::new(spawn_ctx, Arc::clone(&service), Arc::clone(&store))
+            LiveOrchestratorSpawn::new(
+                spawn_ctx,
+                Arc::clone(&service),
+                Arc::clone(&store),
+                Arc::new(crate::initiatives::PlanRegistry::new()),
+            )
         );
         let handle = live
             .spawn_for_initiative(
@@ -1115,7 +1225,12 @@ mod tests {
         );
 
         let live: Arc<dyn OrchestratorSpawn> = Arc::new(
-            LiveOrchestratorSpawn::new(spawn_ctx, service, store),
+            LiveOrchestratorSpawn::new(
+                spawn_ctx,
+                service,
+                store,
+                Arc::new(crate::initiatives::PlanRegistry::new()),
+            ),
         );
         let err = live
             .spawn_for_initiative(

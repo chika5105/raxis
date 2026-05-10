@@ -3354,6 +3354,7 @@ dependencies = [
  "raxis-isolation",
  "raxis-isolation-apple-vz",
  "raxis-isolation-firecracker",
+ "raxis-ksb",
  "raxis-plan-credentials",
  "raxis-policy",
  "raxis-runtime",
@@ -3377,6 +3378,15 @@ dependencies = [
  "toml",
  "uuid",
  "webpki-roots",
+]
+
+[[package]]
+name = "raxis-ksb"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3440,6 +3450,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "raxis-ipc",
+ "raxis-ksb",
  "raxis-types",
  "reqwest",
  "serde",

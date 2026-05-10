@@ -1,0 +1,27 @@
+[package]
+name        = "raxis-ksb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# V2 `v2_extended_gaps.md §2.4` — shared crate that owns the
+# Kernel-State-Block (KSB) wire shape rendered into the planner-role
+# LLM's system prompt every turn. Pinned in one place so the kernel
+# (which assembles + serializes the snapshot) and the planner-core
+# driver (which reads + renders it from the env) cannot drift on the
+# wire shape.
+#
+# The renderer (`render_ksb`) and the open/close delimiters
+# (`KSB_DELIMITER_OPEN`, `KSB_DELIMITER_CLOSE`) are pinned by
+# `kernel-mechanics-prompt.md §"KSB delivery"`; the schema is pinned
+# by `kernel-mechanics-prompt.md §"KSB schema"`. Adding a field is
+# non-breaking; removing or renaming requires a `version` bump on
+# `KsbSnapshot::version`.
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+serde_json  = { workspace = true }

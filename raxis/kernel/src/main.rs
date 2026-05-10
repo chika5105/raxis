@@ -881,6 +881,7 @@ async fn main() {
                     .with_data_dir(data_dir.clone()),
                     session_spawn_for_orch,
                     Arc::clone(&store),
+                    Arc::clone(&plan_registry),
                 ),
             )
         },

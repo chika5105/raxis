@@ -13,6 +13,7 @@
 // their corresponding audit record in a single SQLite transaction.
 
 pub mod custom_tools_validator;
+pub mod ksb_assembly;
 pub mod lifecycle;
 pub mod plan_registry;
 pub mod review_aggregation;

@@ -2226,6 +2226,7 @@ async fn handle_activate_sub_task(
         Vec::new(),
         extra_env,
         Arc::clone(&ctx.session_spawn),
+        &ctx.plan_registry,
         &ctx.store,
         image_override,
     )

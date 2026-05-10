@@ -49,6 +49,7 @@ members = [
     "crates/worktree-staging",
     "crates/session-spawn",
     "crates/image-cache",
+    "crates/ksb",
     "crates/planner-core",
     "crates/planner-orchestrator",
     "crates/planner-executor",
@@ -154,6 +155,7 @@ bincode     = { version = "=2.0.1", features = ["serde"] }
 
 # Workspace-internal crates
 raxis-types  = { path = "crates/types" }
+raxis-ksb    = { path = "crates/ksb" }
 raxis-ipc    = { path = "crates/ipc" }
 raxis-store  = { path = "crates/store" }
 raxis-policy = { path = "crates/policy" }
