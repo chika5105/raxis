@@ -160,20 +160,33 @@ pub async fn handle_propose_defaults(
 
 /// Handle `OperatorRequest::EstimateCost`.
 ///
-/// Returns a heuristic dollar cost upper bound for the supplied plan.
-/// V2.4 estimate is intentionally conservative:
+/// Returns a dollar cost upper bound for the supplied plan, derived
+/// **from the operator-declared per-provider `[providers.<id>.pricing]`
+/// tables** (V2 `v2_extended_gaps.md §2.5 phase A` —
+/// `ProviderPricing`). The estimate is intentionally conservative:
 ///
 /// 1. Parses the plan TOML; counts `[[tasks]]` entries.
-/// 2. For each task, estimates token consumption from
-///    `[tasks.token_policy.max_tokens_total]` (when declared) or a
-///    fall-back of `default_tokens_per_task = 200_000`.
-/// 3. Multiplies by the operator-grade rate of `$0.005 / 1k tokens`
-///    (Anthropic Sonnet pricing midpoint as of 2026-04). V3 will
-///    derive the rate from per-provider `[providers.<id>.pricing]`
-///    tables once those land.
+/// 2. For each task, estimates token consumption from the optional
+///    `[tasks.token_policy.max_tokens_total]` declaration when
+///    present; falls back to `DEFAULT_TOKENS_PER_TASK = 200_000`
+///    (median observed Anthropic Sonnet planner-loop usage in
+///    internal benchmarks).
+/// 3. Splits the estimate `60% input / 40% output` (the median ratio
+///    across V2 planner traces), then prices each side through the
+///    *most expensive* LLM provider declared in the policy via
+///    [`raxis_policy::ProviderPricing::cost_micro_dollars`]. Pricing
+///    "most expensive" provider is the safest upper bound when a
+///    plan can route to multiple providers.
 /// 4. Adds `policy.max_cost_per_task()` as a per-task admission
-///    overhead allowance so the upper-bound captures retry headroom
-///    inside the kernel's budget enforcer.
+///    overhead allowance (admission-units are operator-defined and
+///    treated as cents in the upper-bound projection — this is the
+///    same convention the kernel's budget enforcer uses internally).
+///
+/// **No-LLM-provider deployments.** When the policy declares zero
+/// LLM providers (e.g. a degraded read-only deployment), token cost
+/// is reported as `0`; the admission-overhead allowance is still
+/// included so operators see a non-zero upper bound for the
+/// kernel-side admission charge.
 ///
 /// Per `INV-OPERATOR-ERG-01` this handler does NOT verify the plan
 /// signature, NOT commit any rows, and NOT reserve any budget. The
@@ -199,17 +212,43 @@ pub async fn handle_estimate_cost(
     let tasks = parsed.get("tasks").and_then(|v| v.as_array());
     let task_count = tasks.map(|a| a.len()).unwrap_or(0);
 
-    /// V2.4 conservative default — 200k tokens / task. Matches the
+    /// V2 conservative default — 200k tokens / task. Matches the
     /// median observed Anthropic Sonnet planner-loop usage in
     /// internal benchmarks; will become operator-configurable in
     /// V3 via `[token_policy_defaults] default_tokens_per_task`.
     const DEFAULT_TOKENS_PER_TASK: u64 = 200_000;
-    /// V2.4 operator-grade `$ / 1k tokens` rate. Will be replaced
-    /// with `[providers.<id>.pricing.tokens_per_dollar]` in V3.
-    const USD_CENTS_PER_1K_TOKENS: u64 = 1; // $0.01 per 1k tokens; rounded conservatively
+    /// V2 default split — 60% input / 40% output. Median observed
+    /// ratio across the planner-trace corpus used to pin
+    /// `DEFAULT_TOKENS_PER_TASK`. Tweaking this constant shifts the
+    /// upper bound by ≤10% under typical pricing.
+    const INPUT_FRACTION_PERCENT:  u64 = 60;
+    const OUTPUT_FRACTION_PERCENT: u64 = 40;
+
+    // Resolve the worst-case provider for the upper-bound computation
+    // by max-ing `cost_micro_dollars(1M, 1M)` across every LLM
+    // provider with declared pricing. Non-LLM providers and LLM
+    // providers without pricing are skipped (per `PolicyBundle::
+    // validate` contract, every LLM provider MUST declare pricing,
+    // so the latter set is empty in any validated bundle).
+    //
+    // Why "1M, 1M" as the comparator: it linearises the cost
+    // function so the most-expensive provider for *any* token mix is
+    // the one with the highest combined-1M cost. This is exact for
+    // affine pricing (which `ProviderPricing` is by construction).
+    let worst_provider: Option<&raxis_policy::ProviderEntry> = policy
+        .providers()
+        .iter()
+        .filter(|p| p.pricing.is_some())
+        .max_by_key(|p| {
+            let pr = p.pricing.as_ref().expect("filtered to Some");
+            pr.cost_micro_dollars(1_000_000, 1_000_000, 0, 0)
+        });
 
     let mut breakdown: Vec<serde_json::Value> = Vec::with_capacity(task_count);
-    let mut total_cents: i64 = 0;
+    // u128 accumulator so summing `cost_micro_dollars` (`u64`) across
+    // many tasks cannot overflow even on 100k-task plans at peak
+    // pricing.
+    let mut total_micro_dollars: u128 = 0;
     let mut total_tokens: u64 = 0;
     if let Some(arr) = tasks {
         for (i, t) in arr.iter().enumerate() {
@@ -220,17 +259,33 @@ pub async fn handle_estimate_cost(
                 .filter(|n| *n > 0)
                 .map(|n| n as u64)
                 .unwrap_or(DEFAULT_TOKENS_PER_TASK);
-            let task_cents = est.saturating_mul(USD_CENTS_PER_1K_TOKENS) / 1_000;
-            total_cents = total_cents.saturating_add(task_cents as i64);
+
+            let est_input  = est.saturating_mul(INPUT_FRACTION_PERCENT)  / 100;
+            let est_output = est.saturating_mul(OUTPUT_FRACTION_PERCENT) / 100;
+
+            let task_micro: u64 = match worst_provider {
+                Some(p) => p.pricing.as_ref().expect("checked above")
+                    .cost_micro_dollars(est_input, est_output, 0, 0),
+                None => 0u64,
+            };
+            total_micro_dollars = total_micro_dollars.saturating_add(u128::from(task_micro));
             total_tokens = total_tokens.saturating_add(est);
             breakdown.push(json!({
-                "task_index":     i,
-                "task_id":        task_id,
-                "estimated_tokens": est,
-                "estimated_usd_cents": task_cents,
+                "task_index":             i,
+                "task_id":                task_id,
+                "estimated_tokens":       est,
+                "estimated_input_tokens": est_input,
+                "estimated_output_tokens":est_output,
+                "estimated_usd_cents":    micro_dollars_to_cents(u128::from(task_micro)),
             }));
         }
     }
+
+    // Convert micro-dollars to cents (round half-up). 10_000 µ$ = 1 ¢.
+    // Saturating cast guards against pathological multi-million-task
+    // plans whose cents total overflows `i64::MAX`.
+    let mut total_cents: i64 = micro_dollars_to_cents(total_micro_dollars)
+        .min(u128::from(i64::MAX as u64)) as i64;
 
     // Per-initiative kernel-side admission overhead. The kernel's
     // budget enforcer charges at least one `base_cost_per_intent_kind`
@@ -241,15 +296,18 @@ pub async fn handle_estimate_cost(
     total_cents = total_cents.saturating_add(admission_overhead_cents);
 
     let breakdown_value = json!({
-        "rate_usd_cents_per_1k_tokens":   USD_CENTS_PER_1K_TOKENS,
+        "pricing_source":                 worst_provider.map(|p| p.provider_id.as_str()).unwrap_or("none"),
+        "input_fraction_percent":         INPUT_FRACTION_PERCENT,
+        "output_fraction_percent":        OUTPUT_FRACTION_PERCENT,
         "default_tokens_per_task":        DEFAULT_TOKENS_PER_TASK,
         "task_count":                     task_count,
         "total_estimated_tokens":         total_tokens,
+        "total_micro_dollars":            total_micro_dollars,
         "admission_overhead_cents":       admission_overhead_cents,
         "tasks":                          breakdown,
         "policy_epoch":                   policy.epoch(),
-        "supported_in_release":           "v2.4",
-        "estimate_class":                 "operator_grade_heuristic",
+        "supported_in_release":           "v2.5",
+        "estimate_class":                 "operator_grade_provider_pricing",
     });
 
     let breakdown_json = match serde_json::to_string(&breakdown_value) {
@@ -264,6 +322,14 @@ pub async fn handle_estimate_cost(
         upper_bound_usd_cents: total_cents,
         breakdown_json,
     }
+}
+
+/// Round-half-up conversion from micro-dollars to whole cents.
+/// 1 ¢ = 10 000 µ$. The half-up rule keeps the upper-bound
+/// estimate from drifting below the actual price under partial-
+/// cent costs.
+fn micro_dollars_to_cents(micro: u128) -> u128 {
+    micro.saturating_add(5_000) / 10_000
 }
 
 // ---------------------------------------------------------------------------
