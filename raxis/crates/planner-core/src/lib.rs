@@ -120,7 +120,8 @@ pub use provider_model::{
     ProviderModelError, DEFAULT_MODEL, KNOWN_MODELS,
 };
 pub use circuit::{
-    CircuitBreakerModelClient, CircuitConfig, CircuitSnapshot, CircuitState,
+    CircuitBreakerModelClient, CircuitConfig, CircuitRow, CircuitSnapshot,
+    CircuitState, CircuitStore, InMemoryCircuitStore,
 };
 pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
 pub use gemini_client::GeminiClient;
