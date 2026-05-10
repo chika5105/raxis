@@ -2044,6 +2044,39 @@ pub enum AuditEventKind {
         /// pulling the body.
         payload_bytes: u32,
     },
+
+    /// Emitted by the operator dashboard's
+    /// `PUT /api/policy/toml` write surface AFTER
+    /// `policy_manager::advance_epoch` succeeds. Provides a
+    /// dashboard-distinct lineage so an auditor can see at a
+    /// glance which policy advances came from the web UI vs the
+    /// CLI's `raxis policy reload`.
+    ///
+    /// This event is in addition to (NOT in place of) the
+    /// canonical `PolicyEpochAdvanced` record that `advance_epoch`
+    /// writes for every successful advance.
+    ///
+    /// Field semantics:
+    ///   * `operator_fingerprint` — pubkey-fingerprint of the
+    ///     operator whose JWT authenticated the PUT.
+    ///   * `previous_epoch` — epoch the kernel was running before
+    ///     the advance.
+    ///   * `new_epoch` — epoch the kernel is running after the
+    ///     advance; identical to the corresponding
+    ///     `PolicyEpochAdvanced.epoch_id`.
+    ///   * `policy_sha256` — SHA-256 of the new policy artifact
+    ///     bytes; matches the `PolicyEpochAdvanced.policy_sha256`
+    ///     in the same chain segment.
+    PolicyUpdatedViaDashboard {
+        /// Operator pubkey fingerprint (SHA-256[:16] hex).
+        operator_fingerprint: String,
+        /// Epoch the kernel was running before the PUT.
+        previous_epoch:       u64,
+        /// Epoch the kernel is running after the PUT.
+        new_epoch:            u64,
+        /// SHA-256 of the new policy artifact bytes.
+        policy_sha256:        String,
+    },
 }
 
 impl AuditEventKind {
@@ -2143,6 +2176,7 @@ impl AuditEventKind {
             Self::DryRunAdmitted { .. } => "DryRunAdmitted",
             Self::StructuredOutputEmitted { .. } => "StructuredOutputEmitted",
             Self::CircuitBreakerStateChanged { .. } => "CircuitBreakerStateChanged",
+            Self::PolicyUpdatedViaDashboard { .. } => "PolicyUpdatedViaDashboard",
         }
     }
 }

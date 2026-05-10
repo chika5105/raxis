@@ -171,3 +171,4 @@ reqwest       = { workspace = true, features = ["stream"] }
 hex           = { workspace = true }
 tokio-util    = { version = "0.7", features = ["io"] }
 futures-util  = "0.3"
+parking_lot   = "0.12"

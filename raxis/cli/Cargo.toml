@@ -58,6 +58,14 @@ raxis-canonical-images = { workspace = true }
 # I/O only so the client is never used for HTTP.
 raxis-image-cache      = { workspace = true }
 reqwest                = { workspace = true }
+# `commands/providers.rs` opens kernel.db read-only via
+# `rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY` to read the
+# `provider_circuit_state` view (provider-failure-handling.md §6.6).
+# We deliberately use rusqlite directly (no `raxis-store::ro`)
+# because the CLI process MUST NOT race the kernel's SQLite
+# WAL writer — read-only flags + NO_MUTEX is the bounded
+# semantics here.
+rusqlite               = { workspace = true }
 
 serde        = { workspace = true }
 serde_json   = { workspace = true }
@@ -87,10 +95,6 @@ libc         = "0.2"
 # (`tests/genesis_emitter_round_trip.rs`), which writes the emitted policy
 # to a tempdir and reads it back through the production loader.
 tempfile     = "3"
-# Used by `reveal::tests` to seed a `kernel.db` with a fixture
-# initiative + signed_plan_artifacts row so the audit-on-reveal
-# path can be exercised end-to-end without standing up the kernel.
-rusqlite     = { workspace = true }
 # Cert-mandatory test fixtures: the genesis-emitter round-trip test
 # needs a structurally-valid self-signed cert that matches the
 # operator pubkey, and `commands::genesis::tests` needs the same.

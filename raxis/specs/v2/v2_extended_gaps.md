@@ -1152,16 +1152,90 @@ in `kernel.db` (it would be too large and too transient). Instead:
 operator's roles; the middleware checks `roles.contains("read")`
 for all `GET` endpoints.
 
-**Write policy role.** `PUT /api/policy/toml` requires
-`roles.contains("write_policy")`. The handler:
+**Write policy role (✅ shipped — V2.5).** `PUT /api/policy/toml`
+requires `roles.contains("write_policy")` (granted to
+operators with `RotateEpoch` in their cert's `permitted_ops`).
+The endpoint mirrors the CLI flow `raxis policy reload
+--policy <toml> --sig <sig>`: the operator must supply BOTH a
+new policy.toml AND a detached Ed25519 signature over those
+exact bytes, signed by the authority key. **The dashboard
+NEVER holds the authority private key** — the operator signs
+offline (e.g. on an air-gapped workstation) and pastes the
+detached signature into the editor.
 
-1. Validates the new TOML parses into a valid `PolicyBundle`.
-2. Writes the file to the policy path.
-3. Triggers the kernel's policy reload mechanism (same as
-   `raxis policy reload` CLI).
-4. Returns the new policy epoch.
-5. Emits a `PolicyUpdatedViaDashboard` audit event with the
-   operator's id, the old epoch, and the new epoch.
+**Wire shape.**
+
+```
+PUT /api/policy/toml
+Authorization: Bearer <jwt>
+Content-Type: application/json
+
+{
+  "toml":          "<full UTF-8 TOML content>",
+  "signature_b64": "<base64 of 64 raw Ed25519 signature bytes>"
+}
+
+→ 200
+{
+  "previous_epoch":              7,
+  "new_epoch":                   8,
+  "policy_sha256":               "abcd…(64 hex chars)",
+  "signed_by_authority":         "f1f1…(16 hex chars)",
+  "n_sessions_invalidated":      3,
+  "n_delegations_marked_stale":  2,
+  "advanced_at":                 1730000123
+}
+```
+
+The handler:
+
+1. Validates JWT + role + JSON body shape; rejects empty TOML
+   and signatures whose decoded length ≠ 64 with HTTP 400
+   (`FAIL_DASHBOARD_BAD_REQUEST`). Accepts both padded and
+   unpadded base64 (operator-friendly copy/paste behaviour).
+2. Hands off to the kernel-resident `KernelPolicyAdvancer`
+   inside `tokio::task::spawn_blocking` (the advance path
+   touches SQLite + the file system).
+3. The advancer atomically stages the new bytes onto the
+   canonical `policy.toml` / `policy.toml.sig` paths via
+   `<path>.dashboard.tmp` + `rename`. On any failure
+   (signature invalid, replay, malformed TOML, IO trouble) it
+   restores the previous bytes so a partial write never
+   leaves the canonical files inconsistent with the in-memory
+   `Arc<ArcSwap<PolicyBundle>>`.
+4. Calls `policy_manager::advance_epoch` — the same pipeline
+   the operator IPC `RotateEpoch` handler uses. This emits
+   `PolicyEpochAdvanced` and updates the in-memory swap.
+5. Emits `AuditEventKind::PolicyUpdatedViaDashboard` with
+   the operator's pubkey fingerprint, the previous epoch,
+   the new epoch, and the policy SHA-256. This is in
+   ADDITION to the canonical `PolicyEpochAdvanced` so an
+   auditor can distinguish dashboard-driven advances from
+   CLI-driven advances at a glance.
+6. Returns the structured `PolicyAdvancement` envelope.
+
+**Failure mapping.**
+
+| Status | Code | Trigger |
+|---|---|---|
+| 400 | `FAIL_DASHBOARD_BAD_REQUEST` | empty TOML, malformed base64, signature ≠ 64 bytes |
+| 400 | `FAIL_DASHBOARD_POLICY_INVALID` | signature mismatch / replay / malformed TOML |
+| 401 | `FAIL_DASHBOARD_AUTH_*` | missing / invalid / revoked JWT |
+| 403 | `FAIL_DASHBOARD_FORBIDDEN` | operator lacks `write_policy` role |
+| 500 | `FAIL_DASHBOARD_INTERNAL` | IO trouble persisting / rolling back |
+
+**Architecture seam.** The dashboard crate (`raxis-dashboard`)
+defines an `update_policy_toml` method on the `DashboardData`
+trait. Production wiring lives in `raxis-dashboard-kernel`
+(`KernelDashboardData::update_policy_toml`) which delegates to
+a `PolicyAdvancer` trait object. The kernel binary supplies
+the production impl (`KernelPolicyAdvancer` in
+`kernel/src/dashboard_glue.rs`) which holds Arc handles for
+the `KeyRegistry`, `Store`, `AuditSink`,
+`Arc<ArcSwap<PolicyBundle>>`, `EpochBinding`, and the optional
+`ArtifactStore`. Tests use a `ClosurePolicyAdvancer`
+(also in `raxis-dashboard-kernel`) so the HTTP route layer
+can be exercised without booting the full kernel.
 
 **Admin role.** `GET /api/health` (doctor output) requires
 `roles.contains("admin")`. Operator key listing and certificate
@@ -1170,19 +1244,19 @@ metadata.
 
 ### §4.6 — Implementation plan
 
-| Phase | Scope | Estimate |
-|---|---|---|
-| 1 | `raxis-dashboard` crate skeleton + axum server + static serving + auth endpoints | ~400 lines |
-| 2 | Core API endpoints (initiatives, tasks, sessions, audit, escalations, inbox) | ~600 lines |
-| 3 | Git worktree API (log, diff, file tree) | ~300 lines |
-| 4 | Agent stream capture (bounded file ring + broadcast channel + SSE endpoint) | ~250 lines |
-| 5 | Policy view/edit API | ~150 lines |
-| 6 | React frontend: scaffold + routing + auth flow + overview page | ~800 lines |
-| 7 | React frontend: initiative detail + DAG visualization + task detail | ~1000 lines |
-| 8 | React frontend: session detail + agent stream view | ~600 lines |
-| 9 | React frontend: git worktree + diff view + audit log | ~800 lines |
-| 10 | React frontend: policy editor + health page + inbox | ~500 lines |
-| **Total** | | **~5400 lines** |
+| Phase | Scope | Estimate | Status |
+|---|---|---|---|
+| 1 | `raxis-dashboard` crate skeleton + axum server + static serving + auth endpoints | ~400 lines | ✅ shipped |
+| 2 | Core API endpoints (initiatives, tasks, sessions, audit, escalations, inbox) | ~600 lines | ✅ shipped |
+| 3 | Git worktree API (log, diff, file tree) | ~300 lines | ✅ shipped |
+| 4 | Agent stream capture (bounded file ring + broadcast channel + SSE endpoint) | ~250 lines | ✅ shipped |
+| 5 | Policy view/edit API + `PolicyUpdatedViaDashboard` audit | ~250 lines | ✅ shipped |
+| 6 | React frontend: scaffold + routing + auth flow + overview page | ~800 lines | 🔵 pending |
+| 7 | React frontend: initiative detail + DAG visualization + task detail | ~1000 lines | 🔵 pending |
+| 8 | React frontend: session detail + agent stream view | ~600 lines | 🔵 pending |
+| 9 | React frontend: git worktree + diff view + audit log | ~800 lines | 🔵 pending |
+| 10 | React frontend: policy editor + health page + inbox | ~500 lines | 🔵 pending |
+| **Total** | | **~5500 lines** | |
 
 ### §4.7 — Invariant safety
 
@@ -1232,5 +1306,5 @@ The following invariants must be reviewed:
 | 🟢 DONE | §2.3 | MySQL `caching_sha2_password` (fast-path + RSA-OAEP full-auth + AuthSwitchRequest) | ~140 |
 | 🟢 DONE | §3.1 | `Sleep` tool | ~90 |
 | 🟢 DONE | §3.2 | `StructuredOutput` (fixed enum + `task outputs` CLI) | ~310 |
-| 🔵 P2 | §4   | Operator dashboard (full stack) | ~5400 |
-| | | **Total remaining** | **~5400** |
+| 🟡 IN-FLIGHT | §4   | Operator dashboard — backend ✅ shipped (P1-P5); React FE pending (P6-P10) | ~3700 FE |
+| | | **Total remaining** | **~3700** |

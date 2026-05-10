@@ -28,6 +28,7 @@ mod bootstrap;
 mod authority;
 mod canonical_images_preflight;
 mod capacity;
+mod dashboard_glue;
 mod ipc;
 mod recovery;
 mod initiatives;
@@ -971,13 +972,40 @@ async fn main() {
     // requests cleanly.
     let dashboard_handle = match raxis_dashboard_kernel::load_dashboard_config(&policy_path) {
         Ok(Some(cfg)) => {
-            match raxis_dashboard_kernel::start_dashboard(
+            // Wire the kernel-resident policy advancer so the
+            // dashboard's `PUT /api/policy/toml` write surface
+            // can drive the same `advance_epoch` pipeline as
+            // the CLI. The dashboard NEVER holds the authority
+            // private key — the operator signs offline and
+            // pastes the detached signature into the editor.
+            let advancer: Arc<dyn raxis_dashboard_kernel::PolicyAdvancer> =
+                Arc::new(crate::dashboard_glue::KernelPolicyAdvancer::new(
+                    Arc::clone(&registry),
+                    Arc::clone(&store),
+                    Arc::clone(&audit),
+                    Arc::clone(&policy),
+                    Arc::clone(&epoch_binding),
+                    Some(Arc::clone(&artifact_store)),
+                    policy_path.clone(),
+                ));
+            // Reuse the data layer's stream capture for the
+            // gateway bridge by allocating it here so both
+            // surfaces (file ring + broadcast channel) point
+            // at the same `<data_dir>/streams/` directory.
+            let stream_capture = raxis_dashboard_kernel::SessionStreamCapture::new(
+                &data_dir,
+                raxis_dashboard_kernel::CaptureConfig::default(),
+            )
+            .expect("create streams dir");
+            match raxis_dashboard_kernel::start_dashboard_with_advancer(
                 cfg.clone(),
                 Arc::clone(&store),
                 Arc::clone(&policy),
                 data_dir.clone(),
                 policy_path.clone(),
                 started_at,
+                stream_capture,
+                advancer,
             )
             .await
             {

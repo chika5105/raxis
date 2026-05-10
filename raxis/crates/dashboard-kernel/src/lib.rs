@@ -52,9 +52,10 @@ use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
     AuditEntryView, DagEdge, DashboardData, EscalationView, HealthCheck, HealthSnapshot,
-    InitiativeListEntry, InitiativeView, OperatorAuthResolution, PolicyOperatorView,
-    PolicySnapshotView, ReviewerVerdictView, SessionView, StructuredOutputView, TaskView,
-    WorktreeDetail, WorktreeDiff, WorktreeListEntry, WorktreeLogEntry,
+    InitiativeListEntry, InitiativeView, OperatorAuthResolution, PolicyAdvancement,
+    PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView, SessionView,
+    StructuredOutputView, TaskView, WorktreeDetail, WorktreeDiff, WorktreeListEntry,
+    WorktreeLogEntry,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -66,6 +67,127 @@ mod git;
 pub mod stream_capture;
 
 pub use stream_capture::{CaptureConfig, SessionStreamCapture};
+
+// ---------------------------------------------------------------------------
+// PolicyAdvancer — kernel-side write callback for the dashboard
+// ---------------------------------------------------------------------------
+
+/// Result the kernel impl returns when it has staged the new
+/// policy bytes + signature on disk and successfully advanced
+/// the in-memory + on-disk epoch.
+#[derive(Debug, Clone)]
+pub struct AdvanceResult {
+    /// Epoch the kernel was running before the call.
+    pub previous_epoch: u64,
+    /// Epoch the kernel is running after the call.
+    pub new_epoch: u64,
+    /// SHA-256 of the new policy artifact bytes.
+    pub policy_sha256: String,
+    /// Operator id from `meta.signed_by` on the new artifact.
+    pub signed_by_authority: String,
+    /// Pending delegations marked stale by the swap.
+    pub n_delegations_marked_stale: u64,
+    /// Active sessions invalidated by the swap.
+    pub n_sessions_invalidated: u64,
+    /// Unix-seconds timestamp recorded on the new history row.
+    pub advanced_at: u64,
+}
+
+/// Failure surface for [`PolicyAdvancer::advance`].
+///
+/// The dashboard maps `Validation` to `ApiError::PolicyInvalid`
+/// (HTTP 400) and `Internal` to `ApiError::Internal` (HTTP 500);
+/// no kernel-internal state ever reaches the wire body.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AdvanceError {
+    /// Validator (signature, replay, malformed TOML, path containment).
+    /// The contained string is operator-safe — it is the same
+    /// short message the CLI prints.
+    #[error("policy validation failed: {0}")]
+    Validation(String),
+    /// IO trouble (write, rename, fsync, etc.). Logged via
+    /// `tracing::error!` and suppressed on the wire.
+    #[error("internal error: {0}")]
+    Internal(String),
+}
+
+/// Kernel-side callback the dashboard uses to install a new
+/// signed policy artifact. Implemented in the kernel binary
+/// (`kernel/src/dashboard_glue.rs`) which has the
+/// `KeyRegistry`, `AuditSink`, `EpochBinding`, etc. needed to
+/// drive `policy_manager::advance_epoch`.
+///
+/// The trait is intentionally tiny so tests can stub it
+/// without booting the kernel — see [`ClosurePolicyAdvancer`]
+/// for the test-only adapter.
+pub trait PolicyAdvancer: Send + Sync + 'static {
+    /// Atomically install the supplied TOML + signature and
+    /// drive the kernel's `advance_epoch` pipeline.
+    ///
+    /// Implementation contract:
+    ///   1. Stage the bytes onto the canonical
+    ///      `policy.toml` / `policy.toml.sig` paths via
+    ///      `tempfile::persist` (atomic rename) so a partial
+    ///      write never leaves the canonical files inconsistent.
+    ///   2. Call `raxis_kernel::policy_manager::advance_epoch`
+    ///      to verify + commit. On failure, restore the previous
+    ///      bytes (best-effort) and surface
+    ///      `AdvanceError::Validation`.
+    ///   3. Emit `AuditEventKind::PolicyUpdatedViaDashboard`
+    ///      with the operator's pubkey fingerprint.
+    ///
+    /// Returns the structured outcome the dashboard renders to
+    /// the operator UI.
+    fn advance(
+        &self,
+        toml_bytes: &[u8],
+        sig_bytes: &[u8],
+        operator_fingerprint: &str,
+    ) -> Result<AdvanceResult, AdvanceError>;
+}
+
+/// Closure-backed [`PolicyAdvancer`] for tests. Wraps a
+/// `Fn(&[u8], &[u8], &str) -> Result<AdvanceResult,
+/// AdvanceError>` so test code can stub the advancer behaviour
+/// without standing up a full `KeyRegistry` + `Store` +
+/// `EpochBinding` rig.
+///
+/// This is NOT for production use — the real production
+/// advancer lives in the kernel binary
+/// (`kernel/src/dashboard_glue::KernelPolicyAdvancer`).
+pub struct ClosurePolicyAdvancer<F>
+where
+    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError>
+        + Send + Sync + 'static,
+{
+    inner: F,
+}
+
+impl<F> ClosurePolicyAdvancer<F>
+where
+    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError>
+        + Send + Sync + 'static,
+{
+    /// Wrap a closure into a `PolicyAdvancer`.
+    pub fn new(f: F) -> Self {
+        Self { inner: f }
+    }
+}
+
+impl<F> PolicyAdvancer for ClosurePolicyAdvancer<F>
+where
+    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError>
+        + Send + Sync + 'static,
+{
+    fn advance(
+        &self,
+        toml_bytes: &[u8],
+        sig_bytes: &[u8],
+        operator_fingerprint: &str,
+    ) -> Result<AdvanceResult, AdvanceError> {
+        (self.inner)(toml_bytes, sig_bytes, operator_fingerprint)
+    }
+}
 
 /// Kernel-wired implementation of the dashboard data trait.
 ///
@@ -89,18 +211,24 @@ pub struct KernelDashboardData {
     audit_dir: PathBuf,
     /// Boot time in unix seconds for the health snapshot.
     booted_at: u64,
-    /// Kernel store handle. Reserved for future write surfaces
-    /// (PUT /api/policy/toml, mark-notification-read, etc.) —
-    /// the read trait does not currently need it because every
-    /// view function takes `&RoConn` instead, but we hold the
-    /// handle so PUT endpoints (P5) can grab `lock_sync()` for
-    /// the actual mutation.
+    /// Kernel store handle. Reserved for write surfaces that
+    /// directly mutate kernel.db. The read trait fans out
+    /// through `RoConn`s; the only current write surface
+    /// (`PUT /api/policy/toml`) goes through `policy_advancer`
+    /// which holds its own `Arc<Store>`.
     #[allow(dead_code)]
     store: Arc<Store>,
     /// Per-session agent-output capture. The kernel's gateway
     /// bridge writes to this; the dashboard's SSE handler
     /// subscribes to it.
     stream_capture: Arc<SessionStreamCapture>,
+    /// Optional policy-write callback. Wired by the kernel main
+    /// loop with [`KernelDashboardData::with_advancer`]. When
+    /// `None`, `update_policy_toml` returns
+    /// `ApiError::Forbidden` so the integration test fixtures
+    /// (which don't boot the kernel) can opt out without
+    /// silently exposing a no-op write surface.
+    policy_advancer: Option<Arc<dyn PolicyAdvancer>>,
 }
 
 impl KernelDashboardData {
@@ -126,6 +254,7 @@ impl KernelDashboardData {
             booted_at,
             store,
             stream_capture,
+            policy_advancer: None,
         }
     }
 
@@ -149,7 +278,20 @@ impl KernelDashboardData {
             booted_at,
             store,
             stream_capture,
+            policy_advancer: None,
         }
+    }
+
+    /// Wire a [`PolicyAdvancer`] callback. The kernel main loop
+    /// calls this before handing the data layer to the
+    /// dashboard server so `PUT /api/policy/toml` can drive
+    /// `policy_manager::advance_epoch`.
+    ///
+    /// Builder-style: returns `Self` so the kernel main can
+    /// chain the call onto a `KernelDashboardData::new(...)`.
+    pub fn with_advancer(mut self, advancer: Arc<dyn PolicyAdvancer>) -> Self {
+        self.policy_advancer = Some(advancer);
+        self
     }
 
     /// Cloneable handle to the agent-stream capture. The
@@ -706,6 +848,49 @@ impl DashboardData for KernelDashboardData {
             .subscribe(session_id)
             .ok_or(ApiError::NotFound { kind: "stream".into() })
     }
+
+    fn update_policy_toml(
+        &self,
+        operator_fingerprint: &str,
+        toml_bytes: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<PolicyAdvancement, ApiError> {
+        // The route layer already enforces `write_policy`. Defence
+        // in depth: when the kernel main loop did NOT wire a
+        // PolicyAdvancer (e.g. the dashboard was started for a
+        // read-only workspace), reject the write so we never
+        // silently accept and discard the new bytes.
+        let advancer = self
+            .policy_advancer
+            .as_ref()
+            .cloned()
+            .ok_or(ApiError::Forbidden {
+                required: "policy-advance capability".into(),
+            })?;
+        // Move to a blocking-safe context. The advancer takes a
+        // `&Store` lock and runs the full `advance_epoch`
+        // pipeline (SQL transaction, audit-after-commit, in-memory
+        // swap). spawn_blocking would normally be the right tool,
+        // but the trait method is sync so we run inline — the
+        // dashboard's HTTP handler already wraps this call in
+        // `tokio::task::spawn_blocking` (see
+        // crates/dashboard/src/routes/policy.rs).
+        let outcome = advancer
+            .advance(toml_bytes, signature_bytes, operator_fingerprint)
+            .map_err(|e| match e {
+                AdvanceError::Validation(msg) => ApiError::PolicyInvalid { detail: msg },
+                AdvanceError::Internal(msg) => ApiError::Internal { log_only: msg },
+            })?;
+        Ok(PolicyAdvancement {
+            previous_epoch: outcome.previous_epoch,
+            new_epoch: outcome.new_epoch,
+            policy_sha256: outcome.policy_sha256,
+            signed_by_authority: outcome.signed_by_authority,
+            n_sessions_invalidated: outcome.n_sessions_invalidated,
+            n_delegations_marked_stale: outcome.n_delegations_marked_stale,
+            advanced_at: outcome.advanced_at,
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -882,10 +1067,13 @@ pub fn load_dashboard_config(policy_path: &Path) -> Result<Option<DashboardConfi
 // Server lifecycle
 // ---------------------------------------------------------------------------
 
-/// Spawn the dashboard server in the background. Returns the
-/// handle the kernel main loop holds until shutdown. Caller is
-/// responsible for awaiting `handle.shutdown()` during the
-/// orderly exit path.
+/// Spawn the dashboard server in the background WITHOUT a
+/// policy-write capability. `PUT /api/policy/toml` will return
+/// `403 FAIL_DASHBOARD_FORBIDDEN`. Reserved for read-only
+/// deployments / smoke tests.
+///
+/// Caller is responsible for awaiting `handle.shutdown()`
+/// during the orderly exit path.
 pub async fn start_dashboard(
     cfg: DashboardConfig,
     store: Arc<Store>,
@@ -901,6 +1089,42 @@ pub async fn start_dashboard(
         policy_path,
         booted_at,
     ));
+    let server = DashboardServer::bind(cfg, data)
+        .await
+        .map_err(|e| format!("dashboard bind failed: {e}"))?;
+    Ok(ServerHandle::spawn(server))
+}
+
+/// Spawn the dashboard server with a wired policy-write
+/// callback. The supplied `advancer` is invoked from
+/// `PUT /api/policy/toml` (write_policy role) inside a
+/// `tokio::task::spawn_blocking` closure.
+///
+/// The capture handle lets the caller share a single
+/// `SessionStreamCapture` instance with the gateway bridge so
+/// SSE subscribers see the same events the kernel persists to
+/// `<data_dir>/streams/<session>.jsonl`.
+pub async fn start_dashboard_with_advancer(
+    cfg: DashboardConfig,
+    store: Arc<Store>,
+    policy: Arc<ArcSwap<PolicyBundle>>,
+    data_dir: PathBuf,
+    policy_path: PathBuf,
+    booted_at: u64,
+    stream_capture: Arc<SessionStreamCapture>,
+    advancer: Arc<dyn PolicyAdvancer>,
+) -> Result<ServerHandle, String> {
+    let data = Arc::new(
+        KernelDashboardData::with_capture(
+            store,
+            policy,
+            data_dir,
+            policy_path,
+            booted_at,
+            stream_capture,
+        )
+        .with_advancer(advancer),
+    );
     let server = DashboardServer::bind(cfg, data)
         .await
         .map_err(|e| format!("dashboard bind failed: {e}"))?;

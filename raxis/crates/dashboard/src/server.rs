@@ -133,7 +133,8 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/inbox",                       get(inbox::list::<D>))
         // Policy.
         .route("/api/policy",                      get(policy::snapshot::<D>))
-        .route("/api/policy/toml",                 get(policy::raw_toml::<D>))
+        .route("/api/policy/toml",
+            get(policy::raw_toml::<D>).put(policy::update_toml::<D>))
         // Git worktrees.
         .route("/api/git/worktrees",                       get(git::list::<D>))
         .route("/api/git/worktrees/:name",                 get(git::detail::<D>))

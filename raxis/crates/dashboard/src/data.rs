@@ -230,6 +230,34 @@ pub struct PolicyOperatorView {
     pub permitted_ops: Vec<String>,
 }
 
+/// Outcome of `PUT /api/policy/toml`. Mirrors the kernel's
+/// `policy_manager::AdvanceOutcome` for the dashboard wire
+/// surface — every field comes straight off the verified
+/// artifact + the write transaction's return values.
+#[derive(Debug, Clone, Serialize)]
+pub struct PolicyAdvancement {
+    /// Epoch the kernel was running before the advance.
+    pub previous_epoch: u64,
+    /// Epoch the kernel is running after the advance.
+    pub new_epoch: u64,
+    /// SHA-256 of the new policy artifact bytes (lowercase hex).
+    pub policy_sha256: String,
+    /// Operator id from `meta.signed_by` on the new artifact.
+    /// Mirrors `policy_manager::AdvanceOutcome::signed_by_authority`
+    /// — the FIELD NAME is preserved so wire-shape consumers
+    /// don't have to special-case the dashboard surface.
+    pub signed_by_authority: String,
+    /// Number of session-prompt cache entries marked stale by
+    /// the epoch swap (forensic visibility for the operator UI).
+    pub n_sessions_invalidated: u64,
+    /// Number of pending delegations marked stale by the epoch
+    /// swap (forensic visibility for the operator UI).
+    pub n_delegations_marked_stale: u64,
+    /// Unix-seconds timestamp recorded on the
+    /// `policy_epoch_history` row.
+    pub advanced_at: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Git worktree views (§4.3 git worktree API)
 // ---------------------------------------------------------------------------
@@ -484,6 +512,37 @@ pub trait DashboardData: Send + Sync + 'static {
         &self,
         session_id: &str,
     ) -> Result<StreamSubscription, ApiError>;
+
+    /// Apply a new policy artifact + detached signature.
+    ///
+    /// Routed from `PUT /api/policy/toml` (write_policy role).
+    /// The handler:
+    ///   1. Stages the new TOML + signature bytes on disk
+    ///      (atomic temp-then-rename onto the canonical
+    ///      `policy.toml` / `policy.toml.sig` paths).
+    ///   2. Calls `raxis_kernel::policy_manager::advance_epoch`
+    ///      which Phase-0 verifies the Ed25519 signature against
+    ///      the authority key and Phase-1 commits the
+    ///      `policy_epoch_history` row.
+    ///   3. Emits `AuditEventKind::PolicyUpdatedViaDashboard`
+    ///      with the operator's pubkey fingerprint.
+    ///
+    /// On any failure (signature invalid, replay, malformed
+    /// TOML, IO trouble) the handler MUST roll the on-disk
+    /// files back to their previous content so a partial write
+    /// never leaves the canonical files out-of-sync with the
+    /// in-memory `Arc<ArcSwap<PolicyBundle>>`.
+    ///
+    /// The trait method is synchronous because the production
+    /// implementation already wraps `advance_epoch` in
+    /// `tokio::task::spawn_blocking` — calling it from inside
+    /// an async handler is safe.
+    fn update_policy_toml(
+        &self,
+        operator_fingerprint: &str,
+        toml_bytes: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<PolicyAdvancement, ApiError>;
 }
 
 /// Output of [`DashboardData::lookup_operator_roles`].
@@ -879,6 +938,84 @@ impl DashboardData for InMemoryDashboardData {
             .ok_or(ApiError::NotFound { kind: "stream-source".into() })?;
         Ok(src.subscribe())
     }
+
+    fn update_policy_toml(
+        &self,
+        operator_fingerprint: &str,
+        toml_bytes: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<PolicyAdvancement, ApiError> {
+        // The in-memory fixture has no real policy validator; it
+        // just performs the side-effects a real impl would so
+        // route-layer tests can assert end-to-end behaviour:
+        //   - reject when the operator is not pre-registered as
+        //     a write_policy role (callers with no entry here
+        //     hit the auth layer first, but defence-in-depth);
+        //   - reject empty TOML + zero-length signatures (the
+        //     real validator rejects both unconditionally);
+        //   - install the new bytes into the read surface (so
+        //     a follow-up GET /api/policy/toml returns the new
+        //     bytes the same way production would after a
+        //     successful advance);
+        //   - bump the epoch counter on the cached snapshot so
+        //     callers can observe the advance through
+        //     /api/policy too.
+        if toml_bytes.is_empty() {
+            return Err(ApiError::PolicyInvalid {
+                detail: "policy TOML is empty".into(),
+            });
+        }
+        if signature_bytes.len() != 64 {
+            return Err(ApiError::PolicyInvalid {
+                detail: format!(
+                    "signature must be exactly 64 bytes (got {})",
+                    signature_bytes.len(),
+                ),
+            });
+        }
+        let mut g = self.inner.write();
+        let prev_epoch = g.policy.as_ref().map(|p| p.epoch).unwrap_or(0);
+        let new_epoch = prev_epoch.saturating_add(1);
+        let policy_sha256 = hex_sha256(toml_bytes);
+        let prev_toml_len = g.policy_toml.len() as i64;
+        if let Some(p) = g.policy.as_mut() {
+            p.epoch = new_epoch;
+            p.policy_sha256 = policy_sha256.clone();
+            p.signed_by = operator_fingerprint.to_owned();
+            p.signed_at = prev_toml_len + 1; // monotone for tests
+        }
+        g.policy_toml = String::from_utf8_lossy(toml_bytes).into_owned();
+        let signed_by_authority = g
+            .policy
+            .as_ref()
+            .map(|p| p.signed_by.clone())
+            .unwrap_or_else(|| operator_fingerprint.to_owned());
+        Ok(PolicyAdvancement {
+            previous_epoch: prev_epoch,
+            new_epoch,
+            policy_sha256,
+            signed_by_authority,
+            n_sessions_invalidated: 0,
+            n_delegations_marked_stale: 0,
+            advanced_at: 0,
+        })
+    }
+}
+
+/// Lowercase-hex SHA-256 helper used by the in-memory fixture
+/// only. Avoids pulling another digest crate into the dashboard
+/// surface (the kernel side uses `raxis_policy::load_policy`
+/// which already hashes the artifact).
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(bytes);
+    let out = h.finalize();
+    out.iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(&mut s, "{b:02x}");
+        s
+    })
 }
 
 #[cfg(test)]

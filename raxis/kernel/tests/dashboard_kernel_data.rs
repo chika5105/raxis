@@ -665,3 +665,272 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
     )
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// Policy update (P5) — exercises the `PUT /api/policy/toml`
+// route end-to-end with a closure-backed PolicyAdvancer + the
+// real HTTP listener. Verifies role enforcement, JSON body
+// shape, base64 signature handling, and the full advancement
+// payload returned to the operator UI.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn policy_update_endpoint_round_trips_through_real_http_with_role_enforcement() {
+    use base64::Engine;
+    use raxis_dashboard_kernel::{
+        AdvanceError, AdvanceResult, ClosurePolicyAdvancer, KernelDashboardData,
+        SessionStreamCapture,
+    };
+    use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (tmp, store) = fresh_data_dir();
+
+    // Mint two operator keys: alice has `RotateEpoch` (=>
+    // write_policy role); bob has nothing (=> read-only).
+    let alice = SigningKey::from_bytes(&[0xA1u8; 32]);
+    let bob   = SigningKey::from_bytes(&[0xB0u8; 32]);
+    let alice_pk = alice.verifying_key().to_bytes();
+    let bob_pk   = bob.verifying_key().to_bytes();
+
+    // Build a policy that knows BOTH operators. We extend the
+    // helper inline because `policy_with_operator` only takes
+    // one operator entry.
+    let policy = {
+        use sha2::Digest;
+        let mk_entry = |pk: [u8; 32], name: &str, ops: Vec<&str>| {
+            let pubkey_hex = hex::encode(pk);
+            let fingerprint = hex::encode(&sha2::Sha256::digest(pk)[..16]);
+            raxis_policy::OperatorEntry {
+                pubkey_fingerprint: fingerprint,
+                display_name: name.into(),
+                pubkey_hex: pubkey_hex.clone(),
+                permitted_ops: ops.into_iter().map(str::to_owned).collect(),
+                cert: stub_cert_for_pubkey(pubkey_hex),
+                force_misconfig_bypass: false,
+            }
+        };
+        Arc::new(ArcSwap::from_pointee(
+            raxis_policy::PolicyBundle::for_tests_with_operators(vec![
+                mk_entry(alice_pk, "alice", vec!["RotateEpoch"]),
+                mk_entry(bob_pk,   "bob",   vec![]),
+            ]),
+        ))
+    };
+
+    // Stub PolicyAdvancer that records inputs + returns a
+    // fixed AdvanceResult on the happy path. The dashboard
+    // handler is the system-under-test; the advancer is
+    // intentionally minimal.
+    let advance_calls = Arc::new(AtomicUsize::new(0));
+    let last_op_fp    = Arc::new(parking_lot::Mutex::new(String::new()));
+    let last_toml_len = Arc::new(AtomicUsize::new(0));
+    {
+        let advance_calls_for_closure = Arc::clone(&advance_calls);
+        let last_op_fp_for_closure    = Arc::clone(&last_op_fp);
+        let last_toml_len_for_closure = Arc::clone(&last_toml_len);
+        let advancer = Arc::new(ClosurePolicyAdvancer::new(
+            move |toml: &[u8], _sig: &[u8], op: &str| {
+                advance_calls_for_closure.fetch_add(1, Ordering::SeqCst);
+                *last_op_fp_for_closure.lock() = op.to_owned();
+                last_toml_len_for_closure.store(toml.len(), Ordering::SeqCst);
+                if toml.starts_with(b"# bad") {
+                    return Err(AdvanceError::Validation("bad bytes".into()));
+                }
+                Ok(AdvanceResult {
+                    previous_epoch: 1,
+                    new_epoch: 2,
+                    policy_sha256: "deadbeef".repeat(8),
+                    signed_by_authority: "deadbeefdeadbeef".into(),
+                    n_delegations_marked_stale: 4,
+                    n_sessions_invalidated: 7,
+                    advanced_at: 1_700_000_500,
+                })
+            },
+        ))
+            as Arc<dyn raxis_dashboard_kernel::PolicyAdvancer>;
+        let capture = SessionStreamCapture::new(
+            tmp.path(),
+            raxis_dashboard_kernel::CaptureConfig::default(),
+        )
+        .expect("capture::new");
+        let data = Arc::new(
+            KernelDashboardData::with_capture(
+                Arc::clone(&store),
+                Arc::clone(&policy),
+                tmp.path().to_path_buf(),
+                tmp.path().join("policy/policy.toml"),
+                1_700_000_000,
+                capture,
+            )
+            .with_advancer(advancer),
+        );
+
+        let cfg = DashboardConfig {
+            enabled: true,
+            bind_address: "127.0.0.1".into(),
+            bind_port: 0,
+            ..Default::default()
+        };
+        let server = raxis_dashboard::server::DashboardServer::bind(cfg, data)
+            .await
+            .expect("DashboardServer::bind");
+        let handle = raxis_dashboard::server::ServerHandle::spawn(server);
+        let base = format!("http://{}", handle.local_addr());
+        let client = reqwest::Client::new();
+
+        // Helper closure: complete the JWT challenge handshake
+        // for the supplied operator key and return the bearer
+        // token string.
+        let auth = |signing: SigningKey, pk: [u8; 32]| {
+            let base = base.clone();
+            let client = client.clone();
+            async move {
+                let chal_resp: serde_json::Value = client
+                    .get(format!("{base}/api/auth/challenge"))
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                let challenge_hex =
+                    chal_resp["challenge"].as_str().unwrap().to_owned();
+                let challenge_bytes = hex::decode(&challenge_hex).unwrap();
+                let sig = signing.sign(&challenge_bytes);
+                let body = json!({
+                    "challenge":  challenge_hex,
+                    "signature":  hex::encode(sig.to_bytes()),
+                    "public_key": hex::encode(pk),
+                });
+                let verify_resp: serde_json::Value = client
+                    .post(format!("{base}/api/auth/verify"))
+                    .header(CONTENT_TYPE, "application/json")
+                    .body(body.to_string())
+                    .send()
+                    .await
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                verify_resp["token"].as_str().unwrap().to_owned()
+            }
+        };
+
+        let alice_token = auth(alice.clone(), alice_pk).await;
+        let bob_token   = auth(bob.clone(),   bob_pk).await;
+
+        // 1) Bob (read-only) gets 403 — his cert lacks
+        //    RotateEpoch so the role mapper grants only Read.
+        let new_toml = b"[meta]\nepoch = 2\n";
+        let put_body = json!({
+            "toml":          String::from_utf8_lossy(new_toml).into_owned(),
+            "signature_b64": base64::engine::general_purpose::STANDARD.encode([0u8; 64]),
+        });
+        let resp = client
+            .put(format!("{base}/api/policy/toml"))
+            .header(AUTHORIZATION, format!("Bearer {bob_token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(put_body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 403, "bob must be forbidden");
+        assert_eq!(
+            advance_calls.load(Ordering::SeqCst),
+            0,
+            "advancer must not be called for forbidden requests"
+        );
+
+        // 2) Alice with malformed signature (wrong length) gets 400.
+        let put_body = json!({
+            "toml":          String::from_utf8_lossy(new_toml).into_owned(),
+            "signature_b64": base64::engine::general_purpose::STANDARD.encode([0u8; 32]),
+        });
+        let resp = client
+            .put(format!("{base}/api/policy/toml"))
+            .header(AUTHORIZATION, format!("Bearer {alice_token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(put_body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400, "short signature must 400");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "FAIL_DASHBOARD_BAD_REQUEST");
+
+        // 3) Alice with valid bytes ⇒ 200 + the AdvanceResult
+        //    surfaces through the wire as a `PolicyAdvancement`
+        //    JSON envelope.
+        let put_body = json!({
+            "toml":          String::from_utf8_lossy(new_toml).into_owned(),
+            "signature_b64": base64::engine::general_purpose::STANDARD.encode([0xCDu8; 64]),
+        });
+        let resp = client
+            .put(format!("{base}/api/policy/toml"))
+            .header(AUTHORIZATION, format!("Bearer {alice_token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(put_body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "happy path must 200");
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["previous_epoch"], 1);
+        assert_eq!(body["new_epoch"], 2);
+        assert_eq!(body["policy_sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(body["n_sessions_invalidated"], 7);
+        assert_eq!(body["n_delegations_marked_stale"], 4);
+        assert_eq!(body["advanced_at"], 1_700_000_500);
+
+        // 4) The advancer was called exactly once with alice's
+        //    fingerprint and the supplied TOML byte length.
+        assert_eq!(advance_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(last_toml_len.load(Ordering::SeqCst), new_toml.len());
+        let alice_fp = {
+            use sha2::Digest;
+            hex::encode(&sha2::Sha256::digest(alice_pk)[..16])
+        };
+        assert_eq!(*last_op_fp.lock(), alice_fp);
+
+        // 5) Validation failures from the advancer are surfaced
+        //    as 400 with the FAIL_DASHBOARD_POLICY_INVALID code
+        //    (not the 500 internal-error code).
+        let put_body = json!({
+            "toml":          "# bad bytes\n",
+            "signature_b64": base64::engine::general_purpose::STANDARD.encode([0xEEu8; 64]),
+        });
+        let resp = client
+            .put(format!("{base}/api/policy/toml"))
+            .header(AUTHORIZATION, format!("Bearer {alice_token}"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(put_body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 400);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["code"], "FAIL_DASHBOARD_POLICY_INVALID");
+
+        // 6) An anonymous PUT (no JWT) gets 401.
+        let put_body = json!({
+            "toml": "[meta]\n",
+            "signature_b64": base64::engine::general_purpose::STANDARD.encode([0u8; 64]),
+        });
+        let resp = client
+            .put(format!("{base}/api/policy/toml"))
+            .header(CONTENT_TYPE, "application/json")
+            .body(put_body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 401);
+
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            handle.shutdown(),
+        )
+        .await;
+    }
+}
