@@ -199,45 +199,70 @@ on success).
 
 ## §2 — 🟡 Category 2: Operator-Facing Features (not blocking ship, high value)
 
-### §2.1 — `SubscribeInitiative` (real-time initiative event stream)
+### §2.1 — `SubscribeInitiative` (real-time initiative event stream) ✅ shipped (V2.5)
 
-**Current state:** Returns `FAIL_NOT_YET_IMPLEMENTED`
-(`kernel/src/ipc/operator_ergonomics.rs:550-563`).
+**Implementation.**
 
-**What it does.** Lets an operator run `raxis initiative watch
-init-123` and receive a live stream of events as they happen:
+1. **Wire shape:** `raxis_types::InitiativeEvent` (
+   `crates/types/src/initiative_event.rs`) — a `serde`-tagged
+   enum carrying the operator-visible event payloads. The
+   `kind` discriminator on the wire matches the variant name
+   (`Subscribed`, `TaskStateChanged`, `InitiativeStateChanged`,
+   `ReviewAggregationCompleted`, `EscalationRaised`,
+   `EscalationResolved`, `IntegrationMergeCompleted`,
+   `StructuredOutputEmitted`, `Closed`). `ClosedReason` enumerates
+   the three terminal-frame causes (`InitiativeTerminal`,
+   `KernelShutdown`, `InitiativeNotFound`).
+2. **In-process bus:** `kernel::push::InitiativeEventBus`
+   (`kernel/src/push/initiative_bus.rs`) — one
+   `tokio::sync::broadcast::Sender<InitiativeEvent>` per
+   initiative_id, allocated lazily on first publish/subscribe.
+   Per-channel capacity is
+   `PER_INITIATIVE_BROADCAST_CAPACITY = 256`; a slow operator
+   that lags past the cap sees `Closed { reason: KernelShutdown }`
+   and reconnects.
+3. **Audit-tee:** `kernel::push::BroadcastingAuditSink` wraps
+   the inbound `Arc<dyn AuditSink>` in `HandlerContext::new`.
+   Every successful audit emit that carries an `initiative_id`
+   AND maps to a public-wire variant (per
+   `audit_kind_to_initiative_event`) is mirrored onto the bus
+   AFTER the durable write. Failed emits never broadcast — the
+   operator stream is a strict subset of the audit chain.
+4. **Streaming dispatcher:** `ipc::operator::dispatch_loop`
+   intercepts `OperatorRequest::SubscribeInitiative` BEFORE the
+   per-request handler dispatch. It runs
+   `validate_subscribe_admission` (initiative must exist + must
+   not be terminal at attach time), then hands the
+   `&mut UnixStream` to `stream_subscribe_initiative`, which
+   subscribes to the bus, writes the
+   `OperatorResponse::InitiativeSubscribed` ack as the first
+   frame, then loops `bus.recv().await → write_json_frame_async`.
+   The runner exits cleanly on
+   `InitiativeStateChanged { to_state ∈ {Completed, Failed,
+   Aborted} }` (writes `Closed { InitiativeTerminal }` and
+   returns), on a peer disconnect (next write fails), or on a
+   `Closed` channel.
+5. **CLI:** `raxis initiative watch <initiative_id>`
+   (`cli/src/commands/initiative.rs::run_watch`). Sends the
+   request, asserts the ack envelope, then loops
+   `OperatorConn::read_frame` and pretty-prints each event.
+   Stops when the kernel writes the `Closed` frame.
 
-* Task activated / completed / failed
-* Reviewer verdict delivered
-* Escalation raised / resolved
-* Integration merge completed
-* Budget threshold crossed
+**Estimate (delivered): ~660 lines** across `raxis-types`,
+`kernel/src/push/initiative_bus.rs`, `ipc/operator_ergonomics.rs`,
+`ipc/operator.rs`, `cli/src/commands/initiative.rs`,
+`cli/src/conn.rs`, plus round-trip + integration tests.
 
-**Why it was deferred.** The operator UDS is single-shot: one
-request frame → one response frame → connection close. The
-original design assumed this required a full `KernelPush`
-bidirectional transport redesign.
-
-**Revised assessment.** A simpler implementation is viable in V2:
-
-1. On `SubscribeInitiative { initiative_id }`, hold the connection
-   open.
-2. Register a `tokio::sync::broadcast::Receiver` on the kernel's
-   existing `NotificationRouter` for events matching the initiative.
-3. Write each event as a length-prefixed JSON frame (same wire
-   format as the existing response).
-4. Close the connection on initiative terminal state or client
-   disconnect.
-
-The client reads frames in a loop. No protocol redesign needed —
-just changing the handler from "write one frame, close" to "write
-frames in a loop, close on terminal."
-
-**Estimate:** ~80 lines (handler + broadcast tap + client-side
-CLI `initiative watch` subcommand).
-
-**Workaround today:** Operators poll `DescribeInitiativePause` or
-read the audit chain via `raxis audit tail`.
+**Tests.** `crates/types::initiative_event::tests` pin the wire
+shape (10 round-trips covering every variant + variant-count
+canary). `kernel::push::initiative_bus::tests` cover fan-out,
+isolation across initiatives, the
+"audit-emit-then-broadcast" ordering, and the
+"do-not-broadcast-on-failed-emit" property.
+`kernel::ipc::operator_ergonomics::stream_tests` cover the
+end-to-end streaming flow against a `tokio::io::duplex` pair —
+ack frame, two events, terminal `InitiativeStateChanged → Closed`,
+and the `KernelShutdown` exit path.
 
 ---
 

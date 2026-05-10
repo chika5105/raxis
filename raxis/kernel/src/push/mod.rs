@@ -58,6 +58,16 @@
 //!    away mid-broadcast simply drops the message; the dispatcher
 //!    does not back-pressure publishers.
 
+pub mod initiative_bus;
+
+// Re-export the surface the rest of the kernel uses. The two
+// items pulled in here are read by `ipc::context` (wraps the audit
+// sink + stores the bus). The `audit_kind_to_initiative_event`
+// helper and the broadcast capacity constant are public from the
+// submodule so tests / future callers can depend on them
+// directly without going through the re-export.
+pub use initiative_bus::{BroadcastingAuditSink, InitiativeEventBus};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

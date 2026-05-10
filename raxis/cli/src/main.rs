@@ -58,7 +58,7 @@ const PLAN_SUBCOMMANDS:        &[&str] = &["approve", "reject", "validate", "fmt
 /// Currently exposes only `plan`; future sub-commands (`policy`,
 /// `operator-cert`) will plug in here without a third rename.
 const SUBMIT_SUBCOMMANDS:      &[&str] = &["plan"];
-const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "list", "quarantine", "show"];
+const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "list", "quarantine", "show", "watch"];
 const OPERATOR_SUBCOMMANDS:    &[&str] = &["quarantine-plans-by"];
 const TASK_SUBCOMMANDS:        &[&str] = &["abort", "resume", "retry", "outputs"];
 const SESSION_SUBCOMMANDS:     &[&str] = &["create", "revoke"];
@@ -219,6 +219,7 @@ fn run() -> Result<(), CliError> {
                 "list"       => commands::initiatives::run(&flags, &rest[1..]),
                 "quarantine" => commands::initiative::run_quarantine(&flags, &rest[1..]),
                 "show"       => commands::initiative_show::run(&flags, &rest[1..]),
+                "watch"      => commands::initiative::run_watch(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "initiative sub-command", sub2, INITIATIVE_SUBCOMMANDS,
                 ))),

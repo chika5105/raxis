@@ -177,6 +177,51 @@ pub async fn dispatch_loop(
             op_name, &operator.fingerprint, operator_display_str, &context_fields,
         );
         let started = std::time::Instant::now();
+
+        // ── Streaming branch: SubscribeInitiative
+        // (`v2_extended_gaps.md §2.1`) ────────────────────────────────────
+        //
+        // SubscribeInitiative is the only operator op that needs
+        // ownership of the connection AFTER the per-request
+        // response. We handle it inline so the streaming runner
+        // can write multiple frames before returning. The first
+        // frame (`InitiativeSubscribed` ack) is logged as the
+        // response for parity with all other handlers; subsequent
+        // event frames are not individually logged (would flood
+        // stderr at high event rates) — operators see them on the
+        // CLI side.
+        if let OperatorRequest::SubscribeInitiative { initiative_id } = &request {
+            let initiative_id = initiative_id.clone();
+            match crate::ipc::operator_ergonomics::validate_subscribe_admission(
+                initiative_id.clone(), &ctx,
+            ).await {
+                Ok(ack) => {
+                    let latency_ms = started.elapsed().as_millis() as u64;
+                    dispatch_log::op_response(
+                        op_name, &operator.fingerprint, operator_display_str,
+                        &ack, &context_fields, latency_ms,
+                    );
+                    // Hand the connection over to the streaming
+                    // runner. It writes the ack, then loops
+                    // events, then returns when the initiative
+                    // terminates or the operator disconnects.
+                    crate::ipc::operator_ergonomics::stream_subscribe_initiative(
+                        &mut stream, initiative_id, &ctx,
+                    ).await?;
+                    return Ok(());
+                }
+                Err(err_resp) => {
+                    let latency_ms = started.elapsed().as_millis() as u64;
+                    dispatch_log::op_response(
+                        op_name, &operator.fingerprint, operator_display_str,
+                        &err_resp, &context_fields, latency_ms,
+                    );
+                    write_json_frame_async(&mut stream, &err_resp).await?;
+                    continue;
+                }
+            }
+        }
+
         let response = handle_request(request, &operator, &ctx).await;
         let latency_ms = started.elapsed().as_millis() as u64;
         dispatch_log::op_response(
@@ -718,9 +763,17 @@ async fn handle_request(
         OperatorRequest::DryRunAdmit { plan_toml, plan_sig_hex, submitted_by } => {
             crate::ipc::operator_ergonomics::handle_dry_run_admit(plan_toml, plan_sig_hex, submitted_by, ctx).await
         }
-        OperatorRequest::SubscribeInitiative { initiative_id } => {
-            crate::ipc::operator_ergonomics::handle_subscribe_initiative(initiative_id, ctx).await
-        }
+        // SubscribeInitiative is handled by the streaming branch
+        // in `dispatch_loop` BEFORE this dispatcher runs (it
+        // needs ownership of the stream). Reaching this arm
+        // means a non-streaming caller invoked it; we surface a
+        // typed error so the misuse is obvious in the response
+        // log line.
+        OperatorRequest::SubscribeInitiative { .. } => OperatorResponse::Error {
+            code:   "FAIL_INVALID_TRANSPORT".into(),
+            detail: "SubscribeInitiative must be invoked through the streaming dispatcher; \
+                     the per-request dispatcher does not own the connection".into(),
+        },
         OperatorRequest::DescribeInitiativePause { initiative_id } => {
             crate::ipc::operator_ergonomics::handle_describe_initiative_pause(initiative_id, ctx).await
         }

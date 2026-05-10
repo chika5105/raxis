@@ -105,6 +105,30 @@ impl OperatorConn {
         write_json_frame(&mut self.stream, req).map_err(map_frame_err)?;
         read_json(&mut self.stream)
     }
+
+    /// Read one additional JSON frame from the kernel without
+    /// sending a new request. Used by streaming subcommands like
+    /// `raxis initiative watch`, which receive
+    /// `OperatorResponse::InitiativeSubscribed` (the ack) via
+    /// `send_request` and then loop over `read_frame` to pump
+    /// the per-event `InitiativeEvent` JSON envelopes the kernel
+    /// pushes over the same connection.
+    ///
+    /// Returns `Ok(None)` on a clean EOF (kernel closed the
+    /// stream cleanly — for `initiative watch` this is the
+    /// "initiative reached terminal state" signal). All other
+    /// I/O / framing errors propagate as `Err`.
+    pub fn read_frame(&mut self) -> Result<Option<Value>, CliError> {
+        match read_json_frame_raw(&mut self.stream) {
+            Ok(body) => serde_json::from_str(&body)
+                .map(Some)
+                .map_err(CliError::Json),
+            Err(JsonFrameError::Eof) => Ok(None),
+            Err(JsonFrameError::Io(io))
+                if io.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(other) => Err(map_frame_err(other)),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

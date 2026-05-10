@@ -348,6 +348,18 @@ pub struct HandlerContext {
     /// `raxis status`. See `notifications::handler::sidecar`.
     pub sidecar_registry: Arc<crate::notifications::handler::sidecar::SidecarRegistry>,
 
+    /// `v2_extended_gaps.md §2.1` — per-initiative realtime
+    /// event bus. The audit sink stored in `Self::audit` is wrapped
+    /// in [`crate::push::BroadcastingAuditSink`] so every successful
+    /// audit emit that carries an `initiative_id` AND maps to a
+    /// public-wire `InitiativeEvent` (per
+    /// [`crate::push::audit_kind_to_initiative_event`]) is mirrored
+    /// onto this bus. The operator-side `SubscribeInitiative`
+    /// streaming handler (`ipc::operator_ergonomics_stream::run`)
+    /// holds one subscriber per attached operator and forwards
+    /// each frame as a length-prefixed JSON record.
+    pub initiative_bus: Arc<crate::push::InitiativeEventBus>,
+
     /// V2_GAPS §C5 — content-addressed immutable artifact store
     /// rooted at `<data_dir>/artifacts/`. Writes are
     /// `<root>/<category>/<sha256>.<ext>` with `O_CREAT|O_EXCL`
@@ -403,6 +415,20 @@ impl HandlerContext {
         >,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
+
+        // `v2_extended_gaps.md §2.1` — install the per-initiative
+        // realtime bus and wrap the inbound audit sink so every
+        // successful audit emit fans an `InitiativeEvent` out to
+        // `SubscribeInitiative` subscribers. The wrapper is
+        // transparent to existing callers — `AuditSink::emit`
+        // semantics + Result types are unchanged. The bus is
+        // shared (Arc-cloned) into `Self::initiative_bus` so the
+        // streaming handler can subscribe by initiative_id.
+        let initiative_bus = crate::push::InitiativeEventBus::new();
+        let audit: Arc<dyn AuditSink> = crate::push::BroadcastingAuditSink::new(
+            audit, Arc::clone(&initiative_bus),
+        );
+
         let proxy_manager = Arc::new(CredentialProxyManager::new(
             Arc::clone(&credentials),
             Arc::clone(&audit),
@@ -468,6 +494,7 @@ impl HandlerContext {
             disk_watchdog: None,
             push_dispatcher,
             sidecar_registry,
+            initiative_bus,
             artifact_store: None,
         }
     }

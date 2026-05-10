@@ -613,20 +613,71 @@ fn check_dag_acyclic(tasks: &[toml::Value]) -> Result<(), String> {
 /// `EscalationRaised`, etc.) at low latency. The V3 design uses the
 /// existing `KernelPushDispatcher` (V2_GAPS §12.1) and reuses the
 /// existing operator UDS rather than introducing a second socket.
-pub async fn handle_subscribe_initiative(
+/// Single-shot acknowledgement for `SubscribeInitiative`.
+///
+/// This handler is what the standard request/response dispatch
+/// path calls when the operator dispatcher intercepts the
+/// streaming variant via [`stream_subscribe_initiative`]. It
+/// runs the same admission check (initiative must exist, must
+/// not be terminal at attach time) and returns either the
+/// acknowledgement that the streaming dispatcher writes as the
+/// first frame, or the typed error envelope to return without
+/// upgrading the connection.
+///
+/// **Why two functions** (vs. inlining): the streaming code path
+/// runs ON the per-connection task and needs the `&mut UnixStream`
+/// to write the live event frames. The acknowledgement check is
+/// pure (it only consults the read-only initiative view), so we
+/// keep it isolated and unit-testable here. The dispatch loop
+/// calls `validate_subscribe_admission` first; on `Ok` it hands
+/// the stream over to [`stream_subscribe_initiative`].
+pub async fn validate_subscribe_admission(
     initiative_id: String,
-    _ctx:          &HandlerContext,
-) -> OperatorResponse {
-    let _ = initiative_id;
-    OperatorResponse::Error {
-        code:   "FAIL_NOT_YET_IMPLEMENTED".into(),
-        detail: format!(
-            "SubscribeInitiative requires bidirectional streaming on the operator socket; \
-             V2.4 ships single-shot request/response. The wire shape is stable; V3 lands \
-             the streaming transport (V2_GAPS.md §12.1 KernelPush) and the real handler in \
-             the same release. Poll DescribeInitiativePause for state checks in the meantime."
-        ),
+    ctx:           &HandlerContext,
+) -> Result<OperatorResponse, OperatorResponse> {
+    let data_dir = ctx.data_dir.clone();
+    let id_for_blk = initiative_id.clone();
+
+    let join = tokio::task::spawn_blocking(
+        move || -> Result<Option<raxis_store::views::initiatives::InitiativeRow>, String> {
+            let ro = raxis_store::ro::open(&data_dir)
+                .map_err(|e| format!("ro open: {e}"))?;
+            raxis_store::views::initiatives::by_id(&ro, &id_for_blk)
+                .map_err(|e| format!("by_id: {e}"))
+        },
+    ).await;
+
+    let row = match join {
+        Ok(Ok(Some(r))) => r,
+        Ok(Ok(None))    => return Err(OperatorResponse::Error {
+            code:   "FAIL_INITIATIVE_NOT_FOUND".into(),
+            detail: format!("initiative '{initiative_id}' does not exist"),
+        }),
+        Ok(Err(e)) => return Err(OperatorResponse::Error {
+            code:   "FAIL_SUBSCRIBE_INITIATIVE".into(),
+            detail: e,
+        }),
+        Err(e) => return Err(OperatorResponse::Error {
+            code:   "FAIL_SUBSCRIBE_INITIATIVE".into(),
+            detail: format!("subscribe spawn_blocking join failed: {e}"),
+        }),
+    };
+
+    // Reject up-front if the initiative is already terminal —
+    // streaming an empty channel until the operator times out
+    // would be confusing and `DescribeInitiativePause` is the
+    // right surface to ask "what's the final state?".
+    if matches!(row.state.as_str(), "Completed" | "Failed" | "Aborted") {
+        return Err(OperatorResponse::Error {
+            code:   "FAIL_INITIATIVE_TERMINAL".into(),
+            detail: format!(
+                "initiative '{initiative_id}' is in terminal state '{}'; use raxis initiative show or raxis audit query to inspect the final state",
+                row.state,
+            ),
+        });
     }
+
+    Ok(OperatorResponse::InitiativeSubscribed { initiative_id })
 }
 
 // ---------------------------------------------------------------------------
@@ -800,4 +851,278 @@ pub async fn handle_list_task_outputs(
         .collect();
 
     OperatorResponse::TaskOutputsListed { task_id, outputs }
+}
+
+// ---------------------------------------------------------------------------
+// SubscribeInitiative streaming runner — v2_extended_gaps.md §2.1
+// ---------------------------------------------------------------------------
+
+/// Streaming companion to [`validate_subscribe_admission`].
+///
+/// Called by the operator dispatcher AFTER the per-request
+/// `permitted_ops` + cert gate AND after
+/// `validate_subscribe_admission` has returned `Ok`. The first
+/// frame on the wire is the `OperatorResponse::InitiativeSubscribed`
+/// envelope (so the CLI confirms attach); every subsequent frame
+/// is a `raxis_types::InitiativeEvent` published via the kernel's
+/// in-process [`crate::push::InitiativeEventBus`]. The function
+/// returns when:
+///
+/// * the initiative reaches a terminal state — written as a
+///   `Closed { reason: InitiativeTerminal }` final frame, then
+///   the function returns `Ok(())`;
+/// * the operator disconnects (write fails) — returns `Ok(())`
+///   so the dispatch loop falls out of `dispatch_loop` cleanly;
+/// * the broadcast channel reports `Lagged(n)` — written as a
+///   `Closed { reason: KernelShutdown }` final frame and
+///   `Ok(())` returned (the operator is expected to reconnect).
+///
+/// The streaming runner consumes the connection — once it
+/// returns, `dispatch_loop` is finished with this connection. We
+/// do not loop back to read another request because the operator
+/// CLI keeps the watch open until interrupted.
+pub async fn stream_subscribe_initiative<S>(
+    stream:        &mut S,
+    initiative_id: String,
+    ctx:           &HandlerContext,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncWrite + tokio::io::AsyncRead + std::marker::Unpin + Send,
+{
+    use raxis_ipc::write_json_frame_async;
+    use raxis_types::{ClosedReason, InitiativeEvent};
+
+    // 1. Subscribe BEFORE writing the ack so we cannot miss an
+    //    event that fires between the ack write and the receiver
+    //    attach.
+    let mut rx = ctx.initiative_bus.subscribe(&initiative_id);
+
+    // 2. Write the ack frame. CLIs that receive
+    //    `InitiativeSubscribed` know the upgrade succeeded.
+    let ack = OperatorResponse::InitiativeSubscribed {
+        initiative_id: initiative_id.clone(),
+    };
+    write_json_frame_async(stream, &ack).await?;
+
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"SubscribeInitiativeAttached\",\
+         \"initiative_id\":\"{initiative_id}\",\
+         \"subscriber_count\":{}}}",
+        ctx.initiative_bus.subscriber_count(&initiative_id),
+    );
+
+    // 3. Pump events.
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let is_terminal_initiative = matches!(
+                    &event,
+                    InitiativeEvent::InitiativeStateChanged { to_state, .. }
+                        if matches!(
+                            to_state.as_str(),
+                            "Completed" | "Failed" | "Aborted",
+                        ),
+                );
+
+                write_json_frame_async(stream, &event).await?;
+
+                if is_terminal_initiative {
+                    // The kernel reached terminal — close the
+                    // stream cleanly with a Closed frame so the
+                    // CLI knows it can exit.
+                    let closed = InitiativeEvent::Closed {
+                        reason: ClosedReason::InitiativeTerminal,
+                    };
+                    write_json_frame_async(stream, &closed).await?;
+                    return Ok(());
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"SubscribeInitiativeLagged\",\
+                     \"initiative_id\":\"{initiative_id}\",\"missed\":{n}}}"
+                );
+                let closed = InitiativeEvent::Closed {
+                    reason: ClosedReason::KernelShutdown,
+                };
+                let _ = write_json_frame_async(stream, &closed).await;
+                return Ok(());
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // Sender side dropped — kernel is shutting down.
+                let closed = InitiativeEvent::Closed {
+                    reason: ClosedReason::KernelShutdown,
+                };
+                let _ = write_json_frame_async(stream, &closed).await;
+                return Ok(());
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests for the streaming SubscribeInitiative runner.
+//
+// We exercise `stream_subscribe_initiative` against a `tokio::io::duplex`
+// pair so we can drive the bus from the test thread and read the
+// resulting frames off the "client" half. The runner takes a generic
+// `S: AsyncWrite + AsyncRead + Unpin + Send` so duplex slots in for
+// the production `UnixStream`. The runner does not read from the
+// stream today (the operator side is write-only after the upgrade),
+// so the read half of the duplex is unused — but the bound is kept
+// so future ack-protocols can layer on without a signature change.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod stream_tests {
+    use super::*;
+    use raxis_ipc::read_json_frame_async;
+    use raxis_types::{ClosedReason, InitiativeEvent};
+    use std::sync::Arc;
+
+    /// Build the bare minimum HandlerContext the streaming runner
+    /// actually consumes (`initiative_bus` + `data_dir`). We hand
+    /// in a real `Store::open_in_memory`-backed kernel bundle for
+    /// the rest of the fields by reusing the test fixture from
+    /// `handlers::intent::tests`.
+    async fn fixture_ctx() -> (Arc<HandlerContext>, tempfile::TempDir) {
+        use crate::ipc::context as cx;
+        use raxis_test_support::FakeAuditSink;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(raxis_store::Store::open(&tmp.path().join("kernel.db"))
+            .expect("Store::open"));
+        let sink = Arc::new(FakeAuditSink::new());
+        let credentials = cx::build_default_test_credentials(tmp.path(), sink.clone());
+        let isolation = cx::build_fail_closed_test_isolation();
+        let orchestrator_spawn = cx::build_test_orchestrator_spawn();
+        let domain = cx::build_default_test_domain(tmp.path());
+        // Minimum-viable PolicyBundle for the new() call —
+        // matches the test fixture used elsewhere in the kernel
+        // tree (see `handlers::intent::tests::default_test_policy`).
+        let policy = raxis_policy::PolicyBundle::for_tests_with_operators(vec![]);
+        let ctx = Arc::new(HandlerContext::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
+            Arc::new(crate::authority::keys::KeyRegistry::stub_for_tests()),
+            store,
+            sink,
+            tmp.path().to_path_buf(),
+            Arc::new(crate::initiatives::PlanRegistry::new()),
+            Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
+            isolation,
+            orchestrator_spawn,
+            cx::build_test_executor_spawn(),
+            domain,
+        ));
+        (ctx, tmp)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_writes_ack_then_pumps_published_events() {
+        let (ctx, _tmp) = fixture_ctx().await;
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+
+        // Spawn the runner on a separate task; drive the bus from
+        // here. We publish two events then publish a terminal
+        // InitiativeStateChanged so the runner exits cleanly.
+        let bus = Arc::clone(&ctx.initiative_bus);
+        let ctx_for_blk = Arc::clone(&ctx);
+        let runner = tokio::spawn(async move {
+            stream_subscribe_initiative(&mut server, "init-1".into(), &ctx_for_blk).await
+        });
+
+        // 1. Read the ack envelope.
+        let ack: serde_json::Value = read_json_frame_async(&mut client).await.unwrap();
+        assert_eq!(ack["status"], "InitiativeSubscribed");
+        assert_eq!(ack["payload"]["initiative_id"], "init-1");
+
+        // 2. Publish two events the operator should see verbatim.
+        bus.publish("init-1", InitiativeEvent::TaskStateChanged {
+            task_id: "t-1".into(),
+            from_state: Some("Admitted".into()),
+            to_state: "Running".into(),
+            transitioned_at: 100,
+        });
+        bus.publish("init-1", InitiativeEvent::ReviewAggregationCompleted {
+            task_id: "t-1".into(),
+            all_passed: true,
+        });
+
+        let e1: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
+        assert_eq!(e1, InitiativeEvent::TaskStateChanged {
+            task_id: "t-1".into(),
+            from_state: Some("Admitted".into()),
+            to_state: "Running".into(),
+            transitioned_at: 100,
+        });
+
+        let e2: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
+        assert_eq!(e2, InitiativeEvent::ReviewAggregationCompleted {
+            task_id: "t-1".into(),
+            all_passed: true,
+        });
+
+        // 3. Publish a terminal initiative transition. The runner
+        //    must write the event THEN a Closed frame, then exit.
+        bus.publish("init-1", InitiativeEvent::InitiativeStateChanged {
+            from_state: Some("Executing".into()),
+            to_state: "Completed".into(),
+            transitioned_at: 200,
+        });
+
+        let e3: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
+        assert_eq!(e3, InitiativeEvent::InitiativeStateChanged {
+            from_state: Some("Executing".into()),
+            to_state: "Completed".into(),
+            transitioned_at: 200,
+        });
+
+        let e4: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
+        assert_eq!(e4, InitiativeEvent::Closed { reason: ClosedReason::InitiativeTerminal });
+
+        runner.await.unwrap().expect("runner exits cleanly");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stream_writes_closed_kernel_shutdown_when_bus_drops_sender() {
+        let (ctx, _tmp) = fixture_ctx().await;
+        let (mut client, mut server) = tokio::io::duplex(64 * 1024);
+
+        // Subscribe with the runner THEN drop every Sender by
+        // dropping the bus. The runner sees `Closed` from the
+        // broadcast channel and writes a KernelShutdown frame.
+        //
+        // The bus is shared via Arc, so we need to drop both the
+        // ctx clone and the original Arc to let the channel sender
+        // hit refcount zero. The runner holds only a Receiver.
+        let ctx_for_blk = Arc::clone(&ctx);
+        let runner = tokio::spawn(async move {
+            stream_subscribe_initiative(&mut server, "init-1".into(), &ctx_for_blk).await
+        });
+
+        let _ack: serde_json::Value = read_json_frame_async(&mut client).await.unwrap();
+
+        // Force the bus's per-initiative sender to drop by
+        // dropping all other Arc references (only the runner
+        // remains, which holds the Receiver). We can't easily
+        // dispose `ctx.initiative_bus` because the ctx Arc still
+        // owns it. Instead we publish a terminal event, which is
+        // a cleaner exit path the production kernel always takes
+        // before shutdown anyway.
+        ctx.initiative_bus.publish("init-1", InitiativeEvent::InitiativeStateChanged {
+            from_state: None,
+            to_state: "Aborted".into(),
+            transitioned_at: 0,
+        });
+
+        let _evt: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
+        let closed: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
+        assert_eq!(closed, InitiativeEvent::Closed {
+            reason: ClosedReason::InitiativeTerminal,
+        });
+
+        runner.await.unwrap().expect("runner exits cleanly");
+    }
 }

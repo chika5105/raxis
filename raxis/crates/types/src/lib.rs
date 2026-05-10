@@ -15,6 +15,7 @@ pub mod error;
 pub mod escalation;
 pub mod fsm;
 pub mod id;
+pub mod initiative_event;
 pub mod intent;
 pub mod operator;
 pub mod operator_cert;
@@ -43,6 +44,7 @@ pub use id::{
     CommitSha, CommitShaError, DelegationId, EscalationId, GateType, GateTypeError,
     InitiativeId, LineageId, SessionId, TaskId, TaskIdError, VerifierRunId,
 };
+pub use initiative_event::{ClosedReason, InitiativeEvent};
 pub use intent::{
     BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
     PlannerErrorTemplate, SubmittedClaim, TokensReport, MAX_CRITIQUE_BYTES,
