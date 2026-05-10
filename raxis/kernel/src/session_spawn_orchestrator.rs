@@ -566,6 +566,7 @@ async fn spawn_orchestrator_for_initiative(
     // them into `DispatchConfig::max_tokens_*_total`. Absent caps
     // ⇒ env vars stay unset ⇒ uncapped on that axis.
     populate_token_cap_env(&mut env, policy.token_caps());
+    populate_sleep_cap_env(&mut env, policy.sleep_caps());
 
     // V2 `v2_extended_gaps.md §2.4` — assemble the KSB snapshot
     // from the live kernel state and stamp it into
@@ -723,6 +724,46 @@ fn populate_token_cap_env_or_insert(
         env.entry(PLANNER_MAX_TOKENS_TOTAL_ENV.to_owned())
             .or_insert_with(|| n.to_string());
     }
+}
+
+/// V2 `v2_extended_gaps.md §3.1` — stamp the `[budget.sleep_caps]`
+/// per-call and cumulative ceilings into the spawned VM env.
+/// Absent ⇒ the in-VM `SleepTool::disabled()` refuses every
+/// invocation; opting in requires both keys to be present
+/// (validated at policy load).
+fn populate_sleep_cap_env(
+    env:  &mut BTreeMap<String, String>,
+    caps: Option<&raxis_policy::SleepCapsSection>,
+) {
+    use raxis_types::planner_env::{
+        PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
+    };
+    let Some(caps) = caps else { return; };
+    env.insert(
+        PLANNER_MAX_SLEEP_PER_CALL_ENV.to_owned(),
+        caps.max_seconds_per_call.to_string(),
+    );
+    env.insert(
+        PLANNER_MAX_SLEEP_CUMULATIVE_ENV.to_owned(),
+        caps.max_cumulative_seconds.to_string(),
+    );
+}
+
+/// `entry().or_insert` variant of [`populate_sleep_cap_env`] for the
+/// executor path where the caller-supplied env may already declare
+/// overrides (test rewiring).
+fn populate_sleep_cap_env_or_insert(
+    env:  &mut BTreeMap<String, String>,
+    caps: Option<&raxis_policy::SleepCapsSection>,
+) {
+    use raxis_types::planner_env::{
+        PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
+    };
+    let Some(caps) = caps else { return; };
+    env.entry(PLANNER_MAX_SLEEP_PER_CALL_ENV.to_owned())
+        .or_insert_with(|| caps.max_seconds_per_call.to_string());
+    env.entry(PLANNER_MAX_SLEEP_CUMULATIVE_ENV.to_owned())
+        .or_insert_with(|| caps.max_cumulative_seconds.to_string());
 }
 
 // ---------------------------------------------------------------------------
@@ -1032,6 +1073,7 @@ pub async fn spawn_executor_for_task(
     // (gives integration tests a knob to override the policy
     // ceiling without rewriting the bundle).
     populate_token_cap_env_or_insert(&mut env, policy.token_caps());
+    populate_sleep_cap_env_or_insert(&mut env, policy.sleep_caps());
 
     // V2 `v2_extended_gaps.md §2.4` — assemble the per-task KSB
     // and stamp into `RAXIS_PLANNER_KSB`. Same fallback policy as

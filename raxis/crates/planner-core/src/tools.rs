@@ -734,11 +734,178 @@ impl Tool for GitCommitTool {
 }
 
 // ---------------------------------------------------------------------------
+// V2 §3.1 — Sleep tool
+//
+// `v2_extended_gaps.md §3.1` token-budget-preserving wait. Lets an
+// agent block on an external process (CI, deploy rollout) without
+// burning model turns on a polling loop. Available to executor and
+// orchestrator only — NOT to the reviewer (the Pure-Static Reviewer
+// has no external process to wait for; INV-PLANNER-HARNESS-02).
+// ---------------------------------------------------------------------------
+
+/// Hard upper bound on `seconds` regardless of policy. The §3.1
+/// spec specifies "60 second" as a typical operator value; this
+/// 600s ceiling is the absolute kernel guard so a typo in
+/// `policy.toml` cannot pin a VM slot for hours.
+pub const SLEEP_TOOL_HARD_MAX_SECONDS: u32 = 600;
+
+/// V2 `v2_extended_gaps.md §3.1` Sleep tool. Carries its own
+/// per-call ceiling, cumulative ceiling, and rolling cumulative
+/// counter (shared between every Tool::execute call inside one
+/// dispatch loop). Construct with [`SleepTool::new`] from the
+/// dispatch loop's policy snapshot.
+///
+/// Rate-limit semantics:
+///
+/// * `seconds == 0`             → success, nothing to sleep.
+/// * `seconds > max_per_call`   → `FAIL_SLEEP_PER_CALL_EXCEEDED`.
+/// * `seconds > SLEEP_TOOL_HARD_MAX_SECONDS` → `FAIL_SLEEP_HARD_MAX_EXCEEDED`.
+/// * `cumulative + seconds > max_cumulative` → `FAIL_SLEEP_BUDGET_EXCEEDED`.
+/// * `max_per_call == 0`        → tool disabled, every call returns
+///                                `FAIL_SLEEP_DISABLED`.
+///
+/// All errors are STRUCTURED (returned as `ToolOutput::err`) so the
+/// model can recover; `Tool::execute` itself returns `Ok` in every
+/// case (matches the dispatch loop's error contract — see `BashTool`).
+pub struct SleepTool {
+    max_per_call_seconds:    u32,
+    max_cumulative_seconds:  u32,
+    cumulative_slept_seconds: Arc<std::sync::Mutex<u32>>,
+}
+
+impl SleepTool {
+    /// Construct a new SleepTool with the given per-call and
+    /// cumulative ceilings (both in seconds). Use
+    /// [`SleepTool::disabled`] when the policy did not declare
+    /// `[budget.sleep_caps]`.
+    pub fn new(max_per_call_seconds: u32, max_cumulative_seconds: u32) -> Self {
+        Self {
+            max_per_call_seconds,
+            max_cumulative_seconds,
+            cumulative_slept_seconds: Arc::new(std::sync::Mutex::new(0)),
+        }
+    }
+
+    /// Construct a Sleep tool that refuses every invocation. Used
+    /// when the policy did not opt in by declaring
+    /// `[budget.sleep_caps]`.
+    pub fn disabled() -> Self {
+        Self::new(0, 0)
+    }
+
+    /// Snapshot the cumulative seconds slept so far. For tests +
+    /// audit instrumentation.
+    pub fn cumulative_slept_seconds(&self) -> u32 {
+        *self.cumulative_slept_seconds.lock().expect("sleep mutex poisoned")
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for SleepTool {
+    fn name(&self) -> &'static str { "sleep" }
+    fn description(&self) -> &'static str {
+        "Pause execution for `seconds` seconds without consuming any \
+         model inference turn. Use to wait for an external process \
+         (CI build, database migration, deployment rollout) to \
+         finish. Per-call and cumulative limits are enforced by the \
+         policy; exceeding them returns a structured error."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["seconds"],
+            "properties": {
+                "seconds": {
+                    "type":        "integer",
+                    "minimum":     0,
+                    "maximum":     SLEEP_TOOL_HARD_MAX_SECONDS,
+                    "description": "How long to sleep, in whole seconds. \
+                                   Subject to policy `max_seconds_per_call` and \
+                                   the kernel's 600s hard cap.",
+                },
+                "reason": {
+                    "type":        "string",
+                    "description": "Optional human-readable reason \
+                                   (e.g. `\"waiting for CI\"`) — \
+                                   surfaced in the audit chain.",
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        input: &serde_json::Value,
+        _ctx:  &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        // Tool disabled → operator did not opt in.
+        if self.max_per_call_seconds == 0 {
+            return Ok(ToolOutput::err(
+                "FAIL_SLEEP_DISABLED: the operator policy does not declare \
+                 [budget.sleep_caps]; the Sleep tool is unavailable."
+                    .to_owned(),
+            ));
+        }
+        let seconds_raw = input.get("seconds")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| ToolError::InvalidInput {
+                tool:   "sleep".to_owned(),
+                reason: "missing or non-integer `seconds`".to_owned(),
+            })?;
+        // Clamp at u32::MAX to keep cast safe; the per-call gate
+        // below catches anything above the policy ceiling.
+        let seconds: u32 = seconds_raw.min(u32::MAX as u64) as u32;
+
+        if seconds == 0 {
+            // Trivial fast path. No sleep, no cumulative charge.
+            return Ok(ToolOutput::ok("slept_seconds: 0".to_owned()));
+        }
+        if seconds > SLEEP_TOOL_HARD_MAX_SECONDS {
+            return Ok(ToolOutput::err(format!(
+                "FAIL_SLEEP_HARD_MAX_EXCEEDED: requested {seconds}s > kernel \
+                 hard ceiling {SLEEP_TOOL_HARD_MAX_SECONDS}s",
+            )));
+        }
+        if seconds > self.max_per_call_seconds {
+            return Ok(ToolOutput::err(format!(
+                "FAIL_SLEEP_PER_CALL_EXCEEDED: requested {seconds}s > policy \
+                 max_seconds_per_call={}s",
+                self.max_per_call_seconds,
+            )));
+        }
+        // Cumulative gate — atomic read+write under the same lock.
+        // The lock scope is intentionally tight to keep the await
+        // outside it (Mutex is std::sync, not tokio).
+        {
+            let mut cum = self.cumulative_slept_seconds.lock()
+                .expect("sleep mutex poisoned");
+            let projected = cum.saturating_add(seconds);
+            if projected > self.max_cumulative_seconds {
+                return Ok(ToolOutput::err(format!(
+                    "FAIL_SLEEP_BUDGET_EXCEEDED: cumulative {cum}s + requested \
+                     {seconds}s > policy max_cumulative_seconds={}s",
+                    self.max_cumulative_seconds,
+                )));
+            }
+            *cum = projected;
+        }
+        // Optional `reason` is reflected back in the response so the
+        // model has its own text to anchor on for the next turn.
+        let reason_suffix = match input.get("reason").and_then(|v| v.as_str()) {
+            Some(r) if !r.trim().is_empty() => format!(" reason: {r}"),
+            _                               => String::new(),
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(seconds as u64)).await;
+        Ok(ToolOutput::ok(format!("slept_seconds: {seconds}{reason_suffix}")))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Role-specific registry constructors
 // ---------------------------------------------------------------------------
 
 /// **Executor registry.** Includes all tools the executor needs:
-/// `read_file`, `edit_file`, `bash`, `grep_search`, `git_commit`.
+/// `read_file`, `edit_file`, `bash`, `grep_search`, `git_commit`,
+/// `sleep` (V2 §3.1).
 pub fn build_executor_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
@@ -746,13 +913,18 @@ pub fn build_executor_registry() -> ToolRegistry {
     r.register(Arc::new(BashTool));
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(GitCommitTool));
+    // V2 §3.1 — disabled by default; the planner-binary main.rs
+    // overrides via [`build_executor_registry_with_sleep`] when the
+    // operator policy declares `[budget.sleep_caps]`.
+    r.register(Arc::new(SleepTool::disabled()));
     r
 }
 
 /// **Reviewer registry.** Read-only by construction:
 /// `read_file`, `grep_search`. NO `edit_file`, NO `bash`, NO
-/// `git_commit`. Pinned by `planner-harness.md §14.3
-/// INV-PLANNER-HARNESS-04`.
+/// `git_commit`, NO `sleep` (INV-PLANNER-HARNESS-02 — Pure-Static
+/// Reviewer has no external process to wait for). Pinned by
+/// `planner-harness.md §14.3 INV-PLANNER-HARNESS-04`.
 pub fn build_reviewer_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
@@ -760,14 +932,51 @@ pub fn build_reviewer_registry() -> ToolRegistry {
     r
 }
 
-/// **Orchestrator registry.** Read-only + git-status: `read_file`,
-/// `grep_search`. The orchestrator does not edit files — its
-/// authority is over the DAG (sub-task activation / merge), not
-/// over commit content.
+/// **Orchestrator registry.** Read-only + Sleep: `read_file`,
+/// `grep_search`, `sleep` (V2 §3.1 — orchestrators wait on
+/// long-running sub-task lifecycle events). The orchestrator does
+/// not edit files — its authority is over the DAG (sub-task
+/// activation / merge), not over commit content.
 pub fn build_orchestrator_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(GrepSearchTool));
+    // V2 §3.1 — disabled by default; the planner-binary main.rs
+    // overrides via [`build_orchestrator_registry_with_sleep`] when
+    // the operator policy declares `[budget.sleep_caps]`.
+    r.register(Arc::new(SleepTool::disabled()));
+    r
+}
+
+/// V2 `v2_extended_gaps.md §3.1` — executor registry with the
+/// `sleep` tool wired to the operator-declared policy ceilings.
+/// Construct from the dispatch-loop boot env (the kernel projects
+/// `policy.sleep_caps()` into `RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL`
+/// and `RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS`).
+pub fn build_executor_registry_with_sleep(
+    max_per_call_seconds:    u32,
+    max_cumulative_seconds:  u32,
+) -> ToolRegistry {
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(ReadFileTool));
+    r.register(Arc::new(EditFileTool));
+    r.register(Arc::new(BashTool));
+    r.register(Arc::new(GrepSearchTool));
+    r.register(Arc::new(GitCommitTool));
+    r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
+    r
+}
+
+/// V2 `v2_extended_gaps.md §3.1` — orchestrator registry with the
+/// `sleep` tool wired to the operator-declared policy ceilings.
+pub fn build_orchestrator_registry_with_sleep(
+    max_per_call_seconds:    u32,
+    max_cumulative_seconds:  u32,
+) -> ToolRegistry {
+    let mut r = ToolRegistry::new();
+    r.register(Arc::new(ReadFileTool));
+    r.register(Arc::new(GrepSearchTool));
+    r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
     r
 }
 
@@ -792,6 +1001,10 @@ mod tests {
         assert!(r.get("git_commit").is_some());
         assert!(r.get("edit_file").is_some());
         assert!(r.get("bash").is_some());
+        // V2 §3.1 — Sleep is registered (disabled by default, opt-in
+        // via `[budget.sleep_caps]`).
+        assert!(r.get("sleep").is_some(),
+            "executor registry MUST include the sleep tool (V2 §3.1)");
     }
 
     #[test]
@@ -805,9 +1018,115 @@ mod tests {
             "reviewer registry MUST NOT include edit_file");
         assert!(r.get("bash").is_none(),
             "reviewer registry MUST NOT include bash");
+        // V2 §3.1 — Pure-Static Reviewer never has Sleep
+        // (INV-PLANNER-HARNESS-02; no external process to wait for).
+        assert!(r.get("sleep").is_none(),
+            "reviewer registry MUST NOT include the sleep tool \
+             (INV-PLANNER-HARNESS-02)");
         // Read-only tools ARE expected:
         assert!(r.get("read_file").is_some());
         assert!(r.get("grep_search").is_some());
+    }
+
+    /// V2 `v2_extended_gaps.md §3.1` — `seconds = 0` is a fast path:
+    /// success, no actual sleep, no cumulative charge.
+    #[tokio::test]
+    async fn sleep_zero_is_fast_path_no_charge() {
+        let tool = SleepTool::new(60, 300);
+        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool.execute(&serde_json::json!({"seconds": 0}), &ctx).await.unwrap();
+        assert!(!out.is_error.unwrap_or(false));
+        assert_eq!(tool.cumulative_slept_seconds(), 0,
+            "0-second sleep MUST NOT charge against cumulative budget");
+    }
+
+    /// `seconds > max_per_call` returns `FAIL_SLEEP_PER_CALL_EXCEEDED`
+    /// without sleeping or charging cumulative budget.
+    #[tokio::test]
+    async fn sleep_per_call_ceiling_rejects() {
+        let tool = SleepTool::new(/*per_call*/ 5, /*cum*/ 60);
+        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool.execute(&serde_json::json!({"seconds": 10}), &ctx).await.unwrap();
+        assert!(out.is_error.unwrap_or(false), "10s > 5s per-call ceiling MUST be rejected");
+        assert!(out.content.contains("FAIL_SLEEP_PER_CALL_EXCEEDED"),
+            "error must surface FAIL_SLEEP_PER_CALL_EXCEEDED, got: {}", out.content);
+        assert_eq!(tool.cumulative_slept_seconds(), 0,
+            "rejected call MUST NOT charge cumulative budget");
+    }
+
+    /// Cumulative gate fires when `cumulative + seconds > max_cumulative`.
+    #[tokio::test]
+    async fn sleep_cumulative_ceiling_rejects() {
+        let tool = SleepTool::new(/*per_call*/ 60, /*cum*/ 10);
+        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        // First 5s call: passes.
+        let out = tool.execute(&serde_json::json!({"seconds": 5}), &ctx).await.unwrap();
+        assert!(!out.is_error.unwrap_or(false));
+        assert_eq!(tool.cumulative_slept_seconds(), 5);
+        // Second 6s call: would push cumulative to 11 > 10. Reject.
+        let out = tool.execute(&serde_json::json!({"seconds": 6}), &ctx).await.unwrap();
+        assert!(out.is_error.unwrap_or(false));
+        assert!(out.content.contains("FAIL_SLEEP_BUDGET_EXCEEDED"),
+            "expected FAIL_SLEEP_BUDGET_EXCEEDED, got: {}", out.content);
+        assert_eq!(tool.cumulative_slept_seconds(), 5,
+            "rejected call MUST NOT charge cumulative budget");
+    }
+
+    /// `SleepTool::disabled()` refuses every invocation with
+    /// `FAIL_SLEEP_DISABLED`.
+    #[tokio::test]
+    async fn sleep_disabled_rejects_every_call() {
+        let tool = SleepTool::disabled();
+        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool.execute(&serde_json::json!({"seconds": 1}), &ctx).await.unwrap();
+        assert!(out.is_error.unwrap_or(false));
+        assert!(out.content.contains("FAIL_SLEEP_DISABLED"),
+            "expected FAIL_SLEEP_DISABLED, got: {}", out.content);
+    }
+
+    /// `seconds > SLEEP_TOOL_HARD_MAX_SECONDS` is rejected even when
+    /// the policy ceiling would allow it (defense-in-depth against
+    /// operator typo).
+    #[tokio::test]
+    async fn sleep_hard_max_rejects_even_with_permissive_policy() {
+        // Policy itself caps at 600 (matches the hard ceiling), but
+        // the operator typo'd 9999.  We bump per_call to u32::MAX
+        // for this test ONLY to prove the hard ceiling fires before
+        // the per-call ceiling.
+        let tool = SleepTool::new(u32::MAX, u32::MAX);
+        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool.execute(&serde_json::json!({"seconds": 9999}), &ctx).await.unwrap();
+        assert!(out.is_error.unwrap_or(false));
+        assert!(out.content.contains("FAIL_SLEEP_HARD_MAX_EXCEEDED"),
+            "expected FAIL_SLEEP_HARD_MAX_EXCEEDED, got: {}", out.content);
+    }
+
+    /// Multiple successful sleeps accumulate in the cumulative
+    /// counter as expected.
+    #[tokio::test]
+    async fn sleep_cumulative_counter_tracks_successes() {
+        let tool = SleepTool::new(/*per_call*/ 1, /*cum*/ 10);
+        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        for _ in 0..3 {
+            let out = tool.execute(&serde_json::json!({"seconds": 1}), &ctx).await.unwrap();
+            assert!(!out.is_error.unwrap_or(false));
+        }
+        assert_eq!(tool.cumulative_slept_seconds(), 3);
+    }
+
+    /// `reason` field is round-tripped to the model in the
+    /// success message so the next turn has anchoring text.
+    #[tokio::test]
+    async fn sleep_reason_field_round_trips_into_response() {
+        let tool = SleepTool::new(60, 300);
+        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool.execute(
+            &serde_json::json!({"seconds": 1, "reason": "waiting for CI"}),
+            &ctx,
+        ).await.unwrap();
+        assert!(!out.is_error.unwrap_or(false));
+        assert!(out.content.contains("waiting for CI"),
+            "expected reason in response, got: {}", out.content);
     }
 
     #[test]

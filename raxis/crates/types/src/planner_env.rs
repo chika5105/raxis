@@ -54,6 +54,19 @@ pub const PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV: &str = "RAXIS_PLANNER_MAX_TOKENS_
 /// `policy.budget.token_caps.max_total_tokens_per_session`.
 pub const PLANNER_MAX_TOKENS_TOTAL_ENV:        &str = "RAXIS_PLANNER_MAX_TOKENS_TOTAL";
 
+/// V2 `v2_extended_gaps.md §3.1` — per-call ceiling for the `sleep`
+/// planner tool. Kernel stamps from
+/// `policy.budget.sleep_caps.max_seconds_per_call`. Absent ⇒ tool
+/// is registered as `SleepTool::disabled()` and refuses every
+/// invocation with `FAIL_SLEEP_DISABLED`.
+pub const PLANNER_MAX_SLEEP_PER_CALL_ENV:      &str = "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL";
+
+/// V2 `v2_extended_gaps.md §3.1` — cumulative ceiling across the
+/// session for the `sleep` planner tool. Kernel stamps from
+/// `policy.budget.sleep_caps.max_cumulative_seconds`. MUST be ≥
+/// `PLANNER_MAX_SLEEP_PER_CALL_ENV` (validated at policy load time).
+pub const PLANNER_MAX_SLEEP_CUMULATIVE_ENV:    &str = "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,7 +76,7 @@ mod tests {
     /// every spawned planner VM that consumed the previous name —
     /// this test fails on every rename so the change author is
     /// forced to update the spec (`v2_extended_gaps.md §§1.1, 2.4,
-    /// 2.5`) and the planner-core mirror constants in lockstep.
+    /// 2.5, 3.1`) and the planner-core mirror constants in lockstep.
     #[test]
     fn env_names_are_stable_wire() {
         assert_eq!(PLANNER_TASK_PROMPT_ENV,            "RAXIS_PLANNER_TASK_PROMPT");
@@ -71,5 +84,9 @@ mod tests {
         assert_eq!(PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV, "RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL");
         assert_eq!(PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,"RAXIS_PLANNER_MAX_TOKENS_OUTPUT_TOTAL");
         assert_eq!(PLANNER_MAX_TOKENS_TOTAL_ENV,       "RAXIS_PLANNER_MAX_TOKENS_TOTAL");
+        assert_eq!(PLANNER_MAX_SLEEP_PER_CALL_ENV,
+                   "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL");
+        assert_eq!(PLANNER_MAX_SLEEP_CUMULATIVE_ENV,
+                   "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS");
     }
 }

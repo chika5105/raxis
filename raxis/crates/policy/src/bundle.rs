@@ -888,6 +888,46 @@ pub(crate) struct BudgetSection {
     /// axis (matches today's behaviour for unmigrated policies).
     #[serde(default)]
     pub(crate) token_caps: Option<TokenCapsSection>,
+
+    /// V2 `v2_extended_gaps.md §3.1` — `[budget.sleep_caps]`.
+    /// Per-call and cumulative ceilings for the `sleep` planner tool
+    /// (executor + orchestrator only; reviewer NEVER has it). `None`
+    /// ⇒ section omitted ⇒ the in-VM tool itself is registered with
+    /// `max_per_call = 0`, which causes every `sleep` invocation to
+    /// fail with `FAIL_SLEEP_DISABLED`. Operators who want the tool
+    /// MUST opt in by declaring this section.
+    #[serde(default)]
+    pub(crate) sleep_caps: Option<SleepCapsSection>,
+}
+
+/// **`v2_extended_gaps.md §3.1` — per-session `sleep` tool budgets.**
+///
+/// ```toml
+/// [budget.sleep_caps]
+/// max_seconds_per_call         = 60      # hard ceiling per Sleep call
+/// max_cumulative_seconds       = 300     # total over the session
+/// ```
+///
+/// Both fields default to 0 when absent, which causes the in-VM
+/// Sleep tool to refuse every invocation (`FAIL_SLEEP_DISABLED`).
+/// This makes the §3.1 spec's "operators must opt in" requirement
+/// the codified default.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SleepCapsSection {
+    /// Maximum allowed `seconds` argument on any single `sleep` call.
+    /// 0 ⇒ tool disabled. Hard upper bound: 600s (10 minutes) — the
+    /// dispatch loop will reject larger values regardless of policy
+    /// to keep one runaway agent from monopolising a VM slot.
+    #[serde(default)]
+    pub max_seconds_per_call:    u32,
+
+    /// Cumulative cap across the session. Once the running total of
+    /// previously-completed `sleep` calls hits this value, every
+    /// subsequent `sleep` invocation fails with
+    /// `FAIL_SLEEP_BUDGET_EXCEEDED`. 0 ⇒ disabled (forces every
+    /// `sleep` to fail; same as `max_seconds_per_call = 0`).
+    #[serde(default)]
+    pub max_cumulative_seconds:  u32,
 }
 
 /// **`v2_extended_gaps.md §2.5` — per-session LLM token ceilings.**
@@ -3025,6 +3065,13 @@ pub struct PolicyBundle {
     /// `RAXIS_PLANNER_MAX_TOKENS_*` env vars.
     token_caps: Option<TokenCapsSection>,
 
+    /// V2 `v2_extended_gaps.md §3.1` — `[budget.sleep_caps]`.
+    /// Per-session `sleep` tool budgets. `None` ⇒ section omitted ⇒
+    /// the in-VM Sleep tool refuses every invocation
+    /// (`FAIL_SLEEP_DISABLED`). Operators MUST opt in by declaring
+    /// the section.
+    sleep_caps: Option<SleepCapsSection>,
+
     /// SHA-256 of the raw policy.toml bytes. Set by the loader after computing
     /// from actual file bytes (not from the meta field). Used for storage in
     /// policy_epoch_history. Initially empty; populated by loader via with_sha256().
@@ -3582,6 +3629,48 @@ impl PolicyBundle {
             }
         }
 
+        // ── V2 `v2_extended_gaps.md §3.1` — `[budget.sleep_caps]` ───────
+        //
+        // Both `max_seconds_per_call` and `max_cumulative_seconds` must
+        // be > 0 when the section is present (a 0 cap means "tool
+        // disabled" and the operator should just omit the entire
+        // section instead). The hard upper bounds (`max_seconds_per_call
+        // ≤ 600`, `max_cumulative_seconds ≤ 3 * max_seconds_per_call`)
+        // are advisory ceilings — the in-VM `SleepTool` implementation
+        // also clamps `seconds` at 600 regardless of the policy value
+        // so an operator typo can't pin a VM slot for hours.
+        if let Some(caps) = raw.budget.sleep_caps.as_ref() {
+            if caps.max_seconds_per_call == 0 {
+                return Err(PolicyError::MalformedArtifact(
+                    "[budget.sleep_caps] max_seconds_per_call = 0 is never useful; \
+                     omit the entire section to disable the Sleep tool \
+                     (v2_extended_gaps.md §3.1)".to_owned()
+                ));
+            }
+            if caps.max_cumulative_seconds == 0 {
+                return Err(PolicyError::MalformedArtifact(
+                    "[budget.sleep_caps] max_cumulative_seconds = 0 is never useful; \
+                     omit the entire section to disable the Sleep tool \
+                     (v2_extended_gaps.md §3.1)".to_owned()
+                ));
+            }
+            if caps.max_seconds_per_call > 600 {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[budget.sleep_caps] max_seconds_per_call = {} exceeds the hard \
+                     ceiling of 600 (v2_extended_gaps.md §3.1)",
+                    caps.max_seconds_per_call,
+                )));
+            }
+            if caps.max_cumulative_seconds < caps.max_seconds_per_call {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "[budget.sleep_caps] max_cumulative_seconds ({}) MUST be \
+                     >= max_seconds_per_call ({}) (v2_extended_gaps.md §3.1)",
+                    caps.max_cumulative_seconds,
+                    caps.max_seconds_per_call,
+                )));
+            }
+        }
+
         // ── Validate `[notifications]` ───────────────────────────────
         let (notification_channels, notification_routes, default_notification_channels) =
             validate_notifications(&raw.notifications)?;
@@ -3610,6 +3699,7 @@ impl PolicyBundle {
             cost_per_touched_path: raw.budget.cost_per_touched_path,
             max_cost_per_task: raw.budget.max_cost_per_task,
             token_caps: raw.budget.token_caps,
+            sleep_caps: raw.budget.sleep_caps,
             policy_sha256: String::new(),
             signed_by: raw.meta.signed_by,
             signed_at: raw.meta.signed_at,
@@ -3981,6 +4071,7 @@ impl PolicyBundle {
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
             token_caps: None,
+            sleep_caps: None,
             policy_sha256: String::new(),
             signed_by: String::new(),
             signed_at: 0,
@@ -4138,6 +4229,15 @@ impl PolicyBundle {
     /// via `DispatchOutcome::TokensExceeded`.
     pub fn token_caps(&self) -> Option<&TokenCapsSection> {
         self.token_caps.as_ref()
+    }
+
+    /// V2 `v2_extended_gaps.md §3.1` — per-session `sleep` tool
+    /// budgets (`[budget.sleep_caps]`). `None` ⇒ section omitted ⇒
+    /// the in-VM Sleep tool refuses every invocation
+    /// (`FAIL_SLEEP_DISABLED`); operators MUST opt in by declaring
+    /// the section.
+    pub fn sleep_caps(&self) -> Option<&SleepCapsSection> {
+        self.sleep_caps.as_ref()
     }
 
     /// Lane configuration for a named lane. Returns `None` if not found.
@@ -4549,6 +4649,7 @@ mod tests {
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
             token_caps: None,
+            sleep_caps: None,
             policy_sha256: String::new(),
             signed_by: String::new(),
             signed_at: 0,
@@ -5484,6 +5585,86 @@ priority             = 100
         let err = write_and_load(&t).expect_err("zero total cap must be rejected");
         let s = format!("{err}");
         assert!(s.contains("max_total_tokens_per_session"), "msg = {s}");
+    }
+
+    // ── V2 §3.1 [budget.sleep_caps] — schema + accessor + validation ──
+
+    /// Omitting `[budget.sleep_caps]` leaves the accessor as `None` —
+    /// the kernel uses that to register `SleepTool::disabled()`.
+    #[test]
+    fn sleep_caps_section_absent_is_none() {
+        let bundle = write_and_load(&minimal_policy_toml())
+            .expect("minimal policy without sleep_caps must load");
+        assert!(bundle.sleep_caps().is_none(),
+            "absent [budget.sleep_caps] MUST surface as None");
+    }
+
+    #[test]
+    fn sleep_caps_section_round_trip() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.sleep_caps]\n\
+             max_seconds_per_call   = 60\n\
+             max_cumulative_seconds = 300\n",
+        );
+        let bundle = write_and_load(&t).expect("sleep_caps must load");
+        let caps = bundle.sleep_caps().expect("sleep_caps decoded");
+        assert_eq!(caps.max_seconds_per_call,   60);
+        assert_eq!(caps.max_cumulative_seconds, 300);
+    }
+
+    #[test]
+    fn sleep_caps_zero_per_call_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.sleep_caps]\n\
+             max_seconds_per_call   = 0\n\
+             max_cumulative_seconds = 60\n",
+        );
+        let err = write_and_load(&t).expect_err("zero per-call MUST be rejected");
+        let s = format!("{err}");
+        assert!(s.contains("max_seconds_per_call"), "msg = {s}");
+    }
+
+    #[test]
+    fn sleep_caps_zero_cumulative_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.sleep_caps]\n\
+             max_seconds_per_call   = 60\n\
+             max_cumulative_seconds = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero cumulative MUST be rejected");
+        let s = format!("{err}");
+        assert!(s.contains("max_cumulative_seconds"), "msg = {s}");
+    }
+
+    #[test]
+    fn sleep_caps_per_call_above_hard_ceiling_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.sleep_caps]\n\
+             max_seconds_per_call   = 700\n\
+             max_cumulative_seconds = 7000\n",
+        );
+        let err = write_and_load(&t).expect_err("700 > 600 hard ceiling MUST reject");
+        let s = format!("{err}");
+        assert!(s.contains("hard ceiling of 600"), "msg = {s}");
+    }
+
+    #[test]
+    fn sleep_caps_cumulative_below_per_call_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.sleep_caps]\n\
+             max_seconds_per_call   = 60\n\
+             max_cumulative_seconds = 30\n",
+        );
+        let err = write_and_load(&t).expect_err(
+            "cumulative < per-call MUST be rejected as nonsensical",
+        );
+        let s = format!("{err}");
+        assert!(s.contains("max_cumulative_seconds"), "msg = {s}");
     }
 }
 

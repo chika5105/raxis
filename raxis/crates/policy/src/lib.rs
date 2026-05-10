@@ -23,7 +23,7 @@ pub use bundle::{
     IntegrationMergeVerifierOnFailure, LaneEntry,
     NotificationChannel, NotificationChannelKind, NotificationRoute, OperatorEntry,
     PermittedCredentialConfig, PlanBundleLimitsSection, PlanSigningSection, PolicyBundle,
-    ProviderEntry, ProviderPricing, TokenCapsSection, VmImageConfig,
+    ProviderEntry, ProviderPricing, SleepCapsSection, TokenCapsSection, VmImageConfig,
     IMPLICIT_SHELL_CHANNEL_ID, IMPLICIT_SHELL_INBOX_FILENAME,
     KNOWN_AUDIT_EVENT_KINDS, MAX_DATA_FETCH_TIMEOUT_MS, MAX_INFERENCE_TIMEOUT_MS,
     MAX_RESPONSE_BYTES_CEILING, MIN_GUEST_LINUX_KERNEL_MAJOR, MIN_GUEST_LINUX_KERNEL_MINOR,

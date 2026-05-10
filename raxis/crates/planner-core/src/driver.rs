@@ -104,7 +104,9 @@ use crate::intent::{
 use crate::model::{AnthropicClient, ModelClient};
 use crate::provider_model::{resolve_model_from_env_fn, ProviderModelError};
 use crate::tools::{
-    build_executor_registry, build_orchestrator_registry, build_reviewer_registry, ToolContext,
+    build_executor_registry, build_executor_registry_with_sleep,
+    build_orchestrator_registry, build_orchestrator_registry_with_sleep,
+    build_reviewer_registry, ToolContext,
     ToolRegistry,
 };
 use crate::transport::{KernelTransport, KernelTransportConfig, TransportError};
@@ -513,15 +515,41 @@ pub async fn run_role_session_with_model(
 }
 
 /// Build the role-specific tool registry + terminal-tool name list.
+///
+/// V2 `v2_extended_gaps.md §3.1` — when the spawn env declares
+/// `RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL` and
+/// `RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS`, the executor and
+/// orchestrator registries are constructed via
+/// `build_*_registry_with_sleep` so the `sleep` tool is wired with
+/// the operator-declared ceilings. Absent ⇒ the disabled SleepTool
+/// (refuses every invocation with `FAIL_SLEEP_DISABLED`) is
+/// registered. Reviewer NEVER receives Sleep
+/// (`INV-PLANNER-HARNESS-02`).
 fn build_role(role: Role) -> (ToolRegistry, Vec<&'static str>) {
+    use raxis_types::planner_env::{
+        PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
+    };
+    let sleep_caps = match (
+        std::env::var(PLANNER_MAX_SLEEP_PER_CALL_ENV).ok().and_then(|s| s.parse::<u32>().ok()),
+        std::env::var(PLANNER_MAX_SLEEP_CUMULATIVE_ENV).ok().and_then(|s| s.parse::<u32>().ok()),
+    ) {
+        (Some(per), Some(cum)) if per > 0 && cum >= per => Some((per, cum)),
+        _                                               => None,
+    };
     match role {
         Role::Executor => (
-            build_executor_registry(),
+            match sleep_caps {
+                Some((per, cum)) => build_executor_registry_with_sleep(per, cum),
+                None             => build_executor_registry(),
+            },
             vec!["task_complete", "single_commit", "report_failure"],
         ),
         Role::Reviewer => (build_reviewer_registry(), vec!["submit_review"]),
         Role::Orchestrator => (
-            build_orchestrator_registry(),
+            match sleep_caps {
+                Some((per, cum)) => build_orchestrator_registry_with_sleep(per, cum),
+                None             => build_orchestrator_registry(),
+            },
             vec!["integration_merge", "activate_subtask", "retry_subtask"],
         ),
     }
