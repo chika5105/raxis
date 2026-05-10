@@ -122,11 +122,62 @@ pub async fn evaluate_claims(
         return Ok(GateEvalResult::Pass { delegate_renewal_required: false });
     }
 
+    // ── Step 2.5: Auto-derive claims from witness records ───────────────
+    //
+    // Gap fix (claims_explained.md §"Current Implementation Gap"):
+    //
+    // The spec assumed the planner would actively populate
+    // `submitted_claims` referencing witness blobs. The planner driver
+    // hardcodes `submitted_claims: vec![]` and has no mechanism to
+    // discover which claims are required or which witnesses have landed.
+    //
+    // Rather than wiring planner-side claim awareness (which would ask
+    // the untrusted agent to self-report), the kernel auto-synthesises
+    // claims from its own witness records. For each required claim type
+    // that maps to a gate type with a passing witness for this
+    // (task_id, evaluation_sha), the kernel injects a synthetic
+    // `SubmittedClaim` with `evidence_ref` pointing to the witness
+    // blob hash.
+    //
+    // This is strictly more secure than planner-submitted claims:
+    //   - The witness is kernel-verified (verifier token + blob hash)
+    //   - The planner cannot fabricate a passing witness
+    //   - The kernel already has the data; asking the planner is redundant
+    //
+    // Planner-submitted claims are still accepted and merged (in case
+    // a future version adds planner-side claim awareness), but they
+    // are no longer *required* for the pipeline to work.
+    let mut effective_claims: Vec<SubmittedClaim> = submitted_claims.to_vec();
+
+    for req in &required_claims {
+        let claim_type_str = req.as_str();
+        if claim_type_str == "StrictDefault" {
+            continue; // No witness can satisfy StrictDefault — handled by claim::evaluate
+        }
+
+        // Skip if the planner already submitted this claim type.
+        let already_submitted = effective_claims.iter().any(|c| c.claim_type == claim_type_str);
+        if already_submitted {
+            continue;
+        }
+
+        // Check if a passing witness exists for this gate type + task + sha.
+        let witness = witness::lookup(evaluation_sha, task_id, claim_type_str, None, store)?;
+        if let Some(ref rec) = witness {
+            if rec.result_class == ResultClass::Pass {
+                effective_claims.push(SubmittedClaim {
+                    claim_type: claim_type_str.to_owned(),
+                    evidence_ref: Some(rec.blob_sha256.clone()),
+                });
+            }
+        }
+    }
+
     // ── Step 3: Claim evaluation ──────────────────────────────────────────
     let claim_result = claim::evaluate(
         session_id,
         &required_claims,
-        submitted_claims,
+        &effective_claims,
         touched_paths,
         policy,
         store,
@@ -254,4 +305,282 @@ pub async fn evaluate_claims(
     }
 
     Ok(GateEvalResult::PendingWitness { missing_gates })
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests — witness-backed claim auto-derivation.
+//
+// These tests exercise the core gap fix: a passing witness record for a
+// (task_id, evaluation_sha, gate_type) triple satisfies the corresponding
+// claim requirement without the planner submitting anything.
+//
+// Each test builds an in-memory Store, seeds a witness record (or not),
+// and calls the derivation logic extracted into a testable helper.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod auto_claim_tests {
+    use raxis_types::SubmittedClaim;
+
+    use crate::witness_index::{self, WitnessRecord, ResultClass};
+    use crate::gates::witness;
+    use crate::gates::policy_lookup::ClaimType;
+
+    use raxis_crypto::token::sha256_hex;
+    use raxis_test_support::mem_store;
+
+    /// Helper: seed a witness record into the in-memory store.
+    fn seed_witness(
+        store: &raxis_store::Store,
+        task_id: &str,
+        evaluation_sha: &str,
+        gate_type: &str,
+        result_class: ResultClass,
+    ) -> String {
+        let blob = b"test-witness-blob";
+        let blob_sha = sha256_hex(blob);
+        let run_id = format!("run-{}", uuid::Uuid::new_v4().simple());
+
+        let record = WitnessRecord {
+            verifier_run_id: run_id.clone(),
+            evaluation_sha:  evaluation_sha.to_owned(),
+            task_id:         task_id.to_owned(),
+            gate_type:       gate_type.to_owned(),
+            result_class,
+            blob_sha256:     blob_sha.clone(),
+            blob_path:       blob_sha.clone(),
+            recorded_at:     0,
+        };
+
+        let conn = store.lock_sync();
+        witness_index::insert_witness_index_in_tx(
+            &conn, &record, raxis_types::unix_now_secs(),
+        ).expect("seed_witness insert");
+
+        blob_sha
+    }
+
+    /// Reproduce the auto-derivation logic from evaluate_claims Step 2.5.
+    /// This is a focused test helper that mirrors the kernel's runtime path
+    /// without needing the full HandlerContext/PolicyBundle/async machinery.
+    fn auto_derive_claims(
+        required: &[ClaimType],
+        submitted: &[SubmittedClaim],
+        task_id: &str,
+        evaluation_sha: &str,
+        store: &raxis_store::Store,
+    ) -> Vec<SubmittedClaim> {
+        let mut effective: Vec<SubmittedClaim> = submitted.to_vec();
+
+        for req in required {
+            let claim_type_str = req.as_str();
+            if claim_type_str == "StrictDefault" {
+                continue;
+            }
+            let already = effective.iter().any(|c| c.claim_type == claim_type_str);
+            if already {
+                continue;
+            }
+
+            let w = witness::lookup(
+                evaluation_sha, task_id, claim_type_str, None, store,
+            ).expect("witness lookup");
+
+            if let Some(ref rec) = w {
+                if rec.result_class == ResultClass::Pass {
+                    effective.push(SubmittedClaim {
+                        claim_type: claim_type_str.to_owned(),
+                        evidence_ref: Some(rec.blob_sha256.clone()),
+                    });
+                }
+            }
+        }
+
+        effective
+    }
+
+    #[test]
+    fn passing_witness_auto_derives_claim() {
+        let store = mem_store();
+        let task_id = "task-1";
+        let eval_sha = "abcd1234abcd1234abcd1234abcd1234abcd1234";
+
+        let blob_sha = seed_witness(
+            &store, task_id, eval_sha, "TestSuite", ResultClass::Pass,
+        );
+
+        let required = vec![ClaimType::Named("TestSuite".to_owned())];
+        let submitted: Vec<SubmittedClaim> = vec![];
+
+        let effective = auto_derive_claims(
+            &required, &submitted, task_id, eval_sha, &store,
+        );
+
+        assert_eq!(effective.len(), 1, "should auto-derive exactly one claim");
+        assert_eq!(effective[0].claim_type, "TestSuite");
+        assert_eq!(effective[0].evidence_ref.as_deref(), Some(blob_sha.as_str()));
+    }
+
+    #[test]
+    fn failing_witness_does_not_auto_derive() {
+        let store = mem_store();
+        let task_id = "task-2";
+        let eval_sha = "beef1234beef1234beef1234beef1234beef1234";
+
+        seed_witness(
+            &store, task_id, eval_sha, "TestSuite", ResultClass::Fail,
+        );
+
+        let required = vec![ClaimType::Named("TestSuite".to_owned())];
+        let submitted: Vec<SubmittedClaim> = vec![];
+
+        let effective = auto_derive_claims(
+            &required, &submitted, task_id, eval_sha, &store,
+        );
+
+        assert!(effective.is_empty(), "failing witness must not produce a claim");
+    }
+
+    #[test]
+    fn inconclusive_witness_does_not_auto_derive() {
+        let store = mem_store();
+        let task_id = "task-3";
+        let eval_sha = "dead1234dead1234dead1234dead1234dead1234";
+
+        seed_witness(
+            &store, task_id, eval_sha, "TestSuite", ResultClass::Inconclusive,
+        );
+
+        let required = vec![ClaimType::Named("TestSuite".to_owned())];
+        let submitted: Vec<SubmittedClaim> = vec![];
+
+        let effective = auto_derive_claims(
+            &required, &submitted, task_id, eval_sha, &store,
+        );
+
+        assert!(effective.is_empty(), "inconclusive witness must not produce a claim");
+    }
+
+    #[test]
+    fn planner_submitted_claim_preserved_alongside_auto_derived() {
+        let store = mem_store();
+        let task_id = "task-4";
+        let eval_sha = "cafe1234cafe1234cafe1234cafe1234cafe1234";
+
+        // Auto-derivable: TestSuite has a Pass witness
+        seed_witness(
+            &store, task_id, eval_sha, "TestSuite", ResultClass::Pass,
+        );
+
+        let required = vec![
+            ClaimType::Named("TestSuite".to_owned()),
+            ClaimType::Named("WriteCode".to_owned()),
+        ];
+
+        // Planner explicitly submitted WriteCode
+        let submitted = vec![SubmittedClaim {
+            claim_type: "WriteCode".to_owned(),
+            evidence_ref: None,
+        }];
+
+        let effective = auto_derive_claims(
+            &required, &submitted, task_id, eval_sha, &store,
+        );
+
+        assert_eq!(effective.len(), 2, "should have planner + auto-derived");
+
+        let has_write_code = effective.iter().any(|c| c.claim_type == "WriteCode");
+        let has_test_suite = effective.iter().any(|c| c.claim_type == "TestSuite");
+        assert!(has_write_code, "planner-submitted WriteCode must be preserved");
+        assert!(has_test_suite, "auto-derived TestSuite must be added");
+    }
+
+    #[test]
+    fn planner_submitted_claim_not_duplicated() {
+        let store = mem_store();
+        let task_id = "task-5";
+        let eval_sha = "f00d1234f00d1234f00d1234f00d1234f00d1234";
+
+        seed_witness(
+            &store, task_id, eval_sha, "TestSuite", ResultClass::Pass,
+        );
+
+        let required = vec![ClaimType::Named("TestSuite".to_owned())];
+
+        // Planner also submitted TestSuite — auto-derivation should NOT duplicate
+        let submitted = vec![SubmittedClaim {
+            claim_type: "TestSuite".to_owned(),
+            evidence_ref: Some("manual-ref".to_owned()),
+        }];
+
+        let effective = auto_derive_claims(
+            &required, &submitted, task_id, eval_sha, &store,
+        );
+
+        assert_eq!(effective.len(), 1, "must not duplicate an already-submitted claim");
+        assert_eq!(
+            effective[0].evidence_ref.as_deref(),
+            Some("manual-ref"),
+            "planner's original evidence_ref must be preserved, not overwritten"
+        );
+    }
+
+    #[test]
+    fn strict_default_never_auto_derived() {
+        let store = mem_store();
+        let task_id = "task-6";
+        let eval_sha = "1111111111111111111111111111111111111111";
+
+        // Even if someone made a gate named "StrictDefault" (they shouldn't)
+        seed_witness(
+            &store, task_id, eval_sha, "StrictDefault", ResultClass::Pass,
+        );
+
+        let required = vec![ClaimType::StrictDefault];
+        let submitted: Vec<SubmittedClaim> = vec![];
+
+        let effective = auto_derive_claims(
+            &required, &submitted, task_id, eval_sha, &store,
+        );
+
+        assert!(effective.is_empty(), "StrictDefault must never be auto-derived");
+    }
+
+    #[test]
+    fn no_witness_at_all_leaves_claims_empty() {
+        let store = mem_store();
+        let task_id = "task-7";
+        let eval_sha = "2222222222222222222222222222222222222222";
+
+        // No witness seeded — table is empty for this task
+        let required = vec![ClaimType::Named("TestSuite".to_owned())];
+        let submitted: Vec<SubmittedClaim> = vec![];
+
+        let effective = auto_derive_claims(
+            &required, &submitted, task_id, eval_sha, &store,
+        );
+
+        assert!(effective.is_empty(), "no witness → no auto-derived claim");
+    }
+
+    #[test]
+    fn wrong_evaluation_sha_does_not_auto_derive() {
+        let store = mem_store();
+        let task_id = "task-8";
+
+        // Witness exists for a DIFFERENT evaluation_sha
+        seed_witness(
+            &store, task_id, "old_sha_old_sha_old_sha_old_sha_old_sha_", "TestSuite", ResultClass::Pass,
+        );
+
+        let required = vec![ClaimType::Named("TestSuite".to_owned())];
+        let submitted: Vec<SubmittedClaim> = vec![];
+
+        // Query against a different sha
+        let effective = auto_derive_claims(
+            &required, &submitted, task_id, "new_sha_new_sha_new_sha_new_sha_new_sha_", &store,
+        );
+
+        assert!(effective.is_empty(), "witness for different SHA must not satisfy this intent");
+    }
 }
