@@ -47,6 +47,7 @@ mod prompt;
 mod push;
 mod runtime;
 mod session_spawn_orchestrator;
+mod worktree_gc;
 
 use std::sync::Arc;
 

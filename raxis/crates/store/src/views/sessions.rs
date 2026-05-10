@@ -134,6 +134,89 @@ fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+// ---------------------------------------------------------------------------
+// Worktree-GC helpers — V2.5 `integration-merge.md §11.4`
+// (INV-MERGE-WORKTREE-RETAIN). The kernel-side worktree garbage
+// collector consults these two helpers under the store mutex before
+// removing a session worktree from disk; both must succeed (no
+// pending merge AND a recorded worktree path) for removal to proceed.
+// ---------------------------------------------------------------------------
+
+/// Look up `sessions.worktree_root` for a session, returning the
+/// stored absolute path string or `None` when the row is missing or
+/// the column is NULL (the session was reserved but never received
+/// a staged worktree).
+///
+/// Used by both `kernel::recovery::reconcile_git_apply_pending`
+/// (Case A re-applies Phase 2 against this path) and the worktree
+/// GC sweep (which calls `worktree_staging::destroy` on this path
+/// after [`pending_initiative_for_session`] returns `None`).
+pub fn worktree_root_for_session(
+    conn:       &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        &format!(
+            "SELECT worktree_root FROM {} WHERE session_id = ?1",
+            Table::Sessions.as_str(),
+        ),
+        rusqlite::params![session_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other                                => Err(other),
+    })
+    .map(Option::flatten)
+}
+
+/// Return the `initiative_id` of any initiative still holding the
+/// given session's worktree under `git_apply_pending = 1`
+/// (INV-MERGE-WORKTREE-RETAIN, `integration-merge.md §11.4`).
+///
+/// The session→initiative edge runs through `tasks.session_id`:
+///
+/// ```sql
+/// SELECT i.initiative_id
+///   FROM initiatives i
+///   JOIN tasks t ON t.initiative_id = i.initiative_id
+///  WHERE t.session_id        = :session_id
+///    AND i.git_apply_pending = 1
+///  LIMIT 1;
+/// ```
+///
+/// Returns `Ok(None)` when no blocking initiative is found — the
+/// caller (worktree GC) is then free to delete the worktree from
+/// disk. Returns `Ok(Some(initiative_id))` when at least one match
+/// exists; the caller MUST skip removal and surface the retention
+/// in its decision report so a follow-up sweep retries after
+/// recovery clears the flag.
+pub fn pending_initiative_for_session(
+    conn:       &rusqlite::Connection,
+    session_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    conn.query_row(
+        &format!(
+            "SELECT i.initiative_id \
+               FROM {initiatives} i \
+               JOIN {tasks}       t ON t.initiative_id = i.initiative_id \
+              WHERE t.session_id        = ?1 \
+                AND i.git_apply_pending = 1 \
+              LIMIT 1",
+            initiatives = Table::Initiatives.as_str(),
+            tasks       = Table::Tasks.as_str(),
+        ),
+        rusqlite::params![session_id],
+        |r| r.get::<_, String>(0),
+    )
+    .map(Some)
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other                                => Err(other),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +273,122 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].session_id, "s-active");
         assert!(!rows[0].revoked);
+    }
+
+    // ── Worktree-GC helper tests (V2.5 §11.4) ─────────────────────
+
+    /// Seed an `initiatives + tasks + sessions` triangle so the
+    /// `JOIN tasks ON ... JOIN sessions ON ...` walk in
+    /// [`pending_initiative_for_session`] has rows to traverse.
+    fn fresh_store_for_gc() -> (TempDir, Store) {
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const TASKS:       &str = Table::Tasks.as_str();
+        const SESSIONS:    &str = Table::Sessions.as_str();
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let g = store.lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {INITIATIVES} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at, git_apply_pending) \
+                 VALUES \
+                    ('init-pending', 'Executing', '{{}}', 'deadbeef', 100, 1), \
+                    ('init-clear',   'Executing', '{{}}', 'deadbeef', 100, 0)"
+            ),
+            [],
+        ).unwrap();
+        g.execute(
+            &format!(
+                "INSERT INTO {SESSIONS} \
+                    (session_id, role_id, session_token, lineage_id, fetch_quota, \
+                     worktree_root, created_at, expires_at) \
+                 VALUES \
+                    ('sess-pending',   'orch', 'tok-p', 'lin', 0, '/tmp/wt-pending',   100, 9999999999), \
+                    ('sess-clear',     'orch', 'tok-c', 'lin', 0, '/tmp/wt-clear',     100, 9999999999), \
+                    ('sess-orphaned',  'orch', 'tok-o', 'lin', 0, NULL,                100, 9999999999), \
+                    ('sess-no-task',   'orch', 'tok-n', 'lin', 0, '/tmp/wt-no-task',   100, 9999999999)"
+            ),
+            [],
+        ).unwrap();
+        g.execute(
+            &format!(
+                "INSERT INTO {TASKS} \
+                    (task_id, initiative_id, lane_id, state, actor, \
+                     policy_epoch, admitted_at, transitioned_at, session_id) \
+                 VALUES \
+                    ('t-pending', 'init-pending', 'lane-1', 'Running', 'orch', \
+                     1, 100, 100, 'sess-pending'), \
+                    ('t-clear',   'init-clear',   'lane-1', 'Running', 'orch', \
+                     1, 100, 100, 'sess-clear')"
+            ),
+            [],
+        ).unwrap();
+        drop(g);
+        (tmp, store)
+    }
+
+    #[test]
+    fn worktree_root_for_session_returns_path_when_present() {
+        let (_tmp, store) = fresh_store_for_gc();
+        let g = store.lock_sync();
+        let path = worktree_root_for_session(&g, "sess-pending").unwrap();
+        assert_eq!(path.as_deref(), Some("/tmp/wt-pending"));
+    }
+
+    #[test]
+    fn worktree_root_for_session_returns_none_when_session_missing() {
+        let (_tmp, store) = fresh_store_for_gc();
+        let g = store.lock_sync();
+        assert_eq!(worktree_root_for_session(&g, "ghost").unwrap(), None);
+    }
+
+    #[test]
+    fn worktree_root_for_session_returns_none_when_column_null() {
+        let (_tmp, store) = fresh_store_for_gc();
+        let g = store.lock_sync();
+        assert_eq!(worktree_root_for_session(&g, "sess-orphaned").unwrap(), None);
+    }
+
+    #[test]
+    fn pending_initiative_for_session_finds_blocking_initiative() {
+        let (_tmp, store) = fresh_store_for_gc();
+        let g = store.lock_sync();
+        let blocker = pending_initiative_for_session(&g, "sess-pending").unwrap();
+        assert_eq!(blocker.as_deref(), Some("init-pending"),
+            "INV-MERGE-WORKTREE-RETAIN: GC must see the pending initiative");
+    }
+
+    #[test]
+    fn pending_initiative_for_session_returns_none_when_flag_clear() {
+        let (_tmp, store) = fresh_store_for_gc();
+        let g = store.lock_sync();
+        assert_eq!(pending_initiative_for_session(&g, "sess-clear").unwrap(), None,
+            "git_apply_pending=0 ⇒ no retention; GC may proceed");
+    }
+
+    #[test]
+    fn pending_initiative_for_session_returns_none_when_session_has_no_tasks() {
+        let (_tmp, store) = fresh_store_for_gc();
+        let g = store.lock_sync();
+        assert_eq!(pending_initiative_for_session(&g, "sess-no-task").unwrap(), None,
+            "session not yet bound to any task ⇒ cannot block any merge");
+    }
+
+    #[test]
+    fn pending_initiative_for_session_returns_none_when_session_unknown() {
+        let (_tmp, store) = fresh_store_for_gc();
+        let g = store.lock_sync();
+        assert_eq!(pending_initiative_for_session(&g, "ghost").unwrap(), None);
+    }
+
+    #[test]
+    fn pending_initiative_for_session_clears_after_flag_drops() {
+        let (_tmp, store) = fresh_store_for_gc();
+        let g = store.lock_sync();
+        assert!(pending_initiative_for_session(&g, "sess-pending").unwrap().is_some());
+        crate::views::initiatives::clear_git_apply_pending(&g, "init-pending").unwrap();
+        assert_eq!(pending_initiative_for_session(&g, "sess-pending").unwrap(), None,
+            "once Phase 3 / recovery clears the flag, GC must be unblocked");
     }
 }

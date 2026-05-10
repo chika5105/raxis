@@ -1164,6 +1164,68 @@ fn run_phase_c(
             let target  = initiative_target_ref.clone();
             let refspec = format!("{target}:{target}");
 
+            // V2.5 `integration-merge.md §11.5` — wait for
+            // `git_apply_pending = 0` before reading `refs/heads/<target>`
+            // to push. In the synchronous handler path Phase 3 already
+            // cleared the flag two statements up, so this loop exits on
+            // its first poll. The wait exists as a defensive guard for
+            // future code paths that move push to a background task and
+            // for the brief window where another thread could still be
+            // setting the flag (which would never happen here, but the
+            // assertion is cheap and pins the invariant explicitly).
+            //
+            // Polls every 50 ms up to a 5 s deadline. On timeout, emits
+            // `PushFailed { category: "pending_git_apply" }` and skips
+            // the push — operator must investigate the stuck initiative
+            // before retrying.
+            let pending_clear = wait_for_git_apply_pending_clear(
+                store,
+                &initiative_id_owned,
+                std::time::Duration::from_secs(5),
+                std::time::Duration::from_millis(50),
+            );
+            if !pending_clear {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"PushDeferredPending\",\
+                     \"initiative_id\":\"{initiative_id_owned}\",\
+                     \"reason\":\"git_apply_pending=1 after 5s\"}}",
+                );
+                if let Err(e) = ctx.audit.emit(
+                    raxis_audit_tools::AuditEventKind::PushFailed {
+                        initiative_id: initiative_id_owned.clone(),
+                        commit_sha:    pre_state.head_sha_raw.clone(),
+                        remote:        remote.clone(),
+                        refspec:       refspec.clone(),
+                        category:      "pending_git_apply".to_owned(),
+                        reason:        "git_apply_pending did not clear within 5s deadline".to_owned(),
+                    },
+                    Some(session_id_str.as_str()),
+                    Some(task_id_owned.as_str()),
+                    Some(initiative_id_owned.as_str()),
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"PushFailed\",\
+                         \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                    );
+                }
+                return Ok(IntentResponse {
+                    sequence_number: seq,
+                    task_state: if !pending_gates.is_empty() {
+                        TaskState::GatesPending
+                    } else if task_state == TaskState::Admitted {
+                        TaskState::Running
+                    } else {
+                        task_state
+                    },
+                    outcome: IntentOutcome::Accepted {
+                        remaining_budget:      lane_budget_snapshot(
+                            &pre_state.task.lane_id, policy, store,
+                        ),
+                        warn_delegation_stale: warn_stale,
+                    },
+                });
+            }
+
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::PushAttempted {
                     initiative_id: initiative_id_owned.clone(),
@@ -2995,6 +3057,48 @@ fn classify_merge_ff_error(err: &raxis_domain_git::MainMergeError) -> (&'static 
     }
 }
 
+/// V2.5 `integration-merge.md §11.5` push-time wait helper. Polls
+/// `initiatives.git_apply_pending` until it reads 0 or the
+/// `deadline` elapses. Returns `true` if the flag cleared in time,
+/// `false` on timeout. Reads under `lock_sync()` so the poll
+/// observes a snapshot that includes any concurrent commit (the
+/// store mutex is the serialisation point for SQLite writes).
+///
+/// The default deadline is 5 s with a 50 ms poll interval — short
+/// enough to surface a stuck-pending pathology promptly, long
+/// enough that a healthy Phase 3 (which clears the flag inside the
+/// same handler invocation in production) clears the loop on its
+/// first iteration.
+fn wait_for_git_apply_pending_clear(
+    store:         &Store,
+    initiative_id: &str,
+    deadline:      std::time::Duration,
+    poll_interval: std::time::Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        let pending: i64 = {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!(
+                    "SELECT git_apply_pending FROM {} WHERE initiative_id = ?1",
+                    raxis_store::Table::Initiatives.as_str(),
+                ),
+                rusqlite::params![initiative_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+        };
+        if pending == 0 {
+            return true;
+        }
+        if start.elapsed() >= deadline {
+            return false;
+        }
+        std::thread::sleep(poll_interval);
+    }
+}
+
 fn lane_budget_snapshot(
     lane_id: &str,
     policy: &raxis_policy::PolicyBundle,
@@ -3049,6 +3153,88 @@ mod tests {
     fn parse_unknown_defaults_to_admitted() {
         // Defensive: unknown DB value should not panic; treated as non-runnable.
         assert_eq!(parse_task_state("CorruptValue"), TaskState::Admitted);
+    }
+
+    // ── wait_for_git_apply_pending_clear (V2.5 §11.5 push wait) ───────────
+
+    use raxis_test_support::DiskStore;
+
+    fn seed_initiative_with_pending(disk: &DiskStore, id: &str, pending: i64) {
+        let g = disk.store().lock_sync();
+        g.execute(
+            &format!(
+                "INSERT INTO {} \
+                    (initiative_id, state, terminal_criteria_json, \
+                     plan_artifact_sha256, created_at, git_apply_pending) \
+                 VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, ?2)",
+                raxis_store::Table::Initiatives.as_str(),
+            ),
+            rusqlite::params![id, pending],
+        ).unwrap();
+    }
+
+    #[test]
+    fn wait_returns_true_immediately_when_flag_already_clear() {
+        let disk = DiskStore::new();
+        seed_initiative_with_pending(&disk, "init-clear", 0);
+        let start = std::time::Instant::now();
+        let cleared = wait_for_git_apply_pending_clear(
+            disk.store(),
+            "init-clear",
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_millis(50),
+        );
+        assert!(cleared);
+        assert!(start.elapsed() < std::time::Duration::from_millis(50),
+            "no poll iteration should fire when flag is already 0");
+    }
+
+    #[test]
+    fn wait_returns_true_after_concurrent_clear() {
+        let disk = DiskStore::new();
+        seed_initiative_with_pending(&disk, "init-flip", 1);
+        let store_handle: Store = disk.store().clone();
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            let g = store_handle.lock_sync();
+            raxis_store::views::initiatives::clear_git_apply_pending(&g, "init-flip")
+                .unwrap();
+        });
+        let cleared = wait_for_git_apply_pending_clear(
+            disk.store(),
+            "init-flip",
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_millis(25),
+        );
+        flipper.join().unwrap();
+        assert!(cleared, "wait must observe the concurrent Phase-3 clear");
+    }
+
+    #[test]
+    fn wait_returns_false_when_deadline_elapses_without_clear() {
+        let disk = DiskStore::new();
+        seed_initiative_with_pending(&disk, "init-stuck", 1);
+        let cleared = wait_for_git_apply_pending_clear(
+            disk.store(),
+            "init-stuck",
+            std::time::Duration::from_millis(150),
+            std::time::Duration::from_millis(25),
+        );
+        assert!(!cleared, "stuck flag must time out within the configured deadline");
+    }
+
+    #[test]
+    fn wait_treats_missing_initiative_as_clear() {
+        let disk = DiskStore::new();
+        let cleared = wait_for_git_apply_pending_clear(
+            disk.store(),
+            "ghost",
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_millis(10),
+        );
+        assert!(cleared,
+            "QueryReturnedNoRows ⇒ defaults to 0 ⇒ wait clears (push will then \
+             fail later with a different error if the initiative truly was deleted)");
     }
 
     // ── ReportFailure justification validation rules ───────────────────────
