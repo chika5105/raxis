@@ -309,32 +309,75 @@ never enters the VM (enforced by the tproxy architecture, unchanged).
 
 ---
 
-### §2.3 — MySQL `caching_sha2_password` (credential proxy auth)
+### §2.3 — MySQL `caching_sha2_password` (credential proxy auth) ✅ shipped (V2.5)
 
-**Current state:** `credential-proxy-mysql` supports
-`mysql_native_password` only. Operators using MySQL 8.0+ must set
-`default-authentication-plugin=mysql_native_password` on their
-upstream.
+**Status:** ✅ Implemented. `credential-proxy-mysql` now negotiates
+both `mysql_native_password` and `caching_sha2_password` on the
+upstream side; operators no longer need to override
+`default-authentication-plugin` on MySQL 8.0+ servers.
 
-**What it does.** `caching_sha2_password` is MySQL 8.0's default
-authentication plugin. It uses SHA-256 with an RSA public key
-exchange for the first connection (when the server's auth cache
-is cold) and a cached fast-path for subsequent connections.
+**Implementation surface (v2.5 → main).**
 
-**What's needed.**
+1. `crates/credential-proxy-mysql/src/upstream.rs` —
+   * `caching_sha2_password_scramble(password, scramble) -> Vec<u8>`
+     computes the 32-byte SHA-256 token
+     (`SHA256(password) XOR SHA256(SHA256(SHA256(password)) || scramble)`).
+   * `build_handshake_response_41` is now generic over the auth
+     plugin and is dispatched via
+     `build_handshake_response_41_native` /
+     `build_handshake_response_41_sha256`.
+   * `UpstreamSession::connect` inspects the server's advertised
+     `auth_plugin_name` in HandshakeV10 and dispatches to either
+     `handle_native_auth_result` (legacy 20-byte XOR token) or
+     `drive_caching_sha2_auth` (32-byte SHA-256 token + state
+     machine).
+   * `drive_caching_sha2_auth` implements the full SHA-256 state
+     machine:
+       1. **Fast path:** server replies `0x01 0x03` → next packet
+          MUST be `OK_Packet` (auth cache hit, no RSA needed).
+       2. **Full auth path:** server replies `0x01 0x04` → proxy
+          asks for the RSA public key (`0x02`), receives a
+          PEM-encoded `RsaPublicKey`, XORs the cleartext password
+          (with trailing NUL) against the scramble, and encrypts
+          the result with `RSA-OAEP-SHA1`. The encrypted blob is
+          sent as the next handshake packet.
+       3. **Switch path:** the server can also issue an
+          `AuthSwitchRequest` (`0xfe`) at any time; the proxy
+          recomputes the SHA-256 token against the new scramble
+          and reruns the state machine.
+2. `crates/credential-proxy-mysql/Cargo.toml` adds the `rsa`
+   dependency. The `sha1` and `sha2` crates were already in the
+   workspace; both are reused here.
+3. Module doc comments updated to describe the new wire shape and
+   the explicit `OK_Packet` / `ERR_Packet` / `0x01 0x0?`
+   classification used by `classify_terminal_auth_packet`.
 
-1. **RSA public key exchange.** On first connection (cache miss),
-   the server sends its RSA public key; the client encrypts the
-   password with it. ~80 lines using the `rsa` crate.
-2. **SHA-256 hashing.** Replace the `mysql_native_password`
-   double-SHA1 path with SHA-256. ~40 lines.
-3. **Fast-path detection.** When the server indicates a cache hit
-   (`0x03` response), skip the RSA exchange. ~20 lines.
+**Tests.**
 
-**Estimate:** ~140 lines.
+* `caching_sha2_scramble_is_deterministic_and_32_bytes` and
+  `caching_sha2_scramble_matches_fixed_reference_vector` pin the
+  deterministic SHA-256 contract.
+* `caching_sha2_fast_path_completes_handshake` drives a
+  hand-rolled TCP server that emits the real wire shape
+  (HandshakeV10 → SHA-256 token validation → `0x01 0x03` fast
+  success → `OK_Packet`). The proxy MUST complete the handshake
+  with `handshake_ms < 5_000`.
+* `caching_sha2_with_wrong_password_surfaces_auth_rejected`
+  asserts the proxy maps an upstream `ERR_Packet` to
+  `UpstreamError::AuthRejected` so the operator audit trail is
+  the standard `AuthRejected` reason rather than a generic
+  `ProtocolHandshakeFailed`.
+* `caching_sha2_via_auth_switch_request_completes` exercises the
+  AuthSwitchRequest mid-handshake path (server greets with
+  `mysql_native_password` then switches to `caching_sha2_password`
+  with a fresh scramble; the proxy MUST recompute the SHA-256
+  token and complete).
 
-**Invariant safety:** Same as §2.2 — credential proxy is outside
-the kernel trust boundary.
+**Invariant safety.** Unchanged from §2.2: credential proxy is
+outside the kernel trust boundary, the agent never sees the
+upstream password, and the proxy enforces deny-list +
+read-/write-budget the same way for both auth plugins. RSA-OAEP
+encryption uses `OsRng` so the encrypted blob is non-replayable.
 
 ---
 
@@ -1117,13 +1160,13 @@ The following invariants must be reviewed:
 |---|---|---|---|
 | 🟢 DONE | §1.1 | Plan `description` REQUIRED + `RAXIS_PLANNER_TASK_PROMPT` unconditional stamp | ~50 |
 | 🟢 DONE | §1.2 | Integration merge Phase 2 (host-side fast-forward) inline + `MergeFastForwardFailed` audit | ~140 |
+| 🟢 DONE | §2.1 | `SubscribeInitiative` real-time stream (operator UDS streaming + broadcast tap) | ~80 |
 | 🟢 DONE | §2.4 | In-VM KSB renderer (`raxis-ksb` + kernel assembly + driver fold) | ~300 |
-| 🟡 P1 | §2.1 | `SubscribeInitiative` | ~80 |
-| 🟡 P1 | §3.2 | `StructuredOutput` (fixed enum) | ~310 |
-| 🟡 P1 | §2.5 | Token-limit enforcement | ~210 |
-| 🟡 P2 | §3.1 | `Sleep` tool | ~90 |
-| 🟡 P2 | §2.6 | Sidecar streaming + heartbeat | ~180 |
-| 🟡 P2 | §2.2 | MongoDB SCRAM-SHA-256 | ~400 |
-| 🟡 P2 | §2.3 | MySQL `caching_sha2_password` | ~140 |
+| 🟢 DONE | §2.5 | Token-limit enforcement (`request_token_budget` + `TokenBudgetExhausted`) | ~210 |
+| 🟢 DONE | §2.6 | Sidecar streaming + heartbeat + reconnect + mid-stream budget abort | ~180 |
+| 🟢 DONE | §2.3 | MySQL `caching_sha2_password` (fast-path + RSA-OAEP full-auth + AuthSwitchRequest) | ~140 |
+| 🟢 DONE | §3.1 | `Sleep` tool | ~90 |
+| 🟢 DONE | §3.2 | `StructuredOutput` (fixed enum + `task outputs` CLI) | ~310 |
+| 🟡 P2 | §2.2 | MongoDB SCRAM-SHA-256 + OP_MSG real relay | ~400 |
 | 🔵 P2 | §4   | Operator dashboard (full stack) | ~5400 |
-| | | **Total** | **~7260** |
+| | | **Total remaining** | **~5800** |
