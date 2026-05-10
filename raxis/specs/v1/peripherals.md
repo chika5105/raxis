@@ -88,9 +88,7 @@ The planner must not assume it can reuse a session across initiatives. One sessi
   "task_id":          "<task-id from signed plan>",
   "base_sha":         "<40-char hex commit OID>",
   "head_sha":         "<40-char hex commit OID>",
-  "submitted_claims": [
-    { "claim_type": "TestSuite", "evidence_ref": "<witness blob hash>" }
-  ],
+  "submitted_claims": [],
   "justification":    "<free text, max 2048 chars; required for ReportFailure>",
   "idempotency_key":  "<uuid-v4; optional; for safe retry>"
 }
@@ -100,7 +98,7 @@ The planner must not assume it can reuse a session across initiatives. One sessi
 - `sequence_number` — must be exactly `prev_accepted_sequence + 1`. Gaps or reuse → `UNAUTHORIZED`.
 - `envelope_nonce` — 16 random bytes, hex. Must be globally unique per `(session_id, nonce)` pair within the nonce cache TTL (§2.5.1 Table 16). Reuse → `UNAUTHORIZED`.
 - `base_sha` and `head_sha` — required for all intent kinds except `ReportFailure`. For `CompleteTask`, `base_sha` is accepted but ignored by the kernel (see `kernel-store.md` §2.5.8 `base_sha` disposition). For `SingleCommit`, `base_sha == head_sha` is a valid "no committed changes yet" intent (empty diff — path check passes vacuously per §2.5.8 edge-case table). For non-empty `SingleCommit` (`base_sha != head_sha`): the kernel enforces `parent(head_sha) == base_sha` via **`vcs::rev_parse_parent`** (`kernel-core.md` Part 2.2 §`src/vcs/diff.rs` — normative command `git -C <worktree_root> rev-parse --verify <head_sha>^1`; root-commit and missing-SHA edge cases mapped to `HandlerError::InvalidShaRange`) — i.e. exactly one new commit on top of `base_sha`. Submitting a `base_sha` that is an ancestor of `head_sha` but not its direct parent is rejected with `HandlerError::InvalidShaRange`. **This means `SingleCommit` is truly single-commit: one intent = one commit. Multi-commit ranges require a different `IntentKind` (not in v1).**
-- `submitted_claims` — may be empty `[]` if the task's gate set has no active claim requirements. Providing claims when none are required is accepted (they are ignored).
+- `submitted_claims` — **deprecated; always `[]`; contents discarded by the kernel.** The kernel auto-derives all claims from its own witness records (`gates/mod.rs` Step 2.5). Any claims the planner populates in this field are silently dropped. The field is retained on the wire for backward compatibility but has no semantic effect. See `kernel-core.md` §`src/gates/mod.rs` Step 2.5 for the auto-derivation contract.
 - `justification` — required and non-empty for `IntentKind::ReportFailure`. Ignored for all other kinds.
 - `idempotency_key` — if provided, the kernel returns the same `IntentResponse` on a duplicate submission with the same key (within the session). Absent → no idempotency guarantee.
 
