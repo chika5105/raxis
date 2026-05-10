@@ -957,10 +957,13 @@ identity only.
    in a bounded in-memory map (max 100 pending challenges; oldest
    evicted on overflow).
 
-2. **Operator signs the challenge.** The browser prompts the
-   operator to paste their `raxis` private key (or uses a
-   browser extension / local agent that holds the key). The
-   challenge is signed with Ed25519:
+2. **Operator signs the challenge outside the browser.** The
+   dashboard displays the challenge hex and a copyable CLI command.
+   The operator runs `raxis auth sign <challenge>` on their local
+   machine (where their private key resides) or uses a hardware
+   token. The CLI outputs the Ed25519 signature and public key.
+   The operator pastes **only the signature and public key**
+   (both non-secret) back into the browser:
    ```
    POST /api/auth/verify
    {
@@ -969,6 +972,16 @@ identity only.
      "public_key": "<operator-pubkey-hex>"
    }
    ```
+
+   > **Security invariant.** The operator's private key MUST NEVER
+   > enter browser memory. Previous implementations that prompted
+   > the operator to paste their private key into a `<textarea>`
+   > and signed via WebCrypto were removed because:
+   > (a) the key sat in a React `useState` string, readable by XSS
+   > payloads or browser extensions; (b) the paste wrote to OS
+   > clipboard history; (c) JavaScript provides no memory-zeroing;
+   > (d) the `CryptoKey` was imported with `extractable: true`,
+   > allowing re-export by any script on the page.
 
 3. **Kernel verifies.** The kernel:
    * Checks the challenge exists and is not expired.

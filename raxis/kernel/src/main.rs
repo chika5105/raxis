@@ -24,6 +24,7 @@
 #![allow(dead_code)]
 
 mod errors;
+mod banner;
 mod bootstrap;
 mod authority;
 mod canonical_images_preflight;
@@ -68,6 +69,13 @@ fn data_dir() -> std::path::PathBuf {
 
 #[tokio::main]
 async fn main() {
+    // Step 0: Print the boot banner.
+    if std::env::var("RAXIS_LOG_FORMAT").as_deref() == Ok("json") {
+        banner::print_boot_banner_json();
+    } else {
+        banner::print_boot_banner();
+    }
+
     // Step 1: Parse CLI flags and environment.
     let data_dir = data_dir();
     let bootstrap_mode = std::env::var("RAXIS_BOOTSTRAP").is_ok();

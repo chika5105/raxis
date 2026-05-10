@@ -171,9 +171,7 @@ export function LoginPage() {
       <div className="w-full max-w-lg card p-6">
         {/* ── Header ── */}
         <div className="flex items-center gap-3 mb-5">
-          <div className="w-10 h-10 bg-accent text-white rounded-md font-mono font-bold flex items-center justify-center text-lg">
-            R
-          </div>
+          <img src="/raxis-favicon.svg" alt="Raxis" className="w-10 h-10 rounded-md" />
           <div>
             <h1 className="text-base font-semibold text-ink">
               Raxis Operator Dashboard
