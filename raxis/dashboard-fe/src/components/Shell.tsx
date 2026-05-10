@@ -91,7 +91,7 @@ export function Shell({ children }: ShellProps) {
       {/* Sidebar */}
       <aside className="w-56 shrink-0 border-r border-edge bg-panel-raised flex flex-col">
         <div className="p-4 border-b border-edge flex items-center gap-2">
-          <img src="/raxis-favicon.svg" alt="Raxis" className="w-7 h-7 rounded" />
+          <img src="/raxis-logo.svg" alt="Raxis" className="w-7 h-7 rounded" />
           <div>
             <div className="text-sm font-semibold text-ink leading-tight">
               Raxis
