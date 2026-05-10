@@ -1,9 +1,22 @@
 # RAXIS V2 — Email & Operator Notification Channels
 
 > **Status:** V2 Specified
+> **V2.5 forward-only consolidation:** The original draft below
+> distinguishes a `WebhookChannel` (HMAC-signed HTTPS POST to an
+> operator URL) from the future `Sidecar`-style integrations.  In
+> V2.5 those were folded into a single `Sidecar` channel kind:
+> `Webhook` ≡ "HTTP POST a JSON payload to a URL" was a strict
+> subset of `Sidecar`, shipped without HMAC signing in the kernel
+> path, and lacked the per-channel concurrency cap + 3-state
+> circuit breaker (V2_GAPS.md §C4) that `Sidecar` provides.  Read
+> every reference to `WebhookChannel` / "Webhook kind" / `crates/
+> raxis-notification-webhook/` below as historical context for the
+> `Sidecar` surface.  HMAC signing is the sidecar process's
+> responsibility — kernel→sidecar trust is the loopback boundary.
+>
 > **Role:** Canonical home for two related but separately-bounded subsystems:
 >
-> 1. **`OperatorNotificationChannel`** — the kernel→operator outbound transport seam (Shell, File, Email, Webhook today; Slack/PagerDuty/Teams future). The 7th extensibility trait per `extensibility-traits.md §6A`. Implements forward-compat from `cli-readonly.md §5.6.6`.
+> 1. **`OperatorNotificationChannel`** — the kernel→operator outbound transport seam (Shell, File, Email, Sidecar today; Slack/PagerDuty/Teams via operator-run sidecar translators).  V1-draft `Webhook` was folded into `Sidecar` in V2.5 (forward-only).  The 7th extensibility trait per `extensibility-traits.md §6A`. Implements forward-compat from `cli-readonly.md §5.6.6`.
 > 2. **`SmtpCredentialProxy`** — agent→external SMTP relay, the 6th `proxy_type` per `credential-proxy.md §3.6`. Lets agents send email as part of their work without ever holding the SMTP password.
 >
 > The two subsystems share the SMTP transport library (`crates/raxis-smtp-client/`) but are not the same code path. Mixing them would erase the `R-9` attribution boundary (an operator-attributed channel triggerable from agent intent would let the agent forge operator-attributed email).

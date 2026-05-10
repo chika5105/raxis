@@ -803,7 +803,7 @@ Default audit dir: `<data_dir>/audit/` (every `segment-NNN.jsonl` in numeric ord
 
 ### `notify channel add | delete | probe | test` (V2)
 
-**Purpose:** Manage operator notification channels (`Email`, `Webhook`; v1 carryover `Shell`, `File`). The full subsystem is specified in `email-and-notification-channels.md`. These commands wrap edits to the `[[notifications.channels]]` section of `policy.toml` and call the existing `policy sign` ceremony — the signed bundle remains the source of truth.
+**Purpose:** Manage operator notification channels (`Email`, `Sidecar`; v1 carryover `Shell`, `File`). The full subsystem is specified in `email-and-notification-channels.md`. These commands wrap edits to the `[[notifications.channels]]` section of `policy.toml` and call the existing `policy sign` ceremony — the signed bundle remains the source of truth.  The V1-draft `Webhook` kind was folded into `Sidecar` in V2.5 (forward-only).
 
 **Usage:**
 
@@ -817,11 +817,13 @@ raxis-cli notify channel add ops-email \
     --auth-method plain \
     --cred-ref smtp-ops-cred
 
-# Add a Webhook channel
-raxis-cli notify channel add ops-webhook \
-    --kind webhook \
-    --target https://hooks.example.com/raxis \
-    --cred-ref webhook-hmac-secret
+# Add a Sidecar channel (POST → operator-run translator → Slack /
+# PagerDuty / Teams / Discord / ...).  The sidecar handles its own
+# upstream auth; kernel-to-sidecar trust is the localhost boundary.
+raxis-cli notify channel add ops-sidecar \
+    --kind sidecar \
+    --target http://localhost:9200/notify \
+    --max-in-flight 8
 
 # Delete a channel (refused if any [[notifications.routes]] still references it)
 raxis-cli notify channel delete ops-email
@@ -866,7 +868,7 @@ raxis-cli notify route delete \
 
 ### `notify credential add | delete | rotate` (V2)
 
-**Purpose:** Manage credentials the **kernel itself** uses to talk to upstream notification channels (SMTP relay password, webhook HMAC secret, future Slack token). Distinct from `raxis credential add` which manages credentials the kernel proxies *for an agent*. Stored at `<data_dir>/credentials/<cred-ref>.notify-cred`, mode 0600, kernel-readable only.
+**Purpose:** Manage credentials the **kernel itself** uses to talk to upstream notification channels (SMTP relay password, future Slack token). Sidecar channels handle their own upstream auth — the kernel-to-sidecar boundary is loopback only — so no `notify credential` entry is required for Sidecar.  Distinct from `raxis credential add` which manages credentials the kernel proxies *for an agent*. Stored at `<data_dir>/credentials/<cred-ref>.notify-cred`, mode 0600, kernel-readable only.
 
 **Usage:**
 

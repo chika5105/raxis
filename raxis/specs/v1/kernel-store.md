@@ -2176,10 +2176,11 @@ A non-zero exit is **not** a gate failure. The gate outcome is determined only b
 ### §2.5.6a — `[notifications]` Normative Schema
 
 > **Normative reference:** the full notification model — channel kinds,
-> routing, fail-open semantics, the Shell channel handler, and the v2
-> Email/Webhook forward-compat — lives in `cli-readonly.md` §5.6. This
+> routing, fail-open semantics, the Shell channel handler, and the V2
+> Email/Sidecar handlers — lives in `cli-readonly.md` §5.6. This
 > section is the authoritative TOML schema and `PolicyBundle::validate`
-> contract that section refers to.
+> contract that section refers to.  The V1-draft `Webhook` kind was
+> folded into `Sidecar` in V2.5 (forward-only — see V2_GAPS.md §C4).
 
 #### `[notifications]` in `policy.toml`
 
@@ -2189,7 +2190,7 @@ default_channels = ["shell"]
 
 [[notifications.channels]]
 id     = "shell"                 # implicit; explicit entry overrides target
-kind   = "Shell"                 # Shell | File | Email | Webhook
+kind   = "Shell"                 # Shell | File | Email | Sidecar
 target = "<data_dir>/notifications/inbox.jsonl"
 
 [[notifications.channels]]
@@ -2215,13 +2216,12 @@ channels   = ["shell", "audit-mirror"]
    `AuditEventKind` discriminant string (validated by reflecting on
    the enum at validate time — same string the `event_kind` column in
    `audit_records` carries).
-4. `Email` and `Webhook` channels are accepted by the validator but
-   trigger a boot-time **warning** in the kernel log
-   (`level = "warn"`, message: `notification channel '<id>' of kind
-   '<Email|Webhook>' is declared but its handler is not implemented in
-   v1; events routed to this channel will be silently dropped`). This
-   is a warning, not an error — operators may stage v2 channel config
-   in v1 without blocking the boot.
+4. `Email` and `Sidecar` channels are validated for target presence
+   and shape (recipient address for `Email`, `http(s)` URL for
+   `Sidecar`).  In V2 every recognised kind has a real shipping
+   handler — the V1-draft "declared but not implemented" warning
+   path is gone.  An unknown `kind` is a hard
+   `FAIL_NOTIFY_CHANNEL_INVALID`.
 
 #### `[notifications]` is policy state, not store state
 

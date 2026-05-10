@@ -1103,8 +1103,14 @@ so the old text was forward-looking. The new model is:
 - **Shell channel** (always available, zero-config) is the v1 default.
   Local-first means the operator runs `raxis inbox` to see notifications;
   no SMTP, no webhook, no daemon-sidecar ever needed.
-- **Email** and **Webhook** are spec'd here for forward-compat with v2 but
-  v1 ships handlers ONLY for **Shell** and **File** kinds.
+- **Email** is the operator-side SMTP handler (V2.3+).
+- **Sidecar** is the V2 HTTP-egress handler (concurrency cap +
+  3-state circuit breaker, V2_GAPS.md §C4).
+- The V1-draft `Webhook` channel kind was removed in V2.5 — it
+  duplicated `Sidecar` ("HTTP POST a JSON payload to a URL")
+  without HMAC signing or backpressure controls.  Operators with an
+  existing webhook URL put it behind a one-line `Sidecar`
+  translator.
 - Routing is per-event-kind; an event with no matching route uses
   `default_channels`; an empty `channels` list silences that event entirely.
 
@@ -1119,7 +1125,7 @@ default_channels = ["shell"]
 
 [[notifications.channels]]
 id     = "shell"                 # always present implicitly; explicit entry overrides target
-kind   = "Shell"                 # Shell | File | Email | Webhook
+kind   = "Shell"                 # Shell | File | Email | Sidecar
 target = "<data_dir>/notifications/inbox.jsonl"
 
 [[notifications.channels]]
@@ -1135,11 +1141,13 @@ target = "/var/log/raxis-notifications.jsonl"
 # smtp_relay   = "smtp://localhost:25"
 # auth_env_var = "RAXIS_SMTP_PASSWORD"
 
+# V2 sidecar (HTTP POST → operator-run translator → Slack /
+# PagerDuty / Teams / Discord / ...).
 # [[notifications.channels]]
-# id     = "ops-webhook"
-# kind   = "Webhook"
-# target = "https://hooks.example.com/raxis"
-# auth_env_var = "RAXIS_WEBHOOK_TOKEN"
+# id            = "ops-sidecar"
+# kind          = "Sidecar"
+# target        = "http://localhost:9200/notify"
+# max_in_flight = 8
 
 [[notifications.routes]]
 event_kind = "EscalationSubmitted"
@@ -1166,12 +1174,11 @@ channels   = ["shell", "audit-mirror"]   # security-relevant; force visibility
   declared ids.
 - Every `event_kind` is a real `AuditEventKind` variant name (validated
   against the same string the audit emit writes).
-- For `Email`/`Webhook` channels in v1, `PolicyBundle::validate` MUST emit
-  a warning to the kernel log at boot ("notification channel `<id>` of
-  kind `<Email|Webhook>` is declared but its handler is not implemented in
-  v1; events routed to this channel will be silently dropped"). This is a
-  warning, not an error — it lets operators stage their v2 channel config
-  in v1 without blocking the boot.
+- For `Email`/`Sidecar` channels, `PolicyBundle::validate` enforces
+  target presence + structural validity (recipient address for Email,
+  http(s) URL for Sidecar).  The V1-draft warning surface
+  ("declared but its handler is not implemented in v1") is gone in
+  V2: every recognised kind has a real shipping handler.
 
 ### §5.6.3 — Kernel emit path
 
@@ -1226,28 +1233,33 @@ Identical to Shell, but `target` is operator-supplied. Used for piping
 notifications into a sidecar (`tail -f /var/log/raxis-notifications.jsonl
 | journalctl --identifier=raxis -p notice`).
 
-### §5.6.6 — Forward compatibility
+### §5.6.6 — V2 channel surface
 
-V2 lands the Email and Webhook handlers behind the new
-`OperatorNotificationChannel` trait (the 7th extensibility seam, registered
-in `extensibility-traits.md §6A`; full subsystem in
-`email-and-notification-channels.md §2`). V2 ships:
+V2 ships the operator notification surface as four kinds:
+`Shell | File | Email | Sidecar`.  The legacy V1-draft `Webhook`
+kind was folded into `Sidecar` in V2.5 (forward-only — see
+V2_GAPS.md §C4).  `Slack` / `PagerDuty` / `Teams` / `Discord` /
+`Opsgenie` are not first-class kinds — they are operator-run
+sidecar processes that receive a structured `NotificationPayload`
+POST and translate to the target API.
 
-1. `crates/raxis-notification/` — the trait + conformance kit.
-2. `crates/raxis-notification-shell/` and `-file/` — the v1 carryover impls,
-   refactored to implement the trait.
-3. `crates/raxis-notification-email/` — the new SMTP impl, depending on
-   `crates/raxis-smtp-client/` (shared with the agent SMTP credential
-   proxy in `credential-proxy.md §3.6`).
-4. `crates/raxis-notification-webhook/` — the new HTTPS POST + HMAC impl.
-5. The boot warning for unrecognised channel kinds is dropped; a kind
-   not in `Shell | File | Email | Webhook | Slack | PagerDuty | Teams`
-   becomes a hard `FAIL_NOTIFY_CHANNEL_INVALID`.
-6. New CLI surface `raxis notify channel/route/credential add|delete|list|
-   probe|test` per `cli-ceremony.md` and `cli-readonly.md §5.5.17/§5.5.18`.
-7. Integration tests under `kernel/tests/notifications_smtp_e2e.rs`
-   against a local Maildrop / `letterbox` fixture container, and
-   `kernel/tests/notifications_webhook_e2e.rs` against `httpbin.org`.
+Crate layout:
+
+1. `kernel/src/notifications/handler/file.rs` — `Shell` + `File`
+   handlers (one JSONL append per dispatched event).
+2. `kernel/src/notifications/handler/email.rs` — SMTP handler
+   (STARTTLS or implicit TLS, AUTH PLAIN, password from sidecar
+   `.notify-cred` file).
+3. `kernel/src/notifications/handler/sidecar.rs` — HTTP POST
+   handler with per-channel semaphore + 3-state circuit breaker.
+
+Validation is hard-fail: a kind not in
+`Shell | File | Email | Sidecar` is a
+`FAIL_NOTIFY_CHANNEL_INVALID` at policy-load time.
+
+Test coverage: `kernel/tests/notifications_*.rs` exercises every
+handler against in-process fixtures (`tokio::io::duplex` for
+sidecar, `lettre`'s testing fixture for email).
 
 The v1 schema in `§5.6.2` remains the contract — V2 extends it with new
 tables (`[[notifications.credentials]]`, `[[notifications.channels.email]]`,
@@ -1396,8 +1408,10 @@ For the audit reader:
 - **Cross-uid / multi-tenant access control.** v1 assumes one Unix uid per
   kernel (`raxis status` is callable by anyone with read access to
   `<data_dir>/`).
-- **Email and Webhook notification handlers.** Spec'd in §5.6 for forward
-  compatibility; implementation is v2.
+- **Notification handlers.** V1 ships `Shell` + `File` only; the
+  `Email` and `Sidecar` handlers land in V2 per §5.6.6.  The
+  V1-draft `Webhook` kind was folded into `Sidecar` in V2.5
+  (forward-only).
 - **Audit segment rollover.** `raxis-audit-tools::reader::open_chain` is
   forward-compatible with multi-segment chains, but v1 only ever produces
   `segment-000.jsonl`.

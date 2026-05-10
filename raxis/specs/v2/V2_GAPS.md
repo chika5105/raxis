@@ -840,20 +840,22 @@ bypass. See `extensibility-traits.md §9A.2`.
 **Spec:** `email-and-notification-channels.md` (61KB)
 **Delivered:** ~1,000 lines (handler crates + tests + sidecar +
 NotificationDelivered audit event)
-**V2.4 update:** Sidecar dispatch handler shipped with concurrency
-cap, circuit breaker, and `NotificationDelivered` audit event. The
-legacy in-kernel Webhook handler is RETAINED for backwards
-compatibility but operators are encouraged to migrate to the
-Sidecar kind for any new third-party integration (Slack,
-PagerDuty, Teams, Discord, Opsgenie, custom).
+**V2.5 update:** Forward-only consolidation — the legacy in-kernel
+Webhook handler was REMOVED.  It duplicated the Sidecar surface
+("HTTP POST a JSON payload to a URL"), shipped without HMAC
+signing or per-channel concurrency control, and existed only for
+backward-compat.  Operators with an existing webhook URL put it
+behind a one-line `Sidecar` translator.  The Sidecar handler is
+the single HTTP-egress notification surface and ships with the
+concurrency cap + 3-state circuit breaker described below.
 
 | Channel kind | Policy parsed | Handler impl | Status |
 |---|---|---|---|
 | `Shell`   | ✅ | ✅ `handler/file.rs`    | V1 carryover |
 | `File`    | ✅ | ✅ `handler/file.rs`    | V1 carryover |
 | `Email`   | ✅ | ✅ `handler/email.rs`   | V2.3 — SMTP submission with STARTTLS or implicit TLS, AUTH PLAIN, password from sidecar `.notify-cred` file |
-| `Webhook` | ✅ | ✅ `handler/webhook.rs` (legacy) | V2.3 — kept for backwards compatibility; new integrations should use `Sidecar` |
 | `Sidecar` | ✅ | ✅ `handler/sidecar.rs` | V2.4 — HTTP POST + concurrency cap (semaphore) + 3-state circuit breaker (closed/open/half-open) + `NotificationDelivered` audit emit with upstream `trace_id` |
+| `Webhook` | — | ❌ removed (V2.5) | Folded into `Sidecar`; operators put the URL behind a one-line translator |
 
 **V2.4 design decision: sidecar for third-party integrations.**
 
