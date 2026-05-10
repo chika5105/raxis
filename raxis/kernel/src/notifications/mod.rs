@@ -11,13 +11,16 @@
 // the route for that event-kind in the active `PolicyBundle` and writes
 // one record per declared channel.
 //
-// Channel kinds in v1
-// ───────────────────
-//   - `Shell`  → appends one JSON line to `<data_dir>/notifications/inbox.jsonl`.
-//                Watched by the operator via `raxis inbox` (cli-readonly.md §5.5.16).
-//   - `File`   → identical to Shell but `target` is operator-supplied.
-//   - `Email`  → schema-only in v1 (handler ships in v2). Logged-and-skipped.
-//   - `Webhook`→ schema-only in v1. Logged-and-skipped.
+// Channel kinds (V2 surface — forward-only, no Webhook backward-compat)
+// ──────────────────────────────────────────────────────────────────────
+//   - `Shell`   → appends one JSON line to `<data_dir>/notifications/inbox.jsonl`.
+//                 Watched by the operator via `raxis inbox` (cli-readonly.md §5.5.16).
+//   - `File`    → identical to Shell but `target` is operator-supplied.
+//   - `Email`   → SMTP submission with STARTTLS or implicit TLS, AUTH PLAIN.
+//   - `Sidecar` → HTTP POST a structured payload to an operator-run sidecar
+//                 process that translates to the target platform's API
+//                 (Slack, PagerDuty, Teams, ...).  Wrapped in a per-channel
+//                 semaphore + 3-state circuit breaker (V2_GAPS.md §C4).
 //
 // Routing model
 // ─────────────
@@ -203,17 +206,6 @@ async fn dispatch_one(
                 started_at,
             );
         }
-        NotificationChannelKind::Webhook => {
-            let started_at = std::time::Instant::now();
-            let outcome = handler::webhook::deliver(channel, &event).await;
-            handle_simple_outcome(
-                audit.as_ref(),
-                channel,
-                &event,
-                outcome,
-                started_at,
-            );
-        }
         NotificationChannelKind::Email => {
             let started_at = std::time::Instant::now();
             let outcome = handler::email::deliver(channel, &event, data_dir).await;
@@ -294,7 +286,7 @@ async fn dispatch_one(
     };
 }
 
-/// Common path for Shell/File/Webhook/Email handlers — emit a
+/// Common path for Shell/File/Email handlers — emit a
 /// `NotificationDelivered` on `Ok`, `NotificationDeliveryFailed` on
 /// `Err`. Sidecar has its own outcome type so it does not flow through
 /// here.
@@ -308,7 +300,6 @@ fn handle_simple_outcome(
     let kind_str = match channel.kind {
         NotificationChannelKind::Shell   => "Shell",
         NotificationChannelKind::File    => "File",
-        NotificationChannelKind::Webhook => "Webhook",
         NotificationChannelKind::Email   => "Email",
         NotificationChannelKind::Sidecar => "Sidecar",
     };
@@ -353,16 +344,7 @@ pub enum DeliveryError {
     #[error("notification channel target is invalid")]
     TargetInvalid,
 
-    /// Channel kind is declared in policy but its handler is not
-    /// shipped in v1 (deprecated — kept for one release as a
-    /// migration affordance). The V2 webhook + email handlers have
-    /// landed; this variant should never be observed in production.
-    /// Retained so older operator dashboards keying off
-    /// `reason: "unimplemented_v1"` don't crash.
-    #[error("notification channel kind is not implemented in v1")]
-    UnimplementedV1,
-
-    /// Network or TLS failure dispatching a Webhook / Email channel
+    /// Network or TLS failure dispatching a Sidecar / Email channel
     /// (DNS failure, TCP refused, TLS handshake error, HTTP timeout).
     #[error("notification network failure: {0}")]
     Network(String),
@@ -386,7 +368,6 @@ impl DeliveryError {
         match self {
             DeliveryError::Io(_)                   => "io",
             DeliveryError::TargetInvalid           => "target_invalid",
-            DeliveryError::UnimplementedV1         => "unimplemented_v1",
             DeliveryError::Network(_)              => "network",
             DeliveryError::UpstreamRejected(_)     => "upstream_rejected",
             DeliveryError::CredentialUnavailable(_) => "credential_unavailable",

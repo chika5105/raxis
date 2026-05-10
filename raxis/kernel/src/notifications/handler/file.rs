@@ -310,7 +310,15 @@ mod tests {
             "io",
         );
         assert_eq!(DeliveryError::TargetInvalid.category(), "target_invalid");
-        assert_eq!(DeliveryError::UnimplementedV1.category(), "unimplemented_v1");
+        assert_eq!(DeliveryError::Network("x".into()).category(), "network");
+        assert_eq!(
+            DeliveryError::UpstreamRejected("x".into()).category(),
+            "upstream_rejected",
+        );
+        assert_eq!(
+            DeliveryError::CredentialUnavailable("x".into()).category(),
+            "credential_unavailable",
+        );
     }
 
     // ── Record shape contract pin ────────────────────────────────────

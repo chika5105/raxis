@@ -999,9 +999,10 @@ pub enum AuditEventKind {
     /// `channel_id` matches `[[notifications.channels]].id` from the
     /// active policy. `event_kind` is the `AuditEventKind` discriminant
     /// of the event we tried to deliver. `reason` is a short, stable
-    /// classification string (`"io"`, `"target_invalid"`,
-    /// `"unimplemented_v1"`, `"backpressure"`, `"circuit_open"`); the
-    /// verbose error text goes to the kernel stderr log.
+    /// classification string (`"io"`, `"target_invalid"`, `"network"`,
+    /// `"upstream_rejected"`, `"credential_unavailable"`,
+    /// `"backpressure"`, `"circuit_open"`); the verbose error text
+    /// goes to the kernel stderr log.
     NotificationDeliveryFailed {
         channel_id: String,
         event_kind: String,

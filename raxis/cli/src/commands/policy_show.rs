@@ -393,7 +393,6 @@ fn channel_kind_label(k: NotificationChannelKind) -> &'static str {
         NotificationChannelKind::Shell   => "Shell",
         NotificationChannelKind::File    => "File",
         NotificationChannelKind::Email   => "Email",
-        NotificationChannelKind::Webhook => "Webhook",
         NotificationChannelKind::Sidecar => "Sidecar",
     }
 }

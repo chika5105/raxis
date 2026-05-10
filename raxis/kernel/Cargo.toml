@@ -120,8 +120,8 @@ glob        = { workspace = true }
 rustc-hash  = { workspace = true }
 arc-swap    = { workspace = true }
 
-# V2 §C4 — operator notification transports (Webhook, Email).
-# `reqwest` carries the HTTPS POST for `WebhookChannel`; `tokio-rustls`
+# V2 §C4 — operator notification transports (Sidecar, Email).
+# `reqwest` carries the HTTP POST for `SidecarChannel`; `tokio-rustls`
 # + `rustls` carry STARTTLS for `EmailChannel` SMTP submission. Both
 # follow the workspace-wide `rustls-tls` selection (no native-tls /
 # OpenSSL link) per `extensibility-traits.md §6.5`.

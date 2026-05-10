@@ -2012,39 +2012,54 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 // ---------------------------------------------------------------------------
 // Notification channels — `[notifications]`
 //
-// Normative reference: cli-readonly.md §5.6.
+// Normative reference: cli-readonly.md §5.6 +
+// `email-and-notification-channels.md`.
 //
-// v1 ships handlers for `Shell` and `File` only; `Email` and `Webhook`
-// are accepted at policy-validate time so operators can stage their v2
-// channel config but each one emits a one-line warning at boot
-// ("declared but its handler is not implemented in v1").
+// V2 surface (forward-only, no V1 backward-compat shims):
+//
+//   * `Shell` / `File` — local JSONL append (kernel built-in).
+//   * `Email`          — direct SMTP submission with STARTTLS or
+//                        implicit TLS, AUTH PLAIN.
+//   * `Sidecar`        — HTTP POST to an operator-run sidecar
+//                        process that translates to the target
+//                        platform's API (Slack, PagerDuty, Teams,
+//                        Discord, Opsgenie, ...).
+//
+// The legacy `Webhook` channel kind was removed in V2.5: it
+// duplicated `Sidecar` (both are "HTTP POST a JSON payload to a
+// URL"), shipped without HMAC signing, lacked the per-channel
+// concurrency cap + circuit breaker, and only existed for V1
+// backward-compat.  Operators with existing webhook URLs put the
+// URL behind a `Sidecar` (the URL stays a one-hop translator).
 // ---------------------------------------------------------------------------
 
 /// Channel-kind discriminator.
 ///
-/// V2.4 surface:
+/// V2 surface (forward-only — V1 `Webhook` removed):
 /// * `Shell` / `File` — local JSONL append.
-/// * `Email` — direct SMTP submission (V2.3 closeout).
-/// * `Webhook` — HTTPS POST to operator-supplied URL (V2.3
-///   closeout). Retained for backward-compat. **Prefer `Sidecar`
-///   for new deployments** — see V2_GAPS.md §C4 architecture
-///   note.
-/// * `Sidecar` — V2.4 HTTP-sidecar pattern. Posts a structured
-///   `NotificationPayload` (see `notifications/sidecar_protocol.rs`
-///   in the kernel) to an operator-run sidecar process which
-///   translates to the target platform's API (Slack, PagerDuty,
-///   Teams, etc.) and returns `2xx` with an opaque
-///   `upstream_trace_id`. Localhost-only by convention; the
-///   sidecar handles its own auth.
+/// * `Email` — direct SMTP submission with STARTTLS or implicit
+///   TLS, AUTH PLAIN.
+/// * `Sidecar` — HTTP POST a structured `NotificationPayload`
+///   (see `notifications/sidecar_protocol.rs`) to an operator-run
+///   sidecar process which translates to the target platform's API
+///   and returns `2xx` with an opaque `upstream_trace_id`.
+///   Localhost-only by convention; the sidecar handles its own auth.
+///   The dispatcher wraps every Sidecar call in a per-channel
+///   semaphore + 3-state circuit breaker so a hanging upstream
+///   never wedges the kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum NotificationChannelKind {
+    /// Append a JSON line to the operator's shell-readable inbox
+    /// (`<data_dir>/notifications/inbox.jsonl` by default).
     Shell,
+    /// Append a JSON line to the operator-supplied path.
     File,
+    /// Submit the notification by SMTP (STARTTLS or implicit TLS,
+    /// AUTH PLAIN).
     Email,
-    Webhook,
-    /// V2.4 — HTTP sidecar (V2_GAPS.md §C4). The kernel POSTs a
-    /// structured payload to `target` and the sidecar converts
-    /// to the platform's API.
+    /// V2 — HTTP sidecar (`email-and-notification-channels.md` +
+    /// V2_GAPS.md §C4).  The kernel POSTs a structured payload to
+    /// `target` and the sidecar converts to the platform's API.
     Sidecar,
 }
 
@@ -2068,7 +2083,6 @@ pub struct NotificationChannel {
     /// when the operator omits the explicit channel entry, see
     /// `PolicyBundle::shell_inbox_path_for`).
     /// For `Email`: the recipient address (validated only as non-empty in v1).
-    /// For `Webhook`: the destination URL (validated only as non-empty in v1).
     /// For `Sidecar`: the HTTP endpoint URL the kernel POSTs the
     ///   structured payload to (e.g. `http://localhost:9200/notify`).
     pub target: String,
@@ -2224,8 +2238,10 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
 ///    omits the field — never empty, so an event kind with no route
 ///    is dispatched to the implicit Shell channel rather than silently
 ///    dropped.
-/// 7. **For Email/Webhook channels**, validate target is non-empty;
-///    the kernel emits a one-line warning at boot per spec §5.6.2.
+/// 7. **For Email channels**, validate target (recipient address) is
+///    non-empty.  For Sidecar channels, validate the URL parses.
+///    `Webhook` is no longer a recognised kind in V2 — see the
+///    `NotificationChannelKind` doc-comment.
 
 // ---------------------------------------------------------------------------
 // `[[integration_merge_verifiers]]` operator-side validator (V2).
@@ -2907,23 +2923,13 @@ fn validate_notifications(
                     )));
                 }
             }
-            NotificationChannelKind::Email | NotificationChannelKind::Webhook => {
+            NotificationChannelKind::Email => {
                 if ch.target.trim().is_empty() {
                     return Err(PolicyError::MalformedArtifact(format!(
-                        "[[notifications.channels]] id={:?} kind={:?} requires a non-empty target",
-                        ch.id, ch.kind
+                        "[[notifications.channels]] id={:?} kind=Email requires a non-empty target",
+                        ch.id,
                     )));
                 }
-                // The handler is unimplemented in v1; the kernel
-                // emits a one-line warning at boot per spec §5.6.2.
-                // We do NOT short-circuit validation here — operators
-                // can stage v2 channel config in v1 without blocking
-                // boot.
-                eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"notification_channel_v2_only\",\
-                     \"channel_id\":\"{}\",\"kind\":\"{:?}\"}}",
-                    ch.id, ch.kind,
-                );
             }
             NotificationChannelKind::Sidecar => {
                 // V2.4 §C4 — the sidecar endpoint URL must be
