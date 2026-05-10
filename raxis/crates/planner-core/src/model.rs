@@ -751,6 +751,17 @@ impl ModelClient for AnthropicClient {
 
 // ---------------------------------------------------------------------------
 // Test fakes
+//
+// Gated on `debug_assertions || test` per the workspace's mock-isolation
+// discipline (see `raxis-test-support/src/lib.rs` Layer 1). In a release
+// build of any crate that depends on `raxis-planner-core`, `MockModelClient`
+// does not exist and any reference to it fails to compile with E0432.
+//
+// This is an interim measure. The clean long-term path is to extract the
+// `ModelClient` trait into a `raxis-planner-substrate` crate (like
+// `raxis-gateway-substrate`) so `raxis-test-support` can host the mock
+// without creating a circular dependency. Until then, gating here achieves
+// the same production-safety guarantee.
 // ---------------------------------------------------------------------------
 
 /// In-memory test fake — pre-canned responses driven by the test.
@@ -758,6 +769,7 @@ impl ModelClient for AnthropicClient {
 /// The dispatch-loop unit tests construct one `MockModelClient`
 /// queued with a sequence of `MessageResponse` values and verify
 /// the dispatch behaviour against each turn's response.
+#[cfg(any(debug_assertions, test))]
 pub struct MockModelClient {
     pending: Arc<tokio::sync::Mutex<Vec<MessageResponse>>>,
     /// Captured inbound requests, in order. Tests assert against
@@ -766,6 +778,7 @@ pub struct MockModelClient {
     pub seen: Arc<tokio::sync::Mutex<Vec<MessageRequest>>>,
 }
 
+#[cfg(any(debug_assertions, test))]
 impl MockModelClient {
     /// Construct from a queue of pre-canned responses (FIFO).
     pub fn new(responses: Vec<MessageResponse>) -> Self {
@@ -776,6 +789,7 @@ impl MockModelClient {
     }
 }
 
+#[cfg(any(debug_assertions, test))]
 #[async_trait::async_trait]
 impl ModelClient for MockModelClient {
     async fn create_message(

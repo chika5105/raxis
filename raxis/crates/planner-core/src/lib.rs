@@ -109,9 +109,11 @@ pub use ksb::{
     KSB_DELIMITER_OPEN,
 };
 pub use model::{
-    AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse, MockModelClient,
+    AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse,
     ModelClient, ModelError, ToolSpec, Usage,
 };
+#[cfg(any(debug_assertions, test))]
+pub use model::MockModelClient;
 pub use provider_model::{
     emit_model_deprecation_warning, find_known_model, resolve_model_from_env,
     resolve_model_from_env_fn, validate_model_id, KnownModel, ProviderId,

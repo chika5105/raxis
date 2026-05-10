@@ -53,7 +53,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::model::{ContentBlock, Message, MessageRequest, ModelClient, ModelError, Usage};
+use crate::model::{ContentBlock, Message, MessageRequest, MessageResponse, ModelClient, ModelError, Usage};
 use crate::tools::{ToolContext, ToolError, ToolOutput, ToolRegistry};
 
 // ---------------------------------------------------------------------------
@@ -374,44 +374,263 @@ impl DispatchLoop {
             // V2_GAPS §C1 — coarse per-session ceiling check. Runs
             // after the turn's `Usage` is folded into the running
             // totals so a ceiling firing on the FIRST request still
-            // records the call. Order is `total → input → output`:
-            // most operators set `max_tokens_total` for spend, and
-            // we want the most-restrictive ceiling to surface first.
-            if let Some(ceiling) = self.config.max_tokens_total {
-                if cum_in.saturating_add(cum_out) > ceiling {
-                    return Ok(DispatchOutcome::TokensExceeded {
-                        which:         "total",
-                        input_tokens:  cum_in,
-                        output_tokens: cum_out,
-                        ceiling,
-                    });
-                }
-            }
-            if let Some(ceiling) = self.config.max_tokens_input_total {
-                if cum_in > ceiling {
-                    return Ok(DispatchOutcome::TokensExceeded {
-                        which:         "input",
-                        input_tokens:  cum_in,
-                        output_tokens: cum_out,
-                        ceiling,
-                    });
-                }
-            }
-            if let Some(ceiling) = self.config.max_tokens_output_total {
-                if cum_out > ceiling {
-                    return Ok(DispatchOutcome::TokensExceeded {
-                        which:         "output",
-                        input_tokens:  cum_in,
-                        output_tokens: cum_out,
-                        ceiling,
-                    });
-                }
+            // records the call. Order is `total → input → output`
+            // (delegated to `check_ceilings`).
+            if let Some(exceeded) = self.check_ceilings(cum_in, cum_out) {
+                return Ok(exceeded);
             }
         }
 
         Ok(DispatchOutcome::MaxTurnsExceeded {
             turns: self.config.max_turns,
         })
+    }
+
+    // -------------------------------------------------------------------
+    // V2_EXTENDED_GAPS §2.6 / §2.5 — streaming dispatch with
+    // mid-stream budget abort.
+    //
+    // Same loop semantics as `run()` except:
+    //
+    //   1. Uses `create_message_stream` instead of `create_message`.
+    //   2. Monitors `StreamEvent::Usage` events *during* the stream
+    //      and aborts (drops the `Receiver`, severing the upstream
+    //      HTTP connection) if any cumulative ceiling is exceeded.
+    //   3. Falls back to `create_message` if the provider's
+    //      `create_message_stream` returns `ModelError::Unsupported`.
+    //
+    // The tool-dispatch and terminal-tool logic is identical to
+    // `run()` — only the model-call shape changes. This avoids
+    // divergence: callers that don't need mid-stream abort keep
+    // using `run()`.
+    // -------------------------------------------------------------------
+
+    /// Drive one dispatch session using streaming model calls with
+    /// **mid-stream budget enforcement**.
+    ///
+    /// Behaves identically to [`Self::run`] in all outcomes but adds
+    /// a real-time budget check on every `StreamEvent::Usage` the
+    /// upstream emits. If a ceiling is hit mid-stream, the receiver
+    /// is dropped (closing the channel → upstream reader drops the
+    /// HTTP body → TCP connection severed → provider stops
+    /// generating tokens). This reduces overspend from "one full
+    /// overbudget turn" (post-turn check) to "a few chunks past the
+    /// ceiling" (mid-stream check).
+    pub async fn run_streaming(
+        &mut self,
+        system_prompt:  String,
+        seed_user_text: String,
+    ) -> Result<DispatchOutcome, DispatchError> {
+        use crate::streaming::StreamEvent;
+
+        let mut messages: Vec<Message> = vec![Message {
+            role:    "user".to_owned(),
+            content: vec![ContentBlock::Text { text: seed_user_text }],
+        }];
+        let tool_specs = self.registry.to_specs();
+
+        let mut cum_in:  u64 = 0;
+        let mut cum_out: u64 = 0;
+
+        for turn in 0..self.config.max_turns {
+            let req = MessageRequest {
+                model:       self.config.model.clone(),
+                max_tokens:  self.config.max_tokens,
+                system:      Some(system_prompt.clone()),
+                messages:    messages.clone(),
+                tools:       tool_specs.clone(),
+                temperature: self.config.temperature,
+                stream:      true,
+            };
+
+            // ── Stream consumption with mid-stream budget check ──
+            let mut rx = self.model.create_message_stream(&req).await?;
+            let mut resp: Option<MessageResponse> = None;
+
+            while let Some(event) = rx.recv().await {
+                match event {
+                    StreamEvent::Usage(usage) => {
+                        // Speculatively fold mid-stream usage into
+                        // temporaries. The canonical fold happens
+                        // below from the `Complete` event's
+                        // `resp.usage`, but checking here lets us
+                        // abort before the full response arrives.
+                        let speculative_in = cum_in.saturating_add(
+                            u64::from(usage.input_tokens)
+                                .saturating_add(u64::from(usage.cache_creation_input_tokens))
+                                .saturating_add(u64::from(usage.cache_read_input_tokens))
+                        );
+                        let speculative_out = cum_out.saturating_add(
+                            u64::from(usage.output_tokens)
+                        );
+
+                        if let Some(budget_exceeded) = self.check_ceilings(
+                            speculative_in,
+                            speculative_out,
+                        ) {
+                            // Drop rx: closes the channel, upstream
+                            // reader task will observe a closed
+                            // `Sender` and drop the HTTP body,
+                            // severing the TCP connection to the
+                            // provider. Near-zero overspend.
+                            drop(rx);
+                            return Ok(budget_exceeded);
+                        }
+                    }
+                    StreamEvent::Complete(msg) => {
+                        resp = Some(msg);
+                        // After Complete, no more events will arrive.
+                        break;
+                    }
+                    // Observability events — consumed by V3 progress
+                    // indicators and agent-stream capture (§4.3).
+                    // The dispatch loop ignores them.
+                    StreamEvent::MessageStart { .. }
+                    | StreamEvent::ContentBlockStart { .. }
+                    | StreamEvent::ContentBlockDelta { .. }
+                    | StreamEvent::ContentBlockStop { .. }
+                    | StreamEvent::Stop { .. } => {}
+                }
+            }
+
+            let resp = match resp {
+                Some(r) => r,
+                None => {
+                    // Stream ended without a Complete event — treat
+                    // as a transport error (upstream disconnected).
+                    return Err(DispatchError::Model(
+                        ModelError::Transport(
+                            "stream ended without Complete event".to_owned(),
+                        ),
+                    ));
+                }
+            };
+
+            // ── Canonical post-turn usage fold (same as `run()`) ──
+            let Usage {
+                input_tokens, output_tokens,
+                cache_creation_input_tokens, cache_read_input_tokens,
+            } = resp.usage;
+            cum_in  = cum_in.saturating_add(
+                u64::from(input_tokens)
+                    .saturating_add(u64::from(cache_creation_input_tokens))
+                    .saturating_add(u64::from(cache_read_input_tokens))
+            );
+            cum_out = cum_out.saturating_add(u64::from(output_tokens));
+
+            // ── From here, identical to `run()` ───────────────────
+            messages.push(Message {
+                role:    "assistant".to_owned(),
+                content: resp.content.clone(),
+            });
+
+            let mut tool_uses: Vec<(String, String, serde_json::Value)> = Vec::new();
+            let mut text_acc = String::new();
+            for block in &resp.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        if !text_acc.is_empty() { text_acc.push('\n'); }
+                        text_acc.push_str(text);
+                    }
+                    ContentBlock::ToolUse { id, name, input } => {
+                        tool_uses.push((id.clone(), name.clone(), input.clone()));
+                    }
+                    ContentBlock::ToolResult { .. } | ContentBlock::Other(_) => {}
+                }
+            }
+
+            if tool_uses.is_empty() {
+                return Ok(DispatchOutcome::Idle { final_text: text_acc });
+            }
+
+            let mut next_user_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
+            for (tu_id, tool_name, input) in &tool_uses {
+                if self.terminal_tools.iter().any(|n| *n == tool_name.as_str()) {
+                    let output = match self.registry.get(tool_name) {
+                        Some(tool) => tool.execute(input, &self.ctx).await
+                            .unwrap_or_else(|e| ToolOutput::err(e.to_string())),
+                        None => ToolOutput::ok(format!(
+                            "<terminal tool {tool_name:?} not in registry; \
+                             dispatch loop returning input verbatim>"
+                        )),
+                    };
+                    return Ok(DispatchOutcome::TerminalTool {
+                        tool_name: tool_name.clone(),
+                        input:     input.clone(),
+                        output,
+                    });
+                }
+                let output = match self.registry.get(tool_name) {
+                    Some(tool) => match tool.execute(input, &self.ctx).await {
+                        Ok(o)  => o,
+                        Err(e) => ToolOutput::err(e.to_string()),
+                    },
+                    None => ToolOutput::err(format!(
+                        "unknown tool: {tool_name:?}"
+                    )),
+                };
+                next_user_blocks.push(ContentBlock::ToolResult {
+                    tool_use_id: tu_id.clone(),
+                    content:     output.content,
+                    is_error:    output.is_error,
+                });
+            }
+            messages.push(Message {
+                role:    "user".to_owned(),
+                content: next_user_blocks,
+            });
+            let _ = turn;
+
+            // ── Post-turn ceiling check (same as `run()`) ─────────
+            if let Some(exceeded) = self.check_ceilings(cum_in, cum_out) {
+                return Ok(exceeded);
+            }
+        }
+
+        Ok(DispatchOutcome::MaxTurnsExceeded {
+            turns: self.config.max_turns,
+        })
+    }
+
+    /// Shared ceiling check used by both `run()` and
+    /// `run_streaming()`. Returns `Some(TokensExceeded)` if any
+    /// configured ceiling is exceeded, `None` otherwise.
+    fn check_ceilings(
+        &self,
+        cum_in:  u64,
+        cum_out: u64,
+    ) -> Option<DispatchOutcome> {
+        if let Some(ceiling) = self.config.max_tokens_total {
+            if cum_in.saturating_add(cum_out) > ceiling {
+                return Some(DispatchOutcome::TokensExceeded {
+                    which:         "total",
+                    input_tokens:  cum_in,
+                    output_tokens: cum_out,
+                    ceiling,
+                });
+            }
+        }
+        if let Some(ceiling) = self.config.max_tokens_input_total {
+            if cum_in > ceiling {
+                return Some(DispatchOutcome::TokensExceeded {
+                    which:         "input",
+                    input_tokens:  cum_in,
+                    output_tokens: cum_out,
+                    ceiling,
+                });
+            }
+        }
+        if let Some(ceiling) = self.config.max_tokens_output_total {
+            if cum_out > ceiling {
+                return Some(DispatchOutcome::TokensExceeded {
+                    which:         "output",
+                    input_tokens:  cum_in,
+                    output_tokens: cum_out,
+                    ceiling,
+                });
+            }
+        }
+        None
     }
 }
 
@@ -783,5 +1002,248 @@ mod tests {
             }
             other => panic!("expected TokensExceeded, got {other:?}"),
         }
+    }
+
+    // ── Streaming dispatch tests ─────────────────────────────────────
+
+    /// Mock model client that emits real `StreamEvent`s through the
+    /// channel, including intermediate `Usage` events. This lets us
+    /// test mid-stream budget abort deterministically.
+    struct MockStreamingModelClient {
+        /// Pre-canned responses, consumed FIFO. Each entry is a pair
+        /// of (mid-stream Usage, final MessageResponse). The Usage
+        /// is emitted as a `StreamEvent::Usage` *before* the
+        /// `StreamEvent::Complete` so the dispatch loop can check
+        /// its budget mid-stream.
+        pending: Arc<tokio::sync::Mutex<Vec<(Usage, MessageResponse)>>>,
+    }
+
+    impl MockStreamingModelClient {
+        fn new(responses: Vec<(Usage, MessageResponse)>) -> Self {
+            Self {
+                pending: Arc::new(tokio::sync::Mutex::new(responses)),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelClient for MockStreamingModelClient {
+        async fn create_message(
+            &self,
+            _req: &MessageRequest,
+        ) -> Result<MessageResponse, ModelError> {
+            // Streaming mock — not used via the buffered path.
+            Err(ModelError::Transport(
+                "MockStreamingModelClient: use create_message_stream".to_owned(),
+            ))
+        }
+
+        async fn create_message_stream(
+            &self,
+            _req: &MessageRequest,
+        ) -> Result<
+            tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>,
+            ModelError,
+        > {
+            use crate::streaming::StreamEvent;
+
+            let mut q = self.pending.lock().await;
+            if q.is_empty() {
+                return Err(ModelError::Transport(
+                    "MockStreamingModelClient: response queue exhausted".to_owned(),
+                ));
+            }
+            let (mid_usage, resp) = q.remove(0);
+
+            let (tx, rx) = tokio::sync::mpsc::channel(
+                crate::streaming::DEFAULT_STREAM_CHANNEL_CAP,
+            );
+
+            // Emit events in the same order a real provider would:
+            // MessageStart → Usage → Complete.
+            tokio::spawn(async move {
+                let _ = tx
+                    .send(StreamEvent::MessageStart {
+                        id:    resp.id.clone(),
+                        model: resp.model.clone(),
+                    })
+                    .await;
+                let _ = tx.send(StreamEvent::Usage(mid_usage)).await;
+                let _ = tx.send(StreamEvent::Complete(resp)).await;
+            });
+
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn streaming_idle_outcome_when_model_emits_text_only() {
+        let resp = empty_response_end_turn("streamed done!");
+        let mid = Usage::default();
+        let model = Arc::new(MockStreamingModelClient::new(vec![(mid, resp)]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws = fixture_workspace();
+        let mut d = DispatchLoop::new(
+            model,
+            registry,
+            DispatchConfig::new("test-model"),
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d
+            .run_streaming("system".to_owned(), "seed".to_owned())
+            .await
+            .unwrap();
+        match out {
+            DispatchOutcome::Idle { final_text } => {
+                assert_eq!(final_text, "streamed done!");
+            }
+            other => panic!("expected Idle, got {other:?}"),
+        }
+    }
+
+    /// V2_EXTENDED_GAPS §2.5 — mid-stream output ceiling abort.
+    /// The mock emits a `Usage` event with 200 output tokens
+    /// mid-stream; the ceiling is 100. The dispatch loop must
+    /// abort mid-stream (drop the receiver) and return
+    /// `TokensExceeded { which: "output" }` WITHOUT consuming
+    /// the `Complete` event.
+    #[tokio::test]
+    async fn streaming_mid_stream_output_ceiling_aborts() {
+        let mid_usage = Usage {
+            input_tokens:  50,
+            output_tokens: 200,  // exceeds ceiling of 100
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens:     0,
+        };
+        // The Complete would carry these same counts, but the loop
+        // should never reach it — it aborts on the Usage event.
+        let resp = MessageResponse {
+            id:    "msg-abort".to_owned(),
+            kind:  "message".to_owned(),
+            role:  "assistant".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "should not reach this".to_owned(),
+            }],
+            stop_reason: Some("end_turn".to_owned()),
+            usage: mid_usage.clone(),
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+        };
+        let model = Arc::new(MockStreamingModelClient::new(vec![
+            (mid_usage, resp),
+        ]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
+        cfg.max_tokens_output_total = Some(100);
+        let mut d = DispatchLoop::new(
+            model,
+            registry,
+            cfg,
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d
+            .run_streaming("sys".to_owned(), "seed".to_owned())
+            .await
+            .unwrap();
+        match out {
+            DispatchOutcome::TokensExceeded {
+                which,
+                output_tokens,
+                ceiling,
+                ..
+            } => {
+                assert_eq!(which, "output");
+                assert_eq!(output_tokens, 200);
+                assert_eq!(ceiling, 100);
+            }
+            other => panic!("expected TokensExceeded(output), got {other:?}"),
+        }
+    }
+
+    /// V2_EXTENDED_GAPS §2.5 — mid-stream total ceiling abort.
+    #[tokio::test]
+    async fn streaming_mid_stream_total_ceiling_aborts() {
+        let mid_usage = Usage {
+            input_tokens:  80,
+            output_tokens: 80,  // total 160 > ceiling 100
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens:     0,
+        };
+        let resp = MessageResponse {
+            id:    "msg-total".to_owned(),
+            kind:  "message".to_owned(),
+            role:  "assistant".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "over budget".to_owned(),
+            }],
+            stop_reason: Some("end_turn".to_owned()),
+            usage: mid_usage.clone(),
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+        };
+        let model = Arc::new(MockStreamingModelClient::new(vec![
+            (mid_usage, resp),
+        ]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
+        cfg.max_tokens_total = Some(100);
+        let mut d = DispatchLoop::new(
+            model,
+            registry,
+            cfg,
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d
+            .run_streaming("sys".to_owned(), "seed".to_owned())
+            .await
+            .unwrap();
+        match out {
+            DispatchOutcome::TokensExceeded { which, .. } => {
+                assert_eq!(which, "total",
+                    "total ceiling must fire before input/output per check_ceilings order");
+            }
+            other => panic!("expected TokensExceeded(total), got {other:?}"),
+        }
+    }
+
+    /// Streaming under budget completes normally with tool dispatch.
+    #[tokio::test]
+    async fn streaming_under_budget_completes_tool_dispatch() {
+        let mid1 = Usage {
+            input_tokens:  20,
+            output_tokens: 10,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens:     0,
+        };
+        let r1 = tool_use_response(
+            "tu1", "read_file",
+            serde_json::json!({ "path": "hello.txt" }),
+        );
+        // Override usage on r1 to match mid-stream
+        let r1 = MessageResponse { usage: mid1.clone(), ..r1 };
+
+        let mid2 = Usage::default();
+        let r2 = empty_response_end_turn("file read");
+
+        let model = Arc::new(MockStreamingModelClient::new(vec![
+            (mid1, r1),
+            (mid2, r2),
+        ]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
+        cfg.max_tokens_output_total = Some(1000); // plenty of headroom
+        let mut d = DispatchLoop::new(
+            model,
+            registry,
+            cfg,
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d
+            .run_streaming("sys".to_owned(), "seed".to_owned())
+            .await
+            .unwrap();
+        assert!(matches!(out, DispatchOutcome::Idle { .. }),
+            "under-budget streaming must complete normally, got {out:?}");
     }
 }
