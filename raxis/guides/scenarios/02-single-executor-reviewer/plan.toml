@@ -4,16 +4,17 @@
 # Reviewer at the Executor's evaluation_sha; if the Reviewer rejects,
 # the Executor reboots with the critique prepended to its system prompt.
 
-[workspace]
-name        = "Single Executor + Reviewer"
-lane_id     = "single-er-lane"
+[plan.initiative]
 description = """
-  The adder Executor implements pub fn add(a: i32, b: i32) -> i32
+The adder Executor implements pub fn add(a: i32, b: i32) -> i32
   in src/lib.rs and writes a unit test. The reviewer Reviewer evaluates
   the resulting commit and approves only if the implementation is
   correct, idiomatic Rust, and the unit test actually exercises the
   function.
 """
+[workspace]
+name        = "Single Executor + Reviewer"
+lane_id     = "single-er-lane"
 
 # ── Executor ────────────────────────────────────────────────────────────────
 [[tasks]]
@@ -22,7 +23,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-context = """
+description = """
   Add a public function `pub fn add(a: i32, b: i32) -> i32` to
   `src/lib.rs` that returns the sum. Add a `#[cfg(test)] mod tests`
   block in the same file with at least one #[test] that exercises
@@ -43,7 +44,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["adder"]
-context = """
+description = """
   Evaluate the commit produced by `adder`. Approve only if:
     1. The function signature matches `pub fn add(a: i32, b: i32) -> i32` exactly.
     2. The implementation is straightforward (a + b is fine; no creative interpretations).

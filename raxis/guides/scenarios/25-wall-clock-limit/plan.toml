@@ -1,5 +1,9 @@
 # Scenario 25 — wall-clock ceiling.
 
+[plan.initiative]
+description = """
+Wall clock limit (scenario 25)
+"""
 [workspace]
 name        = "Wall-clock limit"
 lane_id     = "wallclock-lane"
@@ -10,7 +14,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 wall_clock_seconds = 5
-context = """
+description = """
   Add an exhaustive 5,000-word essay as a comment in src/main.rs
   explaining each line of the program. Be very thorough.
 """

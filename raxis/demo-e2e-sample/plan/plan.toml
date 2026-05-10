@@ -1,19 +1,45 @@
-# RAXIS sample plan for manual E2E demo (same shape as fixtures/minimal_plan.toml).
+# RAXIS V2 sample plan for the manual end-to-end demo.
 #
-# After setup.sh: sign with `raxis policy sign …/plan/plan.toml --key <operator.pem>`
-# then `plan submit test-minimal-001 <plan_dir>`.
+# After running `setup.sh`, sign and submit:
+#   raxis plan sign   plan.toml --key <operator.pem>
+#   raxis plan submit plan.toml
+#
+# The kernel reads `[plan.initiative].description` as the orchestrator
+# seed prompt and `[[tasks]].description` as each Executor / Reviewer
+# seed prompt. Both fields are REQUIRED (V2 v2_extended_gaps.md §1.1).
 
-[plan]
-initiative_id   = "test-minimal-001"
-description     = "Demo minimal single-task plan (no gates)"
-version         = "1"
+[meta]
+version = 1
+
+[plan.initiative]
+description = """
+Add a /healthz endpoint to the demo service. Wire it into the existing HTTP
+router, return a JSON `{ "status": "ok" }` body with HTTP 200, and add an
+integration test that exercises the new route end-to-end.
+"""
+
+[workspace]
+lane_id    = "main"
+target_ref = "refs/heads/main"
 
 [[tasks]]
-task_id          = "task-alpha"
-description      = "Demo task"
-intent_kinds     = ["SingleCommit", "CompleteTask"]
-path_allowlist   = ["src/", "tests/"]
-predecessors     = []
-gates            = []
+task_id            = "implement_healthz"
+name               = "Implement /healthz route"
+description        = """
+Add the /healthz route to the existing HTTP router. The handler returns
+HTTP 200 with the JSON body `{ "status": "ok" }`. Keep the change scoped
+to the router module and its sibling tests; do not touch unrelated handlers.
+"""
+session_agent_type = "Executor"
+clone_strategy     = "blobless"
 
-terminal_criteria = "AllTasksSucceeded"
+[[tasks]]
+task_id            = "review_healthz"
+name               = "Review /healthz route"
+description        = """
+Review the implementation produced by `implement_healthz`. Confirm the
+route is registered, the response body matches `{ "status": "ok" }`, and
+the new integration test exercises the new route end-to-end.
+"""
+session_agent_type = "Reviewer"
+predecessors       = ["implement_healthz"]

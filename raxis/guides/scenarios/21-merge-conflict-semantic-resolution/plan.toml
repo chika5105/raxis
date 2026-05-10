@@ -1,5 +1,9 @@
 # Scenario 21 — semantic merge conflict (disjoint symbols, same file).
 
+[plan.initiative]
+description = """
+Merge conflict semantic resolution (scenario 21)
+"""
 [workspace]
 name        = "Semantic merge"
 lane_id     = "semantic-merge-lane"
@@ -9,7 +13,7 @@ task_id            = "harden-add"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   In src/lib.rs, change `add` to use checked arithmetic (return
   `Option<i64>`). Do NOT touch `mul`. Run `cargo build`. Commit.
 """
@@ -19,7 +23,7 @@ task_id            = "harden-mul"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   In src/lib.rs, change `mul` to use checked arithmetic (return
   `Option<i64>`). Do NOT touch `add`. Run `cargo build`. Commit.
 """

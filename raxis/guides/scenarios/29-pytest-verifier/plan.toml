@@ -1,5 +1,9 @@
 # Scenario 29 — pytest verifier.
 
+[plan.initiative]
+description = """
+Pytest verifier (scenario 29)
+"""
 [workspace]
 name        = "pytest verifier"
 lane_id     = "pytest-lane"
@@ -9,7 +13,7 @@ task_id            = "extend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "tests/"]
-context = """
+description = """
   Add `def sub(a, b)` to src/calc.py and a test for it in
   tests/test_calc.py. Run pytest. Commit on green.
 """

@@ -1,13 +1,14 @@
 # Scenario 04 — Fix a typo with a cargo-build witness.
 
-[workspace]
-name        = "Fix typo with witness"
-lane_id     = "fix-typo-lane"
+[plan.initiative]
 description = """
-  The fixer Executor restores `pub fn add(...)` in src/lib.rs; the
+The fixer Executor restores `pub fn add(...)` in src/lib.rs; the
   cargo_build verifier confirms the build succeeds before the merge
   is allowed to advance main.
 """
+[workspace]
+name        = "Fix typo with witness"
+lane_id     = "fix-typo-lane"
 
 [[tasks]]
 task_id            = "fixer"
@@ -15,7 +16,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-context = """
+description = """
   src/lib.rs has a typo: `pub fn ad(...)` should be `pub fn add(...)`.
   Restore the correct function name. Do not change the signature, the
   body, or the test. Commit with the message "scenario 04: fix typo"

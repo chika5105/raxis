@@ -1,5 +1,9 @@
 # Scenario 40 — default-deny posture.
 
+[plan.initiative]
+description = """
+Block everything by default (scenario 40)
+"""
 [workspace]
 name        = "Default deny"
 lane_id     = "default-deny-lane"
@@ -9,7 +13,7 @@ task_id            = "try-egress"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   Try to fetch https://1.1.1.1 via curl. The kernel is configured to
   deny that egress. Document in src/main.rs the *outcome* (the
   audit-recorded denial code).

@@ -1,5 +1,9 @@
 # Scenario 16 step 1 — wire the feature flag (still off).
 
+[plan.initiative]
+description = """
+Feature flag rollout (scenario 16)
+"""
 [workspace]
 name        = "Wire feature flag (off)"
 lane_id     = "ff-wire-lane"
@@ -9,7 +13,7 @@ task_id            = "wire"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   In src/main.rs, parse config/flags.json (read only) and branch on
   `new_pricing`. If true, print "new", else print "legacy". Commit.
 """

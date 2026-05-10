@@ -14,22 +14,26 @@
 // Coverage (in evaluation order, deterministic):
 //
 //   1. TOML parse              — operator-typed syntax errors
-//   2. Required sections       — `[workspace]`, `[[tasks]]`
-//   3. `[workspace] lane_id`   — present + non-empty
-//   4. Per-task fields:
+//   2. Required sections       — `[plan.initiative]`, `[workspace]`, `[[tasks]]`
+//   3. `[plan.initiative] description` (V2 v2_extended_gaps.md §1.1) —
+//      present + non-empty + ≤ 64 KiB
+//   4. `[workspace] lane_id`   — present + non-empty
+//   5. Per-task fields:
 //        - `task_id` required
+//        - `description` (V2 v2_extended_gaps.md §1.1) — present +
+//          non-empty + ≤ 64 KiB
 //        - no `lane_id` override (single-lane propagation per V2 §28)
 //        - no `session_agent_type = "Orchestrator"` (V2 §27 rule 1)
 //        - valid `clone_strategy` ∈ {`full`, `blobless`, `sparse`}
 //          (V2 §27 typed clone strategy)
 //        - valid `session_agent_type` ∈ {`Executor`, `Reviewer`} when
 //          declared
-//   5. DAG family:
+//   6. DAG family:
 //        - duplicate `task_id`
 //        - self-loop (`task.predecessors` lists itself)
 //        - dangling predecessor (id not declared in this plan)
 //        - cyclic dependency (DFS over the predecessor graph)
-//   6. Cross-cutting artifacts (`[orchestrator] cross_cutting_artifacts`):
+//   7. Cross-cutting artifacts (`[orchestrator] cross_cutting_artifacts`):
 //        - empty entry, leading `!`, leading or trailing `/`,
 //          `..` segments, embedded `/`, glob characters
 //
@@ -118,8 +122,22 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
     };
 
     // ── Step 2: required sections ─────────────────────────────────────────
+    let plan_initiative = doc
+        .get("plan")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("initiative"))
+        .and_then(|v| v.as_table());
     let workspace = doc.get("workspace").and_then(|v| v.as_table());
     let tasks_arr = doc.get("tasks").and_then(|v| v.as_array());
+    if plan_initiative.is_none() {
+        r.fail(
+            "required sections",
+            "missing [plan.initiative] (V2 §1.1: declare \
+             `[plan.initiative]\\ndescription = \"...\"` to seed the \
+             orchestrator agent)"
+                .to_owned(),
+        );
+    }
     if workspace.is_none() {
         r.fail("required sections", "missing [workspace]".to_owned());
     }
@@ -131,7 +149,60 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
     }
     r.ok("required sections present");
 
-    // ── Step 3: [workspace] lane_id ───────────────────────────────────────
+    // ── Step 3: [plan.initiative] description (V2 §1.1) ──────────────────
+    // Mirrors the kernel `parse_plan_orchestrator` validator. Same
+    // 64 KiB cap so an operator catches `execve(2)` `ARG_MAX` issues
+    // client-side instead of after the round-trip.
+    const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
+    let plan_initiative = plan_initiative.unwrap();
+    match plan_initiative.get("description") {
+        Some(toml::Value::String(s)) => {
+            let trimmed = s.trim_end();
+            if trimmed.is_empty() {
+                r.fail(
+                    "[plan.initiative] description",
+                    "is empty; V2 §1.1 requires a non-empty initiative \
+                     description so the orchestrator agent has a concrete \
+                     seed prompt"
+                        .to_owned(),
+                );
+                return r;
+            }
+            if trimmed.len() > MAX_DESCRIPTION_BYTES {
+                r.fail(
+                    "[plan.initiative] description",
+                    format!(
+                        "is {} bytes, exceeds 64 KiB cap; trim to fit \
+                         execve(2) ARG_MAX",
+                        trimmed.len(),
+                    ),
+                );
+                return r;
+            }
+            r.ok(&format!(
+                "[plan.initiative] description ({} byte(s))",
+                trimmed.len(),
+            ));
+        }
+        Some(_) => {
+            r.fail(
+                "[plan.initiative] description",
+                "must be a TOML string".to_owned(),
+            );
+            return r;
+        }
+        None => {
+            r.fail(
+                "[plan.initiative] description",
+                "is missing; V2 §1.1 requires `[plan.initiative]\\n\
+                 description = \"<what is this initiative about?>\"`"
+                    .to_owned(),
+            );
+            return r;
+        }
+    }
+
+    // ── Step 4: [workspace] lane_id ───────────────────────────────────────
     let workspace = workspace.unwrap();
     let lane_id = match workspace.get("lane_id").and_then(|v| v.as_str()) {
         None | Some("") => {
@@ -148,7 +219,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
     };
     r.ok(&format!("[workspace] lane_id = \"{lane_id}\""));
 
-    // ── Step 4: per-task fields ───────────────────────────────────────────
+    // ── Step 5: per-task fields ───────────────────────────────────────────
     let mut tasks: Vec<ParsedTask> = Vec::new();
     for (i, entry) in tasks_arr.unwrap().iter().enumerate() {
         let task_id = match entry.get("task_id").and_then(|v| v.as_str()) {
@@ -161,6 +232,59 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
                 return r;
             }
         };
+
+        // V2 v2_extended_gaps.md §1.1 — every `[[tasks]]` block must
+        // declare a non-empty `description`. Mirrors the kernel
+        // `parse_plan_tasks` validator. Catches operator typos before
+        // the signed-bundle round-trip.
+        match entry.get("description") {
+            Some(toml::Value::String(s)) => {
+                let trimmed = s.trim_end();
+                if trimmed.is_empty() {
+                    r.fail(
+                        "[[tasks]] description",
+                        format!(
+                            "task `{task_id}` has empty `description`; \
+                             V2 §1.1 requires a non-empty per-task seed \
+                             prompt — describe what the agent should do"
+                        ),
+                    );
+                    return r;
+                }
+                if trimmed.len() > MAX_DESCRIPTION_BYTES {
+                    r.fail(
+                        "[[tasks]] description",
+                        format!(
+                            "task `{task_id}` description is {} bytes, \
+                             exceeds 64 KiB cap; trim to fit execve(2) \
+                             ARG_MAX",
+                            trimmed.len(),
+                        ),
+                    );
+                    return r;
+                }
+            }
+            Some(_) => {
+                r.fail(
+                    "[[tasks]] description",
+                    format!(
+                        "task `{task_id}` `description` must be a TOML string"
+                    ),
+                );
+                return r;
+            }
+            None => {
+                r.fail(
+                    "[[tasks]] description",
+                    format!(
+                        "task `{task_id}` is missing required `description` \
+                         field — V2 §1.1 requires every task to declare what \
+                         the agent should do"
+                    ),
+                );
+                return r;
+            }
+        }
 
         if let Some(per_task_lane) = entry.get("lane_id").and_then(|v| v.as_str()) {
             if !per_task_lane.is_empty() {
@@ -404,19 +528,27 @@ fn check_path_allowlist_entry(entry: &str) -> Result<(), &'static str> {
 mod tests {
     use super::*;
 
+    /// Standard test plan: every required field present, two tasks
+    /// with descriptions, deterministic DAG. Extend tests using
+    /// `passing_plan_with(...)` when a single field needs to vary.
     fn passing_plan() -> &'static str {
         r#"
+[plan.initiative]
+description = "Add a healthz endpoint"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "build"
+task_id            = "build"
+description        = "Compile the new endpoint and supporting modules"
 session_agent_type = "Executor"
 
 [[tasks]]
-task_id = "test"
+task_id            = "test"
+description        = "Run the integration test against /healthz"
 session_agent_type = "Executor"
-predecessors = ["build"]
+predecessors       = ["build"]
 "#
     }
 
@@ -431,8 +563,12 @@ predecessors = ["build"]
     #[test]
     fn missing_workspace_section_is_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [[tasks]]
-task_id = "a"
+task_id     = "a"
+description = "do thing"
 "#);
         assert!(r.first_error.as_ref().unwrap().contains("[workspace]"));
     }
@@ -440,10 +576,14 @@ task_id = "a"
     #[test]
     fn missing_workspace_lane_is_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 
 [[tasks]]
-task_id = "a"
+task_id     = "a"
+description = "do thing"
 "#);
         let err = r.first_error.unwrap();
         assert!(err.contains("[workspace] lane_id"), "err = {err}");
@@ -452,11 +592,15 @@ task_id = "a"
     #[test]
     fn orchestrator_task_declaration_is_rejected_with_v2_hint() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "orch"
+task_id            = "orch"
+description        = "do thing"
 session_agent_type = "Orchestrator"
 "#);
         let err = r.first_error.unwrap();
@@ -467,11 +611,15 @@ session_agent_type = "Orchestrator"
     #[test]
     fn invalid_clone_strategy_is_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "a"
+task_id        = "a"
+description    = "do thing"
 clone_strategy = "shallow"
 "#);
         let err = r.first_error.unwrap();
@@ -482,12 +630,16 @@ clone_strategy = "shallow"
     #[test]
     fn per_task_lane_id_override_is_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "a"
-lane_id = "other"
+task_id     = "a"
+description = "do thing"
+lane_id     = "other"
 "#);
         let err = r.first_error.unwrap();
         assert!(err.contains("single-lane propagation"), "err = {err}");
@@ -496,13 +648,18 @@ lane_id = "other"
     #[test]
     fn duplicate_task_ids_are_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "a"
+task_id     = "a"
+description = "do thing"
 [[tasks]]
-task_id = "a"
+task_id     = "a"
+description = "do thing again"
 "#);
         let err = r.first_error.unwrap();
         assert!(err.contains("duplicate"), "err = {err}");
@@ -511,11 +668,15 @@ task_id = "a"
     #[test]
     fn self_loop_is_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "a"
+task_id      = "a"
+description  = "do thing"
 predecessors = ["a"]
 "#);
         let err = r.first_error.unwrap();
@@ -525,11 +686,15 @@ predecessors = ["a"]
     #[test]
     fn dangling_predecessor_is_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "a"
+task_id      = "a"
+description  = "do thing"
 predecessors = ["ghost"]
 "#);
         let err = r.first_error.unwrap();
@@ -539,15 +704,20 @@ predecessors = ["ghost"]
     #[test]
     fn cycle_is_detected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "a"
+task_id      = "a"
+description  = "do thing"
 predecessors = ["b"]
 
 [[tasks]]
-task_id = "b"
+task_id      = "b"
+description  = "do other thing"
 predecessors = ["a"]
 "#);
         let err = r.first_error.unwrap();
@@ -557,6 +727,9 @@ predecessors = ["a"]
     #[test]
     fn cross_cutting_artifact_globs_are_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
@@ -564,7 +737,8 @@ lane_id = "default"
 cross_cutting_artifacts = ["Cargo.lock", "*.toml"]
 
 [[tasks]]
-task_id = "a"
+task_id     = "a"
+description = "do thing"
 "#);
         let err = r.first_error.unwrap();
         assert!(err.contains("glob"), "err = {err}");
@@ -573,11 +747,15 @@ task_id = "a"
     #[test]
     fn path_allowlist_glob_is_rejected() {
         let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "a"
+task_id        = "a"
+description    = "do thing"
 path_allowlist = ["src/*.rs"]
 "#);
         let err = r.first_error.unwrap();
@@ -585,15 +763,126 @@ path_allowlist = ["src/*.rs"]
     }
 
     #[test]
-    fn empty_plan_with_zero_tasks_passes() {
+    fn single_task_plan_passes() {
+        let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id     = "noop"
+description = "do thing"
+"#);
+        assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
+    }
+
+    // ── V2 v2_extended_gaps.md §1.1 — description checks ────────────────
+
+    #[test]
+    fn missing_plan_initiative_section_is_rejected() {
         let r = validate_plan_text(r#"
 [workspace]
 lane_id = "default"
 
 [[tasks]]
-task_id = "noop"
+task_id     = "a"
+description = "do thing"
 "#);
-        assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
+        let err = r.first_error.unwrap();
+        assert!(err.contains("[plan.initiative]"), "err = {err}");
+        assert!(err.contains("§1.1"), "err = {err}");
+    }
+
+    #[test]
+    fn missing_plan_initiative_description_is_rejected() {
+        let r = validate_plan_text(r#"
+[plan.initiative]
+
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "do thing"
+"#);
+        let err = r.first_error.unwrap();
+        assert!(err.contains("[plan.initiative] description"), "err = {err}");
+        assert!(err.contains("missing"), "err = {err}");
+    }
+
+    #[test]
+    fn empty_plan_initiative_description_is_rejected() {
+        let r = validate_plan_text(r#"
+[plan.initiative]
+description = "   "
+
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "do thing"
+"#);
+        let err = r.first_error.unwrap();
+        assert!(err.contains("[plan.initiative] description"), "err = {err}");
+        assert!(err.contains("empty"), "err = {err}");
+    }
+
+    #[test]
+    fn missing_task_description_is_rejected() {
+        let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id = "a"
+"#);
+        let err = r.first_error.unwrap();
+        assert!(err.contains("[[tasks]] description"), "err = {err}");
+        assert!(err.contains("missing"), "err = {err}");
+        assert!(err.contains("`a`"), "err = {err}");
+    }
+
+    #[test]
+    fn empty_task_description_is_rejected() {
+        let r = validate_plan_text(r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "   "
+"#);
+        let err = r.first_error.unwrap();
+        assert!(err.contains("[[tasks]] description"), "err = {err}");
+        assert!(err.contains("empty"), "err = {err}");
+    }
+
+    #[test]
+    fn oversized_task_description_is_rejected() {
+        let huge = "x".repeat(65 * 1024);
+        let plan = format!(r#"
+[plan.initiative]
+description = "fixture"
+
+[workspace]
+lane_id = "default"
+
+[[tasks]]
+task_id     = "a"
+description = "{huge}"
+"#);
+        let r = validate_plan_text(&plan);
+        let err = r.first_error.unwrap();
+        assert!(err.contains("64 KiB"), "err = {err}");
     }
 
     fn _unused_warns_to_silence_compiler(p: &std::path::Path) {

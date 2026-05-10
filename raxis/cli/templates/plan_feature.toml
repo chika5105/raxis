@@ -18,6 +18,12 @@ target_ref = "refs/heads/main"
 [[tasks]]
 task_id            = "implement_feature"
 name               = "Implement feature"
+description        = """
+Implement @@INITIATIVE_NAME@@ end-to-end. Read the existing surrounding code
+to keep style and naming conventions consistent, add or update tests to cover
+the new behaviour, and stop as soon as the feature compiles cleanly and the
+new tests pass.
+"""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 
@@ -25,5 +31,10 @@ clone_strategy     = "blobless"
 [[tasks]]
 task_id            = "review_feature"
 name               = "Review feature"
+description        = """
+Review the implementation produced by `implement_feature`. Confirm: the new
+behaviour matches the initiative description, tests are present and exercise
+the new code, and there are no obvious regressions in surrounding modules.
+"""
 session_agent_type = "Reviewer"
 predecessors       = ["implement_feature"]

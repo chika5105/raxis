@@ -1,16 +1,19 @@
 # Scenario 14 — DB migration then app change.
 
+[plan.initiative]
+description = """
+Add `display_name` column then surface it in src/users.py.
+"""
 [workspace]
 name        = "DB migration + app change"
 lane_id     = "db-migration-lane"
-description = "Add `display_name` column then surface it in src/users.py."
 
 [[tasks]]
 task_id            = "migration"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["migrations/"]
-context = """
+description = """
   Add migrations/002_add_display_name.sql adding a TEXT column
   `display_name` to `users`. Use `ALTER TABLE`. Commit.
 """
@@ -21,7 +24,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["migration"]
-context = """
+description = """
   Update src/users.py: add `get_display_name(user)` returning the
   display_name field. Commit.
 """

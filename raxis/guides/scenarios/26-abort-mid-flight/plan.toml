@@ -1,5 +1,9 @@
 # Scenario 26 — abort mid-flight.
 
+[plan.initiative]
+description = """
+Abort mid flight (scenario 26)
+"""
 [workspace]
 name        = "Abort mid-flight"
 lane_id     = "abort-lane"
@@ -10,7 +14,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 wall_clock_seconds = 600
-context = """
+description = """
   Add a 5,000-line auto-generated module to src/main.rs, with each
   line incrementing a counter. Take your time.
 """

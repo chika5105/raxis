@@ -460,10 +460,11 @@ pub struct PlanApproved {
     pub orchestrator_session_id: Option<String>,
 
     /// V2 `v2_extended_gaps.md §1.1` — operator-authored seed prompt
-    /// for the orchestrator agent, sourced from the signed plan TOML's
-    /// `[workspace] description` field. Empty when the plan omits it
-    /// (the V1 default — keeps the orchestrator binary in scaffold/
-    /// park mode `INV-DRIVER-01`). The post-commit
+    /// for the orchestrator agent, sourced from the signed plan
+    /// TOML's `[plan.initiative] description` field. Always
+    /// non-empty: the parser rejects plans whose `[plan.initiative]
+    /// description` is missing or empty (same `FAIL_PLAN_PARSE_ERROR`
+    /// class as missing `task_id`). The post-commit
     /// `ctx.orchestrator_spawn.spawn_for_initiative(...)` callsite
     /// stamps this verbatim into the spawned VM's
     /// `RAXIS_PLANNER_TASK_PROMPT` env var.
@@ -1988,45 +1989,50 @@ fn parse_plan_orchestrator(plan_toml: &str)
         .unwrap_or_default();
 
     // V2 `v2_extended_gaps.md §1.1` — initiative-level seed prompt
-    // for the orchestrator. Sourced from `[workspace] description`
-    // (the conventional TOML location for "what is this initiative
-    // about?").
+    // for the orchestrator. Sourced from `[plan.initiative]
+    // description`, the canonical operator-authored "what is this
+    // initiative about?" surface per `kernel-mechanics-prompt.md
+    // §3.2`. The orchestrator KSB renders this verbatim into the
+    // `[KERNEL: INITIATIVE GUIDANCE]` block.
     //
-    // **REQUIRED**: the `[workspace]` table MUST declare a
-    // non-empty `description` string. Same `FAIL_PLAN_PARSE_ERROR`
-    // class as missing `lane_id` — operators MUST tell the
-    // orchestrator agent what the initiative is. Same 64 KiB cap
-    // as task descriptions to bound the env-var footprint.
+    // **REQUIRED**: every plan MUST declare `[plan.initiative]
+    // description = "..."` with non-empty content. Same
+    // `FAIL_PLAN_PARSE_ERROR` class as missing `task_id`. Same
+    // 64 KiB cap as task descriptions to bound the env-var
+    // footprint passed to the substrate.
     const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
-    let workspace_table = doc
-        .get("workspace")
+    let initiative_table = doc
+        .get("plan")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("initiative"))
         .and_then(|v| v.as_table());
-    let description = match workspace_table.and_then(|t| t.get("description")) {
+    let description = match initiative_table.and_then(|t| t.get("description")) {
         Some(toml::Value::String(s)) => s.trim_end().to_owned(),
         Some(_) => {
             return Err(LifecycleError::PlanInvalid {
-                reason: "[workspace] description must be a TOML string".to_owned(),
+                reason: "[plan.initiative] description must be a TOML string".to_owned(),
             });
         }
         None => {
             return Err(LifecycleError::PlanInvalid {
-                reason: "[workspace] is missing required `description` field — \
-                         operator must declare what the initiative is about \
-                         (V2 v2_extended_gaps.md §1.1)".to_owned(),
+                reason: "[plan.initiative] is missing required `description` \
+                         field — operator must declare what the initiative is \
+                         about (V2 v2_extended_gaps.md §1.1, \
+                         kernel-mechanics-prompt.md §3.2)".to_owned(),
             });
         }
     };
     if description.is_empty() {
         return Err(LifecycleError::PlanInvalid {
-            reason: "[workspace] `description` is empty — operator must \
-                     declare what the initiative is about \
+            reason: "[plan.initiative] `description` is empty — operator \
+                     must declare what the initiative is about \
                      (V2 v2_extended_gaps.md §1.1)".to_owned(),
         });
     }
     if description.len() > MAX_DESCRIPTION_BYTES {
         return Err(LifecycleError::PlanInvalid {
             reason: format!(
-                "[workspace] description is {bytes} bytes, exceeds cap {cap}",
+                "[plan.initiative] description is {bytes} bytes, exceeds cap {cap}",
                 bytes = description.len(),
                 cap = MAX_DESCRIPTION_BYTES,
             ),
@@ -4474,9 +4480,11 @@ session_agent_type = "Coordinator"
         let (sk, _) = fixture_keypair();
         // Operator declared an Orchestrator task — V2 forbids this.
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: rogue orchestrator"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id            = "rogue-orch"
@@ -4506,9 +4514,11 @@ session_agent_type = "Orchestrator"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: unknown clone strategy"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id        = "t1"
@@ -4536,9 +4546,11 @@ clone_strategy = "treeless"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: clone strategy persistence"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id        = "build-svc"
@@ -4592,9 +4604,11 @@ predecessors       = ["run-tests"]
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: subtask activations"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id     = "build-svc"
@@ -4695,9 +4709,11 @@ predecessors       = ["run-tests"]
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: known proxy types"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id     = "build-svc"
@@ -4783,9 +4799,11 @@ predecessors = ["test-it"]
         // round-trip exercises postgres + http + k8s + per-task row
         // partitioning all in one go.
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: credential proxies persistence"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id     = "build-svc"
@@ -4947,9 +4965,11 @@ predecessors = ["build-svc"]
         // the test keeps tracking the unknown-arm policy as new
         // proxies are added.
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: unknown proxy type"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id     = "send-email"
@@ -5005,9 +5025,11 @@ description = "send the email"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: malformed credential block"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id     = "x"
@@ -5402,9 +5424,11 @@ on_failure  = "block_review"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: pre-merge verifier unknown task"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id     = "implement_auth"
@@ -5447,9 +5471,11 @@ task_set    = ["implement_auth", "implement_session"]
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-[workspace]
-lane_id     = "default"
+[plan.initiative]
 description = "fixture: pre-merge verifier valid"
+
+[workspace]
+lane_id = "default"
 
 [[tasks]]
 task_id     = "t1"
@@ -5681,54 +5707,44 @@ target_ref = "refs/heads/raxis/feature"
         } else {
             format!("[workspace]\nlane_id = \"default\"\n\n{plan_toml}")
         };
-        // V2 `v2_extended_gaps.md §1.1` — `[workspace] description`
-        // is REQUIRED. If the test author didn't add one, splice in
-        // a deterministic placeholder. We splice INTO the existing
-        // [workspace] table (matching the table header line) so we
-        // never duplicate the table.
-        let with_description = ensure_workspace_description(&with_workspace);
+        // V2 `v2_extended_gaps.md §1.1` — `[plan.initiative]
+        // description` is REQUIRED. If the test author didn't add
+        // one, splice in a deterministic placeholder (and the
+        // surrounding `[plan.initiative]` table when missing).
+        let with_initiative_description =
+            ensure_plan_initiative_description(&with_workspace);
         // V2 `v2_extended_gaps.md §1.1` — every `[[tasks]]` block
         // must declare a non-empty `description`. Inject a
         // deterministic placeholder per task that lacks one so
         // legacy unit-test fixtures continue to validate without
         // being individually rewritten.
-        ensure_task_descriptions(&with_description)
+        ensure_task_descriptions(&with_initiative_description)
     }
 
     /// V2 `v2_extended_gaps.md §1.1` test helper — splice
-    /// `description = "<placeholder>"` into the `[workspace]` table
-    /// when the test author didn't author one. Idempotent: a plan
-    /// that already has a `description` line under `[workspace]` is
-    /// returned verbatim.
-    fn ensure_workspace_description(plan_toml: &str) -> String {
-        // Cheap detection: if the literal `description` substring
-        // appears anywhere in the file inside `[workspace]`'s
-        // section, leave it alone. We don't try to be precise about
-        // table boundaries — these are hand-authored short test
-        // fixtures, and a false-negative (we splice when the
-        // operator already authored one) would surface immediately
-        // as a TOML duplicate-key parse error from the next call.
-        if has_field_in_table(plan_toml, "workspace", "description") {
+    /// `[plan.initiative] description = "<placeholder>"` into the
+    /// plan TOML when the test author didn't author one. Idempotent.
+    fn ensure_plan_initiative_description(plan_toml: &str) -> String {
+        if has_field_in_dotted_table(plan_toml, "plan.initiative", "description") {
             return plan_toml.to_owned();
         }
-        // Find the `[workspace]` (or `[ workspace ]`) header and
-        // splice the field on the next line. We've already verified
-        // a workspace table exists upstream.
-        let needle_a = "[workspace]";
-        let needle_b = "[ workspace ]";
-        let (idx, len) = if let Some(i) = plan_toml.find(needle_a) {
-            (i, needle_a.len())
-        } else if let Some(i) = plan_toml.find(needle_b) {
-            (i, needle_b.len())
+        let header = "[plan.initiative]";
+        if let Some(idx) = plan_toml.find(header) {
+            // Table exists, just splice the field after the header.
+            let mut s = plan_toml.to_owned();
+            s.insert_str(
+                idx + header.len(),
+                "\ndescription = \"test fixture: kernel exercise plan\"",
+            );
+            s
         } else {
-            unreachable!("ensure_workspace_lane guaranteed [workspace] above");
-        };
-        let mut s = plan_toml.to_owned();
-        s.insert_str(
-            idx + len,
-            "\ndescription = \"test fixture: kernel exercise plan\"",
-        );
-        s
+            // Prepend the entire table.
+            format!(
+                "[plan.initiative]\n\
+                 description = \"test fixture: kernel exercise plan\"\n\n\
+                 {plan_toml}",
+            )
+        }
     }
 
     /// V2 `v2_extended_gaps.md §1.1` test helper — for every
@@ -5784,10 +5800,10 @@ target_ref = "refs/heads/raxis/feature"
         out
     }
 
-    /// Check whether `field` appears inside `[table]` in a TOML
-    /// string. Cheap substring scan — good enough for hand-authored
-    /// test fixtures; not appropriate for production parsing.
-    fn has_field_in_table(plan_toml: &str, table: &str, field: &str) -> bool {
+    /// Check whether `field` appears inside `[dotted.table]` in a
+    /// TOML string. Cheap substring scan — good enough for hand-
+    /// authored test fixtures; not appropriate for production parsing.
+    fn has_field_in_dotted_table(plan_toml: &str, table: &str, field: &str) -> bool {
         let header = format!("[{table}]");
         let Some(start) = plan_toml.find(&header) else {
             return false;
@@ -6266,7 +6282,7 @@ target_ref = "refs/heads/raxis/feature"
             [meta]
             version = 1
 
-            [workspace]
+            [plan.initiative]
             description = "fixture: missing lane"
 
             [[tasks]]
@@ -6300,9 +6316,11 @@ target_ref = "refs/heads/raxis/feature"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-            [workspace]
-            lane_id     = ""
+            [plan.initiative]
             description = "fixture: empty lane"
+
+            [workspace]
+            lane_id = ""
 
             [[tasks]]
             task_id     = "t1"
@@ -6329,9 +6347,11 @@ target_ref = "refs/heads/raxis/feature"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-            [workspace]
-            lane_id     = "feature-work"
+            [plan.initiative]
             description = "fixture: lane override"
+
+            [workspace]
+            lane_id = "feature-work"
 
             [[tasks]]
             task_id     = "t1"
@@ -6368,9 +6388,11 @@ target_ref = "refs/heads/raxis/feature"
         // Three tasks, none declare lane_id. `[workspace]` declares the
         // single source of truth.
         let plan = r#"
-            [workspace]
-            lane_id     = "feature-work"
+            [plan.initiative]
             description = "fixture: lane propagation"
+
+            [workspace]
+            lane_id = "feature-work"
 
             [[tasks]]
             task_id     = "t1"
@@ -6801,18 +6823,23 @@ target_ref = "refs/heads/raxis/feature"
         );
     }
 
-    /// `[workspace] description` lands on the `OrchestratorPlanFields`
-    /// AND is surfaced through `PlanApproved.orchestrator_task_prompt`
-    /// so the post-commit caller can stamp it into the orchestrator
-    /// VM's env without doing a registry round-trip.
+    /// `[plan.initiative] description` lands on the
+    /// `OrchestratorPlanFields` AND is surfaced through
+    /// `PlanApproved.orchestrator_task_prompt` so the post-commit
+    /// caller can stamp it into the orchestrator VM's env without
+    /// doing a registry round-trip. This is the same field that
+    /// `kernel-mechanics-prompt.md §3.2` uses for the orchestrator
+    /// `[KERNEL: INITIATIVE GUIDANCE]` block.
     #[test]
     fn approve_plan_propagates_orchestrator_description_into_registry_and_result() {
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let plan = r#"
-            [workspace]
-            lane_id     = "default"
+            [plan.initiative]
             description = "Migrate the cron service from systemd-timer to k8s CronJobs"
+
+            [workspace]
+            lane_id = "default"
 
             [[tasks]]
             task_id = "only"
@@ -6834,10 +6861,10 @@ target_ref = "refs/heads/raxis/feature"
         assert_eq!(orch.description, result.orchestrator_task_prompt);
     }
 
-    /// Plans that omit `[workspace] description` MUST be rejected at
-    /// admission with a structured `PlanInvalid`. There is no
-    /// scaffold/park escape hatch — operators must always declare
-    /// what the initiative is about.
+    /// Plans that omit `[plan.initiative] description` MUST be
+    /// rejected at admission with a structured `PlanInvalid`. There
+    /// is no scaffold/park escape hatch — operators must always
+    /// declare what the initiative is about.
     #[test]
     fn approve_plan_rejects_missing_orchestrator_description() {
         let store = Store::open_in_memory().unwrap();
@@ -6858,12 +6885,12 @@ target_ref = "refs/heads/raxis/feature"
 
         let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect_err("plan without [workspace] description must be rejected");
+        ).expect_err("plan without [plan.initiative] description must be rejected");
         match err {
             LifecycleError::PlanInvalid { reason } => {
                 assert!(
-                    reason.contains("workspace") && reason.contains("description"),
-                    "expected workspace-description diagnostic; got `{reason}`",
+                    reason.contains("plan.initiative") && reason.contains("description"),
+                    "expected initiative-description diagnostic; got `{reason}`",
                 );
             }
             other => panic!("expected LifecycleError::PlanInvalid; got {other:?}"),

@@ -12,15 +12,16 @@
 #   raxis submit plan ./plan.toml --no-dry-run
 #   raxis plan approve <init-id>
 
-[workspace]
-name        = "Hello World"
-lane_id     = "hello-world-lane"
+[plan.initiative]
 description = """
-  The greeter task writes a small markdown file (HELLO.md) at the
+The greeter task writes a small markdown file (HELLO.md) at the
   repository root and commits it. No Reviewer; no merge gate; the
   initiative completes the moment the Executor's CompleteTask is
   accepted.
 """
+[workspace]
+name        = "Hello World"
+lane_id     = "hello-world-lane"
 
 # ── Greeter ───────────────────────────────────────────────────────────────────
 # `clone_strategy = "blobless"` is the V2 default. `path_allowlist = ["./"]`
@@ -33,7 +34,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["./"]
 predecessors       = []
-context = """
+description = """
   Create a file called HELLO.md at the repository root containing a
   cheerful one-line greeting. Commit it with the message "scenario 01:
   hello world". Then submit CompleteTask. Do not modify any other

@@ -1,6 +1,10 @@
 # Scenario 45 — intentionally invalid plan to demonstrate
 # admission-time rejection.
 
+[plan.initiative]
+description = """
+Quarantine a bad plan (scenario 45)
+"""
 [workspace]
 name        = "Bad plan"
 lane_id     = "bad-plan-lane"
@@ -10,4 +14,4 @@ task_id            = "escapes-the-jail"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["../etc/passwd"]
-context = "Will be rejected by validate."
+description = "Will be rejected by validate."

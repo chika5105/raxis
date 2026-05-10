@@ -1,9 +1,12 @@
 # Scenario 22 — reject-then-pass loop.
 
+[plan.initiative]
+description = """
+Reviewer rejects round 1, accepts round 2.
+"""
 [workspace]
 name        = "Reject then pass"
 lane_id     = "reject-pass-lane"
-description = "Reviewer rejects round 1, accepts round 2."
 
 [[tasks]]
 task_id            = "implement"
@@ -11,7 +14,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 max_revision_rounds = 3
-context = """
+description = """
   Add a function `pub fn greet(name: &str) -> String` to src/main.rs
   returning "Hello, NAME!". On the FIRST commit, intentionally use
   format! without escaping (the reviewer will reject). On the
@@ -24,7 +27,7 @@ task_id            = "review"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["implement"]
-context = """
+description = """
   Inspect implement's commit. If `format!` is used, Reject with
   reason "use bytes-safe concatenation". Otherwise Accept.
 """

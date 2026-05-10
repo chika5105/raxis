@@ -7,14 +7,15 @@
 # Run `raxis plan validate ./plan.toml` to confirm validity before
 # committing.
 
-[workspace]
-name        = "Scenario template"
-lane_id     = "scenario-template-lane"
+[plan.initiative]
 description = """
-  One-paragraph natural-language description of the work this plan
+One-paragraph natural-language description of the work this plan
   represents. The Orchestrator and Executor agents read this verbatim
   as part of their boot prompt.
 """
+[workspace]
+name        = "Scenario template"
+lane_id     = "scenario-template-lane"
 
 # ── Executor ──────────────────────────────────────────────────────────────────
 # Replace this stub with one [[tasks]] block per Executor your scenario
@@ -27,7 +28,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-context = """
+description = """
   Concrete, two-to-five-sentence task brief the agent will execute.
   Be specific about file names, function signatures, and acceptance
   criteria — agents do better with sharp prompts than soft ones.

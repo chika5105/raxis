@@ -1,20 +1,21 @@
 # Scenario 10 — coordinated API contract change.
 
-[workspace]
-name        = "API contract change"
-lane_id     = "api-contract-lane"
+[plan.initiative]
 description = """
-  Add a function `parse_version(s: &str) -> Result<(u32, u32, u32),
+Add a function `parse_version(s: &str) -> Result<(u32, u32, u32),
   ParseError>` to the library. Three tasks coordinate handler, tests,
   and docs.
 """
+[workspace]
+name        = "API contract change"
+lane_id     = "api-contract-lane"
 
 [[tasks]]
 task_id            = "handler"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   In src/lib.rs add `pub fn parse_version(s: &str) -> Result<(u32,
   u32, u32), ParseError>`. Define `pub struct ParseError` with a
   Display impl. Run `cargo build` to verify, then commit.
@@ -26,7 +27,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["tests/"]
 predecessors       = ["handler"]
-context = """
+description = """
   Add tests/version_test.rs covering: valid "1.2.3", missing field,
   non-numeric. Run `cargo test --tests`. Commit on green.
 """
@@ -37,7 +38,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
 predecessors       = ["handler"]
-context = """
+description = """
   Add docs/version.md describing the format and listing the error
   cases.
 """

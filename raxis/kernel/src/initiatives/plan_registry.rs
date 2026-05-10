@@ -188,11 +188,15 @@ pub struct OrchestratorPlanFields {
     pub cross_cutting_artifacts: Vec<String>,
 
     /// V2 `v2_extended_gaps.md §1.1` — initiative-scoped seed prompt for
-    /// the orchestrator agent. Sourced from the plan TOML's `[workspace]
-    /// description` field at `approve_plan` time and stamped into the
+    /// the orchestrator agent. Sourced from the plan TOML's
+    /// `[plan.initiative] description` field at `approve_plan` time
+    /// (the same field that `kernel-mechanics-prompt.md §3.2`
+    /// renders into the orchestrator's
+    /// `[KERNEL: INITIATIVE GUIDANCE]` block) and stamped into the
     /// orchestrator session's spawn env as
-    /// `RAXIS_PLANNER_TASK_PROMPT`. Empty `""` keeps the orchestrator
-    /// binary in scaffold/park mode (`INV-DRIVER-01`).
+    /// `RAXIS_PLANNER_TASK_PROMPT`. **REQUIRED** by the parser:
+    /// reaching this struct with an empty `description` indicates a
+    /// validator regression.
     pub description: String,
 }
 

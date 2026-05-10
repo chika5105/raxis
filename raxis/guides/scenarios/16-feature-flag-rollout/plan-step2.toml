@@ -1,5 +1,9 @@
 # Scenario 16 step 2 — flip the feature flag to on.
 
+[plan.initiative]
+description = """
+Feature flag rollout (scenario 16)
+"""
 [workspace]
 name        = "Flip flag on"
 lane_id     = "ff-flip-lane"
@@ -9,7 +13,7 @@ task_id            = "flip"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["config/"]
-context = """
+description = """
   Edit config/flags.json: set `new_pricing` to true. Commit only the
   flag file; do not modify src.
 """

@@ -1,5 +1,9 @@
 # Scenario 34 — benchmark witness.
 
+[plan.initiative]
+description = """
+Benchmark witness (scenario 34)
+"""
 [workspace]
 name        = "Benchmark witness"
 lane_id     = "bench-lane"
@@ -9,7 +13,7 @@ task_id            = "speed-it-up"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/", "benches/"]
-context = """
+description = """
   Replace naive_sum in src/lib.rs with a SIMD-friendly loop. The
   bench `naive_sum_1k` must complete; cargo bench must succeed.
 """

@@ -1,5 +1,9 @@
 # Scenario 49 — under-budget initiative.
 
+[plan.initiative]
+description = """
+Budget exceeded graceful stop (scenario 49)
+"""
 [workspace]
 name        = "Tiny budget"
 lane_id     = "tiny-budget-lane"
@@ -13,4 +17,4 @@ task_id            = "verbose-task"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/"]
-context = "Write a 5,000-word essay on monad transformers in docs/essay.md."
+description = "Write a 5,000-word essay on monad transformers in docs/essay.md."

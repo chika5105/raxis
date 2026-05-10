@@ -1,5 +1,9 @@
 # Scenario 15 — HTTP API + curl mechanical witness.
 
+[plan.initiative]
+description = """
+Http api and curl witness (scenario 15)
+"""
 [workspace]
 name        = "HTTP API + curl"
 lane_id     = "http-api-curl-lane"
@@ -9,7 +13,7 @@ task_id            = "build"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   In src/main.rs, write a small HTTP server using `tiny_http` that
   listens on 127.0.0.1:7878 and responds to GET / with body
   `{"ok":true}` and content-type application/json. Run `cargo build`
@@ -18,10 +22,17 @@ context = """
 
 [[tasks.witnesses]]
 kind = "Mechanical"
-command = ["sh", "-c",
-  "cargo build --release && (./target/release/demo15 &) && sleep 1 \
-   && curl -fsS http://127.0.0.1:7878/ | grep -q '\"ok\":true' \
-   && pkill -f demo15"]
+command = [
+  "sh",
+  "-c",
+  """\
+cargo build --release && \
+(./target/release/demo15 &) && \
+sleep 1 && \
+curl -fsS http://127.0.0.1:7878/ | grep -q '\"ok\":true' && \
+pkill -f demo15\
+""",
+]
 exit_code_eq = 0
 
 [orchestrator]

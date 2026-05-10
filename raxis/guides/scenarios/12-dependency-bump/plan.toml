@@ -1,16 +1,19 @@
 # Scenario 12 — Dependency bump.
 
+[plan.initiative]
+description = """
+Bump serde to ~1.0.200 and verify build still passes.
+"""
 [workspace]
 name        = "Dependency bump"
 lane_id     = "depbump-lane"
-description = "Bump serde to ~1.0.200 and verify build still passes."
 
 [[tasks]]
 task_id            = "bump"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["Cargo.toml"]
-context = """
+description = """
   Edit Cargo.toml so the serde dependency is "~1.0.200". Run
   `cargo update -p serde` to refresh Cargo.lock. Run `cargo build`
   to ensure the project still compiles. Commit both files.

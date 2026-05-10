@@ -1,5 +1,9 @@
 # Scenario 18 — license compliance sweep.
 
+[plan.initiative]
+description = """
+License compliance sweep (scenario 18)
+"""
 [workspace]
 name        = "License compliance"
 lane_id     = "licsweep-lane"
@@ -9,7 +13,7 @@ task_id            = "sweep"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["COMPLIANCE.md"]
-context = """
+description = """
   Run `cargo metadata --format-version=1` and parse the JSON. For
   each direct dependency, write a row to COMPLIANCE.md with name,
   version, license. Group by license. Commit COMPLIANCE.md only.

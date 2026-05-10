@@ -1,5 +1,9 @@
 # Scenario 33 — coverage witness.
 
+[plan.initiative]
+description = """
+Coverage witness (scenario 33)
+"""
 [workspace]
 name        = "Coverage witness"
 lane_id     = "coverage-lane"
@@ -9,7 +13,7 @@ task_id            = "extend-with-coverage"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   Add `pub fn sub(a, b)` and matching tests. Coverage must stay
   above 80%.
 """

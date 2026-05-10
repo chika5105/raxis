@@ -1,5 +1,9 @@
 # Scenario 27 — cargo test verifier.
 
+[plan.initiative]
+description = """
+Cargo test verifier (scenario 27)
+"""
 [workspace]
 name        = "cargo test verifier"
 lane_id     = "cargo-test-lane"
@@ -9,7 +13,7 @@ task_id            = "extend"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   Extend src/lib.rs: add `pub fn fib(n: u32) -> u64` (iterative,
   no overflow on small n). Add tests for fib(0)=0, fib(1)=1,
   fib(10)=55. Run `cargo test`. Commit on green.

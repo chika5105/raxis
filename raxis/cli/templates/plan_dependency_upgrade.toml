@@ -17,11 +17,23 @@ target_ref = "refs/heads/main"
 [[tasks]]
 task_id            = "upgrade"
 name               = "Bump dependency version"
+description        = """
+Bump the dependency named in @@INITIATIVE_NAME@@ to the new version: edit
+the manifest, refresh the lockfile, and surface every breaking-change call
+site that needs adjustment. Apply the call-site adjustments in-place; do
+not introduce a new abstraction layer.
+"""
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 
 [[tasks]]
 task_id            = "test"
 name               = "Run regression suite against the upgrade"
+description        = """
+Run the full test suite against the upgraded dependency. For every test
+that fails, decide whether it is a real regression introduced by the
+upgrade or an out-of-scope flake; mark each accordingly in the review. Do
+not modify production code in this task — flag regressions for follow-up.
+"""
 session_agent_type = "Reviewer"
 predecessors       = ["upgrade"]

@@ -1,5 +1,9 @@
 # Scenario 17 — security headers audit (Reviewer only).
 
+[plan.initiative]
+description = """
+Security headers audit (scenario 17)
+"""
 [workspace]
 name        = "Security headers audit"
 lane_id     = "secaudit-lane"
@@ -9,7 +13,7 @@ task_id            = "audit"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["audits/"]
-context = """
+description = """
   Read server/nginx.conf and produce audits/headers-audit.md. The
   report should list each well-known security header (CSP,
   X-Content-Type-Options, X-Frame-Options, Referrer-Policy,

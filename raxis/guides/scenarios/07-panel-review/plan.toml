@@ -1,14 +1,15 @@
 # Scenario 07 — Panel review (1 Executor, 3 Reviewers).
 
-[workspace]
-name        = "Panel review"
-lane_id     = "panel-review-lane"
+[plan.initiative]
 description = """
-  The implementer Executor adds a tiny URL-parsing function. Three
+The implementer Executor adds a tiny URL-parsing function. Three
   Reviewers evaluate the same evaluation_sha for correctness, style,
   and security. Any one rejection reboots the Executor with the
   combined critique.
 """
+[workspace]
+name        = "Panel review"
+lane_id     = "panel-review-lane"
 
 [[tasks]]
 task_id            = "implementer"
@@ -16,7 +17,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = []
-context = """
+description = """
   Add `pub fn parse_host(url: &str) -> Option<&str>` to src/lib.rs
   that returns the host portion of an http:// or https:// URL or None
   if the URL is malformed. Add three unit tests covering: a valid
@@ -31,7 +32,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["implementer"]
-context = """
+description = """
   Evaluate parse_host for correctness. Reject if any of: missing
   scheme handling (http vs https), wrong host extraction for URLs
   with paths or query strings, or missing/wrong tests.
@@ -43,7 +44,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["implementer"]
-context = """
+description = """
   Evaluate parse_host for style. Reject if: function is longer than
   20 lines, the implementation hand-rolls a parser instead of using
   str::strip_prefix / split_once / find, or the doc comment is
@@ -56,7 +57,7 @@ session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 predecessors       = ["implementer"]
-context = """
+description = """
   Evaluate parse_host for security. Reject if the function panics on
   any input, allocates an unbounded String from caller-controlled
   bytes, or uses unsafe code.

@@ -1,5 +1,9 @@
 # Scenario 32 — load-test mechanical witness.
 
+[plan.initiative]
+description = """
+Load test witness (scenario 32)
+"""
 [workspace]
 name        = "Load test witness"
 lane_id     = "loadtest-lane"
@@ -9,7 +13,7 @@ task_id            = "build"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = """
+description = """
   Build a tiny HTTP server (tiny_http) on 127.0.0.1:7878 returning
   {"ok":true} for any GET. Run cargo build to verify; commit.
 """

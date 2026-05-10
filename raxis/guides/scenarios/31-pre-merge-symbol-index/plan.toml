@@ -1,5 +1,9 @@
 # Scenario 31 — pre-merge symbol-index verifier (deferred surface).
 
+[plan.initiative]
+description = """
+Pre merge symbol index (scenario 31)
+"""
 [workspace]
 name        = "Pre-merge symbol index"
 lane_id     = "premerge-index-lane"
@@ -9,7 +13,7 @@ task_id            = "edit"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-context = "Add `pub fn nop() {}` to src/lib.rs."
+description = "Add `pub fn nop() {}` to src/lib.rs."
 
 [[plan.verifiers.pre_merge]]
 name             = "symbol-index"

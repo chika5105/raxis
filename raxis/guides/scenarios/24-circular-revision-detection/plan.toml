@@ -1,5 +1,9 @@
 # Scenario 24 — circular revision detection.
 
+[plan.initiative]
+description = """
+Circular revision detection (scenario 24)
+"""
 [workspace]
 name        = "Circular revision"
 lane_id     = "circular-revision-lane"
@@ -10,7 +14,7 @@ session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
 max_revision_rounds = 5
-context = """
+description = """
   When the reviewer rejects with "make x mutable", flip `let x` to
   `let mut x`. If they reject with "make x immutable", flip back.
   Keep oscillating; this is intentional for testing the loop
@@ -22,7 +26,7 @@ task_id            = "oscillate-rev"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 predecessors       = ["ping-pong"]
-context = """
+description = """
   If round is odd, reject with "make x mutable"; if round is even,
   reject with "make x immutable". Always reject.
 """
