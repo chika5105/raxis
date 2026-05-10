@@ -21,6 +21,7 @@
 //   - No IPC, no subprocess logic, no key material.
 //   - The mutex must be held for the entire duration of any transaction.
 
+pub mod circuit_store;
 pub mod db;
 pub mod genesis;
 pub mod migration;
@@ -29,6 +30,9 @@ pub mod ro;
 pub mod table;
 pub mod views;
 
+pub use circuit_store::{
+    CircuitRowSqlite, CircuitTransition, SqliteCircuitStore,
+};
 pub use db::{Store, StoreError};
 pub use genesis::install_genesis_policy_epoch_row;
 pub use migration::SCHEMA_VERSION;
