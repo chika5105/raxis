@@ -1,24 +1,20 @@
-//! Fake-MongoDB backend for the proxy's real-upstream integration
-//! tests.
+//! Fake-MongoDB backend(s) for the proxy's real-upstream
+//! integration tests.
 //!
-//! What this implements (just enough for the proxy's
-//! `upstream::UpstreamSession::connect()` + `forward_op_msg()` to
-//! work end-to-end):
+//! Two fixtures live here:
 //!
-//!   * `OP_MSG` framing (op_code 2013).
-//!   * Test-supplied callback maps each `(command_name)` to a
-//!     [`FakeResponse`] which becomes the kind-0 BSON section of
-//!     the upstream's reply.
-//!   * Connection is pure no-auth — the proxy V2.1 MVP rejects URLs
-//!     with `user:pass@` userinfo before even calling
-//!     [`super::UpstreamSession::connect`], so this fixture deliberately
-//!     does not implement SCRAM. (V2.2 follow-up will swap this for
-//!     a SCRAM-SHA-256-aware fixture once the proxy gains SCRAM
-//!     support.)
+//! * [`FakeBackend`] — pure no-auth listener. The agent's first
+//!   OP_MSG goes straight into the response callback. Used by the
+//!   no-userinfo URL paths (`mongodb://host:port/db`).
+//! * [`FakeScramBackend`] — listens for the proxy's SCRAM-SHA-256
+//!   `saslStart` / `saslContinue` exchange first, validates the
+//!   client proof against a known username + password, then hands
+//!   subsequent OP_MSG frames to the response callback. Used by
+//!   the V2 §2.2 SCRAM tests.
 //!
 //! Out of scope:
 //!
-//!   * Cursor batching / `getMore` (the V2.1 MVP relays single
+//!   * Cursor batching / `getMore` (the relay path forwards single
 //!     OP_MSG round trips; cursors land in a follow-up).
 //!   * `OP_QUERY` (legacy wire — Mongo dropped it in 5.0+).
 //!   * Compressed `OP_COMPRESSED` envelopes.
@@ -261,4 +257,275 @@ impl BsonBuilder {
         out.push(0);
         out
     }
+
+    fn binary(mut self, key: &str, bytes: &[u8]) -> Self {
+        self.body.push(0x05);
+        self.body.extend_from_slice(key.as_bytes());
+        self.body.push(0);
+        self.body.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
+        self.body.push(0); // subtype 0
+        self.body.extend_from_slice(bytes);
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeScramBackend — SCRAM-SHA-256-aware fake mongod for the V2 §2.2
+// integration tests.
+// ---------------------------------------------------------------------------
+
+/// SCRAM-SHA-256-aware fake mongod. Validates the proxy's
+/// saslStart / saslContinue conversation against a known username +
+/// password, then dispatches subsequent OP_MSG frames through the
+/// response callback (same callback shape as [`FakeBackend`]).
+pub struct FakeScramBackend {
+    addr: std::net::SocketAddr,
+}
+
+impl FakeScramBackend {
+    /// Bind a SCRAM-aware fake-mongo listener on a random localhost
+    /// port. `username` / `password` define the credential the
+    /// fixture will validate the proxy's SCRAM proof against.
+    pub async fn start(
+        username: String,
+        password: Vec<u8>,
+        responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
+    ) -> std::io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        let r = Arc::clone(&responses);
+                        let user = username.clone();
+                        let pw = password.clone();
+                        tokio::spawn(async move {
+                            let _ = serve_scram(stream, user, pw, r).await;
+                        });
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Ok(Self { addr })
+    }
+
+    /// The address the listener is bound to.
+    pub fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+}
+
+async fn serve_scram(
+    mut s: TcpStream,
+    username: String,
+    password: Vec<u8>,
+    responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
+) -> std::io::Result<()> {
+    use base64::Engine as _;
+    // ---- saslStart ----
+    let frame = read_op_msg_frame(&mut s).await?;
+    let payload = extract_bin_payload(&frame).expect("saslStart payload");
+    let cf = std::str::from_utf8(&payload).unwrap();
+    assert!(cf.starts_with("n,,n="),
+        "expected SCRAM client first message, got {cf:?}");
+    let bare = &cf[3..];
+    let user_attr = bare.split(',').next().unwrap();
+    let user = user_attr.trim_start_matches("n=");
+    if user != username {
+        write_sasl_reply(&mut s, false, 1, b"e=unknown-user", true,
+            Some("UserNotFound")).await?;
+        return Ok(());
+    }
+    let cnonce = bare.split(',').nth(1).unwrap().trim_start_matches("r=");
+    let salt = b"raxis-scram-test-salt-32B-pad000";
+    let iter: u32 = 4096;
+    let snonce = "SERVERNONCE-XYZ";
+    let combined = format!("{cnonce}{snonce}");
+    let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt);
+    let server_first = format!("r={combined},s={salt_b64},i={iter}");
+    write_sasl_reply(&mut s, true, 1, server_first.as_bytes(), false, None).await?;
+
+    // ---- saslContinue (proxy's client-final-message) ----
+    let frame = read_op_msg_frame(&mut s).await?;
+    let payload = extract_bin_payload(&frame).expect("saslContinue payload");
+    let cf2 = std::str::from_utf8(&payload).unwrap();
+    let mut got_combined = "";
+    let mut proof_b64 = "";
+    for attr in cf2.split(',') {
+        if let Some(v) = attr.strip_prefix("r=") { got_combined = v; }
+        if let Some(v) = attr.strip_prefix("p=") { proof_b64 = v; }
+    }
+    assert_eq!(got_combined, combined);
+
+    // Server-side SCRAM crypto.
+    let salted = test_pbkdf2_hmac_sha256(&password, salt, iter);
+    let client_key = test_hmac_sha256(&salted, b"Client Key");
+    let stored_key = test_sha256(&client_key);
+    let server_key = test_hmac_sha256(&salted, b"Server Key");
+    let cf_bare = format!("n={user},r={cnonce}");
+    let cl_final_bare = format!("c=biws,r={combined}");
+    let auth_msg = format!("{cf_bare},{server_first},{cl_final_bare}");
+    let cli_sig = test_hmac_sha256(&stored_key, auth_msg.as_bytes());
+    let mut expected_proof = client_key;
+    for (a, b) in expected_proof.iter_mut().zip(cli_sig.iter()) {
+        *a ^= *b;
+    }
+    let got_proof = base64::engine::general_purpose::STANDARD
+        .decode(proof_b64).unwrap();
+    let proof_matches = got_proof == expected_proof;
+
+    if !proof_matches {
+        write_sasl_reply(&mut s, false, 1, b"e=invalid-proof", true,
+            Some("AuthenticationFailed")).await?;
+        return Ok(());
+    }
+    let server_sig = test_hmac_sha256(&server_key, auth_msg.as_bytes());
+    let v = base64::engine::general_purpose::STANDARD.encode(server_sig);
+    let server_final = format!("v={v}");
+    write_sasl_reply(&mut s, true, 1, server_final.as_bytes(), true, None).await?;
+
+    // ---- Post-auth: dispatch subsequent OP_MSG frames through the
+    // response callback (same shape as FakeBackend).
+    loop {
+        let mut header = [0u8; 16];
+        if s.read_exact(&mut header).await.is_err() {
+            return Ok(());
+        }
+        let total = i32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let request_id = i32::from_le_bytes([header[4], header[5], header[6], header[7]]);
+        let op_code = i32::from_le_bytes([header[12], header[13], header[14], header[15]]);
+        if total < 16 || total > 64 * 1024 * 1024 || op_code != 2013 {
+            return Ok(());
+        }
+        let body_len = total - 16;
+        let mut body = vec![0u8; body_len];
+        s.read_exact(&mut body).await?;
+        let cmd = first_command_name(&body).unwrap_or_default();
+        let resp = responses(&cmd).unwrap_or(FakeResponse::Ok { extras: vec![] });
+        let reply_doc = build_reply_doc(&cmd, &resp);
+        let reply_msg = build_op_msg_reply(
+            request_id.wrapping_add(0x4000_0000), request_id, &reply_doc,
+        );
+        s.write_all(&reply_msg).await?;
+        s.flush().await?;
+    }
+}
+
+async fn read_op_msg_frame(s: &mut TcpStream) -> std::io::Result<Vec<u8>> {
+    let mut header = [0u8; 16];
+    s.read_exact(&mut header).await?;
+    let total = i32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    let body_len = total - 16;
+    let mut body = vec![0u8; body_len];
+    s.read_exact(&mut body).await?;
+    let mut frame = Vec::with_capacity(total);
+    frame.extend_from_slice(&header);
+    frame.extend_from_slice(&body);
+    Ok(frame)
+}
+
+fn extract_bin_payload(frame: &[u8]) -> Option<Vec<u8>> {
+    let body = &frame[16..];
+    let kind = *body.get(4)?;
+    if kind != 0 { return None; }
+    let doc = body.get(5..)?;
+    let total = i32::from_le_bytes([
+        *doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?,
+    ]) as usize;
+    let inner = &doc[4..total - 1];
+    let mut i = 0;
+    while i < inner.len() {
+        let t = inner[i];
+        i += 1;
+        if t == 0 { break; }
+        let nul = inner[i..].iter().position(|&b| b == 0)?;
+        let name = std::str::from_utf8(&inner[i..i + nul]).ok()?;
+        i += nul + 1;
+        if t == 0x05 && name == "payload" {
+            let blen = i32::from_le_bytes([
+                inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
+            ]) as usize;
+            return Some(inner[i + 5..i + 5 + blen].to_vec());
+        }
+        let skip = match t {
+            0x01 | 0x09 | 0x11 | 0x12 => 8,
+            0x02 => {
+                let l = i32::from_le_bytes([
+                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
+                ]) as usize;
+                4 + l
+            }
+            0x03 | 0x04 => i32::from_le_bytes([
+                inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
+            ]) as usize,
+            0x05 => {
+                let l = i32::from_le_bytes([
+                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
+                ]) as usize;
+                4 + 1 + l
+            }
+            0x07 => 12,
+            0x08 => 1,
+            0x10 => 4,
+            _ => return None,
+        };
+        i += skip;
+    }
+    None
+}
+
+async fn write_sasl_reply(
+    s: &mut TcpStream,
+    ok: bool,
+    conv_id: i32,
+    payload: &[u8],
+    done: bool,
+    errmsg: Option<&str>,
+) -> std::io::Result<()> {
+    let mut b = BsonBuilder::new()
+        .double("ok", if ok { 1.0 } else { 0.0 })
+        .int32("conversationId", conv_id)
+        .binary("payload", payload)
+        .bool_("done", done);
+    if let Some(m) = errmsg {
+        b = b.string("errmsg", m).int32("code", 18);
+    }
+    let doc = b.finish();
+    let body_len = 4 + 1 + doc.len();
+    let total = 16 + body_len;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&(total as i32).to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&2013i32.to_le_bytes());
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out.push(0);
+    out.extend_from_slice(&doc);
+    s.write_all(&out).await?;
+    s.flush().await
+}
+
+fn test_pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], rounds: u32) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    pbkdf2::pbkdf2_hmac::<sha2::Sha256>(password, salt, rounds, &mut out);
+    out
+}
+
+fn test_hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).unwrap();
+    mac.update(data);
+    let bytes = mac.finalize().into_bytes();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    out
+}
+
+fn test_sha256(data: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().into()
 }

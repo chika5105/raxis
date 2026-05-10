@@ -115,6 +115,18 @@ sha1        = "0.10"
 # transitively, so adding this here does not introduce a second
 # RustCrypto-RSA version into the build graph.
 rsa         = "0.9"
+# PBKDF2-HMAC-SHA256 for the V2 MongoDB SCRAM-SHA-256 upstream auth
+# path (`v2_extended_gaps.md §2.2` / RFC 7677). Pinned to the
+# RustCrypto-aligned 0.12 line so the `Mac` trait surface matches
+# `hmac` 0.12. `default-features = false` keeps the dependency
+# surface small (no parallel rayon impl).
+pbkdf2      = { version = "0.12", default-features = false, features = ["hmac"] }
+# Base64 used by the SCRAM client for `client-final-message`'s
+# `p=<base64(client_proof)>` and the server's `s=<base64(salt)>`
+# / `v=<base64(server_signature)>` decoding. Pinned to the 0.22 line
+# which is what `reqwest` already pulls in transitively, so we don't
+# fork the base64 graph.
+base64      = "0.22"
 uuid        = { version = "1", features = ["v4", "v7", "serde"] }
 toml        = "0.8"
 glob        = "0.3"

@@ -182,6 +182,7 @@ pub fn build_op_msg_reply(request_id: i32, response_to: i32, bson_doc: &[u8]) ->
 const BSON_DOUBLE: u8  = 0x01;
 const BSON_STRING: u8  = 0x02;
 const BSON_DOC:    u8  = 0x03;
+const BSON_BIN:    u8  = 0x05;
 const BSON_BOOL:   u8  = 0x08;
 const BSON_INT32:  u8  = 0x10;
 const BSON_INT64:  u8  = 0x12;
@@ -250,6 +251,20 @@ impl BsonBuilder {
         self.body.put_slice(key.as_bytes());
         self.body.put_u8(0);
         self.body.put_slice(&inner);
+        self
+    }
+
+    /// `{ key: BinData(0, bytes) }` — generic binary subtype 0.
+    /// Used by the SCRAM-SHA-256 upstream auth path to wrap the
+    /// SASL `payload` field per the MongoDB driver spec.
+    pub fn binary(mut self, key: &str, bytes: &[u8]) -> Self {
+        self.body.put_u8(BSON_BIN);
+        self.body.put_slice(key.as_bytes());
+        self.body.put_u8(0);
+        // BSON binary value: int32 length, u8 subtype, bytes...
+        self.body.put_i32_le(bytes.len() as i32);
+        self.body.put_u8(0); // subtype 0 = generic binary
+        self.body.put_slice(bytes);
         self
     }
 

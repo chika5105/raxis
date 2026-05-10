@@ -2,34 +2,38 @@
 //! proxy.
 //!
 //! Normative reference: `specs/v2/credential-proxy.md §4.4`
-//! (MongoDB). The proxy speaks the modern wire protocol
-//! (`OP_MSG`, op code 2013), recognises the `hello` / `isMaster`
-//! greeting, and routes every other command document through
+//! (MongoDB) and `specs/v2/v2_extended_gaps.md §2.2`
+//! (SCRAM-SHA-256 upstream auth, V2.5).
+//!
+//! The proxy speaks the modern wire protocol (`OP_MSG`, op code
+//! 2013), terminates the agent-side `hello` / `isMaster` greeting
+//! locally, and routes every other command document through
 //! [`restriction::Restrictions::is_blocked`]. Blocked commands get
 //! `{ ok: 0, code: 13, codeName: "Unauthorized", errmsg: "..." }`
 //! — the canonical MongoDB authorization-error shape so drivers
 //! surface a clean `MongoServerError` with code 13 instead of
 //! a generic protocol error.
 //!
-//! # Why no SCRAM in V2 MVP
+//! # Auth shapes
 //!
-//! Mongo's modern auth path (SCRAM-SHA-256) requires the proxy to
-//! either (a) hold the upstream password and replay the SASL
-//! conversation byte-for-byte against the agent, or (b) terminate
-//! SCRAM locally with a known agent-side password and forward
-//! commands upstream with a separately-resolved upstream
-//! credential. Both options expand the proxy surface considerably
-//! and tie its correctness to a third-party crypto library
-//! (`pbkdf2`). For V2 the simpler shape is "no auth at all": the
-//! `mount_as` URI the agent gets is `mongodb://127.0.0.1:PORT/db`
-//! with no credentials. The hello response advertises an empty
-//! `saslSupportedMechs` list so well-behaved drivers never attempt
-//! authentication. V3 lands the SCRAM path (per the
-//! `specs/v2/credential-proxy.md` deferral list) once the BSON
-//! doc-walker is mature enough to enforce
-//! `forbidden_collections` and `max_documents` too.
+//! Both upstream auth shapes are supported:
 //!
-//! # What this MVP supports
+//! * `mongodb://host:port/db` (no userinfo) — pure plaintext +
+//!   `--noauth`. Useful for ephemeral CI containers.
+//! * `mongodb://user:pass@host:port/db?authSource=admin`
+//!   — drives SCRAM-SHA-256 SASL against `authSource` (default
+//!   `admin`) before any data command. The proxy's SCRAM client
+//!   is RFC 5802 + 7677 compliant: nonce-prefix verified,
+//!   server-signature verified in constant time, iteration count
+//!   bounded ≥ 4096.
+//!
+//! In both cases the agent-side connection is no-auth from the
+//! agent's point of view (`mount_as` URI =
+//! `mongodb://127.0.0.1:PORT/db` with no credentials, hello
+//! response advertises an empty `saslSupportedMechs`). The proxy
+//! authenticates upstream with the kernel-resolved credential.
+//!
+//! # What this crate supports
 //!
 //!   * `OP_MSG` framing on inbound messages, with the 64 MiB hard
 //!     cap enforced before any allocation.
@@ -37,21 +41,24 @@
 //!     synthesised replies sufficient for `mongo`, `pymongo`,
 //!     `mongoose`, `mongo-rust-driver`, and the official Java /
 //!     Go / Node drivers to consider the connection ready.
-//!   * Every other command: classified through
-//!     [`restriction::Restrictions::is_blocked`].
-//!     Allowed commands get `{ ok: 1.0 }`. Blocked commands get
-//!     `{ ok: 0.0, code: 13, codeName: "Unauthorized", errmsg }`.
+//!   * SCRAM-SHA-256 upstream SASL via the [`upstream`] module.
+//!   * Every other agent command: classified through
+//!     [`restriction::Restrictions::is_blocked`]. Blocked commands
+//!     get `{ ok: 0.0, code: 13, codeName: "Unauthorized", errmsg }`
+//!     and never touch the upstream.
 //!   * Per-command audit emission with the command name and a
 //!     SHA-256 of the *full* OP_MSG body bytes for fingerprinting.
 //!
-//! # What is deferred
+//! # What is still deferred (tracked under V3)
 //!
-//!   * Real upstream forwarding via `mongodb`/`mongo-rust-driver`.
-//!   * SASL SCRAM-SHA-256 / SCRAM-SHA-1 auth proxying.
-//!   * `forbidden_collections`, `max_documents`, `op_timeout_ms`.
-//!   * Multi-section `OP_MSG` parsing for batched
-//!     insert/update/delete document arrays — V2 classifies on
-//!     the kind-0 section command name only.
+//!   * Compressed `OP_COMPRESSED` envelopes.
+//!   * Cursor batching aggregation (the V2 relay forwards single
+//!     `OP_MSG` round trips and lets the agent issue `getMore`
+//!     itself).
+//!   * `forbidden_collections`, `max_documents`, `op_timeout_ms`
+//!     deep BSON tree walks.
+//!   * TLS on the upstream socket (the SCRAM SASL conversation
+//!     itself is independent of TLS).
 
 #![deny(unsafe_code)]
 #![warn(missing_docs)]

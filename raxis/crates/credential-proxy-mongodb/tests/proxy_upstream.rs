@@ -330,24 +330,39 @@ async fn upstream_error_is_forwarded_and_audited() {
 }
 
 #[tokio::test]
-async fn userinfo_url_fails_fast_with_clear_audit_signal() {
-    // V2.1 MVP intentionally rejects URLs with userinfo (SCRAM-SHA-256
-    // is V2.2 work). Assert the failure surfaces as
-    // `CredentialProxyUpstreamFailed` with reason
-    // `"ProtocolHandshakeFailed"` and a detail that mentions
-    // `--noauth` so operators have a clear migration path.
-    let backend = FakeBackend::start(Arc::new(|_: &str| {
-        Some(FakeResponse::Ok { extras: vec![] })
-    })).await.unwrap();
+async fn scram_sha256_round_trips_against_real_upstream() {
+    // V2 §2.2: when the credential URL carries `user:pass@`, the
+    // proxy MUST drive SCRAM-SHA-256 SASL against the upstream
+    // before serving any agent commands. Drives the full state
+    // machine against a SCRAM-aware fake mongod fixture and
+    // asserts (a) the upstream-Connected audit fires (proves SASL
+    // ran to completion, not just TCP), (b) a subsequent `find`
+    // round trips, and (c) the upstream's `nReturned` flows back
+    // verbatim.
+    let backend = support::FakeScramBackend::start(
+        "demo".into(), b"hunter2".to_vec(),
+        Arc::new(|cmd: &str| {
+            if cmd == "find" {
+                Some(FakeResponse::Ok {
+                    extras: vec![
+                        ("nReturned".into(), FakeBsonValue::Int32(11)),
+                    ],
+                })
+            } else {
+                Some(FakeResponse::Ok { extras: vec![] })
+            }
+        }),
+    ).await.unwrap();
+    let upstream_addr = backend.addr();
 
     let creds = Arc::new(StaticBackend {
-        url: format!("mongodb://demo:hunter2@{}/test", backend.addr()),
+        url: format!("mongodb://demo:hunter2@{}/test?authSource=admin", upstream_addr),
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
         listen_addr:     "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mongo"),
-        consumer:        OwnedConsumer::new("session", "s-4"),
+        consumer:        OwnedConsumer::new("session", "s-scram-ok"),
         restrictions:    Restrictions::default(),
     };
     let proxy = MongodbProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
@@ -356,15 +371,69 @@ async fn userinfo_url_fails_fast_with_clear_audit_signal() {
     tokio::spawn(async move { proxy.serve().await });
 
     let mut s = TcpStream::connect(proxy_addr).await.unwrap();
-    s.write_all(&build_op_msg(99, "find")).await.unwrap();
+    s.write_all(&build_op_msg(123, "find")).await.unwrap();
     let reply = read_op_msg(&mut s).await.unwrap();
-    let code = op_msg_int32_field(&reply, "code");
-    // Proxy synthesises code 8000 (RaxisProxyError) for upstream
-    // connect failures; the upstream is never contacted.
-    assert_eq!(code, Some(8000));
+    let n = op_msg_int32_field(&reply, "nReturned");
+    assert_eq!(n, Some(11),
+        "expected upstream's nReturned=11 to round trip after SCRAM; got {n:?}");
     drop(s);
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let events = audit.snapshot();
+    assert!(
+        events.iter().any(|e| matches!(e, AuditEvent::CredentialProxyUpstreamConnected { .. })),
+        "UpstreamConnected (post-SCRAM) audit must fire: {events:#?}",
+    );
+    assert!(
+        events.iter().any(|e| matches!(e, AuditEvent::DatabaseQueryCompleted { upstream_error: None, .. })),
+        "DatabaseQueryCompleted (success) audit must fire: {events:#?}",
+    );
+    assert!(
+        !events.iter().any(|e| matches!(e, AuditEvent::CredentialProxyUpstreamFailed { .. })),
+        "UpstreamFailed must NOT fire on success path: {events:#?}",
+    );
+}
+
+#[tokio::test]
+async fn scram_sha256_with_wrong_password_surfaces_auth_rejected_audit() {
+    // V2 §2.2: when the kernel-resolved credential is wrong, SCRAM
+    // MUST surface as `CredentialProxyUpstreamFailed` with reason
+    // `AuthRejected` (not `ProtocolHandshakeFailed`), and the
+    // password bytes must never appear in the redacted detail.
+    let backend = support::FakeScramBackend::start(
+        "demo".into(), b"correct-password".to_vec(),
+        Arc::new(|_: &str| Some(FakeResponse::Ok { extras: vec![] })),
+    ).await.unwrap();
+
+    let creds = Arc::new(StaticBackend {
+        url: format!(
+            "mongodb://demo:hunter2@{}/test?authSource=admin",
+            backend.addr(),
+        ),
+    });
+    let audit = Arc::new(CapturingChannel::default());
+    let cfg = ProxyConfig {
+        listen_addr:     "127.0.0.1:0".into(),
+        credential_name: CredentialName::new("demo-mongo"),
+        consumer:        OwnedConsumer::new("session", "s-scram-bad"),
+        restrictions:    Restrictions::default(),
+    };
+    let proxy = MongodbProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
+        .await.unwrap();
+    let proxy_addr = proxy.local_addr().unwrap();
+    tokio::spawn(async move { proxy.serve().await });
+
+    let mut s = TcpStream::connect(proxy_addr).await.unwrap();
+    s.write_all(&build_op_msg(456, "find")).await.unwrap();
+    let reply = read_op_msg(&mut s).await.unwrap();
+    let code = op_msg_int32_field(&reply, "code");
+    // Proxy synthesises code 8000 (RaxisProxyError) for upstream
+    // connect / SASL failures; the upstream's data path is never
+    // contacted.
+    assert_eq!(code, Some(8000));
+    drop(s);
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     let events = audit.snapshot();
     let failed = events.iter().find_map(|e| match e {
         AuditEvent::CredentialProxyUpstreamFailed { reason, detail, .. } => {
@@ -373,9 +442,8 @@ async fn userinfo_url_fails_fast_with_clear_audit_signal() {
         _ => None,
     });
     let (reason, detail) = failed.expect("expected UpstreamFailed audit");
-    assert_eq!(reason, "ProtocolHandshakeFailed");
-    assert!(detail.contains("--noauth") || detail.contains("SCRAM"),
-        "detail should mention SCRAM/--noauth migration path: {detail:?}");
-    // Password bytes must NOT appear in the redacted detail.
-    assert!(!detail.contains("hunter2"), "redaction failed: detail = {detail:?}");
+    assert_eq!(reason, "AuthRejected",
+        "wrong SCRAM password must classify as AuthRejected (not generic Handshake)");
+    assert!(!detail.contains("hunter2"),
+        "password bytes must not leak into audit detail: {detail:?}");
 }

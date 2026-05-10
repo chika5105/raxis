@@ -266,46 +266,110 @@ and the `KernelShutdown` exit path.
 
 ---
 
-### §2.2 — MongoDB SCRAM-SHA-256 (credential proxy auth)
+### §2.2 — MongoDB SCRAM-SHA-256 (credential proxy auth) ✅ shipped (V2.5)
 
-**Current state:** `credential-proxy-mongo` supports `--noauth`
-only. The proxy synthesizes empty `saslSupportedMechs` so MongoDB
-drivers skip authentication entirely.
+**Status:** ✅ Implemented. `credential-proxy-mongodb` now drives
+SCRAM-SHA-256 SASL against the upstream when the credential URL
+carries `user:pass@` userinfo. Production MongoDB 4.0+ deployments
+are reachable through the proxy without the operator having to
+configure `--noauth` on the upstream. The agent's view is unchanged
+(no SASL on the agent side; `mount_as` URI is plain
+`mongodb://127.0.0.1:PORT/db`).
 
-**What it does.** When an executor VM connects to a MongoDB
-credential proxy, the proxy authenticates with the real upstream
-MongoDB on the agent's behalf. SCRAM-SHA-256 is MongoDB's default
-authentication mechanism since MongoDB 4.0.
+**Implementation surface (v2.5 → main).**
 
-**What works today.** The proxy handles the MongoDB wire protocol
-(`OP_MSG`) and routes queries to the upstream, but only for
-`--noauth` development deployments. Production MongoDB instances
-that require authentication are not reachable through the proxy.
+1. `crates/credential-proxy-mongodb/src/upstream.rs` —
+   * `ParsedUpstreamUrl` now retains `username`, `password`, and
+     `auth_source` (parsed from the `authSource` query parameter,
+     falling back to the path db, falling back to `"admin"`). The
+     `has_userinfo()` method replaces the deprecated boolean field.
+   * `scram_sha256_authenticate(stream, auth_source, user, password)`
+     drives the full RFC 5802 + 7677 conversation:
+       1. `saslStart` with `mechanism = SCRAM-SHA-256` and
+          `client-first-message = "n,,n=<user>,r=<client-nonce>"`
+          (24 random bytes, base64-encoded; well above the 16-bit
+          minimum).
+       2. Parse `server-first-message`: `r=<combined>,s=<base64-salt>,i=<iter>`.
+          MUST verify (a) the combined nonce starts with the client
+          nonce, (b) `iter ≥ 4096`, (c) no `m=<mandatory-extension>`.
+       3. Compute
+          `salted = PBKDF2-HMAC-SHA256(password, salt, iter, 32)`,
+          `client_key = HMAC-SHA256(salted, "Client Key")`,
+          `stored_key = SHA256(client_key)`,
+          `server_key = HMAC-SHA256(salted, "Server Key")`.
+       4. Send `saslContinue` with
+          `client-final-message = "c=biws,r=<combined>,p=<base64(client_proof)>"`
+          where `client_proof = client_key XOR HMAC-SHA256(stored_key, auth_message)`.
+       5. Parse `server-final-message`: `v=<base64(server_signature)>`
+          (success) or `e=<server-error>` (failure). MUST verify the
+          server signature in **constant time** using
+          `constant_time_eq`. Mismatch surfaces as
+          `UpstreamError::AuthRejected("scram server-signature mismatch …")`.
+       6. If neither the second nor third reply carries
+          `done: true`, send a trailing empty `saslContinue` to let
+          the server close the conversation.
+   * `UpstreamError` gains an `AuthRejected(String)` variant that
+     maps to audit reason `AuthRejected` per
+     `credential-proxy.md §14.5.3`. Wrong-password / unknown-user /
+     server-signature mismatch / RFC violation all surface as this.
+2. `crates/credential-proxy-mongodb/src/wire.rs` — `BsonBuilder`
+   gains `binary(key, bytes)` for BSON BinData subtype 0
+   (the SASL `payload` field per the MongoDB driver spec).
+3. `crates/credential-proxy-mongodb/Cargo.toml` adds workspace deps
+   on `hmac`, `pbkdf2`, `base64`, and `getrandom`. The workspace
+   pins `pbkdf2 = 0.12` (RustCrypto 0.10 family — same `Mac` trait
+   surface as the existing `hmac` crate) and `base64 = 0.22`
+   (the version `reqwest` already pulls in transitively, so no
+   second base64 in the build graph).
 
-**What's needed.**
+**Tests.**
 
-1. **SCRAM-SHA-256 handshake implementation.** Multi-round-trip
-   challenge-response: `SASLStart` → server nonce + salt + iteration
-   count → client proof (HMAC-SHA-256) → server signature
-   verification. ~300 lines of crypto plumbing using the `hmac` and
-   `sha2` crates (already in the workspace for `raxis-crypto`).
+* Unit (RFC vectors):
+  * `pbkdf2_hmac_sha256_matches_reference_vector`
+    pins PBKDF2-HMAC-SHA256 against a known `{password, salt, 1, 32}`
+    vector.
+  * `hmac_sha256_matches_rfc4231_vector_1` pins HMAC-SHA-256 against
+    RFC 4231 test vector 1 (`key = 20×0x0b`, `data = "Hi There"`).
+  * `sha256_digest_of_empty_is_zero_hash` pins the empty-input
+    SHA-256 against the canonical hex.
+* Unit (RFC compliance):
+  * `parse_server_first_message_extracts_r_s_i` /
+    `parse_server_first_message_rejects_mandatory_extension` /
+    `parse_server_first_message_rejects_missing_iter`.
+  * `parse_server_final_message_returns_signature` /
+    `parse_server_final_message_surfaces_server_error`.
+  * `scram_username_escape_handles_reserved_chars` pins the RFC
+    5802 §5.1 escaping (`,` → `=2C`, `=` → `=3D`).
+  * `constant_time_eq_returns_true_on_equal` /
+    `constant_time_eq_returns_false_on_diff_or_len`.
+* Unit (state machine, end-to-end against in-process mock):
+  * `scram_sha256_authenticate_against_mock_succeeds` drives the
+    full state machine against an inline mock that validates the
+    proxy's proof.
+  * `scram_sha256_authenticate_wrong_password_is_auth_rejected`
+    drives the same state machine with the wrong password and
+    asserts `UpstreamError::AuthRejected` AND that the password
+    bytes do not appear in the error message.
+* Integration (real `MongodbProxy::serve` against a SCRAM-aware
+  fake mongod fixture, `tests/proxy_upstream.rs`):
+  * `scram_sha256_round_trips_against_real_upstream` proves the
+    full path: SCRAM SASL → `UpstreamConnected` audit fires →
+    agent's `find` round trips → upstream's `nReturned` flows back
+    verbatim → `DatabaseQueryCompleted` audit fires.
+  * `scram_sha256_with_wrong_password_surfaces_auth_rejected_audit`
+    proves the SASL failure path: agent sees a synthesized
+    `RaxisProxyError(8000)`, `CredentialProxyUpstreamFailed` audit
+    classifies as `AuthRejected` (not `ProtocolHandshakeFailed`),
+    and the password bytes never appear in the audit detail.
 
-2. **Credential injection.** The proxy reads the upstream MongoDB
-   username/password from the credential store (same path as the
-   Postgres and MySQL proxies) and injects them into the SCRAM
-   handshake transparently. The agent never sees the credential.
-
-3. **`OP_MSG` real relay.** Today the proxy synthesizes responses
-   for some operations. Full SCRAM requires real bidirectional
-   `OP_MSG` relay with the frame header intact. ~100 lines.
-
-**Estimate:** ~400 lines total.
-
-**Invariant safety:** The credential proxy is outside the kernel's
-trust boundary — it runs on the host side, mediating between the
-in-VM tproxy and the upstream database. No kernel invariants are
-affected. The only RAXIS-relevant constraint is that the credential
-never enters the VM (enforced by the tproxy architecture, unchanged).
+**Invariant safety.** Credential proxy is outside the kernel's
+trust boundary, the agent never sees the upstream password, and the
+SCRAM client uses `OsRng` for the client nonce so the conversation
+is non-replayable. The constant-time server-signature comparison
+prevents timing oracles. Restrictions still gate every command
+post-handshake, so `allow_read_only` continues to refuse
+`insert` / `update` / `delete` / `findAndModify` independently of
+the auth path.
 
 ---
 
@@ -1164,9 +1228,9 @@ The following invariants must be reviewed:
 | 🟢 DONE | §2.4 | In-VM KSB renderer (`raxis-ksb` + kernel assembly + driver fold) | ~300 |
 | 🟢 DONE | §2.5 | Token-limit enforcement (`request_token_budget` + `TokenBudgetExhausted`) | ~210 |
 | 🟢 DONE | §2.6 | Sidecar streaming + heartbeat + reconnect + mid-stream budget abort | ~180 |
+| 🟢 DONE | §2.2 | MongoDB SCRAM-SHA-256 (RFC 5802 + 7677 + AuthSource) | ~400 |
 | 🟢 DONE | §2.3 | MySQL `caching_sha2_password` (fast-path + RSA-OAEP full-auth + AuthSwitchRequest) | ~140 |
 | 🟢 DONE | §3.1 | `Sleep` tool | ~90 |
 | 🟢 DONE | §3.2 | `StructuredOutput` (fixed enum + `task outputs` CLI) | ~310 |
-| 🟡 P2 | §2.2 | MongoDB SCRAM-SHA-256 + OP_MSG real relay | ~400 |
 | 🔵 P2 | §4   | Operator dashboard (full stack) | ~5400 |
-| | | **Total remaining** | **~5800** |
+| | | **Total remaining** | **~5400** |
