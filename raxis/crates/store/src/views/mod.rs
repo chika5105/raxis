@@ -35,6 +35,7 @@
 //! ├── initiatives.rs    // initiative counts, lookup
 //! ├── sessions.rs       // active session counts + list
 //! ├── escalations.rs    // pending counts + list with filters
+//! ├── notifications.rs  // notification list, count, mark-read
 //! └── policy_history.rs // policy_epoch_history rows
 //! ```
 //!
@@ -68,6 +69,7 @@ pub mod escalations;
 pub mod initiative_quarantines;
 pub mod initiatives;
 pub mod kernel_meta;
+pub mod notifications;
 pub mod operator_certificates;
 pub mod plan_bundles;
 pub mod plan_fields;
@@ -84,6 +86,7 @@ pub mod witnesses;
 pub use budget::{LaneBudgetRow, ReservationRow};
 pub use escalations::{EscalationRow, EscalationStatusFilter};
 pub use initiative_quarantines::{InitiativeQuarantineRow, QuarantineViewError};
+pub use notifications::{NotificationRow, NotificationViewError};
 pub use initiatives::{
     InitiativeListFilter, InitiativeListRow, InitiativeRow, InitiativeStateCounts,
 };

@@ -52,10 +52,10 @@ use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
     AuditEntryView, DagEdge, DashboardData, EscalationView, HealthCheck, HealthSnapshot,
-    InitiativeListEntry, InitiativeView, OperatorAuthResolution, PolicyAdvancement,
-    PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView, SessionView,
-    StructuredOutputView, TaskView, WorktreeDetail, WorktreeDiff, WorktreeListEntry,
-    WorktreeLogEntry,
+    InitiativeListEntry, InitiativeView, NotificationView, OperatorAuthResolution,
+    PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView,
+    SessionView, StructuredOutputView, TaskView, WorktreeDetail, WorktreeDiff,
+    WorktreeListEntry, WorktreeLogEntry,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -673,29 +673,56 @@ impl DashboardData for KernelDashboardData {
     }
 
     fn list_inbox(&self) -> Result<Vec<AuditEntryView>, ApiError> {
-        // Inbox surface: union of escalations + reviews awaiting
-        // operator action. Today the kernel-owned `notifications`
-        // table is the durable inbox (see kernel/src/notifications);
-        // for V2.5 we surface the pending escalations as inbox rows
-        // until the dashboard P4 (notification table) lands.
-        let escs = self.list_escalations()?;
-        let inbox = escs
-            .into_iter()
-            .map(|e| AuditEntryView {
-                seq: 0,
-                event_id: e.escalation_id.clone(),
-                event_kind: "EscalationPending".to_owned(),
-                initiative_id: Some(e.initiative_id),
-                task_id: e.task_id,
-                session_id: None,
-                at: e.created_at,
-                payload: serde_json::json!({
-                    "severity":        e.severity,
-                    "reason":          e.reason,
-                    "action_required": e.action_required,
-                }),
-            })
-            .collect();
+        // Unified inbox: merge kernel-owned notifications (from
+        // the `notifications` SQLite table) with pending escalations.
+        // Both are surfaced as AuditEntryView so the frontend
+        // renders them with one component.
+        let mut inbox = Vec::new();
+
+        // 1. Unread notifications from SQLite.
+        if let Ok(conn) = self.open_ro() {
+            if let Ok(rows) = raxis_store::views::notifications::list_unread(&conn, 100) {
+                for r in rows {
+                    let payload = serde_json::from_str(&r.payload_json)
+                        .unwrap_or(serde_json::json!({}));
+                    inbox.push(AuditEntryView {
+                        seq: 0,
+                        event_id: r.notification_id,
+                        event_kind: r.event_kind,
+                        initiative_id: r.initiative_id,
+                        task_id: r.task_id,
+                        session_id: r.session_id,
+                        at: r.created_at,
+                        payload,
+                    });
+                }
+            }
+        }
+
+        // 2. Pending escalations.
+        if let Ok(escs) = self.list_escalations() {
+            for e in escs {
+                inbox.push(AuditEntryView {
+                    seq: 0,
+                    event_id: e.escalation_id.clone(),
+                    event_kind: "EscalationPending".to_owned(),
+                    initiative_id: Some(e.initiative_id),
+                    task_id: e.task_id,
+                    session_id: None,
+                    at: e.created_at,
+                    payload: serde_json::json!({
+                        "severity":        e.severity,
+                        "reason":          e.reason,
+                        "action_required": e.action_required,
+                    }),
+                });
+            }
+        }
+
+        // Newest first, deduplicate by event_id.
+        inbox.sort_by(|a, b| b.at.cmp(&a.at));
+        let mut seen = std::collections::HashSet::new();
+        inbox.retain(|e| seen.insert(e.event_id.clone()));
         Ok(inbox)
     }
 
@@ -890,6 +917,106 @@ impl DashboardData for KernelDashboardData {
             n_delegations_marked_stale: outcome.n_delegations_marked_stale,
             advanced_at: outcome.advanced_at,
         })
+    }
+
+    fn list_notifications(
+        &self,
+        limit: u32,
+        unread_only: bool,
+        initiative_id: Option<&str>,
+    ) -> Result<Vec<NotificationView>, ApiError> {
+        let conn = self.open_ro()?;
+        let cap = limit.min(200) as usize;
+        let rows = if unread_only {
+            raxis_store::views::notifications::list_unread(&conn, cap)
+        } else {
+            raxis_store::views::notifications::list_all(&conn, cap, initiative_id)
+        }
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("notification list: {e}"),
+        })?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let payload = serde_json::from_str(&r.payload_json)
+                    .unwrap_or(serde_json::json!({}));
+                NotificationView {
+                    notification_id: r.notification_id,
+                    event_kind: r.event_kind,
+                    initiative_id: r.initiative_id,
+                    task_id: r.task_id,
+                    session_id: r.session_id,
+                    summary: r.summary,
+                    payload,
+                    read: r.read,
+                    source_event_id: r.source_event_id,
+                    created_at: r.created_at,
+                }
+            })
+            .collect())
+    }
+
+    fn notification_count_unread(&self) -> Result<u64, ApiError> {
+        let conn = self.open_ro()?;
+        raxis_store::views::notifications::unread_count(&conn).map_err(|e| {
+            ApiError::Internal {
+                log_only: format!("notification unread count: {e}"),
+            }
+        })
+    }
+
+    fn mark_notification_read(&self, notification_id: &str) -> Result<bool, ApiError> {
+        let guard = self.store.lock_sync();
+        guard
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("mark_notification_read BEGIN: {e}"),
+            })?;
+        let result =
+            raxis_store::views::notifications::mark_read(&guard, notification_id);
+        match result {
+            Ok(updated) => {
+                guard
+                    .execute_batch("COMMIT")
+                    .map_err(|e| ApiError::Internal {
+                        log_only: format!("mark_notification_read COMMIT: {e}"),
+                    })?;
+                Ok(updated)
+            }
+            Err(e) => {
+                let _ = guard.execute_batch("ROLLBACK");
+                Err(ApiError::Internal {
+                    log_only: format!("mark_notification_read: {e}"),
+                })
+            }
+        }
+    }
+
+    fn mark_all_notifications_read(&self) -> Result<u64, ApiError> {
+        let guard = self.store.lock_sync();
+        guard
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("mark_all_notifications_read BEGIN: {e}"),
+            })?;
+        let result = raxis_store::views::notifications::mark_all_read(&guard);
+        match result {
+            Ok(count) => {
+                guard
+                    .execute_batch("COMMIT")
+                    .map_err(|e| ApiError::Internal {
+                        log_only: format!("mark_all_notifications_read COMMIT: {e}"),
+                    })?;
+                Ok(count)
+            }
+            Err(e) => {
+                let _ = guard.execute_batch("ROLLBACK");
+                Err(ApiError::Internal {
+                    log_only: format!("mark_all_notifications_read: {e}"),
+                })
+            }
+        }
     }
 }
 

@@ -11,6 +11,7 @@
 //! * [`escalations`] — pending escalation list.
 //! * [`audit`] — paginated audit chain.
 //! * [`inbox`] — operator inbox.
+//! * [`notifications`] — notification list + mark-read.
 //! * [`policy`] — policy snapshot view.
 
 pub mod audit;
@@ -20,6 +21,7 @@ pub mod git;
 pub mod health;
 pub mod inbox;
 pub mod initiatives;
+pub mod notifications;
 pub mod policy;
 pub mod sessions;
 pub mod tasks;

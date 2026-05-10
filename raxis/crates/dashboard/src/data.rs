@@ -389,6 +389,31 @@ pub struct HealthCheck {
     pub message: String,
 }
 
+/// Notification row surfaced by `GET /api/notifications`.
+#[derive(Debug, Clone, Serialize)]
+pub struct NotificationView {
+    /// UUID notification id.
+    pub notification_id: String,
+    /// Event kind that triggered this notification.
+    pub event_kind: String,
+    /// Owning initiative id (if any).
+    pub initiative_id: Option<String>,
+    /// Owning task id (if any).
+    pub task_id: Option<String>,
+    /// Owning session id (if any).
+    pub session_id: Option<String>,
+    /// Human-readable summary.
+    pub summary: String,
+    /// Structured JSON payload.
+    pub payload: serde_json::Value,
+    /// Whether the operator has marked this notification as read.
+    pub read: bool,
+    /// Source audit event id for correlation.
+    pub source_event_id: String,
+    /// Unix-seconds creation timestamp.
+    pub created_at: u64,
+}
+
 /// Trait the kernel implements. Default impls are NOT provided
 /// — the kernel-glue code MUST wire every method.
 pub trait DashboardData: Send + Sync + 'static {
@@ -447,6 +472,27 @@ pub trait DashboardData: Send + Sync + 'static {
     /// input. Returned as audit-shaped rows so the frontend can
     /// render them with the same component as the audit page.
     fn list_inbox(&self) -> Result<Vec<AuditEntryView>, ApiError>;
+
+    /// List notifications from the kernel's `notifications` table.
+    /// `unread_only = true` filters to unread only.
+    /// `limit` caps the result set (≤ 200).
+    fn list_notifications(
+        &self,
+        limit: u32,
+        unread_only: bool,
+        initiative_id: Option<&str>,
+    ) -> Result<Vec<NotificationView>, ApiError>;
+
+    /// Count of unread notifications (for badge rendering).
+    fn notification_count_unread(&self) -> Result<u64, ApiError>;
+
+    /// Mark a single notification as read. Returns `true` if a
+    /// row was actually updated.
+    fn mark_notification_read(&self, notification_id: &str) -> Result<bool, ApiError>;
+
+    /// Mark all notifications as read. Returns the count of
+    /// rows updated.
+    fn mark_all_notifications_read(&self) -> Result<u64, ApiError>;
 
     /// Read-only policy snapshot.
     fn policy_snapshot(&self) -> Result<PolicySnapshotView, ApiError>;
@@ -570,6 +616,7 @@ struct InMemoryInner {
     escalations: Vec<EscalationView>,
     audit: Vec<AuditEntryView>,
     inbox: Vec<AuditEntryView>,
+    notifications: Vec<NotificationView>,
     policy: Option<PolicySnapshotView>,
     policy_toml: String,
     health: Option<HealthSnapshot>,
@@ -657,6 +704,12 @@ impl InMemoryDashboardData {
     /// Push an inbox entry.
     pub fn push_inbox(self: &Arc<Self>, view: AuditEntryView) -> &Arc<Self> {
         self.inner.write().inbox.push(view);
+        self
+    }
+
+    /// Push a notification entry.
+    pub fn push_notification(self: &Arc<Self>, view: NotificationView) -> &Arc<Self> {
+        self.inner.write().notifications.push(view);
         self
     }
 
@@ -829,6 +882,56 @@ impl DashboardData for InMemoryDashboardData {
 
     fn list_inbox(&self) -> Result<Vec<AuditEntryView>, ApiError> {
         Ok(self.inner.read().inbox.clone())
+    }
+
+    fn list_notifications(
+        &self,
+        limit: u32,
+        unread_only: bool,
+        initiative_id: Option<&str>,
+    ) -> Result<Vec<NotificationView>, ApiError> {
+        let g = self.inner.read();
+        let mut out: Vec<NotificationView> = g.notifications.iter()
+            .filter(|n| {
+                if unread_only && n.read { return false; }
+                if let Some(iid) = initiative_id {
+                    if n.initiative_id.as_deref() != Some(iid) { return false; }
+                }
+                true
+            })
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.truncate(limit.min(200) as usize);
+        Ok(out)
+    }
+
+    fn notification_count_unread(&self) -> Result<u64, ApiError> {
+        let g = self.inner.read();
+        Ok(g.notifications.iter().filter(|n| !n.read).count() as u64)
+    }
+
+    fn mark_notification_read(&self, notification_id: &str) -> Result<bool, ApiError> {
+        let mut g = self.inner.write();
+        if let Some(n) = g.notifications.iter_mut().find(|n| n.notification_id == notification_id) {
+            if !n.read {
+                n.read = true;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn mark_all_notifications_read(&self) -> Result<u64, ApiError> {
+        let mut g = self.inner.write();
+        let mut count = 0u64;
+        for n in g.notifications.iter_mut() {
+            if !n.read {
+                n.read = true;
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     fn policy_snapshot(&self) -> Result<PolicySnapshotView, ApiError> {
@@ -1198,5 +1301,136 @@ mod tests {
         let r = d.lookup_operator_roles("F").unwrap();
         assert_eq!(r.display_name, "alice");
         assert_eq!(r.roles, vec![DashboardRole::Read]);
+    }
+
+    // ── Notification tests ────────────────────────────────────────
+
+    fn sample_notification(id: &str, kind: &str, read: bool, ts: u64) -> NotificationView {
+        NotificationView {
+            notification_id: id.into(),
+            event_kind: kind.into(),
+            initiative_id: Some("init-1".into()),
+            task_id: None,
+            session_id: None,
+            summary: format!("{kind} happened"),
+            payload: serde_json::json!({"k": "v"}),
+            read,
+            source_event_id: "evt-1".into(),
+            created_at: ts,
+        }
+    }
+
+    #[test]
+    fn list_notifications_returns_all_when_no_filter() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "EscalationPending", false, 300))
+         .push_notification(sample_notification("n-2", "PolicyAdvanced",    true,  200))
+         .push_notification(sample_notification("n-3", "EscalationApproved", false, 100));
+        let all = d.list_notifications(10, false, None).unwrap();
+        assert_eq!(all.len(), 3);
+        // Newest first.
+        assert_eq!(all[0].notification_id, "n-1");
+        assert_eq!(all[2].notification_id, "n-3");
+    }
+
+    #[test]
+    fn list_notifications_filters_unread_only() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "EscalationPending", false, 300))
+         .push_notification(sample_notification("n-2", "PolicyAdvanced",    true,  200))
+         .push_notification(sample_notification("n-3", "EscalationApproved", false, 100));
+        let unread = d.list_notifications(10, true, None).unwrap();
+        assert_eq!(unread.len(), 2);
+        assert!(unread.iter().all(|n| !n.read));
+    }
+
+    #[test]
+    fn list_notifications_filters_by_initiative() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "X", false, 300))
+         .push_notification({
+             let mut n = sample_notification("n-2", "Y", false, 200);
+             n.initiative_id = Some("init-other".into());
+             n
+         });
+        let filtered = d.list_notifications(10, false, Some("init-1")).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].notification_id, "n-1");
+    }
+
+    #[test]
+    fn list_notifications_respects_limit() {
+        let d = InMemoryDashboardData::new();
+        for i in 0..10 {
+            d.push_notification(sample_notification(
+                &format!("n-{i}"), "X", false, i as u64,
+            ));
+        }
+        let page = d.list_notifications(3, false, None).unwrap();
+        assert_eq!(page.len(), 3);
+    }
+
+    #[test]
+    fn notification_count_unread_counts_only_unread() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "X", false, 300))
+         .push_notification(sample_notification("n-2", "Y", true,  200))
+         .push_notification(sample_notification("n-3", "Z", false, 100));
+        assert_eq!(d.notification_count_unread().unwrap(), 2);
+    }
+
+    #[test]
+    fn mark_notification_read_flips_unread_to_read() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "X", false, 300));
+        let updated = d.mark_notification_read("n-1").unwrap();
+        assert!(updated);
+        // Now it should be read.
+        assert_eq!(d.notification_count_unread().unwrap(), 0);
+        let all = d.list_notifications(10, false, None).unwrap();
+        assert!(all[0].read);
+    }
+
+    #[test]
+    fn mark_notification_read_is_idempotent() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "X", true, 300));
+        // Already read — returns false.
+        let updated = d.mark_notification_read("n-1").unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn mark_notification_read_returns_false_for_unknown() {
+        let d = InMemoryDashboardData::new();
+        let updated = d.mark_notification_read("nonexistent").unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn mark_all_notifications_read_clears_unread() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "X", false, 300))
+         .push_notification(sample_notification("n-2", "Y", false, 200))
+         .push_notification(sample_notification("n-3", "Z", true,  100));
+        let count = d.mark_all_notifications_read().unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(d.notification_count_unread().unwrap(), 0);
+    }
+
+    #[test]
+    fn mark_all_notifications_read_returns_zero_when_none_unread() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "X", true, 300));
+        let count = d.mark_all_notifications_read().unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn push_notification_builder_appends() {
+        let d = InMemoryDashboardData::new();
+        d.push_notification(sample_notification("n-1", "A", false, 100))
+         .push_notification(sample_notification("n-2", "B", false, 200));
+        assert_eq!(d.list_notifications(10, false, None).unwrap().len(), 2);
     }
 }

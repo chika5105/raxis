@@ -101,12 +101,18 @@ impl<D: DashboardData> DashboardServer<D> {
     }
 }
 
-/// Build the full router for the supplied state.
+/// Build the full router for the supplied state. When
+/// `state.config.static_dir` is `Some(_)` the bundle is mounted
+/// as the fallback service so SPA client-side routes (e.g.
+/// `/initiatives/init-abc`) load `index.html` and resolve in
+/// the browser.
 fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
-    use axum::routing::{get, post};
+    use axum::routing::{get, patch, post};
     use crate::routes::*;
 
-    Router::new()
+    let static_dir = state.config.static_dir.clone();
+
+    let mut router = Router::new()
         // Auth (no JWT required).
         .route("/api/auth/challenge", get(auth::challenge::<D>))
         .route("/api/auth/verify",    post(auth::verify::<D>))
@@ -131,6 +137,11 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Audit + Inbox.
         .route("/api/audit",                       get(audit::list::<D>))
         .route("/api/inbox",                       get(inbox::list::<D>))
+        // Notifications.
+        .route("/api/notifications",               get(notifications::list::<D>))
+        .route("/api/notifications/unread-count",  get(notifications::unread_count::<D>))
+        .route("/api/notifications/mark-all-read", post(notifications::mark_all_read::<D>))
+        .route("/api/notifications/:id/read",      patch(notifications::mark_read::<D>))
         // Policy.
         .route("/api/policy",                      get(policy::snapshot::<D>))
         .route("/api/policy/toml",
@@ -140,7 +151,23 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/git/worktrees/:name",                 get(git::detail::<D>))
         .route("/api/git/worktrees/:name/log",             get(git::log::<D>))
         .route("/api/git/worktrees/:name/diff",            get(git::diff_default::<D>))
-        .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>))
+        .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>));
+
+    // SPA fallback: any non-API route serves index.html so
+    // React Router can resolve client-side routes. ServeDir's
+    // fallback wires `not_found_service` to a handler that
+    // serves `index.html` (so a deep link like
+    // `/initiatives/init-abc` works on a fresh page load).
+    if let Some(dir) = static_dir {
+        use tower_http::services::ServeDir;
+        let index = std::path::PathBuf::from(&dir).join("index.html");
+        let serve = ServeDir::new(&dir).fallback(
+            tower_http::services::ServeFile::new(index),
+        );
+        router = router.fallback_service(serve);
+    }
+
+    router
         // Cross-cutting layers.
         //
         // The compression predicate exempts text/event-stream so
