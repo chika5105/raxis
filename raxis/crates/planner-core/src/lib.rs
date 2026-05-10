@@ -121,7 +121,7 @@ pub use provider_model::{
 };
 pub use circuit::{
     CircuitBreakerModelClient, CircuitConfig, CircuitRow, CircuitSnapshot,
-    CircuitState, CircuitStore, InMemoryCircuitStore,
+    CircuitState, CircuitStore, InMemoryCircuitStore, circuit_state_wire_str,
 };
 pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
 pub use gemini_client::GeminiClient;

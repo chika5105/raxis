@@ -20,7 +20,8 @@
 //! | `0`  | Success (status rendered / reset done). |
 //! | `1`  | Error opening kernel.db or parsing args.|
 
-use raxis_store::{open_ro, SqliteCircuitStore};
+use raxis_store::{SqliteCircuitStore};
+use raxis_types::CircuitBreakerState;
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -52,7 +53,7 @@ pub fn run_status(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
                 serde_json::json!({
                     "provider":             &r.provider,
                     "model":                &r.model,
-                    "state":                &r.state,
+                    "state":                r.state.as_sql_str(),
                     "consecutive_failures": r.consecutive_failures,
                     "last_failure_kind":    &r.last_failure_kind,
                     "last_failure_http_code": r.last_failure_http_code,
@@ -95,10 +96,10 @@ fn render_status_human(rows: &[raxis_store::CircuitRowSqlite]) {
             .last_failure_kind
             .as_deref()
             .unwrap_or("-");
-        let state_display = match r.state.as_str() {
-            "Open" => "\x1b[31mOpen\x1b[0m",      // red
-            "HalfOpen" => "\x1b[33mHalfOpen\x1b[0m", // yellow
-            _ => "Closed",
+        let state_display = match r.state {
+            CircuitBreakerState::Open     => "\x1b[31mOpen\x1b[0m",
+            CircuitBreakerState::HalfOpen => "\x1b[33mHalfOpen\x1b[0m",
+            CircuitBreakerState::Closed   => "Closed",
         };
         println!(
             "{:<16} {:<28} {:<10} {:>8}  {:<14} {:<12}",
@@ -112,8 +113,8 @@ fn render_status_human(rows: &[raxis_store::CircuitRowSqlite]) {
     }
 
     // Summary line.
-    let open_count = rows.iter().filter(|r| r.state == "Open").count();
-    let half_open_count = rows.iter().filter(|r| r.state == "HalfOpen").count();
+    let open_count = rows.iter().filter(|r| r.state == CircuitBreakerState::Open).count();
+    let half_open_count = rows.iter().filter(|r| r.state == CircuitBreakerState::HalfOpen).count();
     println!();
     println!(
         "{} provider(s) tracked. {} Open, {} HalfOpen.",
@@ -186,8 +187,8 @@ pub fn run_reset(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                 serde_json::json!({
                     "provider": &row.provider,
                     "model": &row.model,
-                    "state": &row.state,
-                    "previous_state": transition.as_ref().map(|t| &t.from_state),
+                    "state": row.state.as_sql_str(),
+                    "previous_state": transition.as_ref().map(|t| t.from_state.as_sql_str()),
                     "reset": transition.is_some(),
                 })
             })

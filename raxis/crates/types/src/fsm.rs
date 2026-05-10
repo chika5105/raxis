@@ -1236,3 +1236,86 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// CircuitBreakerState — provider circuit breaker lifecycle.
+// provider-failure-handling.md §6.3.
+// DDL: provider_circuit_state.state TEXT NOT NULL CHECK
+//      (state IN ('Closed', 'Open', 'HalfOpen')).
+//
+// Normative state machine:
+//
+//   Closed ──(N consecutive retryable failures)──► Open
+//   Open   ──(open_duration elapsed, lazy)───────► HalfOpen
+//   HalfOpen ──(probe success)───────────────────► Closed
+//   HalfOpen ──(probe failure)───────────────────► Open
+//   Open | HalfOpen ──(manual_reset)─────────────► Closed
+// ---------------------------------------------------------------------------
+
+/// The three states of a per-(provider, model) circuit breaker.
+///
+/// The state governs whether upstream calls are admitted:
+///
+/// * **Closed** — normal operation; all calls pass through.
+/// * **Open** — breaker tripped; calls are short-circuited with the
+///   last recorded error.
+/// * **HalfOpen** — the `open_duration` window has elapsed; exactly
+///   one probe call is admitted. A success closes the breaker; a
+///   failure re-opens it for another `open_duration` window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum CircuitBreakerState {
+    /// Normal operation — all calls pass through to the upstream provider.
+    Closed,
+    /// Breaker tripped — all calls are short-circuited.
+    Open,
+    /// Probe window — exactly one call is admitted to test the upstream.
+    HalfOpen,
+}
+
+impl CircuitBreakerState {
+    /// All variants — the canonical set referenced by the
+    /// `provider_circuit_state.state` SQL CHECK constraint
+    /// (migration 15, provider-failure-handling.md §6.4).
+    ///
+    /// **Spec drift contract.** Adding a new variant requires BOTH
+    /// a length bump here AND a new migration that ALTERs the CHECK
+    /// constraint on already-installed databases.
+    pub const ALL: [Self; 3] = [Self::Closed, Self::Open, Self::HalfOpen];
+
+    /// Canonical SQL string used in CHECK constraints and at-rest storage.
+    pub fn as_sql_str(self) -> &'static str {
+        match self {
+            Self::Closed   => "Closed",
+            Self::Open     => "Open",
+            Self::HalfOpen => "HalfOpen",
+        }
+    }
+
+    /// Parse from the SQL at-rest string.
+    pub fn from_sql_str(s: &str) -> Option<Self> {
+        match s {
+            "Closed"   => Some(Self::Closed),
+            "Open"     => Some(Self::Open),
+            "HalfOpen" => Some(Self::HalfOpen),
+            _          => None,
+        }
+    }
+
+    /// Render the SQL `CHECK (state IN (...))` clause body from the
+    /// enum variants. Used by the migration DDL to guarantee the CHECK
+    /// constraint is always in bijection with the Rust enum.
+    pub fn sql_check_in_clause() -> String {
+        let values: Vec<String> = Self::ALL
+            .iter()
+            .map(|s| format!("'{}'", s.as_sql_str()))
+            .collect();
+        values.join(", ")
+    }
+}
+
+impl fmt::Display for CircuitBreakerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_sql_str())
+    }
+}

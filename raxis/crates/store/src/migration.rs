@@ -2056,6 +2056,11 @@ pub fn render_migration_15_ddl() -> String {
     let provider_circuit_state = Table::ProviderCircuitState.as_str();
     let schema_version         = Table::SchemaVersion.as_str();
 
+    // Derive the CHECK constraint from the canonical enum — single
+    // source of truth (raxis-types::fsm::CircuitBreakerState).
+    let state_check = raxis_types::CircuitBreakerState::sql_check_in_clause();
+    let open_str    = raxis_types::CircuitBreakerState::Open.as_sql_str();
+
     format!(
         "
 BEGIN EXCLUSIVE;
@@ -2064,7 +2069,7 @@ BEGIN EXCLUSIVE;
 CREATE TABLE {provider_circuit_state} (
     provider                  TEXT    NOT NULL,
     model                     TEXT    NOT NULL,
-    state                     TEXT    NOT NULL CHECK (state IN ('Closed', 'Open', 'HalfOpen')),
+    state                     TEXT    NOT NULL CHECK (state IN ({state_check})),
     consecutive_failures      INTEGER NOT NULL DEFAULT 0,
     last_failure_at_ms        INTEGER,
     last_failure_kind         TEXT,
@@ -2081,7 +2086,7 @@ CREATE TABLE {provider_circuit_state} (
 -- rows where state = 'Open' AND open_expires_at_ms <= now().
 CREATE INDEX idx_{provider_circuit_state}_open_expires
     ON {provider_circuit_state} (open_expires_at_ms)
-    WHERE state = 'Open';
+    WHERE state = '{open_str}';
 
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)

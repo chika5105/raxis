@@ -258,56 +258,43 @@ impl CircuitConfig {
 }
 
 // ---------------------------------------------------------------------------
-// CircuitState
+// CircuitState — type alias to the canonical enum in raxis-types.
 // ---------------------------------------------------------------------------
 
-/// Three-state circuit breaker, observable for `raxis status`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CircuitState {
-    /// Pass through normally.
-    Closed   = 0,
-    /// Refuse all dispatches; transition to `HalfOpen` after the
-    /// open-duration elapses.
-    Open     = 1,
-    /// Admit one probe. Success closes; failure re-opens.
-    HalfOpen = 2,
+/// Re-export the canonical circuit breaker state enum from `raxis-types`.
+/// All SQL column values and audit event payloads use
+/// `CircuitBreakerState::as_sql_str()` — there is exactly one source of
+/// truth for the wire-stable strings.
+pub type CircuitState = raxis_types::CircuitBreakerState;
+
+/// Mapping from atomic-stored `u8` discriminant to enum.
+/// Used only by `InMemoryCircuitStore` (test backend).
+fn circuit_state_from_u8(b: u8) -> CircuitState {
+    match b {
+        1 => CircuitState::Open,
+        2 => CircuitState::HalfOpen,
+        _ => CircuitState::Closed,
+    }
 }
 
-impl CircuitState {
-    fn from_u8(b: u8) -> Self {
-        match b {
-            1 => CircuitState::Open,
-            2 => CircuitState::HalfOpen,
-            _ => CircuitState::Closed,
-        }
+/// Mapping from enum to atomic-stored `u8` discriminant.
+fn circuit_state_to_u8(s: CircuitState) -> u8 {
+    match s {
+        CircuitState::Closed   => 0,
+        CircuitState::Open     => 1,
+        CircuitState::HalfOpen => 2,
     }
-    /// Stable wire short-string for `raxis status` JSON.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            CircuitState::Closed   => "closed",
-            CircuitState::Open     => "circuit_open",
-            CircuitState::HalfOpen => "half_open",
-        }
-    }
+}
 
-    /// PascalCase string matching the SQLite CHECK constraint and
-    /// audit event payload (`provider-failure-handling.md §6.4`).
-    pub fn as_sql_str(&self) -> &'static str {
-        match self {
-            CircuitState::Closed   => "Closed",
-            CircuitState::Open     => "Open",
-            CircuitState::HalfOpen => "HalfOpen",
-        }
-    }
-
-    /// Parse a PascalCase string from the SQLite column back to enum.
-    /// Returns `Closed` for unrecognised values (defense-in-depth).
-    pub fn from_sql_str(s: &str) -> Self {
-        match s {
-            "Open"     => CircuitState::Open,
-            "HalfOpen" => CircuitState::HalfOpen,
-            _          => CircuitState::Closed,
-        }
+/// Stable wire short-string for `raxis status` JSON output.
+/// Distinct from `CircuitState::as_sql_str()` which is PascalCase
+/// for the SQLite column — this is the lowercase form the CLI
+/// emits to JSON consumers.
+pub fn circuit_state_wire_str(s: CircuitState) -> &'static str {
+    match s {
+        CircuitState::Closed   => "closed",
+        CircuitState::Open     => "circuit_open",
+        CircuitState::HalfOpen => "half_open",
     }
 }
 
@@ -333,7 +320,7 @@ struct InMemoryEntry {
 impl InMemoryEntry {
     fn new() -> Self {
         Self {
-            state:                AtomicU8::new(CircuitState::Closed as u8),
+            state:                AtomicU8::new(circuit_state_to_u8(CircuitState::Closed)),
             consecutive_failures: AtomicU64::new(0),
             opened_at_ms:         AtomicU64::new(0),
             open_expires_at_ms:   AtomicU64::new(0),
@@ -349,7 +336,7 @@ impl InMemoryEntry {
         CircuitRow {
             provider:               provider.to_owned(),
             model:                  model.to_owned(),
-            state:                  CircuitState::from_u8(self.state.load(Ordering::Acquire)),
+            state:                  circuit_state_from_u8(self.state.load(Ordering::Acquire)),
             consecutive_failures:   self.consecutive_failures.load(Ordering::Relaxed),
             last_failure_kind:      self.last_failure_kind.lock().ok().and_then(|g| g.clone()),
             last_failure_http_code: self.last_failure_http_code.lock().ok().and_then(|g| *g),
@@ -424,8 +411,8 @@ impl CircuitStore for InMemoryCircuitStore {
             let expires = now + config.open_duration.as_millis() as u64;
             e.opened_at_ms.store(now, Ordering::Relaxed);
             e.open_expires_at_ms.store(expires, Ordering::Relaxed);
-            let prev = e.state.swap(CircuitState::Open as u8, Ordering::AcqRel);
-            if prev != CircuitState::Open as u8 {
+            let prev = e.state.swap(circuit_state_to_u8(CircuitState::Open), Ordering::AcqRel);
+            if prev != circuit_state_to_u8(CircuitState::Open) {
                 e.last_state_change_ms.store(now, Ordering::Relaxed);
             }
         }
@@ -439,9 +426,9 @@ impl CircuitStore for InMemoryCircuitStore {
         model: &str,
     ) -> CircuitRow {
         let e = self.get_or_create(provider, model);
-        let prev = CircuitState::from_u8(e.state.load(Ordering::Acquire));
+        let prev = circuit_state_from_u8(e.state.load(Ordering::Acquire));
         e.consecutive_failures.store(0, Ordering::Relaxed);
-        e.state.store(CircuitState::Closed as u8, Ordering::Release);
+        e.state.store(circuit_state_to_u8(CircuitState::Closed), Ordering::Release);
         e.opened_at_ms.store(0, Ordering::Relaxed);
         e.open_expires_at_ms.store(0, Ordering::Relaxed);
         e.last_success_at_ms.store(now_ms(), Ordering::Relaxed);
@@ -465,14 +452,14 @@ impl CircuitStore for InMemoryCircuitStore {
 
     async fn maybe_promote(&self, provider: &str, model: &str) -> CircuitRow {
         let e = self.get_or_create(provider, model);
-        let s = CircuitState::from_u8(e.state.load(Ordering::Acquire));
+        let s = circuit_state_from_u8(e.state.load(Ordering::Acquire));
         if s == CircuitState::Open {
             let now = now_ms();
             let expires = e.open_expires_at_ms.load(Ordering::Relaxed);
             if expires > 0 && now >= expires {
                 let _ = e.state.compare_exchange(
-                    CircuitState::Open as u8,
-                    CircuitState::HalfOpen as u8,
+                    circuit_state_to_u8(CircuitState::Open),
+                    circuit_state_to_u8(CircuitState::HalfOpen),
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 );
@@ -491,7 +478,7 @@ impl CircuitStore for InMemoryCircuitStore {
         let e = self.get_or_create(provider, model);
         let now = now_ms();
         e.consecutive_failures.store(0, Ordering::Relaxed);
-        e.state.store(CircuitState::Closed as u8, Ordering::Release);
+        e.state.store(circuit_state_to_u8(CircuitState::Closed), Ordering::Release);
         e.opened_at_ms.store(0, Ordering::Relaxed);
         e.open_expires_at_ms.store(0, Ordering::Relaxed);
         e.half_open_inflight.store(0, Ordering::Release);
@@ -913,9 +900,9 @@ mod tests {
 
     #[test]
     fn state_wire_strings_are_stable() {
-        assert_eq!(CircuitState::Closed.as_str(),   "closed");
-        assert_eq!(CircuitState::Open.as_str(),     "circuit_open");
-        assert_eq!(CircuitState::HalfOpen.as_str(), "half_open");
+        assert_eq!(circuit_state_wire_str(CircuitState::Closed),   "closed");
+        assert_eq!(circuit_state_wire_str(CircuitState::Open),     "circuit_open");
+        assert_eq!(circuit_state_wire_str(CircuitState::HalfOpen), "half_open");
     }
 
     #[test]
@@ -928,9 +915,17 @@ mod tests {
     #[test]
     fn state_sql_round_trip() {
         for s in [CircuitState::Closed, CircuitState::Open, CircuitState::HalfOpen] {
-            assert_eq!(CircuitState::from_sql_str(s.as_sql_str()), s);
+            assert_eq!(CircuitState::from_sql_str(s.as_sql_str()), Some(s));
         }
-        // Unknown values default to Closed (defense-in-depth).
-        assert_eq!(CircuitState::from_sql_str("garbage"), CircuitState::Closed);
+        // Unknown values return None.
+        assert_eq!(CircuitState::from_sql_str("garbage"), None);
+    }
+
+    #[test]
+    fn state_sql_check_in_clause_matches_all_variants() {
+        let clause = CircuitState::sql_check_in_clause();
+        assert!(clause.contains("'Closed'"));
+        assert!(clause.contains("'Open'"));
+        assert!(clause.contains("'HalfOpen'"));
     }
 }

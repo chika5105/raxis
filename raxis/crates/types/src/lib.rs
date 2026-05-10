@@ -36,8 +36,9 @@ pub use escalation::{
     EscalationStatus, RequestedEscalationScope,
 };
 pub use fsm::{
-    BlockReason, CloneStrategy, InitiativeState, IntegrationMergeAttemptDiscardReason,
-    IntegrationMergeAttemptState, PlanBundleNonceOutcome, ReviewVerdict, SessionAgentType,
+    BlockReason, CircuitBreakerState, CloneStrategy, InitiativeState,
+    IntegrationMergeAttemptDiscardReason, IntegrationMergeAttemptState,
+    PlanBundleNonceOutcome, ReviewVerdict, SessionAgentType,
     SubtaskActivationState, TaskState, TerminalCriteria,
 };
 pub use id::{
