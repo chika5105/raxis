@@ -1,0 +1,295 @@
+// Thin typed fetch wrapper for the Raxis dashboard HTTP API.
+//
+// Spec: raxis/specs/v2/v2_extended_gaps.md §4.3 / §4.5.
+//
+// Design notes:
+//   * One `apiFetch` entrypoint so JWT injection, error
+//     normalization, and 401 → /login redirect live in one place.
+//   * No "default value" fallbacks. A 404 / parse error throws an
+//     `ApiError`; React Query surfaces it to the calling page so
+//     the operator sees a real error instead of silently empty
+//     state.
+//   * Compatible with both the production deployment (FE served
+//     from the same origin as the API by `tower_http::ServeDir`)
+//     and the dev server (Vite proxies `/api/*` to the kernel).
+
+import type {
+  AuditEntryView,
+  ChallengeResponse,
+  DagView,
+  EscalationView,
+  HealthSnapshot,
+  InitiativeListEntry,
+  InitiativeView,
+  PolicyAdvancement,
+  PolicySnapshotView,
+  SessionView,
+  TaskView,
+  UpdatePolicyResponse,
+  VerifyResponse,
+  WorktreeDetail,
+  WorktreeDiff,
+  WorktreeListEntry,
+  WorktreeLogEntry,
+} from "@/types/api";
+
+import { getStoredToken, clearStoredToken } from "@/lib/auth-store";
+
+/// Dashboard API error normalized from the JSON envelope.
+export class ApiError extends Error {
+  /// HTTP status (e.g. 401, 403, 404, 500).
+  public readonly status: number;
+  /// Stable backend code (`FAIL_DASHBOARD_*`).
+  public readonly code: string;
+  /// Backend-provided short message (already operator-safe).
+  public readonly detail: string;
+
+  constructor(status: number, code: string, detail: string) {
+    super(`${code} (${status}): ${detail}`);
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+
+  /// `true` when the error means the operator must re-authenticate.
+  public isAuthExpired(): boolean {
+    return (
+      this.status === 401 &&
+      (this.code === "FAIL_DASHBOARD_AUTH_JWT" ||
+        this.code === "FAIL_DASHBOARD_AUTH_JWT_REVOKED" ||
+        this.code === "FAIL_DASHBOARD_AUTH_MISSING")
+    );
+  }
+}
+
+/// Endpoints whose response body is plain text (not JSON).
+const TEXT_ENDPOINTS = new Set<string>(["/api/policy/toml"]);
+
+interface FetchOptions {
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  body?: unknown;
+  /// When true, do NOT redirect on 401 (used by the auth flow
+  /// itself so a wrong-key login surfaces the error in-page).
+  skipAuthRedirect?: boolean;
+  /// Accept text body instead of JSON.
+  asText?: boolean;
+  /// Per-call abort signal — used by React Query.
+  signal?: AbortSignal;
+}
+
+async function apiFetch<T>(path: string, opts: FetchOptions = {}): Promise<T> {
+  const headers: Record<string, string> = {
+    Accept: opts.asText || TEXT_ENDPOINTS.has(path)
+      ? "text/plain, application/json"
+      : "application/json",
+  };
+  if (opts.body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
+  const token = getStoredToken();
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const fetchInit: RequestInit = {
+    method: opts.method ?? "GET",
+    headers,
+    credentials: "same-origin",
+  };
+  if (opts.body !== undefined) {
+    fetchInit.body = JSON.stringify(opts.body);
+  }
+  if (opts.signal) {
+    fetchInit.signal = opts.signal;
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(path, fetchInit);
+  } catch (e) {
+    // Network-level failure (DNS, connection refused, …). The
+    // dashboard always runs on the same host as the kernel so
+    // this usually means the kernel is down.
+    throw new ApiError(
+      0,
+      "FAIL_DASHBOARD_NETWORK",
+      e instanceof Error ? e.message : "network error",
+    );
+  }
+
+  if (!res.ok) {
+    let body: { code?: string; message?: string } = {};
+    try {
+      body = await res.json();
+    } catch {
+      // Backend returned non-JSON for an error (shouldn't happen
+      // for known endpoints, but the dashboard's middleware
+      // may inject a plain 413 on oversized requests). Surface
+      // a generic code so the UI can still display something.
+    }
+    const err = new ApiError(
+      res.status,
+      body.code ?? `HTTP_${res.status}`,
+      body.message ?? res.statusText,
+    );
+    if (!opts.skipAuthRedirect && err.isAuthExpired()) {
+      clearStoredToken();
+      // History API redirect — React Router picks this up via
+      // its route config (the AppRouter listens to `popstate`).
+      if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+        const next = encodeURIComponent(
+          window.location.pathname + window.location.search,
+        );
+        window.location.assign(`/login?next=${next}`);
+      }
+    }
+    throw err;
+  }
+
+  if (opts.asText || TEXT_ENDPOINTS.has(path)) {
+    return (await res.text()) as unknown as T;
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Auth
+// ---------------------------------------------------------------------------
+
+export const authApi = {
+  challenge: (signal?: AbortSignal): Promise<ChallengeResponse> =>
+    apiFetch<ChallengeResponse>("/api/auth/challenge", {
+      skipAuthRedirect: true,
+      ...(signal ? { signal } : {}),
+    }),
+  verify: (
+    body: { challenge: string; signature: string; public_key: string },
+  ): Promise<VerifyResponse> =>
+    apiFetch<VerifyResponse>("/api/auth/verify", {
+      method: "POST",
+      body,
+      skipAuthRedirect: true,
+    }),
+  logout: (token: string): Promise<{ revoked_at: number; operator_id: string }> =>
+    apiFetch("/api/auth/logout", {
+      method: "POST",
+      body: { token },
+      skipAuthRedirect: true,
+    }),
+};
+
+// ---------------------------------------------------------------------------
+// Read endpoints
+// ---------------------------------------------------------------------------
+
+export const dashboardApi = {
+  health: (signal?: AbortSignal): Promise<HealthSnapshot> =>
+    apiFetch<HealthSnapshot>("/api/health", signal ? { signal } : {}),
+
+  initiatives: {
+    list: (
+      params: { state?: string; limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<InitiativeListEntry[]> => {
+      const qs = new URLSearchParams();
+      if (params.state) qs.set("state", params.state);
+      if (params.limit) qs.set("limit", String(params.limit));
+      const suffix = qs.toString() ? `?${qs}` : "";
+      return apiFetch<InitiativeListEntry[]>(
+        `/api/initiatives${suffix}`,
+        signal ? { signal } : {},
+      );
+    },
+    get: (id: string, signal?: AbortSignal): Promise<InitiativeView> =>
+      apiFetch<InitiativeView>(`/api/initiatives/${encodeURIComponent(id)}`, signal ? { signal } : {}),
+    dag: (id: string, signal?: AbortSignal): Promise<DagView> =>
+      apiFetch<DagView>(`/api/initiatives/${encodeURIComponent(id)}/dag`, signal ? { signal } : {}),
+    tasks: (id: string, signal?: AbortSignal): Promise<TaskView[]> =>
+      apiFetch<TaskView[]>(`/api/initiatives/${encodeURIComponent(id)}/tasks`, signal ? { signal } : {}),
+  },
+
+  tasks: {
+    get: (id: string, signal?: AbortSignal): Promise<TaskView> =>
+      apiFetch<TaskView>(`/api/tasks/${encodeURIComponent(id)}`, signal ? { signal } : {}),
+    outputs: (id: string, signal?: AbortSignal): Promise<TaskView["structured_outputs"]> =>
+      apiFetch(`/api/tasks/${encodeURIComponent(id)}/outputs`, signal ? { signal } : {}),
+  },
+
+  sessions: {
+    list: (limit = 50, signal?: AbortSignal): Promise<SessionView[]> =>
+      apiFetch<SessionView[]>(`/api/sessions?limit=${limit}`, signal ? { signal } : {}),
+    get: (id: string, signal?: AbortSignal): Promise<SessionView> =>
+      apiFetch<SessionView>(`/api/sessions/${encodeURIComponent(id)}`, signal ? { signal } : {}),
+  },
+
+  escalations: {
+    list: (signal?: AbortSignal): Promise<EscalationView[]> =>
+      apiFetch<EscalationView[]>("/api/escalations", signal ? { signal } : {}),
+    get: (id: string, signal?: AbortSignal): Promise<EscalationView> =>
+      apiFetch<EscalationView>(`/api/escalations/${encodeURIComponent(id)}`, signal ? { signal } : {}),
+  },
+
+  audit: {
+    list: (
+      params: { cursor?: number; initiative_id?: string; limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<AuditEntryView[]> => {
+      const qs = new URLSearchParams();
+      if (params.cursor !== undefined) qs.set("cursor_seq", String(params.cursor));
+      if (params.initiative_id) qs.set("initiative_id", params.initiative_id);
+      if (params.limit !== undefined) qs.set("limit", String(params.limit));
+      const suffix = qs.toString() ? `?${qs}` : "";
+      return apiFetch<AuditEntryView[]>(`/api/audit${suffix}`, signal ? { signal } : {});
+    },
+  },
+
+  inbox: (signal?: AbortSignal): Promise<AuditEntryView[]> =>
+    apiFetch<AuditEntryView[]>("/api/inbox", signal ? { signal } : {}),
+
+  policy: {
+    snapshot: (signal?: AbortSignal): Promise<PolicySnapshotView> =>
+      apiFetch<PolicySnapshotView>("/api/policy", signal ? { signal } : {}),
+    rawToml: (signal?: AbortSignal): Promise<string> =>
+      apiFetch<string>("/api/policy/toml", { asText: true, ...(signal ? { signal } : {}) }),
+    update: (
+      body: { toml: string; signature_b64: string },
+    ): Promise<PolicyAdvancement> =>
+      apiFetch<UpdatePolicyResponse>("/api/policy/toml", {
+        method: "PUT",
+        body,
+      }).then((r) => r.advancement),
+  },
+
+  git: {
+    list: (signal?: AbortSignal): Promise<WorktreeListEntry[]> =>
+      apiFetch<WorktreeListEntry[]>("/api/git/worktrees", signal ? { signal } : {}),
+    get: (name: string, signal?: AbortSignal): Promise<WorktreeDetail> =>
+      apiFetch<WorktreeDetail>(`/api/git/worktrees/${encodeURIComponent(name)}`, signal ? { signal } : {}),
+    log: (name: string, limit = 50, signal?: AbortSignal): Promise<WorktreeLogEntry[]> =>
+      apiFetch<WorktreeLogEntry[]>(
+        `/api/git/worktrees/${encodeURIComponent(name)}/log?limit=${limit}`,
+        signal ? { signal } : {},
+      ),
+    diffDefault: (name: string, signal?: AbortSignal): Promise<WorktreeDiff> =>
+      apiFetch<WorktreeDiff>(`/api/git/worktrees/${encodeURIComponent(name)}/diff`, signal ? { signal } : {}),
+    diffRange: (name: string, from: string, to: string, signal?: AbortSignal): Promise<WorktreeDiff> =>
+      apiFetch<WorktreeDiff>(
+        `/api/git/worktrees/${encodeURIComponent(name)}/diff/${from}..${to}`,
+        signal ? { signal } : {},
+      ),
+  },
+};
+
+/// Compute a SHA-256 of the supplied UTF-8 text and return the
+/// lowercase hex digest. Used by the policy editor to display
+/// the same `policy_sha256` the kernel will compute on advance,
+/// before the operator submits the PUT.
+export async function sha256Hex(text: string): Promise<string> {
+  const enc = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest("SHA-256", enc);
+  const arr = new Uint8Array(digest);
+  let out = "";
+  for (let i = 0; i < arr.length; i++) {
+    out += arr[i].toString(16).padStart(2, "0");
+  }
+  return out;
+}
