@@ -297,7 +297,8 @@ async fn main() {
             Arc::clone(&policy),
             data_dir.clone(),
         )
-        .with_sidecar_registry(Arc::clone(&sidecar_registry)),
+        .with_sidecar_registry(Arc::clone(&sidecar_registry))
+        .with_store(Arc::clone(&store)),
     );
 
     // Step 8: Emit the canonical KernelStarted record. This is the very

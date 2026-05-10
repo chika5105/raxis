@@ -46,16 +46,22 @@ pub async fn deliver(
     event:    &AuditEvent,
     data_dir: &Path,
 ) -> Result<(), DeliveryError> {
+    // Shell channels with an empty target (the synthesised implicit
+    // channel) resolve to `<data_dir>/notifications/inbox.jsonl`.
+    // Since `dispatch()` now unconditionally writes to inbox.jsonl
+    // before channel fan-out, the implicit Shell handler is a no-op
+    // — writing here would duplicate every notification in the file.
+    // Shell channels with EXPLICIT custom targets still write to
+    // their specified path.
+    if matches!(channel.kind, NotificationChannelKind::Shell) && channel.target.is_empty() {
+        return Ok(());
+    }
+
     let target = resolve_target(channel, data_dir)?;
 
-    // Ensure the parent directory exists. The implicit Shell channel
-    // points at <data_dir>/notifications/ which the kernel creates at
-    // bootstrap; operator-supplied File channels may point anywhere
-    // and we are deliberately conservative — the operator is
-    // responsible for the parent directory existing AND being
-    // writable. We `create_dir_all` only for the implicit Shell
-    // channel because spec §5.6.4 documents that the kernel owns
-    // <data_dir>/notifications/.
+    // Ensure the parent directory exists. Shell channels with explicit
+    // targets may point anywhere — create_dir_all only for Shell kind
+    // because spec §5.6.4 documents the kernel owns the parent.
     if matches!(channel.kind, NotificationChannelKind::Shell) {
         if let Some(parent) = target.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(DeliveryError::Io)?;

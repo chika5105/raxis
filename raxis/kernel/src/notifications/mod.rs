@@ -43,6 +43,7 @@ use std::sync::Arc;
 
 use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink};
 use raxis_policy::{NotificationChannel, NotificationChannelKind, PolicyBundle};
+use raxis_store::Store;
 
 pub mod handler;
 pub mod sink;
@@ -79,7 +80,97 @@ pub fn dispatch(
     data_dir:         PathBuf,
     audit:            Arc<dyn AuditSink>,
     sidecar_registry: Option<Arc<SidecarRegistry>>,
+    store:            Option<Arc<Store>>,
 ) {
+    // ── Unconditional kernel-owned write ────────────────────────────────
+    // Always write to inbox.jsonl AND SQLite regardless of routing.
+    // This is the kernel's ground truth for "what notifications were
+    // generated." Channel fan-out below is best-effort; this is not.
+    let human_summary = summary::render(&event);
+    let payload_json = serde_json::to_string(&event.payload).unwrap_or_default();
+    let notification_id = uuid::Uuid::new_v4().to_string();
+    let created_at = event.emitted_at;
+
+    // 1. Always append to inbox.jsonl.
+    {
+        let inbox_path = PolicyBundle::shell_inbox_path_for(&data_dir);
+        if let Some(parent) = inbox_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let record = serde_json::json!({
+            "notification_id": notification_id,
+            "event_kind":      &event.event_kind,
+            "event_id":        event.event_id.to_string(),
+            "initiative_id":   &event.initiative_id,
+            "task_id":         &event.task_id,
+            "session_id":      &event.session_id,
+            "human_summary":   &human_summary,
+            "payload":         &event.payload,
+            "emitted_at":      created_at,
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&inbox_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", record);
+        }
+    }
+
+    // 2. Write to SQLite notifications table.
+    //
+    // **Invariant relationship.** This insert is a post-commit
+    // side-effect — it runs AFTER the parent handler's transaction
+    // committed and AFTER the audit event landed in the chain. It is
+    // NOT part of the parent handler's `BEGIN IMMEDIATE` transaction
+    // (it cannot be: dispatch runs asynchronously after audit emit).
+    // Failure here does NOT affect the parent handler's state —
+    // consistent with §5.6.3 ("handler failure NEVER aborts the
+    // parent transaction"). The inbox.jsonl append above provides a
+    // durable fallback even if this SQLite write fails.
+    //
+    // Uses its own `BEGIN IMMEDIATE` transaction for atomicity parity
+    // with all other kernel writes to kernel.db.
+    if let Some(ref store) = store {
+        let store_for_insert = Arc::clone(store);
+        let nid  = notification_id.clone();
+        let ek   = event.event_kind.clone();
+        let iid  = event.initiative_id.clone();
+        let tid  = event.task_id.clone();
+        let sid  = event.session_id.clone();
+        let summ = human_summary.clone();
+        let pj   = payload_json.clone();
+        let seid = event.event_id.to_string();
+        // Spawn a blocking task because Store::lock_sync blocks.
+        tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = store_for_insert.lock_sync() {
+                let tx_result = (|| -> Result<(), rusqlite::Error> {
+                    conn.execute_batch("BEGIN IMMEDIATE")?;
+                    let sql = format!(
+                        "INSERT OR IGNORE INTO {} \
+                         (notification_id, event_kind, initiative_id, task_id, \
+                          session_id, summary, payload_json, read, source_event_id, created_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
+                        raxis_store::Table::Notifications.as_str(),
+                    );
+                    conn.execute(
+                        &sql,
+                        rusqlite::params![nid, ek, iid, tid, sid, summ, pj, seid, created_at],
+                    )?;
+                    conn.execute_batch("COMMIT")?;
+                    Ok(())
+                })();
+                if let Err(e) = tx_result {
+                    let _ = conn.execute_batch("ROLLBACK");
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"notification_store_insert_failed\",\
+                         \"notification_id\":\"{nid}\",\"reason\":\"{e}\"}}"
+                    );
+                }
+            }
+        });
+    }
     // Resolve the channel id list ONCE on the calling thread; fan out
     // to per-channel spawns. Cloning the channel id list is cheap
     // (single Vec<String> with a handful of entries).
@@ -130,7 +221,7 @@ pub async fn dispatch_blocking_for_tests(
     data_dir: &std::path::Path,
     audit:    Arc<dyn AuditSink>,
 ) {
-    dispatch_blocking_for_tests_with_registry(event, bundle, data_dir, audit, None).await
+    dispatch_blocking_for_tests_with_registry(event, bundle, data_dir, audit, None, None).await
 }
 
 /// Variant of `dispatch_blocking_for_tests` that takes an explicit
@@ -142,6 +233,7 @@ pub async fn dispatch_blocking_for_tests_with_registry(
     data_dir:         &std::path::Path,
     audit:            Arc<dyn AuditSink>,
     sidecar_registry: Option<&SidecarRegistry>,
+    store:            Option<&Store>,
 ) {
     let channel_ids: Vec<String> = match bundle.notification_route(&event.event_kind) {
         Some(explicit) if explicit.is_empty() => return,
@@ -587,7 +679,7 @@ mod tests {
         }));
 
         let start = std::time::Instant::now();
-        dispatch(event, bundle, tmp.path().to_path_buf(), audit, None);
+        dispatch(event, bundle, tmp.path().to_path_buf(), audit, None, None);
         let elapsed = start.elapsed();
         assert!(elapsed.as_millis() < 50,
             "dispatch must be near-instant; took {:?}", elapsed);

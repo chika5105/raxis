@@ -38,6 +38,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink, AuditWriterError};
 use raxis_policy::PolicyBundle;
+use raxis_store::Store;
 
 use super::SidecarRegistry;
 
@@ -49,6 +50,7 @@ pub struct NotifyingAuditSink {
     policy:           Arc<ArcSwap<PolicyBundle>>,
     data_dir:         PathBuf,
     sidecar_registry: Option<Arc<SidecarRegistry>>,
+    store:            Option<Arc<Store>>,
 }
 
 impl NotifyingAuditSink {
@@ -61,13 +63,20 @@ impl NotifyingAuditSink {
         policy:   Arc<ArcSwap<PolicyBundle>>,
         data_dir: PathBuf,
     ) -> Self {
-        Self { inner, policy, data_dir, sidecar_registry: None }
+        Self { inner, policy, data_dir, sidecar_registry: None, store: None }
     }
 
     /// Builder-style: attach the per-kernel `SidecarRegistry` so
     /// Sidecar-kind channels can be dispatched.
     pub fn with_sidecar_registry(mut self, reg: Arc<SidecarRegistry>) -> Self {
         self.sidecar_registry = Some(reg);
+        self
+    }
+
+    /// Builder-style: attach the kernel's `Store` so every notification
+    /// is unconditionally written to the `notifications` table in SQLite.
+    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+        self.store = Some(store);
         self
     }
 }
@@ -104,6 +113,7 @@ impl AuditSink for NotifyingAuditSink {
             self.data_dir.clone(),
             Arc::clone(&self.inner),
             self.sidecar_registry.clone(),
+            self.store.clone(),
         );
 
         Ok(event)

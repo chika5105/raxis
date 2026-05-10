@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -109,6 +109,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 13 {
         apply_migration_13(conn)?;
+    }
+    if current_version < 14 {
+        apply_migration_14(conn)?;
     }
 
     Ok(())
@@ -1956,6 +1959,72 @@ CREATE INDEX idx_{structured_outputs}_session
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (13, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 14 — kernel-owned notifications table.
+//
+// Every notification the kernel generates is stored here unconditionally,
+// regardless of which delivery channels (Shell, File, Email, Sidecar)
+// the operator configured. This is the ground truth for `raxis inbox`,
+// the dashboard notification view, and read/unread state.
+//
+// The inbox.jsonl file continues to be appended to as a durable fallback,
+// but the SQLite table is the queryable, indexed, authoritative store.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_14(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_14_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 14 failed: {e}"))
+    })
+}
+
+/// The complete migration-14 DDL.
+pub fn render_migration_14_ddl() -> String {
+    let notifications  = Table::Notifications.as_str();
+    let initiatives    = Table::Initiatives.as_str();
+    let tasks          = Table::Tasks.as_str();
+    let sessions       = Table::Sessions.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── notifications: kernel-owned notification store ──────────────────────
+CREATE TABLE {notifications} (
+    notification_id  TEXT    NOT NULL PRIMARY KEY,
+    event_kind       TEXT    NOT NULL,
+    initiative_id    TEXT             REFERENCES {initiatives}(initiative_id) ON DELETE CASCADE,
+    task_id          TEXT             REFERENCES {tasks}(task_id)             ON DELETE CASCADE,
+    session_id       TEXT             REFERENCES {sessions}(session_id)       ON DELETE CASCADE,
+    summary          TEXT    NOT NULL,
+    payload_json     TEXT    NOT NULL,
+    read             INTEGER NOT NULL DEFAULT 0 CHECK (read IN (0, 1)),
+    source_event_id  TEXT    NOT NULL,
+    created_at       INTEGER NOT NULL
+);
+
+-- Primary query path: unread notifications, newest first.
+CREATE INDEX idx_{notifications}_unread
+    ON {notifications}(read, created_at DESC);
+
+-- Per-initiative notification history.
+CREATE INDEX idx_{notifications}_initiative
+    ON {notifications}(initiative_id, created_at DESC);
+
+-- Per-task notification history.
+CREATE INDEX idx_{notifications}_task
+    ON {notifications}(task_id, created_at DESC);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (14, strftime('%s', 'now'));
 
 COMMIT;
 "

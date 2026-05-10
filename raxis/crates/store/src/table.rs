@@ -257,6 +257,23 @@ pub enum Table {
     /// Schema: `(output_id, initiative_id, task_id, session_id,
     ///           kind, severity, payload_json, emitted_at)`.
     StructuredOutputs,
+
+    // ── v2: Kernel-owned notification store ──────────────────────────────
+    /// **Kernel-owned notification store.** Every notification the
+    /// kernel generates is written here unconditionally — regardless
+    /// of which delivery channels (Shell, File, Email, Sidecar) the
+    /// operator configured. This table is the ground truth for
+    /// "what notifications were generated" and backs `raxis inbox`,
+    /// the dashboard notification view, and read/unread state.
+    ///
+    /// The inbox.jsonl file is also always appended to as a durable
+    /// fallback, but the SQLite table is the queryable, indexed,
+    /// authoritative store.
+    ///
+    /// Schema: `(notification_id, event_kind, initiative_id,
+    ///           task_id, session_id, summary, payload_json, read,
+    ///           source_event_id, created_at)`.
+    Notifications,
 }
 
 impl Table {
@@ -302,6 +319,7 @@ impl Table {
             Self::TaskCredentialProxies     => "task_credential_proxies",
             Self::IntegrationMergeAttempts  => "integration_merge_attempts",
             Self::StructuredOutputs         => "structured_outputs",
+            Self::Notifications             => "notifications",
         }
     }
 }
@@ -331,6 +349,7 @@ mod tests {
             Table::TaskCredentialProxies,
             Table::IntegrationMergeAttempts,
             Table::StructuredOutputs,
+            Table::Notifications,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
@@ -393,6 +412,14 @@ mod tests {
             Table::IntegrationMergeAttempts.as_str(),
             "integration_merge_attempts",
         );
+    }
+
+    /// Kernel-owned notification store table name is wire-stable
+    /// (the CLI `raxis inbox` and the dashboard read this table
+    /// using its literal name in production SQL).
+    #[test]
+    fn notifications_table_name_is_pinned() {
+        assert_eq!(Table::Notifications.as_str(), "notifications");
     }
 
     #[test]
