@@ -62,6 +62,7 @@ pub mod data;
 pub mod error;
 pub mod routes;
 pub mod server;
+pub mod stream;
 
 pub use config::{DashboardConfig, DEFAULT_DASHBOARD_ADDR, DEFAULT_DASHBOARD_PORT};
 pub use data::{

@@ -167,5 +167,7 @@ raxis-test-support = { path = "../crates/test-support" }
 # binary (no kernel boot ceremony in unit-test scope).
 ed25519-dalek = { workspace = true }
 sha2          = { workspace = true }
-reqwest       = { workspace = true }
+reqwest       = { workspace = true, features = ["stream"] }
 hex           = { workspace = true }
+tokio-util    = { version = "0.7", features = ["io"] }
+futures-util  = "0.3"

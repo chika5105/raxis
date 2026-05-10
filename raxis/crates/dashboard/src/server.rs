@@ -16,6 +16,7 @@ use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
 use tokio::net::TcpListener;
+use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -123,6 +124,7 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Sessions.
         .route("/api/sessions",                    get(sessions::list::<D>))
         .route("/api/sessions/:id",                get(sessions::detail::<D>))
+        .route("/api/sessions/:id/stream",         get(sessions::stream::<D>))
         // Escalations.
         .route("/api/escalations",                 get(escalations::list::<D>))
         .route("/api/escalations/:id",             get(escalations::detail::<D>))
@@ -139,9 +141,19 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/git/worktrees/:name/diff",            get(git::diff_default::<D>))
         .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>))
         // Cross-cutting layers.
+        //
+        // The compression predicate exempts text/event-stream so
+        // the SSE handler in routes::sessions::stream is not
+        // buffered for gzip — a buffered SSE stream looks like a
+        // hung connection from the browser's point of view.
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
-        .layer(CompressionLayer::new())
+        .layer(
+            CompressionLayer::new().compress_when(
+                SizeAbove::new(512)
+                    .and(NotForContentType::const_new("text/event-stream")),
+            ),
+        )
         .with_state(state)
 }
 

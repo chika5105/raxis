@@ -58,10 +58,14 @@ use raxis_dashboard::data::{
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
+use raxis_dashboard::stream::{StreamEvent, StreamSubscription};
 use raxis_policy::PolicyBundle;
 use raxis_store::Store;
 
 mod git;
+pub mod stream_capture;
+
+pub use stream_capture::{CaptureConfig, SessionStreamCapture};
 
 /// Kernel-wired implementation of the dashboard data trait.
 ///
@@ -93,6 +97,10 @@ pub struct KernelDashboardData {
     /// the actual mutation.
     #[allow(dead_code)]
     store: Arc<Store>,
+    /// Per-session agent-output capture. The kernel's gateway
+    /// bridge writes to this; the dashboard's SSE handler
+    /// subscribes to it.
+    stream_capture: Arc<SessionStreamCapture>,
 }
 
 impl KernelDashboardData {
@@ -105,7 +113,50 @@ impl KernelDashboardData {
         booted_at: u64,
     ) -> Self {
         let audit_dir = data_dir.join("audit");
-        Self { policy, data_dir, policy_path, audit_dir, booted_at, store }
+        let stream_capture = SessionStreamCapture::new(
+            &data_dir,
+            CaptureConfig::default(),
+        )
+        .expect("create streams dir");
+        Self {
+            policy,
+            data_dir,
+            policy_path,
+            audit_dir,
+            booted_at,
+            store,
+            stream_capture,
+        }
+    }
+
+    /// Same as [`Self::new`] but with a caller-supplied capture
+    /// (lets the kernel main loop share a single capture
+    /// instance with the gateway bridge).
+    pub fn with_capture(
+        store: Arc<Store>,
+        policy: Arc<ArcSwap<PolicyBundle>>,
+        data_dir: PathBuf,
+        policy_path: PathBuf,
+        booted_at: u64,
+        stream_capture: Arc<SessionStreamCapture>,
+    ) -> Self {
+        let audit_dir = data_dir.join("audit");
+        Self {
+            policy,
+            data_dir,
+            policy_path,
+            audit_dir,
+            booted_at,
+            store,
+            stream_capture,
+        }
+    }
+
+    /// Cloneable handle to the agent-stream capture. The
+    /// kernel's gateway bridge holds this clone and writes to
+    /// it via [`SessionStreamCapture::append`].
+    pub fn stream_capture(&self) -> Arc<SessionStreamCapture> {
+        Arc::clone(&self.stream_capture)
     }
 
     fn open_ro(&self) -> Result<raxis_store::ro::RoConn, ApiError> {
@@ -628,6 +679,32 @@ impl DashboardData for KernelDashboardData {
             to_sha: to_sha.to_owned(),
             files,
         })
+    }
+
+    fn stream_tail(
+        &self,
+        session_id: &str,
+        n: usize,
+    ) -> Result<Vec<StreamEvent>, ApiError> {
+        Ok(self.stream_capture.tail(session_id, n))
+    }
+
+    fn stream_subscribe(
+        &self,
+        session_id: &str,
+    ) -> Result<StreamSubscription, ApiError> {
+        // Lazily allocate the session state so a subscriber
+        // that connects before the first append still attaches
+        // to a real broadcast channel (events that arrive after
+        // attach flow through normally).
+        self.stream_capture
+            .ensure_session(session_id)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("stream ensure_session: {e}"),
+            })?;
+        self.stream_capture
+            .subscribe(session_id)
+            .ok_or(ApiError::NotFound { kind: "stream".into() })
     }
 }
 

@@ -27,6 +27,7 @@ tower        = "0.5"
 tokio        = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
 arc-swap     = { workspace = true }
 parking_lot  = "0.12"
+futures-util = "0.3"
 
 # Serialization + crypto for the JWT path.
 serde        = { workspace = true }

@@ -24,6 +24,7 @@ use serde::Serialize;
 
 use crate::auth::DashboardRole;
 use crate::error::ApiError;
+use crate::stream::{SimpleStreamSource, StreamEvent, StreamSubscription};
 
 /// Operator role decoded from the cert. Mirrors
 /// [`DashboardRole`] but lives on the data layer so impls can
@@ -459,6 +460,30 @@ pub trait DashboardData: Send + Sync + 'static {
         from_sha: &str,
         to_sha: &str,
     ) -> Result<WorktreeDiff, ApiError>;
+
+    /// Replay the last `n` events captured for the session's
+    /// stream from the on-disk file ring. Used by the SSE
+    /// handler before it attaches the live subscription so
+    /// freshly-connected clients see recent context.
+    fn stream_tail(
+        &self,
+        session_id: &str,
+        n: usize,
+    ) -> Result<Vec<StreamEvent>, ApiError>;
+
+    /// Subscribe to a session's live event stream. The returned
+    /// [`StreamSubscription`] yields events emitted AFTER the
+    /// subscribe call. Lagged subscribers receive `Err(n)` on
+    /// the next recv and remain usable.
+    ///
+    /// `Err(NotFound)` ⇒ the session never recorded any output
+    /// (no broadcast channel exists yet). The SSE handler
+    /// surfaces this as a 404; the frontend can fall back to
+    /// the `stream_tail` snapshot and poll.
+    fn stream_subscribe(
+        &self,
+        session_id: &str,
+    ) -> Result<StreamSubscription, ApiError>;
 }
 
 /// Output of [`DashboardData::lookup_operator_roles`].
@@ -491,6 +516,21 @@ struct InMemoryInner {
     health: Option<HealthSnapshot>,
     /// (entry, detail, log entries, default-diff, ranged-diff store)
     worktrees: Vec<WorktreeFixture>,
+    /// Per-session stream capture surfaces. Tests register a
+    /// source via [`InMemoryDashboardData::install_stream_source`]
+    /// then push events onto it; the trait routes
+    /// `stream_subscribe` / `stream_tail` to the matching source.
+    streams: HashMap<String, StreamFixture>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct StreamFixture {
+    /// Persistent tail returned by `stream_tail`. Tests append
+    /// to this via [`InMemoryDashboardData::push_stream_tail`].
+    tail: Vec<StreamEvent>,
+    /// Live broadcast source returned by `stream_subscribe`.
+    /// `None` ⇒ subscribe returns `NotFound`.
+    source: Option<SimpleStreamSource>,
 }
 
 /// One worktree shape held by the in-memory fixture. Tests
@@ -583,6 +623,35 @@ impl InMemoryDashboardData {
     /// `fix.detail.summary.name`.
     pub fn push_worktree(self: &Arc<Self>, fix: WorktreeFixture) -> &Arc<Self> {
         self.inner.write().worktrees.push(fix);
+        self
+    }
+
+    /// Install a live broadcast source for `session_id`. Future
+    /// `stream_subscribe` calls return a fresh subscription
+    /// against this source; future `push_stream_event` calls
+    /// fan out to active subscribers.
+    pub fn install_stream_source(
+        self: &Arc<Self>,
+        session_id: impl Into<String>,
+        source: SimpleStreamSource,
+    ) -> &Arc<Self> {
+        let mut g = self.inner.write();
+        let entry = g.streams.entry(session_id.into()).or_default();
+        entry.source = Some(source);
+        self
+    }
+
+    /// Append an event to the persistent tail returned by
+    /// `stream_tail` for `session_id`. Does NOT broadcast —
+    /// tests that want both should also push to the source via
+    /// `SimpleStreamSource::push`.
+    pub fn push_stream_tail(
+        self: &Arc<Self>,
+        session_id: impl Into<String>,
+        evt: StreamEvent,
+    ) -> &Arc<Self> {
+        let mut g = self.inner.write();
+        g.streams.entry(session_id.into()).or_default().tail.push(evt);
         self
     }
 }
@@ -784,6 +853,31 @@ impl DashboardData for InMemoryDashboardData {
             .get(&(from_sha.to_owned(), to_sha.to_owned()))
             .cloned()
             .ok_or(ApiError::NotFound { kind: "diff-range".into() })
+    }
+
+    fn stream_tail(
+        &self,
+        session_id: &str,
+        n: usize,
+    ) -> Result<Vec<StreamEvent>, ApiError> {
+        let g = self.inner.read();
+        let fix = g.streams.get(session_id)
+            .ok_or(ApiError::NotFound { kind: "stream".into() })?;
+        let cap = n.min(2_000);
+        let start = fix.tail.len().saturating_sub(cap);
+        Ok(fix.tail[start..].to_vec())
+    }
+
+    fn stream_subscribe(
+        &self,
+        session_id: &str,
+    ) -> Result<StreamSubscription, ApiError> {
+        let g = self.inner.read();
+        let fix = g.streams.get(session_id)
+            .ok_or(ApiError::NotFound { kind: "stream".into() })?;
+        let src = fix.source.as_ref()
+            .ok_or(ApiError::NotFound { kind: "stream-source".into() })?;
+        Ok(src.subscribe())
     }
 }
 

@@ -462,3 +462,206 @@ async fn worktree_endpoints_surface_real_git_state() {
     let err = data.get_worktree("session-deadbeefdead").unwrap_err();
     assert!(matches!(err, raxis_dashboard::error::ApiError::NotFound { .. }));
 }
+
+// ---------------------------------------------------------------------------
+// Agent stream capture (P4) — exercises the file ring + SSE
+// surface end-to-end against a real on-disk capture and a real
+// HTTP listener.
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stream_capture_round_trips_through_real_sse_endpoint() {
+    use futures_util::StreamExt;
+    use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+    use serde_json::json;
+    use tokio::io::AsyncBufReadExt;
+
+    let (tmp, store) = fresh_data_dir();
+
+    // Sign the policy with a known operator key for the JWT
+    // handshake.
+    let signing = SigningKey::from_bytes(&[0x4Du8; 32]);
+    let pk_bytes = signing.verifying_key().to_bytes();
+    let policy = policy_with_operator(pk_bytes, vec![]);
+
+    // Build the capture once and share it between the data
+    // layer (subscribed by the dashboard) and the test
+    // (publisher role).
+    let capture = raxis_dashboard_kernel::SessionStreamCapture::new(
+        tmp.path(),
+        raxis_dashboard_kernel::CaptureConfig::default(),
+    )
+    .expect("capture::new");
+
+    // Pre-allocate the session so the SSE handler attaches to a
+    // ready broadcast channel.
+    capture.ensure_session("sess-stream-test").unwrap();
+    // Seed two tail events so a fresh subscriber sees recent
+    // context before the live stream begins.
+    capture
+        .append(
+            "sess-stream-test",
+            raxis_dashboard::stream::StreamEvent {
+                at_ms: 1,
+                kind: "model_chunk".into(),
+                payload: json!({"text": "hello"}),
+            },
+        )
+        .unwrap();
+    capture
+        .append(
+            "sess-stream-test",
+            raxis_dashboard::stream::StreamEvent {
+                at_ms: 2,
+                kind: "model_chunk".into(),
+                payload: json!({"text": " world"}),
+            },
+        )
+        .unwrap();
+
+    let data = Arc::new(raxis_dashboard_kernel::KernelDashboardData::with_capture(
+        Arc::clone(&store),
+        Arc::clone(&policy),
+        tmp.path().to_path_buf(),
+        tmp.path().join("policy/policy.toml"),
+        1_700_000_000,
+        Arc::clone(&capture),
+    ));
+
+    let cfg = DashboardConfig {
+        enabled: true,
+        bind_address: "127.0.0.1".into(),
+        bind_port: 0,
+        ..Default::default()
+    };
+    let server = raxis_dashboard::server::DashboardServer::bind(cfg, data)
+        .await
+        .expect("DashboardServer::bind");
+    let handle = raxis_dashboard::server::ServerHandle::spawn(server);
+    let base = format!("http://{}", handle.local_addr());
+    let client = reqwest::Client::new();
+
+    // Auth handshake (challenge → sign → JWT).
+    let chal_resp: serde_json::Value = client
+        .get(format!("{base}/api/auth/challenge"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let challenge_hex = chal_resp["challenge"].as_str().unwrap().to_owned();
+    let challenge_bytes = hex::decode(&challenge_hex).unwrap();
+    let sig = signing.sign(&challenge_bytes);
+    let verify_body = json!({
+        "challenge":  challenge_hex,
+        "signature":  hex::encode(sig.to_bytes()),
+        "public_key": hex::encode(pk_bytes),
+    });
+    let verify_resp: serde_json::Value = client
+        .post(format!("{base}/api/auth/verify"))
+        .header(CONTENT_TYPE, "application/json")
+        .body(verify_body.to_string())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let token = verify_resp["token"].as_str().unwrap().to_owned();
+
+    // Open the SSE stream — request 5 tail events (we only have
+    // 2 so the handler emits both, then `tail-complete`, then
+    // any live frames).
+    let resp = client
+        .get(format!(
+            "{base}/api/sessions/sess-stream-test/stream?tail=5"
+        ))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "stream connect: {}", resp.status());
+    let stream = resp.bytes_stream();
+    let reader = tokio_util::io::StreamReader::new(
+        stream.map(|r| r.map_err(|e| std::io::Error::other(e))),
+    );
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+
+    // Capture lines until we see the `tail-complete` marker.
+    let mut tail_lines = Vec::new();
+    let read_tail = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                tail_lines.push(line.clone());
+                if line == "event: tail-complete" {
+                    return Ok::<_, std::io::Error>(());
+                }
+            }
+            Err(std::io::Error::other("EOF before tail-complete"))
+        },
+    )
+    .await
+    .expect("did not see tail-complete in 10s")
+    .expect("tail read");
+
+    let _ = read_tail;
+    let body = tail_lines.join("\n");
+    assert!(
+        body.contains("hello") && body.contains("world"),
+        "expected the two seeded chunks in the SSE tail; got {body}"
+    );
+
+    // Push live events repeatedly so the subscriber sees the
+    // event regardless of any HTTP-layer chunk batching the
+    // first frame might wait on.
+    let cap_clone = Arc::clone(&capture);
+    let pusher = tokio::spawn(async move {
+        for i in 0..10 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            cap_clone
+                .append(
+                    "sess-stream-test",
+                    raxis_dashboard::stream::StreamEvent {
+                        at_ms: 3 + i,
+                        kind: "tool_call".into(),
+                        payload: json!({"tool": "FetchPath"}),
+                    },
+                )
+                .unwrap();
+        }
+    });
+
+    let live = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.starts_with("event: tool_call") {
+                    return Ok::<String, std::io::Error>(line);
+                }
+            }
+            Err(std::io::Error::other("EOF before live event"))
+        },
+    )
+    .await
+    .expect("did not see live tool_call event in 10s")
+    .expect("live read");
+    assert_eq!(live, "event: tool_call");
+
+    pusher.abort();
+    // Drop the SSE reader first so the server-side handler
+    // observes the connection close and unparks its broadcast
+    // recv (otherwise `handle.shutdown()` waits forever for the
+    // in-flight SSE stream to finish).
+    drop(lines);
+    // Bound the shutdown wait — the SSE handler's parked recv
+    // is woken by the broadcast sender being dropped. We do not
+    // drop `capture` here because the test has not exited yet,
+    // so we cap the shutdown await instead.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle.shutdown(),
+    )
+    .await;
+}
