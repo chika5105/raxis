@@ -1757,11 +1757,142 @@ pub struct ProviderEntry {
     /// circuit-breaker probe. Default: `"/health"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sidecar_health_check_path: Option<String>,
+
+    /// **`v2_extended_gaps.md §2.5` — per-provider pricing table.**
+    ///
+    /// Required for every model-bearing provider kind (`Anthropic`,
+    /// `OpenAI`, `Gemini`, `Bedrock`, `http_sidecar`); MUST be unset
+    /// for non-LLM providers (kernel rejects with
+    /// `MalformedArtifact` either way).
+    ///
+    /// ```toml
+    /// [[providers]]
+    /// provider_id      = "anthropic-prod"
+    /// kind             = "Anthropic"
+    /// credentials_file = "anthropic-prod.toml"
+    ///
+    ///   # Inline-dotted form keeps the array-of-tables boundary
+    ///   # unambiguous (TOML's `[providers.pricing]` would close the
+    ///   # `[[providers]]` row, which is not what we want).
+    ///   pricing.input_tokens_per_dollar         = 200_000   # $5  / 1M input
+    ///   pricing.output_tokens_per_dollar        = 50_000    # $20 / 1M output
+    ///   pricing.cache_read_tokens_per_dollar    = 2_000_000 # $0.50 / 1M cache hit
+    /// ```
+    ///
+    /// All three rates are *tokens per US dollar* — operators
+    /// declare the inverse of the published per-million price so the
+    /// kernel can compute cost via integer division
+    /// (`tokens * 1_000_000 / tokens_per_dollar` → micro-dollars)
+    /// with no floating-point drift in the audit chain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<ProviderPricing>,
 }
 
 fn default_inference_timeout_ms() -> u32 { 30_000 }
 fn default_data_fetch_timeout_ms() -> u32 { 10_000 }
 fn default_max_response_bytes() -> u64 { 16 * 1024 * 1024 }
+
+/// **`v2_extended_gaps.md §2.5` — per-provider pricing table.**
+///
+/// Operators declare model rates as *tokens per US dollar* (the
+/// inverse of the conventional per-million pricing) so the kernel
+/// computes cost via integer division and the audit chain carries no
+/// floating-point drift. The kernel stores cost in **micro-dollars**
+/// (1 USD = 1_000_000 µ$) so a $0.000001 charge is the smallest
+/// representable increment — finer than any current provider's
+/// per-token unit cost.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProviderPricing {
+    /// Tokens of *input* (prompt) you can send per US dollar.
+    /// e.g. `200_000` ⇒ $5 / 1M input tokens.
+    pub input_tokens_per_dollar: u64,
+
+    /// Tokens of *output* (completion / reasoning) you can receive
+    /// per US dollar. e.g. `50_000` ⇒ $20 / 1M output tokens.
+    pub output_tokens_per_dollar: u64,
+
+    /// Tokens of *cache-read* input (Anthropic prompt-caching)
+    /// you can re-use per US dollar. Defaults to
+    /// `input_tokens_per_dollar` (no discount) when omitted.
+    /// e.g. `2_000_000` ⇒ $0.50 / 1M cache hits (typical Anthropic
+    /// 90% discount on cached prompt prefixes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens_per_dollar: Option<u64>,
+
+    /// Tokens of *cache-creation* input (Anthropic prompt-caching
+    /// write surcharge) you can write per US dollar. Defaults to
+    /// `input_tokens_per_dollar` when omitted (no surcharge).
+    /// e.g. `160_000` ⇒ $6.25 / 1M cache writes (typical Anthropic
+    /// 25% write premium).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens_per_dollar: Option<u64>,
+}
+
+impl ProviderPricing {
+    /// Compute the dollar cost of a usage record in **micro-dollars**
+    /// (`1 USD = 1_000_000 µ$`). Pure integer math — no floating-point
+    /// drift in the audit chain.
+    ///
+    /// All four token kinds are summed independently:
+    /// * `input_tokens` and `output_tokens` always at the base rate.
+    /// * `cache_read_tokens` at the cache-read rate (defaulting to
+    ///   `input_tokens_per_dollar` when the operator did not declare
+    ///   a discount).
+    /// * `cache_creation_tokens` at the cache-creation rate
+    ///   (defaulting to `input_tokens_per_dollar`).
+    ///
+    /// Returns `0` when *every* rate is zero — that case can only
+    /// occur in unit tests; `PolicyBundle::validate` rejects any
+    /// real `[[providers]]` entry with a zero `input_tokens_per_dollar`
+    /// or `output_tokens_per_dollar`.
+    ///
+    /// Token counts are widened to `u128` internally to absorb the
+    /// `tokens * 1_000_000` multiplication without overflow even at
+    /// the (absurd) maximum of `u64::MAX` tokens; the final result
+    /// is saturated back into `u64` so callers never see overflow
+    /// panics.
+    pub fn cost_micro_dollars(
+        &self,
+        input_tokens:           u64,
+        output_tokens:          u64,
+        cache_read_tokens:      u64,
+        cache_creation_tokens:  u64,
+    ) -> u64 {
+        const SCALE: u128 = 1_000_000;
+
+        fn quotient(tokens: u64, rate: u64) -> u128 {
+            if rate == 0 { return 0; }
+            (tokens as u128 * SCALE) / rate as u128
+        }
+
+        let cache_read_rate = self
+            .cache_read_tokens_per_dollar
+            .unwrap_or(self.input_tokens_per_dollar);
+        let cache_creation_rate = self
+            .cache_creation_tokens_per_dollar
+            .unwrap_or(self.input_tokens_per_dollar);
+
+        let total: u128 = quotient(input_tokens,          self.input_tokens_per_dollar)
+                        + quotient(output_tokens,         self.output_tokens_per_dollar)
+                        + quotient(cache_read_tokens,     cache_read_rate)
+                        + quotient(cache_creation_tokens, cache_creation_rate);
+
+        u64::try_from(total).unwrap_or(u64::MAX)
+    }
+}
+
+/// `[[providers]] kind` values that reach a model provider and
+/// therefore MUST declare `pricing`. Anything outside this list is
+/// treated as a non-LLM provider (e.g. a future `"DataFetch"` kind)
+/// and MUST leave `pricing` unset; mismatches are rejected at
+/// `PolicyBundle::validate` time.
+pub(crate) const LLM_PROVIDER_KINDS: &[&str] = &[
+    "Anthropic",
+    "OpenAI",
+    "Gemini",
+    "Bedrock",
+    "http_sidecar",
+];
 
 /// Hard cap on inference timeout, normative per peripherals.md §3.2.
 pub const MAX_INFERENCE_TIMEOUT_MS: u32 = 120_000;
@@ -3300,6 +3431,69 @@ impl PolicyBundle {
                     )));
                 }
             }
+
+            // V2 `v2_extended_gaps.md §2.5` — `pricing` is REQUIRED
+            // for every model-bearing provider kind and FORBIDDEN
+            // for everything else. The kernel needs the rate table
+            // to convert per-intent `Usage` into a dollar cost; a
+            // missing rate would silently bypass the per-task cost
+            // ceiling.
+            let is_llm_kind = LLM_PROVIDER_KINDS.iter().any(|k| *k == p.kind);
+            match (&p.pricing, is_llm_kind) {
+                (None, true) => {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} kind={:?} is a model provider but has no \
+                         `pricing` table — operators MUST declare \
+                         `pricing.input_tokens_per_dollar` and \
+                         `pricing.output_tokens_per_dollar` (v2_extended_gaps.md §2.5)",
+                        p.provider_id, p.kind
+                    )));
+                }
+                (Some(_), false) => {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[[providers]] {:?} kind={:?} is not a model provider but \
+                         declares `pricing`; remove the `pricing` table",
+                        p.provider_id, p.kind
+                    )));
+                }
+                (Some(pricing), true) => {
+                    if pricing.input_tokens_per_dollar == 0 {
+                        return Err(PolicyError::MalformedArtifact(format!(
+                            "[[providers]] {:?} pricing.input_tokens_per_dollar must \
+                             be > 0 (declares the inverse of $/token)",
+                            p.provider_id
+                        )));
+                    }
+                    if pricing.output_tokens_per_dollar == 0 {
+                        return Err(PolicyError::MalformedArtifact(format!(
+                            "[[providers]] {:?} pricing.output_tokens_per_dollar must \
+                             be > 0",
+                            p.provider_id
+                        )));
+                    }
+                    if let Some(r) = pricing.cache_read_tokens_per_dollar {
+                        if r == 0 {
+                            return Err(PolicyError::MalformedArtifact(format!(
+                                "[[providers]] {:?} pricing.cache_read_tokens_per_dollar \
+                                 must be > 0 when declared (omit to inherit \
+                                 input_tokens_per_dollar)",
+                                p.provider_id
+                            )));
+                        }
+                    }
+                    if let Some(r) = pricing.cache_creation_tokens_per_dollar {
+                        if r == 0 {
+                            return Err(PolicyError::MalformedArtifact(format!(
+                                "[[providers]] {:?} pricing.cache_creation_tokens_per_dollar \
+                                 must be > 0 when declared (omit to inherit \
+                                 input_tokens_per_dollar)",
+                                p.provider_id
+                            )));
+                        }
+                    }
+                }
+                (None, false) => { /* non-LLM provider, no pricing — OK */ }
+            }
         }
 
         // ── Validate `[notifications]` ───────────────────────────────
@@ -4344,6 +4538,7 @@ mod tests {
 
 #[cfg(test)]
 mod gateway_providers_tests {
+    use super::ProviderPricing;
     use crate::load_policy;
 
     /// Minimal valid policy.toml — exactly the sections REQUIRED by
@@ -4438,6 +4633,18 @@ priority             = 100
         load_policy(tmp.path()).map(|(b, _, _)| b)
     }
 
+    /// V2 `v2_extended_gaps.md §2.5` — minimal pricing block for
+    /// LLM-bearing provider fixtures. Operators MUST declare
+    /// `pricing.input_tokens_per_dollar` and
+    /// `pricing.output_tokens_per_dollar` for every model provider;
+    /// `PolicyBundle::validate` rejects entries that omit them.
+    /// These rates mirror Anthropic's published Sonnet pricing
+    /// ($5 / 1M input, $20 / 1M output) so the fixture is realistic
+    /// without being load-bearing on any specific provider.
+    const LLM_PRICING_BLOCK: &str =
+        "  pricing.input_tokens_per_dollar  = 200000\n\
+          pricing.output_tokens_per_dollar = 50000\n";
+
     // ── No-section happy path ─────────────────────────────────────────────
 
     #[test]
@@ -4514,12 +4721,13 @@ priority             = 100
     #[test]
     fn provider_entry_with_only_required_fields_uses_defaults() {
         let mut t = minimal_policy_toml();
-        t.push_str(
+        t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id      = \"anthropic-prod\"\n\
              kind             = \"Anthropic\"\n\
-             credentials_file = \"anthropic-prod.toml\"\n",
-        );
+             credentials_file = \"anthropic-prod.toml\"\n\
+             {LLM_PRICING_BLOCK}",
+        ));
         let bundle = write_and_load(&t).expect("minimal provider entry must load");
         assert_eq!(bundle.providers().len(), 1);
         let p = bundle.provider("anthropic-prod").expect("lookup by id works");
@@ -4534,12 +4742,13 @@ priority             = 100
     #[test]
     fn provider_lookup_returns_none_for_unknown_id() {
         let mut t = minimal_policy_toml();
-        t.push_str(
+        t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id      = \"anthropic-prod\"\n\
              kind             = \"Anthropic\"\n\
-             credentials_file = \"anthropic-prod.toml\"\n",
-        );
+             credentials_file = \"anthropic-prod.toml\"\n\
+             {LLM_PRICING_BLOCK}",
+        ));
         let bundle = write_and_load(&t).unwrap();
         assert!(bundle.provider("openai-prod").is_none());
     }
@@ -4550,12 +4759,13 @@ priority             = 100
     fn duplicate_provider_id_is_rejected() {
         let mut t = minimal_policy_toml();
         for _ in 0..2 {
-            t.push_str(
+            t.push_str(&format!(
                 "\n[[providers]]\n\
                  provider_id      = \"dup\"\n\
                  kind             = \"Anthropic\"\n\
-                 credentials_file = \"x.toml\"\n",
-            );
+                 credentials_file = \"x.toml\"\n\
+                 {LLM_PRICING_BLOCK}",
+            ));
         }
         let err = write_and_load(&t).expect_err("dup ids must fail");
         assert!(format!("{err}").contains("duplicated"));
@@ -4702,13 +4912,14 @@ priority             = 100
     #[test]
     fn stream_idle_timeout_120s_loads_cleanly_for_reasoning_models() {
         let mut t = minimal_policy_toml();
-        t.push_str(
+        t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id            = \"openai-o1\"\n\
              kind                   = \"OpenAI\"\n\
              credentials_file       = \"openai.toml\"\n\
-             stream_idle_timeout_ms = 120000\n",
-        );
+             stream_idle_timeout_ms = 120000\n\
+             {LLM_PRICING_BLOCK}",
+        ));
         let bundle = write_and_load(&t)
             .expect("120s must load — primary o1/o3 use case");
         assert_eq!(
@@ -4724,12 +4935,13 @@ priority             = 100
     #[test]
     fn stream_idle_timeout_absent_field_is_none() {
         let mut t = minimal_policy_toml();
-        t.push_str(
+        t.push_str(&format!(
             "\n[[providers]]\n\
              provider_id      = \"p1\"\n\
              kind             = \"Anthropic\"\n\
-             credentials_file = \"p1.toml\"\n",
-        );
+             credentials_file = \"p1.toml\"\n\
+             {LLM_PRICING_BLOCK}",
+        ));
         let bundle = write_and_load(&t).expect("default policy must load");
         assert!(
             bundle.providers()[0].stream_idle_timeout_ms.is_none(),
@@ -4742,6 +4954,9 @@ priority             = 100
         // peripherals.md §3.2: unknown kinds are accepted at policy-validate
         // time (forward-compat); they will be rejected by the gateway at
         // dispatch time. This test pins the validate-time accept side.
+        // NOTE: unknown kinds are NOT in `LLM_PROVIDER_KINDS`, so they
+        // MUST NOT carry a pricing block (validator rejects pricing on
+        // non-LLM kinds — see §2.5).
         let mut t = minimal_policy_toml();
         t.push_str(
             "\n[[providers]]\n\
@@ -4769,7 +4984,8 @@ priority             = 100
              credentials_file         = \"kombai.toml\"\n\
              sidecar_endpoint         = \"http://127.0.0.1:9100\"\n\
              sidecar_hmac_secret      = \"{SIDECAR_TEST_SECRET}\"\n\
-             sidecar_health_check_path = \"/health\"\n",
+             sidecar_health_check_path = \"/health\"\n\
+             {LLM_PRICING_BLOCK}",
         ));
         let bundle = write_and_load(&t).expect("valid sidecar provider must load");
         let p = bundle.provider("kombai").expect("lookup by id works");
@@ -4874,6 +5090,199 @@ priority             = 100
         let err = write_and_load(&t).expect_err("non-sidecar with sidecar fields must fail");
         let s = format!("{err}");
         assert!(s.contains("sidecar_endpoint"), "got: {s}");
+    }
+
+    // ── V2 §2.5 provider pricing — validation + cost math ──────────────
+
+    /// Anthropic / OpenAI / Gemini / Bedrock / http_sidecar all
+    /// land in `LLM_PROVIDER_KINDS`. Omitting `pricing` on ANY of
+    /// them MUST fail at policy-validate time with a clear message
+    /// pointing at §2.5.
+    #[test]
+    fn llm_provider_without_pricing_is_rejected() {
+        for kind in &["Anthropic", "OpenAI", "Gemini", "Bedrock"] {
+            let mut t = minimal_policy_toml();
+            t.push_str(&format!(
+                "\n[[providers]]\n\
+                 provider_id      = \"prov-{kind}\"\n\
+                 kind             = \"{kind}\"\n\
+                 credentials_file = \"creds.toml\"\n",
+            ));
+            let err = write_and_load(&t).expect_err(&format!(
+                "{kind} without pricing must be rejected (§2.5)"
+            ));
+            let s = format!("{err}");
+            assert!(s.contains("pricing"), "[{kind}] msg = {s}");
+            assert!(s.contains("v2_extended_gaps.md §2.5"),
+                "[{kind}] error must cite the spec; got: {s}");
+        }
+    }
+
+    /// A non-LLM `kind` MUST NOT carry a `pricing` table — the
+    /// validator rejects so a typo on `kind` cannot accidentally
+    /// silence pricing enforcement.
+    #[test]
+    fn non_llm_provider_with_pricing_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(&format!(
+            "\n[[providers]]\n\
+             provider_id      = \"future-vendor\"\n\
+             kind             = \"NotAValidKindYet\"\n\
+             credentials_file = \"future.toml\"\n\
+             {LLM_PRICING_BLOCK}",
+        ));
+        let err = write_and_load(&t).expect_err(
+            "non-LLM kind with pricing must be rejected (§2.5)"
+        );
+        let s = format!("{err}");
+        assert!(s.contains("pricing"), "msg = {s}");
+        assert!(s.contains("not a model provider"), "msg = {s}");
+    }
+
+    /// `pricing.input_tokens_per_dollar = 0` is a divide-by-zero
+    /// landmine. The validator rejects so the kernel never has to
+    /// guard against it at cost-computation time.
+    #[test]
+    fn llm_provider_with_zero_input_pricing_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"anthropic-prod\"\n\
+             kind             = \"Anthropic\"\n\
+             credentials_file = \"a.toml\"\n  \
+             pricing.input_tokens_per_dollar  = 0\n  \
+             pricing.output_tokens_per_dollar = 50000\n",
+        );
+        let err = write_and_load(&t).expect_err("zero input rate must be rejected");
+        let s = format!("{err}");
+        assert!(s.contains("input_tokens_per_dollar"), "msg = {s}");
+    }
+
+    #[test]
+    fn llm_provider_with_zero_output_pricing_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"anthropic-prod\"\n\
+             kind             = \"Anthropic\"\n\
+             credentials_file = \"a.toml\"\n  \
+             pricing.input_tokens_per_dollar  = 200000\n  \
+             pricing.output_tokens_per_dollar = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero output rate must be rejected");
+        let s = format!("{err}");
+        assert!(s.contains("output_tokens_per_dollar"), "msg = {s}");
+    }
+
+    /// Optional cache rates default to inheriting `input_tokens_per_dollar`
+    /// (no surcharge / no discount) when omitted. When provided, they
+    /// MUST be > 0.
+    #[test]
+    fn llm_provider_with_zero_cache_read_rate_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"anthropic-prod\"\n\
+             kind             = \"Anthropic\"\n\
+             credentials_file = \"a.toml\"\n  \
+             pricing.input_tokens_per_dollar       = 200000\n  \
+             pricing.output_tokens_per_dollar      = 50000\n  \
+             pricing.cache_read_tokens_per_dollar  = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero cache_read rate must be rejected");
+        let s = format!("{err}");
+        assert!(s.contains("cache_read_tokens_per_dollar"), "msg = {s}");
+    }
+
+    /// Round-trip a realistic Anthropic-Sonnet rate set and assert
+    /// `provider().pricing` decodes verbatim.
+    #[test]
+    fn llm_provider_with_full_pricing_decodes_round_trip() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[[providers]]\n\
+             provider_id      = \"anthropic-prod\"\n\
+             kind             = \"Anthropic\"\n\
+             credentials_file = \"a.toml\"\n  \
+             pricing.input_tokens_per_dollar          = 200000\n  \
+             pricing.output_tokens_per_dollar         = 50000\n  \
+             pricing.cache_read_tokens_per_dollar     = 2000000\n  \
+             pricing.cache_creation_tokens_per_dollar = 160000\n",
+        );
+        let bundle = write_and_load(&t).expect("full pricing must load");
+        let p = bundle.provider("anthropic-prod").unwrap();
+        let pricing = p.pricing.as_ref().expect("pricing decoded");
+        assert_eq!(pricing.input_tokens_per_dollar,         200_000);
+        assert_eq!(pricing.output_tokens_per_dollar,        50_000);
+        assert_eq!(pricing.cache_read_tokens_per_dollar,     Some(2_000_000));
+        assert_eq!(pricing.cache_creation_tokens_per_dollar, Some(160_000));
+    }
+
+    // ── ProviderPricing::cost_micro_dollars unit math ──────────────────
+
+    fn anthropic_sonnet_pricing() -> ProviderPricing {
+        ProviderPricing {
+            input_tokens_per_dollar:           200_000,   // $5  / 1M input
+            output_tokens_per_dollar:          50_000,    // $20 / 1M output
+            cache_read_tokens_per_dollar:      Some(2_000_000),  // $0.50 / 1M
+            cache_creation_tokens_per_dollar:  Some(160_000),    // $6.25 / 1M
+        }
+    }
+
+    #[test]
+    fn cost_micro_dollars_input_only() {
+        let p = anthropic_sonnet_pricing();
+        // 200 input tokens at $5/1M = $0.001 = 1000 µ$.
+        assert_eq!(p.cost_micro_dollars(200, 0, 0, 0), 1_000);
+    }
+
+    #[test]
+    fn cost_micro_dollars_output_only() {
+        let p = anthropic_sonnet_pricing();
+        // 50 output tokens at $20/1M = $0.001 = 1000 µ$.
+        assert_eq!(p.cost_micro_dollars(0, 50, 0, 0), 1_000);
+    }
+
+    #[test]
+    fn cost_micro_dollars_combined_input_output_cache() {
+        let p = anthropic_sonnet_pricing();
+        // 200 in @ 5/1M + 50 out @ 20/1M + 200 cache_read @ 0.5/1M
+        //   + 200 cache_creation @ 6.25/1M
+        // = 1000 + 1000 + 100 + 1250 = 3350 µ$.
+        assert_eq!(p.cost_micro_dollars(200, 50, 200, 200), 3_350);
+    }
+
+    /// Omitting cache rates inherits `input_tokens_per_dollar`
+    /// (no surcharge / no discount).
+    #[test]
+    fn cost_micro_dollars_cache_rates_default_to_input_rate() {
+        let p = ProviderPricing {
+            input_tokens_per_dollar:           200_000,
+            output_tokens_per_dollar:          50_000,
+            cache_read_tokens_per_dollar:      None,  // ← inherit
+            cache_creation_tokens_per_dollar:  None,  // ← inherit
+        };
+        // 200 cache_read at the inherited input rate ($5/1M) =
+        // $0.001 = 1000 µ$.
+        assert_eq!(p.cost_micro_dollars(0, 0, 200, 0), 1_000);
+        assert_eq!(p.cost_micro_dollars(0, 0, 0, 200), 1_000);
+    }
+
+    /// Saturate-not-panic for absurd inputs: u64::MAX tokens against
+    /// any positive rate would overflow `tokens * 1_000_000` if we
+    /// stayed in u64; the implementation widens to u128 and then
+    /// saturates back into u64 on the way out.
+    #[test]
+    fn cost_micro_dollars_saturates_on_extreme_input() {
+        let p = ProviderPricing {
+            input_tokens_per_dollar:           1, // 1 token per dollar
+            output_tokens_per_dollar:          1,
+            cache_read_tokens_per_dollar:      None,
+            cache_creation_tokens_per_dollar:  None,
+        };
+        let _ = p.cost_micro_dollars(u64::MAX, 0, 0, 0);
+        let _ = p.cost_micro_dollars(0, u64::MAX, 0, 0);
+        let _ = p.cost_micro_dollars(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
     }
 }
 

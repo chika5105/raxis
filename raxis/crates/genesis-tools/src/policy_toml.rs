@@ -333,7 +333,16 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
          # credentials_file      = \"anthropic-prod.toml\"\n\
          # inference_timeout_ms  = 30000\n\
          # data_fetch_timeout_ms = 10000\n\
-         # max_response_bytes    = 16777216\n",
+         # max_response_bytes    = 16777216\n\
+         # # v2_extended_gaps.md §2.5 — pricing is REQUIRED for every\n\
+         # # model-bearing provider kind (Anthropic, OpenAI, Gemini,\n\
+         # # Bedrock, http_sidecar). Operators declare the inverse of\n\
+         # # the published per-million price (tokens per US dollar) so\n\
+         # # the kernel can compute cost via integer math.\n\
+         # pricing.input_tokens_per_dollar  = 200000   # $5  / 1M input\n\
+         # pricing.output_tokens_per_dollar = 50000    # $20 / 1M output\n\
+         # # pricing.cache_read_tokens_per_dollar    = 2000000  # $0.50 / 1M cache hit\n\
+         # # pricing.cache_creation_tokens_per_dollar = 160000  # $6.25 / 1M cache write\n",
     );
 
     out

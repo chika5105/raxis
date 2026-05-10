@@ -285,6 +285,8 @@ max_fetches_per_window = 100
 provider_id      = "anthropic-prod"
 kind             = "Anthropic"
 credentials_file = "anthropic-prod.toml"
+  pricing.input_tokens_per_dollar  = 200000
+  pricing.output_tokens_per_dollar = 50000
 "#,
         a = "a".repeat(64),
         b = "b".repeat(64),
