@@ -763,7 +763,7 @@ pub fn approve_plan(
 
     let plan_toml_str    = String::from_utf8_lossy(&plan_bytes);
     let mut plan_tasks   = parse_plan_tasks(&plan_toml_str)?;
-    let orchestrator_fields = parse_plan_orchestrator(&plan_toml_str)?;
+    let mut orchestrator_fields = parse_plan_orchestrator(&plan_toml_str)?;
     // V2 §Step 28 — read `[workspace] lane_id` (or surface the
     // missing/empty/override error below).
     let workspace_lane_raw  = parse_plan_workspace_lane(&plan_toml_str)?;
@@ -874,21 +874,17 @@ pub fn approve_plan(
     // override + policy-side default + locked flag. Surface
     // `LifecycleError::PlanTargetRefInvalid { rule="locked"|"invalid" }`
     // pre-tx so a malformed/locked plan cannot allocate any
-    // initiative state. The resolved value is currently observable
-    // in the audit chain via the `IntegrationMergeCompleted` event
-    // path; persistence into a future `initiatives.target_ref` column
-    // is gated on the worktree-provision wiring deferred in
-    // `V2_STATUS.md §2.2`.
+    // initiative state. The resolved value is plumbed into the
+    // orchestrator plan-fields registry (`OrchestratorPlanFields::
+    // target_ref`) so the integration-merge handler can read it
+    // verbatim into `commit_merge_to_target_ref(...)` (`v2_extended_
+    // gaps.md §1.2`).
     let resolved_target_ref = resolve_target_ref(
         plan_target_ref_raw.as_deref(),
         policy_default_target_ref,
         policy_target_ref_locked,
     )?;
-    // Plumb the resolved value into the orchestrator-fields snapshot
-    // so the post-commit audit path can record it. Currently a no-op
-    // until the integration-merge handler consumes
-    // `current_target_ref` per the §12.8 follow-up.
-    let _ = &resolved_target_ref;
+    orchestrator_fields.target_ref = resolved_target_ref.clone();
 
     let task_count    = plan_tasks.len();
     let now           = unix_now_secs();
@@ -1342,8 +1338,10 @@ fn auto_spawn_orchestrator_session_in_tx(
 ///
 /// Returns the number of (initiative, task) pairs successfully inserted.
 pub fn repopulate_plan_registry(
-    store:    &Store,
-    registry: &PlanRegistry,
+    store:                       &Store,
+    registry:                    &PlanRegistry,
+    policy_default_target_ref:   &str,
+    policy_target_ref_locked:    bool,
 ) -> Result<usize, LifecycleError> {
     let conn = store.lock_sync();
 
@@ -1428,8 +1426,41 @@ pub fn repopulate_plan_registry(
         // pattern used for `parse_plan_tasks` above) rather than
         // aborting registry rebuild for the whole kernel.
         match parse_plan_orchestrator(&plan_str) {
-            Ok(orch) => registry.insert_orchestrator(&init_id, orch),
-            Err(e)   => eprintln!(
+            Ok(mut orch) => {
+                // V2 `v2_extended_gaps.md §1.2` — re-resolve the
+                // per-initiative `target_ref` against the *current*
+                // policy. We deliberately re-resolve rather than
+                // persist the value at admission time so an operator
+                // who tightens `[git] target_ref_locked` between
+                // restarts surfaces the lock at hot-restart with the
+                // same `LifecycleError::PlanTargetRefInvalid` they
+                // would have seen at admission. A re-resolution
+                // failure logs and proceeds with the
+                // policy-default target_ref so the registry stays
+                // populated and the operator's next
+                // `IntegrationMerge` is the surface that hard-fails
+                // (and surfaces the actual lock error) rather than a
+                // silent boot-time skip.
+                let plan_tr = parse_plan_workspace_target_ref(&plan_str)
+                    .ok().flatten();
+                orch.target_ref = match resolve_target_ref(
+                    plan_tr.as_deref(),
+                    policy_default_target_ref,
+                    policy_target_ref_locked,
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"plan_registry_repopulate\",\
+                             \"initiative_id\":\"{init_id}\",\
+                             \"reason\":\"target_ref_resolution_failed_at_restart: {e}\"}}",
+                        );
+                        policy_default_target_ref.to_owned()
+                    }
+                };
+                registry.insert_orchestrator(&init_id, orch);
+            }
+            Err(e) => eprintln!(
                 "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
                  \"initiative_id\":\"{init_id}\",\"reason\":\"orchestrator_parse_failed: {e}\"}}",
             ),
@@ -2045,6 +2076,13 @@ fn parse_plan_orchestrator(plan_toml: &str)
     Ok(crate::initiatives::OrchestratorPlanFields {
         cross_cutting_artifacts,
         description,
+        // Caller (`approve_plan` / `repopulate_from_store`) overwrites
+        // this with the resolved `target_ref` from
+        // `resolve_target_ref(plan_value, policy_default, locked)`.
+        // The `Default` is used here so unit tests that exercise
+        // `parse_plan_orchestrator` directly (without a policy) still
+        // produce a well-formed struct.
+        target_ref: crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned(),
     })
 }
 
@@ -7060,7 +7098,7 @@ target_ref = "refs/heads/raxis/feature"
         // Simulate a kernel restart: brand-new (empty) registry rebuilt
         // from the on-disk store via repopulate_plan_registry.
         let registry_two = PlanRegistry::new();
-        repopulate_plan_registry(&store, &registry_two).unwrap();
+        repopulate_plan_registry(&store, &registry_two, "refs/heads/main", false).unwrap();
 
         let orch = registry_two.orchestrator(&init_id)
             .expect("repopulate must rehydrate orchestrator entry");
@@ -7202,7 +7240,7 @@ target_ref = "refs/heads/raxis/feature"
         // Simulate a kernel restart — fresh registry, populated only
         // by the boot-time hook.
         let restarted_registry = PlanRegistry::new();
-        let n = repopulate_plan_registry(&store, &restarted_registry).unwrap();
+        let n = repopulate_plan_registry(&store, &restarted_registry, "refs/heads/main", false).unwrap();
         assert_eq!(n, 2, "two tasks must be re-inserted from the plan");
 
         let f1 = restarted_registry.get(&TaskKey::new(&init_id, "t1")).unwrap();
@@ -7237,7 +7275,7 @@ target_ref = "refs/heads/raxis/feature"
         abort_initiative(&init_id, "op", &store).unwrap();
 
         let restarted = PlanRegistry::new();
-        let n = repopulate_plan_registry(&store, &restarted).unwrap();
+        let n = repopulate_plan_registry(&store, &restarted, "refs/heads/main", false).unwrap();
         assert_eq!(n, 0, "aborted initiatives must NOT be repopulated");
         assert!(restarted.is_empty());
     }
@@ -7257,7 +7295,7 @@ target_ref = "refs/heads/raxis/feature"
         let (_init_id, _pk) = seed_draft_initiative(&store, plan, &sk);
 
         let registry = PlanRegistry::new();
-        let n = repopulate_plan_registry(&store, &registry).unwrap();
+        let n = repopulate_plan_registry(&store, &registry, "refs/heads/main", false).unwrap();
         assert_eq!(n, 0,
             "Draft initiatives have no admitted tasks — repopulate must skip");
     }
@@ -7267,7 +7305,7 @@ target_ref = "refs/heads/raxis/feature"
         // No initiatives → nothing to repopulate, MUST NOT error.
         let store    = Store::open_in_memory().unwrap();
         let registry = PlanRegistry::new();
-        let n        = repopulate_plan_registry(&store, &registry).unwrap();
+        let n        = repopulate_plan_registry(&store, &registry, "refs/heads/main", false).unwrap();
         assert_eq!(n, 0);
         assert!(registry.is_empty());
     }

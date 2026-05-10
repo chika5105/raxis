@@ -221,3 +221,77 @@ fn two_consecutive_merges_chain_through_prev_sha256() {
         "first event omits escalation_id (None — skip on serde)");
     assert_eq!(p1["escalation_id"], serde_json::json!("esc-77"));
 }
+
+/// V2 `v2_extended_gaps.md §1.2` — when the host-side fast-forward
+/// of the operator-configured `target_ref` fails (Phase 2), the
+/// kernel writes a `MergeFastForwardFailed` line to the audit chain
+/// AND keeps writing the standard `IntegrationMergeCompleted` line
+/// for Phase 1 (the SQLite intent commit succeeded). The two lines
+/// chain through `prev_sha256` so an external auditor reconstructing
+/// the timeline sees: Phase 1 done → Phase 2 alarm → operator
+/// recovery follow-up.
+///
+/// Pinning the on-disk shape here protects the operator dashboard,
+/// alert routing, and recovery runbooks — all of which pivot on the
+/// `category` discriminator string.
+#[test]
+fn merge_fast_forward_failed_lands_on_audit_chain_with_category_discriminator() {
+    let dir          = TempDir::new().unwrap();
+    let (sink, path) = fresh_audit_sink(&dir);
+
+    // First, the durable signal that Phase 2 failed.
+    let ff_event: AuditEvent = sink.emit(
+        AuditEventKind::MergeFastForwardFailed {
+            initiative_id: "init-ff".into(),
+            commit_sha:    "abc1234abc1234abc1234abc1234abc1234abc1".into(),
+            target_ref:    "refs/heads/main".into(),
+            category:      "target_ref_advanced_concurrently".into(),
+            reason:        "ref txn rejected: expected aaa…, got bbb…".into(),
+        },
+        Some("sess-orch"),
+        Some("task-merge"),
+        Some("init-ff"),
+    ).expect("emit MergeFastForwardFailed");
+
+    assert_eq!(ff_event.event_kind, "MergeFastForwardFailed");
+
+    // Second, the standard IntegrationMergeCompleted line for the
+    // Phase-1 intent. The two MUST chain.
+    let _ = sink.emit(
+        AuditEventKind::IntegrationMergeCompleted {
+            initiative_id:     "init-ff".into(),
+            session_id:        "sess-orch".into(),
+            commit_sha:        "abc1234abc1234abc1234abc1234abc1234abc1".into(),
+            previous_sha:      "f3d21a09f3d21a09f3d21a09f3d21a09f3d21a09".into(),
+            operator_assisted: false,
+            escalation_id:     None,
+        },
+        Some("sess-orch"),
+        Some("task-merge"),
+        Some("init-ff"),
+    ).expect("emit IntegrationMergeCompleted");
+
+    let chain = read_audit_segment(&path);
+    assert_eq!(chain.len(), 2,
+        "Phase-2 failure + Phase-1 completion both land on the segment");
+
+    assert_eq!(chain[0].event_kind, "MergeFastForwardFailed");
+    let p0 = chain[0].payload.as_object().expect("payload object");
+    assert_eq!(p0["initiative_id"], serde_json::json!("init-ff"));
+    assert_eq!(p0["target_ref"],    serde_json::json!("refs/heads/main"));
+    assert_eq!(
+        p0["category"],
+        serde_json::json!("target_ref_advanced_concurrently"),
+        "category MUST land verbatim — dashboards and alert routing \
+         pivot on this discriminator string",
+    );
+    assert!(p0["reason"].as_str().unwrap().contains("ref txn rejected"),
+        "reason MUST round-trip the underlying gix error verbatim");
+
+    assert_eq!(chain[1].event_kind, "IntegrationMergeCompleted");
+    assert_eq!(chain[0].prev_sha256, AuditWriter::GENESIS_PREV_SHA256,
+        "first event chains to genesis");
+    let first_line_sha = sha256_of_line(&path, 0);
+    assert_eq!(chain[1].prev_sha256, first_line_sha,
+        "MergeFastForwardFailed → IntegrationMergeCompleted MUST chain");
+}

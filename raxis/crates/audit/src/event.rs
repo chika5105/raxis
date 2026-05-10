@@ -525,6 +525,45 @@ pub enum AuditEventKind {
         escalation_id: Option<String>,
     },
 
+    /// V2 `v2_extended_gaps.md §1.2` — emitted when the kernel's
+    /// host-side fast-forward of the operator-configured `target_ref`
+    /// after a successful `IntegrationMerge` (Phase 1) fails. The
+    /// underlying `commit_merge_to_target_ref` is non-mutating on
+    /// failure (locks-and-retries, atomic ref update via
+    /// `git update-ref`), so this audit event is purely an alarm bell
+    /// for the operator: the merge commit is still recorded in the
+    /// initiative worktree, the SQLite intent has been committed, but
+    /// `<target_ref>` does NOT yet point at it. The operator either
+    /// hand-rolls the fast-forward or runs the next-boot recovery
+    /// pass that re-drives `commit_merge_to_target_ref` (the call is
+    /// idempotent on success).
+    ///
+    /// `category` discriminates so dashboards/alerts can route:
+    ///   * `"target_ref_advanced_concurrently"` — someone else moved
+    ///     `target_ref` during the merge and the fast-forward is no
+    ///     longer trivial.
+    ///   * `"unopenable_main_repo"` — the central main repo is
+    ///     missing or corrupt.
+    ///   * `"missing_commit"` — the merge commit was not visible to
+    ///     the main repo (orchestrator never pushed up).
+    ///   * `"git_failed"` — git plumbing returned a non-zero exit.
+    ///   * `"deadline_exceeded"` — wall-clock timeout while taking
+    ///     the cross-process worktree lock.
+    ///   * `"other"` — any other classification.
+    MergeFastForwardFailed {
+        /// Initiative the fast-forward belongs to.
+        initiative_id: String,
+        /// Commit SHA the kernel attempted to fast-forward to.
+        commit_sha:    String,
+        /// Operator-configured target ref (`refs/heads/<name>`).
+        target_ref:    String,
+        /// Stable-wire short string for the failure class.
+        category:      String,
+        /// Free-form reason captured from the failure path.
+        /// Truncated at 4 KiB to keep audit rows bounded.
+        reason:        String,
+    },
+
     /// V2_GAPS §C6 — emitted when the kernel begins a push to the
     /// configured upstream remote after a successful Phase 3 of
     /// `IntegrationMerge`. The matching success → `PushCompleted` or
@@ -1928,6 +1967,7 @@ impl AuditEventKind {
             Self::IntentAccepted { .. } => "IntentAccepted",
             Self::IntentRejected { .. } => "IntentRejected",
             Self::IntegrationMergeCompleted { .. } => "IntegrationMergeCompleted",
+            Self::MergeFastForwardFailed { .. }   => "MergeFastForwardFailed",
             Self::PushAttempted { .. }            => "PushAttempted",
             Self::PushCompleted { .. }            => "PushCompleted",
             Self::PushFailed    { .. }            => "PushFailed",
@@ -2612,6 +2652,69 @@ mod path_read_accessed_tests {
             }
             other => panic!("expected IntegrationMergeCompleted; got {other:?}"),
         }
+    }
+
+    /// V2 `v2_extended_gaps.md §1.2` — `MergeFastForwardFailed`
+    /// round-trips through JSON, carrying every classification field
+    /// an operator dashboard / runbook needs to route the alert
+    /// without re-running the kernel. The variant is the durable
+    /// signal that Phase 1 (SQLite intent commit) succeeded but
+    /// Phase 2 (host-side `target_ref` advance) did not — pinning the
+    /// shape protects the downstream consumers (ops dashboards,
+    /// recovery driver) from silent drift.
+    #[test]
+    fn merge_fast_forward_failed_round_trips_through_json() {
+        let kind = AuditEventKind::MergeFastForwardFailed {
+            initiative_id: "init-ff-1".into(),
+            commit_sha:    "abc1234".into(),
+            target_ref:    "refs/heads/main".into(),
+            category:      "target_ref_advanced_concurrently".into(),
+            reason:        "ref txn rejected: expected 0000…, got deadbeef".into(),
+        };
+        let s    = serde_json::to_string(&kind).unwrap();
+        let v    = serde_json::from_str::<serde_json::Value>(&s).unwrap();
+        let obj  = v.as_object().unwrap();
+        assert_eq!(obj["kind"], serde_json::json!("MergeFastForwardFailed"));
+        assert_eq!(obj["initiative_id"], serde_json::json!("init-ff-1"));
+        assert_eq!(obj["target_ref"],    serde_json::json!("refs/heads/main"));
+        assert_eq!(
+            obj["category"],
+            serde_json::json!("target_ref_advanced_concurrently"),
+            "category MUST round-trip verbatim — dashboards pivot on it",
+        );
+
+        let back = serde_json::from_str::<AuditEventKind>(&s).unwrap();
+        match back {
+            AuditEventKind::MergeFastForwardFailed {
+                initiative_id, commit_sha, target_ref, category, reason,
+            } => {
+                assert_eq!(initiative_id, "init-ff-1");
+                assert_eq!(commit_sha,    "abc1234");
+                assert_eq!(target_ref,    "refs/heads/main");
+                assert_eq!(category,      "target_ref_advanced_concurrently");
+                assert!(reason.contains("ref txn rejected"));
+            }
+            other => panic!("expected MergeFastForwardFailed; got {other:?}"),
+        }
+    }
+
+    /// V2 `v2_extended_gaps.md §1.2` — the variant's
+    /// `as_str()` projection MUST equal the on-wire JSON
+    /// `kind` field. This is the contract the
+    /// audit-segment grep'er and the chain-walker rely on.
+    #[test]
+    fn merge_fast_forward_failed_kind_string_matches_wire() {
+        let kind = AuditEventKind::MergeFastForwardFailed {
+            initiative_id: "init-x".into(),
+            commit_sha:    "fff".into(),
+            target_ref:    "refs/heads/feature".into(),
+            category:      "git_failed".into(),
+            reason:        "exit 128".into(),
+        };
+        assert_eq!(kind.as_str(), "MergeFastForwardFailed");
+        let s = serde_json::to_string(&kind).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["kind"], serde_json::json!("MergeFastForwardFailed"));
     }
 
     /// Forward-compat: an older audit segment that emitted

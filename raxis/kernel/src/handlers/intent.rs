@@ -846,13 +846,21 @@ fn run_phase_c(
     // kernel-store.md §2.5.2: a failed audit emit logs and proceeds
     // (the reconciler closes the gap on next boot).
     //
-    // Note: `previous_sha` is set to the request's `base_sha` rather
-    // than the row-level `initiatives.current_sha` because the
-    // host-side main-fast-forward (integration-merge.md §11
-    // Phase 2/3) is not yet wired into the admission path; the
-    // Orchestrator's claimed base is the only ancestor visible at
-    // this point in the pipeline. When the Step 8 follow-up wires
-    // Phase 2/3 the field becomes the row-pre-update value.
+    // V2 `v2_extended_gaps.md §1.2` — host-side fast-forward of the
+    // operator-configured `target_ref`. Performed inline here, AFTER
+    // the SQLite intent commit and BEFORE the audit emission +
+    // optional push. The kernel reads the per-initiative
+    // `target_ref` from the orchestrator plan-fields registry
+    // (resolved at admission time from `[workspace] target_ref` /
+    // `[git] default_target_ref` / hardcoded fallback). The merge
+    // is performed by `raxis_domain_git::commit_merge_to_target_ref`
+    // which is idempotent: the recovery path on next boot will
+    // re-run it cleanly if the kernel crashes between Phase 1 and
+    // Phase 2 (full §11.1 three-phase commit + `git_apply_pending`
+    // is tracked under §1.2 — the V2.5 cut performs Phase 2 inline
+    // and emits a typed `MergeFastForwardFailed` audit event when
+    // it fails so a future recovery pass has the durable signal it
+    // needs).
     if matches!(intent_kind, IntentKind::IntegrationMerge) {
         let initiative_id_owned = pre_state.task.initiative_id.clone();
         let (operator_assisted, escalation_id) =
@@ -860,6 +868,63 @@ fn run_phase_c(
                 Some(id) => (true,  Some(id.as_str().to_owned())),
                 None     => (false, None),
             };
+
+        // ── V2 §1.2 Phase 2 — host-side fast-forward ───────────────
+        let main_repo_root = ctx.data_dir.join("repositories").join("main");
+        let orch_worktree_root = pre_state.worktree_path.clone();
+        let initiative_target_ref = ctx.plan_registry
+            .orchestrator(&initiative_id_owned)
+            .map(|o| o.target_ref)
+            .unwrap_or_else(|| {
+                crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned()
+            });
+        let host_merge_result = raxis_domain_git::commit_merge_to_target_ref(
+            &main_repo_root,
+            &orch_worktree_root,
+            &pre_state.head_sha_raw,
+            &initiative_target_ref,
+        );
+        let host_merge_succeeded = match &host_merge_result {
+            Ok(advance) => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"IntegrationMergeFastForward\",\
+                     \"initiative_id\":\"{initiative_id_owned}\",\
+                     \"target_ref\":\"{initiative_target_ref}\",\
+                     \"current_sha\":\"{cur}\",\"already_at_target\":{aat}}}",
+                    cur = advance.current_sha,
+                    aat = advance.already_at_target,
+                );
+                true
+            }
+            Err(err) => {
+                let (category, reason) = classify_merge_ff_error(err);
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"IntegrationMergeFastForwardFailed\",\
+                     \"initiative_id\":\"{initiative_id_owned}\",\
+                     \"target_ref\":\"{initiative_target_ref}\",\
+                     \"category\":\"{category}\",\"reason\":\"{reason}\"}}",
+                );
+                if let Err(e) = ctx.audit.emit(
+                    raxis_audit_tools::AuditEventKind::MergeFastForwardFailed {
+                        initiative_id: initiative_id_owned.clone(),
+                        commit_sha:    pre_state.head_sha_raw.clone(),
+                        target_ref:    initiative_target_ref.clone(),
+                        category:      category.to_owned(),
+                        reason,
+                    },
+                    Some(session_id_str.as_str()),
+                    Some(task_id_owned.as_str()),
+                    Some(initiative_id_owned.as_str()),
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"MergeFastForwardFailed\",\
+                         \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
+                    );
+                }
+                false
+            }
+        };
+
         if let Err(e) = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted {
                 initiative_id: initiative_id_owned.clone(),
@@ -885,11 +950,15 @@ fn run_phase_c(
         // helpers / SSH config. The merge already committed; push
         // failure is informational and emits `PushFailed` without
         // rolling back the merge.
-        if policy.git_auto_push() {
+        //
+        // Push is skipped when Phase 2 (host-side fast-forward) failed
+        // — pushing the un-advanced `target_ref` to the upstream
+        // remote would race the operator's manual recovery and could
+        // surface a misleading "successful push" to the audit chain.
+        if policy.git_auto_push() && host_merge_succeeded {
             let remote  = policy.git_push_remote().to_owned();
-            let target  = policy.git_default_target_ref().to_owned();
+            let target  = initiative_target_ref.clone();
             let refspec = format!("{target}:{target}");
-            let main_repo_root = ctx.data_dir.join("repositories").join("main");
 
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::PushAttempted {
@@ -2480,6 +2549,40 @@ fn parse_task_state(s: &str) -> TaskState {
         "Cancelled"              => TaskState::Cancelled,
         "BlockedRecoveryPending" => TaskState::BlockedRecoveryPending,
         _                        => TaskState::Admitted, // defensive; unknown treated as non-runnable
+    }
+}
+
+/// V2 `v2_extended_gaps.md §1.2` — categorise a `MainMergeError` for
+/// the `MergeFastForwardFailed` audit row + structured operator log.
+///
+/// The `category` strings are part of the audit wire contract:
+/// dashboards, alerts, and recovery runbooks pivot on them. Keep
+/// them stable and document additions in
+/// `crates/audit/src/event.rs` `MergeFastForwardFailed` doc-comment.
+fn classify_merge_ff_error(err: &raxis_domain_git::MainMergeError) -> (&'static str, String) {
+    use raxis_domain_git::MainMergeError;
+    match err {
+        MainMergeError::MainRepoUnopenable { reason, path } =>
+            ("unopenable_main_repo", format!("{}: {reason}", path.display())),
+        MainMergeError::SourceUnopenable { reason, path } =>
+            ("unopenable_source_repo", format!("{}: {reason}", path.display())),
+        MainMergeError::FetchFailed(s) =>
+            ("git_failed", s.clone()),
+        MainMergeError::ShaMissingPostFetch { sha } =>
+            ("missing_commit", format!("sha {sha} not present in main ODB after fetch")),
+        MainMergeError::RefUpdateFailed(s) => {
+            // gix surfaces concurrent-advance races as a ref-txn
+            // rejection — the message contains the previous and
+            // expected SHAs. Pattern-match conservatively.
+            let lower = s.to_lowercase();
+            if lower.contains("locked") || lower.contains("expected") || lower.contains("conflict") {
+                ("target_ref_advanced_concurrently", s.clone())
+            } else {
+                ("git_failed", s.clone())
+            }
+        }
+        MainMergeError::InvalidSha { sha, reason } =>
+            ("invalid_sha", format!("sha {sha}: {reason}")),
     }
 }
 

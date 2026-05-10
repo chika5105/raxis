@@ -124,12 +124,14 @@ pub struct TaskPlanFields {
     /// `RAXIS_PLANNER_TASK_PROMPT` so the dispatch loop has a
     /// concrete user message to seed the model with.
     ///
-    /// **Empty by default.** Plans (V1 + V2 plans that omit
-    /// `description`) get `""`, which keeps the planner binary in
-    /// scaffold/park mode (`crates/planner-core/src/driver.rs`
-    /// `INV-DRIVER-01`). This preserves bit-for-bit backward
-    /// compatibility with every kernel test that does not stamp a
-    /// prompt.
+    /// **Always non-empty in production.** The plan validator
+    /// (`parse_plan_tasks` in `lifecycle.rs`) rejects any
+    /// `[[tasks]]` row whose `description` is missing, empty, or
+    /// non-string with `LifecycleError::PlanInvalid`. The
+    /// `Default` impl yields `""` purely as a test-fixture
+    /// convenience (`..Default::default()` spreads in unit tests);
+    /// every production `TaskPlanFields` reaches the registry
+    /// through the parser, which guarantees a non-empty value.
     ///
     /// **Trust origin.** Comes from the operator-signed plan TOML;
     /// the agent never sees the prompt before it is rendered into
@@ -179,7 +181,7 @@ impl Default for TaskPlanFields {
 /// hybrid allowlist degenerates to the union of sub-task allowlists.
 /// This matches the V1 behaviour exactly — V1 plans are
 /// forward-compatible with the Step 11 enforcement path.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OrchestratorPlanFields {
     /// Exact filenames the Orchestrator may touch on
     /// `IntegrationMerge`, in addition to the union of every sub-task's
@@ -198,6 +200,48 @@ pub struct OrchestratorPlanFields {
     /// reaching this struct with an empty `description` indicates a
     /// validator regression.
     pub description: String,
+
+    /// V2 `integration-merge.md §1.2` (V2_GAPS §12.8) — fully-qualified
+    /// ref name that this initiative's `IntegrationMerge` advances.
+    /// Resolved at `approve_plan` time by `resolve_target_ref` from
+    /// the chain `[workspace] target_ref` (plan) → `[git]
+    /// default_target_ref` (policy) → hardcoded fallback
+    /// `"refs/heads/main"`. The `[git] target_ref_locked` policy
+    /// knob can pin the value at admission time.
+    ///
+    /// Always non-empty after `approve_plan`. The integration-merge
+    /// handler reads this verbatim into
+    /// `commit_merge_to_target_ref(...)` so the host-side
+    /// fast-forward advances the operator-configured branch instead
+    /// of always touching `refs/heads/main`.
+    ///
+    /// **Default `"refs/heads/main"`.** Used both for V1 plans (no
+    /// `[workspace]` section), test fixtures that
+    /// `..Default::default()`-spread, and the `Default` impl. The
+    /// kernel never reaches the integration-merge fast-forward path
+    /// for an initiative whose registry entry was never populated
+    /// (the lookup returns `None` and the caller fails closed); the
+    /// non-empty default exists so any caller that *does* find an
+    /// entry can advance to a real ref without a panic.
+    pub target_ref: String,
+}
+
+impl OrchestratorPlanFields {
+    /// V2 `integration-merge.md §1.2` — `target_ref` fallback used by
+    /// the `Default` impl and by callers that explicitly want the V2
+    /// historical default. Pinned at the data layer so tests cannot
+    /// drift to a different default by mistake.
+    pub const DEFAULT_TARGET_REF: &'static str = "refs/heads/main";
+}
+
+impl Default for OrchestratorPlanFields {
+    fn default() -> Self {
+        Self {
+            cross_cutting_artifacts: Vec::new(),
+            description:             String::new(),
+            target_ref:              Self::DEFAULT_TARGET_REF.to_owned(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

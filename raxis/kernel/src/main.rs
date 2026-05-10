@@ -661,10 +661,20 @@ async fn main() {
     {
         let store_for_repopulate = Arc::clone(&store);
         let registry_for_repopulate = Arc::clone(&plan_registry);
+        // V2 `v2_extended_gaps.md §1.2` — repopulate also needs the
+        // operator policy's `[git] default_target_ref` /
+        // `target_ref_locked` so it can re-resolve every initiative's
+        // per-initiative target_ref against the *current* policy and
+        // stamp it back into `OrchestratorPlanFields::target_ref`.
+        let snapshot = policy.load();
+        let policy_default_target_ref = snapshot.git_default_target_ref().to_owned();
+        let policy_target_ref_locked  = snapshot.git_target_ref_locked();
         let repopulate_outcome = tokio::task::spawn_blocking(move || {
             initiatives::lifecycle::repopulate_plan_registry(
                 &store_for_repopulate,
                 &registry_for_repopulate,
+                &policy_default_target_ref,
+                policy_target_ref_locked,
             )
         })
         .await;

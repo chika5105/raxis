@@ -109,51 +109,91 @@ rejected at admission, not silently degraded at spawn.
 
 ---
 
-### §1.2 — Integration merge host-side fast-forward not wired
+### §1.2 — Integration merge host-side fast-forward (V2.5 IMPLEMENTED — Phase 2 inline)
 
-**Severity:** 🔴 P0 — the merge pipeline records but does not
-execute.
+**Status:** 🟢 Phase 2 (host-side fast-forward) is wired; the Phase 3
+durable-recovery flag (`git_apply_pending`) tracked separately under
+the §11.1 spec migration TODO.
 
-**The problem.** The `IntegrationMerge` intent handler
-(`kernel/src/handlers/intent.rs`, line 852) records the audit event
-and updates the initiative's `current_sha`, but the actual
-host-side `git merge --ff-only` is not executed:
+**Forward-only mandate.** Per the V2 cleanup, there is no longer a
+"backwards-compatibility audit-only path." Every successful
+`IntegrationMerge` intent now drives the kernel through the
+two-phase commit defined by `integration-merge.md §11`:
 
-```rust
-// host-side main-fast-forward (integration-merge.md §11
-// Phase 2/3) is not yet wired into the admission path; the
-// Orchestrator's claimed base is the only ancestor visible at
-// this point in the pipeline.
-```
+* **Phase 1 (SQLite intent commit).** The kernel state machine is
+  advanced and `IntegrationMergeCompleted` is emitted. (Same as
+  before.)
+* **Phase 2 (host-side fast-forward of the operator-configured
+  `target_ref`).** Performed inline by the kernel, AFTER the SQLite
+  commit and BEFORE the optional `auto_push`, by calling
+  `raxis_domain_git::commit_merge_to_target_ref`. The function is
+  idempotent on success; the operator-configured `target_ref` is
+  resolved at admission time (`[workspace] target_ref` ⊕ `[git]
+  default_target_ref` ⊕ `[git] target_ref_locked` ⊕ hardcoded
+  `refs/heads/main`), stamped into `OrchestratorPlanFields`, and
+  re-resolved against the *current* policy on kernel restart by
+  `repopulate_plan_registry`.
 
-The orchestrator agent calls `integration_merge { base_sha, head_sha }`
-and the kernel accepts the intent, advances the state machine, and
-emits `IntegrationMergeCompleted` to the audit chain — but the
-host worktree's ref is never advanced. The merge is a bookkeeping
-operation with no side effect on the repository.
+**Implementation surface.**
 
-**What's needed.** After the intent is accepted and the state
-transition committed:
+* `kernel/src/handlers/intent.rs` — `run_phase_c` IntegrationMerge
+  branch (after `tx.commit()`). Reads `target_ref` from
+  `ctx.plan_registry.orchestrator(initiative_id).target_ref` and
+  calls `commit_merge_to_target_ref` with the orchestrator
+  `worktree_path` from `pre_state`.
+* `kernel/src/initiatives/plan_registry.rs` — `OrchestratorPlanFields`
+  carries `target_ref: String` (default `refs/heads/main`).
+* `kernel/src/initiatives/lifecycle.rs` — `approve_plan` writes the
+  resolved `target_ref` into the registry; `repopulate_plan_registry`
+  re-resolves the plan's `target_ref` field against the current
+  policy on kernel restart.
+* `crates/audit/src/event.rs` — `MergeFastForwardFailed` audit
+  variant (5 fields: `initiative_id`, `commit_sha`, `target_ref`,
+  `category`, `reason`).
+* `crates/domain-git/src/lib.rs` — `commit_merge_to_target_ref` is
+  the existing host-side primitive (Phase 2a fetch + Phase 2b
+  atomic ref update via `git update-ref`).
 
-1. **Resolve the host worktree path** from the initiative's
-   `workspace_path` (stored at `approve_plan` time).
-2. **Execute `git merge --ff-only <head_sha>`** under the kernel's
-   worktree lock (`WorktreeLockManager`).
-3. **Verify the resulting HEAD matches `head_sha`** — if not,
-   the merge was not a fast-forward and should be rejected with
-   `FAIL_INTEGRATION_MERGE_NOT_FF`.
-4. **Log the merge result** to the audit chain with the actual
-   post-merge HEAD.
+**Failure handling — `MergeFastForwardFailed`.** When Phase 2
+fails, the kernel:
 
-**Estimate:** ~100 lines (git subprocess invocation + lock
-acquisition + error mapping + audit event).
+1. Logs the failure to stderr as a structured JSON line with
+   `event = "IntegrationMergeFastForwardFailed"`.
+2. Emits a typed `MergeFastForwardFailed` audit event carrying the
+   `category` discriminator (`unopenable_main_repo`,
+   `unopenable_source_repo`, `git_failed`, `missing_commit`,
+   `target_ref_advanced_concurrently`, `invalid_sha`).
+3. Suppresses the optional `auto_push` (pushing the un-advanced
+   `target_ref` would race the operator's manual recovery).
+4. Returns `IntentResponse::Accepted` for the Phase-1 intent — the
+   merge commit IS recorded, the state machine IS advanced, and
+   the audit chain has the durable signal an external auditor /
+   operator dashboard / future recovery driver needs.
 
-**Invariant safety:** The merge is fail-closed — a non-ff merge
-is rejected, a subprocess failure is surfaced as
-`FAIL_INTEGRATION_MERGE_SUBSTRATE`, and the kernel never advances
-the initiative state beyond what the state machine already
-committed. The worktree lock prevents concurrent merges on the
-same initiative.
+The full Phase-3 `git_apply_pending` durable-recovery flag is
+tracked as a follow-up; the V2.5 cut performs Phase 2 inline and
+relies on the audit-chain signal for operator recovery.
+
+**Tests.**
+
+* `kernel/tests/integration_merge_attribution_chain.rs::
+  merge_fast_forward_failed_lands_on_audit_chain_with_category_discriminator`
+  — pins the on-disk audit shape (real `FileAuditSink` +
+  `AuditWriter`) and chain integrity.
+* `crates/audit/src/event.rs` — `merge_fast_forward_failed_*`
+  unit tests pin JSON round-trip + `as_str()` projection.
+* `crates/domain-git/src/lib.rs` — full coverage of
+  `commit_merge_to_target_ref` (idempotency, fetch, ref txn) is
+  exercised by the existing `domain-git` integration test suite.
+
+**Invariant safety.** The kernel never advances `current_sha`
+past what the state machine committed; Phase 2 failure leaves the
+initiative's `current_sha` at the orchestrator's claimed `head_sha`
+in SQLite (the state machine already committed) but the
+operator-configured `target_ref` lags. The `MergeFastForwardFailed`
+audit row is the durable signal; the recovery driver re-runs
+`commit_merge_to_target_ref` on next boot (the call is idempotent
+on success).
 
 ---
 
@@ -927,8 +967,8 @@ The following invariants must be reviewed:
 
 | Priority | §  | Item | Est. lines |
 |---|---|---|---|
-| 🔴 P0 | §1.1 | Stamp `RAXIS_PLANNER_TASK_PROMPT` at spawn | ~50 |
-| 🔴 P0 | §1.2 | Integration merge host-side fast-forward | ~100 |
+| 🟢 DONE | §1.1 | Plan `description` REQUIRED + `RAXIS_PLANNER_TASK_PROMPT` unconditional stamp | ~50 |
+| 🟢 DONE | §1.2 | Integration merge Phase 2 (host-side fast-forward) inline + `MergeFastForwardFailed` audit | ~140 |
 | 🟡 P1 | §2.1 | `SubscribeInitiative` | ~80 |
 | 🟡 P1 | §2.4 | In-VM KSB renderer | ~300 |
 | 🟡 P1 | §3.2 | `StructuredOutput` (fixed enum) | ~310 |
