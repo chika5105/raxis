@@ -109,11 +109,39 @@ rejected at admission, not silently degraded at spawn.
 
 ---
 
-### §1.2 — Integration merge host-side fast-forward (V2.5 IMPLEMENTED — Phase 2 inline)
+### §1.2 — Integration merge host-side fast-forward (V2.5 SHIPPED — Phase 2 inline + §11 durable recovery)
 
-**Status:** 🟢 Phase 2 (host-side fast-forward) is wired; the Phase 3
-durable-recovery flag (`git_apply_pending`) tracked separately under
-the §11.1 spec migration TODO.
+**Status:** ✅ shipped — V2.5. Phase 2 (host-side fast-forward) is
+wired AND the Phase 3 durable-recovery flag (`git_apply_pending`)
+is fully implemented, including:
+
+* DDL migration 16 adds `git_apply_pending INTEGER NOT NULL DEFAULT 0`
+  to `initiatives` plus the partial index
+  `idx_initiatives_pending_git`.
+* Phase 1 sets the flag inside the same `BEGIN IMMEDIATE` block as
+  the `current_sha` advance; Phase 3 clears it after a successful
+  host-side merge.
+* Pre-flight check rejects subsequent `IntegrationMerge` intents
+  for the same initiative with `PlannerErrorCode::FailGitApplyPending`
+  while the flag is set (no race window).
+* Boot recovery (`kernel/src/recovery.rs::reconcile_git_apply_pending`,
+  invoked from `main.rs` Step 8a after `KernelStarted` and before
+  IPC accept) walks every flagged initiative and dispatches Cases
+  A / B / C from `integration-merge.md §11.3`, emitting one of
+  `GitConsistencyRepaired` / `GitConsistencyVerified` /
+  `GitStateInconsistent` per initiative.
+* `IntegrationMergeCompleted` carries the fully-qualified
+  `target_ref` so recovery does not need to re-resolve plan-fields.
+* Worktree GC (`kernel/src/worktree_gc.rs::gc_session_worktree`)
+  enforces `INV-MERGE-WORKTREE-RETAIN` (§11.4) via
+  `raxis_store::views::sessions::pending_initiative_for_session`.
+* Push handler waits for `git_apply_pending = 0` (§11.5) with a
+  5 s deadline, emitting `PushFailed { category: "pending_git_apply" }`
+  on timeout.
+
+The `[ ]` checklist at the bottom of `integration-merge.md §11`
+is now entirely `[x]`. There is no remaining V3 deferral on the
+git-↔-SQLite transactional boundary.
 
 **Forward-only mandate.** Per the V2 cleanup, there is no longer a
 "backwards-compatibility audit-only path." Every successful
