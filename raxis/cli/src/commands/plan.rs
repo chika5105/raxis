@@ -32,14 +32,14 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
 
     let (mut conn, fingerprint) = open_conn(flags)?;
 
-    // `operator_pubkey_hex` is preserved on the wire for backward
-    // compatibility but the kernel IGNORES it (kernel-store.md §2.5.3).
-    // The canonical pubkey is looked up server-side from
-    // `policy.operators` keyed by the authenticated fingerprint.
+    // The canonical operator pubkey is looked up server-side from
+    // `policy.operators` keyed by the authenticated fingerprint
+    // (kernel-store.md §2.5.3); the wire never carries it. The
+    // legacy `operator_pubkey_hex` field that earlier V2 builds
+    // accepted-and-ignored was removed in V2.5.
     let req = OperatorRequest::ApprovePlan {
-        initiative_id:       initiative_id.clone(),
-        approving_operator:  fingerprint,
-        operator_pubkey_hex: String::new(),
+        initiative_id:      initiative_id.clone(),
+        approving_operator: fingerprint,
     };
     let req_json = to_wire(&req)?;
 

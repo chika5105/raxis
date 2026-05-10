@@ -137,19 +137,8 @@ pub enum OperatorRequest {
         signed_by_hex:    String,
     },
     ApprovePlan {
-        initiative_id:       String,
-        approving_operator:  String,
-        /// Hex-encoded Ed25519 pubkey of the approving operator.
-        ///
-        /// **Wire field, IGNORED by the kernel.** Per kernel-store.md
-        /// §2.5.3 `approve_plan call path`, the canonical pubkey is
-        /// looked up from `policy.operators` keyed by
-        /// `authenticated.fingerprint`. The wire field is preserved
-        /// for backward compatibility with older CLIs but its value is
-        /// discarded; sending an attacker-controlled value here gives
-        /// the attacker no advantage. See spec §2.5.3 for the full
-        /// trust model.
-        operator_pubkey_hex: String,
+        initiative_id:      String,
+        approving_operator: String,
     },
     RejectPlan {
         initiative_id: String,
@@ -634,16 +623,14 @@ mod tests {
     fn approve_plan_wire_shape() {
         round_trip(
             &OperatorRequest::ApprovePlan {
-                initiative_id:       "init-1".into(),
-                approving_operator:  "op-prime".into(),
-                operator_pubkey_hex: "abcd".into(),
+                initiative_id:      "init-1".into(),
+                approving_operator: "op-prime".into(),
             },
             json!({
                 "op": "ApprovePlan",
                 "payload": {
-                    "initiative_id": "init-1",
+                    "initiative_id":      "init-1",
                     "approving_operator": "op-prime",
-                    "operator_pubkey_hex": "abcd"
                 }
             }),
         );

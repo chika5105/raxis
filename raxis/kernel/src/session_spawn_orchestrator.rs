@@ -242,14 +242,16 @@ pub trait OrchestratorSpawn: Send + Sync {
     /// store; the test fake returns an empty list).
     ///
     /// `task_prompt` is the operator-authored seed prompt for the
-    /// orchestrator agent (V2 `v2_extended_gaps.md §1.1`). When
-    /// non-empty, the implementation MUST stamp it into the spawned
-    /// VM's env table under [`PLANNER_TASK_PROMPT_ENV`] so the
-    /// orchestrator binary's dispatch driver enters live mode rather
-    /// than parking in scaffold mode (`INV-DRIVER-01`). When empty
-    /// (the V1 default for plans that omit `[workspace] description`)
-    /// the env var MUST NOT be stamped — the driver treats absence
-    /// the same as empty and parks.
+    /// orchestrator agent (V2 `v2_extended_gaps.md §1.1`). The plan
+    /// validator (`parse_plan_orchestrator`) rejects any plan whose
+    /// `[plan.initiative]` block omits or empty-strings
+    /// `description` with `LifecycleError::PlanInvalid`, so by
+    /// construction `task_prompt` is **always non-empty** when
+    /// reaching this trait. Implementations MUST unconditionally
+    /// stamp it into the spawned VM's env table under
+    /// [`PLANNER_TASK_PROMPT_ENV`] (`INV-DRIVER-01`); there is no
+    /// scaffold-mode fallback and the driver treats absence as a
+    /// hard error.
     fn spawn_for_initiative<'a>(
         &'a self,
         session_id:       &'a str,
@@ -514,7 +516,7 @@ async fn spawn_orchestrator_for_initiative(
     // V2 `v2_extended_gaps.md §1.1` — additionally stamp
     // `RAXIS_PLANNER_TASK_PROMPT` unconditionally. The plan-side
     // validator (`parse_plan_orchestrator`) already rejected plans
-    // whose `[workspace]` table omits or empty-strings
+    // whose `[plan.initiative]` table omits or empty-strings
     // `description`, so by construction `task_prompt` is non-empty
     // here. We assert defensively — reaching this point with an
     // empty prompt indicates a parser regression and must surface
@@ -522,7 +524,7 @@ async fn spawn_orchestrator_for_initiative(
     // orchestrator.
     debug_assert!(
         !task_prompt.is_empty(),
-        "INV §1.1: parser guarantees non-empty [workspace] description; \
+        "INV §1.1: parser guarantees non-empty [plan.initiative] description; \
          reaching orchestrator spawn with an empty prompt is a parser bug",
     );
     let mut env: BTreeMap<String, String> = BTreeMap::new();

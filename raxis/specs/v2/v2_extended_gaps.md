@@ -22,9 +22,10 @@ real agent workloads. The planner binaries, the dispatch loop, the
 tool registries, the intent pipeline — all of that is implemented.
 But two wiring gaps mean that no real agent work actually runs today.
 
-### §1.1 — Planner binaries always park in scaffold mode
+### §1.1 — Planner task-prompt plumbing (FORWARD-ONLY, IMPLEMENTED)
 
 **Severity:** 🔴 P0 — blocks all agent execution.
+**Status:** ✅ **Implemented in V2.5** (forward-only — no scaffold-mode fallback).
 
 **The problem.** The three planner role binaries (executor, reviewer,
 orchestrator) have a full working agent loop
@@ -41,67 +42,70 @@ orchestrator) have a full working agent loop
    (`task_complete`, `submit_review`, `integration_merge`, etc.)
 7. Returns a structured `DriverOutcome`
 
-However, **the kernel never stamps `RAXIS_PLANNER_TASK_PROMPT` into
-the guest env at spawn time**. The spawn path in
-`kernel/src/session_spawn_orchestrator.rs` (lines 808-824) populates
-`RAXIS_KERNEL_PLANNER_SOCKET` but explicitly leaves
-`RAXIS_PLANNER_TASK_PROMPT` empty:
+In V1 / V2.4-and-earlier the kernel never stamped
+`RAXIS_PLANNER_TASK_PROMPT` into the guest env at spawn time, so
+every spawned planner binary entered `DriverOutcome::Scaffold` and
+parked on SIGTERM — **no real agent work ran**.
 
-```rust
-// V2_GAPS §B1 — merge planner UDS env contract into `extra_env`
-// ...
-// absence of `RAXIS_PLANNER_TASK_PROMPT` keeps the binary in
-// scaffold/park mode — so populating only the socket here is
-// backward-compatible with every existing kernel test.
-```
+**Forward-only mandate.** Raxis V2.5 retired scaffold mode as a
+production code path. There is no end user yet, so we move
+features forward instead of carrying optional V1 plumbing
+indefinitely. The new contract is:
 
-Without the seed prompt, every spawned planner binary enters
-`DriverOutcome::Scaffold` and parks on SIGTERM. **No real agent work
-runs.**
+* **Admission rejects empty descriptions.** The plan validator
+  (`raxis-cli plan validate`) and the kernel's
+  `parse_plan_tasks` / `parse_plan_orchestrator` reject any plan
+  whose `[plan.initiative]` block or any `[[tasks]]` stanza is
+  missing / empty / non-string / oversized `description` with
+  `LifecycleError::PlanInvalid` ("`FAIL_PLAN_PARSE_ERROR`"),
+  exactly the same severity as a missing `task_id`.
+* **Stamping is unconditional.** Both spawn sites
+  (`session_spawn_orchestrator::spawn_for_initiative` and
+  `handlers::intent::handle_activate_sub_task` →
+  `spawn_executor_for_task`) unconditionally populate
+  `RAXIS_PLANNER_TASK_PROMPT` from the `PlanRegistry`'s
+  `TaskPlanFields::description` /
+  `OrchestratorPlanFields::description`. A
+  `debug_assert!(!task_prompt.is_empty(), …)` guards both
+  sites so a future regression in the parser surfaces loudly in
+  test builds rather than silently spawning an idle agent.
+* **Source of truth.** Orchestrator prompt comes from
+  `[plan.initiative] description`; per-task prompts come from
+  `[[tasks]] description`. Plan templates and scenario fixtures
+  ship with concrete prompts — the migration removed every
+  `[workspace] description` and every `context = …` field that
+  pre-dated the canonical schema.
 
-**Root cause.** The task's description lives inside the signed plan
-artifact (`signed_plan_artifacts.plan_bytes`), not in the `tasks`
-table. The activation handler (`handle_activate_sub_task` in
-`kernel/src/handlers/intent.rs`) reads the task's
-`session_agent_type` and `vm_image` from the in-memory
-`PlanRegistry` but does not read or forward the task description.
+**Implementation surface (v2.5 → main).**
 
-**What's needed.** Two changes:
+1. `kernel/src/initiatives/plan_registry.rs` —
+   `TaskPlanFields::description` and
+   `OrchestratorPlanFields::description` now non-optional fields
+   on the registry, populated at `approve_plan` time.
+2. `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks` /
+   `parse_plan_orchestrator` — extract + validate
+   (trim trailing whitespace, 64 KiB cap, reject empty / wrong
+   type).
+3. `kernel/src/session_spawn_orchestrator.rs` —
+   `pub const PLANNER_TASK_PROMPT_ENV` declared once;
+   `spawn_for_initiative` stamps it unconditionally; trait doc
+   pins the "always non-empty by construction" contract.
+4. `kernel/src/handlers/intent.rs::handle_activate_sub_task` —
+   builds `extra_env` with `RAXIS_PLANNER_TASK_PROMPT` from the
+   plan registry's task fields.
+5. `cli/src/commands/plan_validate.rs` — mirrors the kernel-side
+   validation so operators see the rejection at `plan validate`
+   time, before signing.
+6. CLI templates (`cli/templates/plan_*.toml`) and scenario
+   plans (`guides/scenarios/*/plan.toml`) ship with concrete,
+   non-trivial multi-line descriptions for both
+   `[plan.initiative]` and every `[[tasks]]`.
 
-1. **Add `description: String` to `TaskPlanFields`**
-   (`kernel/src/initiatives/plan_registry.rs`). Populated at
-   `approve_plan` time from each `[[tasks]]` stanza's `description`
-   field.
-
-2. **Stamp the description into `extra_env` at the call site.**
-   In `kernel/src/handlers/intent.rs` (around line 2116), the call
-   to `spawn_executor_for_task` currently passes
-   `BTreeMap::new()` as `extra_env`. Instead:
-
-   ```rust
-   let mut extra_env = BTreeMap::new();
-   if let Some(fields) = ctx.plan_registry.get(&task_key) {
-       if !fields.description.is_empty() {
-           extra_env.insert(
-               "RAXIS_PLANNER_TASK_PROMPT".to_owned(),
-               fields.description.clone(),
-           );
-       }
-   }
-   ```
-
-   For the orchestrator spawn path, the seed prompt is the
-   initiative-level description (from `[workspace] description`
-   in the plan TOML).
-
-**Estimate:** ~50 lines (field addition + env stamp at both call
-sites + plan parser update).
-
-**Invariant safety:** This change is additive — it populates an
-env var that the planner binary already reads. No new IPC surface,
-no new database column, no change to the admission pipeline. The
-existing scaffold behaviour is preserved when `description` is
-empty (backward-compatible with V1 plans that omit the field).
+**Invariant safety.** The change preserves every prior invariant
+and tightens one (`INV §1.1`: every spawned agent has a non-empty
+seed prompt). There is intentionally no escape hatch — production
+must move forward; legacy "park in scaffold mode" plans are
+rejected at admission, not silently degraded at spawn.
 
 ---
 

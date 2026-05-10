@@ -257,7 +257,6 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
         OperatorRequest::ApprovePlan {
             initiative_id,
             approving_operator,
-            ..
         } => vec![
             ("initiative_id", initiative_id.clone()),
             ("approving_operator", approving_operator.clone()),
@@ -661,8 +660,8 @@ async fn handle_request(
             initiative_id, plan_bundle_hex, bundle_sha256_hex,
             signature_hex, signed_by_hex, ctx,
         ).await,
-        OperatorRequest::ApprovePlan { initiative_id, approving_operator, operator_pubkey_hex } => {
-            handle_approve_plan(initiative_id, approving_operator, operator_pubkey_hex, operator, ctx).await
+        OperatorRequest::ApprovePlan { initiative_id, approving_operator } => {
+            handle_approve_plan(initiative_id, approving_operator, operator, ctx).await
         }
         OperatorRequest::RejectPlan { initiative_id, rejected_by, reason } => {
             handle_reject_plan(initiative_id, rejected_by, reason, ctx).await
@@ -1171,27 +1170,27 @@ async fn handle_create_initiative_v2(
 ///
 ///   The connected operator is authenticated by the challenge-response
 ///   handshake at connection time (`AuthenticatedOperator { fingerprint, .. }`).
-///   The `ApprovePlan` request also carries `approving_operator` and a legacy
-///   `operator_pubkey_hex` field. Per `kernel-store.md` §2.5.3:
+///   The `ApprovePlan` request carries the `approving_operator`
+///   fingerprint that the connected operator claims to be acting as.
+///   Per `kernel-store.md` §2.5.3:
 ///
 ///     - `approving_operator` MUST equal the authenticated fingerprint
 ///       (no impersonation between operators on the wire).
-///     - The pubkey used for signature verification MUST be looked up from
-///       `policy.operator_entry(approving_operator).pubkey_hex`. The wire
-///       field `operator_pubkey_hex` is **ignored** — accepting it would let
-///       a malicious caller substitute their own key. We keep the wire field
-///       in the request type only for back-compat with already-deployed
-///       CLI builds; new clients SHOULD send an empty string.
+///     - The pubkey used for signature verification MUST be looked up
+///       from `policy.operator_entry(approving_operator).pubkey_hex`
+///       — the wire request never carries an attacker-controlled
+///       pubkey. The legacy `operator_pubkey_hex` wire field that
+///       earlier V2 builds accepted-and-ignored has been removed in
+///       V2.5; the kernel no longer participates in carrying it.
 ///
 /// Only after the identity check passes do we resolve the policy pubkey,
 /// hex-decode it, and hand the bytes to `lifecycle::approve_plan`, which
 /// then performs canonical Ed25519 verification over the plan signing domain.
 async fn handle_approve_plan(
-    initiative_id:        String,
-    approving_operator:   String,
-    _operator_pubkey_hex: String,
-    authenticated:        &AuthenticatedOperator,
-    ctx: &HandlerContext,
+    initiative_id:      String,
+    approving_operator: String,
+    authenticated:      &AuthenticatedOperator,
+    ctx:                &HandlerContext,
 ) -> OperatorResponse {
     if approving_operator != authenticated.fingerprint {
         return OperatorResponse::Error {
@@ -3669,9 +3668,8 @@ mod dispatch_logging_tests {
         // log can route on initiative_id without re-pattern-matching the
         // whole request enum at every chokepoint.
         let req = OperatorRequest::ApprovePlan {
-            initiative_id:        "test-minimal-001".to_owned(),
-            approving_operator:   "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            operator_pubkey_hex:  String::new(), // legacy/ignored field
+            initiative_id:      "test-minimal-001".to_owned(),
+            approving_operator: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
         };
         let fields = request_context_fields(&req);
         assert_eq!(
@@ -3726,9 +3724,8 @@ mod dispatch_logging_tests {
                 submitted_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
             }, "submitted_by"),
             (OperatorRequest::ApprovePlan {
-                initiative_id:       "i1".to_owned(),
-                approving_operator:  "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-                operator_pubkey_hex: String::new(),
+                initiative_id:      "i1".to_owned(),
+                approving_operator: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
             }, "initiative_id"),
             (OperatorRequest::RejectPlan {
                 initiative_id: "i1".to_owned(),

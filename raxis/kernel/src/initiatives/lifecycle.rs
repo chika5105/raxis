@@ -1411,8 +1411,11 @@ pub fn repopulate_plan_registry(
                     vm_image:                  pt.vm_image,
                     // V2 `v2_extended_gaps.md §1.1` — re-hydrate the
                     // operator-authored seed prompt from the immutable
-                    // signed plan bytes. Empty when omitted (V1
-                    // backward compat — keeps planner in scaffold mode).
+                    // signed plan bytes. Always non-empty: admission
+                    // validation in `parse_plan_tasks` rejects any
+                    // `[[tasks]]` row without a non-empty
+                    // `description`, so a sealed plan can never carry
+                    // a zero-length description through restart.
                     description:               pt.description,
                 },
             );

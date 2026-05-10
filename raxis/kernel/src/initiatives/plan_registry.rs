@@ -403,12 +403,18 @@ mod tests {
         // is auto-created at admission per `planner-harness.md §4.8`.
         assert_eq!(f.session_agent_type, SessionAgentType::Executor,
             "default session_agent_type must be Executor (V2 §Step 6)");
-        // V2 `v2_extended_gaps.md §1.1` — empty description keeps the
-        // planner in scaffold/park mode (`INV-DRIVER-01`); a regression
-        // here would let a mis-configured kernel boot a runaway agent
-        // with an unintended seed prompt.
+        // V2 `v2_extended_gaps.md §1.1` — `Default` MUST yield an
+        // empty `description`. Production NEVER reaches the spawn
+        // path with a default-constructed `TaskPlanFields`: every
+        // entry in the registry is built by `parse_plan_tasks`,
+        // which rejects empty / missing descriptions at admission
+        // time. The `Default` impl is exclusively a test convenience
+        // (e.g. `..Default::default()` spreads in unit fixtures);
+        // pinning the empty default here guarantees that callers
+        // who accidentally rely on it cannot smuggle a non-empty
+        // prompt past the parser.
         assert!(f.description.is_empty(),
-            "default description must be empty (INV-DRIVER-01 backward compat)");
+            "default description must be empty so test fixtures cannot smuggle a non-parser-validated prompt");
     }
 
     #[test]
@@ -561,9 +567,14 @@ mod tests {
 
     #[test]
     fn orchestrator_default_description_is_empty() {
+        // Same rationale as the per-task variant above: `Default` is
+        // exclusively for test fixtures (and `..Default::default()`
+        // spreads). Production builds the orchestrator entry through
+        // `parse_plan_orchestrator`, which rejects missing / empty
+        // `[plan.initiative] description` at admission time.
         let f = OrchestratorPlanFields::default();
         assert!(f.description.is_empty(),
-            "default orchestrator description must be empty (INV-DRIVER-01 backward compat)");
+            "default orchestrator description must be empty so test fixtures cannot smuggle a non-parser-validated prompt");
     }
 
     #[test]

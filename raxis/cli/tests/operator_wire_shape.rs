@@ -25,17 +25,23 @@ fn round_trip(req: OperatorRequest) -> Value {
     v
 }
 
-// ── ApprovePlan: kernel ignores operator_pubkey_hex, so empty string is
-//    an acceptable wire value (kernel-store.md §2.5.3).
+// ── ApprovePlan: V2.5 wire shape carries only (initiative_id,
+//    approving_operator); the legacy `operator_pubkey_hex` field
+//    was removed (kernel-store.md §2.5.3 — the canonical pubkey
+//    is looked up server-side from policy.operators keyed by the
+//    authenticated fingerprint).
 #[test]
-fn approve_plan_with_empty_pubkey_round_trips() {
+fn approve_plan_round_trips_without_pubkey_field() {
     let v = round_trip(OperatorRequest::ApprovePlan {
-        initiative_id:       "init-xyz".into(),
-        approving_operator:  "op-prime".into(),
-        operator_pubkey_hex: String::new(),
+        initiative_id:      "init-xyz".into(),
+        approving_operator: "op-prime".into(),
     });
     assert_eq!(v["op"], "ApprovePlan");
-    assert_eq!(v["payload"]["operator_pubkey_hex"], "");
+    assert_eq!(
+        v["payload"].get("operator_pubkey_hex"),
+        None,
+        "wire shape MUST NOT carry the retired operator_pubkey_hex field",
+    );
 }
 
 // ── CreateSession: optional fields serialise as null (NOT omitted).
