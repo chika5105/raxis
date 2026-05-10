@@ -1849,7 +1849,7 @@ Re-exports the public initiative API: `create`, `approve_plan`, `reject_plan`, `
 >   `Finding::is_critical` — chain break, dangling confirmed,
 >   dangling rollback, digest mismatch — recovery refuses to proceed
 >   and the kernel refuses to start until an operator runs
->   `raxis audit verify --acknowledge-critical` (signed) to override.
+>   `raxis verify-chain --acknowledge-critical` (signed) to override.
 >   Critical findings are operator-attention events, not auto-fixable.
 > - **Task FSM recovery is unchanged.** `reconcile_tasks` (the
 >   non-terminal-task → `BlockedRecoveryPending` sweep) and

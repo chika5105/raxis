@@ -86,7 +86,7 @@ What you have checked out is the **RAXIS** codebase: a **Rust workspace** meant 
 
 Do not confuse the workspace root with **where the kernel keeps live state**. Databases, sockets, audit log segments, witness blobs, and the policy cache live under **`$RAXIS_DATA_DIR`**, which defaults to **`~/.raxis/`**. That location is fixed by environment variable, not by where the Git tree sits on disk.
 
-For operator actions (genesis, plan approval, escalations, audit verify, and the rest), the spec names one binary: **`raxis`**. Details are in Part 4 ([`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md)). The Cargo crate that produces this binary is `raxis-cli` (the crate name remains stable because it's referenced from every workspace dependency); the produced binary is plain `raxis` so operator commands read naturally (`raxis genesis init`, `raxis policy sign`, etc.).
+For operator actions (genesis, plan approval, escalations, audit-chain verification, and the rest), the spec names one binary: **`raxis`**. Details are in Part 4 ([`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md)). The Cargo crate that produces this binary is `raxis-cli` (the crate name remains stable because it's referenced from every workspace dependency); the produced binary is plain `raxis` so operator commands read naturally (`raxis genesis init`, `raxis policy sign`, etc.).
 
 ---
 

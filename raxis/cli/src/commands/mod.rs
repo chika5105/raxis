@@ -3,16 +3,19 @@
 // Sub-modules are split into two families:
 //
 //   * "Mutating / ceremony" commands — talk to the kernel over
-//     operator.sock with a typed OperatorRequest. (`audit verify`
-//     is local-only but lives in the same family for historical
-//     reasons.)
+//     operator.sock with a typed OperatorRequest.
 //
 //   * "Read-only" commands — never touch operator.sock. They open
 //     `<data_dir>/runtime/heartbeat.json` and a read-only
 //     `kernel.db` handle (`raxis_store::open_ro`) and render a
 //     report. cli-readonly.md §5.5 catalogues them.
+//
+// Audit-chain integrity verification lives exclusively in
+// [`crate::commands::verify_chain`] (the canonical, multi-segment,
+// library-backed implementation).  The historical V1 single-segment
+// `audit verify` shim was removed: keeping two CLI surfaces that
+// "verify the chain" violates the no-duplicate-action invariant.
 
-pub mod audit;
 pub mod budget;
 pub mod cert;
 pub mod credential;

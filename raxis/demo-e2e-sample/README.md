@@ -225,9 +225,8 @@ empty initiative list.
 > <path>` as a **global flag** (it goes BEFORE the subcommand, not
 > after). The kernel uses it to perform an Ed25519 challenge-response
 > handshake on every connection. Read-only commands (`status`,
-> `inspect`, `doctor`, `audit verify`, `verify-chain`, `log`,
-> `inbox`, `sessions`, `escalations`, `verifiers`, `witnesses`,
-> `budget`) do NOT need it.
+> `inspect`, `doctor`, `verify-chain`, `log`, `inbox`, `sessions`,
+> `escalations`, `verifiers`, `witnesses`, `budget`) do NOT need it.
 >
 > To avoid retyping the path on every command, you have two choices:
 >
@@ -327,7 +326,7 @@ raxis inspect task-alpha                  # task-level deep-dive: predecessors,
 > Chika (abcd1234)` — so you don't have to cross-reference
 > `raxis cert list`. Pass `--json` for a single structured object;
 > use `raxis inspect <task_id>` for task-level forensics; use
-> `raxis log <init_id>` and `raxis audit verify` for chronological
+> `raxis log <init_id>` and `raxis verify-chain` for chronological
 > history. The `raxis initiative` *write* surface still only exposes
 > `abort` and `quarantine` — read goes through `initiative show`,
 > write through `initiative <verb>`.
@@ -382,20 +381,21 @@ created) was hash-chained into `$RAXIS_DATA_DIR/audit/segment-000.jsonl`.
 Verify it end-to-end:
 
 ```bash
-raxis audit verify            # prints record count, chain breaks, and gap count
-                              # (exits non-zero if any breaks or gaps are found)
+raxis verify-chain            # walks every segment-NNN.jsonl in numeric
+                              # order; exits 0 (intact) or 3 (broken)
 tail -n 5 "$RAXIS_DATA_DIR/audit/segment-000.jsonl"
 ```
 
-> `raxis verify-chain` is a top-level alias that runs the same chain
-> verification with slightly different output formatting; either one
-> works. There is no separate `audit gaps` subcommand — gap counts
-> are part of the `audit verify` output line `Gaps: <n>`.
+> `raxis verify-chain` is the only audit-chain verification surface.
+> The V1-draft `audit verify` / `audit gaps` shims were removed in V2
+> (no two CLI commands may perform the same action).  Use
+> `--quick` for the first-+-last fast path or `--from <seq>` to
+> narrow the reported stats to a window.
 
 You should see (roughly in order): `KernelStarted`, `OperatorAuthenticated`,
 `InitiativeCreated`, `PlanApproved`, `SessionCreated`. INV-04 (audit
 tamper-detection) and INV-05 (decisions reproducible from records) hold by
-construction; `audit verify` is the operator-side check.
+construction; `verify-chain` is the operator-side check.
 
 ---
 

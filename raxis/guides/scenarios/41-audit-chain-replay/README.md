@@ -15,7 +15,7 @@ A completed initiative (any of scenarios 01–40 will do).
 
 ## What this scenario demonstrates
 
-- `raxis audit verify` walks the chain.
+- `raxis verify-chain` walks the chain.
 - Detection of any tampering would manifest as
   `FAIL_AUDIT_CHAIN_BROKEN`.
 
@@ -24,12 +24,12 @@ A completed initiative (any of scenarios 01–40 will do).
 ## Run it
 
 ```bash
-raxis audit list --initiative-id "$INIT_ID"
-raxis audit verify --initiative-id "$INIT_ID"
+raxis log "$INIT_ID"           # human-readable audit replay for one initiative
+raxis verify-chain             # full chain integrity walk (every segment)
 ```
 
 ---
 
 ## What "success" looks like
 
-`raxis audit verify` exits 0 and prints `chain ok`.
+`raxis verify-chain` exits 0 and prints `chain ok`.

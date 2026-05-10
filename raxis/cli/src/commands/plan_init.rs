@@ -115,7 +115,7 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     println!("  1. Open {} and edit the [[tasks]] sections.", output.display());
     println!("  2. Run `raxis plan validate {}` to check the schema.",
              output.display());
-    println!("  3. When ready: `raxis plan submit --plan {}`.",
+    println!("  3. When ready: `raxis submit plan {}`.",
              output.display());
     Ok(())
 }

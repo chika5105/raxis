@@ -42,9 +42,13 @@
 >
 > Mutating subcommands NOT in the operator-ergonomics surface
 > (`policy sign`, `plan approve`, `escalation approve`, `task abort`,
-> `session create`, `delegation grant`, `epoch advance`,
-> `audit verify`, `audit gaps`, plus `genesis`) remain canonical in
-> this document for both V1 and V2 deployments.
+> `session create`, `delegation grant`, `epoch advance`, plus
+> `genesis`) remain canonical in this document for both V1 and V2
+> deployments.  Audit-chain integrity verification has been
+> consolidated into the read-only `verify-chain` command (see
+> §"`verify-chain`" below); the V1-draft `audit verify` / `audit gaps`
+> shims were removed in V2 to preserve the no-duplicate-action
+> invariant.
 >
 > The two surfaces (V1 mutating commands here, V2 ergonomics
 > commands in `operator-ergonomics.md`) are designed to coexist on
@@ -57,7 +61,7 @@
 1. **Mutating subcommands** (this document, §4.1) — every command that
    changes kernel state (`genesis`, `policy sign`, `plan submit`,
    `plan approve`, `escalation approve`, `task abort`, `session create`,
-   `delegation grant`, `epoch advance`, `audit verify`, `audit gaps`).
+   `delegation grant`, `epoch advance`).
    These communicate exclusively over the operator UDS
    (`<data_dir>/sockets/operator.sock`), performing the challenge-response
    handshake on every invocation.
@@ -775,24 +779,25 @@ Both arguments are **required**. There is no implicit staged location. The kerne
 
 ---
 
-### `audit verify`
+### `verify-chain` (was `audit verify` in V1 drafts)
 
-**Purpose:** Verify the integrity of the JSONL audit log chain. Does not connect to the kernel.
+**Purpose:** Verify the integrity of the JSONL audit chain. Does not connect to the kernel.
 
-**Usage:** `raxis-cli audit verify [--log-path <path>]`
+**Status:** **CONSOLIDATED in V2.** The V1-draft `audit verify` single-segment shim has been removed; `verify-chain` is the only audit-verification surface (no two CLI commands may perform the same action, per V2_GAPS §C0).
 
-Default log path: `<data_dir>/audit/segment-000.jsonl` (the initial segment created at genesis; see `kernel-store.md` §2.5.2).
+**Usage:** `raxis verify-chain [--quick] [--from <seq>] [--audit-dir <path>]`
+
+Default audit dir: `<data_dir>/audit/` (every `segment-NNN.jsonl` in numeric order). The full canonical reference is `cli-readonly.md §5.5.13`.
 
 **Behaviour:**
-1. Reads the JSONL segment file line by line (one audit record per line).
-2. For each line: parses the record, computes SHA-256 of the raw line bytes (including trailing newline), and checks it against `next_line.prev_sha256`.
-3. On chain break: prints `Chain break at seq=<n>: expected <hash>, got <hash>`. Continues verifying the remainder.
-4. Prints a summary: total records, gaps detected, chain breaks detected.
-5. Exit code 0 = clean chain; non-zero = chain has breaks or gaps.
 
-**Multi-segment installations:** `audit verify` operates on one segment file per invocation. Cross-segment chain integrity — verifying that the first line of `segment-001.jsonl` correctly chains from the last line of `segment-000.jsonl` — is the responsibility of `raxis-audit-tools`, not the CLI. The CLI does not implement cross-segment stitching. To verify a full multi-segment audit trail, use `raxis-audit-tools verify-chain --audit-dir <data_dir>/audit/`, which walks all `segment-*.jsonl` files in creation order and validates the inter-segment `prev_sha256` link. The per-line algorithm is identical to single-segment verification.
+1. Walks `<audit-dir>/segment-NNN.jsonl` in numeric order via `raxis_audit_tools::ChainReader`.
+2. Asserts `prev_sha256` linkage and `seq` monotonicity per record AND across the segment seam.
+3. `--quick` is a fast first-+-last-record check (mirrors `raxis status`'s liveness probe).
+4. `--from <seq>` narrows the reported stats to records with `seq ≥ <seq>`; the whole chain is still walked end-to-end for linkage.
+5. Exit codes: `0` (intact), `3` (broken — chain link mismatch / gap / malformed record), `2` (CLI usage error).
 
-**Note:** `audit verify` only checks chain integrity for the file given. It does not verify that audit records match SQLite state. Use `recovery::reconcile` (kernel-internal) for state-vs-audit reconciliation.
+**Why the consolidation:** The V1 `audit verify` did the same job (chain-walk per record) but only on a single hand-named segment, with a hand-rolled JSON parser that drifted from `raxis_audit_tools`. Folding it into `verify-chain` removes a duplicate audit surface AND ensures every operator path through the codebase parses chain bytes through the same library.
 
 ---
 
@@ -886,13 +891,9 @@ raxis-cli notify credential rotate <cred-ref>
 
 ---
 
-### `audit gaps`
+### `audit gaps` — consolidated into `verify-chain`
 
-**Purpose:** Report reconciliation gaps — JSONL records marked `reconstructed: true` by `recovery::reconcile`.
-
-**Usage:** `raxis-cli audit gaps [--log-path <path>]` (defaults to the same path convention as `audit verify`)
-
-Prints a table of gap records with their `missing_seq` values and reconstructed event kinds.
+**Status:** **REMOVED in V2.** Reporting reconstructed records (`reconstructed: true` rows from `recovery::reconcile`) lives inside the same chain walk that `verify-chain` already performs. A separate `audit gaps` subcommand would mean two operator paths through the same JSONL parser, which violates the no-duplicate-action invariant. `raxis verify-chain` already exits non-zero (code 3) on a chain break or gap; `raxis log --kind reconciliation` (the catalogued read-only surface) renders the per-record `reconstructed: true` rows.
 
 ---
 

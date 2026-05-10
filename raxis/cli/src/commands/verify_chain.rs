@@ -134,8 +134,9 @@ struct VerifyChainOpts {
     /// command reports. See `raxis_audit_tools::verify_chain_from`
     /// doc-comment.
     from_seq: Option<u64>,
-    /// Override audit dir (defaults to `<data_dir>/audit`). Mirrors
-    /// the existing `audit verify --log-path` flag.
+    /// Override audit dir (defaults to `<data_dir>/audit`).  Use this
+    /// to point at a backup / archived chain (e.g. an export from
+    /// another host) without symlink-juggling.
     audit_dir: Option<PathBuf>,
 }
 

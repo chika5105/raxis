@@ -1079,7 +1079,7 @@ pub trait AuditSink: Send + Sync + 'static {
 
     /// V2 ADDITION: read events in chain order for offline
     /// verification and recovery. The sink MUST return events in
-    /// strict `seq` ascending order. Used by `raxis audit verify`
+    /// strict `seq` ascending order. Used by `raxis verify-chain`
     /// and `raxis audit replay` (per `v3/audit-retention.md`).
     fn read_range(
         &self,

@@ -194,7 +194,7 @@ decisions are reproducible from stored records" claim collapses.
 
 **Scenario.** An attacker truncates `segment-007.jsonl` to remove
 an `OperatorCertInstalled` event for a key they had compromised.
-`raxis audit verify` re-walks the chain, computes the hash of
+`raxis verify-chain` re-walks the chain, computes the hash of
 segment N+1's first record from segment N's last record, and
 detects the discontinuity. The kernel itself refuses to advance
 the epoch when the chain is invalid.

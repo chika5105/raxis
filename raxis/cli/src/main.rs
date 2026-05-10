@@ -6,7 +6,7 @@
 // All commands that require kernel connectivity open the operator UDS,
 // perform the Ed25519 challenge-response handshake, then send a typed
 // OperatorRequest frame. Commands that don't require the kernel (genesis,
-// policy sign, audit verify) run locally.
+// policy sign, verify-chain) run locally.
 //
 // Wire protocol: length-prefixed JSON frames on operator.sock.
 // Auth: challenge-response per ipc/auth.rs (challenge → response → dispatch).
@@ -43,7 +43,7 @@ use errors::CliError;
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "genesis", "policy", "plan", "initiative", "operator", "task", "session",
-    "delegation", "escalation", "epoch", "audit", "cert", "credential", "kernel",
+    "delegation", "escalation", "epoch", "cert", "credential", "kernel",
     "submit",
     "status", "log", "verify-chain", "queue", "inspect",
     "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
@@ -65,7 +65,6 @@ const SESSION_SUBCOMMANDS:     &[&str] = &["create", "revoke"];
 const DELEGATION_SUBCOMMANDS:  &[&str] = &["grant"];
 const ESCALATION_SUBCOMMANDS:  &[&str] = &["approve", "deny"];
 const EPOCH_SUBCOMMANDS:       &[&str] = &["advance"];
-const AUDIT_SUBCOMMANDS:       &[&str] = &["verify"];
 const CERT_SUBCOMMANDS:        &[&str] = &[
     "mint", "mint-emergency", "show", "verify", "list", "install",
     // V2_GAPS §D1 — operator-cert revocation (admission-time MVP).
@@ -283,15 +282,6 @@ fn run() -> Result<(), CliError> {
                 "advance" => commands::epoch::run_advance(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "epoch sub-command", sub2, EPOCH_SUBCOMMANDS,
-                ))),
-            }
-        }
-        "audit" => {
-            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
-            match sub2 {
-                "verify" => commands::audit::run_verify(&flags, &rest[1..]),
-                _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "audit sub-command", sub2, AUDIT_SUBCOMMANDS,
                 ))),
             }
         }
@@ -556,9 +546,6 @@ SUBCOMMANDS:
 
     epoch advance --policy <path> --sig <path>
         Advance the policy epoch by loading a new signed policy artifact.
-
-    audit verify [--log-path <path>]
-        Verify the integrity of the JSONL audit log chain.
 
     credential list [--json]
         List registered credentials (metadata only — never the value).
@@ -954,7 +941,6 @@ mod catalog_consistency_tests {
             ("delegation", DELEGATION_SUBCOMMANDS),
             ("escalation", ESCALATION_SUBCOMMANDS),
             ("epoch",      EPOCH_SUBCOMMANDS),
-            ("audit",      AUDIT_SUBCOMMANDS),
             ("cert",       CERT_SUBCOMMANDS),
             ("credential", CREDENTIAL_SUBCOMMANDS),
             ("kernel",     KERNEL_SUBCOMMANDS),
@@ -988,7 +974,6 @@ mod catalog_consistency_tests {
             ("\"delegation\" => {", DELEGATION_SUBCOMMANDS),
             ("\"escalation\" => {", ESCALATION_SUBCOMMANDS),
             ("\"epoch\" => {",      EPOCH_SUBCOMMANDS),
-            ("\"audit\" => {",      AUDIT_SUBCOMMANDS),
             ("\"cert\" => {",       CERT_SUBCOMMANDS),
             ("\"credential\" => {", CREDENTIAL_SUBCOMMANDS),
             ("\"kernel\" => {",     KERNEL_SUBCOMMANDS),

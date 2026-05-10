@@ -38,7 +38,7 @@
 //      subcommand" line.
 //
 // Comparison is case-sensitive on the assumption that subcommands
-// are always lowercase ASCII (audit verify, plan submit, …) — the
+// are always lowercase ASCII (verify-chain, submit plan, …) — the
 // CLI never accepts mixed-case forms today, so a case-insensitive
 // match would only succeed on operator typos like `RAXIS CERT`,
 // which we'd rather surface as a usage error than auto-correct.

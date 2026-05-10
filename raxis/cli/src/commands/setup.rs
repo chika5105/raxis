@@ -6,7 +6,7 @@
 // onboarding path; without it new operators have to discover the
 // right ordering of `raxis cert mint` → `raxis genesis` →
 // `raxis policy sign` → `raxis plan init` → `raxis doctor` →
-// `raxis plan submit` from prose.
+// `raxis submit plan` from prose.
 //
 // V2.3 MVP scope
 // ──────────────
@@ -47,10 +47,10 @@
 //   * Phase 7 (egress allowlist auto-populate) — V2 ships an
 //     empty `[[tproxy_allowlist]]` and the operator pastes the
 //     hosts they need.
-//   * Phase 9 (`raxis plan submit --dry-run`) — handler is V3
+//   * Phase 9 (`raxis submit plan --dry-run`) — handler is V3
 //     (no `DryRunAdmit` IPC type yet, see `V2_GAPS.md §11`).
 //   * Phase 10 (first launch) — operator runs
-//     `raxis plan submit` manually after the cert ceremony.
+//     `raxis submit plan` manually after the cert ceremony.
 //
 // Design constraints honoured by the V2 MVP
 // ──────────────────────────────────────────
@@ -406,7 +406,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     println!("  4. raxis policy sign --policy {}/policy/policy.toml", data_dir.display());
     println!("  5. raxis credential add --name {provider}-api-key --file ./{provider}-key.txt");
     println!("  6. raxis doctor --data-dir {}", data_dir.display());
-    println!("  7. Start the kernel binary, then `raxis plan submit --plan {}/plan/plan.toml`", data_dir.display());
+    println!("  7. Start the kernel binary, then `raxis submit plan {}/plan/plan.toml`", data_dir.display());
 
     Ok(())
 }

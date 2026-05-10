@@ -1707,7 +1707,7 @@ Audit-event variants that name an operator carry **two** fields, never one:
 
 **Render-layer fallback (CLI side, normative).**
 
-When a CLI consumer (`raxis log`, `raxis inbox`, `raxis status`, `raxis audit verify`, etc.) renders an operator-bearing audit event:
+When a CLI consumer (`raxis log`, `raxis inbox`, `raxis status`, `raxis verify-chain`, etc.) renders an operator-bearing audit event:
 
 1. If the embedded display name is `Some(name)`, render `"name (fp_prefix)"` — this is the snapshot the kernel pinned at emit time. The name shown is the name the operator had **at the time of the event**, even if their cert has since rotated to a different display name.
 2. If the embedded display name is `None`, look up the fingerprint in the current `operator_certificates` view (§2.5.7).
@@ -1716,7 +1716,7 @@ When a CLI consumer (`raxis log`, `raxis inbox`, `raxis status`, `raxis audit ve
 
 **Why both fields, not just the snapshot.**
 
-The fingerprint stays canonical so `raxis audit verify` and any forensic tool can join across the chain by a stable, unforgeable key. The display name is a humane affordance — it is what the operator sees when they read their own logs, and it survives the case where the policy bundle shrinks (e.g. the operator who triggered the event was later removed, but the audit chain still tells you who they were). The two fields together let the audit chain be both machine-correct and human-readable without conflating identity with label.
+The fingerprint stays canonical so `raxis verify-chain` and any forensic tool can join across the chain by a stable, unforgeable key. The display name is a humane affordance — it is what the operator sees when they read their own logs, and it survives the case where the policy bundle shrinks (e.g. the operator who triggered the event was later removed, but the audit chain still tells you who they were). The two fields together let the audit chain be both machine-correct and human-readable without conflating identity with label.
 
 **Kernel-stderr dispatch logs (third surface).**
 

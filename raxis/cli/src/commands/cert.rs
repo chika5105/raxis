@@ -1303,7 +1303,7 @@ mod revoke {
         // V2_GAPS §D1 — operator-local audit trail. The CLI cannot
         // append to the kernel's hash-chained audit segments
         // (single-writer invariant), so a parallel `cert-cli.jsonl`
-        // is written under `<data_dir>/audit/`. `raxis audit verify`
+        // is written under `<data_dir>/audit/`. `raxis verify-chain`
         // already merges any well-formed JSONL trail discovered in
         // that directory; V3 will also forward the record over the
         // operator socket so the kernel persists it inside the

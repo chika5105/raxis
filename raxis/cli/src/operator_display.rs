@@ -8,7 +8,7 @@
 //! row routes through [`format_operator`] (or the higher-level
 //! [`format_operator_with_lookup`]) so the rendered identity is
 //! consistent across `raxis log`, `raxis inbox`, `raxis status`,
-//! `raxis sessions`, `raxis escalations`, `raxis audit verify`,
+//! `raxis sessions`, `raxis escalations`, `raxis verify-chain`,
 //! `raxis policy show --history`, etc.
 //!
 //! # Three-state resolution

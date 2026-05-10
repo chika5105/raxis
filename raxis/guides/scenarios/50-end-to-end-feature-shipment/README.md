@@ -92,8 +92,9 @@ watch -n 2 "raxis initiative show $INIT_ID --with-tasks"
 
 - `raxis initiative show "$INIT_ID"` ends with `state = Completed`.
 - `git log --oneline` in the workspace shows commits from each agent.
-- `raxis audit verify --initiative-id "$INIT_ID"` returns
-  `chain ok`.
+- `raxis verify-chain` exits 0 and prints `chain ok`. (Filtering by
+  initiative is `raxis log "$INIT_ID"` — `verify-chain` always walks
+  the whole chain end-to-end.)
 
 ---
 
