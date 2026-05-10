@@ -53,7 +53,7 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
 ];
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff", "generate-sidecar-secret"];
-const PLAN_SUBCOMMANDS:        &[&str] = &["submit", "approve", "reject", "validate", "fmt", "init"];
+const PLAN_SUBCOMMANDS:        &[&str] = &["approve", "reject", "validate", "fmt", "init"];
 /// V2.1 atomic plan-bundle submit. Spec: plan-bundle-sealing.md §4.
 /// Currently exposes only `plan`; future sub-commands (`policy`,
 /// `operator-cert`) will plug in here without a third rename.
@@ -202,9 +202,8 @@ fn run() -> Result<(), CliError> {
         "plan" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "submit" => commands::plan::run_submit(&flags, &rest[1..]),
-                "approve" => commands::plan::run_approve(&flags, &rest[1..]),
-                "reject" => commands::plan::run_reject(&flags, &rest[1..]),
+                "approve"  => commands::plan::run_approve(&flags, &rest[1..]),
+                "reject"   => commands::plan::run_reject(&flags, &rest[1..]),
                 "validate" => commands::plan_validate::run(&flags, &rest[1..]),
                 "fmt"      => commands::plan_fmt::run(&flags, &rest[1..]),
                 "init"     => commands::plan_init::run(&flags, &rest[1..]),
@@ -438,22 +437,17 @@ SUBCOMMANDS:
         in-process; private bytes are never persisted).
 
     policy sign <artifact.toml> --key <path>
-        Sign a policy or non-plan artifact with the operator's private key.
-        Signing a `plan.toml` artifact through this path is REMOVED in
-        V2 — use `submit plan <plan.toml>` (plan-bundle-sealing.md §4.5).
-
-    plan submit <initiative_id> <plan_dir>
-        REMOVED in V2 — running this command always returns a usage
-        error pointing to `submit plan <plan.toml>`. The V1 two-step
-        ceremony (`policy sign plan.toml` + `plan submit <id> <dir>`)
-        is replaced by atomic V2.1 sign+submit; see
-        plan-bundle-sealing.md §4 / §4.5.
+        Sign a policy.toml or other non-plan artifact with the operator's
+        private key. Plans are signed and submitted atomically through
+        `submit plan <plan.toml>`; this command intentionally rejects
+        `plan.toml` artifacts (plan-bundle-sealing.md §4).
 
     submit plan <plan.toml> [--initiative-id <id>] [--dry-run | --no-dry-run]
-        V2.1 atomic plan-bundle submission. Reads plan.toml, builds the
-        canonical bundle, stamps a fresh nonce + signed_at, signs in
-        memory, and submits via the V2 IPC envelope (kernel admission
-        landed per plan-bundle-sealing.md §8.1). There is no intermediate
+        V2.1 atomic plan-bundle submission — the ONLY way to admit a
+        plan to the kernel. Reads plan.toml, builds the canonical
+        bundle, stamps a fresh nonce + signed_at, signs in memory, and
+        submits via the V2 IPC envelope (kernel admission landed per
+        plan-bundle-sealing.md §8.1). There is no intermediate
         `plan.sig` file. The default is `--dry-run`; pass `--no-dry-run`
         to commit the bundle to the kernel.
 

@@ -15,53 +15,14 @@ use crate::errors::CliError;
 use crate::GlobalFlags;
 
 // ---------------------------------------------------------------------------
-// plan submit <initiative_id> <plan_dir>
-// ---------------------------------------------------------------------------
-
-pub fn run_submit(_flags: &GlobalFlags, _args: &[String]) -> Result<(), CliError> {
-    // V2 hard-reject (plan-bundle-sealing.md §4.5).
-    //
-    // The V1 two-arg `plan submit <initiative_id> <plan_dir>` form is
-    // rejected at argument-parse time with a hint pointing to
-    // `submit plan <plan.toml>` — the V2 atomic sign+submit workflow.
-    //
-    // This rejection lands together with kernel admission (§8.1) so the
-    // V2 functional replacement and the V1 hard-reject ship in the same
-    // commit: an operator typing `plan submit foo bar` has the new path
-    // available the moment the old path stops working.
-    //
-    // No host-disk I/O happens before this check: we do NOT want a
-    // missing plan.toml / plan.sig path or a permission error to mask
-    // the actual signal (V1 is gone). The reject also covers the case
-    // where the operator passes the V2 invocation against the wrong
-    // top-level subcommand (`plan submit` instead of `submit plan`) —
-    // a common typo for muscle-memory operators.
-    Err(CliError::Usage(v1_plan_submit_removal_message()))
-}
-
-/// Operator-facing migration text emitted by `plan submit`.
-///
-/// Pulled out into a standalone function so the test suite can pin the
-/// exact message: any drift here means an operator-visible behaviour
-/// change and forces a corresponding spec update in
-/// `plan-bundle-sealing.md §4.5`.
-pub(crate) fn v1_plan_submit_removal_message() -> String {
-    "V1 `plan submit <initiative_id> <plan_dir>` is removed in V2.\n\
-     \n\
-     Use the V2.1 atomic sign+submit workflow instead:\n\
-     \n\
-     \traxis submit plan <plan.toml> [--initiative-id <id>] \\\n\
-     \t                              [--no-dry-run]\n\
-     \n\
-     The V2 path takes a `plan.toml` *file* (not a directory), no\n\
-     intermediate `plan.sig` is written, and the kernel admits the\n\
-     signed bundle in a single IPC call. See plan-bundle-sealing.md\n\
-     §4 for the full ceremony and §4.5 for the migration guide."
-        .to_owned()
-}
-
-// ---------------------------------------------------------------------------
 // plan approve <initiative_id>
+//
+// Note: the V1 `plan submit <initiative_id> <plan_dir>` form is removed
+// in V2 (forward-only — no tombstone, no helpful-error fallback). The
+// only path to admit a plan is `raxis submit plan <plan.toml>` per
+// `plan-bundle-sealing.md §4`. An operator who types the old form gets
+// the standard "did you mean…" closeness suggester pointing at the
+// remaining `plan` sub-commands.
 // ---------------------------------------------------------------------------
 
 pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
@@ -150,37 +111,6 @@ pub fn to_wire(req: &OperatorRequest) -> Result<Value, CliError> {
     serde_json::to_value(req).map_err(|e| {
         CliError::Usage(format!("could not serialise operator request: {e}"))
     })
-}
-
-// ---------------------------------------------------------------------------
-// Tests — V1 plan-submit hard-reject (plan-bundle-sealing.md §4.5)
-// ---------------------------------------------------------------------------
-//
-// The reject message is pinned by tests so any drift here forces a
-// corresponding spec update in `plan-bundle-sealing.md §4.5`.
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn v1_plan_submit_removal_message_pins_operator_facing_text() {
-        let msg = v1_plan_submit_removal_message();
-        // V2 invocation appears verbatim so a copy-paste lands on the
-        // right command.
-        assert!(msg.contains("raxis submit plan"), "msg = {msg:?}");
-        // Spec back-reference is present so the operator can read up.
-        assert!(msg.contains("plan-bundle-sealing.md"), "msg = {msg:?}");
-        // The literal V1 invocation appears so a CI grep on
-        // "plan submit" still matches the reject hint.
-        assert!(
-            msg.contains("V1 `plan submit <initiative_id> <plan_dir>`"),
-            "msg = {msg:?}",
-        );
-        // The reject explicitly names the V2 atomic-sign+submit ceremony
-        // (this is the operator's mental model for the migration).
-        assert!(msg.contains("atomic sign+submit"), "msg = {msg:?}");
-    }
 }
 
 /// Pattern-match the kernel's `OperatorResponse` envelope. The wire
