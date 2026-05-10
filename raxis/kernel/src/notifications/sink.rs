@@ -211,7 +211,7 @@ mod tests {
             Arc::clone(&inner),
         ).await;
 
-        let inbox = PolicyBundle::shell_inbox_path_for(tmp.path());
+        let inbox = PolicyBundle::inbox_path_for(tmp.path());
         let raw   = std::fs::read_to_string(&inbox).unwrap_or_default();
         assert!(raw.contains("EscalationApproved"),
             "inbox MUST carry the dispatched event; got: {raw:?}");
@@ -254,7 +254,7 @@ mod tests {
 
         // The inbox file must NOT have been created — we never reached
         // the dispatch fan-out.
-        let inbox = PolicyBundle::shell_inbox_path_for(tmp.path());
+        let inbox = PolicyBundle::inbox_path_for(tmp.path());
         assert!(!inbox.exists(),
             "no inbox write must occur on a failed inner emit; found {inbox:?}");
         let _ = json!({}); // keep serde_json import live for future variant assertions

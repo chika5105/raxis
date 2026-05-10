@@ -1,11 +1,8 @@
-// raxis-kernel::notifications::handler::file — Shell + File channel handler.
+// raxis-kernel::notifications::handler::file — File channel handler.
 //
-// Normative reference: cli-readonly.md §5.6.4 (Shell), §5.6.5 (File).
+// Normative reference: cli-readonly.md §5.6.5 (File).
 //
-// Both channel kinds are operationally identical:
-//   - Resolve `target` to an absolute path. For `Shell` channels with
-//     an empty target (the synthesised implicit channel), resolve to
-//     `<data_dir>/notifications/inbox.jsonl`.
+// Appends a JSON line to the operator-supplied `target` path:
 //   - `O_APPEND | O_CREAT`, mode 0644.
 //   - Write one JSON line:
 //       { notified_at, event_kind, event_seq, payload, human_summary }
@@ -13,23 +10,21 @@
 //
 // Failure mapping → `DeliveryError`:
 //   - I/O error opening or writing the target → `Io(e)`
-//   - empty target on a `File` channel → `TargetInvalid`
+//   - empty target → `TargetInvalid`
 //     (validate already rejects this, but defence-in-depth at runtime)
 
 use std::path::{Path, PathBuf};
 
 use raxis_audit_tools::AuditEvent;
-use raxis_policy::{NotificationChannel, NotificationChannelKind, PolicyBundle};
+use raxis_policy::{NotificationChannel, NotificationChannelKind};
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 use super::super::{summary, DeliveryError};
 
-/// One JSONL line written by the Shell / File handler. The shape is
-/// pinned by `cli-readonly.md` §5.6.4 — bumping any field here is a
-/// wire-break for `raxis inbox` (read by tests in this file).
+/// One JSONL line written by the File handler.
 #[derive(Debug, Serialize)]
-struct ShellRecord<'a> {
+struct FileRecord<'a> {
     notified_at:   i64,
     event_kind:    &'a str,
     event_seq:     u64,
@@ -37,38 +32,16 @@ struct ShellRecord<'a> {
     human_summary: String,
 }
 
-/// Append one notification record to `channel.target` (resolved
-/// against `data_dir` for the implicit Shell channel). On disk
+/// Append one notification record to `channel.target`. On disk
 /// failure, returns `DeliveryError::Io(_)` for the dispatcher to
 /// translate into `NotificationDeliveryFailed { reason: "io" }`.
 pub async fn deliver(
     channel:  &NotificationChannel,
     event:    &AuditEvent,
-    data_dir: &Path,
 ) -> Result<(), DeliveryError> {
-    // Shell channels with an empty target (the synthesised implicit
-    // channel) resolve to `<data_dir>/notifications/inbox.jsonl`.
-    // Since `dispatch()` now unconditionally writes to inbox.jsonl
-    // before channel fan-out, the implicit Shell handler is a no-op
-    // — writing here would duplicate every notification in the file.
-    // Shell channels with EXPLICIT custom targets still write to
-    // their specified path.
-    if matches!(channel.kind, NotificationChannelKind::Shell) && channel.target.is_empty() {
-        return Ok(());
-    }
+    let target = resolve_target(channel)?;
 
-    let target = resolve_target(channel, data_dir)?;
-
-    // Ensure the parent directory exists. Shell channels with explicit
-    // targets may point anywhere — create_dir_all only for Shell kind
-    // because spec §5.6.4 documents the kernel owns the parent.
-    if matches!(channel.kind, NotificationChannelKind::Shell) {
-        if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(DeliveryError::Io)?;
-        }
-    }
-
-    let record = ShellRecord {
+    let record = FileRecord {
         notified_at:   raxis_types::unix_now_secs() as i64,
         event_kind:    &event.event_kind,
         event_seq:     event.seq,
@@ -90,34 +63,21 @@ pub async fn deliver(
     opts.create(true).append(true);
     #[cfg(unix)]
     {
-        // `tokio::fs::OpenOptions::mode` is a direct method on
-        // unix targets — no `OpenOptionsExt` import required.
         opts.mode(0o644);
     }
     let mut file = opts.open(&target).await.map_err(DeliveryError::Io)?;
 
     file.write_all(&line).await.map_err(DeliveryError::Io)?;
-    // fsync is best-effort per spec §5.6.4 — failure already produces
-    // an Io error from the OS, so we don't separately classify "wrote
-    // but didn't sync".
+    // fsync is best-effort — failure already produces an Io error
+    // from the OS.
     let _ = file.sync_data().await;
     Ok(())
 }
 
-/// Resolve `channel.target` to an absolute path. The implicit Shell
-/// channel's empty target resolves to
-/// `<data_dir>/notifications/inbox.jsonl` (cli-readonly.md §5.6.4).
-/// File channels with empty targets are rejected at validate time but
-/// double-checked here.
-fn resolve_target(channel: &NotificationChannel, data_dir: &Path) -> Result<PathBuf, DeliveryError> {
+/// Resolve `channel.target` to an absolute path. File channels with
+/// empty targets are rejected at validate time but double-checked here.
+fn resolve_target(channel: &NotificationChannel) -> Result<PathBuf, DeliveryError> {
     match channel.kind {
-        NotificationChannelKind::Shell => {
-            if channel.target.is_empty() {
-                Ok(PolicyBundle::shell_inbox_path_for(data_dir))
-            } else {
-                Ok(PathBuf::from(&channel.target))
-            }
-        }
         NotificationChannelKind::File => {
             if channel.target.is_empty() {
                 Err(DeliveryError::TargetInvalid)
@@ -155,13 +115,15 @@ mod tests {
         }
     }
 
-    fn implicit_shell() -> NotificationChannel {
-        NotificationChannel {
-            id: "shell".into(),
-            kind: NotificationChannelKind::Shell,
-            target: String::new(),
+    fn make_file_channel(tmp: &tempfile::TempDir, name: &str) -> (NotificationChannel, PathBuf) {
+        let p = tmp.path().join(name);
+        let ch = NotificationChannel {
+            id: "audit-mirror".into(),
+            kind: NotificationChannelKind::File,
+            target: p.to_string_lossy().into_owned(),
             max_in_flight: 8,
-        }
+        };
+        (ch, p)
     }
 
     /// Read the JSONL file at `path` into a Vec<JSON> for assertions.
@@ -175,22 +137,22 @@ mod tests {
             .collect()
     }
 
-    // ── Implicit Shell channel writes to canonical inbox path ─────────
+    // ── File channel writes to supplied target ────────────────────────
 
     #[tokio::test]
-    async fn implicit_shell_writes_to_canonical_inbox_path() {
+    async fn file_channel_writes_to_target() {
         let tmp = tempfile::tempdir().unwrap();
+        let (chan, p) = make_file_channel(&tmp, "audit.jsonl");
         let event = make_event("EscalationApproved", 7, json!({
             "escalation_id": "esc-7",
             "approved_by":   "op",
         }));
 
-        deliver(&implicit_shell(), &event, tmp.path())
+        deliver(&chan, &event)
             .await
             .expect("write must succeed");
 
-        let inbox = PolicyBundle::shell_inbox_path_for(tmp.path());
-        let records = read_jsonl(&inbox);
+        let records = read_jsonl(&p);
         assert_eq!(records.len(), 1, "exactly one line written; got {records:?}");
         let r = &records[0];
         assert_eq!(r["event_kind"], "EscalationApproved");
@@ -205,6 +167,7 @@ mod tests {
     #[tokio::test]
     async fn multiple_events_append_in_order() {
         let tmp = tempfile::tempdir().unwrap();
+        let (chan, p) = make_file_channel(&tmp, "seq.jsonl");
         for i in 0..3u64 {
             let e = make_event("EscalationSubmitted", i, json!({
                 "escalation_id": format!("esc-{i}"),
@@ -212,61 +175,13 @@ mod tests {
                 "class":         "CapabilityUpgrade",
                 "lineage_id":    "lin",
             }));
-            deliver(&implicit_shell(), &e, tmp.path()).await.unwrap();
+            deliver(&chan, &e).await.unwrap();
         }
-        let records = read_jsonl(&PolicyBundle::shell_inbox_path_for(tmp.path()));
+        let records = read_jsonl(&p);
         assert_eq!(records.len(), 3);
         assert_eq!(records[0]["event_seq"], 0);
         assert_eq!(records[1]["event_seq"], 1);
         assert_eq!(records[2]["event_seq"], 2);
-    }
-
-    // ── Explicit Shell target overrides the implicit path ─────────────
-
-    #[tokio::test]
-    async fn explicit_shell_target_writes_to_supplied_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let custom = tmp.path().join("custom.jsonl");
-        let chan = NotificationChannel {
-            id: "shell".into(),
-            kind: NotificationChannelKind::Shell,
-            target: custom.to_string_lossy().into_owned(),
-            max_in_flight: 8,
-        };
-        let e = make_event("EscalationApproved", 1, json!({
-            "escalation_id": "esc-x",
-            "approved_by":   "op",
-        }));
-        deliver(&chan, &e, tmp.path()).await.unwrap();
-
-        let records = read_jsonl(&custom);
-        assert_eq!(records.len(), 1);
-        assert!(!PolicyBundle::shell_inbox_path_for(tmp.path()).exists(),
-            "implicit-target file MUST NOT have been written");
-    }
-
-    // ── File channel honours its target ────────────────────────────────
-
-    #[tokio::test]
-    async fn file_channel_writes_to_target() {
-        let tmp = tempfile::tempdir().unwrap();
-        let p = tmp.path().join("audit.jsonl");
-        let chan = NotificationChannel {
-            id: "audit-mirror".into(),
-            kind: NotificationChannelKind::File,
-            target: p.to_string_lossy().into_owned(),
-            max_in_flight: 8,
-        };
-        let e = make_event("EscalationDenied", 1, json!({
-            "escalation_id": "esc-d",
-            "denied_by":     "op",
-            "reason":        "scope mismatch",
-        }));
-        deliver(&chan, &e, tmp.path()).await.unwrap();
-
-        let records = read_jsonl(&p);
-        assert_eq!(records.len(), 1);
-        assert!(records[0]["human_summary"].as_str().unwrap().contains("scope mismatch"));
     }
 
     // ── File channel with empty target fails at runtime ──────────────
@@ -282,7 +197,7 @@ mod tests {
             max_in_flight: 8,
         };
         let e = make_event("KernelStarted", 1, json!({}));
-        let result = deliver(&chan, &e, std::path::Path::new("/tmp")).await;
+        let result = deliver(&chan, &e).await;
         assert!(matches!(result, Err(DeliveryError::TargetInvalid)));
     }
 
@@ -290,9 +205,6 @@ mod tests {
 
     #[tokio::test]
     async fn io_error_on_unwritable_target_maps_to_io_variant() {
-        // Point at a path whose parent doesn't exist AND is on a kind
-        // that doesn't auto-create-parents (File). Open MUST fail
-        // and surface Io.
         let chan = NotificationChannel {
             id: "broken".into(),
             kind: NotificationChannelKind::File,
@@ -300,7 +212,7 @@ mod tests {
             max_in_flight: 8,
         };
         let e = make_event("KernelStarted", 1, json!({}));
-        let result = deliver(&chan, &e, std::path::Path::new("/tmp")).await;
+        let result = deliver(&chan, &e).await;
         match result {
             Err(DeliveryError::Io(_)) => {}
             other => panic!("expected Io, got {other:?}"),
@@ -334,6 +246,7 @@ mod tests {
         // Pin the JSONL field set so any rename here is caught by a
         // failing test rather than silently breaking `raxis inbox`.
         let tmp = tempfile::tempdir().unwrap();
+        let (chan, p) = make_file_channel(&tmp, "shape.jsonl");
         let e = make_event("PolicyEpochAdvanced", 99, json!({
             "new_epoch_id":             5,
             "policy_sha256":            "a".repeat(64),
@@ -341,11 +254,11 @@ mod tests {
             "delegations_marked_stale": 0,
             "sessions_invalidated":     0,
         }));
-        deliver(&implicit_shell(), &e, tmp.path()).await.unwrap();
-        let r = &read_jsonl(&PolicyBundle::shell_inbox_path_for(tmp.path()))[0];
+        deliver(&chan, &e).await.unwrap();
+        let r = &read_jsonl(&p)[0];
         for required in &["notified_at", "event_kind", "event_seq", "payload", "human_summary"] {
             assert!(r.get(required).is_some(),
-                "JSONL record MUST carry `{required}` per cli-readonly.md §5.6.4; got: {r}");
+                "JSONL record MUST carry `{required}`; got: {r}");
         }
     }
 }

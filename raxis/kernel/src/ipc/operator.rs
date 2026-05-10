@@ -2933,7 +2933,7 @@ mod escalation_dispatch_tests {
         assert!(matches!(resp, OperatorResponse::EscalationApproved { .. }),
             "expected EscalationApproved, got {resp:?}");
 
-        let inbox   = PolicyBundle::shell_inbox_path_for(tmp.path());
+        let inbox   = PolicyBundle::inbox_path_for(tmp.path());
         let records = await_inbox_with_min(&inbox, 1, Duration::from_secs(2)).await;
         assert_eq!(records.len(), 1,
             "exactly one inbox record expected; got {records:?}");
@@ -2971,7 +2971,7 @@ mod escalation_dispatch_tests {
         assert!(matches!(resp, OperatorResponse::EscalationDenied { .. }),
             "expected EscalationDenied, got {resp:?}");
 
-        let inbox   = PolicyBundle::shell_inbox_path_for(tmp.path());
+        let inbox   = PolicyBundle::inbox_path_for(tmp.path());
         let records = await_inbox_with_min(&inbox, 1, Duration::from_secs(2)).await;
         assert_eq!(records.len(), 1);
         let r = &records[0];

@@ -93,7 +93,7 @@ pub fn dispatch(
 
     // 1. Always append to inbox.jsonl.
     {
-        let inbox_path = PolicyBundle::shell_inbox_path_for(&data_dir);
+        let inbox_path = PolicyBundle::inbox_path_for(&data_dir);
         if let Some(parent) = inbox_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -248,7 +248,7 @@ pub async fn dispatch_blocking_for_tests_with_registry(
     let created_at = event.emitted_at;
 
     {
-        let inbox_path = PolicyBundle::shell_inbox_path_for(data_dir);
+        let inbox_path = PolicyBundle::inbox_path_for(data_dir);
         if let Some(parent) = inbox_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -347,12 +347,11 @@ async fn dispatch_one(
     };
 
     match channel.kind {
-        NotificationChannelKind::Shell | NotificationChannelKind::File => {
-            // Shell + File share a code path — they are both "append
-            // a JSON line to a file". Shell channels with empty
-            // `target` resolve to `<data_dir>/notifications/inbox.jsonl`.
+        NotificationChannelKind::File => {
+            // File channels append a JSON line to the operator-supplied
+            // target path.
             let started_at = std::time::Instant::now();
-            let outcome = handler::file::deliver(channel, &event, data_dir).await;
+            let outcome = handler::file::deliver(channel, &event).await;
             handle_simple_outcome(
                 audit.as_ref(),
                 channel,
@@ -453,7 +452,6 @@ fn handle_simple_outcome(
     started_at: std::time::Instant,
 ) {
     let kind_str = match channel.kind {
-        NotificationChannelKind::Shell   => "Shell",
         NotificationChannelKind::File    => "File",
         NotificationChannelKind::Email   => "Email",
         NotificationChannelKind::Sidecar => "Sidecar",
@@ -628,7 +626,7 @@ mod tests {
 
     /// Read the implicit-Shell inbox into a Vec<JSON> for assertions.
     fn read_inbox(data_dir: &Path) -> Vec<serde_json::Value> {
-        let p = PolicyBundle::shell_inbox_path_for(data_dir);
+        let p = PolicyBundle::inbox_path_for(data_dir);
         let bytes = std::fs::read(&p).unwrap_or_default();
         std::str::from_utf8(&bytes)
             .unwrap()

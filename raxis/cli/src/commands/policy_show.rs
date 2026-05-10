@@ -390,7 +390,6 @@ fn render_section_notifications<W: Write>(out: &mut W, bundle: &PolicyBundle) {
 
 fn channel_kind_label(k: NotificationChannelKind) -> &'static str {
     match k {
-        NotificationChannelKind::Shell   => "Shell",
         NotificationChannelKind::File    => "File",
         NotificationChannelKind::Email   => "Email",
         NotificationChannelKind::Sidecar => "Sidecar",

@@ -28,6 +28,7 @@ mod bootstrap;
 mod authority;
 mod canonical_images_preflight;
 mod capacity;
+mod dashboard;
 mod ipc;
 mod recovery;
 mod initiatives;
@@ -963,6 +964,51 @@ async fn main() {
         })
     };
 
+    // Step 8.6: v2_extended_gaps.md §4 — start the operator
+    // dashboard HTTP server if `policy.toml [dashboard].enabled =
+    // true`. Absent / disabled ⇒ no listener bound (zero
+    // runtime cost). The handle is held until the orderly
+    // shutdown path so `serve_with_shutdown` drains in-flight
+    // requests cleanly.
+    let dashboard_handle = match dashboard::load_dashboard_config(&policy_path) {
+        Ok(Some(cfg)) => {
+            match dashboard::start_dashboard(
+                cfg.clone(),
+                Arc::clone(&store),
+                Arc::clone(&policy),
+                data_dir.clone(),
+                policy_path.clone(),
+                started_at,
+            )
+            .await
+            {
+                Ok(h) => {
+                    eprintln!(
+                        "{{\"level\":\"info\",\"event\":\"dashboard_started\",\
+                         \"local_addr\":\"{}\"}}",
+                        h.local_addr()
+                    );
+                    Some(h)
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"dashboard_start_failed\",\
+                         \"reason\":\"{e}\"}}"
+                    );
+                    None
+                }
+            }
+        }
+        Ok(None) => None,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"dashboard_config_parse_failed\",\
+                 \"reason\":\"{e}\"}}"
+            );
+            None
+        }
+    };
+
     // Step 9: Enter IPC dispatch loop. Returns when SIGTERM or SIGINT is
     // received OR when one of the three accept loops dies. Either way we
     // emit `KernelStopped` for audit completeness; exit code differs.
@@ -991,6 +1037,17 @@ async fn main() {
     let _ = gateway_shutdown_tx.send(());
     let _ = heartbeat_shutdown_tx.send(());
     let _ = nonce_sweep_shutdown_tx.send(());
+    if let Some(h) = dashboard_handle {
+        match h.shutdown().await {
+            Ok(()) => eprintln!(
+                "{{\"level\":\"info\",\"event\":\"dashboard_shutdown\"}}"
+            ),
+            Err(e) => eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"dashboard_shutdown_failed\",\
+                 \"reason\":\"{e}\"}}"
+            ),
+        }
+    }
     match supervisor_handle.await {
         Ok(reason) => eprintln!(
             "{{\"level\":\"info\",\"event\":\"gateway_supervisor_done\",\

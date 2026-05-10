@@ -2017,7 +2017,7 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 //
 // V2 surface (forward-only, no V1 backward-compat shims):
 //
-//   * `Shell` / `File` — local JSONL append (kernel built-in).
+//   * `File`           — local JSONL append to operator-supplied path.
 //   * `Email`          — direct SMTP submission with STARTTLS or
 //                        implicit TLS, AUTH PLAIN.
 //   * `Sidecar`        — HTTP POST to an operator-run sidecar
@@ -2035,8 +2035,8 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 
 /// Channel-kind discriminator.
 ///
-/// V2 surface (forward-only — V1 `Webhook` removed):
-/// * `Shell` / `File` — local JSONL append.
+/// V2 surface:
+/// * `File` — local JSONL append to an operator-supplied path.
 /// * `Email` — direct SMTP submission with STARTTLS or implicit
 ///   TLS, AUTH PLAIN.
 /// * `Sidecar` — HTTP POST a structured `NotificationPayload`
@@ -2047,11 +2047,14 @@ pub const MAX_RESPONSE_BYTES_CEILING: u64 = 64 * 1024 * 1024;
 ///   The dispatcher wraps every Sidecar call in a per-channel
 ///   semaphore + 3-state circuit breaker so a hanging upstream
 ///   never wedges the kernel.
+///
+/// Note: the kernel unconditionally writes every notification to
+/// `<data_dir>/notifications/inbox.jsonl` AND the SQLite
+/// `notifications` table before fanning out to these channels.
+/// There is no longer a `Shell` variant — inbox.jsonl is always
+/// written by `dispatch()`, not by a channel handler.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum NotificationChannelKind {
-    /// Append a JSON line to the operator's shell-readable inbox
-    /// (`<data_dir>/notifications/inbox.jsonl` by default).
-    Shell,
     /// Append a JSON line to the operator-supplied path.
     File,
     /// Submit the notification by SMTP (STARTTLS or implicit TLS,
@@ -2067,9 +2070,9 @@ pub enum NotificationChannelKind {
 ///
 /// ```toml
 /// [[notifications.channels]]
-/// id     = "shell"
-/// kind   = "Shell"
-/// target = "<data_dir>/notifications/inbox.jsonl"
+/// id     = "audit-mirror"
+/// kind   = "File"
+/// target = "/var/log/raxis-audit.jsonl"
 /// ```
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotificationChannel {
@@ -2077,11 +2080,8 @@ pub struct NotificationChannel {
     /// Must be unique across the channels array; PolicyBundle::validate enforces.
     pub id:     String,
     pub kind:   NotificationChannelKind,
-    /// For `Shell`/`File`: an absolute filesystem path the kernel will
-    /// `O_APPEND | O_CREAT` (the `Shell` channel's default target —
-    /// `<data_dir>/notifications/inbox.jsonl` — is filled in at runtime
-    /// when the operator omits the explicit channel entry, see
-    /// `PolicyBundle::shell_inbox_path_for`).
+    /// For `File`: an absolute filesystem path the kernel will
+    /// `O_APPEND | O_CREAT`.
     /// For `Email`: the recipient address (validated only as non-empty in v1).
     /// For `Sidecar`: the HTTP endpoint URL the kernel POSTs the
     ///   structured payload to (e.g. `http://localhost:9200/notify`).
@@ -2135,15 +2135,13 @@ pub(crate) struct NotificationsSection {
     pub routes_raw: Vec<NotificationRoute>,
 }
 
-/// Implicit channel id used by the spec's "always-on Shell channel"
-/// (cli-readonly.md §5.6.2: "always present implicitly; explicit entry
-/// overrides target"). The kernel synthesises this entry at validate
-/// time when the operator does not declare it.
-pub const IMPLICIT_SHELL_CHANNEL_ID: &str = "shell";
-
-/// Filename appended to `<data_dir>/notifications/` for the implicit
-/// Shell channel target (cli-readonly.md §5.6.2).
-pub const IMPLICIT_SHELL_INBOX_FILENAME: &str = "inbox.jsonl";
+/// Filename appended to `<data_dir>/notifications/` for the kernel's
+/// unconditional inbox JSONL log.
+///
+/// Every notification is written here by `dispatch()` regardless of
+/// which operator channels are configured. Historically this was
+/// owned by an implicit "Shell" channel; it is now a kernel primitive.
+pub const INBOX_FILENAME: &str = "inbox.jsonl";
 
 /// Every `AuditEventKind` discriminant string the kernel currently
 /// emits. `PolicyBundle::validate` rejects routes whose `event_kind`
@@ -2218,30 +2216,26 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
 /// Validate the raw `[notifications]` section and produce the final
 /// `(channels, routes, default_channels)` triple for `PolicyBundle`.
 ///
-/// Rules enforced (mirroring `cli-readonly.md` §5.6.2):
+/// Rules enforced:
 ///
 /// 1. **Channel ids are unique.** Duplicate `id` values fail loudly.
-/// 2. **Implicit Shell is always present.** If the operator does not
-///    declare a channel with `id="shell"`, we synthesise one with
-///    `kind=Shell, target=""`. The empty target is interpreted by the
-///    Shell handler as "use the default `<data_dir>/notifications/inbox.jsonl`"
-///    (resolved at runtime via `PolicyBundle::shell_inbox_path_for`).
+/// 2. **No implicit channel synthesis.** The kernel unconditionally
+///    writes every notification to `inbox.jsonl` + the SQLite
+///    `notifications` table. Channels are purely operator-configured
+///    additional delivery routes (File, Email, Sidecar).
 /// 3. **Default channels reference declared ids.** Every entry in
-///    `default_channels` MUST resolve to a channel id (the implicit
-///    `"shell"` counts).
+///    `default_channels` MUST resolve to a channel id. An empty
+///    `default_channels` is valid — it means events with no explicit
+///    route go only to the kernel-owned stores.
 /// 4. **Route channel ids resolve.** Every channel id in a route's
 ///    `channels` array MUST resolve to a declared id.
 /// 5. **Route event_kind is real.** The event_kind MUST appear in
 ///    [`KNOWN_AUDIT_EVENT_KINDS`] (defence against typo-silenced
 ///    routes).
-/// 6. **Default channels default to `["shell"]`** when the operator
-///    omits the field — never empty, so an event kind with no route
-///    is dispatched to the implicit Shell channel rather than silently
-///    dropped.
-/// 7. **For Email channels**, validate target (recipient address) is
-///    non-empty.  For Sidecar channels, validate the URL parses.
-///    `Webhook` is no longer a recognised kind in V2 — see the
-///    `NotificationChannelKind` doc-comment.
+/// 6. **Per-kind validation.** File channels require non-empty
+///    target. Email channels require non-empty target. Sidecar
+///    channels require a valid HTTP(S) URL and non-zero
+///    `max_in_flight`.
 
 // ---------------------------------------------------------------------------
 // `[[integration_merge_verifiers]]` operator-side validator (V2).
@@ -2909,14 +2903,8 @@ fn validate_notifications(
         }
         // Per-kind target validation.
         match ch.kind {
-            NotificationChannelKind::Shell | NotificationChannelKind::File => {
-                // Empty target on an explicit Shell entry means "use
-                // default" (implicit-channel behaviour). For File
-                // channels the target is operator-supplied so empty
-                // is a misconfiguration.
-                if matches!(ch.kind, NotificationChannelKind::File)
-                    && ch.target.trim().is_empty()
-                {
+            NotificationChannelKind::File => {
+                if ch.target.trim().is_empty() {
                     return Err(PolicyError::MalformedArtifact(format!(
                         "[[notifications.channels]] id={:?} kind=File requires a non-empty target",
                         ch.id
@@ -2960,27 +2948,18 @@ fn validate_notifications(
         }
     }
 
-    // Synthesise the implicit Shell channel if the operator did not
-    // declare one. Empty target is the runtime sentinel for "use
-    // <data_dir>/notifications/inbox.jsonl" — resolved by
-    // `PolicyBundle::shell_inbox_path_for(data_dir)`.
-    if !seen.contains(IMPLICIT_SHELL_CHANNEL_ID) {
-        channels.push(NotificationChannel {
-            id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
-            kind:   NotificationChannelKind::Shell,
-            target: String::new(),
-            max_in_flight: default_max_in_flight(),
-        });
-    }
+    // No implicit Shell synthesis — inbox.jsonl is now written
+    // unconditionally by dispatch(). Operator channels are purely
+    // explicit.
 
-    // Build the channel-id index AFTER synthesis so route validation
-    // can resolve `"shell"` regardless of whether it was declared.
+    // Build the channel-id index for route validation.
     let declared_ids: HashSet<&str> = channels.iter().map(|c| c.id.as_str()).collect();
 
-    // Default channels: validate every id resolves; default to ["shell"]
-    // when omitted.
+    // Default channels: validate every id resolves. When omitted,
+    // defaults to empty — inbox.jsonl + SQLite are unconditional,
+    // so "no channels" means "only the kernel-owned stores."
     let default_channels: Vec<String> = if raw.default_channels.is_empty() {
-        vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()]
+        vec![]
     } else {
         for cid in &raw.default_channels {
             if !declared_ids.contains(cid.as_str()) {
@@ -4086,16 +4065,12 @@ impl PolicyBundle {
             egress_domains: Vec::new(),
             egress_patterns: Vec::new(),
             egress_max_fetches_per_window: 0,
-            // Tests get the same implicit-Shell defaults a real
-            // policy.toml would synthesise.
-            notification_channels: vec![NotificationChannel {
-                id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
-                kind:   NotificationChannelKind::Shell,
-                target: String::new(),
-                max_in_flight: default_max_in_flight(),
-            }],
+            // No default channels — inbox.jsonl + SQLite are
+            // unconditional. Tests that need explicit channels
+            // configure them individually.
+            notification_channels: vec![],
             notification_routes: HashMap::new(),
-            default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
+            default_notification_channels: vec![],
             bypassed_cert_misconfigs: Vec::new(),
             credential_backend: CredentialBackendKind::default(),
             integration_merge_verifiers: Vec::new(),
@@ -4439,12 +4414,14 @@ impl PolicyBundle {
         self.notification_routes.get(event_kind).map(|v| v.as_slice())
     }
 
-    /// Resolve the absolute filesystem path the implicit Shell channel
-    /// writes to, given a `data_dir`. Equivalent to
-    /// `<data_dir>/notifications/inbox.jsonl` (cli-readonly.md §5.6.2).
-    /// Used by the Shell handler when the channel's `target` is empty.
-    pub fn shell_inbox_path_for(data_dir: &std::path::Path) -> std::path::PathBuf {
-        data_dir.join("notifications").join(IMPLICIT_SHELL_INBOX_FILENAME)
+    /// Resolve the absolute filesystem path for the kernel's
+    /// unconditional notification inbox, given a `data_dir`.
+    /// Equivalent to `<data_dir>/notifications/inbox.jsonl`.
+    ///
+    /// Used by `dispatch()` to write every notification before
+    /// channel fan-out, and by `raxis inbox` to read the log.
+    pub fn inbox_path_for(data_dir: &std::path::Path) -> std::path::PathBuf {
+        data_dir.join("notifications").join(INBOX_FILENAME)
     }
 }
 
@@ -4664,14 +4641,9 @@ mod tests {
             egress_domains: Vec::new(),
             egress_patterns: Vec::new(),
             egress_max_fetches_per_window: 0,
-            notification_channels: vec![NotificationChannel {
-                id:     IMPLICIT_SHELL_CHANNEL_ID.to_owned(),
-                kind:   NotificationChannelKind::Shell,
-                target: String::new(),
-                max_in_flight: default_max_in_flight(),
-            }],
+            notification_channels: vec![],
             notification_routes: HashMap::new(),
-            default_notification_channels: vec![IMPLICIT_SHELL_CHANNEL_ID.to_owned()],
+            default_notification_channels: vec![],
             bypassed_cert_misconfigs: Vec::new(),
             credential_backend: CredentialBackendKind::default(),
             integration_merge_verifiers: Vec::new(),
@@ -6051,54 +6023,29 @@ mod notifications_tests {
         load_policy(tmp.path()).map(|(b, _, _)| b)
     }
 
-    // ── Implicit-Shell synthesis ─────────────────────────────────────
+    // ── No implicit channel synthesis ─────────────────────────────────
 
     #[test]
-    fn no_notifications_section_synthesises_implicit_shell_channel() {
-        // Genesis policies that omit [notifications] still get a working
-        // Shell channel so escalation notifications are visible from
-        // day one (cli-readonly.md §5.6.2).
+    fn no_notifications_section_produces_empty_channels_and_defaults() {
+        // inbox.jsonl + SQLite are unconditional — omitting
+        // [notifications] produces zero channels and empty defaults.
         let bundle = write_and_load(&minimal_with_notifications(""))
             .expect("policy without [notifications] must load cleanly");
 
         let chans = bundle.notification_channels();
-        assert_eq!(chans.len(), 1, "exactly the implicit shell channel");
-        assert_eq!(chans[0].id, IMPLICIT_SHELL_CHANNEL_ID);
-        assert_eq!(chans[0].kind, NotificationChannelKind::Shell);
-        assert!(chans[0].target.is_empty(),
-            "implicit Shell target is empty (resolved at runtime)");
+        assert!(chans.is_empty(), "no channels when section is omitted; got {chans:?}");
 
         let defaults = bundle.default_notification_channels();
-        assert_eq!(defaults, &["shell".to_owned()],
-            "default_channels falls back to [\"shell\"] when omitted");
+        assert!(defaults.is_empty(),
+            "default_channels is empty when omitted (inbox is unconditional)");
 
         assert!(bundle.notification_route("EscalationApproved").is_none(),
             "no explicit routes ⇒ None ⇒ caller uses default channels");
     }
 
     #[test]
-    fn explicit_shell_channel_overrides_implicit_target() {
-        // Operators who run two RAXIS instances on the same host can
-        // point the Shell channel at a non-default file by declaring
-        // an explicit `id="shell"` entry.
-        let toml = minimal_with_notifications("
-[[notifications.channels]]
-id     = \"shell\"
-kind   = \"Shell\"
-target = \"/var/log/raxis-alt-inbox.jsonl\"
-");
-        let bundle = write_and_load(&toml).expect("override must load");
-        let shell = bundle.notification_channel("shell").expect("shell channel exists");
-        assert_eq!(shell.target, "/var/log/raxis-alt-inbox.jsonl",
-            "explicit entry overrides the implicit target");
-        assert_eq!(bundle.notification_channels().len(), 1,
-            "no synthesised duplicate when operator declared shell explicitly");
-    }
-
-    #[test]
-    fn shell_inbox_path_for_data_dir_is_canonical_path() {
-        // The runtime resolves an empty Shell target to this path.
-        let p = PolicyBundle::shell_inbox_path_for(std::path::Path::new("/tmp/raxis"));
+    fn inbox_path_for_data_dir_is_canonical_path() {
+        let p = PolicyBundle::inbox_path_for(std::path::Path::new("/tmp/raxis"));
         assert!(p.ends_with("notifications/inbox.jsonl"),
             "got {p:?}");
     }
@@ -6116,27 +6063,19 @@ default_channels = [\"does-not-exist\"]
             "error must explain WHY rejected; got: {err}");
     }
 
-    #[test]
-    fn default_channels_can_reference_implicit_shell() {
-        // The implicit Shell channel is always available — even if it
-        // was not declared explicitly. default_channels = ["shell"]
-        // must validate cleanly.
-        let toml = minimal_with_notifications("
-[notifications]
-default_channels = [\"shell\"]
-");
-        let bundle = write_and_load(&toml).expect("must load");
-        assert_eq!(bundle.default_notification_channels(), &["shell".to_owned()]);
-    }
-
     // ── route validation ─────────────────────────────────────────────
 
     #[test]
     fn route_with_unknown_event_kind_is_rejected() {
         let toml = minimal_with_notifications("
+[[notifications.channels]]
+id     = \"audit-mirror\"
+kind   = \"File\"
+target = \"/tmp/audit.jsonl\"
+
 [[notifications.routes]]
 event_kind = \"NotARealAuditEventKind\"
-channels   = [\"shell\"]
+channels   = [\"audit-mirror\"]
 ");
         let err = write_and_load(&toml).expect_err("typo must fail");
         let s = format!("{err}");
@@ -6147,6 +6086,11 @@ channels   = [\"shell\"]
     #[test]
     fn route_with_unknown_channel_id_is_rejected() {
         let toml = minimal_with_notifications("
+[[notifications.channels]]
+id     = \"audit-mirror\"
+kind   = \"File\"
+target = \"/tmp/audit.jsonl\"
+
 [[notifications.routes]]
 event_kind = \"EscalationApproved\"
 channels   = [\"ghost\"]

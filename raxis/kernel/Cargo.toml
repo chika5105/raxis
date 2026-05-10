@@ -104,6 +104,11 @@ raxis-canonical-images  = { workspace = true }
 # `initiatives::lifecycle::approve_plan` (plan bytes + `.sig`),
 # and the operator-cert install path (operator public keys).
 raxis-artifact-store    = { workspace = true }
+# v2_extended_gaps.md §4 — operator dashboard HTTP backend. Linked
+# into the kernel binary (not a separate process). The
+# `[dashboard]` block in `policy.toml` controls bind / TLS / JWT /
+# challenge bounds; absence ⇒ disabled (zero runtime cost).
+raxis-dashboard         = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }
