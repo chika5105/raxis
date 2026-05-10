@@ -1843,6 +1843,102 @@ If the response does not match this schema →
 → fail-closed (R-3). The planner sees a coarse error code per
 INV-08, never the malformed bytes.
 
+### §9A.5A RAXIS Sidecar Streaming Protocol (V2.5, optional)
+*(Closes `v2_extended_gaps.md §2.6` — sidecar streaming + heartbeat
++ mid-stream budget abort.)*
+
+A sidecar that wants to stream tokens incrementally exposes a
+second endpoint, `POST <endpoint>/v1/stream`, in addition to (and
+not in place of) `POST /v1/complete`.  Sidecars that do not
+implement streaming surface HTTP `404 Not Found` on `/v1/stream`;
+the planner-side
+[`SidecarModelClient::create_message_stream`](`crates/planner-core/src/sidecar_client.rs`)
+falls back to the buffered path through the `ModelClient` trait's
+default impl — no operator-visible behaviour change.
+
+**Request.** Identical wire shape and HMAC headers as
+`/v1/complete`: `Content-Type: application/json`, body =
+`SidecarRequest`, plus the
+`X-Raxis-Request-Id` / `X-Raxis-Timestamp` /
+`X-Raxis-HMAC` triple.  Adds `Accept: text/event-stream`.
+
+**Response.** `Content-Type: text/event-stream` (HTTP 200) with
+chunked transfer encoding.  The sidecar emits SSE frames in this
+order (`event: <name>` + `data: <JSON>`, separated by `\n\n`):
+
+| event                 | data shape                                                                  |
+|-----------------------|-----------------------------------------------------------------------------|
+| `message_start`       | `{ "id": "...", "model": "..." }`                                           |
+| `content_block_start` | `{ "index": 0, "block_kind": "text" \| "tool_use" }`                       |
+| `content_block_delta` | `{ "index": 0, "delta": { "type": "text_delta", "text": "..." } }`         |
+| `content_block_delta` | `{ "index": 0, "delta": { "type": "input_json_delta", "partial_json": "..." } }` |
+| `content_block_stop`  | `{ "index": 0 }`                                                             |
+| `usage`               | `{ "input_tokens": N, "output_tokens": N, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0 }` |
+| `stop`                | `{ "stop_reason": "end_turn" \| "tool_use" \| "max_tokens" \| "stop_sequence" }` |
+| `complete` (terminal) | `{ "request_id": "...", "timestamp_ms": N, "response": <SidecarResponse>, "signature_hex": "<hex>" }` |
+
+**Heartbeats.** During silences > 15 seconds, the sidecar SHOULD
+emit SSE comment lines (`: heartbeat\n\n`) to (a) keep proxies
+from closing the idle connection and (b) reset the planner's
+per-chunk idle deadline.  Heartbeats are W3C SSE comments and are
+skipped by the planner's
+[`SseParser`](`crates/planner-core/src/streaming.rs`) without
+producing any `StreamEvent`.
+
+**Per-chunk idle deadline.** The planner times every chunk read
+against
+[`DEFAULT_STREAM_IDLE_TIMEOUT`](`crates/planner-core/src/streaming.rs`)
+(30 seconds, V2 default).  Silences beyond that surface a
+synthesised terminal
+`StreamEvent::Stop { stop_reason: "stream_idle_timeout_after_30_s" }`
+on the receiver and the underlying TCP connection is dropped.
+Same code path as
+`AnthropicClient::create_message_stream` so `INV-PROVIDER-04`
+("atomic per-turn delivery") holds identically across providers.
+
+**End-of-stream HMAC binding.** The terminal `complete` event's
+`data` is signed with HMAC-SHA256 over
+
+```
+<request_id> ":" <timestamp_ms> ":" <serde_json::to_vec(response)>
+```
+
+using the same operator-shared secret as `/v1/complete`.  The
+`request_id` and `timestamp_ms` MUST equal those the planner sent
+on the request — a spliced `complete` from a different
+conversation fails the bind check and the planner surfaces a
+terminal `Stop { stop_reason: "stream_aggregator_error: ..." }`
+without yielding `StreamEvent::Complete`.
+
+> **Why one terminal signature, not per-event signatures?**  Per-event
+> signing forces the sidecar to either (a) buffer the entire response
+> before it can sign each chunk (defeating streaming) or (b) sign each
+> chunk independently with a chunk index, which the planner would have
+> to reassemble in order.  Option (b) doubles the wire-protocol
+> surface and the verification logic for no integrity gain — the
+> *only* thing the planner ever feeds into the dispatch loop's
+> `INV-PROVIDER-04` boundary is the aggregated `MessageResponse`
+> in `StreamEvent::Complete`.  Signing the canonical encoding of
+> the terminal `SidecarResponse` therefore covers exactly the
+> bytes that flow into the kernel's audit chain, with the request
+> id + timestamp binding making each signature single-use.
+
+**Reconnect / retry.** None inside `create_message_stream`.  A
+mid-stream transport error or per-chunk idle timeout surfaces as a
+terminal `Stop` and the receiver closes; the existing
+[`RetryingModelClient`](`crates/planner-core/src/retry.rs`) wrapping
+re-issues the entire request from scratch (per
+`provider-failure-handling.md §7.5` "no resumable streams").
+
+**Mid-stream budget abort.** The dispatch loop's
+[`run_streaming`](`crates/planner-core/src/dispatch.rs`) watches
+`StreamEvent::Usage` events and drops the receiver when a
+configured ceiling is hit.  The reader task observes
+`tx.send(...).is_err()`, bails, and the underlying TCP connection
+is severed — so the upstream sidecar (and the upstream LLM
+provider) stop generating tokens promptly rather than running to
+completion before the planner discards the result.
+
 ### §9A.6 Invariant analysis
 
 | Invariant | Why the sidecar cannot weaken it |

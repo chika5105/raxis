@@ -479,42 +479,95 @@ tables are operator-declared in policy (same trust model as
 
 ---
 
-### §2.6 — Sidecar streaming + heartbeat
+### §2.6 — Sidecar streaming + heartbeat ✅ shipped (V2.5)
 
-**Current state:** The gateway's SSE reader
-(`gateway/src/http_backend.rs`) streams model responses end-to-end.
-But there is no heartbeat to detect stalled streams and no
-mid-stream abort for budget enforcement.
+**Status.** ✅ Implemented in V2.5
+(`crates/planner-core/src/sidecar_client.rs` +
+`crates/planner-core/src/streaming.rs` +
+`extensibility-traits.md §9A.5A`).
 
-**What's needed.**
+**What shipped.**
 
-1. **Heartbeat detection.** The gateway sends a `heartbeat` SSE
-   comment every 15 seconds during an active stream. If no data
-   or heartbeat arrives for 30 seconds, the gateway closes the
-   upstream connection and returns a structured error to the
-   planner. ~60 lines.
+1. **Per-chunk idle timeout (heartbeat detection).** Every chunk
+   read on the sidecar SSE stream is wrapped in
+   `tokio::time::timeout(DEFAULT_STREAM_IDLE_TIMEOUT, …)` (30 s
+   default).  Silences beyond that surface a synthesised terminal
+   `StreamEvent::Stop { stop_reason: "stream_idle_timeout_after_30_s" }`
+   and the underlying TCP connection is dropped.  Sidecars SHOULD
+   emit `: heartbeat\n\n` SSE comment lines during idle; those are
+   skipped by `SseParser` and reset the idle deadline by virtue of
+   being a chunk read.
 
-2. **Reconnect logic.** On heartbeat timeout or upstream
-   disconnect, the gateway retries the request once (with the
-   same idempotency key if the provider supports it). If the
-   retry also fails, the error propagates to the planner as a
-   `DispatchError::Model`. ~40 lines.
+2. **Reconnect logic.** Lives in the existing
+   `RetryingModelClient`
+   (`crates/planner-core/src/retry.rs`) — a transport-class error
+   from `create_message_stream` is retryable per `is_retryable`,
+   so the retry shell re-issues the full request against the same
+   sidecar (or falls through to the next provider via
+   `FallbackModelClient`).  This matches
+   `provider-failure-handling.md §7.5`'s "no resumable streams"
+   stance.
 
-3. **Mid-stream budget abort.** The sidecar (host-side process
-   co-located with the gateway) monitors cumulative tokens from
-   the SSE `usage` events. When the per-session ceiling is
-   reached, the sidecar closes the upstream connection mid-stream,
-   causing the gateway to return a `TokensExceeded` error. ~80
-   lines.
+3. **Mid-stream budget abort.** Already shipped via
+   `DispatchLoop::run_streaming`
+   (`crates/planner-core/src/dispatch.rs`).  The dispatch loop
+   monitors `StreamEvent::Usage` events and drops the receiver
+   when a configured ceiling is hit.  The sidecar reader task
+   observes `tx.send(...).is_err()`, bails, and the underlying
+   TCP connection is severed so the sidecar stops generating
+   tokens promptly.
 
-**Estimate:** ~180 lines.
+**Wire shape.** New `POST <endpoint>/v1/stream` endpoint on the
+sidecar — request shape and HMAC headers identical to
+`/v1/complete`; response is `text/event-stream` with the eight
+event kinds documented in `extensibility-traits.md §9A.5A`.  The
+terminal `complete` event carries an HMAC-SHA256 signature over
+`<request_id>:<timestamp_ms>:<canonical_json(response)>` so the
+planner can verify provenance end-to-end without per-event
+signing (the only bytes the dispatch loop ever feeds into
+`INV-PROVIDER-04` are the aggregated `MessageResponse` in
+`StreamEvent::Complete`).
 
-**Invariant safety:** The gateway is outside the kernel trust
-boundary. Heartbeat and reconnect are transparent to the planner
-— it sees either a complete response or a structured error. The
-mid-stream abort is a defense-in-depth limb for the budget enforcer
-(§2.5); the kernel-side enforcement remains the authoritative
-check.
+**Tests** (in `crates/planner-core/src/sidecar_client.rs`):
+
+* `stream_happy_path_against_local_sidecar_server` — full
+  round-trip against a local TCP server: planner stamps HMAC,
+  server emits 8 events, planner aggregator yields matching
+  `StreamEvent`s and surfaces a `MessageResponse` identical to the
+  buffered path.
+* `stream_passes_through_heartbeat_comments` — `: heartbeat`
+  comment lines are skipped without producing extra events.
+* `stream_with_bogus_complete_signature_surfaces_aggregator_error`
+  — wrong-secret sidecar surfaces a terminal `Stop` and never
+  yields `StreamEvent::Complete`.
+* `stream_eof_without_complete_surfaces_terminal_stop` — early
+  EOF surfaces a `Stop { stop_reason: "stream_eof_before_complete" }`.
+* `stream_pre_stream_4xx_surfaces_upstream_error` — non-2xx
+  responses surface synchronously, never as a torn channel.
+* `hmac_sha256_helper_round_trips_against_compute_hmac` — pins
+  the canonicalisation helper used by the aggregator.
+* `constant_time_eq_returns_correct_value` — pins the timing-safe
+  comparator used in signature verification.
+
+**Invariant safety.** The sidecar runs outside the kernel trust
+boundary (`extensibility-traits.md §9A.6`).  The streaming path
+preserves every invariant the buffered path satisfies:
+
+* `INV-PROVIDER-04` (atomic per-turn delivery) — the dispatch
+  loop's tool-execution path consumes only the terminal
+  `StreamEvent::Complete`; intermediate events are
+  observability-only.  Same shape as
+  `AnthropicClient::create_message_stream`.
+* `R-3` (Fail-closed) — signature mismatch / malformed JSON /
+  bind-check failure all surface as terminal `Stop` events; the
+  receiver closes without yielding a `Complete`.
+* `R-5` (Bounded capabilities) — token usage from
+  `StreamEvent::Usage` feeds the dispatch loop's cumulative
+  ceilings (V2_GAPS §C1); ceiling breaches cause
+  `run_streaming` to drop the receiver mid-stream, severing the
+  upstream connection.
+* `R-7` (Audit chain) — kernel-side audit is unchanged; the
+  streaming wire shape is a planner→sidecar concern only.
 
 ---
 
