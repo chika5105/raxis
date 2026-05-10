@@ -398,6 +398,7 @@ mod tests {
             approved:                None,
             critique:                None,
             resolved_via_escalation: None,
+            tokens_used:     None,
         }
     }
 

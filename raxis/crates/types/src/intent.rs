@@ -331,6 +331,77 @@ pub struct IntentRequest {
     /// V2-aware planner frame).
     #[serde(default)]
     pub resolved_via_escalation: Option<EscalationId>,
+
+    // ── V2 §2.5 token-limit enforcement (per-intent token reporting) ──
+
+    /// **V2 `v2_extended_gaps.md §2.5` per-intent token report.**
+    ///
+    /// The cumulative token usage the planner has consumed in its
+    /// dispatch loop *up to and including* the LLM turn that
+    /// produced this intent. Stamped by
+    /// [`crate::IntentSubmitter`] from the dispatch loop's
+    /// `(cum_in, cum_out)` counters.
+    ///
+    /// **Required by every planner-submitted intent.** Forward-only,
+    /// no V1/V2.4 fallback path: every planner binary that runs
+    /// against the V2.5+ kernel populates this field unconditionally.
+    /// `Some(zero)` is a legitimate value (the dispatch loop
+    /// short-circuited on a deterministic terminal tool before any
+    /// LLM turn fired); `None` is reserved for synthetic
+    /// kernel-injected intents where no dispatch loop ran (e.g.
+    /// the recovery sweep's posthumous `ReportFailure`).
+    ///
+    /// **Why on the request and not the response.** Both directions
+    /// were considered. Carrying the report on the request makes
+    /// every individual intent self-describing: kernel-side audit
+    /// and budget gates need the token total *at admission time*
+    /// (not after a successful response), so attaching to the
+    /// request keeps the admission pipeline's single-pass shape.
+    /// The response carries the *post-admission* lane budget snapshot
+    /// (see `IntentResponse.budget`), which is a different quantity.
+    ///
+    /// **Wire encoding note:** see the analogous comment on
+    /// `approved` — `skip_serializing_if` is intentionally absent
+    /// for bincode round-trip compatibility.
+    #[serde(default)]
+    pub tokens_used: Option<TokensReport>,
+}
+
+/// V2 `v2_extended_gaps.md §2.5` — cumulative LLM token usage the
+/// planner has consumed across its dispatch loop up to (and
+/// including) the turn that produced the carrying intent.
+///
+/// All counts are non-negative and saturate at `u64::MAX` in the
+/// driver before being stamped on the wire (so the wire shape never
+/// has to reason about overflow). Cache-read / cache-creation
+/// counters are zero unless the model client surfaces them
+/// explicitly via the streaming `usage` events; the
+/// [`raxis_policy::ProviderPricing::cost_micro_dollars`] arithmetic
+/// handles all four channels uniformly.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokensReport {
+    /// Cumulative input tokens (prompt + tool output) the planner
+    /// has consumed in this session.
+    pub input_tokens:          u64,
+    /// Cumulative output tokens (model-generated text + tool calls)
+    /// the planner has emitted in this session.
+    pub output_tokens:         u64,
+    /// Cumulative cache-read tokens (Anthropic prompt-caching). 0
+    /// when the provider does not surface this counter.
+    #[serde(default)]
+    pub cache_read_tokens:     u64,
+    /// Cumulative cache-creation tokens (Anthropic prompt-caching).
+    /// 0 when the provider does not surface this counter.
+    #[serde(default)]
+    pub cache_creation_tokens: u64,
+    /// **Provider id** the planner billed these tokens against —
+    /// matches an entry in `policy.providers[].provider_id`. The
+    /// kernel uses this to pick the right
+    /// `ProviderPricing` table at admission time. Empty string
+    /// when the planner did not route through the gateway (e.g.
+    /// reviewer that short-circuited on a deterministic check).
+    #[serde(default)]
+    pub provider_id:           String,
 }
 
 /// V2 hard cap on `IntentRequest.critique` byte length
@@ -583,6 +654,7 @@ mod tests {
             approved:        None,
             critique:        None,
             resolved_via_escalation: None,
+            tokens_used:     None,
         };
 
         // 1. bincode round-trip on the canonical wire shape.
@@ -629,6 +701,7 @@ mod tests {
             approved:        Some(false),
             critique:        Some("the auth check is missing".to_owned()),
             resolved_via_escalation: None,
+            tokens_used:     None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: IntentRequest = serde_json::from_str(&s).unwrap();
@@ -679,6 +752,7 @@ mod tests {
             approved:         None,
             critique:         None,
             resolved_via_escalation: Some(escalation_id.clone()),
+            tokens_used:      None,
         };
 
         // Canonical IPC wire — bincode standard().
@@ -729,6 +803,7 @@ mod tests {
             approved:         None,
             critique:         None,
             resolved_via_escalation: None,
+            tokens_used:      None,
         };
         let bytes = bincode::serde::encode_to_vec(
             &req, bincode::config::standard()).expect("bincode encode");

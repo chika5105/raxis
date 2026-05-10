@@ -4163,6 +4163,23 @@ impl PolicyBundle {
         self.lanes = lanes;
     }
 
+    /// Test-only setter for `[budget].max_cost_per_task`. Used by the
+    /// kernel V2.5 token-budget tests
+    /// (`scheduler::budget::evaluate_token_budget_*`) to swing the
+    /// admission ceiling without round-tripping a full `policy.toml`.
+    #[cfg(any(debug_assertions, test))]
+    pub fn set_max_cost_per_task_for_tests(&mut self, cents: u64) {
+        self.max_cost_per_task = cents;
+    }
+
+    /// Test-only setter for `[[providers]]`. Used by the kernel V2.5
+    /// token-budget tests to install pricing tables without
+    /// round-tripping a full `policy.toml`.
+    #[cfg(any(debug_assertions, test))]
+    pub fn set_providers_for_tests(&mut self, providers: Vec<ProviderEntry>) {
+        self.providers = providers;
+    }
+
     /// Test-only setter for `[plan_signing].accept_unfresh_v2_0_bundles`.
     /// Used by the kernel V2 admission tests (`v2_admission::tests`) to
     /// flip the V2.0 transitional knob without round-tripping a full

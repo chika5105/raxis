@@ -479,15 +479,31 @@ pub async fn run_role_session_with_model(
     })?;
     let submitter = IntentSubmitter::new(transport, env.session_token.clone(), task_id);
 
+    // V2 `v2_extended_gaps.md §2.5` — relay the dispatch loop's
+    // cumulative `(input, output)` totals into the submitter BEFORE
+    // any submit fires, so every outbound `IntentRequest::tokens_used`
+    // carries the truthful end-of-loop count. Provider id is left
+    // empty: the kernel resolves the billing provider via policy
+    // (worst-of-N over LLM providers with pricing) at admission
+    // time, which matches the `EstimateCost` upper-bound contract.
+    let (cum_in, cum_out) = outcome.cumulative_tokens();
+    submitter.report_tokens(raxis_types::TokensReport {
+        input_tokens:          cum_in,
+        output_tokens:         cum_out,
+        cache_read_tokens:     0,
+        cache_creation_tokens: 0,
+        provider_id:           String::new(),
+    });
+
     match outcome {
         DispatchOutcome::TerminalTool {
-            tool_name, input, output: _,
+            tool_name, input, output: _, ..
         } => {
             submit_terminal(role, &submitter, &tool_name, &input).await?;
             Ok(DriverOutcome::Completed { tool_name })
         }
-        DispatchOutcome::Idle { final_text } => Ok(DriverOutcome::Idle { final_text }),
-        DispatchOutcome::MaxTurnsExceeded { turns } => {
+        DispatchOutcome::Idle { final_text, .. } => Ok(DriverOutcome::Idle { final_text }),
+        DispatchOutcome::MaxTurnsExceeded { turns, .. } => {
             Ok(DriverOutcome::MaxTurnsExceeded { turns })
         }
         DispatchOutcome::TokensExceeded {

@@ -126,6 +126,14 @@ impl DispatchConfig {
 }
 
 /// One dispatch-loop terminal outcome.
+///
+/// Every variant carries the cumulative `(input_tokens,
+/// output_tokens)` totals consumed by the loop so the role binary
+/// can stamp them onto its outbound `IntentRequest::tokens_used`
+/// per V2 `v2_extended_gaps.md §2.5` (per-intent token reporting).
+/// The `TokensExceeded` variant retains its dedicated counters for
+/// audit clarity (which ceiling tripped); they are identical in
+/// value to the `cum_*` pair on that variant.
 #[derive(Debug, Clone)]
 pub enum DispatchOutcome {
     /// A terminal tool fired (e.g. `task_complete` /
@@ -140,6 +148,14 @@ pub enum DispatchOutcome {
         input:     serde_json::Value,
         /// Tool's output.
         output:    ToolOutput,
+        /// V2 §2.5 — cumulative input tokens at the moment the
+        /// terminal tool fired (across every model turn the loop
+        /// drove). May be 0 when the terminal tool fired on the
+        /// very first model turn before any input was charged.
+        cum_input_tokens:  u64,
+        /// V2 §2.5 — cumulative output tokens at the moment the
+        /// terminal tool fired.
+        cum_output_tokens: u64,
     },
     /// The model said it was done (`stop_reason = "end_turn"`) and
     /// emitted no tool_use blocks. The caller decides whether to
@@ -147,13 +163,23 @@ pub enum DispatchOutcome {
     Idle {
         /// Final assistant text content (joined across all `Text`
         /// blocks in the last turn).
-        final_text: String,
+        final_text:        String,
+        /// V2 §2.5 — cumulative input tokens at idle.
+        cum_input_tokens:  u64,
+        /// V2 §2.5 — cumulative output tokens at idle.
+        cum_output_tokens: u64,
     },
     /// Hit the `max_turns` ceiling. INV-PLANNER-HARNESS-04 surfaces
     /// this as a structured failure on the role binary side.
     MaxTurnsExceeded {
         /// Number of turns the loop ran.
         turns: u32,
+        /// V2 §2.5 — cumulative input tokens at the moment the
+        /// turn ceiling fired.
+        cum_input_tokens:  u64,
+        /// V2 §2.5 — cumulative output tokens at the moment the
+        /// turn ceiling fired.
+        cum_output_tokens: u64,
     },
     /// V2_GAPS §C1 — cumulative session token total exceeded one of
     /// the configured per-session ceilings. The loop terminates
@@ -177,6 +203,23 @@ pub enum DispatchOutcome {
         /// surface a clean operator-facing message).
         ceiling:       u64,
     },
+}
+
+impl DispatchOutcome {
+    /// V2 `v2_extended_gaps.md §2.5` — cumulative `(input_tokens,
+    /// output_tokens)` projection across every variant. Used by the
+    /// driver to stamp `IntentRequest::tokens_used` regardless of
+    /// which terminal arm fired.
+    pub fn cumulative_tokens(&self) -> (u64, u64) {
+        match self {
+            DispatchOutcome::TerminalTool { cum_input_tokens, cum_output_tokens, .. }
+            | DispatchOutcome::Idle { cum_input_tokens, cum_output_tokens, .. }
+            | DispatchOutcome::MaxTurnsExceeded { cum_input_tokens, cum_output_tokens, .. }
+                => (*cum_input_tokens, *cum_output_tokens),
+            DispatchOutcome::TokensExceeded { input_tokens, output_tokens, .. }
+                => (*input_tokens, *output_tokens),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -336,7 +379,11 @@ impl DispatchLoop {
 
             if tool_uses.is_empty() {
                 // No tools called — either Idle or MaxTurns will fire.
-                return Ok(DispatchOutcome::Idle { final_text: text_acc });
+                return Ok(DispatchOutcome::Idle {
+                    final_text:        text_acc,
+                    cum_input_tokens:  cum_in,
+                    cum_output_tokens: cum_out,
+                });
             }
 
             // Execute each tool_use in declaration order, building
@@ -361,9 +408,11 @@ impl DispatchLoop {
                         )),
                     };
                     return Ok(DispatchOutcome::TerminalTool {
-                        tool_name: tool_name.clone(),
-                        input:     input.clone(),
+                        tool_name:         tool_name.clone(),
+                        input:             input.clone(),
                         output,
+                        cum_input_tokens:  cum_in,
+                        cum_output_tokens: cum_out,
                     });
                 }
                 let output = match self.registry.get(tool_name) {
@@ -398,7 +447,9 @@ impl DispatchLoop {
         }
 
         Ok(DispatchOutcome::MaxTurnsExceeded {
-            turns: self.config.max_turns,
+            turns:             self.config.max_turns,
+            cum_input_tokens:  cum_in,
+            cum_output_tokens: cum_out,
         })
     }
 
@@ -556,7 +607,11 @@ impl DispatchLoop {
             }
 
             if tool_uses.is_empty() {
-                return Ok(DispatchOutcome::Idle { final_text: text_acc });
+                return Ok(DispatchOutcome::Idle {
+                    final_text:        text_acc,
+                    cum_input_tokens:  cum_in,
+                    cum_output_tokens: cum_out,
+                });
             }
 
             let mut next_user_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
@@ -571,9 +626,11 @@ impl DispatchLoop {
                         )),
                     };
                     return Ok(DispatchOutcome::TerminalTool {
-                        tool_name: tool_name.clone(),
-                        input:     input.clone(),
+                        tool_name:         tool_name.clone(),
+                        input:             input.clone(),
                         output,
+                        cum_input_tokens:  cum_in,
+                        cum_output_tokens: cum_out,
                     });
                 }
                 let output = match self.registry.get(tool_name) {
@@ -604,7 +661,9 @@ impl DispatchLoop {
         }
 
         Ok(DispatchOutcome::MaxTurnsExceeded {
-            turns: self.config.max_turns,
+            turns:             self.config.max_turns,
+            cum_input_tokens:  cum_in,
+            cum_output_tokens: cum_out,
         })
     }
 
@@ -739,7 +798,7 @@ mod tests {
             "seed user message".to_owned(),
         ).await.unwrap();
         match out {
-            DispatchOutcome::Idle { final_text } => {
+            DispatchOutcome::Idle { final_text, .. } => {
                 assert_eq!(final_text, "done!");
             }
             other => panic!("expected Idle, got {other:?}"),
@@ -876,7 +935,7 @@ mod tests {
         );
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
-            DispatchOutcome::MaxTurnsExceeded { turns } => {
+            DispatchOutcome::MaxTurnsExceeded { turns, .. } => {
                 assert_eq!(turns, 3);
             }
             other => panic!("expected MaxTurnsExceeded, got {other:?}"),
@@ -1205,7 +1264,7 @@ mod tests {
             .await
             .unwrap();
         match out {
-            DispatchOutcome::Idle { final_text } => {
+            DispatchOutcome::Idle { final_text, .. } => {
                 assert_eq!(final_text, "streamed done!");
             }
             other => panic!("expected Idle, got {other:?}"),

@@ -468,6 +468,71 @@ fn run_phase_a(
         }
     }
 
+    // ── V2 §2.5 — per-task LLM token-cost admission gate ─────────────────
+    //
+    // The planner stamps `IntentRequest::tokens_used` with the
+    // running-total `(input, output, cache_read, cache_creation)`
+    // tokens it has consumed so far. We compute the current dollar
+    // cost from the policy's worst-of-N LLM pricing
+    // (`scheduler::budget::cost_micros_for_tokens`) and compare to
+    // the per-task ceiling (`policy.max_cost_per_task` in USD cents
+    // → micros). Over-budget intents fail-closed with
+    // `FailPolicyViolation`; admitted intents have the new running
+    // total persisted on the task row so the next intent's check
+    // sees the monotonically-non-decreasing cumulative cost.
+    let token_verdict = crate::scheduler::budget::evaluate_token_budget(
+        req.tokens_used.as_ref(),
+        task.cumulative_token_cost_micros,
+        policy,
+    );
+    let new_token_cost_micros = match token_verdict {
+        crate::scheduler::budget::TokenBudgetVerdict::Allow {
+            cumulative_token_cost_micros,
+        } => cumulative_token_cost_micros,
+        crate::scheduler::budget::TokenBudgetVerdict::Reject {
+            cumulative_token_cost_micros, ceiling_micros,
+        } => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"IntentRejectedTokenBudget\",\
+                 \"task_id\":\"{}\",\"cumulative_micros\":{cumulative_token_cost_micros},\
+                 \"ceiling_micros\":{ceiling_micros}}}",
+                req.task_id.as_str(),
+            );
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailPolicyViolation, task_state);
+        }
+    };
+
+    // Persist the updated running total — fire-and-forget UPDATE.
+    // The acceptance contract is that admission monotonically
+    // increases the cost; a writer-mutex hop here is acceptable
+    // because intent admission already serialised on the writer
+    // mutex via `accept_envelope_and_advance_sequence` and
+    // `load_task`. If the UPDATE silently fails the worst case is
+    // the *next* intent's gate sees a stale (under-) cost — the
+    // current intent still proceeds with the correct admission
+    // decision.
+    if new_token_cost_micros != task.cumulative_token_cost_micros {
+        let conn = store.lock_sync();
+        if let Some(report) = req.tokens_used.as_ref() {
+            let _ = conn.execute(
+                &format!(
+                    "UPDATE {TASKS} SET
+                       cumulative_input_tokens       = ?1,
+                       cumulative_output_tokens      = ?2,
+                       cumulative_token_cost_micros  = ?3
+                     WHERE task_id = ?4"
+                ),
+                rusqlite::params![
+                    report.input_tokens  as i64,
+                    report.output_tokens as i64,
+                    new_token_cost_micros as i64,
+                    req.task_id.as_str(),
+                ],
+            );
+        }
+    }
+
     // ── Dispatch by intent kind ───────────────────────────────────────────
     //
     // ReportFailure and CompleteTask are entirely sync: they do not need
@@ -2441,17 +2506,26 @@ struct TaskRow {
     lane_id:       String,
     state:         String,
     initiative_id: String,
+    /// V2 `v2_extended_gaps.md §2.5` — running total of micro-dollar
+    /// LLM-token cost on this task across every accepted intent.
+    /// `0` for V2.4-and-earlier tasks (the column was added by
+    /// migration 12 with `DEFAULT 0`).
+    cumulative_token_cost_micros: u64,
 }
 
 fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
     let conn = store.lock_sync();
     conn.query_row(
-        &format!("SELECT lane_id, state, initiative_id FROM {TASKS} WHERE task_id = ?1"),
+        &format!(
+            "SELECT lane_id, state, initiative_id, cumulative_token_cost_micros
+             FROM {TASKS} WHERE task_id = ?1"
+        ),
         rusqlite::params![task_id],
         |row| Ok(TaskRow {
             lane_id:       row.get(0)?,
             state:         row.get(1)?,
             initiative_id: row.get(2)?,
+            cumulative_token_cost_micros: row.get::<_, i64>(3).map(|v| v as u64).unwrap_or(0),
         }),
     ).map_err(|_| ())
 }
@@ -3099,6 +3173,7 @@ mod tests {
             approved,
             critique:        critique.map(str::to_owned),
             resolved_via_escalation: None,
+            tokens_used:     None,
         }
     }
 

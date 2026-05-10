@@ -38,6 +38,7 @@ use raxis_ipc::IpcMessage;
 use raxis_types::{
     CommitSha, EscalationClass, EscalationRequest, IntentKind,
     IntentRequest, IntentResponse, RequestedEscalationScope, TaskId,
+    TokensReport,
 };
 
 use crate::transport::{KernelTransport, TransportError};
@@ -47,13 +48,25 @@ use crate::transport::{KernelTransport, TransportError};
 // ---------------------------------------------------------------------------
 
 /// One per-session intent submitter. Holds the session token, the
-/// task id, and the per-session sequence + nonce counters.
+/// task id, the per-session sequence + nonce counters, and the
+/// rolling [`TokensReport`] last reported by the dispatch loop.
 pub struct IntentSubmitter {
     transport:    Arc<dyn KernelTransport>,
     session_token: String,
     task_id:      TaskId,
     next_seq:     std::sync::atomic::AtomicU64,
     nonce_seed:   std::sync::atomic::AtomicU64,
+    /// V2 `v2_extended_gaps.md §2.5` — last known cumulative LLM
+    /// token usage. Updated by callers via
+    /// [`IntentSubmitter::report_tokens`] every time the dispatch
+    /// loop updates `(cum_in, cum_out)`. Stamped onto every
+    /// outbound `IntentRequest::tokens_used` so the kernel can run
+    /// the dollar-cost admission gate at intent admission time.
+    ///
+    /// Stored behind a `std::sync::Mutex` so the dispatch loop and
+    /// the terminal-tool submission path (which run on the same
+    /// task) can share without a `&mut`.
+    tokens:       std::sync::Mutex<TokensReport>,
 }
 
 impl IntentSubmitter {
@@ -82,7 +95,26 @@ impl IntentSubmitter {
             nonce_seed: std::sync::atomic::AtomicU64::new(
                 u64::from_le_bytes(Uuid::new_v4().as_bytes()[..8].try_into().unwrap()),
             ),
+            tokens:     std::sync::Mutex::new(TokensReport::default()),
         }
+    }
+
+    /// V2 `v2_extended_gaps.md §2.5` — record the latest cumulative
+    /// LLM token counts. The dispatch loop calls this after every
+    /// model turn so the next `submit_*` call carries an accurate
+    /// `IntentRequest::tokens_used`.
+    ///
+    /// Replaces the stored report wholesale (the dispatch loop
+    /// owns the cumulative state; the submitter is just a relay).
+    pub fn report_tokens(&self, tokens: TokensReport) {
+        *self.tokens.lock().expect("tokens mutex poisoned") = tokens;
+    }
+
+    /// Snapshot the most-recent token report. Used by the wire
+    /// helpers below; exposed for tests that want to assert the
+    /// snapshot after a series of `report_tokens` calls.
+    pub fn last_token_report(&self) -> TokensReport {
+        self.tokens.lock().expect("tokens mutex poisoned").clone()
     }
 
     fn next_seq(&self) -> u64 {
@@ -108,6 +140,12 @@ impl IntentSubmitter {
 
     /// Build a fresh `IntentRequest` skeleton with the per-session
     /// fields populated. Caller fills in the kind-specific fields.
+    ///
+    /// V2 `v2_extended_gaps.md §2.5` — `tokens_used` is stamped from
+    /// the most-recent `report_tokens` snapshot. `Some(zero)` is
+    /// the default when no LLM turn has fired yet (deterministic
+    /// short-circuit terminal tools): the kernel still gets a
+    /// truthful "zero token cost" report rather than a `None`.
     fn skeleton(&self, kind: IntentKind) -> IntentRequest {
         IntentRequest {
             session_token:           self.session_token.clone(),
@@ -124,6 +162,7 @@ impl IntentSubmitter {
             approved:                None,
             critique:                None,
             resolved_via_escalation: None,
+            tokens_used:             Some(self.last_token_report()),
         }
     }
 

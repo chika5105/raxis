@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -103,6 +103,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 11 {
         apply_migration_11(conn)?;
+    }
+    if current_version < 12 {
+        apply_migration_12(conn)?;
     }
 
     Ok(())
@@ -1789,6 +1792,82 @@ CREATE INDEX IF NOT EXISTS idx_imerge_attempts_open
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (11, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 12 — V2 §2.5 per-task LLM token-usage accounting.
+//
+// `v2_extended_gaps.md §2.5` admission gate requires the kernel to
+// know each task's cumulative LLM input/output token consumption
+// AND the corresponding micro-dollar cost (derived from the
+// operator-declared `[providers.<id>.pricing]` tables) to enforce
+// `policy.max_cost_per_task` as a real dollar ceiling rather than a
+// flat admission-units heuristic.
+//
+// We add three columns to `tasks`:
+//
+//   * cumulative_input_tokens         — INTEGER NOT NULL DEFAULT 0
+//   * cumulative_output_tokens        — INTEGER NOT NULL DEFAULT 0
+//   * cumulative_token_cost_micros    — INTEGER NOT NULL DEFAULT 0
+//
+// Why these live on `tasks` and not on a separate event table:
+// admission is a per-task decision — the kernel needs the
+// running totals at sub-millisecond cost on every intent
+// admission. A separate event table would force an aggregate
+// query (`SUM(...) WHERE task_id = ?1`) inside the admission hot
+// path; co-locating the running totals on the task row keeps
+// admission O(1).
+//
+// Audit reconstruction still works: `IntentAccepted` audit
+// events carry the per-intent `tokens_used` payload (V2 §2.5
+// phase D), so the full per-turn history is replayable from the
+// audit chain alone.
+//
+// Defaults: NOT NULL DEFAULT 0 means existing rows on a V2.4 DB
+// being migrated forward see "no LLM tokens charged yet" — which
+// is correct because pre-migration tasks predate the
+// `IntentRequest::tokens_used` field.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_12(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_12_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 12 failed: {e}"))
+    })
+}
+
+/// The complete migration-12 DDL. Two `ALTER TABLE` statements add
+/// the cumulative token-usage and dollar-cost columns to `tasks`.
+pub fn render_migration_12_ddl() -> String {
+    let tasks          = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── tasks: V2 §2.5 cumulative LLM token accounting ───────────────────────
+ALTER TABLE {tasks}
+    ADD COLUMN cumulative_input_tokens INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE {tasks}
+    ADD COLUMN cumulative_output_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- Cumulative micro-dollar cost = sum over every accepted intent of
+-- `provider_pricing.cost_micro_dollars(input_tokens, output_tokens, ...)`.
+-- The kernel re-computes the increment per intent from the planner-
+-- reported `tokens_used` delta and the policy's worst-of-N LLM
+-- pricing (matches the `EstimateCost` upper-bound contract).
+ALTER TABLE {tasks}
+    ADD COLUMN cumulative_token_cost_micros INTEGER NOT NULL DEFAULT 0;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (12, strftime('%s', 'now'));
 
 COMMIT;
 "

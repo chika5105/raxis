@@ -154,6 +154,7 @@ impl MockPlanner {
             approved: None,
             critique: None,
             resolved_via_escalation: None,
+            tokens_used: None,
         }
     }
 

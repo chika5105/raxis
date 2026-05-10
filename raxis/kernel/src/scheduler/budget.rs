@@ -229,6 +229,148 @@ fn intent_kind_to_str(kind: &IntentKind) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
+// V2 §2.5 — per-task LLM token-cost admission gate
+// ---------------------------------------------------------------------------
+
+/// V2 `v2_extended_gaps.md §2.5` — number of micro-dollars in one
+/// admission-units cent. The kernel treats `policy.max_cost_per_task`
+/// as a USD-cents ceiling; the per-task cumulative LLM cost is
+/// tracked in micro-dollars (`ProviderPricing::cost_micro_dollars`)
+/// for sub-cent precision. 1 ¢ = 10 000 µ$.
+pub const MICROS_PER_CENT: u64 = 10_000;
+
+/// V2 `v2_extended_gaps.md §2.5` — incremental dollar cost of one
+/// planner-reported `TokensReport`. The kernel picks the
+/// **worst-of-N** LLM provider (the one whose
+/// [`raxis_policy::ProviderPricing::cost_micro_dollars`] is highest
+/// at the comparator point `(1M input, 1M output)`) when the
+/// planner's `TokensReport.provider_id` is empty / unknown, matching
+/// the `EstimateCost` upper-bound contract. When `provider_id` matches
+/// a declared LLM provider with `pricing`, that provider's pricing is
+/// used directly (more accurate accounting for multi-provider
+/// deployments).
+///
+/// Returns `0` when the policy declares no LLM providers with
+/// pricing — degraded read-only deployments charge no LLM cost.
+pub fn cost_micros_for_tokens(
+    report: &raxis_types::TokensReport,
+    policy: &PolicyBundle,
+) -> u64 {
+    let provider = if report.provider_id.is_empty() {
+        worst_llm_pricing(policy)
+    } else {
+        policy
+            .providers()
+            .iter()
+            .find(|p| p.provider_id == report.provider_id && p.pricing.is_some())
+            .or_else(|| worst_llm_pricing(policy))
+    };
+    match provider.and_then(|p| p.pricing.as_ref()) {
+        Some(pricing) => pricing.cost_micro_dollars(
+            report.input_tokens,
+            report.output_tokens,
+            report.cache_read_tokens,
+            report.cache_creation_tokens,
+        ),
+        None => 0,
+    }
+}
+
+/// Resolve the most-expensive LLM provider declared in the policy.
+/// Linear-scan; the provider list is bounded by policy and never
+/// exceeds tens of entries in practice.
+fn worst_llm_pricing(policy: &PolicyBundle) -> Option<&raxis_policy::ProviderEntry> {
+    policy
+        .providers()
+        .iter()
+        .filter(|p| p.pricing.is_some())
+        .max_by_key(|p| {
+            let pr = p.pricing.as_ref().expect("filtered to Some");
+            pr.cost_micro_dollars(1_000_000, 1_000_000, 0, 0)
+        })
+}
+
+/// V2 `v2_extended_gaps.md §2.5` — the per-task token-cost ceiling
+/// expressed in micro-dollars. Derived from
+/// `policy.max_cost_per_task()` (USD cents) by multiplying through
+/// `MICROS_PER_CENT`; saturating multiplication keeps a pathological
+/// `u64::MAX` policy from wrapping.
+pub fn token_cost_ceiling_micros(policy: &PolicyBundle) -> u64 {
+    policy.max_cost_per_task().saturating_mul(MICROS_PER_CENT)
+}
+
+/// V2 `v2_extended_gaps.md §2.5` — admission gate verdict. Used by
+/// `handlers::intent::run_phase_a` to fail-closed-reject any intent
+/// whose cumulative LLM token cost would push the task above
+/// `policy.max_cost_per_task` (treated as a USD-cents ceiling).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenBudgetVerdict {
+    /// The reported cumulative cost is at or below the ceiling.
+    /// Admission proceeds.
+    Allow {
+        /// Newly-computed cumulative token cost in micro-dollars.
+        cumulative_token_cost_micros: u64,
+    },
+    /// Cumulative cost would exceed the ceiling. Admission is
+    /// rejected with `PlannerErrorCode::FailPolicyViolation` per
+    /// the §2.5 contract ("fail-closed").
+    Reject {
+        /// Cumulative cost that would have resulted from admitting
+        /// the intent (for audit + operator-facing reporting).
+        cumulative_token_cost_micros: u64,
+        /// Configured ceiling (micros).
+        ceiling_micros:               u64,
+    },
+}
+
+/// V2 `v2_extended_gaps.md §2.5` — evaluate the per-task token-cost
+/// ceiling for an intent. Pure function: takes the planner-
+/// reported cumulative `TokensReport`, computes the dollar cost via
+/// [`cost_micros_for_tokens`], compares against
+/// [`token_cost_ceiling_micros`].
+///
+/// `previous_cost_micros` is the cumulative cost already persisted
+/// on the task row from prior accepted intents (V2.5 admission gate
+/// is monotonic — every intent reports the running total, not a
+/// delta). When the planner reports the same total as the previous
+/// intent (no new LLM turns happened — e.g. a retry), the ceiling
+/// check still runs on the current total so the admission decision
+/// is monotonic with the most recent report.
+pub fn evaluate_token_budget(
+    report:               Option<&raxis_types::TokensReport>,
+    previous_cost_micros: u64,
+    policy:               &PolicyBundle,
+) -> TokenBudgetVerdict {
+    let report = match report {
+        Some(r) => r,
+        // Synthetic / kernel-injected intents skip the token gate.
+        // The dispatch loop's per-session HARD cap remains in
+        // effect via the spawn-time env vars (§2.5 phase B).
+        None    => return TokenBudgetVerdict::Allow {
+            cumulative_token_cost_micros: previous_cost_micros,
+        },
+    };
+    let new_micros = cost_micros_for_tokens(report, policy);
+    let ceiling    = token_cost_ceiling_micros(policy);
+    if ceiling == 0 {
+        // Policy did not configure a per-task cost ceiling — admit.
+        return TokenBudgetVerdict::Allow {
+            cumulative_token_cost_micros: new_micros.max(previous_cost_micros),
+        };
+    }
+    if new_micros > ceiling {
+        TokenBudgetVerdict::Reject {
+            cumulative_token_cost_micros: new_micros,
+            ceiling_micros:               ceiling,
+        }
+    } else {
+        TokenBudgetVerdict::Allow {
+            cumulative_token_cost_micros: new_micros.max(previous_cost_micros),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -519,5 +661,232 @@ mod tests {
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
+    }
+
+    // ── V2 §2.5 — token-cost admission gate (per-provider pricing) ──────
+
+    /// Build a policy with one Anthropic LLM provider whose pricing is
+    /// configured for the V2.5 token-budget tests, plus a configurable
+    /// `max_cost_per_task` ceiling (cents).
+    fn make_provider(
+        id:                       &str,
+        input_tokens_per_dollar:  u64,
+        output_tokens_per_dollar: u64,
+    ) -> raxis_policy::ProviderEntry {
+        raxis_policy::ProviderEntry {
+            provider_id:               id.to_owned(),
+            kind:                      "Anthropic".to_owned(),
+            credentials_file:          format!("{id}.toml"),
+            inference_timeout_ms:      30_000,
+            data_fetch_timeout_ms:     10_000,
+            max_response_bytes:        16 * 1024 * 1024,
+            stream_idle_timeout_ms:    None,
+            sidecar_endpoint:          None,
+            sidecar_hmac_secret:       None,
+            sidecar_health_check_path: None,
+            pricing: Some(raxis_policy::ProviderPricing {
+                input_tokens_per_dollar,
+                output_tokens_per_dollar,
+                cache_read_tokens_per_dollar:     None,
+                cache_creation_tokens_per_dollar: None,
+            }),
+        }
+    }
+
+    fn policy_with_pricing_and_ceiling(
+        max_cost_per_task_cents: u64,
+        input_tokens_per_dollar: u64,
+        output_tokens_per_dollar: u64,
+    ) -> PolicyBundle {
+        let mut bundle = PolicyBundle::for_tests_with_operators(
+            Vec::<OperatorEntry>::new(),
+        );
+        bundle.set_max_cost_per_task_for_tests(max_cost_per_task_cents);
+        bundle.set_providers_for_tests(vec![make_provider(
+            "anthropic-prod",
+            input_tokens_per_dollar,
+            output_tokens_per_dollar,
+        )]);
+        bundle
+    }
+
+    /// `cost_micros_for_tokens` returns 0 for an empty TokensReport.
+    #[test]
+    fn token_cost_zero_tokens_is_zero_cost() {
+        let policy = policy_with_pricing_and_ceiling(100, 200_000, 50_000);
+        let report = raxis_types::TokensReport::default();
+        assert_eq!(cost_micros_for_tokens(&report, &policy), 0);
+    }
+
+    /// Anthropic-style $5/MTok input + $20/MTok output. 1M input + 1M
+    /// output costs $25 → 25_000_000 µ$.
+    #[test]
+    fn token_cost_anthropic_million_million_is_25usd() {
+        let policy = policy_with_pricing_and_ceiling(
+            /*cents*/ 0,
+            /*input/$*/ 200_000,   // $5 / 1M input
+            /*output/$*/ 50_000,   // $20 / 1M output
+        );
+        let report = raxis_types::TokensReport {
+            input_tokens:  1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_id: String::new(),
+        };
+        assert_eq!(cost_micros_for_tokens(&report, &policy), 25_000_000);
+    }
+
+    /// `evaluate_token_budget` admits when no `tokens_used` is reported
+    /// (synthetic / kernel-injected intent path).
+    #[test]
+    fn evaluate_token_budget_admits_when_no_report() {
+        let policy = policy_with_pricing_and_ceiling(100, 200_000, 50_000);
+        match evaluate_token_budget(None, /*prev*/ 1234, &policy) {
+            TokenBudgetVerdict::Allow {
+                cumulative_token_cost_micros,
+            } => assert_eq!(cumulative_token_cost_micros, 1234,
+                "synthetic intent must NOT modify the previous total"),
+            other => panic!("expected Allow, got {other:?}"),
+        }
+    }
+
+    /// `evaluate_token_budget` admits when ceiling = 0 (operator opted
+    /// out by leaving `max_cost_per_task = 0`).
+    #[test]
+    fn evaluate_token_budget_admits_when_no_ceiling() {
+        let policy = policy_with_pricing_and_ceiling(0, 200_000, 50_000);
+        let report = raxis_types::TokensReport {
+            input_tokens:  500_000,
+            output_tokens: 500_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_id: String::new(),
+        };
+        match evaluate_token_budget(Some(&report), 0, &policy) {
+            TokenBudgetVerdict::Allow { .. } => {}
+            other => panic!("expected Allow with no-ceiling policy, got {other:?}"),
+        }
+    }
+
+    /// `evaluate_token_budget` rejects when the cumulative cost
+    /// exceeds the ceiling.
+    #[test]
+    fn evaluate_token_budget_rejects_over_ceiling() {
+        // Ceiling = 100 ¢ = 1_000_000 µ$.
+        // Pricing = $5/MTok in, $20/MTok out. 100k input + 50k output
+        //         = $0.50 input + $1.00 output = $1.50 = 1_500_000 µ$.
+        // 1_500_000 > 1_000_000 → reject.
+        let policy = policy_with_pricing_and_ceiling(100, 200_000, 50_000);
+        let report = raxis_types::TokensReport {
+            input_tokens:  100_000,
+            output_tokens: 50_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_id: String::new(),
+        };
+        match evaluate_token_budget(Some(&report), 0, &policy) {
+            TokenBudgetVerdict::Reject {
+                cumulative_token_cost_micros,
+                ceiling_micros,
+            } => {
+                assert_eq!(cumulative_token_cost_micros, 1_500_000);
+                assert_eq!(ceiling_micros, 1_000_000);
+            }
+            other => panic!("expected Reject, got {other:?}"),
+        }
+    }
+
+    /// `evaluate_token_budget` admits when the cumulative cost is
+    /// exactly the ceiling (≤ admit; > reject).
+    #[test]
+    fn evaluate_token_budget_admits_at_ceiling_boundary() {
+        // Ceiling = 200 ¢ = 2_000_000 µ$.
+        // 200k input @ $5/M + 50k output @ $20/M = $1 + $1 = $2 = 2_000_000 µ$.
+        let policy = policy_with_pricing_and_ceiling(200, 200_000, 50_000);
+        let report = raxis_types::TokensReport {
+            input_tokens:  200_000,
+            output_tokens: 50_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_id: String::new(),
+        };
+        match evaluate_token_budget(Some(&report), 0, &policy) {
+            TokenBudgetVerdict::Allow {
+                cumulative_token_cost_micros,
+            } => assert_eq!(cumulative_token_cost_micros, 2_000_000),
+            other => panic!("expected Allow at boundary, got {other:?}"),
+        }
+    }
+
+    /// `evaluate_token_budget` returns the previous (higher) cost when
+    /// the new report would compute lower (e.g. planner replaying a
+    /// stale snapshot). The cumulative cost is monotonically
+    /// non-decreasing per the §2.5 contract.
+    #[test]
+    fn evaluate_token_budget_total_is_monotonic_non_decreasing() {
+        let policy = policy_with_pricing_and_ceiling(0, 200_000, 50_000);
+        let lower_report = raxis_types::TokensReport {
+            input_tokens:  100_000,
+            output_tokens: 50_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_id: String::new(),
+        };
+        // Previous cost is higher than what the new (smaller) report
+        // would compute. Admission must keep the previous total.
+        match evaluate_token_budget(Some(&lower_report), /*prev*/ 9_999_999, &policy) {
+            TokenBudgetVerdict::Allow {
+                cumulative_token_cost_micros,
+            } => assert_eq!(cumulative_token_cost_micros, 9_999_999),
+            other => panic!("expected Allow with monotonic total, got {other:?}"),
+        }
+    }
+
+    /// `cost_micros_for_tokens` falls back to worst-of-N when
+    /// `provider_id` is empty.
+    #[test]
+    fn token_cost_worst_of_n_on_empty_provider_id() {
+        let mut policy = PolicyBundle::for_tests_with_operators(
+            Vec::<OperatorEntry>::new(),
+        );
+        policy.set_providers_for_tests(vec![
+            // Cheap: $1/M input + $1/M output.
+            make_provider("cheap",   1_000_000, 1_000_000),
+            // Expensive: $10/M input + $10/M output (worst-of-N
+            // wins for upper-bound).
+            make_provider("premium",   100_000,   100_000),
+        ]);
+        let report = raxis_types::TokensReport {
+            input_tokens:  1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_id: String::new(),
+        };
+        // Worst-of-N pricing: $10/M × 2M = $20 = 20_000_000 µ$.
+        assert_eq!(cost_micros_for_tokens(&report, &policy), 20_000_000);
+    }
+
+    /// `cost_micros_for_tokens` honours `provider_id` when it matches a
+    /// declared provider with pricing.
+    #[test]
+    fn token_cost_uses_named_provider_when_present() {
+        let mut policy = PolicyBundle::for_tests_with_operators(
+            Vec::<OperatorEntry>::new(),
+        );
+        policy.set_providers_for_tests(vec![
+            make_provider("cheap",   1_000_000, 1_000_000),
+            make_provider("premium",   100_000,   100_000),
+        ]);
+        let report = raxis_types::TokensReport {
+            input_tokens:  1_000_000,
+            output_tokens: 1_000_000,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            provider_id: "cheap".to_owned(),
+        };
+        // Cheap pricing: $1/M × 2M = $2 = 2_000_000 µ$.
+        assert_eq!(cost_micros_for_tokens(&report, &policy), 2_000_000);
     }
 }
