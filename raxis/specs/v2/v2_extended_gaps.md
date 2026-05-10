@@ -313,12 +313,53 @@ the kernel trust boundary.
 
 ---
 
-### §2.4 — In-VM KSB (Kernel State Block) renderer
+### §2.4 — In-VM KSB (Kernel State Block) renderer (V2.5 IMPLEMENTED)
 
-**Current state:** The planner's system prompt is a hardcoded string
-template in `crates/planner-core/src/driver.rs:400-422`. It says
-"you are the executor for task X of initiative Y" but contains no
-live kernel state.
+**Status:** ✅ Implemented in V2.5 (`raxis-ksb` shared crate +
+kernel-side assembly + driver-side fold).
+
+**Implementation surface (v2.5 → main).**
+
+1. `crates/ksb/` — new workspace crate that owns `KsbSnapshot`,
+   `DagRow`, `ReviewerVerdict`, `PendingEscalation`, `CredentialPort`,
+   the `KSB_DELIMITER_OPEN` / `KSB_DELIMITER_CLOSE` /
+   `PLANNER_KSB_ENV` / `KSB_SCHEMA_VERSION` constants, the
+   `render_ksb` deterministic renderer, and `assemble_system_prompt`.
+   `crates/planner-core/src/ksb.rs` is now a thin re-export so older
+   import paths keep working.
+2. `kernel/src/initiatives/ksb_assembly.rs` — projects live state
+   (initiative + task rows, `PlanRegistry`, escalations) into a
+   `KsbSnapshot`. Provides `fallback_snapshot` so transient SQLite
+   contention never blocks initiative activation.
+3. `kernel/src/session_spawn_orchestrator.rs` — both
+   `spawn_orchestrator_for_initiative` and `spawn_executor_for_task`
+   call `assemble_ksb_snapshot` (off the tokio worker via
+   `spawn_blocking`), serialize to JSON, and stamp into the guest env
+   as `RAXIS_PLANNER_KSB`. `LiveOrchestratorSpawn::new` takes
+   `Arc<PlanRegistry>` so the spawn path can read plan-side fields.
+4. `crates/planner-core/src/driver.rs` —
+   `run_role_session_with_env_fn` reads `RAXIS_PLANNER_KSB`,
+   deserializes to `Option<KsbSnapshot>`, and feeds
+   `run_role_session_with_model`. The system prompt is built via
+   `raxis_ksb::assemble_system_prompt(NNSP, snap)` when present; the
+   NNSP-only path remains for unit tests that pass `None`.
+
+**Tests.** `raxis-ksb` ships 21 unit tests (deterministic render,
+delimiter sanitization, JSON round-trip, field-order stability).
+`planner-core::driver` adds two new tests pinning the KSB-fold
+contract (`run_role_session_with_model_folds_ksb_snapshot_into_system_prompt`
+and `run_role_session_with_model_uses_nnsp_only_when_no_ksb_supplied`).
+Kernel binary tests (750) and integration tests stay green.
+
+**Invariant safety.** Unchanged from §2.4 invariant note above:
+KSB is read-only, stamped into the guest env at spawn time, and the
+agent cannot modify it.
+
+**Original problem statement (preserved for context).** The planner's
+system prompt was previously a hardcoded string template in
+`crates/planner-core/src/driver.rs:400-422`. It said "you are the
+executor for task X of initiative Y" but contained no live kernel
+state.
 
 **What KSB is.** The Kernel State Block is a structured JSON
 document the kernel assembles at session activation time, containing:
@@ -969,8 +1010,8 @@ The following invariants must be reviewed:
 |---|---|---|---|
 | 🟢 DONE | §1.1 | Plan `description` REQUIRED + `RAXIS_PLANNER_TASK_PROMPT` unconditional stamp | ~50 |
 | 🟢 DONE | §1.2 | Integration merge Phase 2 (host-side fast-forward) inline + `MergeFastForwardFailed` audit | ~140 |
+| 🟢 DONE | §2.4 | In-VM KSB renderer (`raxis-ksb` + kernel assembly + driver fold) | ~300 |
 | 🟡 P1 | §2.1 | `SubscribeInitiative` | ~80 |
-| 🟡 P1 | §2.4 | In-VM KSB renderer | ~300 |
 | 🟡 P1 | §3.2 | `StructuredOutput` (fixed enum) | ~310 |
 | 🟡 P1 | §2.5 | Token-limit enforcement | ~210 |
 | 🟡 P2 | §3.1 | `Sleep` tool | ~90 |
