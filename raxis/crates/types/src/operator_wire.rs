@@ -289,6 +289,16 @@ pub enum OperatorRequest {
     DescribeInitiativePause {
         initiative_id: String,
     },
+
+    /// `v2_extended_gaps.md §3.2 StructuredOutput tool`
+    /// (`raxis task outputs <task_id>`).
+    ///
+    /// Lists every typed structured output emitted under
+    /// `task_id`, ordered by `emitted_at` ascending. Read-only;
+    /// upholds `INV-OPERATOR-ERG-01`.
+    ListTaskOutputs {
+        task_id: String,
+    },
 }
 
 /// Scope of an approval token issued for a `Pending` escalation.
@@ -308,6 +318,27 @@ pub struct ApprovalScopeWire {
     /// Lifetime of the issued token, in seconds from `issued_at`.
     /// `0` is rejected by the kernel.
     pub valid_for_seconds: u64,
+}
+
+/// Wire-shape of a single row of the `structured_outputs`
+/// table, surfaced through `OperatorResponse::TaskOutputsListed`.
+///
+/// `kind` is one of `progress_report` / `diagnostic_flag` /
+/// `task_summary` (the same string used by the executor's
+/// `structured_output` tool). `severity` is `Some(...)` only
+/// for `diagnostic_flag` rows. `payload_json` is the verbatim
+/// JSON the kernel persisted (already validated /
+/// normalised at admission time).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TaskOutputWire {
+    pub output_id:     String,
+    pub initiative_id: String,
+    pub task_id:       String,
+    pub session_id:    String,
+    pub kind:          String,
+    pub severity:      Option<String>,
+    pub payload_json:  String,
+    pub emitted_at:    i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -456,6 +487,20 @@ pub enum OperatorResponse {
         is_paused:               bool,
         paused_at:               Option<i64>,
         outstanding_escalations: Vec<String>,
+    },
+
+    /// Response to `ListTaskOutputs`. Each entry is the
+    /// canonical wire shape for a single row of the
+    /// `structured_outputs` table.
+    ///
+    /// `payload_json` is the verbatim JSON string the kernel
+    /// stored in `structured_outputs.payload_json`; the CLI is
+    /// responsible for pretty-printing or filtering it. The
+    /// kernel has already validated and normalised the payload
+    /// at admission time (`StructuredOutputKind::validate_and_normalise`).
+    TaskOutputsListed {
+        task_id: String,
+        outputs: Vec<TaskOutputWire>,
     },
 
     /// Single canonical error envelope. `code` is an opaque short string
@@ -1203,6 +1248,93 @@ mod tests {
                     "is_paused": true,
                     "paused_at": 1_700_000_000_i64,
                     "outstanding_escalations": ["esc-1", "esc-2"]
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn list_task_outputs_request_wire_shape() {
+        round_trip(
+            &OperatorRequest::ListTaskOutputs { task_id: "task-1".into() },
+            json!({
+                "op": "ListTaskOutputs",
+                "payload": { "task_id": "task-1" }
+            }),
+        );
+    }
+
+    #[test]
+    fn task_outputs_listed_response_wire_shape_empty() {
+        round_trip(
+            &OperatorResponse::TaskOutputsListed {
+                task_id: "task-1".into(),
+                outputs: vec![],
+            },
+            json!({
+                "status": "TaskOutputsListed",
+                "payload": {
+                    "task_id": "task-1",
+                    "outputs": [],
+                }
+            }),
+        );
+    }
+
+    #[test]
+    fn task_outputs_listed_response_wire_shape_full() {
+        round_trip(
+            &OperatorResponse::TaskOutputsListed {
+                task_id: "task-1".into(),
+                outputs: vec![
+                    TaskOutputWire {
+                        output_id:     "out-1".into(),
+                        initiative_id: "init-1".into(),
+                        task_id:       "task-1".into(),
+                        session_id:    "sess-1".into(),
+                        kind:          "diagnostic_flag".into(),
+                        severity:      Some("warning".into()),
+                        payload_json:  r#"{"DiagnosticFlag":{"severity":"warning","message":"x"}}"#.into(),
+                        emitted_at:    1_700_000_000,
+                    },
+                    TaskOutputWire {
+                        output_id:     "out-2".into(),
+                        initiative_id: "init-1".into(),
+                        task_id:       "task-1".into(),
+                        session_id:    "sess-1".into(),
+                        kind:          "progress_report".into(),
+                        severity:      None,
+                        payload_json:  r#"{"ProgressReport":{}}"#.into(),
+                        emitted_at:    1_700_000_010,
+                    },
+                ],
+            },
+            json!({
+                "status": "TaskOutputsListed",
+                "payload": {
+                    "task_id": "task-1",
+                    "outputs": [
+                        {
+                            "output_id": "out-1",
+                            "initiative_id": "init-1",
+                            "task_id": "task-1",
+                            "session_id": "sess-1",
+                            "kind": "diagnostic_flag",
+                            "severity": "warning",
+                            "payload_json": r#"{"DiagnosticFlag":{"severity":"warning","message":"x"}}"#,
+                            "emitted_at": 1_700_000_000_i64,
+                        },
+                        {
+                            "output_id": "out-2",
+                            "initiative_id": "init-1",
+                            "task_id": "task-1",
+                            "session_id": "sess-1",
+                            "kind": "progress_report",
+                            "severity": null,
+                            "payload_json": r#"{"ProgressReport":{}}"#,
+                            "emitted_at": 1_700_000_010_i64,
+                        }
+                    ],
                 }
             }),
         );

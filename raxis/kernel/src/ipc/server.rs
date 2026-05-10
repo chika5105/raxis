@@ -1237,6 +1237,7 @@ mod planner_dispatch_log_tests {
             critique:         None,
             resolved_via_escalation: None,
             tokens_used:      None,
+            structured_output: None,
         }
     }
 

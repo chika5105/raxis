@@ -598,11 +598,23 @@ would create an unvalidatable surface.
 
 **Output kind enum (Rust):**
 
+> [!IMPORTANT]
+> **Wire shape (INV-IPC-BINCODE).** The enum uses the **default
+> external-tag** serde representation (NOT
+> `#[serde(tag = "kind")]` as an earlier draft suggested). The
+> canonical IPC encoder is `bincode::serde` which does NOT
+> support `serde::deserialize_any` and rejects internally-tagged
+> enums with `Decode(Serde(AnyNotSupported))`. The
+> snake-case `kind` discriminator the model and CLI speak is
+> bridged to the external-tag wire shape by the
+> `parse_structured_output_input` helper in
+> `crates/planner-core/src/tools.rs` and surfaced for SQL
+> projections via `StructuredOutputKind::variant_tag()`.
+
 ```rust
 /// Typed mid-session output kinds. Each variant has a fixed schema
 /// the kernel validates before accepting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StructuredOutputKind {
     /// Mid-session progress snapshot. The kernel stores it as an
     /// audit event; the operator dashboard (§4) renders it as a
@@ -669,32 +681,49 @@ pub enum DiagnosticSeverity {
 }
 ```
 
-**Implementation.**
+**Implementation status: ✅ shipped (V2.5).**
 
 1. **Types.** `StructuredOutputKind` + `DiagnosticSeverity` in
-   `crates/types/src/structured_output.rs`. Serde-tagged enum with
-   validation (clamp confidence, truncate strings). ~80 lines.
-2. **Tool handler.** In `crates/planner-core/src/tools.rs`, add
-   `structured_output` to the executor and orchestrator registries
-   (NOT reviewer). Parse input → validate → submit to kernel via
-   `IntentSubmitter`. ~60 lines.
-3. **Kernel IPC handler.** New `IntentKind::StructuredOutput`.
-   Validate the payload against the enum. Store as an audit event
-   (`AuditEventKind::StructuredOutputEmitted`). For
-   `DiagnosticFlag { severity: Critical }`, optionally create an
-   escalation. ~100 lines.
-4. **Store.** New `structured_outputs` table:
-   `(output_id, initiative_id, task_id, session_id, kind, payload_json, emitted_at)`.
-   Read-only view for CLI / dashboard. ~40 lines.
-5. **CLI.** `raxis task outputs <task-id>` — list structured
-   outputs for a task. ~30 lines.
+   `crates/types/src/structured_output.rs`. External-tag serde
+   enum (see Wire shape note above) with `validate_and_normalise`
+   (clamp confidence, truncate over-cap strings, reject non-hex
+   `commit_sha`) + size constants
+   (`STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES`,
+   `STRUCTURED_OUTPUT_MAX_APPROACH_BYTES`,
+   `STRUCTURED_OUTPUT_MAX_PATH_LIST_LEN`,
+   `STRUCTURED_OUTPUT_MAX_PATH_BYTES`,
+   `STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT`).
+2. **Tool handler.** `StructuredOutputTool` in
+   `crates/planner-core/src/tools.rs` registered into
+   `build_executor_registry_full` /
+   `build_orchestrator_registry_full` (NOT reviewer — pinned by
+   `reviewer_registry_never_includes_structured_output` test).
+   Parses snake-case input → bridges to external-tag wire enum →
+   submits via `IntentSubmitter::submit_structured_output`.
+3. **Kernel IPC handler.** `IntentKind::StructuredOutput` arm in
+   `kernel/src/handlers/intent.rs::run_phase_a` dispatches to
+   `handle_structured_output` (validate → rate-limit COUNT +
+   INSERT in one BEGIN IMMEDIATE tx → `StructuredOutputEmitted`
+   audit emit → NON-TERMINAL Accepted response). The handler
+   does NOT auto-escalate `DiagnosticFlag { severity: Critical }`
+   in V2.5 — operator dashboards are the routing surface; an
+   auto-escalation would be a policy decision (the kernel is the
+   reference monitor, not the policy engine).
+4. **Store.** Migration 13 creates `structured_outputs`:
+   `(output_id, initiative_id, task_id, session_id, kind,
+   severity, payload_json, emitted_at)`. Indexes on
+   `(task_id, emitted_at)`, `(initiative_id, emitted_at)`,
+   `(session_id)` so the CLI / dashboard read paths and the
+   per-session rate-limit COUNT all run as index probes.
+5. **CLI.** `raxis task outputs <task-id>` exposed by
+   `cli/src/commands/task_outputs.rs`. Read-only.
 
-**Estimate:** ~310 lines.
-
-**Rate limiting.** The kernel enforces a per-session output rate
-limit (e.g., 10 outputs per session) to prevent a runaway agent
-from flooding the audit chain. Exceeding the limit returns
-`FAIL_STRUCTURED_OUTPUT_RATE_LIMITED`.
+**Rate limiting.** The kernel enforces
+`STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT` (currently 10) outputs
+per session. Exceeding the limit returns
+`FAIL_STRUCTURED_OUTPUT_RATE_LIMITED`. The COUNT + INSERT run
+inside one `BEGIN IMMEDIATE` so concurrent submissions on the
+same session cannot race past the cap.
 
 ---
 

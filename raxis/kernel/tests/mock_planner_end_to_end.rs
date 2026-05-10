@@ -155,6 +155,7 @@ impl MockPlanner {
             critique: None,
             resolved_via_escalation: None,
             tokens_used: None,
+            structured_output: None,
         }
     }
 

@@ -900,6 +900,249 @@ impl Tool for SleepTool {
 }
 
 // ---------------------------------------------------------------------------
+// StructuredOutputTool — V2 §3.2 typed mid-session output.
+// ---------------------------------------------------------------------------
+
+/// **`v2_extended_gaps.md §3.2` typed mid-session communication.**
+///
+/// The `structured_output` tool ships a closed-enum payload to the
+/// kernel via the planner UDS (R-2 — Mediated I/O). Three variants:
+///
+///   * `progress_report` — files modified, tests passing/failing,
+///     confidence in `[0.0, 1.0]`.
+///   * `diagnostic_flag` — severity (`info` / `warning` / `critical`),
+///     operator-facing message, optional source-location evidence.
+///   * `task_summary`    — final commit SHA, changed paths,
+///     one-paragraph approach.
+///
+/// **Authority.** Registered in the executor + orchestrator
+/// registries only; the reviewer registry never has it
+/// (INV-PLANNER-HARNESS-02). NOT a terminal tool — the dispatch
+/// loop keeps running after a successful submission.
+///
+/// **Wire shape.** The model invokes the tool with
+/// `{ "kind": "progress_report", "files_modified": [...], ... }`
+/// (snake-case `kind` discriminator + variant fields). The tool
+/// parses into [`StructuredOutputKind`] (which uses the default
+/// external-tag serde representation for `bincode::serde`
+/// compatibility) by manually mapping the snake-case `kind`
+/// string to the matching variant. This is the ONLY place in
+/// the planner stack that bridges the model's snake-case
+/// projection to the external-tag wire shape; downstream
+/// handlers see the canonical bincode shape.
+pub struct StructuredOutputTool {
+    submitter: Arc<crate::intent::IntentSubmitter>,
+}
+
+impl StructuredOutputTool {
+    /// Construct a new `structured_output` tool wired to the
+    /// session-scoped [`crate::intent::IntentSubmitter`].
+    pub fn new(submitter: Arc<crate::intent::IntentSubmitter>) -> Self {
+        Self { submitter }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tool for StructuredOutputTool {
+    fn name(&self) -> &'static str { "structured_output" }
+    fn description(&self) -> &'static str {
+        "Emit a typed mid-session structured output to the kernel: \
+         a progress report, a diagnostic flag, or a task summary. \
+         NON-TERMINAL — the session continues. Use this to surface \
+         operator-actionable signals (test counts, severity-tagged \
+         findings, hand-off summaries) without consuming a commit \
+         intent. Each session has a hard cap on the number of \
+         structured outputs it can emit; over-cap submissions return \
+         a structured error."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["kind"],
+            "properties": {
+                "kind": {
+                    "type":        "string",
+                    "enum":        ["progress_report", "diagnostic_flag", "task_summary"],
+                    "description": "Which structured output variant to emit. \
+                                   The remaining required fields depend on \
+                                   this discriminator.",
+                },
+                "files_modified": {
+                    "type":  "array",
+                    "items": { "type": "string" },
+                    "description": "progress_report only: workspace-relative \
+                                   paths the executor has touched so far.",
+                },
+                "tests_passing": {
+                    "type":    "integer",
+                    "minimum": 0,
+                    "description": "progress_report only: tests that passed \
+                                   in the most-recent run.",
+                },
+                "tests_failing": {
+                    "type":    "integer",
+                    "minimum": 0,
+                    "description": "progress_report only: tests that failed \
+                                   in the most-recent run.",
+                },
+                "confidence": {
+                    "type":    "number",
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "progress_report only: self-reported \
+                                   confidence in `[0.0, 1.0]`. Out-of-range \
+                                   values are clamped, not rejected.",
+                },
+                "severity": {
+                    "type":        "string",
+                    "enum":        ["info", "warning", "critical"],
+                    "description": "diagnostic_flag only: severity drives \
+                                   notification routing.",
+                },
+                "message": {
+                    "type":        "string",
+                    "description": "diagnostic_flag only: operator-facing \
+                                   message. Capped at 1024 bytes; longer \
+                                   payloads are truncated, not rejected.",
+                },
+                "evidence": {
+                    "type":        "string",
+                    "description": "diagnostic_flag only (optional): file path \
+                                   or `path:line` reference to the relevant \
+                                   source location.",
+                },
+                "commit_sha": {
+                    "type":        "string",
+                    "description": "task_summary only: 40-char hex commit SHA.",
+                },
+                "changed_paths": {
+                    "type":  "array",
+                    "items": { "type": "string" },
+                    "description": "task_summary only: workspace-relative paths \
+                                   the executor authored.",
+                },
+                "approach": {
+                    "type":        "string",
+                    "description": "task_summary only: one-paragraph rationale \
+                                   (capped at 2048 bytes; longer payloads are \
+                                   truncated).",
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        input: &serde_json::Value,
+        _ctx:  &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let payload = match parse_structured_output_input(input) {
+            Ok(p)  => p,
+            Err(e) => return Ok(ToolOutput::err(format!(
+                "FAIL_STRUCTURED_OUTPUT_INVALID: {e}"
+            ))),
+        };
+        // Stable variant tag for the model-facing OK message.
+        let variant_tag = payload.variant_tag();
+
+        match self.submitter.submit_structured_output(payload).await {
+            Ok(resp) => match resp.outcome {
+                raxis_types::IntentOutcome::Accepted { .. } => Ok(ToolOutput::ok(
+                    format!("structured_output_emitted: kind={variant_tag}"),
+                )),
+                raxis_types::IntentOutcome::Rejected { error_code, .. } => {
+                    Ok(ToolOutput::err(format!(
+                        "kernel rejected structured_output: {error_code}"
+                    )))
+                }
+            },
+            Err(e) => Ok(ToolOutput::err(format!(
+                "structured_output transport error: {e}"
+            ))),
+        }
+    }
+}
+
+/// Translate the model-facing snake-case `kind` discriminator + tag
+/// fields into the wire-shape [`raxis_types::StructuredOutputKind`].
+/// The wire enum uses the default external-tag serde representation
+/// (for `bincode::serde` compatibility) but the model and the JSON
+/// schema we advertise speak snake-case `kind`. This function is the
+/// single bridge between the two.
+fn parse_structured_output_input(
+    v: &serde_json::Value,
+) -> Result<raxis_types::StructuredOutputKind, String> {
+    use raxis_types::{DiagnosticSeverity, StructuredOutputKind};
+
+    let kind = v.get("kind")
+        .and_then(|k| k.as_str())
+        .ok_or_else(|| "missing or non-string `kind`".to_owned())?;
+    match kind {
+        "progress_report" => {
+            let files_modified = v.get("files_modified")
+                .map(|f| serde_json::from_value::<Vec<String>>(f.clone())
+                    .map_err(|e| format!("`files_modified`: {e}")))
+                .transpose()?
+                .unwrap_or_default();
+            let tests_passing = v.get("tests_passing")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0) as u32;
+            let tests_failing = v.get("tests_failing")
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0) as u32;
+            let confidence = v.get("confidence")
+                .and_then(|c| c.as_f64())
+                .unwrap_or(0.0) as f32;
+            Ok(StructuredOutputKind::ProgressReport {
+                files_modified, tests_passing, tests_failing, confidence,
+            })
+        }
+        "diagnostic_flag" => {
+            let severity = match v.get("severity").and_then(|s| s.as_str()) {
+                Some("info")     => DiagnosticSeverity::Info,
+                Some("warning")  => DiagnosticSeverity::Warning,
+                Some("critical") => DiagnosticSeverity::Critical,
+                Some(other)      => return Err(format!(
+                    "unknown severity {other:?}; expected info/warning/critical"
+                )),
+                None             => return Err(
+                    "diagnostic_flag requires `severity`".to_owned()
+                ),
+            };
+            let message = v.get("message")
+                .and_then(|m| m.as_str())
+                .ok_or_else(|| "diagnostic_flag requires `message`".to_owned())?
+                .to_owned();
+            let evidence = v.get("evidence")
+                .and_then(|e| e.as_str())
+                .map(str::to_owned);
+            Ok(StructuredOutputKind::DiagnosticFlag { severity, message, evidence })
+        }
+        "task_summary" => {
+            let commit_sha = v.get("commit_sha")
+                .and_then(|s| s.as_str())
+                .ok_or_else(|| "task_summary requires `commit_sha`".to_owned())?
+                .to_owned();
+            let changed_paths = v.get("changed_paths")
+                .map(|p| serde_json::from_value::<Vec<String>>(p.clone())
+                    .map_err(|e| format!("`changed_paths`: {e}")))
+                .transpose()?
+                .unwrap_or_default();
+            let approach = v.get("approach")
+                .and_then(|a| a.as_str())
+                .ok_or_else(|| "task_summary requires `approach`".to_owned())?
+                .to_owned();
+            Ok(StructuredOutputKind::TaskSummary {
+                commit_sha, changed_paths, approach,
+            })
+        }
+        other => Err(format!(
+            "unknown structured_output kind {other:?}; expected one of \
+             progress_report, diagnostic_flag, task_summary"
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Role-specific registry constructors
 // ---------------------------------------------------------------------------
 
@@ -977,6 +1220,43 @@ pub fn build_orchestrator_registry_with_sleep(
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
+    r
+}
+
+/// **V2 `v2_extended_gaps.md §3.1 + §3.2`** — full executor registry
+/// wired to the operator-declared policy ceilings AND the
+/// session-scoped `IntentSubmitter`. Use from the executor binary's
+/// `main.rs` once the submitter is constructed.
+///
+/// The §3.2 `structured_output` tool requires an `IntentSubmitter`
+/// (it ships its payload via the planner UDS); supplying it here
+/// keeps the registry constructors purely declarative — the
+/// dispatch loop never needs to know which tools require IPC.
+pub fn build_executor_registry_full(
+    max_per_call_seconds:   u32,
+    max_cumulative_seconds: u32,
+    submitter:              Arc<crate::intent::IntentSubmitter>,
+) -> ToolRegistry {
+    let mut r = build_executor_registry_with_sleep(
+        max_per_call_seconds, max_cumulative_seconds,
+    );
+    r.register(Arc::new(StructuredOutputTool::new(submitter)));
+    r
+}
+
+/// **V2 `v2_extended_gaps.md §3.1 + §3.2`** — full orchestrator
+/// registry wired to the operator-declared policy ceilings AND the
+/// session-scoped `IntentSubmitter`. Mirror of
+/// [`build_executor_registry_full`] for the orchestrator role.
+pub fn build_orchestrator_registry_full(
+    max_per_call_seconds:   u32,
+    max_cumulative_seconds: u32,
+    submitter:              Arc<crate::intent::IntentSubmitter>,
+) -> ToolRegistry {
+    let mut r = build_orchestrator_registry_with_sleep(
+        max_per_call_seconds, max_cumulative_seconds,
+    );
+    r.register(Arc::new(StructuredOutputTool::new(submitter)));
     r
 }
 
@@ -1292,5 +1572,121 @@ mod tests {
         let mut r = ToolRegistry::new();
         r.register(Arc::new(ReadFileTool));
         r.register(Arc::new(ReadFileTool));
+    }
+
+    // ── StructuredOutputTool input parsing (V2 §3.2) ──────────────────────
+
+    /// Reviewer registry MUST NOT include `structured_output` even
+    /// after the V2.5 §3.2 wiring (R-5 — Bounded capabilities;
+    /// INV-PLANNER-HARNESS-02). Both the bare `_with_sleep` variant
+    /// and the `_full` constructor (which would normally include it
+    /// for the executor / orchestrator) MUST keep the reviewer
+    /// fenced. Pin the rule at the construction layer so a future
+    /// "let me just add structured_output for the reviewer too"
+    /// regression fails this test.
+    #[test]
+    fn reviewer_registry_never_includes_structured_output() {
+        let r = build_reviewer_registry();
+        assert!(r.get("structured_output").is_none(),
+            "reviewer MUST NOT have structured_output (V2 §3.2 R-5)");
+    }
+
+    /// `parse_structured_output_input` translates the model's
+    /// snake-case `kind` discriminator into the matching
+    /// [`raxis_types::StructuredOutputKind`] variant. The wire enum
+    /// uses external-tag serde for `bincode::serde` compatibility;
+    /// this helper is the single bridge so the model never sees
+    /// the bincode shape.
+    #[test]
+    fn parse_structured_output_progress_report_round_trip() {
+        let v = serde_json::json!({
+            "kind":           "progress_report",
+            "files_modified": ["a.rs", "b.rs"],
+            "tests_passing":  3,
+            "tests_failing":  1,
+            "confidence":     0.75,
+        });
+        let p = parse_structured_output_input(&v).unwrap();
+        match p {
+            raxis_types::StructuredOutputKind::ProgressReport {
+                files_modified, tests_passing, tests_failing, confidence,
+            } => {
+                assert_eq!(files_modified, vec!["a.rs", "b.rs"]);
+                assert_eq!(tests_passing, 3);
+                assert_eq!(tests_failing, 1);
+                assert!((confidence - 0.75).abs() < 1e-6);
+            }
+            other => panic!("expected ProgressReport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_structured_output_diagnostic_flag_round_trip() {
+        let v = serde_json::json!({
+            "kind":     "diagnostic_flag",
+            "severity": "critical",
+            "message":  "auth bypass!",
+            "evidence": "src/auth.rs:42",
+        });
+        let p = parse_structured_output_input(&v).unwrap();
+        assert_eq!(p.variant_tag(), "diagnostic_flag");
+        match p {
+            raxis_types::StructuredOutputKind::DiagnosticFlag {
+                severity, message, evidence,
+            } => {
+                assert_eq!(severity, raxis_types::DiagnosticSeverity::Critical);
+                assert_eq!(message, "auth bypass!");
+                assert_eq!(evidence.as_deref(), Some("src/auth.rs:42"));
+            }
+            other => panic!("expected DiagnosticFlag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_structured_output_task_summary_round_trip() {
+        let v = serde_json::json!({
+            "kind":          "task_summary",
+            "commit_sha":    "0".repeat(40),
+            "changed_paths": ["x.rs"],
+            "approach":      "split into helper",
+        });
+        let p = parse_structured_output_input(&v).unwrap();
+        match p {
+            raxis_types::StructuredOutputKind::TaskSummary {
+                commit_sha, changed_paths, approach,
+            } => {
+                assert_eq!(commit_sha, "0".repeat(40));
+                assert_eq!(changed_paths, vec!["x.rs"]);
+                assert_eq!(approach, "split into helper");
+            }
+            other => panic!("expected TaskSummary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_structured_output_rejects_unknown_kind() {
+        let v = serde_json::json!({ "kind": "alien_kind" });
+        let err = parse_structured_output_input(&v).unwrap_err();
+        assert!(err.contains("unknown structured_output kind"),
+            "error: {err}");
+    }
+
+    #[test]
+    fn parse_structured_output_rejects_missing_kind() {
+        let v = serde_json::json!({ "severity": "info" });
+        let err = parse_structured_output_input(&v).unwrap_err();
+        assert!(err.contains("`kind`"));
+    }
+
+    #[test]
+    fn parse_structured_output_diagnostic_flag_requires_message_and_severity() {
+        // missing severity
+        let v = serde_json::json!({ "kind": "diagnostic_flag", "message": "x" });
+        let err = parse_structured_output_input(&v).unwrap_err();
+        assert!(err.contains("severity"));
+        // missing message
+        let v = serde_json::json!({ "kind": "diagnostic_flag", "severity": "info" });
+        let err = parse_structured_output_input(&v).unwrap_err();
+        assert!(err.contains("message"));
     }
 }

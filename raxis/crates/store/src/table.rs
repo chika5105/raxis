@@ -246,6 +246,17 @@ pub enum Table {
     /// re-submission of the same merge cannot race past the check.
     /// Foreign key on `initiative_id` references `initiatives(id)`.
     IntegrationMergeAttempts,
+
+    /// **V2 `v2_extended_gaps.md §3.2`** — typed mid-session
+    /// outputs (progress reports, diagnostic flags, task summaries)
+    /// emitted by executor / orchestrator agents via the
+    /// `structured_output` planner tool. Read-only from CLI +
+    /// dashboard; write path is the kernel intent handler at
+    /// `handlers::intent::handle_structured_output` exclusively.
+    ///
+    /// Schema: `(output_id, initiative_id, task_id, session_id,
+    ///           kind, severity, payload_json, emitted_at)`.
+    StructuredOutputs,
 }
 
 impl Table {
@@ -290,6 +301,7 @@ impl Table {
             Self::PlanBundleNoncesSeen      => "plan_bundle_nonces_seen",
             Self::TaskCredentialProxies     => "task_credential_proxies",
             Self::IntegrationMergeAttempts  => "integration_merge_attempts",
+            Self::StructuredOutputs         => "structured_outputs",
         }
     }
 }
@@ -318,10 +330,19 @@ mod tests {
             Table::PlanBundles, Table::PlanBundleArtifacts, Table::PlanBundleNoncesSeen,
             Table::TaskCredentialProxies,
             Table::IntegrationMergeAttempts,
+            Table::StructuredOutputs,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
         }
+    }
+
+    /// V2 §3.2 structured outputs table name is wire-stable (the
+    /// CLI `raxis task outputs` and the dashboard read this table
+    /// using its literal name in production SQL).
+    #[test]
+    fn structured_outputs_table_name_is_pinned() {
+        assert_eq!(Table::StructuredOutputs.as_str(), "structured_outputs");
     }
 
     /// V2 plan-bundle-sealing table names are wire-stable (the kernel's

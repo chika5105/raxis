@@ -110,6 +110,8 @@ pub fn evaluate_dispatch(
         (ActivateSubTask,  None) => Unauthorized,
         (RetrySubTask,     None) => Unauthorized,
         (SubmitReview,     None) => Unauthorized,
+        // V2 §3.2: V1 sessions cannot emit StructuredOutput.
+        (StructuredOutput, None) => Unauthorized,
 
         // ── Orchestrator row ─────────────────────────────────────────
         // Step 8: Orchestrator owns IntegrationMerge (and only the
@@ -129,6 +131,9 @@ pub fn evaluate_dispatch(
         (ActivateSubTask,  Some(Orchestrator)) => Authorized,
         (RetrySubTask,     Some(Orchestrator)) => Authorized,
         (SubmitReview,     Some(Orchestrator)) => Unauthorized,
+        // V2 §3.2: Orchestrator can emit a TaskSummary handoff /
+        // ProgressReport / DiagnosticFlag mid-DAG.
+        (StructuredOutput, Some(Orchestrator)) => Authorized,
 
         // ── Executor row ─────────────────────────────────────────────
         // The Executor's job is to produce commits and complete
@@ -143,6 +148,9 @@ pub fn evaluate_dispatch(
         (ActivateSubTask,  Some(Executor)) => Unauthorized,
         (RetrySubTask,     Some(Executor)) => Unauthorized,
         (SubmitReview,     Some(Executor)) => Unauthorized,
+        // V2 §3.2: Executor emits ProgressReport / DiagnosticFlag /
+        // TaskSummary mid-task.
+        (StructuredOutput, Some(Executor)) => Authorized,
 
         // ── Reviewer row ─────────────────────────────────────────────
         // The Reviewer's only authorized intent is SubmitReview.
@@ -161,6 +169,9 @@ pub fn evaluate_dispatch(
         (ActivateSubTask,  Some(Reviewer)) => Unauthorized,
         (RetrySubTask,     Some(Reviewer)) => Unauthorized,
         (SubmitReview,     Some(Reviewer)) => Authorized,
+        // V2 §3.2 / INV-PLANNER-HARNESS-02: Reviewer is a
+        // Pure-Static actor and NEVER emits structured output.
+        (StructuredOutput, Some(Reviewer)) => Unauthorized,
     }
 }
 
@@ -172,7 +183,7 @@ pub fn evaluate_dispatch(
 mod tests {
     use super::*;
 
-    /// The matrix is a 7×4 grid (7 intent kinds × 3 agent types + 1
+    /// The matrix is an 8×4 grid (8 intent kinds × 3 agent types + 1
     /// NULL backward-compat row) with each cell labelled `Authorized`
     /// or `Unauthorized`. We enumerate every cell explicitly so that
     /// any future table-edit silently breaks this test instead of
@@ -189,6 +200,7 @@ mod tests {
             (IntentKind::ActivateSubTask,  None, false),
             (IntentKind::RetrySubTask,     None, false),
             (IntentKind::SubmitReview,     None, false),
+            (IntentKind::StructuredOutput, None, false),
 
             // Orchestrator
             (IntentKind::SingleCommit,     Some(SessionAgentType::Orchestrator), false),
@@ -198,6 +210,7 @@ mod tests {
             (IntentKind::ActivateSubTask,  Some(SessionAgentType::Orchestrator), true),
             (IntentKind::RetrySubTask,     Some(SessionAgentType::Orchestrator), true),
             (IntentKind::SubmitReview,     Some(SessionAgentType::Orchestrator), false),
+            (IntentKind::StructuredOutput, Some(SessionAgentType::Orchestrator), true),
 
             // Executor
             (IntentKind::SingleCommit,     Some(SessionAgentType::Executor), true),
@@ -207,6 +220,7 @@ mod tests {
             (IntentKind::ActivateSubTask,  Some(SessionAgentType::Executor), false),
             (IntentKind::RetrySubTask,     Some(SessionAgentType::Executor), false),
             (IntentKind::SubmitReview,     Some(SessionAgentType::Executor), false),
+            (IntentKind::StructuredOutput, Some(SessionAgentType::Executor), true),
 
             // Reviewer
             (IntentKind::SingleCommit,     Some(SessionAgentType::Reviewer), false),
@@ -216,12 +230,13 @@ mod tests {
             (IntentKind::ActivateSubTask,  Some(SessionAgentType::Reviewer), false),
             (IntentKind::RetrySubTask,     Some(SessionAgentType::Reviewer), false),
             (IntentKind::SubmitReview,     Some(SessionAgentType::Reviewer), true),
+            (IntentKind::StructuredOutput, Some(SessionAgentType::Reviewer), false),
         ];
 
-        // 7 kinds × (3 agent types + 1 NULL) = 28 cells.
-        assert_eq!(expectations.len(), 7 * 4,
-            "matrix coverage: 7 IntentKind variants × 4 agent-type \
-             buckets (Orchestrator/Executor/Reviewer/None) = 28 cells. \
+        // 8 kinds × (3 agent types + 1 NULL) = 32 cells.
+        assert_eq!(expectations.len(), 8 * 4,
+            "matrix coverage: 8 IntentKind variants × 4 agent-type \
+             buckets (Orchestrator/Executor/Reviewer/None) = 32 cells. \
              A mismatch here is a test-data drift, not a matrix bug.");
 
         for (kind, agent_type, expected) in expectations {
@@ -253,9 +268,10 @@ mod tests {
         // Pin both enum lengths so a future variant addition trips
         // this test rather than silently expanding the table outside
         // the explicit coverage above.
-        assert_eq!(IntentKind::ALL.len(), 7,
-            "matrix sized for 7 IntentKind variants; bumping requires \
-             a new row in `evaluate_dispatch` AND a new line in \
+        assert_eq!(IntentKind::ALL.len(), 8,
+            "matrix sized for 8 IntentKind variants (V2 base 7 + V2.5 \
+             `StructuredOutput`); bumping requires a new row in \
+             `evaluate_dispatch` AND a new line in \
              `matrix_authorizes_exactly_the_expected_cells`.");
         assert_eq!(SessionAgentType::ALL.len(), 3,
             "matrix sized for 3 SessionAgentType variants; bumping \

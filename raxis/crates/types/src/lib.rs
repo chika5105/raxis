@@ -23,6 +23,7 @@ pub mod plan_bundle;
 pub mod planner_env;
 pub mod policy;
 pub mod push;
+pub mod structured_output;
 pub mod witness;
 
 // Convenient flat re-exports for the most-used types.
@@ -52,5 +53,11 @@ pub use plan_bundle::{
     BundleArtifact, BundleNonce, BundleSha256, OperatorFingerprint, PlanBundle, SchemaVersion,
 };
 pub use policy::Role;
+pub use structured_output::{
+    DiagnosticSeverity, StructuredOutputKind,
+    STRUCTURED_OUTPUT_MAX_APPROACH_BYTES, STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES,
+    STRUCTURED_OUTPUT_MAX_PATH_BYTES, STRUCTURED_OUTPUT_MAX_PATH_LIST_LEN,
+    STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT,
+};
 pub use push::{KernelPush, KernelPushFrame};
 pub use witness::{WitnessResultClass, WitnessSubmission};

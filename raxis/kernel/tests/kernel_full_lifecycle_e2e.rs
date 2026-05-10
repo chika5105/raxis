@@ -89,6 +89,7 @@ fn build_bogus_intent(seq: u64) -> IntentRequest {
         critique:         None,
         resolved_via_escalation: None,
         tokens_used:      None,
+        structured_output: None,
     }
 }
 

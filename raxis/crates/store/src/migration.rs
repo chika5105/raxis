@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -106,6 +106,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 12 {
         apply_migration_12(conn)?;
+    }
+    if current_version < 13 {
+        apply_migration_13(conn)?;
     }
 
     Ok(())
@@ -1875,6 +1878,91 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 13 — V2 §3.2 `structured_outputs` table.
+//
+// `v2_extended_gaps.md §3.2` typed mid-session outputs (progress
+// reports, diagnostic flags, task summaries) emitted by executor /
+// orchestrator agents via the `structured_output` planner tool.
+//
+// Schema:
+//   * output_id        UUID v4 (PK), kernel-generated.
+//   * initiative_id    text, FK to `initiatives.initiative_id`.
+//   * task_id          text, FK to `tasks.task_id`.
+//   * session_id       text, FK to `sessions.session_id`.
+//   * kind             text, one of {progress_report, diagnostic_flag,
+//                      task_summary} — matches
+//                      `StructuredOutputKind::variant_tag`.
+//   * severity         text, one of {info, warning, critical} for
+//                      `diagnostic_flag` rows; NULL for
+//                      `progress_report` / `task_summary`.
+//   * payload_json     text, the validated/normalised
+//                      `serde_json::to_string` projection of the
+//                      `StructuredOutputKind` enum (tagged
+//                      snake_case).
+//   * emitted_at       integer unix-seconds.
+//
+// Indexes:
+//   * `(task_id, emitted_at)` — `raxis task outputs <id>` query.
+//   * `(initiative_id, emitted_at)` — dashboard initiative view.
+//   * `(session_id)` — per-session rate-limit lookup
+//     (`STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT`).
+//
+// Atomicity: a single INSERT is enough — no FSM transition, no
+// budget reservation. The §3.2 handler runs its INSERT inside the
+// same `BEGIN IMMEDIATE` transaction as the per-session rate-limit
+// COUNT(*) so the count cannot race past the cap.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_13(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_13_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 13 failed: {e}"))
+    })
+}
+
+/// The complete migration-13 DDL.
+pub fn render_migration_13_ddl() -> String {
+    let structured_outputs = Table::StructuredOutputs.as_str();
+    let initiatives        = Table::Initiatives.as_str();
+    let tasks              = Table::Tasks.as_str();
+    let sessions           = Table::Sessions.as_str();
+    let schema_version     = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── structured_outputs: V2 §3.2 typed mid-session outputs ───────────────
+CREATE TABLE {structured_outputs} (
+    output_id      TEXT NOT NULL PRIMARY KEY,
+    initiative_id  TEXT NOT NULL REFERENCES {initiatives}(initiative_id) ON DELETE CASCADE,
+    task_id        TEXT NOT NULL REFERENCES {tasks}(task_id)             ON DELETE CASCADE,
+    session_id     TEXT NOT NULL REFERENCES {sessions}(session_id)       ON DELETE CASCADE,
+    kind           TEXT NOT NULL CHECK (kind IN ('progress_report', 'diagnostic_flag', 'task_summary')),
+    severity       TEXT          CHECK (severity IS NULL OR severity IN ('info', 'warning', 'critical')),
+    payload_json   TEXT NOT NULL,
+    emitted_at     INTEGER NOT NULL
+);
+
+CREATE INDEX idx_{structured_outputs}_task
+    ON {structured_outputs}(task_id, emitted_at);
+
+CREATE INDEX idx_{structured_outputs}_initiative
+    ON {structured_outputs}(initiative_id, emitted_at);
+
+CREATE INDEX idx_{structured_outputs}_session
+    ON {structured_outputs}(session_id);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (13, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2149,6 +2237,12 @@ mod tests {
             //                    swept at boot per §11.10.4 to fold
             //                    crashed mid-flight verifier runs.
             Table::IntegrationMergeAttempts,
+            // Migration 13 — V2 §3.2 typed mid-session structured outputs
+            //                emitted by executor / orchestrator agents
+            //                via the `structured_output` planner tool.
+            //                See `crates/types/src/structured_output.rs`
+            //                for the closed-enum payload shape.
+            Table::StructuredOutputs,
         ]
         .iter()
         .map(|t| t.as_str().to_owned())

@@ -60,7 +60,7 @@ const PLAN_SUBCOMMANDS:        &[&str] = &["approve", "reject", "validate", "fmt
 const SUBMIT_SUBCOMMANDS:      &[&str] = &["plan"];
 const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "list", "quarantine", "show"];
 const OPERATOR_SUBCOMMANDS:    &[&str] = &["quarantine-plans-by"];
-const TASK_SUBCOMMANDS:        &[&str] = &["abort", "resume", "retry"];
+const TASK_SUBCOMMANDS:        &[&str] = &["abort", "resume", "retry", "outputs"];
 const SESSION_SUBCOMMANDS:     &[&str] = &["create", "revoke"];
 const DELEGATION_SUBCOMMANDS:  &[&str] = &["grant"];
 const ESCALATION_SUBCOMMANDS:  &[&str] = &["approve", "deny"];
@@ -241,6 +241,7 @@ fn run() -> Result<(), CliError> {
                 "abort" => commands::task::run_abort(&flags, &rest[1..]),
                 "resume" => commands::task::run_resume(&flags, &rest[1..]),
                 "retry" => commands::task::run_retry(&flags, &rest[1..]),
+                "outputs" => commands::task::run_outputs(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "task sub-command", sub2, TASK_SUBCOMMANDS,
                 ))),

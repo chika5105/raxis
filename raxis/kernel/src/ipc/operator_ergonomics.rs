@@ -739,3 +739,65 @@ struct DescribeOutcome {
     quarantine_row:          Option<raxis_store::views::initiative_quarantines::InitiativeQuarantineRow>,
     outstanding_escalations: Vec<String>,
 }
+
+// ---------------------------------------------------------------------------
+// ListTaskOutputs — v2_extended_gaps.md §3.2 StructuredOutput tool
+// ---------------------------------------------------------------------------
+
+/// Handle `OperatorRequest::ListTaskOutputs`.
+///
+/// Returns every row of `structured_outputs` whose `task_id`
+/// equals the request id, ordered by `emitted_at` ascending.
+/// Read-only; upholds `INV-OPERATOR-ERG-01`.
+///
+/// Returns `Error{FAIL_LIST_TASK_OUTPUTS, …}` on any sqlite
+/// error; an empty list (no outputs emitted yet for the task)
+/// is reported as a successful `TaskOutputsListed { outputs: [] }`
+/// rather than as a failure — the caller's read intent is
+/// satisfied either way.
+pub async fn handle_list_task_outputs(
+    task_id: String,
+    ctx:     &HandlerContext,
+) -> OperatorResponse {
+    let data_dir = ctx.data_dir.clone();
+    let task_for_blk = task_id.clone();
+
+    let join = tokio::task::spawn_blocking(
+        move || -> Result<Vec<raxis_store::views::StructuredOutputRow>, String> {
+            // INV-OPERATOR-ERG-01: short-lived read-only connection
+            // (`SQLITE_OPEN_READ_ONLY`) — write attempts are a type
+            // error against `RoConn`.
+            let ro = raxis_store::ro::open(&data_dir)
+                .map_err(|e| format!("ro open: {e}"))?;
+            raxis_store::views::structured_outputs::list_for_task(&ro, &task_for_blk)
+                .map_err(|e| format!("list_for_task: {e}"))
+        },
+    ).await;
+
+    let rows = match join {
+        Ok(Ok(v))  => v,
+        Ok(Err(e)) => return OperatorResponse::Error {
+            code:   "FAIL_LIST_TASK_OUTPUTS".into(),
+            detail: e,
+        },
+        Err(e)     => return OperatorResponse::Error {
+            code:   "FAIL_LIST_TASK_OUTPUTS".into(),
+            detail: format!("list_task_outputs spawn_blocking join failed: {e}"),
+        },
+    };
+
+    let outputs = rows.into_iter()
+        .map(|r| raxis_types::operator_wire::TaskOutputWire {
+            output_id:     r.output_id,
+            initiative_id: r.initiative_id,
+            task_id:       r.task_id,
+            session_id:    r.session_id,
+            kind:          r.kind,
+            severity:      r.severity,
+            payload_json:  r.payload_json,
+            emitted_at:    r.emitted_at,
+        })
+        .collect();
+
+    OperatorResponse::TaskOutputsListed { task_id, outputs }
+}

@@ -328,6 +328,10 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
             ("initiative_id", initiative_id.clone()),
             ("feature", "DescribeInitiativePause".into()),
         ],
+        OperatorRequest::ListTaskOutputs { task_id } => vec![
+            ("task_id", task_id.clone()),
+            ("feature", "ListTaskOutputs".into()),
+        ],
     }
 }
 
@@ -611,6 +615,7 @@ pub(crate) mod dispatch_log {
             OperatorResponse::DryRunAdmitted { .. }         => "DryRunAdmitted",
             OperatorResponse::InitiativeSubscribed { .. }   => "InitiativeSubscribed",
             OperatorResponse::InitiativePauseDescribed { .. } => "InitiativePauseDescribed",
+            OperatorResponse::TaskOutputsListed { .. }      => "TaskOutputsListed",
         }
     }
 }
@@ -718,6 +723,9 @@ async fn handle_request(
         }
         OperatorRequest::DescribeInitiativePause { initiative_id } => {
             crate::ipc::operator_ergonomics::handle_describe_initiative_pause(initiative_id, ctx).await
+        }
+        OperatorRequest::ListTaskOutputs { task_id } => {
+            crate::ipc::operator_ergonomics::handle_list_task_outputs(task_id, ctx).await
         }
     }
 }
@@ -2299,6 +2307,7 @@ fn op_name(req: &OperatorRequest) -> &'static str {
         OperatorRequest::DryRunAdmit { .. }                => "DryRunAdmit",
         OperatorRequest::SubscribeInitiative { .. }        => "SubscribeInitiative",
         OperatorRequest::DescribeInitiativePause { .. }    => "DescribeInitiativePause",
+        OperatorRequest::ListTaskOutputs { .. }            => "ListTaskOutputs",
     }
 }
 

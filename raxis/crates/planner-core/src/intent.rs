@@ -37,8 +37,8 @@ use uuid::Uuid;
 use raxis_ipc::IpcMessage;
 use raxis_types::{
     CommitSha, EscalationClass, EscalationRequest, IntentKind,
-    IntentRequest, IntentResponse, RequestedEscalationScope, TaskId,
-    TokensReport,
+    IntentRequest, IntentResponse, RequestedEscalationScope,
+    StructuredOutputKind, TaskId, TokensReport,
 };
 
 use crate::transport::{KernelTransport, TransportError};
@@ -163,6 +163,7 @@ impl IntentSubmitter {
             critique:                None,
             resolved_via_escalation: None,
             tokens_used:             Some(self.last_token_report()),
+            structured_output:       None,
         }
     }
 
@@ -259,6 +260,30 @@ impl IntentSubmitter {
         let mut req = self.skeleton(IntentKind::SubmitReview);
         req.approved = Some(approved);
         req.critique = critique;
+        self.send(IpcMessage::IntentRequest(req)).await
+    }
+
+    /// **V2 `v2_extended_gaps.md §3.2`** — submit a typed mid-session
+    /// structured output (`progress_report`, `diagnostic_flag`, or
+    /// `task_summary`).
+    ///
+    /// Authorized for the executor + orchestrator roles only
+    /// (the kernel's static dispatch matrix forbids the reviewer
+    /// path; INV-PLANNER-HARNESS-02). A NON-TERMINAL intent —
+    /// the dispatch loop continues after a successful submission;
+    /// the kernel does NOT transition the task FSM.
+    ///
+    /// The `payload` is normalised on the kernel side via
+    /// [`StructuredOutputKind::validate_and_normalise`] (over-cap
+    /// strings/lists are silently truncated; only fundamentally-
+    /// malformed inputs like a non-hex `commit_sha` on
+    /// `TaskSummary` produce `FAIL_STRUCTURED_OUTPUT_INVALID`).
+    pub async fn submit_structured_output(
+        &self,
+        payload: StructuredOutputKind,
+    ) -> Result<IntentResponse, SubmitError> {
+        let mut req = self.skeleton(IntentKind::StructuredOutput);
+        req.structured_output = Some(payload);
         self.send(IpcMessage::IntentRequest(req)).await
     }
 
@@ -465,6 +490,51 @@ mod tests {
         );
         let _resp = submitter.submit_complete_task(
             "0123456789abcdef0123456789abcdef01234567",
+        ).await.unwrap();
+        kernel_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn submit_structured_output_emits_correct_intent_kind_and_payload() {
+        use raxis_types::{DiagnosticSeverity, StructuredOutputKind};
+
+        let (planner_side, mut kernel_side) = duplex(64 * 1024);
+        let transport = Arc::new(StreamTransport::new(planner_side));
+
+        let kernel_task = tokio::spawn(async move {
+            let inbound: IpcMessage = read_frame(&mut kernel_side).await.unwrap();
+            match inbound {
+                IpcMessage::IntentRequest(r) => {
+                    assert_eq!(r.intent_kind, IntentKind::StructuredOutput);
+                    let payload = r.structured_output
+                        .as_ref().expect("structured_output payload must be present");
+                    match payload {
+                        StructuredOutputKind::DiagnosticFlag {
+                            severity, message, evidence,
+                        } => {
+                            assert_eq!(*severity, DiagnosticSeverity::Critical);
+                            assert_eq!(message, "auth bypass");
+                            assert_eq!(evidence.as_deref(), Some("src/auth.rs:42"));
+                        }
+                        other => panic!("expected DiagnosticFlag, got {other:?}"),
+                    }
+                }
+                other => panic!("expected IntentRequest, got {other:?}"),
+            }
+            write_frame(&mut kernel_side, &fixture_response(1)).await.unwrap();
+        });
+
+        let submitter = IntentSubmitter::new(
+            transport,
+            "session-tok".to_owned(),
+            TaskId::parse("exec-task").unwrap(),
+        );
+        let _ = submitter.submit_structured_output(
+            StructuredOutputKind::DiagnosticFlag {
+                severity: DiagnosticSeverity::Critical,
+                message:  "auth bypass".to_owned(),
+                evidence: Some("src/auth.rs:42".to_owned()),
+            },
         ).await.unwrap();
         kernel_task.await.unwrap();
     }

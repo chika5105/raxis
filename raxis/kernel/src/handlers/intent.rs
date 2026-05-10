@@ -581,6 +581,16 @@ fn run_phase_a(
             return PreGateOutcome::Reject(
                 PlannerErrorCode::FailPolicyViolation, task_state);
         }
+        IntentKind::StructuredOutput => {
+            // V2 §3.2 — typed mid-session output. NON-TERMINAL: the
+            // session continues; we do not transition the task FSM
+            // and we do not run gate evaluation (the payload is not
+            // a commit). Validate, persist, return.
+            return match handle_structured_output(req, task_state, &session_id, seq, store, ctx.as_ref()) {
+                Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
+                Err((code, st))  => PreGateOutcome::Reject(code, st),
+            };
+        }
     }
 
     // ── Step 3b (V2 Step 30): IntegrationMerge attribution gate ───────────
@@ -1797,6 +1807,195 @@ fn handle_submit_review(
     Ok(IntentResponse {
         sequence_number: seq,
         task_state: TaskState::Completed,
+        outcome: IntentOutcome::Accepted {
+            remaining_budget:      remaining,
+            warn_delegation_stale: false,
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// handle_structured_output — V2 §3.2 typed mid-session output.
+//
+// Spec references:
+//   * `v2_extended_gaps.md §3.2` — typed mid-session communication
+//     enum (`StructuredOutputKind`).
+//   * `crates/types/src/structured_output.rs` — payload shape +
+//     `validate_and_normalise` + size caps.
+//
+// Pipeline (entirely sync, runs inside Phase A's spawn_blocking):
+//   1. Wire payload validation: `req.structured_output` MUST be
+//      `Some(_)` (the dispatch-matrix arm authorised the kind, but
+//      a payload-less submission still fails closed).
+//   2. Kernel-side normalisation:
+//      [`StructuredOutputKind::validate_and_normalise`] truncates
+//      over-cap strings/lists, clamps confidence into `[0.0, 1.0]`,
+//      and rejects fundamentally-malformed inputs (e.g. a non-hex
+//      `commit_sha` on `TaskSummary`).
+//   3. Per-session rate limit: COUNT(*) of prior accepted outputs
+//      for this `session_id`, reject with
+//      `FailStructuredOutputRateLimited` when >=
+//      `STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT`.
+//   4. INSERT into `structured_outputs` inside the same `BEGIN
+//      IMMEDIATE` transaction so the COUNT cannot race past the
+//      cap (concurrent submissions on the same session serialise
+//      on the writer mutex).
+//   5. Audit emit (`StructuredOutputEmitted`) AFTER the commit.
+//   6. NON-TERMINAL response — task stays in its current state
+//      (Admitted or Running). Lane budget snapshot is unchanged
+//      (a structured output consumes no lane units; the §2.5
+//      token-cost gate already debited the LLM-token cost above).
+// ---------------------------------------------------------------------------
+
+fn handle_structured_output(
+    req:        IntentRequest,
+    task_state: TaskState,
+    session_id: &SessionId,
+    seq:        u64,
+    store:      &Store,
+    ctx:        &HandlerContext,
+) -> HandlerResult {
+    // ── 1. Wire payload validation ────────────────────────────────────────
+    let mut payload = match req.structured_output {
+        Some(p) => p,
+        None    => return Err((
+            PlannerErrorCode::FailStructuredOutputInvalid, task_state)),
+    };
+
+    // ── 2. Normalise (and reject hard-failures only) ──────────────────────
+    if payload.validate_and_normalise().is_err() {
+        return Err((
+            PlannerErrorCode::FailStructuredOutputInvalid, task_state));
+    }
+
+    // ── 3. Look up task scope (initiative_id, lane_id) for the audit row.
+    let task = load_task(req.task_id.as_str(), store)
+        .map_err(|_| (PlannerErrorCode::FailUnknownTask, task_state))?;
+
+    let kind_tag    = payload.variant_tag();
+    let severity    = match &payload {
+        raxis_types::StructuredOutputKind::DiagnosticFlag { severity, .. } =>
+            Some(severity.as_str().to_owned()),
+        _ => None,
+    };
+
+    // Serialise the (possibly-truncated) payload for storage.
+    // A pure in-memory `serde_json::to_string` on a closed enum
+    // can only fail if the enum carries non-finite floats or
+    // non-UTF8 strings, neither of which `validate_and_normalise`
+    // permits. Belt-and-braces: surface the failure as
+    // `FailStructuredOutputInvalid` instead of unwrapping.
+    let payload_json = match serde_json::to_string(&payload) {
+        Ok(s)  => s,
+        Err(_) => return Err((
+            PlannerErrorCode::FailStructuredOutputInvalid, task_state)),
+    };
+    let payload_bytes = u32::try_from(payload_json.len()).unwrap_or(u32::MAX);
+
+    // ── 4. Rate-limit COUNT + INSERT inside one BEGIN IMMEDIATE tx ────────
+    //
+    // We hold the writer mutex across both reads + writes so the
+    // per-session counter cannot race past the cap. The kernel's
+    // single-writer SQLite mutex makes this contention-free for
+    // any reasonable structured-output rate.
+    let output_id = uuid::Uuid::new_v4().to_string();
+    let emitted_at = unix_now_secs();
+    {
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction()
+            .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, task_state))?;
+
+        let so_table = Table::StructuredOutputs.as_str();
+
+        let count: u32 = tx.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {so_table} WHERE session_id = ?1"
+            ),
+            rusqlite::params![session_id.as_str()],
+            |r| r.get::<_, i64>(0).map(|v| v as u32),
+        ).unwrap_or(0);
+
+        if count >= raxis_types::STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT {
+            // INV-08 — coarse code only. The internal log carries
+            // the structured detail.
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"StructuredOutputRateLimited\",\
+                 \"session_id\":\"{}\",\"task_id\":\"{}\",\"count\":{count}}}",
+                session_id.as_str(),
+                req.task_id.as_str(),
+            );
+            return Err((
+                PlannerErrorCode::FailStructuredOutputRateLimited, task_state));
+        }
+
+        tx.execute(
+            &format!(
+                "INSERT INTO {so_table}
+                    (output_id, initiative_id, task_id, session_id,
+                     kind, severity, payload_json, emitted_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
+            ),
+            rusqlite::params![
+                output_id,
+                task.initiative_id,
+                req.task_id.as_str(),
+                session_id.as_str(),
+                kind_tag,
+                severity,
+                payload_json,
+                emitted_at as i64,
+            ],
+        ).map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, task_state))?;
+
+        tx.commit()
+            .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, task_state))?;
+    }
+
+    // ── 5. Audit emit AFTER the commit (§2.5.2 audit-after-commit) ────────
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
+            output_id:     output_id.clone(),
+            initiative_id: task.initiative_id.clone(),
+            task_id:       req.task_id.as_str().to_owned(),
+            session_id:    session_id.as_str().to_owned(),
+            output_kind:   kind_tag.to_owned(),
+            severity:      severity.clone(),
+            payload_bytes,
+        },
+        Some(session_id.as_str()),
+        Some(req.task_id.as_str()),
+        Some(task.initiative_id.as_str()),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"StructuredOutputEmitted\",\
+             \"audit_emit_failed\":\"{e}\",\"session_id\":\"{}\",\
+             \"task_id\":\"{}\"}}",
+            session_id.as_str(),
+            req.task_id.as_str(),
+        );
+    }
+
+    // Forensic info-level log so operators can grep by event name
+    // even when the audit sink drops temporarily.
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"StructuredOutputEmitted\",\
+         \"session_id\":\"{}\",\"task_id\":\"{}\",\"kind\":\"{kind_tag}\",\
+         \"payload_bytes\":{payload_bytes}}}",
+        session_id.as_str(),
+        req.task_id.as_str(),
+    );
+
+    // ── 6. NON-TERMINAL response ─────────────────────────────────────────
+    //
+    // The task FSM stays where it is — `StructuredOutput` is a
+    // mid-session emission, not a terminal commit. Lane budget is
+    // unchanged (no admission unit consumed). The §2.5 token-cost
+    // gate already debited the cumulative LLM cost above (in
+    // `run_phase_a` before dispatch reached this handler).
+    let remaining = BudgetSnapshot { admission_units: 0 };
+    Ok(IntentResponse {
+        sequence_number: seq,
+        task_state,
         outcome: IntentOutcome::Accepted {
             remaining_budget:      remaining,
             warn_delegation_stale: false,
@@ -3174,6 +3373,7 @@ mod tests {
             critique:        critique.map(str::to_owned),
             resolved_via_escalation: None,
             tokens_used:     None,
+            structured_output: None,
         }
     }
 
@@ -3773,5 +3973,475 @@ mod tests {
             ("base2".to_owned(), "head2".to_owned()),
             ("base3".to_owned(), "head3".to_owned()),
         ]);
+    }
+
+    // ── handle_structured_output (V2 §3.2) ────────────────────────────────
+
+    /// Seed a `sessions` row keyed on `session_id` so the
+    /// `structured_outputs.session_id` foreign key passes. Uses a
+    /// deterministic UUID (`dummy_session_id`) so multiple-session
+    /// rate-limit tests can re-seed the same row.
+    fn seed_session(store: &Store, session_id: &str) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        let _ = conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO sessions (
+                    session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, fetch_quota, created_at, expires_at, revoked,
+                    session_agent_type, can_delegate
+                 ) VALUES (?1,'Planner','tok-{session_id}',0,
+                          NULL,NULL,NULL,'lineage-1',1000,?2,?3,0,'Executor',0)"
+            ),
+            rusqlite::params![session_id, now, now + 86_400],
+        );
+    }
+
+    fn count_structured_outputs(store: &Store, session_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {so} WHERE session_id = ?1",
+                so = Table::StructuredOutputs.as_str(),
+            ),
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        ).unwrap()
+    }
+
+    fn make_structured_output_request(
+        task_id: &str,
+        payload: Option<raxis_types::StructuredOutputKind>,
+    ) -> IntentRequest {
+        IntentRequest {
+            session_token:   "tok".into(),
+            sequence_number: 1,
+            envelope_nonce:  "0".repeat(32),
+            intent_kind:     IntentKind::StructuredOutput,
+            task_id:         raxis_types::TaskId::parse(task_id).unwrap(),
+            base_sha:        None,
+            head_sha:        None,
+            submitted_claims: vec![],
+            justification:   None,
+            idempotency_key: None,
+            approval_token:  None,
+            approved:        None,
+            critique:        None,
+            resolved_via_escalation: None,
+            tokens_used:     None,
+            structured_output: payload,
+        }
+    }
+
+    /// Missing payload — kernel rejects with
+    /// `FailStructuredOutputInvalid`. INV-09 / R-10 — coarse code only.
+    #[test]
+    fn structured_output_missing_payload_is_rejected() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        seed_session(&store, session.as_str());
+        // Reuse the executor-predecessor seed for a Running task.
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_structured_output_request("exe1", None);
+        let err = handle_structured_output(
+            req, TaskState::Running, &session, 1, &store, &ctx,
+        ).expect_err("missing payload must be rejected");
+        assert_eq!(err.0, PlannerErrorCode::FailStructuredOutputInvalid);
+        assert_eq!(count_structured_outputs(&store, session.as_str()), 0);
+    }
+
+    /// Hard-malformed payload (TaskSummary with non-hex commit_sha)
+    /// is rejected with `FailStructuredOutputInvalid`. Confidence
+    /// over-cap and oversized strings DO NOT take this path — they
+    /// are silently truncated/clamped (see `validate_and_normalise`
+    /// + the truncation tests in the types crate).
+    #[test]
+    fn structured_output_non_hex_commit_sha_is_rejected() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        seed_session(&store, session.as_str());
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_structured_output_request(
+            "exe1",
+            Some(raxis_types::StructuredOutputKind::TaskSummary {
+                commit_sha:    "not-a-real-sha".to_owned(),
+                changed_paths: vec![],
+                approach:      "fix".to_owned(),
+            }),
+        );
+        let err = handle_structured_output(
+            req, TaskState::Running, &session, 1, &store, &ctx,
+        ).expect_err("non-hex commit_sha must be rejected");
+        assert_eq!(err.0, PlannerErrorCode::FailStructuredOutputInvalid);
+        assert_eq!(count_structured_outputs(&store, session.as_str()), 0);
+    }
+
+    /// Happy path: ProgressReport admission writes a single
+    /// `structured_outputs` row, the FSM stays Running (NON-TERMINAL
+    /// per §3.2), and a `StructuredOutputEmitted` audit event lands
+    /// on the sink. The audit row's `output_kind` matches the SQL
+    /// `kind` column.
+    #[test]
+    fn structured_output_progress_report_persists_and_emits_audit() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        seed_session(&store, session.as_str());
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_structured_output_request(
+            "exe1",
+            Some(raxis_types::StructuredOutputKind::ProgressReport {
+                files_modified: vec!["a.rs".into(), "b.rs".into()],
+                tests_passing:  3,
+                tests_failing:  1,
+                confidence:     0.8,
+            }),
+        );
+        let resp = handle_structured_output(
+            req, TaskState::Running, &session, 1, &store, &ctx,
+        ).expect("progress report must be accepted");
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+        assert_eq!(resp.task_state, TaskState::Running,
+            "structured_output is NON-TERMINAL — task FSM stays put");
+
+        assert_eq!(count_structured_outputs(&store, session.as_str()), 1,
+            "exactly one row written to structured_outputs");
+
+        // Audit event landed on the sink with `output_kind = "progress_report"`.
+        let events = sink.events();
+        let so_evt = events.iter().find(|e| matches!(
+            e.kind, raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
+        )).expect("StructuredOutputEmitted audit event missing");
+        if let raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
+            output_kind, severity, task_id, session_id: sid, ..
+        } = &so_evt.kind {
+            assert_eq!(output_kind, "progress_report");
+            assert!(severity.is_none(),
+                "progress_report carries no severity");
+            assert_eq!(task_id, "exe1");
+            assert_eq!(sid, session.as_str());
+        }
+    }
+
+    /// DiagnosticFlag carries a severity column on the SQL row AND
+    /// the audit projection. Pin both.
+    #[test]
+    fn structured_output_diagnostic_flag_persists_severity() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        seed_session(&store, session.as_str());
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let req = make_structured_output_request(
+            "exe1",
+            Some(raxis_types::StructuredOutputKind::DiagnosticFlag {
+                severity: raxis_types::DiagnosticSeverity::Critical,
+                message:  "auth bypass!".into(),
+                evidence: Some("src/auth.rs:42".into()),
+            }),
+        );
+        handle_structured_output(
+            req, TaskState::Running, &session, 1, &store, &ctx,
+        ).expect("diagnostic flag must be accepted");
+
+        let conn = store.lock_sync();
+        let (kind, severity): (String, Option<String>) = conn.query_row(
+            &format!(
+                "SELECT kind, severity FROM {so} WHERE session_id = ?1",
+                so = Table::StructuredOutputs.as_str(),
+            ),
+            rusqlite::params![session.as_str()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        drop(conn);
+        assert_eq!(kind, "diagnostic_flag");
+        assert_eq!(severity.as_deref(), Some("critical"));
+
+        let events = sink.events();
+        let so_evt = events.iter().find(|e| matches!(
+            e.kind, raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
+        )).expect("StructuredOutputEmitted audit event missing");
+        if let raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
+            output_kind, severity, ..
+        } = &so_evt.kind {
+            assert_eq!(output_kind, "diagnostic_flag");
+            assert_eq!(severity.as_deref(), Some("critical"));
+        }
+    }
+
+    /// Per-session rate limit: after
+    /// `STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT` accepted outputs
+    /// the next submission rejects with
+    /// `FailStructuredOutputRateLimited`. The previously-stored rows
+    /// are NOT rolled back (rate limit is a forward-only cap).
+    #[test]
+    fn structured_output_per_session_rate_limit_is_enforced() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        seed_session(&store, session.as_str());
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let cap = raxis_types::STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT;
+        for i in 0..cap {
+            let req = make_structured_output_request(
+                "exe1",
+                Some(raxis_types::StructuredOutputKind::ProgressReport {
+                    files_modified: vec![],
+                    tests_passing:  i,
+                    tests_failing:  0,
+                    confidence:     0.5,
+                }),
+            );
+            handle_structured_output(
+                req, TaskState::Running, &session, (i as u64) + 1, &store, &ctx,
+            ).unwrap_or_else(|e| panic!("output #{i} rejected: {e:?}"));
+        }
+        assert_eq!(count_structured_outputs(&store, session.as_str()), cap as i64);
+
+        // The (cap+1)-th submission fails with the rate-limit code.
+        let req = make_structured_output_request(
+            "exe1",
+            Some(raxis_types::StructuredOutputKind::ProgressReport {
+                files_modified: vec![],
+                tests_passing:  cap,
+                tests_failing:  0,
+                confidence:     0.5,
+            }),
+        );
+        let err = handle_structured_output(
+            req, TaskState::Running, &session, (cap as u64) + 1, &store, &ctx,
+        ).expect_err("over-cap submission must be rejected");
+        assert_eq!(err.0, PlannerErrorCode::FailStructuredOutputRateLimited);
+        assert_eq!(count_structured_outputs(&store, session.as_str()), cap as i64,
+            "rate-limit rejection MUST NOT roll back prior rows");
+    }
+
+    /// Truncation via `validate_and_normalise` runs BEFORE the
+    /// payload is stored — an over-cap `DiagnosticFlag.message` is
+    /// truncated to ≤ `STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES + ε`
+    /// and persisted, NOT rejected. `payload_bytes` on the audit row
+    /// reflects the truncated size.
+    #[test]
+    fn structured_output_truncates_oversize_message_before_store() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        seed_session(&store, session.as_str());
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+
+        let huge = "x".repeat(
+            raxis_types::STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES * 4
+        );
+        let req = make_structured_output_request(
+            "exe1",
+            Some(raxis_types::StructuredOutputKind::DiagnosticFlag {
+                severity: raxis_types::DiagnosticSeverity::Warning,
+                message:  huge.clone(),
+                evidence: None,
+            }),
+        );
+        handle_structured_output(
+            req, TaskState::Running, &session, 1, &store, &ctx,
+        ).expect("oversize message must be truncated, not rejected");
+
+        let events = sink.events();
+        let so_evt = events.iter().find(|e| matches!(
+            e.kind, raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
+        )).expect("audit event missing");
+        if let raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
+            payload_bytes, ..
+        } = &so_evt.kind {
+            // payload_json includes the JSON wrapper + truncated message
+            // + "<truncated>" marker. Cap is the message body alone, so
+            // we expect the JSON to be a small constant overhead larger.
+            let cap = raxis_types::STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES as u32;
+            assert!(*payload_bytes <= cap + 256,
+                "payload_bytes {payload_bytes} exceeded cap {cap} + JSON overhead");
+            assert!((*payload_bytes as usize) < huge.len(),
+                "truncation must shrink the payload");
+        }
+    }
+
+    // ── handle_list_task_outputs (V2 §3.2 read path) ──────────────────────────
+    //
+    // End-to-end check that the full pipeline composes correctly:
+    //
+    //   1. seed `sessions` + reviewer/executor task rows
+    //   2. drive `handle_structured_output` for two real payloads
+    //   3. run `handle_list_task_outputs` against a real on-disk
+    //      `kernel.db` and assert the operator sees both rows in
+    //      `emitted_at` order with the right wire shape.
+    //
+    // Uses a real `Store::open(<file>)` rather than `open_in_memory`
+    // because `views::structured_outputs::list_for_task` opens its
+    // own short-lived `RoConn` snapshot via
+    // `raxis_store::ro::open(data_dir)` — a memory-only DB has no
+    // path the read-only opener can reach.
+
+    // Multi-threaded runtime: the seed helpers + the
+    // `handle_structured_output` writer use `Store::lock_sync` which
+    // calls `tokio::sync::Mutex::blocking_lock`. That panics on a
+    // single-threaded runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_task_outputs_returns_rows_emitted_via_handle_structured_output() {
+        use raxis_types::operator_wire::OperatorResponse;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("kernel.db");
+        let store = Arc::new(Store::open(&db_path).expect("Store::open"));
+
+        // Build a HandlerContext rooted at this tempdir so the
+        // operator handler's `data_dir` matches the file we just
+        // opened. We reuse the standard test fixture for everything
+        // else (audit sink, isolation backend, etc.).
+        let sink = Arc::new(raxis_test_support::FakeAuditSink::new());
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            tmp.path(), sink.clone(),
+        );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
+        let domain = crate::ipc::context::build_default_test_domain(tmp.path());
+        let ctx = Arc::new(HandlerContext::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(default_test_policy())),
+            Arc::new(crate::authority::keys::KeyRegistry::stub_for_tests()),
+            store.clone(),
+            sink.clone(),
+            tmp.path().to_path_buf(),
+            Arc::new(crate::initiatives::PlanRegistry::new()),
+            Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
+            isolation,
+            orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
+            domain,
+        ));
+
+        let session = dummy_session_id();
+        // The seed helpers + the handler call `Store::lock_sync` =>
+        // `tokio::sync::Mutex::blocking_lock`, which panics if invoked
+        // from inside a runtime worker. Run them on a dedicated
+        // blocking thread instead.
+        let session_for_blk = session.clone();
+        let store_for_blk = store.clone();
+        let ctx_for_blk = ctx.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_session(&store_for_blk, session_for_blk.as_str());
+            seed_reviewer_with_executor_predecessor(&store_for_blk, "rev1", "exe1");
+
+            for (i, payload) in [
+                raxis_types::StructuredOutputKind::ProgressReport {
+                    files_modified: vec!["src/lib.rs".to_owned()],
+                    tests_passing:  3,
+                    tests_failing:  0,
+                    confidence:     0.8,
+                },
+                raxis_types::StructuredOutputKind::DiagnosticFlag {
+                    severity: raxis_types::DiagnosticSeverity::Warning,
+                    message:  "watch out".to_owned(),
+                    evidence: Some("src/lib.rs:42".to_owned()),
+                },
+            ].into_iter().enumerate() {
+                let req = make_structured_output_request("exe1", Some(payload));
+                handle_structured_output(
+                    req, TaskState::Running, &session_for_blk,
+                    (i as u64) + 1, &store_for_blk, &ctx_for_blk,
+                ).expect("handle_structured_output must accept a normalised payload");
+            }
+        }).await.expect("blocking seed task must succeed");
+
+        // Now drive the operator read path — same code path the IPC
+        // dispatcher invokes for `OperatorRequest::ListTaskOutputs`.
+        let resp = crate::ipc::operator_ergonomics::handle_list_task_outputs(
+            "exe1".to_owned(),
+            &ctx,
+        ).await;
+
+        match resp {
+            OperatorResponse::TaskOutputsListed { task_id, outputs } => {
+                assert_eq!(task_id, "exe1");
+                assert_eq!(outputs.len(), 2,
+                    "operator must see both structured outputs");
+
+                // Ordered by `emitted_at ASC`. Both rows are stamped
+                // by the same call to `unix_now_secs` inside the
+                // handler so the secondary sort on `output_id ASC`
+                // (UUID) breaks ties; we assert by kind instead of
+                // by relative position to keep the test stable.
+                let kinds: std::collections::HashSet<&str> = outputs.iter()
+                    .map(|o| o.kind.as_str())
+                    .collect();
+                assert!(kinds.contains("progress_report"));
+                assert!(kinds.contains("diagnostic_flag"));
+
+                for o in &outputs {
+                    assert_eq!(o.task_id, "exe1");
+                    assert_eq!(o.session_id, session.as_str());
+                    assert_eq!(o.initiative_id, "init-rev");
+                    assert!(!o.payload_json.is_empty(),
+                        "payload_json must be populated verbatim");
+                    if o.kind == "diagnostic_flag" {
+                        assert_eq!(o.severity.as_deref(), Some("warning"));
+                    } else {
+                        assert!(o.severity.is_none(),
+                            "non-diagnostic kinds must have no severity");
+                    }
+                }
+            }
+            other => panic!("expected TaskOutputsListed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn list_task_outputs_for_unknown_task_returns_empty_listing() {
+        use raxis_types::operator_wire::OperatorResponse;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("kernel.db");
+        let store = Arc::new(Store::open(&db_path).expect("Store::open"));
+
+        let sink = Arc::new(raxis_test_support::FakeAuditSink::new());
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            tmp.path(), sink.clone(),
+        );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
+        let domain = crate::ipc::context::build_default_test_domain(tmp.path());
+        let ctx = Arc::new(HandlerContext::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(default_test_policy())),
+            Arc::new(crate::authority::keys::KeyRegistry::stub_for_tests()),
+            store,
+            sink.clone(),
+            tmp.path().to_path_buf(),
+            Arc::new(crate::initiatives::PlanRegistry::new()),
+            Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
+            isolation,
+            orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
+            domain,
+        ));
+
+        let resp = crate::ipc::operator_ergonomics::handle_list_task_outputs(
+            "no-such-task".to_owned(),
+            &ctx,
+        ).await;
+        match resp {
+            OperatorResponse::TaskOutputsListed { task_id, outputs } => {
+                assert_eq!(task_id, "no-such-task");
+                assert!(outputs.is_empty(),
+                    "unknown task must yield an empty list, not an error");
+            }
+            other => panic!("expected TaskOutputsListed, got {other:?}"),
+        }
     }
 }

@@ -89,6 +89,23 @@ pub enum IntentKind {
     ///     dropped — the critique field has no meaning in the success
     ///     path). Oversized critique ⇒ `FAIL_INVALID_ARGUMENT`.
     SubmitReview,
+
+    /// **V2 `v2_extended_gaps.md §3.2`.** Executor / Orchestrator —
+    /// emit a typed mid-session output (progress report, diagnostic
+    /// flag, task summary). NON-TERMINAL: the session continues
+    /// after the kernel records the output. Reviewer is NEVER
+    /// authorized to submit this kind (INV-PLANNER-HARNESS-02).
+    ///
+    /// Wire fields used: `structured_output` (must be `Some(_)`;
+    /// `None` ⇒ `FAIL_STRUCTURED_OUTPUT_INVALID`). `task_id` is
+    /// required so the kernel can scope the row to the correct
+    /// `(initiative_id, task_id)` per R-1. `base_sha` / `head_sha`
+    /// are unused.
+    ///
+    /// Rate-limit: per-session N outputs (kernel-side counter,
+    /// reset on session expiry). Exceeding ⇒
+    /// `FAIL_STRUCTURED_OUTPUT_RATE_LIMITED`.
+    StructuredOutput,
 }
 
 impl IntentKind {
@@ -101,6 +118,7 @@ impl IntentKind {
             Self::ActivateSubTask  => "ActivateSubTask",
             Self::RetrySubTask     => "RetrySubTask",
             Self::SubmitReview     => "SubmitReview",
+            Self::StructuredOutput => "StructuredOutput",
         }
     }
 
@@ -145,7 +163,7 @@ impl IntentKind {
     /// All variants. Used by the static-dispatch-matrix exhaustiveness
     /// guard (v2-deep-spec.md §Step 20) so a future added variant
     /// automatically fails the matrix-build test until a row is added.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::SingleCommit,
         Self::IntegrationMerge,
         Self::CompleteTask,
@@ -153,6 +171,7 @@ impl IntentKind {
         Self::ActivateSubTask,
         Self::RetrySubTask,
         Self::SubmitReview,
+        Self::StructuredOutput,
     ];
 }
 
@@ -365,6 +384,23 @@ pub struct IntentRequest {
     /// for bincode round-trip compatibility.
     #[serde(default)]
     pub tokens_used: Option<TokensReport>,
+
+    // ── V2 §3.2 StructuredOutput payload ───────────────────────────────
+
+    /// **V2 `v2_extended_gaps.md §3.2` typed mid-session output.**
+    ///
+    /// Required to be `Some(_)` when `intent_kind = StructuredOutput`
+    /// (kernel rejects with `FAIL_STRUCTURED_OUTPUT_INVALID`); MUST
+    /// be `None` for every other intent kind. The kernel runs
+    /// [`crate::structured_output::StructuredOutputKind::validate_and_normalise`]
+    /// on the payload before storing it in `structured_outputs` —
+    /// see the type doc for the closed enum's invariant matrix.
+    ///
+    /// **Wire encoding note:** see the analogous comment on
+    /// `approved` — `skip_serializing_if` is intentionally absent
+    /// for bincode round-trip compatibility.
+    #[serde(default)]
+    pub structured_output: Option<crate::StructuredOutputKind>,
 }
 
 /// V2 `v2_extended_gaps.md §2.5` — cumulative LLM token usage the
@@ -524,19 +560,22 @@ impl IntentResponse {
 mod tests {
     use super::*;
 
-    /// V2 added 3 sub-task lifecycle kinds; the variant array must
-    /// stay in sync. The pinned-count test surfaces accidental adds
-    /// at the test layer before any dispatch matrix or store mapping
-    /// regresses.
+    /// V2.5 has 8 IntentKind variants total: the V2 base seven
+    /// (4 V1 — SingleCommit, IntegrationMerge, CompleteTask,
+    /// ReportFailure; 3 V2 — ActivateSubTask, RetrySubTask,
+    /// SubmitReview) plus 1 V2.5 — `StructuredOutput` from
+    /// `v2_extended_gaps.md §3.2`. The pinned-count test surfaces
+    /// accidental adds at the test layer before any dispatch matrix
+    /// or store mapping regresses.
     #[test]
-    fn intent_kind_variant_count_is_pinned_to_v2() {
-        assert_eq!(IntentKind::ALL.len(), 7,
-            "V2 has exactly 7 IntentKind variants \
+    fn intent_kind_variant_count_is_pinned_to_v25() {
+        assert_eq!(IntentKind::ALL.len(), 8,
+            "V2.5 has exactly 8 IntentKind variants \
              (4 V1: SingleCommit, IntegrationMerge, CompleteTask, \
              ReportFailure; 3 V2: ActivateSubTask, RetrySubTask, \
-             SubmitReview). Bumping this requires the static \
-             dispatch matrix (v2-deep-spec.md §Step 20) to gain a \
-             matching row.");
+             SubmitReview; 1 V2.5: StructuredOutput). Bumping this \
+             requires the static dispatch matrix \
+             (v2-deep-spec.md §Step 20) to gain a matching row.");
     }
 
     /// `as_str` round-trip: every variant maps to a non-empty
@@ -561,6 +600,7 @@ mod tests {
         assert_eq!(IntentKind::ActivateSubTask.as_str(),  "ActivateSubTask");
         assert_eq!(IntentKind::RetrySubTask.as_str(),     "RetrySubTask");
         assert_eq!(IntentKind::SubmitReview.as_str(),     "SubmitReview");
+        assert_eq!(IntentKind::StructuredOutput.as_str(),  "StructuredOutput");
     }
 
     /// V2 sub-task kinds do NOT carry a SHA range. The kernel
@@ -655,6 +695,7 @@ mod tests {
             critique:        None,
             resolved_via_escalation: None,
             tokens_used:     None,
+            structured_output: None,
         };
 
         // 1. bincode round-trip on the canonical wire shape.
@@ -702,6 +743,7 @@ mod tests {
             critique:        Some("the auth check is missing".to_owned()),
             resolved_via_escalation: None,
             tokens_used:     None,
+            structured_output: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: IntentRequest = serde_json::from_str(&s).unwrap();
@@ -753,6 +795,7 @@ mod tests {
             critique:         None,
             resolved_via_escalation: Some(escalation_id.clone()),
             tokens_used:      None,
+            structured_output: None,
         };
 
         // Canonical IPC wire — bincode standard().
@@ -804,6 +847,7 @@ mod tests {
             critique:         None,
             resolved_via_escalation: None,
             tokens_used:      None,
+            structured_output: None,
         };
         let bytes = bincode::serde::encode_to_vec(
             &req, bincode::config::standard()).expect("bincode encode");

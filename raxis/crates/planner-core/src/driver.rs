@@ -104,9 +104,10 @@ use crate::intent::{
 use crate::model::{AnthropicClient, ModelClient};
 use crate::provider_model::{resolve_model_from_env_fn, ProviderModelError};
 use crate::tools::{
-    build_executor_registry, build_executor_registry_with_sleep,
-    build_orchestrator_registry, build_orchestrator_registry_with_sleep,
-    build_reviewer_registry, ToolContext,
+    build_executor_registry, build_executor_registry_full,
+    build_executor_registry_with_sleep, build_orchestrator_registry,
+    build_orchestrator_registry_full, build_orchestrator_registry_with_sleep,
+    build_reviewer_registry, StructuredOutputTool, ToolContext,
     ToolRegistry,
 };
 use crate::transport::{KernelTransport, KernelTransportConfig, TransportError};
@@ -432,8 +433,30 @@ pub async fn run_role_session_with_model(
     };
     let transport: Arc<dyn KernelTransport> = crate::transport::connect(&cfg).await?;
 
+    // ── Step 1b: construct the session-scoped IntentSubmitter ──────
+    //
+    // V2 §3.2 wires the `structured_output` tool to the submitter so
+    // it can ship typed mid-session payloads through the kernel UDS.
+    // The submitter must therefore exist BEFORE the registry is
+    // constructed (the registry's `StructuredOutputTool` holds an
+    // `Arc<IntentSubmitter>`). The same submitter is reused for the
+    // post-dispatch terminal-tool intent submission below, so we
+    // build it once here and clone the `Arc` everywhere.
+    let task_id_owned = args
+        .task_id
+        .clone()
+        .unwrap_or_else(|| args.initiative_id.clone());
+    let task_id = TaskId::parse(&task_id_owned).map_err(|e| {
+        DriverError::InvalidTaskId(format!(
+            "task id `{task_id_owned}` failed validation: {e}"
+        ))
+    })?;
+    let submitter = Arc::new(
+        IntentSubmitter::new(Arc::clone(&transport), env.session_token.clone(), task_id),
+    );
+
     // ── Step 2: build per-role registry + terminal tool list. ───────
-    let (registry, terminal_tools) = build_role(role);
+    let (registry, terminal_tools) = build_role(role, Arc::clone(&submitter));
     let registry = Arc::new(registry);
 
     // ── Step 3: configure dispatch loop. ────────────────────────────
@@ -469,17 +492,9 @@ pub async fn run_role_session_with_model(
     // Orchestrator sessions don't carry a `--task-id`, so we fall
     // back to the initiative id — the kernel uses the session-token
     // dimension for orchestrator authority and ignores the task id
-    // on `IntegrationMerge` / `ActivateSubTask` framing.
-    let task_id_owned = args
-        .task_id
-        .clone()
-        .unwrap_or_else(|| args.initiative_id.clone());
-    let task_id = TaskId::parse(&task_id_owned).map_err(|e| {
-        DriverError::InvalidTaskId(format!(
-            "task id `{task_id_owned}` failed validation: {e}"
-        ))
-    })?;
-    let submitter = IntentSubmitter::new(transport, env.session_token.clone(), task_id);
+    // on `IntegrationMerge` / `ActivateSubTask` framing. The
+    // submitter was constructed at Step 1b alongside the registry
+    // (V2 §3.2 wires the `structured_output` tool to it directly).
 
     // V2 `v2_extended_gaps.md §2.5` — relay the dispatch loop's
     // cumulative `(input, output)` totals into the submitter BEFORE
@@ -501,7 +516,7 @@ pub async fn run_role_session_with_model(
         DispatchOutcome::TerminalTool {
             tool_name, input, output: _, ..
         } => {
-            submit_terminal(role, &submitter, &tool_name, &input).await?;
+            submit_terminal(role, submitter.as_ref(), &tool_name, &input).await?;
             Ok(DriverOutcome::Completed { tool_name })
         }
         DispatchOutcome::Idle { final_text, .. } => Ok(DriverOutcome::Idle { final_text }),
@@ -523,9 +538,17 @@ pub async fn run_role_session_with_model(
 /// `build_*_registry_with_sleep` so the `sleep` tool is wired with
 /// the operator-declared ceilings. Absent ⇒ the disabled SleepTool
 /// (refuses every invocation with `FAIL_SLEEP_DISABLED`) is
-/// registered. Reviewer NEVER receives Sleep
-/// (`INV-PLANNER-HARNESS-02`).
-fn build_role(role: Role) -> (ToolRegistry, Vec<&'static str>) {
+/// registered.
+///
+/// V2 `v2_extended_gaps.md §3.2` — the executor and orchestrator
+/// registries always receive the `structured_output` tool wired
+/// to the session-scoped [`crate::intent::IntentSubmitter`].
+/// Reviewer NEVER receives `structured_output` or `sleep`
+/// (INV-PLANNER-HARNESS-02 / R-5 — bounded capabilities).
+fn build_role(
+    role:      Role,
+    submitter: Arc<crate::intent::IntentSubmitter>,
+) -> (ToolRegistry, Vec<&'static str>) {
     use raxis_types::planner_env::{
         PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
     };
@@ -539,16 +562,24 @@ fn build_role(role: Role) -> (ToolRegistry, Vec<&'static str>) {
     match role {
         Role::Executor => (
             match sleep_caps {
-                Some((per, cum)) => build_executor_registry_with_sleep(per, cum),
-                None             => build_executor_registry(),
+                Some((per, cum)) => build_executor_registry_full(per, cum, submitter),
+                None             => {
+                    let mut r = build_executor_registry();
+                    r.register(Arc::new(StructuredOutputTool::new(submitter)));
+                    r
+                }
             },
             vec!["task_complete", "single_commit", "report_failure"],
         ),
         Role::Reviewer => (build_reviewer_registry(), vec!["submit_review"]),
         Role::Orchestrator => (
             match sleep_caps {
-                Some((per, cum)) => build_orchestrator_registry_with_sleep(per, cum),
-                None             => build_orchestrator_registry(),
+                Some((per, cum)) => build_orchestrator_registry_full(per, cum, submitter),
+                None             => {
+                    let mut r = build_orchestrator_registry();
+                    r.register(Arc::new(StructuredOutputTool::new(submitter)));
+                    r
+                }
             },
             vec!["integration_merge", "activate_subtask", "retry_subtask"],
         ),
@@ -650,6 +681,19 @@ async fn submit_terminal(
             let critique = pick_str(input, "critique");
             submitter.submit_review(approved, critique).await?;
         }
+        IntentKind::StructuredOutput => {
+            // V2 §3.2 — non-terminal tool: the dispatch loop never
+            // routes through here for `structured_output` because
+            // it is NOT in the role's terminal-tool list. Reaching
+            // this arm means a planner-binary mis-wiring promoted
+            // it to terminal; surface that as a hard `DriverError`
+            // so the bug fails loud rather than silently
+            // double-submitting.
+            return Err(DriverError::UnmappableTerminal {
+                tool_name: "structured_output".to_owned(),
+                role,
+            });
+        }
     }
     let _ = role;
     Ok(())
@@ -677,13 +721,32 @@ pub async fn park_on_signal() {
 mod tests {
     use super::*;
     use crate::model::{ContentBlock, MessageResponse, MockModelClient, Usage};
+    use crate::transport::StreamTransport;
+    use tokio::io::duplex;
+
+    /// Construct a minimal `IntentSubmitter` for `build_role` tests.
+    /// The transport's other end is dropped — tests that assert on
+    /// the registry shape do not exercise the wire path.
+    fn stub_submitter() -> Arc<crate::intent::IntentSubmitter> {
+        let (planner_side, _kernel_side) = duplex(4096);
+        let transport = Arc::new(StreamTransport::new(planner_side));
+        Arc::new(crate::intent::IntentSubmitter::new(
+            transport,
+            "stub-tok".to_owned(),
+            TaskId::parse("stub-task").unwrap(),
+        ))
+    }
 
     #[test]
     fn build_role_executor_includes_write_tools() {
-        let (reg, terminals) = build_role(Role::Executor);
+        let (reg, terminals) = build_role(Role::Executor, stub_submitter());
         assert!(reg.get("git_commit").is_some());
         assert!(reg.get("edit_file").is_some());
         assert!(reg.get("bash").is_some());
+        // V2 §3.2 — structured_output is now part of the executor
+        // tool surface.
+        assert!(reg.get("structured_output").is_some(),
+            "executor MUST have structured_output (V2 §3.2)");
         assert!(terminals.contains(&"task_complete"));
         assert!(terminals.contains(&"report_failure"));
         assert!(terminals.contains(&"single_commit"));
@@ -691,12 +754,15 @@ mod tests {
 
     #[test]
     fn build_role_reviewer_excludes_write_tools_and_pins_terminal() {
-        let (reg, terminals) = build_role(Role::Reviewer);
+        let (reg, terminals) = build_role(Role::Reviewer, stub_submitter());
         // INV-PLANNER-HARNESS-04: reviewer must not have write
         // tools.
         assert!(reg.get("edit_file").is_none());
         assert!(reg.get("bash").is_none());
         assert!(reg.get("git_commit").is_none());
+        // V2 §3.2 — reviewer NEVER receives structured_output (R-5).
+        assert!(reg.get("structured_output").is_none(),
+            "reviewer MUST NOT have structured_output (V2 §3.2 R-5)");
         // Read-only tools present:
         assert!(reg.get("read_file").is_some());
         assert!(reg.get("grep_search").is_some());
@@ -706,8 +772,11 @@ mod tests {
 
     #[test]
     fn build_role_orchestrator_pins_dag_terminals() {
-        let (reg, terminals) = build_role(Role::Orchestrator);
+        let (reg, terminals) = build_role(Role::Orchestrator, stub_submitter());
         assert!(reg.get("read_file").is_some());
+        // V2 §3.2 — orchestrator also gets structured_output.
+        assert!(reg.get("structured_output").is_some(),
+            "orchestrator MUST have structured_output (V2 §3.2)");
         assert_eq!(
             terminals,
             vec!["integration_merge", "activate_subtask", "retry_subtask"]

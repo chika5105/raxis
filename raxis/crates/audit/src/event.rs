@@ -1942,6 +1942,52 @@ pub enum AuditEventKind {
         /// `credential-proxy.md §22`.
         reason:          String,
     },
+
+    // --- V2 §3.2 typed structured outputs --------------------------------
+    /// Emitted by `handlers::intent::handle_structured_output` whenever
+    /// an executor or orchestrator agent submits a `StructuredOutput`
+    /// intent and the kernel-side validator accepts the payload. The
+    /// row is the audit-chain projection of `structured_outputs`
+    /// (`Table::StructuredOutputs`) — the operator dashboard joins the
+    /// two so a chain replay reconstructs the full payload.
+    ///
+    /// Carries enough metadata for forensic correlation but **does
+    /// not** include the full payload (the dashboard / CLI fetch the
+    /// payload from `structured_outputs.payload_json` keyed on
+    /// `output_id`). Keeping the audit row compact bounds the chain
+    /// growth — a verbose progress-report stream can produce dozens
+    /// of rows per task and we do not want each row to embed kilobytes
+    /// of file lists.
+    ///
+    /// CLI surface: `raxis audit query --event-type StructuredOutputEmitted`.
+    StructuredOutputEmitted {
+        /// `output_id` PK of the matching `structured_outputs` row.
+        output_id:     String,
+        /// Initiative the emitting session belongs to.
+        initiative_id: String,
+        /// Task the emitting session is bound to.
+        task_id:       String,
+        /// Emitting session.
+        session_id:    String,
+        /// Variant tag (`progress_report`, `diagnostic_flag`,
+        /// `task_summary`) — matches `StructuredOutputKind::variant_tag`.
+        ///
+        /// **Field-name note.** Renamed from `kind` to
+        /// `output_kind` because the parent `AuditEventKind` enum
+        /// uses `#[serde(tag = "kind")]` for its internal-tag
+        /// projection; serde rejects a struct-variant field whose
+        /// name collides with the internal tag.
+        output_kind:   String,
+        /// `info` / `warning` / `critical` for `diagnostic_flag`,
+        /// `None` for the other two variants.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        severity:      Option<String>,
+        /// Byte length of the validated/normalised
+        /// `payload_json` written to `structured_outputs`. Operators
+        /// can quickly spot pathologically-large outputs without
+        /// pulling the body.
+        payload_bytes: u32,
+    },
 }
 
 impl AuditEventKind {
@@ -2039,6 +2085,7 @@ impl AuditEventKind {
             Self::SmtpMessageRelayed { .. } => "SmtpMessageRelayed",
             Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",
             Self::DryRunAdmitted { .. } => "DryRunAdmitted",
+            Self::StructuredOutputEmitted { .. } => "StructuredOutputEmitted",
         }
     }
 }

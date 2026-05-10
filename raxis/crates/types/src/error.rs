@@ -141,6 +141,26 @@ pub enum PlannerErrorCode {
     /// recovers (`host-capacity.md §7.1`, INV-CAPACITY-02).
     #[serde(rename = "FAIL_DISK_FULL")]
     FailDiskFull,
+
+    /// **V2 `v2_extended_gaps.md §3.2`** — the planner submitted a
+    /// `StructuredOutput` intent whose payload failed kernel-side
+    /// validation: `structured_output = None` on a
+    /// `IntentKind::StructuredOutput`, an unparseable `commit_sha`
+    /// on a `TaskSummary`, or a missing `task_id` scope. Retryable
+    /// only by emitting a syntactically-correct payload — the
+    /// kernel does NOT reveal which sub-check fired (INV-09 /
+    /// R-10 opaque rejection).
+    #[serde(rename = "FAIL_STRUCTURED_OUTPUT_INVALID")]
+    FailStructuredOutputInvalid,
+
+    /// **V2 `v2_extended_gaps.md §3.2`** — the planner exceeded
+    /// `STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT` accepted
+    /// structured outputs in this session. Retryable on the next
+    /// session activation; not retryable within the current
+    /// session. The rate cap is per-session so an abusive agent
+    /// can be sandboxed without quarantining its lineage.
+    #[serde(rename = "FAIL_STRUCTURED_OUTPUT_RATE_LIMITED")]
+    FailStructuredOutputRateLimited,
 }
 
 impl PlannerErrorCode {
@@ -178,6 +198,8 @@ impl fmt::Display for PlannerErrorCode {
             Self::DependencyNotMet => "DEPENDENCY_NOT_MET",
             Self::FailVmConcurrencyAtCap => "FAIL_VM_CONCURRENCY_AT_CAP",
             Self::FailDiskFull => "FAIL_DISK_FULL",
+            Self::FailStructuredOutputInvalid => "FAIL_STRUCTURED_OUTPUT_INVALID",
+            Self::FailStructuredOutputRateLimited => "FAIL_STRUCTURED_OUTPUT_RATE_LIMITED",
         };
         f.write_str(s)
     }
@@ -421,6 +443,10 @@ mod tests {
             PlannerErrorCode::InvalidRequest,
             PlannerErrorCode::FailApprovalTokenInvalid,
             PlannerErrorCode::DependencyNotMet,
+            PlannerErrorCode::FailVmConcurrencyAtCap,
+            PlannerErrorCode::FailDiskFull,
+            PlannerErrorCode::FailStructuredOutputInvalid,
+            PlannerErrorCode::FailStructuredOutputRateLimited,
         ] {
             assert!(!code.is_terminal(),
                 "{code:?} is in the retryable set but \
