@@ -128,6 +128,61 @@ pub fn plan_bundle_sha256_by_id(
     Ok(Some(raxis_types::BundleSha256::new(arr)))
 }
 
+/// Whether the given initiative has `git_apply_pending = 1`.
+///
+/// Phase 1 of the IntegrationMerge three-phase commit
+/// (integration-merge.md §11.1) sets this flag inside the same SQLite
+/// transaction that records the intent. Phase 3 clears it after the
+/// host-side fast-forward of the operator-configured `target_ref`
+/// completes. Between Phase 1 commit and Phase 3 clear, this returns
+/// `Ok(true)` and:
+///   * the IntegrationMerge admission pre-flight rejects with
+///     `FAIL_GIT_APPLY_PENDING`,
+///   * worktree GC retains the worktree until the flag clears (so
+///     recovery still has the merge commit reachable), and
+///   * boot recovery re-runs the host-side merge.
+///
+/// Returns `Ok(false)` when the initiative does not exist (callers
+/// already validate existence via [`by_id`]) so the recovery scan can
+/// stay narrow.
+pub fn git_apply_pending(
+    conn:          &RoConn,
+    initiative_id: &str,
+) -> Result<bool, InitiativeViewError> {
+    let pending: Option<i64> = conn.query_row(
+        &format!(
+            "SELECT git_apply_pending FROM {} WHERE initiative_id = ?1",
+            Table::Initiatives.as_str(),
+        ),
+        rusqlite::params![initiative_id],
+        |r| r.get(0),
+    ).optional()?;
+    Ok(pending.unwrap_or(0) != 0)
+}
+
+/// Initiative ids whose IntegrationMerge committed Phase 1 but never
+/// observed Phase 3 (kernel crashed between the SQLite commit and the
+/// host-side `commit_merge_to_target_ref` returning).
+///
+/// Backed by the partial index `idx_initiatives_pending_git`
+/// (migration 16) so this scan is O(pending) rather than
+/// O(initiatives). Boot recovery iterates this list and, for each
+/// id, looks up the most recent `IntegrationMergeCompleted` audit
+/// event to recover the merge commit SHA + target ref to re-apply.
+pub fn pending_git_apply_ids(
+    conn: &RoConn,
+) -> Result<Vec<String>, InitiativeViewError> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT initiative_id FROM {} WHERE git_apply_pending = 1 \
+         ORDER BY created_at ASC",
+        Table::Initiatives.as_str(),
+    ))?;
+    let rows: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
 /// Look up a single initiative by id. Returns `None` when missing.
 pub fn by_id(conn: &RoConn, initiative_id: &str) -> Result<Option<InitiativeRow>, InitiativeViewError> {
     let row = conn.query_row(
@@ -297,6 +352,56 @@ pub fn list_filtered(
         .query_map(rusqlite::params![limit_i], map_list_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
+}
+
+// ────────────────────────────────────────────────────────────────────
+// Write-side helpers for `git_apply_pending` (integration-merge.md
+// §11.1). These take a `&rusqlite::Connection` because they are
+// invoked from inside an `IMMEDIATE` transaction inside the kernel
+// IntegrationMerge handler — Phase 1 sets the flag inside the same
+// transaction that records the intent; Phase 3 clears it after the
+// host-side fast-forward returns.
+//
+// They are not on `RoConn` because they mutate. They are not on
+// `Store` either because the kernel needs to compose them inside a
+// pre-existing transaction. Returning `usize` (rows affected) lets
+// the caller assert "exactly one row updated".
+// ────────────────────────────────────────────────────────────────────
+
+/// Set `git_apply_pending = 1` for one initiative. Returns the number
+/// of rows affected (0 if the initiative does not exist; 1 on
+/// success). MUST be called inside the kernel's Phase 1 SQLite
+/// transaction so the flag flips atomically with the intent record.
+pub fn set_git_apply_pending(
+    conn:          &rusqlite::Connection,
+    initiative_id: &str,
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        &format!(
+            "UPDATE {} SET git_apply_pending = 1 WHERE initiative_id = ?1",
+            Table::Initiatives.as_str(),
+        ),
+        rusqlite::params![initiative_id],
+    )
+}
+
+/// Clear `git_apply_pending` (set to 0) for one initiative. Returns
+/// the number of rows affected. Called either:
+///   * by the IntegrationMerge handler after the host-side merge
+///     succeeds (Phase 3), OR
+///   * by boot recovery after the merge is verified or successfully
+///     re-applied.
+pub fn clear_git_apply_pending(
+    conn:          &rusqlite::Connection,
+    initiative_id: &str,
+) -> Result<usize, rusqlite::Error> {
+    conn.execute(
+        &format!(
+            "UPDATE {} SET git_apply_pending = 0 WHERE initiative_id = ?1",
+            Table::Initiatives.as_str(),
+        ),
+        rusqlite::params![initiative_id],
+    )
 }
 
 fn map_list_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeListRow> {
@@ -577,6 +682,100 @@ mod tests {
         // Newest-first ordering MUST hold under LIMIT — never random.
         assert_eq!(rows[0].initiative.initiative_id, "init-fresh");
         assert_eq!(rows[1].initiative.initiative_id, "init-other");
+    }
+
+    // ── git_apply_pending: read + write helpers ─────────────────────────
+
+    #[test]
+    fn git_apply_pending_returns_false_for_fresh_initiative() {
+        // A newly-inserted initiative has the migration-16 default
+        // `git_apply_pending = 0` and so the read helper returns false.
+        let tmp  = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        assert!(!git_apply_pending(&conn, "init-fresh").unwrap());
+    }
+
+    #[test]
+    fn git_apply_pending_returns_false_for_missing_initiative() {
+        let tmp  = fresh_store_with_seed();
+        let conn = open_ro(tmp.path()).unwrap();
+        // Recovery scan must not blow up on missing rows; the
+        // pre-flight check treats missing-as-not-pending so the
+        // outer FK / existence check stays the source of truth for
+        // "initiative exists".
+        assert!(!git_apply_pending(&conn, "no-such-init").unwrap());
+    }
+
+    #[test]
+    fn set_then_read_then_clear_then_read_round_trips() {
+        let tmp = fresh_store_with_seed();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+
+        // Set inside an IMMEDIATE transaction, mimicking the kernel's
+        // Phase 1 commit shape.
+        {
+            let mut conn = store.lock_sync();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            assert_eq!(set_git_apply_pending(&tx, "init-mid").unwrap(), 1);
+            tx.commit().unwrap();
+        }
+
+        let ro = open_ro(tmp.path()).unwrap();
+        assert!(git_apply_pending(&ro, "init-mid").unwrap());
+
+        // Clear (Phase 3 / recovery success).
+        {
+            let mut conn = store.lock_sync();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            assert_eq!(clear_git_apply_pending(&tx, "init-mid").unwrap(), 1);
+            tx.commit().unwrap();
+        }
+
+        let ro = open_ro(tmp.path()).unwrap();
+        assert!(!git_apply_pending(&ro, "init-mid").unwrap());
+    }
+
+    #[test]
+    fn pending_git_apply_ids_returns_only_flagged_rows_oldest_first() {
+        let tmp = fresh_store_with_seed();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+
+        // Flip two of the seeded initiatives to pending. Their
+        // `created_at` order is init-old=100, init-mid=200, so the
+        // recovery scan returns them in that order regardless of
+        // the order we set the flag.
+        {
+            let mut conn = store.lock_sync();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            assert_eq!(set_git_apply_pending(&tx, "init-mid").unwrap(), 1);
+            assert_eq!(set_git_apply_pending(&tx, "init-old").unwrap(), 1);
+            tx.commit().unwrap();
+        }
+
+        let ro = open_ro(tmp.path()).unwrap();
+        let ids = pending_git_apply_ids(&ro).unwrap();
+        assert_eq!(ids, vec!["init-old", "init-mid"]);
+    }
+
+    #[test]
+    fn set_git_apply_pending_returns_zero_rows_for_missing_initiative() {
+        // The kernel asserts on the rows-affected count to surface a
+        // bug that would otherwise silently lose the flag (e.g. the
+        // initiative was concurrently deleted). Confirm the helper
+        // really does return 0 in that case rather than masking it.
+        let tmp = fresh_store_with_seed();
+        let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
+        let mut conn = store.lock_sync();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_eq!(set_git_apply_pending(&tx, "no-such-init").unwrap(), 0);
     }
 
     #[test]

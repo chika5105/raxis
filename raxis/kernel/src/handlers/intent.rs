@@ -632,6 +632,70 @@ fn run_phase_a(
         }
     }
 
+    // ── Step 3c (V2.5 §11.1): IntegrationMerge git_apply_pending pre-flight ─
+    //
+    // The IntegrationMerge three-phase commit (integration-merge.md
+    // §11) sets `initiatives.git_apply_pending = 1` inside the same
+    // SQLite transaction that records the intent (Phase 1) and clears
+    // it after the host-side fast-forward of the operator-configured
+    // `target_ref` returns (Phase 3). Between Phase 1 commit and
+    // Phase 3 clear, NO other IntegrationMerge for that initiative
+    // may proceed:
+    //
+    //   * If we let a second merge in, it would race the first
+    //     merge's host-side `commit_merge_to_target_ref` and could
+    //     either leave `target_ref` pointing into the old merge's
+    //     octopus or — worse — clobber a successful Phase 2 with a
+    //     Phase 1 of a stale follow-on intent.
+    //
+    //   * If the kernel crashed between Phase 1 and Phase 2, boot
+    //     recovery (handlers::git_apply_recovery) re-runs the merge.
+    //     A fresh IntegrationMerge submission must wait for that
+    //     recovery — surfaced to the planner as
+    //     `FAIL_GIT_APPLY_PENDING` so the orchestrator backs off
+    //     instead of raising on operator escalation.
+    //
+    // The check is read-only and runs on a fresh `RoConn`; the
+    // authoritative serialization happens inside the Phase 1
+    // `IMMEDIATE` transaction below (Step 12B), where we re-set
+    // the flag and observe the SQLite-level race-free toggle.
+    if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
+        let initiative_id = task.initiative_id.clone();
+        // Read the flag using a one-shot rusqlite query against the
+        // shared `Connection` rather than a fresh `RoConn`, so the
+        // pre-flight observes any pending Phase 1 commit even if WAL
+        // has not yet checkpointed (a fresh `RoConn` over the same DB
+        // file would still see it via WAL, but going through the same
+        // mutex eliminates an unnecessary file-open under the
+        // `data_dir` indirection — and matches the surrounding
+        // helpers' style of operating on `&store`).
+        let pending: bool = {
+            let conn = store.lock_sync();
+            match conn.query_row(
+                &format!(
+                    "SELECT git_apply_pending FROM {INITIATIVES} WHERE initiative_id = ?1"
+                ),
+                rusqlite::params![initiative_id.as_str()],
+                |r| r.get::<_, Option<i64>>(0),
+            ) {
+                Ok(opt) => opt.unwrap_or(0) != 0,
+                Err(rusqlite::Error::QueryReturnedNoRows) => false,
+                Err(_) => return PreGateOutcome::Reject(
+                    PlannerErrorCode::FailPolicyViolation, task_state),
+            }
+        };
+        if pending {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"IntegrationMergeBlockedByPendingApply\",\
+                 \"task_id\":\"{}\",\"initiative_id\":\"{initiative_id}\",\
+                 \"diagnostic\":\"prior IntegrationMerge committed Phase 1 but Phase 3 has not cleared the flag — boot recovery must complete first\"}}",
+                req.task_id.as_str(),
+            );
+            return PreGateOutcome::Reject(
+                PlannerErrorCode::FailGitApplyPending, task_state);
+        }
+    }
+
     // ── Step 4: Validate worktree_root against policy ─────────────────────
     let worktree_root = session.worktree_root.as_deref().unwrap_or("");
     if !policy.worktree_root_allowed(worktree_root) {
@@ -901,6 +965,36 @@ fn run_phase_c(
         pre_state.head_sha_raw.as_str(),
     ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
+    // ── Step 12B (V2.5 §11.1 Phase 1): set git_apply_pending = 1 ─────────
+    //
+    // For IntegrationMerge ONLY. Inside the SAME transaction as the
+    // intent record so the flag flips atomically with the kernel's
+    // commitment to apply the merge. Phase 2 (host-side fast-forward
+    // below, after `tx.commit()`) is the side-effect; Phase 3 clears
+    // the flag once Phase 2 returns. If the kernel crashes between
+    // commit and Phase 3, boot recovery scans `git_apply_pending = 1`
+    // and either re-applies the merge or records `GitStateInconsistent`
+    // (handlers::git_apply_recovery).
+    //
+    // We assert exactly one row was updated so a missing initiative
+    // (which would be a bug — the FK on tasks.initiative_id already
+    // proves the parent exists by Step 3) surfaces as a hard reject
+    // instead of a silently-lost flag that would let a second merge
+    // race the recovery on next boot.
+    if matches!(intent_kind, IntentKind::IntegrationMerge) {
+        let updated = raxis_store::views::initiatives::set_git_apply_pending(
+            &tx, pre_state.task.initiative_id.as_str(),
+        ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+        if updated != 1 {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"GitApplyPendingSetMissed\",\
+                 \"initiative_id\":\"{}\",\"updated_rows\":{updated}}}",
+                pre_state.task.initiative_id,
+            );
+            return Err((PlannerErrorCode::FailPolicyViolation, task_state));
+        }
+    }
+
     tx.commit().map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
     drop(conn);
 
@@ -969,6 +1063,40 @@ fn run_phase_c(
                     cur = advance.current_sha,
                     aat = advance.already_at_target,
                 );
+
+                // ── V2.5 §11.1 Phase 3: clear git_apply_pending ─────────
+                //
+                // Best-effort: a SQLite failure here would re-trigger
+                // boot recovery on next start (recovery is idempotent
+                // — `commit_merge_to_target_ref` short-circuits when
+                // `target_ref` already points at the merge commit and
+                // emits `GitConsistencyVerified` instead of
+                // `GitConsistencyRepaired`). We log the failure so the
+                // operator notices, but we do NOT fail the merge —
+                // Phase 2 already succeeded and rolling it back is
+                // impossible.
+                {
+                    let conn = store.lock_sync();
+                    match raxis_store::views::initiatives::clear_git_apply_pending(
+                        &conn, initiative_id_owned.as_str(),
+                    ) {
+                        Ok(1) => {}
+                        Ok(n) => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\"event\":\"GitApplyPendingClearMissed\",\
+                                 \"initiative_id\":\"{initiative_id_owned}\",\"updated_rows\":{n},\
+                                 \"diagnostic\":\"clear matched {n} rows; expected 1 — boot recovery will reconcile\"}}",
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "{{\"level\":\"error\",\"event\":\"GitApplyPendingClearFailed\",\
+                                 \"initiative_id\":\"{initiative_id_owned}\",\"diagnostic\":\"{e}\"}}",
+                            );
+                        }
+                    }
+                }
+
                 true
             }
             Err(err) => {
