@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -115,6 +115,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 15 {
         apply_migration_15(conn)?;
+    }
+    if current_version < 16 {
+        apply_migration_16(conn)?;
     }
 
     Ok(())
@@ -2098,6 +2101,74 @@ COMMIT;
 }
 
 // ---------------------------------------------------------------------------
+// Migration 16 — initiatives.git_apply_pending durable-recovery flag.
+// integration-merge.md §11.1 (DDL) + §11.2/§11.3 (recovery semantics).
+//
+// Three-phase model for IntegrationMerge admission:
+//
+//   * Phase 1 — SQLite BEGIN IMMEDIATE: UPDATE current_sha,
+//               SET git_apply_pending = 1, INSERT
+//               IntegrationMergeCompleted audit, UPDATE
+//               subtask_activations.merge_included.
+//   * Phase 2 — Host-side `git fetch` + `git update-ref` against
+//               refs/heads/<target_ref> (idempotent).
+//   * Phase 3 — Single SQLite UPDATE: git_apply_pending = 0.
+//
+// Between Phase 1 and Phase 3 the row carries
+// `git_apply_pending = 1`. Startup recovery
+// (kernel-lifecycle.md §7 + integration-merge.md §11.3) scans
+// the partial index `idx_initiatives_pending_git`, runs cases
+// A/B against the worktree referenced by the most-recent
+// `IntegrationMergeCompleted` audit event, and either restores
+// the (a) consistent state or transitions the initiative to
+// `Blocked` with a `SecurityViolation { GitStateInconsistent }`
+// audit event (case C — §11.8 INV-MERGE-CONSISTENCY).
+//
+// The partial index keeps the boot-scan O(in-flight merges)
+// rather than O(all initiatives ever) (§11.1, end of section).
+// ---------------------------------------------------------------------------
+
+fn apply_migration_16(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_16_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 16 failed: {e}"))
+    })
+}
+
+/// The complete migration-16 DDL.
+pub fn render_migration_16_ddl() -> String {
+    let initiatives    = Table::Initiatives.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- Add the recovery driver flag. Default 0 ⇒ all preexisting rows
+-- are observably in INV-MERGE-CONSISTENCY case (a) the moment
+-- the migration completes (no in-flight merges across boots
+-- because the process restart implies any prior process exit
+-- was clean for the purposes of this column — pre-V2.5 the
+-- column did not exist, so there is no pending work to recover).
+ALTER TABLE {initiatives} ADD COLUMN git_apply_pending INTEGER NOT NULL DEFAULT 0;
+
+-- Partial index keyed off the recovery driver predicate so the
+-- boot-time scan in integration-merge.md §11.3 is O(in-flight
+-- merges) rather than O(all initiatives).
+CREATE INDEX idx_initiatives_pending_git
+    ON {initiatives} (initiative_id)
+    WHERE git_apply_pending = 1;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (16, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2378,6 +2449,26 @@ mod tests {
             //                See `crates/types/src/structured_output.rs`
             //                for the closed-enum payload shape.
             Table::StructuredOutputs,
+            // Migration 14 — v2: kernel-owned notification store
+            //                (notification-routing.md §3 + §4 +
+            //                v2_extended_gaps.md §3.4). Source of truth
+            //                for raxis inbox + the dashboard
+            //                /notifications page.
+            Table::Notifications,
+            // Migration 15 — v2: per-(provider, model) circuit-breaker
+            //                state (provider-failure-handling.md §6.3
+            //                / §6.4). Restored across kernel restarts
+            //                so an Open circuit mid-cooldown does not
+            //                silently reset to Closed on reboot.
+            Table::ProviderCircuitState,
+            // Migration 16 — v2: initiatives.git_apply_pending column +
+            //                idx_initiatives_pending_git partial index
+            //                (integration-merge.md §11.1). The column
+            //                is added by ALTER TABLE so the bare
+            //                `initiatives` row stays in the migration-1
+            //                entry above; the partial index is not a
+            //                table and intentionally absent from this
+            //                set.
         ]
         .iter()
         .map(|t| t.as_str().to_owned())

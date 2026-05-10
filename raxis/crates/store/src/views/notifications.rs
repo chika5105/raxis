@@ -186,6 +186,25 @@ mod tests {
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
 
+        // Seed the parent initiative row first so notifications'
+        // `initiative_id REFERENCES initiatives(initiative_id) ON
+        // DELETE CASCADE` foreign key (migration 14) is satisfied.
+        // Without this seed every NOT-NULL `initiative_id` insert
+        // below trips `SQLITE_CONSTRAINT_FOREIGNKEY`. The schema
+        // pins `state ∈ InitiativeState::ALL` (`Draft` is the
+        // canonical seed value used elsewhere in the test suite).
+        guard.execute(
+            &format!(
+                "INSERT INTO {} \
+                 (initiative_id, state, terminal_criteria_json, \
+                  plan_artifact_sha256, created_at) \
+                 VALUES ('init-1', 'Draft', '{{}}', 'sha-fixture', 0)",
+                Table::Initiatives.as_str(),
+            ),
+            [],
+        )
+        .unwrap();
+
         // Seed three notifications — two unread, one read.
         for (id, kind, init, read, ts) in [
             ("n-1", "EscalationPending",   Some("init-1"), 0, 300_i64),

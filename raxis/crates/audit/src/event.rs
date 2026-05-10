@@ -2077,6 +2077,83 @@ pub enum AuditEventKind {
         /// SHA-256 of the new policy artifact bytes.
         policy_sha256:        String,
     },
+
+    /// **V2 `integration-merge.md §11.3` Case A** — emitted by
+    /// startup recovery when an initiative was found with
+    /// `git_apply_pending = 1` AND `current_sha != refs/heads/main`,
+    /// and the recovery successfully re-ran Phase 2
+    /// (`git fetch` + `git update-ref`) to restore consistency.
+    /// The matching SQLite UPDATE clears the flag in the same
+    /// post-condition. INV-MERGE-CONSISTENCY (§11.8).
+    GitConsistencyRepaired {
+        /// Initiative whose merge was repaired.
+        initiative_id:    String,
+        /// SHA the kernel restored on `refs/heads/<target_ref>`.
+        db_sha:           String,
+        /// SHA `refs/heads/<target_ref>` was at BEFORE recovery —
+        /// either the unchanged base sha (Case A — Phase 2 missed
+        /// entirely), or a fetched-but-not-ref-updated state.
+        previous_git_sha: String,
+        /// `refs/heads/<name>` the recovery operated on (matches
+        /// the operator-configured target_ref at admission time).
+        target_ref:       String,
+    },
+
+    /// **V2 `integration-merge.md §11.3` Case B** — emitted by
+    /// startup recovery when an initiative was found with
+    /// `git_apply_pending = 1` AND `current_sha = refs/heads/main`
+    /// (Phase 2 fully succeeded; only Phase 3's flag-clearing
+    /// SQLite UPDATE was missed across the crash). Recovery
+    /// runs the missing UPDATE and emits this event.
+    GitConsistencyVerified {
+        /// Initiative whose pending flag was cleared.
+        initiative_id: String,
+        /// SHA observed identical between SQLite and the git ref.
+        sha:           String,
+        /// `refs/heads/<name>` the recovery operated on.
+        target_ref:    String,
+    },
+
+    /// **V2 `integration-merge.md §11.3` Case C — INV-MERGE-CONSISTENCY
+    /// (§11.8) violation.** Emitted by startup recovery when a row
+    /// with `git_apply_pending = 1` cannot be reconciled because
+    /// the originating Orchestrator's worktree (referenced by the
+    /// most-recent `IntegrationMergeCompleted` audit event) is
+    /// missing from disk OR does not contain `current_sha` as a
+    /// reachable commit. The kernel transitions the initiative to
+    /// `Blocked` and intentionally does NOT clear
+    /// `git_apply_pending` — the inconsistency persists in the
+    /// record until an operator intervenes via
+    /// `raxis initiative abort` (or, if the worktree can be
+    /// restored from backup, via a recovery-mode boot).
+    ///
+    /// Distinct from `AuditEventKind::SecurityViolation` (which is
+    /// reserved for the V2 wire-frame violation taxonomy of
+    /// §13). The git-state inconsistency is a durability /
+    /// recovery class violation, not a frame-validation class.
+    GitStateInconsistent {
+        /// Initiative whose merge cannot be reconciled.
+        initiative_id:   String,
+        /// SQLite-side `current_sha` (kernel-authoritative).
+        db_sha:          String,
+        /// Git-side `refs/heads/<target_ref>` SHA observed at
+        /// recovery time — left in place by recovery.
+        git_sha:         String,
+        /// `refs/heads/<name>` the recovery operated on.
+        target_ref:      String,
+        /// Stable-wire short string for the underlying cause.
+        /// One of:
+        ///   * `"orchestrator_worktree_missing"` — the worktree
+        ///     directory the audit event named no longer exists.
+        ///   * `"orchestrator_worktree_unreachable_commit"` — the
+        ///     worktree directory exists but does not have
+        ///     `db_sha` as a reachable commit.
+        ///   * `"audit_record_missing"` — no
+        ///     `IntegrationMergeCompleted` event for this
+        ///     `(initiative_id, db_sha)` pair was found in the
+        ///     audit log (chain corruption — extreme case).
+        reason:          String,
+    },
 }
 
 impl AuditEventKind {
@@ -2177,6 +2254,9 @@ impl AuditEventKind {
             Self::StructuredOutputEmitted { .. } => "StructuredOutputEmitted",
             Self::CircuitBreakerStateChanged { .. } => "CircuitBreakerStateChanged",
             Self::PolicyUpdatedViaDashboard { .. } => "PolicyUpdatedViaDashboard",
+            Self::GitConsistencyRepaired { .. }    => "GitConsistencyRepaired",
+            Self::GitConsistencyVerified { .. }    => "GitConsistencyVerified",
+            Self::GitStateInconsistent { .. }      => "GitStateInconsistent",
         }
     }
 }

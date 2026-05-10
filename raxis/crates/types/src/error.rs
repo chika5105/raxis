@@ -161,6 +161,19 @@ pub enum PlannerErrorCode {
     /// can be sandboxed without quarantining its lineage.
     #[serde(rename = "FAIL_STRUCTURED_OUTPUT_RATE_LIMITED")]
     FailStructuredOutputRateLimited,
+
+    /// **V2 `integration-merge.md §11.5`** — a previous
+    /// `IntegrationMerge` for this initiative left
+    /// `initiatives.git_apply_pending = 1` (Phase 2 host-side
+    /// fast-forward incomplete or Phase 3 ack missed across a
+    /// kernel restart). Check 8 Phase 1 pre-flight refuses to
+    /// admit a new merge until startup recovery (§11.3 Cases A
+    /// or B) clears the flag. **Retryable** with backoff: the
+    /// flag clears either inline (when the previous merge's
+    /// host-side fast-forward retries succeed) or on the next
+    /// kernel restart. INV-MERGE-CONSISTENCY (§11.8).
+    #[serde(rename = "FAIL_GIT_APPLY_PENDING")]
+    FailGitApplyPending,
 }
 
 impl PlannerErrorCode {
@@ -200,6 +213,7 @@ impl fmt::Display for PlannerErrorCode {
             Self::FailDiskFull => "FAIL_DISK_FULL",
             Self::FailStructuredOutputInvalid => "FAIL_STRUCTURED_OUTPUT_INVALID",
             Self::FailStructuredOutputRateLimited => "FAIL_STRUCTURED_OUTPUT_RATE_LIMITED",
+            Self::FailGitApplyPending => "FAIL_GIT_APPLY_PENDING",
         };
         f.write_str(s)
     }
