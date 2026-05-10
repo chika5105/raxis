@@ -274,6 +274,31 @@ pub enum Table {
     ///           task_id, session_id, summary, payload_json, read,
     ///           source_event_id, created_at)`.
     Notifications,
+
+    // ── v2: Provider circuit-breaker state ────────────────────────────────
+    /// **Per-(provider, model) circuit-breaker state.** Tracks
+    /// consecutive failures, open/half-open/closed state, and the
+    /// half-open probe slot for the kernel's provider failure-handling
+    /// pipeline (`provider-failure-handling.md §6.3`).
+    ///
+    /// State transitions are transactional: every `record_failure` /
+    /// `record_success` / `Open → HalfOpen` promotion executes inside
+    /// a single `BEGIN IMMEDIATE` transaction that also inserts the
+    /// `CircuitBreakerStateChanged` audit event (INV-PROVIDER-08).
+    /// A kernel crash between the UPDATE and the INSERT cannot leave
+    /// a moved breaker with no audit record — either both land or
+    /// neither does.
+    ///
+    /// Persistence across kernel restarts: a fresh boot does NOT
+    /// reset breakers to `Closed`. An `Open` circuit that was mid-
+    /// cooldown before the crash resumes where it left off.
+    ///
+    /// Schema: `(provider, model, state, consecutive_failures,
+    ///           last_failure_at_ms, last_failure_kind,
+    ///           last_failure_http_code, opened_at_ms,
+    ///           open_expires_at_ms, half_open_inflight,
+    ///           last_success_at_ms, last_state_change_at_ms)`.
+    ProviderCircuitState,
 }
 
 impl Table {
@@ -320,6 +345,7 @@ impl Table {
             Self::IntegrationMergeAttempts  => "integration_merge_attempts",
             Self::StructuredOutputs         => "structured_outputs",
             Self::Notifications             => "notifications",
+            Self::ProviderCircuitState      => "provider_circuit_state",
         }
     }
 }
@@ -350,6 +376,7 @@ mod tests {
             Table::IntegrationMergeAttempts,
             Table::StructuredOutputs,
             Table::Notifications,
+            Table::ProviderCircuitState,
         ];
         for t in all {
             assert!(!t.as_str().is_empty(), "Table::{t:?} returned empty string");
@@ -420,6 +447,18 @@ mod tests {
     #[test]
     fn notifications_table_name_is_pinned() {
         assert_eq!(Table::Notifications.as_str(), "notifications");
+    }
+
+    /// Provider circuit-breaker state table name is wire-stable
+    /// (the kernel's `CircuitStore` and `raxis providers status`
+    /// CLI query this table using its literal name in production
+    /// SQL — see `provider-failure-handling.md §6.4`).
+    #[test]
+    fn provider_circuit_state_table_name_is_pinned() {
+        assert_eq!(
+            Table::ProviderCircuitState.as_str(),
+            "provider_circuit_state",
+        );
     }
 
     #[test]

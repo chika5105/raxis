@@ -229,6 +229,106 @@ pub struct PolicyOperatorView {
     pub permitted_ops: Vec<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Git worktree views (§4.3 git worktree API)
+// ---------------------------------------------------------------------------
+
+/// One worktree row returned by `GET /api/git/worktrees`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeListEntry {
+    /// URL-safe slug identifying the worktree (e.g. `main-0`,
+    /// `session-abc123de`). Used as the `:name` path component
+    /// for downstream worktree endpoints.
+    pub name: String,
+    /// Friendly label suitable for table rendering. For main
+    /// worktrees this is the path basename; for session
+    /// worktrees this is `<role>:<short-session-id>`.
+    pub label: String,
+    /// `Main` for operator-allowed roots, `Session` for
+    /// per-session VM clones.
+    pub kind: String,
+    /// Absolute on-disk path of the worktree (loopback-only —
+    /// this is the same path the kernel reads).
+    pub path: String,
+    /// Owning session id when `kind == "Session"`, else `None`.
+    pub session_id: Option<String>,
+    /// Owning task id when `kind == "Session"`, else `None`.
+    pub task_id: Option<String>,
+    /// Recorded base SHA (sessions only — `None` when the
+    /// session never recorded one or for main roots).
+    pub base_sha: Option<String>,
+}
+
+/// Worktree detail surfaced by `GET /api/git/worktrees/:name`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeDetail {
+    /// Same fields as [`WorktreeListEntry`].
+    #[serde(flatten)]
+    pub summary: WorktreeListEntry,
+    /// Current `HEAD` commit SHA (40-char hex). `None` when
+    /// the worktree path is missing or `git rev-parse HEAD`
+    /// failed (empty repo, broken worktree).
+    pub head_sha: Option<String>,
+    /// Active branch (`git symbolic-ref --short HEAD`). `None`
+    /// when HEAD is detached.
+    pub branch: Option<String>,
+    /// Commits ahead/behind the recorded base SHA. `None` when
+    /// no base is recorded or the comparison failed.
+    pub ahead: Option<u32>,
+    /// Commits behind the recorded base SHA. See above.
+    pub behind: Option<u32>,
+    /// `git status --porcelain=v1` lines. Empty ⇒ clean.
+    pub status_lines: Vec<String>,
+}
+
+/// One commit returned by `GET /api/git/worktrees/:name/log`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeLogEntry {
+    /// 40-char hex commit SHA.
+    pub sha: String,
+    /// Short SHA (first 8 chars).
+    pub short_sha: String,
+    /// `<author name> <author email>`.
+    pub author: String,
+    /// First non-empty line of the commit message (subject).
+    pub subject: String,
+    /// Author timestamp in unix seconds (UTC).
+    pub at: i64,
+}
+
+/// One file changed in a diff returned by
+/// `GET /api/git/worktrees/:name/diff{,/:range}`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeDiffFile {
+    /// Path relative to the worktree root.
+    pub path: String,
+    /// `A` (added) / `M` (modified) / `D` (deleted) /
+    /// `T` (type-change) — same vocabulary as
+    /// `git diff --name-status`.
+    pub status: String,
+    /// Number of inserted lines.
+    pub insertions: u32,
+    /// Number of deleted lines.
+    pub deletions: u32,
+    /// Unified-diff hunk text for the file. Bounded to
+    /// 64 KiB per file by the kernel-side wrapper to keep
+    /// the JSON payload small enough to render.
+    pub hunk: String,
+}
+
+/// Diff envelope returned by the dashboard.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeDiff {
+    /// Worktree slug the diff was computed against.
+    pub name: String,
+    /// Base side of the diff (`from`).
+    pub from_sha: String,
+    /// Head side of the diff (`to`).
+    pub to_sha: String,
+    /// One entry per changed file. Sorted by path.
+    pub files: Vec<WorktreeDiffFile>,
+}
+
 /// Health snapshot returned by `GET /api/health`.
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthSnapshot {
@@ -325,6 +425,40 @@ pub trait DashboardData: Send + Sync + 'static {
     /// Raw `policy.toml` bytes (UTF-8). Returned for the
     /// `write_policy`-role policy editor.
     fn policy_toml_bytes(&self) -> Result<String, ApiError>;
+
+    /// All worktrees the operator may inspect (main +
+    /// per-session). Returned newest-first when a sort order
+    /// applies.
+    fn list_worktrees(&self) -> Result<Vec<WorktreeListEntry>, ApiError>;
+
+    /// One worktree by slug. `Err(NotFound)` ⇒ unknown slug.
+    fn get_worktree(&self, name: &str) -> Result<WorktreeDetail, ApiError>;
+
+    /// `git log -n <limit>` for the worktree, newest first.
+    /// `limit` is clamped to `[1, 200]` by the route layer.
+    fn worktree_log(
+        &self,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<WorktreeLogEntry>, ApiError>;
+
+    /// Diff between the worktree's `HEAD` and its recorded
+    /// base SHA. `Err(NotFound)` ⇒ no base recorded for the
+    /// worktree (e.g. main worktrees with no upstream pin).
+    fn worktree_diff_default(
+        &self,
+        name: &str,
+    ) -> Result<WorktreeDiff, ApiError>;
+
+    /// Diff between two arbitrary commit SHAs in the worktree.
+    /// Both SHAs must be 40-char lowercase hex; the route layer
+    /// rejects malformed input before it reaches the data layer.
+    fn worktree_diff_range(
+        &self,
+        name: &str,
+        from_sha: &str,
+        to_sha: &str,
+    ) -> Result<WorktreeDiff, ApiError>;
 }
 
 /// Output of [`DashboardData::lookup_operator_roles`].
@@ -355,6 +489,26 @@ struct InMemoryInner {
     policy: Option<PolicySnapshotView>,
     policy_toml: String,
     health: Option<HealthSnapshot>,
+    /// (entry, detail, log entries, default-diff, ranged-diff store)
+    worktrees: Vec<WorktreeFixture>,
+}
+
+/// One worktree shape held by the in-memory fixture. Tests
+/// construct this via [`InMemoryDashboardData::push_worktree`]
+/// and downstream lookups walk the vec by `summary.name`.
+#[derive(Debug, Clone)]
+pub struct WorktreeFixture {
+    /// Detail surface — the listing surface is derived from
+    /// `detail.summary`, so callers only need to populate the
+    /// detail once.
+    pub detail: WorktreeDetail,
+    /// Log surface returned by `worktree_log` (already
+    /// newest-first).
+    pub log: Vec<WorktreeLogEntry>,
+    /// Diff returned when no explicit range is requested.
+    pub default_diff: Option<WorktreeDiff>,
+    /// Per-`(from, to)` diff lookups for the ranged endpoint.
+    pub range_diffs: HashMap<(String, String), WorktreeDiff>,
 }
 
 impl InMemoryDashboardData {
@@ -422,6 +576,13 @@ impl InMemoryDashboardData {
     /// Set the health snapshot.
     pub fn set_health(self: &Arc<Self>, h: HealthSnapshot) -> &Arc<Self> {
         self.inner.write().health = Some(h);
+        self
+    }
+
+    /// Push a worktree fixture. The slug used by lookups is
+    /// `fix.detail.summary.name`.
+    pub fn push_worktree(self: &Arc<Self>, fix: WorktreeFixture) -> &Arc<Self> {
+        self.inner.write().worktrees.push(fix);
         self
     }
 }
@@ -554,6 +715,76 @@ impl DashboardData for InMemoryDashboardData {
         }
         Ok(g.policy_toml.clone())
     }
+
+    fn list_worktrees(&self) -> Result<Vec<WorktreeListEntry>, ApiError> {
+        Ok(self
+            .inner
+            .read()
+            .worktrees
+            .iter()
+            .map(|w| w.detail.summary.clone())
+            .collect())
+    }
+
+    fn get_worktree(&self, name: &str) -> Result<WorktreeDetail, ApiError> {
+        self.inner
+            .read()
+            .worktrees
+            .iter()
+            .find(|w| w.detail.summary.name == name)
+            .map(|w| w.detail.clone())
+            .ok_or(ApiError::NotFound { kind: "worktree".into() })
+    }
+
+    fn worktree_log(
+        &self,
+        name: &str,
+        limit: u32,
+    ) -> Result<Vec<WorktreeLogEntry>, ApiError> {
+        let g = self.inner.read();
+        let w = g
+            .worktrees
+            .iter()
+            .find(|w| w.detail.summary.name == name)
+            .ok_or(ApiError::NotFound { kind: "worktree".into() })?;
+        let cap = limit.clamp(1, 200) as usize;
+        let mut out = w.log.clone();
+        out.truncate(cap);
+        Ok(out)
+    }
+
+    fn worktree_diff_default(
+        &self,
+        name: &str,
+    ) -> Result<WorktreeDiff, ApiError> {
+        let g = self.inner.read();
+        let w = g
+            .worktrees
+            .iter()
+            .find(|w| w.detail.summary.name == name)
+            .ok_or(ApiError::NotFound { kind: "worktree".into() })?;
+        w.default_diff
+            .clone()
+            .ok_or(ApiError::NotFound { kind: "default-diff".into() })
+    }
+
+    fn worktree_diff_range(
+        &self,
+        name: &str,
+        from_sha: &str,
+        to_sha: &str,
+    ) -> Result<WorktreeDiff, ApiError> {
+        let g = self.inner.read();
+        let w = g
+            .worktrees
+            .iter()
+            .find(|w| w.detail.summary.name == name)
+            .ok_or(ApiError::NotFound { kind: "worktree".into() })?;
+        w.range_diffs
+            .get(&(from_sha.to_owned(), to_sha.to_owned()))
+            .cloned()
+            .ok_or(ApiError::NotFound { kind: "diff-range".into() })
+    }
 }
 
 #[cfg(test)]
@@ -650,6 +881,82 @@ mod tests {
         assert_eq!(page1[0].seq, 10);
         let page2 = d.list_audit(Some(page1.last().unwrap().seq), 4, None).unwrap();
         assert_eq!(page2.first().unwrap().seq, 6);
+    }
+
+    #[test]
+    fn worktree_lookups_round_trip_through_fixture() {
+        let d = InMemoryDashboardData::new();
+        let from = "a".repeat(40);
+        let to = "b".repeat(40);
+        let summary = WorktreeListEntry {
+            name: "main-0".into(),
+            label: "raxis".into(),
+            kind: "Main".into(),
+            path: "/srv/work/raxis".into(),
+            session_id: None,
+            task_id: None,
+            base_sha: Some(from.clone()),
+        };
+        let detail = WorktreeDetail {
+            summary: summary.clone(),
+            head_sha: Some(to.clone()),
+            branch: Some("main".into()),
+            ahead: Some(0),
+            behind: Some(0),
+            status_lines: vec![],
+        };
+        let log = vec![WorktreeLogEntry {
+            sha: to.clone(),
+            short_sha: to[..8].into(),
+            author: "alice <alice@example>".into(),
+            subject: "first".into(),
+            at: 100,
+        }];
+        let default_diff = WorktreeDiff {
+            name: "main-0".into(),
+            from_sha: from.clone(),
+            to_sha: to.clone(),
+            files: vec![],
+        };
+        let mut range_diffs = HashMap::new();
+        range_diffs.insert(
+            (from.clone(), to.clone()),
+            WorktreeDiff {
+                name: "main-0".into(),
+                from_sha: from.clone(),
+                to_sha: to.clone(),
+                files: vec![WorktreeDiffFile {
+                    path: "src/lib.rs".into(),
+                    status: "M".into(),
+                    insertions: 1,
+                    deletions: 0,
+                    hunk: "@@ -1 +1,2 @@\n line\n+more\n".into(),
+                }],
+            },
+        );
+        d.push_worktree(WorktreeFixture { detail, log, default_diff: Some(default_diff), range_diffs });
+
+        let listed = d.list_worktrees().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "main-0");
+
+        let det = d.get_worktree("main-0").unwrap();
+        assert_eq!(det.head_sha.as_deref(), Some(to.as_str()));
+
+        let log = d.worktree_log("main-0", 10).unwrap();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].subject, "first");
+
+        let dd = d.worktree_diff_default("main-0").unwrap();
+        assert_eq!(dd.from_sha, from);
+
+        let rd = d.worktree_diff_range("main-0", &from, &to).unwrap();
+        assert_eq!(rd.files.len(), 1);
+        assert_eq!(rd.files[0].path, "src/lib.rs");
+
+        // Unknown name → 404 family.
+        let err = d.get_worktree("bogus").unwrap_err();
+        assert!(matches!(err, ApiError::NotFound { .. }));
     }
 
     #[test]

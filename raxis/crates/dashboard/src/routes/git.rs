@@ -1,0 +1,222 @@
+//! Git worktree endpoints.
+//!
+//! Spec §4.3 — `GET /api/git/worktrees`,
+//! `GET /api/git/worktrees/:name`,
+//! `GET /api/git/worktrees/:name/log`,
+//! `GET /api/git/worktrees/:name/diff`,
+//! `GET /api/git/worktrees/:name/diff/:range` (where `:range`
+//! is `<sha1>..<sha2>`).
+//!
+//! Authorization: `read` role suffices for every endpoint —
+//! these are read-only views over operator-blessed worktrees,
+//! and the kernel-side data layer enforces that only paths
+//! under `policy.allowed_worktree_roots()` are ever surfaced.
+//!
+//! Hard input validation:
+//!   * `:name` MUST match `[A-Za-z0-9._-]{1,128}` (route layer
+//!     rejects anything else with `FAIL_BAD_REQUEST`).
+//!   * `:range` MUST parse as `<sha1>..<sha2>` where both SHAs
+//!     are 40-char lowercase hex.
+//! These checks shut the door on path traversal and arbitrary
+//! command injection through the URL.
+
+use axum::extract::{Path, Query, State};
+use axum::Json;
+use serde::Deserialize;
+
+use crate::auth::DashboardRole;
+use crate::data::{
+    WorktreeDetail, WorktreeDiff, WorktreeListEntry, WorktreeLogEntry,
+};
+use crate::error::{ApiError, ApiResult};
+use crate::server::{AppState, AuthorizedOperator};
+
+/// Maximum length of the `:name` path segment.
+const MAX_NAME_LEN: usize = 128;
+
+/// `GET /api/git/worktrees`.
+pub async fn list<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+) -> ApiResult<Json<Vec<WorktreeListEntry>>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    Ok(Json(state.data.list_worktrees()?))
+}
+
+/// `GET /api/git/worktrees/:name`.
+pub async fn detail<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Path(name): Path<String>,
+) -> ApiResult<Json<WorktreeDetail>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    let name = validate_name(&name)?;
+    Ok(Json(state.data.get_worktree(name)?))
+}
+
+/// Query string for `GET /api/git/worktrees/:name/log`.
+#[derive(Debug, Deserialize)]
+pub struct LogQuery {
+    /// Page size; clamped to `[1, 200]`. Default 50.
+    #[serde(default = "default_log_limit")]
+    pub limit: u32,
+}
+
+fn default_log_limit() -> u32 { 50 }
+
+/// `GET /api/git/worktrees/:name/log`.
+pub async fn log<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Path(name): Path<String>,
+    Query(q): Query<LogQuery>,
+) -> ApiResult<Json<Vec<WorktreeLogEntry>>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    let name = validate_name(&name)?;
+    let limit = q.limit.clamp(1, 200);
+    Ok(Json(state.data.worktree_log(name, limit)?))
+}
+
+/// `GET /api/git/worktrees/:name/diff` — diff between the
+/// worktree's recorded base SHA and current HEAD.
+pub async fn diff_default<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Path(name): Path<String>,
+) -> ApiResult<Json<WorktreeDiff>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    let name = validate_name(&name)?;
+    Ok(Json(state.data.worktree_diff_default(name)?))
+}
+
+/// `GET /api/git/worktrees/:name/diff/:range` — diff between
+/// two arbitrary commit SHAs in the worktree.
+pub async fn diff_range<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Path((name, range)): Path<(String, String)>,
+) -> ApiResult<Json<WorktreeDiff>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    let name = validate_name(&name)?;
+    let (from, to) = parse_range(&range)?;
+    Ok(Json(state.data.worktree_diff_range(name, &from, &to)?))
+}
+
+// ---------------------------------------------------------------------------
+// Input validation helpers
+// ---------------------------------------------------------------------------
+
+/// Reject anything outside `[A-Za-z0-9._-]{1,128}`.
+fn validate_name(name: &str) -> ApiResult<&str> {
+    if name.is_empty() || name.len() > MAX_NAME_LEN {
+        return Err(ApiError::BadRequest {
+            detail: "worktree name length out of range".into(),
+        });
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return Err(ApiError::BadRequest {
+            detail: "worktree name contains forbidden characters".into(),
+        });
+    }
+    Ok(name)
+}
+
+/// Parse `<sha1>..<sha2>` where both SHAs are 40-char
+/// lowercase hex. Rejects anything else.
+fn parse_range(range: &str) -> ApiResult<(String, String)> {
+    let mut parts = range.split("..");
+    let from = parts.next().unwrap_or("");
+    let to = parts.next().unwrap_or("");
+    if parts.next().is_some() || from.len() != 40 || to.len() != 40 {
+        return Err(ApiError::BadRequest {
+            detail: "diff range must be <sha1>..<sha2> with 40-hex shas".into(),
+        });
+    }
+    if !is_hex(from) || !is_hex(to) {
+        return Err(ApiError::BadRequest {
+            detail: "diff range shas must be lowercase hex".into(),
+        });
+    }
+    Ok((from.to_owned(), to.to_owned()))
+}
+
+fn is_hex(s: &str) -> bool {
+    s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
+    if !op.has_role(DashboardRole::Read)
+        && !op.has_role(DashboardRole::WritePolicy)
+        && !op.has_role(DashboardRole::Admin)
+    {
+        return Err(ApiError::Forbidden { required: "read".into() });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn name_validator_accepts_typical_slugs() {
+        assert!(validate_name("main-0").is_ok());
+        assert!(validate_name("session-abc12345").is_ok());
+        assert!(validate_name("a.b.c").is_ok());
+        assert!(validate_name("snake_case_2").is_ok());
+    }
+
+    #[test]
+    fn name_validator_rejects_traversal_and_specials() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("../etc/passwd").is_err());
+        assert!(validate_name("foo/bar").is_err());
+        assert!(validate_name("a b").is_err());
+        assert!(validate_name(&"a".repeat(MAX_NAME_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn range_parser_round_trips_valid_input() {
+        let from = "a".repeat(40);
+        let to = "b".repeat(40);
+        let raw = format!("{from}..{to}");
+        let (got_from, got_to) = parse_range(&raw).unwrap();
+        assert_eq!(got_from, from);
+        assert_eq!(got_to, to);
+    }
+
+    #[test]
+    fn range_parser_rejects_short_sha_or_extra_separator() {
+        assert!(parse_range("short..short").is_err());
+        let valid = "a".repeat(40);
+        assert!(parse_range(&format!("{valid}..{valid}..{valid}")).is_err());
+        assert!(parse_range(&format!("{valid}-{valid}")).is_err());
+    }
+
+    #[test]
+    fn range_parser_rejects_uppercase_or_non_hex() {
+        let upper = "A".repeat(40);
+        let lower = "a".repeat(40);
+        assert!(parse_range(&format!("{upper}..{lower}")).is_err());
+        let bogus = "z".repeat(40);
+        assert!(parse_range(&format!("{lower}..{bogus}")).is_err());
+    }
+}

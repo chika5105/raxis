@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -112,6 +112,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 14 {
         apply_migration_14(conn)?;
+    }
+    if current_version < 15 {
+        apply_migration_15(conn)?;
     }
 
     Ok(())
@@ -2025,6 +2028,64 @@ CREATE INDEX idx_{notifications}_task
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (14, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 15 — provider_circuit_state table.
+// provider-failure-handling.md §6.3 / §6.4.
+//
+// Per-(provider, model) circuit-breaker state. State transitions are
+// transactional: every record_failure / record_success / Open → HalfOpen
+// promotion executes inside a single BEGIN IMMEDIATE that also inserts
+// the CircuitBreakerStateChanged audit event (INV-PROVIDER-08).
+// ---------------------------------------------------------------------------
+
+fn apply_migration_15(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_15_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 15 failed: {e}"))
+    })
+}
+
+/// The complete migration-15 DDL.
+pub fn render_migration_15_ddl() -> String {
+    let provider_circuit_state = Table::ProviderCircuitState.as_str();
+    let schema_version         = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── provider_circuit_state: per-(provider, model) circuit breaker ────────
+CREATE TABLE {provider_circuit_state} (
+    provider                  TEXT    NOT NULL,
+    model                     TEXT    NOT NULL,
+    state                     TEXT    NOT NULL CHECK (state IN ('Closed', 'Open', 'HalfOpen')),
+    consecutive_failures      INTEGER NOT NULL DEFAULT 0,
+    last_failure_at_ms        INTEGER,
+    last_failure_kind         TEXT,
+    last_failure_http_code    INTEGER,
+    opened_at_ms              INTEGER,
+    open_expires_at_ms        INTEGER,
+    half_open_inflight        INTEGER NOT NULL DEFAULT 0 CHECK (half_open_inflight IN (0, 1)),
+    last_success_at_ms        INTEGER,
+    last_state_change_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (provider, model)
+);
+
+-- Index for lazy Open → HalfOpen promotion: the resolver scans for
+-- rows where state = 'Open' AND open_expires_at_ms <= now().
+CREATE INDEX idx_{provider_circuit_state}_open_expires
+    ON {provider_circuit_state} (open_expires_at_ms)
+    WHERE state = 'Open';
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (15, strftime('%s', 'now'));
 
 COMMIT;
 "

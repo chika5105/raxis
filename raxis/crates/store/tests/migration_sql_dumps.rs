@@ -55,6 +55,8 @@ fn slug(version: u32) -> &'static str {
         11 => "v2_integration_merge_attempts",
         12 => "v25_tasks_token_usage",
         13 => "v32_structured_outputs",
+        14 => "v2_notifications",
+        15 => "v2_provider_circuit_state",
         _  => panic!("no slug registered for migration version {version}"),
     }
 }
@@ -75,6 +77,8 @@ fn render(version: u32) -> String {
         11 => render_migration_11_ddl(),
         12 => render_migration_12_ddl(),
         13 => render_migration_13_ddl(),
+        14 => render_migration_14_ddl(),
+        15 => render_migration_15_ddl(),
         _  => panic!("no renderer registered for migration version {version}"),
     }
 }
@@ -110,7 +114,7 @@ fn wrap_with_header(rendered: &str) -> String {
     out
 }
 
-const VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+const VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 /// Drift-detection: every committed `.sql` matches its
 /// `render_migration_N_ddl()` output byte-for-byte. Set

@@ -132,6 +132,12 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Policy.
         .route("/api/policy",                      get(policy::snapshot::<D>))
         .route("/api/policy/toml",                 get(policy::raw_toml::<D>))
+        // Git worktrees.
+        .route("/api/git/worktrees",                       get(git::list::<D>))
+        .route("/api/git/worktrees/:name",                 get(git::detail::<D>))
+        .route("/api/git/worktrees/:name/log",             get(git::log::<D>))
+        .route("/api/git/worktrees/:name/diff",            get(git::diff_default::<D>))
+        .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>))
         // Cross-cutting layers.
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())

@@ -1029,6 +1029,61 @@ pub enum AuditEventKind {
         attempts:          u32,
     },
 
+    // --- Provider circuit breaker (provider-failure-handling.md §6.3) -----
+    /// Emitted on every circuit-breaker state-class transition. State
+    /// transitions execute inside a single `BEGIN IMMEDIATE` SQLite
+    /// transaction that atomically updates `provider_circuit_state`
+    /// AND inserts this audit event (INV-PROVIDER-08). A kernel crash
+    /// between the two cannot leave a moved breaker with no audit
+    /// record — either both land or neither does.
+    ///
+    /// **Emission rule.** This event is written when and only when
+    /// `from_state != to_state` OR `consecutive_failures` crossed
+    /// `trip_threshold`. A `Closed → Closed` success does NOT emit
+    /// (the breaker counter resets silently). A `HalfOpen → Closed`
+    /// probe-success DOES emit (state-class transition).
+    ///
+    /// **Manual reset.** When an operator runs `raxis providers
+    /// reset --provider P --model M`, the kernel forces the breaker
+    /// to `Closed` and emits this event with
+    /// `trigger = "ManualReset"` + `operator` populated.
+    ///
+    /// Defined in `provider-failure-handling.md §6.3` and the
+    /// `provider_circuit_state` DDL (migration 15, §6.4).
+    CircuitBreakerStateChanged {
+        /// Provider key (e.g. `"anthropic"`, `"openai"`).
+        provider:             String,
+        /// Model key (e.g. `"claude-opus-4.7"`).
+        model:                String,
+        /// State before this transition.
+        from_state:           String,
+        /// State after this transition.
+        to_state:             String,
+        /// Consecutive retryable failures at the moment of transition.
+        consecutive_failures: u32,
+        /// Error category of the failure that triggered the transition
+        /// (e.g. `"Unavailable"`, `"Timeout"`). `None` for success-
+        /// driven transitions (`HalfOpen → Closed`) and manual resets.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        last_failure_kind:    Option<String>,
+        /// When the circuit will expire its `Open` state and promote
+        /// to `HalfOpen`. `None` when `to_state != "Open"`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        open_expires_at_ms:   Option<u64>,
+        /// What caused this transition. One of:
+        /// `"FailureThreshold"` — consecutive failures reached trip_threshold.
+        /// `"ProbeSuccess"` — half-open probe succeeded.
+        /// `"ProbeFailure"` — half-open probe failed, re-opened.
+        /// `"OpenWindowElapsed"` — lazy Open → HalfOpen promotion.
+        /// `"ManualReset"` — operator ran `raxis providers reset`.
+        trigger:              String,
+        /// Operator fingerprint when `trigger = "ManualReset"`.
+        /// `None` for all other triggers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        operator:             Option<String>,
+    },
+
+
     // --- Operator certificates (kernel-store.md §2.5.7, security-model.md §cert-lifecycle) ---
     /// Emitted by `policy_manager::advance_epoch` (and the genesis path)
     /// for every cert-bound `OperatorEntry` mirrored into the
