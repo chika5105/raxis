@@ -882,6 +882,13 @@ async fn main() {
                     session_spawn_for_orch,
                     Arc::clone(&store),
                     Arc::clone(&plan_registry),
+                    // V2 `v2_extended_gaps.md §2.5` — share the live
+                    // policy ArcSwap so the spawn path always reads
+                    // the most-recent operator-signed
+                    // `[budget.token_caps]` when stamping the
+                    // per-session token caps into the planner-VM
+                    // env. Hot-reloads land within one spawn cycle.
+                    Arc::clone(&policy),
                 ),
             )
         },

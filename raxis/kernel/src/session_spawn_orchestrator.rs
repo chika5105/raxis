@@ -107,7 +107,16 @@ use crate::initiatives::lifecycle as kernel_lifecycle;
 /// "agent did nothing"). The constant is also referenced by the
 /// E2E integration test fixtures so a single rename here updates
 /// the assertion.
-pub const PLANNER_TASK_PROMPT_ENV: &str = "RAXIS_PLANNER_TASK_PROMPT";
+///
+/// **V2.5 cleanup.** The canonical declaration moved to
+/// [`raxis_types::planner_env::PLANNER_TASK_PROMPT_ENV`] so the
+/// kernel and `raxis-planner-core` can share the wire contract via
+/// `raxis-types` (the only crate both already depend on; pulling
+/// `raxis-planner-core` into the kernel would drag `reqwest` and
+/// the model HTTP path into the kernel build). This re-export
+/// preserves every existing import path (`use
+/// crate::session_spawn_orchestrator::PLANNER_TASK_PROMPT_ENV`).
+pub use raxis_types::planner_env::PLANNER_TASK_PROMPT_ENV;
 
 /// Failure modes specific to the kernel-side bridge.
 ///
@@ -279,14 +288,16 @@ pub trait OrchestratorSpawn: Send + Sync {
 ///
 /// Holds the boot-time install-dir + kernel-version (via
 /// [`OrchestratorSpawnContext`]) plus the kernel's
-/// `Arc<SessionSpawnService>`, `Arc<Store>`, and
-/// `Arc<PlanRegistry>` (V2 §2.4 KSB assembly). Constructed once at
+/// `Arc<SessionSpawnService>`, `Arc<Store>`,
+/// `Arc<PlanRegistry>` (V2 §2.4 KSB assembly), and the policy
+/// `ArcSwap` (V2 §2.5 token-cap stamping). Constructed once at
 /// `main.rs` boot and cloned into `HandlerContext`.
 pub struct LiveOrchestratorSpawn {
     ctx:           OrchestratorSpawnContext,
     service:       Arc<SessionSpawnService>,
     store:         Arc<Store>,
     plan_registry: Arc<crate::initiatives::PlanRegistry>,
+    policy:        Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
 }
 
 impl LiveOrchestratorSpawn {
@@ -296,8 +307,9 @@ impl LiveOrchestratorSpawn {
         service:       Arc<SessionSpawnService>,
         store:         Arc<Store>,
         plan_registry: Arc<crate::initiatives::PlanRegistry>,
+        policy:        Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
     ) -> Self {
-        Self { ctx, service, store, plan_registry }
+        Self { ctx, service, store, plan_registry, policy }
     }
 }
 
@@ -310,6 +322,10 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
         task_prompt:      String,
     ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>> {
         Box::pin(async move {
+            // V2 `v2_extended_gaps.md §2.5` — read the live policy
+            // snapshot once at the spawn boundary so token caps
+            // honour the most recent operator-signed bundle.
+            let policy_snapshot = self.policy.load_full();
             spawn_orchestrator_for_initiative(
                 &self.ctx,
                 session_id,
@@ -319,6 +335,7 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
                 Arc::clone(&self.service),
                 &self.store,
                 &self.plan_registry,
+                &policy_snapshot,
             )
             .await
         })
@@ -462,6 +479,7 @@ async fn spawn_orchestrator_for_initiative(
     service:          Arc<SessionSpawnService>,
     store:            &Arc<Store>,
     plan_registry:    &Arc<crate::initiatives::PlanRegistry>,
+    policy:           &raxis_policy::PolicyBundle,
 ) -> Result<SpawnHandle, OrchestratorSpawnError> {
     // ── Step 1: locate canonical orchestrator image. ─────────────
     // We don't re-verify the digest here; the boot-time preflight
@@ -541,6 +559,13 @@ async fn spawn_orchestrator_for_initiative(
         );
     }
     env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), task_prompt);
+
+    // V2 `v2_extended_gaps.md §2.5` — stamp per-session LLM token
+    // caps from `policy.budget.token_caps` into the guest env. The
+    // in-VM dispatch loop reads them via `parse_u64_env` and folds
+    // them into `DispatchConfig::max_tokens_*_total`. Absent caps
+    // ⇒ env vars stay unset ⇒ uncapped on that axis.
+    populate_token_cap_env(&mut env, policy.token_caps());
 
     // V2 `v2_extended_gaps.md §2.4` — assemble the KSB snapshot
     // from the live kernel state and stamp it into
@@ -638,6 +663,66 @@ async fn terminate_orchestrator(
     service:    Arc<SessionSpawnService>,
 ) -> Result<TerminationReport, OrchestratorSpawnError> {
     Ok(service.terminate_session(session_id, grace).await?)
+}
+
+// ---------------------------------------------------------------------------
+// V2 `v2_extended_gaps.md §2.5` — token-cap env stamping.
+// ---------------------------------------------------------------------------
+
+/// Stamp the per-session LLM token caps from `[budget.token_caps]`
+/// into the spawned VM's env. Three independent vars; absent caps
+/// leave the corresponding axis uncapped at the in-VM dispatch loop
+/// (matches `DispatchConfig::max_tokens_*_total = None`).
+///
+/// Used on the orchestrator path where the env table is freshly
+/// allocated and there is no caller-supplied override to defer to.
+fn populate_token_cap_env(
+    env:  &mut BTreeMap<String, String>,
+    caps: Option<&raxis_policy::TokenCapsSection>,
+) {
+    use raxis_types::planner_env::{
+        PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV,
+        PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
+        PLANNER_MAX_TOKENS_TOTAL_ENV,
+    };
+    let Some(caps) = caps else { return; };
+    if let Some(n) = caps.max_input_tokens_per_session {
+        env.insert(PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV.to_owned(), n.to_string());
+    }
+    if let Some(n) = caps.max_output_tokens_per_session {
+        env.insert(PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV.to_owned(), n.to_string());
+    }
+    if let Some(n) = caps.max_total_tokens_per_session {
+        env.insert(PLANNER_MAX_TOKENS_TOTAL_ENV.to_owned(), n.to_string());
+    }
+}
+
+/// Same as [`populate_token_cap_env`] but uses `entry().or_insert`
+/// so a caller-supplied override (e.g. a test rewiring the env)
+/// wins over the policy default. Used on the executor path where
+/// `extra_env` is the caller's BTreeMap.
+fn populate_token_cap_env_or_insert(
+    env:  &mut BTreeMap<String, String>,
+    caps: Option<&raxis_policy::TokenCapsSection>,
+) {
+    use raxis_types::planner_env::{
+        PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV,
+        PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
+        PLANNER_MAX_TOKENS_TOTAL_ENV,
+    };
+    let Some(caps) = caps else { return; };
+    if let Some(n) = caps.max_input_tokens_per_session {
+        env.entry(PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV.to_owned())
+            .or_insert_with(|| n.to_string());
+    }
+    if let Some(n) = caps.max_output_tokens_per_session {
+        env.entry(PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV.to_owned())
+            .or_insert_with(|| n.to_string());
+    }
+    if let Some(n) = caps.max_total_tokens_per_session {
+        env.entry(PLANNER_MAX_TOKENS_TOTAL_ENV.to_owned())
+            .or_insert_with(|| n.to_string());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -782,6 +867,7 @@ pub async fn spawn_executor_for_task(
     service:          Arc<SessionSpawnService>,
     plan_registry:    &Arc<crate::initiatives::PlanRegistry>,
     store:            &Arc<Store>,
+    policy:           &raxis_policy::PolicyBundle,
     // V2.5 §13 — operator-published `[[vm_images]]` override.
     // When `Some`, the spawn path uses this image instead of the
     // canonical Executor-starter / Reviewer-core. The activation
@@ -939,6 +1025,14 @@ pub async fn spawn_executor_for_task(
             .or_insert(sock.display().to_string());
     }
 
+    // V2 `v2_extended_gaps.md §2.5` — stamp per-session LLM token
+    // caps from `policy.budget.token_caps` into the guest env, same
+    // contract as the orchestrator spawn path. `entry().or_insert`
+    // semantics: an existing override stamped by the caller wins
+    // (gives integration tests a knob to override the policy
+    // ceiling without rewriting the bundle).
+    populate_token_cap_env_or_insert(&mut env, policy.token_caps());
+
     // V2 `v2_extended_gaps.md §2.4` — assemble the per-task KSB
     // and stamp into `RAXIS_PLANNER_KSB`. Same fallback policy as
     // the orchestrator path: if the SQLite read fails the spawn
@@ -1084,6 +1178,22 @@ mod tests {
         .unwrap();
     }
 
+    /// Test fixture: build the live `Arc<ArcSwap<PolicyBundle>>` the
+    /// production wire feeds into `LiveOrchestratorSpawn`. Uses
+    /// `PolicyBundle::for_tests_with_operators(vec![])` so the spawn
+    /// path stamps no optional `RAXIS_PLANNER_MAX_TOKENS_*` env vars
+    /// (the test fixture has no `[budget.token_caps]` section),
+    /// keeping these spawn-trait round-trips focused on the trait
+    /// surface rather than token-cap stamping (which has its own
+    /// dedicated unit tests on `populate_token_cap_env`).
+    fn test_policy_arcswap()
+        -> Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>
+    {
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            raxis_policy::PolicyBundle::for_tests_with_operators(vec![]),
+        ))
+    }
+
     #[tokio::test]
     async fn live_orchestrator_spawn_full_round_trip_through_trait_surface() {
         let _g = ENV_LOCK.lock().unwrap();
@@ -1142,6 +1252,7 @@ mod tests {
                 Arc::clone(&service),
                 Arc::clone(&store),
                 Arc::new(crate::initiatives::PlanRegistry::new()),
+                test_policy_arcswap(),
             )
         );
         let handle = live
@@ -1230,6 +1341,7 @@ mod tests {
                 service,
                 store,
                 Arc::new(crate::initiatives::PlanRegistry::new()),
+                test_policy_arcswap(),
             ),
         );
         let err = live

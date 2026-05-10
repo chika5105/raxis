@@ -294,6 +294,22 @@ impl DispatchLoop {
             );
             cum_out = cum_out.saturating_add(u64::from(output_tokens));
 
+            // V2 `v2_extended_gaps.md §2.5` — enforce the per-session
+            // token caps BEFORE inspecting the response for terminal
+            // tools / Idle. The earlier version of this check sat
+            // below the `Idle` and `TerminalTool` early returns,
+            // which meant a session that crossed the cap on its
+            // FINAL turn never surfaced `TokensExceeded` —
+            // operators would see `Idle { final_text }` and the
+            // budget gate would silently no-op. Promoting the check
+            // here keeps the contract tight: every cap that is hit
+            // reaches the role binary as a `TokensExceeded` outcome,
+            // regardless of whether the model also tried to end the
+            // turn.
+            if let Some(exceeded) = self.check_ceilings(cum_in, cum_out) {
+                return Ok(exceeded);
+            }
+
             // Append the assistant turn to the history (verbatim so
             // tool_use blocks correlate with our tool_result reply).
             messages.push(Message {
@@ -371,14 +387,14 @@ impl DispatchLoop {
             });
             let _ = turn; // turn is implicit in the for-loop counter.
 
-            // V2_GAPS §C1 — coarse per-session ceiling check. Runs
-            // after the turn's `Usage` is folded into the running
-            // totals so a ceiling firing on the FIRST request still
-            // records the call. Order is `total → input → output`
-            // (delegated to `check_ceilings`).
-            if let Some(exceeded) = self.check_ceilings(cum_in, cum_out) {
-                return Ok(exceeded);
-            }
+            // V2 `v2_extended_gaps.md §2.5` — the post-turn ceiling
+            // check has already fired earlier in the loop (right after
+            // `cum_in` / `cum_out` were updated), so reaching the next
+            // iteration is the explicit "cap not yet hit" branch.
+            // Keep this comment as a tombstone so a future refactor
+            // that flips the order back to "tools first, then check"
+            // is forced to think about the Idle/TerminalTool early-
+            // return regression that motivated the move.
         }
 
         Ok(DispatchOutcome::MaxTurnsExceeded {
@@ -653,6 +669,32 @@ mod tests {
             }],
             stop_reason: Some("end_turn".to_owned()),
             usage: Usage::default(),
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+        }
+    }
+
+    /// Like `empty_response_end_turn` but with explicit usage so
+    /// regression tests can pin the post-turn ceiling-check
+    /// behaviour (`v2_extended_gaps.md §2.5`).
+    fn empty_response_end_turn_with_usage(
+        text:          &str,
+        input_tokens:  u32,
+        output_tokens: u32,
+    ) -> MessageResponse {
+        MessageResponse {
+            id:    "msg-end".to_owned(),
+            kind:  "message".to_owned(),
+            role:  "assistant".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: text.to_owned(),
+            }],
+            stop_reason: Some("end_turn".to_owned()),
+            usage: Usage {
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens:    0,
+            },
             model: "claude-sonnet-4-5-20250929".to_owned(),
         }
     }
@@ -936,6 +978,75 @@ mod tests {
                     "total ceiling fires before input ceiling per V2_GAPS §C1");
             }
             other => panic!("expected TokensExceeded(total), got {other:?}"),
+        }
+    }
+
+    /// V2 `v2_extended_gaps.md §2.5` — when the model returns
+    /// `end_turn` with no tool_use blocks AND the cumulative input
+    /// total has crossed the configured cap, the loop MUST surface
+    /// `TokensExceeded` and NOT `Idle`. Earlier dispatch versions
+    /// gated the post-turn ceiling check behind the
+    /// `tool_uses.is_empty()` continuation path, which silently
+    /// no-op'd the cap when the session ended on a clean `end_turn`.
+    /// This test pins the fixed contract.
+    #[tokio::test]
+    async fn input_ceiling_fires_even_on_idle_terminal_path() {
+        let r1 = empty_response_end_turn_with_usage("done", 200, 5);
+        let model    = Arc::new(MockModelClient::new(vec![r1]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws       = fixture_workspace();
+        let mut cfg  = DispatchConfig::new("test-model");
+        cfg.max_tokens_input_total = Some(100);
+        let mut d = DispatchLoop::new(
+            model, registry, cfg,
+            ToolContext::for_workspace(ws.path()),
+        );
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        match out {
+            DispatchOutcome::TokensExceeded {
+                which, input_tokens, ceiling, ..
+            } => {
+                assert_eq!(which, "input",
+                    "Idle exit MUST NOT bypass the input cap (§2.5 regression guard)");
+                assert_eq!(input_tokens, 200);
+                assert_eq!(ceiling, 100);
+            }
+            other => panic!("expected TokensExceeded(input), got {other:?}"),
+        }
+    }
+
+    /// Counterpart to the test above — when the model fires a
+    /// terminal tool AND the cumulative cap has been crossed, the
+    /// loop MUST surface `TokensExceeded` and NOT `TerminalTool`.
+    /// Same regression guard, different early-return path.
+    #[tokio::test]
+    async fn input_ceiling_fires_even_on_terminal_tool_short_circuit() {
+        // Use `task_complete` — registered as a terminal tool by
+        // `build_executor_registry`. Usage explicitly busts the cap.
+        let r1 = tool_use_response_with_usage(
+            "tu1", "task_complete",
+            serde_json::json!({ "summary": "done" }),
+            300, // input
+            5,   // output
+        );
+        let model    = Arc::new(MockModelClient::new(vec![r1]));
+        let registry = Arc::new(crate::tools::build_executor_registry());
+        let ws       = fixture_workspace();
+        let mut cfg  = DispatchConfig::new("test-model");
+        cfg.max_tokens_input_total = Some(100);
+        let mut d = DispatchLoop::new(
+            model, registry, cfg,
+            ToolContext::for_workspace(ws.path()),
+        )
+        .with_terminal_tools(vec!["task_complete"]);
+        let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
+        match out {
+            DispatchOutcome::TokensExceeded { which, ceiling, .. } => {
+                assert_eq!(which, "input",
+                    "terminal-tool short-circuit MUST NOT bypass the input cap");
+                assert_eq!(ceiling, 100);
+            }
+            other => panic!("expected TokensExceeded(input), got {other:?}"),
         }
     }
 

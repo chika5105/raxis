@@ -20,6 +20,7 @@ pub mod operator;
 pub mod operator_cert;
 pub mod operator_wire;
 pub mod plan_bundle;
+pub mod planner_env;
 pub mod policy;
 pub mod push;
 pub mod witness;

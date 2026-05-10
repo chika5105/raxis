@@ -863,6 +863,13 @@ pub(crate) struct DelegationsSection {
 /// MultiBranchCommit  = 25
 /// IntegrationMerge   = 50
 /// PrGateEvaluation   = 15
+///
+/// # v2_extended_gaps.md §2.5 — per-session LLM token ceilings.
+/// # All three are optional; absent ⇒ uncapped on that axis.
+/// [budget.token_caps]
+/// max_input_tokens_per_session  = 200_000   # ≈ Claude 3.5 Sonnet context
+/// max_output_tokens_per_session = 100_000
+/// max_total_tokens_per_session  = 250_000   # input + output combined
 /// ```
 #[derive(Debug, Deserialize)]
 pub(crate) struct BudgetSection {
@@ -873,6 +880,54 @@ pub(crate) struct BudgetSection {
     /// Cap on per-task admission cost before lane enforcement. Default 10000.
     #[serde(default = "default_max_cost_per_task")]
     pub(crate) max_cost_per_task: u64,
+
+    /// V2 `v2_extended_gaps.md §2.5` — `[budget.token_caps]`.
+    /// Per-session cumulative LLM token ceilings stamped into the
+    /// planner-VM env at spawn time and enforced by the in-VM
+    /// dispatch loop. `None` ⇒ section omitted ⇒ uncapped on every
+    /// axis (matches today's behaviour for unmigrated policies).
+    #[serde(default)]
+    pub(crate) token_caps: Option<TokenCapsSection>,
+}
+
+/// **`v2_extended_gaps.md §2.5` — per-session LLM token ceilings.**
+///
+/// ```toml
+/// [budget.token_caps]
+/// max_input_tokens_per_session  = 200_000
+/// max_output_tokens_per_session = 100_000
+/// max_total_tokens_per_session  = 250_000
+/// ```
+///
+/// Every field is optional and counts cumulative tokens across the
+/// session. The kernel stamps each present cap into the spawned
+/// planner VM's env (`RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL`,
+/// `RAXIS_PLANNER_MAX_TOKENS_OUTPUT_TOTAL`,
+/// `RAXIS_PLANNER_MAX_TOKENS_TOTAL`); the in-VM dispatch loop enforces
+/// the caps via `DispatchOutcome::TokensExceeded`. This is mid-session
+/// abort defense-in-depth — the kernel-side §2.5 cost ceiling is the
+/// authoritative spend gate; the in-VM ceiling stops the agent
+/// burning more tokens between intent submissions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenCapsSection {
+    /// Cumulative *input* tokens (Anthropic `input_tokens` +
+    /// `cache_creation_input_tokens` + `cache_read_input_tokens`)
+    /// allowed across a single session. Cumulative across every turn.
+    /// `None` ⇒ uncapped on this axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_input_tokens_per_session: Option<u64>,
+
+    /// Cumulative *output* tokens (Anthropic `output_tokens`) allowed
+    /// across a single session. `None` ⇒ uncapped on this axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens_per_session: Option<u64>,
+
+    /// Cumulative *combined* tokens (input + output) allowed across
+    /// a single session. Cheaper to set when an operator only cares
+    /// about total spend rather than the input/output split.
+    /// `None` ⇒ uncapped on this axis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_total_tokens_per_session: Option<u64>,
 }
 
 fn default_cost_per_touched_path() -> u64 { 1 }
@@ -2962,6 +3017,14 @@ pub struct PolicyBundle {
     base_cost_per_intent_kind: HashMap<String, u64>,
     cost_per_touched_path: u64,
     max_cost_per_task: u64,
+
+    /// V2 `v2_extended_gaps.md §2.5` — `[budget.token_caps]`.
+    /// Per-session LLM token ceilings. `None` ⇒ section omitted ⇒
+    /// uncapped on every axis (today's behaviour). The kernel
+    /// `session_spawn_orchestrator` projects the present caps into
+    /// `RAXIS_PLANNER_MAX_TOKENS_*` env vars.
+    token_caps: Option<TokenCapsSection>,
+
     /// SHA-256 of the raw policy.toml bytes. Set by the loader after computing
     /// from actual file bytes (not from the meta field). Used for storage in
     /// policy_epoch_history. Initially empty; populated by loader via with_sha256().
@@ -3496,6 +3559,29 @@ impl PolicyBundle {
             }
         }
 
+        // ── V2 `v2_extended_gaps.md §2.5` — `[budget.token_caps]` ───────
+        //
+        // Each cap is optional, but when present MUST be > 0 (a cap of
+        // zero would terminate the dispatch loop before the first
+        // model call, which is never useful and is almost certainly
+        // an operator typo). When all three caps are unset we leave
+        // the section as `None` so the kernel can distinguish "no
+        // caps" (skip env stamping) from "explicit caps".
+        if let Some(caps) = raw.budget.token_caps.as_ref() {
+            for (name, value) in [
+                ("max_input_tokens_per_session",  caps.max_input_tokens_per_session),
+                ("max_output_tokens_per_session", caps.max_output_tokens_per_session),
+                ("max_total_tokens_per_session",  caps.max_total_tokens_per_session),
+            ] {
+                if let Some(0) = value {
+                    return Err(PolicyError::MalformedArtifact(format!(
+                        "[budget.token_caps] {name} = 0 is never useful; \
+                         omit the key to leave the cap unset (v2_extended_gaps.md §2.5)"
+                    )));
+                }
+            }
+        }
+
         // ── Validate `[notifications]` ───────────────────────────────
         let (notification_channels, notification_routes, default_notification_channels) =
             validate_notifications(&raw.notifications)?;
@@ -3523,6 +3609,7 @@ impl PolicyBundle {
             base_cost_per_intent_kind: raw.budget.base_cost_per_intent_kind,
             cost_per_touched_path: raw.budget.cost_per_touched_path,
             max_cost_per_task: raw.budget.max_cost_per_task,
+            token_caps: raw.budget.token_caps,
             policy_sha256: String::new(),
             signed_by: raw.meta.signed_by,
             signed_at: raw.meta.signed_at,
@@ -3893,6 +3980,7 @@ impl PolicyBundle {
             base_cost_per_intent_kind: HashMap::new(),
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
+            token_caps: None,
             policy_sha256: String::new(),
             signed_by: String::new(),
             signed_at: 0,
@@ -4040,6 +4128,16 @@ impl PolicyBundle {
     /// Per-task admission cost cap (before lane enforcement).
     pub fn max_cost_per_task(&self) -> u64 {
         self.max_cost_per_task
+    }
+
+    /// V2 `v2_extended_gaps.md §2.5` — per-session LLM token caps
+    /// (`[budget.token_caps]`). `None` ⇒ section omitted ⇒ uncapped
+    /// on every axis. The kernel's `session_spawn_orchestrator`
+    /// projects the present caps into `RAXIS_PLANNER_MAX_TOKENS_*`
+    /// env vars at spawn time; the in-VM dispatch loop enforces them
+    /// via `DispatchOutcome::TokensExceeded`.
+    pub fn token_caps(&self) -> Option<&TokenCapsSection> {
+        self.token_caps.as_ref()
     }
 
     /// Lane configuration for a named lane. Returns `None` if not found.
@@ -4433,6 +4531,7 @@ mod tests {
             base_cost_per_intent_kind: HashMap::new(),
             cost_per_touched_path: 0,
             max_cost_per_task: 0,
+            token_caps: None,
             policy_sha256: String::new(),
             signed_by: String::new(),
             signed_at: 0,
@@ -5283,6 +5382,91 @@ priority             = 100
         let _ = p.cost_micro_dollars(u64::MAX, 0, 0, 0);
         let _ = p.cost_micro_dollars(0, u64::MAX, 0, 0);
         let _ = p.cost_micro_dollars(u64::MAX, u64::MAX, u64::MAX, u64::MAX);
+    }
+
+    // ── V2 §2.5 [budget.token_caps] — schema + accessor + validation ──
+
+    /// Omitting the `[budget.token_caps]` table leaves `token_caps()`
+    /// as `None` — that's how the kernel knows to skip env stamping.
+    /// This MUST be byte-for-byte equivalent to today's behaviour
+    /// (no kernel regression for unmigrated policies).
+    #[test]
+    fn token_caps_section_absent_is_none() {
+        let bundle = write_and_load(&minimal_policy_toml())
+            .expect("minimal policy without token_caps must load");
+        assert!(bundle.token_caps().is_none(),
+            "absent [budget.token_caps] MUST surface as None");
+    }
+
+    /// All three caps round-trip verbatim into the accessor.
+    #[test]
+    fn token_caps_section_all_fields_round_trip() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.token_caps]\n\
+             max_input_tokens_per_session  = 200000\n\
+             max_output_tokens_per_session = 100000\n\
+             max_total_tokens_per_session  = 250000\n",
+        );
+        let bundle = write_and_load(&t).expect("token_caps must load");
+        let caps = bundle.token_caps().expect("token_caps decoded");
+        assert_eq!(caps.max_input_tokens_per_session,  Some(200_000));
+        assert_eq!(caps.max_output_tokens_per_session, Some(100_000));
+        assert_eq!(caps.max_total_tokens_per_session,  Some(250_000));
+    }
+
+    /// Partial table — operators can declare only one axis.
+    #[test]
+    fn token_caps_section_partial_round_trip() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.token_caps]\n\
+             max_total_tokens_per_session  = 50000\n",
+        );
+        let bundle = write_and_load(&t).expect("partial token_caps must load");
+        let caps = bundle.token_caps().expect("token_caps decoded");
+        assert_eq!(caps.max_input_tokens_per_session,  None);
+        assert_eq!(caps.max_output_tokens_per_session, None);
+        assert_eq!(caps.max_total_tokens_per_session,  Some(50_000));
+    }
+
+    /// `cap = 0` is rejected: it would terminate the dispatch loop
+    /// before the first model call. Always an operator typo.
+    #[test]
+    fn token_caps_zero_input_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.token_caps]\n\
+             max_input_tokens_per_session = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero input cap must be rejected");
+        let s = format!("{err}");
+        assert!(s.contains("max_input_tokens_per_session"), "msg = {s}");
+        assert!(s.contains("never useful"), "msg = {s}");
+    }
+
+    #[test]
+    fn token_caps_zero_output_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.token_caps]\n\
+             max_output_tokens_per_session = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero output cap must be rejected");
+        let s = format!("{err}");
+        assert!(s.contains("max_output_tokens_per_session"), "msg = {s}");
+    }
+
+    #[test]
+    fn token_caps_zero_total_is_rejected() {
+        let mut t = minimal_policy_toml();
+        t.push_str(
+            "\n[budget.token_caps]\n\
+             max_total_tokens_per_session = 0\n",
+        );
+        let err = write_and_load(&t).expect_err("zero total cap must be rejected");
+        let s = format!("{err}");
+        assert!(s.contains("max_total_tokens_per_session"), "msg = {s}");
     }
 }
 

@@ -131,6 +131,21 @@ pub const DEFAULT_PLANNER_MAX_TURNS: u32 = 20;
 /// [`DispatchConfig::new`].
 pub const DEFAULT_PLANNER_MAX_TOKENS: u32 = 4096;
 
+/// V2 `v2_extended_gaps.md §2.5` — env var carrying the per-session
+/// cumulative *input* token cap. Re-export of the canonical
+/// declaration in [`raxis_types::planner_env`]; both crates need
+/// the constant and `raxis-types` is the only one both depend on
+/// without dragging the planner HTTP path into the kernel.
+pub use raxis_types::planner_env::PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV;
+
+/// V2 `v2_extended_gaps.md §2.5` — env var carrying the per-session
+/// cumulative *output* token cap.
+pub use raxis_types::planner_env::PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV;
+
+/// V2 `v2_extended_gaps.md §2.5` — env var carrying the per-session
+/// cumulative *combined* (input + output) token cap.
+pub use raxis_types::planner_env::PLANNER_MAX_TOKENS_TOTAL_ENV;
+
 /// What the binary's `main` does next after [`run_role_session`].
 #[derive(Debug)]
 pub enum DriverOutcome {
@@ -295,6 +310,14 @@ where
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(DEFAULT_PLANNER_MAX_TOKENS);
 
+    // V2 `v2_extended_gaps.md §2.5` — read the kernel-stamped
+    // per-session token caps. Absent / unparseable → `None`, which
+    // leaves the corresponding `DispatchConfig` ceiling uncapped
+    // (matches today's behaviour for unmigrated policies).
+    let max_tokens_input_total  = parse_u64_env(&f, PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV);
+    let max_tokens_output_total = parse_u64_env(&f, PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV);
+    let max_tokens_total        = parse_u64_env(&f, PLANNER_MAX_TOKENS_TOTAL_ENV);
+
     // V2 `v2_extended_gaps.md §2.4` — read the kernel-stamped KSB
     // env var. Absent / unparseable → `None`, which the
     // dispatch-loop seam uses to fall back to the NNSP-only system
@@ -314,6 +337,11 @@ where
     });
 
     let model: Arc<dyn ModelClient> = Arc::new(AnthropicClient::new(base_url));
+    let token_caps = TokenCaps {
+        input_total:  max_tokens_input_total,
+        output_total: max_tokens_output_total,
+        total:        max_tokens_total,
+    };
     run_role_session_with_model(
         role,
         args,
@@ -324,10 +352,46 @@ where
         model_id,
         max_turns,
         max_tokens,
+        token_caps,
         model,
         ksb_snapshot,
     )
     .await
+}
+
+/// V2 `v2_extended_gaps.md §2.5` — bundle of optional per-session
+/// LLM token ceilings. Each axis is independently optional; absent
+/// fields leave the corresponding `DispatchConfig` cap unbounded
+/// (the in-VM dispatch loop only enforces present caps).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokenCaps {
+    /// Cumulative input-token cap across the session
+    /// (`DispatchConfig::max_tokens_input_total`).
+    pub input_total:  Option<u64>,
+    /// Cumulative output-token cap across the session
+    /// (`DispatchConfig::max_tokens_output_total`).
+    pub output_total: Option<u64>,
+    /// Cumulative combined-token cap across the session
+    /// (`DispatchConfig::max_tokens_total`).
+    pub total:        Option<u64>,
+}
+
+/// Helper for `run_role_session_with_env_fn` — parse a `u64` from a
+/// kernel-stamped env var, returning `None` for absent or
+/// unparseable values. We log the parse failure on stderr so a
+/// kernel-side regression doesn't silently disable enforcement.
+fn parse_u64_env<F: Fn(&str) -> Option<String>>(f: &F, name: &str) -> Option<u64> {
+    let raw = f(name)?;
+    match raw.parse::<u64>() {
+        Ok(n) => Some(n),
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_token_cap_parse_failed\",\
+                 \"env\":\"{name}\",\"raw\":\"{raw}\",\"err\":\"{e}\"}}",
+            );
+            None
+        }
+    }
 }
 
 /// Test-friendly variant — accepts the model client as an
@@ -356,6 +420,7 @@ pub async fn run_role_session_with_model(
     model_id: String,
     max_turns: u32,
     max_tokens: u32,
+    token_caps: TokenCaps,
     model: Arc<dyn ModelClient>,
     ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
@@ -373,6 +438,13 @@ pub async fn run_role_session_with_model(
     let mut config = DispatchConfig::new(model_id);
     config.max_turns = max_turns;
     config.max_tokens = max_tokens;
+    // V2 `v2_extended_gaps.md §2.5` — fold the per-session token caps
+    // into the dispatch config. The dispatch loop already enforces
+    // these via `check_ceilings` → `DispatchOutcome::TokensExceeded`;
+    // we just thread the kernel-stamped values through.
+    config.max_tokens_input_total  = token_caps.input_total;
+    config.max_tokens_output_total = token_caps.output_total;
+    config.max_tokens_total        = token_caps.total;
     let ctx = ToolContext::for_workspace(workspace);
     let mut loop_ = DispatchLoop::new(model, Arc::clone(&registry), config, ctx)
         .with_terminal_tools(terminal_tools.clone());
@@ -697,6 +769,7 @@ mod tests {
             "mock".to_owned(),
             5,
             512,
+            TokenCaps::default(),
             model as Arc<dyn ModelClient>,
             Some(snap),
         )
@@ -769,6 +842,7 @@ mod tests {
             "mock".to_owned(),
             5,
             512,
+            TokenCaps::default(),
             model as Arc<dyn ModelClient>,
             None,
         )
@@ -858,6 +932,7 @@ mod tests {
             "mock".to_owned(),
             5,
             512,
+            TokenCaps::default(),
             model,
             None,
         )
@@ -895,5 +970,86 @@ mod tests {
         )
         .await;
         assert!(matches!(res, Err(DriverError::BadBaseUrl { .. })));
+    }
+
+    /// V2 `v2_extended_gaps.md §2.5` — `parse_u64_env` returns `None`
+    /// for absent or unparseable values. Pinning the silent-skip
+    /// contract: a kernel that fails to stamp the env var (because
+    /// the operator omitted `[budget.token_caps]`) MUST leave the
+    /// dispatch loop uncapped, not crash with a "missing env" error.
+    #[test]
+    fn parse_u64_env_returns_none_for_absent_and_garbage() {
+        let absent  = |_: &str| None;
+        let garbage = |k: &str| if k == "X" { Some("not-a-number".to_owned()) } else { None };
+        let valid   = |k: &str| if k == "X" { Some("12345".to_owned()) } else { None };
+        assert_eq!(parse_u64_env(&absent,  "X"), None);
+        assert_eq!(parse_u64_env(&garbage, "X"), None);
+        assert_eq!(parse_u64_env(&valid,   "X"), Some(12345));
+    }
+
+    /// V2 `v2_extended_gaps.md §2.5` — when the kernel stamps a
+    /// per-session input-token cap into the planner env, the
+    /// dispatch loop's `check_ceilings` MUST observe it and
+    /// terminate post-turn with `DispatchOutcome::TokensExceeded`
+    /// (which `run_role_session_with_model` lifts into
+    /// `DriverOutcome::TokensExceeded`). This pins the env →
+    /// `DispatchConfig` → enforcement chain end-to-end.
+    #[tokio::test]
+    async fn run_role_session_with_model_enforces_input_token_cap_from_token_caps() {
+        // A single response that consumes 100 input tokens — well
+        // above our 50-token cap. The dispatch loop must abort
+        // after this one turn.
+        let model = Arc::new(MockModelClient::new(vec![MessageResponse {
+            id: "msg_1".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
+            model: "mock".to_owned(),
+            content: vec![ContentBlock::Text { text: "ack".to_owned() }],
+            stop_reason: Some("end_turn".to_owned()),
+            usage: Usage {
+                input_tokens:                100,
+                output_tokens:               1,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens:     0,
+            },
+        }]));
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("planner.sock");
+        let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
+        tokio::spawn(async move {
+            while let Ok((_s, _)) = listener.accept().await {}
+        });
+
+        let outcome = run_role_session_with_model(
+            Role::Reviewer,
+            BootArgs {
+                initiative_id: "init-CAP".to_owned(),
+                task_id: Some("task-CAP".to_owned()),
+            },
+            BootEnv { session_token: "tok".to_owned() },
+            "review please".to_owned(),
+            sock_path.display().to_string(),
+            dir.path().to_path_buf(),
+            "mock".to_owned(),
+            5,
+            512,
+            // Input cap of 50 < the 100 the model reports, so the
+            // post-turn ceiling check fires.
+            TokenCaps { input_total: Some(50), output_total: None, total: None },
+            model as Arc<dyn ModelClient>,
+            None,
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            DriverOutcome::TokensExceeded { which, ceiling } => {
+                assert_eq!(which, "input",
+                    "input cap must trip first when only the input cap is configured");
+                assert_eq!(ceiling, 50, "ceiling MUST be the cap we set");
+            }
+            other => panic!("expected TokensExceeded, got {other:?}"),
+        }
     }
 }

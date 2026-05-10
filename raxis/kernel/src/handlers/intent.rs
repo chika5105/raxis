@@ -2228,6 +2228,12 @@ async fn handle_activate_sub_task(
         Arc::clone(&ctx.session_spawn),
         &ctx.plan_registry,
         &ctx.store,
+        // V2 `v2_extended_gaps.md §2.5` — pass the live policy
+        // snapshot so the spawn path can stamp `[budget.token_caps]`
+        // into the planner-VM env. Reading off the existing
+        // `policy_snapshot` (loaded earlier in this handler) keeps
+        // the snapshot consistent across this intent's lifecycle.
+        &policy_snapshot,
         image_override,
     )
     .await
