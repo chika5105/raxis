@@ -144,21 +144,16 @@ pub async fn evaluate_claims(
     //   - The planner cannot fabricate a passing witness
     //   - The kernel already has the data; asking the planner is redundant
     //
-    // Planner-submitted claims are still accepted and merged (in case
-    // a future version adds planner-side claim awareness), but they
-    // are no longer *required* for the pipeline to work.
-    let mut effective_claims: Vec<SubmittedClaim> = submitted_claims.to_vec();
+    // Planner-submitted claims are intentionally discarded. The kernel
+    // is the sole claim source — the agent has zero influence on the
+    // claim pipeline. All claims are auto-derived from kernel-verified
+    // witness records below.
+    let mut effective_claims: Vec<SubmittedClaim> = Vec::new();
 
     for req in &required_claims {
         let claim_type_str = req.as_str();
         if claim_type_str == "StrictDefault" {
             continue; // No witness can satisfy StrictDefault — handled by claim::evaluate
-        }
-
-        // Skip if the planner already submitted this claim type.
-        let already_submitted = effective_claims.iter().any(|c| c.claim_type == claim_type_str);
-        if already_submitted {
-            continue;
         }
 
         // Check if a passing witness exists for this gate type + task + sha.
@@ -363,22 +358,24 @@ mod auto_claim_tests {
     /// Reproduce the auto-derivation logic from evaluate_claims Step 2.5.
     /// This is a focused test helper that mirrors the kernel's runtime path
     /// without needing the full HandlerContext/PolicyBundle/async machinery.
+    ///
+    /// Planner-submitted claims are intentionally discarded (matches
+    /// production code). The `_submitted` parameter is kept in the
+    /// signature so callers can document what the planner would have
+    /// sent, but it is never read.
     fn auto_derive_claims(
         required: &[ClaimType],
-        submitted: &[SubmittedClaim],
+        _submitted: &[SubmittedClaim],
         task_id: &str,
         evaluation_sha: &str,
         store: &raxis_store::Store,
     ) -> Vec<SubmittedClaim> {
-        let mut effective: Vec<SubmittedClaim> = submitted.to_vec();
+        // Planner claims discarded — kernel is the sole claim source.
+        let mut effective: Vec<SubmittedClaim> = Vec::new();
 
         for req in required {
             let claim_type_str = req.as_str();
             if claim_type_str == "StrictDefault" {
-                continue;
-            }
-            let already = effective.iter().any(|c| c.claim_type == claim_type_str);
-            if already {
                 continue;
             }
 
@@ -462,7 +459,7 @@ mod auto_claim_tests {
     }
 
     #[test]
-    fn planner_submitted_claim_preserved_alongside_auto_derived() {
+    fn planner_submitted_claims_are_discarded() {
         let store = mem_store();
         let task_id = "task-4";
         let eval_sha = "cafe1234cafe1234cafe1234cafe1234cafe1234";
@@ -477,7 +474,7 @@ mod auto_claim_tests {
             ClaimType::Named("WriteCode".to_owned()),
         ];
 
-        // Planner explicitly submitted WriteCode
+        // Planner explicitly submitted WriteCode — kernel must IGNORE it
         let submitted = vec![SubmittedClaim {
             claim_type: "WriteCode".to_owned(),
             evidence_ref: None,
@@ -487,41 +484,45 @@ mod auto_claim_tests {
             &required, &submitted, task_id, eval_sha, &store,
         );
 
-        assert_eq!(effective.len(), 2, "should have planner + auto-derived");
-
-        let has_write_code = effective.iter().any(|c| c.claim_type == "WriteCode");
-        let has_test_suite = effective.iter().any(|c| c.claim_type == "TestSuite");
-        assert!(has_write_code, "planner-submitted WriteCode must be preserved");
-        assert!(has_test_suite, "auto-derived TestSuite must be added");
+        // Only TestSuite should appear (auto-derived from witness).
+        // WriteCode is NOT present — no witness exists for it, and
+        // the planner's assertion is discarded.
+        assert_eq!(effective.len(), 1, "only witness-backed claims should appear");
+        assert_eq!(effective[0].claim_type, "TestSuite");
+        assert!(
+            !effective.iter().any(|c| c.claim_type == "WriteCode"),
+            "planner-submitted WriteCode must be discarded"
+        );
     }
 
     #[test]
-    fn planner_submitted_claim_not_duplicated() {
+    fn planner_claim_ignored_kernel_derives_from_witness() {
         let store = mem_store();
         let task_id = "task-5";
         let eval_sha = "f00d1234f00d1234f00d1234f00d1234f00d1234";
 
-        seed_witness(
+        let blob_sha = seed_witness(
             &store, task_id, eval_sha, "TestSuite", ResultClass::Pass,
         );
 
         let required = vec![ClaimType::Named("TestSuite".to_owned())];
 
-        // Planner also submitted TestSuite — auto-derivation should NOT duplicate
+        // Planner submitted TestSuite with a bogus evidence_ref —
+        // kernel must ignore it and use the real witness blob hash.
         let submitted = vec![SubmittedClaim {
             claim_type: "TestSuite".to_owned(),
-            evidence_ref: Some("manual-ref".to_owned()),
+            evidence_ref: Some("planner-fabricated-ref".to_owned()),
         }];
 
         let effective = auto_derive_claims(
             &required, &submitted, task_id, eval_sha, &store,
         );
 
-        assert_eq!(effective.len(), 1, "must not duplicate an already-submitted claim");
+        assert_eq!(effective.len(), 1);
         assert_eq!(
             effective[0].evidence_ref.as_deref(),
-            Some("manual-ref"),
-            "planner's original evidence_ref must be preserved, not overwritten"
+            Some(blob_sha.as_str()),
+            "evidence_ref must come from the kernel's witness, not the planner's fabrication"
         );
     }
 
