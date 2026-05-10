@@ -965,6 +965,7 @@ mod tests {
                 "Cargo.lock".to_owned(),
                 "package-lock.json".to_owned(),
             ],
+            ..Default::default()
         });
 
         let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
@@ -1068,6 +1069,7 @@ mod tests {
         ]);
         registry.insert_orchestrator("init-A", OrchestratorPlanFields {
             cross_cutting_artifacts: vec!["Cargo.lock".to_owned()],
+            ..Default::default()
         });
         let touched = vec![
             PathBuf::from("src/lib.rs"),
@@ -1087,6 +1089,7 @@ mod tests {
         ]);
         registry.insert_orchestrator("init-A", OrchestratorPlanFields {
             cross_cutting_artifacts: vec!["Cargo.lock".to_owned()],
+            ..Default::default()
         });
         let touched = vec![
             PathBuf::from("src/lib.rs"),       // admitted (sub-task)

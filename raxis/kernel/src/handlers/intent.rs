@@ -1920,6 +1920,17 @@ async fn handle_activate_sub_task(
         /// string (the validator rejects any `vm_image` on a
         /// Reviewer per INV-PLANNER-HARNESS-02).
         vm_image_alias: String,
+
+        /// V2 `v2_extended_gaps.md §1.1` — operator-authored seed
+        /// prompt for the planner agent (Executor / Reviewer).
+        /// Empty when the plan omitted `[[tasks.X]] description`;
+        /// the spawn path then leaves `RAXIS_PLANNER_TASK_PROMPT`
+        /// unset which keeps the planner binary in scaffold/park
+        /// mode (`INV-DRIVER-01`). The activation handler is the
+        /// trust boundary that materialises the prompt into the
+        /// substrate's env table — the agent never observes it
+        /// before the dispatch loop renders it.
+        task_prompt: String,
     }
 
     let lookup: ActivationLookup = {
@@ -1973,7 +1984,7 @@ async fn handle_activate_sub_task(
             // older migrations; the in-memory plan registry is the
             // canonical V2 source). The same registry entry carries
             // the V2.5 `vm_image` alias chosen at admission time.
-            let (agent_kind, vm_image_alias) = {
+            let (agent_kind, vm_image_alias, task_prompt) = {
                 let key = crate::initiatives::plan_registry::TaskKey::new(
                     &initiative_id, &task_id,
                 );
@@ -1995,7 +2006,11 @@ async fn handle_activate_sub_task(
                         return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
                     }
                 };
-                (kind, fields.vm_image)
+                // V2 `v2_extended_gaps.md §1.1` — fetch the
+                // operator-authored seed prompt out of the same
+                // signed-plan-derived registry entry so the spawn
+                // path can stamp it into the planner's env table.
+                (kind, fields.vm_image, fields.description)
             };
 
             // 2c. Mint the new Executor / Reviewer session row.
@@ -2051,6 +2066,7 @@ async fn handle_activate_sub_task(
                 new_lineage_id,
                 activation_id,
                 vm_image_alias,
+                task_prompt,
             })
         })
         .await
@@ -2106,6 +2122,31 @@ async fn handle_activate_sub_task(
         None
     };
 
+    // V2 `v2_extended_gaps.md §1.1` — stamp the operator-authored
+    // task prompt into the substrate's env table so the spawned
+    // planner binary's dispatch driver has a concrete user-message
+    // seed. The plan-side validator already rejected plans whose
+    // `[[tasks]]` block omits or empty-strings `description`
+    // (see `parse_plan_tasks`), so by construction
+    // `lookup.task_prompt` is non-empty here — no fallback path,
+    // no scaffold-mode escape hatch in production.
+    //
+    // The `BTreeMap` ordering is load-bearing: the substrate's
+    // audit / spawn-call logging enumerates env keys in sorted
+    // order, and a `HashMap` would surface non-determinism in
+    // those logs across boots.
+    debug_assert!(
+        !lookup.task_prompt.is_empty(),
+        "INV §1.1: parser guarantees non-empty description; reaching activation \
+         with an empty prompt is a bug in `parse_plan_tasks` — fix the parser, \
+         do not silently spawn a runaway agent",
+    );
+    let mut extra_env = std::collections::BTreeMap::<String, String>::new();
+    extra_env.insert(
+        crate::session_spawn_orchestrator::PLANNER_TASK_PROMPT_ENV.to_owned(),
+        lookup.task_prompt.clone(),
+    );
+
     let spawn_handle = match crate::session_spawn_orchestrator::spawn_executor_for_task(
         &ctx.executor_spawn,
         lookup.agent_kind,
@@ -2114,7 +2155,7 @@ async fn handle_activate_sub_task(
         &lookup.initiative_id,
         allowlist,
         Vec::new(),
-        std::collections::BTreeMap::new(),
+        extra_env,
         Arc::clone(&ctx.session_spawn),
         &ctx.store,
         image_override,

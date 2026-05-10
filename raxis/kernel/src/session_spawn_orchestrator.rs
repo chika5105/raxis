@@ -80,6 +80,35 @@ use thiserror::Error;
 
 use crate::initiatives::lifecycle as kernel_lifecycle;
 
+/// V2 `v2_extended_gaps.md §1.1` — env-var name carrying the
+/// operator-authored seed prompt to the spawned planner binary.
+///
+/// **Single source of truth.** This constant is referenced by:
+///
+/// 1. `kernel/src/handlers/intent.rs::handle_activate_sub_task`
+///    (Executor / Reviewer activation path)
+/// 2. `kernel/src/initiatives/lifecycle.rs` orchestrator auto-spawn
+///    (Orchestrator activation path)
+/// 3. `crates/planner-core/src/driver.rs` (the consuming driver
+///    inside the planner binary; see the `var()` helper there)
+///
+/// **Trust contract.** Presence of a NON-EMPTY value flips the
+/// driver out of scaffold/park mode (`INV-DRIVER-01`). The kernel
+/// is the single trust boundary that materialises the prompt into
+/// the substrate's env table — it is sourced from the
+/// operator-signed plan TOML and the agent never observes it
+/// before the dispatch loop renders it into the system / user
+/// messages.
+///
+/// **Why a constant, not a string literal.** Keeping the name in
+/// one place prevents the kernel and the driver from drifting on
+/// the wire shape; a typo on either side would silently keep the
+/// binary in scaffold mode (the most common failure mode for
+/// "agent did nothing"). The constant is also referenced by the
+/// E2E integration test fixtures so a single rename here updates
+/// the assertion.
+pub const PLANNER_TASK_PROMPT_ENV: &str = "RAXIS_PLANNER_TASK_PROMPT";
+
 /// Failure modes specific to the kernel-side bridge.
 ///
 /// Wraps `SpawnError` for substrate failures and adds the kernel-
@@ -211,11 +240,22 @@ pub trait OrchestratorSpawn: Send + Sync {
     /// initiative_id)`. The implementation is responsible for
     /// rehydrating the credential decls (production reads from the
     /// store; the test fake returns an empty list).
+    ///
+    /// `task_prompt` is the operator-authored seed prompt for the
+    /// orchestrator agent (V2 `v2_extended_gaps.md §1.1`). When
+    /// non-empty, the implementation MUST stamp it into the spawned
+    /// VM's env table under [`PLANNER_TASK_PROMPT_ENV`] so the
+    /// orchestrator binary's dispatch driver enters live mode rather
+    /// than parking in scaffold mode (`INV-DRIVER-01`). When empty
+    /// (the V1 default for plans that omit `[workspace] description`)
+    /// the env var MUST NOT be stamped — the driver treats absence
+    /// the same as empty and parks.
     fn spawn_for_initiative<'a>(
         &'a self,
         session_id:       &'a str,
         initiative_id:    &'a str,
         egress_allowlist: EgressAllowlist,
+        task_prompt:      String,
     ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>>;
 
     /// Tear down a previously-spawned Orchestrator VM. Idempotent:
@@ -262,6 +302,7 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
         session_id:       &'a str,
         initiative_id:    &'a str,
         egress_allowlist: EgressAllowlist,
+        task_prompt:      String,
     ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>> {
         Box::pin(async move {
             spawn_orchestrator_for_initiative(
@@ -269,6 +310,7 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
                 session_id,
                 initiative_id,
                 egress_allowlist,
+                task_prompt,
                 Arc::clone(&self.service),
                 &self.store,
             )
@@ -307,9 +349,12 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
 /// to compile.
 #[cfg(any(debug_assertions, test))]
 pub struct NoopOrchestratorSpawn {
-    /// Sequence of `(session_id, initiative_id)` pairs the kernel
-    /// asked to spawn, in call order.
-    spawn_calls:     std::sync::Mutex<Vec<(String, String)>>,
+    /// Sequence of `(session_id, initiative_id, task_prompt)` triples
+    /// the kernel asked to spawn, in call order. The third element
+    /// lets V2 `v2_extended_gaps.md §1.1` tests assert that the
+    /// activation handler propagated the operator-authored seed
+    /// prompt verbatim to the spawn callsite.
+    spawn_calls:     std::sync::Mutex<Vec<(String, String, String)>>,
     /// Sequence of `session_id`s the kernel asked to terminate.
     terminate_calls: std::sync::Mutex<Vec<String>>,
 }
@@ -324,10 +369,13 @@ impl NoopOrchestratorSpawn {
         }
     }
 
-    /// Snapshot of `(session_id, initiative_id)` pairs the kernel
-    /// has asked to spawn so far. Tests use this to assert that
-    /// `handle_approve_plan` reached the orchestrator-spawn callsite.
-    pub fn spawn_calls(&self) -> Vec<(String, String)> {
+    /// Snapshot of `(session_id, initiative_id, task_prompt)`
+    /// triples the kernel has asked to spawn so far. Tests use
+    /// this to assert that `handle_approve_plan` reached the
+    /// orchestrator-spawn callsite AND that V2
+    /// `v2_extended_gaps.md §1.1` propagated the operator-authored
+    /// seed prompt unchanged to the spawn boundary.
+    pub fn spawn_calls(&self) -> Vec<(String, String, String)> {
         self.spawn_calls.lock().expect("spawn_calls poisoned").clone()
     }
 
@@ -351,6 +399,7 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
         session_id:        &'a str,
         initiative_id:     &'a str,
         _egress_allowlist: EgressAllowlist,
+        task_prompt:       String,
     ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>> {
         let session_owned    = session_id.to_owned();
         let initiative_owned = initiative_id.to_owned();
@@ -358,7 +407,7 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
             self.spawn_calls
                 .lock()
                 .expect("spawn_calls poisoned")
-                .push((session_owned.clone(), initiative_owned));
+                .push((session_owned.clone(), initiative_owned, task_prompt));
             Ok(SpawnHandle {
                 session_id:         session_owned,
                 vsock_cid:          None,
@@ -403,6 +452,7 @@ async fn spawn_orchestrator_for_initiative(
     session_id:       &str,
     initiative_id:    &str,
     egress_allowlist: EgressAllowlist,
+    task_prompt:      String,
     service:          Arc<SessionSpawnService>,
     store:            &Arc<Store>,
 ) -> Result<SpawnHandle, OrchestratorSpawnError> {
@@ -458,14 +508,23 @@ async fn spawn_orchestrator_for_initiative(
     // tproxy admission gate.
     // V2_GAPS §B1 — stamp the planner UDS env contract into the
     // guest env so `raxis-planner-core::run_role_session` can
-    // connect back. Only `RAXIS_KERNEL_PLANNER_SOCKET` is set
-    // unconditionally; `RAXIS_PLANNER_TASK_PROMPT` is left
-    // empty/absent here because the orchestrator role does not yet
-    // have a per-initiative seed prompt plumbed end-to-end (the
-    // toggle into "live mode" is the kernel choosing to populate
-    // it via a future call site; absent ⇒ the binary parks, which
-    // matches the V2.3 scaffold behaviour bit-for-bit). See
-    // `crates/planner-core/src/driver.rs` for the contract table.
+    // connect back. `RAXIS_KERNEL_PLANNER_SOCKET` is set when a
+    // data_dir is configured.
+    //
+    // V2 `v2_extended_gaps.md §1.1` — additionally stamp
+    // `RAXIS_PLANNER_TASK_PROMPT` unconditionally. The plan-side
+    // validator (`parse_plan_orchestrator`) already rejected plans
+    // whose `[workspace]` table omits or empty-strings
+    // `description`, so by construction `task_prompt` is non-empty
+    // here. We assert defensively — reaching this point with an
+    // empty prompt indicates a parser regression and must surface
+    // loudly in test builds rather than silently spawning an idle
+    // orchestrator.
+    debug_assert!(
+        !task_prompt.is_empty(),
+        "INV §1.1: parser guarantees non-empty [workspace] description; \
+         reaching orchestrator spawn with an empty prompt is a parser bug",
+    );
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     if let Some(data_dir) = &spawn_ctx.data_dir {
         let sock = data_dir.join("sockets").join("planner.sock");
@@ -474,6 +533,7 @@ async fn spawn_orchestrator_for_initiative(
             sock.display().to_string(),
         );
     }
+    env.insert(PLANNER_TASK_PROMPT_ENV.to_owned(), task_prompt);
     let vm_spec = VmSpec {
         vcpu_count:       spawn_ctx.vcpu_count,
         mem_mib:          spawn_ctx.mem_mib,
@@ -973,7 +1033,13 @@ mod tests {
             LiveOrchestratorSpawn::new(spawn_ctx, Arc::clone(&service), Arc::clone(&store))
         );
         let handle = live
-            .spawn_for_initiative(session_id, initiative_id, allowlist)
+            .spawn_for_initiative(
+                session_id,
+                initiative_id,
+                allowlist,
+                "fixture: drive the orchestrator agent for round-trip test"
+                    .to_owned(),
+            )
             .await
             .expect("orchestrator spawn");
 
@@ -1054,6 +1120,7 @@ mod tests {
                 "sess-missing-1",
                 "init-missing-1",
                 EgressAllowlist::default(),
+                "fixture: missing-image case".to_owned(),
             )
             .await
             .expect_err("must error when image missing");
@@ -1075,14 +1142,24 @@ mod tests {
         let dyn_fake: &dyn OrchestratorSpawn = &fake;
 
         let h1 = dyn_fake
-            .spawn_for_initiative("sess-A", "init-A", EgressAllowlist::default())
+            .spawn_for_initiative(
+                "sess-A",
+                "init-A",
+                EgressAllowlist::default(),
+                "fixture: orchestrator A".to_owned(),
+            )
             .await
             .expect("fake spawn always Ok");
         assert_eq!(h1.session_id, "sess-A");
         assert!(h1.loopback_env.is_empty());
 
         let h2 = dyn_fake
-            .spawn_for_initiative("sess-B", "init-B", EgressAllowlist::default())
+            .spawn_for_initiative(
+                "sess-B",
+                "init-B",
+                EgressAllowlist::default(),
+                "Coordinate the migration".to_owned(),
+            )
             .await
             .expect("fake spawn always Ok");
         assert_eq!(h2.session_id, "sess-B");
@@ -1096,9 +1173,18 @@ mod tests {
         assert_eq!(
             fake.spawn_calls(),
             vec![
-                ("sess-A".to_owned(), "init-A".to_owned()),
-                ("sess-B".to_owned(), "init-B".to_owned()),
+                (
+                    "sess-A".to_owned(),
+                    "init-A".to_owned(),
+                    "fixture: orchestrator A".to_owned(),
+                ),
+                (
+                    "sess-B".to_owned(),
+                    "init-B".to_owned(),
+                    "Coordinate the migration".to_owned(),
+                ),
             ],
+            "V2 §1.1 — fake must record the operator-authored seed prompt verbatim",
         );
         assert_eq!(fake.terminate_calls(), vec!["sess-A".to_owned()]);
     }

@@ -458,6 +458,16 @@ pub struct PlanApproved {
     /// (e.g. unit tests asserting only the SQL admission tx). Every
     /// production caller of `approve_plan` observes this as `Some`.
     pub orchestrator_session_id: Option<String>,
+
+    /// V2 `v2_extended_gaps.md §1.1` — operator-authored seed prompt
+    /// for the orchestrator agent, sourced from the signed plan TOML's
+    /// `[workspace] description` field. Empty when the plan omits it
+    /// (the V1 default — keeps the orchestrator binary in scaffold/
+    /// park mode `INV-DRIVER-01`). The post-commit
+    /// `ctx.orchestrator_spawn.spawn_for_initiative(...)` callsite
+    /// stamps this verbatim into the spawned VM's
+    /// `RAXIS_PLANNER_TASK_PROMPT` env var.
+    pub orchestrator_task_prompt: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -964,6 +974,11 @@ pub fn approve_plan(
             // activation against the *current* policy bundle so a
             // mid-flight policy rotation is observed.
             vm_image:                  pt.vm_image.clone(),
+            // V2 `v2_extended_gaps.md §1.1` — operator-authored seed
+            // prompt; the activation handler stamps this verbatim into
+            // `RAXIS_PLANNER_TASK_PROMPT`. Empty (the V1 default)
+            // preserves the scaffold/park behaviour of the role binary.
+            description:               pt.description.clone(),
         };
         path_scope_snapshots.push((
             pt.task_id.clone(),
@@ -1080,6 +1095,12 @@ pub fn approve_plan(
     // per-task registry insert: the SQLite tx is the source of truth,
     // and the in-memory registry is repopulated from `plan_bytes` on
     // hot-restart so a missed insert here cannot survive a kernel boot.
+    //
+    // V2 `v2_extended_gaps.md §1.1` — the same insert also persists
+    // `description` (orchestrator seed prompt). We clone here rather
+    // than move so the caller's PlanApproved result can carry the
+    // prompt without doing a second registry round-trip.
+    let orchestrator_fields_for_result = orchestrator_fields.clone();
     plan_registry.insert_orchestrator(initiative_id, orchestrator_fields);
 
     // Audit-after-commit per kernel-store.md §2.5.2. A failure here
@@ -1163,10 +1184,20 @@ pub fn approve_plan(
         }
     }
 
+    // V2 `v2_extended_gaps.md §1.1` — clone the orchestrator's
+    // operator-authored seed prompt out of the parsed plan into
+    // the result so the post-commit caller (handle_approve_plan)
+    // can stamp it into the orchestrator VM's env. The registry
+    // also holds it for forward queries (e.g. dashboard display)
+    // but the spawn caller reads it directly off the result to
+    // avoid a registry round-trip immediately after insertion.
+    let orchestrator_task_prompt = orchestrator_fields_for_result.description.clone();
+
     Ok(PlanApproved {
         initiative_id: initiative_id.to_owned(),
         tasks_admitted: task_count,
         orchestrator_session_id: Some(orchestrator_auto_spawn.session_id),
+        orchestrator_task_prompt,
     })
 }
 
@@ -1377,6 +1408,11 @@ pub fn repopulate_plan_registry(
                     // signed plan bytes. Empty when the plan
                     // omitted the field.
                     vm_image:                  pt.vm_image,
+                    // V2 `v2_extended_gaps.md §1.1` — re-hydrate the
+                    // operator-authored seed prompt from the immutable
+                    // signed plan bytes. Empty when omitted (V1
+                    // backward compat — keeps planner in scaffold mode).
+                    description:               pt.description,
                 },
             );
             inserted += 1;
@@ -1678,6 +1714,19 @@ struct PlanTask {
     ///   `INV-PLANNER-HARNESS-02`); a non-empty value is rejected
     ///   with `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`.
     vm_image:                  String,
+
+    /// **V2 `v2_extended_gaps.md §1.1` — `[[plan.tasks.X]] description`.**
+    /// Operator-authored seed prompt for the Executor / Reviewer agent.
+    /// **REQUIRED** at admission: the parser rejects plans whose
+    /// `[[tasks]]` block omits or empty-strings this field with the
+    /// same `FAIL_PLAN_PARSE_ERROR` class as missing `task_id`.
+    /// Rationale: a plan that reaches activation with no instructions
+    /// would spawn an agent with nothing to do — a silent
+    /// "agent did nothing" failure that no operator can debug.
+    /// Strings beyond 64 KiB are also rejected at validation time to
+    /// bound the env-var footprint passed to the substrate
+    /// (`execve(2)` `ARG_MAX` ~128 KiB on Linux).
+    description:               String,
 }
 
 /// Parse `[[tasks]]` array from plan TOML.
@@ -1820,6 +1869,68 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .trim()
             .to_owned();
 
+        // V2 `v2_extended_gaps.md §1.1` — `description` is the
+        // operator-authored seed prompt the kernel stamps into the
+        // spawned planner's `RAXIS_PLANNER_TASK_PROMPT` env var.
+        //
+        // **REQUIRED**: every `[[tasks]]` block MUST declare a
+        // non-empty string. Same `FAIL_PLAN_PARSE_ERROR` class as a
+        // missing `task_id` — a plan that reaches activation with
+        // nothing to tell the agent is structurally invalid.
+        //
+        // We trim trailing whitespace to keep wire encoding stable
+        // (TOML multi-line strings preserve trailing newlines) and
+        // detect the all-whitespace case as "missing". Interior
+        // whitespace is left intact — operator prompts may be
+        // multi-line markdown.
+        //
+        // Hard cap at 64 KiB so a runaway operator prompt cannot
+        // make `execve(2)`'s env table grow past `ARG_MAX` (Linux
+        // ~128 KiB) and silently break spawn. The cap is generous
+        // — typical task descriptions are 100-2000 bytes; 64 KiB
+        // is an order of magnitude over that.
+        const MAX_TASK_DESCRIPTION_BYTES: usize = 64 * 1024;
+        let description_raw = match entry.get("description") {
+            Some(toml::Value::String(s)) => s.trim_end().to_owned(),
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) description \
+                         must be a TOML string"
+                    ),
+                });
+            }
+            None => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) is missing \
+                         required `description` field — operator \
+                         must declare what the agent should do \
+                         (V2 v2_extended_gaps.md §1.1)"
+                    ),
+                });
+            }
+        };
+        if description_raw.is_empty() {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) `description` is \
+                     empty — operator must declare what the agent \
+                     should do (V2 v2_extended_gaps.md §1.1)"
+                ),
+            });
+        }
+        if description_raw.len() > MAX_TASK_DESCRIPTION_BYTES {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) description \
+                     is {bytes} bytes, exceeds cap {cap}",
+                    bytes = description_raw.len(),
+                    cap = MAX_TASK_DESCRIPTION_BYTES,
+                ),
+            });
+        }
+
         tasks.push(PlanTask {
             task_id,
             name,
@@ -1833,6 +1944,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             session_agent_type,
             credentials,
             vm_image,
+            description: description_raw,
         });
     }
 
@@ -1875,7 +1987,56 @@ fn parse_plan_orchestrator(plan_toml: &str)
         })
         .unwrap_or_default();
 
-    Ok(crate::initiatives::OrchestratorPlanFields { cross_cutting_artifacts })
+    // V2 `v2_extended_gaps.md §1.1` — initiative-level seed prompt
+    // for the orchestrator. Sourced from `[workspace] description`
+    // (the conventional TOML location for "what is this initiative
+    // about?").
+    //
+    // **REQUIRED**: the `[workspace]` table MUST declare a
+    // non-empty `description` string. Same `FAIL_PLAN_PARSE_ERROR`
+    // class as missing `lane_id` — operators MUST tell the
+    // orchestrator agent what the initiative is. Same 64 KiB cap
+    // as task descriptions to bound the env-var footprint.
+    const MAX_DESCRIPTION_BYTES: usize = 64 * 1024;
+    let workspace_table = doc
+        .get("workspace")
+        .and_then(|v| v.as_table());
+    let description = match workspace_table.and_then(|t| t.get("description")) {
+        Some(toml::Value::String(s)) => s.trim_end().to_owned(),
+        Some(_) => {
+            return Err(LifecycleError::PlanInvalid {
+                reason: "[workspace] description must be a TOML string".to_owned(),
+            });
+        }
+        None => {
+            return Err(LifecycleError::PlanInvalid {
+                reason: "[workspace] is missing required `description` field — \
+                         operator must declare what the initiative is about \
+                         (V2 v2_extended_gaps.md §1.1)".to_owned(),
+            });
+        }
+    };
+    if description.is_empty() {
+        return Err(LifecycleError::PlanInvalid {
+            reason: "[workspace] `description` is empty — operator must \
+                     declare what the initiative is about \
+                     (V2 v2_extended_gaps.md §1.1)".to_owned(),
+        });
+    }
+    if description.len() > MAX_DESCRIPTION_BYTES {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[workspace] description is {bytes} bytes, exceeds cap {cap}",
+                bytes = description.len(),
+                cap = MAX_DESCRIPTION_BYTES,
+            ),
+        });
+    }
+
+    Ok(crate::initiatives::OrchestratorPlanFields {
+        cross_cutting_artifacts,
+        description,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -3498,7 +3659,7 @@ mod tests {
 
     #[test]
     fn parse_plan_tasks_empty_array_ok() {
-        let toml = "[meta]\nversion = 1\n[[tasks]]\ntask_id = \"t1\"\n";
+        let toml = "[meta]\nversion = 1\n[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\n";
         let tasks = parse_plan_tasks(toml).unwrap();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].task_id, "t1");
@@ -3510,7 +3671,7 @@ mod tests {
         // internal "operator did not declare" marker. The approve_plan
         // path replaces this with the workspace-root value after
         // `validate_single_lane_propagation` accepts the plan.
-        let toml = "[[tasks]]\ntask_id = \"t2\"\n";
+        let toml = "[[tasks]]\ntask_id = \"t2\"\ndescription = \"do thing\"\n";
         let tasks = parse_plan_tasks(toml).unwrap();
         assert_eq!(tasks[0].lane_id, "");
     }
@@ -3525,6 +3686,7 @@ mod tests {
 [[tasks]]
 task_id = "t1"
 lane_id = "rogue-lane"
+description = "do thing"
 "#;
         let tasks = parse_plan_tasks(toml).unwrap();
         assert_eq!(tasks[0].lane_id, "rogue-lane");
@@ -3532,7 +3694,7 @@ lane_id = "rogue-lane"
 
     #[test]
     fn parse_plan_tasks_name_defaults_to_task_id() {
-        let toml = "[[tasks]]\ntask_id = \"t3\"\n";
+        let toml = "[[tasks]]\ntask_id = \"t3\"\ndescription = \"do thing\"\n";
         let tasks = parse_plan_tasks(toml).unwrap();
         assert_eq!(tasks[0].name, "t3");
     }
@@ -3541,6 +3703,40 @@ lane_id = "rogue-lane"
     fn parse_plan_tasks_missing_tasks_array_is_error() {
         let toml = "[meta]\nversion = 1\n";
         assert!(parse_plan_tasks(toml).is_err());
+    }
+
+    // ── V2 `v2_extended_gaps.md §1.1` — description is required ───────────
+
+    #[test]
+    fn parse_plan_tasks_rejects_missing_description() {
+        // No `description` field at all: parser must reject with a
+        // structured PlanInvalid that names both the task and the
+        // missing field, in the same shape as missing `task_id`.
+        let toml = "[[tasks]]\ntask_id = \"t1\"\n";
+        let err = parse_plan_tasks(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("description"), "error must name the missing field; got: {msg}");
+        assert!(msg.contains("t1"), "error must name the offending task; got: {msg}");
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_empty_description() {
+        // Empty / whitespace-only descriptions are functionally
+        // equivalent to missing — reject both with the same shape.
+        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"   \"\n";
+        let err = parse_plan_tasks(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("empty"), "error must call out emptiness; got: {msg}");
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_non_string_description() {
+        // Type errors must surface a precise diagnostic, not a
+        // silent fallback to empty.
+        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = 42\n";
+        let err = parse_plan_tasks(toml).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("string"), "error must mention TOML type; got: {msg}");
     }
 
     // ── §2.5.8 path-scope field defaults — locked-down ────────────────────
@@ -3556,7 +3752,8 @@ lane_id = "rogue-lane"
         // these would silently weaken path enforcement for every plan
         // that omits the field.
         let toml = r#"[[tasks]]
-        task_id = "t-default"
+        task_id     = "t-default"
+        description = "exercise lockdown defaults"
         "#;
         let tasks = parse_plan_tasks(toml).unwrap();
         assert!(tasks[0].path_allowlist.is_empty(),
@@ -3576,6 +3773,7 @@ lane_id = "rogue-lane"
         // is the syntax gate (see tests below) and runs in approve_plan.
         let toml = r#"[[tasks]]
         task_id        = "t-globs"
+        description    = "exercise allowlist ordering"
         path_allowlist = ["src/", "tests/", "README.md"]
         "#;
         let tasks = parse_plan_tasks(toml).unwrap();
@@ -3587,6 +3785,7 @@ lane_id = "rogue-lane"
     fn parse_plan_tasks_reads_path_export_optin_and_globs() {
         let toml = r#"[[tasks]]
         task_id                   = "t-export"
+        description               = "exercise export opt-in"
         path_export_to_successors = true
         path_export_globs         = ["src/ipc/**"]
         "#;
@@ -3599,6 +3798,7 @@ lane_id = "rogue-lane"
     fn parse_plan_tasks_reads_path_scope_override() {
         let toml = r#"[[tasks]]
         task_id             = "t-override"
+        description         = "exercise path scope override"
         path_scope_override = true
         "#;
         let tasks = parse_plan_tasks(toml).unwrap();
@@ -3613,6 +3813,7 @@ lane_id = "rogue-lane"
         // `predecessors` behaviour.)
         let toml = r#"[[tasks]]
         task_id        = "t"
+        description    = "exercise non-string array entries"
         path_allowlist = ["src/", 123, "ok.rs"]
         "#;
         let tasks = parse_plan_tasks(toml).unwrap();
@@ -3643,6 +3844,7 @@ lane_id = "rogue-lane"
             session_agent_type:        SessionAgentType::Executor,
             credentials:               vec![],
             vm_image:                  String::new(),
+            description:               String::new(),
         }
     }
 
@@ -3814,6 +4016,7 @@ lane_id = "rogue-lane"
             session_agent_type:        SessionAgentType::Executor,
             credentials:               vec![],
             vm_image:                  String::new(),
+            description:               String::new(),
         }
     }
 
@@ -4005,6 +4208,7 @@ lane_id = "rogue-lane"
             session_agent_type: SessionAgentType::Executor,
             credentials: vec![],
             vm_image: String::new(),
+            description: String::new(),
         }
     }
 
@@ -4073,7 +4277,7 @@ lane_id = "rogue-lane"
 
     #[test]
     fn parse_plan_tasks_omitted_clone_strategy_defaults_to_blobless() {
-        let toml = "[[tasks]]\ntask_id = \"t1\"\n";
+        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\n";
         let tasks = parse_plan_tasks(toml).unwrap();
         assert_eq!(tasks[0].clone_strategy, CloneStrategy::Blobless);
     }
@@ -4083,6 +4287,7 @@ lane_id = "rogue-lane"
         let toml = r#"
 [[tasks]]
 task_id = "t1"
+description = "do thing"
 clone_strategy = "full"
 "#;
         let tasks = parse_plan_tasks(toml).unwrap();
@@ -4094,6 +4299,7 @@ clone_strategy = "full"
         let toml = r#"
 [[tasks]]
 task_id = "t1"
+description = "do thing"
 clone_strategy = "sparse"
 "#;
         let tasks = parse_plan_tasks(toml).unwrap();
@@ -4105,6 +4311,7 @@ clone_strategy = "sparse"
         let toml = r#"
 [[tasks]]
 task_id = "t1"
+description = "do thing"
 clone_strategy = "treeless"
 "#;
         let err = parse_plan_tasks(toml).unwrap_err();
@@ -4121,7 +4328,7 @@ clone_strategy = "treeless"
 
     #[test]
     fn parse_plan_tasks_omitted_session_agent_type_defaults_to_executor() {
-        let toml = "[[tasks]]\ntask_id = \"t1\"\n";
+        let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"do thing\"\n";
         let tasks = parse_plan_tasks(toml).unwrap();
         assert_eq!(tasks[0].session_agent_type, SessionAgentType::Executor);
     }
@@ -4131,6 +4338,7 @@ clone_strategy = "treeless"
         let toml = r#"
 [[tasks]]
 task_id = "t1"
+description = "do thing"
 session_agent_type = "Reviewer"
 "#;
         let tasks = parse_plan_tasks(toml).unwrap();
@@ -4148,6 +4356,7 @@ session_agent_type = "Reviewer"
         let toml = r#"
 [[tasks]]
 task_id = "t1"
+description = "do thing"
 session_agent_type = "Orchestrator"
 "#;
         let tasks = parse_plan_tasks(toml).unwrap();
@@ -4159,6 +4368,7 @@ session_agent_type = "Orchestrator"
         let toml = r#"
 [[tasks]]
 task_id = "t1"
+description = "do thing"
 session_agent_type = "Coordinator"
 "#;
         let err = parse_plan_tasks(toml).unwrap_err();
@@ -4191,6 +4401,7 @@ session_agent_type = "Coordinator"
             session_agent_type: agent,
             credentials: vec![],
             vm_image: String::new(),
+            description: String::new(),
         }
     }
 
@@ -4264,10 +4475,12 @@ session_agent_type = "Coordinator"
         // Operator declared an Orchestrator task — V2 forbids this.
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: rogue orchestrator"
 
 [[tasks]]
-task_id = "rogue-orch"
+task_id            = "rogue-orch"
+description        = "fixture task"
 session_agent_type = "Orchestrator"
 "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
@@ -4294,10 +4507,12 @@ session_agent_type = "Orchestrator"
         let (sk, _) = fixture_keypair();
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: unknown clone strategy"
 
 [[tasks]]
-task_id = "t1"
+task_id        = "t1"
+description    = "fixture task"
 clone_strategy = "treeless"
 "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
@@ -4322,23 +4537,27 @@ clone_strategy = "treeless"
         let (sk, _) = fixture_keypair();
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: clone strategy persistence"
 
 [[tasks]]
-task_id = "build-svc"
+task_id        = "build-svc"
+description    = "build the service"
 clone_strategy = "blobless"
 
 [[tasks]]
-task_id = "run-tests"
+task_id        = "run-tests"
+description    = "run the test suite"
 clone_strategy = "sparse"
 path_allowlist = ["tests/", "Cargo.toml"]
-predecessors = ["build-svc"]
+predecessors   = ["build-svc"]
 
 [[tasks]]
-task_id = "review-it"
+task_id            = "review-it"
+description        = "review the diff"
 session_agent_type = "Reviewer"
-clone_strategy = "full"
-predecessors = ["run-tests"]
+clone_strategy     = "full"
+predecessors       = ["run-tests"]
 "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -4374,19 +4593,23 @@ predecessors = ["run-tests"]
         let (sk, _) = fixture_keypair();
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: subtask activations"
 
 [[tasks]]
-task_id = "build-svc"
+task_id     = "build-svc"
+description = "build the service"
 
 [[tasks]]
-task_id = "run-tests"
+task_id      = "run-tests"
+description  = "run the test suite"
 predecessors = ["build-svc"]
 
 [[tasks]]
-task_id = "review-it"
+task_id            = "review-it"
+description        = "review the diff"
 session_agent_type = "Reviewer"
-predecessors = ["run-tests"]
+predecessors       = ["run-tests"]
 "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -4473,10 +4696,12 @@ predecessors = ["run-tests"]
         let (sk, _) = fixture_keypair();
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: known proxy types"
 
 [[tasks]]
-task_id = "build-svc"
+task_id     = "build-svc"
+description = "build the service"
 
   [[tasks.credentials]]
   name       = "pg-staging"
@@ -4487,7 +4712,8 @@ task_id = "build-svc"
     allow_only_select = true
 
 [[tasks]]
-task_id = "test-it"
+task_id      = "test-it"
+description  = "run the tests"
 predecessors = ["build-svc"]
 
   [[tasks.credentials]]
@@ -4501,7 +4727,8 @@ predecessors = ["build-svc"]
     allowed_methods = ["GET", "POST"]
 
 [[tasks]]
-task_id = "send-receipts"
+task_id      = "send-receipts"
+description  = "send the receipts"
 predecessors = ["test-it"]
 
   [[tasks.credentials]]
@@ -4557,10 +4784,12 @@ predecessors = ["test-it"]
         // partitioning all in one go.
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: credential proxies persistence"
 
 [[tasks]]
-task_id = "build-svc"
+task_id     = "build-svc"
+description = "build the service"
 
   [[tasks.credentials]]
   name       = "pg-staging"
@@ -4571,7 +4800,8 @@ task_id = "build-svc"
     allow_only_select = true
 
 [[tasks]]
-task_id = "deploy"
+task_id      = "deploy"
+description  = "deploy the service"
 predecessors = ["build-svc"]
 
   [[tasks.credentials]]
@@ -4718,10 +4948,12 @@ predecessors = ["build-svc"]
         // proxies are added.
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: unknown proxy type"
 
 [[tasks]]
-task_id = "send-email"
+task_id     = "send-email"
+description = "send the email"
 
   [[tasks.credentials]]
   name       = "future-uri"
@@ -4774,10 +5006,12 @@ task_id = "send-email"
         let (sk, _) = fixture_keypair();
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: malformed credential block"
 
 [[tasks]]
-task_id = "x"
+task_id     = "x"
+description = "do thing"
 
   [[tasks.credentials]]
   name     = "no-proxy-type"
@@ -4828,6 +5062,7 @@ task_id = "x"
             session_agent_type:        SessionAgentType::Executor,
             credentials:               Vec::new(),
             vm_image:                  String::new(),
+            description:               String::new(),
         }
     }
 
@@ -5168,10 +5403,12 @@ on_failure  = "block_review"
         let (sk, _) = fixture_keypair();
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: pre-merge verifier unknown task"
 
 [[tasks]]
-task_id = "implement_auth"
+task_id     = "implement_auth"
+description = "implement the auth flow"
 
 [[plan.integration_merge_verifiers]]
 name        = "auth_integration"
@@ -5211,10 +5448,12 @@ task_set    = ["implement_auth", "implement_session"]
         let (sk, _) = fixture_keypair();
         let plan = r#"
 [workspace]
-lane_id = "default"
+lane_id     = "default"
+description = "fixture: pre-merge verifier valid"
 
 [[tasks]]
-task_id = "t1"
+task_id     = "t1"
+description = "do thing"
 
 [[plan.integration_merge_verifiers]]
 name        = "smoke"
@@ -5435,10 +5674,138 @@ target_ref = "refs/heads/raxis/feature"
         // around the table name). The bytes-substring check is good
         // enough — TOML test fixtures here are hand-authored and
         // never embed the literal sequence inside a string value.
-        if plan_toml.contains("[workspace]") || plan_toml.contains("[ workspace ]") {
+        let with_workspace = if plan_toml.contains("[workspace]")
+            || plan_toml.contains("[ workspace ]")
+        {
+            plan_toml.to_owned()
+        } else {
+            format!("[workspace]\nlane_id = \"default\"\n\n{plan_toml}")
+        };
+        // V2 `v2_extended_gaps.md §1.1` — `[workspace] description`
+        // is REQUIRED. If the test author didn't add one, splice in
+        // a deterministic placeholder. We splice INTO the existing
+        // [workspace] table (matching the table header line) so we
+        // never duplicate the table.
+        let with_description = ensure_workspace_description(&with_workspace);
+        // V2 `v2_extended_gaps.md §1.1` — every `[[tasks]]` block
+        // must declare a non-empty `description`. Inject a
+        // deterministic placeholder per task that lacks one so
+        // legacy unit-test fixtures continue to validate without
+        // being individually rewritten.
+        ensure_task_descriptions(&with_description)
+    }
+
+    /// V2 `v2_extended_gaps.md §1.1` test helper — splice
+    /// `description = "<placeholder>"` into the `[workspace]` table
+    /// when the test author didn't author one. Idempotent: a plan
+    /// that already has a `description` line under `[workspace]` is
+    /// returned verbatim.
+    fn ensure_workspace_description(plan_toml: &str) -> String {
+        // Cheap detection: if the literal `description` substring
+        // appears anywhere in the file inside `[workspace]`'s
+        // section, leave it alone. We don't try to be precise about
+        // table boundaries — these are hand-authored short test
+        // fixtures, and a false-negative (we splice when the
+        // operator already authored one) would surface immediately
+        // as a TOML duplicate-key parse error from the next call.
+        if has_field_in_table(plan_toml, "workspace", "description") {
             return plan_toml.to_owned();
         }
-        format!("[workspace]\nlane_id = \"default\"\n\n{plan_toml}")
+        // Find the `[workspace]` (or `[ workspace ]`) header and
+        // splice the field on the next line. We've already verified
+        // a workspace table exists upstream.
+        let needle_a = "[workspace]";
+        let needle_b = "[ workspace ]";
+        let (idx, len) = if let Some(i) = plan_toml.find(needle_a) {
+            (i, needle_a.len())
+        } else if let Some(i) = plan_toml.find(needle_b) {
+            (i, needle_b.len())
+        } else {
+            unreachable!("ensure_workspace_lane guaranteed [workspace] above");
+        };
+        let mut s = plan_toml.to_owned();
+        s.insert_str(
+            idx + len,
+            "\ndescription = \"test fixture: kernel exercise plan\"",
+        );
+        s
+    }
+
+    /// V2 `v2_extended_gaps.md §1.1` test helper — for every
+    /// `[[tasks]]` array element that lacks a `description = "..."`
+    /// line, splice `description = "<test fixture>"` immediately
+    /// after the header. We assume the test plans are simple and
+    /// follow the convention that each `[[tasks]]` line stands
+    /// alone on its own line (true for every fixture in the kernel
+    /// tree).
+    fn ensure_task_descriptions(plan_toml: &str) -> String {
+        let mut out = String::with_capacity(plan_toml.len() + 256);
+        let mut lines = plan_toml.lines().peekable();
+        while let Some(line) = lines.next() {
+            out.push_str(line);
+            out.push('\n');
+            let trimmed = line.trim();
+            if trimmed != "[[tasks]]" && trimmed != "[[ tasks ]]" {
+                continue;
+            }
+            // Look ahead until the next table header (`[`-prefixed
+            // line) or EOF. If we find a `description` field
+            // anywhere in that span, leave the block alone.
+            let mut peek_buf = Vec::new();
+            let mut has_description = false;
+            while let Some(nxt) = lines.peek() {
+                let nt = nxt.trim();
+                if nt.starts_with('[') && !nt.starts_with("[[") {
+                    break;
+                }
+                if nt.starts_with("[[") {
+                    break;
+                }
+                if nt.starts_with("description") {
+                    // Match `description =` (allowing whitespace).
+                    let after = nt.trim_start_matches("description").trim_start();
+                    if after.starts_with('=') {
+                        has_description = true;
+                    }
+                }
+                peek_buf.push((*nxt).to_owned());
+                lines.next();
+            }
+            if !has_description {
+                out.push_str(
+                    "description = \"test fixture: exercise the planner harness\"\n",
+                );
+            }
+            for buffered in peek_buf {
+                out.push_str(&buffered);
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// Check whether `field` appears inside `[table]` in a TOML
+    /// string. Cheap substring scan — good enough for hand-authored
+    /// test fixtures; not appropriate for production parsing.
+    fn has_field_in_table(plan_toml: &str, table: &str, field: &str) -> bool {
+        let header = format!("[{table}]");
+        let Some(start) = plan_toml.find(&header) else {
+            return false;
+        };
+        let after = &plan_toml[start + header.len()..];
+        // Stop at the next table header.
+        let end = after.find('[').unwrap_or(after.len());
+        let body = &after[..end];
+        for line in body.lines() {
+            let t = line.trim();
+            if t.starts_with(field) {
+                let rest = t.trim_start_matches(field).trim_start();
+                if rest.starts_with('=') {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Build a Draft initiative + signed_plan_artifacts row directly
@@ -5888,12 +6255,23 @@ target_ref = "refs/heads/raxis/feature"
         // No `[workspace]` table at all. `seed_draft_initiative_raw`
         // bypasses the auto-prepend so the validator must surface the
         // missing-workspace-lane rule.
+        //
+        // Note: §1.1 requires `[workspace] description`, so omitting
+        // the entire `[workspace]` table now also fails the orchestrator
+        // description check. Both are missing-workspace-config errors;
+        // the test asserts the more specific lane-rule diagnostic
+        // because that one is structurally tied to lane validation
+        // and is the layer the operator can fix first.
         let plan = r#"
             [meta]
             version = 1
 
+            [workspace]
+            description = "fixture: missing lane"
+
             [[tasks]]
-            task_id = "t1"
+            task_id     = "t1"
+            description = "fixture task"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -5923,10 +6301,12 @@ target_ref = "refs/heads/raxis/feature"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [workspace]
-            lane_id = ""
+            lane_id     = ""
+            description = "fixture: empty lane"
 
             [[tasks]]
-            task_id = "t1"
+            task_id     = "t1"
+            description = "fixture task"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
         let audit = FakeAuditSink::new();
@@ -5950,14 +6330,17 @@ target_ref = "refs/heads/raxis/feature"
         let (sk, _) = fixture_keypair();
         let plan = r#"
             [workspace]
-            lane_id = "feature-work"
+            lane_id     = "feature-work"
+            description = "fixture: lane override"
 
             [[tasks]]
-            task_id = "t1"
+            task_id     = "t1"
+            description = "fixture task 1"
 
             [[tasks]]
-            task_id = "t2"
-            lane_id = "rogue-lane"
+            task_id      = "t2"
+            description  = "fixture task 2"
+            lane_id      = "rogue-lane"
             predecessors = ["t1"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
@@ -5986,17 +6369,21 @@ target_ref = "refs/heads/raxis/feature"
         // single source of truth.
         let plan = r#"
             [workspace]
-            lane_id = "feature-work"
+            lane_id     = "feature-work"
+            description = "fixture: lane propagation"
 
             [[tasks]]
-            task_id = "t1"
+            task_id     = "t1"
+            description = "do thing 1"
 
             [[tasks]]
-            task_id = "t2"
+            task_id      = "t2"
+            description  = "do thing 2"
             predecessors = ["t1"]
 
             [[tasks]]
-            task_id = "t3"
+            task_id      = "t3"
+            description  = "do thing 3"
             predecessors = ["t2"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
@@ -6365,6 +6752,155 @@ target_ref = "refs/heads/raxis/feature"
             "approve_plan must hydrate `[orchestrator] cross_cutting_artifacts` \
              into the in-memory PlanRegistry verbatim (V2 §Step 11)",
         );
+    }
+
+    // ── V2 `v2_extended_gaps.md §1.1` — task / orchestrator descriptions ─
+
+    /// `[[tasks.X]] description` lands verbatim in the in-memory plan
+    /// registry so `handle_activate_sub_task` can stamp it into
+    /// `RAXIS_PLANNER_TASK_PROMPT` at spawn time. We pin verbatim
+    /// round-trip semantics here because the kernel does no template
+    /// substitution — the bytes the operator signed are the bytes
+    /// the agent observes.
+    #[test]
+    fn approve_plan_propagates_task_description_into_registry() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [[tasks]]
+            task_id     = "with-prompt"
+            description = "Add a /healthz endpoint that returns 200 OK"
+
+            [[tasks]]
+            task_id      = "second"
+            description  = "Run the integration test against /healthz"
+            predecessors = ["with-prompt"]
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap();
+
+        let with_prompt = registry.get(&TaskKey::new(&init_id, "with-prompt"))
+            .expect("registry must contain with-prompt");
+        assert_eq!(
+            with_prompt.description,
+            "Add a /healthz endpoint that returns 200 OK",
+            "task description must be stored verbatim — kernel does no template substitution",
+        );
+
+        let second = registry.get(&TaskKey::new(&init_id, "second"))
+            .expect("registry must contain second");
+        assert_eq!(
+            second.description,
+            "Run the integration test against /healthz",
+            "every task's description must round-trip verbatim, not be coerced",
+        );
+    }
+
+    /// `[workspace] description` lands on the `OrchestratorPlanFields`
+    /// AND is surfaced through `PlanApproved.orchestrator_task_prompt`
+    /// so the post-commit caller can stamp it into the orchestrator
+    /// VM's env without doing a registry round-trip.
+    #[test]
+    fn approve_plan_propagates_orchestrator_description_into_registry_and_result() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"
+            [workspace]
+            lane_id     = "default"
+            description = "Migrate the cron service from systemd-timer to k8s CronJobs"
+
+            [[tasks]]
+            task_id = "only"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let result = approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).unwrap();
+
+        assert_eq!(
+            result.orchestrator_task_prompt,
+            "Migrate the cron service from systemd-timer to k8s CronJobs",
+            "PlanApproved must surface the orchestrator seed prompt verbatim",
+        );
+        let orch = registry.orchestrator(&init_id).unwrap();
+        assert_eq!(orch.description, result.orchestrator_task_prompt);
+    }
+
+    /// Plans that omit `[workspace] description` MUST be rejected at
+    /// admission with a structured `PlanInvalid`. There is no
+    /// scaffold/park escape hatch — operators must always declare
+    /// what the initiative is about.
+    #[test]
+    fn approve_plan_rejects_missing_orchestrator_description() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        // Bypass the test helper that auto-injects a description so
+        // we exercise the real validator path.
+        let plan = r#"
+            [workspace]
+            lane_id = "default"
+
+            [[tasks]]
+            task_id     = "only"
+            description = "fixture task"
+        "#;
+        let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).expect_err("plan without [workspace] description must be rejected");
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(
+                    reason.contains("workspace") && reason.contains("description"),
+                    "expected workspace-description diagnostic; got `{reason}`",
+                );
+            }
+            other => panic!("expected LifecycleError::PlanInvalid; got {other:?}"),
+        }
+    }
+
+    /// `[[tasks.X]] description` exceeding 64 KiB must reject the
+    /// whole plan to avoid `execve(2)` `ARG_MAX` regressions in the
+    /// substrate. We exercise the cap with a 65 KiB string.
+    #[test]
+    fn approve_plan_rejects_oversized_task_description() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let huge = "x".repeat(65 * 1024);
+        let plan = format!(
+            r#"
+            [[tasks]]
+            task_id     = "huge"
+            description = "{huge}"
+            "#,
+        );
+        let (init_id, pk_bytes) = seed_draft_initiative(&store, &plan, &sk);
+        let audit    = FakeAuditSink::new();
+        let registry = PlanRegistry::new();
+
+        let err = approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        ).expect_err("oversized description must reject the plan");
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(
+                    reason.contains("description") && reason.contains("exceeds cap"),
+                    "expected descriptive PlanInvalid; got `{reason}`",
+                );
+            }
+            other => panic!("expected LifecycleError::PlanInvalid; got {other:?}"),
+        }
     }
 
     #[test]
@@ -6869,6 +7405,7 @@ mod env_consistency_tests {
             session_agent_type:        SessionAgentType::Executor,
             credentials:               creds,
             vm_image:                  String::new(),
+            description:               String::new(),
         }
     }
 
@@ -7011,6 +7548,7 @@ mod vm_image_admission_tests {
             session_agent_type:        agent,
             credentials:               Vec::new(),
             vm_image:                  vm_image.to_owned(),
+            description:               String::new(),
         }
     }
 

@@ -1328,12 +1328,22 @@ async fn handle_approve_plan(
             // for the orchestrator session_id means the boot failed.
             if let Some(orch_session_id) = result.orchestrator_session_id.as_deref() {
                 let allowlist = build_egress_allowlist_from_policy(&policy_snapshot);
+                // V2 `v2_extended_gaps.md §1.1` — clone the prompt
+                // because the trait takes ownership; we log only
+                // its byte length below (not the bytes themselves)
+                // to keep operator-authored content out of stderr
+                // while still letting an operator confirm delivery
+                // size after a spawn. The validator guarantees
+                // `task_prompt` is non-empty.
+                let task_prompt = result.orchestrator_task_prompt.clone();
+                let task_prompt_len = task_prompt.len();
                 match ctx
                     .orchestrator_spawn
                     .spawn_for_initiative(
                         orch_session_id,
                         &result.initiative_id,
                         allowlist,
+                        task_prompt,
                     )
                     .await
                 {
@@ -1342,7 +1352,8 @@ async fn handle_approve_plan(
                             "{{\"level\":\"info\",\"event\":\"orchestrator_spawn_ok\",\
                              \"initiative_id\":\"{initiative_id}\",\
                              \"session_id\":\"{session_id}\",\
-                             \"admission_loopback\":\"{admission}\"}}",
+                             \"admission_loopback\":\"{admission}\",\
+                             \"task_prompt_bytes\":{task_prompt_len}}}",
                             initiative_id = result.initiative_id,
                             session_id    = handle.session_id,
                             admission     = handle.admission_loopback,

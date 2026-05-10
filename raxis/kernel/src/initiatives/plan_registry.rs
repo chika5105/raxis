@@ -116,6 +116,28 @@ pub struct TaskPlanFields {
     /// so a credential rotation between admission and activation
     /// does not silently drift the image bytes.
     pub vm_image:                  String,
+
+    /// V2 `v2_extended_gaps.md §1.1` — operator-authored seed prompt
+    /// for the executor / reviewer agent. Lives inside the signed
+    /// plan artifact (`[[tasks]] description`); the kernel stamps it
+    /// into the spawned planner binary's env as
+    /// `RAXIS_PLANNER_TASK_PROMPT` so the dispatch loop has a
+    /// concrete user message to seed the model with.
+    ///
+    /// **Empty by default.** Plans (V1 + V2 plans that omit
+    /// `description`) get `""`, which keeps the planner binary in
+    /// scaffold/park mode (`crates/planner-core/src/driver.rs`
+    /// `INV-DRIVER-01`). This preserves bit-for-bit backward
+    /// compatibility with every kernel test that does not stamp a
+    /// prompt.
+    ///
+    /// **Trust origin.** Comes from the operator-signed plan TOML;
+    /// the agent never sees the prompt before it is rendered into
+    /// the system / user messages by the role-binary's dispatch
+    /// driver. The kernel does not interpret the prompt text in
+    /// any way (no template substitution, no command parsing) — it
+    /// is opaque bytes the model receives.
+    pub description:               String,
 }
 
 impl Default for TaskPlanFields {
@@ -128,6 +150,7 @@ impl Default for TaskPlanFields {
             clone_strategy:            CloneStrategy::Blobless,
             session_agent_type:        SessionAgentType::Executor,
             vm_image:                  String::new(),
+            description:               String::new(),
         }
     }
 }
@@ -163,6 +186,14 @@ pub struct OrchestratorPlanFields {
     /// `path_allowlist`. Validated to contain no `/`, no glob
     /// metacharacters, no `..`, and no empty entries at admission time.
     pub cross_cutting_artifacts: Vec<String>,
+
+    /// V2 `v2_extended_gaps.md §1.1` — initiative-scoped seed prompt for
+    /// the orchestrator agent. Sourced from the plan TOML's `[workspace]
+    /// description` field at `approve_plan` time and stamped into the
+    /// orchestrator session's spawn env as
+    /// `RAXIS_PLANNER_TASK_PROMPT`. Empty `""` keeps the orchestrator
+    /// binary in scaffold/park mode (`INV-DRIVER-01`).
+    pub description: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +399,12 @@ mod tests {
         // is auto-created at admission per `planner-harness.md §4.8`.
         assert_eq!(f.session_agent_type, SessionAgentType::Executor,
             "default session_agent_type must be Executor (V2 §Step 6)");
+        // V2 `v2_extended_gaps.md §1.1` — empty description keeps the
+        // planner in scaffold/park mode (`INV-DRIVER-01`); a regression
+        // here would let a mis-configured kernel boot a runaway agent
+        // with an unintended seed prompt.
+        assert!(f.description.is_empty(),
+            "default description must be empty (INV-DRIVER-01 backward compat)");
     }
 
     #[test]
@@ -405,6 +442,7 @@ mod tests {
                 "Cargo.lock".to_owned(),
                 "package-lock.json".to_owned(),
             ],
+            ..Default::default()
         };
         r.insert_orchestrator("init-1", f.clone());
         let got = r.orchestrator("init-1").expect("just inserted");
@@ -416,9 +454,11 @@ mod tests {
         let r = PlanRegistry::new();
         r.insert_orchestrator("init-1", OrchestratorPlanFields {
             cross_cutting_artifacts: vec!["old.lock".to_owned()],
+            ..Default::default()
         });
         r.insert_orchestrator("init-1", OrchestratorPlanFields {
             cross_cutting_artifacts: vec!["new.lock".to_owned()],
+            ..Default::default()
         });
         let got = r.orchestrator("init-1").unwrap();
         assert_eq!(got.cross_cutting_artifacts, vec!["new.lock"]);
@@ -429,9 +469,11 @@ mod tests {
         let r = PlanRegistry::new();
         r.insert_orchestrator("init-A", OrchestratorPlanFields {
             cross_cutting_artifacts: vec!["a.lock".to_owned()],
+            ..Default::default()
         });
         r.insert_orchestrator("init-B", OrchestratorPlanFields {
             cross_cutting_artifacts: vec!["b.lock".to_owned()],
+            ..Default::default()
         });
         assert_eq!(r.orchestrator("init-A").unwrap().cross_cutting_artifacts,
                    vec!["a.lock"]);
@@ -486,11 +528,49 @@ mod tests {
             clone_strategy:            CloneStrategy::Sparse,
             session_agent_type:        SessionAgentType::Executor,
             vm_image:                  String::new(),
+            description:               "Refactor parser to handle UTF-16".to_owned(),
         };
         r.insert(TaskKey::new("init-A", "t1"), f.clone());
         let snapshot = r.tasks_in_initiative("init-A");
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].0, "t1");
         assert_eq!(snapshot[0].1, f);
+    }
+
+    // ── V2 `v2_extended_gaps.md §1.1` — task description plumbing ────
+
+    #[test]
+    fn description_round_trips_through_registry() {
+        let r = PlanRegistry::new();
+        let key = TaskKey::new("init-1", "task-A");
+        let f = TaskPlanFields {
+            description: "Create hello.txt with greeting".to_owned(),
+            ..Default::default()
+        };
+        r.insert(key.clone(), f.clone());
+        assert_eq!(
+            r.get(&key).unwrap().description,
+            "Create hello.txt with greeting",
+            "task description must round-trip verbatim through the registry",
+        );
+    }
+
+    #[test]
+    fn orchestrator_default_description_is_empty() {
+        let f = OrchestratorPlanFields::default();
+        assert!(f.description.is_empty(),
+            "default orchestrator description must be empty (INV-DRIVER-01 backward compat)");
+    }
+
+    #[test]
+    fn orchestrator_description_round_trips_through_registry() {
+        let r = PlanRegistry::new();
+        let f = OrchestratorPlanFields {
+            description: "Coordinate the migration".to_owned(),
+            ..Default::default()
+        };
+        r.insert_orchestrator("init-1", f.clone());
+        let got = r.orchestrator("init-1").expect("just inserted");
+        assert_eq!(got.description, "Coordinate the migration");
     }
 }
