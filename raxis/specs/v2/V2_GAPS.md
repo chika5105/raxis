@@ -216,81 +216,35 @@ alongside SCRAM-SHA-256 auth (see rationale below).
 | **Postgres** | ✅ `AuthenticationOk` (accepts anything) | ✅ via `tokio-postgres` | SCRAM-SHA-256, MD5, cleartext, trust | **Fully implemented** in `upstream.rs`. The only proxy with real upstream auth today. |
 | **Redis** | ✅ Intercepts `AUTH` command | ✅ Sends real `AUTH <password>` upstream | `AUTH <password>` / `AUTH <user> <password>` (RESP2) | Working. ACL-form `AUTH user password` and TLS-to-upstream both **CLOSED in V2.3**: ACL form lands when the credential file declares `RAXIS_REDIS_USER` + `RAXIS_REDIS_PASSWORD` (parsed inside the proxy, no trait change). TLS-to-upstream is opt-in via `[[credentials]].require_upstream_tls = true` and reuses the SMTP proxy's `webpki-roots`-backed `tokio-rustls` `ClientConfig`. |
 | **SMTP** | ✅ Accepts `AUTH PLAIN`/`AUTH LOGIN` | ✅ Sends real `AUTH PLAIN` upstream | `AUTH PLAIN` over STARTTLS | Working. Missing: `AUTH SCRAM-SHA-256` (rare for SMTP). |
-| **MySQL** | ✅ `mysql_native_password` handshake | ✅ via `mysql_async` (V2.3) | `mysql_native_password` | Real upstream forwarding shipped in V2.3 (`crates/credential-proxy-mysql/src/upstream.rs`). `caching_sha2_password` (MySQL 8.0 default) **explicitly deferred to V3** — see "MySQL/Mongo crypto auth" rationale below. |
+| **MySQL** | ✅ `mysql_native_password` + `caching_sha2_password` handshakes | ✅ via `mysql_async` (V2.3) + native fast/full-auth (V2.5) | `mysql_native_password`, `caching_sha2_password` (fast + full RSA-OAEP) | Real upstream forwarding shipped in V2.3. `caching_sha2_password` (MySQL 8.0 default) **CLOSED V2.5** in `crates/credential-proxy-mysql/src/upstream.rs`. |
 | **MSSQL** | ✅ PRELOGIN + LOGINACK | ✅ via `tiberius` (V2.3) | TDS PRELOGIN + LOGIN7 | Real upstream forwarding shipped in V2.3 (`crates/credential-proxy-mssql/src/upstream.rs`). |
-| **MongoDB** | ⚠️ **No auth at all** | ❌ Synthesizes responses | Would need SCRAM-SHA-256 | **V3 deferral**, NOT V2.3 work. The proxy advertises empty `saslSupportedMechs` so drivers skip auth, which is correct for `--noauth` development upstreams (the V2.3 first-usable-session target). SCRAM-SHA-256 + OP_MSG real relay both deferred to V3 — see "MySQL/Mongo crypto auth" rationale below. |
+| **MongoDB** | ✅ SCRAM-SHA-256 (V2.5) | ✅ Real OP_MSG relay (V2.5) | SCRAM-SHA-256 (RFC 7677) | **CLOSED V2.5.** Promoted from V3 deferral and shipped. The 4-message SASL exchange (`saslStart` → server-first → `saslContinue` → server-final) and bidirectional `OP_MSG` framing relay live in `crates/credential-proxy-mongodb/{upstream,wire,restriction}.rs`. |
 
-**MongoDB auth gap detail:** The proxy's `hello` response sets
-`saslSupportedMechs: []` to prevent drivers from attempting auth.
-This works for unauthenticated local dev databases but fails against
-any Atlas, DocumentDB, or self-hosted MongoDB with `--auth` enabled.
-The upstream module (`upstream.rs`) exists with the relay path for
-`--noauth` deployments but does NOT yet implement SCRAM. The SCRAM
-handshake for MongoDB is a 4-message SASL exchange:
-`SASLStart → ServerFirst → SASLContinue → ServerFinal`. Estimate:
-~150 lines for SCRAM + ~150 lines for upstream relay = ~300 total
-(revised up from ~150).
+### MongoDB SCRAM-SHA-256 + OP_MSG relay + MySQL `caching_sha2_password` — **CLOSED V2.5** (promoted from V3 deferral)
 
-### MySQL / Mongo crypto-auth — V3 deferral with rationale (V2.3)
+Per the V2.5 "no deferred work" cleanup the V3 deferral on
+the three remaining auth-tier proxies was lifted and the
+features were shipped. The implementations live in:
 
-The MongoDB SCRAM-SHA-256 handshake AND the MySQL
-`caching_sha2_password` plugin are both **deliberately deferred
-to V3**. Tradeoffs analysis:
+* `crates/credential-proxy-mongodb/src/upstream.rs` — full
+  SCRAM-SHA-256 client state machine (`saslStart`,
+  server-first, `saslContinue`, server-final) feeding the
+  real `OP_MSG` relay. Restriction checks happen at the wire
+  boundary (`crates/credential-proxy-mongodb/src/wire.rs` +
+  `restriction.rs`) so the upstream never sees blocked
+  collections / commands. Spec mirror:
+  `v2_extended_gaps.md §2.2`.
+* `crates/credential-proxy-mysql/src/upstream.rs` — both the
+  `caching_sha2_password` fast-auth (`AuthSwitchRequest` with
+  the cached scramble) and full-auth (RSA-OAEP-encrypted
+  password exchange) paths, alongside the original
+  `mysql_native_password` happy path. Spec mirror:
+  `v2_extended_gaps.md §2.3`.
 
-| Option | Pro | Con |
-|---|---|---|
-| **A. Implement SCRAM-SHA-256 / `caching_sha2_password` in V2.3** | Closes the auth gap for production-Mongo / MySQL 8 fixtures | (1) Crypto correctness without a live integration test against the upstream is high-risk — RFC 7677 + the `caching_sha2_password` fast/full-auth state machine are subtle. (2) The current V2.3 fail-fast paths already give operators a clear signal to either (a) configure the upstream as `--noauth` for dev or (b) wait for V3. (3) ~300 LOC each + integration-test infrastructure shifts the V2.3 ship date. |
-| **B. Skip the auth implementation; ship V2.3 with the fail-fast path** ✅ **chosen** | Honest about scope; no half-built crypto code in the kernel; V3 lands the auth path with the testing infrastructure to prove correctness against a real upstream | Operators with auth-required upstreams must wait for V3 (or use the existing TLS-terminated postgres / MSSQL path, which IS shipped) |
-
-**V2.3 chose B** because the marginal value of "agent dials a
-SCRAM-protected Mongo" — versus the V2.3 already-shipped
-`--noauth` Mongo path or the fully-shipped Postgres / MSSQL
-paths — is bounded by the fact that V2.3's primary first-
-usable-session target is a postgres-shaped query workflow.
-Mongo and MySQL `caching_sha2` shipping in V3 with proper
-integration testing (Atlas / Aurora MySQL / mongosh fixtures)
-keeps the kernel codebase honest about correctness invariants.
-
-**The forward path** (V3): the dedicated PR will:
-
-1. Add `pbkdf2` and `hmac` deps (already in the workspace's
-   transitive closure via `ring`).
-2. Implement the SCRAM state machine in
-   `crates/credential-proxy-mongodb/src/scram.rs` and the
-   `caching_sha2_password` machine in
-   `crates/credential-proxy-mysql/src/upstream.rs`.
-3. Add integration tests against `mongo:7` + `mysql:8`
-   containerised fixtures (the live-e2e harness already
-   spins up TestContainers fixtures for postgres / redis;
-   adding mongo + mysql is a matched extension).
-4. Update `credential-proxy.md §4.2` (MySQL) and
-   `§4.4` (MongoDB) to reflect the new auth methods.
-
-Until then, V2.3 ships:
-
-* MongoDB: `--noauth` upstream path. Operator gets a clean
-  `UpstreamError::Handshake("MongoDB SCRAM-SHA-256 auth is
-  deferred to V3; ...")` when the credential URL contains
-  userinfo, so the misconfiguration surfaces immediately.
-* MySQL: `mysql_native_password` only. Operators using
-  MySQL 8.0 with the default `caching_sha2_password` plugin
-  must temporarily set `default_authentication_plugin =
-  mysql_native_password` on the upstream, OR create a
-  per-RAXIS user with `IDENTIFIED WITH mysql_native_password
-  BY '...'`. This is documented in the V2.3 release notes.
-
-### MongoDB OP_MSG real relay — V3 deferral
-
-The V2.3 MongoDB proxy synthesises responses for the hand-shake-tier
-commands (`hello`, `isMaster`, `ping`, `buildInfo`) and gates every
-other command through `Restrictions::is_blocked` returning `{ ok:
-1.0 }` for allowed commands and `{ ok: 0.0, code: 13 }` for blocked
-ones. **Real query forwarding** — opening an actual TCP connection
-to the upstream and relaying `OP_MSG` packets bidirectionally — is
-deferred to V3 alongside SCRAM-SHA-256 because the two share the
-same upstream-connection path: V2.3 ships either both or neither,
-and the design call above chose neither. The V3 PR lands the
-relay and the SCRAM auth in the same commit.
+The V3-deferral fail-fast paths (the `UpstreamError::Handshake(
+"… deferred to V3 …")` strings) are removed. The integration
+tests under `crates/credential-proxy-{mongodb,mysql}/tests/`
+exercise the real wire formats end-to-end.
 
 ### ORM Extended Query (Postgres) — **CLOSED V2.4**
 
@@ -2318,9 +2272,9 @@ The proxy:
 | 11 | ~~Redis ACL-form `AUTH user password`~~ — **CLOSED V2.3** | ~30 | Implemented inside the proxy; credential file declares `RAXIS_REDIS_USER` + `RAXIS_REDIS_PASSWORD`. No `CredentialBackend` trait change required. |
 | 12 | ~~Redis TLS-to-upstream~~ — **CLOSED V2.3** | ~40 | Implemented via `[[credentials]].require_upstream_tls = true` reusing the SMTP proxy's `webpki-roots`-backed `tokio-rustls` `ClientConfig`. |
 | 13 | ~~AWS/GCP/Azure declarative restrictions~~ — **CLOSED V2.3** | ~250 | Cloud restriction surfaces (AWS `allowed_services` / `allowed_regions`, GCP `allowed_scopes` / `project`, Azure `allowed_actions`) shipped declaratively + audit echo + `x-ms-allowed-actions` header. Runtime SigV4-/ARM-aware gating remains V3 work via `raxis-egress-aws` / `raxis-egress-arm`. |
-| 14 | MongoDB SCRAM-SHA-256 | ~150 | **V3 deferral** — see "MySQL/Mongo crypto auth" rationale above. |
-| 15 | MongoDB OP_MSG real relay | ~150 | **V3 deferral** — bundled with the SCRAM PR. |
-| 16 | MySQL `caching_sha2_password` | ~120 | **V3 deferral** — same rationale. Operators on MySQL 8 use `mysql_native_password` until V3. |
+| 14 | ~~MongoDB SCRAM-SHA-256~~ — **CLOSED V2.5** | ~150 | Promoted from V3 deferral and shipped. SCRAM-SHA-256 client-side state machine + sasl{Start,Continue} authority forwarding live in `crates/credential-proxy-mongodb/src/upstream.rs`. |
+| 15 | ~~MongoDB OP_MSG real relay~~ — **CLOSED V2.5** | ~150 | Bundled with the SCRAM PR. Real `OP_MSG` framing relay (sections 0/1, kind 0/1) in `crates/credential-proxy-mongodb/src/wire.rs` + `upstream.rs`; restriction checks at the wire boundary. |
+| 16 | ~~MySQL `caching_sha2_password`~~ — **CLOSED V2.5** | ~120 | Promoted from V3 deferral and shipped. Fast-auth + full-auth state machines + RSA-OAEP password exchange live in `crates/credential-proxy-mysql/src/upstream.rs`. Operators on MySQL 8 work end-to-end with the default plugin. |
 
 ### Phase 3: GA polish (~2,800 lines) — ✅ Substantively closed in V2.3
 

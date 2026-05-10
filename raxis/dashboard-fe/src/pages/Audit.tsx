@@ -1,0 +1,145 @@
+import { useState } from "react";
+import { useInfiniteQuery } from "@tanstack/react-query";
+import { Link, useSearchParams } from "react-router-dom";
+
+import { dashboardApi } from "@/api/client";
+import { Empty } from "@/components/Empty";
+import { ErrorBox } from "@/components/ErrorBox";
+import { Mono } from "@/components/Mono";
+import { PageSpinner } from "@/components/Spinner";
+import { fmtAbsolute, fmtRelative } from "@/lib/format";
+import type { AuditEntryView } from "@/types/api";
+
+const PAGE_SIZE = 50;
+
+export function AuditPage() {
+  const [params, setParams] = useSearchParams();
+  const initiativeId = params.get("initiative_id") ?? undefined;
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const q = useInfiniteQuery({
+    queryKey: ["audit", { initiativeId }],
+    queryFn: ({ pageParam, signal }) =>
+      dashboardApi.audit.list(
+        {
+          limit: PAGE_SIZE,
+          ...(pageParam !== undefined ? { cursor: pageParam } : {}),
+          ...(initiativeId ? { initiative_id: initiativeId } : {}),
+        },
+        signal,
+      ),
+    initialPageParam: undefined as number | undefined,
+    getNextPageParam: (last: AuditEntryView[]) =>
+      last.length === PAGE_SIZE ? last[last.length - 1].seq : undefined,
+  });
+
+  if (q.isPending) return <PageSpinner />;
+  if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
+
+  const all = q.data.pages.flat();
+
+  return (
+    <div className="space-y-4">
+      <header className="flex items-end justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-xl font-semibold text-ink">Audit Chain</h1>
+          <p className="text-sm text-ink-muted">
+            Tamper-evident, append-only record of every kernel state change.
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <input
+            className="input w-72"
+            placeholder="Filter by initiative id…"
+            defaultValue={initiativeId ?? ""}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                const v = (e.target as HTMLInputElement).value.trim();
+                if (v) {
+                  setParams({ initiative_id: v });
+                } else {
+                  setParams({});
+                }
+              }
+            }}
+          />
+        </div>
+      </header>
+
+      {initiativeId && (
+        <div className="text-xs text-ink-muted">
+          Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
+          <button onClick={() => setParams({})} className="text-accent hover:underline ml-2">
+            clear
+          </button>
+        </div>
+      )}
+
+      {all.length === 0 ? (
+        <Empty title="No audit events." />
+      ) : (
+        <div className="card p-0 overflow-hidden">
+          <ul className="divide-y divide-edge/50">
+            {all.map((a) => (
+              <li key={a.event_id}>
+                <button
+                  onClick={() => setExpanded(expanded === a.event_id ? null : a.event_id)}
+                  className="w-full text-left px-4 py-2.5 flex items-center gap-3 hover:bg-panel-high"
+                >
+                  <span className="text-[11px] text-ink-subtle font-mono w-14 text-right">
+                    #{a.seq}
+                  </span>
+                  <span className="badge bg-panel-high text-ink-muted border-edge-strong">
+                    {a.event_kind}
+                  </span>
+                  {a.initiative_id && (
+                    <Link
+                      to={`/initiatives/${a.initiative_id}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-xs text-accent hover:underline font-mono"
+                    >
+                      {a.initiative_id}
+                    </Link>
+                  )}
+                  {a.task_id && (
+                    <Link
+                      to={`/tasks/${a.task_id}`}
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-[11px] text-ink-muted hover:text-accent font-mono"
+                    >
+                      · {a.task_id}
+                    </Link>
+                  )}
+                  <span className="ml-auto text-xs text-ink-subtle">
+                    {fmtRelative(a.at)}
+                  </span>
+                </button>
+                {expanded === a.event_id && (
+                  <div className="px-4 pb-3 pt-1 bg-panel">
+                    <div className="text-[11px] text-ink-subtle">
+                      <Mono>{a.event_id}</Mono> · {fmtAbsolute(a.at)}
+                    </div>
+                    <pre className="mt-2 text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96">
+                      {JSON.stringify(a.payload, null, 2)}
+                    </pre>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+          {q.hasNextPage && (
+            <div className="p-3 border-t border-edge text-center">
+              <button
+                className="btn"
+                disabled={q.isFetchingNextPage}
+                onClick={() => q.fetchNextPage()}
+              >
+                {q.isFetchingNextPage ? "Loading…" : "Load more"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

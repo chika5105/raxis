@@ -1099,19 +1099,129 @@ in `kernel.db` (it would be too large and too transient). Instead:
    from disk for sessions that were active at shutdown. The
    in-memory broadcast is refilled from the file tail.
 
-### §4.4 — React frontend
+### §4.4 — React frontend (✅ shipped — V2.5)
 
-**Stack:**
+**Layout.** The frontend lives at `raxis/dashboard-fe/`. It is
+NOT a workspace member of the Rust workspace; the Rust dashboard
+crate consumes the *built bundle* (`dashboard-fe/dist/`) at
+runtime via `tower_http::services::ServeDir`. The path is
+configured by `[dashboard] static_dir` in `policy.toml`:
 
-* React 18+ with TypeScript
-* Vite for build tooling (fast dev server, small production bundle)
-* React Router for client-side routing
-* `@tanstack/react-query` for data fetching and caching
-* Recharts for DAG visualization and time-series charts
-* `react-diff-viewer-continued` for git diff rendering
-* Monaco Editor for `policy.toml` editing (write_policy role only)
-* Tailwind CSS for styling (operator tooling, not end-user product
-  — clean utility-first is appropriate)
+```toml
+[dashboard]
+enabled    = true
+bind_port  = 9820
+# Absolute or operator-cwd-relative path to the built bundle.
+static_dir = "/srv/raxis/dashboard-fe/dist"
+```
+
+When `static_dir` is set, ServeDir is mounted as the router's
+fallback service so any non-`/api/*` path serves the bundle's
+`index.html`, enabling SPA client-side routing (deep links like
+`/initiatives/init-abc/dag` resolve in the browser).
+
+**Stack (final).**
+
+* React 18 + TypeScript (strict; `noUnusedLocals`, `noUnusedParameters`)
+* Vite 5 for build tooling (`tsc -b && vite build`); JS chunks
+  split into `react`, `query`, `monaco`, `dagre`, `index` for
+  cache stability
+* React Router 6 (`BrowserRouter`)
+* `@tanstack/react-query` 5 for data fetching, caching, and
+  background refetch
+* `dagre` for DAG layout (rendered as SVG inline — no canvas
+  WebGL dependency); Recharts is intentionally NOT used
+  (SVG-DAG is the only graph surface, and Recharts ships ~50 KB
+  for one bar-chart that the operator dashboard does not need)
+* `@monaco-editor/react` for the `policy.toml` editor
+  (lazy-loaded by Vite chunk-split; only fetched when the
+  policy page mounts)
+* Tailwind CSS 3 with a custom dark-first operator palette
+  (`ink`, `panel`, `edge`, `accent`, plus state-tone families
+  `ok`, `warn`, `bad`, `info`, `block` mirroring kernel FSM
+  vocabulary)
+* `react-diff-viewer-continued` is intentionally NOT used —
+  the DiffView component is implemented from scratch as a
+  hunk-line renderer keyed off the kernel's already-clamped
+  64 KiB-per-file unified diff payload, which keeps the bundle
+  small and avoids one more transitive dep tree
+
+**Cross-tab auth.**
+* JWT lives in `localStorage` under `raxis.dashboard.token.v1`,
+  profile under `raxis.dashboard.profile.v1`. A `storage` event
+  listener in `Shell.tsx` re-reads on cross-tab logout.
+* `RequireAuth` route guard checks token TTL (with a 30-second
+  buffer) and redirects unauthenticated requests to
+  `/login?next=<path>` so the post-login redirect lands the
+  operator on the page they originally requested.
+* The `Authorization: Bearer <jwt>` header is auto-injected by
+  the `apiFetch` wrapper. The SSE endpoint accepts the JWT via
+  `?token=<jwt>` query string as a fallback (see §4.5: the
+  browser EventSource API does not allow custom headers).
+
+**CLI-mediated Ed25519 signing.** Login uses a strict
+challenge-response flow that NEVER lets the operator's
+private key enter the browser. The dashboard:
+
+1. Calls `GET /api/auth/challenge` and renders the 32-byte
+   hex challenge with a copy button + a one-shot copyable
+   command line: `raxis auth sign --json <challenge-hex>`.
+2. The operator runs that command in their terminal (the
+   CLI loads the operator key via `--operator-key <path>`
+   or `RAXIS_OPERATOR_KEY` env var, signs the bytes with
+   Ed25519, and prints `{challenge, public_key, signature}`
+   as JSON or human-readable lines).
+3. The operator pastes the public key + signature back into
+   the dashboard form. The dashboard POSTs them, alongside
+   the original challenge, to `/api/auth/verify`.
+
+**Why CLI-mediated and NOT in-browser.** The earlier draft
+of this spec proposed in-browser WebCrypto signing of the
+challenge after the operator pasted their private key. That
+design was implemented and then reverted in commit `a78ef45`
+for these reasons:
+
+* **XSS pivot risk.** Any XSS in the dashboard would let an
+  attacker exfiltrate the typed key BEFORE the WebCrypto
+  call, regardless of CSP.
+* **Clipboard / IME history.** Pasting a key into a browser
+  text input writes it to clipboard managers, IME caches,
+  and sometimes shoulder-surfable history rings. None of
+  those exist for a CLI subprocess.
+* **No memory zeroing.** The browser's GC does not zero the
+  string buffer holding the typed key; a subsequent process
+  dump (or browser extension) can recover it. The CLI
+  zeroes its key buffer on drop.
+* **Policy clarity.** The kernel already requires the
+  operator key for every other privileged action (plan
+  signing, policy advancement, etc). Reusing the same key
+  flow for dashboard login means the operator does not have
+  to manage a "browser key" distinct from their CLI key.
+
+The shipped `src/lib/ed25519.ts` therefore contains ONLY
+the security rationale — there is no in-browser signing
+code anywhere in the bundle.
+
+**Build artifact.**
+```
+dist/
+├── index.html
+├── raxis-logo.svg
+└── assets/
+    ├── index-<hash>.{js,css}
+    ├── react-<hash>.js
+    ├── query-<hash>.js
+    ├── monaco-<hash>.js
+    └── dagre-<hash>.js
+```
+Total gzipped: ~125 KB JS + ~5 KB CSS at first paint, well
+under the operator dashboard target of 200 KB. The
+`real_bundle_serving.rs` integration test points the
+dashboard at `dashboard-fe/dist/` and asserts that
+`GET /` serves the real Vite-emitted `index.html`, asset
+chunks load with the right content-type, deep SPA links
+fall through to `index.html`, and `/api/*` routes never
+fall through to ServeDir.
 
 **Pages.**
 
@@ -1264,12 +1374,12 @@ metadata.
 | 3 | Git worktree API (log, diff, file tree) | ~300 lines | ✅ shipped |
 | 4 | Agent stream capture (bounded file ring + broadcast channel + SSE endpoint) | ~250 lines | ✅ shipped |
 | 5 | Policy view/edit API + `PolicyUpdatedViaDashboard` audit | ~250 lines | ✅ shipped |
-| 6 | React frontend: scaffold + routing + auth flow + overview page | ~800 lines | 🔵 pending |
-| 7 | React frontend: initiative detail + DAG visualization + task detail | ~1000 lines | 🔵 pending |
-| 8 | React frontend: session detail + agent stream view | ~600 lines | 🔵 pending |
-| 9 | React frontend: git worktree + diff view + audit log | ~800 lines | 🔵 pending |
-| 10 | React frontend: policy editor + health page + inbox | ~500 lines | 🔵 pending |
-| **Total** | | **~5500 lines** | |
+| 6 | React frontend: scaffold + routing + auth flow + overview page | ~800 lines | ✅ shipped |
+| 7 | React frontend: initiative detail + DAG visualization + task detail | ~1000 lines | ✅ shipped |
+| 8 | React frontend: session detail + agent stream view | ~600 lines | ✅ shipped |
+| 9 | React frontend: git worktree + diff view + audit log | ~800 lines | ✅ shipped |
+| 10 | React frontend: policy editor + health page + inbox + notifications | ~500 lines | ✅ shipped |
+| **Total** | | **~5500 lines** | ✅ shipped |
 
 ### §4.7 — Invariant safety
 
@@ -1319,5 +1429,5 @@ The following invariants must be reviewed:
 | 🟢 DONE | §2.3 | MySQL `caching_sha2_password` (fast-path + RSA-OAEP full-auth + AuthSwitchRequest) | ~140 |
 | 🟢 DONE | §3.1 | `Sleep` tool | ~90 |
 | 🟢 DONE | §3.2 | `StructuredOutput` (fixed enum + `task outputs` CLI) | ~310 |
-| 🟡 IN-FLIGHT | §4   | Operator dashboard — backend ✅ shipped (P1-P5); React FE pending (P6-P10) | ~3700 FE |
-| | | **Total remaining** | **~3700** |
+| 🟢 DONE | §4   | Operator dashboard — backend ✅ shipped (P1-P5) + React FE ✅ shipped (P6-P10, ~3700 LOC under `raxis/dashboard-fe/`) | 0 |
+| | | **Total remaining** | **0** |

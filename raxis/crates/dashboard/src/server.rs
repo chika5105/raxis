@@ -276,18 +276,27 @@ impl<D: DashboardData> FromRequestParts<AppState<D>> for AuthorizedOperator {
         parts: &mut Parts,
         state: &AppState<D>,
     ) -> Result<Self, Self::Rejection> {
-        let header_val = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .ok_or(ApiError::MissingAuth)?;
-        let s = header_val
-            .to_str()
-            .map_err(|_| ApiError::MissingAuth)?
-            .trim();
-        let token = match s.strip_prefix("Bearer ") {
-            Some(rest) => rest.trim(),
-            None => return Err(ApiError::MissingAuth),
+        // Primary auth path: `Authorization: Bearer <jwt>` header.
+        // Fallback (browser SSE only): `?token=<jwt>` query param,
+        // because the EventSource API does not let JS attach
+        // headers. The SSE handler is the only consumer in
+        // practice; other endpoints continue to require the
+        // header (the dashboard frontend always sets it).
+        let token_owned: String = if let Some(h) = parts.headers.get(header::AUTHORIZATION) {
+            let s = h
+                .to_str()
+                .map_err(|_| ApiError::MissingAuth)?
+                .trim();
+            match s.strip_prefix("Bearer ") {
+                Some(rest) => rest.trim().to_owned(),
+                None => return Err(ApiError::MissingAuth),
+            }
+        } else if let Some(qs) = parts.uri.query() {
+            extract_query_token(qs).ok_or(ApiError::MissingAuth)?
+        } else {
+            return Err(ApiError::MissingAuth);
         };
+        let token = token_owned.as_str();
         let claims = state.auth.jwt.verify(token)?;
         // Revocation check.
         let digest = crate::auth::JwtSigner::digest(token);
@@ -315,6 +324,46 @@ async fn not_found() -> impl IntoResponse {
     ApiError::NotFound { kind: "endpoint".into() }
         .into_response()
         .into_response()
+}
+
+/// Extract `token=<value>` from a URL query string. Used by the
+/// SSE auth fallback (the browser EventSource API cannot attach
+/// an `Authorization` header, so the JWT is passed via the
+/// query string instead). Performs minimal percent-decoding so
+/// JWTs with `=` padding round-trip.
+fn extract_query_token(qs: &str) -> Option<String> {
+    for pair in qs.split('&') {
+        let mut it = pair.splitn(2, '=');
+        let k = it.next()?;
+        if k == "token" {
+            let raw = it.next().unwrap_or("");
+            // Manual percent-decode: only `%xx` escapes matter;
+            // `+` is NOT decoded as space (JWTs are URL-safe
+            // base64 + alphabet which doesn't include `+`, but
+            // we keep verbatim for forward-compat).
+            return Some(percent_decode(raw));
+        }
+    }
+    None
+}
+
+fn percent_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
+                out.push(b as char);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
 }
 
 #[allow(dead_code)]

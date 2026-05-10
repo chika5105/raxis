@@ -50,6 +50,8 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "budget", "explain", "top",
     // V2_GAPS §C10 / §12.6 — non-interactive first-run scaffolding.
     "setup",
+    // V2 §4.2 — operator-dashboard auth helper (`raxis auth sign`).
+    "auth",
 ];
 
 const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff", "generate-sidecar-secret"];
@@ -89,6 +91,8 @@ const CREDENTIAL_SUBCOMMANDS:  &[&str] = &[
 const KERNEL_SUBCOMMANDS:      &[&str] = &["install", "uninstall"];
 /// provider-failure-handling.md §6.6 — circuit breaker operator surface.
 const PROVIDERS_SUBCOMMANDS:   &[&str] = &["status", "reset"];
+/// V2 §4.2 — operator-dashboard auth helper (challenge-response signing).
+const AUTH_SUBCOMMANDS:        &[&str] = &["sign"];
 
 // ---------------------------------------------------------------------------
 // Global CLI flags
@@ -344,6 +348,15 @@ fn run() -> Result<(), CliError> {
                 "reset"  => commands::providers::run_reset(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
                     "providers sub-command", sub2, PROVIDERS_SUBCOMMANDS,
+                ))),
+            }
+        }
+        "auth" => {
+            let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
+            match sub2 {
+                "sign" => commands::auth::run_sign(&flags, &rest[1..]),
+                _ => Err(CliError::Usage(unknown_with_suggestion(
+                    "auth sub-command", sub2, AUTH_SUBCOMMANDS,
                 ))),
             }
         }
@@ -621,6 +634,13 @@ SUBCOMMANDS:
         a specific model). If <model> is omitted, resets ALL models
         for the provider. The kernel reads state lazily, so the reset
         takes effect on the next dispatch.
+
+    auth sign [--json] <challenge-hex>
+        Sign a 32-byte hex challenge issued by the operator dashboard's
+        GET /api/auth/challenge endpoint. Output the operator's public
+        key + Ed25519 signature so the dashboard can complete the
+        POST /api/auth/verify call without ever seeing the private key.
+        Spec: v2_extended_gaps.md §4.2.
 
 READ-ONLY OBSERVATION:
 
@@ -968,6 +988,9 @@ mod catalog_consistency_tests {
             ("credential", CREDENTIAL_SUBCOMMANDS),
             ("kernel",     KERNEL_SUBCOMMANDS),
             ("submit",     SUBMIT_SUBCOMMANDS),
+            ("auth",       AUTH_SUBCOMMANDS),
+            ("providers",  PROVIDERS_SUBCOMMANDS),
+            ("task",       TASK_SUBCOMMANDS),
         ] {
             assert!(!list.is_empty(), "{name}_SUBCOMMANDS is empty");
         }

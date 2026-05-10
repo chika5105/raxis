@@ -21,10 +21,14 @@ import type {
   HealthSnapshot,
   InitiativeListEntry,
   InitiativeView,
+  MarkAllReadResponse,
+  MarkReadResponse,
+  NotificationView,
   PolicyAdvancement,
   PolicySnapshotView,
   SessionView,
   TaskView,
+  UnreadCountResponse,
   UpdatePolicyResponse,
   VerifyResponse,
   WorktreeDetail,
@@ -244,6 +248,35 @@ export const dashboardApi = {
 
   inbox: (signal?: AbortSignal): Promise<AuditEntryView[]> =>
     apiFetch<AuditEntryView[]>("/api/inbox", signal ? { signal } : {}),
+
+  notifications: {
+    list: (
+      params: { unread_only?: boolean; initiative_id?: string; limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<NotificationView[]> => {
+      const qs = new URLSearchParams();
+      if (params.unread_only) qs.set("unread_only", "true");
+      if (params.initiative_id) qs.set("initiative_id", params.initiative_id);
+      if (params.limit !== undefined) qs.set("limit", String(params.limit));
+      const suffix = qs.toString() ? `?${qs}` : "";
+      return apiFetch<NotificationView[]>(
+        `/api/notifications${suffix}`,
+        signal ? { signal } : {},
+      );
+    },
+    unreadCount: (signal?: AbortSignal): Promise<UnreadCountResponse> =>
+      apiFetch<UnreadCountResponse>("/api/notifications/unread-count", signal ? { signal } : {}),
+    markRead: (id: string): Promise<MarkReadResponse> =>
+      apiFetch<MarkReadResponse>(
+        `/api/notifications/${encodeURIComponent(id)}/read`,
+        { method: "PATCH" },
+      ),
+    markAllRead: (): Promise<MarkAllReadResponse> =>
+      apiFetch<MarkAllReadResponse>(
+        "/api/notifications/mark-all-read",
+        { method: "POST" },
+      ),
+  },
 
   policy: {
     snapshot: (signal?: AbortSignal): Promise<PolicySnapshotView> =>

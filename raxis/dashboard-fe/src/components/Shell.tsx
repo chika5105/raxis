@@ -1,8 +1,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 
-import { authApi } from "@/api/client";
+import { authApi, dashboardApi } from "@/api/client";
 import { clearStoredToken, getStoredProfile, getStoredToken } from "@/lib/auth-store";
 import { shortFingerprint } from "@/lib/format";
 
@@ -28,6 +29,7 @@ const NAV: NavSection[] = [
       { to: "/", label: "Home", glyph: "H" },
       { to: "/health", label: "Health", glyph: "+" },
       { to: "/inbox", label: "Inbox", glyph: "I" },
+      { to: "/notifications", label: "Notifications", glyph: "N" },
     ],
   },
   {
@@ -71,6 +73,27 @@ export function Shell({ children }: ShellProps) {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
+  // Lightweight badge counts for the nav. Refresh every 10s
+  // so the operator sees inbox / escalation drops without
+  // having to navigate to those pages.
+  const unread = useQuery({
+    queryKey: ["notifications", "unread-count"],
+    queryFn: ({ signal }) => dashboardApi.notifications.unreadCount(signal),
+    refetchInterval: 10_000,
+    enabled: !!profile,
+  });
+  const escalations = useQuery({
+    queryKey: ["escalations"],
+    queryFn: ({ signal }) => dashboardApi.escalations.list(signal),
+    refetchInterval: 10_000,
+    enabled: !!profile,
+  });
+
+  const badges: Record<string, number> = {
+    "/notifications": unread.data?.count ?? 0,
+    "/escalations": escalations.data?.length ?? 0,
+  };
+
   const onLogout = async () => {
     const tok = getStoredToken();
     if (tok) {
@@ -113,26 +136,34 @@ export function Shell({ children }: ShellProps) {
                     !i.rolesAny ||
                     i.rolesAny.some((r) => profile?.roles.includes(r)),
                 )
-                .map((item) => (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.to === "/"}
-                    className={({ isActive }) =>
-                      clsx(
-                        "flex items-center gap-2.5 px-4 py-1.5 text-sm border-l-2 transition-colors",
-                        isActive
-                          ? "border-accent text-ink bg-panel-high"
-                          : "border-transparent text-ink-muted hover:text-ink hover:bg-panel-high/50",
-                      )
-                    }
-                  >
-                    <span className="font-mono text-ink-subtle text-[11px] w-3 text-center">
-                      {item.glyph}
-                    </span>
-                    {item.label}
-                  </NavLink>
-                ))}
+                .map((item) => {
+                  const badge = badges[item.to] ?? 0;
+                  return (
+                    <NavLink
+                      key={item.to}
+                      to={item.to}
+                      end={item.to === "/"}
+                      className={({ isActive }) =>
+                        clsx(
+                          "flex items-center gap-2.5 px-4 py-1.5 text-sm border-l-2 transition-colors",
+                          isActive
+                            ? "border-accent text-ink bg-panel-high"
+                            : "border-transparent text-ink-muted hover:text-ink hover:bg-panel-high/50",
+                        )
+                      }
+                    >
+                      <span className="font-mono text-ink-subtle text-[11px] w-3 text-center">
+                        {item.glyph}
+                      </span>
+                      <span className="flex-1">{item.label}</span>
+                      {badge > 0 && (
+                        <span className="badge bg-accent/30 border-accent text-accent text-[10px] px-1.5">
+                          {badge}
+                        </span>
+                      )}
+                    </NavLink>
+                  );
+                })}
             </div>
           ))}
         </nav>

@@ -1,0 +1,104 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Operator-tooling base layer: dense, dark-first, calm.
+ *
+ * Spec: raxis/specs/v2/v2_extended_gaps.md §4.4 — UI design
+ * principle #1 (dark mode default), #2 (information density).
+ */
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html, body, #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Tabular numbers in tables — operator metrics line up. */
+  table, .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Custom scrollbar for the dense terminal-style stream pane. */
+  .scroll-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scroll-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb {
+    background: #2e3849;
+    border-radius: 4px;
+  }
+  .scroll-thin::-webkit-scrollbar-thumb:hover {
+    background: #3a86ff;
+  }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md
+           text-sm font-medium border border-edge-strong bg-panel-raised
+           text-ink hover:bg-panel-high hover:border-accent
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary {
+    @apply btn bg-accent border-accent text-white hover:bg-accent-strong hover:border-accent-strong;
+  }
+  .btn-danger {
+    @apply btn bg-bad-muted border-bad text-ink hover:bg-bad hover:border-bad;
+  }
+
+  .card {
+    @apply bg-panel-raised border border-edge rounded-lg shadow-soft;
+  }
+
+  .input {
+    @apply bg-panel border border-edge-strong text-ink rounded-md
+           px-2.5 py-1.5 text-sm placeholder:text-ink-subtle
+           focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-1.5 py-0.5 rounded
+           text-xs font-medium border;
+  }
+
+  .kbd {
+    @apply inline-flex items-center px-1.5 py-0.5 rounded
+           text-[10px] font-mono border border-edge-strong
+           bg-panel text-ink-muted;
+  }
+
+  .table-row-hover > tr:hover {
+    @apply bg-panel-high cursor-pointer;
+  }
+
+  .pulse-dot {
+    @apply inline-block w-2 h-2 rounded-full bg-info animate-pulseDot;
+  }
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+  .grid-overlay {
+    background-image:
+      linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
+    background-size: 16px 16px;
+  }
+}

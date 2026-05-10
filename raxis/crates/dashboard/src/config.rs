@@ -80,6 +80,17 @@ pub struct DashboardConfig {
     /// when the underlying JWT's `expires_at` passes. Default 1000.
     #[serde(default = "default_max_revoked_jwts")]
     pub max_revoked_jwts: usize,
+
+    /// Filesystem path of the React frontend bundle (the
+    /// `dist/` directory produced by `npm run build` under
+    /// `dashboard-fe/`). When `Some(_)` the dashboard mounts
+    /// a `tower_http::services::ServeDir` fallback so any
+    /// non-`/api/*` route serves the bundle (with SPA-style
+    /// `index.html` fallback for client-side routes). When
+    /// `None` (the default) the dashboard exposes only the
+    /// JSON API and returns 404 for unknown routes.
+    #[serde(default)]
+    pub static_dir: Option<String>,
 }
 
 impl Default for DashboardConfig {
@@ -93,6 +104,7 @@ impl Default for DashboardConfig {
             jwt_ttl_secs: default_jwt_ttl_secs(),
             max_pending_challenges: default_max_pending_challenges(),
             max_revoked_jwts: default_max_revoked_jwts(),
+            static_dir: None,
         }
     }
 }

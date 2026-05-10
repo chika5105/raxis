@@ -16,6 +16,7 @@
 // `audit verify` shim was removed: keeping two CLI surfaces that
 // "verify the chain" violates the no-duplicate-action invariant.
 
+pub mod auth;
 pub mod budget;
 pub mod cert;
 pub mod credential;
