@@ -142,32 +142,33 @@ pub fn dispatch(
         let summ = human_summary.clone();
         let pj   = payload_json.clone();
         let seid = event.event_id.to_string();
-        // Spawn a blocking task because Store::lock_sync blocks.
+        // Spawn a blocking task because Store::lock_sync blocks the
+        // current thread on the underlying tokio Mutex (it is not async).
+        // Using spawn_blocking keeps the kernel runtime worker free.
         tokio::task::spawn_blocking(move || {
-            if let Ok(conn) = store_for_insert.lock_sync() {
-                let tx_result = (|| -> Result<(), rusqlite::Error> {
-                    conn.execute_batch("BEGIN IMMEDIATE")?;
-                    let sql = format!(
-                        "INSERT OR IGNORE INTO {} \
-                         (notification_id, event_kind, initiative_id, task_id, \
-                          session_id, summary, payload_json, read, source_event_id, created_at) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
-                        raxis_store::Table::Notifications.as_str(),
-                    );
-                    conn.execute(
-                        &sql,
-                        rusqlite::params![nid, ek, iid, tid, sid, summ, pj, seid, created_at],
-                    )?;
-                    conn.execute_batch("COMMIT")?;
-                    Ok(())
-                })();
-                if let Err(e) = tx_result {
-                    let _ = conn.execute_batch("ROLLBACK");
-                    eprintln!(
-                        "{{\"level\":\"warn\",\"event\":\"notification_store_insert_failed\",\
-                         \"notification_id\":\"{nid}\",\"reason\":\"{e}\"}}"
-                    );
-                }
+            let conn = store_for_insert.lock_sync();
+            let tx_result = (|| -> Result<(), rusqlite::Error> {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let sql = format!(
+                    "INSERT OR IGNORE INTO {} \
+                     (notification_id, event_kind, initiative_id, task_id, \
+                      session_id, summary, payload_json, read, source_event_id, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
+                    raxis_store::Table::Notifications.as_str(),
+                );
+                conn.execute(
+                    &sql,
+                    rusqlite::params![nid, ek, iid, tid, sid, summ, pj, seid, created_at],
+                )?;
+                conn.execute_batch("COMMIT")?;
+                Ok(())
+            })();
+            if let Err(e) = tx_result {
+                let _ = conn.execute_batch("ROLLBACK");
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"notification_store_insert_failed\",\
+                     \"notification_id\":\"{nid}\",\"reason\":\"{e}\"}}"
+                );
             }
         });
     }
@@ -225,7 +226,11 @@ pub async fn dispatch_blocking_for_tests(
 }
 
 /// Variant of `dispatch_blocking_for_tests` that takes an explicit
-/// sidecar registry — for tests that exercise Sidecar channels.
+/// sidecar registry — for tests that exercise Sidecar channels — AND
+/// performs the same kernel-owned writes (`inbox.jsonl` + SQLite
+/// `notifications`) that production `dispatch` does, so notification
+/// integration tests can assert against the inbox table without
+/// duplicating insert plumbing.
 #[cfg(any(debug_assertions, test))]
 pub async fn dispatch_blocking_for_tests_with_registry(
     event:            AuditEvent,
@@ -235,6 +240,64 @@ pub async fn dispatch_blocking_for_tests_with_registry(
     sidecar_registry: Option<&SidecarRegistry>,
     store:            Option<&Store>,
 ) {
+    // Mirror the production kernel-owned writes (inbox.jsonl + SQLite
+    // `notifications` row) so test paths exercise the same ground truth.
+    let human_summary = summary::render(&event);
+    let payload_json  = serde_json::to_string(&event.payload).unwrap_or_default();
+    let notification_id = uuid::Uuid::new_v4().to_string();
+    let created_at = event.emitted_at;
+
+    {
+        let inbox_path = PolicyBundle::shell_inbox_path_for(data_dir);
+        if let Some(parent) = inbox_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let record = serde_json::json!({
+            "notification_id": notification_id,
+            "event_kind":      &event.event_kind,
+            "event_id":        event.event_id.to_string(),
+            "initiative_id":   &event.initiative_id,
+            "task_id":         &event.task_id,
+            "session_id":      &event.session_id,
+            "human_summary":   &human_summary,
+            "payload":         &event.payload,
+            "emitted_at":      created_at,
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&inbox_path)
+        {
+            use std::io::Write;
+            let _ = writeln!(f, "{}", record);
+        }
+    }
+
+    if let Some(s) = store {
+        let conn = s.lock_sync();
+        let sql = format!(
+            "INSERT OR IGNORE INTO {} \
+             (notification_id, event_kind, initiative_id, task_id, \
+              session_id, summary, payload_json, read, source_event_id, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9)",
+            raxis_store::Table::Notifications.as_str(),
+        );
+        let _ = conn.execute(
+            &sql,
+            rusqlite::params![
+                notification_id,
+                &event.event_kind,
+                &event.initiative_id,
+                &event.task_id,
+                &event.session_id,
+                human_summary,
+                payload_json,
+                event.event_id.to_string(),
+                created_at,
+            ],
+        );
+    }
+
     let channel_ids: Vec<String> = match bundle.notification_route(&event.event_kind) {
         Some(explicit) if explicit.is_empty() => return,
         Some(explicit) => explicit.iter().cloned().collect(),
