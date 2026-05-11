@@ -80,7 +80,10 @@ pub mod restriction;
 pub mod upstream;
 pub mod wire;
 
-pub use restriction::{OperationKind, Restrictions, classify_first_operation};
+pub use restriction::{
+    OperationKind, Restrictions, RestrictionDecision, RestrictionReason,
+    classify_first_operation, extract_relations,
+};
 pub use upstream::{
     ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamSession,
     redact_for_audit, resolve_upstream_url, DEFAULT_CONNECT_TIMEOUT,
@@ -162,6 +165,18 @@ pub struct ProxyStats {
     pub upstream_connects_failed:    AtomicU32,
     /// V2.1: sum of upstream→agent payload bytes relayed.
     pub upstream_bytes_forwarded:    AtomicU64,
+    /// V2 — queries blocked by `allowed_tables` / `forbidden_tables`
+    /// (subset of `queries_blocked`). Per
+    /// `proxy-table-allowlists.md §10`.
+    pub queries_blocked_by_table_allowlist:  AtomicU32,
+    /// V2 — queries blocked because the walker reported the SQL as
+    /// ambiguous and an allowlist was configured (subset of
+    /// `queries_blocked`).
+    pub queries_blocked_by_ambiguous_sql:    AtomicU32,
+    /// V2 — queries whose result set was truncated by
+    /// `max_result_rows`. Not a subset of `queries_blocked`
+    /// (the agent saw rows then a cap-error, not a pure rejection).
+    pub queries_capped_by_max_result_rows:   AtomicU32,
 }
 
 impl ProxyStats {
@@ -176,6 +191,12 @@ impl ProxyStats {
             upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
             upstream_connects_failed:    self.upstream_connects_failed   .load(Ordering::Relaxed),
             upstream_bytes_forwarded:    self.upstream_bytes_forwarded   .load(Ordering::Relaxed),
+            queries_blocked_by_table_allowlist:
+                self.queries_blocked_by_table_allowlist .load(Ordering::Relaxed),
+            queries_blocked_by_ambiguous_sql:
+                self.queries_blocked_by_ambiguous_sql   .load(Ordering::Relaxed),
+            queries_capped_by_max_result_rows:
+                self.queries_capped_by_max_result_rows  .load(Ordering::Relaxed),
         }
     }
 }
@@ -199,6 +220,13 @@ pub struct ProxyStatsSnapshot {
     pub upstream_connects_failed:    u32,
     /// V2.1: sum of upstream→agent payload bytes relayed.
     pub upstream_bytes_forwarded:    u64,
+    /// V2 — queries blocked by `allowed_tables` / `forbidden_tables`.
+    pub queries_blocked_by_table_allowlist:  u32,
+    /// V2 — queries blocked because the walker reported the SQL as
+    /// ambiguous.
+    pub queries_blocked_by_ambiguous_sql:    u32,
+    /// V2 — queries truncated by `max_result_rows`.
+    pub queries_capped_by_max_result_rows:   u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +269,15 @@ pub enum AuditEvent {
         operation:   OperationKind,
         /// True if the proxy refused the query under restrictions.
         blocked:     bool,
+        /// V2 — walker-resolved relation list. Empty when no
+        /// allow/deny list is configured. Per
+        /// `proxy-table-allowlists.md §8.1`.
+        tables_referenced: Vec<String>,
+        /// V2 — closed-enum reason if restrictions tripped (block
+        /// or `enforce = false` audit-only mode); `None` on
+        /// admit. Values are pinned by
+        /// `RestrictionReason::as_str()`.
+        restriction_reason: Option<String>,
     },
 
     /// V2.1: emitted on the upstream's terminal frame for a
@@ -487,7 +524,9 @@ async fn serve_one(
                 let sql = String::from_utf8_lossy(&sql_bytes).into_owned();
                 let op  = classify_first_operation(&sql);
 
-                let blocked = config.restrictions.is_blocked(&op);
+                let decision = config.restrictions.check(&sql, &op);
+                let (blocked, tables_referenced, restriction_reason) =
+                    decision_to_audit_fields(&decision);
                 stats.queries_audited.fetch_add(1, Ordering::Relaxed);
                 let sql_sha = sha256_hex(&sql_bytes);
 
@@ -499,14 +538,17 @@ async fn serve_one(
                     sql_text:   if config.log_content { Some(sql.clone()) } else { None },
                     operation:  op,
                     blocked,
+                    tables_referenced,
+                    restriction_reason,
                 });
 
                 if blocked {
-                    stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
+                    bump_blocked_counters(&stats, &decision);
+                    let (sqlstate, msg) = error_for_decision(&decision);
                     let err = wire::build_err_packet(
                         1142, // ER_TABLEACCESS_DENIED_ERROR
-                        "42501",
-                        "operation blocked by RAXIS allow_only_select policy",
+                        &sqlstate,
+                        &msg,
                     );
                     stream.write_all(&wire::frame_packet(&err, 1)).await?;
                     stream.flush().await?;
@@ -524,24 +566,45 @@ async fn serve_one(
                 let session = upstream_session.as_mut().expect("upstream connected above");
                 match session.forward_query(&sql_bytes).await {
                     Ok(outcome) => {
-                        for frame in &outcome.frames {
+                        let capped = apply_max_result_rows_cap(
+                            outcome,
+                            config.restrictions.max_result_rows,
+                        );
+                        for frame in &capped.frames {
                             stream.write_all(frame).await?;
+                        }
+                        if capped.cap_triggered {
+                            let n = config.restrictions.max_result_rows;
+                            stats.queries_capped_by_max_result_rows
+                                .fetch_add(1, Ordering::Relaxed);
+                            let err = wire::build_err_packet(
+                                1226, // ER_USER_LIMIT_REACHED
+                                "54000",
+                                &format!(
+                                    "blocked by RAXIS policy: max_result_rows_exceeded \
+                                     (result-set row count exceeded max_result_rows = {n})",
+                                ),
+                            );
+                            stream.write_all(&wire::frame_packet(&err, capped.next_seq))
+                                .await?;
                         }
                         stream.flush().await?;
                         stats.upstream_bytes_forwarded.fetch_add(
-                            outcome.bytes_returned, Ordering::Relaxed,
+                            capped.bytes_returned, Ordering::Relaxed,
                         );
-                        let upstream_error = outcome.upstream_error.as_ref().map(|(_, sqlstate, _)| {
-                            if sqlstate.is_empty() { "HY000".to_owned() } else { sqlstate.clone() }
-                        });
+                        let upstream_error = if capped.cap_triggered {
+                            Some("max_result_rows_exceeded".to_owned())
+                        } else {
+                            capped.upstream_error_sqlstate.clone()
+                        };
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: now_secs(),
                             consumer:       config.consumer.clone(),
                             credential:     config.credential_name.clone(),
                             sql_sha256:     sql_sha,
-                            rows_returned:  outcome.rows_returned,
-                            bytes_returned: outcome.bytes_returned,
-                            duration_ms:    outcome.duration_ms,
+                            rows_returned:  capped.rows_returned,
+                            bytes_returned: capped.bytes_returned,
+                            duration_ms:    capped.duration_ms,
                             upstream_error,
                         });
                     }
@@ -585,12 +648,16 @@ async fn serve_one(
                 // Audit + restriction-check the prepared SQL exactly
                 // like COM_QUERY, then byte-relay the upstream's
                 // PREPARE_OK + ParamDef* + EOF + ColumnDef* + EOF
-                // response.
+                // response. Streaming `max_result_rows` enforcement
+                // for the binary-protocol execute leg is V3 work
+                // (`proxy-table-allowlists.md §14 deferrals`).
                 let sql_bytes = payload[1..].to_vec();
                 stats.bytes_observed.fetch_add(sql_bytes.len() as u64, Ordering::Relaxed);
                 let sql = String::from_utf8_lossy(&sql_bytes).into_owned();
                 let op  = classify_first_operation(&sql);
-                let blocked = config.restrictions.is_blocked(&op);
+                let decision = config.restrictions.check(&sql, &op);
+                let (blocked, tables_referenced, restriction_reason) =
+                    decision_to_audit_fields(&decision);
                 stats.queries_audited.fetch_add(1, Ordering::Relaxed);
                 let sql_sha = sha256_hex(&sql_bytes);
                 audit.emit(AuditEvent::DatabaseQueryExecuted {
@@ -601,13 +668,13 @@ async fn serve_one(
                     sql_text:   if config.log_content { Some(sql.clone()) } else { None },
                     operation:  op,
                     blocked,
+                    tables_referenced,
+                    restriction_reason,
                 });
                 if blocked {
-                    stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
-                    let err = wire::build_err_packet(
-                        1142, "42501",
-                        "operation blocked by RAXIS allow_only_select policy",
-                    );
+                    bump_blocked_counters(&stats, &decision);
+                    let (sqlstate, msg) = error_for_decision(&decision);
+                    let err = wire::build_err_packet(1142, &sqlstate, &msg);
                     stream.write_all(&wire::frame_packet(&err, 1)).await?;
                     stream.flush().await?;
                     continue;
@@ -941,6 +1008,225 @@ fn sha256_hex(b: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(b);
     hex::encode(h.finalize())
+}
+
+// ---------------------------------------------------------------------------
+// V2 — restriction decision plumbing
+//   (`proxy-table-allowlists.md §8`)
+// ---------------------------------------------------------------------------
+
+/// Translate a `RestrictionDecision` into the audit-event fields
+/// `(blocked, tables_referenced, restriction_reason)`. Per
+/// `proxy-table-allowlists.md §8.3`: `AuditOnly` decisions surface
+/// as `blocked = false` BUT carry the would-have-blocked reason in
+/// `restriction_reason`.
+fn decision_to_audit_fields(
+    decision: &RestrictionDecision,
+) -> (bool, Vec<String>, Option<String>) {
+    match decision {
+        RestrictionDecision::Admit { tables_referenced } =>
+            (false, tables_referenced.clone(), None),
+        RestrictionDecision::Block { reason, tables_referenced } =>
+            (true, tables_referenced.clone(), Some(reason.as_str().to_owned())),
+        RestrictionDecision::AuditOnly { reason, tables_referenced } =>
+            (false, tables_referenced.clone(), Some(reason.as_str().to_owned())),
+    }
+}
+
+/// Bump the per-restriction-class counter for a blocked decision.
+/// Always bumps the V2.1 `queries_blocked` aggregate too.
+fn bump_blocked_counters(stats: &Arc<ProxyStats>, decision: &RestrictionDecision) {
+    stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
+    if let RestrictionDecision::Block { reason, .. } = decision {
+        match reason {
+            RestrictionReason::TableNotInAllowedList
+            | RestrictionReason::TableInForbiddenList => {
+                stats.queries_blocked_by_table_allowlist
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            RestrictionReason::AmbiguousSqlMultiStatement
+            | RestrictionReason::AmbiguousSqlDynamic
+            | RestrictionReason::AmbiguousSqlMalformed => {
+                stats.queries_blocked_by_ambiguous_sql
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            RestrictionReason::AllowOnlySelect => {}
+        }
+    }
+}
+
+/// `(sqlstate, message)` for a `RestrictionDecision::Block`. Per
+/// `proxy-table-allowlists.md §9.1`: sqlstate `42501` for
+/// allow/deny decisions; `54000` is reserved for `max_result_rows`.
+/// Message embeds the closed-enum reason verbatim per the
+/// `R-10 Opaque Rejection` discussion in §1.3 of that spec.
+fn error_for_decision(decision: &RestrictionDecision) -> (String, String) {
+    let reason = match decision {
+        RestrictionDecision::Block { reason, .. } => reason,
+        _ => return ("42501".to_owned(), "blocked by RAXIS policy".to_owned()),
+    };
+    (
+        "42501".to_owned(),
+        format!("blocked by RAXIS policy: {}", reason.as_str()),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// V2 — streaming `max_result_rows` cap
+//   (`proxy-table-allowlists.md §7.1`)
+// ---------------------------------------------------------------------------
+
+/// Result of applying the `max_result_rows` streaming cap to a
+/// completed MySQL `ForwardOutcome`. Mirrors the Postgres helper of
+/// the same name.
+///
+/// MySQL's result-set wire shape per the protocol reference:
+///   * ResultSetHeader (length-encoded column count) — frame 0
+///   * N ColumnDef packets
+///   * EOF packet (unless `CLIENT_DEPRECATE_EOF` negotiated, which
+///     V2.4 does NOT do upstream — see `upstream.rs`)
+///   * M Row packets — these are what we cap
+///   * Terminating EOF or OK packet
+///
+/// When the cap fires we truncate the row packets to N and replace
+/// the trailing EOF/OK with an `ERR_Packet { code = 1226, sqlstate
+/// = "54000", reason = "max_result_rows_exceeded" }` so the agent's
+/// driver sees a visible cap rather than a silent truncation. The
+/// caller writes the synthetic ERR packet with sequence ID
+/// `next_seq` (which we compute by counting frames kept).
+#[derive(Debug)]
+struct CappedOutcome {
+    frames:                  Vec<Vec<u8>>,
+    rows_returned:           u64,
+    bytes_returned:          u64,
+    duration_ms:             u32,
+    cap_triggered:           bool,
+    /// Sequence ID the caller must use for the synthetic terminator
+    /// ERR_Packet. Honoured ONLY when `cap_triggered = true`.
+    next_seq:                u8,
+    /// Forwarded upstream-error sqlstate when the upstream produced
+    /// an ERR mid-stream and the cap did NOT fire.
+    upstream_error_sqlstate: Option<String>,
+}
+
+fn apply_max_result_rows_cap(
+    outcome: crate::upstream::ForwardOutcome,
+    max_result_rows: u64,
+) -> CappedOutcome {
+    let duration_ms = outcome.duration_ms;
+    let upstream_error_sqlstate = outcome.upstream_error.as_ref().map(|(_, sqlstate, _)| {
+        if sqlstate.is_empty() { "HY000".to_owned() } else { sqlstate.clone() }
+    });
+    if max_result_rows == 0 || outcome.rows_returned <= max_result_rows {
+        return CappedOutcome {
+            frames:                  outcome.frames,
+            rows_returned:           outcome.rows_returned,
+            bytes_returned:          outcome.bytes_returned,
+            duration_ms,
+            cap_triggered:           false,
+            next_seq:                0,
+            upstream_error_sqlstate,
+        };
+    }
+    // Cap fires. We need to walk the response packets and keep:
+    //   1. ResultSetHeader (frame 0)
+    //   2. The N column-definition packets
+    //   3. The EOF marking end of column metadata
+    //   4. The first `max_result_rows` row packets
+    // ...then drop everything else (further rows + terminating EOF).
+    // The caller emits an ERR_Packet with sequence ID `next_seq`.
+    //
+    // Detecting "row vs EOF vs OK vs ERR" from a raw frame: the
+    // 4-byte packet header is `bytes[0..3] = payload_len (LE)`,
+    // `bytes[3] = seq_id`. The first payload byte is `bytes[4]`.
+    //   * 0xff           → ERR (relay verbatim, do NOT cap)
+    //   * 0xfe + payload_len < 9 → EOF (without CLIENT_DEPRECATE_EOF;
+    //                          this is the V2.4 upstream shape).
+    //   * else                   → row or column metadata.
+    //
+    // We're past column metadata once we've seen the first EOF.
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(outcome.frames.len());
+    let mut bytes: u64 = 0;
+    let mut rows_kept: u64 = 0;
+    let mut seen_metadata_eof = false;
+    let mut last_seq: u8 = 0;
+    for frame in outcome.frames.into_iter() {
+        let kind = mysql_frame_kind(&frame);
+        if let Some(seq) = frame.get(3).copied() { last_seq = seq; }
+        match kind {
+            MysqlFrameKind::Err => {
+                // Upstream ERR — relay verbatim; do not cap.
+                bytes += frame.len() as u64;
+                out.push(frame);
+                break;
+            }
+            MysqlFrameKind::Eof if !seen_metadata_eof => {
+                // First EOF: end of column-definition section.
+                seen_metadata_eof = true;
+                bytes += frame.len() as u64;
+                out.push(frame);
+            }
+            MysqlFrameKind::Eof => {
+                // Second EOF (or OK_Packet acting as terminator):
+                // drop — the caller substitutes an ERR_Packet so
+                // the cap is visible to the client.
+            }
+            MysqlFrameKind::OtherOrRow if !seen_metadata_eof => {
+                // Column-metadata frame (ResultSetHeader or
+                // ColumnDef). Keep as-is.
+                bytes += frame.len() as u64;
+                out.push(frame);
+            }
+            MysqlFrameKind::OtherOrRow => {
+                // Row packet (we're past the metadata EOF).
+                if rows_kept < max_result_rows {
+                    bytes += frame.len() as u64;
+                    out.push(frame);
+                    rows_kept += 1;
+                }
+                // Drop further rows.
+            }
+        }
+    }
+    CappedOutcome {
+        frames:                  out,
+        rows_returned:           rows_kept,
+        bytes_returned:          bytes,
+        duration_ms,
+        cap_triggered:           true,
+        next_seq:                last_seq.wrapping_add(1),
+        upstream_error_sqlstate: None,
+    }
+}
+
+#[derive(Debug)]
+enum MysqlFrameKind {
+    /// `ERR_Packet` — payload[0] = 0xff.
+    Err,
+    /// `EOF_Packet` (or short `OK_Packet` acting as a terminator
+    /// when `CLIENT_DEPRECATE_EOF` is negotiated upstream): payload
+    /// starts with 0xfe and is < 9 bytes.
+    Eof,
+    /// Either a row, the `ResultSetHeader`, or a `ColumnDef` packet.
+    /// Disambiguated by the caller using `seen_metadata_eof`.
+    OtherOrRow,
+}
+
+fn mysql_frame_kind(frame: &[u8]) -> MysqlFrameKind {
+    if frame.len() < 5 {
+        return MysqlFrameKind::OtherOrRow;
+    }
+    let first = frame[4];
+    let payload_len = (frame[0] as usize)
+        | ((frame[1] as usize) << 8)
+        | ((frame[2] as usize) << 16);
+    if first == 0xff {
+        return MysqlFrameKind::Err;
+    }
+    if first == 0xfe && payload_len < 9 {
+        return MysqlFrameKind::Eof;
+    }
+    MysqlFrameKind::OtherOrRow
 }
 
 // ---------------------------------------------------------------------------

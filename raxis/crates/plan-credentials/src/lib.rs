@@ -529,18 +529,51 @@ fn default_gcp_allowed_paths() -> Vec<String> {
 /// MySQL restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "mysql"`).
 ///
-/// Mirrors `raxis_credential_proxy_mysql::Restrictions`. The
-/// `allow_only_select` flag is the only V2 MVP knob — when set,
-/// every COM_QUERY whose first statement is not a `SELECT` /
-/// `WITH … SELECT` / `SHOW` / `EXPLAIN … SELECT` is rejected with
-/// an `ERR_Packet { code = 1142, sqlstate = "42501" }`.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Mirrors `raxis_credential_proxy_mysql::Restrictions`. V2.4
+/// (`specs/v2/proxy-table-allowlists.md`) adds the table-level
+/// allowlist + denylist surface and a streaming row-count cap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MysqlRestrictions {
     /// If `true`, only `SELECT`-shaped statements pass; everything
     /// else is rejected at the proxy.
     #[serde(default)]
     pub allow_only_select: bool,
+
+    /// Table-level allowlist; see `PostgresRestrictions::allowed_tables`
+    /// for the matching contract.
+    #[serde(default)]
+    pub allowed_tables: Vec<String>,
+
+    /// Table-level denylist applied AFTER the allowlist.
+    #[serde(default)]
+    pub forbidden_tables: Vec<String>,
+
+    /// Per-result-set hard cap on rows returned. `0` = uncapped.
+    /// Streaming enforcement: the proxy truncates the result set
+    /// after the cap and replaces the trailing `EOF` / `OK_Packet`
+    /// with an `ERR_Packet { code = 1226, sqlstate = "54000" }`.
+    #[serde(default)]
+    pub max_result_rows: u64,
+
+    /// When `false`, walker verdicts and cap overage are audited
+    /// but the query is forwarded as if no restriction tripped.
+    #[serde(default = "default_mysql_enforce")]
+    pub enforce: bool,
 }
+
+impl Default for MysqlRestrictions {
+    fn default() -> Self {
+        Self {
+            allow_only_select: false,
+            allowed_tables:    Vec::new(),
+            forbidden_tables:  Vec::new(),
+            max_result_rows:   0,
+            enforce:           true,
+        }
+    }
+}
+
+fn default_mysql_enforce() -> bool { true }
 
 /// MSSQL restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "mssql"`).

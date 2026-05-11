@@ -2350,6 +2350,10 @@ impl CredentialProxyManager {
             server_version:  "8.0.0-raxis-handshake".to_owned(),
             restrictions: MysqlProxyRestrictions {
                 allow_only_select: restrictions.allow_only_select,
+                allowed_tables:    restrictions.allowed_tables.clone(),
+                forbidden_tables:  restrictions.forbidden_tables.clone(),
+                max_result_rows:   restrictions.max_result_rows,
+                enforce:           restrictions.enforce,
             },
             log_content:     false,
         };
