@@ -578,17 +578,53 @@ fn default_mysql_enforce() -> bool { true }
 /// MSSQL restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "mssql"`).
 ///
-/// Mirrors `raxis_credential_proxy_mssql::Restrictions`. Behaves
-/// identically to `MysqlRestrictions` — the V2 wire surface for
-/// both is "classify the first SQL token; reject DML/DDL when
-/// `allow_only_select` is true".
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Mirrors `raxis_credential_proxy_mssql::Restrictions`. The V2.4
+/// surface adds `allowed_tables` / `forbidden_tables` /
+/// `max_result_rows` / `enforce` per `proxy-table-allowlists.md`.
+/// Note: `max_result_rows` is currently configured + audited but
+/// not stream-enforced; see `lib.rs` doc comment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MssqlRestrictions {
     /// If `true`, only `SELECT`-shaped statements pass; everything
     /// else is rejected at the proxy with an `ERROR` token.
     #[serde(default)]
     pub allow_only_select: bool,
+
+    /// Table-level allowlist; see `PostgresRestrictions::allowed_tables`
+    /// for the matching contract.
+    #[serde(default)]
+    pub allowed_tables: Vec<String>,
+
+    /// Table-level denylist applied AFTER the allowlist.
+    #[serde(default)]
+    pub forbidden_tables: Vec<String>,
+
+    /// Per-result-set hard cap on rows returned. `0` = uncapped.
+    /// V2 plumbs this field end-to-end; streaming enforcement
+    /// (TDS token-stream parsing) is V2-followup work — see
+    /// `proxy-table-allowlists.md §11` for the deferral note.
+    #[serde(default)]
+    pub max_result_rows: u64,
+
+    /// When `false`, walker verdicts are audited but the batch is
+    /// admitted regardless of restriction outcome.
+    #[serde(default = "default_mssql_enforce")]
+    pub enforce: bool,
 }
+
+impl Default for MssqlRestrictions {
+    fn default() -> Self {
+        Self {
+            allow_only_select: false,
+            allowed_tables:    Vec::new(),
+            forbidden_tables:  Vec::new(),
+            max_result_rows:   0,
+            enforce:           true,
+        }
+    }
+}
+
+fn default_mssql_enforce() -> bool { true }
 
 /// MongoDB restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "mongodb"`).

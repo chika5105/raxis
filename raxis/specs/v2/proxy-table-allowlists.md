@@ -864,8 +864,24 @@ serialises the full stats struct, so this is a passive extension).
 |---|---|---|---|---|---|---|---|
 | `postgres` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | `tables_referenced`, `restriction_reason` |
 | `mysql`    | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | same |
-| `mssql`    | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | same |
+| `mssql`    | ✓ | ✓ | ✓ | configured | ✓ | ❗ followup | same |
 | `mongodb`  | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ (cursor rewrite) | `collection`, `restriction_reason` |
+
+> **MSSQL `max_result_rows` followup**: the field is plumbed end-to-end
+> and the configured value is surfaced in the audit envelope, but the
+> streaming cap (counting `ROW` tokens in the relayed TDS stream and
+> short-circuiting with an `ERROR` token + `DONE_ERROR` when the cap
+> trips) is **not yet** wired. TDS token-stream parsing has a much
+> larger surface than the postgres / mysql wire (variable-length
+> `COLMETADATA` widths, `ALTROW` / `NBCROW` token variants, SQL
+> Server's chunked LOB packaging), and the V2 MSSQL proxy already
+> relays bytes verbatim with the agent-side packet header preserved.
+> Landing the cap correctly requires TDS token parsing on the
+> upstream→agent path, which is a larger increment than this PR.
+> Tracked as a V2 followup; the audit envelope already exposes the
+> configured value so dashboards and `raxis doctor` can flag
+> credentials configured for caps that the proxy isn't yet
+> enforcing.
 
 ### 11.2 Deferred to V3
 

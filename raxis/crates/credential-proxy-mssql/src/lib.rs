@@ -40,8 +40,13 @@
 //!     `tokio-rustls` once `tds-rs` is wired up.
 //!   * RPC requests (packet type 0x03) — V2 returns ERROR + DONE
 //!     for any non-SQLBatch packet after login.
-//!   * `forbidden_tables`, `forbidden_schemas`, `max_result_rows`,
-//!     `statement_timeout_ms`.
+//!   * **Streaming** `max_result_rows` cap — the field is plumbed
+//!     and surfaced in audit, but ROW-token counting in the TDS
+//!     token stream is V2-followup work (see
+//!     `proxy-table-allowlists.md §11`). `allowed_tables`,
+//!     `forbidden_tables`, and ambiguity fail-closure are
+//!     enforced as of this commit.
+//!   * `statement_timeout_ms`.
 //!   * Multi-packet messages — V2 reads exactly one packet per
 //!     message (so SQL > 4060 bytes is rejected; production
 //!     queries fit comfortably).
@@ -61,7 +66,10 @@ pub mod restriction;
 pub mod upstream;
 pub mod wire;
 
-pub use restriction::{OperationKind, Restrictions, classify_first_operation};
+pub use restriction::{
+    AmbiguityReason, OperationKind, RelationList, RestrictionDecision,
+    RestrictionReason, Restrictions, classify_first_operation, extract_relations,
+};
 pub use upstream::{
     ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamSession,
     redact_for_audit, resolve_upstream_url, DEFAULT_CONNECT_TIMEOUT,
@@ -118,6 +126,13 @@ pub struct ProxyStats {
     pub queries_audited:    AtomicU32,
     /// Number of `SQLBatch` statements rejected by `Restrictions`.
     pub queries_blocked:    AtomicU32,
+    /// V2: subset of `queries_blocked` blocked by the
+    /// `allowed_tables` / `forbidden_tables` walker.
+    pub queries_blocked_by_table_allowlist: AtomicU32,
+    /// V2: subset of `queries_blocked` blocked because the walker
+    /// could not prove the relation list (fail-closed under the
+    /// V2 ambiguity policy).
+    pub queries_blocked_by_ambiguous_sql:   AtomicU32,
     /// Bytes seen in inbound `SQLBatch` payloads.
     pub bytes_observed:     AtomicU64,
     /// V2.1: number of upstream TCP+auth handshakes started.
@@ -137,6 +152,10 @@ impl ProxyStats {
             connections_served: self.connections_served.load(Ordering::Relaxed),
             queries_audited:    self.queries_audited   .load(Ordering::Relaxed),
             queries_blocked:    self.queries_blocked   .load(Ordering::Relaxed),
+            queries_blocked_by_table_allowlist:
+                self.queries_blocked_by_table_allowlist.load(Ordering::Relaxed),
+            queries_blocked_by_ambiguous_sql:
+                self.queries_blocked_by_ambiguous_sql  .load(Ordering::Relaxed),
             bytes_observed:     self.bytes_observed    .load(Ordering::Relaxed),
             upstream_connects_attempted: self.upstream_connects_attempted.load(Ordering::Relaxed),
             upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
@@ -155,6 +174,12 @@ pub struct ProxyStatsSnapshot {
     pub queries_audited:    u32,
     /// Number of `SQLBatch` statements rejected by `Restrictions`.
     pub queries_blocked:    u32,
+    /// V2: subset of `queries_blocked` blocked by the
+    /// `allowed_tables` / `forbidden_tables` walker.
+    pub queries_blocked_by_table_allowlist: u32,
+    /// V2: subset of `queries_blocked` blocked because the walker
+    /// could not prove the relation list.
+    pub queries_blocked_by_ambiguous_sql:   u32,
     /// Bytes seen in inbound `SQLBatch` payloads.
     pub bytes_observed:     u64,
     /// V2.1: number of upstream TCP+auth handshakes started.
@@ -201,6 +226,13 @@ pub enum AuditEvent {
         operation:   OperationKind,
         /// True if the proxy refused the batch under restrictions.
         blocked:     bool,
+        /// V2: walker-resolved relation list, canonicalised to
+        /// `<schema>.<table>` or bare `<table>` (per
+        /// `proxy-table-allowlists.md §8.1`).
+        tables_referenced: Vec<String>,
+        /// V2: closed-enum reason key, present iff the batch was
+        /// blocked OR audited-only by V2 restrictions.
+        restriction_reason: Option<&'static str>,
     },
 
     /// V2.1: emitted on the upstream's terminal frame for a
@@ -433,10 +465,12 @@ async fn serve_one(
             .unwrap_or_default();
         let op  = classify_first_operation(&sql);
 
-        let blocked = config.restrictions.is_blocked(&op);
+        let decision = config.restrictions.check(&sql, &op);
         stats.queries_audited.fetch_add(1, Ordering::Relaxed);
         let sql_sha = sha256_hex(sql.as_bytes());
 
+        let (tables_referenced, restriction_reason, is_block) =
+            decision_to_audit_fields(&decision);
         audit.emit(AuditEvent::DatabaseQueryExecuted {
             timestamp_unix_seconds: now_secs(),
             consumer:    config.consumer.clone(),
@@ -444,14 +478,16 @@ async fn serve_one(
             sql_sha256:  sql_sha.clone(),
             sql_text:    if config.log_content { Some(sql.clone()) } else { None },
             operation:   op,
-            blocked,
+            blocked:     is_block,
+            tables_referenced,
+            restriction_reason,
         });
 
-        if blocked {
-            stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
+        if is_block {
+            bump_blocked_counters(&stats, &decision);
             let resp = wire::build_error_done_body(
                 -1,
-                "operation blocked by RAXIS allow_only_select policy",
+                error_message_for_decision(&decision),
             );
             stream.write_all(&wire::frame_packet(wire::pkt::TABULAR_RESULT, &resp)).await?;
             stream.flush().await?;
@@ -572,6 +608,62 @@ async fn serve_one(
     }
 
     Ok(())
+}
+
+/// Translate a `RestrictionDecision` into the audit-envelope
+/// fields (`tables_referenced`, `restriction_reason`, `blocked`).
+fn decision_to_audit_fields(
+    decision: &RestrictionDecision,
+) -> (Vec<String>, Option<&'static str>, bool) {
+    match decision {
+        RestrictionDecision::Admit { tables_referenced } =>
+            (tables_referenced.clone(), None, false),
+        RestrictionDecision::Block { reason, tables_referenced } =>
+            (tables_referenced.clone(), Some(reason.as_str()), true),
+        RestrictionDecision::AuditOnly { reason, tables_referenced } =>
+            (tables_referenced.clone(), Some(reason.as_str()), false),
+    }
+}
+
+/// Increment the right `queries_blocked_*` sub-counter.
+fn bump_blocked_counters(stats: &ProxyStats, decision: &RestrictionDecision) {
+    let reason = match decision {
+        RestrictionDecision::Block { reason, .. } => *reason,
+        _ => return,
+    };
+    stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
+    match reason {
+        RestrictionReason::TableNotInAllowedList
+        | RestrictionReason::TableInForbiddenList => {
+            stats.queries_blocked_by_table_allowlist.fetch_add(1, Ordering::Relaxed);
+        }
+        RestrictionReason::AmbiguousSqlMultiStatement
+        | RestrictionReason::AmbiguousSqlDynamic
+        | RestrictionReason::AmbiguousSqlMalformed => {
+            stats.queries_blocked_by_ambiguous_sql.fetch_add(1, Ordering::Relaxed);
+        }
+        RestrictionReason::AllowOnlySelect => {}
+    }
+}
+
+fn error_message_for_decision(decision: &RestrictionDecision) -> &'static str {
+    match decision {
+        RestrictionDecision::Block { reason, .. } => match reason {
+            RestrictionReason::AllowOnlySelect =>
+                "operation blocked by RAXIS allow_only_select policy",
+            RestrictionReason::TableNotInAllowedList =>
+                "operation blocked: relation not in RAXIS allowed_tables",
+            RestrictionReason::TableInForbiddenList =>
+                "operation blocked: relation in RAXIS forbidden_tables",
+            RestrictionReason::AmbiguousSqlMultiStatement =>
+                "operation blocked: multi-statement batch is ambiguous under RAXIS allowlist",
+            RestrictionReason::AmbiguousSqlDynamic =>
+                "operation blocked: dynamic SQL is ambiguous under RAXIS allowlist",
+            RestrictionReason::AmbiguousSqlMalformed =>
+                "operation blocked: malformed SQL could not be parsed by RAXIS allowlist walker",
+        },
+        _ => "operation blocked by RAXIS policy",
+    }
 }
 
 fn now_secs() -> u64 {
