@@ -4,8 +4,7 @@
   "private": true,
   "description": "Marketing site and live documentation browser for the RAXIS paradigm.",
   "scripts": {
-    "predev": "node scripts/sync-docs.mjs && node scripts/build-search-index.mjs",
-    "dev": "next dev",
+    "dev": "node scripts/watch-docs.mjs & next dev",
     "prebuild": "node scripts/sync-docs.mjs && node scripts/build-search-index.mjs",
     "build": "next build",
     "start": "next start",
