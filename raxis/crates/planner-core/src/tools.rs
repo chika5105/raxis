@@ -1154,12 +1154,337 @@ fn parse_structured_output_input(
 }
 
 // ---------------------------------------------------------------------------
+// Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3)
+// ---------------------------------------------------------------------------
+//
+// These tools are declared so the LLM advertises them in
+// `MessageRequest::tools` and knows their argument shape, but their
+// `execute` is a no-op: the dispatch loop intercepts every name in
+// the role-specific `terminal_tools` whitelist BEFORE the tool result
+// is folded back into the conversation, then exits with
+// `DispatchOutcome::TerminalTool`. The driver's `submit_terminal`
+// function then translates the captured `input` JSON into the matching
+// `IntentKind` and ships it through the kernel IPC.
+//
+// Without these declarations the Anthropic API never tells the model
+// these tools exist, the model just emits free-form text describing
+// what it would do, and the dispatch loop times out with
+// `DispatchOutcome::Idle` (no terminal tool fired). That was the
+// observed orchestrator failure mode pre-V2 §3.2 fix.
+
+/// Declaration-only `task_complete` — fires the executor's
+/// terminal "I am done" signal. Argument: `head_sha` (the executor's
+/// commit). The dispatch loop intercepts before `execute` is called.
+struct TaskCompleteTool;
+
+#[async_trait::async_trait]
+impl Tool for TaskCompleteTool {
+    fn name(&self) -> &'static str { "task_complete" }
+    fn description(&self) -> &'static str {
+        "TERMINAL — call this exactly once when you have committed \
+         the changes that satisfy the task description. The session \
+         ends as soon as you call this. `head_sha` is the 40-char \
+         hex SHA of the commit you just produced (typically the \
+         output of the `git_commit` tool)."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["head_sha"],
+            "properties": {
+                "head_sha": {
+                    "type":        "string",
+                    "minLength":   40,
+                    "maxLength":   40,
+                    "pattern":     "^[0-9a-f]{40}$",
+                    "description": "40-char lowercase-hex SHA of the executor's commit."
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx:   &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("task_complete"))
+    }
+}
+
+/// Declaration-only `report_failure` — terminal "I cannot do this"
+/// signal. Argument: `justification`.
+struct ReportFailureTool;
+
+#[async_trait::async_trait]
+impl Tool for ReportFailureTool {
+    fn name(&self) -> &'static str { "report_failure" }
+    fn description(&self) -> &'static str {
+        "TERMINAL — call this when you have determined you cannot \
+         complete the task. Provide a one-paragraph `justification` \
+         the operator can act on. The session ends after this call. \
+         Prefer `report_failure` over silently giving up: the kernel \
+         records the rationale in the audit chain and surfaces it to \
+         the operator."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["justification"],
+            "properties": {
+                "justification": {
+                    "type":        "string",
+                    "minLength":   1,
+                    "maxLength":   4096,
+                    "description": "Operator-readable rationale (≤ 4 KiB)."
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx:   &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("report_failure"))
+    }
+}
+
+/// Declaration-only `single_commit` — terminal alternative to
+/// `task_complete` for executors that want to publish a single
+/// (base, head) pair to the kernel without staging through
+/// `task_complete`. Args: `base_sha`, `head_sha`.
+struct SingleCommitTool;
+
+#[async_trait::async_trait]
+impl Tool for SingleCommitTool {
+    fn name(&self) -> &'static str { "single_commit" }
+    fn description(&self) -> &'static str {
+        "TERMINAL — submit a single-commit advance from `base_sha` \
+         to `head_sha`. Use this when you have a base/head pair to \
+         publish that does NOT need the task_complete `head_sha`-only \
+         shape. The session ends after this call."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["base_sha", "head_sha"],
+            "properties": {
+                "base_sha": {
+                    "type":        "string",
+                    "minLength":   40,
+                    "maxLength":   40,
+                    "pattern":     "^[0-9a-f]{40}$",
+                    "description": "40-char lowercase-hex base SHA."
+                },
+                "head_sha": {
+                    "type":        "string",
+                    "minLength":   40,
+                    "maxLength":   40,
+                    "pattern":     "^[0-9a-f]{40}$",
+                    "description": "40-char lowercase-hex head SHA."
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx:   &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("single_commit"))
+    }
+}
+
+/// Declaration-only `submit_review` — reviewer's terminal verdict.
+/// Args: `approved` (bool), optional `critique` (string).
+struct SubmitReviewTool;
+
+#[async_trait::async_trait]
+impl Tool for SubmitReviewTool {
+    fn name(&self) -> &'static str { "submit_review" }
+    fn description(&self) -> &'static str {
+        "TERMINAL — submit your review verdict for the executor's \
+         most-recent commit. `approved = true` means the commit \
+         satisfies the task; `approved = false` rejects it. \
+         `critique` is optional context the executor may use on a \
+         follow-up attempt (capped at 4 KiB by the kernel). Call this \
+         exactly once."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["approved"],
+            "properties": {
+                "approved": {
+                    "type":        "boolean",
+                    "description": "true = accept the commit, false = reject."
+                },
+                "critique": {
+                    "type":        "string",
+                    "maxLength":   4096,
+                    "description": "Optional rationale (≤ 4 KiB). Recommended \
+                                    when `approved = false`."
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx:   &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("submit_review"))
+    }
+}
+
+/// Declaration-only `activate_subtask` — orchestrator's primary DAG
+/// driver. Argument: `subtask_task_id` (the task id of a sub-task
+/// in `pending` state with no incomplete predecessors). The kernel
+/// promotes the row from `PendingActivation → Active` and spawns
+/// the corresponding executor / reviewer session.
+///
+/// IMPORTANT for the model: the task ids you can pass live in the
+/// KSB `dag=` block — every row's first column is a task id.
+struct ActivateSubtaskTool;
+
+#[async_trait::async_trait]
+impl Tool for ActivateSubtaskTool {
+    fn name(&self) -> &'static str { "activate_subtask" }
+    fn description(&self) -> &'static str {
+        "TERMINAL — activate one ready sub-task by its task id. \
+         The valid ids are the `task_id` column of rows in the KSB \
+         `dag=` block whose `state` is `pending` AND whose \
+         predecessors (per the plan) are all `complete`. Call this \
+         exactly once per turn; the kernel spawns the corresponding \
+         executor (or reviewer) session and returns control. After \
+         the activation lands, the next orchestrator turn will see \
+         the updated DAG state and can decide whether to activate \
+         another task, retry one, or call `integration_merge`."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["subtask_task_id"],
+            "properties": {
+                "subtask_task_id": {
+                    "type":        "string",
+                    "minLength":   1,
+                    "maxLength":   128,
+                    "description": "Task id from the KSB `dag=` block. \
+                                    MUST exactly match one of the \
+                                    listed rows; case-sensitive."
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx:   &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("activate_subtask"))
+    }
+}
+
+/// Declaration-only `retry_subtask` — orchestrator re-spawns a
+/// failed sub-task with a fresh activation row. Same input shape as
+/// [`ActivateSubtaskTool`].
+struct RetrySubtaskTool;
+
+#[async_trait::async_trait]
+impl Tool for RetrySubtaskTool {
+    fn name(&self) -> &'static str { "retry_subtask" }
+    fn description(&self) -> &'static str {
+        "TERMINAL — retry one failed sub-task by its task id. The \
+         kernel inserts a new `subtask_activations` row with state \
+         `PendingActivation` and re-spawns the executor (or reviewer). \
+         Use this when a row's `state` in the KSB `dag=` block is \
+         `failed` AND you have reason to believe a retry will fare \
+         better (e.g. flaky network on the previous attempt). \
+         Call exactly once per turn."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["subtask_task_id"],
+            "properties": {
+                "subtask_task_id": {
+                    "type":        "string",
+                    "minLength":   1,
+                    "maxLength":   128,
+                    "description": "Task id of the failed sub-task to retry."
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx:   &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("retry_subtask"))
+    }
+}
+
+/// Declaration-only `integration_merge` — orchestrator's terminal
+/// "all sub-tasks done — merge them" signal. Args: `base_sha`,
+/// `head_sha`. The kernel performs the canonical fast-forward
+/// against `target_ref` (from the KSB).
+struct IntegrationMergeTool;
+
+#[async_trait::async_trait]
+impl Tool for IntegrationMergeTool {
+    fn name(&self) -> &'static str { "integration_merge" }
+    fn description(&self) -> &'static str {
+        "TERMINAL — fast-forward the initiative's `target_ref` from \
+         `base_sha` to `head_sha`. Call this exactly once when EVERY \
+         executor row in the KSB `dag=` block has `state = complete` \
+         AND every reviewer row has `state = complete`. The session \
+         ends after this call; the kernel records the merge as the \
+         initiative's terminal event."
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type":     "object",
+            "required": ["base_sha", "head_sha"],
+            "properties": {
+                "base_sha": {
+                    "type":        "string",
+                    "minLength":   40,
+                    "maxLength":   40,
+                    "pattern":     "^[0-9a-f]{40}$",
+                    "description": "40-char lowercase-hex base SHA."
+                },
+                "head_sha": {
+                    "type":        "string",
+                    "minLength":   40,
+                    "maxLength":   40,
+                    "pattern":     "^[0-9a-f]{40}$",
+                    "description": "40-char lowercase-hex head SHA \
+                                    (the merge result the kernel will \
+                                    fast-forward to)."
+                }
+            }
+        })
+    }
+    async fn execute(
+        &self,
+        _input: &serde_json::Value,
+        _ctx:   &ToolContext,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput::ok("integration_merge"))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Role-specific registry constructors
 // ---------------------------------------------------------------------------
 
 /// **Executor registry.** Includes all tools the executor needs:
 /// `read_file`, `edit_file`, `bash`, `grep_search`, `git_commit`,
-/// `sleep` (V2 §3.1).
+/// `sleep` (V2 §3.1), and the three terminal-tool declarations
+/// (`task_complete`, `report_failure`, `single_commit`) so the
+/// model knows it can call them.
 pub fn build_executor_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
@@ -1171,6 +1496,10 @@ pub fn build_executor_registry() -> ToolRegistry {
     // overrides via [`build_executor_registry_with_sleep`] when the
     // operator policy declares `[budget.sleep_caps]`.
     r.register(Arc::new(SleepTool::disabled()));
+    // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
+    r.register(Arc::new(TaskCompleteTool));
+    r.register(Arc::new(ReportFailureTool));
+    r.register(Arc::new(SingleCommitTool));
     r
 }
 
@@ -1178,11 +1507,14 @@ pub fn build_executor_registry() -> ToolRegistry {
 /// `read_file`, `grep_search`. NO `edit_file`, NO `bash`, NO
 /// `git_commit`, NO `sleep` (INV-PLANNER-HARNESS-02 — Pure-Static
 /// Reviewer has no external process to wait for). Pinned by
-/// `planner-harness.md §14.3 INV-PLANNER-HARNESS-04`.
+/// `planner-harness.md §14.3 INV-PLANNER-HARNESS-04`. Includes the
+/// `submit_review` terminal-tool declaration so the model knows to
+/// call it.
 pub fn build_reviewer_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(GrepSearchTool));
+    r.register(Arc::new(SubmitReviewTool));
     r
 }
 
@@ -1190,7 +1522,10 @@ pub fn build_reviewer_registry() -> ToolRegistry {
 /// `grep_search`, `sleep` (V2 §3.1 — orchestrators wait on
 /// long-running sub-task lifecycle events). The orchestrator does
 /// not edit files — its authority is over the DAG (sub-task
-/// activation / merge), not over commit content.
+/// activation / merge), not over commit content. Includes the
+/// three orchestrator terminal-tool declarations so the model can
+/// drive the DAG (`activate_subtask`, `retry_subtask`,
+/// `integration_merge`).
 pub fn build_orchestrator_registry() -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
@@ -1199,6 +1534,10 @@ pub fn build_orchestrator_registry() -> ToolRegistry {
     // overrides via [`build_orchestrator_registry_with_sleep`] when
     // the operator policy declares `[budget.sleep_caps]`.
     r.register(Arc::new(SleepTool::disabled()));
+    // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
+    r.register(Arc::new(ActivateSubtaskTool));
+    r.register(Arc::new(RetrySubtaskTool));
+    r.register(Arc::new(IntegrationMergeTool));
     r
 }
 
@@ -1206,7 +1545,8 @@ pub fn build_orchestrator_registry() -> ToolRegistry {
 /// `sleep` tool wired to the operator-declared policy ceilings.
 /// Construct from the dispatch-loop boot env (the kernel projects
 /// `policy.sleep_caps()` into `RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL`
-/// and `RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS`).
+/// and `RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS`). Includes the
+/// three executor terminal-tool declarations.
 pub fn build_executor_registry_with_sleep(
     max_per_call_seconds:    u32,
     max_cumulative_seconds:  u32,
@@ -1218,11 +1558,16 @@ pub fn build_executor_registry_with_sleep(
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(GitCommitTool));
     r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
+    // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
+    r.register(Arc::new(TaskCompleteTool));
+    r.register(Arc::new(ReportFailureTool));
+    r.register(Arc::new(SingleCommitTool));
     r
 }
 
 /// V2 `v2_extended_gaps.md §3.1` — orchestrator registry with the
 /// `sleep` tool wired to the operator-declared policy ceilings.
+/// Includes the three orchestrator terminal-tool declarations.
 pub fn build_orchestrator_registry_with_sleep(
     max_per_call_seconds:    u32,
     max_cumulative_seconds:  u32,
@@ -1231,6 +1576,10 @@ pub fn build_orchestrator_registry_with_sleep(
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
+    // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
+    r.register(Arc::new(ActivateSubtaskTool));
+    r.register(Arc::new(RetrySubtaskTool));
+    r.register(Arc::new(IntegrationMergeTool));
     r
 }
 
@@ -1427,6 +1776,64 @@ mod tests {
             "orchestrator registry MUST NOT include git_commit");
         assert!(r.get("edit_file").is_none(),
             "orchestrator registry MUST NOT include edit_file");
+    }
+
+    /// V2 §3.2 — the orchestrator's terminal tools MUST be declared
+    /// in its registry so the LLM advertises them in
+    /// `MessageRequest::tools`. Without these declarations the model
+    /// cannot fire them, the dispatch loop terminates with `Idle`,
+    /// and the kernel records an orchestration failure even though
+    /// the model would otherwise have driven the DAG to completion.
+    /// (This is the regression that left the live-e2e orchestrator
+    /// stuck after one turn — see commit history.)
+    #[test]
+    fn orchestrator_registry_declares_dag_terminal_tools() {
+        let r = build_orchestrator_registry();
+        assert!(r.get("activate_subtask").is_some(),
+            "orchestrator registry MUST declare `activate_subtask`");
+        assert!(r.get("retry_subtask").is_some(),
+            "orchestrator registry MUST declare `retry_subtask`");
+        assert!(r.get("integration_merge").is_some(),
+            "orchestrator registry MUST declare `integration_merge`");
+    }
+
+    /// Same invariant for the `_with_sleep` variant — adding a
+    /// budgeted sleep MUST NOT drop the terminal-tool declarations.
+    #[test]
+    fn orchestrator_registry_with_sleep_declares_dag_terminal_tools() {
+        let r = build_orchestrator_registry_with_sleep(60, 300);
+        assert!(r.get("activate_subtask").is_some());
+        assert!(r.get("retry_subtask").is_some());
+        assert!(r.get("integration_merge").is_some());
+    }
+
+    /// V2 §3.2 — executor terminal-tool declarations.
+    #[test]
+    fn executor_registry_declares_terminal_tools() {
+        let r = build_executor_registry();
+        assert!(r.get("task_complete").is_some(),
+            "executor registry MUST declare `task_complete`");
+        assert!(r.get("report_failure").is_some(),
+            "executor registry MUST declare `report_failure`");
+        assert!(r.get("single_commit").is_some(),
+            "executor registry MUST declare `single_commit`");
+    }
+
+    /// Same invariant for the `_with_sleep` variant.
+    #[test]
+    fn executor_registry_with_sleep_declares_terminal_tools() {
+        let r = build_executor_registry_with_sleep(60, 300);
+        assert!(r.get("task_complete").is_some());
+        assert!(r.get("report_failure").is_some());
+        assert!(r.get("single_commit").is_some());
+    }
+
+    /// V2 §3.2 — reviewer terminal-tool declaration.
+    #[test]
+    fn reviewer_registry_declares_submit_review() {
+        let r = build_reviewer_registry();
+        assert!(r.get("submit_review").is_some(),
+            "reviewer registry MUST declare `submit_review`");
     }
 
     #[test]

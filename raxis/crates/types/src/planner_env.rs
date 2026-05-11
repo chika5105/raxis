@@ -67,6 +67,27 @@ pub const PLANNER_MAX_SLEEP_PER_CALL_ENV:      &str = "RAXIS_PLANNER_MAX_SLEEP_S
 /// `PLANNER_MAX_SLEEP_PER_CALL_ENV` (validated at policy load time).
 pub const PLANNER_MAX_SLEEP_CUMULATIVE_ENV:    &str = "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS";
 
+/// V2_GAPS §C5 + `extensibility-traits.md §9A.5` — base URL of the
+/// operator-run sidecar process when the resolved model maps to a
+/// `policy.toml [[providers]] kind = "http_sidecar"` row. Kernel
+/// stamps verbatim from `ProviderEntry::sidecar_endpoint`. Empty
+/// or absent ⇒ planner refuses to boot a sidecar provider with
+/// `DriverError::SidecarEnvMissing`.
+pub const PLANNER_SIDECAR_ENDPOINT_ENV:        &str = "RAXIS_PLANNER_SIDECAR_ENDPOINT";
+
+/// V2_GAPS §C5 — logical sidecar provider id (matches the policy
+/// `[[providers]] provider_id` row). The sidecar HMAC handshake
+/// stamps this value into the request body so the sidecar can
+/// disambiguate per-deployment routing keys.
+pub const PLANNER_SIDECAR_PROVIDER_ID_ENV:     &str = "RAXIS_PLANNER_SIDECAR_PROVIDER_ID";
+
+/// V2_GAPS §C5 + `extensibility-traits.md §9A.7A` — 32-byte HMAC
+/// shared secret in lowercase hex (64 chars). Kernel stamps from
+/// `ProviderEntry::sidecar_hmac_secret`. **Operator MUST rotate
+/// per-spawn** (the kernel mints fresh material each time so a
+/// compromised planner cannot replay across spawns). NEVER logged.
+pub const PLANNER_SIDECAR_HMAC_SECRET_ENV:     &str = "RAXIS_PLANNER_SIDECAR_HMAC_SECRET";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,5 +109,11 @@ mod tests {
                    "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL");
         assert_eq!(PLANNER_MAX_SLEEP_CUMULATIVE_ENV,
                    "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS");
+        assert_eq!(PLANNER_SIDECAR_ENDPOINT_ENV,
+                   "RAXIS_PLANNER_SIDECAR_ENDPOINT");
+        assert_eq!(PLANNER_SIDECAR_PROVIDER_ID_ENV,
+                   "RAXIS_PLANNER_SIDECAR_PROVIDER_ID");
+        assert_eq!(PLANNER_SIDECAR_HMAC_SECRET_ENV,
+                   "RAXIS_PLANNER_SIDECAR_HMAC_SECRET");
     }
 }

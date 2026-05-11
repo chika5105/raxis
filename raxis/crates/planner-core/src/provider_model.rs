@@ -45,23 +45,34 @@ use thiserror::Error;
 
 /// V2 known providers. Matches the gateway's `[providers]` table
 /// vocabulary one-for-one. Adding a provider here also requires a
-/// matching gateway-side `[providers.X]` config + (eventually) a
+/// matching gateway-side `[providers.X]` config + a
 /// `crate::model::ModelClient` impl.
+///
+/// The driver in `crate::driver` dispatches model construction on
+/// this enum: each variant maps to one of `AnthropicClient`,
+/// `OpenAiClient`, `GeminiClient`, `BedrockClient`,
+/// `SidecarModelClient`. All five accept an
+/// `Arc<dyn crate::http_fetch::HttpFetch>` so the kernel-mediated
+/// transport (`EgressTier::None` guests) and the direct transport
+/// (subprocess substrate) share the same construction codepath.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderId {
-    /// Anthropic Messages API. The only V2 provider with a wired
-    /// `ModelClient` impl (`crate::model::AnthropicClient`).
+    /// Anthropic Messages API → [`crate::model::AnthropicClient`].
     Anthropic,
-    /// OpenAI Chat Completions API. V2 maps the model id to the
-    /// gateway's outbound endpoint; no in-process `ModelClient`
-    /// impl yet.
+    /// OpenAI Chat Completions API →
+    /// [`crate::openai_client::OpenAiClient`].
     OpenAi,
-    /// Google Gemini Generative Language API. V2 forwards to the
-    /// gateway; no in-process impl yet.
+    /// Google Gemini Generative Language API →
+    /// [`crate::gemini_client::GeminiClient`].
     Gemini,
-    /// AWS Bedrock InvokeModel API. V2 forwards via the gateway's
-    /// SigV4-signing leg; no in-process impl yet.
+    /// AWS Bedrock InvokeModel API →
+    /// [`crate::bedrock_client::BedrockClient`]. Wraps the SigV4
+    /// signing leg through the gateway in production.
     Bedrock,
+    /// Operator-run HTTP sidecar implementing the
+    /// `extensibility-traits.md §9A` request / response contract →
+    /// [`crate::sidecar_client::SidecarModelClient`].
+    Sidecar,
 }
 
 impl ProviderId {
@@ -73,6 +84,37 @@ impl ProviderId {
             Self::OpenAi    => "openai",
             Self::Gemini    => "gemini",
             Self::Bedrock   => "bedrock",
+            Self::Sidecar   => "sidecar",
+        }
+    }
+
+    /// Default base URL for the provider when
+    /// `RAXIS_PLANNER_BASE_URL` is unset.
+    ///
+    /// * **Anthropic** — `https://api.anthropic.com`. Stable.
+    /// * **OpenAI** — `https://api.openai.com`. Stable.
+    /// * **Gemini** — `https://generativelanguage.googleapis.com`.
+    ///   Stable.
+    /// * **Bedrock** — `https://bedrock-runtime.us-east-1.amazonaws.com`
+    ///   as a production-shaped placeholder; multi-region operators
+    ///   override via `RAXIS_PLANNER_BASE_URL`. We deliberately do NOT
+    ///   accept an env-driven region here because the planner has no
+    ///   business choosing the region — that's the gateway's job
+    ///   (it knows the operator's deployment topology). Once the
+    ///   gateway is ready to override the URL upstream of the planner
+    ///   the env var becomes unnecessary.
+    /// * **Sidecar** — returns `""`. The sidecar endpoint is
+    ///   operator-supplied per-deployment via the
+    ///   `RAXIS_PLANNER_SIDECAR_ENDPOINT` env var; there is no
+    ///   well-known default, and the driver MUST refuse to boot when
+    ///   the env var is missing for a sidecar-backed model.
+    pub const fn default_base_url(self) -> &'static str {
+        match self {
+            Self::Anthropic => "https://api.anthropic.com",
+            Self::OpenAi    => "https://api.openai.com",
+            Self::Gemini    => "https://generativelanguage.googleapis.com",
+            Self::Bedrock   => "https://bedrock-runtime.us-east-1.amazonaws.com",
+            Self::Sidecar   => "",
         }
     }
 }
@@ -369,5 +411,28 @@ mod tests {
         assert_eq!(ProviderId::OpenAi.as_str(),    "openai");
         assert_eq!(ProviderId::Gemini.as_str(),    "gemini");
         assert_eq!(ProviderId::Bedrock.as_str(),   "bedrock");
+        assert_eq!(ProviderId::Sidecar.as_str(),   "sidecar");
+    }
+
+    #[test]
+    fn default_base_url_is_https_for_known_providers() {
+        for (id, expected_prefix) in [
+            (ProviderId::Anthropic, "https://"),
+            (ProviderId::OpenAi,    "https://"),
+            (ProviderId::Gemini,    "https://"),
+            (ProviderId::Bedrock,   "https://"),
+        ] {
+            let url = id.default_base_url();
+            assert!(
+                url.starts_with(expected_prefix),
+                "{:?}: default_base_url {url:?} must start with {expected_prefix}",
+                id,
+            );
+        }
+    }
+
+    #[test]
+    fn default_base_url_for_sidecar_is_empty() {
+        assert_eq!(ProviderId::Sidecar.default_base_url(), "");
     }
 }

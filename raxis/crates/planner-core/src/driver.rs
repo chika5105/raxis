@@ -101,8 +101,14 @@ use crate::intent::{
     executor_terminal_tool_to_intent_kind, orchestrator_terminal_tool_to_intent_kind,
     reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError,
 };
+use crate::bedrock_client::BedrockClient;
+use crate::gemini_client::GeminiClient;
 use crate::model::{AnthropicClient, ModelClient};
-use crate::provider_model::{resolve_model_from_env_fn, ProviderModelError};
+use crate::openai_client::OpenAiClient;
+use crate::provider_model::{
+    resolve_model_from_env_fn, KnownModel, ProviderId, ProviderModelError,
+};
+use crate::sidecar_client::{SidecarConstructError, SidecarModelClient};
 use crate::tools::{
     build_executor_registry, build_executor_registry_full, build_orchestrator_registry,
     build_orchestrator_registry_full, build_reviewer_registry, StructuredOutputTool, ToolContext,
@@ -111,12 +117,34 @@ use crate::tools::{
 use crate::transport::{KernelTransport, KernelTransportConfig, TransportError};
 use crate::{BootArgs, BootEnv, Role};
 
-/// Default base URL when `RAXIS_PLANNER_BASE_URL` is unset.
+/// Default base URL when `RAXIS_PLANNER_BASE_URL` is unset AND no
+/// per-provider default applies.
 ///
-/// Production planners hit `https://api.anthropic.com`; tproxy +
-/// gateway intercept and inject credentials transparently. Tests
-/// override this env var to point at a local mock server.
+/// Kept for backwards compatibility — production planners now derive
+/// the default from [`ProviderId::default_base_url`] based on the
+/// resolved `RAXIS_MODEL_ID`, so this constant is only used by tests
+/// that don't go through `provider_model::resolve_model_from_env_fn`.
 pub const DEFAULT_PLANNER_BASE_URL: &str = "https://api.anthropic.com";
+
+/// V2_GAPS §C5 sidecar env vars (kernel-stamped per
+/// `extensibility-traits.md §9A.5`).
+///
+/// The kernel resolves the operator-supplied
+/// `policy.toml [[providers]] kind = "http_sidecar"` row and stamps
+/// these three vars into the spawn envelope when the resolved
+/// model maps to a sidecar provider; the planner uses them to
+/// build a [`SidecarModelClient`] that signs every outbound body
+/// with `HMAC-SHA256(secret, …)` per
+/// `extensibility-traits.md §9A.7A`.
+///
+/// Re-exports of the canonical declarations in
+/// [`raxis_types::planner_env`] so the kernel (writer) and the
+/// planner-core driver (reader) stay in lock-step on the same set
+/// of names.
+pub use raxis_types::planner_env::{
+    PLANNER_SIDECAR_ENDPOINT_ENV, PLANNER_SIDECAR_HMAC_SECRET_ENV,
+    PLANNER_SIDECAR_PROVIDER_ID_ENV,
+};
 
 /// Default workspace mount point — matches what the
 /// `session-spawn` substrate stamps into Firecracker / Apple-VZ /
@@ -257,6 +285,29 @@ pub enum DriverError {
     /// torn system prompt.
     #[error("KSB assembly failed: {0}")]
     KsbAssembleFailed(String),
+
+    /// The planner resolved a [`ProviderId::Sidecar`] model but the
+    /// per-spawn env contract was missing one of the required
+    /// sidecar configuration vars (`RAXIS_PLANNER_SIDECAR_ENDPOINT`,
+    /// `RAXIS_PLANNER_SIDECAR_PROVIDER_ID`,
+    /// `RAXIS_PLANNER_SIDECAR_HMAC_SECRET`). Surface the missing
+    /// env var by name so the operator can correlate against the
+    /// kernel-side spawn audit event.
+    #[error(
+        "sidecar provider requires env var {var:?} (set by kernel from \
+         policy.toml [[providers]] kind = \"http_sidecar\")"
+    )]
+    SidecarEnvMissing {
+        /// Name of the missing env var.
+        var: &'static str,
+    },
+
+    /// The sidecar client constructor rejected the operator-supplied
+    /// HMAC secret. Wraps
+    /// [`crate::sidecar_client::SidecarConstructError`] verbatim so
+    /// the operator's audit trail keeps the rejection rationale.
+    #[error("sidecar client construction failed: {0}")]
+    SidecarConstruct(#[from] SidecarConstructError),
 }
 
 /// **Per-role driver entry point.** Called from the role binary's
@@ -319,15 +370,33 @@ where
     // callers' error handling stays compatible.
     let transport_cfg = KernelTransportConfig::from_env_fn(&f)
         .map_err(|_| DriverError::KernelSocketMissing)?;
-    let base_url = var("RAXIS_PLANNER_BASE_URL")
-        .unwrap_or_else(|| DEFAULT_PLANNER_BASE_URL.to_owned());
-    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
-        return Err(DriverError::BadBaseUrl { got: base_url });
-    }
     let workspace = var("RAXIS_WORKSPACE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKSPACE_PATH));
-    let model_id = resolve_model_from_env_fn(&f)?.name.to_owned();
+
+    // Resolve model id + provider via the registry. The `provider`
+    // field drives the multi-provider router below; the `name` field
+    // is what gets stamped into every `MessageRequest::model`.
+    let known_model = resolve_model_from_env_fn(&f)?;
+    let model_id    = known_model.name.to_owned();
+    let provider    = known_model.provider;
+
+    // Base URL precedence: explicit operator override
+    // (`RAXIS_PLANNER_BASE_URL`) wins for every provider. Otherwise
+    // each provider has a canonical default
+    // ([`ProviderId::default_base_url`]); the sidecar variant
+    // returns "" because there is no well-known sidecar URL —
+    // operators MUST stamp `RAXIS_PLANNER_SIDECAR_ENDPOINT` (the
+    // construction path below validates that).
+    let base_url = match var("RAXIS_PLANNER_BASE_URL") {
+        Some(u) => u,
+        None    => provider.default_base_url().to_owned(),
+    };
+    if provider != ProviderId::Sidecar
+        && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
+    {
+        return Err(DriverError::BadBaseUrl { got: base_url });
+    }
     let max_turns = var("RAXIS_PLANNER_MAX_TURNS")
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(DEFAULT_PLANNER_MAX_TURNS);
@@ -395,19 +464,15 @@ where
         }
     };
 
-    // ── Construct the model with the chosen HTTP transport.
-    //
-    // V2 GA wires `AnthropicClient` for every role; the
-    // multi-provider router (`v2_extended_gaps.md §C5` + 
-    // `provider-model-selection.md`) lands in V2.5 and will pick
-    // between Anthropic, OpenAI, Bedrock, Gemini, and Sidecar
-    // clients here based on the resolved `model_id`'s provider
-    // prefix. All five clients accept an `Arc<dyn HttpFetch>`
-    // through their `with_http_fetch` constructors so the swap
-    // requires no further driver-side change.
-    let model: Arc<dyn ModelClient> = Arc::new(
-        AnthropicClient::with_http_fetch(base_url, Arc::clone(&http_fetch)),
-    );
+    // ── Construct the model client by dispatching on the resolved
+    //    provider (`provider-model-selection.md §4` +
+    //    `v2_extended_gaps.md §C5`). All five client impls accept
+    //    `Arc<dyn HttpFetch>` so the kernel-mediated transport flows
+    //    through identically for every provider — the planner never
+    //    holds a credential, the gateway injects per
+    //    `peripherals.md §3.2`.
+    let model: Arc<dyn ModelClient> =
+        build_model_client(known_model, &base_url, &http_fetch, &f)?;
 
     let token_caps = TokenCaps {
         input_total:  max_tokens_input_total,
@@ -446,6 +511,82 @@ pub struct TokenCaps {
     /// Cumulative combined-token cap across the session
     /// (`DispatchConfig::max_tokens_total`).
     pub total:        Option<u64>,
+}
+
+/// **`v2_extended_gaps.md §C5` — multi-provider model client
+/// router.**
+///
+/// Picks the right [`ModelClient`] impl for the resolved provider
+/// and threads the shared [`crate::http_fetch::HttpFetch`] through
+/// its `with_http_fetch` constructor. Each variant returns an
+/// `Arc<dyn ModelClient>` so the dispatch loop stays
+/// provider-agnostic.
+///
+/// Provider routing rules:
+///
+/// * **Anthropic** — wraps [`AnthropicClient`] against the resolved
+///   `base_url` (defaults to `https://api.anthropic.com`). The
+///   gateway injects `x-api-key` per `peripherals.md §3.2` so the
+///   planner never sees the credential.
+/// * **OpenAI** — wraps [`OpenAiClient`]; gateway injects the
+///   `Authorization: Bearer …` header.
+/// * **Gemini** — wraps [`GeminiClient`]; gateway injects the API
+///   key as a `?key=` query param per Google's contract.
+/// * **Bedrock** — wraps [`BedrockClient`]; gateway performs the
+///   SigV4 signing leg before dispatch (the planner's request body
+///   never carries AWS credentials).
+/// * **Sidecar** — wraps [`SidecarModelClient`]. Reads
+///   [`PLANNER_SIDECAR_ENDPOINT_ENV`],
+///   [`PLANNER_SIDECAR_PROVIDER_ID_ENV`], and
+///   [`PLANNER_SIDECAR_HMAC_SECRET_ENV`] from the kernel-stamped
+///   env (each is `SidecarEnvMissing` if absent / empty). The HMAC
+///   secret is per-spawn material — see `extensibility-traits.md
+///   §9A.7A` for the threat-model rationale.
+fn build_model_client<F>(
+    known_model: &KnownModel,
+    base_url:    &str,
+    http_fetch:  &Arc<dyn crate::http_fetch::HttpFetch>,
+    f:           &F,
+) -> Result<Arc<dyn ModelClient>, DriverError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let var = |k: &str| f(k).filter(|v| !v.is_empty());
+    Ok(match known_model.provider {
+        ProviderId::Anthropic => Arc::new(AnthropicClient::with_http_fetch(
+            base_url.to_owned(),
+            Arc::clone(http_fetch),
+        )),
+        ProviderId::OpenAi => Arc::new(OpenAiClient::with_http_fetch(
+            base_url.to_owned(),
+            Arc::clone(http_fetch),
+        )),
+        ProviderId::Gemini => Arc::new(GeminiClient::with_http_fetch(
+            base_url.to_owned(),
+            Arc::clone(http_fetch),
+        )),
+        ProviderId::Bedrock => Arc::new(BedrockClient::with_http_fetch(
+            base_url.to_owned(),
+            Arc::clone(http_fetch),
+        )),
+        ProviderId::Sidecar => {
+            let endpoint = var(PLANNER_SIDECAR_ENDPOINT_ENV).ok_or(
+                DriverError::SidecarEnvMissing { var: PLANNER_SIDECAR_ENDPOINT_ENV },
+            )?;
+            let provider_id = var(PLANNER_SIDECAR_PROVIDER_ID_ENV).ok_or(
+                DriverError::SidecarEnvMissing { var: PLANNER_SIDECAR_PROVIDER_ID_ENV },
+            )?;
+            let secret_hex = var(PLANNER_SIDECAR_HMAC_SECRET_ENV).ok_or(
+                DriverError::SidecarEnvMissing { var: PLANNER_SIDECAR_HMAC_SECRET_ENV },
+            )?;
+            Arc::new(SidecarModelClient::with_http_fetch(
+                endpoint,
+                provider_id,
+                &secret_hex,
+                Arc::clone(http_fetch),
+            )?)
+        }
+    })
 }
 
 /// Helper for `run_role_session_with_env_fn` — parse a `u64` from a
@@ -705,19 +846,58 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
     let role_blurb = match role {
         Role::Executor => "You are the RAXIS executor agent for task `{TASK}` of \
                           initiative `{INIT}`. Make code changes that satisfy the \
-                          task description, then call `task_complete` with the \
-                          head SHA, or `report_failure` with a justification if you \
-                          cannot complete the task.",
+                          task description (use `edit_file`, `bash`, `git_commit`, \
+                          etc.), then call ONE of these terminal tools to end \
+                          the session:\n\
+                          \n\
+                          - `task_complete { head_sha }` — you committed the \
+                            change; supply the 40-char hex SHA of the commit.\n\
+                          - `single_commit { base_sha, head_sha }` — same as \
+                            `task_complete` but you want to publish a (base, \
+                            head) pair explicitly.\n\
+                          - `report_failure { justification }` — you cannot \
+                            complete the task; supply a one-paragraph operator-\
+                            actionable rationale.\n\
+                          \n\
+                          You MUST call one of these tools before the turn ends. \
+                          Free-form text without a tool call leaves the session \
+                          stuck and the kernel will record an Idle failure.",
         Role::Reviewer => "You are the RAXIS reviewer for task `{TASK}` of \
-                          initiative `{INIT}`. Evaluate the executor's commit \
-                          against the task description, then call \
-                          `submit_review { approved: bool, critique?: string }` \
-                          to deliver your verdict.",
+                          initiative `{INIT}`. Read the executor's commit \
+                          (via `read_file` / `grep_search`) and evaluate it \
+                          against the task description, then call the terminal \
+                          tool `submit_review { approved: bool, critique?: \
+                          string }` exactly once to deliver your verdict. \
+                          You MUST call `submit_review` before ending the \
+                          turn — free-form text without a tool call leaves \
+                          the session stuck.",
         Role::Orchestrator => "You are the RAXIS orchestrator for initiative \
-                              `{INIT}`. Drive the DAG of tasks: activate ready \
-                              sub-tasks via `activate_subtask`, retry stuck \
-                              sub-tasks via `retry_subtask`, and merge completed \
-                              work via `integration_merge`.",
+                              `{INIT}`. Your job is to drive the task DAG to \
+                              completion by calling the right terminal tool \
+                              on every turn:\n\
+                              \n\
+                              1. Look at the `dag=` block inside \
+                                 `[RAXIS:KERNEL_STATE …]` (below). Each row \
+                                 has the shape `<task_id> <state> reviewers=N \
+                                 \"<title>\"`.\n\
+                              2. Find the first task whose `state` is `pending` \
+                                 AND whose plan-declared predecessors are all \
+                                 `complete`. Call `activate_subtask { \
+                                 subtask_task_id: \"<task_id>\" }` with that \
+                                 row's task id (verbatim — case-sensitive).\n\
+                              3. If a row's `state` is `failed` and you judge \
+                                 a retry is warranted, call `retry_subtask { \
+                                 subtask_task_id: \"<task_id>\" }` instead.\n\
+                              4. When EVERY executor row is `complete` AND \
+                                 every reviewer row is `complete`, call \
+                                 `integration_merge { base_sha, head_sha }` \
+                                 to fast-forward the initiative's `target_ref`.\n\
+                              \n\
+                              You MUST call exactly ONE of `activate_subtask`, \
+                              `retry_subtask`, or `integration_merge` per \
+                              turn. Free-form text alone (no tool call) ends \
+                              the session in Idle and the kernel records an \
+                              orchestration failure — never do that.",
     };
     let task_repr = args.task_id.as_deref().unwrap_or("(no task id)");
     role_blurb
@@ -844,6 +1024,241 @@ mod tests {
             "stub-tok".to_owned(),
             TaskId::parse("stub-task").unwrap(),
         ))
+    }
+
+    /// Stub `HttpFetch` that records the last request's URL +
+    /// returns a 200 OK with the fixture body. Used by the
+    /// multi-provider router tests to assert *which* client variant
+    /// was constructed: we identify the variant by the URL shape it
+    /// hits (`/v1/messages` for Anthropic, `/v1/chat/completions`
+    /// for OpenAI, `/v1beta/models/...` for Gemini, `/model/.../invoke`
+    /// for Bedrock, `/inference/messages` for Sidecar).
+    ///
+    /// `Debug` is required by `#[async_trait]` + the trait bound on
+    /// the model clients' `http_fetch` field but contains no state
+    /// worth printing.
+    #[derive(Debug)]
+    struct RecordingFetch {
+        last_url: tokio::sync::Mutex<Option<String>>,
+        body:     Vec<u8>,
+    }
+
+    impl RecordingFetch {
+        fn new(body: Vec<u8>) -> Self {
+            Self {
+                last_url: tokio::sync::Mutex::new(None),
+                body,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::http_fetch::HttpFetch for RecordingFetch {
+        async fn fetch<'a>(
+            &self,
+            req: crate::http_fetch::HttpFetchRequest<'a>,
+        ) -> Result<
+            crate::http_fetch::HttpFetchResponse,
+            crate::http_fetch::HttpFetchError,
+        > {
+            *self.last_url.lock().await = Some(req.url.to_owned());
+            Ok(crate::http_fetch::HttpFetchResponse {
+                status:  200,
+                headers: vec![],
+                body:    self.body.clone(),
+            })
+        }
+    }
+
+    fn known(name: &str) -> &'static crate::provider_model::KnownModel {
+        crate::provider_model::find_known_model(name)
+            .expect("test fixture: model id must be registered")
+    }
+
+    /// Drive one `create_message` call through the constructed client
+    /// and return the URL it dialled. The trait-object surface
+    /// (`Arc<dyn ModelClient>`) hides which concrete impl is
+    /// underneath; we use the URL fingerprint to assert routing.
+    async fn url_dialled_by(client: Arc<dyn ModelClient>, recorder: Arc<RecordingFetch>) -> String {
+        use crate::model::MessageRequest;
+        let req = MessageRequest {
+            model: "fixture-model".to_owned(),
+            ..MessageRequest::default()
+        };
+        // Anthropic responds with a `MessageResponse`; for the
+        // other clients, the body shape doesn't match — we don't
+        // assert on the parsed response here, only on the URL the
+        // client requested. Errors on parse are fine.
+        let _ = client.create_message(&req).await;
+        let url = recorder.last_url.lock().await.clone();
+        url.expect("client did not call HttpFetch::fetch")
+    }
+
+    #[tokio::test]
+    async fn build_model_client_routes_anthropic_to_anthropic_url() {
+        // `MessageResponse`-shaped body so the parse succeeds.
+        let body = br#"{
+            "id":"m_test","model":"fixture-model","role":"assistant",
+            "content":[],"stop_reason":"end_turn",
+            "usage":{"input_tokens":1,"output_tokens":1}
+        }"#.to_vec();
+        let rec = Arc::new(RecordingFetch::new(body));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
+        let m = known("claude-sonnet-4-5-20250929");
+        let client = build_model_client(
+            m, "https://api.anthropic.com", &fetch, &|_| None,
+        ).unwrap();
+        let url = url_dialled_by(client, rec).await;
+        assert_eq!(url, "https://api.anthropic.com/v1/messages");
+    }
+
+    #[tokio::test]
+    async fn build_model_client_routes_openai_to_openai_url() {
+        let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
+        let m = known("gpt-5.5-medium");
+        let client = build_model_client(m, "https://api.openai.com", &fetch, &|_| None).unwrap();
+        let url = url_dialled_by(client, rec).await;
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[tokio::test]
+    async fn build_model_client_routes_gemini_to_gemini_url() {
+        let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
+        let m = known("gemini-2.5-pro");
+        let client = build_model_client(
+            m, "https://generativelanguage.googleapis.com", &fetch, &|_| None,
+        ).unwrap();
+        let url = url_dialled_by(client, rec).await;
+        // Gemini's URL embeds the model id in the path:
+        //   /v1beta/models/<model>:generateContent
+        assert!(
+            url.starts_with("https://generativelanguage.googleapis.com/v1beta/models/"),
+            "unexpected URL: {url}",
+        );
+        assert!(url.ends_with(":generateContent"), "unexpected URL: {url}");
+    }
+
+    #[tokio::test]
+    async fn build_model_client_routes_bedrock_to_bedrock_url() {
+        let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
+        let m = known("anthropic.claude-3-5-sonnet-20241022-v2:0");
+        let client = build_model_client(
+            m, "https://bedrock-runtime.us-east-1.amazonaws.com", &fetch, &|_| None,
+        ).unwrap();
+        let url = url_dialled_by(client, rec).await;
+        // Bedrock URL: <base>/model/<model>/invoke
+        assert_eq!(
+            url,
+            "https://bedrock-runtime.us-east-1.amazonaws.com/model/fixture-model/invoke",
+        );
+    }
+
+    /// Match-on-error helper: `Arc<dyn ModelClient>` doesn't impl
+    /// `Debug`, so the `unwrap_err()` shorthand cannot be used
+    /// against `build_model_client`'s return type.
+    fn assert_sidecar_env_missing(
+        result: Result<Arc<dyn ModelClient>, DriverError>,
+        expected_var: &str,
+    ) {
+        match result {
+            Ok(_) => panic!("expected SidecarEnvMissing, got Ok(_)"),
+            Err(DriverError::SidecarEnvMissing { var }) => {
+                assert_eq!(var, expected_var);
+            }
+            Err(other) => panic!("expected SidecarEnvMissing, got {other}"),
+        }
+    }
+
+    #[test]
+    fn build_model_client_sidecar_requires_endpoint_env() {
+        // Synthesise a sidecar `KnownModel` for the router test.
+        // The registry doesn't yet ship a real sidecar row (operators
+        // wire those per-deployment), but the router must accept
+        // any `KnownModel` whose `provider == Sidecar`.
+        let m = crate::provider_model::KnownModel {
+            name:           "sidecar-fixture",
+            provider:       crate::provider_model::ProviderId::Sidecar,
+            deprecated:     None,
+            context_window: Some(8_000),
+        };
+        let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec;
+        assert_sidecar_env_missing(
+            build_model_client(&m, "", &fetch, &|_| None),
+            PLANNER_SIDECAR_ENDPOINT_ENV,
+        );
+    }
+
+    #[test]
+    fn build_model_client_sidecar_requires_provider_id_env() {
+        let m = crate::provider_model::KnownModel {
+            name:           "sidecar-fixture",
+            provider:       crate::provider_model::ProviderId::Sidecar,
+            deprecated:     None,
+            context_window: Some(8_000),
+        };
+        let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec;
+        let env = |k: &str| match k {
+            "RAXIS_PLANNER_SIDECAR_ENDPOINT" => Some("https://sidecar.test".to_owned()),
+            _                                => None,
+        };
+        assert_sidecar_env_missing(
+            build_model_client(&m, "", &fetch, &env),
+            PLANNER_SIDECAR_PROVIDER_ID_ENV,
+        );
+    }
+
+    #[test]
+    fn build_model_client_sidecar_requires_hmac_secret_env() {
+        let m = crate::provider_model::KnownModel {
+            name:           "sidecar-fixture",
+            provider:       crate::provider_model::ProviderId::Sidecar,
+            deprecated:     None,
+            context_window: Some(8_000),
+        };
+        let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec;
+        let env = |k: &str| match k {
+            "RAXIS_PLANNER_SIDECAR_ENDPOINT"    => Some("https://sidecar.test".to_owned()),
+            "RAXIS_PLANNER_SIDECAR_PROVIDER_ID" => Some("custom-llm".to_owned()),
+            _                                   => None,
+        };
+        assert_sidecar_env_missing(
+            build_model_client(&m, "", &fetch, &env),
+            PLANNER_SIDECAR_HMAC_SECRET_ENV,
+        );
+    }
+
+    #[tokio::test]
+    async fn build_model_client_sidecar_succeeds_with_full_env_and_dialles_endpoint() {
+        let m = crate::provider_model::KnownModel {
+            name:           "sidecar-fixture",
+            provider:       crate::provider_model::ProviderId::Sidecar,
+            deprecated:     None,
+            context_window: Some(8_000),
+        };
+        let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
+        let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
+        // 32-byte hex secret (64 hex chars) — well above the
+        // `SidecarConstructError::SecretTooShort` floor (16 bytes).
+        let secret =
+            "0000000000000000000000000000000000000000000000000000000000000000";
+        let env = |k: &str| match k {
+            "RAXIS_PLANNER_SIDECAR_ENDPOINT"      => Some("https://sidecar.test".to_owned()),
+            "RAXIS_PLANNER_SIDECAR_PROVIDER_ID"   => Some("custom-llm".to_owned()),
+            "RAXIS_PLANNER_SIDECAR_HMAC_SECRET"   => Some(secret.to_owned()),
+            _                                     => None,
+        };
+        let client = build_model_client(&m, "", &fetch, &env).unwrap();
+        let url = url_dialled_by(client, rec).await;
+        assert!(
+            url.starts_with("https://sidecar.test/"),
+            "sidecar should dial its operator-supplied endpoint, got {url}",
+        );
     }
 
     #[test]
