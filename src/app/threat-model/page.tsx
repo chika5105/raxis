@@ -199,8 +199,8 @@ function Residual() {
           compromises with coordinated timing. One containment channel that
           holds regardless of colluding agents is operator-configured
           mechanical witnesses: verifier subprocesses the kernel spins up
-          independently after each action to validate correctness —
-          compilation, test execution, diff bounds — using criteria the
+          independently after each action to validate correctness:
+          compilation, test execution, diff bounds, using criteria the
           agents cannot influence. A colluding Implementer and Reviewer cannot
           suppress a witness result without defeating a separate kernel-level
           control. Adding a second independent Reviewer with different
