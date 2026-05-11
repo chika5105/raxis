@@ -42,7 +42,7 @@ function Tiers() {
       verification: "Self-attested",
       evidence:
         "Public conformance statement mapping each of the twelve invariants to its enforcement mechanism, plus an architectural diagram of the intelligence/authority boundary.",
-      use: "Early-stage implementations, research prototypes, early stage designs, Raxis adapted to a new domain.",
+      use: "Early-stage designs, implementations, research prototypes, Raxis adapted to a new domain.",
     },
     {
       tier: "2",

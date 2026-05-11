@@ -283,7 +283,7 @@ function Conformance() {
       tier: "1",
       name: "Aligned",
       verification: "Self-attested",
-      use: "Early-stage implementations, prototypes, and early stage designs",
+      use: "Early-stage designs, implementations, and prototypes",
     },
     {
       tier: "2",
