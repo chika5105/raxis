@@ -108,10 +108,18 @@ pub async fn evaluate_claims(
     let store  = ctx.store.as_ref();
 
     // ── Step 1: Break-glass ────────────────────────────────────────────────
-    // v1 Tier 4 not yet implemented — breakglass always Inactive.
-    let breakglass_active = false;
-    if breakglass_active {
-        return Ok(GateEvalResult::BreakglassPass { activation_id: String::new() });
+    // V1 Tier 4 — emergency operator override (kernel-core.md §2.3
+    // src/breakglass.rs). When an unexpired two-operator activation
+    // is on disk, gate enforcement is bypassed and the caller
+    // (handlers/intent.rs) is expected to emit a `BreakglassAction`
+    // audit event for every admission carried under that activation
+    // (see `breakglass::log_action`).
+    if let crate::breakglass::BreakglassStatus::Active { activation_id, .. } =
+        ctx.breakglass.check()
+    {
+        return Ok(GateEvalResult::BreakglassPass {
+            activation_id: activation_id.to_string(),
+        });
     }
 
     // ── Step 2: Policy lookup ─────────────────────────────────────────────

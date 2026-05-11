@@ -354,9 +354,46 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
             pending_gates = vec![];
             warn_stale    = *delegate_renewal_required;
         }
-        GateEvalResult::BreakglassPass { .. } => {
+        GateEvalResult::BreakglassPass { activation_id } => {
             pending_gates = vec![];
             warn_stale    = false;
+            // V1 Tier 4 — every gate-bypass admission appends a
+            // `BreakglassAction` event to the audit chain so the
+            // post-incident review can enumerate every action
+            // carried under the activation. We log here (after the
+            // gate decision, before the spawn_blocking phase that
+            // commits state) rather than inside `evaluate_claims`
+            // so the kernel-core audit ordering ("audit emit AFTER
+            // store commit") still holds for the success path —
+            // emit failures here are non-fatal because the
+            // activation itself is already audited and admission
+            // continues; future gates will re-emit the
+            // `BreakglassAction` event for any subsequent intent.
+            //
+            // `Uuid::parse_str` is infallible here because
+            // `gates::evaluate_claims` formats the activation_id
+            // through `Uuid::to_string`, so a parse failure means
+            // an in-process construction error, not an operator
+            // input error.
+            if let Ok(act_id) = uuid::Uuid::parse_str(activation_id) {
+                let desc = format!(
+                    "intent.{}.task={}",
+                    req.intent_kind.as_str(),
+                    req.task_id.as_str(),
+                );
+                if let Err(e) = crate::breakglass::log_action(
+                    act_id,
+                    Some(session_id.as_str()),
+                    &desc,
+                    &ctx.audit,
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"BreakglassActionAuditFailed\",\
+                         \"reason\":\"{e}\",\"task\":\"{}\"}}",
+                        req.task_id.as_str(),
+                    );
+                }
+            }
         }
     }
 

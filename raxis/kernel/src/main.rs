@@ -42,6 +42,7 @@ mod handlers;
 mod isolation_select;
 mod notifications;
 mod observability;
+mod breakglass;
 mod path_scope;
 mod policy_manager;
 mod prompt;
@@ -1036,6 +1037,30 @@ async fn main() {
         }
     };
     let ctx_inner = ctx_inner.with_observability(Arc::clone(&observability_hub));
+
+    // Step 8.6: Boot-time break-glass state (v1 Tier 4,
+    // kernel-core.md §2.3 src/breakglass.rs). Opens the
+    // single-record TOML at `<data_dir>/breakglass/active.toml` and
+    // proactively prunes any expired record so admission never
+    // honours a stale activation. A missing / unreadable file
+    // logs and falls back to `BreakglassState::disabled` —
+    // breakglass is fail-closed: an unreachable record file means
+    // `Inactive`, never `Active`.
+    let breakglass_state: Arc<breakglass::BreakglassState> = {
+        let record_path = breakglass::default_record_path(&data_dir);
+        match breakglass::BreakglassState::open(record_path) {
+            Ok(s)  => Arc::new(s),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"BreakglassOpenFailed\",\
+                     \"reason\":\"{e}\"}}",
+                );
+                Arc::new(breakglass::BreakglassState::disabled())
+            }
+        }
+    };
+    let ctx_inner = ctx_inner.with_breakglass(Arc::clone(&breakglass_state));
+
     let ctx = Arc::new(ctx_inner);
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a

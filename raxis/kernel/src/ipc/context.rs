@@ -418,6 +418,23 @@ pub struct HandlerContext {
     /// with `if let Some(hub) = ...` guards; the disabled hub is
     /// equivalent and ~free at the call site.
     pub observability: Arc<ObservabilityHub>,
+
+    /// V1 Tier 4 — emergency operator override (break-glass) state.
+    ///
+    /// Held as `Arc<BreakglassState>` so handlers can call
+    /// `ctx.breakglass.check()` on the gate-evaluation hot path
+    /// without paying for a clone. Production wiring opens the
+    /// state from `<data_dir>/breakglass/active.toml` at boot
+    /// (see `main.rs`); tests construct
+    /// [`crate::breakglass::BreakglassState::disabled`] which keeps
+    /// the cache empty and skips all on-disk persistence.
+    ///
+    /// **Why non-Option**: the gate-evaluation path
+    /// (`gates::evaluate_claims` step 1) checks this on every
+    /// admission. A disabled instance behaves identically to an
+    /// inactive activation — the fast-path read is a single
+    /// `RwLock::read` of an empty `Option`, which costs ~nothing.
+    pub breakglass: Arc<crate::breakglass::BreakglassState>,
 }
 
 impl HandlerContext {
@@ -530,6 +547,12 @@ impl HandlerContext {
             // means tests pay zero cost and existing fixtures keep
             // compiling without churn.
             observability: Arc::new(ObservabilityHub::disabled()),
+            // V1 Tier 4 — default `disabled()` state means
+            // `check()` returns `Inactive`. Production main.rs
+            // swaps this for an on-disk-backed instance via
+            // `with_breakglass`. Tests that don't exercise
+            // breakglass keep the default.
+            breakglass: Arc::new(crate::breakglass::BreakglassState::disabled()),
         }
     }
 
@@ -553,6 +576,16 @@ impl HandlerContext {
     /// that don't keep the default disabled hub.
     pub fn with_observability(mut self, hub: Arc<ObservabilityHub>) -> Self {
         self.observability = hub;
+        self
+    }
+
+    /// V1 Tier 4 — install the boot-time
+    /// [`crate::breakglass::BreakglassState`]. Production boot in
+    /// `main.rs` opens the state from
+    /// `<data_dir>/breakglass/active.toml`; tests that exercise the
+    /// break-glass code path inject a fixture-built state.
+    pub fn with_breakglass(mut self, state: Arc<crate::breakglass::BreakglassState>) -> Self {
+        self.breakglass = state;
         self
     }
 
