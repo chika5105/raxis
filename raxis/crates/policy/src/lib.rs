@@ -16,6 +16,7 @@
 pub mod bundle;
 pub mod error;
 pub mod loader;
+pub mod observability;
 
 pub use bundle::{
     DefaultExecutorImageConfig, EnvironmentConfig, GateEntry, GatewaySection, HostCapacityConfig,
@@ -49,3 +50,8 @@ pub use bundle::{
 pub use bundle::EscalationPolicyForTests;
 pub use error::PolicyError;
 pub use loader::load_policy;
+pub use observability::{
+    ObservabilityConfig, ObservabilityMetricsConfig, ObservabilityPusherConfig,
+    ObservabilityPusherTlsConfig, ObservabilityResourceConfig, ObservabilityRingConfig,
+    ObservabilityTracesConfig,
+};

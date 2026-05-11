@@ -214,6 +214,21 @@ pub(crate) struct RawPolicy {
     /// policy load.
     #[serde(default, rename = "default_executor_image")]
     pub(crate) default_executor_image: Option<DefaultExecutorImageSection>,
+
+    /// `[observability]` — V3 OpenTelemetry surface configuration.
+    /// **Optional**: an omitted section keeps the kernel running with
+    /// `enabled = false` and a no-op exporter (the typical default).
+    /// When present, the section is validated by
+    /// [`crate::observability::ObservabilityConfig::validate`] against
+    /// `specs/v3/otel-observability.md §5.2`. The kernel reads the
+    /// `[observability.ring]`, `[observability.traces]`,
+    /// `[observability.metrics]`, and `[observability.resource]`
+    /// sub-sections; the `[observability.pusher]` section is validated
+    /// here so the operator gets a single failure surface, but the
+    /// values are consumed by the separate `raxis-otel-pusher` binary
+    /// (the kernel itself has no OTLP code, per `INV-OTEL-03`).
+    #[serde(default)]
+    pub(crate) observability: Option<crate::observability::ObservabilitySection>,
 }
 
 /// `[environments.<label>]` — operator-declared environment
@@ -3207,6 +3222,18 @@ pub struct PolicyBundle {
     /// guaranteed to resolve to an `[[vm_images]]` entry whose
     /// `role_restriction` includes `"Executor"`.
     default_executor_image: Option<DefaultExecutorImageConfig>,
+
+    /// V3 — validated `[observability]` section. ALWAYS populated;
+    /// when the operator omits the section, this falls back to
+    /// [`crate::observability::ObservabilityConfig::disabled_default`].
+    /// Read at kernel boot (`kernel/src/main.rs`) to wire the
+    /// `Arc<ObservabilityHub>` injected into `HandlerContext`, and at
+    /// every `policy_manager::advance_epoch` to apply rotation
+    /// changes. Per `INV-OTEL-03`, the kernel never imports OTLP
+    /// transport — the `[observability.pusher]` sub-section here is
+    /// validated for the operator's convenience but consumed only by
+    /// the separate `raxis-otel-pusher` binary.
+    observability: crate::observability::ObservabilityConfig,
 }
 
 /// V2 effective `[environments.<label>]` config. Validated mirror
@@ -3777,6 +3804,23 @@ impl PolicyBundle {
             // a re-walk of the input array.
             vm_images: vm_images_validated,
             default_executor_image: default_executor_image_validated,
+            observability: {
+                // V3 §5.2 — validate `[observability]` against
+                // the spec table. The pusher's `@cred:<name>`
+                // header values resolve against the same
+                // `[[permitted_credentials]]` set as plan tasks.
+                let cred_names: std::collections::HashSet<&str> = raw
+                    .permitted_credentials
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect();
+                match raw.observability.as_ref() {
+                    Some(section) => {
+                        crate::observability::ObservabilityConfig::validate(section, &cred_names)?
+                    }
+                    None => crate::observability::ObservabilityConfig::disabled_default(),
+                }
+            },
         })
     }
 
@@ -3943,6 +3987,20 @@ impl PolicyBundle {
             .and_then(|d| self.vm_image_by_name(&d.alias))
     }
 
+    /// V3 — validated `[observability]` configuration. Always
+    /// populated; defaults to
+    /// [`crate::observability::ObservabilityConfig::disabled_default`]
+    /// when the operator omits the section. Read at kernel boot to
+    /// wire `Arc<ObservabilityHub>` into `HandlerContext` and at
+    /// every `policy_manager::advance_epoch` for rotation. Per
+    /// `INV-OTEL-03`, the kernel itself does not consume the
+    /// `[observability.pusher]` sub-fields — those are validated
+    /// here for the operator's convenience and read by the separate
+    /// `raxis-otel-pusher` binary at its own startup.
+    pub fn observability(&self) -> &crate::observability::ObservabilityConfig {
+        &self.observability
+    }
+
     // ── Key accessors ───────────────────────────────────────────────────────
 
     /// Authority Ed25519 public key bytes (32 bytes).
@@ -4083,6 +4141,7 @@ impl PolicyBundle {
             permitted_credentials:  Vec::new(),
             vm_images:              Vec::new(),
             default_executor_image: None,
+            observability:          crate::observability::ObservabilityConfig::disabled_default(),
         }
     }
 
@@ -4669,6 +4728,7 @@ mod tests {
             permitted_credentials:  Vec::new(),
             vm_images:              Vec::new(),
             default_executor_image: None,
+            observability:          crate::observability::ObservabilityConfig::disabled_default(),
         }
     }
 
