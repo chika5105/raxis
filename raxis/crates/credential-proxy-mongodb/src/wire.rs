@@ -56,8 +56,11 @@
 //!   value                   // type-dependent
 //! ```
 //!
-//! We do not need to decode value bodies for the V2 surface — only
-//! the first field name.
+//! This module decodes the bare minimum needed for framing — header,
+//! message-length bound, and `first_command_name`. The deeper BSON
+//! walker that resolves collection names, `$db`, and pipeline
+//! references lives in `restriction::walk_command` per
+//! `specs/v2/proxy-table-allowlists.md §6`.
 
 use bytes::{BufMut, BytesMut};
 
