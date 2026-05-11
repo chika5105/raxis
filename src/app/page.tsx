@@ -352,7 +352,7 @@ function FAQ() {
     },
     {
       q: "Does this only work for coding agents?",
-      a: "The reference implementation is for coding agents because that is the hardest domain we could pick: highest stakes, strongest ground truth, every invariant under load. The paradigm is independent of domain. Other implementations could exist.",
+      a: "The reference implementation is for coding agents because that is the hardest domain we could pick: highest stakes, strongest ground truth, every invariant under load. The paradigm is independent of domain. Other implementations could exist. We hope to see Raxis in healthcare (agents authorising diagnostic actions and treatment plans), financial trading systems (agents placing orders within cryptographically bounded mandates), legal discovery (agents retrieving and summarising documents under strict privilege controls), and critical infrastructure (agents issuing configuration changes to power, water, or network systems). Any domain where an autonomous system takes consequential actions on behalf of a human principal is a candidate.",
     },
     {
       q: "What does it not do?",
