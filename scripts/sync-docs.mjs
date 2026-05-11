@@ -142,8 +142,16 @@ function writePlaceholder() {
 }
 
 function main() {
-  const repoPath = process.env.RAXIS_REPO_PATH;
+  // Auto-detect the sibling raxis/ directory when no env var is set.
+  let repoPath = process.env.RAXIS_REPO_PATH;
   const repoUrl = process.env.RAXIS_REPO_URL;
+  if (!repoPath && !repoUrl) {
+    const candidate = path.resolve(ROOT, "..", "raxis");
+    if (fs.existsSync(candidate)) {
+      log(`auto-detected local raxis repo at ${candidate}`);
+      repoPath = candidate;
+    }
+  }
 
   // Always start from a clean destination so removed source files don't linger.
   if (repoPath || repoUrl) {

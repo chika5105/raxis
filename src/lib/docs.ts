@@ -240,9 +240,12 @@ function orderFor(category: DocCategory, slugPath: string, title: string): numbe
 }
 
 let _cache: DocMeta[] | null = null;
+const IS_DEV = process.env.NODE_ENV === "development";
 
 export function getAllDocs(): DocMeta[] {
-  if (_cache) return _cache;
+  // Skip the in-process cache in development so that running sync-docs picks
+  // up new vendor files without requiring a server restart.
+  if (_cache && !IS_DEV) return _cache;
   if (!exists(DOCS_DIR)) {
     _cache = [];
     return _cache;

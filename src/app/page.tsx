@@ -29,8 +29,8 @@ function Hero() {
           Raxis (Runtime Attestation eXchange for Intelligent Systems) is a
           structural enforcement layer that sits between AI agents and the
           systems they act on. Twelve invariants extending Lampson&rsquo;s
-          1974 protection model into the era of probabilistic, adversarial
-          intelligence. Proven in a working reference implementation for
+          1974 Protection model into the era of probabilistic, autonomous
+          intelligence working at scale. Proven in a working reference implementation for
           autonomous software engineering.
         </p>
         <div className="mt-12 flex flex-wrap items-center gap-4">
