@@ -390,6 +390,39 @@ pub enum Unit {
     None,
 }
 
+impl Unit {
+    /// Stable symbol used as the OTLP `Metric.unit` field. Empty
+    /// string for `Unit::None`. The pusher copies this verbatim
+    /// onto every emitted metric.
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Self::Milliseconds => "ms",
+            Self::Bytes        => "By",
+            Self::Tokens       => "{tokens}",
+            Self::Connections  => "{connections}",
+            Self::None         => "",
+        }
+    }
+}
+
+impl EventName {
+    /// Stable string label used as the OTLP `Span.Event.name` field.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GateRequired             => "gate.required",
+            Self::GateSatisfied            => "gate.satisfied",
+            Self::GateMissing              => "gate.missing",
+            Self::VerifierSpawned          => "verifier.spawned",
+            Self::BudgetReserved           => "budget.reserved",
+            Self::BudgetReleased           => "budget.released",
+            Self::InferenceTokensReported  => "inference.tokens_reported",
+            Self::CircuitOpened            => "circuit.opened",
+            Self::CircuitClosed            => "circuit.closed",
+            Self::HeartbeatTick            => "heartbeat.tick",
+        }
+    }
+}
+
 /// Single metric data point — either a sum-style scalar (counter /
 /// gauge) or a histogram bucket vector.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

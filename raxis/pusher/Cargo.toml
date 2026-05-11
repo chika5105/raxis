@@ -1,0 +1,70 @@
+[package]
+name        = "raxis-otel-pusher"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS OTel sidecar — reads kernel JSONL ring + ships OTLP."
+
+# V3 §12 — separate binary, separate UID, separate trust boundary.
+# The pusher is the ONLY process in the RAXIS workspace that imports
+# OTLP transport libraries (`reqwest` + `prost` for HTTP/protobuf;
+# `tonic` for gRPC). The kernel never imports any of these
+# (`INV-OTEL-03`).
+
+[[bin]]
+name = "raxis-otel-pusher"
+path = "src/main.rs"
+
+[lib]
+name = "raxis_otel_pusher"
+path = "src/lib.rs"
+
+[dependencies]
+# Workspace-shared types, hub protocol, and policy validation.
+raxis-observability = { workspace = true }
+raxis-policy        = { workspace = true }
+
+# Async runtime + filesystem watching.
+tokio       = { workspace = true }
+
+# Serde stack — frame deserialisation + cursor persistence.
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+toml        = { workspace = true }
+
+# Errors + diagnostics.
+thiserror   = { workspace = true }
+anyhow      = { workspace = true }
+
+# OTLP HTTP/protobuf transport.
+# `reqwest` is already pinned to `rustls-tls` at the workspace root,
+# which gives us a single audited TLS implementation. `gzip` is
+# enabled because the workspace already pulls it in for the
+# gateway, and the OTLP HTTP/protobuf encoding spec recommends
+# gzip compression for large batches.
+reqwest     = { workspace = true }
+
+# Protobuf encoding for the OTLP HTTP/protobuf wire format.
+# Pinned to 0.13 to match the `prost-types` crate the
+# `opentelemetry-proto` crate brings in transitively. We hand-write
+# a minimal subset of the OTLP proto messages (only the message
+# fields we actually use) to keep the dependency surface small —
+# importing the full `opentelemetry-proto` crate plus the OTel SDK
+# would add ~30 MiB of compiled bytecode for messages we don't
+# emit.
+prost       = "0.13"
+
+# Hex-encoding for trace + span ids in cursor / health output.
+hex         = { workspace = true }
+
+# Wallclock timestamps in cursor entries.
+chrono      = { workspace = true }
+
+# Random jitter for retry backoff.
+rand_core   = { workspace = true }
+getrandom   = { workspace = true }
+
+[dev-dependencies]
+tempfile    = "3"

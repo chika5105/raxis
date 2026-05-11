@@ -62,6 +62,7 @@ members = [
     "cli",
     "gateway",
     "live-e2e",
+    "pusher",
     "xtask",
 ]
 
