@@ -72,10 +72,10 @@ export function SiteFooter() {
             </li>
             <li>
               <a
-                href="mailto:hello@raxis.io"
+                href="mailto:support@raxis.io"
                 className="text-[var(--muted)] hover:text-[var(--fg)]"
               >
-                Contact
+                support@raxis.io
               </a>
             </li>
           </ul>
