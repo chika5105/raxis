@@ -1,10 +1,30 @@
 # RAXIS Credential Proxies — End-to-End Explained
 
+> **Audience.** Operators wiring `[[tasks.credentials]]` blocks in
+> `plan.toml`, contributors building or modifying a `credential-proxy-*`
+> crate, and reviewers auditing why an agent's request to a backend
+> service was allowed or blocked.
+>
+> **Authority.** Wire shapes, restriction names, and crate paths
+> below are pinned to the current source tree. Where this doc
+> disagrees with the code, the code wins. The canonical specs are
+> `specs/v2/credential-proxy.md` (architecture) and
+> `specs/v2/proxy-table-allowlists.md` (the SQL allowlist semantics
+> for `postgres` / `mysql` / `mssql`).
+
+---
+
 ## What is a credential proxy?
 
 A credential proxy is a **localhost TCP listener** that the kernel runs on behalf of an agent. The agent connects to `localhost:PORT` and talks a normal protocol (Postgres wire protocol, HTTP, SMTP, Redis, etc.). The proxy intercepts every request, logs it to the audit chain, applies restrictions, and forwards it to the real upstream service with the real credentials injected.
 
 **The agent never sees the actual credentials.** It only sees `localhost:PORT`.
+
+**Paradigm anchor.** Credential proxies are the reference
+implementation's enforcement of **R-2 — Mediated I/O**. An agent
+without a proxy has no path to the upstream system; with a proxy,
+every request traverses an authority-controlled chokepoint that
+audits, restricts, and reauthenticates.
 
 ---
 
@@ -31,12 +51,28 @@ max_rows_per_query = 1000
 The operator stores the real Postgres connection string (with password) in the credential backend using the CLI:
 
 ```bash
-raxis-cli credential set prod_db \
+raxis credential add prod_db \
   --type postgres \
   --value "postgresql://real_user:S3cret@prod-db.internal:5432/mydb"
 ```
 
-The credential is stored encrypted at rest. The kernel resolves it at session start.
+The credential is stored encrypted at rest by the `CredentialBackend` (see `crates/raxis-credentials/`). The kernel resolves it at session start (lazily, only when a session that references it is admitted).
+
+CLI surface (verified against `cli/src/main.rs:319-333` and `cli/src/commands/credential.rs`):
+
+| Subcommand | Purpose |
+|---|---|
+| `raxis credential add`    | Insert / overwrite an entry in the encrypted backend |
+| `raxis credential rotate` | Replace the stored value, bumping the credential version |
+| `raxis credential list`   | Enumerate names + types (no secret material) |
+| `raxis credential show`   | Reveal a value (operator-only, audited) |
+| `raxis credential remove` | Delete a credential entry |
+| `raxis credential verify` | Connect once and validate the upstream is reachable |
+| `raxis credential audit`  | Replay the audit chain rows for a credential name |
+
+There is **no** `raxis credential set` subcommand; earlier drafts of
+this guide used it. Use `add` for a new entry and `rotate` to update
+an existing one.
 
 ---
 
@@ -228,4 +264,7 @@ The proxy runs as a tokio task under the kernel. If it panics, the kernel detect
 | `crates/credential-proxy-mssql/` | MSSQL/TDS proxy |
 | `crates/credential-proxy-mongodb/` | MongoDB wire proxy |
 | `crates/plan-credentials/` | `TaskCredentialDecl` — parsed credential declarations |
-| `crates/credentials/` | `CredentialBackend` trait — encrypted storage |
+| `crates/raxis-credentials/` | `CredentialBackend` trait — encrypted storage at rest |
+| `cli/src/commands/credential.rs` | `raxis credential …` operator surface |
+| `specs/v2/credential-proxy.md` | Architecture spec (authoritative) |
+| `specs/v2/proxy-table-allowlists.md` | SQL `allowed_tables` semantics + result caps |

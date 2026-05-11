@@ -2855,6 +2855,85 @@ pattern and extends it to cover the three missing categories
 (floors, defaults-with-override, locked fields) needed for
 `target_ref` and future configurable fields.
 
+### 12.11 Delegation runtime SQL drift — 🔴 OPEN
+
+**Discovered.** 2026-05 docs review (raxis-concepts/04-delegations).
+
+**Class.** Latent runtime bug — only fires when an operator actually
+issues `OperatorRequest::GrantDelegation`. The `mock_planner_end_to_end`
+integration test explicitly skips the delegation flow and the kernel's
+unit suite has no `grant_delegation` exerciser, so the drift survived
+into HEAD undetected.
+
+**Symptom.** `kernel/src/authority/delegation.rs` (HEAD) issues
+SQL referencing five columns that do not exist in the migration DDL:
+
+```sql
+INSERT INTO delegations (
+    delegation_id, session_id, capability_class,
+    scope_json,         -- ❌ not in migration 1
+    granted_by,         -- ❌ not in migration 1
+    granted_at,         -- ❌ not in migration 1
+    expires_at, use_count, max_uses, status
+                        -- ❌ use_count, max_uses also missing
+) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+```
+
+The migration-1 DDL (`crates/store/src/migration.rs`, Table 7) and
+`specs/v1/kernel-store.md` §2.5.1 Table 7 agree on the canonical
+schema:
+
+```sql
+CREATE TABLE delegations (
+    delegation_id, session_id, capability_class,
+    delegating_role_id, delegate_role_id,   -- ✅ canonical
+    effective_from, expires_at, revoked_at,
+    status, epoch_stale_set_at,
+    operator_signature,                     -- ✅ canonical
+    UNIQUE (session_id, capability_class)
+);
+```
+
+Three runtime functions are affected:
+
+* `grant_delegation` — INSERT references missing columns.
+* `list_delegations` — SELECT references missing columns; will fail
+  the moment `raxis delegation list` is invoked against a real DB.
+* `record_capability_use` — UPDATE references the correct columns
+  (`status`, `session_id`, `capability_class`) and is safe.
+* `mark_stale_on_epoch_advance` — UPDATE references the correct
+  columns and is safe; this is the only path proven by the
+  policy-epoch tests.
+
+**Why no test caught it.** Delegations are only exercised by the
+operator wire (`OperatorRequest::GrantDelegation`); the only
+integration test that touches them
+(`crates/policy/tests/epoch_advance.rs`) goes through
+`mark_stale_on_epoch_advance` which uses spec-correct columns. Any
+real `raxis delegation grant` invocation will SQLite-fail with
+`no such column: scope_json`.
+
+**Remediation.** Rewrite `grant_delegation` and `list_delegations`
+to use the canonical Table 7 columns (`delegating_role_id`,
+`delegate_role_id`, `effective_from`, `operator_signature`). The
+operator wire shape (`OperatorRequest::GrantDelegation`) accepts
+`scope_json` and `max_uses` for forward-compat; both are dropped on
+the floor in V2 (no DDL column for either). Add a
+`grant_delegation_inserts_with_canonical_columns` integration test
+in `kernel/tests/` that uses the real `Store` + a real signed
+operator request to lock the contract.
+
+**Owner / sizing.** ~80 LOC kernel + 1 integration test (~120 LOC).
+Mechanical change; the trickiest piece is reconstructing
+`delegating_role_id` (operator role id, currently passed as
+`granted_by` = operator fingerprint hex) — the spec says
+`delegating_role_id` is the **operator-defined role id**, so the
+handler needs the operator's role from `policy.operator_entry`.
+
+**Spec impact.** None — spec is correct, code is wrong.
+
+---
+
 ### 12.10 Spec files requiring updates for proxy auth changes — ✅ CLOSED (V2.3, scoped)
 
 **Status (V2.3 GA).** Every spec file in the table below remains
