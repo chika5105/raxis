@@ -7,12 +7,19 @@ const GROUP_ORDER: InvariantGroup[] = [
   "Coordination & recovery",
 ];
 
+export const GROUP_SLUGS: Record<InvariantGroup, string> = {
+  "Structural separation": "structural-separation",
+  "Authority model": "authority-model",
+  "Accountability": "accountability",
+  "Coordination & recovery": "coordination-recovery",
+};
+
 export function InvariantsGrid({ compact = false }: { compact?: boolean }) {
   const groups = invariantsByGroup();
   return (
     <div className="space-y-16">
       {GROUP_ORDER.map((g, gi) => (
-        <div key={g}>
+      <div key={g} id={GROUP_SLUGS[g]}>
           <div className="flex items-baseline gap-3 border-b border-[var(--rule)] pb-4">
             <span className="text-sm tabular-nums text-[var(--soft)]">
               {String(gi + 1).padStart(2, "0")}

@@ -139,24 +139,28 @@ function Invariants() {
   const groups = [
     {
       n: "01",
+      slug: "structural-separation",
       title: "Structural separation",
       ids: ["R-1", "R-2"],
       body: "Intelligence and authority run in separate execution domains. All credential, network, and storage access goes through typed intents.",
     },
     {
       n: "02",
+      slug: "authority-model",
       title: "Authority model",
       ids: ["R-3", "R-4", "R-5", "R-6"],
       body: "Capabilities are signed, derived only by narrowing, bounded by explicit numbers, and fail closed when anything is missing or ambiguous.",
     },
     {
       n: "03",
+      slug: "accountability",
       title: "Accountability",
       ids: ["R-7", "R-8", "R-9", "R-10"],
       body: "The audit chain is cryptographic, decisions reproduce from recorded inputs, every intent traces to a verified identity, rejections do not leak rule structure.",
     },
     {
       n: "04",
+      slug: "coordination-recovery",
       title: "Coordination & recovery",
       ids: ["R-11", "R-12"],
       body: "Multi-agent communication passes through authority. Authority widens only through a human channel the model cannot reach.",
@@ -175,9 +179,12 @@ function Invariants() {
         {groups.map((g) => (
           <div key={g.n} className="border-t-2 border-[var(--accent)] pt-6">
             <div className="flex items-baseline gap-3 mb-1">
-              <span className="text-xs font-semibold uppercase tracking-widest text-[var(--accent)]">
+              <Link
+                href={`/paradigm#${g.slug}`}
+                className="text-xs font-semibold uppercase tracking-widest text-[var(--accent)] hover:text-[var(--accent-strong)] transition"
+              >
                 Category {g.n}
-              </span>
+              </Link>
               <span className="ml-auto text-xs text-[var(--soft)] tabular-nums">
                 {g.ids.join(" · ")}
               </span>
