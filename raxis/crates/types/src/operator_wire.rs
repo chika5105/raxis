@@ -333,7 +333,14 @@ pub struct ApprovalScopeWire {
 pub struct TaskOutputWire {
     pub output_id:     String,
     pub initiative_id: String,
-    pub task_id:       String,
+    /// `Some(task_id)` for outputs emitted by an Executor or Reviewer
+    /// session bound to a specific sub-task; `None` for
+    /// **Orchestrator-emitted outputs** which are scoped to the
+    /// initiative coordinator and not bound to any single sub-task.
+    /// `serde(default)` keeps older operator clients that omit the
+    /// field on the wire deserialising cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id:       Option<String>,
     pub session_id:    String,
     pub kind:          String,
     pub severity:      Option<String>,
@@ -1290,7 +1297,7 @@ mod tests {
                     TaskOutputWire {
                         output_id:     "out-1".into(),
                         initiative_id: "init-1".into(),
-                        task_id:       "task-1".into(),
+                        task_id:       Some("task-1".into()),
                         session_id:    "sess-1".into(),
                         kind:          "diagnostic_flag".into(),
                         severity:      Some("warning".into()),
@@ -1300,7 +1307,7 @@ mod tests {
                     TaskOutputWire {
                         output_id:     "out-2".into(),
                         initiative_id: "init-1".into(),
-                        task_id:       "task-1".into(),
+                        task_id:       Some("task-1".into()),
                         session_id:    "sess-1".into(),
                         kind:          "progress_report".into(),
                         severity:      None,

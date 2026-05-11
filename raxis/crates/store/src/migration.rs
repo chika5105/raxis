@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -121,6 +121,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 17 {
         apply_migration_17(conn)?;
+    }
+    if current_version < 18 {
+        apply_migration_18(conn)?;
     }
 
     Ok(())
@@ -2257,6 +2260,153 @@ CREATE INDEX IF NOT EXISTS idx_task_credential_proxies_task_id
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (17, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 18 — Orchestrator session ↔ initiative linkage + relax
+//                `structured_outputs.task_id` to nullable.
+//
+// Spec references:
+//   * `v2_extended_gaps.md §3.2` — `structured_output` is a tool any
+//     planner-class agent can call (Executor, Reviewer, **and**
+//     Orchestrator). The original migration-13 schema modelled the
+//     `structured_outputs` row as `(initiative_id, task_id, session_id)`
+//     with `task_id` NOT NULL + a foreign-key reference to
+//     `tasks(task_id)`. That model breaks for the Orchestrator: the
+//     coordinator session is admitted under an *initiative*, not under
+//     a `tasks` row, so an orchestrator-emitted output has no task to
+//     point at and the FK refuses the INSERT (`FAIL_UNKNOWN_TASK` as
+//     observed by the live-e2e on 2026-05-09).
+//   * `v2-deep-spec.md §Step 6` — Orchestrator sessions are minted by
+//     `auto_spawn_orchestrator_session_in_tx` immediately after
+//     `approve_plan`. The row carries `session_agent_type =
+//     "Orchestrator"` but had no direct edge back to the initiative
+//     it was minted for. Recovery and per-initiative observability
+//     queries had to walk through `subtask_activations` (which only
+//     covers Executor / Reviewer descendants) to discover the
+//     coordinator — fragile and inconsistent.
+//
+// What changes:
+//
+//   1. `sessions` gains a nullable `initiative_id` column with a FK
+//      to `initiatives(initiative_id)` and a partial index covering
+//      the populated-only subset. Orchestrator sessions populate it
+//      at auto-spawn time; pre-Migration-18 rows + future non-V2
+//      sessions leave it NULL (the FK is only enforced when the
+//      column is non-NULL per SQLite semantics — ditto for the
+//      partial index probe). This gives the intent handler a single,
+//      typed lookup to recover the coordinator's owning initiative
+//      without join-walking through `subtask_activations`.
+//
+//   2. `structured_outputs` is rebuilt with a NULLABLE `task_id`.
+//      The FK to `tasks(task_id)` is preserved (FK still enforced
+//      when the value is non-null per SQLite semantics) so executor
+//      / reviewer rows continue to refer to a real task, while the
+//      Orchestrator's coordinator-level outputs land with
+//      `task_id IS NULL`. Indexes and the `(initiative_id, session_id,
+//      kind, severity, payload_json, emitted_at)` column shape are
+//      otherwise byte-identical to migration 13.
+//
+// SQLite has no `ALTER TABLE ... ALTER COLUMN`, so the
+// `structured_outputs` change uses the canonical
+// `CREATE-NEW → INSERT-FROM-OLD → DROP-OLD → RENAME` pattern (see
+// migration 17 for the precedent). The `sessions` change is a
+// straight `ALTER TABLE ADD COLUMN` because SQLite *does* support
+// adding a nullable column without a table rebuild.
+//
+// Atomicity: the entire migration runs inside one
+// `BEGIN EXCLUSIVE … COMMIT`, so a crash mid-migration leaves the
+// pre-migration schema fully intact (matches the every-migration
+// invariant declared at the top of this module).
+// ---------------------------------------------------------------------------
+
+fn apply_migration_18(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_18_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 18 failed: {e}"))
+    })
+}
+
+/// The complete migration-18 DDL.
+pub fn render_migration_18_ddl() -> String {
+    let sessions           = Table::Sessions.as_str();
+    let initiatives        = Table::Initiatives.as_str();
+    let tasks              = Table::Tasks.as_str();
+    let structured_outputs = Table::StructuredOutputs.as_str();
+    let schema_version     = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- ── 1. sessions: add initiative_id (nullable) + partial index ────────────
+--
+-- v2_extended_gaps.md §3.2 — a planner-class session needs a typed
+-- back-reference to the initiative it was minted under so the kernel
+-- can route Orchestrator-emitted `structured_output` rows to the
+-- correct `initiatives.initiative_id` without a join through
+-- `subtask_activations`. NULL for pre-Migration-18 rows and for
+-- non-V2 sessions (Gateway / Verifier).
+ALTER TABLE {sessions}
+    ADD COLUMN initiative_id TEXT
+        REFERENCES {initiatives}(initiative_id) ON DELETE CASCADE;
+
+-- Partial index — most rows are NULL; we only ever probe by the
+-- populated subset (operator-side initiative dashboards, recovery
+-- driver coordinator-rebind).
+CREATE INDEX IF NOT EXISTS idx_sessions_initiative
+    ON {sessions} (initiative_id)
+    WHERE initiative_id IS NOT NULL;
+
+-- ── 2. structured_outputs: rebuild with nullable task_id ─────────────────
+--
+-- Column shape mirrors migration 13 byte-for-byte modulo the
+-- `task_id` nullability. The FK to `tasks(task_id)` is preserved —
+-- SQLite enforces FKs only when the column value is non-NULL, so
+-- executor / reviewer rows keep their referential guarantee and
+-- orchestrator rows (NULL) bypass the FK without a constraint
+-- violation.
+CREATE TABLE {structured_outputs}_new (
+    output_id      TEXT NOT NULL PRIMARY KEY,
+    initiative_id  TEXT NOT NULL REFERENCES {initiatives}(initiative_id) ON DELETE CASCADE,
+    task_id        TEXT          REFERENCES {tasks}(task_id)             ON DELETE CASCADE,
+    session_id     TEXT NOT NULL REFERENCES {sessions}(session_id)       ON DELETE CASCADE,
+    kind           TEXT NOT NULL CHECK (kind IN ('progress_report', 'diagnostic_flag', 'task_summary')),
+    severity       TEXT          CHECK (severity IS NULL OR severity IN ('info', 'warning', 'critical')),
+    payload_json   TEXT NOT NULL,
+    emitted_at     INTEGER NOT NULL
+);
+
+INSERT INTO {structured_outputs}_new
+    (output_id, initiative_id, task_id, session_id,
+     kind, severity, payload_json, emitted_at)
+SELECT output_id, initiative_id, task_id, session_id,
+       kind, severity, payload_json, emitted_at
+  FROM {structured_outputs};
+
+DROP TABLE {structured_outputs};
+
+ALTER TABLE {structured_outputs}_new RENAME TO {structured_outputs};
+
+-- Recreate the migration-13 indexes — DROP TABLE drops the indexes
+-- defined on the old table along with it.
+CREATE INDEX idx_{structured_outputs}_task
+    ON {structured_outputs}(task_id, emitted_at)
+    WHERE task_id IS NOT NULL;
+
+CREATE INDEX idx_{structured_outputs}_initiative
+    ON {structured_outputs}(initiative_id, emitted_at);
+
+CREATE INDEX idx_{structured_outputs}_session
+    ON {structured_outputs}(session_id);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (18, strftime('%s', 'now'));
 
 COMMIT;
 "
@@ -5112,5 +5262,237 @@ mod tests {
         assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
                 < ddl.find("COMMIT").unwrap(),
             "BEGIN must precede COMMIT");
+    }
+
+    // ── Migration 18 — sessions.initiative_id + nullable structured_outputs.task_id ──
+
+    /// Migration 18 wraps the column ADD + table rebuild in a single
+    /// `BEGIN EXCLUSIVE; ... COMMIT;` per the migration-1 invariant.
+    #[test]
+    fn migration_18_is_a_single_transaction() {
+        let ddl = render_migration_18_ddl();
+        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
+            "migration 18 must open exactly one transaction (BEGIN EXCLUSIVE)");
+        assert_eq!(ddl.matches("COMMIT").count(), 1,
+            "migration 18 must commit exactly once");
+        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
+                < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT");
+    }
+
+    /// After migration 18, the `sessions` table carries an
+    /// `initiative_id` column. PRAGMA reports the column shape; we
+    /// assert it is nullable and that the partial index exists.
+    #[test]
+    fn migration_18_adds_sessions_initiative_id_column_and_partial_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+
+        // Column metadata via PRAGMA — `initiative_id` must exist
+        // and be nullable (notnull = 0).
+        let (col_name, notnull): (String, i64) = conn
+            .query_row(
+                "SELECT name, [notnull] FROM pragma_table_info('sessions') \
+                 WHERE name = 'initiative_id'",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .expect("sessions.initiative_id must exist after migration 18");
+        assert_eq!(col_name, "initiative_id");
+        assert_eq!(notnull, 0,
+            "sessions.initiative_id must be nullable for backward compatibility \
+             with non-V2 sessions (Gateway / Verifier)");
+
+        // Partial index must exist.
+        let idx_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='index' AND name='idx_sessions_initiative'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx_count, 1,
+            "idx_sessions_initiative partial index must exist after migration 18");
+    }
+
+    /// After migration 18, the `structured_outputs` table accepts a
+    /// row with `task_id IS NULL`. Pre-Migration-18 the FK + NOT NULL
+    /// constraint would have rejected this insert.
+    #[test]
+    fn migration_18_structured_outputs_accepts_null_task_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        apply_pending(&conn).unwrap();
+
+        let initiatives_t      = Table::Initiatives.as_str();
+        let sessions_t         = Table::Sessions.as_str();
+        let structured_outs_t  = Table::StructuredOutputs.as_str();
+
+        // Seed an initiative + an Orchestrator session linked to it.
+        // The session has `initiative_id = 'init-1'` (Migration 18
+        // back-edge) and no enclosing `tasks` row.
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives_t} \
+                (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+             VALUES \
+                ('init-1', 'Executing', '{{}}', 'aa', 0); \
+             INSERT INTO {sessions_t} \
+                (session_id, role_id, session_token, lineage_id, fetch_quota, \
+                 created_at, expires_at, revoked, session_agent_type, \
+                 can_delegate, initiative_id) \
+             VALUES \
+                ('sess-orch-1', 'Planner', 'tok-orch-1', 'lin-1', 0, 100, \
+                 9999999999, 0, 'Orchestrator', 1, 'init-1');"
+        )).unwrap();
+
+        // INSERT with `task_id IS NULL` — the orchestrator path the
+        // intent handler exercises at runtime.
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {structured_outs_t} \
+                    (output_id, initiative_id, task_id, session_id, \
+                     kind, severity, payload_json, emitted_at) \
+                 VALUES \
+                    ('out-orch-1', 'init-1', NULL, 'sess-orch-1', \
+                     'progress_report', NULL, '{{}}', 100)"
+            ),
+            [],
+        );
+        assert!(r.is_ok(),
+            "structured_outputs.task_id must accept NULL after migration 18: {r:?}");
+
+        // FK is still enforced when task_id IS NOT NULL — an
+        // orphan task_id rejects.
+        let r = conn.execute(
+            &format!(
+                "INSERT INTO {structured_outs_t} \
+                    (output_id, initiative_id, task_id, session_id, \
+                     kind, severity, payload_json, emitted_at) \
+                 VALUES \
+                    ('out-orphan-1', 'init-1', 'no-such-task', 'sess-orch-1', \
+                     'progress_report', NULL, '{{}}', 100)"
+            ),
+            [],
+        );
+        assert!(r.is_err(),
+            "FK on structured_outputs.task_id must still reject orphan non-null values \
+             after migration 18");
+    }
+
+    /// Migration 18 preserves every pre-existing structured_outputs
+    /// row (the table-rebuild copy must be lossless).
+    #[test]
+    fn migration_18_preserves_existing_structured_outputs_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+
+        // Apply migrations 1..=17 to land at the pre-18 schema.
+        apply_migration_1(&conn).unwrap();
+        apply_migration_2(&conn).unwrap();
+        apply_migration_3(&conn).unwrap();
+        apply_migration_4(&conn).unwrap();
+        apply_migration_5(&conn).unwrap();
+        apply_migration_6(&conn).unwrap();
+        apply_migration_7(&conn).unwrap();
+        apply_migration_8(&conn).unwrap();
+        apply_migration_9(&conn).unwrap();
+        apply_migration_10(&conn).unwrap();
+        apply_migration_11(&conn).unwrap();
+        apply_migration_12(&conn).unwrap();
+        apply_migration_13(&conn).unwrap();
+        apply_migration_14(&conn).unwrap();
+        apply_migration_15(&conn).unwrap();
+        apply_migration_16(&conn).unwrap();
+        apply_migration_17(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), 17);
+
+        let initiatives_t = Table::Initiatives.as_str();
+        let sessions_t    = Table::Sessions.as_str();
+        let tasks_t       = Table::Tasks.as_str();
+        let so_t          = Table::StructuredOutputs.as_str();
+
+        // Seed minimum FK chain (initiative + session + task) and a
+        // structured_outputs row pointing at the task. This row
+        // MUST survive the Migration-18 table rebuild verbatim.
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives_t} \
+                (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
+             VALUES \
+                ('init-1', 'Executing', '{{}}', 'aa', 0); \
+             INSERT INTO {sessions_t} \
+                (session_id, role_id, session_token, lineage_id, fetch_quota, \
+                 created_at, expires_at, revoked) \
+             VALUES \
+                ('sess-1', 'Planner', 'tok-1', 'lin-1', 0, 100, 9999999999, 0); \
+             INSERT INTO {tasks_t} \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, session_id) \
+             VALUES \
+                ('task-1', 'init-1', 'lane-1', 'Running', 'op', 1, 100, 100, 'sess-1'); \
+             INSERT INTO {so_t} \
+                (output_id, initiative_id, task_id, session_id, \
+                 kind, severity, payload_json, emitted_at) \
+             VALUES \
+                ('out-1', 'init-1', 'task-1', 'sess-1', \
+                 'progress_report', NULL, '{{\"a\":1}}', 100);"
+        )).unwrap();
+
+        // Apply migration 18.
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        // The pre-18 row survives unchanged.
+        let (output_id, initiative_id, task_id, session_id, kind, payload):
+            (String, String, Option<String>, String, String, String) = conn
+            .query_row(
+                &format!(
+                    "SELECT output_id, initiative_id, task_id, session_id, kind, payload_json \
+                       FROM {so_t} WHERE output_id = 'out-1'"
+                ),
+                [],
+                |r| Ok((
+                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+                )),
+            )
+            .expect("pre-Migration-18 row must survive the table rebuild");
+        assert_eq!(output_id,     "out-1");
+        assert_eq!(initiative_id, "init-1");
+        assert_eq!(task_id,       Some("task-1".to_owned()));
+        assert_eq!(session_id,    "sess-1");
+        assert_eq!(kind,          "progress_report");
+        assert_eq!(payload,       "{\"a\":1}");
+    }
+
+    /// Migration 18 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_18_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::SchemaVersion.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, SCHEMA_VERSION as i64);
+
+        // structured_outputs table must appear exactly once after
+        // repeated apply_pending — the rebuild path is gated on
+        // schema_version, so a second call must NOT drop+recreate.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                  WHERE type='table' AND name=?1",
+                [Table::StructuredOutputs.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1,
+            "structured_outputs must appear exactly once after repeated apply_pending");
     }
 }

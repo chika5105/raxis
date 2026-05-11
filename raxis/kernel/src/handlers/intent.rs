@@ -498,6 +498,70 @@ fn run_phase_a(
         return PreGateOutcome::Reject(PlannerErrorCode::Unauthorized, TaskState::Admitted);
     }
 
+    // ── Step 2A: Orchestrator + StructuredOutput early-dispatch ───────────
+    //
+    // Spec: `v2_extended_gaps.md §3.2` authorises the Orchestrator to
+    // emit `IntentKind::StructuredOutput` for initiative-scoped
+    // progress / diagnostic / summary updates. The dispatch matrix
+    // (`authority::dispatch_matrix`) already cleared the
+    // `(StructuredOutput, Some(Orchestrator))` cell as Authorized at
+    // Step 1B above.
+    //
+    // Why early-dispatch HERE (between envelope acceptance and the
+    // `load_task` step):
+    //
+    //   * An Orchestrator session is admitted under an *initiative*
+    //     and has no row in the `tasks` table — it is the coordinator
+    //     for the initiative, not a sub-task. Calling `load_task`
+    //     with the wire's `req.task_id` (which the orchestrator's
+    //     `IntentSubmitter` populates with the initiative_id, by
+    //     construction in `planner-core::driver`) returns
+    //     `FailUnknownTask` for every coordinator submission,
+    //     regardless of payload shape.
+    //
+    //   * Routing the orchestrator path through the rest of `run_phase_a`
+    //     would also pull in the per-task token-cost gate
+    //     (`evaluate_token_budget` references `task.cumulative_token_cost_micros`),
+    //     which is meaningless for a coordinator — V2 token caps for
+    //     coordinator sessions are enforced by the planner's
+    //     `DispatchLoop::check_ceilings` before the wire turn-around
+    //     and by `STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT` on the
+    //     kernel side.
+    //
+    //   * The initiative-quarantine check still fires below — see
+    //     `handle_structured_output_initiative_scoped`, which mirrors
+    //     the per-task quarantine read against the
+    //     `initiative_quarantines` table and rejects with
+    //     `FailInitiativeQuarantined` (kernel-store.md §2.5.8).
+    //
+    // The handler reads `session.initiative_id` (Migration 18,
+    // populated by `auto_spawn_orchestrator_session_in_tx`) for the
+    // typed back-edge to the initiative. A pre-Migration-18
+    // coordinator row would have `initiative_id = NULL`; that case
+    // surfaces as `FailPolicyViolation` (INV-08 — coarse code, no
+    // detail leaked) so a stale row cannot drop a coordinator
+    // submission silently.
+    if matches!(req.intent_kind, IntentKind::StructuredOutput)
+        && session.session_agent_type == Some(raxis_types::SessionAgentType::Orchestrator)
+    {
+        let initiative_id = match session.initiative_id.as_deref() {
+            Some(id) => id.to_owned(),
+            None => return PreGateOutcome::Reject(
+                PlannerErrorCode::FailPolicyViolation, TaskState::Admitted),
+        };
+        return match handle_structured_output_initiative_scoped(
+            req,
+            &initiative_id,
+            &session_id,
+            seq,
+            store,
+            ctx.as_ref(),
+        ) {
+            Ok(resp)        => PreGateOutcome::EarlyResponse(resp),
+            Err((code, st)) => PreGateOutcome::Reject(code, st),
+        };
+    }
+
     // ── Step 3: Load task row ─────────────────────────────────────────────
     let task = match load_task(req.task_id.as_str(), store) {
         Ok(t) => t,
@@ -2363,6 +2427,235 @@ fn handle_structured_output(
     Ok(IntentResponse {
         sequence_number: seq,
         task_state,
+        outcome: IntentOutcome::Accepted {
+            remaining_budget:      remaining,
+            warn_delegation_stale: false,
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// handle_structured_output_initiative_scoped — V2 §3.2 Orchestrator path.
+// ---------------------------------------------------------------------------
+//
+// Spec references:
+//   * `v2_extended_gaps.md §3.2` — `structured_output` is a typed
+//     mid-session tool any planner-class agent (Executor, Reviewer,
+//     **Orchestrator**) may call. The Orchestrator emits its
+//     coordinator-level outputs (initiative-scoped progress reports,
+//     diagnostic flags, summaries) which are admitted and persisted
+//     under the *initiative* — not under any single sub-task — per
+//     the migration-18 `structured_outputs` schema (`task_id`
+//     nullable; FK to `tasks(task_id)` enforced only when non-null).
+//   * `v2-deep-spec.md §Step 6` — `auto_spawn_orchestrator_session_in_tx`
+//     is the single point where `sessions.initiative_id` is populated
+//     for a coordinator session. The intent handler reads it back via
+//     `SessionRow::initiative_id` (Migration 18).
+//   * `kernel-store.md §2.5.8` — initiative-quarantine read; same
+//     fail-closed invariant the per-task path enforces (`Ok(true)` →
+//     `FailInitiativeQuarantined`; read error → fail-closed with the
+//     same code).
+//
+// The handler is the coordinator-session equivalent of
+// [`handle_structured_output`]. It mirrors the per-task pipeline
+// modulo three deliberate divergences:
+//
+//   1. **No `tasks` lookup.** The coordinator session has no
+//      `tasks(task_id)` row by construction — it is the initiative's
+//      orchestrator, not a sub-task. The initiative_id is sourced
+//      from the typed `SessionRow::initiative_id` back-edge instead.
+//
+//   2. **Storage with `task_id IS NULL`.** Migration 18 made the
+//      `structured_outputs.task_id` column nullable so coordinator
+//      outputs can land referentially-clean without a synthetic
+//      `tasks` row. Operator surfaces (`raxis task outputs <id>`,
+//      dashboard) ignore null-task rows when scoping by task_id;
+//      the dashboard's per-initiative view picks them up via
+//      `list_for_initiative`.
+//
+//   3. **Synthetic `task_state = Running`** in the response. The
+//      coordinator session is conceptually always `Running` while
+//      the initiative is active; we emit `Running` so the planner's
+//      dispatch loop treats the response as non-terminal (matches
+//      the per-task path's `Admitted | Running` precondition).
+//
+// All other behaviour — payload validation + normalisation, the
+// per-session rate limit, the `BEGIN IMMEDIATE` count+insert
+// transaction, and the audit-after-commit emit — is byte-identical
+// to [`handle_structured_output`].
+fn handle_structured_output_initiative_scoped(
+    req:           IntentRequest,
+    initiative_id: &str,
+    session_id:    &SessionId,
+    seq:           u64,
+    store:         &Store,
+    ctx:           &HandlerContext,
+) -> HandlerResult {
+    // Synthetic state surfaced through the rejection / success path —
+    // matches the per-task convention (`Admitted | Running` are the
+    // only states the matrix admits for `StructuredOutput`).
+    let synth_state = TaskState::Running;
+
+    // ── 1. Wire payload validation ────────────────────────────────────────
+    let mut payload = match req.structured_output {
+        Some(p) => p,
+        None    => return Err((
+            PlannerErrorCode::FailStructuredOutputInvalid, synth_state)),
+    };
+
+    // ── 2. Normalise (and reject hard-failures only) ──────────────────────
+    if payload.validate_and_normalise().is_err() {
+        return Err((
+            PlannerErrorCode::FailStructuredOutputInvalid, synth_state));
+    }
+
+    // ── 3. Initiative-quarantine read (kernel-store.md §2.5.8) ────────────
+    //
+    // Mirrors the per-task quarantine check in `run_phase_a` Step 3A.
+    // We hold the writer mutex across both reads + write so the
+    // count + insert transaction below cannot interleave with a
+    // concurrent quarantine landing on the same initiative.
+    let quarantine_lookup = {
+        let conn = store.lock_sync();
+        raxis_store::views::initiative_quarantines::is_quarantined_rw(
+            &conn,
+            initiative_id,
+        )
+    };
+    match quarantine_lookup {
+        Ok(false) => {}
+        Ok(true) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"IntentRejectedQuarantined\",\
+                 \"initiative_id\":\"{initiative_id}\",\"actor\":\"orchestrator\"}}",
+            );
+            return Err((
+                PlannerErrorCode::FailInitiativeQuarantined, synth_state));
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"QuarantineLookupError\",\
+                 \"initiative_id\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
+            );
+            return Err((
+                PlannerErrorCode::FailInitiativeQuarantined, synth_state));
+        }
+    }
+
+    let kind_tag    = payload.variant_tag();
+    let severity    = match &payload {
+        raxis_types::StructuredOutputKind::DiagnosticFlag { severity, .. } =>
+            Some(severity.as_str().to_owned()),
+        _ => None,
+    };
+
+    let payload_json = match serde_json::to_string(&payload) {
+        Ok(s)  => s,
+        Err(_) => return Err((
+            PlannerErrorCode::FailStructuredOutputInvalid, synth_state)),
+    };
+    let payload_bytes = u32::try_from(payload_json.len()).unwrap_or(u32::MAX);
+
+    // ── 4. Rate-limit COUNT + INSERT inside one BEGIN IMMEDIATE tx ────────
+    let output_id  = uuid::Uuid::new_v4().to_string();
+    let emitted_at = unix_now_secs();
+    {
+        let mut conn = store.lock_sync();
+        let tx = conn.transaction()
+            .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, synth_state))?;
+
+        let so_table = Table::StructuredOutputs.as_str();
+
+        let count: u32 = tx.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {so_table} WHERE session_id = ?1"
+            ),
+            rusqlite::params![session_id.as_str()],
+            |r| r.get::<_, i64>(0).map(|v| v as u32),
+        ).unwrap_or(0);
+
+        if count >= raxis_types::STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"StructuredOutputRateLimited\",\
+                 \"session_id\":\"{}\",\"initiative_id\":\"{initiative_id}\",\
+                 \"count\":{count},\"actor\":\"orchestrator\"}}",
+                session_id.as_str(),
+            );
+            return Err((
+                PlannerErrorCode::FailStructuredOutputRateLimited, synth_state));
+        }
+
+        // task_id IS NULL — orchestrator outputs scope to the
+        // initiative, not to any single sub-task (Migration 18).
+        tx.execute(
+            &format!(
+                "INSERT INTO {so_table}
+                    (output_id, initiative_id, task_id, session_id,
+                     kind, severity, payload_json, emitted_at)
+                 VALUES (?1, ?2, NULL, ?3, ?4, ?5, ?6, ?7)"
+            ),
+            rusqlite::params![
+                output_id,
+                initiative_id,
+                session_id.as_str(),
+                kind_tag,
+                severity,
+                payload_json,
+                emitted_at as i64,
+            ],
+        ).map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, synth_state))?;
+
+        tx.commit()
+            .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, synth_state))?;
+    }
+
+    // ── 5. Audit emit AFTER the commit (§2.5.2 audit-after-commit) ────────
+    //
+    // We stamp `task_id` with the wire's `req.task_id` for forensic
+    // traceability — it carries the orchestrator's view of the
+    // initiative_id (the planner's `IntentSubmitter` falls back to
+    // initiative_id when no specific task_id was provided, by
+    // construction in `planner-core::driver::run_role_session_with_*`)
+    // and the audit chain is the place to record what the planner
+    // *thought* it was emitting against, even when the storage layer
+    // pivots to NULL.
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
+            output_id:     output_id.clone(),
+            initiative_id: initiative_id.to_owned(),
+            task_id:       req.task_id.as_str().to_owned(),
+            session_id:    session_id.as_str().to_owned(),
+            output_kind:   kind_tag.to_owned(),
+            severity:      severity.clone(),
+            payload_bytes,
+        },
+        Some(session_id.as_str()),
+        // No task scope on the wire-level audit — orchestrator
+        // outputs are initiative-scoped.
+        None,
+        Some(initiative_id),
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"StructuredOutputEmitted\",\
+             \"audit_emit_failed\":\"{e}\",\"session_id\":\"{}\",\
+             \"initiative_id\":\"{initiative_id}\"}}",
+            session_id.as_str(),
+        );
+    }
+
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"StructuredOutputEmitted\",\
+         \"session_id\":\"{}\",\"initiative_id\":\"{initiative_id}\",\
+         \"kind\":\"{kind_tag}\",\"payload_bytes\":{payload_bytes},\
+         \"actor\":\"orchestrator\"}}",
+        session_id.as_str(),
+    );
+
+    // ── 6. NON-TERMINAL response ─────────────────────────────────────────
+    let remaining = BudgetSnapshot { admission_units: 0 };
+    Ok(IntentResponse {
+        sequence_number: seq,
+        task_state:      synth_state,
         outcome: IntentOutcome::Accepted {
             remaining_budget:      remaining,
             warn_delegation_stale: false,
@@ -5305,6 +5598,203 @@ mod tests {
         }
     }
 
+    // ── Orchestrator path (V2 §3.2 + Migration 18) ───────────────────────
+
+    /// Seed an Orchestrator session whose `initiative_id` back-edge
+    /// points at the seeded initiative. Mirrors
+    /// `auto_spawn_orchestrator_session_in_tx` (lifecycle.rs) so the
+    /// intent handler's Migration-18 code path exercises the same
+    /// shape it sees in production.
+    fn seed_orchestrator_session_for_initiative(
+        store: &Store, session_id: &str, initiative_id: &str,
+    ) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        // Initiative must exist for the FK to resolve.
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![
+                initiative_id,
+                InitiativeState::Executing.as_sql_str(),
+                now,
+            ],
+        ).unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO {SESSIONS} (
+                    session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, fetch_quota, created_at, expires_at, revoked,
+                    session_agent_type, can_delegate, initiative_id
+                 ) VALUES (?1,'Planner','tok-{session_id}',0,
+                          NULL,NULL,NULL,'lineage-orch',1000,?2,?3,0,
+                          'Orchestrator',1,?4)"
+            ),
+            rusqlite::params![session_id, now, now + 86_400, initiative_id],
+        ).unwrap();
+    }
+
+    /// Happy path: an Orchestrator session emits a ProgressReport,
+    /// the kernel writes the row with `task_id IS NULL` (no enclosing
+    /// `tasks` row exists for a coordinator session — Migration 18),
+    /// and the audit chain records the initiative-scope event.
+    /// Mirrors `structured_output_progress_report_persists_and_emits_audit`
+    /// for the per-task path.
+    #[test]
+    fn structured_output_orchestrator_emits_with_null_task_id() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        let initiative_id = "init-orch";
+        seed_orchestrator_session_for_initiative(&store, session.as_str(), initiative_id);
+
+        // The orchestrator's IntentSubmitter populates task_id with
+        // its initiative_id (planner-core::driver). The kernel does
+        // not validate this against any `tasks` row on the
+        // orchestrator path — it routes by SessionRow::initiative_id.
+        let req = make_structured_output_request(
+            initiative_id,
+            Some(raxis_types::StructuredOutputKind::ProgressReport {
+                files_modified: vec!["coordinator-note".into()],
+                tests_passing:  0,
+                tests_failing:  0,
+                confidence:     0.5,
+            }),
+        );
+        let resp = handle_structured_output_initiative_scoped(
+            req, initiative_id, &session, 1, &store, &ctx,
+        ).expect("orchestrator progress report must be accepted");
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+        assert_eq!(resp.task_state, TaskState::Running,
+            "orchestrator structured_output is NON-TERMINAL — synth state Running");
+
+        // Exactly one row written, with task_id IS NULL.
+        let conn = store.lock_sync();
+        let (row_count, null_task_count): (i64, i64) = conn.query_row(
+            &format!(
+                "SELECT COUNT(*),
+                        SUM(CASE WHEN task_id IS NULL THEN 1 ELSE 0 END)
+                   FROM {so}
+                  WHERE session_id = ?1",
+                so = Table::StructuredOutputs.as_str(),
+            ),
+            rusqlite::params![session.as_str()],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+        ).unwrap();
+        drop(conn);
+        assert_eq!(row_count,       1, "exactly one orchestrator output row");
+        assert_eq!(null_task_count, 1, "the row's task_id must be NULL");
+
+        let events = sink.events();
+        let so_evt = events.iter().find(|e| matches!(
+            e.kind, raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
+        )).expect("StructuredOutputEmitted audit event missing");
+        if let raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
+            output_kind, severity, initiative_id: ev_init, session_id: ev_sess, ..
+        } = &so_evt.kind {
+            assert_eq!(output_kind, "progress_report");
+            assert!(severity.is_none());
+            assert_eq!(ev_init,  initiative_id);
+            assert_eq!(ev_sess,  session.as_str());
+        }
+    }
+
+    /// The orchestrator path enforces the same per-session rate
+    /// limit as the per-task path. After `STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT`
+    /// admissions, the next submission rejects with the rate-limit
+    /// code and the prior rows are NOT rolled back.
+    #[test]
+    fn structured_output_orchestrator_per_session_rate_limit_is_enforced() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        let initiative_id = "init-orch-rl";
+        seed_orchestrator_session_for_initiative(&store, session.as_str(), initiative_id);
+
+        let cap = raxis_types::STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT;
+        for i in 0..cap {
+            let req = make_structured_output_request(
+                initiative_id,
+                Some(raxis_types::StructuredOutputKind::ProgressReport {
+                    files_modified: vec![],
+                    tests_passing:  i,
+                    tests_failing:  0,
+                    confidence:     0.5,
+                }),
+            );
+            handle_structured_output_initiative_scoped(
+                req, initiative_id, &session, (i as u64) + 1, &store, &ctx,
+            ).unwrap_or_else(|e| panic!("orch output #{i} rejected: {e:?}"));
+        }
+        assert_eq!(count_structured_outputs(&store, session.as_str()), cap as i64);
+
+        let req = make_structured_output_request(
+            initiative_id,
+            Some(raxis_types::StructuredOutputKind::ProgressReport {
+                files_modified: vec![],
+                tests_passing:  cap,
+                tests_failing:  0,
+                confidence:     0.5,
+            }),
+        );
+        let err = handle_structured_output_initiative_scoped(
+            req, initiative_id, &session, (cap as u64) + 1, &store, &ctx,
+        ).expect_err("over-cap orch submission must be rejected");
+        assert_eq!(err.0, PlannerErrorCode::FailStructuredOutputRateLimited);
+        assert_eq!(count_structured_outputs(&store, session.as_str()), cap as i64,
+            "rate-limit rejection MUST NOT roll back prior rows");
+    }
+
+    /// Quarantining the initiative the orchestrator coordinates must
+    /// drop subsequent `StructuredOutput` submissions with
+    /// `FailInitiativeQuarantined` (`kernel-store.md §2.5.8`).
+    #[test]
+    fn structured_output_orchestrator_rejects_quarantined_initiative() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let session = dummy_session_id();
+        let initiative_id = "init-orch-quarantined";
+        seed_orchestrator_session_for_initiative(&store, session.as_str(), initiative_id);
+
+        // Quarantine the initiative — column shape per migration 3
+        // (`kernel-store.md §2.5.8`): `(initiative_id, quarantined_at,
+        // quarantined_by, reason, sweep_target)`.
+        {
+            let conn = store.lock_sync();
+            let now = unix_now_secs();
+            let quar = Table::InitiativeQuarantines.as_str();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {quar} \
+                        (initiative_id, quarantined_at, quarantined_by, reason) \
+                     VALUES (?1, ?2, 'op-fp-1', 'test quarantine')"
+                ),
+                rusqlite::params![initiative_id, now],
+            ).unwrap();
+        }
+
+        let req = make_structured_output_request(
+            initiative_id,
+            Some(raxis_types::StructuredOutputKind::ProgressReport {
+                files_modified: vec![],
+                tests_passing:  0,
+                tests_failing:  0,
+                confidence:     0.5,
+            }),
+        );
+        let err = handle_structured_output_initiative_scoped(
+            req, initiative_id, &session, 1, &store, &ctx,
+        ).expect_err("quarantined initiative must reject orchestrator output");
+        assert_eq!(err.0, PlannerErrorCode::FailInitiativeQuarantined);
+        assert_eq!(count_structured_outputs(&store, session.as_str()), 0,
+            "no row may land when the initiative is quarantined");
+    }
+
     /// Per-session rate limit: after
     /// `STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT` accepted outputs
     /// the next submission rejects with
@@ -5512,7 +6002,7 @@ mod tests {
                 assert!(kinds.contains("diagnostic_flag"));
 
                 for o in &outputs {
-                    assert_eq!(o.task_id, "exe1");
+                    assert_eq!(o.task_id.as_deref(), Some("exe1"));
                     assert_eq!(o.session_id, session.as_str());
                     assert_eq!(o.initiative_id, "init-rev");
                     assert!(!o.payload_json.is_empty(),
@@ -5826,6 +6316,7 @@ mod tests {
             revoked_at:         None,
             session_agent_type: Some(raxis_types::SessionAgentType::Orchestrator),
             can_delegate:       true,
+            initiative_id:      None,
         }
     }
 

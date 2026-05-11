@@ -1362,8 +1362,8 @@ pub struct OrchestratorAutoSpawn {
 /// the operator sees a generic `FAIL_APPROVE_PLAN` and the store
 /// stays in `Draft`. There is no partial-spawn failure mode.
 fn auto_spawn_orchestrator_session_in_tx(
-    tx:             &rusqlite::Transaction<'_>,
-    _initiative_id: &str,
+    tx:            &rusqlite::Transaction<'_>,
+    initiative_id: &str,
 ) -> Result<OrchestratorAutoSpawn, LifecycleError> {
     use raxis_types::SessionId;
 
@@ -1386,14 +1386,21 @@ fn auto_spawn_orchestrator_session_in_tx(
     let expires_at = now_secs + 86_400;
 
     let sessions_t = Table::Sessions.as_str();
+    // V2 Migration 18 — `sessions.initiative_id` is the typed
+    // back-edge from a coordinator session to the initiative it was
+    // minted for. Populated here so the intent handler can route
+    // Orchestrator-emitted `IntentKind::StructuredOutput`
+    // (`v2_extended_gaps.md §3.2`) to the initiative-scoped
+    // structured-output path without trying to load a `tasks` row
+    // that does not exist for a coordinator session.
     tx.execute(
         &format!(
             "INSERT INTO {sessions_t} (
                 session_id, role_id, session_token, sequence_number,
                 worktree_root, base_sha, base_tracking_ref,
                 lineage_id, fetch_quota, created_at, expires_at, revoked,
-                session_agent_type, can_delegate
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,1)"
+                session_agent_type, can_delegate, initiative_id
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,1,?13)"
         ),
         rusqlite::params![
             session_id_s,
@@ -1412,6 +1419,7 @@ fn auto_spawn_orchestrator_session_in_tx(
             now_secs,
             expires_at,
             SessionAgentType::Orchestrator.as_sql_str(),
+            initiative_id,
         ],
     )?;
 

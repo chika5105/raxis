@@ -841,6 +841,8 @@ pub async fn handle_list_task_outputs(
         .map(|r| raxis_types::operator_wire::TaskOutputWire {
             output_id:     r.output_id,
             initiative_id: r.initiative_id,
+            // V2 Migration 18 — `Option<String>`. Orchestrator-emitted
+            // outputs land with `task_id IS NULL`; pass through as-is.
             task_id:       r.task_id,
             session_id:    r.session_id,
             kind:          r.kind,

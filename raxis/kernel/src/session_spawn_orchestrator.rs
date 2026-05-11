@@ -439,6 +439,11 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
                 // wire `LiveOrchestratorSpawn` against a real
                 // substrate instead.
                 admission_loopback: "127.0.0.1:0".parse().expect("static ipv4 literal"),
+                // Noop fake never bridges a real IPC stream — the
+                // production bridging path (`drive_planner_stream`)
+                // is exercised by the live-e2e harness, not by
+                // unit tests against this fake.
+                kernel_ipc_stream:  None,
             })
         })
     }
@@ -522,22 +527,58 @@ async fn spawn_orchestrator_for_initiative(
         ),
     };
 
-    // ── Step 2: rehydrate credential decls. ──────────────────────
-    // The orchestrator session typically has no `[[tasks]]` row
-    // (the kernel auto-creates it), so this read returns an empty
-    // Vec. We still go through the uniform path for forward
-    // compat. The read happens off the tokio worker via
-    // `spawn_blocking` so the SQLite mutex stays sync.
+    // ── Step 2: rehydrate credential decls AND the session token. ──
+    //
+    // Two reads off the same `spawn_blocking` so the SQLite mutex
+    // is acquired exactly once. Both come from the canonical
+    // orchestrator session row that `lifecycle::approve_plan`
+    // inserted inside the same transaction that admitted the
+    // plan tasks.
+    //
+    // The session token is the CSPRNG-generated 64-char hex value
+    // emitted by `raxis_crypto::token::generate_session_token` and
+    // persisted to `sessions.session_token`. It is the SAME value
+    // the kernel-mediated egress handler validates on every
+    // `IpcMessage::PlannerFetchRequest` via
+    // `authority::session::get_session_by_token`. Minting a
+    // synthetic token at the spawn boundary (the V0 placeholder
+    // shape `format!("orch-{session_id}")`) would put the planner
+    // and the kernel out of sync — every egress fetch would fail
+    // closed with `FAIL_SESSION_TOKEN_MISMATCH` and the planner
+    // would never reach the LLM. The audit chain would log a
+    // SessionVmSpawned event followed by an unbounded fetch-retry
+    // storm, which is exactly the regression mode this read closes.
+    //
+    // The credential decls list is empty for the canonical
+    // orchestrator session (no `[[tasks]]` row), but we still go
+    // through the uniform path for forward compat with sessions
+    // that gain credentials in V3.
     let store_for_read = Arc::clone(store);
     let session_id_for_read = session_id.to_owned();
-    let credentials = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let conn = store_for_read.lock_sync();
-        kernel_lifecycle::read_task_credential_proxies_in_tx(&conn, &session_id_for_read)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| OrchestratorSpawnError::StoreRead(e.to_string()))?
-    .map_err(OrchestratorSpawnError::StoreRead)?;
+    let (credentials, session_token_db) =
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let conn = store_for_read.lock_sync();
+            let creds = kernel_lifecycle::read_task_credential_proxies_in_tx(
+                &conn,
+                &session_id_for_read,
+            )
+            .map_err(|e| e.to_string())?;
+            let token: String = conn
+                .query_row(
+                    "SELECT session_token FROM sessions WHERE session_id = ?1",
+                    rusqlite::params![&session_id_for_read],
+                    |row| row.get(0),
+                )
+                .map_err(|e| {
+                    format!(
+                        "session row missing for session_id {session_id_for_read}: {e}",
+                    )
+                })?;
+            Ok((creds, token))
+        })
+        .await
+        .map_err(|e| OrchestratorSpawnError::StoreRead(e.to_string()))?
+        .map_err(OrchestratorSpawnError::StoreRead)?;
 
     // ── Step 3: build the spawn spec. ────────────────────────────
     // Egress tier is `EgressTier::None` for the Orchestrator. Per
@@ -665,10 +706,12 @@ async fn spawn_orchestrator_for_initiative(
             initiative_id.to_owned(),
         ],
         // Per-session token; the substrate stamps it into the
-        // guest env under `RAXIS_SESSION_TOKEN`. Production wires
-        // this from the V2 `sessions.session_token` column; we
-        // use a deterministic-but-opaque shape here.
-        session_token:     SessionToken(format!("orch-{}", session_id)),
+        // guest env under `RAXIS_SESSION_TOKEN`. Sourced from the
+        // canonical `sessions.session_token` column inserted by
+        // `lifecycle::approve_plan` (see Step 2 above) — same
+        // 64-char hex value the kernel-mediated egress handler
+        // re-validates on every `IpcMessage::PlannerFetchRequest`.
+        session_token:     SessionToken(session_token_db.clone()),
         vsock_cid:         None,
         virtio_fs_mounts:  Vec::new(),
         // Host-canonical Linux kernel binary. The microVM substrates
@@ -679,6 +722,10 @@ async fn spawn_orchestrator_for_initiative(
             &spawn_ctx.install_dir,
         ),
         env,
+        guest_console_log: spawn_ctx
+            .data_dir
+            .as_ref()
+            .map(|d| d.join("guests").join(session_id).join("console.log")),
     };
 
     let req = SpawnRequest {
@@ -694,6 +741,58 @@ async fn spawn_orchestrator_for_initiative(
 
     // ── Step 4: delegate. ─────────────────────────────────────────
     Ok(service.spawn_session(req).await?)
+}
+
+/// **Drive the kernel ↔ guest IPC channel for a freshly-spawned
+/// session.**
+///
+/// When the substrate hands the kernel a host-side IPC stream via
+/// [`raxis_session_spawn::SpawnHandle::kernel_ipc_stream`] (today:
+/// every microVM substrate that surrenders its per-session VSock fd
+/// through [`raxis_isolation::Session::take_kernel_ipc_fd`]), the
+/// kernel needs to start reading length-prefixed bincode
+/// `IpcMessage` frames from it and routing them through the same
+/// handler chain `accept_planner_loop` uses for UDS connections.
+///
+/// This function takes the stream out of the [`SpawnHandle`] (when
+/// present) and spawns a detached tokio task that runs
+/// [`crate::ipc::server::drive_planner_stream`] on it. The task
+/// terminates naturally when the guest disconnects (clean EOF) or
+/// when the host-side stream is dropped (e.g. on session
+/// teardown). No join handle is retained — the dispatch loop does
+/// not need to be cancelled explicitly because the only way to
+/// outlive the session is to hold the stream, and the kernel never
+/// shares it.
+///
+/// **Invariant.** Substrates that do NOT surrender an IPC fd
+/// (subprocess substrate, where the planner dials the kernel's UDS
+/// `planner.sock` directly) leave `kernel_ipc_stream = None`; this
+/// function is a no-op in that case and the existing
+/// `accept_planner_loop` handles the connection on the UDS side.
+/// Calling this function is therefore safe regardless of substrate.
+pub fn spawn_planner_dispatcher(
+    handle: &mut SpawnHandle,
+    ctx: Arc<crate::ipc::context::HandlerContext>,
+) {
+    let Some(stream) = handle.kernel_ipc_stream.take() else {
+        return;
+    };
+    let session_id = handle.session_id.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crate::ipc::server::drive_planner_stream(stream, ctx).await {
+            // Per the planner-dispatch logging convention, the
+            // structured log keys on `step:"planner-dispatch"` so a
+            // post-mortem can correlate a session_id to a dispatch
+            // failure surfaced here. The substrate-level
+            // `SessionVmExited` event is emitted independently when
+            // the guest exits.
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_dispatch_terminated\",\
+                 \"session_id\":\"{session_id}\",\"error\":\"{err}\"}}",
+                err = e,
+            );
+        }
+    });
 }
 
 /// Tear down a previously-spawned Orchestrator VM. Returns the
@@ -1215,6 +1314,10 @@ pub async fn spawn_executor_for_task(
             &spawn_ctx.install_dir,
         ),
         env,
+        guest_console_log: spawn_ctx
+            .data_dir
+            .as_ref()
+            .map(|d| d.join("guests").join(session_id).join("console.log")),
     };
 
     let req = SpawnRequest {

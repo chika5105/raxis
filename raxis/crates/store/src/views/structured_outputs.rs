@@ -44,7 +44,13 @@ use crate::Table;
 pub struct StructuredOutputRow {
     pub output_id:     String,
     pub initiative_id: String,
-    pub task_id:       String,
+    /// `Some(task_id)` for outputs emitted by an Executor or
+    /// Reviewer session whose enclosing `tasks` row is still alive
+    /// (FK-enforced by the migration-18 schema). `None` for
+    /// **Orchestrator-emitted outputs** which are scoped to the
+    /// initiative but are NOT bound to any single sub-task —
+    /// see `v2_extended_gaps.md §3.2`.
+    pub task_id:       Option<String>,
     pub session_id:    String,
     /// `progress_report` | `diagnostic_flag` | `task_summary`.
     /// Matches the wire `kind` discriminator the executor emits.
@@ -79,7 +85,7 @@ fn row_to_struct(row: &rusqlite::Row<'_>) -> rusqlite::Result<StructuredOutputRo
     Ok(StructuredOutputRow {
         output_id:     row.get::<_, String>(0)?,
         initiative_id: row.get::<_, String>(1)?,
-        task_id:       row.get::<_, String>(2)?,
+        task_id:       row.get::<_, Option<String>>(2)?,
         session_id:    row.get::<_, String>(3)?,
         kind:          row.get::<_, String>(4)?,
         severity:      row.get::<_, Option<String>>(5)?,

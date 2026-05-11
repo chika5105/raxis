@@ -67,6 +67,30 @@ pub struct SessionRow {
     /// `session_agent_type = Orchestrator` at the DB layer. Decoded
     /// here as `bool` for ergonomic handler use.
     pub can_delegate: bool,
+
+    /// **V2 Migration 18.** `Some(initiative_id)` for V2 planner-class
+    /// sessions that the kernel auto-spawned under a specific
+    /// initiative (today: Orchestrator coordinator sessions, soon
+    /// Executor / Reviewer sub-task sessions). `None` for pre-V2
+    /// sessions and for non-V2 substrates (Gateway / Verifier).
+    ///
+    /// Populated by `auto_spawn_orchestrator_session_in_tx`
+    /// (`v2-deep-spec.md §Step 6`) and read by:
+    ///
+    /// * `intent::run_phase_a` — to route Orchestrator-emitted
+    ///   `IntentKind::StructuredOutput` to the initiative-scoped
+    ///   `handle_structured_output_orchestrator` handler without
+    ///   doing a `tasks` lookup that would always fail
+    ///   (`v2_extended_gaps.md §3.2`).
+    /// * Recovery / dashboard surfaces — typed back-edge from a
+    ///   coordinator session to its initiative without joining
+    ///   through `subtask_activations` (which only covers
+    ///   Executor / Reviewer descendants).
+    ///
+    /// Backed by the nullable `sessions.initiative_id` column with
+    /// FK to `initiatives(initiative_id) ON DELETE CASCADE`
+    /// introduced in migration 18.
+    pub initiative_id: Option<String>,
 }
 
 /// Configuration for session creation (fetch_quota, default_ttl, etc.).
@@ -160,7 +184,7 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
             "SELECT session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
                     lineage_id, revoked_at, expires_at,
-                    session_agent_type, can_delegate
+                    session_agent_type, can_delegate, initiative_id
              FROM {SESSIONS} WHERE session_id = ?1"
         ),
         rusqlite::params![session_id.as_str()],
@@ -182,6 +206,7 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
                     .as_deref()
                     .and_then(raxis_types::SessionAgentType::from_sql_str),
                 can_delegate:      can_delegate_int != 0,
+                initiative_id:     row.get(12)?,
             })
         },
     ).map_err(|e| match e {
@@ -216,7 +241,7 @@ pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<Sessio
             "SELECT session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
                     lineage_id, revoked_at, expires_at,
-                    session_agent_type, can_delegate
+                    session_agent_type, can_delegate, initiative_id
              FROM {SESSIONS} WHERE session_token = ?1"
         ),
         rusqlite::params![session_token],
@@ -238,6 +263,7 @@ pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<Sessio
                     .as_deref()
                     .and_then(raxis_types::SessionAgentType::from_sql_str),
                 can_delegate:      can_delegate_int != 0,
+                initiative_id:     row.get(12)?,
             })
         },
     ).map_err(|e| match e {
