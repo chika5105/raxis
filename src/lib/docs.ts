@@ -1,11 +1,17 @@
 // Docs loader.
 //
-// Reads markdown files from a local mirror at `vendor/raxis-docs/`.
-// The mirror is populated at `prebuild` time by `scripts/sync-docs.mjs`,
-// which copies from `RAXIS_REPO_PATH` (preferred) or shallow-clones
-// `RAXIS_REPO_URL` (fallback for Vercel). Either way, by the time this
-// module runs, all source markdown is on the local filesystem and the
-// rendered site has no runtime filesystem dependency.
+// Two backends, selected automatically:
+//
+//   FILESYSTEM (dev + Vercel build)
+//     Reads from vendor/raxis-docs/ which is populated by scripts/sync-docs.mjs
+//     before every dev start or Vercel build.
+//
+//   GITHUB API (production, when RAXIS_GITHUB_REPO is set)
+//     Fetches the file tree + raw content from GitHub. Next.js caches each
+//     fetch() call for REVALIDATE seconds (default 3600 = 1 hour), so content
+//     refreshes in the background without a redeploy.
+//     Set RAXIS_GITHUB_REPO=owner/repo (e.g. "chika5105/raxis").
+//     Optional: RAXIS_GITHUB_BRANCH (default "main"), RAXIS_GITHUB_TOKEN.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -20,40 +26,42 @@ export type DocCategory =
   | "Perspectives";
 
 export interface DocMeta {
-  /** URL slug, e.g. ["raxis-concepts", "01-claims-and-gates"]. */
   slug: string[];
-  /** Joined slug, e.g. "raxis-concepts/01-claims-and-gates". */
   slugPath: string;
-  /** Path on disk relative to the docs root, e.g. "raxis-concepts/01-claims-and-gates.md". */
   relativePath: string;
-  /** Best-effort human-readable title. */
   title: string;
-  /** Doc category for sidebar grouping. */
   category: DocCategory;
-  /** Optional sub-section within a category (e.g. "v1", "v2", "scenarios"). */
   subgroup?: string;
-  /** Short snippet for the docs index. */
   snippet: string;
-  /** Heading skeleton (H2/H3) for in-page TOC and search. */
   headings: Array<{ depth: 2 | 3; text: string; id: string }>;
-  /** Display order within its category (for sorted sidebars). */
   order: number;
 }
 
 export interface DocFull extends DocMeta {
-  /** Rendered HTML from the markdown body. */
   html: string;
-  /** Plain-text version of the body, used for search snippets. */
   plain: string;
 }
 
-const DOCS_DIR = path.join(process.cwd(), "vendor", "raxis-docs");
+export interface TomlFile {
+  filename: string;
+  content: string;
+}
 
-// Paths under the source repo that exist as markdown but are not real
-// product documentation — generated artifacts, release-pipeline scaffolding,
-// auto-generated migration READMEs, scenario templates, GitHub config, etc.
-// We hide them from the docs index but still mirror them under vendor/ in
-// case anyone deep-links a documented commit.
+// ─── Config ──────────────────────────────────────────────────────────────────
+
+const DOCS_DIR = path.join(process.cwd(), "vendor", "raxis-docs");
+const IS_DEV = process.env.NODE_ENV === "development";
+const GITHUB_REPO = process.env.RAXIS_GITHUB_REPO; // "owner/repo"
+const GITHUB_BRANCH = process.env.RAXIS_GITHUB_BRANCH ?? "main";
+const GITHUB_TOKEN = process.env.RAXIS_GITHUB_TOKEN;
+const REVALIDATE = 3600; // 1 hour
+
+// Use GitHub API when the repo is configured (production).
+// In dev we always use the filesystem for speed and offline support.
+const USE_GITHUB = !!GITHUB_REPO && !IS_DEV;
+
+// ─── Exclusion rules ─────────────────────────────────────────────────────────
+
 const EXCLUDE_PREFIXES = [
   ".github/",
   "crates/store/migrations",
@@ -66,84 +74,32 @@ const EXCLUDE_PREFIXES = [
   "installer/",
 ];
 const EXCLUDE_BASENAME_PATTERNS: RegExp[] = [
-  /^_/, // e.g. _template.md
+  /^_/,
   /^changelog\.md$/i,
   /^license\.md$/i,
   /^contributing\.md$/i,
 ];
 
 function isExcluded(rel: string): boolean {
-  const segs = rel.split(path.sep);
+  const segs = rel.split("/");
   const norm = segs.join("/").toLowerCase();
   for (const p of EXCLUDE_PREFIXES) {
     if (norm === p.replace(/\/$/, "") + ".md") return true;
     if (norm.startsWith(p.toLowerCase())) return true;
   }
-  // Treat any path segment starting with `_` as private (mirrors the Jekyll
-  // / 11ty / docusaurus convention so `_template/`, `_drafts/`, etc. are all
-  // hidden without per-name configuration).
   for (const seg of segs) {
     if (seg.startsWith("_")) return true;
   }
-  const base = path.basename(rel);
+  const base = rel.split("/").pop() ?? "";
   for (const re of EXCLUDE_BASENAME_PATTERNS) if (re.test(base)) return true;
   return false;
 }
 
-function exists(p: string) {
-  try {
-    fs.accessSync(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
+// ─── Shared parsing helpers ───────────────────────────────────────────────────
 
-function safeReadDirRecursive(root: string): string[] {
-  const out: string[] = [];
-  if (!exists(root)) return out;
-  const stack: string[] = [root];
-  while (stack.length) {
-    const dir = stack.pop()!;
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const e of entries) {
-      const full = path.join(dir, e.name);
-      // Skip noisy dirs that occasionally appear in the source repo.
-      if (e.isDirectory()) {
-        if (
-          e.name === "node_modules" ||
-          e.name === ".git" ||
-          e.name === "target" ||
-          e.name === "dist" ||
-          e.name === "build" ||
-          e.name === ".next"
-        ) {
-          continue;
-        }
-        stack.push(full);
-      } else if (e.isFile() && e.name.toLowerCase().endsWith(".md")) {
-        out.push(full);
-      }
-    }
-  }
-  return out;
-}
-
-/**
- * Convert a filesystem-relative markdown path into the URL slug used by
- * `/docs/[...slug]`. `*\/README.md` collapses to its parent directory so the
- * scenario URLs read naturally.
- */
-function pathToSlug(rel: string): string[] {
-  // Normalize slashes for cross-platform safety.
-  const norm = rel.split(path.sep).join("/");
+function pathToSlug(relPath: string): string[] {
+  const norm = relPath.split(path.sep).join("/");
   let withoutExt = norm.replace(/\.md$/i, "");
-  // Collapse trailing /README into the directory name.
   withoutExt = withoutExt.replace(/\/README$/i, "");
   if (withoutExt === "README") withoutExt = "readme";
   return withoutExt.split("/").map((s) => s.toLowerCase());
@@ -164,21 +120,15 @@ function categorize(rel: string): { category: DocCategory; subgroup?: string } {
   return { category: "Overview" };
 }
 
-/**
- * Best-effort title extraction. Prefers frontmatter `title`, then first H1,
- * then a humanized form of the filename.
- */
-function extractTitle(filename: string, frontmatter: Record<string, any>, body: string): string {
+function extractTitle(filename: string, frontmatter: Record<string, unknown>, body: string): string {
   if (frontmatter.title && typeof frontmatter.title === "string") return frontmatter.title;
   const h1 = /^#\s+(.+)$/m.exec(body);
   if (h1) return h1[1].replace(/[`*_]/g, "").trim();
   const base = filename.replace(/\.md$/i, "").replace(/^README$/i, "Overview");
-  return base
-    .replace(/[-_]+/g, " ")
-    .replace(/\b\w/g, (m) => m.toUpperCase());
+  return base.replace(/[-_]+/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
 }
 
-function snippet(text: string, limit = 220): string {
+function makeSnippet(text: string, limit = 220): string {
   const stripped = text
     .replace(/^#+\s+.+$/gm, "")
     .replace(/```[\s\S]*?```/g, "")
@@ -194,156 +144,248 @@ function extractHeadings(body: string): Array<{ depth: 2 | 3; text: string; id: 
   const lines = body.split("\n");
   let inFence = false;
   for (const line of lines) {
-    if (/^```/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
+    if (/^```/.test(line)) { inFence = !inFence; continue; }
     if (inFence) continue;
     const m = /^(#{2,3})\s+(.+?)\s*$/.exec(line);
     if (!m) continue;
     const depth = m[1].length === 2 ? 2 : 3;
     const text = m[2].replace(/[`*_]/g, "").trim();
-    const id = slugifyHeading(text);
+    const id = text.toLowerCase().replace(/[^\p{L}\p{N}\s-]+/gu, "").trim().replace(/\s+/g, "-");
     out.push({ depth: depth as 2 | 3, text, id });
   }
   return out;
 }
 
-function slugifyHeading(text: string): string {
-  // Mirrors github-slugger's behavior closely enough for in-page anchors.
-  return text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s-]+/gu, "")
-    .trim()
-    .replace(/\s+/g, "-");
-}
-
-/**
- * Order keys per category for deterministic sidebar rendering. Numbered
- * concept files sort by their leading number; the rest sort alphabetically.
- */
 function orderFor(category: DocCategory, slugPath: string, title: string): number {
-  if (category === "Concepts") {
-    const m = /\/(\d+)-/.exec(slugPath);
-    if (m) return parseInt(m[1], 10);
-  }
-  if (category === "Scenarios") {
+  if (category === "Concepts" || category === "Scenarios") {
     const m = /\/(\d+)-/.exec(slugPath);
     if (m) return parseInt(m[1], 10);
   }
   if (category === "Overview") {
-    // Promote a few canonical files to the top.
     if (/\/?readme$/i.test(slugPath)) return 0;
     if (/positioning$/i.test(slugPath)) return 1;
   }
   return 1000 + (title.charCodeAt(0) || 0);
 }
 
-let _cache: DocMeta[] | null = null;
-const IS_DEV = process.env.NODE_ENV === "development";
+function parseDoc(relPath: string, raw: string): DocMeta {
+  const parsed = matter(raw);
+  const body = parsed.content;
+  const slug = pathToSlug(relPath);
+  const slugPath = slug.join("/");
+  const filename = relPath.split("/").pop() ?? relPath;
+  const title = extractTitle(filename, parsed.data ?? {}, body);
+  const { category, subgroup } = categorize(relPath);
+  return {
+    slug,
+    slugPath,
+    relativePath: relPath,
+    title,
+    category,
+    subgroup,
+    snippet: makeSnippet(body),
+    headings: extractHeadings(body),
+    order: orderFor(category, slugPath, title),
+  };
+}
 
-export function getAllDocs(): DocMeta[] {
-  // Skip the in-process cache in development so that running sync-docs picks
-  // up new vendor files without requiring a server restart.
-  if (_cache && !IS_DEV) return _cache;
-  if (!exists(DOCS_DIR)) {
-    _cache = [];
-    return _cache;
-  }
-  const files = safeReadDirRecursive(DOCS_DIR);
-  const docs: DocMeta[] = [];
-  for (const abs of files) {
-    const rel = path.relative(DOCS_DIR, abs);
-    if (isExcluded(rel)) continue;
-    let raw: string;
-    try {
-      raw = fs.readFileSync(abs, "utf8");
-    } catch {
-      continue;
-    }
-    const parsed = matter(raw);
-    const body = parsed.content;
-    const slug = pathToSlug(rel);
-    const slugPath = slug.join("/");
-    const filename = path.basename(rel);
-    const title = extractTitle(filename, parsed.data ?? {}, body);
-    const { category, subgroup } = categorize(rel);
-    const headings = extractHeadings(body);
-    const order = orderFor(category, slugPath, title);
-    docs.push({
-      slug,
-      slugPath,
-      relativePath: rel,
-      title,
-      category,
-      subgroup,
-      snippet: snippet(body),
-      headings,
-      order,
-    });
-  }
-  docs.sort((a, b) => {
+function sortDocs(docs: DocMeta[]): DocMeta[] {
+  return docs.sort((a, b) => {
     if (a.category !== b.category) return a.category.localeCompare(b.category);
     if ((a.subgroup ?? "") !== (b.subgroup ?? ""))
       return (a.subgroup ?? "").localeCompare(b.subgroup ?? "");
     if (a.order !== b.order) return a.order - b.order;
     return a.title.localeCompare(b.title);
   });
-  _cache = docs;
-  return docs;
 }
 
-export interface TomlFile {
-  filename: string;
-  content: string;
+// ─── Filesystem backend ───────────────────────────────────────────────────────
+
+function exists(p: string): boolean {
+  try { fs.accessSync(p); return true; } catch { return false; }
 }
 
-/** Returns TOML config files (plan, policy, credential) for a scenario doc. */
-export function getScenarioTomlFiles(meta: DocMeta): TomlFile[] {
+function safeReadDirRecursive(root: string): string[] {
+  const out: string[] = [];
+  if (!exists(root)) return out;
+  const SKIP = new Set(["node_modules", ".git", "target", "dist", "build", ".next"]);
+  const stack: string[] = [root];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { if (!SKIP.has(e.name)) stack.push(full); }
+      else if (e.isFile() && e.name.toLowerCase().endsWith(".md")) out.push(full);
+    }
+  }
+  return out;
+}
+
+let _fsCache: DocMeta[] | null = null;
+
+function getAllDocsFromFS(): DocMeta[] {
+  if (_fsCache && !IS_DEV) return _fsCache;
+  if (!exists(DOCS_DIR)) { _fsCache = []; return []; }
+  const files = safeReadDirRecursive(DOCS_DIR);
+  const docs: DocMeta[] = [];
+  for (const abs of files) {
+    const rel = path.relative(DOCS_DIR, abs).split(path.sep).join("/");
+    if (isExcluded(rel)) continue;
+    let raw: string;
+    try { raw = fs.readFileSync(abs, "utf8"); } catch { continue; }
+    docs.push(parseDoc(rel, raw));
+  }
+  _fsCache = sortDocs(docs);
+  return _fsCache;
+}
+
+function getDocBySlugFromFS(slug: string[]): { meta: DocMeta; raw: string } | null {
+  const slugPath = slug.join("/").toLowerCase();
+  const meta = getAllDocsFromFS().find((d) => d.slugPath === slugPath);
+  if (!meta) return null;
+  const abs = path.join(DOCS_DIR, meta.relativePath);
+  try { return { meta, raw: fs.readFileSync(abs, "utf8") }; } catch { return null; }
+}
+
+function getScenarioTomlFilesFromFS(meta: DocMeta): TomlFile[] {
   if (meta.category !== "Scenarios") return [];
   const dir = path.join(DOCS_DIR, path.dirname(meta.relativePath));
   if (!exists(dir)) return [];
   let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; }
   const files: TomlFile[] = [];
   for (const e of entries) {
-    if (!e.isFile()) continue;
-    if (path.extname(e.name).toLowerCase() !== ".toml") continue;
+    if (!e.isFile() || path.extname(e.name).toLowerCase() !== ".toml") continue;
     try {
-      const content = fs.readFileSync(path.join(dir, e.name), "utf8");
-      files.push({ filename: e.name, content });
-    } catch {
-      /* skip unreadable */
-    }
+      files.push({ filename: e.name, content: fs.readFileSync(path.join(dir, e.name), "utf8") });
+    } catch { /* skip */ }
   }
-  // Canonical order: plan → policy → credential → everything else
   const ORDER = ["plan.toml", "policy.toml", "credential.toml"];
-  files.sort((a, b) => {
-    const ai = ORDER.indexOf(a.filename);
-    const bi = ORDER.indexOf(b.filename);
+  return files.sort((a, b) => {
+    const ai = ORDER.indexOf(a.filename), bi = ORDER.indexOf(b.filename);
     if (ai !== -1 && bi !== -1) return ai - bi;
-    if (ai !== -1) return -1;
-    if (bi !== -1) return 1;
+    if (ai !== -1) return -1; if (bi !== -1) return 1;
     return a.filename.localeCompare(b.filename);
   });
-  return files;
 }
 
-export function getDocBySlug(slug: string[]): { meta: DocMeta; raw: string } | null {
+// ─── GitHub API backend ───────────────────────────────────────────────────────
+
+async function ghFetch(url: string): Promise<Response> {
+  const headers: Record<string, string> = { Accept: "application/vnd.github.v3+json" };
+  if (GITHUB_TOKEN) headers["Authorization"] = `Bearer ${GITHUB_TOKEN}`;
+  return fetch(url, { headers, next: { revalidate: REVALIDATE } });
+}
+
+async function fetchRaw(filePath: string): Promise<string> {
+  const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/${filePath}`;
+  const res = await fetch(url, { next: { revalidate: REVALIDATE } });
+  if (!res.ok) throw new Error(`GitHub raw ${res.status}: ${filePath}`);
+  return res.text();
+}
+
+interface GithubTreeItem { path: string; type: string; }
+
+async function fetchGithubTree(): Promise<GithubTreeItem[]> {
+  const res = await ghFetch(
+    `https://api.github.com/repos/${GITHUB_REPO}/git/trees/${GITHUB_BRANCH}?recursive=1`
+  );
+  if (!res.ok) throw new Error(`GitHub tree API: ${res.status}`);
+  const data = await res.json();
+  return (data.tree ?? []) as GithubTreeItem[];
+}
+
+async function getAllDocsFromGitHub(): Promise<DocMeta[]> {
+  const tree = await fetchGithubTree();
+  const mdPaths = tree
+    .filter((item) => item.type === "blob" && item.path.endsWith(".md") && !isExcluded(item.path))
+    .map((item) => item.path);
+
+  // Fetch all files in parallel — Next.js deduplicates & caches each fetch.
+  const results = await Promise.allSettled(
+    mdPaths.map(async (filePath) => {
+      const raw = await fetchRaw(filePath);
+      return parseDoc(filePath, raw);
+    })
+  );
+
+  const docs: DocMeta[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") docs.push(r.value);
+  }
+  return sortDocs(docs);
+}
+
+async function getDocBySlugFromGitHub(
+  slug: string[]
+): Promise<{ meta: DocMeta; raw: string } | null> {
+  const all = await getAllDocsFromGitHub();
   const slugPath = slug.join("/").toLowerCase();
-  const meta = getAllDocs().find((d) => d.slugPath === slugPath);
+  const meta = all.find((d) => d.slugPath === slugPath);
   if (!meta) return null;
-  const abs = path.join(DOCS_DIR, meta.relativePath);
   try {
-    return { meta, raw: fs.readFileSync(abs, "utf8") };
+    const raw = await fetchRaw(meta.relativePath);
+    return { meta, raw };
   } catch {
     return null;
   }
 }
+
+async function getScenarioTomlFilesFromGitHub(meta: DocMeta): Promise<TomlFile[]> {
+  if (meta.category !== "Scenarios") return [];
+  const dir = meta.relativePath.split("/").slice(0, -1).join("/");
+  const tree = await fetchGithubTree();
+  const tomlPaths = tree
+    .filter(
+      (item) =>
+        item.type === "blob" &&
+        item.path.endsWith(".toml") &&
+        item.path.startsWith(dir + "/")
+    )
+    .map((item) => item.path);
+
+  const results = await Promise.allSettled(
+    tomlPaths.map(async (p) => ({
+      filename: p.split("/").pop()!,
+      content: await fetchRaw(p),
+    }))
+  );
+
+  const files: TomlFile[] = [];
+  for (const r of results) {
+    if (r.status === "fulfilled") files.push(r.value);
+  }
+  const ORDER = ["plan.toml", "policy.toml", "credential.toml"];
+  return files.sort((a, b) => {
+    const ai = ORDER.indexOf(a.filename), bi = ORDER.indexOf(b.filename);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1; if (bi !== -1) return 1;
+    return a.filename.localeCompare(b.filename);
+  });
+}
+
+// ─── Public API (always async) ────────────────────────────────────────────────
+
+export async function getAllDocs(): Promise<DocMeta[]> {
+  if (USE_GITHUB) return getAllDocsFromGitHub();
+  return getAllDocsFromFS();
+}
+
+export async function getDocBySlug(
+  slug: string[]
+): Promise<{ meta: DocMeta; raw: string } | null> {
+  if (USE_GITHUB) return getDocBySlugFromGitHub(slug);
+  return getDocBySlugFromFS(slug);
+}
+
+export async function getScenarioTomlFiles(meta: DocMeta): Promise<TomlFile[]> {
+  if (USE_GITHUB) return getScenarioTomlFilesFromGitHub(meta);
+  return getScenarioTomlFilesFromFS(meta);
+}
+
+// ─── Category helpers ─────────────────────────────────────────────────────────
 
 export interface DocsByCategory {
   category: DocCategory;
@@ -351,23 +393,14 @@ export interface DocsByCategory {
 }
 
 const CATEGORY_ORDER: DocCategory[] = [
-  "Overview",
-  "Concepts",
-  "Specs",
-  "Guides",
-  "Scenarios",
-  "Perspectives",
+  "Overview", "Concepts", "Specs", "Guides", "Scenarios", "Perspectives",
 ];
 
-export function getDocsByCategory(): DocsByCategory[] {
-  const all = getAllDocs();
+export async function getDocsByCategory(): Promise<DocsByCategory[]> {
+  const all = await getAllDocs();
   const grouped: Record<DocCategory, Map<string | undefined, DocMeta[]>> = {
-    Overview: new Map(),
-    Concepts: new Map(),
-    Specs: new Map(),
-    Guides: new Map(),
-    Scenarios: new Map(),
-    Perspectives: new Map(),
+    Overview: new Map(), Concepts: new Map(), Specs: new Map(),
+    Guides: new Map(), Scenarios: new Map(), Perspectives: new Map(),
   };
   for (const d of all) {
     const m = grouped[d.category];
@@ -378,11 +411,7 @@ export function getDocsByCategory(): DocsByCategory[] {
   for (const cat of CATEGORY_ORDER) {
     const m = grouped[cat];
     if (m.size === 0) continue;
-    const groups = Array.from(m.entries()).map(([subgroup, docs]) => ({
-      subgroup,
-      docs,
-    }));
-    // Stable subgroup order — explicit for Specs.
+    const groups = Array.from(m.entries()).map(([subgroup, docs]) => ({ subgroup, docs }));
     if (cat === "Specs") {
       const want = ["Foundations", "v1", "v2", "v3"];
       groups.sort((a, b) => {

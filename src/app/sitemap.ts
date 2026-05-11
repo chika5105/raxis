@@ -3,7 +3,7 @@ import { getAllDocs } from "@/lib/docs";
 
 const BASE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://raxis.dev";
 
-export default function sitemap(): MetadataRoute.Sitemap {
+export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const now = new Date();
   const staticEntries: MetadataRoute.Sitemap = [
     "",
@@ -21,7 +21,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
     priority: p === "" ? 1.0 : 0.8,
   }));
 
-  const docEntries: MetadataRoute.Sitemap = getAllDocs().map((doc) => ({
+  const docEntries: MetadataRoute.Sitemap = (await getAllDocs()).map((doc) => ({
     url: `${BASE_URL}/docs/${doc.slugPath}`,
     lastModified: now,
     changeFrequency: "weekly",

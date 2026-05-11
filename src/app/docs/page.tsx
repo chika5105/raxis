@@ -10,8 +10,10 @@ export const metadata: Metadata = {
     "Everything needed to evaluate, implement, operate, or audit Raxis: the paradigm spec, the reference implementation specs, every concept guide, fifty end-to-end scenarios.",
 };
 
-export default function DocsIndexPage() {
-  const sections = getDocsByCategory();
+export const revalidate = 3600;
+
+export default async function DocsIndexPage() {
+  const sections = await getDocsByCategory();
   const totalCount = sections.reduce(
     (n, s) => n + s.groups.reduce((m, g) => m + g.docs.length, 0),
     0,
@@ -34,7 +36,7 @@ export default function DocsIndexPage() {
             Everything needed to evaluate, implement, or audit Raxis
           </h1>
           <p className="subtitle mt-4 max-w-2xl">
-            Pulled from the source repository at build time.
+            Pulled from the source repository, refreshed hourly.
             {totalCount > 0 && <> {totalCount} documents indexed.</>}
           </p>
           <div className="mt-7">

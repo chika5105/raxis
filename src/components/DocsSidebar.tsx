@@ -8,8 +8,8 @@ interface Props {
   active?: string;
 }
 
-export function DocsSidebar({ active }: Props) {
-  const sections = getDocsByCategory();
+export async function DocsSidebar({ active }: Props) {
+  const sections = await getDocsByCategory();
 
   return (
     <nav aria-label="Documentation" className="text-sm">

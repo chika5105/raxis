@@ -11,13 +11,16 @@ interface Params {
   params: Promise<{ slug: string[] }>;
 }
 
+export const revalidate = 3600;
+
 export async function generateStaticParams() {
-  return getAllDocs().map((doc) => ({ slug: doc.slug }));
+  const docs = await getAllDocs();
+  return docs.map((doc) => ({ slug: doc.slug }));
 }
 
 export async function generateMetadata({ params }: Params): Promise<Metadata> {
   const { slug } = await params;
-  const found = getDocBySlug(slug);
+  const found = await getDocBySlug(slug);
   if (!found) return { title: "Not found" };
   return {
     title: found.meta.title,
@@ -27,12 +30,12 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
 
 export default async function DocPage({ params }: Params) {
   const { slug } = await params;
-  const found = getDocBySlug(slug);
+  const found = await getDocBySlug(slug);
   if (!found) notFound();
   const { html } = await renderMarkdown(found.raw);
   const { meta } = found;
-  const tomlFiles = getScenarioTomlFiles(meta);
-  const all = getAllDocs();
+  const tomlFiles = await getScenarioTomlFiles(meta);
+  const all = await getAllDocs();
   const idx = all.findIndex((d) => d.slugPath === meta.slugPath);
   const prev = idx > 0 ? all[idx - 1] : null;
   const next = idx >= 0 && idx < all.length - 1 ? all[idx + 1] : null;
