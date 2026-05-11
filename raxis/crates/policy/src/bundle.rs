@@ -4024,10 +4024,61 @@ impl PolicyBundle {
 
     /// Look up an operator by pubkey fingerprint (the `signed_by` field from
     /// plan.sig / policy.sig). Returns `None` if no entry matches.
+    ///
+    /// Accepts either fingerprint width:
+    ///
+    ///   * **32 hex chars** — the canonical `OperatorEntry::pubkey_fingerprint`
+    ///     form emitted by `raxis_policy::loader::operator_pubkey_fingerprint`
+    ///     (= `hex(SHA-256(pubkey_bytes)[..16])`). This is what the
+    ///     genesis policy template (`crates/genesis-tools::render_genesis_policy_toml`)
+    ///     writes to disk and what the operator IPC challenge-response
+    ///     handshake (`kernel::ipc::auth::verify_response`) sends on
+    ///     the wire.
+    ///
+    ///   * **16 hex chars** — the `OperatorFingerprint` form (a typed
+    ///     `[u8; 8]` = first 8 bytes of the same digest, hex-encoded).
+    ///     This is what plan-bundle V2.1 envelopes carry as
+    ///     `signed_by` (per `specs/v2/plan-bundle-sealing.md §3.4`)
+    ///     and what `OperatorRequest::CreateInitiativeV2` lookups
+    ///     pass in via `req.signed_by.to_hex()`.
+    ///
+    /// The 16-char form is *always* a prefix of the 32-char form for
+    /// the same key (`hex(d[..8]) == hex(d[..16])[..16]`), so
+    /// matching the supplied fingerprint as either an exact equality
+    /// or a 16-char prefix of a stored 32-char fingerprint is
+    /// unambiguous: a fingerprint can only resolve to the same
+    /// operator under both representations or to nothing at all.
+    /// We deliberately do NOT trim or pad the supplied input — the
+    /// caller passes whichever form they have and the lookup
+    /// transparently bridges the two surface layers (genesis policy
+    /// 32-char ↔ plan-bundle 16-char) without requiring a schema
+    /// change.
     pub fn operator_entry(&self, fingerprint: &str) -> Option<&OperatorEntry> {
-        self.operators
+        // Fast path: exact match (the common case for the dashboard /
+        // audit-display surface that already speaks the 32-char form).
+        if let Some(op) = self
+            .operators
             .iter()
             .find(|op| op.pubkey_fingerprint == fingerprint)
+        {
+            return Some(op);
+        }
+
+        // Bridge path: 16-char `OperatorFingerprint` against a stored
+        // 32-char `pubkey_fingerprint`. Reject any other length
+        // combination so a malformed fingerprint can never resolve
+        // by accident.
+        if fingerprint.len() == 16 {
+            return self
+                .operators
+                .iter()
+                .find(|op| {
+                    op.pubkey_fingerprint.len() == 32
+                        && op.pubkey_fingerprint.starts_with(fingerprint)
+                });
+        }
+
+        None
     }
 
     /// Convenience around [`operator_entry`] for the (very common)

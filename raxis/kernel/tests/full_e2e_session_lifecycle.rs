@@ -177,8 +177,15 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 /// (orchestrator boot → executor commit → reviewer approve →
 /// integration-merge) to land in the audit log. Worst case three
 /// VM cold-boots + three real LLM round-trips with a small claude-
-/// sonnet model.
-const LIFECYCLE_DEADLINE: Duration = Duration::from_secs(360);
+/// sonnet model. May be overridden by `RAXIS_E2E_LIFECYCLE_DEADLINE_SECS`
+/// for fast-fail iteration cycles during AVF substrate bring-up.
+fn lifecycle_deadline() -> Duration {
+    let secs = std::env::var("RAXIS_E2E_LIFECYCLE_DEADLINE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(360);
+    Duration::from_secs(secs)
+}
 
 /// Operator-cert seed used for the test. Chosen to be distinct from
 /// the harness's `[0xA5; 32]` so tests that share a binary do not
@@ -469,10 +476,38 @@ fn build_e2e_operator_key() -> (SigningKey, OperatorFingerprint) {
 fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
     let kernel_bin = build_and_locate_kernel();
 
+    // ── macOS — codesign the test-profile kernel binary against
+    //    `release/raxis.entitlements` so AVF accepts the spawn.
+    //    Without this the orchestrator spawn surfaces as
+    //    `Invalid virtual machine configuration. The process doesn't
+    //    have the "com.apple.security.virtualization" entitlement.`
+    //    inside the audit chain. The signature is harmless on rebuild
+    //    (codesign --force overwrites); we apply it every test run so
+    //    a fresh `cargo test` after `cargo clean` still works.
+    #[cfg(target_os = "macos")]
+    codesign_kernel_for_avf(&kernel_bin);
+
+    // Anchor the cert validity window at *real* wall-clock time. The
+    // `CertOpts::default()` anchor is `1_700_000_000` (Nov 2023) which
+    // is intentional for hermetic unit tests — they pin the clock.
+    // The live E2E runs against a kernel that reads
+    // `SystemTime::now()`, so the fixture clock has to match or the
+    // cert lands in the Expired zone.
+    let now_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is post-epoch")
+        .as_secs() as i64;
     let cert = ephemeral_cert_with_key(signing_key, CertOpts {
-        now_unix_secs: 1_700_000_000,
+        now_unix_secs,
         permitted_ops: vec![
+            // V2.1 IPC: the test wraps the plan in a signed
+            // PlanBundle and goes through `CreateInitiativeV2`.
+            // The legacy `CreateInitiative` op is still listed so
+            // the same cert can drive any V1-compatibility surface
+            // (e.g. fallback paths inside the kernel that still
+            // resolve through `intent::handle_create_initiative`).
             "CreateInitiative".to_owned(),
+            "CreateInitiativeV2".to_owned(),
             "ApprovePlan".to_owned(),
             "AbortInitiative".to_owned(),
         ],
@@ -533,11 +568,27 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
 
     let stderr = child.stderr.take().expect("kernel stderr captured");
     let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
+    // Mirror stderr to a log file under `<data_dir>/kernel.stderr.log`
+    // so the deadline-exceeded path in `poll_for_lifecycle_completion`
+    // can tail it without sharing a `KernelInstance` handle with the
+    // poll loop. The on-disk file is also useful for post-mortem
+    // triage when the test panics in CI.
+    let log_path = data_dir.join("kernel.stderr.log");
+    let log_handle = std::fs::File::create(&log_path).ok().map(|f| {
+        Arc::new(Mutex::new(f))
+    });
     {
-        let lines = Arc::clone(&stderr_lines);
+        let lines       = Arc::clone(&stderr_lines);
+        let log_handle  = log_handle.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
+                if let Some(h) = &log_handle {
+                    if let Ok(mut g) = h.lock() {
+                        use std::io::Write as _;
+                        let _ = writeln!(g, "{line}");
+                    }
+                }
                 lines.lock().unwrap().push(line);
             }
         });
@@ -696,7 +747,7 @@ struct OperatorIpc {
 }
 
 impl OperatorIpc {
-    fn connect(socket_path: &Path, signing_key: &SigningKey, fingerprint: &OperatorFingerprint) -> Self {
+    fn connect(socket_path: &Path, signing_key: &SigningKey, _fingerprint: &OperatorFingerprint) -> Self {
         let mut stream = UnixStream::connect(socket_path)
             .unwrap_or_else(|e| panic!("connect {}: {e}", socket_path.display()));
 
@@ -712,9 +763,20 @@ impl OperatorIpc {
         let sig = signing_key.sign(&challenge_bytes);
 
         // Step 3: send response.
-        let fingerprint_hex = hex::encode(fingerprint.as_bytes());
+        //
+        // The IPC handshake fingerprint is the **policy** form
+        // (`raxis_policy::loader::operator_pubkey_fingerprint`,
+        // SHA-256[:16] = 32 hex chars). It is a different value
+        // from `OperatorFingerprint` (SHA-256[:8] = 16 hex chars)
+        // which is carried inside plan bundles for the `signed_by`
+        // field. Sending the 8-char form here would surface as the
+        // exact `fingerprint '...' not found in policy` error
+        // because `policy.operator_entry()` keys on the 32-char
+        // form emitted by `render_genesis_policy_toml`.
+        let pubkey = signing_key.verifying_key().to_bytes();
+        let policy_fingerprint_hex = policy_fingerprint_32(&pubkey);
         let response = serde_json::json!({
-            "fingerprint":          fingerprint_hex,
+            "fingerprint":          policy_fingerprint_hex,
             "signed_challenge_hex": hex::encode(sig.to_bytes()),
         });
         write_json_frame(&mut stream, &response).expect("write auth response");
@@ -757,13 +819,17 @@ impl OperatorIpc {
         });
         write_json_frame(&mut self.stream, &req).expect("write CreateInitiativeV2");
         let resp = read_json_blocking(&mut self.stream);
+        // Wire shape per `raxis_types::operator_wire::OperatorResponse`
+        // (`#[serde(tag = "status", content = "payload")]`):
+        //   { "status": "InitiativeCreated",
+        //     "payload": { "initiative_id": "<uuid>", "status": "Draft" } }
         assert_eq!(
-            resp["result"].as_str(), Some("InitiativeCreated"),
+            resp["status"].as_str(), Some("InitiativeCreated"),
             "CreateInitiativeV2 must succeed; got: {resp:#}",
         );
-        let returned_id = resp["initiative_id"]
+        let returned_id = resp["payload"]["initiative_id"]
             .as_str()
-            .expect("InitiativeCreated carries initiative_id");
+            .expect("InitiativeCreated carries payload.initiative_id");
         assert_eq!(returned_id, initiative_id, "initiative id roundtrip");
     }
 
@@ -771,18 +837,34 @@ impl OperatorIpc {
     /// auto-spawn callsite in `kernel/src/initiatives/lifecycle.rs::
     /// approve_plan` (post-commit `OrchestratorSpawn::spawn_for_
     /// initiative` fires here).
-    fn approve_plan(&mut self, initiative_id: &str, fingerprint: &OperatorFingerprint) {
+    ///
+    /// `approving_operator` MUST be the **policy** 32-char form
+    /// (= `policy_fingerprint_32(pubkey)`) because
+    /// `handle_approve_plan` cross-checks it against the
+    /// connection-authenticated operator fingerprint set up by
+    /// `verify_response`, which is itself the policy form. The
+    /// 16-char `OperatorFingerprint` form (used inside plan-bundle
+    /// `signed_by`) would surface as
+    /// `FAIL_OPERATOR_IDENTITY_MISMATCH` here even though both
+    /// fingerprints reference the same key.
+    fn approve_plan(&mut self, initiative_id: &str, _fingerprint: &OperatorFingerprint) {
+        let signing_key = SigningKey::from_bytes(&E2E_OPERATOR_SEED);
+        let pubkey = signing_key.verifying_key().to_bytes();
+        let approving_operator_32 = policy_fingerprint_32(&pubkey);
         let req = serde_json::json!({
             "op": "ApprovePlan",
             "payload": {
                 "initiative_id":      initiative_id,
-                "approving_operator": hex::encode(fingerprint.as_bytes()),
+                "approving_operator": approving_operator_32,
             },
         });
         write_json_frame(&mut self.stream, &req).expect("write ApprovePlan");
         let resp = read_json_blocking(&mut self.stream);
+        // Same wire shape as `submit_plan` above — `OperatorResponse`
+        // serialises with the variant tag in the top-level `status`
+        // field and the variant body under `payload`.
         assert_eq!(
-            resp["result"].as_str(), Some("PlanApproved"),
+            resp["status"].as_str(), Some("PlanApproved"),
             "ApprovePlan must succeed; got: {resp:#}",
         );
     }
@@ -855,6 +937,13 @@ fn canonical_plan_toml() -> String {
         "  name       = \"test-gcp-dev\"",
         "  proxy_type = \"gcp\"",
         "  mount_as   = \"GCP_METADATA_URL\"",
+        // The GCP proxy variant requires `project` (the GCP project
+        // ID returned by `/computeMetadata/v1/project/project-id`).
+        // See `crates/plan-credentials/src/lib.rs::ProxyVariant::Gcp`.
+        // Use a deterministic placeholder — the live test never
+        // contacts real GCP from inside the VM (the proxy emulates
+        // the metadata server locally).
+        "  project    = \"raxis-e2e\"",
         "",
         "# ── Reviewer task ──────────────────────────────────────",
         "[[tasks]]",
@@ -898,6 +987,78 @@ fn build_plan_bundle(plan_toml: &str) -> PlanBundle {
     )
 }
 
+/// Codesign `kernel_bin` against `release/raxis.entitlements`
+/// using ad-hoc signing (`codesign --sign -`). Required so AVF
+/// honours `com.apple.security.virtualization` when the test
+/// invokes the integration-test build of `raxis-kernel`. Best-
+/// effort: panics with a clear remediation if `codesign` is
+/// unavailable, no-ops when the entitlements file cannot be
+/// located (e.g. someone moved the workspace).
+///
+/// Mirrors `cargo xtask dev-codesign` exactly so the production
+/// recipe and the test recipe never drift.
+#[cfg(target_os = "macos")]
+fn codesign_kernel_for_avf(kernel_bin: &Path) {
+    // Walk up from the binary to the workspace root. The kernel
+    // binary lives at `target/<profile>/raxis-kernel-<hash>` (test
+    // profile) or `target/<profile>/raxis-kernel` (release).
+    // Workspace root is the ancestor whose `Cargo.toml` carries a
+    // `[workspace]` table.
+    let mut anchor = kernel_bin
+        .parent()
+        .and_then(|p| p.parent())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    loop {
+        let manifest = anchor.join("Cargo.toml");
+        if manifest.exists() {
+            if let Ok(s) = std::fs::read_to_string(&manifest) {
+                if s.contains("[workspace]") {
+                    break;
+                }
+            }
+        }
+        if !anchor.pop() {
+            eprintln!(
+                "[e2e] codesign: could not locate workspace root from {} \
+                 — skipping AVF entitlement signing (orchestrator spawn \
+                 will fail with com.apple.security.virtualization missing)",
+                kernel_bin.display(),
+            );
+            return;
+        }
+    }
+
+    let entitlements = anchor.join("release/raxis.entitlements");
+    if !entitlements.exists() {
+        eprintln!(
+            "[e2e] codesign: missing entitlements at {} — skipping",
+            entitlements.display(),
+        );
+        return;
+    }
+
+    let status = Command::new("codesign")
+        .arg("--sign").arg("-")
+        .arg("--entitlements").arg(&entitlements)
+        .arg("--options").arg("runtime")
+        .arg("--force")
+        .arg(kernel_bin)
+        .status()
+        .expect("codesign(1) is required for AVF tests on macOS — install Xcode CLI tools");
+    if !status.success() {
+        panic!(
+            "codesign failed (exit {:?}) for {}; the orchestrator spawn \
+             will be denied by AVF without the entitlements signature",
+            status.code(), kernel_bin.display(),
+        );
+    }
+    eprintln!(
+        "[e2e] codesigned {} for AVF (com.apple.security.virtualization)",
+        kernel_bin.display(),
+    );
+}
+
 /// Compute the operator key fingerprint per
 /// `raxis_types::compute_operator_fingerprint` (SHA-256[:8] of the
 /// 32-byte ed25519 pubkey). Inlined here so the test does not pull
@@ -909,6 +1070,21 @@ fn fingerprint_8(pubkey: &[u8; 32]) -> OperatorFingerprint {
     let mut out = [0u8; 8];
     out.copy_from_slice(&hash[..8]);
     OperatorFingerprint::new(out)
+}
+
+/// Compute the **policy** operator-key fingerprint —
+/// `hex(SHA-256[:16](raw_pubkey_bytes))`, 32 hex chars. Mirrors
+/// `raxis_policy::loader::operator_pubkey_fingerprint` but works
+/// directly off raw pubkey bytes (the policy helper takes a hex
+/// string). This is the form embedded in
+/// `[[operators.entries]].pubkey_fingerprint` by
+/// `render_genesis_policy_toml` and consulted by the IPC
+/// challenge-response handshake (`kernel::ipc::auth::verify_response`).
+fn policy_fingerprint_32(pubkey: &[u8; 32]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(pubkey);
+    let digest = hasher.finalize();
+    hex::encode(&digest[..16])
 }
 
 // ---------------------------------------------------------------------------
@@ -932,16 +1108,36 @@ fn fingerprint_8(pubkey: &[u8; 32]) -> OperatorFingerprint {
 /// that must be present.
 fn poll_for_lifecycle_completion(data_dir: &Path, initiative_id: &str) -> Vec<AuditEvent> {
     let audit_dir = data_dir.join("audit");
+    let deadline  = lifecycle_deadline();
     let start = Instant::now();
     let mut last_len = 0usize;
     loop {
-        if start.elapsed() > LIFECYCLE_DEADLINE {
+        if start.elapsed() > deadline {
+            // Last-mile observability — try to read the kernel
+            // stderr capture file (if the harness wrote one) so the
+            // panic surfaces enough context to triage the spawn /
+            // planner / merge pipeline. The capture is best-effort:
+            // we print the audit chain summary either way.
+            let stderr_path = audit_dir.parent()
+                .map(|p| p.join("kernel.stderr.log"));
+            let stderr_tail = stderr_path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|s| {
+                    let lines: Vec<&str> = s.lines().collect();
+                    let n = lines.len();
+                    let take = n.min(60);
+                    lines[n.saturating_sub(take)..].join("\n")
+                })
+                .unwrap_or_else(|| "<no kernel.stderr.log on disk>".to_owned());
             panic!(
-                "lifecycle deadline of {LIFECYCLE_DEADLINE:?} exceeded \
+                "lifecycle deadline of {deadline:?} exceeded \
                  without IntegrationMergeCompleted for {initiative_id}; \
-                 audit chain at exit ({} events):\n{}",
+                 audit chain at exit ({} events):\n{}\n\n\
+                 ── kernel.stderr (tail) ──\n{}",
                 last_len,
                 summarize_chain_for_panic(&audit_dir),
+                stderr_tail,
             );
         }
 

@@ -3599,6 +3599,7 @@ dependencies = [
 name = "raxis-isolation-apple-vz"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "block2",
  "dispatch2",
  "objc2",
@@ -3784,6 +3785,7 @@ name = "raxis-planner-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "hex",
  "hmac 0.12.1",
  "raxis-ipc",

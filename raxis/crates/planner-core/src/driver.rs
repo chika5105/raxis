@@ -361,18 +361,65 @@ where
         }
     });
 
-    let model: Arc<dyn ModelClient> = Arc::new(AnthropicClient::new(base_url));
+    // ── Connect kernel transport BEFORE building the model so the
+    //    model's HttpFetch can share the connection (required for
+    //    `VsockListen` substrates where the guest's listener accepts
+    //    exactly one host-side connection).
+    let transport: Arc<dyn KernelTransport> =
+        crate::transport::connect(&transport_cfg).await?;
+
+    // ── Choose HTTP transport based on the kernel transport variant.
+    //
+    // Subprocess substrates dial the kernel over UDS and have full
+    // host network access — direct egress is the right answer
+    // (it matches the existing behaviour and lets the planner
+    // exploit reqwest's HTTP/2 connection pooling).
+    //
+    // VM substrates (`Vsock` dial / `VsockListen`) run the planner
+    // in an `EgressTier::None` (Orchestrator, Reviewer) or
+    // `Tier1Tproxy` (Executor) guest. The kernel-mediated path is
+    // the ONLY way out for `EgressTier::None` and a strict
+    // architectural improvement for `Tier1Tproxy` (the audit chain
+    // gains a single anchor on the kernel side per
+    // `provider-failure-handling.md §2.1`).
+    let http_fetch: Arc<dyn crate::http_fetch::HttpFetch> = match &transport_cfg {
+        crate::transport::KernelTransportConfig::Uds { .. } => {
+            Arc::new(crate::http_fetch::DirectHttpFetch::new())
+        }
+        crate::transport::KernelTransportConfig::Vsock { .. }
+        | crate::transport::KernelTransportConfig::VsockListen { .. } => {
+            Arc::new(crate::http_fetch::KernelMediatedHttpFetch::new(
+                Arc::clone(&transport),
+                env.session_token.as_str(),
+            ))
+        }
+    };
+
+    // ── Construct the model with the chosen HTTP transport.
+    //
+    // V2 GA wires `AnthropicClient` for every role; the
+    // multi-provider router (`v2_extended_gaps.md §C5` + 
+    // `provider-model-selection.md`) lands in V2.5 and will pick
+    // between Anthropic, OpenAI, Bedrock, Gemini, and Sidecar
+    // clients here based on the resolved `model_id`'s provider
+    // prefix. All five clients accept an `Arc<dyn HttpFetch>`
+    // through their `with_http_fetch` constructors so the swap
+    // requires no further driver-side change.
+    let model: Arc<dyn ModelClient> = Arc::new(
+        AnthropicClient::with_http_fetch(base_url, Arc::clone(&http_fetch)),
+    );
+
     let token_caps = TokenCaps {
         input_total:  max_tokens_input_total,
         output_total: max_tokens_output_total,
         total:        max_tokens_total,
     };
-    run_role_session_with_model(
+    run_role_session_with_connected_transport(
         role,
         args,
         env,
         task_prompt,
-        transport_cfg,
+        transport,
         workspace,
         model_id,
         max_turns,
@@ -449,13 +496,52 @@ pub async fn run_role_session_with_model(
     model: Arc<dyn ModelClient>,
     ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
-    // ── Step 1: connect to the kernel via the substrate-stamped
-    //    transport (UDS / VSock dial / VSock listen). The framing
-    //    on top is identical for all three; see
-    //    `transport::connect`.
     let transport: Arc<dyn KernelTransport> =
         crate::transport::connect(&transport_cfg).await?;
+    run_role_session_with_connected_transport(
+        role,
+        args,
+        env,
+        task_prompt,
+        transport,
+        workspace,
+        model_id,
+        max_turns,
+        max_tokens,
+        token_caps,
+        model,
+        ksb_snapshot,
+    )
+    .await
+}
 
+/// Variant of [`run_role_session_with_model`] that takes an
+/// already-connected [`KernelTransport`] instead of a
+/// [`KernelTransportConfig`]. The env-fn entry point uses this
+/// variant so the model's `KernelMediatedHttpFetch` can share the
+/// connection with the dispatch loop's `IntentSubmitter`.
+///
+/// Sharing the transport is mandatory under the `VsockListen`
+/// substrate where the in-guest listener accepts exactly one
+/// host-side connection (`tokio_vsock::VsockListener` with
+/// `backlog = 1`); UDS and `Vsock` dial allow multiple connections
+/// but sharing is still preferable so audit, ordering, and
+/// back-pressure happen under one stream.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_role_session_with_connected_transport(
+    role: Role,
+    args: BootArgs,
+    env: BootEnv,
+    task_prompt: String,
+    transport: Arc<dyn KernelTransport>,
+    workspace: PathBuf,
+    model_id: String,
+    max_turns: u32,
+    max_tokens: u32,
+    token_caps: TokenCaps,
+    model: Arc<dyn ModelClient>,
+    ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
+) -> Result<DriverOutcome, DriverError> {
     // ── Step 1b: construct the session-scoped IntentSubmitter ──────
     //
     // V2 §3.2 wires the `structured_output` tool to the submitter so

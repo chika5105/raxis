@@ -466,12 +466,32 @@ pub trait ModelClient: Send + Sync {
 
 /// Production Anthropic Messages API client. POSTs to
 /// `<base_url>/v1/messages` (default
-/// `https://api.anthropic.com`); the gateway's tproxy redirect is
-/// transparent — this struct does not need to know whether it's
-/// talking to Anthropic directly or through the gateway proxy.
+/// `https://api.anthropic.com`).
+///
+/// The buffered `create_message` path goes through an
+/// [`crate::http_fetch::HttpFetch`] so the same client works in
+/// every substrate:
+///
+/// * Subprocess / `Tier1Tproxy` substrates pass
+///   [`crate::http_fetch::DirectHttpFetch`] (`reqwest` direct
+///   egress + transparent tproxy interception in the VM).
+/// * `EgressTier::None` substrates (Orchestrator, Reviewer) pass
+///   [`crate::http_fetch::KernelMediatedHttpFetch`] which routes
+///   each call through `IpcMessage::PlannerFetchRequest` to the
+///   kernel + gateway.
+///
+/// Streaming (`create_message_stream`) still uses the embedded
+/// `reqwest::Client` directly because SSE is reqwest-specific; the
+/// kernel-mediated transport falls through the default
+/// [`ModelClient::create_message_stream`] body which wraps
+/// `create_message` in a synthetic four-event stream — semantics
+/// preserved per `INV-PROVIDER-04`.
 pub struct AnthropicClient {
-    http:           reqwest::Client,
-    base_url:       String,
+    http_fetch:        std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
+    /// Embedded `reqwest::Client` retained for the streaming path.
+    /// Cheap to clone; uses the canonical pool settings.
+    streaming_http:    reqwest::Client,
+    base_url:          String,
     /// Anthropic-required `anthropic-version` header. Stamped at
     /// build time from a constant; future API versions land as a
     /// new field plumbed through `AnthropicClient::new_with_version`.
@@ -481,7 +501,7 @@ pub struct AnthropicClient {
     /// `provider-model-selection.md §6.4`); the client-level value
     /// here is a hard-coded fallback (5 min) for the case where the
     /// caller forgets to wrap in `tokio::time::timeout`.
-    request_timeout: Duration,
+    request_timeout:   Duration,
 }
 
 impl AnthropicClient {
@@ -489,7 +509,9 @@ impl AnthropicClient {
     /// minimum supported model id in `provider-model-selection.md`.
     pub const ANTHROPIC_VERSION: &'static str = "2023-06-01";
 
-    /// Construct a new client.
+    /// Construct a new client over the default direct-egress HTTP
+    /// transport. Equivalent to
+    /// `AnthropicClient::with_http_fetch(base_url, Arc::new(DirectHttpFetch::new()))`.
     ///
     /// The `api_key` parameter is **deliberately absent** — the
     /// gateway injects credentials into the outbound request per
@@ -499,14 +521,29 @@ impl AnthropicClient {
     /// enforcement keys off the credential it injects, not the one
     /// the request arrives with).
     pub fn new(base_url: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
+        Self::with_http_fetch(
+            base_url,
+            std::sync::Arc::new(crate::http_fetch::DirectHttpFetch::new()),
+        )
+    }
+
+    /// Construct a new client backed by the supplied
+    /// [`crate::http_fetch::HttpFetch`]. This is the constructor
+    /// the planner-core driver uses to swap in
+    /// [`crate::http_fetch::KernelMediatedHttpFetch`] for guests
+    /// running in `EgressTier::None`.
+    pub fn with_http_fetch(
+        base_url: impl Into<String>,
+        http_fetch: std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
+    ) -> Self {
+        let streaming_http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(30))
             .build()
             .expect("reqwest::Client::build is infallible with default config");
-
         Self {
-            http,
+            http_fetch,
+            streaming_http,
             base_url: base_url.into(),
             anthropic_version: Self::ANTHROPIC_VERSION,
             request_timeout: Duration::from_secs(300),
@@ -533,43 +570,41 @@ impl ModelClient for AnthropicClient {
         let url = format!("{}/v1/messages", self.base_url);
         let body = serde_json::to_vec(req).map_err(|e| ModelError::Json(e.to_string()))?;
 
-        let resp = self
-            .http
-            .post(&url)
-            .timeout(self.request_timeout)
-            .header("content-type", "application/json")
-            .header("anthropic-version", self.anthropic_version)
-            // We intentionally do NOT set `x-api-key`. The gateway
-            // injects it at the egress hop; setting it here would
-            // be (a) a credential-leak risk and (b) potentially
-            // ignored by the gateway depending on its
-            // injection-precedence config.
-            .body(body)
-            .send()
-            .await?;
+        let fetch_req = crate::http_fetch::HttpFetchRequest {
+            url:     &url,
+            method:  "POST",
+            headers: vec![
+                ("content-type",      "application/json".to_owned()),
+                ("anthropic-version", self.anthropic_version.to_owned()),
+            ],
+            body,
+            timeout: self.request_timeout,
+        };
 
-        let status = resp.status();
-        let bytes  = resp.bytes().await.map_err(|e| ModelError::Transport(e.to_string()))?;
+        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
+            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
+            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+        })?;
 
-        if !status.is_success() {
+        if !(200..300).contains(&resp.status) {
             // Cap the body at 4 KiB so a misbehaving upstream cannot
             // blow up the audit-event payload.
-            let snippet = if bytes.len() <= 4096 {
-                String::from_utf8_lossy(&bytes).into_owned()
+            let snippet = if resp.body.len() <= 4096 {
+                String::from_utf8_lossy(&resp.body).into_owned()
             } else {
                 format!(
                     "{}…<truncated {} bytes>",
-                    String::from_utf8_lossy(&bytes[..4096]),
-                    bytes.len() - 4096,
+                    String::from_utf8_lossy(&resp.body[..4096]),
+                    resp.body.len() - 4096,
                 )
             };
             return Err(ModelError::Upstream {
-                status: status.as_u16(),
+                status: resp.status,
                 body:   snippet,
             });
         }
 
-        let parsed: MessageResponse = serde_json::from_slice(&bytes)
+        let parsed: MessageResponse = serde_json::from_slice(&resp.body)
             .map_err(|e| ModelError::Json(e.to_string()))?;
         Ok(parsed)
     }
@@ -619,7 +654,7 @@ impl ModelClient for AnthropicClient {
             .map_err(|e| ModelError::Json(e.to_string()))?;
 
         let mut resp = self
-            .http
+            .streaming_http
             .post(&url)
             .timeout(self.request_timeout)
             .header("content-type", "application/json")

@@ -484,6 +484,30 @@ async fn handle_planner_connection(
                 write_frame(&mut stream, &IpcMessage::KernelEscalationResponse(resp)).await?;
             }
 
+            // ── PlannerFetchRequest ──────────────────────────────────────
+            // Kernel-mediated egress: the planner asks the kernel to make
+            // an HTTP fetch (typically an LLM Messages API call) on its
+            // behalf. The handler validates the session, dispatches to
+            // the gateway via `ctx.gateway.fetch(...)`, and returns a
+            // typed PlannerFetchResponse. See
+            // `provider-failure-handling.md §2.1` for the architecture
+            // and `handlers/planner_fetch.rs` for the admission rules.
+            IpcMessage::PlannerFetchRequest(req) => {
+                let request_id = req.request_id;
+                let started    = std::time::Instant::now();
+                let resp = handlers::planner_fetch::handle(req, &ctx).await;
+                let latency_ms = started.elapsed().as_millis() as u64;
+                planner_dispatch_log::planner_fetch_response(
+                    request_id,
+                    &resp,
+                    latency_ms,
+                );
+                write_frame(
+                    &mut stream,
+                    &IpcMessage::KernelPlannerFetchResponse(resp),
+                ).await?;
+            }
+
             other => {
                 planner_dispatch_log::planner_unexpected_message(&other);
                 // Unknown variant: log and drop frame but keep connection open.
@@ -1013,6 +1037,38 @@ pub(crate) mod planner_dispatch_log {
         );
     }
 
+    /// One-line structured log for a `PlannerFetchRequest` round
+    /// trip. The body is intentionally narrow — `request_id`,
+    /// `status_code`, `latency_ms`, and the optional `error` short
+    /// string — because we don't want to log URLs or response
+    /// bodies on the kernel's stderr (those go to the gateway's
+    /// own audit chain and the kernel's audit segment via the
+    /// gateway path).
+    pub(super) fn planner_fetch_response(
+        request_id: uuid::Uuid,
+        resp: &raxis_types::PlannerFetchResponse,
+        latency_ms: u64,
+    ) {
+        let status = resp
+            .status_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "none".to_owned());
+        let error = resp
+            .error
+            .as_deref()
+            .map(|e| format!("\"{e}\""))
+            .unwrap_or_else(|| "null".to_owned());
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"planner_fetch_response\",\
+             \"request_id\":\"{request_id}\",\
+             \"status_code\":{status},\
+             \"error\":{error},\
+             \"latency_ms\":{latency_ms},\
+             \"ts\":{ts}}}",
+            ts = raxis_types::unix_now_secs(),
+        );
+    }
+
     // ── Helpers ──
 
     /// Stable variant tag for the `planner_unexpected_message` log
@@ -1024,14 +1080,16 @@ pub(crate) mod planner_dispatch_log {
     /// tag rather than panicking.
     pub(crate) fn ipc_message_variant_name(msg: &IpcMessage) -> &'static str {
         match msg {
-            IpcMessage::IntentRequest(_)             => "IntentRequest",
-            IpcMessage::EscalationRequest(_)         => "EscalationRequest",
-            IpcMessage::KernelIntentResponse(_)      => "KernelIntentResponse",
-            IpcMessage::KernelEscalationResponse(_)  => "KernelEscalationResponse",
-            IpcMessage::WitnessSubmission(_)         => "WitnessSubmission",
-            IpcMessage::WitnessAck { .. }            => "WitnessAck",
-            IpcMessage::OperatorRequest(_)           => "OperatorRequest",
-            IpcMessage::OperatorResponse(_)          => "OperatorResponse",
+            IpcMessage::IntentRequest(_)              => "IntentRequest",
+            IpcMessage::EscalationRequest(_)          => "EscalationRequest",
+            IpcMessage::PlannerFetchRequest(_)        => "PlannerFetchRequest",
+            IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
+            IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
+            IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
+            IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
+            IpcMessage::WitnessAck { .. }             => "WitnessAck",
+            IpcMessage::OperatorRequest(_)            => "OperatorRequest",
+            IpcMessage::OperatorResponse(_)           => "OperatorResponse",
         }
     }
 }

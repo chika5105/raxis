@@ -20,7 +20,8 @@
 
 use raxis_types::{
     EscalationRequest, EscalationResponse, IntentRequest, IntentResponse,
-    OperatorRequest, OperatorResponse, WitnessSubmission,
+    OperatorRequest, OperatorResponse, PlannerFetchRequest, PlannerFetchResponse,
+    WitnessSubmission,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -44,6 +45,18 @@ pub enum IpcMessage {
     /// Sent on the same socket as IntentRequest (same session context).
     EscalationRequest(EscalationRequest),
 
+    /// **Kernel-mediated egress request.** The planner asks the kernel
+    /// to perform an HTTP fetch against an external service on its
+    /// behalf (typically an LLM provider call). The kernel forwards
+    /// the request to the gateway subprocess and routes the response
+    /// back as a [`Self::KernelPlannerFetchResponse`].
+    ///
+    /// Normative reference: `provider-failure-handling.md §2.1` and
+    /// `peripherals.md §3.1`. This is the sole egress path for
+    /// planners running in `EgressTier::None` substrates (the
+    /// canonical Orchestrator and Reviewer guests).
+    PlannerFetchRequest(PlannerFetchRequest),
+
     // -----------------------------------------------------------------------
     // Planner socket — outbound (kernel → planner)
     // peripherals.md §3.1
@@ -53,6 +66,13 @@ pub enum IpcMessage {
 
     /// Kernel response to an EscalationRequest.
     KernelEscalationResponse(EscalationResponse),
+
+    /// Kernel response to a [`Self::PlannerFetchRequest`]. Carries the
+    /// upstream provider's response (status / headers / body) or a
+    /// stable short failure code in the `error` field. The
+    /// `request_id` echoes the planner's correlation id from the
+    /// request.
+    KernelPlannerFetchResponse(PlannerFetchResponse),
 
     // -----------------------------------------------------------------------
     // Verifier / witness intake (verifier → kernel)

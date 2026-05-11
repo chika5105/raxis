@@ -339,30 +339,38 @@ fn parse_response(raw: &GeminiResponse, model_id: &str) -> Result<MessageRespons
 // GeminiClient
 // ---------------------------------------------------------------------------
 
-/// Production Gemini `generateContent` client. The gateway's tproxy
-/// redirect is transparent — this struct does not need to know
-/// whether it's talking to Gemini directly or through the gateway.
+/// Production Gemini `generateContent` client. The buffered call
+/// path goes through an [`crate::http_fetch::HttpFetch`] so the
+/// same client works under direct egress and the kernel-mediated
+/// substrate transparently.
 pub struct GeminiClient {
-    http: reqwest::Client,
+    http_fetch: std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
     base_url: String,
     request_timeout: Duration,
 }
 
 impl GeminiClient {
-    /// Construct a Gemini chat client targeting the given base URL.
-    ///
-    /// `base_url` MUST be the Generative-Language API root
-    /// (e.g. `https://generativelanguage.googleapis.com/v1beta`); per-model
-    /// paths are appended internally.  The client uses a default 10s connect
-    /// timeout and a 300s request timeout.
+    /// Construct a Gemini chat client over the default
+    /// direct-egress HTTP transport. Equivalent to
+    /// `GeminiClient::with_http_fetch(base_url, Arc::new(DirectHttpFetch::new()))`.
     pub fn new(base_url: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(10))
-            .pool_idle_timeout(Duration::from_secs(30))
-            .build()
-            .expect("reqwest::Client::build is infallible with default config");
+        Self::with_http_fetch(
+            base_url,
+            std::sync::Arc::new(crate::http_fetch::DirectHttpFetch::new()),
+        )
+    }
+
+    /// Construct a new client backed by the supplied
+    /// [`crate::http_fetch::HttpFetch`]. The planner-core driver
+    /// uses this constructor to swap in
+    /// [`crate::http_fetch::KernelMediatedHttpFetch`] for guests
+    /// running in `EgressTier::None`.
+    pub fn with_http_fetch(
+        base_url: impl Into<String>,
+        http_fetch: std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
+    ) -> Self {
         Self {
-            http,
+            http_fetch,
             base_url: base_url.into(),
             request_timeout: Duration::from_secs(300),
         }
@@ -390,38 +398,36 @@ impl ModelClient for GeminiClient {
         let body_bytes = serde_json::to_vec(&body)
             .map_err(|e| ModelError::Json(e.to_string()))?;
 
-        let resp = self.http.post(&url)
-            .timeout(self.request_timeout)
-            .header("content-type", "application/json")
-            .header("accept",       "application/json")
-            .body(body_bytes)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ModelError::Timeout(self.request_timeout)
-                } else {
-                    ModelError::Transport(e.to_string())
-                }
-            })?;
+        let fetch_req = crate::http_fetch::HttpFetchRequest {
+            url:     &url,
+            method:  "POST",
+            headers: vec![
+                ("content-type", "application/json".to_owned()),
+                ("accept",       "application/json".to_owned()),
+            ],
+            body:    body_bytes,
+            timeout: self.request_timeout,
+        };
 
-        let status = resp.status();
-        let bytes  = resp.bytes().await.map_err(|e| ModelError::Transport(e.to_string()))?;
+        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
+            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
+            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+        })?;
 
-        if !status.is_success() {
-            let snippet = if bytes.len() <= 4096 {
-                String::from_utf8_lossy(&bytes).into_owned()
+        if !(200..300).contains(&resp.status) {
+            let snippet = if resp.body.len() <= 4096 {
+                String::from_utf8_lossy(&resp.body).into_owned()
             } else {
                 format!(
                     "{}…<truncated {} bytes>",
-                    String::from_utf8_lossy(&bytes[..4096]),
-                    bytes.len() - 4096,
+                    String::from_utf8_lossy(&resp.body[..4096]),
+                    resp.body.len() - 4096,
                 )
             };
-            return Err(ModelError::Upstream { status: status.as_u16(), body: snippet });
+            return Err(ModelError::Upstream { status: resp.status, body: snippet });
         }
 
-        let raw: GeminiResponse = serde_json::from_slice(&bytes)
+        let raw: GeminiResponse = serde_json::from_slice(&resp.body)
             .map_err(|e| ModelError::Json(e.to_string()))?;
         parse_response(&raw, &req.model)
     }

@@ -6,3 +6,22 @@
 
 [alias]
 xtask = "run --package xtask --"
+
+# Cross-compile linker pinning for the AVF / Firecracker guest
+# planner-role binaries (`cargo xtask images dev-stage`). The
+# upstream toolchain crate ships `aarch64-linux-musl-gcc` (and the
+# `aarch64-unknown-linux-musl-gcc` alias) when installed via:
+#   brew install messense/macos-cross-toolchains/aarch64-unknown-linux-musl
+# Without this stanza, `cargo build --target aarch64-unknown-linux-musl`
+# falls through to the host's `cc` and fails to link with
+# `unsupported elf file type 1` at the final pass.
+[target.aarch64-unknown-linux-musl]
+linker = "aarch64-linux-musl-gcc"
+
+# Same idea for x86_64 hosts (the dev-stage default target falls
+# through here when the host arch is x86_64). Install with:
+#   brew install messense/macos-cross-toolchains/x86_64-unknown-linux-musl
+# Harmless if the toolchain isn't installed — Cargo only reads this
+# stanza when a build actually targets the triple.
+[target.x86_64-unknown-linux-musl]
+linker = "x86_64-linux-musl-gcc"

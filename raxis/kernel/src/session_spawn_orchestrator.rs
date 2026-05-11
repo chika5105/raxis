@@ -540,15 +540,29 @@ async fn spawn_orchestrator_for_initiative(
     .map_err(OrchestratorSpawnError::StoreRead)?;
 
     // ── Step 3: build the spawn spec. ────────────────────────────
-    // Egress tier is `Tier1Tproxy` for the Orchestrator: it has no
-    // credential-proxy traffic of its own (the agent code that
-    // consumes credentials runs in Executor VMs), but it MAY make
-    // outbound LLM calls (gateway path) and so still needs the
-    // tproxy admission gate.
+    // Egress tier is `EgressTier::None` for the Orchestrator. Per
+    // the user-clarified invariant ("the Orchestrator has no
+    // credential proxies and no egress"), the Orchestrator's job
+    // is pure coordination: it issues `IntentRequest::ActivateSubTask`
+    // and `IntentRequest::RetrySubTask` over the planner socket
+    // and emits `StructuredOutput`. It MUST NOT reach external
+    // services — both as principle of least privilege (R-5) and to
+    // bound the prompt-injection blast radius. The credential
+    // proxies that Executor sessions get are NEVER bound to the
+    // Orchestrator's session.
+    //
+    // LLM calls reach the upstream provider via the kernel-mediated
+    // egress path: `KernelMediatedHttpFetch` → planner socket →
+    // `IpcMessage::PlannerFetchRequest` → kernel
+    // `handlers::planner_fetch::handle` → gateway subprocess →
+    // upstream (per `provider-failure-handling.md §2.1`).
+    //
     // V2_GAPS §B1 — stamp the planner UDS env contract into the
     // guest env so `raxis-planner-core::run_role_session` can
     // connect back. `RAXIS_KERNEL_PLANNER_SOCKET` is set when a
-    // data_dir is configured.
+    // data_dir is configured. (The AVF substrate stamps
+    // `RAXIS_KERNEL_VSOCK_LISTEN_PORT` instead via
+    // `raxis-isolation-apple-vz::config::translate`.)
     //
     // V2 `v2_extended_gaps.md §1.1` — additionally stamp
     // `RAXIS_PLANNER_TASK_PROMPT` unconditionally. The plan-side
@@ -632,7 +646,17 @@ async fn spawn_orchestrator_for_initiative(
     let vm_spec = VmSpec {
         vcpu_count:        spawn_ctx.vcpu_count,
         mem_mib:           spawn_ctx.mem_mib,
-        egress_tier:       EgressTier::Tier1Tproxy,
+        // Orchestrator runs in `EgressTier::None` (no NIC, no
+        // host-network access). Per the user-clarified invariant
+        // and `kernel-mediated-egress.md`: "the Orchestrator has
+        // no credential proxies and no egress" — its job is pure
+        // coordination over the planner-socket IPC. LLM calls go
+        // through `IpcMessage::PlannerFetchRequest` (kernel
+        // dispatches to gateway), and INV-PROVIDER-04 ensures
+        // every model client supports the
+        // `KernelMediatedHttpFetch` substrate via the
+        // `with_http_fetch` constructor.
+        egress_tier:       EgressTier::None,
         cgroup_quota:      None,
         boot_args:         Vec::new(),
         entrypoint_argv:   vec![

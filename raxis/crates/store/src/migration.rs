@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -118,6 +118,9 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 16 {
         apply_migration_16(conn)?;
+    }
+    if current_version < 17 {
+        apply_migration_17(conn)?;
     }
 
     Ok(())
@@ -2162,6 +2165,98 @@ CREATE INDEX idx_initiatives_pending_git
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (16, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 17 — widen `task_credential_proxies.proxy_type` CHECK to
+// include every variant declared by `raxis_plan_credentials::ProxyVariant`.
+//
+// The original migration-10 DDL pinned the CHECK to the eight V2-baseline
+// proxy types (postgres, http, k8s, smtp, redis, aws, gcp, azure). Three
+// later proxy variants — `mysql`, `mssql`, `mongodb` — were added to
+// `crates/plan-credentials/src/lib.rs::ProxyVariant` as part of the V2.x
+// integration-merge work but the on-disk CHECK was never widened to
+// match. The result: a `[[tasks.credentials]] proxy_type = "mongodb"`
+// block decodes cleanly through `ProxyVariant`, then `approve_plan`'s
+// transactional INSERT into `task_credential_proxies` fires
+// `CHECK constraint failed: proxy_type IN (...)` and the operator
+// sees `FAIL_APPROVE_PLAN` with no actionable detail.
+//
+// SQLite does NOT support `ALTER TABLE ... DROP CONSTRAINT` (or any
+// constraint-mutation idiom on a CHECK), so we rebuild the table
+// using the canonical `CREATE-NEW → INSERT-FROM-OLD → DROP-OLD →
+// RENAME` pattern documented at
+// <https://www.sqlite.org/lang_altertable.html#otheralter>. The
+// rebuild preserves the PRIMARY KEY, FK to `tasks(task_id)`, and the
+// `idx_task_credential_proxies_task_id` index.
+// ---------------------------------------------------------------------------
+
+fn apply_migration_17(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_17_ddl();
+    conn.execute_batch(&ddl).map_err(|e| {
+        StoreError::Migration(format!("migration 17 failed: {e}"))
+    })
+}
+
+/// The complete migration-17 DDL.
+pub fn render_migration_17_ddl() -> String {
+    let task_credential_proxies = Table::TaskCredentialProxies.as_str();
+    let tasks                   = Table::Tasks.as_str();
+    let schema_version          = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- 1. Build the rebuilt table under a temporary name with the widened
+--    CHECK. Column order, types, and constraints mirror the original
+--    DDL (migration 10) modulo the `proxy_type` whitelist.
+CREATE TABLE {task_credential_proxies}_new (
+    task_id              TEXT    NOT NULL
+        REFERENCES {tasks}(task_id),
+    credential_name      TEXT    NOT NULL,
+    mount_as             TEXT    NOT NULL,
+    proxy_type           TEXT    NOT NULL
+        CHECK (proxy_type IN (
+            'postgres', 'http', 'k8s', 'smtp', 'redis',
+            'aws',      'gcp',  'azure',
+            'mysql',    'mssql', 'mongodb'
+        )),
+    proxy_json           TEXT    NOT NULL,
+    created_at_unix_secs INTEGER NOT NULL,
+    PRIMARY KEY (task_id, credential_name)
+);
+
+-- 2. Copy every existing row over. Pre-migration rows by definition
+--    pass the original (narrower) CHECK so they pass the widened
+--    CHECK trivially.
+INSERT INTO {task_credential_proxies}_new
+    (task_id, credential_name, mount_as, proxy_type, proxy_json,
+     created_at_unix_secs)
+SELECT task_id, credential_name, mount_as, proxy_type, proxy_json,
+       created_at_unix_secs
+  FROM {task_credential_proxies};
+
+-- 3. Drop the old table (also drops the old index).
+DROP TABLE {task_credential_proxies};
+
+-- 4. Rename the rebuilt table into place.
+ALTER TABLE {task_credential_proxies}_new RENAME TO {task_credential_proxies};
+
+-- 5. Recreate the lookup index. CredentialProxyManager queries by
+--    task_id at session-spawn time; the composite PK already covers
+--    this prefix but the explicit index makes the query plan
+--    self-documenting and survives any future PK refactor.
+CREATE INDEX IF NOT EXISTS idx_task_credential_proxies_task_id
+    ON {task_credential_proxies} (task_id);
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (17, strftime('%s', 'now'));
 
 COMMIT;
 "

@@ -351,8 +351,19 @@ pub struct SidecarResponse {
 
 /// Production sidecar client. Pings a sidecar HTTP endpoint with
 /// HMAC-authenticated `POST /v1/complete` calls.
+///
+/// The buffered `create_message` + `health_check` paths route
+/// through an [`crate::http_fetch::HttpFetch`] so the same client
+/// works in every substrate (direct egress and kernel-mediated).
+/// The streaming `create_message_stream` path still uses the
+/// embedded `reqwest::Client` because SSE is reqwest-specific —
+/// kernel-mediated guests fall through the default
+/// [`crate::ModelClient::create_message_stream`] body that wraps
+/// the buffered call.
 pub struct SidecarModelClient {
-    http:        reqwest::Client,
+    http_fetch:     std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
+    /// Embedded `reqwest::Client` retained for the streaming path.
+    streaming_http: reqwest::Client,
     /// Base URL (no trailing slash). The client appends `/v1/complete`
     /// on every dispatch.
     endpoint:    String,
@@ -425,6 +436,27 @@ impl SidecarModelClient {
         provider_id: impl Into<String>,
         secret_hex:  &str,
     ) -> Result<Self, SidecarConstructError> {
+        Self::with_http_fetch(
+            endpoint,
+            provider_id,
+            secret_hex,
+            std::sync::Arc::new(crate::http_fetch::DirectHttpFetch::new()),
+        )
+    }
+
+    /// Construct a new client backed by the supplied
+    /// [`crate::http_fetch::HttpFetch`]. The planner-core driver
+    /// uses this constructor to swap in
+    /// [`crate::http_fetch::KernelMediatedHttpFetch`] for guests
+    /// running in `EgressTier::None`. The HMAC handshake stays
+    /// identical — credentials inside the body bytes do not see
+    /// the kernel-mediated boundary as a special case.
+    pub fn with_http_fetch(
+        endpoint:    impl Into<String>,
+        provider_id: impl Into<String>,
+        secret_hex:  &str,
+        http_fetch:  std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
+    ) -> Result<Self, SidecarConstructError> {
         let secret = hex::decode(secret_hex)
             .map_err(|e| SidecarConstructError::SecretHex(e.to_string()))?;
         // 32 bytes is the operator-grade default. Anything shorter
@@ -438,7 +470,7 @@ impl SidecarModelClient {
             });
         }
 
-        let http = reqwest::Client::builder()
+        let streaming_http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(30))
             .build()
@@ -448,7 +480,8 @@ impl SidecarModelClient {
         let endpoint = endpoint.trim_end_matches('/').to_owned();
 
         Ok(Self {
-            http,
+            http_fetch,
+            streaming_http,
             endpoint,
             provider_id: provider_id.into(),
             secret,
@@ -471,15 +504,20 @@ impl SidecarModelClient {
     /// `raxis doctor sidecar` and the C2 circuit-breaker probe.
     pub async fn health_check(&self) -> Result<(), ModelError> {
         let url = format!("{}/health", self.endpoint);
-        let resp = self.http
-            .get(&url)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .await
-            .map_err(|e| ModelError::Transport(e.to_string()))?;
-        if !resp.status().is_success() {
+        let fetch_req = crate::http_fetch::HttpFetchRequest {
+            url:     &url,
+            method:  "GET",
+            headers: vec![],
+            body:    Vec::new(),
+            timeout: Duration::from_secs(5),
+        };
+        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
+            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
+            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+        })?;
+        if !(200..300).contains(&resp.status) {
             return Err(ModelError::Upstream {
-                status: resp.status().as_u16(),
+                status: resp.status,
                 body:   String::new(),
             });
         }
@@ -502,16 +540,28 @@ impl SidecarModelClient {
 
     /// Verify the response triple matches the configured secret,
     /// the original request id, and a 30-second replay window.
-    fn verify_response_hmac(
+    /// Operates on the transport-agnostic `(name, value)` header
+    /// list returned by [`crate::http_fetch::HttpFetchResponse`].
+    /// Header lookups are case-insensitive on the name side per
+    /// HTTP/1.1.
+    fn verify_response_hmac_kv(
         &self,
         expected_request_id: &str,
         local_ts_ms:         u64,
-        headers:             &reqwest::header::HeaderMap,
+        headers:             &[(String, String)],
         body:                &[u8],
     ) -> Result<(), SidecarHmacError> {
-        let req_id = headers.get("x-raxis-request-id")
-            .ok_or(SidecarHmacError::MissingResponseRequestId)?
-            .to_str().map_err(|e| SidecarHmacError::BadTimestamp(e.to_string()))?;
+        fn header_get<'a>(
+            hs: &'a [(String, String)],
+            name: &str,
+        ) -> Option<&'a str> {
+            hs.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        }
+
+        let req_id = header_get(headers, "x-raxis-request-id")
+            .ok_or(SidecarHmacError::MissingResponseRequestId)?;
         if req_id != expected_request_id {
             return Err(SidecarHmacError::RequestIdMismatch {
                 expected: expected_request_id.to_owned(),
@@ -519,9 +569,8 @@ impl SidecarModelClient {
             });
         }
 
-        let ts = headers.get("x-raxis-timestamp")
-            .ok_or(SidecarHmacError::MissingResponseTimestamp)?
-            .to_str().map_err(|e| SidecarHmacError::BadTimestamp(e.to_string()))?;
+        let ts = header_get(headers, "x-raxis-timestamp")
+            .ok_or(SidecarHmacError::MissingResponseTimestamp)?;
         let server_ts_ms: u64 = ts.parse()
             .map_err(|e: std::num::ParseIntError| SidecarHmacError::BadTimestamp(e.to_string()))?;
         let drift = local_ts_ms.abs_diff(server_ts_ms);
@@ -529,9 +578,8 @@ impl SidecarModelClient {
             return Err(SidecarHmacError::TimestampOutOfWindow { local_ts_ms, server_ts_ms });
         }
 
-        let supplied_hmac = headers.get("x-raxis-hmac")
-            .ok_or(SidecarHmacError::MissingResponseHmac)?
-            .to_str().map_err(|e| SidecarHmacError::BadTimestamp(e.to_string()))?;
+        let supplied_hmac = header_get(headers, "x-raxis-hmac")
+            .ok_or(SidecarHmacError::MissingResponseHmac)?;
         let supplied = hex::decode(supplied_hmac)
             .map_err(|e| SidecarHmacError::HmacHexDecode(e.to_string()))?;
 
@@ -548,6 +596,24 @@ impl SidecarModelClient {
         mac.verify_slice(&supplied)
             .map_err(|_| SidecarHmacError::HmacMismatch)?;
         Ok(())
+    }
+
+    /// reqwest::HeaderMap variant retained for the streaming path
+    /// which still consumes `reqwest::Response` directly. Delegates
+    /// to [`Self::verify_response_hmac_kv`] after a one-shot
+    /// translation.
+    fn verify_response_hmac(
+        &self,
+        expected_request_id: &str,
+        local_ts_ms:         u64,
+        headers:             &reqwest::header::HeaderMap,
+        body:                &[u8],
+    ) -> Result<(), SidecarHmacError> {
+        let kv: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or_default().to_owned()))
+            .collect();
+        self.verify_response_hmac_kv(expected_request_id, local_ts_ms, &kv, body)
     }
 }
 
@@ -590,38 +656,37 @@ impl ModelClient for SidecarModelClient {
         let hmac_hex = self.compute_hmac(&request_id, timestamp_ms, &body);
 
         let url = format!("{}/v1/complete", self.endpoint);
-        let resp = self.http
-            .post(&url)
-            .timeout(self.request_timeout)
-            .header("content-type", "application/json")
-            .header("x-raxis-request-id", &request_id)
-            .header("x-raxis-timestamp", timestamp_ms.to_string())
-            .header("x-raxis-hmac", hmac_hex)
-            .body(body)
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() { ModelError::Timeout(self.request_timeout) }
-                else              { ModelError::Transport(e.to_string()) }
-            })?;
+        let timestamp_str = timestamp_ms.to_string();
+        let fetch_req = crate::http_fetch::HttpFetchRequest {
+            url:     &url,
+            method:  "POST",
+            headers: vec![
+                ("content-type",         "application/json".to_owned()),
+                ("x-raxis-request-id",   request_id.clone()),
+                ("x-raxis-timestamp",    timestamp_str),
+                ("x-raxis-hmac",         hmac_hex),
+            ],
+            body,
+            timeout: self.request_timeout,
+        };
 
-        let status   = resp.status();
-        let headers  = resp.headers().clone();
-        let raw_body = resp.bytes().await
-            .map_err(|e| ModelError::Transport(e.to_string()))?;
+        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
+            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
+            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+        })?;
 
-        if !status.is_success() {
-            let snippet = if raw_body.len() <= 4096 {
-                String::from_utf8_lossy(&raw_body).into_owned()
+        if !(200..300).contains(&resp.status) {
+            let snippet = if resp.body.len() <= 4096 {
+                String::from_utf8_lossy(&resp.body).into_owned()
             } else {
                 format!(
                     "{}…<truncated {} bytes>",
-                    String::from_utf8_lossy(&raw_body[..4096]),
-                    raw_body.len() - 4096,
+                    String::from_utf8_lossy(&resp.body[..4096]),
+                    resp.body.len() - 4096,
                 )
             };
             return Err(ModelError::Upstream {
-                status: status.as_u16(),
+                status: resp.status,
                 body:   snippet,
             });
         }
@@ -631,11 +696,16 @@ impl ModelClient for SidecarModelClient {
         // — the dispatch loop will retry against the same sidecar
         // (a transient handshake glitch may recover) and the
         // circuit breaker will open after the configured threshold.
-        if let Err(e) = self.verify_response_hmac(&request_id, timestamp_ms, &headers, &raw_body) {
+        if let Err(e) = self.verify_response_hmac_kv(
+            &request_id,
+            timestamp_ms,
+            &resp.headers,
+            &resp.body,
+        ) {
             return Err(ModelError::Transport(format!("sidecar HMAC: {e}")));
         }
 
-        let parsed: SidecarResponse = serde_json::from_slice(&raw_body)
+        let parsed: SidecarResponse = serde_json::from_slice(&resp.body)
             .map_err(|e| ModelError::Json(e.to_string()))?;
 
         Ok(sidecar_response_to_message_response(parsed, &request_id))
@@ -689,7 +759,7 @@ impl ModelClient for SidecarModelClient {
         let hmac_hex = self.compute_hmac(&request_id, timestamp_ms, &body);
 
         let url = format!("{}/v1/stream", self.endpoint);
-        let mut resp = self.http
+        let mut resp = self.streaming_http
             .post(&url)
             .timeout(self.request_timeout)
             .header("content-type", "application/json")

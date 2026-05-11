@@ -13,4 +13,5 @@
 pub mod escalation;
 pub mod intent;
 pub mod integration_merge_attribution;
+pub mod planner_fetch;
 pub mod witness;

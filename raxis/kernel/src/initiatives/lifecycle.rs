@@ -705,33 +705,139 @@ pub fn approve_plan(
     // ── Pre-tx reads (cheap, do not need to be in the tx) ────────────────
     // We read state + plan bytes + sig before BEGIN so a malformed sig or
     // a non-Draft initiative does not even start a transaction.
-    let current_state: String = conn.query_row(
-        &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
-        rusqlite::params![initiative_id],
-        |r| r.get(0),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => LifecycleError::InitiativeNotFound {
-            initiative_id: initiative_id.to_owned(),
-        },
-        other => LifecycleError::Sql(other),
-    })?;
+    //
+    // **V1 vs V2 source split.** A V1-admitted initiative carries its
+    // signed plan in `signed_plan_artifacts` (`plan_bytes`,
+    // `plan_sig`). A V2-admitted initiative (per
+    // `plan-bundle-sealing.md §8.2`) writes nothing to that table —
+    // the canonical bytes live in `plan_bundles` /
+    // `plan_bundle_artifacts`, keyed by
+    // `initiatives.plan_bundle_sha256`. We branch on the latter so
+    // both paths converge on the same `(plan_bytes, plan_sig,
+    // pubkey_bytes)` triple downstream. Without this branch a V2
+    // approval surfaces as `Query returned no rows` from the
+    // `signed_plan_artifacts` SELECT below.
+    let current_state: String;
+    let plan_bundle_sha256_blob: Option<Vec<u8>>;
+    {
+        let row: (String, Option<Vec<u8>>) = conn.query_row(
+            &format!("SELECT state, plan_bundle_sha256 FROM {INITIATIVES} \
+                      WHERE initiative_id=?1"),
+            rusqlite::params![initiative_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        ).map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => LifecycleError::InitiativeNotFound {
+                initiative_id: initiative_id.to_owned(),
+            },
+            other => LifecycleError::Sql(other),
+        })?;
+        current_state             = row.0;
+        plan_bundle_sha256_blob   = row.1;
+    }
     if current_state != InitiativeState::Draft.as_sql_str() {
         return Err(LifecycleError::InitiativeTerminal { current_state });
     }
 
-    let (plan_bytes, plan_sig): (Vec<u8>, Vec<u8>) = conn.query_row(
-        &format!("SELECT plan_bytes, plan_sig FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1"),
-        rusqlite::params![initiative_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
+    let (plan_bytes, plan_sig): (Vec<u8>, Vec<u8>) = match plan_bundle_sha256_blob.as_deref() {
+        Some(bundle_sha) if bundle_sha.len() == 32 => {
+            // V2 path. The canonical plan.toml bytes live at
+            // `plan_bundle_artifacts.artifact_bytes` for
+            // `(bundle_sha256, artifact_seq=0)` and the V2 bundle
+            // signature lives on `plan_bundles.signature`.
+            // Signature verification was already performed at
+            // admission time
+            // (`v2_admission::pre_tx_checks` step 9 verifies
+            // `verify_ed25519(pubkey, signing_input(bundle_sha256),
+            //  signature)`) — we re-verify here too so an
+            // operator key rotation between admission and approval
+            // fails closed (matches V1 semantics on
+            // `kernel-store.md §1804–1822`).
+            const PLAN_BUNDLES:           &str = "plan_bundles";
+            const PLAN_BUNDLE_ARTIFACTS:  &str = "plan_bundle_artifacts";
+            let plan_toml_bytes: Vec<u8> = conn.query_row(
+                &format!(
+                    "SELECT artifact_bytes FROM {PLAN_BUNDLE_ARTIFACTS} \
+                     WHERE bundle_sha256 = ?1 AND artifact_seq = 0"
+                ),
+                rusqlite::params![bundle_sha],
+                |r| r.get(0),
+            ).map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => LifecycleError::PlanSignatureInvalid {
+                    reason: format!(
+                        "V2 plan_bundle_artifacts row missing for bundle_sha256={}, \
+                         initiative_id={initiative_id}",
+                        hex::encode(bundle_sha),
+                    ),
+                },
+                other => LifecycleError::Sql(other),
+            })?;
+            let bundle_sig: Vec<u8> = conn.query_row(
+                &format!("SELECT signature FROM {PLAN_BUNDLES} \
+                          WHERE bundle_sha256 = ?1"),
+                rusqlite::params![bundle_sha],
+                |r| r.get(0),
+            ).map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => LifecycleError::PlanSignatureInvalid {
+                    reason: format!(
+                        "V2 plan_bundles row missing for bundle_sha256={}, \
+                         initiative_id={initiative_id}",
+                        hex::encode(bundle_sha),
+                    ),
+                },
+                other => LifecycleError::Sql(other),
+            })?;
 
-    // Canonical Ed25519 verification per kernel-store.md §2.5.3 (the same
-    // signing domain the CLI's `policy sign` constructs). Verifying raw
-    // plan bytes — as an earlier draft did — would reject every CLI sig.
-    raxis_crypto::plan::verify_plan_signature(operator_pubkey_bytes, &plan_bytes, &plan_sig)
-        .map_err(|e| LifecycleError::PlanSignatureInvalid {
-            reason: e.to_string(),
-        })?;
+            // Re-verify the V2 bundle signature against the current
+            // operator pubkey (key may have rotated between admission
+            // and approval). The signing domain is
+            // `signing_input(bundle_sha256)`, NOT raw bundle bytes
+            // — see `crates/crypto/src/plan_bundle.rs` and
+            // `plan-bundle-sealing.md §3.2`.
+            let mut bundle_sha_arr = [0u8; 32];
+            bundle_sha_arr.copy_from_slice(bundle_sha);
+            let bundle_sha_typed = raxis_types::BundleSha256::new(bundle_sha_arr);
+            let sig_input = raxis_crypto::signing_input(&bundle_sha_typed);
+            raxis_crypto::verify::verify_ed25519(
+                operator_pubkey_bytes,
+                &sig_input,
+                &bundle_sig,
+            ).map_err(|e| LifecycleError::PlanSignatureInvalid {
+                reason: format!("V2 bundle re-verify: {e}"),
+            })?;
+
+            (plan_toml_bytes, bundle_sig)
+        }
+        Some(bundle_sha) => {
+            return Err(LifecycleError::PlanSignatureInvalid {
+                reason: format!(
+                    "initiatives.plan_bundle_sha256 has unexpected length {} (expected 32) \
+                     for initiative_id={initiative_id}",
+                    bundle_sha.len(),
+                ),
+            });
+        }
+        None => {
+            // V1 path. Read the legacy `signed_plan_artifacts` row
+            // and verify with the V1 plan-signature codec.
+            let (pb, ps): (Vec<u8>, Vec<u8>) = conn.query_row(
+                &format!(
+                    "SELECT plan_bytes, plan_sig FROM {SIGNED_PLAN_ARTIFACTS} \
+                     WHERE initiative_id=?1"
+                ),
+                rusqlite::params![initiative_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            // Canonical Ed25519 verification per kernel-store.md §2.5.3
+            // (the same signing domain the CLI's `policy sign`
+            // constructs). Verifying raw plan bytes — as an earlier
+            // draft did — would reject every CLI sig.
+            raxis_crypto::plan::verify_plan_signature(operator_pubkey_bytes, &pb, &ps)
+                .map_err(|e| LifecycleError::PlanSignatureInvalid {
+                    reason: e.to_string(),
+                })?;
+            (pb, ps)
+        }
+    };
 
     // V2_GAPS §C5 — content-address the verified plan + signature
     // BEFORE BEGIN TRANSACTION so the on-disk artifacts exist by

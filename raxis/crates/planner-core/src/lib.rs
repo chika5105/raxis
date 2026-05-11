@@ -79,6 +79,7 @@ pub mod custom_tools;
 pub mod dispatch;
 pub mod driver;
 pub mod gemini_client;
+pub mod http_fetch;
 pub mod intent;
 pub mod ksb;
 pub mod model;
@@ -123,6 +124,10 @@ pub use provider_model::{
 pub use circuit::{
     CircuitBreakerModelClient, CircuitConfig, CircuitRow, CircuitSnapshot,
     CircuitState, CircuitStore, InMemoryCircuitStore, circuit_state_wire_str,
+};
+pub use http_fetch::{
+    DirectHttpFetch, HttpFetch, HttpFetchError, HttpFetchRequest, HttpFetchResponse,
+    KernelMediatedHttpFetch,
 };
 pub use cmdline_env::{
     apply_envb64_payload, hydrate_from_path, hydrate_from_proc_cmdline,
