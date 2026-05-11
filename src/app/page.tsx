@@ -5,6 +5,7 @@ export default function HomePage() {
   return (
     <>
       <Hero />
+      <HighStakesBridge />
       <WhatItDoes />
       <ThreatModel />
       <Invariants />
@@ -52,6 +53,25 @@ function Hero() {
             Source code available
           </a>
         </div>
+      </div>
+    </section>
+  );
+}
+
+function HighStakesBridge() {
+  return (
+    <section className="border-b border-[var(--rule)] bg-[var(--accent-soft)]">
+      <div className="mx-auto max-w-5xl px-4 sm:px-6 py-10 sm:py-12">
+        <p className="eyebrow mb-4">Built for high-risk environments</p>
+        <p className="text-[1.125rem] sm:text-[1.25rem] leading-relaxed text-[var(--fg)] max-w-3xl">
+          The gap between <em>having AI</em> and <em>deploying AI</em> in high-stakes environments
+          is accountability. Healthcare decisions, financial transactions, infrastructure changes,
+          legal actions — in every domain where errors are costly and reversals are hard, operators
+          need proof that the agent did exactly what was authorized, nothing more.{" "}
+          <strong>Raxis closes that gap.</strong> It is the structural layer that makes AI
+          deployment defensible in environments where the stakes are too high to rely on
+          hope and post-hoc log review.
+        </p>
       </div>
     </section>
   );
