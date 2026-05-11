@@ -168,18 +168,21 @@ function Invariants() {
       title="Twelve invariants"
       lead="A system claiming to be Raxis satisfies all twelve. Drop one and you have something else, possibly useful, but no longer Raxis."
     >
+      <p className="text-sm font-semibold uppercase tracking-widest text-[var(--soft)] mb-8">
+        4 categories &nbsp;·&nbsp; 12 invariants
+      </p>
       <div className="grid gap-10 sm:grid-cols-2">
         {groups.map((g) => (
-          <div key={g.n} className="border-t border-[var(--rule)] pt-6">
-            <div className="flex items-baseline gap-3">
-              <span className="text-sm text-[var(--soft)] tabular-nums">
-                {g.n}
+          <div key={g.n} className="border-t-2 border-[var(--accent)] pt-6">
+            <div className="flex items-baseline gap-3 mb-1">
+              <span className="text-xs font-semibold uppercase tracking-widest text-[var(--accent)]">
+                Category {g.n}
               </span>
-              <h3 className="h-sub">{g.title}</h3>
               <span className="ml-auto text-xs text-[var(--soft)] tabular-nums">
                 {g.ids.join(" · ")}
               </span>
             </div>
+            <h3 className="h-sub">{g.title}</h3>
             <p className="mt-3 text-[var(--muted)] leading-relaxed">{g.body}</p>
           </div>
         ))}
