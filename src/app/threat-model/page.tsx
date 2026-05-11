@@ -196,10 +196,16 @@ function Residual() {
           that approves it) represent the residual risk of any multi-agent
           system. Raxis bounds the blast radius (path allowlists confine
           damage to declared scope) and requires two independent VM-level
-          compromises with coordinated timing. Adding a second independent
-          Reviewer with different criteria reduces the risk further. The
-          audit chain is complete either way: the breach is fully
-          attributable post-incident.
+          compromises with coordinated timing. One containment channel that
+          holds regardless of colluding agents is operator-configured
+          mechanical witnesses: verifier subprocesses the kernel spins up
+          independently after each action to validate correctness —
+          compilation, test execution, diff bounds — using criteria the
+          agents cannot influence. A colluding Implementer and Reviewer cannot
+          suppress a witness result without defeating a separate kernel-level
+          control. Adding a second independent Reviewer with different
+          criteria reduces the risk further. The audit chain is complete
+          either way: the breach is fully attributable post-incident.
         </p>
         <p>
           Compromise of the host OS or the kernel binary itself invalidates
