@@ -1,0 +1,218 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Brand palette derived from the RAXIS logo (raxis-logo.svg):
+ *   primary cyan   #06D7F8   — bright, used in dark mode
+ *   deep cyan     #0A7289   — desaturated, used in light mode
+ *   navy          #090C13   — body fg in light mode
+ *   off-white     #ECECEE   — body fg in dark mode
+ */
+:root {
+  --bg: #fdfdfc;
+  --fg: #0e1017;
+  --muted: #5b626c;
+  --rule: rgba(14, 16, 23, 0.08);
+  --card: #ffffff;
+  --card-rule: rgba(14, 16, 23, 0.06);
+  --accent: #0a7289;
+  --accent-strong: #076175;
+  --accent-soft: rgba(10, 114, 137, 0.09);
+  --code-bg: #f3f4f6;
+}
+
+.dark {
+  --bg: #0b0e14;
+  --fg: #ececee;
+  --muted: #8a93a3;
+  --rule: rgba(255, 255, 255, 0.08);
+  --card: #11151c;
+  --card-rule: rgba(255, 255, 255, 0.06);
+  --accent: #0BCCE7;
+  --accent-strong: #06D7F8;
+  --accent-soft: rgba(11, 204, 231, 0.12);
+  --code-bg: #15191f;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-feature-settings: "ss01", "cv11";
+  letter-spacing: -0.005em;
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--fg);
+}
+
+/* Subtle grid backdrop used on the hero */
+.bg-grid {
+  background-image:
+    linear-gradient(to right, var(--rule) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--rule) 1px, transparent 1px);
+  background-size: 56px 56px;
+  background-position: -1px -1px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 0%, transparent 70%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 0%, transparent 70%);
+}
+
+/* Reading column for marketing copy */
+.reading {
+  max-width: 70ch;
+}
+
+/* Doc prose styles (we render markdown to plain HTML and class it ourselves) */
+.doc-prose {
+  color: var(--fg);
+  font-size: 16px;
+  line-height: 1.7;
+}
+.doc-prose > * + * {
+  margin-top: 1.1em;
+}
+.doc-prose h1 {
+  font-size: 1.875rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-top: 0;
+}
+.doc-prose h2 {
+  font-size: 1.4rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  margin-top: 2.4em;
+  padding-top: 0.4em;
+  border-top: 1px solid var(--rule);
+}
+.doc-prose h3 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 1.8em;
+}
+.doc-prose h4 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 1.4em;
+}
+.doc-prose p,
+.doc-prose li {
+  color: var(--fg);
+}
+.doc-prose a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+.doc-prose a:hover {
+  text-decoration-thickness: 2px;
+}
+.doc-prose ul {
+  list-style: disc;
+  padding-left: 1.4em;
+}
+.doc-prose ol {
+  list-style: decimal;
+  padding-left: 1.4em;
+}
+.doc-prose li::marker {
+  color: var(--muted);
+}
+.doc-prose blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 0.2em 0 0.2em 1em;
+  background: var(--accent-soft);
+  border-radius: 0 6px 6px 0;
+  color: var(--fg);
+  font-style: normal;
+}
+.doc-prose blockquote p {
+  margin: 0.4em 0;
+}
+.doc-prose code {
+  background: var(--code-bg);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  font-size: 0.9em;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.doc-prose pre {
+  background: var(--code-bg);
+  padding: 1em 1.1em;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: 0.875rem;
+  line-height: 1.55;
+  border: 1px solid var(--rule);
+}
+.doc-prose pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+.doc-prose table {
+  display: block;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 0.92em;
+  width: 100%;
+}
+.doc-prose th,
+.doc-prose td {
+  text-align: left;
+  vertical-align: top;
+  padding: 0.55em 0.85em;
+  border-bottom: 1px solid var(--rule);
+}
+.doc-prose th {
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--code-bg);
+}
+.doc-prose hr {
+  border: 0;
+  border-top: 1px solid var(--rule);
+  margin: 2em 0;
+}
+.doc-prose img {
+  max-width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+}
+.doc-prose .heading-anchor {
+  text-decoration: none;
+  color: var(--muted);
+  margin-left: 0.4em;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.doc-prose h1:hover .heading-anchor,
+.doc-prose h2:hover .heading-anchor,
+.doc-prose h3:hover .heading-anchor,
+.doc-prose h4:hover .heading-anchor {
+  opacity: 1;
+}
+
+/* Card hover */
+.card-hover {
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
+}
+.card-hover:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent);
+  box-shadow: 0 6px 22px -10px var(--accent-soft);
+}
