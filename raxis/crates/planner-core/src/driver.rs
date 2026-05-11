@@ -195,9 +195,15 @@ pub enum DriverOutcome {
 /// [`crate::PlannerError::exit_code`] in the binary's `main`.
 #[derive(Debug, Error)]
 pub enum DriverError {
-    /// `RAXIS_KERNEL_PLANNER_SOCKET` was not set when the driver
-    /// was launched in live mode.
-    #[error("RAXIS_KERNEL_PLANNER_SOCKET is required in live mode")]
+    /// None of the kernel-stamped transport env vars were set when
+    /// the driver was launched in live mode (UDS path,
+    /// VSock CID/port, or VSock listen-port). At least one is
+    /// required so the planner knows where to find the kernel.
+    #[error(
+        "live-mode transport not configured: set RAXIS_KERNEL_PLANNER_SOCKET, \
+         RAXIS_KERNEL_VSOCK_LISTEN_PORT, or RAXIS_KERNEL_VSOCK_CID + \
+         RAXIS_KERNEL_VSOCK_PORT"
+    )]
     KernelSocketMissing,
 
     /// `RAXIS_PLANNER_BASE_URL` did not parse as an `http(s)` URL.
@@ -305,8 +311,14 @@ where
         None => return Ok(DriverOutcome::Scaffold),
     };
 
-    let kernel_socket = var("RAXIS_KERNEL_PLANNER_SOCKET")
-        .ok_or(DriverError::KernelSocketMissing)?;
+    // Resolve the kernel transport config from the same env-reader
+    // closure. Supports UDS (subprocess substrate), VSock dial-out
+    // (Firecracker), and VSock listen (Apple-VZ guest) — exactly the
+    // three substrates the kernel ships. `NotConfigured` from
+    // `from_env_fn` maps to `KernelSocketMissing` so existing
+    // callers' error handling stays compatible.
+    let transport_cfg = KernelTransportConfig::from_env_fn(&f)
+        .map_err(|_| DriverError::KernelSocketMissing)?;
     let base_url = var("RAXIS_PLANNER_BASE_URL")
         .unwrap_or_else(|| DEFAULT_PLANNER_BASE_URL.to_owned());
     if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
@@ -360,7 +372,7 @@ where
         args,
         env,
         task_prompt,
-        kernel_socket,
+        transport_cfg,
         workspace,
         model_id,
         max_turns,
@@ -428,7 +440,7 @@ pub async fn run_role_session_with_model(
     args: BootArgs,
     env: BootEnv,
     task_prompt: String,
-    kernel_socket: String,
+    transport_cfg: KernelTransportConfig,
     workspace: PathBuf,
     model_id: String,
     max_turns: u32,
@@ -437,11 +449,12 @@ pub async fn run_role_session_with_model(
     model: Arc<dyn ModelClient>,
     ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
-    // ── Step 1: connect to the kernel UDS. ──────────────────────────
-    let cfg = KernelTransportConfig::Uds {
-        socket_path: PathBuf::from(&kernel_socket),
-    };
-    let transport: Arc<dyn KernelTransport> = crate::transport::connect(&cfg).await?;
+    // ── Step 1: connect to the kernel via the substrate-stamped
+    //    transport (UDS / VSock dial / VSock listen). The framing
+    //    on top is identical for all three; see
+    //    `transport::connect`.
+    let transport: Arc<dyn KernelTransport> =
+        crate::transport::connect(&transport_cfg).await?;
 
     // ── Step 1b: construct the session-scoped IntentSubmitter ──────
     //
@@ -887,7 +900,7 @@ mod tests {
             },
             BootEnv { session_token: "tok".to_owned() },
             "fold prompt".to_owned(),
-            sock_path.display().to_string(),
+            KernelTransportConfig::Uds { socket_path: sock_path.clone() },
             dir.path().to_path_buf(),
             "mock".to_owned(),
             5,
@@ -960,7 +973,7 @@ mod tests {
             },
             BootEnv { session_token: "tok".to_owned() },
             "no-ksb prompt".to_owned(),
-            sock_path.display().to_string(),
+            KernelTransportConfig::Uds { socket_path: sock_path.clone() },
             dir.path().to_path_buf(),
             "mock".to_owned(),
             5,
@@ -1050,7 +1063,7 @@ mod tests {
                 session_token: "tok".to_owned(),
             },
             "Please run a review.".to_owned(),
-            sock_path.display().to_string(),
+            KernelTransportConfig::Uds { socket_path: sock_path.clone() },
             dir.path().to_path_buf(),
             "mock".to_owned(),
             5,
@@ -1152,7 +1165,7 @@ mod tests {
             },
             BootEnv { session_token: "tok".to_owned() },
             "review please".to_owned(),
-            sock_path.display().to_string(),
+            KernelTransportConfig::Uds { socket_path: sock_path.clone() },
             dir.path().to_path_buf(),
             "mock".to_owned(),
             5,

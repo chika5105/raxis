@@ -185,8 +185,10 @@ pub enum KernelTransportConfig {
         /// Filesystem path of the kernel's `planner.sock` socket.
         socket_path: PathBuf,
     },
-    /// Apple-VZ / Firecracker VM. The planner binary reaches the
-    /// kernel through the guest's `vsock` virtio device.
+    /// Firecracker VM (and any future substrate where the planner
+    /// dials the host kernel). The planner binary reaches the
+    /// kernel through the guest's `vsock` virtio device by
+    /// **connecting outbound** to `(cid, port)`.
     ///
     /// Concrete connect logic lives behind the `vsock-transport`
     /// Cargo feature; the variant is always present so callers can
@@ -201,6 +203,29 @@ pub enum KernelTransportConfig {
         /// Port the kernel's host-side proxy is listening on.
         port: u32,
     },
+    /// **Apple-VZ guest** — the planner binds an AF_VSOCK listener
+    /// on `port` and accepts exactly one connection from the host
+    /// kernel (which dials in via
+    /// `VZVirtioSocketDevice.connectToPort:`). Once accepted the
+    /// socket is wrapped in the same `StreamTransport` the
+    /// `Vsock` and `Uds` variants use, so the framing protocol on
+    /// top is identical.
+    ///
+    /// The asymmetry vs the Firecracker `Vsock` variant exists
+    /// because Apple-VZ's `VZVirtioSocketDevice` supports the
+    /// host-dials-guest direction natively but requires an
+    /// Objective-C delegate (`VZVirtioSocketListener`) to do the
+    /// inverse. Pinning the guest as the listener keeps the
+    /// substrate's vsock wiring symmetric with what AVF already
+    /// exposes from `connect_vsock`.
+    ///
+    /// Behind the same `vsock-transport` feature gate as `Vsock`.
+    VsockListen {
+        /// AF_VSOCK port the planner binds. Always `1024` in the
+        /// canonical AVF substrate (matches
+        /// `extensibility-traits.md §3.4` planner-port pin).
+        port: u32,
+    },
 }
 
 impl KernelTransportConfig {
@@ -208,10 +233,12 @@ impl KernelTransportConfig {
     ///
     /// Precedence (matches the kernel-side spawn path):
     /// 1. `RAXIS_KERNEL_PLANNER_SOCKET` → [`KernelTransportConfig::Uds`]
-    /// 2. `RAXIS_KERNEL_VSOCK_CID` + `RAXIS_KERNEL_VSOCK_PORT` →
-    ///    [`KernelTransportConfig::Vsock`]
+    /// 2. `RAXIS_KERNEL_VSOCK_LISTEN_PORT` →
+    ///    [`KernelTransportConfig::VsockListen`] (Apple-VZ guest)
+    /// 3. `RAXIS_KERNEL_VSOCK_CID` + `RAXIS_KERNEL_VSOCK_PORT` →
+    ///    [`KernelTransportConfig::Vsock`] (Firecracker / dial-out)
     ///
-    /// Both missing ⇒ [`TransportError::NotConfigured`].
+    /// All missing ⇒ [`TransportError::NotConfigured`].
     ///
     /// The closure shape `&str -> Option<String>` mirrors
     /// `std::env::var(_).ok()` so tests can inject a hermetic env.
@@ -222,6 +249,18 @@ impl KernelTransportConfig {
         if let Some(path) = f("RAXIS_KERNEL_PLANNER_SOCKET") {
             if !path.is_empty() {
                 return Ok(Self::Uds { socket_path: PathBuf::from(path) });
+            }
+        }
+        if let Some(port) = f("RAXIS_KERNEL_VSOCK_LISTEN_PORT") {
+            // Listener mode (Apple-VZ guest). Empty value coerces
+            // to NotConfigured rather than silently picking 0 — port
+            // 0 is reserved by AF_VSOCK semantics and would shadow
+            // a real misconfiguration.
+            if !port.is_empty() {
+                let port: u32 = port
+                    .parse()
+                    .map_err(|_| TransportError::NotConfigured)?;
+                return Ok(Self::VsockListen { port });
             }
         }
         if let (Some(cid), Some(port)) =
@@ -255,10 +294,17 @@ impl KernelTransportConfig {
 /// so the caller can hold an `Arc<dyn KernelTransport>` regardless
 /// of substrate.
 ///
-/// **VSock path.** Behind the `vsock-transport` feature only.
+/// **VSock dial path.** Behind the `vsock-transport` feature only.
 /// Without the feature we surface [`TransportError::VsockUnavailable`]
 /// so the planner role binary fails fast with a structured exit
 /// code rather than silently ignoring the kernel-stamped CID.
+///
+/// **VSock listen path (Apple-VZ guest).** Same feature gate. The
+/// planner binds an AF_VSOCK listener on `(VMADDR_CID_ANY, port)`,
+/// accepts exactly one connection from the host kernel, and wraps
+/// the accepted stream. Backlog is set to 1 because the kernel
+/// dials exactly once per session per
+/// `extensibility-traits.md §3.4`.
 pub async fn connect(
     cfg: &KernelTransportConfig,
 ) -> Result<Arc<dyn KernelTransport>, TransportError> {
@@ -286,6 +332,26 @@ pub async fn connect(
         }
         #[cfg(not(all(feature = "vsock-transport", target_os = "linux")))]
         KernelTransportConfig::Vsock { .. } => Err(TransportError::VsockUnavailable),
+
+        #[cfg(all(feature = "vsock-transport", target_os = "linux"))]
+        KernelTransportConfig::VsockListen { port } => {
+            // AF_VSOCK bind on (VMADDR_CID_ANY, port). VMADDR_CID_ANY
+            // accepts on any local CID — the guest doesn't know its
+            // own CID at boot and AVF assigns it implicitly. backlog
+            // is exactly one because the kernel dials exactly once
+            // per session.
+            let listener = tokio_vsock::VsockListener::bind(
+                tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_ANY, *port),
+            )
+            .map_err(|e| TransportError::Frame(FrameError::Io(e)))?;
+            let (stream, _peer) = listener
+                .accept()
+                .await
+                .map_err(|e| TransportError::Frame(FrameError::Io(e)))?;
+            Ok(Arc::new(StreamTransport::new(stream)))
+        }
+        #[cfg(not(all(feature = "vsock-transport", target_os = "linux")))]
+        KernelTransportConfig::VsockListen { .. } => Err(TransportError::VsockUnavailable),
     }
 }
 
@@ -438,18 +504,17 @@ mod tests {
     #[test]
     fn config_prefers_uds_path_over_vsock_vars() {
         let cfg = KernelTransportConfig::from_env_fn(|k| match k {
-            "RAXIS_KERNEL_PLANNER_SOCKET" => Some("/tmp/planner.sock".to_owned()),
-            "RAXIS_KERNEL_VSOCK_CID"      => Some("2".to_owned()),
-            "RAXIS_KERNEL_VSOCK_PORT"     => Some("1024".to_owned()),
-            _                             => None,
+            "RAXIS_KERNEL_PLANNER_SOCKET"     => Some("/tmp/planner.sock".to_owned()),
+            "RAXIS_KERNEL_VSOCK_CID"          => Some("2".to_owned()),
+            "RAXIS_KERNEL_VSOCK_PORT"         => Some("1024".to_owned()),
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT"  => Some("1024".to_owned()),
+            _                                 => None,
         }).unwrap();
         match cfg {
             KernelTransportConfig::Uds { socket_path } => {
                 assert_eq!(socket_path.to_str(), Some("/tmp/planner.sock"));
             }
-            KernelTransportConfig::Vsock { .. } => {
-                panic!("UDS path must take precedence over VSock vars");
-            }
+            other => panic!("UDS path must take precedence; got {other:?}"),
         }
     }
 
@@ -465,10 +530,48 @@ mod tests {
                 assert_eq!(cid, 2);
                 assert_eq!(port, 1024);
             }
-            KernelTransportConfig::Uds { .. } => {
-                panic!("expected VSock config when no UDS path is set");
-            }
+            other => panic!("expected VSock dial config; got {other:?}"),
         }
+    }
+
+    /// Listen mode wins over `Vsock` dial-mode when both are
+    /// stamped — the AVF substrate sets `LISTEN_PORT` and never
+    /// stamps `CID`/`PORT` for the same spawn, but `from_env_fn`
+    /// must still pin precedence so a misconfigured spawn fails
+    /// loudly rather than silently demoting to dial-mode.
+    #[test]
+    fn config_prefers_vsock_listen_over_vsock_dial() {
+        let cfg = KernelTransportConfig::from_env_fn(|k| match k {
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT" => Some("1024".to_owned()),
+            "RAXIS_KERNEL_VSOCK_CID"         => Some("2".to_owned()),
+            "RAXIS_KERNEL_VSOCK_PORT"        => Some("1024".to_owned()),
+            _                                => None,
+        }).unwrap();
+        match cfg {
+            KernelTransportConfig::VsockListen { port } => assert_eq!(port, 1024),
+            other => panic!("expected VsockListen; got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_picks_vsock_listen_when_only_listen_var_set() {
+        let cfg = KernelTransportConfig::from_env_fn(|k| match k {
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT" => Some("1024".to_owned()),
+            _                                => None,
+        }).unwrap();
+        assert!(matches!(
+            cfg,
+            KernelTransportConfig::VsockListen { port: 1024 },
+        ));
+    }
+
+    #[test]
+    fn config_rejects_malformed_listen_port_as_not_configured() {
+        let err = KernelTransportConfig::from_env_fn(|k| match k {
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT" => Some("not-a-port".to_owned()),
+            _                                => None,
+        }).unwrap_err();
+        assert!(matches!(err, TransportError::NotConfigured));
     }
 
     #[test]
@@ -501,9 +604,22 @@ mod tests {
     /// `connect` on a `Vsock` config without the feature surfaces
     /// `VsockUnavailable` so the planner role binary can structured-
     /// log + exit. Pins the fail-closed posture.
+    ///
+    /// Runs only on builds that *don't* enable the feature
+    /// (e.g. macOS, or Linux with the feature off). On Linux+feature,
+    /// hitting this path would actually try to dial a vsock — so we
+    /// skip it.
+    #[cfg(not(all(feature = "vsock-transport", target_os = "linux")))]
     #[tokio::test]
     async fn connect_returns_vsock_unavailable_without_feature() {
         let cfg = KernelTransportConfig::Vsock { cid: 2, port: 1024 };
+        match connect(&cfg).await {
+            Err(TransportError::VsockUnavailable) => {}
+            Err(other) => panic!("expected VsockUnavailable, got {other:?}"),
+            Ok(_) => panic!("expected Err(VsockUnavailable)"),
+        }
+
+        let cfg = KernelTransportConfig::VsockListen { port: 1024 };
         match connect(&cfg).await {
             Err(TransportError::VsockUnavailable) => {}
             Err(other) => panic!("expected VsockUnavailable, got {other:?}"),

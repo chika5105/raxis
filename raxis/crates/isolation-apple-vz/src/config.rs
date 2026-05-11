@@ -74,6 +74,14 @@ pub enum ConfigError {
 /// the framework refuses to start the VM.
 pub const AVF_MIN_MEMORY_MIB: u32 = 64;
 
+/// AF_VSOCK port the substrate pins for the kernel ↔ planner control
+/// channel. Mirrored into the guest as
+/// `RAXIS_KERNEL_VSOCK_LISTEN_PORT` so
+/// `KernelTransportConfig::from_env_fn` resolves the planner into
+/// `VsockListen { port = AVF_PLANNER_PORT }`. Pinned by
+/// `extensibility-traits.md §3.4` (planner-port wire constant).
+pub const AVF_PLANNER_PORT: u32 = 1024;
+
 // ---------------------------------------------------------------------------
 // Translated typed shapes
 // ---------------------------------------------------------------------------
@@ -220,13 +228,17 @@ pub fn translate(
     if !image.kind.is_linux_rootfs() {
         return Err(ConfigError::UnsupportedImageKind { kind: image.kind });
     }
-    let cmdline = if spec.boot_args.is_empty() {
-        // AVF's Linux boot loader uses a Virtio console; `hvc0` is
-        // the canonical first hypervisor console. `reboot=k`
-        // ensures a guest panic surfaces as a clean exit. For
-        // initramfs boots we additionally pin `rdinit=/init` so the
-        // guest kernel honours the cpio-archived /init regardless
-        // of the kernel's CONFIG_DEFAULT_INIT default.
+    // Base kernel cmdline. `hvc0` is the canonical Virtio console
+    // for Linux guests under AVF; `reboot=k panic=1` makes a guest
+    // panic surface as a clean exit. For initramfs boots we pin
+    // `rdinit=/init` so the kernel honours our cpio-archived /init
+    // regardless of `CONFIG_DEFAULT_INIT`. EROFS boots get the
+    // virtio-blk root pin instead. Operator-supplied
+    // [`VmSpec::boot_args`] **replace** these defaults wholesale —
+    // the kernel session-spawn path stamps an empty `boot_args`
+    // for the canonical roles and the substrate owns the cmdline
+    // shape.
+    let mut cmdline = if spec.boot_args.is_empty() {
         match image.kind {
             ImageKind::RootfsInitramfsCpio =>
                 "console=hvc0 reboot=k panic=1 rdinit=/init".to_owned(),
@@ -236,6 +248,92 @@ pub fn translate(
     } else {
         spec.boot_args.join(" ")
     };
+
+    // Fold `VmSpec.env` into the cmdline so the in-guest /init can
+    // recover the kernel-stamped session token, planner task prompt,
+    // KSB snapshot, etc. without needing a side channel.
+    //
+    // We compose the payload from three sources, in precedence
+    // order (low → high), so that an explicit operator override on
+    // `spec.env` always wins over the substrate-side defaults:
+    //
+    //   1. **Substrate-default keys** the AVF guest needs in order
+    //      to talk to the kernel:
+    //
+    //      * `RAXIS_SESSION_TOKEN`            — mirrored from
+    //        `spec.session_token`. SubprocessIsolation auto-injects
+    //        this via `Command::env` (see
+    //        `test-support/subprocess_isolation.rs`); AVF must
+    //        mirror the contract since there is no `Command::env`
+    //        analogue at this surface.
+    //      * `RAXIS_KERNEL_VSOCK_LISTEN_PORT` — pinned to the AVF
+    //        planner port (`1024`, matching `AvfVsock::planner_port`)
+    //        so `KernelTransportConfig::from_env_fn` resolves the
+    //        guest into vsock-listen mode.
+    //
+    //   2. **Per-spawn `spec.env`** — what the kernel session-spawn
+    //      path stamped (planner task prompt, KSB snapshot,
+    //      credential-proxy loopback URLs, …).
+    //
+    // **Why cmdline (not virtio-fs side car).** The AVF substrate
+    // already provides virtio-fs for workspace mounts, but a
+    // dedicated env-propagation share would require another
+    // host-tmpdir lifecycle the substrate has to clean up at
+    // session teardown — and would force the guest /init to mount
+    // the share before parsing env, which means the planner binary
+    // (the only thing in the rootfs) would need a `mount` syscall
+    // before its tokio runtime spins up. Cmdline keeps the
+    // contract single-channel and inert.
+    //
+    // **Wire shape.** `raxis.envb64=<base64>` where the base64
+    // payload decodes to `KEY1=VAL1\nKEY2=VAL2\n…`. Newline
+    // separation matches the System V `env(1)` shape and lets
+    // values legally carry `=` (the parser only splits on the
+    // *first* `=` per line). Base64 is the only encoding that
+    // survives Linux's cmdline tokeniser intact for arbitrary
+    // bytes including embedded spaces, quotes, and shell
+    // metacharacters.
+    //
+    // **Cmdline length budget.** Linux on aarch64/virt accepts up
+    // to 2048 bytes by default (CONFIG_CMDLINE_LENGTH). Base64
+    // overhead is 4/3 + delimiter, so the env payload limit is
+    // ~1.5 KiB pre-encoding. The kernel-stamped envelope today
+    // is well below 1 KiB (session token, task prompt summary,
+    // KSB ≤ 4 KiB which we DON'T pass via cmdline — see KSB env
+    // var note in `planner-harness.md §14.5`). If a future role
+    // exceeds the budget the substrate will refuse the spawn at
+    // `validateWithError:` time with a verbatim AVF error.
+    {
+        use base64::Engine as _;
+        let mut effective: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        // (1) substrate-default keys.
+        effective.insert(
+            "RAXIS_SESSION_TOKEN".to_owned(),
+            spec.session_token.0.clone(),
+        );
+        effective.insert(
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT".to_owned(),
+            AVF_PLANNER_PORT.to_string(),
+        );
+        // (2) per-spawn `spec.env` — overrides defaults.
+        for (k, v) in &spec.env {
+            if k.is_empty() {
+                continue;
+            }
+            effective.insert(k.clone(), v.clone());
+        }
+        let mut payload = String::new();
+        for (k, v) in &effective {
+            payload.push_str(k);
+            payload.push('=');
+            payload.push_str(v);
+            payload.push('\n');
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+        cmdline.push_str(" raxis.envb64=");
+        cmdline.push_str(&b64);
+    }
     let initrd_url = match image.kind {
         ImageKind::RootfsInitramfsCpio => Some(rootfs_path.clone()),
         _ => None,
@@ -308,7 +406,7 @@ pub fn translate(
     // substrates without per-platform knobs.
     let vsock = AvfVsock {
         guest_cid:    spec.vsock_cid.unwrap_or(3),
-        planner_port: 1024,
+        planner_port: AVF_PLANNER_PORT,
     };
 
     Ok(AvfConfig {
@@ -384,12 +482,17 @@ mod tests {
             PathBuf::from("/var/raxis/test/vmlinux.bin")
         );
         // EROFS rootfs adds `root=/dev/vda ro` so the guest kernel
-        // mounts the virtio-blk drive as `/`. Initramfs boots
-        // (`RootfsInitramfsCpio`) instead get `rdinit=/init` —
-        // covered by `translate_initramfs_kind_routes_to_initrd_url`.
-        assert_eq!(
+        // mounts the virtio-blk drive as `/`. Substrate-default env
+        // keys (`RAXIS_SESSION_TOKEN`, `RAXIS_KERNEL_VSOCK_LISTEN_PORT`)
+        // are folded into a `raxis.envb64=…` cmdline token even when
+        // `spec.env` is empty — see
+        // `translate_always_appends_substrate_default_env_keys`.
+        assert!(
+            cfg.boot_loader
+                .command_line
+                .starts_with("console=hvc0 reboot=k panic=1 root=/dev/vda ro raxis.envb64="),
+            "unexpected cmdline shape: {:?}",
             cfg.boot_loader.command_line,
-            "console=hvc0 reboot=k panic=1 root=/dev/vda ro"
         );
         // Default fixture is `RootfsErofs` ⇒ one block device.
         assert_eq!(cfg.block_devices.len(), 1);
@@ -405,7 +508,7 @@ mod tests {
         assert!(cfg.fs_shares.is_empty());
         assert!(cfg.network.is_none());
         assert_eq!(cfg.vsock.guest_cid, 7);
-        assert_eq!(cfg.vsock.planner_port, 1024);
+        assert_eq!(cfg.vsock.planner_port, AVF_PLANNER_PORT);
     }
 
     #[test]
@@ -421,9 +524,12 @@ mod tests {
             cfg.block_devices.is_empty(),
             "initramfs boots use the kernel's initrd channel, not virtio-blk",
         );
-        assert_eq!(
+        assert!(
+            cfg.boot_loader
+                .command_line
+                .starts_with("console=hvc0 reboot=k panic=1 rdinit=/init raxis.envb64="),
+            "unexpected initramfs cmdline shape: {:?}",
             cfg.boot_loader.command_line,
-            "console=hvc0 reboot=k panic=1 rdinit=/init",
         );
     }
 
@@ -448,7 +554,145 @@ mod tests {
         let mut spec = fixture_spec();
         spec.boot_args = vec!["quiet".to_owned(), "loglevel=3".to_owned()];
         let cfg = translate(&fixture_image(), &[], &spec).unwrap();
-        assert_eq!(cfg.boot_loader.command_line, "quiet loglevel=3");
+        // Operator boot args replace the substrate's defaults but
+        // the substrate-default env keys are still appended after.
+        assert!(
+            cfg.boot_loader
+                .command_line
+                .starts_with("quiet loglevel=3 raxis.envb64="),
+            "operator boot args must lead the cmdline; got {:?}",
+            cfg.boot_loader.command_line,
+        );
+    }
+
+    /// Pin the env → cmdline envelope: every entry in `spec.env`
+    /// MUST round-trip through `raxis.envb64=` as a base64-encoded
+    /// `KEY=VAL\n…` payload. Decoder lives in
+    /// `planner-orchestrator` `parse_envb64_cmdline`.
+    #[test]
+    fn translate_appends_envb64_token_when_spec_env_is_populated() {
+        use base64::Engine as _;
+
+        let mut spec = fixture_spec();
+        spec.env.insert("RAXIS_SESSION_TOKEN".to_owned(), "tok-123".to_owned());
+        spec.env.insert(
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT".to_owned(),
+            "1024".to_owned(),
+        );
+        // Value with whitespace + `=` MUST survive the round-trip.
+        spec.env.insert(
+            "RAXIS_PLANNER_TASK_PROMPT".to_owned(),
+            "do thing X = Y, please".to_owned(),
+        );
+
+        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
+        let line = &cfg.boot_loader.command_line;
+
+        // Default base prefix preserved.
+        assert!(line.starts_with("console=hvc0 reboot=k panic=1 root=/dev/vda ro"),
+            "base cmdline must precede the envb64 token; got {line:?}");
+
+        // Locate and decode the token.
+        let token = line
+            .split_whitespace()
+            .find(|tok| tok.starts_with("raxis.envb64="))
+            .expect("envb64 token must be present");
+        let b64 = token.strip_prefix("raxis.envb64=").unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .expect("envb64 must decode as standard base64");
+        let payload = std::str::from_utf8(&decoded).expect("payload must be utf-8");
+        assert!(payload.contains("RAXIS_SESSION_TOKEN=tok-123\n"));
+        assert!(payload.contains("RAXIS_KERNEL_VSOCK_LISTEN_PORT=1024\n"));
+        assert!(payload.contains("RAXIS_PLANNER_TASK_PROMPT=do thing X = Y, please\n"));
+    }
+
+    /// Substrate-default env keys (`RAXIS_SESSION_TOKEN`,
+    /// `RAXIS_KERNEL_VSOCK_LISTEN_PORT`) MUST always be folded into
+    /// the cmdline, even when `spec.env` is empty — they are the
+    /// AVF substrate's contract with the in-guest planner. The
+    /// session token is mirrored verbatim from
+    /// `VmSpec.session_token` (mirroring `SubprocessIsolation`'s
+    /// `Command::env`-injection behaviour), and the listen port is
+    /// the AVF-pinned `AVF_PLANNER_PORT`.
+    #[test]
+    fn translate_always_appends_substrate_default_env_keys() {
+        use base64::Engine as _;
+
+        // `fixture_spec()` returns an empty `spec.env`. Translation
+        // MUST still produce a `raxis.envb64=` token containing the
+        // two substrate-default keys.
+        let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
+        let token = cfg
+            .boot_loader
+            .command_line
+            .split_whitespace()
+            .find(|tok| tok.starts_with("raxis.envb64="))
+            .expect("substrate must always stamp the envb64 token");
+        let b64 = token.strip_prefix("raxis.envb64=").unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .expect("envb64 must decode as standard base64");
+        let payload = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            payload.contains("RAXIS_SESSION_TOKEN=avf-test-token\n"),
+            "session token must be propagated; got payload {payload:?}",
+        );
+        assert!(
+            payload.contains(&format!(
+                "RAXIS_KERNEL_VSOCK_LISTEN_PORT={AVF_PLANNER_PORT}\n",
+            )),
+            "vsock listen port must be propagated; got payload {payload:?}",
+        );
+    }
+
+    /// Per-spawn `spec.env` overrides the substrate-default keys.
+    /// This is the operator-escape-hatch contract — a deployment
+    /// may pin a different planner port (e.g. to multiplex two
+    /// guests on the same CID range) by setting it explicitly in
+    /// `spec.env`. The substrate must NOT overwrite the operator's
+    /// value with its default.
+    #[test]
+    fn translate_lets_spec_env_override_substrate_defaults() {
+        use base64::Engine as _;
+
+        let mut spec = fixture_spec();
+        spec.env.insert(
+            "RAXIS_SESSION_TOKEN".to_owned(),
+            "operator-supplied-token".to_owned(),
+        );
+        spec.env.insert(
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT".to_owned(),
+            "9999".to_owned(),
+        );
+        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
+        let token = cfg
+            .boot_loader
+            .command_line
+            .split_whitespace()
+            .find(|tok| tok.starts_with("raxis.envb64="))
+            .unwrap();
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(token.strip_prefix("raxis.envb64=").unwrap().as_bytes())
+            .unwrap();
+        let payload = std::str::from_utf8(&bytes).unwrap();
+        assert!(
+            payload.contains("RAXIS_SESSION_TOKEN=operator-supplied-token\n"),
+            "spec.env override must win for session token; got {payload:?}",
+        );
+        assert!(
+            payload.contains("RAXIS_KERNEL_VSOCK_LISTEN_PORT=9999\n"),
+            "spec.env override must win for vsock port; got {payload:?}",
+        );
+        // The substrate default for the listen port MUST NOT also be
+        // present — uniqueness in the BTreeMap means the override
+        // shadows it cleanly.
+        assert!(
+            !payload.contains(&format!(
+                "RAXIS_KERNEL_VSOCK_LISTEN_PORT={AVF_PLANNER_PORT}\n",
+            )),
+            "substrate default must not coexist with operator override; got {payload:?}",
+        );
     }
 
     // ---- VirtioFS share translation -----------------------------------

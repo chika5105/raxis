@@ -47,6 +47,11 @@ raxis-types     = { workspace = true }
 serde           = { workspace = true }
 serde_json      = { workspace = true }
 thiserror       = { workspace = true }
+# `base64` for the `raxis.envb64=` cmdline propagation envelope.
+# Single-purpose, no_std-friendly; pinned through the workspace
+# manifest so the substrate's link surface stays under tight
+# control.
+base64          = { workspace = true }
 
 # `objc2-virtualization` is the macOS-only binding to
 # Virtualization.framework. Linked only on macOS targets so the

@@ -42,6 +42,10 @@ reqwest     = { workspace = true, features = ["json"] }
 sha2        = { workspace = true }
 hmac        = { workspace = true }
 hex         = { workspace = true }
+# `base64` decodes the `raxis.envb64=` cmdline envelope the AVF
+# substrate uses to pass `VmSpec::env` into the guest. See
+# `cmdline_env::hydrate_from_proc_cmdline`.
+base64      = { workspace = true }
 # Optional vsock transport — see the `vsock-transport` feature above.
 # Linux-only build (the upstream crate guards itself with a Linux
 # `target_os` check; non-Linux + feature-enabled is a build-time

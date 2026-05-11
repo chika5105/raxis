@@ -23,12 +23,25 @@
 //! deadline path.
 
 use raxis_planner_core::{
-    park_on_signal, render_boot_log, run_role_session, BootContext, DriverError, DriverOutcome,
-    PlannerError, Role,
+    hydrate_from_proc_cmdline, park_on_signal, render_boot_log, run_role_session, BootContext,
+    DriverError, DriverOutcome, HydrationOutcome, PlannerError, Role,
 };
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
+    // Pre-runtime cmdline-env hydration. See
+    // `raxis-planner-orchestrator/src/main.rs` for the full
+    // rationale.
+    let hydration = hydrate_from_proc_cmdline();
+    log_hydration_outcome(&hydration);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime construction must not fail at reviewer boot");
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> std::process::ExitCode {
     match run().await {
         Ok(())  => std::process::ExitCode::SUCCESS,
         Err(e)  => {
@@ -39,6 +52,32 @@ async fn main() -> std::process::ExitCode {
             );
             std::process::ExitCode::from(e.exit_code() as u8)
         }
+    }
+}
+
+fn log_hydration_outcome(outcome: &HydrationOutcome) {
+    match outcome {
+        HydrationOutcome::NoProcCmdline { reason } => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"planner-cmdline-env\",\
+              \"role\":\"reviewer\",\"outcome\":\"no-proc-cmdline\",\
+              \"reason\":{:?}}}",
+            reason,
+        ),
+        HydrationOutcome::NoEnvToken => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"planner-cmdline-env\",\
+              \"role\":\"reviewer\",\"outcome\":\"no-env-token\"}}"
+        ),
+        HydrationOutcome::BadEnvToken { reason } => eprintln!(
+            "{{\"level\":\"warn\",\"step\":\"planner-cmdline-env\",\
+              \"role\":\"reviewer\",\"outcome\":\"bad-env-token\",\
+              \"reason\":{:?}}}",
+            reason,
+        ),
+        HydrationOutcome::Hydrated { applied, skipped_already_set } => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"planner-cmdline-env\",\
+              \"role\":\"reviewer\",\"outcome\":\"hydrated\",\
+              \"applied\":{applied},\"skipped_already_set\":{skipped_already_set}}}"
+        ),
     }
 }
 

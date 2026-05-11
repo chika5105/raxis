@@ -75,6 +75,27 @@ use std::time::Duration;
 
 use crate::config::AvfConfig;
 
+/// Hard deadline the [`AvfRuntime::connect_vsock`] retry loop honours
+/// when waiting for the in-guest planner to bind AF_VSOCK on the
+/// canonical port. AVF's `connectToPort:` does not block until a
+/// listener appears — it dispatches once and surfaces ECONNREFUSED
+/// when the guest is mid-boot — so we wrap the call in a polling
+/// loop bounded by this constant.
+///
+/// Sized to comfortably exceed the orchestrator boot budget pinned
+/// by `extensibility-traits.md §3.5` (median ~200 ms boot + tokio
+/// runtime spin-up + cmdline-env hydration). 30 s also matches
+/// the operator-facing Apple-VZ start timeout the substrate uses
+/// for `start()` itself.
+pub const VSOCK_CONNECT_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Inter-attempt sleep for the [`AvfRuntime::connect_vsock`] retry
+/// loop. 100 ms is short enough to surface a successful connect
+/// within one or two extra ticks, long enough to avoid spamming
+/// AVF's dispatch queue with no-op completion handlers while the
+/// guest is still booting.
+pub const VSOCK_CONNECT_BACKOFF:  Duration = Duration::from_millis(100);
+
 /// Errors the runtime can surface.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -661,7 +682,68 @@ mod macos {
         /// resulting connection's file descriptor. The substrate's
         /// caller (`AppleVzSession`) owns the fd and is responsible
         /// for closing it on session teardown.
+        ///
+        /// **Boot-race retry.** AVF's `connectToPort:` does not wait
+        /// for the guest to bind a listener; it dispatches the SYN
+        /// once and surfaces ECONNREFUSED / "Connection reset by
+        /// peer" if no listener exists yet. The kernel calls
+        /// `connect_vsock` immediately after `start()` returns, but
+        /// the in-guest planner needs ~hundreds of ms to spin up
+        /// its tokio runtime and bind AF_VSOCK. We retry with
+        /// 100 ms backoff for up to [`VSOCK_CONNECT_DEADLINE`]
+        /// (currently 30 s — the canonical orchestrator boot
+        /// budget per `extensibility-traits.md §3.5`).
+        ///
+        /// **Terminal errors are not retried** — calling
+        /// `connect_vsock` before `start()` succeeded, or against a
+        /// VM that is missing its `VZVirtioSocketDevice`, returns
+        /// immediately. Both are programming bugs in the
+        /// substrate, not transient guest-boot races.
         pub fn connect_vsock(&self, port: u32) -> Result<c_int, RuntimeError> {
+            let deadline = std::time::Instant::now() + VSOCK_CONNECT_DEADLINE;
+            // Track the most-recent transient reason so the
+            // deadline-exhausted error message names what the guest
+            // was actually surfacing rather than a generic timeout.
+            // We deliberately keep the *latest* (not the first)
+            // value so an operator triaging a hung boot sees the
+            // freshest signal — earlier values are intentionally
+            // overwritten without being read, which the
+            // `unused_assignments` lint is conservative about.
+            #[allow(unused_assignments)]
+            let mut last_err: Option<String> = None;
+            loop {
+                match self.connect_vsock_once(port) {
+                    Ok(fd) => return Ok(fd),
+                    Err(RuntimeError::VsockConnect { reason, .. })
+                        if is_terminal_vsock_reason(&reason) =>
+                    {
+                        return Err(RuntimeError::VsockConnect { port, reason });
+                    }
+                    Err(RuntimeError::VsockConnect { reason, .. }) => {
+                        last_err = Some(reason);
+                    }
+                    Err(other) => return Err(other),
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(RuntimeError::VsockConnect {
+                        port,
+                        reason: format!(
+                            "AVF connect_vsock did not succeed within {:?}; \
+                             last guest-side error: {}",
+                            VSOCK_CONNECT_DEADLINE,
+                            last_err.unwrap_or_else(|| "<none>".to_owned()),
+                        ),
+                    });
+                }
+                std::thread::sleep(VSOCK_CONNECT_BACKOFF);
+            }
+        }
+
+        /// Single-shot AVF `connectToPort:` dispatch — broken out of
+        /// [`Self::connect_vsock`] so the boot-race retry loop can
+        /// re-issue the call without re-implementing the queue +
+        /// completion-handler bridge.
+        fn connect_vsock_once(&self, port: u32) -> Result<c_int, RuntimeError> {
             let vm = self.vm.as_ref().ok_or_else(|| RuntimeError::VsockConnect {
                 port,
                 reason: "VM not started — start() must succeed before connecting vsock".to_owned(),
@@ -736,15 +818,16 @@ mod macos {
                 }
             });
 
-            // VSock connect uses the configured boot grace as a
-            // sane upper bound — the kernel calls this immediately
-            // after start() succeeds, so the guest's planner is
-            // expected to be listening within that window.
-            match rx.recv_timeout(Duration::from_secs(10)) {
+            // VSock connect on a single attempt uses a 5-second
+            // upper bound — the AVF completion handler usually
+            // fires well within tens of milliseconds when the
+            // guest is up. The outer retry loop owns the
+            // longer end-to-end deadline.
+            match rx.recv_timeout(Duration::from_secs(5)) {
                 Ok(result) => result,
                 Err(_) => Err(RuntimeError::VsockConnect {
                     port,
-                    reason: "AVF connect_vsock timed out after 10s".to_owned(),
+                    reason: "AVF connect_vsock single-shot dispatch timed out".to_owned(),
                 }),
             }
         }
@@ -846,6 +929,20 @@ mod macos {
         }
         // SAFETY: caller guarantees non-null AVF-owned pointer.
         unsafe { (*err).localizedDescription().to_string() }
+    }
+
+    /// Classify a `RuntimeError::VsockConnect` reason as terminal
+    /// (substrate misconfiguration the retry loop must NOT mask)
+    /// vs. transient (guest still booting; retry until the
+    /// deadline). Pattern-matches on the substrate-controlled
+    /// reason strings emitted by [`AvfRuntime::connect_vsock_once`]
+    /// — AVF's own ECONNREFUSED / "Connection reset by peer" error
+    /// strings are explicitly NOT in this list, so they fall
+    /// through to the retry path.
+    pub(super) fn is_terminal_vsock_reason(reason: &str) -> bool {
+        reason.contains("VM not started")
+            || reason.contains("VZVirtualMachine has no VZVirtioSocketDevice")
+            || reason.contains("AVF connection returned negative fd")
     }
 
     // Suppress dead-code warnings for the unused `ProtocolObject` import

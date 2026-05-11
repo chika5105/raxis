@@ -64,7 +64,7 @@
 //! load-bearing — the actual capability bound is enforced by the
 //! Cargo feature pinned in each binary's `Cargo.toml`.
 
-#![deny(unsafe_code, unsafe_op_in_unsafe_fn)]
+#![deny(unsafe_op_in_unsafe_fn)]
 #![warn(missing_docs)]
 
 use std::env;
@@ -74,6 +74,7 @@ use std::fmt;
 mod error;
 pub mod bedrock_client;
 pub mod circuit;
+pub mod cmdline_env;
 pub mod custom_tools;
 pub mod dispatch;
 pub mod driver;
@@ -122,6 +123,10 @@ pub use provider_model::{
 pub use circuit::{
     CircuitBreakerModelClient, CircuitConfig, CircuitRow, CircuitSnapshot,
     CircuitState, CircuitStore, InMemoryCircuitStore, circuit_state_wire_str,
+};
+pub use cmdline_env::{
+    apply_envb64_payload, hydrate_from_path, hydrate_from_proc_cmdline,
+    HydrationOutcome, CMDLINE_ENV_TOKEN,
 };
 pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
 pub use gemini_client::GeminiClient;

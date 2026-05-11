@@ -26,12 +26,38 @@
 //! See `raxis-planner-core/src/driver.rs` for the env contract.
 
 use raxis_planner_core::{
-    park_on_signal, render_boot_log, run_role_session, BootContext, DriverError, DriverOutcome,
-    PlannerError, Role,
+    hydrate_from_proc_cmdline, park_on_signal, render_boot_log, run_role_session, BootContext,
+    DriverError, DriverOutcome, HydrationOutcome, PlannerError, Role,
 };
 
-#[tokio::main]
-async fn main() -> std::process::ExitCode {
+fn main() -> std::process::ExitCode {
+    // === PRE-RUNTIME PHASE ===
+    //
+    // Hydrate the process environment from `/proc/cmdline` BEFORE
+    // we start the tokio runtime — `cmdline_env::hydrate_*` calls
+    // `std::env::set_var`, which is documented unsafe under
+    // multi-threaded races. `tokio::main` would spin the runtime
+    // (and pin worker threads) before our function body runs, so
+    // we run the hydration in the synchronous `main` and only then
+    // hand off to the async runner.
+    //
+    // The Apple-VZ substrate folds `VmSpec::env` into
+    // `raxis.envb64=<base64>` on the kernel cmdline because there
+    // is no `Command::env` analogue at the AVF surface. On other
+    // substrates (subprocess UDS, Firecracker — both inherit env
+    // through `Command::env` / the Firecracker config) the
+    // hydration is a no-op (`NoProcCmdline` / `NoEnvToken`).
+    let hydration = hydrate_from_proc_cmdline();
+    log_hydration_outcome(&hydration);
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime construction must not fail at orchestrator boot");
+    runtime.block_on(async_main())
+}
+
+async fn async_main() -> std::process::ExitCode {
     match run().await {
         Ok(())  => std::process::ExitCode::SUCCESS,
         Err(e)  => {
@@ -44,6 +70,38 @@ async fn main() -> std::process::ExitCode {
             );
             std::process::ExitCode::from(e.exit_code() as u8)
         }
+    }
+}
+
+/// Structured-log the cmdline-env hydration outcome on stderr. The
+/// kernel-side scraper keys on `step:"planner-cmdline-env"`. We
+/// log all variants — even the no-op ones — so a regression where
+/// the AVF substrate stopped stamping the token surfaces in the
+/// kernel's audit trail rather than as a silent absence of env
+/// vars.
+fn log_hydration_outcome(outcome: &HydrationOutcome) {
+    match outcome {
+        HydrationOutcome::NoProcCmdline { reason } => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"planner-cmdline-env\",\
+              \"role\":\"orchestrator\",\"outcome\":\"no-proc-cmdline\",\
+              \"reason\":{:?}}}",
+            reason,
+        ),
+        HydrationOutcome::NoEnvToken => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"planner-cmdline-env\",\
+              \"role\":\"orchestrator\",\"outcome\":\"no-env-token\"}}"
+        ),
+        HydrationOutcome::BadEnvToken { reason } => eprintln!(
+            "{{\"level\":\"warn\",\"step\":\"planner-cmdline-env\",\
+              \"role\":\"orchestrator\",\"outcome\":\"bad-env-token\",\
+              \"reason\":{:?}}}",
+            reason,
+        ),
+        HydrationOutcome::Hydrated { applied, skipped_already_set } => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"planner-cmdline-env\",\
+              \"role\":\"orchestrator\",\"outcome\":\"hydrated\",\
+              \"applied\":{applied},\"skipped_already_set\":{skipped_already_set}}}"
+        ),
     }
 }
 
