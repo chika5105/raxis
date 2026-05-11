@@ -25,6 +25,8 @@ const DEST = path.join(ROOT, "vendor", "raxis-docs");
 const CLONE_DIR = path.join(ROOT, "vendor", "_raxis-clone");
 
 const ALLOWED_EXTENSIONS = new Set([".md", ".mdx"]);
+// TOML scenario config files that are safe to vendor (example configs, not secrets).
+const SCENARIO_TOML_DIR = "guides/scenarios";
 const SKIP_DIRS = new Set([
   "node_modules",
   ".git",
@@ -59,6 +61,15 @@ function ensureDir(p) {
   fs.mkdirSync(p, { recursive: true });
 }
 
+function isScenarioToml(relPath) {
+  // e.g. "guides/scenarios/01-hello-world/plan.toml"
+  const norm = relPath.split(path.sep).join("/").toLowerCase();
+  return (
+    norm.startsWith(SCENARIO_TOML_DIR + "/") &&
+    path.extname(relPath).toLowerCase() === ".toml"
+  );
+}
+
 function copyMarkdownTree(src, dst) {
   let count = 0;
   if (!fs.existsSync(src)) return 0;
@@ -80,8 +91,12 @@ function copyMarkdownTree(src, dst) {
         continue;
       }
       if (!entry.isFile()) continue;
-      if (!isMarkdown(entry.name)) continue;
-      if (shouldSkipFile(entry.name)) continue;
+      // Copy markdown files and TOML scenario configs.
+      const isToml = isScenarioToml(rel);
+      if (!isToml) {
+        if (!isMarkdown(entry.name)) continue;
+        if (shouldSkipFile(entry.name)) continue;
+      }
       const target = path.join(dst, rel);
       ensureDir(path.dirname(target));
       fs.copyFileSync(abs, target);

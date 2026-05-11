@@ -290,6 +290,46 @@ export function getAllDocs(): DocMeta[] {
   return docs;
 }
 
+export interface TomlFile {
+  filename: string;
+  content: string;
+}
+
+/** Returns TOML config files (plan, policy, credential) for a scenario doc. */
+export function getScenarioTomlFiles(meta: DocMeta): TomlFile[] {
+  if (meta.category !== "Scenarios") return [];
+  const dir = path.join(DOCS_DIR, path.dirname(meta.relativePath));
+  if (!exists(dir)) return [];
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files: TomlFile[] = [];
+  for (const e of entries) {
+    if (!e.isFile()) continue;
+    if (path.extname(e.name).toLowerCase() !== ".toml") continue;
+    try {
+      const content = fs.readFileSync(path.join(dir, e.name), "utf8");
+      files.push({ filename: e.name, content });
+    } catch {
+      /* skip unreadable */
+    }
+  }
+  // Canonical order: plan → policy → credential → everything else
+  const ORDER = ["plan.toml", "policy.toml", "credential.toml"];
+  files.sort((a, b) => {
+    const ai = ORDER.indexOf(a.filename);
+    const bi = ORDER.indexOf(b.filename);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return a.filename.localeCompare(b.filename);
+  });
+  return files;
+}
+
 export function getDocBySlug(slug: string[]): { meta: DocMeta; raw: string } | null {
   const slugPath = slug.join("/").toLowerCase();
   const meta = getAllDocs().find((d) => d.slugPath === slugPath);

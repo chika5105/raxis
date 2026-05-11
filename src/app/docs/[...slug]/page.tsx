@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { getAllDocs, getDocBySlug } from "@/lib/docs";
+import { getAllDocs, getDocBySlug, getScenarioTomlFiles } from "@/lib/docs";
 import { renderMarkdown } from "@/lib/markdown";
 import { DocsSidebar } from "@/components/DocsSidebar";
+import { TomlFileViewer } from "@/components/TomlFileViewer";
+import { ResizableSidebar } from "@/components/ResizableSidebar";
 
 interface Params {
   params: Promise<{ slug: string[] }>;
@@ -29,20 +31,24 @@ export default async function DocPage({ params }: Params) {
   if (!found) notFound();
   const { html } = await renderMarkdown(found.raw);
   const { meta } = found;
+  const tomlFiles = getScenarioTomlFiles(meta);
   const all = getAllDocs();
   const idx = all.findIndex((d) => d.slugPath === meta.slugPath);
   const prev = idx > 0 ? all[idx - 1] : null;
   const next = idx >= 0 && idx < all.length - 1 ? all[idx + 1] : null;
 
   return (
-    <div className="mx-auto max-w-7xl px-4 sm:px-6 py-10 lg:py-14 grid gap-10 lg:grid-cols-[220px_minmax(0,1fr)_200px]">
-      <aside className="hidden lg:block">
-        <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto pr-3">
-          <DocsSidebar active={meta.slugPath} />
-        </div>
+    <div className="w-full px-6 xl:px-12 py-10 lg:py-14 flex gap-8 xl:gap-12">
+      <aside className="hidden lg:flex shrink-0">
+        <ResizableSidebar>
+          <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto pr-3 w-full">
+            <DocsSidebar active={meta.slugPath} />
+          </div>
+        </ResizableSidebar>
       </aside>
 
-      <article className="min-w-0">
+      <div className="flex-1 min-w-0 flex gap-10">
+      <article className="flex-1 min-w-0">
         <Breadcrumb meta={meta} />
         <h1 className="font-display font-semibold tracking-[-0.02em] leading-[1.15] text-[2rem] sm:text-[2.4rem] mt-4">
           {meta.title}
@@ -56,14 +62,38 @@ export default async function DocPage({ params }: Params) {
           dangerouslySetInnerHTML={{ __html: html }}
         />
 
+        {tomlFiles.length > 0 && (
+          <section className="mt-14">
+            <div className="flex items-center gap-3 mb-5 pb-3 border-b border-[var(--rule)]">
+              <h2 className="text-[1.1rem] font-semibold text-[var(--fg)] tracking-[-0.01em]">
+                Scenario files
+              </h2>
+              <span className="text-xs text-[var(--soft)] tabular-nums">
+                {tomlFiles.length} file{tomlFiles.length !== 1 ? "s" : ""}
+              </span>
+            </div>
+            <div className="space-y-2">
+              {tomlFiles.map((f, i) => (
+                <TomlFileViewer
+                  key={f.filename}
+                  filename={f.filename}
+                  content={f.content}
+                  defaultOpen={i === 0}
+                />
+              ))}
+            </div>
+          </section>
+        )}
+
         <PrevNext prev={prev ?? undefined} next={next ?? undefined} />
       </article>
 
-      <aside className="hidden xl:block">
+      <aside className="hidden xl:block shrink-0 w-[200px]">
         <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto">
           <OnThisPage headings={meta.headings} />
         </div>
       </aside>
+      </div>
     </div>
   );
 }
