@@ -89,8 +89,13 @@ Initiative `Status: Completed`. The audit chain shows
 - **Force a rejection.** Edit `[[tasks.reviewer]] context` to demand
   Property-Based-Tests (which the Executor won't have written) so the
   Reviewer rejects the first attempt.
-- **Increase the retry budget.** Bump `max_review_rejections` to 5 to
-  see how many cycles the agent needs to converge.
+- **Increase the retry budget.** *(V2.6 — not wired today.)* The
+  planned `max_review_rejections` task field is reserved but the
+  kernel does not yet parse it (see `specs/v2/V2_GAPS.md` §12.13).
+  The counter substrate (`subtask_activations.review_reject_count`)
+  IS now bumped per terminal-rejection round; the parser + ceiling
+  check in `handle_retry_sub_task` are the remaining follow-ups.
+  Until then the Orchestrator harness decides when to give up.
 - **Tighten the path allowlist.** Set `path_allowlist = ["src/lib.rs"]`
   to demonstrate exact-filename mode.
 

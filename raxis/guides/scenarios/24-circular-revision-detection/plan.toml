@@ -13,7 +13,12 @@ task_id            = "ping-pong"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-max_revision_rounds = 5
+# NOTE (V2.5): `max_revision_rounds` is reserved for the V2.6
+# plan-toml-parser work — see `specs/v2/V2_GAPS.md` §12.13.
+# Kernel ignores it today. The oscillation-detector this scenario
+# documents is itself a V3 feature; until then the only "loop
+# breaker" is the orchestrator harness giving up after N rounds
+# in user space.
 description = """
   When the reviewer rejects with "make x mutable", flip `let x` to
   `let mut x`. If they reject with "make x immutable", flip back.

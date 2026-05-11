@@ -13,7 +13,15 @@ task_id            = "implement"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/"]
-max_revision_rounds = 3
+# NOTE (V2.5): per-task retry ceilings (`max_crash_retries` /
+# `max_review_rejections` / `max_revision_rounds`) are reserved
+# for the V2.6 plan-toml-parser work — see
+# `specs/v2/V2_GAPS.md` §12.13. The kernel parser today silently
+# ignores any unknown task-field key, so declaring these here
+# would no-op. The substrate they read against
+# (`subtask_activations.review_reject_count`) is now wired by
+# `handle_submit_review` (V2.5+) — the missing piece is the
+# parser + ceiling check in `handle_retry_sub_task`.
 description = """
   Add a function `pub fn greet(name: &str) -> String` to src/main.rs
   returning "Hello, NAME!". On the FIRST commit, intentionally use

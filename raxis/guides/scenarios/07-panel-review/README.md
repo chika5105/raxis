@@ -6,7 +6,16 @@ One Executor, three Reviewers covering different concerns
 (correctness, style, security). After this scenario you understand
 how multiple Reviewers compose, how the kernel injects each
 Reviewer's critique back into the Executor on rejection, and the
-practical limits of `max_review_rejections`.
+practical limits of running multiple sequential review rounds.
+
+> **Status (V2.5).** A plan-time ceiling field
+> (`max_review_rejections`) is reserved for V2.6 — see
+> `specs/v2/V2_GAPS.md` §12.13. As of V2.5 the kernel bumps
+> `subtask_activations.review_reject_count` once per terminal
+> rejection round (the substrate the future ceiling check
+> reads), but the plan parser does not yet accept any retry-
+> ceiling key from `[[tasks]]`. The Orchestrator harness still
+> decides when to give up.
 
 ---
 

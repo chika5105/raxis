@@ -49,6 +49,7 @@ const TASKS:                       &str = Table::Tasks.as_str();
 const TASK_INTENT_RANGES:          &str = Table::TaskIntentRanges.as_str();
 const INITIATIVES:                 &str = Table::Initiatives.as_str();
 const TASK_EXPORTED_PATH_SNAPSHOTS:&str = Table::TaskExportedPathSnapshots.as_str();
+const SUBTASK_ACTIVATIONS:         &str = Table::SubtaskActivations.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
@@ -56,6 +57,7 @@ use crate::initiatives::task_transitions::{
     transition_task as fsm_transition, transition_task_in_tx, TransitionActor,
 };
 use crate::ipc::context::HandlerContext;
+use crate::observability::record_intent_admission;
 use crate::scheduler::budget;
 use crate::vcs::diff::CommitSha;
 
@@ -106,7 +108,21 @@ use crate::vcs::diff::CommitSha;
 /// mutex mid-pipeline (INV-POLICY-01).
 pub async fn handle(req: IntentRequest, ctx: &Arc<HandlerContext>) -> IntentResponse {
     let seq = req.sequence_number;
-    match handle_inner(req, ctx).await {
+    let intent_kind = req.intent_kind;
+    // V3 OTel — open the `raxis.intent.admission` root span around
+    // the entire pipeline. The span is finalised on the way out
+    // with verdict/latency attributes plus a single counter +
+    // histogram emit. The hub short-circuits when
+    // `[observability].enabled = false`, so this is ~free in the
+    // disabled case.
+    let started = std::time::Instant::now();
+    let mut span = ctx.observability.start_span(
+        raxis_observability::SpanName::IntentAdmission,
+        raxis_observability::SpanKind::Server,
+        None,
+    );
+    span.set_attr("intent_kind", intent_kind.as_str());
+    let resp = match handle_inner(req, ctx).await {
         Ok(resp) => resp,
         Err((code, task_state)) => IntentResponse {
             sequence_number: seq,
@@ -116,7 +132,24 @@ pub async fn handle(req: IntentRequest, ctx: &Arc<HandlerContext>) -> IntentResp
                 error_detail: None,
             },
         },
-    }
+    };
+    let latency_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
+    let (verdict_label, verdict_reason): (&'static str, String) = match &resp.outcome {
+        IntentOutcome::Accepted { .. }                => ("Accepted", "ok".to_owned()),
+        IntentOutcome::Rejected { error_code, .. }    => ("Rejected", error_code.to_string()),
+    };
+    span.set_attr("verdict",        verdict_label);
+    span.set_attr("verdict_reason", verdict_reason.as_str());
+    span.set_attr("latency_ms",     latency_ms);
+    span.set_status(raxis_observability::SpanStatus::Ok, None);
+    span.end();
+    record_intent_admission(
+        &ctx.observability,
+        intent_kind.as_str(),
+        verdict_label,
+        latency_ms,
+    );
+    resp
 }
 
 type HandlerResult = Result<IntentResponse, (PlannerErrorCode, TaskState)>;
@@ -239,10 +272,22 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     //
     // Authorization for this branch is already covered by the
     // dispatch matrix above (Orchestrator + ActivateSubTask is the
-    // only Authorized cell). `RetrySubTask` stays fail-closed
-    // pending `subtask_activations.crash_retry_count` /
-    // `review_reject_count` ceiling enforcement (v2-deep-spec.md
-    // §Step 12 — separate task).
+    // only Authorized cell). `RetrySubTask` is intentionally
+    // fail-closed at this layer: the counter substrate
+    // (`subtask_activations.review_reject_count`,
+    // `subtask_activations.crash_retry_count`) IS now populated
+    // — `review_reject_count` is bumped in
+    // `handle_submit_review`'s post-aggregation path
+    // (V2 §Step 25), and plan-bundle sealing
+    // (`0008_v2_plan_bundle_sealing.sql`) ensures the activation
+    // row exists. What remains is the *re-spawn* half of
+    // v2-deep-spec.md §Step 12 (terminate the failed session,
+    // mint a new `sessions` row, re-issue worktree provisioning,
+    // reset `tasks.state` Admitted → Running) plus the
+    // `max_review_rejections` / `max_crash_retries` ceiling
+    // values. Until that lands, return `FAIL_POLICY_VIOLATION` so
+    // any planner that issues `RetrySubTask` against a current
+    // kernel sees a coarse rejection rather than a no-op.
     if matches!(req.intent_kind, IntentKind::ActivateSubTask) {
         return handle_activate_sub_task(req, session, session_id, seq, ctx).await;
     }
@@ -1702,20 +1747,15 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 //      its task lifecycle terminates here regardless of verdict
 //      (v2-deep-spec.md §Step 22 + dispatch matrix § "Reviewer +
 //      ReportFailure = Unauthorized" — the Reviewer cannot self-fail).
-//      The downstream consequences (review_reject_count++,
-//      KernelPush::ReviewRejected / AllReviewersPassed) are out of
-//      scope for this iteration — they are implemented when the
-//      `subtask_activations` row population path lands (Step 25).
-//
-// **Why no `subtask_activations` write here.** V2 plan approval does
-// not yet populate `subtask_activations` (that arrives with the
-// V2 plan-bundle sealing work, Step 1.2). Until then, any Reviewer
-// task is a synthetic test fixture; the activation-row update is a
-// no-op. Adding it here would silently fail in production and pass
-// in fixtures, which is the worst possible failure mode. We make
-// the activation-row update a separate task (Step 25 / Plan Bundle
-// Sealing) so the implementation lands together with the call site
-// that creates the row.
+//   6. Step 25 cross-Reviewer aggregation runs after the commit (see
+//      step 6 below in this function); when the aggregator turns
+//      terminal-`AtLeastOneRejected`, the Executor predecessor's
+//      `subtask_activations.review_reject_count` is bumped via
+//      [`increment_executor_review_reject_count_in_tx`]. Plan-bundle
+//      sealing (V2 §Step 1.2 / `0008_v2_plan_bundle_sealing.sql`) has
+//      shipped, so the Executor's activation row is guaranteed to
+//      exist by the time we reach this code path — the increment is
+//      a hard write, not a no-op.
 //
 // **Idempotency.** Re-submission of the same `(session, sequence_number,
 // nonce)` is rejected at Step 2 (envelope acceptance) before this
@@ -1724,6 +1764,49 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 // a NEW reviewer event and aggregated; the planner (Reviewer harness)
 // is responsible for not double-submitting the same verdict.
 // ---------------------------------------------------------------------------
+
+/// V2 §Step 25 — bump the Executor's *current* (terminated_at IS NULL)
+/// `subtask_activations.review_reject_count` by one.
+///
+/// Called from the [`handle_submit_review`] post-commit aggregation
+/// loop exactly once per terminal-rejected round (the aggregator
+/// emits `AtLeastOneRejected` once when the last sibling Reviewer
+/// votes; per-Reviewer increments would multiply the count and make
+/// `max_review_rejections` ceilings effectively N× too tight). The
+/// returned `Result` is fail-soft at the call site — the counter
+/// is internal accounting, not on the audit path.
+///
+/// **Why scope to `terminated_at IS NULL`.** A given Executor task
+/// can have several historical activation rows (one per retry
+/// round once `RetrySubTask` lands V2 §Step 12 properly). The
+/// counter we want to bump is the *active* one — the row whose
+/// session is still bound — which by construction is the only row
+/// with a NULL `terminated_at`. Bumping a terminated row would
+/// double-count history and skew the ceiling check.
+///
+/// **Atomicity.** Single `UPDATE ... SET review_reject_count =
+/// review_reject_count + 1` in its own transaction. Concurrent
+/// reviewers cannot race here because the aggregator's
+/// terminal-rejected branch fires once per round (when the last
+/// Pending vote becomes non-Pending), and `handle_submit_review`
+/// itself is serialised by the per-session sequence-number gate
+/// (INV-01).
+fn increment_executor_review_reject_count(
+    executor_task_id: &str,
+    store:            &Store,
+) -> Result<(), rusqlite::Error> {
+    let conn = store.lock_sync();
+    conn.execute(
+        &format!(
+            "UPDATE {SUBTASK_ACTIVATIONS}
+                SET review_reject_count = review_reject_count + 1
+              WHERE task_id        = ?1
+                AND terminated_at IS NULL"
+        ),
+        rusqlite::params![executor_task_id],
+    )?;
+    Ok(())
+}
 
 fn handle_submit_review(
     req: IntentRequest,
@@ -1911,15 +1994,26 @@ fn handle_submit_review(
     //                         sibling Reviewer; emitting now would
     //                         flood the audit chain with N-1
     //                         partial-state rows.
-    //   * `AllPassed`       → emit `ReviewAggregationCompleted`.
-    //                         When the push transport lands (gap
-    //                         §12.1), this audit row is the anchor
-    //                         the future emitter reads to issue
-    //                         `KernelPush::AllReviewersPassed`.
-    //   * `AtLeastOneRejected` → emit `ReviewAggregationCompleted`.
-    //                         Same pattern as `AllPassed` but for
-    //                         the `KernelPush::ReviewRejected`
-    //                         direction.
+    //   * `AllPassed`       → emit `ReviewAggregationCompleted`. The
+    //                         V2.3 push dispatcher (`push::mod`) is
+    //                         shipped; once the kernel persists an
+    //                         initiative→Orchestrator-session
+    //                         mapping (gap §12.1 — schema migration
+    //                         pending) the call site here will also
+    //                         fire `push_dispatcher.enqueue(orch,
+    //                         KernelPush::AllReviewersPassed{..})`.
+    //                         Until then the audit row is the
+    //                         canonical signal — the Orchestrator
+    //                         polls the audit chain via
+    //                         `OperatorRequest::ListInitiativeEvents`.
+    //   * `AtLeastOneRejected` → emit `ReviewAggregationCompleted`
+    //                         AND bump `subtask_activations.
+    //                         review_reject_count` for the Executor
+    //                         predecessor (Step 25 counter — see
+    //                         `increment_executor_review_reject_count`).
+    //                         Push enqueue (`KernelPush::ReviewRejected`)
+    //                         follows the same migration as
+    //                         `AllPassed` above.
     //   * `NoSuccessors`    → emit `ReviewAggregationCompleted` for
     //                         defense in depth (a malformed plan
     //                         this kernel let in must surface in
@@ -1961,6 +2055,31 @@ fn handle_submit_review(
             crate::initiatives::review_aggregation::AggregateReviewVerdict::NoSuccessors
                 => "NoSuccessors",
         };
+
+        // V2 §Step 25 — bump the Executor's `review_reject_count` once
+        // per terminal-rejected aggregation round. Plan-bundle sealing
+        // (§Step 1.2) guarantees the activation row exists; the helper
+        // is fail-soft (logs + continues) on SQLite errors so a
+        // counter-bump failure cannot stall the post-commit audit
+        // emission below. The counter is the substrate the
+        // `RetrySubTask` ceiling-check in `handle_retry_sub_task`
+        // reads against the plan-declared `max_review_rejections`.
+        if matches!(
+            outcome.verdict,
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected,
+        ) {
+            if let Err(e) = increment_executor_review_reject_count(
+                predecessor.as_str(), store,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"ReviewRejectCounterIncrementFailed\",\
+                     \"executor_task_id\":\"{predecessor}\",\
+                     \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                     \"error\":\"{e}\"}}",
+                );
+            }
+        }
 
         eprintln!(
             "{{\"level\":\"info\",\"event\":\"ReviewAggregationCompleted\",\
@@ -4259,6 +4378,151 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// Insert an Active `subtask_activations` row for `task_id` with a
+    /// freshly-minted activation_id, `review_reject_count = 0`, and
+    /// `terminated_at = NULL`. Mirror of the row populated by
+    /// `lifecycle::insert_subtask_activation_in_tx` (V2 §Step 5)
+    /// shaped for the `increment_executor_review_reject_count` tests.
+    fn seed_executor_activation_row(store: &Store, task_id: &str) {
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS}
+                    (activation_id, task_id, initiative_id,
+                     activation_state, session_id, evaluation_sha,
+                     crash_retry_count, review_reject_count,
+                     created_at, activated_at, terminated_at)
+                 VALUES (?1, ?2, 'init-rev', 'PendingActivation', NULL, NULL,
+                         0, 0, ?3, NULL, NULL)"
+            ),
+            rusqlite::params![
+                uuid::Uuid::new_v4().to_string(),
+                task_id,
+                unix_now_secs() as i64,
+            ],
+        ).unwrap();
+    }
+
+    fn read_review_reject_count(store: &Store, task_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT review_reject_count FROM {SUBTASK_ACTIVATIONS}
+                  WHERE task_id = ?1 AND terminated_at IS NULL"
+            ),
+            rusqlite::params![task_id],
+            |r| r.get::<_, i64>(0),
+        ).unwrap()
+    }
+
+    /// V2 §Step 25 — a terminal-rejected aggregation must bump the
+    /// Executor's `review_reject_count` exactly once, regardless of
+    /// how many sibling Reviewers voted (the aggregator only reaches
+    /// terminal-rejected on the last sibling's commit). This pins
+    /// the substrate the future `handle_retry_sub_task` ceiling
+    /// check (`max_review_rejections`) reads against.
+    #[test]
+    fn submit_review_rejected_increments_executor_review_reject_count() {
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let policy = default_test_policy();
+
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_executor_activation_row(&store, "exe1");
+
+        assert_eq!(read_review_reject_count(&store, "exe1"), 0,
+            "freshly-seeded activation row starts at zero");
+
+        let req = make_submit_review_request("rev1", Some(false), Some("not yet"));
+        handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
+        ).unwrap();
+
+        assert_eq!(read_review_reject_count(&store, "exe1"), 1,
+            "single-Reviewer rejection bumps the Executor's counter \
+             from 0 → 1 (one rejection round)");
+    }
+
+    /// Approval path must NOT bump `review_reject_count` — only
+    /// terminal-rejected aggregations do.
+    #[test]
+    fn submit_review_approved_leaves_review_reject_count_at_zero() {
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let policy = default_test_policy();
+
+        seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_executor_activation_row(&store, "exe1");
+
+        let req = make_submit_review_request("rev1", Some(true), None);
+        handle_submit_review(
+            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
+        ).unwrap();
+
+        assert_eq!(read_review_reject_count(&store, "exe1"), 0,
+            "AllPassed verdict must not increment the rejection counter");
+    }
+
+    /// N-Reviewer panel: the aggregator only reaches terminal-rejected
+    /// on the LAST sibling's commit, so the counter bumps exactly once
+    /// across the whole panel. Pin this against an off-by-one bug
+    /// where bumping inside the per-Reviewer rejection branch would
+    /// over-count (the prose-pattern in `handle_submit_review` Step 4
+    /// could accidentally regress here).
+    #[test]
+    fn submit_review_rejected_panel_increments_review_reject_count_once() {
+        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
+        let policy = default_test_policy();
+
+        // Two-Reviewer panel.
+        seed_reviewer_with_executor_predecessor(&store, "revA", "exe1");
+        seed_executor_activation_row(&store, "exe1");
+        {
+            let conn = store.lock_sync();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES ('revB', 'init-rev', 'default', ?1, 'kernel',
+                             1, ?2, ?2, 0)"
+                ),
+                rusqlite::params![TaskState::Running.as_sql_str(), now],
+            ).unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {dag_edges}
+                        (initiative_id, predecessor_task_id, successor_task_id,
+                         predecessor_satisfied)
+                     VALUES ('init-rev', 'exe1', 'revB', 1)",
+                    dag_edges = Table::TaskDagEdges.as_str(),
+                ),
+                [],
+            ).unwrap();
+        }
+
+        // revA rejects first → still Pending (revB hasn't voted) → no bump.
+        let req_a = make_submit_review_request("revA", Some(false), Some("first"));
+        handle_submit_review(
+            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
+        ).unwrap();
+        assert_eq!(read_review_reject_count(&store, "exe1"), 0,
+            "Pending aggregation must not bump the counter");
+
+        // revB rejects → terminal AtLeastOneRejected → bump once.
+        let req_b = make_submit_review_request("revB", Some(false), Some("second"));
+        handle_submit_review(
+            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy, &ctx,
+        ).unwrap();
+
+        assert_eq!(read_review_reject_count(&store, "exe1"), 1,
+            "exactly one rejection round across the panel — counter \
+             bumps once when the aggregator turns terminal-rejected");
     }
 
     #[test]

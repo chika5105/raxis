@@ -2912,6 +2912,92 @@ that forgiveness allows this exact class of typo to pass.
 
 ---
 
+### 12.13 `subtask_activations.review_reject_count` never incremented — ✅ CLOSED (V2.5+)
+
+**Discovered.** 2026-05 docs review (raxis-concepts/10 +
+guides/scenarios/{02,07,22,23,24}).
+
+**Class.** Substrate-not-wired bug: the V2 §Step 25 aggregator
+emitted the audit row for terminal `AtLeastOneRejected`, but no
+caller bumped the per-Executor `review_reject_count` counter on
+`subtask_activations`. The counter was the substrate the V2
+§Step 12 `RetrySubTask` ceiling enforcement (`max_review_rejections`)
+was supposed to read. With no bumper and no ceiling check,
+`RetrySubTask` was hard-rejected with `FAIL_POLICY_VIOLATION`
+unconditionally and the `max_*` task fields in scenario
+`plan.toml` files were silently ignored.
+
+The HEAD comments in `handle_submit_review` and
+`review_aggregation.rs` referenced "V2 plan-bundle sealing
+work, Step 1.2" as the unblocking dependency — but plan-bundle
+sealing has shipped (`crates/store/migrations/0008_v2_plan_bundle_sealing.sql`
++ `kernel/src/initiatives/v2_admission.rs`), so the `subtask_activations`
+rows ARE populated by the time `SubmitReview` lands. The comments
+were stale.
+
+**Resolution.** `kernel/src/handlers/intent.rs` now defines
+`increment_executor_review_reject_count(executor_task_id, store)`
+and the post-aggregation loop in `handle_submit_review` calls it
+exactly once per terminal-rejected round (the aggregator only
+emits `AtLeastOneRejected` when the last sibling Reviewer commits,
+so the per-round semantic is preserved without per-Reviewer
+double-counting). The bump is scoped to the row with
+`terminated_at IS NULL`, which is the active activation; bumping
+a terminated row would skew the counter against historical
+rounds. The increment is fail-soft — a SQLite error logs and
+continues so the post-commit audit emission stays canonical.
+
+**Tests** (in `handlers/intent::tests`):
+* `submit_review_rejected_increments_executor_review_reject_count`
+  — single-Reviewer rejection: counter 0 → 1.
+* `submit_review_approved_leaves_review_reject_count_at_zero`
+  — AllPassed verdict does NOT bump.
+* `submit_review_rejected_panel_increments_review_reject_count_once`
+  — N=2 Reviewer panel where both reject sequentially: counter
+  bumps exactly once (the first Reviewer's commit leaves the
+  aggregator `Pending`, the second Reviewer's commit transitions
+  it to `AtLeastOneRejected`).
+
+All three tests pass; the existing 15 `submit_review_*` tests
+continue to pass unchanged.
+
+**Stale comments updated.** The "out of scope for this iteration"
+comment in `handle_submit_review` (line ~1705 pre-edit) was
+rewritten to reflect that the increment now fires here. The
+"Until V2 plan-bundle sealing populates the agent-type signal"
+prose in `review_aggregation.rs` (lines ~24-37 pre-edit) was
+updated to acknowledge that plan-bundle sealing has shipped.
+The `RetrySubTask` short-circuit comment in `intent.rs` was
+also rewritten to point at the *remaining* unfinished work
+(re-spawn half + `max_review_rejections` plan-toml parsing), not
+the phantom "subtask_activations row population" dependency
+that no longer exists.
+
+**Out of scope for this entry (tracked separately).**
+* Parsing `max_crash_retries` / `max_review_rejections` from
+  `[[tasks]]` and stamping them onto `TaskPlanFields`. These
+  fields are reserved on the wire today (scenario `plan.toml`
+  files declare them as comments only) — the parser still
+  silently ignores any unknown task-field key.
+* The `RetrySubTask` re-spawn handler. The dispatch matrix
+  Authorizes Orchestrator+RetrySubTask, but the handler itself
+  is a fail-closed stub (`FAIL_POLICY_VIOLATION` for every
+  request). Implementing it requires the kernel to terminate
+  the failed Executor session, mint a fresh `sessions` row,
+  re-issue worktree provisioning, and reset the activation row
+  to `PendingActivation` — non-trivial and tracked as a V2.6
+  follow-up.
+* `KernelPush::AllReviewersPassed` / `KernelPush::ReviewRejected`
+  enqueue at the aggregator terminal. The V2.3 push dispatcher
+  (`kernel/src/push/mod.rs`) is shipped and `enqueue` is
+  reachable via `HandlerContext::push_dispatcher`, but the
+  kernel does not yet persist an `initiative_id → orchestrator
+  session_id` mapping (gap §12.1 — schema migration pending).
+  Until that lands, the audit chain is the canonical signal and
+  the Orchestrator polls via `OperatorRequest::ListInitiativeEvents`.
+
+---
+
 ### 12.11 Delegation runtime SQL drift — 🔴 OPEN
 
 **Discovered.** 2026-05 docs review (raxis-concepts/04-delegations).

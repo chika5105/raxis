@@ -21,24 +21,37 @@
 // `tasks.last_critique`), so the aggregation query is a single
 // `task_dag_edges → tasks` join with no per-activation history scan.
 //
-// **Design constraint: agent-type filtering is plan-substrate-bound.**
+// **Design constraint: agent-type filtering at the call site, not in SQL.**
 // Step 25 specifies that this aggregation considers only Reviewer
-// successors. Until V2 plan-bundle sealing populates the agent-type
-// signal on tasks (`session_agent_type` on the bound session, or a
-// future `tasks.agent_type` projection), we cannot filter at the
-// SQL layer. The contract instead is:
+// successors. Plan-bundle sealing (V2 §Step 1.2 /
+// `0008_v2_plan_bundle_sealing.sql`) has shipped, so
+// `subtask_activations` rows now exist for every Executor /
+// Reviewer task admitted under V2 — the substrate that future
+// SQL-level filtering would join against (`subtask_activations`
+// has no `session_agent_type` column today; the agent type lives
+// on `sessions` via `subtask_activations.session_id` after
+// activation).
+//
+// We deliberately keep the predicate plan-shape-agnostic for two
+// reasons:
 //
 //   * V1 plans never produce SubmitReview intents (the dispatch
 //     matrix rejects them) so `review_verdict` stays NULL on V1
 //     successors and they are reported as `Pending` — consistent
 //     with the "still has unsubmitted reviewers" semantic.
-//   * V2 plans that mix Executor and Reviewer successors of one
-//     Executor are not supported in the current plan substrate; the
-//     plan-bundle-sealing task is the right home for that filter.
+//   * V2 plans mix Executor and Reviewer successors of one
+//     Executor only via the explicit Reviewer dependency model
+//     described in `v2-deep-spec.md §Step 23`. The Step-17
+//     plan-shape validators (`validate_reviewer_dependencies` and
+//     friends) already reject any sub-task whose `predecessors`
+//     point at a non-Executor; reaching this aggregator with a
+//     non-Reviewer successor is therefore a structural bug in the
+//     plan substrate, not a runtime mis-classification — and the
+//     `Pending` fall-through is the safe posture.
 //
-// This module is therefore safe to ship today: it returns `Pending`
-// when ANY successor lacks a verdict, which is exactly the
-// "wait-for-the-last-reviewer" pre-condition for the
+// The aggregator is therefore safe to ship today: it returns
+// `Pending` when ANY successor lacks a verdict, which is exactly
+// the "wait-for-the-last-reviewer" pre-condition for the
 // `KernelPush::AllReviewersPassed` push.
 
 use raxis_store::{Store, Table};
