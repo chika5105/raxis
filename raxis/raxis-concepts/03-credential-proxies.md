@@ -137,10 +137,10 @@ For every query the agent sends:
 
 | Proxy Type | Protocol | Key Restrictions |
 |---|---|---|
-| `postgres` | PostgreSQL wire protocol | `allowed_operations`, `allowed_tables`, `max_rows` |
-| `mysql` | MySQL wire protocol | `allowed_operations`, `allowed_tables` |
-| `mssql` | TDS (SQL Server) | `allowed_operations`, `allowed_tables` |
-| `mongodb` | MongoDB wire protocol | `allowed_operations`, `allowed_collections` |
+| `postgres` | PostgreSQL wire protocol | `allow_only_select`, `allowed_tables`, `forbidden_tables`, `max_result_rows`, `enforce` |
+| `mysql`    | MySQL wire protocol      | `allow_only_select`, `allowed_tables`, `forbidden_tables`, `max_result_rows`, `enforce` |
+| `mssql`    | TDS (SQL Server)         | `allow_only_select`, `allowed_tables`, `forbidden_tables`, `max_result_rows` (audit-only, no streaming cap yet), `enforce` |
+| `mongodb`  | MongoDB wire protocol    | `allow_read_only`, `allowed_collections`, `forbidden_collections`, `max_documents`, `enforce` |
 | `redis` | RESP (Redis) | `allowed_commands`, `blocked_commands` |
 | `http` | HTTP/1.1 reverse proxy | `allowed_methods`, `allowed_paths`, path globs |
 | `k8s` | HTTP (rides the http proxy) | bearer auth, `allowed_verbs`, `allowed_resources` |

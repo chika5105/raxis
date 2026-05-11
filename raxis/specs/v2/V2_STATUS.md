@@ -72,7 +72,7 @@ credential bytes to the agent VM.
 
 | `proxy_type` | Status | Scope | Reference |
 |---|---|---|---|
-| `postgres` | **shipped (real-upstream-tier, V2.1)** | full simple-query relay against a live Postgres via `tokio-postgres`, real `RowDescription`/`DataRow`/`CommandComplete` frames, lazy upstream connect on first allowed query, `allow_only_select` short-circuits before upstream, V2.1 audit envelope (`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`) | `crates/credential-proxy-postgres/` + integration tests in `tests/proxy_handshake.rs` (6 passing) + live-e2e slice `postgres-proxy` |
+| `postgres` | **shipped (real-upstream-tier, V2.1; V2.4 table allowlists)** | full simple-query relay against a live Postgres via `tokio-postgres`, real `RowDescription`/`DataRow`/`CommandComplete` frames, lazy upstream connect on first allowed query, `allow_only_select` short-circuits before upstream, V2.1 audit envelope (`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`); V2.4 SQL walker + `allowed_tables` / `forbidden_tables` / `max_result_rows` streaming cap / `enforce = false` audit-only mode per `proxy-table-allowlists.md` | `crates/credential-proxy-postgres/` + integration tests in `tests/proxy_handshake.rs` (6 passing) + live-e2e slices `postgres-proxy`, `postgres-proxy-restrictions`, `postgres-proxy-table-allowlists` |
 | `http`     | shipped | bearer / basic auth modes, host rewrite, method+path-prefix allowlist, real upstream forwarding | `crates/credential-proxy-http/` + live-e2e slices `http-proxy-bearer`, `http-proxy-restrictions` |
 | `k8s`      | shipped (rides HTTP) | bearer auth, RBAC-style verb allowlist via the HTTP proxy | `crates/credential-proxy-http/` (k8s convenience layer) |
 | `smtp`     | shipped (real-upstream-tier) | RCPT/MAIL/DATA framing, sender allowlist, recipient-domain allowlist, per-message and per-minute rate caps, real upstream relay with optional STARTTLS | `crates/credential-proxy-smtp/` + live-e2e slice `smtp-proxy` |
@@ -80,9 +80,9 @@ credential bytes to the agent VM.
 | `aws`      | shipped (handshake-tier — real cloud creds) | IMDS-shaped `/creds` envelope, path allowlist, `AWS_CONTAINER_CREDENTIALS_FULL_URI` mount; the proxy returns **real IAM credentials** from the configured backend so the agent's AWS SDK can call real AWS APIs end-to-end | `crates/credential-proxy-aws/` + live-e2e slice `aws-proxy` |
 | `gcp`      | shipped (handshake-tier — real cloud creds) | metadata-server endpoints (`/computeMetadata/v1/...`), `Metadata-Flavor: Google` enforcement, path allowlist; same real-credentials posture as AWS | `crates/credential-proxy-gcp/` + live-e2e slice `gcp-proxy` |
 | `azure`    | shipped (handshake-tier — real cloud creds) | IMDS `/metadata/identity/oauth2/token`, `Metadata: true` enforcement, resource allowlist; same real-credentials posture as AWS | `crates/credential-proxy-azure/` + live-e2e slice `azure-proxy` |
-| `mysql`    | **shipped (real-upstream-tier, V2.1)** | full `COM_QUERY` relay against a live MySQL upstream via a hand-rolled `mysql_native_password` connector, byte-relayed text-resultset frames (`ResultSetHeader`/`ColumnDef`/`EOF`/`RowData`/`EOF`), lazy upstream connect on first allowed query, `allow_only_select` short-circuits before upstream, V2.1 audit envelope (`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`); `caching_sha2_password` deferred to V3 | `crates/credential-proxy-mysql/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slice `mysql-proxy` |
-| `mssql`    | **shipped (real-upstream-tier, V2.1)** | full `SQLBatch` relay against a live SQL Server upstream over plaintext TDS — `PRELOGIN` (ENC_NOT_SUP), `LOGIN7` with SQL Authentication (nibble-swap+XOR(0xA5) password obfuscation per `[MS-TDS] 2.2.6.4`), TABULAR_RESULT relay-until-EOM, `allow_only_select` short-circuits before upstream, V2.1 audit envelope (`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`); Windows Auth / Entra ID / `?encrypt=true` deferred to V3 | `crates/credential-proxy-mssql/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slice `mssql-proxy` |
-| `mongodb`  | **shipped (real-upstream-tier, V2.1; no-auth)** | full `OP_MSG` relay against a `--noauth` upstream, lazy upstream connect on first allowed agent command, hello/isMaster/ping/buildInfo answered locally, `allow_read_only` short-circuits before upstream, V2.1 audit envelope (`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`); SCRAM-SHA-256 upstream auth + TLS upstream deferred to V2.2 (URLs with userinfo or `tls=true` fail fast with a clear `CredentialProxyUpstreamFailed { reason: "ProtocolHandshakeFailed" }` and a detail string mentioning `--noauth`) | `crates/credential-proxy-mongodb/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slice `mongodb-proxy` |
+| `mysql`    | **shipped (real-upstream-tier, V2.1; V2.4 table allowlists)** | full `COM_QUERY` relay against a live MySQL upstream via a hand-rolled `mysql_native_password` connector, byte-relayed text-resultset frames (`ResultSetHeader`/`ColumnDef`/`EOF`/`RowData`/`EOF`), lazy upstream connect on first allowed query, `allow_only_select` short-circuits before upstream, V2.1 audit envelope; V2.4 SQL walker + `allowed_tables` / `forbidden_tables` / `max_result_rows` (truncating `ERR_Packet` 1226/54000 on overflow) / `enforce = false` audit-only mode; `caching_sha2_password` deferred to V3 | `crates/credential-proxy-mysql/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slice `mysql-proxy` |
+| `mssql`    | **shipped (real-upstream-tier, V2.1; V2.4 table allowlists)** | full `SQLBatch` relay against a live SQL Server upstream over plaintext TDS — `PRELOGIN` (ENC_NOT_SUP), `LOGIN7` with SQL Authentication (nibble-swap+XOR(0xA5) password obfuscation per `[MS-TDS] 2.2.6.4`), TABULAR_RESULT relay-until-EOM, `allow_only_select` short-circuits before upstream, V2.1 audit envelope; V2.4 T-SQL walker + `allowed_tables` / `forbidden_tables` / `enforce = false` audit-only mode. `max_result_rows` is plumbed + audited but its streaming cap is a V2 followup (TDS token-stream parsing — see `proxy-table-allowlists.md §11.1`). Windows Auth / Entra ID / `?encrypt=true` deferred to V3 | `crates/credential-proxy-mssql/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slice `mssql-proxy` |
+| `mongodb`  | **shipped (real-upstream-tier, V2.1; V2.4 collection allowlists + cursor cap)** | full `OP_MSG` relay against a `--noauth` upstream, hello/isMaster/ping/buildInfo answered locally, `allow_read_only` short-circuits before upstream, V2.1 audit envelope; V2.4 BSON command walker resolves primary collection + `$db`; `allowed_collections` / `forbidden_collections` admit/deny; `max_documents` cursor-rewrite cap (truncate `firstBatch` / `nextBatch` + zero cursor id per `§7.4`); fail-closed secondary-collection rejection for `$lookup` / `$unionWith` / `$merge` / `$out`; `enforce = false` audit-only mode. SCRAM-SHA-256 upstream auth + TLS upstream deferred to V2.2 (URLs with userinfo or `tls=true` fail fast with `CredentialProxyUpstreamFailed { reason: "ProtocolHandshakeFailed" }`) | `crates/credential-proxy-mongodb/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slices `mongodb-proxy`, `mongodb-proxy-collection-allowlists` |
 
 **V2.1 real-upstream-forwarding contract** (per `credential-proxy.md
 §14`): each TCP-protocol proxy opens a real upstream connection on
@@ -137,18 +137,20 @@ through the cloud SDK using the served credentials.
 
 ### 1.8 Live end-to-end test harness
 
-The `raxis-live-e2e` binary drives 15 in-process slices end-to-end
+The `raxis-live-e2e` binary drives 17 in-process slices end-to-end
 against real subsystems (real listeners, real wire bytes, real audit
-chain, real credential backend). All 15 pass on
+chain, real credential backend). All 17 pass on
 `cargo run -p raxis-live-e2e -- all`:
 
 ```
 gateway-anthropic, egress-enforcement, session-spawn,
 postgres-proxy, postgres-proxy-restrictions,
+postgres-proxy-table-allowlists,
 http-proxy-bearer, http-proxy-restrictions,
 smtp-proxy, redis-proxy,
 aws-proxy, gcp-proxy, azure-proxy,
-mysql-proxy, mssql-proxy, mongodb-proxy
+mysql-proxy, mssql-proxy,
+mongodb-proxy, mongodb-proxy-collection-allowlists
 ```
 
 `gateway-anthropic` and `egress-enforcement` exercise a real call to
@@ -169,11 +171,12 @@ specific named slice when an API key is not available.
 | #5 — Capability-class completeness | **deferred** (see §2.4) | scaffolded as `check_capability_class_completeness` (no-op) |
 
 `cargo xtask spec-graph --strict` succeeds with **0 findings** across
-**44 spec files, 120 unique fail codes, 64 unique audit kinds** at
-the current HEAD (the file count rose from 42→44 with the
-`V2_STATUS.md` ledger and `credential-proxy.md §14` amendment; the
-fail-code count rose from 117→120 with the three new
-`FAIL_PROXY_UPSTREAM_*` codes from §14.7).
+**50 spec files, 120 unique fail codes, 64 unique audit kinds** at
+the current HEAD (the file count rose from 44→50 with the V2.4
+`proxy-table-allowlists.md` spec and the five `raxis-concepts/`
+explainer-tier documents that index it; the fail-code count remains
+at 120 because table-allowlist denials reuse the existing
+proxy-error envelope per `proxy-table-allowlists.md §7`).
 
 ---
 
