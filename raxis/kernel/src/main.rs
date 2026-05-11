@@ -537,6 +537,41 @@ async fn main() {
         }
     }
 
+    // Step 8b.1 — Probe the host-canonical Linux kernel binary
+    // (`<install_dir>/kernel/vmlinux`). Distinct from the per-role
+    // rootfs preflight above because the kernel binary is NOT
+    // covered by an Ed25519-signed manifest in V2 — its trust model
+    // is "operator-protected install root" (see
+    // `canonical_images_preflight::linux_kernel_path` doc). The
+    // outcome is therefore binary: present or missing. Substrates
+    // that don't boot a Linux kernel (SubprocessIsolation, used in
+    // tests + on hosts without microVM support) ignore the
+    // `Missing` outcome; AVF / Firecracker activations surface
+    // `SpawnFailed` at first session-spawn time when the binary is
+    // absent.
+    match canonical_images_preflight::probe_linux_kernel_binary_at_boot(&install_dir) {
+        canonical_images_preflight::KernelBinaryOutcome::Present { path } => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"linux_kernel_binary_ok\",\
+                 \"path\":\"{}\"}}",
+                path.display(),
+            );
+        }
+        canonical_images_preflight::KernelBinaryOutcome::Missing { path } => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"linux_kernel_binary_missing\",\
+                 \"path\":\"{}\",\
+                 \"hint\":\"the host-canonical Linux kernel binary is absent; \
+                    AVF / Firecracker substrates will surface SpawnFailed at first \
+                    session-spawn. Install via `cargo xtask images dev-kernel` \
+                    (developer flow) or your distribution's raxis bundle (operator \
+                    flow). Hosts running only the SubprocessIsolation substrate may \
+                    safely ignore this warning.\"}}",
+                path.display(),
+            );
+        }
+    }
+
     // Step 8c: Select + admit the V2 agent-runtime isolation substrate.
     //
     // Per `extensibility-traits.md §3.8` the kernel picks the
@@ -1142,10 +1177,36 @@ async fn main() {
             .await
             {
                 Ok(h) => {
+                    let addr   = h.local_addr();
+                    let scheme = if !cfg.tls_cert_path.is_empty()
+                        && !cfg.tls_key_path.is_empty()
+                    { "https" } else { "http" };
+                    // Human-readable line: most modern terminals
+                    // (Cursor, VS Code, iTerm2, Terminal.app,
+                    // Ghostty, Kitty, Alacritty, tmux) auto-detect
+                    // `scheme://host:port` URLs and make them
+                    // cmd/ctrl-clickable. When the listener is
+                    // bound to `0.0.0.0` / `::` the printed URL is
+                    // not directly clickable; print a `localhost`
+                    // hint alongside so the operator can still
+                    // click through.
+                    let ip = addr.ip();
+                    let primary = format!("{scheme}://{addr}");
+                    if ip.is_unspecified() {
+                        eprintln!(
+                            "RAXIS dashboard: {primary}  (click: {scheme}://localhost:{})",
+                            addr.port(),
+                        );
+                    } else {
+                        eprintln!("RAXIS dashboard: {primary}");
+                    }
+                    // Keep the structured log line for tooling that
+                    // captures stderr (CI, log shippers, the
+                    // `raxis status` parser).
                     eprintln!(
                         "{{\"level\":\"info\",\"event\":\"dashboard_started\",\
-                         \"local_addr\":\"{}\"}}",
-                        h.local_addr()
+                         \"scheme\":\"{scheme}\",\"local_addr\":\"{addr}\",\
+                         \"url\":\"{primary}\"}}",
                     );
                     Some(h)
                 }
