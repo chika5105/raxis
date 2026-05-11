@@ -20,7 +20,7 @@ export function SiteNav() {
           <Wordmark />
         </Link>
         <nav aria-label="Primary" className="hidden md:block">
-          <ul className="flex items-center gap-5">
+          <ul className="flex items-center gap-4 whitespace-nowrap">
             {NAV_LINKS.map((l) => (
               <li key={l.href}>
                 <Link
