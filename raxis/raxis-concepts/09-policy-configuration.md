@@ -1,30 +1,70 @@
 # RAXIS Policy Configuration — End-to-End Explained
 
+> **Audience.** Operators authoring `policy.toml`, security
+> reviewers checking that an organisation's policy enforces the
+> expected ceilings, and contributors changing `RawPolicy` /
+> `PolicyBundle` in `crates/policy/src/bundle.rs`.
+>
+> **Authority.** The structural source of truth is
+> `crates/policy/src/bundle.rs::RawPolicy` (the deserialised
+> shape) and `PolicyBundle` (the validated runtime shape). Spec
+> documents to consult: `specs/v1/kernel-store.md` §2.5.5/2.5.6
+> (operators + gates), `specs/v2/policy-plan-authority.md` (which
+> field belongs in policy vs plan), `specs/v2/custom-tools.md`,
+> `specs/v3/otel-observability.md` (V3 telemetry section),
+> `specs/v2/credential-proxy.md` §12 (credential schema fields).
+>
+> **Paradigm anchor.** `policy.toml` is the implementation of
+> **R-7 — Operator-bound authority** at the policy layer:
+> every privilege the kernel hands out is rooted in an
+> Ed25519-signed TOML file controlled by the operator, and
+> `arc_swap` makes hot reloads atomic so an in-flight intent
+> cannot straddle epochs.
+
+---
+
 ## What is policy.toml?
 
 `policy.toml` is the **single source of truth** for what an AI agent can and cannot do. The operator writes it, signs it, and the kernel enforces it. The agent never sees or modifies the policy.
 
+Where there is a tension between `policy.toml` and `plan.toml`,
+**policy wins** — `INV-PLAN-POLICY-PRECEDENCE-01` (see
+`specs/v2/policy-plan-authority.md`) defines the precedence:
+*locked* fields (e.g. `target_ref`) cannot be overridden from
+plan, *floor* fields (e.g. `max_custom_tool_timeout_seconds`) cap
+plan-side requests, and *defaults-with-override* fields let plan
+narrow but not widen.
+
 ---
 
-## Policy Sections Overview
+## Policy sections overview
+
+The canonical section list comes straight from
+`crates/policy/src/bundle.rs::RawPolicy`:
 
 ```toml
-# ┌────────────────────────────────────┐
-# │          policy.toml               │
-# ├────────────────────────────────────┤
-# │ [operators]     — who can operate  │
-# │ [sessions]      — session limits   │
-# │ [lanes]         — budget lanes     │
-# │ [claim_req]     — proof gates      │
-# │ [[gates]]       — verifier config  │
-# │ [egress]        — outbound access  │
-# │ [delegations]   — capability rules │
-# │ [gateway]       — fetch proxy      │
-# │ [[providers]]   — LLM providers   │
-# │ [[custom_tools]]— agent tools     │
-# │ [budget]        — cost limits      │
-# └────────────────────────────────────┘
+# ┌────────────────────────────────────────────────────────────┐
+# │                     policy.toml                            │
+# ├────────────────────────────────────────────────────────────┤
+# │ [sessions]              — TTL & concurrency caps           │
+# │ [budget]                — admission cost + LLM token caps  │
+# │ [operators]             — Ed25519 signing keys + permitted │
+# │ [[gates]]               — verifier binaries per claim type │
+# │ [[lanes]]               — budget lane definitions          │
+# │ [claim_requirements]    — path → required claim types      │
+# │ [egress]                — fetch proxy allow-list           │
+# │ [[providers]]           — LLM provider catalogue (optional)│
+# │ [delegations]           — role ceilings + max TTL          │
+# │ [gateway]               — gateway proxy config (optional)  │
+# └────────────────────────────────────────────────────────────┘
 ```
+
+**`[[custom_tools]]` does NOT live in `policy.toml`.** Earlier
+drafts of this guide put it here; it actually lives in
+`plan.toml` (see `specs/v2/custom-tools.md` §3 — declared inline
+in `plan.toml`, hard-capped by `policy.toml`'s
+`max_custom_tool_timeout_seconds` / `max_concurrent_custom_tool_invocations`
+fields).
 
 ---
 
@@ -117,19 +157,22 @@ input_tokens_per_dollar = 200000
 output_tokens_per_dollar = 50000
 ```
 
-### `[[custom_tools]]` — Agent-Available Tools
+### `[delegations]` — Role ceilings
 
 ```toml
-[[custom_tools]]
-name = "lint_check"
-description = "Run the project linter"
-command = "/usr/local/bin/lint.sh"
-timeout_secs = 60
+[delegations]
+max_delegation_ttl_secs = 3600
+
+[delegations.role_ceilings]
+"executor-junior" = ["WriteCode", "RunTests"]
+"executor-senior" = ["WriteCode", "RunTests", "WriteSecrets"]
+"orchestrator"    = ["WriteCode", "RunTests"]
 ```
 
-Custom tools are sandboxed subprocesses the agent can invoke.
+Operator delegation grants are clamped to the role's ceiling at
+grant time (INV-DELEG-03). See concept 04 for the lifecycle.
 
-### `[budget]` — Global Cost Limits
+### `[budget]` — Global cost limits
 
 ```toml
 [budget]
@@ -151,15 +194,29 @@ The kernel loads policy from disk and watches for changes:
 
 ---
 
-## Policy Signing
+## Policy signing
 
-The operator signs the policy with their Ed25519 key. The kernel verifies the signature at load time:
+The operator signs the policy with their Ed25519 key. The kernel
+verifies the signature at load time and again at every epoch
+advance (`policy_manager::advance_epoch` Phase 0). The CLI
+surface (verified against `cli/src/main.rs:319-360` and
+`cli/src/commands/policy.rs`):
 
 ```bash
-raxis-cli policy sign --key operator.key --policy policy.toml
+raxis policy sign --policy policy.toml --operator-key operator.key
 ```
 
-An unsigned or mis-signed policy is rejected at load time. The agent can never trick the kernel into loading a different policy.
+This produces `policy.toml.sig` (raw 64-byte Ed25519 signature
+in hex) alongside the policy file. The kernel verifies the
+signature against the operator pubkey embedded in the *previous*
+epoch's policy bundle — meaning a fresh deployment must seed the
+chain via `raxis genesis` (which writes the bootstrap operator
+entry).
+
+An unsigned or mis-signed policy is rejected at load time with
+`PolicyAdvanceRejected` audit event. The agent can never trick
+the kernel into loading a different policy because the planner
+binary doesn't link the policy crate.
 
 ---
 
@@ -183,11 +240,21 @@ The new policy includes the new key. The old key is removed. Any delegations sig
 
 ---
 
-## Key Source Files
+## Key source files
 
 | File | Role |
-|------|------|
-| `crates/policy/src/bundle.rs` | `PolicyBundle`, all sections, `RawPolicy` |
-| `crates/policy/src/lib.rs` | `load_policy()` entry point |
-| `kernel/src/policy_manager.rs` | Hot reload, epoch advance |
-| `crates/genesis-tools/src/lib.rs` | Genesis policy generation |
+|---|---|
+| `crates/policy/src/bundle.rs` | `RawPolicy` (deserialise) → `PolicyBundle` (validate). All section structs live here |
+| `crates/policy/src/loader.rs` | `load_policy(path)` entry point — TOML parse, signature verify, bundle build |
+| `crates/policy/src/lib.rs`    | Re-exports `load_policy`, `PolicyBundle`, error types |
+| `crates/policy/src/error.rs`  | `PolicyError` taxonomy |
+| `kernel/src/policy_manager.rs` | Hot reload + `advance_epoch` (Phase 0/1/2/3, INV-POLICY-01) |
+| `kernel/src/authority/dispatch_matrix.rs` | V2 static `(IntentKind, SessionAgentType)` matrix — also lives outside policy because it's structural |
+| `crates/genesis-tools/src/policy_toml.rs` | Genesis policy template generation (`raxis genesis`) |
+| `crates/genesis-tools/src/lib.rs`         | Genesis ceremony orchestration |
+| `cli/src/commands/policy.rs`              | `raxis policy sign` operator subcommand |
+| `cli/src/commands/epoch.rs`               | `raxis epoch advance` operator subcommand (rotates active policy) |
+| `specs/v1/kernel-store.md` §2.5.5/§2.5.6  | Normative `[[operators.entries]]`, `[[gates]]` schemas |
+| `specs/v2/policy-plan-authority.md`       | Plan-vs-policy precedence (`INV-PLAN-POLICY-PRECEDENCE-01`) |
+| `specs/v2/custom-tools.md`                | Custom-tools schema (lives in plan, capped by policy) |
+| `specs/v2/credential-proxy.md` §12        | Credential entry schema (`raxis credential add`) |

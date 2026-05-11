@@ -1,10 +1,28 @@
 # RAXIS Lanes & Budgets — End-to-End Explained
 
+> **Audience.** Operators sizing `[[lanes]]` blocks in `policy.toml`,
+> reviewers debugging `BudgetExceeded` admissions, and contributors
+> changing `kernel/src/scheduler/budget.rs`.
+>
+> **Authority.** The runtime contract is
+> `kernel/src/scheduler/budget.rs` (admission units) and
+> `kernel/src/scheduler/budget.rs::evaluate_token_budget` (LLM
+> token cost). The schema lives in `crates/store/src/migration.rs`
+> Tables 14 (`lane_budget_reservations`) and 15. Policy fields are
+> `crates/policy/src/bundle.rs::LaneEntry`.
+>
+> **Paradigm anchor.** Lanes implement **R-3 — Bounded resources**:
+> every action against external compute, money, or wall-clock has
+> a kernel-checked ceiling that the agent cannot raise.
+
+---
+
 ## What is a lane?
 
-A lane is a **concurrency and cost container**. The operator groups tasks into lanes and sets two limits per lane:
+A lane is a **concurrency and cost container**. The operator groups tasks into lanes and sets three limits per lane:
 1. **`max_concurrent_tasks`** — how many tasks can run at the same time
-2. **`max_cost_per_epoch`** — how much total compute budget the lane can spend
+2. **`max_cost_per_epoch`** — how much total admission-unit budget the lane can spend
+3. **`priority`** (default `100`) — higher number = scheduler dequeues first when multiple lanes have headroom
 
 ---
 
@@ -191,7 +209,10 @@ Reviewer:     15 units  ❌ (sum = 105 > 100)
 
 | File | Role |
 |------|------|
-| `kernel/src/scheduler/budget.rs` | Check, reserve, release, token cost |
+| `kernel/src/scheduler/budget.rs` | `check_budget`, `reserve_budget_in_tx`, `release_budget`, `compute_admission_cost`, `evaluate_token_budget`, `cost_micros_for_tokens`, `TokenBudgetVerdict` |
 | `kernel/src/scheduler/lane.rs` | Lane status queries, lane config lookup |
-| `crates/policy/src/bundle.rs` | `PolicyBundle::lanes()`, pricing |
-| `kernel/src/ipc/handlers/intent.rs` | Calls budget check after gate evaluation |
+| `kernel/src/scheduler/admit.rs` | Admission-unit wrapper around `reserve_budget_in_tx` |
+| `crates/policy/src/bundle.rs` | `LaneEntry { max_concurrent_tasks, max_cost_per_epoch, priority }`, LLM provider pricing tables |
+| `kernel/src/handlers/intent.rs` | Phase C of admission: invokes `reserve_budget_in_tx` inside the post-gate transaction (see concept 02 §"Pipeline overview") |
+| `crates/store/src/migration.rs` | Table 14: `lane_budget_reservations(PK = (lane_id, task_id), reserved_cost)`; idempotent under `INSERT OR IGNORE` |
+| `specs/v1/kernel-store.md` §2.5.1.1 Pattern A | Normative description of the closed TOCTOU read-modify-write window (INV-STORE-02) |

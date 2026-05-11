@@ -1,5 +1,27 @@
 # RAXIS V2 Orchestration — End-to-End Explained
 
+> **Audience.** Operators authoring V2 plans, contributors
+> changing `kernel/src/handlers/intent.rs` (the dispatch matrix
+> ingress), and reviewers debugging "why did my Orchestrator
+> intent get `AuthorityProbe` rejected?".
+>
+> **Authority.** Spec is `specs/v2/v2-deep-spec.md` (the deep
+> spec) and `specs/v2/intent-admission.md` for the wire details.
+> Runtime: `kernel/src/handlers/intent.rs`,
+> `kernel/src/authority/dispatch_matrix.rs`,
+> `kernel/src/scheduler/dag.rs`,
+> `kernel/src/initiatives/lifecycle.rs`. Retry FSM lives in
+> Table 22 (`subtask_activations`).
+>
+> **Paradigm anchor.** V2 is the structural manifestation of
+> **R-6 — Roles separate intelligence from authority**: the
+> Orchestrator chooses *what* to do; the Executor and Reviewer
+> have separate, narrower powers; the kernel keeps them strictly
+> apart through a compile-checked dispatch matrix. No single
+> agent can both write code and approve it.
+
+---
+
 ## What is V2 orchestration?
 
 V2 introduces **hierarchical multi-agent coordination**. Instead of one agent doing everything, the operator defines a DAG of tasks:
@@ -165,12 +187,20 @@ The Orchestrator's `RetrySubTask` is rejected with `FAIL_INVALID_REQUEST`. The O
 
 ---
 
-## Key Source Files
+## Key source files
 
 | File | Role |
-|------|------|
-| `crates/types/src/intent.rs` | `IntentKind` — all 8 variants including V2 |
-| `kernel/src/scheduler/dag.rs` | DAG dependency resolution |
-| `kernel/src/ipc/handlers/intent.rs` | Static dispatch matrix enforcement |
-| `crates/planner-core/src/driver.rs` | Role-specific prompt assembly |
-| `specs/v2/v2-deep-spec.md` | V2 formal specification |
+|---|---|
+| `crates/types/src/intent.rs`              | `IntentKind` (8 variants), `SessionAgentType` |
+| `kernel/src/handlers/intent.rs`           | Phase A Step 1 invokes `evaluate_dispatch` before any handler logic — see concept 02 |
+| `kernel/src/authority/dispatch_matrix.rs` | The compile-checked `(IntentKind × SessionAgentType) → Permitted/Denied` table; exhaustive match enforces drift-prevention |
+| `kernel/src/scheduler/dag.rs`             | `release_successors` (predecessor-satisfied bookkeeping); cycle detection at plan admission |
+| `kernel/src/initiatives/lifecycle.rs`     | DAG admission, sub-task spawn, completion fan-out |
+| `kernel/src/initiatives/review_aggregation.rs` | `compute_aggregate_review_outcome` (logical-AND across reviewers) |
+| `kernel/src/session_spawn_orchestrator.rs` | V2 orchestrator-driven sub-task session spawning |
+| `kernel/src/push/mod.rs`                  | `KernelPushDispatcher` — V2.3 in-memory broadcast + audit mirror (V3 transport deferred per V2_GAPS §12.1) |
+| `crates/store/src/migration.rs` Table 22  | `subtask_activations` DDL — `crash_retry_count`, `review_reject_count`, FSM states |
+| `crates/planner-core/src/driver.rs`       | Role-specific prompt assembly + planner main loop |
+| `specs/v2/v2-deep-spec.md`                | V2 formal specification (Steps 1-30+) |
+| `specs/v2/intent-admission.md`            | V2 admission pipeline reference |
+| `specs/v2/V2_GAPS.md`                     | Implementation status by tier |

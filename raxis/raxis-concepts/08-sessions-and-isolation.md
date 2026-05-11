@@ -1,11 +1,31 @@
 # RAXIS Sessions & Isolation — End-to-End Explained
 
+> **Audience.** Operators understanding "who is this session
+> talking to my kernel?", contributors changing
+> `kernel/src/authority/session.rs`, and reviewers debugging
+> `SessionRevoked` / `Replay` rejections.
+>
+> **Authority.** Session row schema:
+> `crates/store/src/migration.rs` Table 4 (`sessions`). Session
+> creation: `kernel/src/authority/session.rs::create_session`.
+> Wire-level auth: `kernel/src/handlers/intent.rs::handle_intent`
+> (Step 1) and `accept_envelope_and_advance_sequence`. Isolation:
+> `crates/session-spawn/`.
+>
+> **Paradigm anchor.** Sessions implement **R-1 — Identity is
+> kernel-issued**: an agent receives an opaque token at spawn and
+> can never mint a new one. Every privileged decision is bound to
+> a kernel-created session row that an operator can revoke
+> instantaneously.
+
+---
+
 ## What is a session?
 
 A session is the kernel's **identity binding** for an agent. Every agent runs inside one session. The session determines:
-- What task the agent is working on
-- What capabilities the agent has (via delegations)
-- What credentials the agent can access (via credential proxies)
+- What task the agent is working on (`task.session_id` foreign key)
+- What capabilities the agent has (via delegations rows keyed on `session_id`)
+- What credentials the agent can access (via credential proxies started for that session)
 - What its security boundaries are (via the isolation backend)
 
 An agent cannot act without a session. A session cannot be created by the agent.
@@ -52,15 +72,40 @@ Kernel receives plan with tasks
 
 ---
 
-## Session Authentication
+## Session authentication
 
-Every `IntentRequest` is authenticated:
+Every `IntentRequest` is authenticated through a three-step gate
+(verified against `kernel/src/handlers/intent.rs::handle_intent`
+and `kernel/src/authority/session.rs::accept_envelope_and_advance_sequence`):
 
-1. **Token check:** `HMAC(session_id, kernel_secret)` must match the token presented
-2. **Sequence check:** The request's sequence number must be monotonically increasing. The kernel maintains a nonce cache. Replay → rejected.
-3. **Revocation check:** `sessions.revoked_at IS NULL`. A revoked session's intents are permanently rejected.
+1. **Token check.** The wire-level `session_token` (64-char hex,
+   256-bit CSPRNG random — see `raxis_crypto::token::generate_session_token`)
+   is looked up directly in `sessions.session_token` via
+   `authority::session::get_session_by_token`. The lookup is exact
+   match on the column (UNIQUE constraint, single index hit). The
+   token is **not** HMAC-derived from `session_id` — earlier drafts
+   of this doc said it was; that was wrong. The token is opaque
+   random bytes.
+2. **Envelope nonce + sequence check.**
+   `accept_envelope_and_advance_sequence` verifies in one
+   transaction:
+   * `envelope_nonce` has not been seen before (`nonce_cache` PK
+     INSERT — duplicate → `ReplayRejected`)
+   * `sequence_number == sessions.sequence_number + 1` exactly
+     (no gaps, no rewinds — INV-01). Mismatch with cryptographic
+     evidence of malice (e.g. equal-or-lower seq with a brand-new
+     nonce) emits `SecurityViolation { violation_class: Replay }`
+     and force-revokes the session; benign retries instead route
+     to `ReplayRejected`.
+3. **Revocation/expiry check.** `sessions.revoked_at IS NULL` and
+   `sessions.expires_at > now()`. A revoked or expired session's
+   intents are permanently rejected with `SessionRevoked` /
+   `SessionExpired`.
 
-The agent receives its session token at spawn time via environment variable. It cannot generate new tokens.
+The agent receives its session token at spawn time via the
+`session.env` mounted in its sandbox. It cannot generate new
+tokens — `generate_session_token` is kernel-private; the agent
+binary doesn't link `raxis-crypto`.
 
 ---
 
@@ -183,12 +228,22 @@ The session row gets `revoked_at = now`. The agent's next intent is rejected wit
 
 ---
 
-## Key Source Files
+## Key source files
 
 | File | Role |
-|------|------|
-| `kernel/src/session/mod.rs` | Session creation, revocation, lookup |
-| `kernel/src/ipc/auth.rs` | Token validation, sequence check |
-| `crates/planner-core/src/driver.rs` | System prompt assembly, agent dispatch loop |
-| `crates/types/src/lib.rs` | `SessionId`, agent type enums |
-| `crates/credential-proxy-manager/src/lib.rs` | Proxy lifecycle tied to session |
+|---|---|
+| `kernel/src/authority/session.rs` | `create_session`, `revoke_session`, `get_session_by_token`, `accept_envelope_and_advance_sequence` (INV-01 monotonic seq + nonce dedup) |
+| `kernel/src/handlers/intent.rs` | Step 1 of admission: token resolution + envelope acceptance + `task.session_id` cross-check |
+| `kernel/src/ipc/auth.rs` | Operator-only Ed25519 challenge/response (NOT session-token validation — that lives in `authority/session.rs`) |
+| `kernel/src/ipc/server.rs` | Wire-frame redaction (`session_token_fp` not raw token); per-frame log line shape |
+| `kernel/src/authority/dispatch_matrix.rs` | V2 static matrix `(IntentKind × SessionAgentType) → Permitted/Denied`; compile-time exhaustiveness |
+| `kernel/src/session_spawn_orchestrator.rs` | V2 orchestrator-driven session spawn for sub-tasks |
+| `crates/session-spawn/` | Isolation backends (microVM/container/process); session.env shape |
+| `crates/runtime/` | `heartbeat.json` schema (kernel-side liveness only — see "Gap Found" above) |
+| `crates/planner-core/src/driver.rs` | Planner main loop (sees only the rendered system prompt + injected tool descriptors) |
+| `kernel/src/prompt/assembler.rs` | System prompt assembly (kernel-side; planner never sees the assembler) |
+| `crates/types/src/lib.rs` | `SessionId`, `LineageId`, `SessionAgentType` |
+| `crates/credential-proxy-manager/src/lib.rs` | Proxy lifecycle tied to session (start at `create_session`, stop at revoke/expiry) |
+| `crates/store/src/migration.rs` Table 4 | `sessions` DDL + INV-01 sequence column |
+| `specs/v1/kernel-store.md` §2.5.1 Table 4 | Normative schema, sequence semantics |
+| `specs/v1/kernel-core.md` §2.3 | `authority::session` function contracts |
