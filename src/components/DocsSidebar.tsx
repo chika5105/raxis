@@ -15,33 +15,33 @@ export function DocsSidebar({ active }: Props) {
         <Link
           href="/docs"
           className={clsx(
-            "block rounded-md px-2 py-1.5 text-sm font-medium",
+            "block py-1 text-sm transition",
             !active
-              ? "bg-accent-soft text-accent"
-              : "text-[var(--muted)] hover:text-[var(--fg)] hover:bg-[var(--card)]",
+              ? "text-accent font-medium"
+              : "text-[var(--muted)] hover:text-[var(--fg)]",
           )}
         >
           Index
         </Link>
         <Link
           href="/docs/search"
-          className="mt-1 block rounded-md px-2 py-1.5 text-sm text-[var(--muted)] hover:text-[var(--fg)] hover:bg-[var(--card)]"
+          className="block py-1 text-sm text-[var(--muted)] hover:text-[var(--fg)] transition"
         >
-          Search docs →
+          Search →
         </Link>
       </div>
       {sections.map((section) => (
         <div key={section.category}>
-          <h3 className="px-2 mb-2 text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--muted)]">
+          <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
             {section.category}
           </h3>
           <div className="space-y-4">
             {section.groups.map((group) => (
               <div key={(group.subgroup ?? "default") + section.category}>
                 {group.subgroup && (
-                  <div className="px-2 mb-1 text-xs font-medium text-[var(--fg)]">{group.subgroup}</div>
+                  <div className="mb-1 text-[13px] font-medium text-[var(--muted)]">{group.subgroup}</div>
                 )}
-                <ul className="space-y-0.5">
+                <ul className="space-y-0.5 border-l border-[var(--rule)]">
                   {group.docs.map((doc) => {
                     const isActive = active === doc.slugPath;
                     return (
@@ -49,10 +49,10 @@ export function DocsSidebar({ active }: Props) {
                         <Link
                           href={`/docs/${doc.slugPath}`}
                           className={clsx(
-                            "block truncate rounded-md px-2 py-1 text-[13px] leading-tight",
+                            "block truncate -ml-px border-l py-1 pl-3 text-[13px] leading-snug transition",
                             isActive
-                              ? "bg-accent-soft text-accent font-medium"
-                              : "text-[var(--muted)] hover:text-[var(--fg)] hover:bg-[var(--card)]",
+                              ? "border-accent text-accent font-medium"
+                              : "border-transparent text-[var(--muted)] hover:text-[var(--fg)] hover:border-[var(--rule)]",
                           )}
                           title={doc.title}
                         >

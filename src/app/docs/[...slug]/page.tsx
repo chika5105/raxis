@@ -35,7 +35,7 @@ export default async function DocPage({ params }: Params) {
   const next = idx >= 0 && idx < all.length - 1 ? all[idx + 1] : null;
 
   return (
-    <div className="mx-auto max-w-7xl px-4 sm:px-6 py-10 lg:py-14 grid gap-10 lg:grid-cols-[240px_minmax(0,1fr)_220px]">
+    <div className="mx-auto max-w-7xl px-4 sm:px-6 py-10 lg:py-14 grid gap-10 lg:grid-cols-[220px_minmax(0,1fr)_200px]">
       <aside className="hidden lg:block">
         <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto pr-3">
           <DocsSidebar active={meta.slugPath} />
@@ -44,17 +44,17 @@ export default async function DocPage({ params }: Params) {
 
       <article className="min-w-0">
         <Breadcrumb meta={meta} />
-        <h1 className="mt-3 text-3xl sm:text-4xl font-semibold tracking-[-0.02em] leading-tight">
+        <h1 className="font-display font-semibold tracking-[-0.02em] leading-[1.15] text-[2rem] sm:text-[2.4rem] mt-4">
           {meta.title}
         </h1>
-        <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--muted)] font-mono">
-          <span className="text-accent">{meta.category}</span>
-          {meta.subgroup && <><span aria-hidden>·</span><span>{meta.subgroup}</span></>}
-          <span aria-hidden>·</span>
-          <span title="Source path in the raxis repo">{meta.relativePath}</span>
+        <div className="mt-3 text-xs text-[var(--soft)] font-mono truncate">
+          {meta.relativePath}
         </div>
 
-        <div className="mt-8 doc-prose" dangerouslySetInnerHTML={{ __html: html }} />
+        <div
+          className="mt-10 doc-prose"
+          dangerouslySetInnerHTML={{ __html: html }}
+        />
 
         <PrevNext prev={prev ?? undefined} next={next ?? undefined} />
       </article>
@@ -71,10 +71,10 @@ export default async function DocPage({ params }: Params) {
 function Breadcrumb({ meta }: { meta: import("@/lib/docs").DocMeta }) {
   return (
     <nav aria-label="Breadcrumb" className="text-xs text-[var(--muted)]">
-      <ol className="flex flex-wrap items-center gap-1">
+      <ol className="flex flex-wrap items-center gap-2">
         <li><Link href="/docs" className="hover:text-[var(--fg)]">Docs</Link></li>
         <li aria-hidden>/</li>
-        <li><span className="text-accent">{meta.category}</span></li>
+        <li className="text-[var(--fg)]">{meta.category}</li>
         {meta.subgroup && (
           <>
             <li aria-hidden>/</li>
@@ -90,7 +90,7 @@ function OnThisPage({ headings }: { headings: Array<{ depth: 2 | 3; text: string
   if (!headings.length) return null;
   return (
     <nav aria-label="On this page" className="text-sm">
-      <h4 className="text-[10px] font-mono uppercase tracking-[0.18em] text-[var(--muted)] mb-2">
+      <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)] mb-3">
         On this page
       </h4>
       <ul className="space-y-1.5 border-l border-[var(--rule)]">
@@ -122,25 +122,27 @@ function PrevNext({
 }) {
   if (!prev && !next) return null;
   return (
-    <div className="mt-12 grid gap-3 sm:grid-cols-2 border-t border-[var(--rule)] pt-6">
+    <div className="mt-16 grid gap-6 sm:grid-cols-2 border-t border-[var(--rule)] pt-6">
       {prev ? (
-        <Link
-          href={`/docs/${prev.slugPath}`}
-          className="rounded-lg border border-[var(--card-rule)] bg-[var(--card)] p-4 hover:border-accent transition"
-        >
-          <div className="text-[10px] font-mono uppercase tracking-wider text-[var(--muted)]">← Previous</div>
-          <div className="mt-1 font-medium tracking-tight truncate">{prev.title}</div>
+        <Link href={`/docs/${prev.slugPath}`} className="group">
+          <div className="text-xs uppercase tracking-wider text-[var(--soft)]">
+            ← Previous
+          </div>
+          <div className="mt-1.5 font-medium text-[var(--fg)] group-hover:text-accent transition truncate">
+            {prev.title}
+          </div>
         </Link>
       ) : (
         <div />
       )}
       {next ? (
-        <Link
-          href={`/docs/${next.slugPath}`}
-          className="rounded-lg border border-[var(--card-rule)] bg-[var(--card)] p-4 hover:border-accent transition text-right"
-        >
-          <div className="text-[10px] font-mono uppercase tracking-wider text-[var(--muted)]">Next →</div>
-          <div className="mt-1 font-medium tracking-tight truncate">{next.title}</div>
+        <Link href={`/docs/${next.slugPath}`} className="group text-right">
+          <div className="text-xs uppercase tracking-wider text-[var(--soft)]">
+            Next →
+          </div>
+          <div className="mt-1.5 font-medium text-[var(--fg)] group-hover:text-accent transition truncate">
+            {next.title}
+          </div>
         </Link>
       ) : (
         <div />

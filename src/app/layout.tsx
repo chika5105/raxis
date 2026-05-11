@@ -1,37 +1,71 @@
 import type { Metadata } from "next";
+import { Plus_Jakarta_Sans, Fraunces, Source_Serif_4, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 import { SiteFooter } from "@/components/SiteFooter";
 import { SiteNav } from "@/components/SiteNav";
 import { ThemeScript } from "@/components/ThemeScript";
 
+const sans = Plus_Jakarta_Sans({
+  subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
+  variable: "--font-sans",
+  display: "swap",
+});
+
+const display = Fraunces({
+  subsets: ["latin"],
+  weight: "variable",
+  variable: "--font-display",
+  display: "swap",
+  axes: ["opsz"],
+});
+
+const wordmark = Source_Serif_4({
+  subsets: ["latin"],
+  weight: ["600", "700"],
+  variable: "--font-wordmark",
+  display: "swap",
+});
+
+const mono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500"],
+  variable: "--font-mono",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
-  metadataBase: new URL("https://raxis.dev"),
+  metadataBase: new URL("https://raxis.io"),
   title: {
-    default: "RAXIS — AI agents: authorized actions only, fully audited",
-    template: "%s · RAXIS",
+    default: "Raxis: AI agents, authorized actions only, fully audited",
+    template: "%s · Raxis",
   },
   description:
-    "RAXIS is the structural enforcement layer between AI intelligence and authority. A paradigm of 12 invariants that extends Lampson's 1974 protection model to autonomous agents — proven in a reference implementation for autonomous software engineering.",
+    "Raxis (Runtime Attestation eXchange for Intelligent Systems) is a structural enforcement layer between AI agents and the systems they act on. Twelve invariants extending Lampson's 1974 protection model, with a working reference implementation in autonomous software engineering.",
   openGraph: {
-    title: "RAXIS — AI agents: authorized actions only, fully audited",
+    title: "Raxis: AI agents, authorized actions only, fully audited",
     description:
-      "12 paradigm invariants. Cryptographic admission on every action. Tamper-evident audit on every decision. The OS kernel for AI agents.",
+      "Twelve invariants. Cryptographic admission on every action. Tamper-evident audit on every decision.",
     type: "website",
     url: "/",
-    siteName: "RAXIS",
+    siteName: "Raxis",
   },
   twitter: {
     card: "summary_large_image",
-    title: "RAXIS — AI agents: authorized actions only, fully audited",
+    title: "Raxis: AI agents, authorized actions only, fully audited",
     description:
-      "12 paradigm invariants. Cryptographic admission on every action. Tamper-evident audit on every decision.",
+      "Twelve invariants. Cryptographic admission on every action. Tamper-evident audit on every decision.",
   },
   robots: { index: true, follow: true },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html
+      lang="en"
+      suppressHydrationWarning
+      className={`${sans.variable} ${display.variable} ${wordmark.variable} ${mono.variable}`}
+    >
       <head>
         <ThemeScript />
       </head>

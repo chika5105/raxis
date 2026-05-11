@@ -4,11 +4,11 @@ interface Props {
 
 export function Wordmark({ size = "md" }: Props) {
   const dim = size === "lg" ? 28 : size === "sm" ? 18 : 22;
-  const text = size === "lg" ? 24 : size === "sm" ? 16 : 18;
+  const text = size === "lg" ? 22 : size === "sm" ? 15 : 18;
   return (
     <span
-      className="inline-flex items-center gap-2 font-mono font-semibold tracking-tight text-[var(--fg)]"
-      style={{ fontSize: text }}
+      className="inline-flex items-center gap-2 font-wordmark font-semibold tracking-tight text-[var(--fg)]"
+      style={{ fontSize: text, letterSpacing: "-0.01em" }}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
@@ -20,7 +20,7 @@ export function Wordmark({ size = "md" }: Props) {
         className="rounded-[5px]"
         style={{ width: dim, height: dim }}
       />
-      raxis
+      Raxis
     </span>
   );
 }

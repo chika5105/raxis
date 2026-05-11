@@ -40,7 +40,6 @@ export function SearchClient() {
   const [state, setState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [error, setError] = useState<string | null>(null);
   const [ms, setMs] = useState<MiniSearch | null>(null);
-  const [meta, setMeta] = useState<DocMeta[]>([]);
   const [count, setCount] = useState(0);
 
   useEffect(() => {
@@ -54,13 +53,11 @@ export function SearchClient() {
         if (!data.index) {
           setState("ready");
           setMs(null);
-          setMeta(data.meta ?? []);
           setCount(data.count ?? 0);
           return;
         }
         const restored = MiniSearch.loadJS(data.index, MS_OPTS as any);
         setMs(restored);
-        setMeta(data.meta ?? []);
         setCount(data.count ?? data.meta?.length ?? 0);
         setState("ready");
       })
@@ -70,12 +67,10 @@ export function SearchClient() {
       });
   }, []);
 
-  // Autofocus the input on mount.
   useEffect(() => {
     inputRef.current?.focus();
   }, [state]);
 
-  // Cmd/Ctrl-K to focus.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -107,7 +102,7 @@ export function SearchClient() {
       <div className="relative">
         <svg
           aria-hidden
-          className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-[var(--muted)]"
+          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--muted)]"
           width="16"
           height="16"
           viewBox="0 0 24 24"
@@ -123,13 +118,13 @@ export function SearchClient() {
           type="search"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search 12 invariants, intent admission, credential proxies, scenarios…"
-          className="w-full rounded-lg border border-[var(--rule)] bg-[var(--card)] py-3 pl-11 pr-16 text-sm text-[var(--fg)] placeholder:text-[var(--muted)] focus:outline-none focus:border-accent focus:ring-2 focus:ring-accent/20 transition"
+          placeholder="Search the docs"
+          className="w-full rounded-md border border-[var(--rule)] bg-[var(--bg)] py-2.5 pl-10 pr-14 text-[15px] text-[var(--fg)] placeholder:text-[var(--muted)] focus:outline-none focus:border-accent transition"
           spellCheck={false}
           autoComplete="off"
           aria-label="Search documentation"
         />
-        <kbd className="hidden sm:inline-flex absolute right-3 top-1/2 -translate-y-1/2 items-center rounded border border-[var(--rule)] bg-[var(--bg)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--muted)]">
+        <kbd className="hidden sm:inline-flex absolute right-3 top-1/2 -translate-y-1/2 items-center font-mono text-[11px] text-[var(--muted)]">
           ⌘K
         </kbd>
       </div>
@@ -140,35 +135,35 @@ export function SearchClient() {
           <span className="text-red-500">Failed to load index: {error}</span>
         )}
         {state === "ready" && q.trim() === "" && (
-          <span>{count} documents indexed. Try a query above, or browse by category.</span>
+          <span>{count} documents indexed.</span>
         )}
         {state === "ready" && q.trim() !== "" && (
           <span>
             {results.length} {results.length === 1 ? "result" : "results"} for{" "}
-            <strong className="text-[var(--fg)]">"{q.trim()}"</strong>
+            <span className="text-[var(--fg)]">&ldquo;{q.trim()}&rdquo;</span>
           </span>
         )}
       </div>
 
       {state === "ready" && q.trim() !== "" && results.length > 0 && (
-        <ol className="mt-6 space-y-3">
+        <ol className="mt-6 divide-y divide-[var(--rule)] border-y border-[var(--rule)]">
           {results.map((r) => (
             <li key={r.id}>
               <Link
                 href={`/docs/${r.slug}`}
-                className="block rounded-lg border border-[var(--card-rule)] bg-[var(--card)] p-4 hover:border-accent transition"
+                className="block py-4 group"
               >
                 <div className="flex items-baseline justify-between gap-3">
-                  <h3 className="font-medium tracking-tight">
+                  <h3 className="text-[15px] font-semibold text-[var(--fg)] group-hover:text-accent transition">
                     <Highlight text={r.title} terms={r.matched} />
                   </h3>
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-accent shrink-0">
-                    {r.category}
-                  </span>
+                  <span className="text-xs text-[var(--muted)] shrink-0">{r.category}</span>
                 </div>
-                <div className="mt-1 font-mono text-[11px] text-[var(--muted)] truncate">/{r.slug}</div>
+                <div className="mt-0.5 font-mono text-[12px] text-[var(--muted)] truncate">
+                  /{r.slug}
+                </div>
                 {r.snippet && (
-                  <p className="mt-2 text-sm text-[var(--muted)] leading-relaxed line-clamp-3">
+                  <p className="mt-2 text-[14px] text-[var(--muted)] leading-relaxed line-clamp-2">
                     <Highlight text={r.snippet} terms={r.matched} />
                   </p>
                 )}
@@ -179,29 +174,21 @@ export function SearchClient() {
       )}
 
       {state === "ready" && q.trim() !== "" && results.length === 0 && (
-        <div className="mt-8 rounded-xl border border-dashed border-[var(--rule)] p-6 text-center text-sm text-[var(--muted)]">
-          No matches. Try shorter terms, a different spelling, or check the category index.
+        <div className="mt-8 text-sm text-[var(--muted)]">
+          No matches. Try shorter terms, a different spelling, or browse the index.
         </div>
       )}
 
       {state === "ready" && q.trim() === "" && (
-        <div className="mt-6 grid gap-2 sm:grid-cols-2">
-          {[
-            ["12 invariants", "12 invariants"],
-            ["credential proxy", "credential proxy"],
-            ["audit chain", "audit chain"],
-            ["escalation", "escalation"],
-            ["lampson protection", "lampson protection"],
-            ["panel review", "panel review"],
-          ].map(([label, query]) => (
+        <div className="mt-6 flex flex-wrap gap-2">
+          {["audit chain", "credential proxy", "escalation", "panel review", "lampson protection"].map((label) => (
             <button
               key={label}
               type="button"
-              onClick={() => setQ(query)}
-              className="rounded-lg border border-[var(--card-rule)] bg-[var(--card)] p-3 text-left text-sm hover:border-accent transition"
+              onClick={() => setQ(label)}
+              className="rounded-md border border-[var(--rule)] px-2.5 py-1 text-xs text-[var(--muted)] hover:text-[var(--fg)] hover:border-[var(--fg)] transition"
             >
-              <span className="text-[var(--muted)]">Try </span>
-              <span className="font-medium text-accent">{label}</span>
+              {label}
             </button>
           ))}
         </div>
@@ -212,7 +199,6 @@ export function SearchClient() {
 
 function Highlight({ text, terms }: { text: string; terms: string[] }) {
   if (!terms?.length) return <>{text}</>;
-  // Build a single regex of all whole-word-ish term matches (case-insensitive).
   const escaped = terms
     .filter(Boolean)
     .map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));

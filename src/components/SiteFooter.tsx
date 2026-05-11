@@ -4,27 +4,38 @@ import { Wordmark } from "./Wordmark";
 export function SiteFooter() {
   return (
     <footer className="border-t border-[var(--rule)] mt-24">
-      <div className="mx-auto max-w-6xl px-4 sm:px-6 py-12 grid gap-8 md:grid-cols-4">
+      <div className="mx-auto max-w-5xl px-4 sm:px-6 py-12 grid gap-10 md:grid-cols-4">
         <div className="md:col-span-2">
           <Wordmark />
-          <p className="mt-3 max-w-md text-sm text-[var(--muted)]">
-            The structural enforcement layer between AI intelligence and authority.
-            Twelve paradigm invariants. Cryptographic admission on every action.
-            Tamper-evident audit on every decision.
+          <p className="mt-3 max-w-md text-sm text-[var(--muted)] leading-relaxed">
+            A structural enforcement layer between AI agents and the systems they
+            act on. Twelve invariants, a working reference implementation in
+            autonomous software engineering.
           </p>
-          <p className="mt-3 text-xs text-[var(--muted)]">
+          <p className="mt-3 max-w-md text-sm text-[var(--muted)] leading-relaxed">
+            Source open under SSPL. For enterprise licensing, evaluations, or
+            partnerships, reach{" "}
+            <a
+              href="mailto:license@raxis.io"
+              className="text-[var(--fg)] hover:text-accent transition"
+            >
+              license@raxis.io
+            </a>
+            .
+          </p>
+          <p className="mt-3 text-sm text-[var(--muted)]">
             Created by{" "}
             <a
-              className="underline decoration-1 underline-offset-2 hover:text-[var(--fg)]"
+              className="text-[var(--fg)] hover:text-accent transition"
               href="https://www.linkedin.com/"
               target="_blank"
               rel="noopener noreferrer"
             >
               Chika Jinanwa
             </a>
-            . A sibling project to{" "}
+            . Sibling project of{" "}
             <a
-              className="underline decoration-1 underline-offset-2 hover:text-[var(--fg)]"
+              className="text-[var(--fg)] hover:text-accent transition"
               href="https://tryaegis.io"
               target="_blank"
               rel="noopener noreferrer"
@@ -35,41 +46,50 @@ export function SiteFooter() {
           </p>
         </div>
         <div>
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
-            Paradigm
-          </h4>
+          <h4 className="text-sm font-semibold text-[var(--fg)]">Paradigm</h4>
           <ul className="mt-3 space-y-2 text-sm">
-            <li><Link href="/paradigm" className="hover:text-[var(--fg)] text-[var(--muted)]">The 12 invariants</Link></li>
-            <li><Link href="/threat-model" className="hover:text-[var(--fg)] text-[var(--muted)]">Threat model</Link></li>
-            <li><Link href="/conformance" className="hover:text-[var(--fg)] text-[var(--muted)]">Conformance tiers</Link></li>
-            <li><Link href="/about" className="hover:text-[var(--fg)] text-[var(--muted)]">About & lineage</Link></li>
+            <li><Link href="/" className="text-[var(--muted)] hover:text-[var(--fg)]">Home</Link></li>
+            <li><Link href="/paradigm" className="text-[var(--muted)] hover:text-[var(--fg)]">The twelve invariants</Link></li>
+            <li><Link href="/threat-model" className="text-[var(--muted)] hover:text-[var(--fg)]">Threat model</Link></li>
+            <li><Link href="/conformance" className="text-[var(--muted)] hover:text-[var(--fg)]">Conformance</Link></li>
+            <li><Link href="/about" className="text-[var(--muted)] hover:text-[var(--fg)]">About</Link></li>
           </ul>
         </div>
         <div>
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-[var(--muted)]">
-            Implementation
-          </h4>
+          <h4 className="text-sm font-semibold text-[var(--fg)]">Implementation</h4>
           <ul className="mt-3 space-y-2 text-sm">
-            <li><Link href="/reference" className="hover:text-[var(--fg)] text-[var(--muted)]">Reference impl</Link></li>
-            <li><Link href="/docs" className="hover:text-[var(--fg)] text-[var(--muted)]">Documentation</Link></li>
-            <li><Link href="/docs/search" className="hover:text-[var(--fg)] text-[var(--muted)]">Search docs</Link></li>
+            <li><Link href="/reference" className="text-[var(--muted)] hover:text-[var(--fg)]">Reference</Link></li>
+            <li><Link href="/docs" className="text-[var(--muted)] hover:text-[var(--fg)]">Documentation</Link></li>
+            <li><Link href="/docs/search" className="text-[var(--muted)] hover:text-[var(--fg)]">Search</Link></li>
             <li>
               <a
                 href="https://github.com/"
-                className="hover:text-[var(--fg)] text-[var(--muted)]"
+                className="text-[var(--muted)] hover:text-[var(--fg)]"
                 target="_blank"
                 rel="noopener noreferrer"
               >
                 GitHub
               </a>
             </li>
+            <li>
+              <a
+                href="mailto:hello@raxis.io"
+                className="text-[var(--muted)] hover:text-[var(--fg)]"
+              >
+                Contact
+              </a>
+            </li>
           </ul>
         </div>
       </div>
       <div className="border-t border-[var(--rule)]">
-        <div className="mx-auto max-w-6xl px-4 sm:px-6 py-5 flex flex-col sm:flex-row gap-2 items-start sm:items-center justify-between text-xs text-[var(--muted)]">
-          <span>© {new Date().getFullYear()} RAXIS. Reference implementation released under SSPL.</span>
-          <span className="font-mono">runtime · attestation · exchange · for intelligent systems</span>
+        <div className="mx-auto max-w-5xl px-4 sm:px-6 py-5 flex flex-col sm:flex-row gap-2 items-start sm:items-center justify-between text-xs text-[var(--muted)]">
+          <span>© {new Date().getFullYear()} Raxis. All rights reserved.</span>
+          <span>
+            <a href="mailto:license@raxis.io" className="hover:text-[var(--fg)]">
+              license@raxis.io
+            </a>
+          </span>
         </div>
       </div>
     </footer>

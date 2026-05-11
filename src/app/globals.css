@@ -3,36 +3,75 @@
 @tailwind utilities;
 
 /*
- * Brand palette derived from the RAXIS logo (raxis-logo.svg):
- *   primary cyan   #06D7F8   — bright, used in dark mode
- *   deep cyan     #0A7289   — desaturated, used in light mode
- *   navy          #090C13   — body fg in light mode
- *   off-white     #ECECEE   — body fg in dark mode
+ * Type system mirrors aegis-client (tryaegis.io):
+ *   sans     Plus Jakarta Sans   body, UI, FAQ
+ *   display  Fraunces            hero + section headlines
+ *   wordmark Source Serif 4      "Raxis" wordmark only
+ *   mono     IBM Plex Mono       code + install commands
+ *
+ * Colors keep Raxis brand cyan but adopt aegis warm canvas palette
+ * (#fafaf9 canvas, neutral-700 ink, ink-muted, ink-soft).
  */
 :root {
-  --bg: #fdfdfc;
-  --fg: #0e1017;
-  --muted: #5b626c;
-  --rule: rgba(14, 16, 23, 0.08);
+  --bg: #fafaf9;
+  --surface: #ffffff;
+  --fg: #171717;
+  --muted: #525252;
+  --soft: #737373;
+  --rule: #e5e5e5;
+  --rule-strong: #d4d4d4;
   --card: #ffffff;
-  --card-rule: rgba(14, 16, 23, 0.06);
+  --card-rule: #e5e5e5;
+
   --accent: #0a7289;
-  --accent-strong: #076175;
-  --accent-soft: rgba(10, 114, 137, 0.09);
-  --code-bg: #f3f4f6;
+  --accent-strong: #075f73;
+  --accent-soft: rgba(10, 114, 137, 0.07);
+
+  --code-bg: #f4f5f7;
+
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.04);
+
+  --max-width: 1120px;
+  --layout-gutter: clamp(16px, 4vw, 40px);
+  --anchor-offset: 96px;
+}
+
+@media (min-width: 1280px) {
+  :root {
+    --max-width: 1260px;
+  }
+}
+
+@media (min-width: 1536px) {
+  :root {
+    --max-width: 1480px;
+  }
 }
 
 .dark {
-  --bg: #0b0e14;
-  --fg: #ececee;
-  --muted: #8a93a3;
+  --bg: #0a0d12;
+  --surface: #11151c;
+  --fg: #e8eaee;
+  --muted: #a3a9b3;
+  --soft: #8a93a3;
   --rule: rgba(255, 255, 255, 0.08);
+  --rule-strong: rgba(255, 255, 255, 0.14);
   --card: #11151c;
-  --card-rule: rgba(255, 255, 255, 0.06);
+  --card-rule: rgba(255, 255, 255, 0.07);
+
   --accent: #0BCCE7;
   --accent-strong: #06D7F8;
-  --accent-soft: rgba(11, 204, 231, 0.12);
-  --code-bg: #15191f;
+  --accent-soft: rgba(11, 204, 231, 0.10);
+
+  --code-bg: #161a21;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
 }
 
 html {
@@ -40,13 +79,16 @@ html {
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   scroll-behavior: smooth;
+  scroll-padding-top: var(--anchor-offset);
 }
 
 body {
   background: var(--bg);
   color: var(--fg);
-  font-feature-settings: "ss01", "cv11";
-  letter-spacing: -0.005em;
+  font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  /* Aegis body scale: 17px → 19px */
+  font-size: clamp(1.0625rem, 0.35vw + 1rem, 1.1875rem);
+  line-height: 1.65;
 }
 
 ::selection {
@@ -54,54 +96,166 @@ body {
   color: var(--fg);
 }
 
-/* Subtle grid backdrop used on the hero */
-.bg-grid {
-  background-image:
-    linear-gradient(to right, var(--rule) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--rule) 1px, transparent 1px);
-  background-size: 56px 56px;
-  background-position: -1px -1px;
-  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 0%, transparent 70%);
-  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 0%, transparent 70%);
+section[id] {
+  scroll-margin-top: var(--anchor-offset);
 }
 
-/* Reading column for marketing copy */
+/* ──────────────────────────────────────────────────────────
+ *  Marketing typography (headlines, leads, eyebrows)
+ *  Mirrors aegis-client size scale exactly.
+ * ────────────────────────────────────────────────────────── */
+
+.h-hero {
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 600;
+  font-size: clamp(2.5rem, 4vw + 1rem, 4.75rem);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--fg);
+  margin: 0;
+}
+
+.h-section {
+  font-family: var(--font-display), Georgia, serif;
+  font-weight: 600;
+  font-size: clamp(1.875rem, 2.2vw + 1rem, 2.75rem);
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  margin: 0;
+}
+
+/* Sub-headings stay in Plus Jakarta Sans on aegis (matches .faq__question /
+ * .step__title / .feature-card__title). Fraunces is reserved for h1 + section h2. */
+.h-sub {
+  font-family: var(--font-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-weight: 600;
+  font-size: 1.1875rem;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  margin: 0;
+}
+
+.lead {
+  font-size: clamp(1.25rem, 1.2vw + 1rem, 1.5rem);
+  line-height: 1.6;
+  color: var(--muted);
+  max-width: min(42rem, 100%);
+  margin: 0;
+}
+
+.subtitle {
+  font-size: clamp(1.125rem, 1vw + 1rem, 1.375rem);
+  line-height: 1.65;
+  color: var(--muted);
+  max-width: min(42rem, 100%);
+  margin: 0;
+}
+
+.note {
+  font-size: clamp(1.0625rem, 0.5vw + 1rem, 1.1875rem);
+  line-height: 1.6;
+  color: var(--soft);
+}
+
+.eyebrow {
+  display: inline-block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+/* Reading column for marketing copy paragraphs */
 .reading {
-  max-width: 70ch;
+  max-width: min(42rem, 100%);
 }
 
-/* Doc prose styles (we render markdown to plain HTML and class it ourselves) */
+/* ──────────────────────────────────────────────────────────
+ *  Buttons (matches aegis 10px radius, 12/24 padding, weight 600)
+ * ────────────────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 24px;
+  font-family: var(--font-sans), sans-serif;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+  line-height: 1;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease,
+    border-color 0.15s ease, transform 0.15s ease;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: 0 1px 2px rgba(10, 114, 137, 0.18);
+}
+.btn-primary:hover {
+  background: var(--accent-strong);
+}
+.dark .btn-primary {
+  color: #06141a;
+  box-shadow: 0 1px 2px rgba(11, 204, 231, 0.18);
+}
+
+.btn-ghost {
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--rule);
+}
+.btn-ghost:hover {
+  background: var(--bg);
+  border-color: var(--rule-strong);
+}
+
+/* ──────────────────────────────────────────────────────────
+ *  Documentation prose (slightly larger to match body scale)
+ * ────────────────────────────────────────────────────────── */
+
 .doc-prose {
   color: var(--fg);
-  font-size: 16px;
+  font-size: 1.0625rem;
   line-height: 1.7;
+  font-family: var(--font-sans), sans-serif;
 }
 .doc-prose > * + * {
-  margin-top: 1.1em;
+  margin-top: 1.05em;
 }
-.doc-prose h1 {
-  font-size: 1.875rem;
-  font-weight: 600;
+.doc-prose h1,
+.doc-prose h2 {
+  font-family: var(--font-display), Georgia, serif;
   letter-spacing: -0.02em;
-  margin-top: 0;
+  color: var(--fg);
 }
 .doc-prose h2 {
-  font-size: 1.4rem;
+  font-size: 1.75rem;
   font-weight: 600;
-  letter-spacing: -0.015em;
   margin-top: 2.4em;
   padding-top: 0.4em;
   border-top: 1px solid var(--rule);
 }
-.doc-prose h3 {
-  font-size: 1.125rem;
+.doc-prose h3,
+.doc-prose h4 {
+  font-family: var(--font-sans), sans-serif;
   font-weight: 600;
   letter-spacing: -0.01em;
+  color: var(--fg);
+}
+.doc-prose h3 {
+  font-size: 1.1875rem;
   margin-top: 1.8em;
 }
 .doc-prose h4 {
-  font-size: 1rem;
-  font-weight: 600;
+  font-size: 1.0625rem;
   margin-top: 1.4em;
 }
 .doc-prose p,
@@ -126,25 +280,20 @@ body {
   padding-left: 1.4em;
 }
 .doc-prose li::marker {
-  color: var(--muted);
+  color: var(--soft);
 }
 .doc-prose blockquote {
-  border-left: 3px solid var(--accent);
-  padding: 0.2em 0 0.2em 1em;
-  background: var(--accent-soft);
-  border-radius: 0 6px 6px 0;
-  color: var(--fg);
-  font-style: normal;
-}
-.doc-prose blockquote p {
-  margin: 0.4em 0;
+  border-left: 2px solid var(--accent);
+  padding: 0.1em 0 0.1em 1em;
+  color: var(--muted);
+  font-style: italic;
 }
 .doc-prose code {
   background: var(--code-bg);
   padding: 0.1em 0.35em;
   border-radius: 4px;
-  font-size: 0.9em;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.88em;
+  font-family: var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .doc-prose pre {
   background: var(--code-bg);
@@ -165,14 +314,14 @@ body {
   display: block;
   overflow-x: auto;
   border-collapse: collapse;
-  font-size: 0.92em;
+  font-size: 0.95em;
   width: 100%;
 }
 .doc-prose th,
 .doc-prose td {
   text-align: left;
   vertical-align: top;
-  padding: 0.55em 0.85em;
+  padding: 0.6em 0.9em;
   border-bottom: 1px solid var(--rule);
 }
 .doc-prose th {
@@ -192,7 +341,7 @@ body {
 }
 .doc-prose .heading-anchor {
   text-decoration: none;
-  color: var(--muted);
+  color: var(--soft);
   margin-left: 0.4em;
   opacity: 0;
   transition: opacity 0.15s ease;
@@ -202,17 +351,4 @@ body {
 .doc-prose h3:hover .heading-anchor,
 .doc-prose h4:hover .heading-anchor {
   opacity: 1;
-}
-
-/* Card hover */
-.card-hover {
-  transition:
-    transform 0.18s ease,
-    box-shadow 0.18s ease,
-    border-color 0.18s ease;
-}
-.card-hover:hover {
-  transform: translateY(-1px);
-  border-color: var(--accent);
-  box-shadow: 0 6px 22px -10px var(--accent-soft);
 }
