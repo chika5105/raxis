@@ -45,6 +45,7 @@ members = [
     "crates/canonical-images",
     "crates/image-manifest",
     "crates/image-builder",
+    "crates/initramfs-builder",
     "crates/worktree-provision",
     "crates/worktree-staging",
     "crates/session-spawn",
@@ -148,6 +149,24 @@ async-trait = "0.1"
 # features.
 chrono      = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 
+# DEFLATE / gzip codec for `crates/initramfs-builder`'s cpio.gz output
+# path. Pinned to the `rust_backend` feature so we get a pure-Rust
+# (`miniz_oxide`) implementation — no libz dependency on macOS or
+# Linux build hosts. The image-build pipeline must be hermetic on a
+# fresh macOS dev box per `system-requirements.md §11.2`; pulling in
+# system zlib would break that contract.
+flate2      = { version = "1", default-features = false, features = ["rust_backend"] }
+
+# Linux AF_VSOCK socket bindings used by the planner-core
+# `vsock-transport` Cargo feature. Tokio-integrated so the planner's
+# dispatch loop drives reads/writes on the same runtime as the rest of
+# the crate. Pinned to the 0.7 line which uses `vsock` 0.5 internally
+# (see `tokio-vsock` README). Linux-only — non-Linux builds that
+# enable the `vsock-transport` feature will fail at the
+# `tokio-vsock` build step with a clear linker error, which is the
+# correct outcome (vsock doesn't exist on macOS / Windows).
+tokio-vsock = "0.7"
+
 # Fast non-cryptographic hash for kernel-internal maps where keys are
 # either small integers or short, **non-user-controllable** strings —
 # typically constants like lane_id, gate_type, or capability_class
@@ -210,6 +229,7 @@ raxis-prompts           = { path = "crates/prompts" }
 raxis-canonical-images  = { path = "crates/canonical-images" }
 raxis-image-manifest    = { path = "crates/image-manifest" }
 raxis-image-builder     = { path = "crates/image-builder" }
+raxis-initramfs-builder = { path = "crates/initramfs-builder" }
 raxis-worktree-provision = { path = "crates/worktree-provision" }
 raxis-worktree-staging  = { path = "crates/worktree-staging" }
 raxis-image-cache        = { path = "crates/image-cache" }

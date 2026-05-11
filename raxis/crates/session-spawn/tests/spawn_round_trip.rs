@@ -65,16 +65,19 @@ fn fixture_image() -> VerifiedImage {
 
 fn fixture_spec() -> VmSpec {
     VmSpec {
-        vcpu_count:       1,
-        mem_mib:          64,
-        egress_tier:      EgressTier::Tier2CredProxy,
-        cgroup_quota:     None,
-        boot_args:        Vec::new(),
-        entrypoint_argv:  Vec::new(),
-        session_token:    SessionToken("session-token-spawn-test".into()),
-        vsock_cid:        Some(0xC1D_0001),
-        virtio_fs_mounts: Vec::new(),
-        env:              BTreeMap::new(),
+        vcpu_count:        1,
+        mem_mib:           64,
+        egress_tier:       EgressTier::Tier2CredProxy,
+        cgroup_quota:      None,
+        boot_args:         Vec::new(),
+        entrypoint_argv:   Vec::new(),
+        session_token:     SessionToken("session-token-spawn-test".into()),
+        vsock_cid:         Some(0xC1D_0001),
+        virtio_fs_mounts:  Vec::new(),
+        // SubprocessIsolation ignores the kernel path; the spec's
+        // `linux_kernel_path` doc covers this contract explicitly.
+        linux_kernel_path: std::path::PathBuf::new(),
+        env:               BTreeMap::new(),
     }
 }
 
@@ -118,7 +121,7 @@ async fn spawn_session_binds_proxies_admission_and_vm_then_terminates_cleanly() 
         name:     CredentialName::new("db-staging".to_owned()),
         mount_as: "DATABASE_URL".to_owned(),
         proxy:    ProxyDecl::Postgres {
-            restrictions: PostgresRestrictions { allow_only_select: true },
+            restrictions: PostgresRestrictions { allow_only_select: true, ..Default::default() },
         },
     }];
 

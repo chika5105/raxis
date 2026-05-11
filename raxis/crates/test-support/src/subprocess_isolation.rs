@@ -374,16 +374,17 @@ mod tests {
 
     fn fixture_spec() -> VmSpec {
         VmSpec {
-            vcpu_count:       1,
-            mem_mib:          64,
-            egress_tier:      EgressTier::None,
+            vcpu_count:        1,
+            mem_mib:           64,
+            egress_tier:       EgressTier::None,
             cgroup_quota:     None,
-            boot_args:        Vec::new(),
-            entrypoint_argv:  Vec::new(),
-            session_token:    SessionToken("tok-test-1".into()),
-            vsock_cid:        Some(0xC1D_FACE),
-            virtio_fs_mounts: Vec::new(),
-            env:              Default::default(),
+            boot_args:         Vec::new(),
+            entrypoint_argv:   Vec::new(),
+            session_token:     SessionToken("tok-test-1".into()),
+            vsock_cid:         Some(0xC1D_FACE),
+            virtio_fs_mounts:  Vec::new(),
+            linux_kernel_path: std::path::PathBuf::new(),
+            env:               Default::default(),
         }
     }
 

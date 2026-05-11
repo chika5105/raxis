@@ -72,7 +72,20 @@ use std::path::Path;
 ///   signed-over expected SHA-256 of the on-disk .img bytes, which
 ///   is the kernel-pinned digest under the V2 manifest-trust model
 ///   (`planner-harness.md §14.4`).
-pub const SCHEMA_VERSION: u32 = 2;
+/// * `3` — adds `image_format: ImageFormat` (one of `RootfsErofs` or
+///   `RootfsInitramfsCpio`) and folds it into the canonical
+///   `bundle_hash` input. The substrate dispatch path (AVF /
+///   Firecracker) reads this field to decide whether to attach the
+///   .img as a virtio-blk device (EROFS) or hand it to the boot
+///   loader as an initial ramdisk (initramfs cpio.gz). Closes the
+///   `mkfs.erofs`-on-macOS gap from `e2e-live-test-gap.md`: dev-host
+///   builds emit the InitramfsCpio shape, production builds keep the
+///   RootfsErofs shape — both are kernel-trusted via the same signed
+///   manifest. No legacy fallback: a v2 manifest is rejected with
+///   `SchemaVersionMismatch` on load (the trust anchor is currently
+///   the all-zero placeholder so no v2 manifests have shipped to
+///   production yet).
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Length of the bundle-hash digest in bytes. Public so callers that
 /// surface this value (audit events, doctor output) do not redefine
@@ -85,6 +98,49 @@ pub const SIGNATURE_LEN: usize = 64;
 /// Length of an Ed25519 verifying-key fingerprint
 /// (SHA-256 over the 32-byte raw public key).
 pub const KEY_FP_LEN: usize = 32;
+
+/// On-disk shape of the rootfs blob the manifest covers. The substrate
+/// (`raxis-isolation-apple-vz`, `raxis-isolation-firecracker`) reads
+/// this off the kernel-verified manifest to decide whether the
+/// `image_artefact_sha256`-pinned bytes are an EROFS-formatted
+/// virtio-blk image (production canonical layout) or an initramfs
+/// `cpio.gz` (dev-host layout produced by `raxis-initramfs-builder`).
+///
+/// **The format is signed.** The substrate trusts whatever the
+/// manifest says without re-probing the bytes; a tampered manifest
+/// claiming the wrong shape is caught by signature verification before
+/// the substrate sees the field.
+///
+/// `SCHEMA_VERSION = 3` addition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ImageFormat {
+    /// EROFS-formatted virtio-blk device, mounted read-only as `/`.
+    /// The production canonical shape per `planner-harness.md §14.4`.
+    /// Substrate hands the .img path to AVF as a
+    /// `VZDiskImageStorageDeviceAttachment` (virtio-blk) and to
+    /// Firecracker as `PUT /drives { is_root_device: true }`.
+    RootfsErofs,
+    /// `cpio.gz` (newc) initramfs, unpacked by the Linux kernel itself
+    /// at boot. The dev-host shape introduced to remove the
+    /// `mkfs.erofs`-on-macOS dependency. Substrate hands the .img path
+    /// to AVF as `VZLinuxBootLoader.initialRamdiskURL` and to
+    /// Firecracker as `PUT /boot-source { initrd_path }` — NOT as a
+    /// virtio-blk device.
+    RootfsInitramfsCpio,
+}
+
+impl ImageFormat {
+    /// Stable string surface for audit-event payloads, doctor output,
+    /// and the canonical `bundle_hash` input. Lowercase-kebab-case so
+    /// it matches the cli flag (`--format erofs|initramfs-cpio`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImageFormat::RootfsErofs         => "erofs",
+            ImageFormat::RootfsInitramfsCpio => "initramfs-cpio",
+        }
+    }
+}
 
 /// Which canonical role this image targets. Matches
 /// `raxis-types::Role` and the `[planner_role]` enum in the kernel
@@ -180,8 +236,8 @@ pub struct ImageManifest {
     /// is the `[u8; 32]` form.
     pub bundle_hash:    String,
     /// Lowercase-hex SHA-256 of the packed `raxis-<role>-<kernel_version>.img`
-    /// blob (the EROFS rootfs the host hands to the hypervisor). The
-    /// builder fills this in **after** EROFS assembly. Folding it
+    /// blob (the rootfs the host hands to the hypervisor). The
+    /// builder fills this in **after** rootfs assembly. Folding it
     /// into [`ImageManifest::recompute_bundle_hash`] means the
     /// signature covers the artefact bytes; the kernel boot path
     /// trusts this field to be the expected SHA-256 of the on-disk
@@ -189,6 +245,10 @@ pub struct ImageManifest {
     ///
     /// `SCHEMA_VERSION = 2` addition.
     pub image_artefact_sha256: String,
+    /// On-disk shape of the `image_artefact_sha256`-pinned bytes.
+    /// See [`ImageFormat`] for the substrate-dispatch contract.
+    /// `SCHEMA_VERSION = 3` addition.
+    pub image_format:   ImageFormat,
     /// Build-environment pin (timestamps, tool versions).
     pub build_env:      BuildEnv,
     /// Per-file inventory; sorted by `path` after `recompute_bundle_hash`.
@@ -320,24 +380,33 @@ impl ImageManifest {
 
     /// Recompute the bundle hash from the manifest.
     ///
-    /// Canonicalisation (`SCHEMA_VERSION = 2`):
+    /// Canonicalisation (`SCHEMA_VERSION = 3`):
     ///
     /// 1. Header line `"__image_artefact__\0{image_artefact_sha256}\n"`.
-    /// 2. Sort `files` by `path`, then hash
+    /// 2. Format line `"__image_format__\0{image_format.as_str()}\n"`.
+    /// 3. Sort `files` by `path`, then hash
     ///    `"{path}\0{lowercase-hex sha256}\n"` for each entry.
     ///
     /// The builder calls this after assembling `files` AND after
     /// computing the .img blob's digest; `verify` calls it when
-    /// checking the signature. Folding `image_artefact_sha256` into
-    /// `bundle_hash` means the Ed25519 signature implicitly commits
-    /// to the packed artefact, which is what the kernel boot path
-    /// re-streams against the on-disk .img.
+    /// checking the signature. Folding `image_artefact_sha256` AND
+    /// `image_format` into `bundle_hash` means the Ed25519 signature
+    /// implicitly commits to both the packed artefact bytes and the
+    /// rootfs shape the substrate must dispatch on — a tampered
+    /// manifest claiming the wrong shape (e.g. swapping `RootfsErofs`
+    /// for `RootfsInitramfsCpio` to slip an unsigned initramfs past
+    /// the substrate's dispatch path) is caught here, before the
+    /// substrate sees the field.
     pub fn recompute_bundle_hash(&self) -> Result<[u8; BUNDLE_HASH_LEN], ManifestError> {
         let mut hasher = Sha256::new();
 
         validate_artefact_sha256(&self.image_artefact_sha256)?;
         hasher.update(b"__image_artefact__\0");
         hasher.update(self.image_artefact_sha256.as_bytes());
+        hasher.update(b"\n");
+
+        hasher.update(b"__image_format__\0");
+        hasher.update(self.image_format.as_str().as_bytes());
         hasher.update(b"\n");
 
         let mut sorted: Vec<&ManifestFile> = self.files.iter().collect();
@@ -566,6 +635,7 @@ mod tests {
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
             image_artefact_sha256: "0".repeat(64),
+            image_format:          ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -604,6 +674,7 @@ mod tests {
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
             image_artefact_sha256: "0".repeat(64),
+            image_format:          ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -651,6 +722,7 @@ mod tests {
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
             image_artefact_sha256: "0".repeat(64),
+            image_format:          ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -687,6 +759,7 @@ mod tests {
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
             image_artefact_sha256: "0".repeat(64),
+            image_format:          ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -723,6 +796,7 @@ mod tests {
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    String::new(),
             image_artefact_sha256: "0".repeat(64),
+            image_format:          ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -775,6 +849,7 @@ mod tests {
             kernel_version: "0.1.0".to_owned(),
             bundle_hash:    "0".repeat(64),
             image_artefact_sha256: "0".repeat(64),
+            image_format:          ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -815,6 +890,7 @@ mod tests {
             kernel_version:        "0.1.0".to_owned(),
             bundle_hash:           String::new(),
             image_artefact_sha256: "1".repeat(64),
+            image_format:          ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),
@@ -876,6 +952,7 @@ mod tests {
             kernel_version:        "0.1.0".to_owned(),
             bundle_hash:           "0".repeat(64),
             image_artefact_sha256: "ab".repeat(32),
+            image_format:          ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),

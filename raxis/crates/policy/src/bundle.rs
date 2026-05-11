@@ -6222,23 +6222,34 @@ target = \"\"
 
     #[test]
     fn full_routing_example_round_trips() {
-        // Mirrors the example in cli-readonly.md §5.6.2.
+        // Mirrors the example in cli-readonly.md §5.6.2 as it stands
+        // post-V2 — the implicit `"shell"` channel was removed when
+        // `dispatch()` started writing `inbox.jsonl` unconditionally
+        // (see `validate_notifications` "No implicit Shell synthesis"
+        // comment). All channel ids referenced by `default_channels`
+        // and routes MUST therefore be declared in
+        // `[[notifications.channels]]`.
         let toml = minimal_with_notifications("
 [notifications]
-default_channels = [\"shell\"]
+default_channels = [\"audit-mirror\"]
 
 [[notifications.channels]]
 id     = \"audit-mirror\"
 kind   = \"File\"
 target = \"/var/log/raxis-notifications.jsonl\"
 
+[[notifications.channels]]
+id     = \"escalations-mirror\"
+kind   = \"File\"
+target = \"/var/log/raxis-escalations.jsonl\"
+
 [[notifications.routes]]
 event_kind = \"EscalationSubmitted\"
-channels   = [\"shell\", \"audit-mirror\"]
+channels   = [\"audit-mirror\", \"escalations-mirror\"]
 
 [[notifications.routes]]
 event_kind = \"EscalationApproved\"
-channels   = [\"shell\"]
+channels   = [\"audit-mirror\"]
 
 [[notifications.routes]]
 event_kind = \"TaskStateChanged\"
@@ -6246,14 +6257,17 @@ channels   = []
 ");
         let bundle = write_and_load(&toml).expect("must load");
 
-        // Implicit shell + audit-mirror = 2 channels.
+        // Both explicit channels round-trip.
         assert_eq!(bundle.notification_channels().len(), 2);
 
         // Routes are accessible.
         let submitted = bundle.notification_route("EscalationSubmitted").unwrap();
-        assert_eq!(submitted, &["shell".to_owned(), "audit-mirror".to_owned()]);
+        assert_eq!(
+            submitted,
+            &["audit-mirror".to_owned(), "escalations-mirror".to_owned()],
+        );
         let approved = bundle.notification_route("EscalationApproved").unwrap();
-        assert_eq!(approved, &["shell".to_owned()]);
+        assert_eq!(approved, &["audit-mirror".to_owned()]);
         let task = bundle.notification_route("TaskStateChanged").unwrap();
         assert!(task.is_empty(), "silenced");
 

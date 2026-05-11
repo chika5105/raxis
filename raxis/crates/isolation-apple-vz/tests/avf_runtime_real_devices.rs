@@ -54,27 +54,48 @@ fn make_kernel_placeholder(path: &Path) {
     std::fs::write(path, vec![0u8; 4096]).unwrap();
 }
 
-fn fixture_image_at(kernel_path: PathBuf) -> VerifiedImage {
+/// Build a `VerifiedImage` whose `body` carries the per-role rootfs
+/// path. After the V2 substrate split, `body` is the rootfs (EROFS
+/// or initramfs cpio.gz) and the kernel binary lives separately on
+/// `VmSpec.linux_kernel_path`.
+fn fixture_image_at(rootfs_path: PathBuf) -> VerifiedImage {
     VerifiedImage {
         kind:      ImageKind::RootfsErofs,
-        body:      ImageBody::Path(kernel_path),
+        body:      ImageBody::Path(rootfs_path),
         signature: ImageSignature(vec![0u8; 64]),
         image_id:  "avf-integ-1".to_owned(),
     }
 }
 
-fn fixture_spec(token: &str, egress: EgressTier) -> VmSpec {
+/// Build a `VmSpec` whose `linux_kernel_path` points at a tempdir-
+/// backed placeholder kernel binary. AVF will refuse to boot from
+/// the placeholder bytes (that's the test's intent — exercise the
+/// typed `RuntimeError::InvalidConfig` / `StartFailed` paths
+/// against real `Virtualization.framework` validation), but
+/// `config::translate` MUST accept the spec so the runtime layer
+/// is reached at all.
+///
+/// The `linux_kernel_path` is supplied by the caller because the
+/// substrate validates the path is non-empty BEFORE handing the
+/// config to AVF — passing `PathBuf::new()` here would short-
+/// circuit the test before any AVF API gets called.
+fn fixture_spec(
+    token:             &str,
+    egress:            EgressTier,
+    linux_kernel_path: PathBuf,
+) -> VmSpec {
     VmSpec {
-        vcpu_count:       1,
-        mem_mib:          128,
-        egress_tier:      egress,
+        vcpu_count:        1,
+        mem_mib:           128,
+        egress_tier:       egress,
         cgroup_quota:     None,
-        boot_args:        Vec::new(),
-        entrypoint_argv:  Vec::new(),
-        session_token:    SessionToken(token.to_owned()),
-        vsock_cid:        Some(11),
-        virtio_fs_mounts: Vec::new(),
-        env:              Default::default(),
+        boot_args:         Vec::new(),
+        entrypoint_argv:   Vec::new(),
+        session_token:     SessionToken(token.to_owned()),
+        vsock_cid:         Some(11),
+        virtio_fs_mounts:  Vec::new(),
+        linux_kernel_path,
+        env:               Default::default(),
     }
 }
 
@@ -99,18 +120,29 @@ fn fixture_mount(host_dir: PathBuf, guest_path: &str, mode: MountMode) -> Worksp
 fn avf_runtime_drives_full_device_array_lifecycle_against_real_avf() {
     let tmp = tempfile::tempdir().unwrap();
 
+    // Placeholder kernel binary — `linux_kernel_path` on the spec.
+    // AVF will reject the boot because the bytes are not a real
+    // Linux kernel; that's the integration assertion (we exercise
+    // AVF's `validateWithError:` / `startWithCompletionHandler:`
+    // path against real bytes).
     let kernel_path = tmp.path().join("vmlinux.bin");
     make_kernel_placeholder(&kernel_path);
+
+    // Placeholder rootfs disk — `VerifiedImage.body`. AVF requires
+    // the file size to be a multiple of 512; `make_raw_disk`
+    // truncates to 1 KiB which satisfies that.
+    let rootfs_path = tmp.path().join("rootfs.img");
+    make_raw_disk(&rootfs_path);
 
     let host_share_dir = tmp.path().join("workspace");
     std::fs::create_dir_all(&host_share_dir).unwrap();
 
-    let image = fixture_image_at(kernel_path);
+    let image = fixture_image_at(rootfs_path);
     let mounts = vec![
         fixture_mount(host_share_dir.clone(), "/workspace", MountMode::ReadWrite),
         fixture_mount(host_share_dir, "/raxis", MountMode::ReadOnly),
     ];
-    let spec = fixture_spec("avf-integ-token", EgressTier::Tier1Tproxy);
+    let spec = fixture_spec("avf-integ-token", EgressTier::Tier1Tproxy, kernel_path);
 
     let cfg = translate(&image, &mounts, &spec).expect("translate succeeds for real fixture");
 
@@ -121,22 +153,6 @@ fn avf_runtime_drives_full_device_array_lifecycle_against_real_avf() {
     assert!(cfg.network.is_some(), "Tier1Tproxy ⇒ NAT network attached");
 
     let mut runtime = AvfRuntime::new(cfg);
-
-    // Pre-create the rootfs disk where the substrate expects it
-    // (AVF will still refuse the kernel image, but we want to make
-    // sure the storage attachment path doesn't fail for the
-    // non-existent rootfs reason — that would mask real
-    // device-wiring bugs).
-    let rootfs = PathBuf::from("/var/raxis/img/rootfs.img");
-    if !rootfs.exists() {
-        // Use the substrate's path expectation; if /var/raxis is not
-        // writable in the test env, AVF will surface the typed
-        // InvalidConfig path which the assertion below tolerates.
-        let _ = std::fs::create_dir_all(rootfs.parent().unwrap());
-        if let Ok(f) = std::fs::File::create(&rootfs) {
-            let _ = f.set_len(1024);
-        }
-    }
 
     match runtime.start(Duration::from_secs(2)) {
         Ok(()) => panic!("AVF should not boot a placeholder kernel image"),
@@ -184,11 +200,13 @@ fn avf_runtime_connect_vsock_without_started_vm_returns_typed_error() {
     let tmp = tempfile::tempdir().unwrap();
     let kernel_path = tmp.path().join("vmlinux.bin");
     make_kernel_placeholder(&kernel_path);
+    let rootfs_path = tmp.path().join("rootfs.img");
+    make_raw_disk(&rootfs_path);
 
     let cfg = translate(
-        &fixture_image_at(kernel_path),
+        &fixture_image_at(rootfs_path),
         &[],
-        &fixture_spec("vsock-pre-start", EgressTier::None),
+        &fixture_spec("vsock-pre-start", EgressTier::None, kernel_path),
     )
     .unwrap();
     let runtime = AvfRuntime::new(cfg);
@@ -211,20 +229,21 @@ fn avf_runtime_network_translation_round_trips_through_runtime() {
     let tmp = tempfile::tempdir().unwrap();
     let kernel_path = tmp.path().join("vmlinux.bin");
     make_kernel_placeholder(&kernel_path);
-    make_raw_disk(&tmp.path().join("rootfs.img"));
+    let rootfs_path = tmp.path().join("rootfs.img");
+    make_raw_disk(&rootfs_path);
 
     let cfg_off = translate(
-        &fixture_image_at(kernel_path.clone()),
+        &fixture_image_at(rootfs_path.clone()),
         &[],
-        &fixture_spec("net-off", EgressTier::None),
+        &fixture_spec("net-off", EgressTier::None, kernel_path.clone()),
     )
     .unwrap();
     assert!(cfg_off.network.is_none());
 
     let cfg_nat = translate(
-        &fixture_image_at(kernel_path),
+        &fixture_image_at(rootfs_path),
         &[],
-        &fixture_spec("net-nat", EgressTier::Tier1Tproxy),
+        &fixture_spec("net-nat", EgressTier::Tier1Tproxy, kernel_path),
     )
     .unwrap();
     let net = cfg_nat.network.clone().unwrap();

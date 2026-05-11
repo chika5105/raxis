@@ -311,6 +311,13 @@ pub enum CanonicalImageKind {
     /// `raxis-orchestrator-core-<kernel_version>.img`,
     /// `INV-PLANNER-HARNESS-05`.
     Orchestrator,
+    /// `raxis-executor-starter-<kernel_version>.img` — the V2-GA
+    /// opt-in canonical Executor image (`planner-harness.md §14.4`,
+    /// also referenced by `system-requirements.md §11`). Operators
+    /// that disable the Executor-starter publishing path on policy
+    /// load do not exercise this variant; activations then fall
+    /// back to operator-published `[[vm_images]]` aliases.
+    ExecutorStarter,
 }
 
 impl CanonicalImageKind {
@@ -318,8 +325,9 @@ impl CanonicalImageKind {
     /// (`SecurityViolationDetected { kind: ... }`).
     pub fn audit_kind(self) -> &'static str {
         match self {
-            Self::Reviewer     => "ReviewerImageDigestMismatch",
-            Self::Orchestrator => "OrchestratorImageDigestMismatch",
+            Self::Reviewer        => "ReviewerImageDigestMismatch",
+            Self::Orchestrator    => "OrchestratorImageDigestMismatch",
+            Self::ExecutorStarter => "ExecutorStarterImageDigestMismatch",
         }
     }
 
@@ -328,10 +336,19 @@ impl CanonicalImageKind {
     /// ([`verify_canonical_image_pinned`]). Centralises the mapping
     /// so out-of-band tools (`raxis doctor`) read from the same
     /// source of truth.
+    ///
+    /// `ExecutorStarter` returns the all-zero placeholder; the V1
+    /// compile-time-pinned path never covered the Executor-starter
+    /// (which is a V2-GA addition). Callers using
+    /// [`verify_canonical_image_pinned`] for `ExecutorStarter` will
+    /// surface [`CanonicalImageError::DigestNotPopulated`] — the
+    /// V2 manifest path ([`verify_canonical_image_via_manifest`])
+    /// is the supported entry point for this variant.
     pub fn expected_digest(self) -> [u8; DIGEST_LEN] {
         match self {
-            Self::Reviewer     => EXPECTED_REVIEWER_IMAGE_DIGEST,
-            Self::Orchestrator => EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
+            Self::Reviewer        => EXPECTED_REVIEWER_IMAGE_DIGEST,
+            Self::Orchestrator    => EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
+            Self::ExecutorStarter => UNPOPULATED_DIGEST,
         }
     }
 
@@ -340,8 +357,9 @@ impl CanonicalImageKind {
     /// manifest covers the role the caller asked for.
     pub fn manifest_role(self) -> Role {
         match self {
-            Self::Reviewer     => Role::Reviewer,
-            Self::Orchestrator => Role::Orchestrator,
+            Self::Reviewer        => Role::Reviewer,
+            Self::Orchestrator    => Role::Orchestrator,
+            Self::ExecutorStarter => Role::ExecutorStarter,
         }
     }
 }
@@ -497,6 +515,66 @@ pub fn verify_canonical_image_via_manifest_with_key(
     verify_image_blob_against_manifest(image_path, &manifest)
 }
 
+/// Load + verify a canonical image's manifest exactly like
+/// [`verify_canonical_image_via_manifest`], then return the
+/// **manifest-pinned, signature-covered** [`raxis_image_manifest::ImageFormat`]
+/// the substrate must dispatch on (EROFS virtio-blk vs. initramfs cpio.gz).
+///
+/// This is the V2 spawn-time entry point used by
+/// `kernel/src/session_spawn_orchestrator.rs` (and its Reviewer
+/// counterpart) to construct
+/// [`raxis_isolation::VerifiedImage`] with the correct
+/// [`raxis_isolation::ImageKind`] without re-implementing the
+/// trust-anchor gate or the manifest-load + signature-verify
+/// sequence.
+///
+/// **No `expected_signing_key` parameter.** Same trust-anchor
+/// rationale as [`verify_canonical_image_via_manifest`]: the kernel
+/// is the only authoritative caller and must use the compile-time
+/// anchor. Tests and `raxis doctor` use
+/// [`read_verified_image_format_with_key`].
+pub fn read_verified_image_format(
+    image_path:     &Path,
+    manifest_path:  &Path,
+    kind:           CanonicalImageKind,
+    kernel_version: &str,
+) -> Result<raxis_image_manifest::ImageFormat, CanonicalImageError> {
+    if EXPECTED_KERNEL_SIGNING_KEY_BYTES == UNPOPULATED_SIGNING_KEY_BYTES {
+        return Err(CanonicalImageError::SigningKeyFpNotPopulated);
+    }
+    let vk = VerifyingKey::from_bytes(&EXPECTED_KERNEL_SIGNING_KEY_BYTES)
+        .map_err(|e| CanonicalImageError::SigningKeyMalformed(e.to_string()))?;
+    read_verified_image_format_with_key(
+        image_path,
+        manifest_path,
+        kind,
+        kernel_version,
+        &vk,
+    )
+}
+
+/// Like [`read_verified_image_format`] but skips the kernel-anchor
+/// placeholder gate. Pulled out for testability and for `raxis
+/// doctor` use cases where the operator passes the key explicitly.
+pub fn read_verified_image_format_with_key(
+    image_path:           &Path,
+    manifest_path:        &Path,
+    kind:                 CanonicalImageKind,
+    kernel_version:       &str,
+    expected_signing_key: &VerifyingKey,
+) -> Result<raxis_image_manifest::ImageFormat, CanonicalImageError> {
+    let manifest = load_manifest(manifest_path)?;
+    verify_manifest_against_kernel_anchor(
+        &manifest,
+        manifest_path,
+        kind,
+        kernel_version,
+        expected_signing_key,
+    )?;
+    verify_image_blob_against_manifest(image_path, &manifest)?;
+    Ok(manifest.image_format)
+}
+
 fn load_manifest(manifest_path: &Path) -> Result<ImageManifest, CanonicalImageError> {
     let s = std::fs::read_to_string(manifest_path).map_err(|e| {
         CanonicalImageError::ManifestIo {
@@ -625,6 +703,7 @@ mod tests {
             kernel_version:        kernel_version.to_owned(),
             bundle_hash:           String::new(),
             image_artefact_sha256: image_artefact_sha256_hex,
+            image_format:          raxis_image_manifest::ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
                 erofs_version:     "1.7.1".to_owned(),

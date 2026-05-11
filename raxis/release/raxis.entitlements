@@ -1,45 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTD/PropertyList-1.0.dtd">
-<!--
-  RAXIS macOS Virtualization.framework entitlements.
-
-  Normative reference: raxis/specs/v2/release-and-distribution.md §6.3.
-
-  Required by Virtualization.framework on macOS 13+. Without these
-  entitlements (carried in a Developer-ID-signed + Apple-notarized
-  binary), the kernel cannot construct a `VZVirtualMachine` — every
-  AVF API call returns `-67050` (`errSecInternalError`) before any
-  RAXIS code runs.
-
-  Consumed by `release/scripts/notarize.sh` via:
-    codesign --force --options runtime \
-             --sign "Developer ID Application: ..." \
-             --entitlements release/raxis.entitlements \
-             bin/raxis-kernel
--->
 <plist version="1.0">
 <dict>
-    <!--
-      Hypervisor + virtualization access. Both keys are required
-      because Virtualization.framework gates VM-creation on
-      `com.apple.security.virtualization` and HV-guest execution
-      on `com.apple.security.hypervisor`. Setting only one results
-      in a successful `VZVirtualMachineConfiguration::validate`
-      followed by an immediate failure on `start`.
-    -->
     <key>com.apple.security.hypervisor</key>
     <true/>
     <key>com.apple.security.virtualization</key>
     <true/>
-
-    <!--
-      Outbound + inbound network. The kernel host process serves
-      operator IPC on a Unix-domain socket (no inbound network
-      socket on the host) and connects out to the operator-pinned
-      Anthropic / OpenAI / Bedrock provider endpoints (outbound
-      network from the host). VM-side egress is mediated through
-      the substrate, not through the host process directly.
-    -->
     <key>com.apple.security.network.client</key>
     <true/>
     <key>com.apple.security.network.server</key>

@@ -118,16 +118,21 @@ pub async fn run() -> Result<()> {
         },
         workspace_mounts:  Vec::new(),
         vm_spec: VmSpec {
-            vcpu_count:       1,
-            mem_mib:          64,
-            egress_tier:      EgressTier::Tier2CredProxy,
-            cgroup_quota:     None,
-            boot_args:        Vec::new(),
-            entrypoint_argv:  Vec::new(),
-            session_token:    SessionToken("live-session-token".into()),
-            vsock_cid:        Some(0xC1D_E2E),
-            virtio_fs_mounts: Vec::new(),
-            env:              BTreeMap::new(),
+            vcpu_count:        1,
+            mem_mib:           64,
+            egress_tier:       EgressTier::Tier2CredProxy,
+            cgroup_quota:      None,
+            boot_args:         Vec::new(),
+            entrypoint_argv:   Vec::new(),
+            session_token:     SessionToken("live-session-token".into()),
+            vsock_cid:         Some(0xC1D_E2E),
+            virtio_fs_mounts:  Vec::new(),
+            // SubprocessIsolation ignores the kernel path. The
+            // platform-default microVM substrates (AVF / Firecracker)
+            // live in the docker-gated full-lifecycle test, not in
+            // this slice.
+            linux_kernel_path: std::path::PathBuf::new(),
+            env:               BTreeMap::new(),
         },
         credentials,
         admission_service: Box::new(PolicyAdmissionService::new(allowlist)),

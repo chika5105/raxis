@@ -74,9 +74,11 @@ use std::path::{Path, PathBuf};
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_canonical_images::{
-    manifest_path_for_image, verify_canonical_image_via_manifest, CanonicalImageError,
-    CanonicalImageKind,
+    manifest_path_for_image, read_verified_image_format, verify_canonical_image_via_manifest,
+    CanonicalImageError, CanonicalImageKind,
 };
+use raxis_image_manifest::ImageFormat;
+use raxis_isolation::ImageKind;
 
 /// Outcome of verifying one canonical image at boot under the V2
 /// manifest-trust model.
@@ -161,6 +163,37 @@ pub fn orchestrator_image_path(install_dir: &Path, kernel_version: &str) -> Path
     ))
 }
 
+/// Resolve the host-canonical Linux kernel binary path (the
+/// `vmlinux` / `Image` blob the substrate hands to its boot loader).
+///
+/// Format pinned by `system-requirements.md §1`:
+/// `<install_dir>/kernel/vmlinux`.
+///
+/// **Why kernel-version-agnostic.** The Linux kernel binary is
+/// rotated independently of the per-role rootfs images — operators
+/// rebuild rootfs more often than the host kernel. Keeping the
+/// filename stable lets `cargo xtask images dev-kernel` cache one
+/// blob across many `cargo xtask images dev-stage` cycles.
+///
+/// **Why a single path, not per-role.** AVF + Firecracker both run
+/// the same Linux kernel for every role; the role distinction lives
+/// entirely in the rootfs (PID-1 entry point, on-disk binaries).
+/// Operators that want per-role kernels (a hardened kernel for
+/// Reviewer with seccomp-bpf compiled in, for instance) extend
+/// `VmSpec::linux_kernel_path` callsites individually rather than
+/// changing the global default.
+///
+/// **No manifest pairing.** Unlike the per-role rootfs images, the
+/// kernel binary is NOT covered by an Ed25519-signed manifest in V2.
+/// The trust comes from the operator-chosen install root being a
+/// host-protected directory (the homebrew bottle, `/usr/local/lib/`,
+/// or a per-developer `$RAXIS_INSTALL_DIR`). V3 will fold the kernel
+/// binary into a fourth canonical image; until then operators wanting
+/// kernel-binary attestation set up host-side filesystem ACLs.
+pub fn linux_kernel_path(install_dir: &Path) -> PathBuf {
+    install_dir.join("kernel").join("vmlinux")
+}
+
 /// Resolve the canonical Executor-starter image filename for
 /// `kernel_version`. Format pinned by `system-requirements.md §1`:
 /// `raxis-executor-starter-<kernel_version>.img`.
@@ -201,6 +234,134 @@ pub fn verify_canonical_images_at_boot(
         (CanonicalImageKind::Reviewer,     reviewer_outcome),
         (CanonicalImageKind::Orchestrator, orchestrator_outcome),
     ]
+}
+
+/// Outcome of probing the host-canonical Linux kernel binary at
+/// boot. Kept distinct from [`PreflightOutcome`] because the kernel
+/// binary is NOT covered by an Ed25519-signed manifest in V2 — the
+/// trust comes from the host install root being operator-protected
+/// (homebrew bottle, `/usr/local/lib/`, per-developer
+/// `$RAXIS_INSTALL_DIR`). The outcome surface therefore degenerates
+/// to "present" / "absent" plus its resolved path.
+///
+/// V3 will fold the kernel binary into a fourth canonical image with
+/// its own manifest; the preflight will then evolve to share the
+/// `PreflightOutcome` surface with the rootfs images.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KernelBinaryOutcome {
+    /// `<install_dir>/kernel/vmlinux` is on disk. Substrate
+    /// activations may proceed.
+    Present {
+        /// The verified path.
+        path: PathBuf,
+    },
+    /// `<install_dir>/kernel/vmlinux` is not on disk. Logged as a
+    /// warning at boot; AVF / Firecracker activations will surface
+    /// `SpawnFailed` at first session-spawn time. Not a boot failure
+    /// (a kernel running only the SubprocessIsolation substrate has
+    /// no use for the binary).
+    Missing {
+        /// The path the kernel would have verified.
+        path: PathBuf,
+    },
+}
+
+/// Map the manifest-pinned [`ImageFormat`] to the
+/// [`raxis_isolation::ImageKind`] the substrate dispatches on.
+/// Pure-function shim so callsites that resolve format-via-manifest
+/// don't replicate the match arms.
+pub fn image_format_to_image_kind(f: ImageFormat) -> ImageKind {
+    match f {
+        ImageFormat::RootfsErofs         => ImageKind::RootfsErofs,
+        ImageFormat::RootfsInitramfsCpio => ImageKind::RootfsInitramfsCpio,
+    }
+}
+
+/// Resolve the `(image_path, ImageKind)` pair the kernel hands to
+/// `IsolationBackend::spawn` for a canonical role.
+///
+/// Reads the sibling `<role>.manifest.toml` (`SCHEMA_VERSION = 3`),
+/// verifies it against the kernel's compile-time trust anchor, and
+/// returns the manifest-signed [`ImageFormat`] mapped via
+/// [`image_format_to_image_kind`].
+///
+/// **Graceful-degradation path.** Falls back to
+/// [`ImageKind::RootfsErofs`] (the production canonical default) and
+/// returns `Ok(_, _, false)` (the third tuple element is "format
+/// known-to-be-trusted-from-manifest") in two scenarios:
+///
+/// * The sibling `<role>.manifest.toml` does not exist on disk
+///   (early-deployment / dev-host case before the build pipeline has
+///   run `cargo xtask images build-all`).
+/// * Manifest verification fails for any reason — most commonly the
+///   trust anchor is the all-zero placeholder
+///   ([`raxis_canonical_images::CanonicalImageError::SigningKeyFpNotPopulated`])
+///   on a kernel built without `RAXIS_KERNEL_SIGNING_KEY_HEX`.
+///
+/// Both fallback cases log a structured warning at this seam (so
+/// `raxis doctor` and the dashboard surface the un-signed boot in the
+/// run record) and let the substrate's own `spawn`-time defence-in-
+/// depth verifier surface the actual tamper case at activation if
+/// the bytes truly disagree with the signed manifest.
+///
+/// Returns the `image_path` unchanged from the input — callers wire
+/// it through to `VerifiedImage::body = ImageBody::Path(image_path)`.
+/// `kind_is_trusted` is `true` iff the format came from a verified
+/// manifest; callers may use this to gate a noisier audit event for
+/// the un-trusted case.
+pub fn resolve_image_kind_for_role(
+    image_path:     &Path,
+    canonical_kind: CanonicalImageKind,
+    kernel_version: &str,
+) -> (ImageKind, bool) {
+    let manifest_path = manifest_path_for_image(image_path);
+    if !manifest_path.exists() {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"canonical_image_kind_fallback\",\
+             \"reason\":\"manifest_missing\",\"image\":\"{}\",\
+             \"manifest\":\"{}\",\"fallback_kind\":\"RootfsErofs\"}}",
+            image_path.display(),
+            manifest_path.display(),
+        );
+        return (ImageKind::RootfsErofs, false);
+    }
+    match read_verified_image_format(image_path, &manifest_path, canonical_kind, kernel_version) {
+        Ok(fmt) => (image_format_to_image_kind(fmt), true),
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"canonical_image_kind_fallback\",\
+                 \"reason\":\"manifest_verify_failed\",\"image\":\"{}\",\
+                 \"manifest\":\"{}\",\"fallback_kind\":\"RootfsErofs\",\
+                 \"error\":{:?}}}",
+                image_path.display(),
+                manifest_path.display(),
+                e.to_string(),
+            );
+            (ImageKind::RootfsErofs, false)
+        }
+    }
+}
+
+/// Probe the host-canonical Linux kernel binary at boot. The
+/// presence check is intentionally cheap (a `Path::exists()`
+/// stat) — the file is not signature-verified in V2 (see
+/// [`linux_kernel_path`] for the trust-model rationale), so a
+/// SHA-256 stream would burn a noticeable wall-clock fraction of
+/// kernel-boot time without a reciprocal trust gain.
+///
+/// Pulled out as a separate function (rather than folding into
+/// [`verify_canonical_images_at_boot`]) so a dashboard or
+/// `raxis doctor` can render the kernel-binary outcome on its own
+/// row and so substrates without a Linux kernel
+/// (SubprocessIsolation in tests) can observe a `Missing` outcome
+/// without the per-role rootfs noise.
+pub fn probe_linux_kernel_binary_at_boot(install_dir: &Path) -> KernelBinaryOutcome {
+    let path = linux_kernel_path(install_dir);
+    if path.exists() {
+        KernelBinaryOutcome::Present { path }
+    } else {
+        KernelBinaryOutcome::Missing { path }
+    }
 }
 
 /// Verify one image's manifest + .img bytes and emit the appropriate
@@ -397,6 +558,51 @@ mod tests {
             !kinds.contains(&"SecurityViolationDetected"),
             "manifest-missing case must NOT emit SecurityViolationDetected: {kinds:?}",
         );
+    }
+
+    /// On a fresh install (kernel binary not present), the kernel
+    /// binary preflight surfaces `Missing` and emits NO audit event.
+    /// Mirrors the rootfs `Missing` posture — the kernel must boot
+    /// regardless so SubprocessIsolation-only substrates remain
+    /// usable.
+    #[test]
+    fn missing_kernel_binary_returns_missing_with_resolved_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = probe_linux_kernel_binary_at_boot(tmp.path());
+        match outcome {
+            KernelBinaryOutcome::Missing { path } => {
+                assert_eq!(path, tmp.path().join("kernel").join("vmlinux"));
+            }
+            other => panic!("expected Missing for fresh install; got {other:?}"),
+        }
+    }
+
+    /// Kernel binary on disk → `Present` with the resolved path.
+    /// Pins the substrate-spawn-eligible posture.
+    #[test]
+    fn present_kernel_binary_returns_present_with_resolved_path() {
+        let tmp     = tempfile::tempdir().unwrap();
+        let kernel  = tmp.path().join("kernel");
+        std::fs::create_dir_all(&kernel).unwrap();
+        let vmlinux = kernel.join("vmlinux");
+        std::fs::write(&vmlinux, b"placeholder-vmlinux-bytes").unwrap();
+
+        let outcome = probe_linux_kernel_binary_at_boot(tmp.path());
+        match outcome {
+            KernelBinaryOutcome::Present { path } => {
+                assert_eq!(path, vmlinux);
+            }
+            other => panic!("expected Present when vmlinux exists; got {other:?}"),
+        }
+    }
+
+    /// Kernel-binary path resolution pins the spec's filename
+    /// format. Drift here would silently break substrates that
+    /// resolve `linux_kernel_path` from `install_dir`.
+    #[test]
+    fn linux_kernel_path_matches_system_requirements_layout() {
+        let p = linux_kernel_path(Path::new("/usr/local/lib/raxis"));
+        assert_eq!(p, PathBuf::from("/usr/local/lib/raxis/kernel/vmlinux"));
     }
 
     /// .img + .manifest.toml are both on disk but the kernel's

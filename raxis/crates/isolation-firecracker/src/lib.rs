@@ -258,6 +258,7 @@ impl FirecrackerBackend {
         let vmm = FirecrackerVmm::spawn(&SpawnArgs {
             api_sock:       api_sock.clone(),
             binary:         self.binary.clone(),
+            pre_args:       None,
             log_level:      None,
             extra_args:     None,
             boot_grace:     self.boot_grace,
@@ -314,42 +315,72 @@ fn drive_boot(
         smt:          false,
     })?;
 
-    let kernel_path: PathBuf = match &image.body {
+    // The Linux kernel binary is a host-canonical artefact lived
+    // entirely on `VmSpec`; the rootfs payload lives on
+    // `VerifiedImage`. See `VmSpec::linux_kernel_path` doc on
+    // `crates/isolation/src/lib.rs` for the rationale.
+    if spec.linux_kernel_path.as_os_str().is_empty() {
+        return Err(api::ApiError::MalformedResponse(
+            "VmSpec.linux_kernel_path is empty; the kernel image \
+             resolver must populate it before reaching this substrate \
+             (see kernel/src/canonical_images_preflight::linux_kernel_path)"
+                .to_owned(),
+        ));
+    }
+    let kernel_path: PathBuf = spec.linux_kernel_path.clone();
+    let rootfs_path: PathBuf = match &image.body {
         raxis_isolation::ImageBody::Path(p) => p.clone(),
         raxis_isolation::ImageBody::Bytes(_) => {
             return Err(api::ApiError::MalformedResponse(
-                "inline-bytes images not supported by Firecracker; \
+                "inline-bytes rootfs images not supported by Firecracker; \
                  image resolver must materialise to a Path"
                     .to_owned(),
             ));
         }
     };
+    if !image.kind.is_linux_rootfs() {
+        return Err(api::ApiError::MalformedResponse(format!(
+            "image kind {:?} is not bootable as a Linux guest by this substrate",
+            image.kind,
+        )));
+    }
+    let is_initramfs = matches!(image.kind, raxis_isolation::ImageKind::RootfsInitramfsCpio);
     let boot_args = if spec.boot_args.is_empty() {
         // Canonical RAXIS pin per `extensibility-traits.md §3.5`:
         // serial console for early-boot diagnostics; reboot on panic
         // so a guest crash leads to a clean exit code via the
-        // VMM-controlled lifecycle.
-        Some(
-            "console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nokbd"
-                .to_owned(),
-        )
+        // VMM-controlled lifecycle. For initramfs boots add
+        // `rdinit=/init` so the cpio-archived /init becomes PID 1
+        // regardless of the kernel's CONFIG_DEFAULT_INIT.
+        let base = "console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nokbd";
+        Some(if is_initramfs {
+            format!("{base} rdinit=/init")
+        } else {
+            format!("{base} root=/dev/vda ro")
+        })
     } else {
         Some(spec.boot_args.join(" "))
     };
     api.put_boot_source(&BootSource {
         kernel_image_path: kernel_path,
         boot_args,
-        initrd_path:       None,
+        // For initramfs boots the rootfs is loaded by the kernel as
+        // initrd; for EROFS boots we attach it as a virtio-blk drive
+        // (`PUT /drives/rootfs`) and leave initrd empty.
+        initrd_path:       if is_initramfs { Some(rootfs_path.clone()) } else { None },
     })?;
 
-    // V2 ships a single rootfs drive. Operators that want
-    // additional data drives extend `VmSpec` (V3+).
-    api.put_drive(&Drive {
-        drive_id:       "rootfs".to_owned(),
-        path_on_host:   PathBuf::from("/var/raxis/img/rootfs.img"),
-        is_root_device: true,
-        is_read_only:   true,
-    })?;
+    // Drive registration is conditional on rootfs shape. EROFS uses
+    // `/drives/rootfs`; initramfs leaves the drive table empty (the
+    // kernel's initrd channel is the rootfs).
+    if !is_initramfs {
+        api.put_drive(&Drive {
+            drive_id:       "rootfs".to_owned(),
+            path_on_host:   rootfs_path,
+            is_root_device: true,
+            is_read_only:   true,
+        })?;
+    }
 
     // Optional network — `EgressTier::Tier1Tproxy` triggers a tap-
     // device assignment by the kernel's egress wiring (per
@@ -610,6 +641,9 @@ mod tests {
     };
 
     fn fixture_image_with_path(p: PathBuf) -> VerifiedImage {
+        // After the V2 substrate fix, `body` carries the ROOTFS path
+        // (per-role, .img/EROFS or initramfs cpio.gz). The kernel
+        // binary path lives on `VmSpec.linux_kernel_path` instead.
         VerifiedImage {
             kind:      ImageKind::RootfsErofs,
             body:      ImageBody::Path(p),
@@ -620,16 +654,20 @@ mod tests {
 
     fn fixture_spec(token: &str) -> VmSpec {
         VmSpec {
-            vcpu_count:       1,
-            mem_mib:          128,
-            egress_tier:      EgressTier::None,
-            cgroup_quota:     None,
-            boot_args:        Vec::new(),
-            entrypoint_argv:  Vec::new(),
-            session_token:    SessionToken(token.to_owned()),
-            vsock_cid:        Some(3),
-            virtio_fs_mounts: Vec::new(),
-            env:              Default::default(),
+            vcpu_count:        1,
+            mem_mib:           128,
+            egress_tier:       EgressTier::None,
+            cgroup_quota:      None,
+            boot_args:         Vec::new(),
+            entrypoint_argv:   Vec::new(),
+            session_token:     SessionToken(token.to_owned()),
+            vsock_cid:         Some(3),
+            virtio_fs_mounts:  Vec::new(),
+            // Substrate tests run with a real (placeholder-on-disk)
+            // kernel path so the empty-path guard does not short-
+            // circuit the test before exercising the boot-source PUT.
+            linux_kernel_path: PathBuf::from("/tmp/raxis-fixture-vmlinux"),
+            env:               Default::default(),
         }
     }
 

@@ -12,5 +12,6 @@ name = "raxis-executor"
 path = "src/main.rs"
 
 [dependencies]
-raxis-planner-core = { path = "../planner-core", features = ["executor"] }
+# Same `vsock-transport` rationale as `planner-orchestrator/Cargo.toml`.
+raxis-planner-core = { path = "../planner-core", features = ["executor", "vsock-transport"] }
 tokio              = { workspace = true }

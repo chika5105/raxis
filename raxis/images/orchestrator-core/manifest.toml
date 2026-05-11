@@ -18,3 +18,11 @@ source_date_epoch = 1700000000
 erofs_version     = "1.7.1"
 tar_version       = "1.34"
 zstd_version      = "1.5.5"
+
+# `image_format` selects the on-disk shape of the rootfs blob this
+# build emits. Defaults to `RootfsErofs` (production canonical) when
+# absent; `cargo xtask images build-all` overrides this to
+# `RootfsInitramfsCpio` for the macOS-hermetic dev pipeline regardless
+# of what's written here. Operators running the production EROFS path
+# leave this at `RootfsErofs` (or omit it entirely).
+image_format      = "RootfsErofs"

@@ -18,6 +18,13 @@ default = []
 executor     = []
 reviewer     = []
 orchestrator = []
+# Wires the AF_VSOCK transport for the planner→kernel IPC path.
+# Required for any planner binary that runs inside an AVF or
+# Firecracker microVM guest (the in-guest planner has no UDS
+# connectivity to the host; vsock is the only available transport).
+# Linux-only at the build level — `tokio-vsock` does not compile on
+# macOS / Windows. See `transport::connect` for the dispatch.
+vsock-transport = ["dep:tokio-vsock"]
 
 [dependencies]
 serde       = { workspace = true }
@@ -35,6 +42,11 @@ reqwest     = { workspace = true, features = ["json"] }
 sha2        = { workspace = true }
 hmac        = { workspace = true }
 hex         = { workspace = true }
+# Optional vsock transport — see the `vsock-transport` feature above.
+# Linux-only build (the upstream crate guards itself with a Linux
+# `target_os` check; non-Linux + feature-enabled is a build-time
+# error, which is the correct fail-closed behaviour).
+tokio-vsock = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "io-util", "fs", "process"] }

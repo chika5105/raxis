@@ -99,6 +99,9 @@ impl FirecrackerVmm {
             .unwrap_or_else(|| PathBuf::from(DEFAULT_FIRECRACKER_BINARY));
 
         let mut cmd = Command::new(&binary);
+        if let Some(pre) = &args.pre_args {
+            cmd.args(pre);
+        }
         cmd.arg("--api-sock").arg(&args.api_sock);
         if let Some(level) = &args.log_level {
             cmd.arg("--level").arg(level);
@@ -228,6 +231,23 @@ pub struct SpawnArgs {
     pub api_sock:       PathBuf,
     /// `firecracker` binary path. `None` ⇒ use `PATH` lookup.
     pub binary:         Option<PathBuf>,
+    /// Argv tokens injected BEFORE `--api-sock <path>`.
+    ///
+    /// Production V2 leaves this empty — Firecracker accepts
+    /// `--api-sock` directly. The seam exists for two real cases:
+    ///
+    /// 1. **Wrapper invocation.** Operators who run Firecracker
+    ///    under `strace` / `dtruss` / a custom seccomp launcher pass
+    ///    the wrapper as `binary` and the real Firecracker path as
+    ///    the first `pre_args` token.
+    /// 2. **Test fixtures on macOS.** Files written to disk by a
+    ///    test runner inherit the `com.apple.provenance` extended
+    ///    attribute under macOS Sequoia/Sonoma; the kernel then
+    ///    refuses direct exec of those files. The fixture works
+    ///    around this by setting `binary = /bin/sh` and
+    ///    `pre_args = [stub.sh]`, so the shell loads + interprets
+    ///    the script (read-side, no exec needed).
+    pub pre_args:       Option<Vec<std::ffi::OsString>>,
     /// VMM log verbosity (`Error`, `Warning`, `Info`, `Debug`). `None`
     /// ⇒ Firecracker's own default (`Warning`).
     pub log_level:      Option<String>,
@@ -247,6 +267,7 @@ impl Default for SpawnArgs {
         Self {
             api_sock:       PathBuf::new(),
             binary:         None,
+            pre_args:       None,
             log_level:      None,
             extra_args:     None,
             boot_grace:     Duration::from_millis(2000),
@@ -329,14 +350,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_then_wait_or_kill_drives_a_tame_child_to_graceful_exit() {
-        // Stub script understands the `--api-sock <path>` arg shape so
-        // it can be exercised by the supervisor without changing the
-        // production argv-injection logic.
-        let (dir, stub) = write_fc_stub_script("touch \"$SOCK\"; sleep 30");
+        let (dir, sh_args) = write_sh_stub_args("touch \"$SOCK\"; sleep 30");
         let sock = dir.path().join("api.sock");
         let args = SpawnArgs {
             api_sock:   sock.clone(),
-            binary:     Some(stub.clone()),
+            binary:     Some(PathBuf::from("/bin/sh")),
+            pre_args:   Some(sh_args),
             log_level:  None,
             extra_args: None,
             boot_grace: Duration::from_secs(2),
@@ -364,11 +383,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn drop_terminates_child_when_caller_forgets() {
-        let (dir, stub) = write_fc_stub_script("touch \"$SOCK\"; sleep 30");
+        let (dir, sh_args) = write_sh_stub_args("touch \"$SOCK\"; sleep 30");
         let sock = dir.path().join("api.sock");
         let args = SpawnArgs {
             api_sock:   sock.clone(),
-            binary:     Some(stub.clone()),
+            binary:     Some(PathBuf::from("/bin/sh")),
+            pre_args:   Some(sh_args),
             log_level:  None,
             extra_args: None,
             boot_grace: Duration::from_secs(2),
@@ -396,11 +416,12 @@ mod tests {
         // Stub that exits without touching the socket. We still write
         // the FC-shaped stub so the `--api-sock` injection doesn't
         // confuse a generic shell.
-        let (dir, stub) = write_fc_stub_script("exit 0");
+        let (dir, sh_args) = write_sh_stub_args("exit 0");
         let sock = dir.path().join("api.sock");
         let args = SpawnArgs {
             api_sock:   sock.clone(),
-            binary:     Some(stub.clone()),
+            binary:     Some(PathBuf::from("/bin/sh")),
+            pre_args:   Some(sh_args),
             log_level:  None,
             extra_args: None,
             boot_grace: Duration::from_millis(75),
@@ -424,15 +445,34 @@ mod tests {
     ///
     /// Returns the tempdir handle (caller owns) and the stub path.
     #[cfg(unix)]
-    fn write_fc_stub_script(body: &str) -> (tempfile::TempDir, PathBuf) {
+    /// Build a `(tempdir, sh-argv-prefix)` pair the test passes to
+    /// `SpawnArgs { binary: /bin/sh, pre_args }`. The supervisor's
+    /// final argv is `[/bin/sh, <stub>, --api-sock, <sock>, ...]`,
+    /// so /bin/sh exec's the stub with the remaining args; the stub
+    /// then walks for `--api-sock`.
+    ///
+    /// **Why /bin/sh and not direct-exec.** Files written to disk
+    /// during a test on macOS Sequoia/Sonoma inherit the
+    /// `com.apple.provenance` extended attribute from the cargo test
+    /// runner. The kernel then refuses to direct-exec the file (even
+    /// with mode `0o755` and an empty `xattr -c` strip — the
+    /// provenance xattr is a system-protected key that ordinary
+    /// tools cannot remove). `/bin/sh` is a system binary that's
+    /// already exec'able; it READS the script content and
+    /// interprets it without needing the script to be exec'able
+    /// itself. This avoids the entire macOS exec-policy seam.
+    ///
+    /// Linux is unaffected; the same code path works there too.
+    #[cfg(unix)]
+    fn write_sh_stub_args(body: &str) -> (tempfile::TempDir, Vec<std::ffi::OsString>) {
         use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
 
         let dir  = tempfile::tempdir().unwrap();
         let stub = dir.path().join("fc-stub.sh");
         let mut script = String::new();
-        script.push_str("#!/bin/sh\n");
-        // Walk the args looking for --api-sock.
+        // No `#!/bin/sh` shebang needed — /bin/sh reads the file as
+        // a sh script directly. Keeping the line out also ensures
+        // we never accidentally direct-exec on a host that allows it.
         script.push_str("SOCK=\n");
         script.push_str("while [ \"$#\" -gt 0 ]; do\n");
         script.push_str("  case \"$1\" in\n");
@@ -445,10 +485,12 @@ mod tests {
 
         let mut f = std::fs::File::create(&stub).unwrap();
         f.write_all(script.as_bytes()).unwrap();
-        let mut perms = f.metadata().unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&stub, perms).unwrap();
         drop(f);
-        (dir, stub)
+
+        // The supervisor will splice this argv between `/bin/sh` and
+        // `--api-sock <sock>`. /bin/sh stops parsing options at the
+        // first non-option positional — the script path — and treats
+        // every subsequent arg as a positional for the script.
+        (dir, vec![std::ffi::OsString::from(&stub)])
     }
 }

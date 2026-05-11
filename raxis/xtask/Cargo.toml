@@ -23,6 +23,18 @@ regex     = "1"
 ed25519-dalek = { workspace = true }
 hex           = { workspace = true }
 rand          = "0.8"
+# Used by `cargo xtask images dev-kernel` to verify the SHA-256 the
+# operator pinned for the staged guest-kernel binary. Workspace-pinned
+# so all crates in the tree resolve to one transitive sha2 version.
+sha2          = { workspace = true }
+# `cargo xtask images dev-stage` + `build-all` consume the typed
+# manifest builder + initramfs writer to produce the macOS-hermetic
+# dev pipeline output (signed initramfs cpio.gz blobs under
+# `$RAXIS_INSTALL_DIR/images/`). Workspace-paths so xtask never falls
+# behind the producer crates.
+raxis-image-builder      = { workspace = true }
+raxis-image-manifest     = { workspace = true }
+raxis-initramfs-builder  = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

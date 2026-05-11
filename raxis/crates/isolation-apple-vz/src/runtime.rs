@@ -871,9 +871,12 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture_image() -> VerifiedImage {
+        // The runtime tests assert AVF rejects placeholder bytes;
+        // the path here is the per-role rootfs (after the V2
+        // substrate fix).
         VerifiedImage {
             kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Path(PathBuf::from("/var/raxis/test/vmlinux.bin")),
+            body:      ImageBody::Path(PathBuf::from("/var/raxis/test/rootfs.img")),
             signature: ImageSignature(vec![0u8; 64]),
             image_id:  "raxis-test-avf-1".to_owned(),
         }
@@ -881,16 +884,21 @@ mod tests {
 
     fn fixture_spec() -> VmSpec {
         VmSpec {
-            vcpu_count:       1,
-            mem_mib:          128,
-            egress_tier:      EgressTier::None,
+            vcpu_count:        1,
+            mem_mib:           128,
+            egress_tier:       EgressTier::None,
             cgroup_quota:     None,
-            boot_args:        Vec::new(),
-            entrypoint_argv:  Vec::new(),
-            session_token:    SessionToken("avf-test-token".to_owned()),
-            vsock_cid:        Some(7),
-            virtio_fs_mounts: Vec::new(),
-            env:              Default::default(),
+            boot_args:         Vec::new(),
+            entrypoint_argv:   Vec::new(),
+            session_token:     SessionToken("avf-test-token".to_owned()),
+            vsock_cid:         Some(7),
+            virtio_fs_mounts:  Vec::new(),
+            // Per-test fixture: AVF runtime tests run against
+            // placeholder bytes; the real-canonical kernel path is
+            // threaded by the kernel-side image resolver in the full
+            // E2E lifecycle test.
+            linux_kernel_path: PathBuf::from("/var/raxis/test/vmlinux.bin"),
+            env:               Default::default(),
         }
     }
 

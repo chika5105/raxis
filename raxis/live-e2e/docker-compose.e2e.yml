@@ -1,0 +1,62 @@
+# live-e2e/docker-compose.e2e.yml
+# Dedicated infrastructure for the full E2E lifecycle test
+# (`raxis/kernel/tests/full_e2e_session_lifecycle.rs`).
+#
+# Per `specs/v2/e2e-live-test-gap.md` §2.1.
+#
+# Ports are deliberately offset from defaults to avoid colliding with
+# any operator-side databases the developer may already be running on
+# 5432 / 27017. The kernel + its credential proxies bind to
+# `127.0.0.1:0` (loopback only) and never reach these containers
+# except via the proxies, so all traffic stays on localhost.
+#
+# Storage: tmpfs only — every `up` is a clean slate. The test asserts
+# on its own ephemeral schema; we do not persist between runs.
+#
+# Health checks must report "healthy" before the kernel test fires. The
+# `--wait` flag on `docker compose up` blocks until every healthcheck
+# transitions to healthy or times out.
+#
+# Run:
+#   docker compose -f live-e2e/docker-compose.e2e.yml up -d --wait
+#   RAXIS_LIVE_E2E=1 cargo test -p raxis-kernel \
+#       --test full_e2e_session_lifecycle -- --nocapture
+#   docker compose -f live-e2e/docker-compose.e2e.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: raxis-e2e-pg
+    ports:
+      - "127.0.0.1:54399:5432"
+    environment:
+      POSTGRES_USER: raxis_test
+      POSTGRES_PASSWORD: raxis_test_pass
+      POSTGRES_DB: raxis_e2e
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raxis_test -d raxis_e2e"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  mongodb:
+    image: mongo:7
+    container_name: raxis-e2e-mongo
+    command: ["--auth", "--bind_ip", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:27399:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: raxis_test
+      MONGO_INITDB_ROOT_PASSWORD: raxis_test_pass
+    healthcheck:
+      test: >
+        mongosh --quiet
+        -u raxis_test -p raxis_test_pass --authenticationDatabase admin
+        --eval "db.adminCommand({ ping: 1 }).ok"
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /data/db

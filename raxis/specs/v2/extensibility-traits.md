@@ -663,6 +663,18 @@ pub struct VmSpec {
     pub session_token:     SessionToken,   // injected by kernel; the only secret in flight
     pub vsock_cid:         Option<u32>,    // microVM-only; backends ignore if not relevant
     pub virtio_fs_mounts:  Vec<WorkspaceMount>, // microVM-only; SGX/Wasm map elsewhere
+    pub linux_kernel_path: PathBuf,        // host path of the guest Linux kernel binary
+                                              // (vmlinux / Image). The microVM substrates
+                                              // (Firecracker, AppleVZ) hand this to their
+                                              // boot loader (`PUT /boot-source` /
+                                              // `VZLinuxBootLoader.kernelURL`). NOT
+                                              // covered by an Ed25519 manifest in V2 — the
+                                              // trust comes from the host install root
+                                              // being operator-protected. V3 will fold the
+                                              // kernel binary into a fourth canonical
+                                              // image with its own manifest. See
+                                              // `system-requirements.md §11.2` and
+                                              // `kernel/src/canonical_images_preflight.rs::linux_kernel_path`.
     pub env:               BTreeMap<String, String>, // per-spawn env block — the kernel
                                               // SessionSpawnService stamps credential-
                                               // proxy loopback URLs and the egress-
@@ -671,6 +683,23 @@ pub struct VmSpec {
                                               // `credential-proxy.md §1` and
                                               // `vm-network-isolation.md §3-§5`.
 }
+```
+
+#### §3.4.1 Architectural decision — rootfs lives on `VerifiedImage.body`, not `VmSpec.root_disk_path`
+
+A natural-looking V2 design would mirror `VmSpec.linux_kernel_path` with a `VmSpec.root_disk_path: PathBuf`, treating both as host paths the substrate hands to its boot loader. We deliberately did NOT do this.
+
+**Rule.** The per-role rootfs blob is referenced by `VerifiedImage.body` (one of `ImageBody::Path` or `ImageBody::Inline`), and `VerifiedImage.kind` declares its on-disk shape (`RootfsErofs` virtio-blk vs. `RootfsInitramfsCpio` initramfs). The substrate dispatches on `image.kind` to decide whether to attach the bytes as a virtio-blk device or hand them to the boot loader as the initial ramdisk.
+
+**Rationale.**
+
+1. **Trust path.** `VerifiedImage` carries the Ed25519 signature over the rootfs bytes. Moving the rootfs path onto `VmSpec` would orphan the bytes from their signature, weakening the V2 manifest-trust model (`planner-harness.md §14.4` — the kernel's signed manifest binds `image_artefact_sha256` to `image_format`, both of which the substrate must trust). Keeping the rootfs on `VerifiedImage` keeps "what we hand the substrate" structurally the same as "what the manifest signed".
+2. **Asymmetry of the kernel binary.** Unlike the per-role rootfs, the host Linux kernel binary is rotated independently of any role and is shared across every spawn. It is NOT manifest-signed in V2 (see field doc above for the V3 plan). A single host path on `VmSpec` matches its lifecycle; a path on every `VerifiedImage` would imply a per-image kernel binding the kernel-version-stable layout does not have.
+3. **Substrate dispatch is on the format, not the path.** AVF needs to either build a `VZDiskImageStorageDeviceAttachment` (EROFS) or set `VZLinuxBootLoader.initialRamdiskURL` (initramfs); Firecracker needs either `PUT /drives` or `PUT /boot-source { initrd_path }`. The format that drives this decision is signed; the host path is purely configuration. Hosting the path on `VerifiedImage` puts both the bytes and the discriminator (kind) in the same struct.
+
+**Implementation reference.** `crates/isolation-apple-vz/src/config.rs::translate` reads `VmSpec.linux_kernel_path` for the kernel binary, `image.body` for the rootfs path, and `image.kind` for the dispatch. The kernel-side `kernel/src/canonical_images_preflight.rs::resolve_image_kind_for_role` loads + verifies the signed manifest at every spawn, returning the manifest-pinned `ImageKind` (so a tampered manifest claiming the wrong shape is caught before the substrate sees the field).
+
+```rust
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum IsolationLevel {

@@ -57,6 +57,17 @@ pub enum ConfigError {
         /// AVF's documented minimum.
         floor:     u32,
     },
+
+    /// `VmSpec::linux_kernel_path` was empty. AVF's `VZLinuxBootLoader`
+    /// requires a host path to the Linux kernel binary; the
+    /// SubprocessIsolation-style empty-path sentinel is not legal
+    /// for this substrate.
+    #[error(
+        "VmSpec.linux_kernel_path is empty; the kernel image resolver \
+         must populate it before reaching this substrate (see \
+         `kernel/src/canonical_images_preflight::linux_kernel_path`)"
+    )]
+    KernelPathMissing,
 }
 
 /// AVF's documented minimum memory size for a Linux guest. Below this
@@ -183,38 +194,73 @@ pub fn translate(
     }
 
     // ---- 2. Boot loader -------------------------------------------------
-    let kernel_url = match &image.body {
+    //
+    // The boot loader needs the host path of the Linux kernel binary
+    // (a `vmlinux` / `Image` blob). That path lives on `VmSpec`,
+    // populated by `kernel/src/canonical_images_preflight::linux_kernel_path`
+    // — NOT on `VerifiedImage`, which carries the per-role rootfs
+    // payload. The two artefacts have separate lifecycles (the kernel
+    // binary is a host-wide install, the rootfs is per-role and per-
+    // session) and are signed under separate keys; folding them into
+    // one structure was the placeholder shape this substrate carried
+    // before V2 GA.
+    if spec.linux_kernel_path.as_os_str().is_empty() {
+        return Err(ConfigError::KernelPathMissing);
+    }
+    let kernel_url = spec.linux_kernel_path.clone();
+
+    // The rootfs image body — handed to the boot loader as initrd
+    // for `RootfsInitramfsCpio`, attached as a virtio-blk drive for
+    // `RootfsErofs`. Inline-bytes is unsupported on either path
+    // because AVF requires an mmap-able file.
+    let rootfs_path = match &image.body {
         ImageBody::Path(p) => p.clone(),
         ImageBody::Bytes(_) => return Err(ConfigError::InlineBytesUnsupported),
     };
-    if !matches!(image.kind, ImageKind::RootfsErofs) {
+    if !image.kind.is_linux_rootfs() {
         return Err(ConfigError::UnsupportedImageKind { kind: image.kind });
     }
     let cmdline = if spec.boot_args.is_empty() {
         // AVF's Linux boot loader uses a Virtio console; `hvc0` is
         // the canonical first hypervisor console. `reboot=k`
-        // ensures a guest panic surfaces as a clean exit.
-        "console=hvc0 reboot=k panic=1".to_owned()
+        // ensures a guest panic surfaces as a clean exit. For
+        // initramfs boots we additionally pin `rdinit=/init` so the
+        // guest kernel honours the cpio-archived /init regardless
+        // of the kernel's CONFIG_DEFAULT_INIT default.
+        match image.kind {
+            ImageKind::RootfsInitramfsCpio =>
+                "console=hvc0 reboot=k panic=1 rdinit=/init".to_owned(),
+            _ =>
+                "console=hvc0 reboot=k panic=1 root=/dev/vda ro".to_owned(),
+        }
     } else {
         spec.boot_args.join(" ")
     };
+    let initrd_url = match image.kind {
+        ImageKind::RootfsInitramfsCpio => Some(rootfs_path.clone()),
+        _ => None,
+    };
     let boot_loader = AvfLinuxBootLoader {
         kernel_url,
-        initrd_url:   None,
+        initrd_url,
         command_line: cmdline,
     };
 
     // ---- 3. Block devices ----------------------------------------------
-    // V2 ships a single read-only rootfs drive; the host-canonical
-    // path is wired by the kernel image resolver and surfaced via
-    // a future `VmSpec::root_disk_path` extension. For now we use the
-    // kernel image as the rootfs source — operators that publish
-    // separate kernel + rootfs images extend `VmSpec` (V3+).
-    let block_devices = vec![AvfBlockDevice {
-        drive_id:  "rootfs".to_owned(),
-        host_path: PathBuf::from("/var/raxis/img/rootfs.img"),
-        read_only: true,
-    }];
+    //
+    // For `RootfsErofs` we attach the rootfs as a single read-only
+    // virtio-blk drive (the guest kernel mounts it at `/dev/vda`).
+    // For `RootfsInitramfsCpio` the rootfs lives in the boot loader's
+    // initrd channel, so no block device is required at all — the
+    // guest's root filesystem is the unpacked cpio in tmpfs.
+    let block_devices = match image.kind {
+        ImageKind::RootfsInitramfsCpio => Vec::new(),
+        _ => vec![AvfBlockDevice {
+            drive_id:  "rootfs".to_owned(),
+            host_path: rootfs_path,
+            read_only: true,
+        }],
+    };
 
     // ---- 4. VirtioFS shares --------------------------------------------
     let mut fs_shares = Vec::with_capacity(mounts.len());
@@ -289,9 +335,12 @@ mod tests {
     };
 
     fn fixture_image() -> VerifiedImage {
+        // After the V2 substrate fix, `body` carries the per-role
+        // ROOTFS path (EROFS .img or initramfs cpio.gz). The kernel
+        // binary path lives on `VmSpec.linux_kernel_path`.
         VerifiedImage {
             kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Path(PathBuf::from("/var/raxis/test/vmlinux.bin")),
+            body:      ImageBody::Path(PathBuf::from("/var/raxis/test/rootfs.img")),
             signature: ImageSignature(vec![0u8; 64]),
             image_id:  "raxis-test-avf-1".to_owned(),
         }
@@ -299,16 +348,17 @@ mod tests {
 
     fn fixture_spec() -> VmSpec {
         VmSpec {
-            vcpu_count:       1,
-            mem_mib:          128,
-            egress_tier:      EgressTier::None,
+            vcpu_count:        1,
+            mem_mib:           128,
+            egress_tier:       EgressTier::None,
             cgroup_quota:     None,
-            boot_args:        Vec::new(),
-            entrypoint_argv:  Vec::new(),
-            session_token:    SessionToken("avf-test-token".to_owned()),
-            vsock_cid:        Some(7),
-            virtio_fs_mounts: Vec::new(),
-            env:              Default::default(),
+            boot_args:         Vec::new(),
+            entrypoint_argv:   Vec::new(),
+            session_token:     SessionToken("avf-test-token".to_owned()),
+            vsock_cid:         Some(7),
+            virtio_fs_mounts:  Vec::new(),
+            linux_kernel_path: PathBuf::from("/var/raxis/test/vmlinux.bin"),
+            env:               Default::default(),
         }
     }
 
@@ -328,18 +378,61 @@ mod tests {
         let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
         assert_eq!(cfg.vcpu_count, 1);
         assert_eq!(cfg.mem_mib, 128);
+        // Kernel binary now comes from `VmSpec.linux_kernel_path`.
         assert_eq!(
             cfg.boot_loader.kernel_url,
             PathBuf::from("/var/raxis/test/vmlinux.bin")
         );
-        assert_eq!(cfg.boot_loader.command_line, "console=hvc0 reboot=k panic=1");
+        // EROFS rootfs adds `root=/dev/vda ro` so the guest kernel
+        // mounts the virtio-blk drive as `/`. Initramfs boots
+        // (`RootfsInitramfsCpio`) instead get `rdinit=/init` —
+        // covered by `translate_initramfs_kind_routes_to_initrd_url`.
+        assert_eq!(
+            cfg.boot_loader.command_line,
+            "console=hvc0 reboot=k panic=1 root=/dev/vda ro"
+        );
+        // Default fixture is `RootfsErofs` ⇒ one block device.
         assert_eq!(cfg.block_devices.len(), 1);
         assert_eq!(cfg.block_devices[0].drive_id, "rootfs");
         assert!(cfg.block_devices[0].read_only);
+        // Image body now is the rootfs path, not the kernel binary.
+        assert_eq!(
+            cfg.block_devices[0].host_path,
+            PathBuf::from("/var/raxis/test/rootfs.img"),
+        );
+        // Initrd channel empty for the EROFS path.
+        assert!(cfg.boot_loader.initrd_url.is_none());
         assert!(cfg.fs_shares.is_empty());
         assert!(cfg.network.is_none());
         assert_eq!(cfg.vsock.guest_cid, 7);
         assert_eq!(cfg.vsock.planner_port, 1024);
+    }
+
+    #[test]
+    fn translate_initramfs_kind_routes_to_initrd_url_and_drops_block_device() {
+        let mut img = fixture_image();
+        img.kind = ImageKind::RootfsInitramfsCpio;
+        let cfg = translate(&img, &[], &fixture_spec()).unwrap();
+        assert_eq!(
+            cfg.boot_loader.initrd_url,
+            Some(PathBuf::from("/var/raxis/test/rootfs.img")),
+        );
+        assert!(
+            cfg.block_devices.is_empty(),
+            "initramfs boots use the kernel's initrd channel, not virtio-blk",
+        );
+        assert_eq!(
+            cfg.boot_loader.command_line,
+            "console=hvc0 reboot=k panic=1 rdinit=/init",
+        );
+    }
+
+    #[test]
+    fn translate_rejects_empty_kernel_path() {
+        let mut spec = fixture_spec();
+        spec.linux_kernel_path = PathBuf::new();
+        let err = translate(&fixture_image(), &[], &spec).unwrap_err();
+        assert_eq!(err, ConfigError::KernelPathMissing);
     }
 
     #[test]

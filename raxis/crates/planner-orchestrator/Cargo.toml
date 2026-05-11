@@ -12,5 +12,13 @@ name = "raxis-orchestrator"
 path = "src/main.rs"
 
 [dependencies]
-raxis-planner-core = { path = "../planner-core", features = ["orchestrator"] }
+# `vsock-transport` is enabled here so a binary built for the canonical
+# orchestrator-core image (cross-compiled to Linux musl by
+# `cargo xtask images dev-stage --role orchestrator`) speaks AF_VSOCK
+# to the kernel host as required by `planner-harness.md §14.5`.
+# Builds on macOS / Windows still link successfully because the inner
+# `tokio-vsock` dep is itself feature-gated to Linux at the upstream
+# crate level — non-Linux builds simply omit the dependency, and the
+# planner-core `connect()` falls back to `TransportError::VsockUnavailable`.
+raxis-planner-core = { path = "../planner-core", features = ["orchestrator", "vsock-transport"] }
 tokio              = { workspace = true }

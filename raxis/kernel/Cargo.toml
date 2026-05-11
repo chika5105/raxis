@@ -97,6 +97,11 @@ raxis-domain-git        = { workspace = true }
 # `SecurityViolationDetected { kind: "ReviewerImageDigestMismatch" |
 # "OrchestratorImageDigestMismatch" }` audit events on mismatch.
 raxis-canonical-images  = { workspace = true }
+# `crates/image-manifest` — typed `ImageManifest` + `ImageFormat` enum
+# the kernel reads at session-spawn time to map the manifest-pinned
+# rootfs shape to `raxis_isolation::ImageKind`. See
+# `kernel/src/canonical_images_preflight.rs::resolve_image_kind_for_role`.
+raxis-image-manifest    = { workspace = true }
 # V2_GAPS §C5 — content-addressed immutable artifact store
 # (`<data_dir>/artifacts/{policy,plans,keys}/<sha256>.<ext>`).
 # Wired at kernel boot via `HandlerContext::artifact_store` and

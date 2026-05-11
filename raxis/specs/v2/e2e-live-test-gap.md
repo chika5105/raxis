@@ -189,24 +189,40 @@ let api_key = dotenv.lines()
 
 ## §4 — Plan File (`plan.toml`)
 
-The test submits this plan via the operator IPC socket:
+The test submits this plan via the operator IPC socket. The shape
+below matches the kernel's actual plan parser
+(`kernel/src/initiatives/lifecycle.rs::parse_plan_*`) verbatim.
+
+> **Spec drift note (2026-05-10).** Earlier drafts of this spec
+> showed top-level `[plan]` (`name`, `version`) and `[plan.gateway]`
+> (`provider`, `model`) blocks. Those keys are NOT recognised by
+> the kernel's plan parser — they are inert when included. The
+> provider/model selection is operator-side state pinned in the
+> policy's `[gateway]` + `[[providers]]` blocks
+> (`peripherals.md §3.2`); the test injects them into the
+> bootstrapped policy.toml in `enable_gateway_in_policy`. The
+> `[workspace] lane_id` field is REQUIRED by
+> `validate_single_lane_propagation`; every `[[tasks]]` block must
+> declare a non-empty `description` per `v2_extended_gaps.md §1.1`.
 
 ```toml
-[plan]
-name    = "e2e-live-test"
-version = "1.0.0"
+[plan.initiative]
+description = """
+Create hello.txt containing the text "Hello from RAXIS E2E test!".
+Use the executor's edit_file tool. Confirm completion via task_complete.
+"""
 
-[plan.gateway]
-provider = "anthropic"
-model    = "claude-sonnet-4-20250514"
+[workspace]
+name    = "E2E live test"
+lane_id = "e2e-live-lane"
 
 # ── Executor task ──────────────────────────────────────
 [[tasks]]
-task_id          = "write-hello"
-name             = "Create hello.txt with a greeting"
+task_id            = "write-hello"
+name               = "Create hello.txt with a greeting"
 session_agent_type = "Executor"
-path_allowlist   = ["hello.txt"]
-description      = """
+path_allowlist     = ["hello.txt"]
+description = """
 Create a file called hello.txt containing the text:
 Hello from RAXIS E2E test!
 """
@@ -224,7 +240,6 @@ Hello from RAXIS E2E test!
   [[tasks.credentials]]
   name       = "test-gcp-dev"
   proxy_type = "gcp"
-  project    = "raxis-e2e-test"
   mount_as   = "GCP_METADATA_URL"
 
 # ── Reviewer task ──────────────────────────────────────
@@ -233,14 +248,22 @@ task_id            = "review-hello"
 name               = "Review hello.txt changes"
 session_agent_type = "Reviewer"
 predecessors       = ["write-hello"]
+description = """
+Confirm that hello.txt was created with the expected content. Approve.
+"""
 
-# ── Verifier ───────────────────────────────────────────
-[[verifiers]]
-id         = "check-hello"
-command    = "test -f hello.txt && grep -q 'Hello' hello.txt"
-task_ids   = ["write-hello"]
-on_failure = "block_review"
-timeout    = "30s"
+# ── Verifier (deferred) ────────────────────────────────
+# V2 verifier dispatch is exercised by the per-proxy live-e2e
+# slices; folding it in here would gate the test on yet another
+# canonical image (`raxis-verifier-default-…`). When the canonical
+# verifier image lands, add:
+#
+# [[verifiers]]
+# id         = "check-hello"
+# command    = "test -f hello.txt && grep -q 'Hello' hello.txt"
+# task_ids   = ["write-hello"]
+# on_failure = "block_review"
+# timeout    = "30s"
 ```
 
 ### §4.1 — Plan Admission Checks Exercised
@@ -257,21 +280,53 @@ timeout    = "30s"
 
 ## §5 — Provider Configuration
 
-The test creates a gateway provider file at
-`<data_dir>/providers/anthropic.toml`:
+Provider configuration is split between the policy (which providers
+are permitted, with what budget / timeouts) and the credentials
+file (the API key bytes, isolated under mode 0600).
+
+### §5.1 — Policy-side `[gateway]` + `[[providers]]`
+
+The bootstrapped genesis `policy.toml` ships these blocks COMMENTED
+OUT (`crates/genesis-tools::render_genesis_policy_toml`). The test's
+`enable_gateway_in_policy` helper rewrites the file post-bootstrap
+to enable them. The kernel's `load_policy` does NOT verify a
+signature on the policy file at boot — signature verification only
+fires inside `policy_manager::advance_epoch` (the runtime
+epoch-rotation path) — so the post-bootstrap mutation persists
+across the second `Command::new(kernel_bin).spawn()`.
 
 ```toml
-# Gateway provider config for real Anthropic API calls.
-[provider]
-name     = "anthropic"
-kind     = "anthropic"
-base_url = "https://api.anthropic.com"
-# api_key is injected at runtime from .env
+[gateway]
+binary_path              = "/abs/path/to/raxis-gateway"  # = $RAXIS_GATEWAY_BINARY
+spawn_timeout_secs       = 30
+respawn_backoff_ms       = 1000
+max_consecutive_respawns = 5
 
-[provider.defaults]
-model              = "claude-sonnet-4-20250514"
-max_tokens          = 4096
-inference_timeout_ms = 120000
+[[providers]]
+provider_id           = "anthropic-e2e"
+kind                  = "Anthropic"
+credentials_file      = "anthropic-e2e.toml"
+inference_timeout_ms  = 120000
+data_fetch_timeout_ms = 30000
+pricing.input_tokens_per_dollar      = 200_000
+pricing.output_tokens_per_dollar     = 50_000
+pricing.cache_read_tokens_per_dollar = 2_000_000
+```
+
+### §5.2 — Credentials file
+
+The gateway resolves `[[providers]].credentials_file` against
+`<data_dir>/providers/<file>` via `FileCredentialBackend`
+(`raxis/gateway/src/policy_view.rs::load_provider_credentials`).
+The wire shape is the canonical `ProviderCredentials` flat TOML;
+Anthropic uses a custom `auth_header` and empty `auth_prefix`.
+Mode 0600 is mandated by `peripherals.md §3.2`.
+
+```toml
+# <data_dir>/providers/anthropic-e2e.toml
+api_key     = "sk-ant-..."   # injected from raxis/.env at test time
+auth_header = "x-api-key"
+auth_prefix = ""
 ```
 
 ---

@@ -65,16 +65,19 @@ fn fixture_image() -> VerifiedImage {
 
 fn fixture_spec(token: &str, mounts: Vec<WorkspaceMount>) -> VmSpec {
     VmSpec {
-        vcpu_count:       1,
-        mem_mib:          64,
-        egress_tier:      EgressTier::None,
-        cgroup_quota:     None,
-        boot_args:        Vec::new(),
-        entrypoint_argv:  Vec::new(),
-        session_token:    SessionToken(token.to_owned()),
-        vsock_cid:        Some(0xC1D_5070),
-        virtio_fs_mounts: mounts,
-        env:              Default::default(),
+        vcpu_count:        1,
+        mem_mib:           64,
+        egress_tier:       EgressTier::None,
+        cgroup_quota:      None,
+        boot_args:         Vec::new(),
+        entrypoint_argv:   Vec::new(),
+        session_token:     SessionToken(token.to_owned()),
+        vsock_cid:          Some(0xC1D_5070),
+        virtio_fs_mounts:  mounts,
+        // Worktree-staging tests target the SubprocessIsolation
+        // substrate; the kernel path is ignored.
+        linux_kernel_path: std::path::PathBuf::new(),
+        env:               Default::default(),
     }
 }
 

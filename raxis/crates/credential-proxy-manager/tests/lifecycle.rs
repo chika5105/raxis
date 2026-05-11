@@ -51,7 +51,7 @@ async fn postgres_listener_accepts_connection_and_counter_increments_through_shu
         name:     CredentialName::new("pg-staging"),
         mount_as: "DATABASE_URL".to_owned(),
         proxy:    ProxyDecl::Postgres {
-            restrictions: PostgresRestrictions { allow_only_select: false },
+            restrictions: PostgresRestrictions { allow_only_select: false, ..Default::default() },
         },
     }];
 

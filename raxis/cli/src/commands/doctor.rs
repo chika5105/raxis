@@ -603,8 +603,9 @@ fn enumerate_dead_digests(
 
 fn kind_tag(kind: CanonicalImageKind) -> &'static str {
     match kind {
-        CanonicalImageKind::Reviewer     => "reviewer",
-        CanonicalImageKind::Orchestrator => "orchestrator",
+        CanonicalImageKind::Reviewer        => "reviewer",
+        CanonicalImageKind::Orchestrator    => "orchestrator",
+        CanonicalImageKind::ExecutorStarter => "executor-starter",
     }
 }
 

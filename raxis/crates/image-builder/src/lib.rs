@@ -44,8 +44,8 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use raxis_image_manifest::{
-    fingerprint_signing_key, sha256_file_hex, BuildEnv, ImageManifest, ManifestError,
-    ManifestFile, Role, SCHEMA_VERSION,
+    fingerprint_signing_key, sha256_file_hex, BuildEnv, ImageFormat, ImageManifest,
+    ManifestError, ManifestFile, Role, SCHEMA_VERSION,
 };
 use std::path::{Path, PathBuf};
 
@@ -70,6 +70,21 @@ pub struct BuildInputs {
     pub tar_version:    String,
     /// Pinned zstd version.
     pub zstd_version:   String,
+    /// Rootfs on-disk shape this build emits. Defaults via
+    /// `default_image_format` to `RootfsErofs` so existing
+    /// `images/<role>/manifest.toml` files keep building unchanged
+    /// (the dev-host pipeline overrides this to
+    /// `RootfsInitramfsCpio`).
+    #[serde(default = "default_image_format")]
+    pub image_format:   ImageFormat,
+}
+
+/// Default `image_format` for `BuildInputs` when the field is absent
+/// from `images/<role>/manifest.toml`. Returns the production shape
+/// (`RootfsErofs`); dev-host pipelines must opt in to
+/// `RootfsInitramfsCpio` explicitly.
+fn default_image_format() -> ImageFormat {
+    ImageFormat::RootfsErofs
 }
 
 /// Top-level errors the builder can surface. Wraps `ManifestError`
@@ -214,6 +229,7 @@ pub fn assemble_manifest(
         kernel_version:        inputs.kernel_version.clone(),
         bundle_hash:           String::new(),
         image_artefact_sha256: image_artefact_sha256_hex,
+        image_format:          inputs.image_format,
         build_env: BuildEnv {
             source_date_epoch: inputs.source_date_epoch,
             erofs_version:     inputs.erofs_version.clone(),
@@ -364,6 +380,7 @@ mod tests {
             erofs_version:     "1.7.1".to_owned(),
             tar_version:       "1.34".to_owned(),
             zstd_version:      "1.5.5".to_owned(),
+            image_format:      ImageFormat::RootfsErofs,
         }
     }
 

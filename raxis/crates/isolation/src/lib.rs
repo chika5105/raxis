@@ -62,14 +62,57 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum ImageKind {
-    /// Read-only EROFS rootfs (Firecracker, AVF). The default V2 image
-    /// shape for `raxis-orchestrator-core`, `raxis-reviewer-core`, and
-    /// every operator-published Executor image.
+    /// Read-only EROFS rootfs mounted as a virtio-blk device
+    /// (Firecracker, AVF). The original V2 image shape for the
+    /// canonical `raxis-orchestrator-core` / `raxis-reviewer-core` /
+    /// `raxis-executor-starter` artefacts shipped by the release
+    /// pipeline. Requires `mkfs.erofs` (Linux-only) on the build
+    /// host, so the production release pipeline produces these
+    /// artefacts; macOS developers cannot natively assemble them.
     RootfsErofs,
+    /// Initramfs (`cpio.gz`, `newc` format) loaded by the Linux
+    /// guest kernel as the root filesystem. The substrate hands
+    /// this to AVF's `VZLinuxBootLoader.initialRamdiskURL` /
+    /// Firecracker's `PUT /boot-source { initrd_path }` instead of
+    /// attaching it as a virtio-blk device.
+    ///
+    /// Two reasons this exists alongside `RootfsErofs`:
+    ///
+    ///   1. **macOS-native assembly.** A `cpio.gz` initramfs is a
+    ///      pure userspace blob — the deterministic
+    ///      [`raxis-initramfs-builder`] crate produces the bytes
+    ///      using only `std::io`, `flate2`, and `sha2`. No
+    ///      Linux-only filesystem tooling is required, so a
+    ///      macOS developer can build the canonical images via
+    ///      `cargo xtask images build-all` without Docker or a
+    ///      Linux VM.
+    ///   2. **Same trust anchor.** The image-builder hashes the
+    ///      cpio.gz bytes through SHA-256 and signs the manifest
+    ///      with the same kernel signing key the EROFS variant
+    ///      uses, so the kernel-side admission path is identical.
+    ///
+    /// The substrate inspects `VerifiedImage.kind` at translate
+    /// time and routes the same `body` path to the boot loader's
+    /// initrd field instead of the virtio-blk drive when it sees
+    /// this variant.
+    RootfsInitramfsCpio,
     /// Intel SGX `SIGSTRUCT`-shaped enclave image (V3+).
     EnclaveSigStruct,
     /// `wasm32-wasi` module bytes (V3+, edge/IoT tier).
     WasmModule,
+}
+
+impl ImageKind {
+    /// True when this image kind is a Linux rootfs the substrate
+    /// must hand to its boot loader (in some shape — either as a
+    /// virtio-blk drive for [`Self::RootfsErofs`] or as an initrd
+    /// for [`Self::RootfsInitramfsCpio`]).
+    ///
+    /// Used by substrates to validate `VmSpec.linux_kernel_path`
+    /// is non-empty without needing to enumerate every variant.
+    pub const fn is_linux_rootfs(self) -> bool {
+        matches!(self, Self::RootfsErofs | Self::RootfsInitramfsCpio)
+    }
 }
 
 /// Where the verified image bytes live on the host.
@@ -240,6 +283,35 @@ pub struct VmSpec {
     /// that route filesystem access elsewhere (Wasm preopen-dirs,
     /// SGX shared pages).
     pub virtio_fs_mounts: Vec<WorkspaceMount>,
+
+    /// Host path of the Linux **kernel binary** (`vmlinux` /
+    /// `Image`) the microVM substrate hands to its boot loader.
+    ///
+    /// **Why this is separate from `VerifiedImage`.** AVF's
+    /// `VZLinuxBootLoader` and Firecracker's `PUT /boot-source` both
+    /// accept the kernel binary and the rootfs as distinct artefacts;
+    /// they have different lifecycles (the kernel binary is a
+    /// host-wide installation, signed and rotated separately from the
+    /// per-role rootfs images). Folding them into a single
+    /// `VerifiedImage` was the V2 placeholder shape and has been
+    /// removed because every microVM substrate has to thread them
+    /// apart anyway.
+    ///
+    /// **Empty `PathBuf` sentinel.** Substrates that do not boot a
+    /// Linux kernel (`SubprocessIsolation`, the test mock, future
+    /// Wasm / SGX backends) MAY pass `PathBuf::new()` here and ignore
+    /// the field. Substrates that DO boot a Linux kernel
+    /// (`isolation-firecracker`, `isolation-apple-vz`) MUST validate
+    /// the field is non-empty at `spawn` and fail-fast otherwise —
+    /// the kernel image resolver always populates it in the
+    /// production path.
+    ///
+    /// **Population.** The kernel populates this via
+    /// [`canonical_images::linux_kernel_path`] at session-spawn
+    /// time. Operators wanting to point at a different host kernel
+    /// extend `VmSpec`'s ctor in `session_spawn_orchestrator`
+    /// rather than mutating the field on the trait surface.
+    pub linux_kernel_path: PathBuf,
 
     /// Environment variables exposed to PID 1 inside the guest.
     ///

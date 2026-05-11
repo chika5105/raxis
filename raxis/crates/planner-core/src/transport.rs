@@ -268,6 +268,23 @@ pub async fn connect(
                 .map_err(|e| TransportError::Frame(FrameError::Io(e)))?;
             Ok(Arc::new(StreamTransport::new(stream)))
         }
+        #[cfg(all(feature = "vsock-transport", target_os = "linux"))]
+        KernelTransportConfig::Vsock { cid, port } => {
+            // AF_VSOCK connect to (cid, port). The kernel-side proxy
+            // listens on the host CID; the guest dials by passing the
+            // host CID it was told via `RAXIS_KERNEL_VSOCK_CID`. Per
+            // `planner-harness.md §14.5` and the kernel's
+            // `accept_planner_loop`, the wire framing on top of vsock
+            // is identical to the UDS path, so we wrap the stream in
+            // the same `StreamTransport` as the UDS branch.
+            let stream = tokio_vsock::VsockStream::connect(
+                tokio_vsock::VsockAddr::new(*cid, *port),
+            )
+            .await
+            .map_err(|e| TransportError::Frame(FrameError::Io(e)))?;
+            Ok(Arc::new(StreamTransport::new(stream)))
+        }
+        #[cfg(not(all(feature = "vsock-transport", target_os = "linux")))]
         KernelTransportConfig::Vsock { .. } => Err(TransportError::VsockUnavailable),
     }
 }

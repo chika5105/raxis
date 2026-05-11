@@ -94,7 +94,16 @@ pub async fn evaluate_claims(
     evaluation_sha:   &str,
     task_id:          &str,
     touched_paths:    &[PathBuf],
-    submitted_claims: &[SubmittedClaim],
+    // Intentionally unused — see Step 2.5 below. The kernel auto-
+    // derives claims from its own witness records; planner-submitted
+    // claims are discarded as a security property (the untrusted
+    // agent has zero influence on the claim pipeline). The parameter
+    // is kept on the signature so the caller's wire shape does not
+    // bifurcate between the kernel-auto-derived path and a
+    // hypothetical V3 mode where the planner regains submission
+    // rights — a contract change of that scope deserves a real PR
+    // rather than a silent restoration.
+    _submitted_claims_discarded: &[SubmittedClaim],
     worktree_root:    &Path,
     ctx:              &HandlerContext,
 ) -> Result<GateEvalResult, GateError> {
@@ -332,7 +341,17 @@ mod auto_claim_tests {
     use raxis_crypto::token::sha256_hex;
     use raxis_test_support::mem_store;
 
-    /// Helper: seed a witness record into the in-memory store.
+    /// Helper: seed an `initiatives` + `tasks` + `verifier_run_tokens`
+    /// chain so the FK-enforced `witness_records` insert succeeds, then
+    /// insert one witness record. The witness_records table FK-references
+    /// both `tasks(task_id)` and `verifier_run_tokens(verifier_run_id)`
+    /// (see `crates/store/migrations/0001_v1_baseline_kernel_db.sql`),
+    /// and the production `Store::open_with_clock` enables
+    /// `PRAGMA foreign_keys = ON`, so an unfettered insert violates
+    /// the constraint. Rather than thread the parent-table insert APIs
+    /// through every test (the witness logic doesn't exercise them),
+    /// we issue minimal raw-SQL INSERTs covering exactly the columns
+    /// each schema requires.
     fn seed_witness(
         store: &raxis_store::Store,
         task_id: &str,
@@ -343,6 +362,57 @@ mod auto_claim_tests {
         let blob = b"test-witness-blob";
         let blob_sha = sha256_hex(blob);
         let run_id = format!("run-{}", uuid::Uuid::new_v4().simple());
+
+        let conn = store.lock_sync();
+
+        // Seed the FK-parent rows. We use INSERT OR IGNORE so the same
+        // task_id/initiative_id can be re-seeded across test calls
+        // without exploding (the test layer is `#[cfg(test)]` only —
+        // production code never reaches here).
+        let initiative_id = format!("init-{}", task_id);
+        conn.execute(
+            "INSERT OR IGNORE INTO initiatives (initiative_id, state, \
+             terminal_criteria_json, plan_artifact_sha256, created_at) \
+             VALUES (?, ?, ?, ?, ?)",
+            rusqlite::params![
+                initiative_id,
+                "ApprovedPlan",
+                "{}",                  // terminal_criteria_json
+                "0".repeat(64),         // plan_artifact_sha256
+                0_i64,                  // created_at
+            ],
+        ).expect("seed_witness initiatives insert");
+
+        conn.execute(
+            "INSERT OR IGNORE INTO tasks (task_id, initiative_id, lane_id, state, \
+             actor, policy_epoch, admitted_at, transitioned_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                task_id,
+                initiative_id,
+                "default",
+                "Admitted",
+                "test-actor",
+                0_i64,
+                0_i64,
+                0_i64,
+            ],
+        ).expect("seed_witness tasks insert");
+
+        conn.execute(
+            "INSERT INTO verifier_run_tokens (verifier_run_id, task_id, gate_type, \
+             evaluation_sha, token_hash, issued_at, expires_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rusqlite::params![
+                run_id,
+                task_id,
+                gate_type,
+                evaluation_sha,
+                "0".repeat(64),
+                0_i64,
+                i64::MAX,
+            ],
+        ).expect("seed_witness verifier_run_tokens insert");
 
         let record = WitnessRecord {
             verifier_run_id: run_id.clone(),
@@ -355,7 +425,6 @@ mod auto_claim_tests {
             recorded_at:     0,
         };
 
-        let conn = store.lock_sync();
         witness_index::insert_witness_index_in_tx(
             &conn, &record, raxis_types::unix_now_secs(),
         ).expect("seed_witness insert");

@@ -70,7 +70,7 @@ use std::sync::Arc;
 
 use raxis_egress_admission::{EgressAllowlist, PolicyAdmissionService};
 use raxis_isolation::{
-    EgressTier, ImageBody, ImageKind, ImageSignature, SessionToken, VerifiedImage, VmSpec,
+    EgressTier, ImageBody, ImageSignature, SessionToken, VerifiedImage, VmSpec,
 };
 use raxis_session_spawn::{
     SessionSpawnService, SpawnError, SpawnHandle, SpawnRequest, TerminationReport,
@@ -495,8 +495,22 @@ async fn spawn_orchestrator_for_initiative(
             path: image_path,
         });
     }
+    // V2 SCHEMA_VERSION=3 — load the rootfs shape (EROFS vs.
+    // initramfs cpio.gz) from the signed manifest. The substrate
+    // dispatches on this to decide whether the .img bytes attach as
+    // a virtio-blk device (EROFS) or as the boot loader's initial
+    // ramdisk (initramfs). Falls back to RootfsErofs with a
+    // structured warning when the manifest is missing or the trust
+    // anchor is the all-zero placeholder; the substrate's own
+    // `spawn` impl re-verifies the bytes either way.
+    let (image_kind, _kind_is_trusted) =
+        crate::canonical_images_preflight::resolve_image_kind_for_role(
+            &image_path,
+            raxis_canonical_images::CanonicalImageKind::Orchestrator,
+            &spawn_ctx.kernel_version,
+        );
     let verified_image = VerifiedImage {
-        kind:      ImageKind::RootfsErofs,
+        kind:      image_kind,
         body:      ImageBody::Path(image_path),
         // The signature is verified at the kernel boot-time preflight
         // by digest; we hand a placeholder here for the trait contract
@@ -616,12 +630,12 @@ async fn spawn_orchestrator_for_initiative(
         .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
     env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
     let vm_spec = VmSpec {
-        vcpu_count:       spawn_ctx.vcpu_count,
-        mem_mib:          spawn_ctx.mem_mib,
-        egress_tier:      EgressTier::Tier1Tproxy,
-        cgroup_quota:     None,
-        boot_args:        Vec::new(),
-        entrypoint_argv:  vec![
+        vcpu_count:        spawn_ctx.vcpu_count,
+        mem_mib:           spawn_ctx.mem_mib,
+        egress_tier:       EgressTier::Tier1Tproxy,
+        cgroup_quota:      None,
+        boot_args:         Vec::new(),
+        entrypoint_argv:   vec![
             "/usr/local/bin/raxis-orchestrator".to_owned(),
             "--initiative-id".to_owned(),
             initiative_id.to_owned(),
@@ -630,9 +644,16 @@ async fn spawn_orchestrator_for_initiative(
         // guest env under `RAXIS_SESSION_TOKEN`. Production wires
         // this from the V2 `sessions.session_token` column; we
         // use a deterministic-but-opaque shape here.
-        session_token:    SessionToken(format!("orch-{}", session_id)),
-        vsock_cid:        None,
-        virtio_fs_mounts: Vec::new(),
+        session_token:     SessionToken(format!("orch-{}", session_id)),
+        vsock_cid:         None,
+        virtio_fs_mounts:  Vec::new(),
+        // Host-canonical Linux kernel binary. The microVM substrates
+        // (AVF, Firecracker) hand this to their boot loaders. The
+        // SubprocessIsolation substrate ignores the field per the
+        // `VmSpec::linux_kernel_path` contract.
+        linux_kernel_path: crate::canonical_images_preflight::linux_kernel_path(
+            &spawn_ctx.install_dir,
+        ),
         env,
     };
 
@@ -943,42 +964,59 @@ pub async fn spawn_executor_for_task(
         }
         override_img
     } else {
-        let (image_path, image_id, missing_err): (PathBuf, String, fn(PathBuf) -> OrchestratorSpawnError) =
-            match agent_kind {
-                ExecutorAgentKind::Executor => {
-                    let p = crate::canonical_images_preflight::executor_starter_image_path(
-                        &spawn_ctx.install_dir,
-                        &spawn_ctx.kernel_version,
-                    );
-                    (
-                        p,
-                        format!(
-                            "raxis-executor-starter-{kernel_version}",
-                            kernel_version = spawn_ctx.kernel_version,
-                        ),
-                        |path| OrchestratorSpawnError::ExecutorStarterImageMissing { path },
-                    )
-                }
-                ExecutorAgentKind::Reviewer => {
-                    let p = crate::canonical_images_preflight::reviewer_image_path(
-                        &spawn_ctx.install_dir,
-                        &spawn_ctx.kernel_version,
-                    );
-                    (
-                        p,
-                        format!(
-                            "raxis-reviewer-core-{kernel_version}",
-                            kernel_version = spawn_ctx.kernel_version,
-                        ),
-                        |path| OrchestratorSpawnError::ReviewerImageMissing { path },
-                    )
-                }
-            };
+        let (image_path, image_id, canonical_kind, missing_err): (
+            PathBuf,
+            String,
+            raxis_canonical_images::CanonicalImageKind,
+            fn(PathBuf) -> OrchestratorSpawnError,
+        ) = match agent_kind {
+            ExecutorAgentKind::Executor => {
+                let p = crate::canonical_images_preflight::executor_starter_image_path(
+                    &spawn_ctx.install_dir,
+                    &spawn_ctx.kernel_version,
+                );
+                (
+                    p,
+                    format!(
+                        "raxis-executor-starter-{kernel_version}",
+                        kernel_version = spawn_ctx.kernel_version,
+                    ),
+                    raxis_canonical_images::CanonicalImageKind::ExecutorStarter,
+                    |path| OrchestratorSpawnError::ExecutorStarterImageMissing { path },
+                )
+            }
+            ExecutorAgentKind::Reviewer => {
+                let p = crate::canonical_images_preflight::reviewer_image_path(
+                    &spawn_ctx.install_dir,
+                    &spawn_ctx.kernel_version,
+                );
+                (
+                    p,
+                    format!(
+                        "raxis-reviewer-core-{kernel_version}",
+                        kernel_version = spawn_ctx.kernel_version,
+                    ),
+                    raxis_canonical_images::CanonicalImageKind::Reviewer,
+                    |path| OrchestratorSpawnError::ReviewerImageMissing { path },
+                )
+            }
+        };
         if !image_path.exists() {
             return Err(missing_err(image_path));
         }
+        // V2 SCHEMA_VERSION=3 — see the matching note on the
+        // orchestrator-spawn path. Same fall-back semantics: if the
+        // manifest is missing or the trust anchor is unpopulated we
+        // default to RootfsErofs and let the substrate's spawn-time
+        // verifier surface tamper at activation time.
+        let (image_kind, _kind_is_trusted) =
+            crate::canonical_images_preflight::resolve_image_kind_for_role(
+                &image_path,
+                canonical_kind,
+                &spawn_ctx.kernel_version,
+            );
         VerifiedImage {
-            kind:      ImageKind::RootfsErofs,
+            kind:      image_kind,
             body:      ImageBody::Path(image_path),
             signature: ImageSignature(Vec::new()),
             image_id,
@@ -1129,14 +1167,14 @@ pub async fn spawn_executor_for_task(
         vcpu_count,
         mem_mib,
         egress_tier,
-        cgroup_quota:     None,
-        boot_args:        Vec::new(),
+        cgroup_quota:      None,
+        boot_args:         Vec::new(),
         entrypoint_argv,
         // Per-session token; the substrate stamps it into the
         // guest env under `RAXIS_SESSION_TOKEN`. Production wires
         // this from `sessions.session_token`; the trait round-trip
         // accepts a deterministic-but-opaque shape here.
-        session_token:    SessionToken(format!(
+        session_token:     SessionToken(format!(
             "{kind}-{session}",
             kind    = match agent_kind {
                 ExecutorAgentKind::Executor => "exec",
@@ -1144,8 +1182,14 @@ pub async fn spawn_executor_for_task(
             },
             session = session_id,
         )),
-        vsock_cid:        None,
-        virtio_fs_mounts: Vec::new(),
+        vsock_cid:         None,
+        virtio_fs_mounts:  Vec::new(),
+        // Same host-canonical kernel binary as the orchestrator path.
+        // SubprocessIsolation ignores; AVF/Firecracker hand it to
+        // their boot loaders.
+        linux_kernel_path: crate::canonical_images_preflight::linux_kernel_path(
+            &spawn_ctx.install_dir,
+        ),
         env,
     };
 

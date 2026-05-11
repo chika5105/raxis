@@ -3475,16 +3475,25 @@ async fn handle_retry_sub_task(
     // Orchestrator's next step is `ActivateSubTask` against the
     // same task_id, which will spawn the fresh VM via
     // `handle_activate_sub_task`.
-    let task_for_budget = match load_task(&task_id_owned, ctx.store.as_ref()) {
-        Ok(t)  => t,
-        Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
-    };
+    //
+    // `load_task` and `lane_budget_snapshot` both call
+    // `Store::lock_sync()` (which calls `tokio::sync::Mutex::blocking_lock`)
+    // and would panic if invoked directly from this async task.
+    // Hop onto the blocking pool exactly once and compute both there.
+    let store_for_resp = Arc::clone(&ctx.store);
     let policy_snapshot = ctx.policy.load_full();
-    let remaining = lane_budget_snapshot(
-        &task_for_budget.lane_id,
-        policy_snapshot.as_ref(),
-        ctx.store.as_ref(),
-    );
+    let task_id_for_resp = task_id_owned.clone();
+    let remaining = tokio::task::spawn_blocking(move || -> Result<BudgetSnapshot, ()> {
+        let task_for_budget = load_task(&task_id_for_resp, store_for_resp.as_ref())?;
+        Ok(lane_budget_snapshot(
+            &task_for_budget.lane_id,
+            policy_snapshot.as_ref(),
+            store_for_resp.as_ref(),
+        ))
+    })
+    .await
+    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
+    .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Admitted))?;
     Ok(IntentResponse {
         sequence_number: seq,
         task_state:      TaskState::Admitted,
@@ -5675,7 +5684,15 @@ mod tests {
     ) -> String {
         let initiative_id = "init-retry";
         let conn = store.lock_sync();
-        let now = unix_now_secs();
+        // Stamp the seeded "prior" rows strictly older than the wall
+        // clock — the retry handler uses `unix_now_secs()` for the
+        // freshly-inserted PendingActivation row, and the assertion
+        // pin in `read_activations` orders by `created_at ASC`. With
+        // 1-second clock resolution the seed and the new row would
+        // otherwise collide, leaving ordering up to the random
+        // activation_id UUID and producing a flaky test.
+        let now_real    = unix_now_secs();
+        let prior_now   = now_real.saturating_sub(60);
         conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO {INITIATIVES}
@@ -5686,7 +5703,7 @@ mod tests {
             rusqlite::params![
                 initiative_id,
                 InitiativeState::Executing.as_sql_str(),
-                now,
+                prior_now,
             ],
         ).unwrap();
         // Task row in `Failed` (the retry handler resets it to
@@ -5703,7 +5720,7 @@ mod tests {
                 task_id,
                 initiative_id,
                 TaskState::Failed.as_sql_str(),
-                now,
+                prior_now,
             ],
         ).unwrap();
         // Optionally seed a prior session row so the retry path
@@ -5722,7 +5739,7 @@ mod tests {
                 ),
                 rusqlite::params![
                     prior_sid, format!("tok-{prior_sid}"),
-                    now, now + 86_400,
+                    prior_now, prior_now + 86_400,
                 ],
             ).unwrap();
         }
@@ -5748,7 +5765,7 @@ mod tests {
                 prior_session,
                 crash_count as i64,
                 review_count as i64,
-                now,
+                prior_now,
             ],
         ).unwrap();
         drop(conn);

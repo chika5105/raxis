@@ -5,7 +5,10 @@
 // implements the V2 cross-spec consistency checks specified in
 // `specs/v2/v2-deep-spec.md §Spec-Graph Lint`.
 
+mod dev_codesign;
+mod dev_kernel;
 mod dev_keys;
+mod images;
 mod spec_graph;
 mod license_check;
 
@@ -15,8 +18,8 @@ fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let target = args.first().cloned();
     // `--strict` is only meaningful for spec-graph / license-check;
-    // we strip it from the inner-args list for dev-keys callers
-    // who never pass it.
+    // we strip it from the inner-args list for dev-keys / dev-codesign
+    // callers who never pass it.
     let strict = args.iter().any(|a| a == "--strict");
     args.retain(|a| a != "--strict");
     match target.as_deref() {
@@ -32,16 +35,42 @@ fn main() -> anyhow::Result<()> {
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             dev_keys::run(&tail).context("dev-keys")
         }
+        Some("dev-codesign") => {
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            dev_codesign::run(&tail).context("dev-codesign")
+        }
+        Some("images") => {
+            // `cargo xtask images <subcommand> [args...]`
+            let mut rest = args.into_iter().skip(1);
+            let sub = rest.next().ok_or_else(|| anyhow::anyhow!(
+                "missing images subcommand; available: dev-kernel, dev-stage, build-all"
+            ))?;
+            let tail: Vec<String> = rest.collect();
+            match sub.as_str() {
+                "dev-kernel" => dev_kernel::run(&tail).context("images dev-kernel"),
+                "dev-stage"  => images::run_dev_stage(&tail).context("images dev-stage"),
+                "build-all"  => images::run_build_all(&tail).context("images build-all"),
+                other        => anyhow::bail!(
+                    "unknown images subcommand: {other:?}; \
+                     available: dev-kernel, dev-stage, build-all"
+                ),
+            }
+        }
         Some(other) => anyhow::bail!(
             "unknown xtask target: {other:?}\n\
-             available: spec-graph [--strict], license-check [--strict], dev-keys"
+             available: spec-graph [--strict], license-check [--strict], \
+             dev-keys, dev-codesign, images"
         ),
         None => anyhow::bail!(
             "usage: cargo xtask <target> [flags]\n\
              available targets:\n  \
-             spec-graph     [--strict]              — cross-spec consistency lint\n  \
-             license-check  [--strict]              — enforce SSPL-1.0 across all crates\n  \
-             dev-keys init  [--dir <PATH>] [--force] — emit local-build signing keypair\n                                              (release-and-distribution.md §8)"
+             spec-graph     [--strict]                 — cross-spec consistency lint\n  \
+             license-check  [--strict]                 — enforce SSPL-1.0 across all crates\n  \
+             dev-keys init  [--dir <PATH>] [--force]   — emit local-build signing keypair\n                                                 (release-and-distribution.md §8)\n  \
+             dev-codesign   [--profile <P>]            — ad-hoc codesign target/<P>/raxis-kernel\n                 [--entitlements <PATH>]    against release/raxis.entitlements\n                 [--binary <NAME>]          (macOS only; no-op on Linux)\n                                                 (system-requirements.md §5.2)\n  \
+             images dev-kernel                          — stage Linux guest-kernel binary at\n                 (--from-file <PATH> | --url <URL> --sha256 <HEX>) \n                 [--install-dir <PATH>] [--arch <ARCH>] [--force]\n                                                 <install_dir>/kernel/vmlinux\n                                                 (system-requirements.md §11)\n  \
+             images dev-stage --role <ROLE>             — cross-compile raxis-planner-<role>\n                 [--target <TRIPLE>]                       and stage it into images/<role>/rootfs/init\n                                                 (planner-harness.md §14.4)\n  \
+             images build-all                           — pack staged rootfs into signed cpio.gz\n                 [--role <ROLE>] [--install-dir <P>]       initramfs and lay out under\n                 [--signing-key <PATH>]                    <install_dir>/images/raxis-<role>-<kver>.{{img,manifest.toml}}\n                                                 (planner-harness.md §14.4 + e2e-live-test-gap.md)"
         ),
     }
 }

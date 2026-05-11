@@ -1,0 +1,19 @@
+[package]
+name        = "raxis-initramfs-builder"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS V2 — pure-Rust deterministic cpio.gz (newc) writer used by `raxis-image-builder` to produce initramfs-format rootfs blobs hermetically on macOS + Linux. Closes the `mkfs.erofs`-on-macOS gap from `e2e-live-test-gap.md` and unblocks Apple Virtualization Framework demo flows where AVF requires an initramfs (or an ext4 disk; this crate handles the initramfs path)."
+
+[lib]
+name = "raxis_initramfs_builder"
+path = "src/lib.rs"
+
+[dependencies]
+flate2    = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
