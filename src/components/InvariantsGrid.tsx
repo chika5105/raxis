@@ -30,6 +30,7 @@ export function InvariantsGrid({ compact = false }: { compact?: boolean }) {
             {groups[g].map((inv) => (
               <li
                 key={inv.id}
+                id={inv.id.toLowerCase()}
                 className="grid gap-3 sm:grid-cols-[6rem_minmax(0,1fr)] sm:gap-10"
               >
                 <div>

@@ -185,8 +185,18 @@ function Invariants() {
               >
                 Category {g.n}
               </Link>
-              <span className="ml-auto text-xs text-[var(--soft)] tabular-nums">
-                {g.ids.join(" · ")}
+              <span className="ml-auto flex items-center gap-1 text-xs text-[var(--soft)] tabular-nums">
+                {g.ids.map((id, i) => (
+                  <span key={id}>
+                    {i > 0 && <span className="opacity-40"> · </span>}
+                    <Link
+                      href={`/paradigm#${id.toLowerCase()}`}
+                      className="hover:text-[var(--accent)] transition"
+                    >
+                      {id}
+                    </Link>
+                  </span>
+                ))}
               </span>
             </div>
             <h3 className="h-sub">{g.title}</h3>
