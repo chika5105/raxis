@@ -2456,7 +2456,11 @@ impl CredentialProxyManager {
                 session_id.to_owned(),
             ),
             restrictions: MongodbProxyRestrictions {
-                allow_read_only: restrictions.allow_read_only,
+                allow_read_only:        restrictions.allow_read_only,
+                allowed_collections:    restrictions.allowed_collections.clone(),
+                forbidden_collections:  restrictions.forbidden_collections.clone(),
+                max_documents:          restrictions.max_documents,
+                enforce:                restrictions.enforce,
             },
         };
         let audit_channel: Arc<dyn MongodbAuditChannel> = Arc::new(MongodbKernelAuditAdapter {

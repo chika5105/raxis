@@ -33,8 +33,11 @@
 //!     doc.
 //!   * Pull the **first BSON field name** out of that doc — that's
 //!     the command name (e.g. `"find"`, `"insert"`, `"hello"`).
-//!     V3 will walk the full BSON tree to enforce
-//!     `forbidden_collections` and `max_documents`.
+//!     This module continues to expose that helper for back-compat;
+//!     the V2 walker in `restriction::walk_command` does the deeper
+//!     parsing for `allowed_collections` / `forbidden_collections`
+//!     / `max_documents` per `specs/v2/proxy-table-allowlists.md
+//!     §6`.
 //!
 //! BSON document layout
 //! ====================
@@ -182,6 +185,7 @@ pub fn build_op_msg_reply(request_id: i32, response_to: i32, bson_doc: &[u8]) ->
 const BSON_DOUBLE: u8  = 0x01;
 const BSON_STRING: u8  = 0x02;
 const BSON_DOC:    u8  = 0x03;
+const BSON_ARRAY:  u8  = 0x04;
 const BSON_BIN:    u8  = 0x05;
 const BSON_BOOL:   u8  = 0x08;
 const BSON_INT32:  u8  = 0x10;
@@ -248,6 +252,18 @@ impl BsonBuilder {
     /// `{ key: <inner doc> }`.
     pub fn document(mut self, key: &str, inner: Vec<u8>) -> Self {
         self.body.put_u8(BSON_DOC);
+        self.body.put_slice(key.as_bytes());
+        self.body.put_u8(0);
+        self.body.put_slice(&inner);
+        self
+    }
+
+    /// `{ key: <array doc> }` — encoded as BSON array (type
+    /// `0x04`). Caller is responsible for using numeric keys
+    /// `"0"`, `"1"`, … inside `inner` per the BSON array
+    /// convention.
+    pub fn array(mut self, key: &str, inner: Vec<u8>) -> Self {
+        self.body.put_u8(BSON_ARRAY);
         self.body.put_slice(key.as_bytes());
         self.body.put_u8(0);
         self.body.put_slice(&inner);

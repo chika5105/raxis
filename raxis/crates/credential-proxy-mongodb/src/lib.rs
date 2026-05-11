@@ -49,14 +49,26 @@
 //!   * Per-command audit emission with the command name and a
 //!     SHA-256 of the *full* OP_MSG body bytes for fingerprinting.
 //!
+//! # V2 restriction surface (`proxy-table-allowlists.md`)
+//!
+//! The BSON command walker resolves the primary collection +
+//! `$db` from `OP_MSG` bodies, runs `allowed_collections` /
+//! `forbidden_collections` allow/deny enforcement, and applies
+//! the secondary-collection ($lookup / $unionWith / $out / $merge)
+//! reject-on-detection heuristic when an allowlist is configured.
+//! Reply cursors get streaming `max_documents` enforcement —
+//! `firstBatch` / `nextBatch` is truncated and the cursor id is
+//! rewritten to 0 on overshoot (so the agent's driver sees a
+//! clean cursor-exhausted result instead of a wire error). The
+//! per-cursor counter accumulates across `find` + N `getMore`s.
+//!
 //! # What is still deferred (tracked under V3)
 //!
 //!   * Compressed `OP_COMPRESSED` envelopes.
-//!   * Cursor batching aggregation (the V2 relay forwards single
-//!     `OP_MSG` round trips and lets the agent issue `getMore`
-//!     itself).
-//!   * `forbidden_collections`, `max_documents`, `op_timeout_ms`
-//!     deep BSON tree walks.
+//!   * Per-pipeline allowlist coverage for `$lookup` /
+//!     `$graphLookup` — V2 rejects them when ANY allowlist is
+//!     configured (the safer fail-closed contract).
+//!   * `op_timeout_ms`.
 //!   * TLS on the upstream socket (the SCRAM SASL conversation
 //!     itself is independent of TLS).
 
@@ -71,11 +83,15 @@ use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+pub mod cursor;
 pub mod restriction;
 pub mod upstream;
 pub mod wire;
 
-pub use restriction::Restrictions;
+pub use restriction::{
+    CommandTarget, RestrictionDecision, RestrictionReason, Restrictions,
+    walk_command,
+};
 pub use upstream::{
     ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamSession,
     redact_for_audit, resolve_upstream_url, DEFAULT_CONNECT_TIMEOUT,
@@ -125,6 +141,15 @@ pub struct ProxyStats {
     pub commands_audited:   AtomicU32,
     /// Number of commands rejected by `Restrictions`.
     pub commands_blocked:   AtomicU32,
+    /// V2: subset of `commands_blocked` rejected by the
+    /// `allowed_collections` / `forbidden_collections` walker.
+    pub commands_blocked_by_collection_allowlist: AtomicU32,
+    /// V2: subset of `commands_blocked` rejected because the
+    /// walker could not prove the collection list (fail-closed
+    /// under the V2 ambiguity policy).
+    pub commands_blocked_by_ambiguous_bson:       AtomicU32,
+    /// V2: number of reply cursors truncated by `max_documents`.
+    pub commands_capped_by_max_documents:         AtomicU32,
     /// Bytes seen in inbound OP_MSG bodies.
     pub bytes_observed:     AtomicU64,
     /// V2.1: number of upstream TCP+auth handshakes started.
@@ -144,6 +169,12 @@ impl ProxyStats {
             connections_served: self.connections_served.load(Ordering::Relaxed),
             commands_audited:   self.commands_audited  .load(Ordering::Relaxed),
             commands_blocked:   self.commands_blocked  .load(Ordering::Relaxed),
+            commands_blocked_by_collection_allowlist:
+                self.commands_blocked_by_collection_allowlist.load(Ordering::Relaxed),
+            commands_blocked_by_ambiguous_bson:
+                self.commands_blocked_by_ambiguous_bson      .load(Ordering::Relaxed),
+            commands_capped_by_max_documents:
+                self.commands_capped_by_max_documents        .load(Ordering::Relaxed),
             bytes_observed:     self.bytes_observed    .load(Ordering::Relaxed),
             upstream_connects_attempted: self.upstream_connects_attempted.load(Ordering::Relaxed),
             upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
@@ -162,6 +193,14 @@ pub struct ProxyStatsSnapshot {
     pub commands_audited:   u32,
     /// Number of commands rejected by `Restrictions`.
     pub commands_blocked:   u32,
+    /// V2: subset of `commands_blocked` rejected by the
+    /// `allowed_collections` / `forbidden_collections` walker.
+    pub commands_blocked_by_collection_allowlist: u32,
+    /// V2: subset of `commands_blocked` rejected because the
+    /// walker could not prove the collection list.
+    pub commands_blocked_by_ambiguous_bson:       u32,
+    /// V2: number of reply cursors truncated by `max_documents`.
+    pub commands_capped_by_max_documents:         u32,
     /// Bytes seen in inbound OP_MSG bodies.
     pub bytes_observed:     u64,
     /// V2.1: number of upstream TCP+auth handshakes started.
@@ -208,6 +247,12 @@ pub enum AuditEvent {
         /// True if the proxy refused the command under
         /// restrictions.
         blocked:     bool,
+        /// V2: walker-resolved `<db>.<coll>`; `None` for server-
+        /// introspection commands like `hello` / `ping`.
+        collection:         Option<String>,
+        /// V2: closed-enum reason key, present iff the command
+        /// was blocked OR audited-only by V2 restrictions.
+        restriction_reason: Option<&'static str>,
     },
 
     /// V2.1: emitted on the upstream's terminal frame for a
@@ -386,6 +431,13 @@ async fn serve_one(
     };
 
     let mut upstream_session: Option<UpstreamSession> = None;
+    // V2 cursor-cap tracking. Per `proxy-table-allowlists.md §7.5`
+    // the cap is per-cursor: a `find` opens a cursor (id != 0),
+    // subsequent `getMore`s on the same id accumulate against the
+    // budget. When a cursor id is 0 (single-batch query) or the
+    // proxy truncates the batch, the id is removed.
+    let mut emitted_by_cursor: std::collections::HashMap<i64, u64> =
+        std::collections::HashMap::new();
 
     loop {
         // Read 16-byte header.
@@ -419,25 +471,41 @@ async fn serve_one(
             break;
         }
 
-        let command = wire::first_command_name(&body)
-            .unwrap_or_else(|| "<unknown>".to_owned());
+        // V2 walker — only inspect the pipeline (for $lookup
+        // detection) when an allowlist is configured. Per
+        // `proxy-table-allowlists.md §6.1 step 4 (D6)`.
+        let inspect_pipeline = config.restrictions.has_collection_lists();
+        let target = restriction::walk_command(&body, inspect_pipeline);
+        let command = match &target {
+            CommandTarget::Resolved { command, .. } => command.clone(),
+            CommandTarget::SecondaryCollectionDetected { command, .. } => command.clone(),
+            CommandTarget::Ambiguous => wire::first_command_name(&body)
+                .unwrap_or_else(|| "<unknown>".to_owned()),
+        };
+        let cursor_id_for_getmore = if command == "getMore" {
+            extract_getmore_cursor_id(&body)
+        } else { None };
         stats.commands_audited.fetch_add(1, Ordering::Relaxed);
 
         let body_sha256 = sha256_hex(&body);
-        let blocked     = config.restrictions.is_blocked(&command);
+        let decision    = config.restrictions.check(&target);
 
+        let (collection, restriction_reason, is_block) =
+            decision_to_audit_fields(&decision);
         audit.emit(AuditEvent::MongoCommandExecuted {
             timestamp_unix_seconds: now_secs(),
             consumer:    config.consumer.clone(),
             credential:  config.credential_name.clone(),
             command:     command.clone(),
             body_sha256: body_sha256.clone(),
-            blocked,
+            blocked:     is_block,
+            collection,
+            restriction_reason,
         });
 
-        if blocked {
-            stats.commands_blocked.fetch_add(1, Ordering::Relaxed);
-            let reply_doc = build_unauthorized_doc(&command);
+        if is_block {
+            bump_blocked_counters(&stats, &decision);
+            let reply_doc = build_blocked_doc(&command, &decision);
             let reply_msg = wire::build_op_msg_reply(
                 header.request_id.wrapping_add(0x4000_0000),
                 header.request_id,
@@ -543,12 +611,36 @@ async fn serve_one(
         let session = upstream_session.as_mut().expect("upstream connected above");
         match session.forward_op_msg(&agent_frame).await {
             Ok(outcome) => {
-                stream.write_all(&outcome.frame).await?;
+                // V2 cursor cap. Per `§7.4`: when the reply
+                // contains a `cursor.firstBatch` / `nextBatch`
+                // array and `max_documents` is finite, count the
+                // batch against the per-cursor budget and rewrite
+                // the reply on overshoot.
+                let max_docs = config.restrictions.max_documents;
+                let (frame_to_send, rows_returned, capped_reason) =
+                    if max_docs > 0 {
+                        apply_cursor_cap_to_outcome(
+                            &outcome.frame,
+                            max_docs,
+                            &command,
+                            cursor_id_for_getmore,
+                            &mut emitted_by_cursor,
+                        )
+                    } else {
+                        (outcome.frame.clone(), 1u64, None)
+                    };
+                let was_capped = capped_reason.is_some();
+                if was_capped {
+                    stats.commands_capped_by_max_documents.fetch_add(1, Ordering::Relaxed);
+                }
+                stream.write_all(&frame_to_send).await?;
                 stream.flush().await?;
                 stats.upstream_bytes_forwarded.fetch_add(
-                    outcome.frame.len() as u64, Ordering::Relaxed,
+                    frame_to_send.len() as u64, Ordering::Relaxed,
                 );
-                let upstream_error = if outcome.upstream_error_marker {
+                let upstream_error = if was_capped {
+                    capped_reason.map(|s| s.to_owned())
+                } else if outcome.upstream_error_marker {
                     Some("ok=0".to_owned())
                 } else {
                     None
@@ -558,8 +650,8 @@ async fn serve_one(
                     consumer:       config.consumer.clone(),
                     credential:     config.credential_name.clone(),
                     body_sha256,
-                    rows_returned:  1,
-                    bytes_returned: outcome.frame.len() as u64,
+                    rows_returned,
+                    bytes_returned: frame_to_send.len() as u64,
                     duration_ms:    outcome.duration_ms,
                     upstream_error,
                 });
@@ -592,6 +684,254 @@ async fn serve_one(
     }
 
     Ok(())
+}
+
+/// Translate a [`RestrictionDecision`] into audit-envelope fields
+/// (`collection`, `restriction_reason`, `blocked`).
+fn decision_to_audit_fields(
+    decision: &RestrictionDecision,
+) -> (Option<String>, Option<&'static str>, bool) {
+    match decision {
+        RestrictionDecision::Admit { collection } =>
+            (collection.clone(), None, false),
+        RestrictionDecision::Block { reason, collection } =>
+            (collection.clone(), Some(reason.as_str()), true),
+        RestrictionDecision::AuditOnly { reason, collection } =>
+            (collection.clone(), Some(reason.as_str()), false),
+    }
+}
+
+/// Increment the right `commands_blocked_*` sub-counter.
+fn bump_blocked_counters(stats: &ProxyStats, decision: &RestrictionDecision) {
+    let reason = match decision {
+        RestrictionDecision::Block { reason, .. } => *reason,
+        _ => return,
+    };
+    stats.commands_blocked.fetch_add(1, Ordering::Relaxed);
+    match reason {
+        RestrictionReason::CollectionNotInAllowedList
+        | RestrictionReason::CollectionInForbiddenList
+        | RestrictionReason::SecondaryCollectionInPipeline => {
+            stats.commands_blocked_by_collection_allowlist.fetch_add(1, Ordering::Relaxed);
+        }
+        RestrictionReason::AmbiguousBson => {
+            stats.commands_blocked_by_ambiguous_bson.fetch_add(1, Ordering::Relaxed);
+        }
+        RestrictionReason::AllowReadOnly
+        | RestrictionReason::MaxDocumentsExceeded => {}
+    }
+}
+
+/// Build the reply doc for a blocked command. The closed-enum
+/// reason name is embedded verbatim per §9.4.
+fn build_blocked_doc(command: &str, decision: &RestrictionDecision) -> Vec<u8> {
+    use wire::BsonBuilder as B;
+    let reason = match decision {
+        RestrictionDecision::Block { reason, .. } => reason.as_str(),
+        _ => "policy_block",
+    };
+    let errmsg = format!(
+        "command `{command}` blocked by RAXIS policy: {reason}",
+    );
+    B::new()
+        .double("ok",       0.0)
+        .int32 ("code",     13)
+        .string("codeName", "Unauthorized")
+        .string("errmsg",   &errmsg)
+        .finish()
+}
+
+/// Pull the `getMore` command's cursor id (i64 first-field value)
+/// out of the OP_MSG body. The walker doesn't carry the numeric
+/// value, only the command name and (string-valued) collection;
+/// we re-parse the first element here.
+fn extract_getmore_cursor_id(body: &[u8]) -> Option<i64> {
+    if body.len() < 5 { return None; }
+    let mut i = 4; // flag_bits
+    while i < body.len() {
+        let kind = body[i];
+        i += 1;
+        if kind == 0 {
+            let doc = &body[i..];
+            if doc.len() < 5 { return None; }
+            let total = i32::from_le_bytes(doc[..4].try_into().ok()?) as usize;
+            if total < 5 || total > doc.len() { return None; }
+            let elems = &doc[4..total - 1];
+            if elems.is_empty() { return None; }
+            // First element: type byte + cstring(name) + value.
+            let type_byte = elems[0];
+            let nul = elems[1..].iter().position(|&b| b == 0)?;
+            let value_off = 1 + nul + 1;
+            if elems.len() < value_off + 8 { return None; }
+            match type_byte {
+                0x12 => {
+                    let v = i64::from_le_bytes(
+                        elems[value_off..value_off + 8].try_into().ok()?,
+                    );
+                    return Some(v);
+                }
+                0x10 => {
+                    if elems.len() < value_off + 4 { return None; }
+                    let v = i32::from_le_bytes(
+                        elems[value_off..value_off + 4].try_into().ok()?,
+                    );
+                    return Some(v as i64);
+                }
+                _ => return None,
+            }
+        } else if kind == 1 {
+            if i + 4 > body.len() { return None; }
+            let section_size = i32::from_le_bytes(
+                body[i..i + 4].try_into().ok()?,
+            ) as usize;
+            if section_size < 4 || i + section_size > body.len() { return None; }
+            i += section_size;
+        } else {
+            return None;
+        }
+    }
+    None
+}
+
+/// Apply the `max_documents` cap to an upstream reply frame.
+/// Returns `(frame_to_emit, rows_returned, cap_reason)`. When the
+/// reply has no cursor structure or the cap is not exceeded, the
+/// frame is returned unchanged and `cap_reason` is `None`.
+fn apply_cursor_cap_to_outcome(
+    upstream_frame: &[u8],
+    max_documents:  u64,
+    command:        &str,
+    getmore_cursor: Option<i64>,
+    emitted_by_cursor: &mut std::collections::HashMap<i64, u64>,
+) -> (Vec<u8>, u64, Option<&'static str>) {
+    let reply_doc = match cursor::extract_reply_doc(upstream_frame) {
+        Some(d) => d,
+        None    => return (upstream_frame.to_vec(), 1, None),
+    };
+    let cursor_id = reply_cursor_id(reply_doc).unwrap_or(0);
+    // Cursor key — for the FIRST batch of a query, use the
+    // upstream-issued cursor id; for getMore the agent already
+    // told us which cursor; for single-batch responses (cursor
+    // id 0) there's no continuation to track.
+    let cursor_key = match command {
+        "getMore" => getmore_cursor,
+        "find" | "aggregate" | "listCollections" | "listIndexes" =>
+            if cursor_id != 0 { Some(cursor_id) } else { None },
+        _ => None,
+    };
+    let prior = cursor_key.and_then(|k| emitted_by_cursor.get(&k).copied())
+        .unwrap_or(0);
+    let outcome = cursor::apply_cap(reply_doc, max_documents, prior);
+    let frame = if outcome.was_capped || !outcome.bson_doc.is_empty() {
+        match cursor::rebuild_op_msg_frame(upstream_frame, &outcome.bson_doc) {
+            Some(f) => f,
+            None    => upstream_frame.to_vec(),
+        }
+    } else {
+        upstream_frame.to_vec()
+    };
+
+    // Update the per-cursor counter.
+    if let Some(key) = cursor_key {
+        let entry = emitted_by_cursor.entry(key).or_insert(0);
+        *entry = entry.saturating_add(outcome.emitted_docs as u64);
+        if outcome.was_capped || cursor_id == 0 {
+            emitted_by_cursor.remove(&key);
+        }
+    }
+
+    let rows_returned = outcome.emitted_docs as u64;
+    let cap_reason = if outcome.was_capped {
+        Some("max_documents_exceeded")
+    } else { None };
+    (frame, rows_returned, cap_reason)
+}
+
+/// Read `cursor.id` from a reply BSON doc.
+fn reply_cursor_id(doc: &[u8]) -> Option<i64> {
+    if doc.len() < 5 { return None; }
+    let total = i32::from_le_bytes(doc[..4].try_into().ok()?) as usize;
+    if total < 5 || total > doc.len() { return None; }
+    let body = &doc[4..total - 1];
+    let mut p = 0;
+    while p < body.len() {
+        let t = body[p];
+        p += 1;
+        let nul = body[p..].iter().position(|&b| b == 0)?;
+        let name = std::str::from_utf8(&body[p..p + nul]).ok()?;
+        p += nul + 1;
+        if name == "cursor" && t == 0x03 {
+            let inner_total = i32::from_le_bytes(body[p..p + 4].try_into().ok()?) as usize;
+            if p + inner_total > body.len() { return None; }
+            let inner = &body[p + 4..p + inner_total - 1];
+            let mut q = 0;
+            while q < inner.len() {
+                let t2 = inner[q];
+                q += 1;
+                let nul2 = inner[q..].iter().position(|&b| b == 0)?;
+                let nm = std::str::from_utf8(&inner[q..q + nul2]).ok()?;
+                q += nul2 + 1;
+                if nm == "id" && t2 == 0x12 {
+                    let v = i64::from_le_bytes(inner[q..q + 8].try_into().ok()?);
+                    return Some(v);
+                }
+                let len = bson_value_len(t2, &inner[q..])?;
+                q += len;
+            }
+            return Some(0);
+        }
+        let len = bson_value_len(t, &body[p..])?;
+        p += len;
+    }
+    None
+}
+
+fn bson_value_len(t: u8, data: &[u8]) -> Option<usize> {
+    Some(match t {
+        0x01 => 8,
+        0x02 => {
+            if data.len() < 4 { return None; }
+            let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
+            4 + len
+        }
+        0x03 | 0x04 => {
+            if data.len() < 4 { return None; }
+            i32::from_le_bytes(data[..4].try_into().ok()?) as usize
+        }
+        0x05 => {
+            if data.len() < 5 { return None; }
+            5 + i32::from_le_bytes(data[..4].try_into().ok()?) as usize
+        }
+        0x06 => 0,
+        0x07 => 12,
+        0x08 => 1,
+        0x09 => 8,
+        0x0A => 0,
+        0x0B => {
+            let n1 = data.iter().position(|&b| b == 0)?;
+            let after1 = &data[n1 + 1..];
+            let n2 = after1.iter().position(|&b| b == 0)?;
+            n1 + 1 + n2 + 1
+        }
+        0x0C => {
+            if data.len() < 4 { return None; }
+            let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
+            4 + len + 12
+        }
+        0x0D | 0x0E => {
+            if data.len() < 4 { return None; }
+            4 + i32::from_le_bytes(data[..4].try_into().ok()?) as usize
+        }
+        0x0F => {
+            if data.len() < 4 { return None; }
+            i32::from_le_bytes(data[..4].try_into().ok()?) as usize
+        }
+        0x10 => 4,
+        0x11 | 0x12 => 8,
+        0x13 => 16,
+        0xFF | 0x7F => 0,
+        _ => return None,
+    })
 }
 
 fn now_secs() -> u64 {
@@ -648,19 +988,6 @@ fn build_reply_for(command: &str) -> Vec<u8> {
     }
 }
 
-/// `{ ok: 0.0, code: 13, codeName: "Unauthorized", errmsg: "..." }`.
-fn build_unauthorized_doc(command: &str) -> Vec<u8> {
-    use wire::BsonBuilder as B;
-    let errmsg = format!(
-        "command `{command}` blocked by RAXIS allow_read_only policy",
-    );
-    B::new()
-        .double("ok",       0.0)
-        .int32 ("code",     13)
-        .string("codeName", "Unauthorized")
-        .string("errmsg",   &errmsg)
-        .finish()
-}
 
 fn sha256_hex(b: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -674,10 +1001,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn unauthorized_doc_pins_code_13() {
-        let doc = build_unauthorized_doc("insert");
-        // The doc carries `code: 13` somewhere; we don't decode
-        // BSON in tests, but the bytes for `0x10 c o d e 0x00 13_le` must appear.
+    fn blocked_doc_pins_code_13() {
+        let decision = RestrictionDecision::Block {
+            reason:     RestrictionReason::AllowReadOnly,
+            collection: None,
+        };
+        let doc = build_blocked_doc("insert", &decision);
         let needle = [
             0x10, b'c', b'o', b'd', b'e', 0x00,
             13, 0, 0, 0,

@@ -629,19 +629,60 @@ fn default_mssql_enforce() -> bool { true }
 /// MongoDB restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "mongodb"`).
 ///
-/// Mirrors `raxis_credential_proxy_mongodb::Restrictions`. The
-/// `allow_read_only` flag is the only V2 MVP knob — when set,
-/// every command document whose first field name is not a known
-/// MongoDB read command is rejected with
-/// `{ ok: 0, code: 13, codeName: "Unauthorized" }`.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Mirrors `raxis_credential_proxy_mongodb::Restrictions`. V2.4
+/// (`specs/v2/proxy-table-allowlists.md`) adds the collection-
+/// level allowlist + denylist surface, a per-cursor `max_documents`
+/// streaming cap, and `enforce = false` audit-only mode.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MongodbRestrictions {
     /// If `true`, only read-only command names pass; everything
     /// else (insert / update / delete / findAndModify / etc.) is
     /// rejected at the proxy.
     #[serde(default)]
     pub allow_read_only: bool,
+
+    /// Fully-qualified collection allowlist (`<db>.<coll>`). The
+    /// BSON walker resolves every command's primary collection
+    /// + `$db` and admits only members of this list. Empty = no
+    /// allowlist. Comparisons are case-sensitive (Mongo is case-
+    /// sensitive on both database and collection names). See
+    /// `proxy-table-allowlists.md §6` for the contract.
+    #[serde(default)]
+    pub allowed_collections: Vec<String>,
+
+    /// Fully-qualified collection denylist applied AFTER the
+    /// allowlist.
+    #[serde(default)]
+    pub forbidden_collections: Vec<String>,
+
+    /// Per-cursor cap on documents returned. `0` (the default)
+    /// means uncapped. Streaming enforcement: the proxy
+    /// truncates `firstBatch`/`nextBatch`, rewrites the cursor
+    /// id to `0`, and emits `restriction_reason =
+    /// "max_documents_exceeded"` in audit.
+    #[serde(default)]
+    pub max_documents: u64,
+
+    /// When `false`, walker verdicts and cap overage are audited
+    /// but the command is admitted regardless of the restriction
+    /// outcome. Defaults to `true`.
+    #[serde(default = "default_mongodb_enforce")]
+    pub enforce: bool,
 }
+
+impl Default for MongodbRestrictions {
+    fn default() -> Self {
+        Self {
+            allow_read_only:        false,
+            allowed_collections:    Vec::new(),
+            forbidden_collections:  Vec::new(),
+            max_documents:          0,
+            enforce:                true,
+        }
+    }
+}
+
+fn default_mongodb_enforce() -> bool { true }
 
 /// Azure restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "azure"`).
