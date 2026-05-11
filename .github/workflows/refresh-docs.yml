@@ -1,0 +1,20 @@
+name: Refresh docs
+
+# Redeploys the site every hour so vendored docs stay current.
+# Requires the VERCEL_DEPLOY_HOOK_URL secret to be set in the repo settings.
+# Obtain it from: Vercel project → Settings → Git → Deploy Hooks.
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # every hour, on the hour (UTC)
+  workflow_dispatch:        # also triggerable manually from the Actions tab
+
+jobs:
+  trigger-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Vercel deploy hook
+        run: |
+          curl -sf -X POST "${{ secrets.VERCEL_DEPLOY_HOOK_URL }}" \
+            -o /dev/null \
+            --write-out "HTTP %{http_code}\n"
