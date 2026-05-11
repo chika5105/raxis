@@ -51,6 +51,6 @@ pub use exporter::{NoopExporter, ObservabilityExporter, RingFileExporter};
 pub use hub::{DropReason, HubConfig, ObservabilityHub, RecordingSpan};
 pub use redact::{RedactError, Redactor};
 pub use types::{
-    AttrValue, DataPoint, EventName, MetricData, MetricName, MetricType,
+    AttrMap, AttrValue, DataPoint, EventName, MetricData, MetricName, MetricType,
     SpanData, SpanEvent, SpanKind, SpanName, SpanStatus, Unit,
 };

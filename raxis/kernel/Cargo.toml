@@ -113,6 +113,13 @@ raxis-artifact-store    = { workspace = true }
 # directly against a real on-disk store.
 raxis-dashboard         = { workspace = true }
 raxis-dashboard-kernel  = { workspace = true }
+# V3 OpenTelemetry-shaped observability surface. Authority side only;
+# the `crates/observability` crate is the in-process layer (types,
+# hub, redactor, ring exporter). The OTLP wire-protocol code lives in
+# the separate `raxis-otel-pusher` binary per `INV-OTEL-03` — the
+# kernel itself never imports `tonic`, `prost`, or `opentelemetry-otlp`.
+# Spec: `specs/v3/otel-observability.md`.
+raxis-observability     = { workspace = true }
 
 # Async runtime — tokio with explicit feature list per Part 2.1.
 tokio       = { workspace = true }

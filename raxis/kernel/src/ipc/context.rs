@@ -23,6 +23,7 @@ use raxis_domain::DomainAdapter;
 use raxis_domain_git::{SeIntentKind, SeTerminalArtefact};
 use raxis_image_cache::{ImageResolver, PrePopulatedResolver};
 use raxis_isolation::Backend as IsolationBackend;
+use raxis_observability::ObservabilityHub;
 use raxis_policy::PolicyBundle;
 use raxis_session_spawn::SessionSpawnService;
 use raxis_store::Store;
@@ -390,6 +391,33 @@ pub struct HandlerContext {
     /// `None` so that test handlers continue to pass without a
     /// per-test tempdir for the artifact root.
     pub artifact_store: Option<Arc<ArtifactStore>>,
+
+    /// V3 — authority-side OpenTelemetry observability hub.
+    ///
+    /// Held as `Arc<ObservabilityHub>` so handlers can call
+    /// `ctx.observability.start_span(...)` / `record_counter(...)`
+    /// without paying for a clone on every call. The hub is
+    /// constructed once at kernel boot from `policy().observability()`;
+    /// when the operator omits the section the field is still
+    /// populated with a [`ObservabilityHub::disabled`] instance so
+    /// emit sites can be unconditional (the disabled hub
+    /// short-circuits before sanitisation).
+    ///
+    /// Production wiring: `kernel/src/main.rs` reads
+    /// `[observability].enabled`, builds a `RingFileExporter` rooted
+    /// at `<data_dir>/observability/`, constructs the hub, and
+    /// passes it to `HandlerContext::with_observability`. The
+    /// separate `raxis-otel-pusher` binary tails the same ring
+    /// directory and ships OTLP — the kernel itself never imports
+    /// OTLP transport per `INV-OTEL-03`.
+    ///
+    /// **Why non-Option**: emit sites are pervasive (intent
+    /// admission, gateway fetch, verifier execution, notification
+    /// dispatch, operator IPC, escalation, session spawn). Threading
+    /// `Option<Arc<ObservabilityHub>>` would litter the codebase
+    /// with `if let Some(hub) = ...` guards; the disabled hub is
+    /// equivalent and ~free at the call site.
+    pub observability: Arc<ObservabilityHub>,
 }
 
 impl HandlerContext {
@@ -496,6 +524,12 @@ impl HandlerContext {
             sidecar_registry,
             initiative_bus,
             artifact_store: None,
+            // V3 — default disabled hub. Production main.rs swaps
+            // this for the policy-derived hub via
+            // `with_observability`. Keeping the default disabled
+            // means tests pay zero cost and existing fixtures keep
+            // compiling without churn.
+            observability: Arc::new(ObservabilityHub::disabled()),
         }
     }
 
@@ -507,6 +541,18 @@ impl HandlerContext {
     /// leave the field `None`.
     pub fn with_artifact_store(mut self, store: Arc<ArtifactStore>) -> Self {
         self.artifact_store = Some(store);
+        self
+    }
+
+    /// V3 — install the boot-time `ObservabilityHub`. Production
+    /// boot in `main.rs` constructs the hub from
+    /// `policy.observability()` (a `RingFileExporter` rooted at
+    /// `<data_dir>/observability/`) and calls this setter. Tests
+    /// that exercise the observability surface inject an
+    /// `InMemoryExporter`-backed hub via this same setter; tests
+    /// that don't keep the default disabled hub.
+    pub fn with_observability(mut self, hub: Arc<ObservabilityHub>) -> Self {
+        self.observability = hub;
         self
     }
 

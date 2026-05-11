@@ -41,6 +41,7 @@ mod gateway;
 mod handlers;
 mod isolation_select;
 mod notifications;
+mod observability;
 mod path_scope;
 mod policy_manager;
 mod prompt;
@@ -985,6 +986,56 @@ async fn main() {
     // semaphore per channel, one circuit breaker per channel, one
     // counter set surfaced to `raxis status`.
     .with_sidecar_registry(Arc::clone(&sidecar_registry));
+
+    // V3 §3 — construct the `ObservabilityHub` per the policy
+    // bundle's validated `[observability]` section. When
+    // `enabled = false` the hub uses `NoopExporter` and every
+    // emit site short-circuits before sanitisation. When enabled,
+    // the kernel writes JSONL frames into `<data_dir>/observability/`
+    // (or operator-supplied `[observability.ring].dir`) and the
+    // out-of-process `raxis-otel-pusher` reads + ships via OTLP
+    // (`INV-OTEL-03`).
+    let observability_hub: Arc<raxis_observability::ObservabilityHub> = {
+        let snap = policy.load();
+        let oc = snap.observability();
+        if oc.enabled {
+            let ring_root = if oc.ring.dir.is_empty() {
+                data_dir.clone()
+            } else {
+                std::path::PathBuf::from(&oc.ring.dir)
+            };
+            let ring_cfg = raxis_observability::ring::RingConfig {
+                segment_max_bytes: oc.ring.segment_max_bytes,
+                max_total_bytes:   oc.ring.max_total_bytes,
+            };
+            let hub_cfg = raxis_observability::HubConfig {
+                enabled:             true,
+                max_queue_depth:     oc.ring.max_queue_depth,
+                sample_rate:         oc.traces.sample_rate,
+                max_attrs_per_span:  oc.traces.max_attrs_per_span,
+                max_events_per_span: oc.traces.max_events_per_span,
+                histogram_buckets:   oc.metrics.histogram_buckets.clone(),
+            };
+            match raxis_observability::ObservabilityHub::with_ring_at(
+                hub_cfg,
+                &ring_root,
+                ring_cfg,
+                kernel_version.to_owned(),
+            ) {
+                Ok((hub, _exp)) => Arc::new(hub),
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"ObservabilityHubInitFailed\",\
+                         \"reason\":\"{e}\"}}",
+                    );
+                    Arc::new(raxis_observability::ObservabilityHub::disabled())
+                }
+            }
+        } else {
+            Arc::new(raxis_observability::ObservabilityHub::disabled())
+        }
+    };
+    let ctx_inner = ctx_inner.with_observability(Arc::clone(&observability_hub));
     let ctx = Arc::new(ctx_inner);
 
     // Step 8.5: Spawn the gateway supervisor. The supervisor runs as a
@@ -1165,6 +1216,12 @@ async fn main() {
              \"reason\":\"{join_err}\"}}"
         ),
     }
+
+    // V3 §3 — flush + shutdown the observability hub before
+    // emitting `KernelStopped` so any final spans/metrics for the
+    // shutdown sequence land on disk before the kernel disappears.
+    // Idempotent; cheap when the hub is disabled.
+    observability_hub.shutdown();
 
     // Step 10: Emit `KernelStopped` audit event. This MUST be the last
     // record in the segment for this kernel-process lifetime; without it,
