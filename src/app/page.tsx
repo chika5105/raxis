@@ -356,7 +356,7 @@ function FAQ() {
     },
     {
       q: "What does it not do?",
-      a: "It does not verify the semantic correctness of the agent's output. Tests, code review, and operator approval gates exist for that. It does not substitute for measured boot, signed builds, or hardware roots of trust. Those belong alongside it.",
+      a: "It does not verify the semantic correctness of the agent's output. Tests, code review, and operator approval gates exist for that — the mechanism is operator-configured mechanical witnesses: verifier subprocesses the kernel spins up after each action to check correctness independently of the agent that produced the work. It does not substitute for measured boot, signed builds, or hardware roots of trust. Those belong alongside it.",
     },
   ];
   return (
