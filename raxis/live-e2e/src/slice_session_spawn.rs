@@ -94,7 +94,10 @@ pub async fn run() -> Result<()> {
         name:     CredentialName::new("db-live".to_owned()),
         mount_as: "DATABASE_URL".to_owned(),
         proxy:    ProxyDecl::Postgres {
-            restrictions: PostgresRestrictions { allow_only_select: true },
+            restrictions: PostgresRestrictions {
+                allow_only_select: true,
+                ..Default::default()
+            },
         },
     }];
 

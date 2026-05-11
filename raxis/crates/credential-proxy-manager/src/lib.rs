@@ -1890,6 +1890,10 @@ impl CredentialProxyManager {
             ),
             restrictions: PgProxyRestrictions {
                 allow_only_select: restrictions.allow_only_select,
+                allowed_tables:    restrictions.allowed_tables.clone(),
+                forbidden_tables:  restrictions.forbidden_tables.clone(),
+                max_result_rows:   restrictions.max_result_rows,
+                enforce:           restrictions.enforce,
             },
         };
         let audit_channel: Arc<dyn PgAuditChannel> = Arc::new(PostgresKernelAuditAdapter {
@@ -2685,7 +2689,10 @@ users:
             name:     CredentialName::new("pg-staging"),
             mount_as: "DATABASE_URL".to_owned(),
             proxy:    ProxyDecl::Postgres {
-                restrictions: PostgresRestrictions { allow_only_select: false },
+                restrictions: PostgresRestrictions {
+                    allow_only_select: false,
+                    ..Default::default()
+                },
             },
         }];
 
@@ -2961,7 +2968,10 @@ users:
                 name:     CredentialName::new("pg-staging"),
                 mount_as: "DATABASE_URL".to_owned(),
                 proxy:    ProxyDecl::Postgres {
-                    restrictions: PostgresRestrictions { allow_only_select: true },
+                    restrictions: PostgresRestrictions {
+                        allow_only_select: true,
+                        ..Default::default()
+                    },
                 },
             },
             TaskCredentialDecl {

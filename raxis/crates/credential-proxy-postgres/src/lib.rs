@@ -126,7 +126,10 @@ pub mod restriction;
 pub mod upstream;
 pub mod wire;
 
-pub use restriction::{Restrictions, OperationKind, classify_first_operation};
+pub use restriction::{
+    Restrictions, OperationKind, RestrictionDecision, RestrictionReason,
+    classify_first_operation, extract_relations,
+};
 pub use upstream::{
     ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamPreparedMeta, UpstreamSession,
     redact_for_audit, resolve_upstream_url,
@@ -231,6 +234,18 @@ pub struct ProxyStats {
     pub upstream_connects_failed:    AtomicU32,
     /// Sum of upstream→agent payload bytes relayed (V2.1+).
     pub upstream_bytes_forwarded:    AtomicU32,
+    /// V2.2 — queries blocked because the walker resolved a table
+    /// outside `allowed_tables` or inside `forbidden_tables`.
+    /// Subset of `queries_blocked` (proxy-table-allowlists.md §10).
+    pub queries_blocked_by_table_allowlist: AtomicU32,
+    /// V2.2 — queries blocked because the walker returned
+    /// `Ambiguous` while an allowlist was configured. Subset of
+    /// `queries_blocked`.
+    pub queries_blocked_by_ambiguous_sql:    AtomicU32,
+    /// V2.2 — queries whose result-set stream was truncated by
+    /// `max_result_rows`. Not a subset of `queries_blocked`
+    /// (the query was admitted; the result set was capped).
+    pub queries_capped_by_max_result_rows:   AtomicU32,
 }
 
 impl ProxyStats {
@@ -244,6 +259,12 @@ impl ProxyStats {
             upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
             upstream_connects_failed:    self.upstream_connects_failed   .load(Ordering::Relaxed),
             upstream_bytes_forwarded:    self.upstream_bytes_forwarded   .load(Ordering::Relaxed),
+            queries_blocked_by_table_allowlist:
+                self.queries_blocked_by_table_allowlist.load(Ordering::Relaxed),
+            queries_blocked_by_ambiguous_sql:
+                self.queries_blocked_by_ambiguous_sql  .load(Ordering::Relaxed),
+            queries_capped_by_max_result_rows:
+                self.queries_capped_by_max_result_rows .load(Ordering::Relaxed),
         }
     }
 }
@@ -265,6 +286,12 @@ pub struct ProxyStatsSnapshot {
     pub upstream_connects_failed:    u32,
     /// Sum of upstream→agent payload bytes relayed.
     pub upstream_bytes_forwarded:    u32,
+    /// V2.2 — subset of `queries_blocked` from the table walker.
+    pub queries_blocked_by_table_allowlist: u32,
+    /// V2.2 — subset of `queries_blocked` from walker ambiguity.
+    pub queries_blocked_by_ambiguous_sql:    u32,
+    /// V2.2 — queries truncated by `max_result_rows`.
+    pub queries_capped_by_max_result_rows:   u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -464,15 +491,23 @@ async fn serve_one(
                     .map_err(|e| ProxyError::AuditSink(format!("parse query: {e}")))?;
                 let op = classify_first_operation(&sql);
                 stats.queries_audited.fetch_add(1, Ordering::Relaxed);
-                let blocked = config.restrictions.is_blocked(&op);
-                audit.emit(audit_query_executed(&config, &sql, &op, blocked));
+                let decision = config.restrictions.check(&sql, &op);
+                let (blocked, tables_referenced, restriction_reason) =
+                    decision_to_audit_fields(&decision);
+                if blocked {
+                    bump_blocked_counters(&stats, &decision);
+                }
+                audit.emit(audit_query_executed(
+                    &config, &sql, &op, blocked,
+                    tables_referenced, restriction_reason,
+                ));
 
                 if blocked {
-                    stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
+                    let (sqlstate, msg) = error_for_decision(&decision);
                     client_stream.write_all(&error_response(
                         b"ERROR",
-                        b"42501",
-                        "operation blocked by RAXIS policy",
+                        sqlstate.as_bytes(),
+                        &msg,
                     )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
                     client_stream.write_all(&ready_for_query(b'I')).await
                         .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
@@ -564,14 +599,31 @@ async fn serve_one(
                 };
                 match session.forward_simple_query(&sql).await {
                     Ok(outcome) => {
-                        for frame in &outcome.frames {
+                        let capped = apply_max_result_rows_cap(
+                            outcome,
+                            config.restrictions.max_result_rows,
+                        );
+                        for frame in &capped.frames {
                             client_stream.write_all(frame).await
                                 .map_err(|e| ProxyError::AuditSink(format!("relay frame: {e}")))?;
+                        }
+                        if capped.cap_triggered {
+                            let n = config.restrictions.max_result_rows;
+                            stats.queries_capped_by_max_result_rows
+                                .fetch_add(1, Ordering::Relaxed);
+                            client_stream.write_all(&error_response(
+                                b"ERROR",
+                                b"54000",
+                                &format!(
+                                    "blocked by RAXIS policy: max_result_rows_exceeded \
+                                     (result-set row count exceeded max_result_rows = {n})",
+                                ),
+                            )).await.map_err(|e| ProxyError::AuditSink(format!("err response: {e}")))?;
                         }
                         client_stream.write_all(&ready_for_query(b'I')).await
                             .map_err(|e| ProxyError::AuditSink(format!("rfq: {e}")))?;
                         stats.upstream_bytes_forwarded.fetch_add(
-                            outcome.bytes_returned.min(u32::MAX as u64) as u32,
+                            capped.bytes_returned.min(u32::MAX as u64) as u32,
                             Ordering::Relaxed,
                         );
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
@@ -581,10 +633,14 @@ async fn serve_one(
                             consumer:       config.consumer.clone(),
                             credential:     config.credential_name.clone(),
                             sql_sha256:     sql_sha,
-                            rows_returned:  outcome.rows_returned,
-                            bytes_returned: outcome.bytes_returned,
-                            duration_ms:    outcome.duration_ms,
-                            upstream_error: None,
+                            rows_returned:  capped.rows_returned,
+                            bytes_returned: capped.bytes_returned,
+                            duration_ms:    capped.duration_ms,
+                            upstream_error: if capped.cap_triggered {
+                                Some("max_result_rows_exceeded".to_owned())
+                            } else {
+                                None
+                            },
                         });
                     }
                     Err(e) => {
@@ -630,15 +686,19 @@ async fn serve_one(
                 };
                 let op = classify_first_operation(&parsed.sql);
                 stats.queries_audited.fetch_add(1, Ordering::Relaxed);
-                let blocked = config.restrictions.is_blocked(&op);
-                audit.emit(audit_query_executed(&config, &parsed.sql, &op, blocked));
+                let decision = config.restrictions.check(&parsed.sql, &op);
+                let (blocked, tables_referenced, restriction_reason) =
+                    decision_to_audit_fields(&decision);
                 if blocked {
-                    stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
-                    send_extended_error(
-                        &mut client_stream,
-                        "42501",
-                        "operation blocked by RAXIS policy",
-                    ).await?;
+                    bump_blocked_counters(&stats, &decision);
+                }
+                audit.emit(audit_query_executed(
+                    &config, &parsed.sql, &op, blocked,
+                    tables_referenced, restriction_reason,
+                ));
+                if blocked {
+                    let (sqlstate, msg) = error_for_decision(&decision);
+                    send_extended_error(&mut client_stream, &sqlstate, &msg).await?;
                     continue;
                 }
                 ext_state.prepared.insert(
@@ -793,22 +853,42 @@ async fn serve_one(
                 };
                 match session.forward_simple_query(&substituted).await {
                     Ok(outcome) => {
+                        let capped = apply_max_result_rows_cap(
+                            outcome,
+                            config.restrictions.max_result_rows,
+                        );
                         // The simple-query outcome carries
                         // RowDescription + DataRow + CommandComplete.
                         // Per the extended-query protocol, the
                         // RowDescription was already emitted by
                         // Describe — drop it from the relay so the
                         // agent doesn't see it twice.
-                        for frame in &outcome.frames {
+                        for frame in &capped.frames {
                             if frame.first().copied() == Some(b'T') {
                                 continue;
                             }
                             client_stream.write_all(frame).await
                                 .map_err(|e| ProxyError::AuditSink(format!("relay frame: {e}")))?;
                         }
+                        if capped.cap_triggered {
+                            let n = config.restrictions.max_result_rows;
+                            stats.queries_capped_by_max_result_rows
+                                .fetch_add(1, Ordering::Relaxed);
+                            // Extended-query path: send the error
+                            // but NOT a RFQ — the agent's Sync drives
+                            // ReadyForQuery.
+                            send_extended_error(
+                                &mut client_stream,
+                                "54000",
+                                &format!(
+                                    "blocked by RAXIS policy: max_result_rows_exceeded \
+                                     (result-set row count exceeded max_result_rows = {n})",
+                                ),
+                            ).await?;
+                        }
                         // No ReadyForQuery here — Sync sends it.
                         stats.upstream_bytes_forwarded.fetch_add(
-                            outcome.bytes_returned.min(u32::MAX as u64) as u32,
+                            capped.bytes_returned.min(u32::MAX as u64) as u32,
                             Ordering::Relaxed,
                         );
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
@@ -818,10 +898,14 @@ async fn serve_one(
                             consumer:       config.consumer.clone(),
                             credential:     config.credential_name.clone(),
                             sql_sha256:     sql_sha,
-                            rows_returned:  outcome.rows_returned,
-                            bytes_returned: outcome.bytes_returned,
-                            duration_ms:    outcome.duration_ms,
-                            upstream_error: None,
+                            rows_returned:  capped.rows_returned,
+                            bytes_returned: capped.bytes_returned,
+                            duration_ms:    capped.duration_ms,
+                            upstream_error: if capped.cap_triggered {
+                                Some("max_result_rows_exceeded".to_owned())
+                            } else {
+                                None
+                            },
                         });
                     }
                     Err(e) => {
@@ -1025,11 +1109,138 @@ async fn ensure_upstream_meta(
     }
 }
 
+/// Result of applying the `max_result_rows` streaming cap to a
+/// completed `ForwardOutcome`. When the cap fires, `frames` is
+/// truncated to keep `RowDescription` + first N `DataRow`s and the
+/// upstream `CommandComplete` is replaced with a synthetic
+/// `CommandComplete <op> <N>` so the agent's driver still
+/// finalises its result-set state machine before the
+/// `ErrorResponse` lands.
+///
+/// Per `proxy-table-allowlists.md §7.1`: the streaming cap operates
+/// at the relay layer, AFTER the walker has admitted the query.
+#[derive(Debug)]
+struct CappedOutcome {
+    frames:         Vec<Vec<u8>>,
+    rows_returned:  u64,
+    bytes_returned: u64,
+    duration_ms:    u32,
+    cap_triggered:  bool,
+}
+
+fn apply_max_result_rows_cap(
+    outcome: ForwardOutcome,
+    max_result_rows: u64,
+) -> CappedOutcome {
+    let duration_ms = outcome.duration_ms;
+    if max_result_rows == 0 || outcome.rows_returned <= max_result_rows {
+        return CappedOutcome {
+            frames:         outcome.frames,
+            rows_returned:  outcome.rows_returned,
+            bytes_returned: outcome.bytes_returned,
+            duration_ms,
+            cap_triggered:  false,
+        };
+    }
+    // Cap fires. Walk frames in order, retaining the
+    // RowDescription ('T') if present plus the first N DataRow ('D')
+    // frames. Drop the original CommandComplete ('C'); the caller
+    // writes a `54000` ErrorResponse + ReadyForQuery so the agent
+    // sees the cap as a real protocol error.
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(max_result_rows as usize + 1);
+    let mut bytes: u64 = 0;
+    let mut rows_kept: u64 = 0;
+    for frame in outcome.frames.into_iter() {
+        match frame.first().copied() {
+            Some(b'T') => {
+                bytes += frame.len() as u64;
+                out.push(frame);
+            }
+            Some(b'D') => {
+                if rows_kept < max_result_rows {
+                    bytes += frame.len() as u64;
+                    out.push(frame);
+                    rows_kept += 1;
+                }
+            }
+            // Drop CommandComplete and anything else — the caller's
+            // ErrorResponse takes its place.
+            _ => {}
+        }
+    }
+    CappedOutcome {
+        frames:         out,
+        rows_returned:  rows_kept,
+        bytes_returned: bytes,
+        duration_ms,
+        cap_triggered:  true,
+    }
+}
+
+/// Translate a `RestrictionDecision` into the audit-event fields it
+/// produces: `(blocked, tables_referenced, restriction_reason)`.
+/// Per `proxy-table-allowlists.md §8.3`: `AuditOnly` decisions
+/// surface as `blocked = false` BUT carry the would-have-blocked
+/// reason in `restriction_reason`.
+fn decision_to_audit_fields(
+    decision: &RestrictionDecision,
+) -> (bool, Vec<String>, Option<String>) {
+    match decision {
+        RestrictionDecision::Admit { tables_referenced } => {
+            (false, tables_referenced.clone(), None)
+        }
+        RestrictionDecision::Block { reason, tables_referenced } => {
+            (true, tables_referenced.clone(), Some(reason.as_str().to_owned()))
+        }
+        RestrictionDecision::AuditOnly { reason, tables_referenced } => {
+            (false, tables_referenced.clone(), Some(reason.as_str().to_owned()))
+        }
+    }
+}
+
+/// Bump the per-restriction-class counter for a blocked decision.
+/// Always bumps the V2.1 `queries_blocked` aggregate too.
+fn bump_blocked_counters(stats: &Arc<ProxyStats>, decision: &RestrictionDecision) {
+    stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
+    if let RestrictionDecision::Block { reason, .. } = decision {
+        match reason {
+            RestrictionReason::TableNotInAllowedList
+            | RestrictionReason::TableInForbiddenList => {
+                stats.queries_blocked_by_table_allowlist
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            RestrictionReason::AmbiguousSqlMultiStatement
+            | RestrictionReason::AmbiguousSqlDynamic
+            | RestrictionReason::AmbiguousSqlMalformed => {
+                stats.queries_blocked_by_ambiguous_sql
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            RestrictionReason::AllowOnlySelect => {}
+        }
+    }
+}
+
+/// `(sqlstate, message)` for a `RestrictionDecision::Block`. Per
+/// `proxy-table-allowlists.md §9.1`: sqlstate `42501` for
+/// allow/deny decisions, `54000` is reserved for `max_result_rows`.
+/// The message embeds the closed-enum reason verbatim per the
+/// `R-10 Opaque Rejection` discussion in §1.3 of that spec.
+fn error_for_decision(decision: &RestrictionDecision) -> (String, String) {
+    let reason = match decision {
+        RestrictionDecision::Block { reason, .. } => reason,
+        _ => return ("42501".to_owned(), "blocked by RAXIS policy".to_owned()),
+    };
+    let msg = format!("blocked by RAXIS policy: {}", reason.as_str());
+    ("42501".to_owned(), msg)
+}
+
 fn audit_query_executed(
     config: &ProxyConfig,
     sql: &str,
     op: &OperationKind,
     blocked: bool,
+    tables_referenced: Vec<String>,
+    restriction_reason: Option<String>,
 ) -> AuditEvent {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -1052,6 +1263,8 @@ fn audit_query_executed(
             OperationKind::Other(_) => "OTHER".to_owned(),
         },
         blocked,
+        tables_referenced,
+        restriction_reason,
     }
 }
 
@@ -1080,6 +1293,21 @@ pub enum AuditEvent {
         operation: String,
         /// True if a restriction blocked the query.
         blocked: bool,
+        /// V2.2 — qualified table references the SQL walker
+        /// extracted from the statement
+        /// (`proxy-table-allowlists.md §8.1`). Empty when no
+        /// allow/deny list is configured (V2.1 compat), when the
+        /// statement is non-DML, or when the walker returned
+        /// `Ambiguous`.
+        tables_referenced: Vec<String>,
+        /// V2.2 — closed-enum string from
+        /// `RestrictionReason::as_str()` when the walker
+        /// triggered. `None` when the query was admitted without
+        /// any walker verdict (no lists configured). When
+        /// `enforce = false` this carries the would-have-blocked
+        /// reason even though `blocked` is `false` (audit-only
+        /// rollout, `proxy-table-allowlists.md §8.3`).
+        restriction_reason: Option<String>,
     },
 
     /// Emitted on the upstream's terminal frame (`ReadyForQuery`)

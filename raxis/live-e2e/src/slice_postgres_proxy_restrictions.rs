@@ -92,7 +92,10 @@ pub(crate) async fn run() -> Result<()> {
         listen_addr:     "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("live-e2e"),
         consumer:        OwnedConsumer::new("credential_proxy", "live-e2e:postgres:r"),
-        restrictions:    Restrictions { allow_only_select: true },
+        restrictions:    Restrictions {
+            allow_only_select: true,
+            ..Default::default()
+        },
     };
     let proxy = PostgresProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel)).await
         .map_err(|e| anyhow!("PostgresProxy::bind: {e}"))?;

@@ -309,13 +309,60 @@ pub enum SmtpAuthMode {
 
 /// Postgres restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "postgres"`).
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// V2.4 (`specs/v2/proxy-table-allowlists.md`) adds the table-level
+/// allowlist + denylist surface and a streaming row-count cap. All
+/// new fields default to "no restriction" so existing V2.1 plans
+/// keep working without modification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PostgresRestrictions {
     /// When `true`, DML/DDL statements are rejected at the proxy
     /// with sqlstate `42501`.
     #[serde(default)]
     pub allow_only_select: bool,
+
+    /// Table-level allowlist; the proxy walker MUST resolve every
+    /// referenced relation to a member of this list (or the query
+    /// is rejected). Entries are `schema.table` or bare `table`
+    /// per `proxy-table-allowlists.md §3 D3`. Empty = no allowlist.
+    #[serde(default)]
+    pub allowed_tables: Vec<String>,
+
+    /// Table-level denylist applied AFTER the allowlist. Any
+    /// referenced relation matching an entry here causes the query
+    /// to be rejected. Empty = no denylist.
+    #[serde(default)]
+    pub forbidden_tables: Vec<String>,
+
+    /// Per-result-set hard cap on rows returned to the agent. `0`
+    /// (the default) means uncapped, V2.1-compatible behaviour.
+    /// Streaming enforcement: the proxy truncates the result set
+    /// after the cap and replaces the trailing `CommandComplete`
+    /// with an `ErrorResponse` so the client sees the cut explicitly.
+    #[serde(default)]
+    pub max_result_rows: u64,
+
+    /// When `false`, walker verdicts and `max_result_rows` overage
+    /// are recorded in audit (`restriction_reason` populated,
+    /// `tables_referenced` echoed) but the query is forwarded as
+    /// if no restriction tripped. Defaults to `true`.
+    #[serde(default = "default_postgres_enforce")]
+    pub enforce: bool,
 }
+
+impl Default for PostgresRestrictions {
+    fn default() -> Self {
+        Self {
+            allow_only_select: false,
+            allowed_tables:    Vec::new(),
+            forbidden_tables:  Vec::new(),
+            max_result_rows:   0,
+            enforce:           true,
+        }
+    }
+}
+
+fn default_postgres_enforce() -> bool { true }
 
 /// HTTP/k8s restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "http"`
