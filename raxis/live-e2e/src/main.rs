@@ -148,10 +148,12 @@ mod slice_gcp_proxy;
 mod slice_http_proxy_bearer;
 mod slice_http_proxy_restrictions;
 mod slice_mongodb_proxy;
+mod slice_mongodb_proxy_collection_allowlists;
 mod slice_mssql_proxy;
 mod slice_mysql_proxy;
 mod slice_postgres_proxy;
 mod slice_postgres_proxy_restrictions;
+mod slice_postgres_proxy_table_allowlists;
 mod slice_redis_proxy;
 mod slice_session_spawn;
 mod slice_smtp_proxy;
@@ -188,6 +190,12 @@ enum Slice {
     /// DML denial (sqlstate `42501`) for INSERT / UPDATE / DELETE while
     /// keeping SELECT and the session alive.
     PostgresProxyRestrictions,
+    /// Real `PostgresProxy` with V2 `allowed_tables` / `forbidden_tables`
+    /// + `enforce = false` audit-only mode. Drives the SQL walker
+    /// end-to-end against real Postgres wire bytes, asserting that
+    /// the closed-enum `restriction_reason` strings reach the audit
+    /// channel per `proxy-table-allowlists.md §8`.
+    PostgresProxyTableAllowlists,
     /// Real `HttpProxy` + real `https://httpbin.org/` — bearer
     /// injection on the allow path.
     HttpProxyBearer,
@@ -249,6 +257,15 @@ enum Slice {
     /// and `find` (read path) under `allow_read_only`, and
     /// `ok: 0.0` with `code: 13` for `insert` (deny path).
     MongodbProxy,
+    /// Real `MongodbProxy` with V2 `allowed_collections` /
+    /// `forbidden_collections` / `max_documents = N` against
+    /// an in-process upstream stub. Asserts the BSON walker
+    /// admits server-introspection commands and allowlisted
+    /// collections, rejects deny-listed collections with
+    /// `restriction_reason = "collection_in_forbidden_list"`,
+    /// and that the cursor cap truncates the upstream's
+    /// `firstBatch` AND zeros `cursor.id` per `§7.4`.
+    MongodbProxyCollectionAllowlists,
     /// Run every slice in order.
     All,
 }
@@ -307,6 +324,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::EgressEnforcement          => slice_egress_enforcement::run(env).await,
         Slice::PostgresProxy              => slice_postgres_proxy::run().await,
         Slice::PostgresProxyRestrictions  => slice_postgres_proxy_restrictions::run().await,
+        Slice::PostgresProxyTableAllowlists =>
+            slice_postgres_proxy_table_allowlists::run().await,
         Slice::HttpProxyBearer            => slice_http_proxy_bearer::run(env).await,
         Slice::HttpProxyRestrictions      => slice_http_proxy_restrictions::run(env).await,
         Slice::SessionSpawn               => slice_session_spawn::run().await,
@@ -318,6 +337,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::MysqlProxy                 => slice_mysql_proxy::run().await,
         Slice::MssqlProxy                 => slice_mssql_proxy::run().await,
         Slice::MongodbProxy               => slice_mongodb_proxy::run().await,
+        Slice::MongodbProxyCollectionAllowlists =>
+            slice_mongodb_proxy_collection_allowlists::run().await,
         Slice::All => {
             slice_gateway_anthropic::run(env).await
                 .context("slice gateway-anthropic")?;
@@ -327,6 +348,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice postgres-proxy")?;
             slice_postgres_proxy_restrictions::run().await
                 .context("slice postgres-proxy-restrictions")?;
+            slice_postgres_proxy_table_allowlists::run().await
+                .context("slice postgres-proxy-table-allowlists")?;
             slice_http_proxy_bearer::run(env).await
                 .context("slice http-proxy-bearer")?;
             slice_http_proxy_restrictions::run(env).await
@@ -349,6 +372,8 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice mssql-proxy")?;
             slice_mongodb_proxy::run().await
                 .context("slice mongodb-proxy")?;
+            slice_mongodb_proxy_collection_allowlists::run().await
+                .context("slice mongodb-proxy-collection-allowlists")?;
             Ok(())
         }
     }
