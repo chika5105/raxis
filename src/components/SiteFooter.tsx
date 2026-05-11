@@ -8,9 +8,8 @@ export function SiteFooter() {
         <div className="md:col-span-2">
           <Wordmark />
           <p className="mt-3 max-w-md text-sm text-[var(--muted)] leading-relaxed">
-            A structural enforcement layer between AI agents and the systems they
-            act on. Twelve invariants, a working reference implementation in
-            autonomous software engineering.
+          A paradigm for autonomous-system safety: twelve structural invariants,
+            and a reference implementation in autonomous software engineering.
           </p>
           <p className="mt-3 max-w-md text-sm text-[var(--muted)] leading-relaxed">
             Source open under SSPL. For enterprise licensing, evaluations, or

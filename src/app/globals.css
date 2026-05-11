@@ -142,7 +142,9 @@ section[id] {
   line-height: 1.6;
   color: var(--muted);
   max-width: min(42rem, 100%);
-  margin: 0;
+  /* margin: 0 omitted — Tailwind Preflight already resets <p> margins,
+     and keeping it here defeats Tailwind margin utilities (mt-*) at
+     equal specificity because this rule is declared after @tailwind utilities. */
 }
 
 .subtitle {
@@ -150,7 +152,7 @@ section[id] {
   line-height: 1.65;
   color: var(--muted);
   max-width: min(42rem, 100%);
-  margin: 0;
+  /* same as .lead — margin omitted intentionally */
 }
 
 .note {
@@ -339,6 +341,21 @@ section[id] {
   border-radius: 8px;
   border: 1px solid var(--rule);
 }
+/* ──────────────────────────────────────────────────────────
+ *  Auto-breathing room after bold section headings.
+ *  The combined-class + type selector (.h-section + p) has
+ *  specificity (0,1,1) which beats any single Tailwind utility
+ *  class (0,1,0), so mt-4 / mt-6 are automatically overridden
+ *  wherever a heading sits directly before a paragraph.
+ * ────────────────────────────────────────────────────────── */
+.h-section + p {
+  margin-top: 1.75rem; /* ~28px — comfortable after a large heading */
+}
+
+.h-sub + p {
+  margin-top: 0.875rem; /* ~14px — proportional for smaller subheadings */
+}
+
 .doc-prose .heading-anchor {
   text-decoration: none;
   color: var(--soft);

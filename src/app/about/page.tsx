@@ -21,7 +21,7 @@ export default function AboutPage() {
             <span className="text-[var(--fg)] font-semibold">
               Chika Jinanwa
             </span>
-            , as a sibling project to{" "}
+            . The architecture emerged while building{" "}
             <a
               href="https://tryaegis.io"
               target="_blank"
@@ -30,8 +30,8 @@ export default function AboutPage() {
             >
               Aegis
             </a>
-            . Aegis is reliability software for ML infrastructure. Raxis is
-            the enforcement layer for AI agents acting on those systems.
+            , reliability software for ML infrastructure. That is where the
+            connection ends; the paradigm stands on its own.
           </>
         }
       />

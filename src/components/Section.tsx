@@ -41,14 +41,14 @@ export function Section({
         {lead && (
           <p
             className={clsx(
-              "subtitle mt-4",
+              "subtitle mt-6",
               align === "center" && "text-center mx-auto",
             )}
           >
             {lead}
           </p>
         )}
-        {children && <div className={clsx(title || lead ? "mt-12" : "")}>{children}</div>}
+        {children && <div className={clsx(lead ? "mt-12" : title ? "mt-8" : "")}>{children}</div>}
       </div>
     </section>
   );
