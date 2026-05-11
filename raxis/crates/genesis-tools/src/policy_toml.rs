@@ -113,6 +113,25 @@ const DEFAULT_LANE_MAX_CONCURRENT_TASKS: u32 = 4;
 const DEFAULT_LANE_MAX_COST_PER_EPOCH: u64 = 10_000;
 const DEFAULT_LANE_PRIORITY: u8 = 100;
 
+/// Default `[dashboard]` values shipped at genesis (per
+/// `v2_extended_gaps.md §4.3` and the field defaults in
+/// `raxis_dashboard::config::DashboardConfig`). The dashboard is
+/// emitted with `enabled = true` so a fresh operator gets a
+/// working dashboard out of the box on loopback; binding stays on
+/// `127.0.0.1` and port `9820` is the documented spec default
+/// (well above the privileged-port ceiling). Operators who want
+/// the dashboard off explicitly set `enabled = false` in epoch 2.
+///
+/// **Why enabled by default (vs. `[gateway]` which is commented):**
+/// the dashboard's authentication is challenge-response over the
+/// kernel's existing operator key, so it carries no out-of-band
+/// secrets to provision. `[gateway]` is commented because it
+/// requires real provider credentials under
+/// `<data_dir>/providers/` before it can do anything useful.
+const DEFAULT_DASHBOARD_BIND_ADDRESS: &str = "127.0.0.1";
+const DEFAULT_DASHBOARD_BIND_PORT:    u16  = 9820;
+const DEFAULT_DASHBOARD_JWT_TTL_SECS: u64  = 3600;
+
 // ---------------------------------------------------------------------------
 // Emitter
 // ---------------------------------------------------------------------------
@@ -301,6 +320,25 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
         priority  = DEFAULT_LANE_PRIORITY,
     ).expect("String write_fmt is infallible");
 
+    // [dashboard] — operator dashboard HTTP server (per
+    // `v2_extended_gaps.md §4.3`). Emitted with `enabled = true` so
+    // a fresh operator gets a working dashboard immediately on
+    // loopback. The kernel boot path
+    // (`raxis_dashboard_kernel::load_dashboard_config` →
+    // `kernel/src/main.rs`) reads this section directly; it is
+    // outside `RawPolicy` (no strict-deserialise interaction with
+    // the policy loader). Operators turn it off by setting
+    // `enabled = false` and rotating the policy epoch.
+    write!(out, "[dashboard]\n\
+        enabled      = true\n\
+        bind_address = \"{addr}\"\n\
+        bind_port    = {port}\n\
+        jwt_ttl_secs = {ttl}\n\n",
+        addr = DEFAULT_DASHBOARD_BIND_ADDRESS,
+        port = DEFAULT_DASHBOARD_BIND_PORT,
+        ttl  = DEFAULT_DASHBOARD_JWT_TTL_SECS,
+    ).expect("String write_fmt is infallible");
+
     // [gateway] + [[providers]] — OPTIONAL. We emit them as commented
     // template blocks so operators get a working starting point without
     // forcing them to know the schema upfront. A kernel started against a
@@ -470,6 +508,40 @@ mod tests {
             assert!(!toml_str.contains(dead),
                 "dead intent kind {dead:?} reappeared in genesis output:\n{toml_str}");
         }
+    }
+
+    #[test]
+    fn dashboard_section_is_emitted_with_enabled_true_and_loopback_defaults() {
+        // Pinned because a fresh operator should get a working
+        // dashboard out of the box. If a future change demotes the
+        // section to commented-template (the `[gateway]` style) or
+        // removes it entirely, this test surfaces the regression
+        // immediately.
+        let (op_pk, op_fp, cert) = fixture_operator_identity();
+        let roots = ["/tmp/raxis-test-worktrees"];
+        let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
+        assert!(toml_str.contains("[dashboard]"),
+            "missing [dashboard] section in output:\n{toml_str}");
+        assert!(toml_str.contains("enabled      = true"),
+            "expected dashboard enabled by default in genesis output:\n{toml_str}");
+        assert!(toml_str.contains("bind_address = \"127.0.0.1\""),
+            "expected loopback bind_address by default:\n{toml_str}");
+        assert!(toml_str.contains("bind_port    = 9820"),
+            "expected port 9820 (spec default) by default:\n{toml_str}");
+        assert!(toml_str.contains("jwt_ttl_secs = 3600"),
+            "expected 1 h JWT TTL by default:\n{toml_str}");
+
+        // Round-trip through the dashboard-config loader so the
+        // bytes we emit are exactly what the kernel boot path reads.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &toml_str).unwrap();
+        let cfg = raxis_dashboard_kernel::load_dashboard_config(tmp.path())
+            .expect("load_dashboard_config must accept emitter output")
+            .expect("[dashboard] is enabled, so cfg must be Some");
+        assert!(cfg.enabled, "loaded config must agree with TOML");
+        assert_eq!(cfg.bind_address, "127.0.0.1");
+        assert_eq!(cfg.bind_port,    9820);
+        assert_eq!(cfg.jwt_ttl_secs, 3600);
     }
 
     #[test]

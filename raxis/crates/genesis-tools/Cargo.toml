@@ -58,3 +58,10 @@ tempfile     = "3"
 # self-signed cert that matches the operator pubkey so the loader's
 # `validate_operator_certs` step accepts the artifact.
 raxis-test-support = { path = "../test-support" }
+# Dashboard-config round-trip: the genesis emitter ships a
+# `[dashboard]` block; the test asserts the loader the kernel boot
+# path actually uses (`raxis-dashboard-kernel::load_dashboard_config`)
+# accepts the bytes byte-for-byte. Dev-dep keeps the
+# operator-facing `raxis-genesis-tools` crate free of the
+# dashboard's tower/axum dependency tree at production build time.
+raxis-dashboard-kernel = { path = "../dashboard-kernel" }

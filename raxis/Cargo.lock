@@ -2520,6 +2520,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d6d0705320c1e6ba1d912b5e37cf18071b6c2e9b7fa8215a1e8a7651966f5d3"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
+]
+
+[[package]]
 name = "nonempty"
 version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3487,6 +3500,7 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "raxis-crypto",
+ "raxis-dashboard-kernel",
  "raxis-policy",
  "raxis-test-support",
  "raxis-types",
@@ -3547,6 +3561,15 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "toml",
+]
+
+[[package]]
+name = "raxis-initramfs-builder"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -3629,6 +3652,7 @@ dependencies = [
  "raxis-egress-admission",
  "raxis-genesis-tools",
  "raxis-image-cache",
+ "raxis-image-manifest",
  "raxis-ipc",
  "raxis-isolation",
  "raxis-isolation-apple-vz",
@@ -3772,6 +3796,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-vsock",
  "uuid",
 ]
 
@@ -3901,7 +3926,7 @@ dependencies = [
 name = "raxis-tproxy"
 version = "0.1.0"
 dependencies = [
- "nix",
+ "nix 0.27.1",
  "raxis-audit-tools",
  "raxis-egress-admission",
  "raxis-test-support",
@@ -4666,6 +4691,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-vsock"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b319ef9394889dab2e1b4f0085b45ba11d0c79dc9d1a9d1afc057d009d0f1c7"
+dependencies = [
+ "bytes",
+ "futures",
+ "libc",
+ "tokio",
+ "vsock",
+]
+
+[[package]]
 name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4983,6 +5021,16 @@ name = "virtue"
 version = "0.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "051eb1abcf10076295e815102942cc58f9d5e3b4560e46e53c21e8ff6f3af7b1"
+
+[[package]]
+name = "vsock"
+version = "0.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ba782755fc073877e567c2253c0be48e4aa9a254c232d36d3985dfae0bd5205"
+dependencies = [
+ "libc",
+ "nix 0.31.2",
+]
 
 [[package]]
 name = "walkdir"
@@ -5552,7 +5600,11 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand 0.8.6",
+ "raxis-image-builder",
+ "raxis-image-manifest",
+ "raxis-initramfs-builder",
  "regex",
+ "sha2 0.10.9",
  "tempfile",
  "toml",
  "walkdir",
