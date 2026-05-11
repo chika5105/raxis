@@ -32,8 +32,8 @@ export default async function DocPage({ params }: Params) {
   const { slug } = await params;
   const found = await getDocBySlug(slug);
   if (!found) notFound();
-  const { html } = await renderMarkdown(found.raw);
   const { meta } = found;
+  const { html } = await renderMarkdown(found.raw, meta.relativePath);
   const tomlFiles = await getScenarioTomlFiles(meta);
   const all = await getAllDocs();
   const idx = all.findIndex((d) => d.slugPath === meta.slugPath);

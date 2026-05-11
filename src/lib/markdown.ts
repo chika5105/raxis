@@ -15,17 +15,102 @@ import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypePrettyCode from "rehype-pretty-code";
 import rehypeStringify from "rehype-stringify";
 import matter from "gray-matter";
+import type { Plugin } from "unified";
+import type { Root, Element } from "hast";
+import { visit } from "unist-util-visit";
 
 export interface RenderResult {
   html: string;
   plain: string;
 }
 
-export async function renderMarkdown(raw: string): Promise<RenderResult> {
+// ─── Relative .md link rewriter ──────────────────────────────────────────────
+//
+// Markdown files cross-link each other using relative paths, e.g.:
+//   [foo](../specs/design-decisions.md)
+//   [bar](raxis-defense.md)
+//   [specs](../specs/)
+//
+// In the browser those hrefs are invalid. This rehype plugin resolves them
+// against the current doc's directory and rewrites them to /docs/… routes.
+
+function mdPathToDocSlug(resolvedRel: string): string {
+  // Strip .md / trailing /index.md / trailing README.md
+  let s = resolvedRel
+    .replace(/\.md$/i, "")
+    .replace(/\/README$/i, "")
+    .replace(/\/index$/i, "");
+  if (s === "README" || s === "index") s = "";
+  // Lowercase, clean up leading slashes
+  return s.toLowerCase().replace(/^\/+/, "");
+}
+
+function resolveRelativeHref(href: string, docDir: string): string | null {
+  // Skip anchors, absolute URLs, and already-absolute paths
+  if (href.startsWith("#") || href.startsWith("http") || href.startsWith("/")) {
+    return null;
+  }
+
+  // Combine docDir + href and normalise ../ segments
+  const parts = (docDir + "/" + href).split("/").filter(Boolean);
+  const resolved: string[] = [];
+  for (const p of parts) {
+    if (p === "..") resolved.pop();
+    else if (p !== ".") resolved.push(p);
+  }
+  return resolved.join("/");
+}
+
+function rehypeMdLinks(docDir: string): Plugin<[], Root> {
+  return () => (tree: Root) => {
+    visit(tree, "element", (node: Element) => {
+      if (node.tagName !== "a") return;
+      const href = node.properties?.href;
+      if (typeof href !== "string") return;
+
+      // Strip any fragment before resolving
+      const [pathPart, fragment] = href.split("#");
+
+      // Directory-only links like ../specs/ → /docs/specs
+      const isDirLink = pathPart.endsWith("/") && !pathPart.endsWith(".md");
+      const isMdLink = pathPart.endsWith(".md") || pathPart.endsWith(".mdx");
+
+      if (!isMdLink && !isDirLink) return;
+
+      const resolved = resolveRelativeHref(pathPart, docDir);
+      if (!resolved) return;
+
+      const slugPath = isMdLink
+        ? mdPathToDocSlug(resolved)
+        : resolved.toLowerCase().replace(/^\/+/, "").replace(/\/+$/, "");
+
+      if (!slugPath) return;
+
+      const newHref = `/docs/${slugPath}${fragment ? "#" + fragment : ""}`;
+      node.properties = { ...node.properties, href: newHref };
+    });
+  };
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+/**
+ * @param raw      The raw markdown string (including any front-matter).
+ * @param docPath  The doc's relative path inside the docs root, e.g.
+ *                 "perspectives/README.md". Used to resolve sibling links.
+ */
+export async function renderMarkdown(
+  raw: string,
+  docPath = ""
+): Promise<RenderResult> {
   const { content } = matter(raw);
   // The page provides its own H1 from the doc metadata. Strip the leading H1
   // from the body so the rendered article doesn't show the title twice.
   const body = stripLeadingH1(content);
+
+  // Directory of the current doc (e.g. "perspectives")
+  const docDir = docPath.split("/").slice(0, -1).join("/");
+
   const file = await unified()
     .use(remarkParse)
     .use(remarkGfm)
@@ -36,6 +121,7 @@ export async function renderMarkdown(raw: string): Promise<RenderResult> {
       properties: { className: ["heading-anchor"], "aria-label": "Link to section" },
       content: { type: "text", value: "#" },
     })
+    .use(rehypeMdLinks(docDir) as Plugin<[], Root>)
     .use(rehypePrettyCode, {
       theme: { light: "github-light", dark: "github-dark" },
       keepBackground: false,
@@ -51,15 +137,11 @@ export async function renderMarkdown(raw: string): Promise<RenderResult> {
 }
 
 function stripLeadingH1(markdown: string): string {
-  // Skip blank lines and front-matter-style noise, then drop the first H1
-  // line if present. We do not strip H1s mid-document — only the first one,
-  // and only if it's the first non-blank line.
   const lines = markdown.split("\n");
   let i = 0;
   while (i < lines.length && lines[i].trim() === "") i++;
   if (i < lines.length && /^#\s+/.test(lines[i])) {
     lines.splice(i, 1);
-    // Also collapse the blank line directly after.
     if (i < lines.length && lines[i].trim() === "") lines.splice(i, 1);
     return lines.join("\n");
   }
