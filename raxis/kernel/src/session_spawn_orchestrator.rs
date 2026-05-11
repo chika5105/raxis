@@ -69,6 +69,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use raxis_egress_admission::{EgressAllowlist, PolicyAdmissionService};
+use raxis_types::clock::unix_now_secs;
 use raxis_isolation::{
     EgressTier, ImageBody, ImageSignature, SessionToken, VerifiedImage, VmSpec,
 };
@@ -779,7 +780,8 @@ pub fn spawn_planner_dispatcher(
     };
     let session_id = handle.session_id.clone();
     tokio::spawn(async move {
-        if let Err(e) = crate::ipc::server::drive_planner_stream(stream, ctx).await {
+        let dispatch_result = crate::ipc::server::drive_planner_stream(stream, Arc::clone(&ctx)).await;
+        if let Err(e) = &dispatch_result {
             // Per the planner-dispatch logging convention, the
             // structured log keys on `step:"planner-dispatch"` so a
             // post-mortem can correlate a session_id to a dispatch
@@ -791,6 +793,64 @@ pub fn spawn_planner_dispatcher(
                  \"session_id\":\"{session_id}\",\"error\":\"{err}\"}}",
                 err = e,
             );
+        }
+
+        // V2 §Step 6 — finalize the session when the IPC channel
+        // closes.
+        //
+        // `drive_planner_stream` returns when the planner-side
+        // socket reaches EOF (clean disconnect after the planner's
+        // PID 1 issues `LINUX_REBOOT_CMD_POWER_OFF`) or when the
+        // first frame fails decode. In both cases the in-guest
+        // execution tier is gone — the kernel must mark the
+        // session row as revoked so:
+        //
+        //   1. A future planner that somehow obtains this token
+        //      cannot replay it (`get_session_by_token` rejects
+        //      `revoked = 1` rows in `handle_inner` Step 1).
+        //   2. The orchestrator continuation re-spawn check in
+        //      `respawn_orchestrator_for_initiative` (which keys on
+        //      "is there a non-revoked orchestrator session for
+        //      this initiative?") sees the prior session as gone
+        //      and proceeds to spawn a successor.
+        //
+        // Idempotent: the SQL is `WHERE revoked = 0`, so a session
+        // already revoked by an operator (`raxis sessions revoke`)
+        // is a no-op here and the operator's `revoked_at` timestamp
+        // is preserved verbatim.
+        let store = Arc::clone(&ctx.store);
+        let session_for_revoke = session_id.clone();
+        let revoke_result = tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            conn.execute(
+                "UPDATE sessions SET revoked = 1, revoked_at = ?1 \
+                  WHERE session_id = ?2 AND revoked = 0",
+                rusqlite::params![
+                    raxis_types::clock::unix_now_secs(),
+                    session_for_revoke,
+                ],
+            )
+        })
+        .await;
+
+        match revoke_result {
+            Ok(Ok(rows)) if rows > 0 => {
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"planner_session_revoked_on_exit\",\
+                     \"session_id\":\"{session_id}\"}}",
+                );
+            }
+            Ok(Ok(_))   => { /* already revoked — no-op, see comment above. */ }
+            Ok(Err(e))  => eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_session_revoke_failed\",\
+                 \"session_id\":\"{session_id}\",\"error\":\"{err}\"}}",
+                err = e,
+            ),
+            Err(e) => eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"planner_session_revoke_failed\",\
+                 \"session_id\":\"{session_id}\",\"error\":\"join: {err}\"}}",
+                err = e,
+            ),
         }
     });
 }
@@ -808,6 +868,299 @@ async fn terminate_orchestrator(
     service:    Arc<SessionSpawnService>,
 ) -> Result<TerminationReport, OrchestratorSpawnError> {
     Ok(service.terminate_session(session_id, grace).await?)
+}
+
+// ---------------------------------------------------------------------------
+// V2 §Step 6 — Orchestrator continuation re-spawn after a DAG event.
+// ---------------------------------------------------------------------------
+
+/// **Re-spawn the canonical Orchestrator VM for an in-flight initiative
+/// after a DAG-progressing lifecycle event.**
+///
+/// V2.4's Orchestrator is short-lived per decision: it boots, reads
+/// the KSB, calls one of the terminal DAG tools (`activate_subtask` /
+/// `retry_subtask` / `integration_merge`), submits the matching
+/// intent, and exits cleanly. Each spawn handles exactly one DAG
+/// edge — the orchestrator does NOT poll. The kernel is responsible
+/// for re-spawning a fresh orchestrator session on every event that
+/// can advance the DAG:
+///
+///   * `IntentKind::CompleteTask` accepted → an Executor task
+///     transitioned `Running → Completed`. The next pending sub-task
+///     may now be admissible, or (if the just-completed task had no
+///     reviewers) the initiative may be ready for `integration_merge`.
+///   * `IntentKind::SubmitReview` accepted with the cross-Reviewer
+///     aggregator returning `AllPassed` → the predecessor Executor
+///     task is fully approved. The orchestrator must decide whether
+///     to activate the next sub-task or fast-forward
+///     `integration_merge`.
+///   * `IntentKind::ReportFailure` accepted → an Executor task
+///     transitioned `Running → Failed`. The orchestrator may choose
+///     to `retry_subtask` (subject to the operator-declared
+///     `max_crash_retries` ceiling) or to give up and let the
+///     initiative settle into a non-terminal `Blocked` state.
+///
+/// **Idempotent on concurrency.** The function aborts before spawning
+/// when:
+///
+///   * The initiative is no longer `Executing` (a parallel
+///     `OperatorRequest::AbortInitiative` won the race, or
+///     `IntegrationMerge` already terminated the lifecycle).
+///   * An Orchestrator session for `initiative_id` is already
+///     present in `sessions` AND has neither been revoked nor
+///     expired. The Orchestrator from the prior decision-cycle is
+///     still mid-run; spawning a second one would race for the same
+///     authority.
+///
+/// **Failure mode.** Errors are logged structurally on stderr but
+/// never propagate — the caller already committed the lifecycle
+/// transition that motivated the re-spawn. A re-spawn failure
+/// leaves the initiative in a recoverable state (the operator can
+/// retry via `OperatorRequest::AbortInitiative` + a fresh
+/// `ApprovePlan`); refusing to log and swallow would mask the real
+/// failure under a misleading SQL rollback.
+///
+/// Returns `Ok(Some(session_id))` on a successful spawn, `Ok(None)`
+/// when the precondition checks elected to skip, and never panics.
+pub async fn respawn_orchestrator_for_initiative(
+    initiative_id: &str,
+    ctx:           Arc<crate::ipc::context::HandlerContext>,
+) -> Option<String> {
+    use raxis_store::Table;
+    use raxis_types::SessionAgentType;
+
+    // ── Step 1: skip-checks. Both reads hit SQLite, so we hop onto
+    //    the blocking pool for atomicity with the surrounding
+    //    transaction model. The two reads share one mutex acquisition
+    //    so we avoid an "is_executing flipped just after our second
+    //    read" TOCTOU window — which would be benign here (we'd
+    //    spawn a doomed orchestrator) but keeping the read in one
+    //    transaction makes the preflight log unambiguous.
+    let store_for_check = Arc::clone(&ctx.store);
+    let init_for_check  = initiative_id.to_owned();
+    let preflight = tokio::task::spawn_blocking(move || -> Result<(bool, bool), rusqlite::Error> {
+        let conn = store_for_check.lock_sync();
+        let is_executing: bool = conn.query_row(
+            &format!(
+                "SELECT state = 'Executing' FROM {init} WHERE initiative_id = ?1",
+                init = Table::Initiatives.as_str(),
+            ),
+            rusqlite::params![&init_for_check],
+            |r| r.get::<_, i64>(0).map(|v| v != 0),
+        ).unwrap_or(false);
+
+        // An orchestrator is "live" if there's a row with
+        // session_agent_type='Orchestrator', initiative_id=this,
+        // revoked=0, AND expires_at > now. Migration 18 stamps
+        // `initiative_id` on coordinator rows so the lookup is O(1)
+        // against the supporting index.
+        let now = unix_now_secs();
+        let active_orchestrator: bool = conn.query_row(
+            &format!(
+                "SELECT 1 FROM {sessions}
+                  WHERE initiative_id     = ?1
+                    AND session_agent_type = ?2
+                    AND revoked            = 0
+                    AND expires_at         > ?3
+                  LIMIT 1",
+                sessions = Table::Sessions.as_str(),
+            ),
+            rusqlite::params![
+                &init_for_check,
+                SessionAgentType::Orchestrator.as_sql_str(),
+                now,
+            ],
+            |_| Ok(true),
+        ).unwrap_or(false);
+        Ok((is_executing, active_orchestrator))
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or((false, false));
+
+    let (is_executing, active_orchestrator) = preflight;
+    if !is_executing {
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"orchestrator_respawn_skipped\",\
+             \"initiative_id\":\"{initiative_id}\",\"reason\":\"not_executing\"}}",
+        );
+        return None;
+    }
+    if active_orchestrator {
+        // Common case for tightly-clustered DAG events — e.g. the
+        // executor's `task_complete` admission, then a reviewer's
+        // `submit_review` admission, fire within milliseconds and
+        // the prior orchestrator session has not been revoked yet.
+        // The next reviewer/executor admission will trigger another
+        // re-spawn check; if THAT one finds no live orchestrator,
+        // it picks up the work.
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"orchestrator_respawn_skipped\",\
+             \"initiative_id\":\"{initiative_id}\",\
+             \"reason\":\"orchestrator_already_active\"}}",
+        );
+        return None;
+    }
+
+    // ── Step 2: read the operator-authored task prompt for this
+    //    initiative's orchestrator. The plan registry is the
+    //    canonical V2 source — `approve_plan` populated it from the
+    //    signed plan TOML's `[plan.initiative].description` field.
+    //    A miss here means the registry forgot the entry, which is
+    //    structurally impossible for an `Executing` initiative
+    //    (`repopulate_plan_registry` would have re-loaded it on a
+    //    kernel restart) — log + skip rather than fabricate one.
+    let task_prompt = match ctx.plan_registry.orchestrator(initiative_id) {
+        Some(orch) if !orch.description.is_empty() => orch.description,
+        Some(_) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"orchestrator_respawn_skipped\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"reason\":\"empty_orchestrator_prompt\"}}",
+            );
+            return None;
+        }
+        None => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"orchestrator_respawn_skipped\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"reason\":\"plan_registry_miss\"}}",
+            );
+            return None;
+        }
+    };
+
+    // ── Step 3: mint a fresh Orchestrator session row keyed to the
+    //    same initiative_id. Migration 18 keeps the back-edge so
+    //    `IntentKind::StructuredOutput` from the new session routes
+    //    to the same initiative-scoped path. Each re-spawn owns a
+    //    new lineage (the orchestrator session is the root of a
+    //    fresh lineage tree per decision-cycle, mirroring
+    //    `auto_spawn_orchestrator_session_in_tx`).
+    let store_for_insert = Arc::clone(&ctx.store);
+    let init_for_insert  = initiative_id.to_owned();
+    let new_session = tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
+        use raxis_types::SessionId;
+
+        let session_id_s = SessionId::new_v4().as_str().to_owned();
+        let lineage_id   = uuid::Uuid::new_v4().to_string();
+        let session_token = match raxis_crypto::token::generate_session_token() {
+            Ok(t)  => t,
+            Err(_) => return Ok(None),
+        };
+        let now_secs   = unix_now_secs();
+        let expires_at = now_secs + 86_400;
+
+        let conn = store_for_insert.lock_sync();
+        conn.execute(
+            &format!(
+                "INSERT INTO {sessions} (
+                    session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, fetch_quota, created_at, expires_at, revoked,
+                    session_agent_type, can_delegate, initiative_id
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,1,?13)",
+                sessions = Table::Sessions.as_str(),
+            ),
+            rusqlite::params![
+                session_id_s,
+                "Planner",
+                session_token,
+                0i64,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                lineage_id,
+                1000i64,
+                now_secs,
+                expires_at,
+                SessionAgentType::Orchestrator.as_sql_str(),
+                init_for_insert,
+            ],
+        )?;
+        Ok(Some(session_id_s))
+    })
+    .await;
+
+    let new_session_id = match new_session {
+        Ok(Ok(Some(id))) => id,
+        Ok(Ok(None)) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"orchestrator_respawn_failed\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"stage\":\"token_rng\"}}",
+            );
+            return None;
+        }
+        Ok(Err(e)) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"orchestrator_respawn_failed\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"stage\":\"insert_session\",\"error\":\"{e}\"}}",
+            );
+            return None;
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"orchestrator_respawn_failed\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"stage\":\"spawn_blocking\",\"error\":\"{e}\"}}",
+            );
+            return None;
+        }
+    };
+
+    // ── Step 4: substrate spawn. Mirror the post-commit boot in
+    //    `OperatorRequest::ApprovePlan` (`ipc/operator.rs` lines
+    //    1397+). Egress allowlist comes from the live policy
+    //    snapshot so a credential rotation between admission and
+    //    re-spawn is observed.
+    let policy_snapshot = ctx.policy.load_full();
+    let allowlist = raxis_egress_admission::EgressAllowlist {
+        exact_hosts: policy_snapshot.egress_domains().to_vec(),
+        patterns:    policy_snapshot.egress_patterns().to_vec(),
+        credential_proxy_real_targets: Default::default(),
+    };
+
+    match ctx
+        .orchestrator_spawn
+        .spawn_for_initiative(
+            new_session_id.as_str(),
+            initiative_id,
+            allowlist,
+            task_prompt,
+        )
+        .await
+    {
+        Ok(mut handle) => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"orchestrator_respawn_ok\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"session_id\":\"{session_id}\",\
+                 \"kernel_ipc_bridged\":{bridged}}}",
+                session_id = handle.session_id,
+                bridged    = handle.kernel_ipc_stream.is_some(),
+            );
+            // Same dispatcher wiring as the approve_plan boot path —
+            // the substrate-surrendered IPC stream needs a tokio
+            // task driving `drive_planner_stream` so the new
+            // orchestrator's intents reach the kernel.
+            spawn_planner_dispatcher(&mut handle, Arc::clone(&ctx));
+            Some(handle.session_id)
+        }
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"orchestrator_respawn_failed\",\
+                 \"initiative_id\":\"{initiative_id}\",\
+                 \"session_id\":\"{session_id}\",\
+                 \"stage\":\"substrate_spawn\",\"error\":\"{err}\"}}",
+                session_id = new_session_id,
+                err        = e,
+            );
+            None
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1391,6 +1744,104 @@ mod tests {
         .unwrap();
     }
 
+    /// Insert an Orchestrator session row keyed to `(session_id,
+    /// initiative_id)` with a freshly-minted CSPRNG `session_token`.
+    ///
+    /// `spawn_orchestrator_for_initiative` (the production spawn
+    /// path covered by these round-trip tests) reads the session row
+    /// via `SELECT session_token … WHERE session_id = ?1` so it can
+    /// stamp the **real** kernel-issued token into the spawned VM's
+    /// env (`RAXIS_SESSION_TOKEN`) — INV-IPC-AUTH-01: the VM and the
+    /// kernel must share the SAME token, never a synthetic spawn-
+    /// boundary placeholder. The caller responsible for inserting
+    /// the row is `auto_spawn_orchestrator_session_in_tx` in the
+    /// production approve_plan / re-spawn paths; the test fixture
+    /// reproduces that contract here so the spawn helper can find
+    /// the row it expects.
+    async fn insert_orchestrator_session_row(
+        store: Arc<raxis_store::Store>,
+        session_id: &str,
+        initiative_id: &str,
+    ) {
+        // The raw `Store::lock_sync()` call below acquires
+        // `tokio::sync::Mutex::blocking_lock`, which panics when
+        // called from a runtime worker thread. Hop onto the
+        // blocking pool — same pattern the kernel intent handlers
+        // use (`run_phase_a`-style spawn_blocking wrap).
+        let session = session_id.to_owned();
+        let init    = initiative_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            insert_orchestrator_session_row_blocking(&store, &session, &init);
+        })
+        .await
+        .expect("blocking insert must not panic");
+    }
+
+    fn insert_orchestrator_session_row_blocking(
+        store: &raxis_store::Store,
+        session_id: &str,
+        initiative_id: &str,
+    ) {
+        use raxis_store::Table;
+        use raxis_types::clock::unix_now_secs;
+        use raxis_types::SessionAgentType;
+
+        let token = raxis_crypto::token::generate_session_token()
+            .expect("test session token generation must succeed");
+        let lineage = uuid::Uuid::new_v4().to_string();
+        let now      = unix_now_secs();
+        let expires  = now + 3600;
+        let conn = store.lock_sync();
+        // FK guard: `sessions.initiative_id REFERENCES
+        // initiatives(initiative_id)` (Migration 18); insert the
+        // parent row first so the test fixture matches the
+        // production order (`approve_plan` always inserts the
+        // initiative before the orchestrator session). Use the
+        // canonical `Executing` state — the spawn helper also runs
+        // on the resume path against an `Executing` initiative.
+        let _ = conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {init} (
+                    initiative_id, state, terminal_criteria_json,
+                    plan_artifact_sha256, created_at, approved_at
+                 ) VALUES (?1, 'Executing', '[]', ?2, ?3, ?3)",
+                init = Table::Initiatives.as_str(),
+            ),
+            rusqlite::params![
+                initiative_id,
+                hex::encode([0u8; 32]),
+                now,
+            ],
+        );
+        conn.execute(
+            &format!(
+                "INSERT INTO {sessions} (
+                    session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, fetch_quota, created_at, expires_at, revoked,
+                    session_agent_type, can_delegate, initiative_id
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,1,?13)",
+                sessions = Table::Sessions.as_str(),
+            ),
+            rusqlite::params![
+                session_id,
+                "Planner",
+                token,
+                0i64,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
+                lineage,
+                1000i64,
+                now,
+                expires,
+                SessionAgentType::Orchestrator.as_sql_str(),
+                initiative_id,
+            ],
+        )
+        .expect("test fixture must insert orchestrator session row");
+    }
+
     /// Test fixture: build the live `Arc<ArcSwap<PolicyBundle>>` the
     /// production wire feeds into `LiveOrchestratorSpawn`. Uses
     /// `PolicyBundle::for_tests_with_operators(vec![])` so the spawn
@@ -1457,6 +1908,20 @@ mod tests {
 
         let session_id = "kernel-orch-test-1";
         let initiative_id = "init-kernel-orch-test-1";
+
+        // V2 INV-IPC-AUTH-01: the spawn path reads
+        // `sessions.session_token` for `session_id` so the spawned
+        // VM gets the SAME CSPRNG token the kernel will validate
+        // against subsequent IPC. Production
+        // (`auto_spawn_orchestrator_session_in_tx`) inserts this row
+        // BEFORE calling `spawn_for_initiative`; the test reproduces
+        // that ordering.
+        insert_orchestrator_session_row(
+            Arc::clone(&store),
+            session_id,
+            initiative_id,
+        )
+        .await;
 
         // Drive the production trait impl exactly as `handle_approve_plan` does.
         let live: Arc<dyn OrchestratorSpawn> = Arc::new(

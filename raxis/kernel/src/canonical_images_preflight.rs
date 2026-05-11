@@ -610,8 +610,30 @@ mod tests {
     /// outcome, no audit event. Pins the V2-cutover posture once the
     /// release pipeline starts shipping signed manifests but the
     /// kernel binary has not yet committed the public key.
+    ///
+    /// **Test only meaningful in builds where the trust anchor is
+    /// the all-zero placeholder.** A developer build that injects a
+    /// real signing key via `RAXIS_KERNEL_SIGNING_KEY_HEX` (e.g. for
+    /// the live-e2e workflow) takes the populated branch in
+    /// `verify_canonical_image_via_manifest`, which goes through
+    /// manifest parsing — for which our placeholder TOML
+    /// (`schema_version = 2`) is intentionally malformed (it omits
+    /// the `role` field). Skip in that case rather than asserting a
+    /// posture the build cannot reach; the populated-trust-anchor
+    /// path is covered by sibling tests in `raxis-canonical-images`
+    /// (`verify_via_manifest_with_key_*`).
     #[test]
     fn manifest_present_with_unpopulated_trust_anchor_is_warning_only() {
+        if raxis_canonical_images::EXPECTED_KERNEL_SIGNING_KEY_BYTES
+            != [0u8; raxis_canonical_images::DIGEST_LEN]
+        {
+            eprintln!(
+                "skip: kernel signing-key trust anchor is populated; \
+                 this test only exercises the all-zero placeholder branch"
+            );
+            return;
+        }
+
         let tmp   = tempfile::tempdir().unwrap();
         let audit = FakeAuditSink::new();
 

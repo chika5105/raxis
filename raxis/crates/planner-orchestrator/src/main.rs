@@ -27,11 +27,11 @@
 
 use raxis_planner_core::{
     hydrate_from_proc_cmdline, init_pid1_filesystem, park_on_signal, render_boot_log,
-    run_role_session, BootContext, DriverError, DriverOutcome, HydrationOutcome, PlannerError,
-    Role,
+    run_role_session, shutdown_or_exit, BootContext, DriverError, DriverOutcome,
+    HydrationOutcome, PlannerError, Role,
 };
 
-fn main() -> std::process::ExitCode {
+fn main() -> ! {
     // === PRE-RUNTIME PHASE ===
     //
     // Step 1: when running as PID 1 inside a Linux initramfs
@@ -65,12 +65,25 @@ fn main() -> std::process::ExitCode {
         .enable_all()
         .build()
         .expect("tokio runtime construction must not fail at orchestrator boot");
-    runtime.block_on(async_main())
+    let exit_code = runtime.block_on(async_main());
+    // V2 substrate contract: when running as Linux PID 1 inside the
+    // microVM (AVF / Firecracker initramfs `/init`), a plain
+    // `process::exit` triggers a kernel panic ("Attempted to kill
+    // init!") and the AVF substrate observes a reboot rather than
+    // a clean stop, wedging the per-session VM in a re-init loop.
+    // `shutdown_or_exit` issues `reboot(LINUX_REBOOT_CMD_POWER_OFF)`
+    // from PID 1 so the substrate sees a clean `SessionVmExited`
+    // event and the kernel can advance the lifecycle (re-spawning
+    // the orchestrator on the next DAG edge per `lifecycle.rs`).
+    // Outside PID 1 the function falls through to a normal
+    // `process::exit`, preserving the host subprocess substrate's
+    // exit-code propagation contract.
+    shutdown_or_exit(exit_code)
 }
 
-async fn async_main() -> std::process::ExitCode {
+async fn async_main() -> u8 {
     match run().await {
-        Ok(())  => std::process::ExitCode::SUCCESS,
+        Ok(())  => 0,
         Err(e)  => {
             // stderr-only structured error. Per `planner-harness.md
             // §14.5` the kernel-side scraper keys on `step:"planner-boot-error"`.
@@ -79,7 +92,7 @@ async fn async_main() -> std::process::ExitCode {
                   \"role\":\"orchestrator\",\"message\":{:?}}}",
                 e.to_string(),
             );
-            std::process::ExitCode::from(e.exit_code() as u8)
+            e.exit_code() as u8
         }
     }
 }

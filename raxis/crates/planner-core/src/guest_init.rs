@@ -284,3 +284,85 @@ pub fn init_pid1_filesystem() {
     }
     // Non-Linux + non-PID-1 path: deliberate no-op.
 }
+
+/// **Cleanly power off the microVM after the planner main exits.**
+///
+/// Linux treats PID 1 exit as a fatal kernel event ("Attempted to
+/// kill init!") and triggers an automatic reboot per the kernel's
+/// `panic=…` cmdline argument. AVF substrates observe the reboot
+/// rather than a clean stop, which keeps the per-session VM alive
+/// in a zombie loop:
+///
+///   1. planner main returns SUCCESS
+///   2. process-1 exits → kernel panic → kernel auto-reboots
+///   3. AVF re-runs `/init`, planner-boot fires again
+///   4. New planner instance binds vsock and blocks on accept(),
+///      but the kernel-side `drive_planner_stream` task has
+///      already returned EOF and there is no re-bridge
+///   5. The host sees an indefinitely-running session with a
+///      planner that never advances — wedging the lifecycle
+///
+/// Issuing `reboot(LINUX_REBOOT_CMD_POWER_OFF)` from PID 1 instead
+/// performs an orderly hypervisor shutdown. The substrate observes
+/// `SessionVmExited` cleanly, the kernel emits the audit row, and
+/// the lifecycle proceeds (e.g. spawning the next sub-task or
+/// re-spawning the orchestrator on the next DAG edge — see
+/// `kernel/src/initiatives/lifecycle.rs::respawn_orchestrator_after_*`).
+///
+/// Behaviour:
+/// * **PID 1 on Linux:** flushes stdio, then issues
+///   `LINUX_REBOOT_CMD_POWER_OFF` via `libc::reboot`. The function
+///   does not return on success (the kernel halts the VM). On
+///   failure we fall through to `exit(code)` so the substrate at
+///   least sees a process exit.
+/// * **PID ≠ 1 or non-Linux:** `std::process::exit(code)` —
+///   subprocess substrate on the host where exit-code propagation
+///   is the host's `Command::status()` contract.
+///
+/// `code` is the kernel-visible exit code per `planner-harness.md
+/// §14.6` ("planner exit codes"). Cross-substrate the meaning is:
+/// 0 = clean terminal-tool firing, non-zero = structured failure.
+pub fn shutdown_or_exit(code: u8) -> ! {
+    // Best-effort flush so the last `planner-completed` /
+    // `planner-boot-error` line lands on the substrate's console
+    // log before we cut the VM. Both writers are line-buffered on
+    // a serial console, but explicit flushing is cheap insurance
+    // against a panic backtrace getting clipped mid-line.
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+
+    #[cfg(target_os = "linux")]
+    {
+        if std::process::id() == 1 {
+            // Emit one structured line so a post-mortem can
+            // unambiguously distinguish a clean halt from a panic
+            // (the kernel-panic path is silent past `do_exit`).
+            eprintln!(
+                "{{\"level\":\"info\",\"step\":\"guest-init\",\
+                  \"event\":\"shutdown_power_off\",\"exit_code\":{code}}}"
+            );
+            // SAFETY: `libc::reboot` is the canonical syscall wrapper
+            // for `reboot(2)`. From PID 1 with `LINUX_REBOOT_CMD_POWER_OFF`
+            // it never returns on success; the VM halts and the
+            // hypervisor observes a clean exit. On error (e.g. the
+            // kernel was built without CONFIG_REBOOT_VECTOR) we fall
+            // through to the std::process::exit path so the substrate
+            // still sees a process exit code.
+            let rc = unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_POWER_OFF) };
+            // Reaching this line means reboot(2) returned non-zero —
+            // log it and fall through to a regular exit so we do not
+            // leave the planner process hanging.
+            let errno = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(-1);
+            eprintln!(
+                "{{\"level\":\"warn\",\"step\":\"guest-init\",\
+                  \"event\":\"shutdown_power_off_failed\",\
+                  \"rc\":{rc},\"errno\":{errno}}}"
+            );
+        }
+    }
+
+    std::process::exit(code as i32)
+}

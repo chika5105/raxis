@@ -134,7 +134,7 @@ pub use cmdline_env::{
     apply_envb64_payload, hydrate_from_path, hydrate_from_proc_cmdline,
     HydrationOutcome, CMDLINE_ENV_TOKEN,
 };
-pub use guest_init::init_pid1_filesystem;
+pub use guest_init::{init_pid1_filesystem, shutdown_or_exit};
 pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
 pub use gemini_client::GeminiClient;
 pub use openai_client::OpenAiClient;

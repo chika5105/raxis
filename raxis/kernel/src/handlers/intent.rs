@@ -333,7 +333,87 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
 
     let pre_state = match pre_gate {
         PreGateOutcome::Reject(code, state)  => return Err((code, state)),
-        PreGateOutcome::EarlyResponse(resp)  => return Ok(resp),
+        PreGateOutcome::EarlyResponse(resp)  => {
+            // ── V2 Step 6 — Orchestrator continuation re-spawn ────────────
+            //
+            // The Orchestrator in V2.4 is short-lived per decision: it
+            // boots, calls one terminal DAG tool (`activate_subtask` /
+            // `retry_subtask` / `integration_merge`), and exits. Each DAG
+            // edge therefore needs its own orchestrator session. Three
+            // intents from the worker tier advance the DAG and so MUST
+            // fire a fresh orchestrator boot:
+            //
+            //   * `CompleteTask` — Executor task transitioned
+            //     `Running → Completed`. The next sub-task may now be
+            //     admissible, OR (if the task had no reviewers) the
+            //     initiative is ready for `integration_merge`.
+            //   * `SubmitReview` — Reviewer voted; the cross-Reviewer
+            //     aggregator inside `handle_submit_review` may have
+            //     flipped the predecessor Executor's "approved" flag.
+            //   * `ReportFailure` — Executor task transitioned
+            //     `Running → Failed`. The Orchestrator must decide
+            //     between `retry_subtask` and a non-terminal `Blocked`.
+            //
+            // Why fire here (after `EarlyResponse` returns Ok and
+            // before we send the planner its IntentResponse): the
+            // sync handler has already committed the FSM transition
+            // and any aggregator side-effects, so a re-spawn at this
+            // point sees the post-transition KSB. Firing earlier
+            // would race the database commit; firing later (after we
+            // hand the response back to the planner) would reorder
+            // the response with the substrate spawn audit events.
+            //
+            // The respawn helper itself is fully fail-soft and
+            // idempotent (skips when the initiative is no longer
+            // `Executing` OR an orchestrator session is already
+            // alive for this initiative). We hop it onto a tokio
+            // task so the substrate spawn (which can take 100ms+
+            // for VM boot) does not stall the IntentResponse.
+            let respawn_kinds = matches!(
+                req.intent_kind,
+                IntentKind::CompleteTask
+                    | IntentKind::SubmitReview
+                    | IntentKind::ReportFailure,
+            );
+            if respawn_kinds {
+                let task_id_for_lookup = req.task_id.as_str().to_owned();
+                let store_for_lookup   = Arc::clone(&ctx.store);
+                let initiative_id_opt  = tokio::task::spawn_blocking(move || {
+                    let conn = store_for_lookup.lock_sync();
+                    conn.query_row(
+                        "SELECT initiative_id FROM tasks WHERE task_id = ?1",
+                        rusqlite::params![&task_id_for_lookup],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok()
+                })
+                .await
+                .ok()
+                .flatten();
+
+                if let Some(init_id) = initiative_id_opt {
+                    let ctx_for_respawn = Arc::clone(ctx);
+                    tokio::spawn(async move {
+                        crate::session_spawn_orchestrator
+                            ::respawn_orchestrator_for_initiative(
+                                &init_id,
+                                ctx_for_respawn,
+                            )
+                            .await;
+                    });
+                } else {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"orchestrator_respawn_skipped\",\
+                         \"reason\":\"task_lookup_miss\",\
+                         \"task_id\":\"{task}\",\"intent_kind\":\"{kind}\"}}",
+                        task = req.task_id.as_str(),
+                        kind = req.intent_kind.as_str(),
+                    );
+                }
+            }
+            return Ok(resp);
+        }
         PreGateOutcome::Proceed(s)           => s,
     };
 
@@ -3296,15 +3376,30 @@ async fn handle_activate_sub_task(
     // FSM is `Active` (separate FSM per Step 5). The Executor's
     // first intent against this task will drive `tasks.state`
     // `Admitted → Running` through the standard pipeline.
-    let task_for_budget = match load_task(&task_id_owned, ctx.store.as_ref()) {
-        Ok(t)  => t,
-        Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
-    };
-    let remaining = lane_budget_snapshot(
-        &task_for_budget.lane_id,
-        policy_snapshot.as_ref(),
-        ctx.store.as_ref(),
-    );
+    //
+    // ASYNC-SAFETY: `load_task` and `lane_budget_snapshot` both
+    // call `Store::lock_sync()` → `tokio::sync::Mutex::blocking_
+    // lock`, which panics when invoked from a tokio worker thread
+    // ("Cannot block the current thread from within a runtime").
+    // We are on the planner-dispatcher async path here, so the
+    // composite read MUST run on the blocking pool. Pre-fix this
+    // crashed the whole worker on the very first ActivateSubTask
+    // ack — `full_e2e_session_lifecycle` reproduces it deterministically.
+    let task_id_for_budget = task_id_owned.clone();
+    let store_for_budget   = Arc::clone(&ctx.store);
+    let policy_for_budget  = Arc::clone(&policy_snapshot);
+    let remaining = tokio::task::spawn_blocking(move || -> Result<BudgetSnapshot, ()> {
+        let task = load_task(&task_id_for_budget, store_for_budget.as_ref())?;
+        Ok(lane_budget_snapshot(
+            &task.lane_id,
+            policy_for_budget.as_ref(),
+            store_for_budget.as_ref(),
+        ))
+    })
+    .await
+    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
+    .map_err(|_| (PlannerErrorCode::FailUnknownTask,     TaskState::Admitted))?;
+
     Ok(IntentResponse {
         sequence_number: seq,
         task_state:      TaskState::Admitted,
