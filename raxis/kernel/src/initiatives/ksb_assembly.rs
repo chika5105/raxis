@@ -341,7 +341,6 @@ mod tests {
     use crate::initiatives::plan_registry::{
         OrchestratorPlanFields, TaskPlanFields,
     };
-    use raxis_types::{CloneStrategy, SessionAgentType};
     use raxis_store::Store;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -361,13 +360,8 @@ mod tests {
         let key = TaskKey::new(initiative_id.to_owned(), task_id.to_owned());
         registry.insert(key, TaskPlanFields {
             path_allowlist:            vec!["src/lib.rs".to_owned(), "src/main.rs".to_owned()],
-            path_export_to_successors: false,
-            path_export_globs:         Vec::new(),
-            path_scope_override:       false,
-            clone_strategy:            CloneStrategy::Blobless,
-            session_agent_type:        SessionAgentType::Executor,
-            vm_image:                  String::new(),
             description:               "Land the typed enum on top of the executor lane.".to_owned(),
+            ..Default::default()
         });
         registry.insert_orchestrator(initiative_id.to_owned(), OrchestratorPlanFields {
             cross_cutting_artifacts: vec![],

@@ -140,7 +140,74 @@ pub struct TaskPlanFields {
     /// any way (no template substitution, no command parsing) — it
     /// is opaque bytes the model receives.
     pub description:               String,
+
+    /// V2 `v2-deep-spec.md §Step 12` — operator-declared ceiling on
+    /// **VM-crash retries** for this sub-task. Read by
+    /// `handle_retry_sub_task` against `subtask_activations.crash_retry_count`
+    /// to decide whether a planner-issued `RetrySubTask` is admissible.
+    ///
+    /// **Semantics.**
+    /// * `Some(c)` — strict ceiling: the kernel admits a `RetrySubTask`
+    ///   only while `crash_retry_count < c`. Once the counter reaches
+    ///   `c`, every subsequent `RetrySubTask` returns
+    ///   `FAIL_INVALID_REQUEST` (INV-08 — coarse code, no detail leak).
+    /// * `None` — operator omitted the field. The kernel substitutes
+    ///   the conservative default [`DEFAULT_MAX_CRASH_RETRIES`] so a
+    ///   silent omission cannot widen the ceiling beyond a few
+    ///   transient hypervisor failures.
+    ///
+    /// **Crash classification.** `crash_retry_count` is bumped by the
+    /// kernel's recovery sweep (SIGCHLD handler / non-zero VM exit /
+    /// `SecurityViolation` revocation per v2-deep-spec.md §Step 14)
+    /// — never by a planner-side intent. The retry handler reads it
+    /// at counter-check time only.
+    pub max_crash_retries:         Option<u32>,
+
+    /// V2 `v2-deep-spec.md §Step 12` — operator-declared ceiling on
+    /// **review-rejection retries** for this sub-task. Read by
+    /// `handle_retry_sub_task` against
+    /// `subtask_activations.review_reject_count` to decide whether
+    /// a planner-issued `RetrySubTask` against an Executor whose
+    /// reviewers rejected can be re-spawned.
+    ///
+    /// **Semantics.**
+    /// * `Some(c)` — strict ceiling: the kernel admits a `RetrySubTask`
+    ///   only while `review_reject_count < c`. Once the counter reaches
+    ///   `c`, every subsequent `RetrySubTask` returns
+    ///   `FAIL_INVALID_REQUEST`.
+    /// * `None` — operator omitted the field. The kernel substitutes
+    ///   the conservative default [`DEFAULT_MAX_REVIEW_REJECTIONS`]
+    ///   so a plan with no explicit budget still rate-limits
+    ///   review-loop oscillation (v2-deep-spec.md §Step 12 rationale:
+    ///   review-fail typically signals planner / spec mismatch and
+    ///   benefits from human escalation rather than unbounded retry).
+    ///
+    /// **Counter substrate.** `review_reject_count` is bumped exactly
+    /// once per terminal-rejected aggregation round
+    /// (`handle_submit_review` → `compute_aggregate_review_outcome`
+    /// transitions to `AtLeastOneRejected`). The retry handler
+    /// reads the latest active activation row's value.
+    pub max_review_rejections:     Option<u32>,
 }
+
+/// V2 `v2-deep-spec.md §Step 12` — kernel default `max_crash_retries`
+/// applied when the plan omits the field.
+///
+/// Three retries is enough to absorb a transient hypervisor eviction
+/// or noisy-neighbour OOM without unbounded retry loops, and matches
+/// the V2 ops guidance that crash retries are environmental noise
+/// (not quality regressions).
+pub const DEFAULT_MAX_CRASH_RETRIES: u32 = 3;
+
+/// V2 `v2-deep-spec.md §Step 12` — kernel default `max_review_rejections`
+/// applied when the plan omits the field.
+///
+/// Two rejections is the spec's recommended budget before human
+/// escalation: the planner gets the original attempt plus two
+/// chances to incorporate Reviewer critique before the operator
+/// must intervene. Higher budgets typically indicate a planner /
+/// spec mismatch better resolved out-of-band.
+pub const DEFAULT_MAX_REVIEW_REJECTIONS: u32 = 2;
 
 impl Default for TaskPlanFields {
     fn default() -> Self {
@@ -153,7 +220,28 @@ impl Default for TaskPlanFields {
             session_agent_type:        SessionAgentType::Executor,
             vm_image:                  String::new(),
             description:               String::new(),
+            max_crash_retries:         None,
+            max_review_rejections:     None,
         }
+    }
+}
+
+impl TaskPlanFields {
+    /// Resolve [`Self::max_crash_retries`] against the kernel default
+    /// [`DEFAULT_MAX_CRASH_RETRIES`]. Always returns a concrete value
+    /// the retry handler can compare counters against; the `Option`
+    /// surface exists to distinguish "operator chose 0" from
+    /// "operator omitted the field".
+    pub fn effective_max_crash_retries(&self) -> u32 {
+        self.max_crash_retries.unwrap_or(DEFAULT_MAX_CRASH_RETRIES)
+    }
+
+    /// Resolve [`Self::max_review_rejections`] against the kernel
+    /// default [`DEFAULT_MAX_REVIEW_REJECTIONS`]. Always returns a
+    /// concrete value the retry handler can compare counters against.
+    pub fn effective_max_review_rejections(&self) -> u32 {
+        self.max_review_rejections
+            .unwrap_or(DEFAULT_MAX_REVIEW_REJECTIONS)
     }
 }
 
@@ -459,6 +547,54 @@ mod tests {
         // prompt past the parser.
         assert!(f.description.is_empty(),
             "default description must be empty so test fixtures cannot smuggle a non-parser-validated prompt");
+        // V2 §Step 12 — `max_crash_retries` / `max_review_rejections`
+        // default to `None` (operator-omitted). The kernel substitutes
+        // a conservative ceiling at `RetrySubTask` admission time
+        // (`DEFAULT_MAX_CRASH_RETRIES = 3`,
+        //  `DEFAULT_MAX_REVIEW_REJECTIONS = 2`). Pin both invariants:
+        // the `Option` shape (so a 0-value test fixture is
+        // distinguishable from omission) and the resolved kernel
+        // defaults.
+        assert_eq!(f.max_crash_retries, None,
+            "default max_crash_retries must be None so the kernel default applies");
+        assert_eq!(f.max_review_rejections, None,
+            "default max_review_rejections must be None so the kernel default applies");
+        assert_eq!(f.effective_max_crash_retries(), DEFAULT_MAX_CRASH_RETRIES,
+            "kernel default max_crash_retries pin (V2 §Step 12)");
+        assert_eq!(f.effective_max_review_rejections(), DEFAULT_MAX_REVIEW_REJECTIONS,
+            "kernel default max_review_rejections pin (V2 §Step 12)");
+    }
+
+    #[test]
+    fn explicit_zero_max_retries_overrides_kernel_default() {
+        // `Some(0)` means "the operator explicitly forbids retries"
+        // — distinct from `None` (omitted, default applies). The
+        // retry handler must observe the explicit zero rather than
+        // the conservative default.
+        let f = TaskPlanFields {
+            max_crash_retries:     Some(0),
+            max_review_rejections: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(f.effective_max_crash_retries(), 0);
+        assert_eq!(f.effective_max_review_rejections(), 0);
+    }
+
+    #[test]
+    fn explicit_max_retries_round_trips_through_registry() {
+        let r = PlanRegistry::new();
+        let key = TaskKey::new("init-1", "task-A");
+        let f = TaskPlanFields {
+            max_crash_retries:     Some(7),
+            max_review_rejections: Some(11),
+            ..Default::default()
+        };
+        r.insert(key.clone(), f);
+        let got = r.get(&key).expect("just inserted");
+        assert_eq!(got.max_crash_retries, Some(7));
+        assert_eq!(got.max_review_rejections, Some(11));
+        assert_eq!(got.effective_max_crash_retries(), 7);
+        assert_eq!(got.effective_max_review_rejections(), 11);
     }
 
     #[test]
@@ -583,6 +719,8 @@ mod tests {
             session_agent_type:        SessionAgentType::Executor,
             vm_image:                  String::new(),
             description:               "Refactor parser to handle UTF-16".to_owned(),
+            max_crash_retries:         None,
+            max_review_rejections:     None,
         };
         r.insert(TaskKey::new("init-A", "t1"), f.clone());
         let snapshot = r.tasks_in_initiative("init-A");

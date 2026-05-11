@@ -976,6 +976,14 @@ pub fn approve_plan(
             // `RAXIS_PLANNER_TASK_PROMPT`. Empty (the V1 default)
             // preserves the scaffold/park behaviour of the role binary.
             description:               pt.description.clone(),
+            // V2 `v2-deep-spec.md §Step 12` — retry ceilings.
+            // `None` here means the operator omitted the field;
+            // the `RetrySubTask` admission path substitutes the
+            // conservative kernel default
+            // (`DEFAULT_MAX_CRASH_RETRIES`,
+            //  `DEFAULT_MAX_REVIEW_REJECTIONS`).
+            max_crash_retries:         pt.max_crash_retries,
+            max_review_rejections:     pt.max_review_rejections,
         };
         path_scope_snapshots.push((
             pt.task_id.clone(),
@@ -1415,6 +1423,14 @@ pub fn repopulate_plan_registry(
                     // `description`, so a sealed plan can never carry
                     // a zero-length description through restart.
                     description:               pt.description,
+                    // V2 `v2-deep-spec.md §Step 12` — re-hydrate the
+                    // operator-declared retry ceilings. `None`
+                    // preserves "operator omitted the field"
+                    // semantics so a kernel reboot does not
+                    // accidentally widen the budget by stamping a
+                    // numeric value where the plan had silence.
+                    max_crash_retries:         pt.max_crash_retries,
+                    max_review_rejections:     pt.max_review_rejections,
                 },
             );
             inserted += 1;
@@ -1722,6 +1738,20 @@ struct PlanTask {
     /// `PathScopeOverrideApplied` at `approve_plan`.
     path_scope_override:       bool,
 
+    // ── V2 §Step 12 retry ceilings ─────────────────────────────────────
+    /// **V2 §Step 12** — operator-declared ceiling on the
+    /// `subtask_activations.crash_retry_count` counter for this task.
+    /// `None` means the operator omitted the field and the kernel
+    /// default applies (`DEFAULT_MAX_CRASH_RETRIES`). Read by the
+    /// `RetrySubTask` admission path (`handle_retry_sub_task`)
+    /// against the live counter on the most-recent activation row.
+    max_crash_retries:         Option<u32>,
+    /// **V2 §Step 12** — operator-declared ceiling on the
+    /// `subtask_activations.review_reject_count` counter for this task.
+    /// Symmetric to `max_crash_retries`: `None` ⇒ kernel default
+    /// (`DEFAULT_MAX_REVIEW_REJECTIONS`).
+    max_review_rejections:     Option<u32>,
+
     // ── V2 `credential-proxy.md §3` typed credential decls ─────────────
     /// Parsed `[[tasks.credentials]]` entries for this task. Empty
     /// when the operator omitted the block. The
@@ -1966,6 +1996,25 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             });
         }
 
+        // V2 `v2-deep-spec.md §Step 12` — operator-declared retry
+        // ceilings. Both fields are OPTIONAL: omission leaves the
+        // value `None` and the kernel substitutes a conservative
+        // default at admission time (see `TaskPlanFields::effective_*`
+        // helpers). Present-but-malformed values (negative, non-integer,
+        // overflowing u32) are a parse-time `PlanInvalid` so the
+        // operator gets a clean rejection rather than a silent
+        // fallback to the default. The bounded u32 ceiling is plenty:
+        // `crash_retry_count` and `review_reject_count` are i64 in
+        // SQL but the in-RAM counter saturates well below 4 billion;
+        // a plan declaring a higher ceiling is almost certainly a
+        // typo.
+        let max_crash_retries = parse_optional_u32_field(
+            entry, "max_crash_retries", &task_id,
+        )?;
+        let max_review_rejections = parse_optional_u32_field(
+            entry, "max_review_rejections", &task_id,
+        )?;
+
         tasks.push(PlanTask {
             task_id,
             name,
@@ -1980,6 +2029,8 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             credentials,
             vm_image,
             description: description_raw,
+            max_crash_retries,
+            max_review_rejections,
         });
     }
 
@@ -3680,6 +3731,54 @@ fn string_array(entry: &toml::Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// V2 §Step 12 — parse an optional `u32` task field.
+///
+/// Three outcomes:
+///   * Field absent ⇒ `Ok(None)`.
+///   * Field present, integer, in `[0, u32::MAX]` ⇒ `Ok(Some(v))`.
+///   * Field present but malformed (non-integer, negative,
+///     out-of-range, wrong TOML type) ⇒
+///     `Err(LifecycleError::PlanInvalid)`.
+///
+/// Used for retry-ceiling fields (`max_crash_retries`,
+/// `max_review_rejections`) where omission must remain a valid
+/// shape (kernel default applies) but a present-but-bogus value
+/// must surface as a parse-time rejection rather than silently
+/// degrading to the default. Fail-loud here keeps operator
+/// intent legible: a typo'd `max_crash_retries = "three"` is a
+/// `PlanInvalid` at sign time, not a silent fallback to `3`.
+fn parse_optional_u32_field(
+    entry:   &toml::Value,
+    field:   &str,
+    task_id: &str,
+) -> Result<Option<u32>, LifecycleError> {
+    let Some(value) = entry.get(field) else { return Ok(None); };
+    let Some(int_value) = value.as_integer() else {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[[tasks]] (task `{task_id}`) `{field}` must be a \
+                 non-negative integer (got TOML type `{}`)",
+                value.type_str(),
+            ),
+        });
+    };
+    if int_value < 0 {
+        return Err(LifecycleError::PlanInvalid {
+            reason: format!(
+                "[[tasks]] (task `{task_id}`) `{field}` must be \
+                 non-negative (got {int_value})"
+            ),
+        });
+    }
+    let v = u32::try_from(int_value).map_err(|_| LifecycleError::PlanInvalid {
+        reason: format!(
+            "[[tasks]] (task `{task_id}`) `{field}` exceeds u32::MAX \
+             (got {int_value})"
+        ),
+    })?;
+    Ok(Some(v))
+}
+
 // `admit_task` (private helper) was removed: task insertion is now done by
 // `scheduler::admit_in_tx`, which inserts both the task row AND its DAG
 // edges inside the surrounding transaction. The old helper inserted only
@@ -3892,6 +3991,8 @@ description = "do thing"
             credentials:               vec![],
             vm_image:                  String::new(),
             description:               String::new(),
+            max_crash_retries:         None,
+            max_review_rejections:     None,
         }
     }
 
@@ -4064,6 +4165,8 @@ description = "do thing"
             credentials:               vec![],
             vm_image:                  String::new(),
             description:               String::new(),
+            max_crash_retries:         None,
+            max_review_rejections:     None,
         }
     }
 
@@ -4256,6 +4359,8 @@ description = "do thing"
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
+            max_crash_retries: None,
+            max_review_rejections: None,
         }
     }
 
@@ -4318,6 +4423,136 @@ description = "do thing"
             &Some("feature-work".into()), &tasks,
         ).unwrap();
         assert_eq!(lane, "feature-work");
+    }
+
+    // ── V2 §Step 12 — max_crash_retries / max_review_rejections parsing ─
+
+    #[test]
+    fn parse_plan_tasks_reads_max_crash_retries_and_max_review_rejections() {
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+description = "test"
+max_crash_retries = 5
+max_review_rejections = 7
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].max_crash_retries, Some(5));
+        assert_eq!(tasks[0].max_review_rejections, Some(7));
+    }
+
+    #[test]
+    fn parse_plan_tasks_omitted_max_retries_yields_none() {
+        // V2 §Step 12 — operator-omitted ceilings carry through as
+        // `None` so the kernel default applies at admission. Pin
+        // this distinct from `Some(0)`: a regression that defaulted
+        // to `Some(0)` would silently lock down every retry on
+        // every task that omitted these fields, breaking V1-shape
+        // plans.
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+description = "test"
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].max_crash_retries, None,
+            "omitted max_crash_retries must yield None, not Some(0)");
+        assert_eq!(tasks[0].max_review_rejections, None);
+    }
+
+    #[test]
+    fn parse_plan_tasks_zero_max_retries_is_explicit_zero_not_none() {
+        // Operator says "no retries allowed". The parser must
+        // surface this verbatim — `Some(0)` is distinct from `None`
+        // and the retry handler reads it as a hard gate.
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+description = "test"
+max_crash_retries = 0
+max_review_rejections = 0
+"#;
+        let tasks = parse_plan_tasks(toml).unwrap();
+        assert_eq!(tasks[0].max_crash_retries, Some(0),
+            "explicit zero must round-trip as Some(0), not collapse to None");
+        assert_eq!(tasks[0].max_review_rejections, Some(0));
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_negative_max_crash_retries() {
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+description = "test"
+max_crash_retries = -1
+"#;
+        let err = parse_plan_tasks(toml).unwrap_err();
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(reason.contains("max_crash_retries"),
+                    "rejection must name the offending field: {reason}");
+                assert!(reason.contains("non-negative"),
+                    "rejection must explain why -1 is invalid: {reason}");
+            }
+            other => panic!("expected PlanInvalid for negative value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_non_integer_max_review_rejections() {
+        let toml = r#"
+[[tasks]]
+task_id = "t1"
+description = "test"
+max_review_rejections = "three"
+"#;
+        let err = parse_plan_tasks(toml).unwrap_err();
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(reason.contains("max_review_rejections"),
+                    "rejection must name the offending field: {reason}");
+                assert!(reason.contains("integer"),
+                    "rejection must hint that the field must be integer: {reason}");
+            }
+            other => panic!("expected PlanInvalid for string value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_plan_tasks_accepts_max_retries_at_u32_max() {
+        // Boundary: u32::MAX is the largest acceptable value. The
+        // parser must NOT silently overflow into i64 ⇒ u32 conversion
+        // failure.
+        let toml = format!(
+            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"x\"\n\
+             max_crash_retries = {}\n",
+            u32::MAX,
+        );
+        let tasks = parse_plan_tasks(&toml).unwrap();
+        assert_eq!(tasks[0].max_crash_retries, Some(u32::MAX));
+    }
+
+    #[test]
+    fn parse_plan_tasks_rejects_max_retries_above_u32_max() {
+        // Boundary: u32::MAX + 1 must fail the conversion. Pin the
+        // overflow rejection so a future widening to u64 doesn't
+        // silently let pathological values past validation.
+        let toml = format!(
+            "[[tasks]]\ntask_id = \"t1\"\ndescription = \"x\"\n\
+             max_crash_retries = {}\n",
+            (u32::MAX as i64) + 1,
+        );
+        let err = parse_plan_tasks(&toml).unwrap_err();
+        match err {
+            LifecycleError::PlanInvalid { reason } => {
+                assert!(reason.contains("max_crash_retries"),
+                    "rejection must name the offending field: {reason}");
+                assert!(reason.contains("u32::MAX"),
+                    "rejection must hint at the overflow: {reason}");
+            }
+            other => panic!("expected PlanInvalid for overflow, got {other:?}"),
+        }
     }
 
     // ── V2 §Step 27 — clone_strategy / session_agent_type parsing ───────
@@ -4449,6 +4684,8 @@ session_agent_type = "Coordinator"
             credentials: vec![],
             vm_image: String::new(),
             description: String::new(),
+            max_crash_retries: None,
+            max_review_rejections: None,
         }
     }
 
@@ -4902,7 +5139,7 @@ predecessors = ["build-svc"]
         assert_eq!(build_svc[0].name.as_str(), "pg-staging");
         assert_eq!(build_svc[0].mount_as, "DATABASE_URL");
         match &build_svc[0].proxy {
-            ProxyDecl::Postgres { restrictions: PostgresRestrictions { allow_only_select } } => {
+            ProxyDecl::Postgres { restrictions: PostgresRestrictions { allow_only_select, .. } } => {
                 assert!(*allow_only_select, "postgres restrictions round-trip");
             }
             other => panic!("expected ProxyDecl::Postgres, got {other:?}"),
@@ -5126,6 +5363,8 @@ description = "do thing"
             credentials:               Vec::new(),
             vm_image:                  String::new(),
             description:               String::new(),
+            max_crash_retries:         None,
+            max_review_rejections:     None,
         }
     }
 
@@ -7474,6 +7713,8 @@ mod env_consistency_tests {
             credentials:               creds,
             vm_image:                  String::new(),
             description:               String::new(),
+            max_crash_retries:         None,
+            max_review_rejections:     None,
         }
     }
 
@@ -7617,6 +7858,8 @@ mod vm_image_admission_tests {
             credentials:               Vec::new(),
             vm_image:                  vm_image.to_owned(),
             description:               String::new(),
+            max_crash_retries:         None,
+            max_review_rejections:     None,
         }
     }
 

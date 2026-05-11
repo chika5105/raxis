@@ -2912,7 +2912,13 @@ that forgiveness allows this exact class of typo to pass.
 
 ---
 
-### 12.13 `subtask_activations.review_reject_count` never incremented — ✅ CLOSED (V2.5+)
+### 12.13 `RetrySubTask` end-to-end — ✅ CLOSED (V2.5+)
+
+> Originally filed as "review_reject_count never incremented".
+> The counter-bump landed first; the parser, ceiling resolution,
+> and re-activation handler followed in the same V2.5+ window.
+> All three pieces are now shipped — see "Follow-up landings"
+> below.
 
 **Discovered.** 2026-05 docs review (raxis-concepts/10 +
 guides/scenarios/{02,07,22,23,24}).
@@ -2973,28 +2979,49 @@ also rewritten to point at the *remaining* unfinished work
 the phantom "subtask_activations row population" dependency
 that no longer exists.
 
-**Out of scope for this entry (tracked separately).**
-* Parsing `max_crash_retries` / `max_review_rejections` from
-  `[[tasks]]` and stamping them onto `TaskPlanFields`. These
-  fields are reserved on the wire today (scenario `plan.toml`
-  files declare them as comments only) — the parser still
-  silently ignores any unknown task-field key.
-* The `RetrySubTask` re-spawn handler. The dispatch matrix
-  Authorizes Orchestrator+RetrySubTask, but the handler itself
-  is a fail-closed stub (`FAIL_POLICY_VIOLATION` for every
-  request). Implementing it requires the kernel to terminate
-  the failed Executor session, mint a fresh `sessions` row,
-  re-issue worktree provisioning, and reset the activation row
-  to `PendingActivation` — non-trivial and tracked as a V2.6
-  follow-up.
-* `KernelPush::AllReviewersPassed` / `KernelPush::ReviewRejected`
-  enqueue at the aggregator terminal. The V2.3 push dispatcher
-  (`kernel/src/push/mod.rs`) is shipped and `enqueue` is
-  reachable via `HandlerContext::push_dispatcher`, but the
-  kernel does not yet persist an `initiative_id → orchestrator
-  session_id` mapping (gap §12.1 — schema migration pending).
-  Until that lands, the audit chain is the canonical signal and
-  the Orchestrator polls via `OperatorRequest::ListInitiativeEvents`.
+**Follow-up landings.**
+* ✅ **Parsing `max_crash_retries` / `max_review_rejections` from
+  `[[tasks]]` (V2.5+).** `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks`
+  now parses both fields via the new `parse_optional_u32_field`
+  helper (rejecting negative, fractional, and overflowing values
+  as `LifecycleError::PlanInvalid`), and propagates them onto
+  `TaskPlanFields` via `approve_plan` and the
+  `repopulate_plan_registry` recovery path. Kernel defaults
+  (`DEFAULT_MAX_CRASH_RETRIES = 3`,
+  `DEFAULT_MAX_REVIEW_REJECTIONS = 2`) are resolved at
+  admission time via `TaskPlanFields::effective_max_crash_retries`
+  / `effective_max_review_rejections`, so the operator-omitted
+  case stays permissive while explicit `Some(0)` opts the task
+  out of retries entirely. Parser unit tests cover omission,
+  explicit zero, negatives, non-integers, the `u32::MAX`
+  boundary, and overflow.
+* ✅ **`RetrySubTask` handler (V2.5+).**
+  `kernel/src/handlers/intent.rs::handle_retry_sub_task` is the
+  full implementation. It runs in a single SQLite transaction:
+  validates the prior `subtask_activations` row is in `Failed`,
+  checks both retry ceilings against `effective_max_*`, revokes
+  the prior bound `sessions` row, INSERTs a new
+  `PendingActivation` row carrying the counters forward
+  verbatim, and resets `tasks.state` Failed → Admitted so the
+  subsequent `ActivateSubTask` can dispatch. Best-effort
+  post-commit substrate teardown (`SessionSpawnService::terminate_session`)
+  drops the dead VM, and a `SessionRevoked` audit event is
+  emitted with the Orchestrator's session id as `revoked_by`.
+  The single-spawn-point invariant is preserved —
+  `ActivateSubTask` remains the only caller of
+  `spawn_executor_for_task`. See
+  [`patterns/04-retry-on-failure`](../../guides/recipes/patterns/04-retry-on-failure.md)
+  for the operator-facing description of the two-intent
+  recovery loop.
+* 🟡 `KernelPush::AllReviewersPassed` / `KernelPush::ReviewRejected`
+  enqueue at the aggregator terminal — **still pending**. The
+  V2.3 push dispatcher (`kernel/src/push/mod.rs`) is shipped
+  and `enqueue` is reachable via
+  `HandlerContext::push_dispatcher`, but the kernel does not
+  yet persist an `initiative_id → orchestrator_session_id`
+  mapping (gap §12.1 — schema migration pending). Until that
+  lands, the audit chain is the canonical signal and the
+  Orchestrator polls via `OperatorRequest::ListInitiativeEvents`.
 
 ---
 

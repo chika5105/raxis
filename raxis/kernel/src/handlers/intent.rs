@@ -50,6 +50,7 @@ const TASK_INTENT_RANGES:          &str = Table::TaskIntentRanges.as_str();
 const INITIATIVES:                 &str = Table::Initiatives.as_str();
 const TASK_EXPORTED_PATH_SNAPSHOTS:&str = Table::TaskExportedPathSnapshots.as_str();
 const SUBTASK_ACTIVATIONS:         &str = Table::SubtaskActivations.as_str();
+const SESSIONS:                    &str = Table::Sessions.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
@@ -270,29 +271,45 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     // back to async for `ctx.session_spawn.spawn_session()`, then
     // back to `spawn_blocking` for the activation FSM transition.
     //
-    // Authorization for this branch is already covered by the
-    // dispatch matrix above (Orchestrator + ActivateSubTask is the
-    // only Authorized cell). `RetrySubTask` is intentionally
-    // fail-closed at this layer: the counter substrate
-    // (`subtask_activations.review_reject_count`,
-    // `subtask_activations.crash_retry_count`) IS now populated
-    // — `review_reject_count` is bumped in
-    // `handle_submit_review`'s post-aggregation path
-    // (V2 §Step 25), and plan-bundle sealing
-    // (`0008_v2_plan_bundle_sealing.sql`) ensures the activation
-    // row exists. What remains is the *re-spawn* half of
-    // v2-deep-spec.md §Step 12 (terminate the failed session,
-    // mint a new `sessions` row, re-issue worktree provisioning,
-    // reset `tasks.state` Admitted → Running) plus the
-    // `max_review_rejections` / `max_crash_retries` ceiling
-    // values. Until that lands, return `FAIL_POLICY_VIOLATION` so
-    // any planner that issues `RetrySubTask` against a current
-    // kernel sees a coarse rejection rather than a no-op.
+    // Authorization for these branches is already covered by the
+    // dispatch matrix above (Orchestrator + ActivateSubTask /
+    // RetrySubTask are the only Authorized cells per v2-deep-spec.md
+    // §Step 20).
+    //
+    // `IntentKind::RetrySubTask` (v2-deep-spec.md §Step 12) opens a
+    // fresh activation attempt against a previously-failed sub-task.
+    // The retry handler:
+    //   1. checks the appropriate counter (`crash_retry_count` for
+    //      VM-crash failures, `review_reject_count` for Reviewer
+    //      rejections) against the operator-declared ceiling
+    //      (`max_crash_retries` / `max_review_rejections`,
+    //      defaulted via `TaskPlanFields::effective_*`);
+    //   2. revokes the prior bound `sessions` row + asks the
+    //      substrate to terminate the failed VM (best-effort);
+    //   3. inserts a fresh `subtask_activations` row in
+    //      `PendingActivation` (carrying counters forward —
+    //      activations are append-only per Migration 5 line 51-52
+    //      "a retry inserts a NEW row, never updates the prior one");
+    //   4. resets the Executor's `tasks.state` from a non-active
+    //      state back to `Admitted` so a subsequent
+    //      `ActivateSubTask` from the Orchestrator is dispatch-
+    //      legal again; and
+    //   5. emits `SessionRevoked` for the prior session (paired
+    //      with the new `SessionCreated` that lands when the
+    //      Orchestrator follows up with `ActivateSubTask`).
+    //
+    // The actual VM re-spawn is delegated to the existing
+    // `handle_activate_sub_task` path: the Orchestrator's normal
+    // post-retry workflow is `RetrySubTask` (this handler) followed
+    // by `ActivateSubTask` (which spawns the new VM against the
+    // freshly-minted PendingActivation row). Keeping the spawn out
+    // of this handler preserves the single-spawn-point invariant
+    // and makes the retry contract trivially auditable.
     if matches!(req.intent_kind, IntentKind::ActivateSubTask) {
         return handle_activate_sub_task(req, session, session_id, seq, ctx).await;
     }
     if matches!(req.intent_kind, IntentKind::RetrySubTask) {
-        return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+        return handle_retry_sub_task(req, session, session_id, seq, ctx).await;
     }
 
     // ── Phase A (spawn_blocking) — Steps 2-8 + dispatch ───────────────────
@@ -657,9 +674,12 @@ fn run_phase_a(
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
         IntentKind::ActivateSubTask
         | IntentKind::RetrySubTask => {
-            // Belt-and-braces: `handle_inner` intercepts these
-            // BEFORE Phase A; this arm catches a future regression
-            // that lets one slip past the early-dispatch.
+            // Belt-and-braces: `handle_inner` intercepts both kinds
+            // BEFORE Phase A (early-dispatch into
+            // `handle_activate_sub_task` / `handle_retry_sub_task`),
+            // so this arm only fires if a future regression lets an
+            // ActivateSubTask / RetrySubTask slip past the early-
+            // dispatch. INV-08 — coarse code on the wire.
             return PreGateOutcome::Reject(
                 PlannerErrorCode::FailPolicyViolation, task_state);
         }
@@ -2624,11 +2644,13 @@ async fn handle_activate_sub_task(
             // 2a. Activation row — must exist, must be PendingActivation.
             let activation_id: String = {
                 let row: Result<(String, String, String), rusqlite::Error> = tx.query_row(
-                    "SELECT activation_id, activation_state, initiative_id
-                       FROM subtask_activations
-                      WHERE task_id = ?1
-                      ORDER BY created_at DESC
-                      LIMIT 1",
+                    &format!(
+                        "SELECT activation_id, activation_state, initiative_id
+                           FROM {SUBTASK_ACTIVATIONS}
+                          WHERE task_id = ?1
+                          ORDER BY created_at DESC
+                          LIMIT 1"
+                    ),
                     rusqlite::params![&task_id],
                     |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 );
@@ -2714,12 +2736,14 @@ async fn handle_activate_sub_task(
                     raxis_types::SessionAgentType::Reviewer.as_sql_str(),
             };
             tx.execute(
-                "INSERT INTO sessions (
-                    session_id, role_id, session_token, sequence_number,
-                    worktree_root, base_sha, base_tracking_ref,
-                    lineage_id, fetch_quota, created_at, expires_at, revoked,
-                    session_agent_type, can_delegate
-                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0)",
+                &format!(
+                    "INSERT INTO {SESSIONS} (
+                        session_id, role_id, session_token, sequence_number,
+                        worktree_root, base_sha, base_tracking_ref,
+                        lineage_id, fetch_quota, created_at, expires_at, revoked,
+                        session_agent_type, can_delegate
+                     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0)"
+                ),
                 rusqlite::params![
                     new_session_str,
                     "Planner",
@@ -2867,7 +2891,10 @@ async fn handle_activate_sub_task(
             let _ = tokio::task::spawn_blocking(move || {
                 let conn = store_arc.lock_sync();
                 let _ = conn.execute(
-                    "UPDATE sessions SET revoked = 1, revoked_at = ?1 WHERE session_id = ?2",
+                    &format!(
+                        "UPDATE {SESSIONS} SET revoked = 1, revoked_at = ?1
+                           WHERE session_id = ?2"
+                    ),
                     rusqlite::params![unix_now_secs(), revoke_session_id],
                 );
             }).await;
@@ -2890,12 +2917,14 @@ async fn handle_activate_sub_task(
             // column CHECK requires `session_id IS NOT NULL` and
             // `activated_at IS NOT NULL`; both stamped here.
             tx.execute(
-                "UPDATE subtask_activations
-                    SET activation_state = 'Active',
-                        session_id       = ?1,
-                        activated_at     = ?2
-                  WHERE activation_id   = ?3
-                    AND activation_state = 'PendingActivation'",
+                &format!(
+                    "UPDATE {SUBTASK_ACTIVATIONS}
+                        SET activation_state = 'Active',
+                            session_id       = ?1,
+                            activated_at     = ?2
+                      WHERE activation_id   = ?3
+                        AND activation_state = 'PendingActivation'"
+                ),
                 rusqlite::params![&new_session_id, now, &activation_id],
             )?;
 
@@ -2905,7 +2934,9 @@ async fn handle_activate_sub_task(
             // CID allowlist).
             if let Some(cid) = vsock_cid {
                 tx.execute(
-                    "UPDATE sessions SET vsock_cid = ?1 WHERE session_id = ?2",
+                    &format!(
+                        "UPDATE {SESSIONS} SET vsock_cid = ?1 WHERE session_id = ?2"
+                    ),
                     rusqlite::params![cid as i64, &new_session_id],
                 )?;
             }
@@ -2976,6 +3007,479 @@ async fn handle_activate_sub_task(
         Ok(t)  => t,
         Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
     };
+    let remaining = lane_budget_snapshot(
+        &task_for_budget.lane_id,
+        policy_snapshot.as_ref(),
+        ctx.store.as_ref(),
+    );
+    Ok(IntentResponse {
+        sequence_number: seq,
+        task_state:      TaskState::Admitted,
+        outcome: IntentOutcome::Accepted {
+            remaining_budget:      remaining,
+            warn_delegation_stale: false,
+        },
+    })
+}
+
+// ---------------------------------------------------------------------------
+// handle_retry_sub_task — V2 §Step 12 dual-counter retry admission.
+// ---------------------------------------------------------------------------
+//
+// Spec references:
+//   * `v2-deep-spec.md §Step 12` — Dual retry counters
+//     (`crash_retry_count`, `review_reject_count`) with
+//     operator-declared ceilings (`max_crash_retries`,
+//     `max_review_rejections`).
+//   * `v2-deep-spec.md §Step 20` — Static dispatch matrix:
+//     Orchestrator + RetrySubTask is the only Authorized cell.
+//   * `crates/store/migrations/0005_v2_session_schema.sql`
+//     line 50-52 — "One row per activation attempt — a retry
+//     inserts a NEW row, never updates the prior one."
+//
+// **Design constraint: this handler does NOT spawn a VM.** It
+// performs only the substrate-side cleanup + state preparation:
+//   1. validate the prior activation row is in a retry-eligible
+//      terminal state (`Failed`);
+//   2. check the appropriate counter against the operator ceiling
+//      (with the kernel default applied when the plan omitted the
+//      field — see `TaskPlanFields::effective_*`);
+//   3. atomically:
+//        a. revoke the prior bound `sessions` row;
+//        b. insert a new `subtask_activations` row in
+//           `PendingActivation`, copying counters forward;
+//        c. reset `tasks.state` to `Admitted` so a subsequent
+//           `ActivateSubTask` is dispatch-legal again
+//           (`v2-deep-spec.md §Step 21` requires Admitted to
+//           accept ActivateSubTask);
+//   4. best-effort ask the substrate to terminate the prior VM
+//      (we do not wait on this for response correctness — the VM
+//      may already be down via SIGCHLD; idempotent at the bridge);
+//   5. emit `SessionRevoked` for the prior session.
+//
+// The Orchestrator's normal retry workflow is two intents:
+// `RetrySubTask` (this handler) followed by `ActivateSubTask`
+// (which re-spawns the VM against the freshly-minted
+// `PendingActivation` row). Keeping the spawn out of this
+// handler preserves the single-spawn-point invariant
+// (`handle_activate_sub_task` is the sole caller of
+// `spawn_executor_for_task`) and makes the retry contract
+// trivially auditable.
+//
+// Atomicity. Steps 1, 2, 3 land in a single SQLite transaction
+// (the row read, ceiling check, revoke, insert, and task FSM
+// update). Step 4 is a best-effort post-commit substrate call
+// that cannot un-mutate the SQL state — if the VM is already
+// down (the common case), the bridge surfaces
+// `SpawnError::SessionNotActive`, which we log and ignore.
+// Step 5 is an audit emit per the `audit-after-commit`
+// discipline (§2.5.2).
+//
+// Rejection codes (INV-08 — coarse on the wire; structured
+// reason logged eprintln-side for forensic recovery):
+//   * `FAIL_UNKNOWN_TASK` — the task row, registry entry, or
+//     activation row is absent.
+//   * `INVALID_REQUEST` — a ceiling is exceeded, or the prior
+//     activation row is not in a retry-eligible state
+//     (`Active` / `PendingActivation` / `Completed` are all
+//     non-retryable; only `Failed` is).
+//   * `FAIL_POLICY_VIOLATION` — defense-in-depth catch for
+//     internal SQL / authority errors.
+async fn handle_retry_sub_task(
+    req:        IntentRequest,
+    _session:   authority::session::SessionRow,
+    session_id: SessionId,
+    seq:        u64,
+    ctx:        &Arc<HandlerContext>,
+) -> HandlerResult {
+    // ── Step 1: replay protection (envelope acceptance) ───────────────
+    let presented_seq_i64 = match i64::try_from(seq) {
+        Ok(v) => v,
+        Err(_) => return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted)),
+    };
+    {
+        let store     = Arc::clone(&ctx.store);
+        let session   = session_id.clone();
+        let nonce     = req.envelope_nonce.clone();
+        let audit     = Arc::clone(&ctx.audit);
+        let session_s = session.as_str().to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            authority::session::accept_envelope_and_advance_sequence(
+                &session, presented_seq_i64, &nonce, &store,
+            )
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::Unauthorized, TaskState::Admitted))?;
+        if let Err(reason) = result {
+            let _ = audit.emit(
+                raxis_audit_tools::AuditEventKind::ReplayRejected {
+                    session_id:   session_s,
+                    sequence_num: seq,
+                    reason:       format!("{reason:?}"),
+                },
+                Some(session_id.as_str()),
+                None,
+                None,
+            );
+            return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted));
+        }
+    }
+
+    let task_id_owned = req.task_id.as_str().to_owned();
+
+    // Pull the operator-declared ceilings from the plan registry
+    // BEFORE the SQL transaction so we can fail fast on a missing
+    // entry. The registry lookup is a single read-only RwLock so
+    // there's no async-safety concern about holding it across an
+    // await.
+    let (initiative_id, max_crash_retries, max_review_rejections) = {
+        // We need initiative_id to look up the registry entry.
+        let store_arc = Arc::clone(&ctx.store);
+        let task_id_clone = task_id_owned.clone();
+        let lookup: Result<String, ()> = tokio::task::spawn_blocking(move || {
+            let conn = store_arc.lock_sync();
+            conn.query_row(
+                &format!(
+                    "SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"
+                ),
+                rusqlite::params![&task_id_clone],
+                |r| r.get::<_, String>(0),
+            ).map_err(|_| ())
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Admitted))?;
+        let initiative_id = lookup
+            .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Admitted))?;
+
+        let key = crate::initiatives::plan_registry::TaskKey::new(
+            &initiative_id, &task_id_owned,
+        );
+        let fields = match ctx.plan_registry.get(&key) {
+            Some(f) => f,
+            None    => {
+                // Fail-closed: a missing registry entry means the
+                // plan-bundle-sealing rehydration didn't see this
+                // task, which is structurally impossible for an
+                // approved plan. Surface the concrete code and
+                // log eprintln-side.
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"RetrySubTaskRegistryMiss\",\
+                     \"task_id\":\"{}\",\"initiative_id\":\"{}\"}}",
+                    task_id_owned, initiative_id,
+                );
+                return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted));
+            }
+        };
+        (
+            initiative_id,
+            fields.effective_max_crash_retries(),
+            fields.effective_max_review_rejections(),
+        )
+    };
+
+    // ── Step 2 + 3: atomic SQL — terminal-state guard, ceiling check,
+    //                revoke prior session, insert new PendingActivation
+    //                row, reset task FSM. ─────────────────────────────
+    //
+    // We bundle every read and write in ONE transaction so a
+    // concurrent operator abort cannot land between the ceiling
+    // check and the new-row insert (which would let the next
+    // RetrySubTask see a counter value the prior call already
+    // claimed).
+    #[derive(Clone)]
+    struct RetryDecision {
+        prior_activation_id:    String,
+        prior_session_id:       Option<String>,
+        new_activation_id:      String,
+        crash_retry_count:      i64,
+        review_reject_count:    i64,
+    }
+
+    let decision: RetryDecision = {
+        let store_arc = Arc::clone(&ctx.store);
+        let task_id_clone = task_id_owned.clone();
+        let initiative_id_clone = initiative_id.clone();
+        tokio::task::spawn_blocking(move || -> Result<RetryDecision, (PlannerErrorCode, TaskState)> {
+            let mut conn = store_arc.lock_sync();
+            let tx = conn.transaction()
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+
+            // 2a. Most-recent activation row — must exist + must be
+            //      `Failed`. `PendingActivation` / `Active` /
+            //      `Completed` are all non-retryable: PendingActivation
+            //      means "use ActivateSubTask, not RetrySubTask";
+            //      Active means "still running, you have no business
+            //      retrying"; Completed means "the task succeeded,
+            //      retrying would be a regression".
+            let prior: Option<(String, String, Option<String>, i64, i64)> = tx.query_row(
+                &format!(
+                    "SELECT activation_id, activation_state, session_id,
+                            crash_retry_count, review_reject_count
+                       FROM {SUBTASK_ACTIVATIONS}
+                      WHERE task_id = ?1
+                      ORDER BY created_at DESC
+                      LIMIT 1"
+                ),
+                rusqlite::params![&task_id_clone],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            ).ok();
+            let (prior_activation_id, prior_state, prior_session_id,
+                 crash_retry_count, review_reject_count) = match prior {
+                Some(t) => t,
+                None    => return Err((PlannerErrorCode::FailUnknownTask,
+                                       TaskState::Admitted)),
+            };
+            if prior_state != "Failed" {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"RetrySubTaskRejectedNotFailed\",\
+                     \"task_id\":\"{task_id_clone}\",\
+                     \"prior_activation_id\":\"{prior_activation_id}\",\
+                     \"prior_state\":\"{prior_state}\"}}",
+                );
+                return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
+            }
+
+            // 2b. Ceiling check. Both ceilings are checked: a task
+            //      may have failed once via crash and once via review,
+            //      so the next retry must respect BOTH budgets.
+            //      `effective_*` already substitutes the kernel
+            //      default when the plan omitted the field.
+            //
+            //      Spec wire surface: `FAIL_INVALID_REQUEST`
+            //      (`crates/types/src/intent.rs::RetrySubTask` doc
+            //      comment line 71).
+            if crash_retry_count >= i64::from(max_crash_retries) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"RetrySubTaskRejectedCrashCeiling\",\
+                     \"task_id\":\"{task_id_clone}\",\
+                     \"crash_retry_count\":{crash_retry_count},\
+                     \"max_crash_retries\":{max_crash_retries}}}",
+                );
+                return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
+            }
+            if review_reject_count >= i64::from(max_review_rejections) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"RetrySubTaskRejectedReviewCeiling\",\
+                     \"task_id\":\"{task_id_clone}\",\
+                     \"review_reject_count\":{review_reject_count},\
+                     \"max_review_rejections\":{max_review_rejections}}}",
+                );
+                return Err((PlannerErrorCode::InvalidRequest, TaskState::Admitted));
+            }
+
+            // 2c. Revoke the prior bound session (if any) so the
+            //      stale session-token cannot be replayed by a
+            //      hostile or buggy planner. The matching VM
+            //      shutdown is best-effort post-commit (Step 4).
+            //      `revoked_at` is set unconditionally so a
+            //      `revoked = 0` row that landed concurrently
+            //      still gets the timestamp — the worst case is
+            //      a no-op overwrite of a row that was already
+            //      revoked.
+            let now = unix_now_secs();
+            if let Some(prior_sid) = prior_session_id.as_ref() {
+                tx.execute(
+                    &format!(
+                        "UPDATE {SESSIONS} SET revoked = 1, revoked_at = ?1
+                           WHERE session_id = ?2"
+                    ),
+                    rusqlite::params![now, prior_sid],
+                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation,
+                               TaskState::Admitted))?;
+            }
+
+            // 2d. Insert a NEW activation row in `PendingActivation`.
+            //      Migration 5 line 51-52: "a retry inserts a NEW
+            //      row, never updates the prior one." Counters carry
+            //      forward verbatim from the prior row — this is
+            //      the V2 spec contract that the retry handler
+            //      neither bumps nor resets the counters; bumps
+            //      happen at the failure event (`SubmitReview`
+            //      rejection / SIGCHLD), reset never happens.
+            let new_activation_id = uuid::Uuid::new_v4().to_string();
+            tx.execute(
+                &format!(
+                    "INSERT INTO {SUBTASK_ACTIVATIONS} (
+                        activation_id, task_id, initiative_id,
+                        activation_state, session_id, evaluation_sha,
+                        crash_retry_count, review_reject_count,
+                        created_at, activated_at, terminated_at
+                     ) VALUES (?1, ?2, ?3, 'PendingActivation',
+                               NULL, NULL, ?4, ?5, ?6, NULL, NULL)"
+                ),
+                rusqlite::params![
+                    &new_activation_id,
+                    &task_id_clone,
+                    &initiative_id_clone,
+                    crash_retry_count,
+                    review_reject_count,
+                    now,
+                ],
+            ).map_err(|e| {
+                eprintln!(
+                    "{{\"level\":\"error\",\
+                     \"event\":\"RetrySubTaskActivationInsertFailed\",\
+                     \"task_id\":\"{task_id_clone}\",\"reason\":\"{e}\"}}",
+                );
+                (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+            })?;
+
+            // 2e. Reset `tasks.state` so a subsequent
+            //      `ActivateSubTask` is dispatch-legal. The Phase A
+            //      task-state gate accepts only `Admitted` /
+            //      `Running` (line ~497 above); `Failed` /
+            //      `Completed` / `Aborted` would surface as
+            //      `FAIL_TASK_NOT_RUNNING`. We unconditionally
+            //      stamp `Admitted` because the activation row is
+            //      the source of truth for the substrate side and
+            //      the `tasks` row should mirror "ready for fresh
+            //      activation".
+            //
+            //      `transitioned_at` is updated for forensic
+            //      ordering — the `tasks` table records the
+            //      latest FSM mutation timestamp, not the most-
+            //      recent intent timestamp.
+            tx.execute(
+                &format!(
+                    "UPDATE {TASKS} SET state = ?1, transitioned_at = ?2
+                       WHERE task_id = ?3"
+                ),
+                rusqlite::params![
+                    TaskState::Admitted.as_sql_str(),
+                    now,
+                    &task_id_clone,
+                ],
+            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation,
+                           TaskState::Admitted))?;
+
+            tx.commit()
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation,
+                              TaskState::Admitted))?;
+
+            Ok(RetryDecision {
+                prior_activation_id,
+                prior_session_id,
+                new_activation_id,
+                crash_retry_count,
+                review_reject_count,
+            })
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))??
+    };
+
+    // ── Step 4: best-effort substrate VM termination. ──────────────────
+    //
+    // The SQL state is already consistent (Step 2 committed); the
+    // VM teardown here is purely substrate hygiene. Two failure
+    // modes are normal and IGNORED:
+    //
+    //   * `SpawnError::SessionNotActive` — the VM already exited
+    //     (the most common path: a SIGCHLD-driven crash flow
+    //     teardown got there first).
+    //   * Backend shutdown errors — the host-side process is gone
+    //     but the bridge couldn't observe a clean exit; the
+    //     credential-proxy manager still drains.
+    //
+    // Errors are LOGGED but do NOT propagate: failing the retry
+    // because the VM was already dead would be surreal.
+    if let Some(prior_sid) = decision.prior_session_id.as_ref() {
+        let grace = std::time::Duration::from_secs(2);
+        if let Err(e) = ctx.session_spawn.terminate_session(prior_sid, grace).await {
+            // Quiet on the SessionNotActive case — it's the
+            // expected path for crash-driven retries. Verbose on
+            // anything else so operators can diagnose pathological
+            // shutdown bugs.
+            let is_not_active = matches!(
+                e,
+                raxis_session_spawn::SpawnError::SessionNotActive { .. },
+            );
+            if !is_not_active {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"RetrySubTaskTerminateBestEffortFailed\",\
+                     \"task_id\":\"{}\",\"prior_session_id\":\"{}\",\
+                     \"error\":\"{}\"}}",
+                    task_id_owned, prior_sid, e,
+                );
+            }
+        }
+    }
+
+    // ── Step 5: audit-after-commit — `SessionRevoked` for the prior
+    //            session. ────────────────────────────────────────────
+    //
+    // Mirrors the `SessionCreated` emission that landed when this
+    // task was first activated (`handle_activate_sub_task` Step 5).
+    // The `SessionRevoked` event is the audit-chain anchor a
+    // forensic replay uses to reconstruct "this session was
+    // burned because the operator-controlled Orchestrator asked
+    // for a retry" (vs. "burned because the operator manually
+    // revoked it" — the audit row's `actor` field carries the
+    // Orchestrator's session_id either way, but the
+    // `triggered_by_intent` projection is RetrySubTask).
+    if let Some(prior_sid) = decision.prior_session_id.as_ref() {
+        // `revoked_by` carries the Orchestrator's session_id (the
+        // intent-submitter); `revoked_by_display_name` is the
+        // structured projection of "why the kernel revoked this
+        // session" so a forensic replay can distinguish a
+        // RetrySubTask-driven revoke from a manual operator
+        // `OperatorRequest::RevokeSession` revoke.
+        let display = format!(
+            "RetrySubTask: task_id={task_id_owned}, \
+             prior_activation_id={}, new_activation_id={}",
+            decision.prior_activation_id,
+            decision.new_activation_id,
+        );
+        if let Err(e) = ctx.audit.emit(
+            raxis_audit_tools::AuditEventKind::SessionRevoked {
+                session_id:              prior_sid.clone(),
+                revoked_by:              session_id.as_str().to_owned(),
+                revoked_by_display_name: Some(display),
+            },
+            Some(prior_sid.as_str()),
+            Some(task_id_owned.as_str()),
+            Some(initiative_id.as_str()),
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\
+                 \"event\":\"RetrySubTaskAuditEmitFailed\",\
+                 \"task_id\":\"{}\",\"prior_session_id\":\"{}\",\
+                 \"error\":\"{e}\"}}",
+                task_id_owned, prior_sid,
+            );
+        }
+    }
+
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"RetrySubTaskAdmitted\",\
+         \"task_id\":\"{}\",\"prior_activation_id\":\"{}\",\
+         \"new_activation_id\":\"{}\",\"crash_retry_count\":{},\
+         \"review_reject_count\":{},\"max_crash_retries\":{},\
+         \"max_review_rejections\":{}}}",
+        task_id_owned,
+        decision.prior_activation_id,
+        decision.new_activation_id,
+        decision.crash_retry_count,
+        decision.review_reject_count,
+        max_crash_retries,
+        max_review_rejections,
+    );
+
+    // ── Response ───────────────────────────────────────────────────────
+    //
+    // The TASK FSM is now `Admitted` (we stamped it in Step 2e);
+    // the activation row FSM is `PendingActivation`. The
+    // Orchestrator's next step is `ActivateSubTask` against the
+    // same task_id, which will spawn the fresh VM via
+    // `handle_activate_sub_task`.
+    let task_for_budget = match load_task(&task_id_owned, ctx.store.as_ref()) {
+        Ok(t)  => t,
+        Err(_) => return Err((PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
+    };
+    let policy_snapshot = ctx.policy.load_full();
     let remaining = lane_budget_snapshot(
         &task_for_budget.lane_id,
         policy_snapshot.as_ref(),
@@ -4602,7 +5106,7 @@ mod tests {
         let now = unix_now_secs();
         let _ = conn.execute(
             &format!(
-                "INSERT OR IGNORE INTO sessions (
+                "INSERT OR IGNORE INTO {SESSIONS} (
                     session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
                     lineage_id, fetch_quota, created_at, expires_at, revoked,
@@ -5060,4 +5564,714 @@ mod tests {
             other => panic!("expected TaskOutputsListed, got {other:?}"),
         }
     }
+
+    // ── handle_retry_sub_task — v2-deep-spec.md §Step 12 ──────────────────
+    //
+    // These tests exercise the V2 §Step 12 `RetrySubTask` admission
+    // path in isolation. The handler is async and uses
+    // `ctx.session_spawn` for best-effort VM termination, so each
+    // test runs on a multi-threaded tokio runtime (the handler does
+    // `Store::lock_sync` on a blocking thread, which panics on a
+    // single-threaded runtime per the same rationale as
+    // `handle_structured_output` tests above).
+    //
+    // Test surface:
+    //   * Ceiling enforcement: each ceiling rejects independently
+    //     (a task with crash_retry_count at ceiling is non-retryable
+    //     even if review_reject_count is well under budget).
+    //   * Operator-omitted ceiling defaults: `TaskPlanFields::None`
+    //     resolves to `DEFAULT_MAX_*` so an under-specified plan
+    //     gets a sensible budget rather than fail-closed-zero.
+    //   * Prior-activation state guard: Active / PendingActivation
+    //     / Completed are non-retryable; only Failed is.
+    //   * Idempotent counter forwarding: the new activation row
+    //     copies counters verbatim from the failed row (the spec
+    //     says retry_handler does not bump the counters — bumps
+    //     happen at the failure event, never at retry).
+    //   * Task FSM reset: post-retry, `tasks.state` is `Admitted`
+    //     so a subsequent `ActivateSubTask` can spawn a fresh VM.
+    //   * Prior session revoke: the bound `sessions` row has
+    //     `revoked = 1` after retry.
+
+    /// Build a HandlerContext rooted at a tempdir, a fresh in-memory
+    /// store, and a fresh PlanRegistry. Mirrors
+    /// `build_review_test_ctx` but with a dedicated tempdir (the
+    /// retry handler reads `ctx.policy` for the lane budget snapshot
+    /// + uses `ctx.session_spawn` for best-effort VM termination —
+    /// neither hits disk in our tests, but a unique tempdir keeps
+    /// concurrent test runs isolated).
+    fn build_retry_test_ctx(
+        store: Arc<Store>,
+    ) -> (Arc<HandlerContext>, Arc<crate::initiatives::PlanRegistry>,
+          Arc<raxis_test_support::FakeAuditSink>) {
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
+        let sink = Arc::new(raxis_test_support::FakeAuditSink::new());
+        let credentials = crate::ipc::context::build_default_test_credentials(
+            tmp_dir.path(), sink.clone(),
+        );
+        let isolation = crate::ipc::context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
+        let domain = crate::ipc::context::build_default_test_domain(tmp_dir.path());
+        let plan_registry = Arc::new(crate::initiatives::PlanRegistry::new());
+        let ctx = Arc::new(HandlerContext::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(default_test_policy())),
+            Arc::new(crate::authority::keys::KeyRegistry::stub_for_tests()),
+            store,
+            sink.clone(),
+            tmp_dir.path().to_path_buf(),
+            plan_registry.clone(),
+            Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
+            isolation,
+            orchestrator_spawn,
+            crate::ipc::context::build_test_executor_spawn(),
+            domain,
+        ));
+        // Hold the tempdir alive for the test duration via leaking;
+        // tests run for milliseconds and the OS reaps the dir at
+        // process exit. We deliberately leak instead of returning
+        // the guard because every retry test would otherwise need
+        // a 4-tuple return.
+        std::mem::forget(tmp_dir);
+        (ctx, plan_registry, sink)
+    }
+
+    /// Insert an Orchestrator session row keyed on `dummy_session_id()`
+    /// with `session_agent_type = 'Orchestrator'` so the static
+    /// dispatch matrix would Authorize a RetrySubTask, and the
+    /// `accept_envelope_and_advance_sequence` helper has a row to
+    /// advance.
+    fn seed_orchestrator_session(store: &Store) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT OR REPLACE INTO {SESSIONS} (
+                    session_id, role_id, session_token, sequence_number,
+                    worktree_root, base_sha, base_tracking_ref,
+                    lineage_id, fetch_quota, created_at, expires_at, revoked,
+                    session_agent_type, can_delegate
+                 ) VALUES (?1, 'Orchestrator', 'tok-orch', 0,
+                          NULL, NULL, NULL, 'lineage-orch', 1000, ?2, ?3, 0,
+                          'Orchestrator', 1)"
+            ),
+            rusqlite::params![dummy_session_id().as_str(), now, now + 86_400],
+        ).unwrap();
+    }
+
+    /// Insert an initiative + task + Failed activation row + plan
+    /// registry entry so the retry handler has a complete substrate
+    /// to operate on.
+    fn seed_failed_executor_for_retry(
+        store:           &Store,
+        registry:        &crate::initiatives::PlanRegistry,
+        task_id:         &str,
+        crash_count:     u32,
+        review_count:    u32,
+        max_crash:       Option<u32>,
+        max_review:      Option<u32>,
+        prior_session:   Option<&str>,
+    ) -> String {
+        let initiative_id = "init-retry";
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
+            ),
+            rusqlite::params![
+                initiative_id,
+                InitiativeState::Executing.as_sql_str(),
+                now,
+            ],
+        ).unwrap();
+        // Task row in `Failed` (the retry handler resets it to
+        // `Admitted`). Use the kernel-store DDL field shape.
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at,
+                     actual_cost)
+                 VALUES (?1, ?2, 'default', ?3, 'kernel', 1, ?4, ?4, 0)"
+            ),
+            rusqlite::params![
+                task_id,
+                initiative_id,
+                TaskState::Failed.as_sql_str(),
+                now,
+            ],
+        ).unwrap();
+        // Optionally seed a prior session row so the retry path
+        // exercises `sessions.revoked` mutation + audit emit.
+        if let Some(prior_sid) = prior_session {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} (
+                        session_id, role_id, session_token, sequence_number,
+                        worktree_root, base_sha, base_tracking_ref,
+                        lineage_id, fetch_quota, created_at, expires_at, revoked,
+                        session_agent_type, can_delegate
+                     ) VALUES (?1, 'Planner', ?2, 0,
+                              NULL, NULL, NULL, 'lineage-x', 1000, ?3, ?4, 0,
+                              'Executor', 0)"
+                ),
+                rusqlite::params![
+                    prior_sid, format!("tok-{prior_sid}"),
+                    now, now + 86_400,
+                ],
+            ).unwrap();
+        }
+        let prior_activation_id = uuid::Uuid::new_v4().to_string();
+        // Failed activation row — terminal state; both timestamps
+        // populated to satisfy the §Step 5 cross-column CHECK.
+        // `session_id` is bound iff the test seeded a prior
+        // session row (the FK requires the session to exist).
+        conn.execute(
+            &format!(
+                "INSERT INTO {SUBTASK_ACTIVATIONS}
+                    (activation_id, task_id, initiative_id,
+                     activation_state, session_id, evaluation_sha,
+                     crash_retry_count, review_reject_count,
+                     created_at, activated_at, terminated_at)
+                 VALUES (?1, ?2, ?3, 'Failed', ?4, NULL,
+                         ?5, ?6, ?7, ?7, ?7)"
+            ),
+            rusqlite::params![
+                prior_activation_id,
+                task_id,
+                initiative_id,
+                prior_session,
+                crash_count as i64,
+                review_count as i64,
+                now,
+            ],
+        ).unwrap();
+        drop(conn);
+        registry.insert(
+            crate::initiatives::plan_registry::TaskKey::new(
+                initiative_id, task_id,
+            ),
+            crate::initiatives::plan_registry::TaskPlanFields {
+                description:           "retry test fixture".to_owned(),
+                max_crash_retries:     max_crash,
+                max_review_rejections: max_review,
+                ..Default::default()
+            },
+        );
+        prior_activation_id
+    }
+
+    /// Build a minimal `IntentRequest` for `RetrySubTask`. All
+    /// non-relevant fields receive deterministic placeholders that
+    /// the handler ignores.
+    fn make_retry_request(task_id: &str, seq: u64) -> IntentRequest {
+        IntentRequest {
+            session_token:   "tok-orch".into(),
+            sequence_number: seq,
+            envelope_nonce:  format!("{:0>32}", seq),
+            intent_kind:     IntentKind::RetrySubTask,
+            task_id:         raxis_types::TaskId::parse(task_id).unwrap(),
+            base_sha:        None,
+            head_sha:        None,
+            submitted_claims: vec![],
+            justification:   None,
+            idempotency_key: None,
+            approval_token:  None,
+            approved:        None,
+            critique:        None,
+            resolved_via_escalation: None,
+            tokens_used:     None,
+            structured_output: None,
+        }
+    }
+
+    /// Construct a placeholder `SessionRow` for callers that pass
+    /// `_session` into the retry handler. The handler ignores the
+    /// row's contents (the dispatch matrix already gated on
+    /// session_agent_type before this point); we only need the
+    /// type to type-check.
+    fn dummy_orchestrator_session_row() -> authority::session::SessionRow {
+        authority::session::SessionRow {
+            session_id:         dummy_session_id().as_str().to_owned(),
+            role:               "Orchestrator".to_owned(),
+            session_token:      "tok-orch".to_owned(),
+            sequence_number:    0,
+            worktree_root:      None,
+            base_sha:           None,
+            base_tracking_ref:  None,
+            lineage_id:         "lineage-orch".to_owned(),
+            expires_at:         unix_now_secs() + 86_400,
+            revoked_at:         None,
+            session_agent_type: Some(raxis_types::SessionAgentType::Orchestrator),
+            can_delegate:       true,
+        }
+    }
+
+    /// Read every activation row for `task_id`, oldest first. Wrapped
+    /// in `spawn_blocking` so callers running on a tokio worker
+    /// thread don't trip `Store::lock_sync` (which calls
+    /// `tokio::sync::Mutex::blocking_lock` — panics on the worker
+    /// pool). Every retry-handler test runs on a multi-threaded
+    /// runtime, so this is the only safe pattern.
+    async fn read_activations(store: Arc<Store>, task_id: &str)
+        -> Vec<(String, String, Option<String>, i64, i64)>
+    {
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            let mut stmt = conn.prepare(
+                &format!(
+                    "SELECT activation_id, activation_state, session_id,
+                            crash_retry_count, review_reject_count
+                       FROM {SUBTASK_ACTIVATIONS}
+                      WHERE task_id = ?1
+                      ORDER BY created_at ASC, activation_id ASC"
+                ),
+            ).unwrap();
+            stmt.query_map(rusqlite::params![&task_id], |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                )))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        }).await.unwrap()
+    }
+
+    /// `sessions.revoked` flag, read on the blocking pool to avoid
+    /// `Store::lock_sync`'s tokio worker-thread panic.
+    async fn read_session_revoked(store: Arc<Store>, session_id: &str) -> i64 {
+        let session_id = session_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!(
+                    "SELECT revoked FROM {SESSIONS} WHERE session_id = ?1"
+                ),
+                rusqlite::params![&session_id],
+                |r| r.get::<_, i64>(0),
+            ).unwrap()
+        }).await.unwrap()
+    }
+
+    /// Read `tasks.state` for `task_id` on the blocking pool —
+    /// same rationale as [`read_activations`] / [`read_session_revoked`].
+    async fn read_task_state(store: Arc<Store>, task_id: &str) -> String {
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!("SELECT state FROM {TASKS} WHERE task_id = ?1"),
+                rusqlite::params![&task_id],
+                |r| r.get::<_, String>(0),
+            ).unwrap()
+        }).await.unwrap()
+    }
+
+    /// Happy path: prior activation is Failed with both counters
+    /// well under budget. The handler must:
+    ///   * insert a brand-new `PendingActivation` row;
+    ///   * carry both counters forward verbatim;
+    ///   * reset `tasks.state` to `Admitted`;
+    ///   * revoke the prior bound session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_sub_task_admits_under_budget_and_creates_new_activation_row() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        let prior_activation_id = tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            seed_failed_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-retry", /*crash*/ 1, /*review*/ 1,
+                /*max_crash*/ Some(3), /*max_review*/ Some(2),
+                /*prior_session*/ Some("11111111-2222-3333-4444-555555555555"),
+            )
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-retry", 1);
+        let resp = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect("retry under budget must succeed");
+
+        assert_eq!(resp.task_state, TaskState::Admitted,
+            "retry resets tasks.state to Admitted so a subsequent \
+             ActivateSubTask can dispatch");
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+
+        let activations = read_activations(store.clone(), "exe-retry").await;
+        assert_eq!(activations.len(), 2,
+            "retry must INSERT a new row, never UPDATE the prior — \
+             one Failed (prior) + one PendingActivation (new) = 2");
+        // Order is by created_at; the prior row was seeded first.
+        assert_eq!(activations[0].0, prior_activation_id,
+            "prior row must be the older one in created_at order");
+        assert_eq!(activations[0].1, "Failed",
+            "prior row state must remain Failed (immutable history)");
+        assert_eq!(activations[1].1, "PendingActivation",
+            "new row state must be PendingActivation \
+             (the spawn handoff lands on `ActivateSubTask`)");
+        assert!(activations[1].2.is_none(),
+            "new PendingActivation row must have NULL session_id");
+        assert_eq!(activations[1].3, 1,
+            "new row must carry crash_retry_count=1 forward verbatim");
+        assert_eq!(activations[1].4, 1,
+            "new row must carry review_reject_count=1 forward verbatim");
+
+        // Task FSM was Failed; retry resets it.
+        let task_state = read_task_state(store.clone(), "exe-retry").await;
+        assert_eq!(task_state, TaskState::Admitted.as_sql_str(),
+            "retry must reset tasks.state Failed → Admitted so the \
+             Phase A task-state gate accepts the subsequent ActivateSubTask");
+
+        // Prior session must be revoked (regardless of whether the
+        // best-effort VM teardown succeeded — the SQL revoke is the
+        // load-bearing mutation).
+        assert_eq!(
+            read_session_revoked(
+                store.clone(),
+                "11111111-2222-3333-4444-555555555555",
+            ).await,
+            1,
+            "retry must SQL-revoke the prior session so its token \
+             cannot be replayed by a stale planner",
+        );
+    }
+
+    /// Crash ceiling: counter == ceiling means "no further retries".
+    /// The handler MUST reject with `INVALID_REQUEST` (per the spec
+    /// wire surface on `IntentKind::RetrySubTask`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_sub_task_rejects_at_crash_ceiling() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            seed_failed_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-crash-ceiling",
+                /*crash*/ 3, /*review*/ 0,
+                /*max_crash*/ Some(3), /*max_review*/ Some(2),
+                /*prior_session*/ None,
+            );
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-crash-ceiling", 1);
+        let err = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect_err("crash_retry_count == max_crash_retries must reject");
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
+            "spec wire surface on RetrySubTask ceiling: FAIL_INVALID_REQUEST");
+
+        // No new activation row inserted.
+        assert_eq!(
+            read_activations(store.clone(), "exe-crash-ceiling").await.len(),
+            1,
+            "rejected retry must NOT insert a new activation row",
+        );
+    }
+
+    /// Review ceiling: same rejection shape as the crash ceiling,
+    /// but driven by `review_reject_count` instead of
+    /// `crash_retry_count`. Pin both ceilings independently — a
+    /// future regression that conflated the two counters would
+    /// silently let one ceiling shadow the other.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_sub_task_rejects_at_review_ceiling() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            seed_failed_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-review-ceiling",
+                /*crash*/ 0, /*review*/ 2,
+                /*max_crash*/ Some(3), /*max_review*/ Some(2),
+                /*prior_session*/ None,
+            );
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-review-ceiling", 1);
+        let err = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect_err("review_reject_count == max_review_rejections must reject");
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
+
+        assert_eq!(
+            read_activations(store.clone(), "exe-review-ceiling").await.len(),
+            1,
+        );
+    }
+
+    /// Operator-omitted ceiling: when the plan declares neither
+    /// `max_crash_retries` nor `max_review_rejections`, the kernel
+    /// substitutes the conservative default
+    /// (`DEFAULT_MAX_CRASH_RETRIES = 3`,
+    ///  `DEFAULT_MAX_REVIEW_REJECTIONS = 2`). Pin this against a
+    /// regression that fail-closed at zero — that would break every
+    /// V1-shape plan that omits the fields.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_sub_task_uses_kernel_default_when_plan_omits_ceiling() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            // `None` ⇒ kernel default applies (3 / 2). A counter of
+            // 1 / 1 is well under both defaults, so the retry must
+            // succeed.
+            seed_failed_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-default",
+                /*crash*/ 1, /*review*/ 1,
+                /*max_crash*/ None, /*max_review*/ None,
+                /*prior_session*/ None,
+            );
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-default", 1);
+        let resp = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect("retry under kernel default budget must succeed");
+        assert_eq!(resp.task_state, TaskState::Admitted);
+        assert_eq!(
+            read_activations(store.clone(), "exe-default").await.len(),
+            2,
+            "kernel default must be permissive enough for a \
+             low-counter retry to admit",
+        );
+    }
+
+    /// Retry against a prior activation in `Active` (not `Failed`)
+    /// must reject. `Active` means the substrate session is still
+    /// running — there's nothing to retry. Pin this against a
+    /// future regression that would let a planner force a retry
+    /// against a live session and leak two parallel VMs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_sub_task_rejects_when_prior_activation_active() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            // Seed an `Active` activation row directly (skipping the
+            // helper which only seeds `Failed`).
+            let conn = store_for_seed.lock_sync();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {INITIATIVES}
+                        (initiative_id, state, terminal_criteria_json,
+                         plan_artifact_sha256, created_at)
+                     VALUES ('init-retry', ?1, '{{}}', 'deadbeef', ?2)"
+                ),
+                rusqlite::params![
+                    InitiativeState::Executing.as_sql_str(), now,
+                ],
+            ).unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES ('exe-active', 'init-retry', 'default', ?1,
+                             'kernel', 1, ?2, ?2, 0)"
+                ),
+                rusqlite::params![TaskState::Running.as_sql_str(), now],
+            ).unwrap();
+            // Active row REQUIRES session_id IS NOT NULL per the
+            // cross-column CHECK; seed a session row first.
+            conn.execute(
+                &format!(
+                    "INSERT INTO {SESSIONS} (
+                        session_id, role_id, session_token, sequence_number,
+                        worktree_root, base_sha, base_tracking_ref,
+                        lineage_id, fetch_quota, created_at, expires_at, revoked,
+                        session_agent_type, can_delegate
+                     ) VALUES ('22222222-3333-4444-5555-666666666666',
+                              'Planner', 'tok-active', 0,
+                              NULL, NULL, NULL, 'lineage-z', 1000, ?1, ?2, 0,
+                              'Executor', 0)"
+                ),
+                rusqlite::params![now, now + 86_400],
+            ).unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {SUBTASK_ACTIVATIONS}
+                        (activation_id, task_id, initiative_id,
+                         activation_state, session_id, evaluation_sha,
+                         crash_retry_count, review_reject_count,
+                         created_at, activated_at, terminated_at)
+                     VALUES (?1, 'exe-active', 'init-retry', 'Active',
+                             '22222222-3333-4444-5555-666666666666', NULL,
+                             0, 0, ?2, ?2, NULL)"
+                ),
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(), now,
+                ],
+            ).unwrap();
+            drop(conn);
+            registry_for_seed.insert(
+                crate::initiatives::plan_registry::TaskKey::new(
+                    "init-retry", "exe-active",
+                ),
+                crate::initiatives::plan_registry::TaskPlanFields {
+                    description: "active fixture".to_owned(),
+                    ..Default::default()
+                },
+            );
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-active", 1);
+        let err = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect_err("retry against an Active activation must reject");
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
+            "Active prior state surfaces as INVALID_REQUEST \
+             (the spec's coarse code for a retry against a non-Failed row)");
+    }
+
+    /// Missing registry entry (plan-bundle-sealing didn't see this
+    /// task — structurally impossible for an approved plan, but
+    /// defense-in-depth). The handler must surface
+    /// `FAIL_UNKNOWN_TASK` rather than fail-open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_sub_task_rejects_when_plan_registry_miss() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, _registry, _sink) = build_retry_test_ctx(store.clone());
+        let store_for_seed = store.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            // Seed task + activation but DO NOT insert into the
+            // registry. The retry handler treats this as an unknown
+            // task (fail-closed: a missing registry entry could be
+            // a corrupted state and we refuse to widen the retry
+            // budget by guessing).
+            let conn = store_for_seed.lock_sync();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "INSERT OR IGNORE INTO {INITIATIVES}
+                        (initiative_id, state, terminal_criteria_json,
+                         plan_artifact_sha256, created_at)
+                     VALUES ('init-retry', ?1, '{{}}', 'deadbeef', ?2)"
+                ),
+                rusqlite::params![
+                    InitiativeState::Executing.as_sql_str(), now,
+                ],
+            ).unwrap();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {TASKS}
+                        (task_id, initiative_id, lane_id, state, actor,
+                         policy_epoch, admitted_at, transitioned_at,
+                         actual_cost)
+                     VALUES ('exe-orphan', 'init-retry', 'default', ?1,
+                             'kernel', 1, ?2, ?2, 0)"
+                ),
+                rusqlite::params![TaskState::Failed.as_sql_str(), now],
+            ).unwrap();
+            // Activation row exists but registry entry doesn't.
+            conn.execute(
+                &format!(
+                    "INSERT INTO {SUBTASK_ACTIVATIONS}
+                        (activation_id, task_id, initiative_id,
+                         activation_state, session_id, evaluation_sha,
+                         crash_retry_count, review_reject_count,
+                         created_at, activated_at, terminated_at)
+                     VALUES (?1, 'exe-orphan', 'init-retry', 'Failed',
+                             NULL, NULL, 0, 0, ?2, ?2, ?2)"
+                ),
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(), now,
+                ],
+            ).unwrap();
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-orphan", 1);
+        let err = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect_err("missing registry entry must reject");
+        assert_eq!(err.0, PlannerErrorCode::FailUnknownTask,
+            "the registry-miss arm surfaces as FAIL_UNKNOWN_TASK \
+             (the operator-facing handle for 'this task is not \
+             tracked' — defense-in-depth against fail-open)");
+    }
+
+    /// Explicit `Some(0)` ceiling: operator says "no retries
+    /// allowed". The handler must respect the explicit zero (NOT
+    /// fall back to `DEFAULT_MAX_*`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_sub_task_respects_explicit_zero_ceiling() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            // A counter of zero AND a ceiling of zero ⇒ even the
+            // first retry is forbidden. The default of `3` would
+            // hide this; pinning the explicit zero confirms the
+            // `Option` semantics carry through to the handler.
+            seed_failed_executor_for_retry(
+                &store_for_seed, &registry_for_seed,
+                "exe-zero-ceiling",
+                /*crash*/ 0, /*review*/ 0,
+                /*max_crash*/ Some(0), /*max_review*/ Some(0),
+                /*prior_session*/ None,
+            );
+        }).await.unwrap();
+
+        let req = make_retry_request("exe-zero-ceiling", 1);
+        let err = handle_retry_sub_task(
+            req,
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        ).await.expect_err("explicit zero ceiling must reject every retry");
+        assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
+    }
+
 }
