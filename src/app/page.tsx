@@ -43,6 +43,14 @@ function Hero() {
           >
             Browse documentation
           </Link>
+          <a
+            href="https://github.com/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-base text-[var(--muted)] hover:text-[var(--fg)] underline underline-offset-4 decoration-[var(--rule)] hover:decoration-[var(--rule-strong)] transition"
+          >
+            Source code available
+          </a>
         </div>
       </div>
     </section>
