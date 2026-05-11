@@ -6,6 +6,12 @@
 > output. All Reviewers must approve before the work is accepted. Faster than sequential
 > review because all perspectives evaluate in parallel.
 
+> **Field-name note.** All TOML examples use the wire-correct
+> `predecessors` field (verified against
+> `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks`). A
+> previous version of this guide used `depends_on`, which is
+> spec-prose only and silently ignored by the parser.
+
 ---
 
 ## When to Use
@@ -16,7 +22,7 @@
 
 ## When Not to Use
 
-- Reviewers need to build on each other's findings (use sequential Reviewers via `depends_on`)
+- Reviewers need to build on each other's findings (use sequential Reviewers via `predecessors`)
 - You want debate between Reviewers (they cannot communicate — use [Structured Debate](structured-debate.md))
 - A single Reviewer with a comprehensive checklist would suffice — more Reviewers = more budget
 
@@ -43,7 +49,7 @@ task_id            = "payments_implementer"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"
 path_allowlist     = ["src/payments/"]
-depends_on         = []
+predecessors         = []
 max_crash_retries     = 2
 max_review_rejections = 1   # low tolerance: payment code quality must be high
 context            = """
@@ -61,7 +67,7 @@ task_id            = "security_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
-depends_on         = ["payments_implementer"]    # same dependency → activates in parallel
+predecessors         = ["payments_implementer"]    # same dependency → activates in parallel
 context            = """
   Review src/payments/ for security issues:
   - Is card data ever logged or written to disk?
@@ -76,7 +82,7 @@ task_id            = "correctness_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
-depends_on         = ["payments_implementer"]    # same dependency → also activates in parallel
+predecessors         = ["payments_implementer"]    # same dependency → also activates in parallel
 context            = """
   Review src/payments/ for functional correctness:
   - Does charge() handle declined cards correctly?
@@ -91,7 +97,7 @@ task_id            = "style_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/payments/"]
-depends_on         = ["payments_implementer"]    # all three share the same depends_on
+predecessors         = ["payments_implementer"]    # all three share the same predecessors
 context            = """
   Review src/payments/ for code quality:
   - Are public functions documented with rustdoc?
@@ -155,7 +161,7 @@ Sequential equivalent: 12 + 8 + 8 + 10 = 38 minutes.
 
 ## Invariant Checklist
 
-- [x] All Reviewers share the same `depends_on` — they activate in parallel
+- [x] All Reviewers share the same `predecessors` — they activate in parallel
 - [x] All Reviewers have the same `path_allowlist` as the Executor they review
 - [x] Logical AND verdict enforced by Kernel — cannot be overridden by the Orchestrator
 - [x] Critique aggregation: `tasks.last_critique` collects from all rejecting Reviewers
@@ -188,12 +194,12 @@ Good: `security_reviewer` checks for data leakage; `correctness_reviewer` checks
 
 ## Common Mistakes
 
-**Mistake:** Reviewers with `depends_on` pointing to each other (serial Reviewers)
+**Mistake:** Reviewers with `predecessors` pointing to each other (serial Reviewers)
 ```toml
 # WRONG — this makes them serial, not parallel
 [[tasks]]
 task_id    = "reviewer_b"
-depends_on = ["reviewer_a"]   # ← defeats the purpose of a panel
+predecessors = ["reviewer_a"]   # ← defeats the purpose of a panel
 ```
 For sequential review chains, this is valid — but it's not a panel anymore.
 

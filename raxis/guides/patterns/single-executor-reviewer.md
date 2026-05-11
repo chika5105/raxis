@@ -5,6 +5,13 @@
 > The baseline RAXIS pattern. One agent implements a task; one agent reviews the output.
 > Learn this pattern before any other — every more complex pattern is built on top of it.
 
+> **Field-name note.** The plan-TOML field for "task A blocks task
+> B until A completes" is **`predecessors`** (verified against
+> `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks`). Some
+> spec prose uses `depends_on` as an informal synonym; the
+> kernel parser only reads `predecessors`. All runnable plan
+> snippets in this guide use the wire-correct name.
+
 ---
 
 ## When to Use
@@ -51,7 +58,7 @@ task_id             = "rate_limit_implementer"
 session_agent_type  = "Executor"
 clone_strategy      = "sparse"
 path_allowlist      = ["src/auth/"]
-depends_on          = []                     # starts immediately
+predecessors        = []                     # starts immediately
 max_crash_retries   = 2                      # VM crash budget (OOM, panic, etc.)
 max_review_rejections = 2                    # quality rejection budget
 context             = """
@@ -64,14 +71,14 @@ context             = """
 
 # ── Reviewer ──────────────────────────────────────────────────────────────────
 # Evaluates the Executor's output. Activates only AFTER the Executor submits
-# CompleteTask — the Kernel enforces this via the depends_on gate.
+# CompleteTask — the kernel enforces this via the `predecessors` gate.
 # The Reviewer receives the Executor's exact HEAD SHA in its system prompt.
 [[tasks]]
 task_id             = "security_reviewer"
 session_agent_type  = "Reviewer"
 clone_strategy      = "blobless"             # needs to read the full src/auth/ tree
 path_allowlist      = ["src/auth/"]          # must match (or be subset of) the Executor's
-depends_on          = ["rate_limit_implementer"]
+predecessors        = ["rate_limit_implementer"]
 context             = """
   Review the rate limiting implementation for:
   1. Correctness: does the sliding window logic match the spec?
@@ -148,7 +155,7 @@ Case B — Reviewer rejects:
 - [x] Path subset: `{"src/auth/"} ⊆ {"src/auth/"}` (Orchestrator allowlist covers all sub-tasks)
 - [x] Orchestrator clone strategy: `full` (not `sparse`)
 - [x] Single `lane_id` at `[workspace]` level; no sub-task overrides
-- [x] Reviewer `depends_on` the Executor (not the other way around)
+- [x] Reviewer's `predecessors` lists the Executor (not the other way around)
 - [x] No cycles in the DAG
 - [x] `cross_cutting_artifacts` is an exact filename list (`Cargo.lock`), not a glob
 
@@ -171,9 +178,9 @@ fails the initiative immediately. Set it higher if you expect the LLM to need it
 
 ## Common Mistakes
 
-**Mistake:** Reviewer `depends_on = []` (forgets the dependency)
+**Mistake:** Reviewer `predecessors = []` (forgets the dependency)
 **Result:** `approve_plan` accepts it, but the Reviewer activates immediately with no
-`evaluation_sha` — there is nothing to review. Always set `depends_on` to the Executor.
+`evaluation_sha` — there is nothing to review. Always set `predecessors` to the Executor.
 
 **Mistake:** Executor uses `sparse` clone, Reviewer uses `sparse` on its own path
 **Result:** Reviewer's sparse cone only has its own allowlist path, not the Executor's

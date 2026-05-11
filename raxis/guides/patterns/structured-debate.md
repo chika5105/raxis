@@ -1,5 +1,11 @@
 # Pattern: Structured Debate
 
+> **Field-name note.** All TOML examples use the wire-correct
+> `predecessors` field (verified against
+> `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks`). A
+> previous version of this guide used `depends_on`, which is
+> spec-prose only and silently ignored by the parser.
+
 > **Complexity:** ⭐⭐⭐ Advanced | **Agents:** 2+ Proposers, 1 Synthesizer, 1 Implementer, Orchestrator
 >
 > Two agents argue a design across N rounds by writing proposal documents to the git
@@ -79,7 +85,7 @@ task_id            = "proposer_a_r1"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"              # needs to READ the full repo for context
 path_allowlist     = ["docs/design/proposal-a-r1.md"]   # can only WRITE this file
-depends_on         = []
+predecessors         = []
 context            = """
   You are Architect A, advocating for a JWT-based, stateless auth design.
   Read the existing codebase in src/ for context.
@@ -96,7 +102,7 @@ task_id            = "proposer_b_r1"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-b-r1.md"]
-depends_on         = ["proposer_a_r1"]       # waits until A's proposal is merged
+predecessors         = ["proposer_a_r1"]       # waits until A's proposal is merged
 context            = """
   You are Architect B, advocating for a session-based, stateful auth design.
   Read docs/design/proposal-a-r1.md carefully — understand A's position before responding.
@@ -112,7 +118,7 @@ task_id            = "proposer_a_r2"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-a-r2.md"]
-depends_on         = ["proposer_b_r1"]       # waits for B's round-1 counter-proposal
+predecessors         = ["proposer_b_r1"]       # waits for B's round-1 counter-proposal
 context            = """
   You are Architect A. Read both round-1 proposals:
     - docs/design/proposal-a-r1.md  (your initial position)
@@ -128,7 +134,7 @@ task_id            = "proposer_b_r2"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/proposal-b-r2.md"]
-depends_on         = ["proposer_a_r2"]
+predecessors         = ["proposer_a_r2"]
 context            = """
   You are Architect B. Read all three prior proposals:
     - docs/design/proposal-a-r1.md
@@ -146,7 +152,7 @@ task_id            = "design_synthesizer"
 session_agent_type = "Executor"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/final-design.md"]
-depends_on         = ["proposer_a_r2", "proposer_b_r2"]   # waits for BOTH round-2 proposals
+predecessors         = ["proposer_a_r2", "proposer_b_r2"]   # waits for BOTH round-2 proposals
 context            = """
   You are the Design Synthesizer. Read all four debate proposals:
     - docs/design/proposal-a-r1.md
@@ -169,7 +175,7 @@ task_id            = "design_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["docs/design/final-design.md"]
-depends_on         = ["design_synthesizer"]
+predecessors         = ["design_synthesizer"]
 context            = """
   Review docs/design/final-design.md before implementation begins.
   Check for: logical inconsistencies, missing failure modes, security antipatterns,
@@ -184,7 +190,7 @@ task_id            = "auth_implementer"
 session_agent_type = "Executor"
 clone_strategy     = "sparse"                # only needs src/auth/ to write
 path_allowlist     = ["src/auth/"]
-depends_on         = ["design_reviewer"]     # depends on Reviewer, not Synthesizer directly
+predecessors         = ["design_reviewer"]     # depends on Reviewer, not Synthesizer directly
                                              # (Reviewer is the last gate before impl)
 max_crash_retries     = 2
 max_review_rejections = 2
@@ -202,7 +208,7 @@ task_id            = "impl_reviewer"
 session_agent_type = "Reviewer"
 clone_strategy     = "blobless"
 path_allowlist     = ["src/auth/"]
-depends_on         = ["auth_implementer"]
+predecessors         = ["auth_implementer"]
 context            = """
   Review the auth implementation in src/auth/ against the design in
   docs/design/final-design.md. Verify the implementation matches the design decisions.
@@ -395,7 +401,7 @@ Implementer → impl_reviewer → IntegrationMerge → main updated
 - [x] Each proposer's `path_allowlist` is a single file — they cannot overwrite each other
 - [x] Debate proposals are dependency-ordered: B cannot start until A's commit is merged
 - [x] `UNION(all path_allowlists) ⊆ orchestrator path_allowlist` — validated at approve_plan
-- [x] `synthesizer depends_on ["proposer_a_r2", "proposer_b_r2"]` — waits for BOTH
+- [x] `synthesizer predecessors ["proposer_a_r2", "proposer_b_r2"]` — waits for BOTH
 - [x] Single `lane_id` at workspace level
 
 ---

@@ -1,0 +1,23 @@
+[package]
+name        = "raxis-observability"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+
+description = "RAXIS V3 OpenTelemetry-shaped observability surface (in-process types, hub, ring file exporter, redactor). Authority side only; the kernel never imports OTLP transport — see specs/v3/otel-observability.md."
+
+# v3/otel-observability.md §18 — explicit allow-list of dependencies
+# inside the kernel address space. Adding `tonic`, `prost`,
+# `opentelemetry`, or `opentelemetry-otlp` here is rejected by
+# CI per INV-OTEL-03; the OTLP wire-protocol code lives in the
+# `raxis-otel-pusher` binary, NOT in this crate.
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"

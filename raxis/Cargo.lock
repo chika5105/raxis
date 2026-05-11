@@ -3673,6 +3673,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-observability"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "raxis-plan-credentials"
 version = "0.1.0"
 dependencies = [

@@ -36,25 +36,27 @@ The kernel enforces the DAG ordering, the role boundaries, and the retry limits.
 ## Step 1: Operator Defines the Task DAG
 
 ```toml
-[[tasks]]
-task_id = "orchestrate"
-agent_type = "Orchestrator"
-lane_id = "feature-work"
+# NOTE: The Orchestrator is auto-created by the kernel and MUST NOT
+# appear in [[tasks]]. The plan declares only Executor + Reviewer
+# tasks; the kernel synthesises the Orchestrator session at
+# `approve_plan`. Verified against
+# `kernel/src/initiatives/lifecycle.rs` (PlanCloneStrategyInvalid
+# rule = "unknown_agent_type" rejects "Orchestrator" in [[tasks]]).
 
 [[tasks]]
-task_id = "implement"
-agent_type = "Executor"
-lane_id = "feature-work"
-depends_on = ["orchestrate"]
+task_id            = "implement"
+session_agent_type = "Executor"
+lane_id            = "feature-work"
+predecessors       = []
 
 [[tasks]]
-task_id = "review"
-agent_type = "Reviewer"
-lane_id = "feature-work"
-depends_on = ["implement"]
+task_id            = "review"
+session_agent_type = "Reviewer"
+lane_id            = "feature-work"
+predecessors       = ["implement"]
 ```
 
-**In plain English:** "The orchestrator decides what to do, the executor writes the code, and the reviewer checks it. Each step must wait for the previous one."
+**In plain English:** "The executor writes the code, and the reviewer checks it. The reviewer waits for the executor to complete." The `predecessors` field is the wire-correct name (`depends_on` is spec-prose only — `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks` reads only `predecessors`).
 
 ---
 

@@ -1,0 +1,547 @@
+//! Closed enumerations for span / metric / event names plus the
+//! attribute-value shape every emit site uses.
+//!
+//! Spec: `v3/otel-observability.md §6`.
+
+use std::collections::BTreeMap;
+
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// AttrValue — closed shape of every attribute value
+// ---------------------------------------------------------------------------
+
+/// Closed-shape attribute value. The redactor only accepts these
+/// concrete shapes; anything else is a compile-time impossibility.
+///
+/// In particular there is NO `Bytes` variant (would invite raw blob
+/// leakage) and NO `Json` variant (would invite open-ended payload
+/// leakage). Each variant has bounded size:
+///
+/// * `Str` — UTF-8 string. The redactor caps and sanitises every
+///   string per the per-key `max_bytes` budget in
+///   [`crate::redact::ATTR_ALLOW_LIST`].
+/// * `I64` — covers durations in milliseconds, byte counts up to
+///   8 EiB, sequence numbers, etc.
+/// * `F64` — covers histogram sums and ratio values. NaN / ±Inf
+///   are rejected by the redactor at sanitise time.
+/// * `Bool` — flags such as `cached`, `circuit_open`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AttrValue {
+    /// UTF-8 string; the redactor enforces the per-key length cap
+    /// and replaces unprintable / control chars with `?`.
+    Str(String),
+    /// Signed 64-bit integer.
+    I64(i64),
+    /// 64-bit float. NaN / ±Inf rejected.
+    F64(f64),
+    /// Boolean flag.
+    Bool(bool),
+}
+
+impl From<&str> for AttrValue {
+    fn from(s: &str) -> Self { Self::Str(s.to_owned()) }
+}
+impl From<String> for AttrValue {
+    fn from(s: String) -> Self { Self::Str(s) }
+}
+impl From<i64> for AttrValue {
+    fn from(v: i64) -> Self { Self::I64(v) }
+}
+impl From<u64> for AttrValue {
+    fn from(v: u64) -> Self { Self::I64(v as i64) }
+}
+impl From<u32> for AttrValue {
+    fn from(v: u32) -> Self { Self::I64(v as i64) }
+}
+impl From<i32> for AttrValue {
+    fn from(v: i32) -> Self { Self::I64(v as i64) }
+}
+impl From<usize> for AttrValue {
+    fn from(v: usize) -> Self { Self::I64(v as i64) }
+}
+impl From<f64> for AttrValue {
+    fn from(v: f64) -> Self { Self::F64(v) }
+}
+impl From<bool> for AttrValue {
+    fn from(v: bool) -> Self { Self::Bool(v) }
+}
+
+/// Sorted attribute map. We use [`BTreeMap`] (not `HashMap`) so the
+/// JSONL frame is byte-deterministic for a given input — useful for
+/// snapshot tests.
+pub type AttrMap = BTreeMap<String, AttrValue>;
+
+// ---------------------------------------------------------------------------
+// SpanName — closed list of authority-side span names
+// ---------------------------------------------------------------------------
+
+/// Closed enumeration of every authority-side span the kernel ever
+/// emits. Adding a variant is a spec change reviewed against
+/// `v3/otel-observability.md §7.1`. The `as_otel_name` projection
+/// produces the canonical OTel span name (`raxis.<area>.<verb>`)
+/// that the pusher sends on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SpanName {
+    /// `raxis.intent.admission` — root span for one intent-handler call.
+    IntentAdmission,
+    /// `raxis.gateway.fetch` — outbound provider round-trip.
+    GatewayFetch,
+    /// `raxis.verifier.execution` — verifier-process wall-clock.
+    VerifierExecution,
+    /// `raxis.credential_proxy.request` — proxied per-request work.
+    CredentialProxyRequest,
+    /// `raxis.notification.dispatch` — operator-channel delivery.
+    NotificationDispatch,
+    /// `raxis.operator.ipc` — operator IPC command handling.
+    OperatorIpc,
+    /// `raxis.escalation.lifecycle` — escalation FSM transition.
+    EscalationLifecycle,
+    /// `raxis.session.spawn` — session VM spawn end-to-end.
+    SessionSpawn,
+    /// `raxis.policy.epoch.advance` — policy rotation.
+    PolicyEpochAdvance,
+    /// `raxis.audit.emit` — single audit chain append (debug only by default).
+    AuditEmit,
+    /// `raxis.breakglass.activation` — operator break-glass activation.
+    BreakglassActivation,
+    /// `raxis.breakglass.action` — single bypassed evaluation under break-glass.
+    BreakglassAction,
+}
+
+impl SpanName {
+    /// OTel-canonical name this span ships under.
+    pub fn as_otel_name(&self) -> &'static str {
+        match self {
+            Self::IntentAdmission         => "raxis.intent.admission",
+            Self::GatewayFetch            => "raxis.gateway.fetch",
+            Self::VerifierExecution       => "raxis.verifier.execution",
+            Self::CredentialProxyRequest  => "raxis.credential_proxy.request",
+            Self::NotificationDispatch    => "raxis.notification.dispatch",
+            Self::OperatorIpc             => "raxis.operator.ipc",
+            Self::EscalationLifecycle     => "raxis.escalation.lifecycle",
+            Self::SessionSpawn            => "raxis.session.spawn",
+            Self::PolicyEpochAdvance      => "raxis.policy.epoch.advance",
+            Self::AuditEmit               => "raxis.audit.emit",
+            Self::BreakglassActivation    => "raxis.breakglass.activation",
+            Self::BreakglassAction        => "raxis.breakglass.action",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SpanKind / SpanStatus / SpanEvent / SpanData
+// ---------------------------------------------------------------------------
+
+/// OTel-aligned span kind. Authority-side spans are mostly `Internal`
+/// (kernel work) or `Client` (gateway/notification outbound). `Server`
+/// is reserved for the operator IPC inbound. `Producer` / `Consumer`
+/// are unused in V3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanKind {
+    /// Kernel-internal work (no remote peer).
+    Internal,
+    /// Inbound IPC from the operator CLI / dashboard.
+    Server,
+    /// Outbound to a provider / sidecar / external endpoint.
+    Client,
+    /// (Reserved.)
+    Producer,
+    /// (Reserved.)
+    Consumer,
+}
+
+/// Pass / fail status. `Error` is reserved for kernel-internal
+/// failures (verifier spawn fail, gateway TCP error, etc.) — NOT for
+/// "intent rejected" or "claim insufficient" outcomes, which are
+/// recorded as `Ok` with a `verdict` attribute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanStatus {
+    /// Span completed normally (regardless of business-level outcome).
+    Ok,
+    /// Span failed due to a kernel-internal fault. The
+    /// `status_message` SHOULD describe the fault; see redactor
+    /// rules in `crate::redact`.
+    Error,
+}
+
+/// Closed enumeration of within-span timeline annotations.
+/// New variants require a spec change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum EventName {
+    /// Step-2 result of `evaluate_claims` — required claim list resolved.
+    GateRequired,
+    /// One required claim satisfied by an existing witness record.
+    GateSatisfied,
+    /// One required claim unsatisfied; verifier spawned.
+    GateMissing,
+    /// Verifier process spawned for a missing gate.
+    VerifierSpawned,
+    /// Lane budget reservation taken inside intent admission.
+    BudgetReserved,
+    /// Lane budget reservation released on terminal transition.
+    BudgetReleased,
+    /// Provider returned token usage on the inference response.
+    InferenceTokensReported,
+    /// Circuit breaker opened for a provider after consecutive failures.
+    CircuitOpened,
+    /// Circuit breaker returned to closed after a successful probe.
+    CircuitClosed,
+    /// Periodic heartbeat tick within a long-running span.
+    HeartbeatTick,
+}
+
+/// One within-span event, e.g. "verifier spawned at relative t=12ms".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpanEvent {
+    /// Closed-list event name.
+    pub name:        EventName,
+    /// Wallclock at event time; nanoseconds since UNIX epoch.
+    pub unix_nanos:  u64,
+    /// Closed-allow-list attribute map.
+    #[serde(default)]
+    pub attrs:       AttrMap,
+}
+
+/// One completed authority-side span. Pure data; no I/O; no time
+/// retrieval. Constructed by [`crate::hub::ObservabilityHub::start_span`]
+/// and finalised when [`crate::hub::RecordingSpan::end`] is called.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpanData {
+    /// 16-byte trace identifier. Zero is reserved (means "unset").
+    pub trace_id:        [u8; 16],
+    /// 8-byte span identifier within the trace. Zero is reserved.
+    pub span_id:         [u8; 8],
+    /// Optional parent span; `None` for trace roots.
+    pub parent_span_id:  Option<[u8; 8]>,
+    /// Closed-list span name; emitted as the OTel canonical name on the wire.
+    pub name:            SpanName,
+    /// OTel kind. Mostly `Internal` and `Client` on the authority side.
+    pub kind:            SpanKind,
+    /// Wallclock at span start; ns since UNIX epoch.
+    pub start_unix_nanos: u64,
+    /// Wallclock at span end; ns since UNIX epoch. Always ≥ start.
+    pub end_unix_nanos:  u64,
+    /// Pass / fail status. See [`SpanStatus`] semantics.
+    pub status:          SpanStatus,
+    /// Optional one-line human-readable status message; the redactor
+    /// caps it at 256 bytes.
+    pub status_message:  Option<String>,
+    /// Closed-allow-list attribute map (sorted by key).
+    pub attrs:           AttrMap,
+    /// Optional within-span events; bounded by hub config.
+    #[serde(default)]
+    pub events:          Vec<SpanEvent>,
+}
+
+impl SpanData {
+    /// Convenience: span duration in milliseconds, integer-rounded.
+    pub fn duration_ms(&self) -> i64 {
+        let ns_diff = self.end_unix_nanos.saturating_sub(self.start_unix_nanos);
+        (ns_diff / 1_000_000) as i64
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MetricName / MetricType / Unit / DataPoint / MetricData
+// ---------------------------------------------------------------------------
+
+/// Closed enumeration of every authority-side metric.
+/// Spec: `v3/otel-observability.md §8`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MetricName {
+    /// `raxis.intent.admission.duration` — Histogram (ms).
+    IntentAdmissionDuration,
+    /// `raxis.intent.admission.total` — Counter.
+    IntentAdmissionTotal,
+    /// `raxis.gateway.fetch.duration` — Histogram (ms).
+    GatewayFetchDuration,
+    /// `raxis.gateway.fetch.total` — Counter.
+    GatewayFetchTotal,
+    /// `raxis.verifier.execution.duration` — Histogram (ms).
+    VerifierExecutionDuration,
+    /// `raxis.verifier.execution.total` — Counter.
+    VerifierExecutionTotal,
+    /// `raxis.tokens.consumed` — Counter (tokens).
+    TokensConsumed,
+    /// `raxis.circuit_breaker.state` — Gauge (1/0 per state label).
+    CircuitBreakerState,
+    /// `raxis.credential_proxy.request.duration` — Histogram (ms).
+    CredentialProxyRequestDuration,
+    /// `raxis.notification.delivery.duration` — Histogram (ms).
+    NotificationDeliveryDuration,
+    /// `raxis.notification.delivery.total` — Counter.
+    NotificationDeliveryTotal,
+    /// `raxis.session.active` — Gauge (current count).
+    SessionsActive,
+    /// `raxis.audit.chain.length` — Gauge (highest seq).
+    AuditChainLength,
+    /// `raxis.escalation.open` — Gauge.
+    EscalationsOpen,
+    /// `raxis.escalation.closed.total` — Counter.
+    EscalationsClosedTotal,
+    /// `raxis.budget.reserved` — Gauge per-lane.
+    BudgetReserved,
+    /// `raxis.budget.exceeded.total` — Counter per-lane.
+    BudgetExceededTotal,
+    /// `raxis.observability.dropped.total` — Counter (per drop reason).
+    ObservabilityDroppedTotal,
+}
+
+impl MetricName {
+    /// OTel-canonical metric name on the wire.
+    pub fn as_otel_name(&self) -> &'static str {
+        match self {
+            Self::IntentAdmissionDuration         => "raxis.intent.admission.duration",
+            Self::IntentAdmissionTotal            => "raxis.intent.admission.total",
+            Self::GatewayFetchDuration            => "raxis.gateway.fetch.duration",
+            Self::GatewayFetchTotal               => "raxis.gateway.fetch.total",
+            Self::VerifierExecutionDuration       => "raxis.verifier.execution.duration",
+            Self::VerifierExecutionTotal          => "raxis.verifier.execution.total",
+            Self::TokensConsumed                  => "raxis.tokens.consumed",
+            Self::CircuitBreakerState             => "raxis.circuit_breaker.state",
+            Self::CredentialProxyRequestDuration  => "raxis.credential_proxy.request.duration",
+            Self::NotificationDeliveryDuration    => "raxis.notification.delivery.duration",
+            Self::NotificationDeliveryTotal       => "raxis.notification.delivery.total",
+            Self::SessionsActive                  => "raxis.session.active",
+            Self::AuditChainLength                => "raxis.audit.chain.length",
+            Self::EscalationsOpen                 => "raxis.escalation.open",
+            Self::EscalationsClosedTotal          => "raxis.escalation.closed.total",
+            Self::BudgetReserved                  => "raxis.budget.reserved",
+            Self::BudgetExceededTotal             => "raxis.budget.exceeded.total",
+            Self::ObservabilityDroppedTotal       => "raxis.observability.dropped.total",
+        }
+    }
+
+    /// The default [`MetricType`] for this metric. Matches `§8`.
+    pub fn default_type(&self) -> MetricType {
+        match self {
+            Self::IntentAdmissionDuration
+            | Self::GatewayFetchDuration
+            | Self::VerifierExecutionDuration
+            | Self::CredentialProxyRequestDuration
+            | Self::NotificationDeliveryDuration => MetricType::Histogram,
+
+            Self::CircuitBreakerState
+            | Self::SessionsActive
+            | Self::AuditChainLength
+            | Self::EscalationsOpen
+            | Self::BudgetReserved => MetricType::Gauge,
+
+            Self::IntentAdmissionTotal
+            | Self::GatewayFetchTotal
+            | Self::VerifierExecutionTotal
+            | Self::TokensConsumed
+            | Self::NotificationDeliveryTotal
+            | Self::EscalationsClosedTotal
+            | Self::BudgetExceededTotal
+            | Self::ObservabilityDroppedTotal => MetricType::Counter,
+        }
+    }
+
+    /// The default [`Unit`] for this metric.
+    pub fn default_unit(&self) -> Unit {
+        match self {
+            Self::IntentAdmissionDuration
+            | Self::GatewayFetchDuration
+            | Self::VerifierExecutionDuration
+            | Self::CredentialProxyRequestDuration
+            | Self::NotificationDeliveryDuration => Unit::Milliseconds,
+
+            Self::TokensConsumed => Unit::Tokens,
+            Self::SessionsActive => Unit::Connections,
+            _ => Unit::None,
+        }
+    }
+}
+
+/// OTel metric type. `Counter` is monotonic-cumulative; `Gauge` is
+/// last-value; `Histogram` carries explicit-boundary buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetricType {
+    /// Monotonic cumulative counter (resets on kernel restart per
+    /// `INV-OTEL-06`).
+    Counter,
+    /// Distribution histogram with explicit boundaries.
+    Histogram,
+    /// Last-value gauge.
+    Gauge,
+}
+
+/// Bounded enumeration of metric units. Avoids open-ended free-form
+/// strings in the wire format — collectors that need richer units
+/// can derive them from `MetricName`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Unit {
+    /// Milliseconds; histograms default here.
+    Milliseconds,
+    /// Bytes.
+    Bytes,
+    /// LLM tokens (input + output).
+    Tokens,
+    /// Active connections / sessions / sockets.
+    Connections,
+    /// No unit (counters/gauges of cardinal quantities).
+    None,
+}
+
+/// Single metric data point — either a sum-style scalar (counter /
+/// gauge) or a histogram bucket vector.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "shape", rename_all = "snake_case")]
+pub enum DataPoint {
+    /// Counter or gauge: a single number.
+    Sum {
+        /// The cardinal value of the data point.
+        value: f64,
+    },
+    /// Histogram with explicit bucket boundaries.
+    Histo {
+        /// Bucket boundaries (length N).
+        buckets: Vec<f64>,
+        /// Bucket counts (length N+1: `[≤bucket_0, ≤bucket_1, …, >bucket_{N-1}]`).
+        counts:  Vec<u64>,
+        /// Sum of all observations.
+        sum:     f64,
+        /// Count of all observations.
+        count:   u64,
+        /// Minimum observation value.
+        min:     f64,
+        /// Maximum observation value.
+        max:     f64,
+    },
+}
+
+/// One aggregated metric data point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MetricData {
+    /// Closed-list metric name; emitted as the OTel canonical name.
+    pub name:         MetricName,
+    /// Counter / gauge / histogram.
+    pub metric_type:  MetricType,
+    /// Bounded enum of physical units.
+    pub unit:         Unit,
+    /// Stable label set (sorted by key on the wire).
+    pub labels:       AttrMap,
+    /// Sum or histogram payload.
+    pub datapoint:    DataPoint,
+    /// Wallclock at observation time; ns since UNIX epoch.
+    pub unix_nanos:   u64,
+}
+
+// ---------------------------------------------------------------------------
+// Tests — JSONL round-trip; closed-list assertions
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn span_data_roundtrips_as_json_line() {
+        let span = SpanData {
+            trace_id:         [1; 16],
+            span_id:          [2; 8],
+            parent_span_id:   None,
+            name:             SpanName::IntentAdmission,
+            kind:             SpanKind::Internal,
+            start_unix_nanos: 1_000_000_000,
+            end_unix_nanos:   1_500_000_000,
+            status:           SpanStatus::Ok,
+            status_message:   None,
+            attrs:            {
+                let mut a = AttrMap::new();
+                a.insert("intent_kind".to_owned(), AttrValue::Str("CompleteTask".to_owned()));
+                a.insert("verdict".to_owned(),     AttrValue::Str("Accepted".to_owned()));
+                a.insert("latency_ms".to_owned(),  AttrValue::I64(500));
+                a
+            },
+            events:           vec![],
+        };
+        let json = serde_json::to_string(&span).expect("serialise");
+        let back: SpanData = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(span, back);
+    }
+
+    #[test]
+    fn metric_data_histogram_roundtrips() {
+        let m = MetricData {
+            name:         MetricName::IntentAdmissionDuration,
+            metric_type:  MetricType::Histogram,
+            unit:         Unit::Milliseconds,
+            labels:       {
+                let mut l = AttrMap::new();
+                l.insert("verdict".to_owned(), AttrValue::Str("Accepted".to_owned()));
+                l
+            },
+            datapoint:    DataPoint::Histo {
+                buckets: vec![1.0, 5.0, 10.0],
+                counts:  vec![0, 1, 0, 0],
+                sum:     3.5,
+                count:   1,
+                min:     3.5,
+                max:     3.5,
+            },
+            unix_nanos:   2_000_000_000,
+        };
+        let json = serde_json::to_string(&m).expect("serialise");
+        let back: MetricData = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(m, back);
+    }
+
+    #[test]
+    fn span_name_otel_names_match_spec() {
+        assert_eq!(SpanName::IntentAdmission.as_otel_name(), "raxis.intent.admission");
+        assert_eq!(SpanName::GatewayFetch.as_otel_name(),    "raxis.gateway.fetch");
+        assert_eq!(SpanName::BreakglassAction.as_otel_name(), "raxis.breakglass.action");
+    }
+
+    #[test]
+    fn metric_name_default_types_match_spec() {
+        assert_eq!(MetricName::IntentAdmissionDuration.default_type(), MetricType::Histogram);
+        assert_eq!(MetricName::IntentAdmissionTotal.default_type(),    MetricType::Counter);
+        assert_eq!(MetricName::SessionsActive.default_type(),          MetricType::Gauge);
+        assert_eq!(MetricName::CircuitBreakerState.default_type(),     MetricType::Gauge);
+    }
+
+    #[test]
+    fn span_data_duration_ms_is_correct() {
+        let span = SpanData {
+            trace_id:         [0; 16],
+            span_id:          [0; 8],
+            parent_span_id:   None,
+            name:             SpanName::IntentAdmission,
+            kind:             SpanKind::Internal,
+            start_unix_nanos: 1_000_000_000,
+            end_unix_nanos:   1_500_000_000,  // +500ms
+            status:           SpanStatus::Ok,
+            status_message:   None,
+            attrs:            AttrMap::new(),
+            events:           vec![],
+        };
+        assert_eq!(span.duration_ms(), 500);
+    }
+
+    #[test]
+    fn span_data_duration_handles_underflow() {
+        let span = SpanData {
+            trace_id:         [0; 16],
+            span_id:          [0; 8],
+            parent_span_id:   None,
+            name:             SpanName::IntentAdmission,
+            kind:             SpanKind::Internal,
+            start_unix_nanos: 2_000_000_000,
+            end_unix_nanos:   1_000_000_000,  // intentionally inverted
+            status:           SpanStatus::Ok,
+            status_message:   None,
+            attrs:            AttrMap::new(),
+            events:           vec![],
+        };
+        assert_eq!(span.duration_ms(), 0, "saturating sub on inverted timestamps");
+    }
+}

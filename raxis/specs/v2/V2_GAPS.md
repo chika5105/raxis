@@ -2855,6 +2855,63 @@ pattern and extends it to cover the three missing categories
 (floors, defaults-with-override, locked fields) needed for
 `target_ref` and future configurable fields.
 
+### 12.12 Plan-TOML field naming drift: `depends_on` vs `predecessors` — 🟡 DOCS-ONLY OPEN
+
+**Discovered.** 2026-05 docs review (raxis-concepts/10 +
+guides/patterns).
+
+**Class.** Documentation drift. The runtime is correct; some
+spec prose and a handful of guide pages used the wrong field name.
+
+**Symptom.** `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks`
+reads exactly one field name for inter-task ordering:
+
+```rust
+let predecessors = string_array(entry, "predecessors");
+```
+
+There is **no** alias for `depends_on` and there never has been.
+A user who wrote `depends_on = [...]` in their `plan.toml` would
+have the field silently ignored — the validator would not flag
+it because the unknown TOML key is not strict-checked. The DAG
+would then be empty for that task, which means it activates
+immediately (which is wrong if the operator expected it to wait).
+
+**Sources of drift (this commit fixes the docs):**
+
+| File | Status before | Status after |
+|---|---|---|
+| `guides/patterns/single-executor-reviewer.md` | `depends_on` | `predecessors` (with field-name note) |
+| `guides/patterns/panel-review.md` | `depends_on` ×8 | `predecessors` ×8 (with field-name note) |
+| `guides/patterns/structured-debate.md` | `depends_on` ×9 | `predecessors` ×9 (with field-name note) |
+| `guides/scenarios/02-single-executor-reviewer/README.md` | `depends_on` | `predecessors` |
+| `raxis-concepts/10-v2-orchestration.md` | `depends_on` ×2 | `predecessors` ×2 (with field-name note) |
+
+**Still drifted (out of scope for this commit, V2.6 follow-up):**
+
+* `specs/v2/v2-deep-spec.md` line 854 (Step 5 DAG validation
+  prose) and line 1341 (Step 23 Reviewer dependency prose) use
+  `depends_on`. Should be replaced with `predecessors` plus a
+  one-line note that the field name is `predecessors` on the
+  wire.
+* `specs/invariants.md` line 2152 example chain uses
+  `depends_on`. Same fix.
+* `kernel/src/path_scope.rs:380` doc-comment uses
+  `(depends_on)` parenthetical. Should be
+  `(predecessors)`.
+
+**No code change required.** The parser is correct; the docs
+were wrong.
+
+**Belt-and-braces follow-up (V2.6):** add a strict-key
+TOML decoder for the `[[tasks]]` array so an unknown field like
+`depends_on` rejects at admission with `PlanInvalid` rather than
+silently being ignored. The current loose `toml::Value` walk in
+`parse_plan_tasks` is forgiving by design (forward-compat), but
+that forgiveness allows this exact class of typo to pass.
+
+---
+
 ### 12.11 Delegation runtime SQL drift — 🔴 OPEN
 
 **Discovered.** 2026-05 docs review (raxis-concepts/04-delegations).

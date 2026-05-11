@@ -19,7 +19,7 @@ exported; Anthropic credentials present).
 
 ## What this scenario demonstrates
 
-- The Reviewer agent type and its `depends_on` activation rule.
+- The Reviewer agent type and its `predecessors` activation rule.
 - The kernel's `evaluation_sha` injection so the Reviewer always
   evaluates the *exact* SHA the Executor produced.
 - The retry loop when a Reviewer rejects: the kernel prepends the
