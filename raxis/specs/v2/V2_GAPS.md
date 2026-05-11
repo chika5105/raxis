@@ -2407,16 +2407,16 @@ Corrections made during cross-check passes:
 | Session spawn handler | "Single blocker, ~400 lines" | ✅ Shipped (1,590 lines) | `session_spawn_orchestrator.rs` + `session-spawn` crate | 1 |
 | Heartbeat writer | "Not wired, ~30 lines" | ✅ Shipped, wired in `main.rs:532` | `grep heartbeat_loop` | 1 |
 | Gateway supervisor | "~200 lines missing" | ✅ Shipped (715 lines) | `gateway/supervisor.rs` | 1 |
-| Credential CLI | "Fully shipped" | 🟡 Partial (2 of 7 subcommands) | CLI code header comments | 1 |
+| Credential CLI | "Fully shipped" | ✅ **Verified V2.5**: All 7 subcommands present in `cli/src/commands/credential.rs` — `list` (L82), `rotate` (L163), `add` (L651), `show` (L827), `remove` (L914), `verify` (L999), `audit` (L1092). The original "2 of 7" Pass-1 entry was stale. | 1 |
 | `raxis plan init` | Not tracked | ✅ Shipped (V2.3) | `cli/src/commands/plan_init.rs` | 1 |
-| Env access control | Not tracked (Tier E) | 🟡 Schema parsed, enforcement missing | `credential-proxy.md §11` examples | 1 |
+| Env access control | Not tracked (Tier E) | ✅ **Closed (V2.3 MVP)**: §E1 documents that the credential limb of `INV-ENV-01` is fully enforced (`validate_task_environment_consistency` at `approve_plan` before `BEGIN TRANSACTION`; rejects cross-env tasks with `FAIL_TASK_ENVIRONMENT_INCONSISTENT`). The URL-gate limb (`[[environment_gates]]` runtime matching) is the V3 deferral with explicit design rationale; that's a forward-looking feature, not engineering debt. | 1 |
 | Invariant coverage | Not tracked | 46% (41 of 89 `INV-` refs in code) | `grep -c INV-` | 1 |
-| Notification channels (C4) | "Zero code" | 🟡 Partial (Shell+File only, 1,327 lines) | `kernel/src/notifications/` grep | 2 |
-| KernelPush type | "Spec complete, zero code" | 🟡 Type defined (6 variants), never sent | `grep KernelPush kernel/src/` — zero hits | 2 |
-| Review aggregation | "Shipped" (in Tier A8) | 🟡 Module exists (403 lines), never called | `grep review_aggregation kernel/src/initiatives/lifecycle.rs` — zero hits | 2 |
+| Notification channels (C4) | "Zero code" | ✅ **Closed (V2.4)**: `crates/notification-channels` ships `ShellChannel`, `FileChannel`, `EmailChannel`, `SidecarChannel`. Original Pass-2 entry was stale — superseded by §C4's V2.4 closure (see `§12.3` in this doc). | 2 |
+| KernelPush type | "Spec complete, zero code" | ✅ **Closed (V2.3 MVP)**: `kernel/src/push/mod.rs` ships the in-process `KernelPushDispatcher` + audit-mirror (every `enqueue` lands `KernelPushEnqueued` on the audit chain even when no live subscriber is bound). The per-session VSock/UDS delivery loop and SQL `pending_pushes` queue are the explicit V3 deferral with rationale — they are forward-looking transport, not engineering debt. See `§12.1` in this doc for the full audit. | 2 |
+| Review aggregation | "Shipped" (in Tier A8) | ✅ **Closed (V2.2)**: `handlers/intent::handle_submit_review` now invokes `compute_aggregate_review_outcome` for every Executor predecessor and emits `ReviewAggregationCompleted` per Executor on terminal verdicts (`AllPassed` / `AtLeastOneRejected` / `NoSuccessors`). See `§12.2` in this doc for the full audit. | 2 |
 | `plan explain` (CLI) | Not tracked | ✅ Shipped (552 lines) | `wc -l explain.rs` | 2 |
 | Planner binaries | "~36 lines each" | ✅ Correct (boot+park, scaffold only) | `wc -l planner-*/src/main.rs` | 2 |
-| `submit plan --dry-run` | "Not implemented" | 🟡 CLI flag parsed, kernel handler missing | `grep dry_run submit.rs` — flag exists; no `DryRunAdmit` IPC type | 2 |
+| `submit plan --dry-run` | "Not implemented" | ✅ **Shipped (V2.4)**: CLI `--dry-run` short-circuits at phase 9 (canonical signature inspection only); the kernel-side `OperatorRequest::DryRunAdmit` handler in `kernel/src/ipc/operator_ergonomics.rs::handle_dry_run_admit` runs the full admission chain (parse, DAG acyclicity, dup id, dangling preds, lane existence, target_ref resolution) without persisting or charging quota, emits one `DryRunAdmitted` audit event per call, and returns `OperatorResponse::DryRunAdmitted { target_ref, warnings }`. Pass-2 audit entry was stale — re-verified V2.5. | 2 |
 | Codebase total | 150,119 lines | 140,010 lines | `find ... -name "*.rs" \| xargs wc -l` | 2 |
 
 ---
@@ -2561,7 +2561,7 @@ heuristic, plan parser, DAG validator, and read-only conn lookups.
 | `EstimateCost` | §11.3 | ✅ | ✅ Real | Parses `plan_toml`, applies a conservative 200k-tokens/task heuristic at $0.005/1k tokens, adds the policy's `max_cost_per_task` admission overhead, returns a per-task breakdown. |
 | `DryRunAdmit` | §12.3 | ✅ | ✅ Real | Parses the plan, validates `[workspace]` + `[[tasks]]`, runs DAG cohesion + acyclicity checks, resolves the would-be `target_ref` against `[git]` precedence, collects non-fatal warnings, and emits a single `DryRunAdmitted` audit event (registered in `KNOWN_AUDIT_EVENT_KINDS`). |
 | `DescribeInitiativePause` | §14.3 | ✅ | ✅ Real | `spawn_blocking` read-only `RoConn` open to query `initiatives`, `initiative_quarantines`, and pending escalations. Pause is union of `quarantine || terminal_state || pending_escalations`. |
-| `SubscribeInitiative` | §13.4 | ✅ | 🟡 Stub | Returns `FAIL_NOT_YET_IMPLEMENTED` because the operator UDS is single-shot request/response — bidirectional streaming requires the per-session VSock/UDS push transport (§12.1) which lands in V3. |
+| `SubscribeInitiative` | §13.4 | ✅ | ✅ **Streaming runner V2.5** | The single-shot dispatcher returns `FAIL_NOT_YET_IMPLEMENTED` (kept as the canonical envelope for the unary path), but the operator socket detects this variant and forwards control to `operator_ergonomics::stream_subscribe_initiative`, which subscribes to the kernel's broadcast bus, fans out a `SubscribeInitiativeAttached` envelope followed by initiative-state / escalation / push-id frames, and tears down on receiver lag. See `v2_extended_gaps.md §2.1` for the full streaming spec. |
 
 **INV-OPERATOR-ERG-01.** Every real handler above is **read-only**:
 no row inserts, no budget reservation, no state mutation. The
@@ -2569,17 +2569,27 @@ single `DryRunAdmitted` audit event is the
 `operator-ergonomics.md §12.3` allowance for forensic traceability;
 all other handlers leave the kernel chain untouched.
 
-**Why `SubscribeInitiative` stays a stub.** The other four
-handlers complete inside one IPC round-trip and read state from
-the snapshot conn. `SubscribeInitiative` requires the kernel to
-push frames to the operator on its own schedule (initiative
-state changes, escalation arrivals, push id allocations). The
-existing operator UDS is single-shot per `peripherals.md §3.1`;
-bidirectional streaming requires the per-session VSock/UDS push
-transport described in §12.1. The stub returns the canonical
-`FAIL_NOT_YET_IMPLEMENTED` envelope so CLI integrations
-(`raxis initiative watch`) compile against the same wire shape
-they will use in V3.
+**`SubscribeInitiative` in V2.5: streaming over the operator UDS.**
+The other four ergonomics handlers complete inside one IPC
+round-trip and read state from the snapshot conn.
+`SubscribeInitiative` requires the kernel to push frames to the
+operator on its own schedule (initiative state changes,
+escalation arrivals, push id allocations). Rather than waiting
+for the per-session VSock transport in §12.1, V2.5 ships a
+length-prefixed multi-frame stream **over the existing operator
+UDS**: `kernel/src/ipc/operator.rs` detects the
+`SubscribeInitiative` variant before calling the unary
+dispatcher and hands the connection to
+`operator_ergonomics::stream_subscribe_initiative`, which
+subscribes to the kernel's broadcast bus, emits a
+`SubscribeInitiativeAttached` envelope and one frame per fan-out
+(`InitiativeStateChanged` / `EscalationCreated` / `PushIdAllocated`),
+and aborts the stream on receiver lag. The single-shot path
+still returns `FAIL_NOT_YET_IMPLEMENTED` because that envelope
+is the canonical reject for clients that try to call this
+variant through the unary path. See
+`v2_extended_gaps.md §2.1` for the wire framing spec and the
+streaming integration tests in `operator_ergonomics.rs`.
 
 ### 12.5 `raxis doctor`: categories — `CLOSED (V2.3, MVP)`
 
