@@ -315,8 +315,8 @@ function Conformance() {
         ))}
       </div>
       <p className="mt-8 text-base text-[var(--muted)]">
-        Status of the reference implementation: tier 1 aligned, partial tier
-        2, tier 3 not currently claimed.{" "}
+        Status of the reference implementation: tier 1 and tier 2 current,
+        tier 3 not currently claimed.{" "}
         <Link
           href="/conformance"
           className="text-accent hover:underline underline-offset-4"

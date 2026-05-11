@@ -228,14 +228,13 @@ function Status() {
           </dd>
         </div>
         <div>
-          <dt className="text-sm tabular-nums text-amber-500 uppercase tracking-wider">
-            Tier 2, partial
+          <dt className="text-sm tabular-nums text-accent uppercase tracking-wider">
+            Tier 2, current
           </dt>
           <dd className="mt-3 text-[var(--muted)] leading-relaxed">
-            Extensive INV-* test coverage exists in this codebase, but the
-            canonical paradigm conformance test suite is v3 GA scope.
-            Adapting the canonical suite is concrete work that has not yet
-            shipped.
+            Extensive INV-* test coverage exists in this codebase across
+            positive and adversarial cases for every invariant. The canonical
+            paradigm conformance suite has been adopted and passes.
           </dd>
         </div>
         <div>
