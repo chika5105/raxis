@@ -668,6 +668,7 @@ mod tests {
             // circuit the test before exercising the boot-source PUT.
             linux_kernel_path: PathBuf::from("/tmp/raxis-fixture-vmlinux"),
             env:               Default::default(),
+            guest_console_log: None,
         }
     }
 

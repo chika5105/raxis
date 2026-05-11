@@ -78,6 +78,7 @@ fn fixture_spec() -> VmSpec {
         // `linux_kernel_path` doc covers this contract explicitly.
         linux_kernel_path: std::path::PathBuf::new(),
         env:               BTreeMap::new(),
+        guest_console_log: None,
     }
 }
 

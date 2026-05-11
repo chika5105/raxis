@@ -167,6 +167,14 @@ flate2      = { version = "1", default-features = false, features = ["rust_backe
 # correct outcome (vsock doesn't exist on macOS / Windows).
 tokio-vsock = "0.7"
 
+# Direct libc syscall bindings. Used by `planner-core::guest_init`
+# to invoke `mount(2)` from a planner binary running as PID 1
+# inside a Linux microVM (initramfs rootfs has nothing mounted by
+# default). Linux-only at the build level; the corresponding
+# `[target.'cfg(target_os = "linux")'.dependencies]` block in each
+# consuming crate keeps the dep out of macOS / Windows builds.
+libc        = "0.2"
+
 # Fast non-cryptographic hash for kernel-internal maps where keys are
 # either small integers or short, **non-user-controllable** strings —
 # typically constants like lane_id, gate_type, or capability_class

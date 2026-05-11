@@ -617,12 +617,20 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
         "policy.toml already has a [gateway] block; bootstrap template changed",
     );
     let injected = format!(
-        "\n# ── [gateway] + [[providers]] injected by full_e2e_session_lifecycle ──\n\
+        "\n# ── [gateway] + [[providers]] + [egress] injected by full_e2e_session_lifecycle ──\n\
          [gateway]\n\
          binary_path              = \"{gw}\"\n\
          spawn_timeout_secs       = 30\n\
          respawn_backoff_ms       = 1000\n\
          max_consecutive_respawns = 5\n\
+         \n\
+         # Gateway-side domain allowlist re-validation per peripherals.md §3.2.\n\
+         # Without this section the gateway rejects every dispatched URL with\n\
+         # `DomainNotAllowed`, regardless of what the kernel admitted, because\n\
+         # the gateway does NOT trust the kernel's pre-validation result.\n\
+         [egress]\n\
+         domains = [\"api.anthropic.com\"]\n\
+         patterns = []\n\
          \n\
          [[providers]]\n\
          provider_id           = \"anthropic-e2e\"\n\

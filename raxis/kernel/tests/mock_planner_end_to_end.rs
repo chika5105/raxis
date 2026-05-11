@@ -210,8 +210,10 @@ fn describe_message(msg: &IpcMessage) -> &'static str {
     match msg {
         IpcMessage::IntentRequest(_)              => "IntentRequest",
         IpcMessage::EscalationRequest(_)          => "EscalationRequest",
+        IpcMessage::PlannerFetchRequest(_)        => "PlannerFetchRequest",
         IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
         IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
+        IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
         IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
         IpcMessage::WitnessAck { .. }             => "WitnessAck",
         IpcMessage::OperatorRequest(_)            => "OperatorRequest",

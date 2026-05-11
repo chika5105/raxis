@@ -79,6 +79,7 @@ pub mod custom_tools;
 pub mod dispatch;
 pub mod driver;
 pub mod gemini_client;
+pub mod guest_init;
 pub mod http_fetch;
 pub mod intent;
 pub mod ksb;
@@ -133,6 +134,7 @@ pub use cmdline_env::{
     apply_envb64_payload, hydrate_from_path, hydrate_from_proc_cmdline,
     HydrationOutcome, CMDLINE_ENV_TOKEN,
 };
+pub use guest_init::init_pid1_filesystem;
 pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
 pub use gemini_client::GeminiClient;
 pub use openai_client::OpenAiClient;

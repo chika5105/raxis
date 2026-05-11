@@ -160,7 +160,14 @@ pub struct SpawnRequest {
 /// a *summary* of what was bound. The caller does NOT directly drive
 /// the isolation session — IPC traffic flows through the kernel's
 /// existing transport plumbing. See `extensibility-traits.md §3.4`.
-#[derive(Debug, Clone)]
+///
+/// **Note: not `Clone`.** The handle now owns the kernel-side IPC
+/// stream surrendered by the substrate (when the substrate is a
+/// microVM and the planner is bound as a vsock listener). That
+/// stream is a `tokio::net::UnixStream` and cannot be cloned; the
+/// caller is expected to `take()` it once and pass it into a
+/// per-session dispatch task.
+#[derive(Debug)]
 pub struct SpawnHandle {
     /// Echo of the request's `session_id`.
     pub session_id:           String,
@@ -178,6 +185,18 @@ pub struct SpawnHandle {
     /// or the vsock CID at V2 GA. Likewise pre-stamped into
     /// `VmSpec.env` under `RAXIS_TPROXY_KERNEL_TCP`.
     pub admission_loopback:    SocketAddr,
+    /// Host-side end of the kernel ↔ guest IPC channel for
+    /// substrates that surrender one at spawn time
+    /// (`Session::take_kernel_ipc_fd`). The kernel-side caller is
+    /// expected to `Option::take` this stream and run its planner
+    /// dispatch loop on it (`raxis_kernel::ipc::server::
+    /// drive_planner_stream`).
+    ///
+    /// `None` for substrates where the planner dials the kernel's
+    /// UDS planner socket directly (subprocess, wasm) — those
+    /// rely on the kernel's existing `accept_planner_loop` to pick
+    /// up the connection without per-session bridging.
+    pub kernel_ipc_stream:     Option<tokio::net::UnixStream>,
 }
 
 /// Outcome of a successful `terminate_session` call.
@@ -356,7 +375,7 @@ impl SessionSpawnService {
         // Failure here MUST tear down the credential proxies AND the
         // admission listener bound above. Drop on the listener
         // releases the port immediately.
-        let session = match self.isolation.spawn(
+        let mut session = match self.isolation.spawn(
             &req.image,
             &req.workspace_mounts,
             &req.vm_spec,
@@ -368,6 +387,41 @@ impl SessionSpawnService {
                 return Err(SpawnError::IsolationSpawn(e));
             }
         };
+
+        // ── Step 4.5: surrender the kernel-side IPC stream. ─────────
+        //
+        // microVM substrates (Apple-VZ today, Firecracker once it
+        // implements `take_kernel_ipc_fd`) negotiate a per-session
+        // VSock SOCK_STREAM at spawn time and hand the host-side
+        // fd back here. We wrap it as a non-blocking
+        // `tokio::net::UnixStream` so the kernel's existing
+        // `handle_planner_connection` machinery (length-prefixed
+        // bincode `IpcMessage` framing per `peripherals.md §3`) can
+        // drive it directly without bouncing every byte through the
+        // synchronous `Session::push` / `Session::recv_intent` pair.
+        //
+        // Any failure to wrap the fd is fail-closed: tear down the
+        // VM, the admission listener, and the credential proxies.
+        // The kernel cannot proceed without the IPC channel for
+        // substrates that produced one — silently dropping the fd
+        // would surface as a vsock CONNECT timeout in the guest.
+        let kernel_ipc_stream: Option<tokio::net::UnixStream> =
+            match session.take_kernel_ipc_fd() {
+                Some(fd) => match wrap_ipc_fd_as_unix_stream(fd) {
+                    Ok(stream) => Some(stream),
+                    Err(e) => {
+                        drop(admission_listener);
+                        let _ = session.terminate();
+                        let _ = cred_handles.shutdown();
+                        return Err(SpawnError::IsolationSpawn(
+                            raxis_isolation::IsolationError::TransportFault(format!(
+                                "session-spawn: wrap kernel IPC fd: {e}"
+                            )),
+                        ));
+                    }
+                },
+                None => None,
+            };
         tracing::info!(
             session_id = %session_id,
             backend    = self.isolation.backend_id(),
@@ -468,6 +522,7 @@ impl SessionSpawnService {
             vsock_cid:          req.vm_spec.vsock_cid,
             loopback_env,
             admission_loopback: admission_addr,
+            kernel_ipc_stream,
         })
     }
 
@@ -589,4 +644,40 @@ fn classify_exit(status: &ExitStatus) -> (String, i32, Option<String>) {
         ExitStatus::Timeout                 => ("Timeout".into(),       -1,                None),
         ExitStatus::BackendError(msg)       => ("BackendError".into(),  -2, Some(msg.clone())),
     }
+}
+
+/// Wrap a substrate-surrendered SOCK_STREAM file descriptor as a
+/// non-blocking [`tokio::net::UnixStream`].
+///
+/// The contract from [`raxis_isolation::Session::take_kernel_ipc_fd`]:
+/// the substrate has already established a connected SOCK_STREAM and
+/// transferred ownership of the fd to us. We MUST set `O_NONBLOCK`
+/// and hand it to tokio's reactor so the kernel's per-session
+/// dispatch loop can `await` reads without blocking the executor.
+///
+/// `tokio::net::UnixStream::from_std` expects a non-blocking
+/// `std::os::unix::net::UnixStream`; the `from_raw_fd` constructor
+/// takes ownership of the fd, so on success the fd's lifetime is
+/// the returned stream's `Drop`.
+///
+/// On failure the fd is dropped (closed) by the intermediate
+/// `std::os::unix::net::UnixStream` value, so the substrate's `Drop`
+/// will not double-close.
+fn wrap_ipc_fd_as_unix_stream(
+    fd: std::os::unix::io::RawFd,
+) -> Result<tokio::net::UnixStream, std::io::Error> {
+    use std::os::unix::io::FromRawFd;
+    // SAFETY: `fd` is a SOCK_STREAM file descriptor whose ownership
+    // was just transferred to us per the
+    // `Session::take_kernel_ipc_fd` contract. The substrate
+    // promises not to close it again. The crate carries
+    // `#![deny(unsafe_code)]` because the rest of the module is
+    // pure data flow over already-typed sockets; this single
+    // syscall wrapper is the one place where we cross the FFI
+    // boundary, and the contract is exhaustively documented at
+    // `Session::take_kernel_ipc_fd`.
+    #[allow(unsafe_code)]
+    let std_stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+    std_stream.set_nonblocking(true)?;
+    tokio::net::UnixStream::from_std(std_stream)
 }

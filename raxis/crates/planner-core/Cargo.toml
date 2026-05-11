@@ -52,6 +52,13 @@ base64      = { workspace = true }
 # error, which is the correct fail-closed behaviour).
 tokio-vsock = { workspace = true, optional = true }
 
+# `libc` is used by `guest_init::mount_pid1_essentials` to invoke
+# the `mount(2)` syscall directly. Linux-only — on macOS / other
+# the `guest_init` module compiles to a no-op via `cfg(target_os
+# = "linux")`, so we gate the dep too.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread", "io-util", "fs", "process"] }
 tempfile = "3"

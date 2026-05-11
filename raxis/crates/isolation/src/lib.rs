@@ -351,6 +351,30 @@ pub struct VmSpec {
     /// **`BTreeMap` rather than `HashMap`** — deterministic
     /// iteration order makes audit-log replay reproducible.
     pub env: std::collections::BTreeMap<String, String>,
+
+    /// Optional host-side path the substrate appends guest serial
+    /// console output to.
+    ///
+    /// Set by `SessionSpawnService` to
+    /// `<data_dir>/guests/<session_id>/console.log` (created with
+    /// mode 0600 — the file may contain prompt-injection-class
+    /// model output and is not for general operator viewing).
+    /// Substrates that lack a serial console (the subprocess
+    /// substrate forwards stdout/stderr through `Command::stdout`
+    /// directly; Firecracker writes to its own `log_path`) MAY
+    /// ignore this field; the AVF substrate attaches a
+    /// `VZVirtioConsoleDeviceSerialPortConfiguration` whose
+    /// `fileHandleForWriting` points at the path so guest stderr
+    /// (e.g. planner panics, kernel boot messages) is captured for
+    /// post-mortem debugging.
+    ///
+    /// **Why optional, not always-set:** the kernel may decline to
+    /// allocate a console log for substrates that don't need it
+    /// (pure-ring-buffer backends, Wasm modules) without forcing
+    /// every backend to handle a placeholder path. `None` means
+    /// "no console capture; substrate's default discard behaviour
+    /// applies".
+    pub guest_console_log: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -663,6 +687,44 @@ pub trait Session: Send + 'static {
     /// Transport-level identity of this session for diagnostic logs.
     /// MUST be stable for the lifetime of the session.
     fn session_identity(&self) -> SessionTransportId;
+
+    /// **Optionally surrender the kernel ↔ guest IPC file
+    /// descriptor.** Substrates that boot a microVM (Apple-VZ,
+    /// Firecracker) negotiate a per-session VSock SOCK_STREAM
+    /// connection at spawn time and expose its host-side fd here so
+    /// the kernel's IPC dispatch loop can read length-prefixed
+    /// `bincode IpcMessage` frames directly off the transport
+    /// instead of bouncing every byte through the synchronous
+    /// [`Session::push`] / [`Session::recv_intent`] pair.
+    ///
+    /// **Ownership transfer.** After this method returns `Some(fd)`,
+    /// the caller owns the fd and is responsible for closing it
+    /// (typically by wrapping it in a stream type whose `Drop` impl
+    /// closes the fd). The substrate MUST NOT close the fd in its
+    /// own `terminate` / `shutdown` / `Drop` impls after handing
+    /// ownership over. Subsequent calls to [`Session::push`] /
+    /// [`Session::recv_intent`] on the same session SHOULD return a
+    /// typed transport-fault error rather than reuse the fd.
+    ///
+    /// **Default impl returns `None`** because substrates where the
+    /// planner dials the kernel's UDS planner socket directly (e.g.
+    /// the test-only [`SubprocessIsolation`]) do not expose a
+    /// kernel-side IPC fd: the kernel-side accept loop on
+    /// `planner.sock` already gives the dispatcher a UDS stream
+    /// without any substrate involvement.
+    ///
+    /// Wire framing on top of the fd is identical across substrates
+    /// (length-prefixed bincode `IpcMessage` per
+    /// `peripherals.md §3`). The kernel-side caller is responsible
+    /// for setting `O_NONBLOCK` and wrapping into the async stream
+    /// type appropriate for its runtime.
+    ///
+    /// `RawFd` (vs a typed stream object) keeps this trait crate
+    /// dependency-free of `tokio` / `mio`; the fd plumbing happens
+    /// in the substrate-agnostic session-spawn service one layer up.
+    fn take_kernel_ipc_fd(&mut self) -> Option<std::os::unix::io::RawFd> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

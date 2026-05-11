@@ -666,10 +666,18 @@ pub(crate) mod dispatch_log {
 }
 
 /// Dispatch a single request to the appropriate handler.
+///
+/// `ctx: &Arc<HandlerContext>` (rather than the historical
+/// `&HandlerContext`) is required so handlers that need to spawn
+/// detached tokio tasks bound to the same context — today: the
+/// post-approve-plan planner-dispatch bridge — can `Arc::clone(ctx)`
+/// without rebuilding a fresh `Arc` from the deref'd reference.
+/// All existing call sites continue to work because `Arc<T>` derefs
+/// to `&T` at every method-call site.
 async fn handle_request(
     request: OperatorRequest,
     operator: &AuthenticatedOperator,
-    ctx: &HandlerContext,
+    ctx: &Arc<HandlerContext>,
 ) -> OperatorResponse {
     match request {
         OperatorRequest::CreateSession {
@@ -1251,7 +1259,7 @@ async fn handle_approve_plan(
     initiative_id:      String,
     approving_operator: String,
     authenticated:      &AuthenticatedOperator,
-    ctx:                &HandlerContext,
+    ctx:                &Arc<HandlerContext>,
 ) -> OperatorResponse {
     if approving_operator != authenticated.fingerprint {
         return OperatorResponse::Error {
@@ -1407,16 +1415,28 @@ async fn handle_approve_plan(
                     )
                     .await
                 {
-                    Ok(handle) => {
+                    Ok(mut handle) => {
                         eprintln!(
                             "{{\"level\":\"info\",\"event\":\"orchestrator_spawn_ok\",\
                              \"initiative_id\":\"{initiative_id}\",\
                              \"session_id\":\"{session_id}\",\
                              \"admission_loopback\":\"{admission}\",\
-                             \"task_prompt_bytes\":{task_prompt_len}}}",
+                             \"task_prompt_bytes\":{task_prompt_len},\
+                             \"kernel_ipc_bridged\":{bridged}}}",
                             initiative_id = result.initiative_id,
                             session_id    = handle.session_id,
                             admission     = handle.admission_loopback,
+                            bridged       = handle.kernel_ipc_stream.is_some(),
+                        );
+                        // Hand the substrate-surrendered IPC stream
+                        // (when one exists — microVM substrates only;
+                        // see `Session::take_kernel_ipc_fd`) into the
+                        // kernel's planner dispatch loop. No-op for
+                        // subprocess substrate where the planner
+                        // dials `planner.sock` directly.
+                        crate::session_spawn_orchestrator::spawn_planner_dispatcher(
+                            &mut handle,
+                            Arc::clone(ctx),
                         );
                     }
                     Err(e) => {

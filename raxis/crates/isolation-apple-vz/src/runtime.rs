@@ -264,7 +264,48 @@ mod macos {
         vm:         Option<VmHandle>,
         started:    bool,
         last_error: Option<String>,
+        /// Background thread that drains AVF's serial-port pipe to
+        /// the host-side console log file. Set when
+        /// [`AvfConfig::console_log`] is present and the substrate
+        /// successfully wires the pipe; cleared when the runtime is
+        /// dropped (the read end closes, the thread exits naturally).
+        console_pump: Option<std::thread::JoinHandle<()>>,
+        /// Live `VZVirtioSocketConnection` retained for the lifetime
+        /// of the session. AVF returns the fd via the connection's
+        /// `fileDescriptor` property, which the connection owns and
+        /// closes at deinit. We keep the strong reference here so
+        /// the kernel-side `tokio::net::UnixStream` (built from a
+        /// `dup(2)` of the fd we extracted under that
+        /// retain-window) and the AVF-owned original fd both stay
+        /// open until session teardown — at which point Drop on
+        /// this `Option` releases the connection (closing the
+        /// AVF-owned fd) and Drop on the kernel-side stream
+        /// closes the dup independently.
+        ///
+        /// Stored as `VsockConnHandle` (a `Send`-marked wrapper)
+        /// because the runtime itself is `Send` and the connection
+        /// pointer is queue-confined: we never call methods on it
+        /// from arbitrary threads after the initial fd extraction.
+        vsock_conn:  Option<VsockConnHandle>,
     }
+
+    /// `Send` wrapper around a retained `VZVirtioSocketConnection`.
+    ///
+    /// AVF's queue-confinement contract applies to method calls on
+    /// the connection, but the bare `Retained<...>` is not `Send`
+    /// because the underlying ObjC object is not `Sync`. We never
+    /// call methods through this handle after construction; it
+    /// exists solely to keep the connection alive (and therefore
+    /// the AVF-owned fd open) for the lifetime of the runtime.
+    /// The `unsafe impl Send` records that invariant.
+    struct VsockConnHandle(#[allow(dead_code)] Retained<VZVirtioSocketConnection>);
+
+    // SAFETY: the wrapped pointer is only ever dropped here (which
+    // calls release on the substrate's drop thread). No methods are
+    // invoked on the connection after the fd extraction inside the
+    // dispatch block at `connect_vsock_once`, so the queue-
+    // confinement contract is preserved.
+    unsafe impl Send for VsockConnHandle {}
 
     /// Send-safe wrapper around a queue-confined `VZVirtualMachine`.
     ///
@@ -307,6 +348,196 @@ mod macos {
         }
     }
 
+    use std::cell::RefCell;
+    use std::path::Path;
+
+    thread_local! {
+        /// Stash for the console-pump `JoinHandle` produced inside
+        /// `build_configuration` (which only holds `&self`). The
+        /// caller (`start`, which holds `&mut self`) collects it
+        /// and stores it on the runtime so the thread is joined
+        /// at runtime drop.
+        static CONSOLE_PUMP_TAKE: RefCell<Option<std::thread::JoinHandle<()>>> =
+            const { RefCell::new(None) };
+    }
+
+    /// Allocate an anonymous pipe via `libc::pipe`, attach the
+    /// write end to AVF as a `VZVirtioConsoleDeviceSerialPortConfiguration`,
+    /// and spawn a background thread that drains the read end into
+    /// the host-side console log file.
+    ///
+    /// # Errors
+    /// * `pipe(2)` failure surfaces as `RuntimeError::InvalidConfig`
+    ///   with the OS error string (host fd-table exhaustion is the
+    ///   only realistic cause).
+    /// * Failure to create / open the host log file surfaces the
+    ///   same way; the substrate refuses to start a VM whose console
+    ///   capture cannot be wired (no silent dropping).
+    fn wire_console_pipe(
+        log_path: &Path,
+        conf:     &VZVirtualMachineConfiguration,
+    ) -> Result<std::thread::JoinHandle<()>, RuntimeError> {
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| RuntimeError::InvalidConfig(format!(
+                    "console.log parent {}: {e}",
+                    parent.display(),
+                )))?;
+        }
+        // Truncate-open: the file is per-session; previous content
+        // (if any) is stale.
+        let mut sink = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(log_path)
+            .map_err(|e| RuntimeError::InvalidConfig(format!(
+                "console.log open {}: {e}", log_path.display(),
+            )))?;
+
+        // Host-side marker so the file is never zero bytes — even
+        // if the guest never produces a single byte (kernel boot
+        // failure before virtio-console enumeration), the operator
+        // can see "the substrate did wire a console" vs "the
+        // substrate gave up on wiring".
+        use std::io::Write as _;
+        let _ = writeln!(
+            sink,
+            "{{\"level\":\"info\",\"step\":\"avf-console\",\
+              \"event\":\"host_marker\",\"path\":{:?}}}",
+            log_path.display().to_string(),
+        );
+        let _ = sink.flush();
+
+        // Allocate the pipe.
+        let mut fds: [c_int; 2] = [0, 0];
+        // SAFETY: pipe(2) writes two fds into the supplied buffer.
+        let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(RuntimeError::InvalidConfig(format!(
+                "console.log pipe(2): {}",
+                std::io::Error::last_os_error(),
+            )));
+        }
+        let read_fd  = fds[0];
+        let write_fd = fds[1];
+
+        // Wrap the write end in NSFileHandle and hand it to AVF.
+        // SAFETY: NSFileHandle takes ownership of `write_fd` via
+        // `closeOnDealloc:YES`; AVF retains the NSFileHandle for
+        // the lifetime of the VM (strong property on the
+        // attachment), so the fd stays open until VM teardown.
+        let nfh = objc2_foundation::NSFileHandle::initWithFileDescriptor_closeOnDealloc(
+            objc2_foundation::NSFileHandle::alloc(),
+            write_fd,
+            true,
+        );
+        let attach = unsafe {
+            objc2_virtualization::VZFileHandleSerialPortAttachment::initWithFileHandleForReading_fileHandleForWriting(
+                objc2_virtualization::VZFileHandleSerialPortAttachment::alloc(),
+                None,
+                Some(&nfh),
+            )
+        };
+        // SAFETY: VZFileHandleSerialPortAttachment <: VZSerialPortAttachment.
+        let attach_upcast: Retained<
+            objc2_virtualization::VZSerialPortAttachment,
+        > = unsafe {
+            Retained::cast_unchecked::<
+                objc2_virtualization::VZSerialPortAttachment,
+            >(attach)
+        };
+        let port_cfg = unsafe {
+            objc2_virtualization::VZVirtioConsoleDeviceSerialPortConfiguration::new()
+        };
+        // SAFETY: setAttachment is a strong setter; the configuration
+        // retains the attachment for the configuration's lifetime.
+        unsafe { port_cfg.setAttachment(Some(&attach_upcast)); }
+        // SAFETY: VZVirtioConsoleDeviceSerialPortConfiguration <: VZSerialPortConfiguration.
+        let port_upcast: Retained<
+            objc2_virtualization::VZSerialPortConfiguration,
+        > = unsafe {
+            Retained::cast_unchecked::<
+                objc2_virtualization::VZSerialPortConfiguration,
+            >(port_cfg)
+        };
+        let serial_array =
+            NSArray::from_retained_slice(std::slice::from_ref(&port_upcast));
+        // SAFETY: setSerialPorts copies the array (per the Apple
+        // docs / objc2 binding) so the configuration owns its own
+        // references after this call.
+        unsafe { conf.setSerialPorts(&serial_array); }
+
+        // Background thread: read the pipe's read end, append to
+        // the file. Uses blocking `read(2)` — when AVF closes the
+        // write end at VM teardown the read returns 0 and the
+        // thread exits.
+        let path_for_log  = log_path.display().to_string();
+        let pump = std::thread::Builder::new()
+            .name(format!("raxis-avf-console-{}",
+                log_path.file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("guest"),
+            ))
+            .spawn(move || {
+                let mut buf = [0u8; 4096];
+                loop {
+                    // SAFETY: read(2) into a stack buffer of known
+                    // size; rc < 0 ⇒ error, == 0 ⇒ EOF, > 0 ⇒
+                    // bytes available.
+                    let rc = unsafe {
+                        libc::read(
+                            read_fd,
+                            buf.as_mut_ptr() as *mut _,
+                            buf.len(),
+                        )
+                    };
+                    if rc < 0 {
+                        let e = std::io::Error::last_os_error();
+                        if e.raw_os_error() == Some(libc::EINTR) {
+                            continue;
+                        }
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"avf_console_pump_read_err\",\
+                              \"path\":{:?},\"err\":{:?}}}",
+                            path_for_log, e.to_string(),
+                        );
+                        break;
+                    }
+                    if rc == 0 {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"avf_console_pump_eof\",\
+                              \"path\":{:?}}}",
+                            path_for_log,
+                        );
+                        break;
+                    }
+                    if let Err(e) = sink.write_all(&buf[..rc as usize]) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"avf_console_pump_write_err\",\
+                              \"path\":{:?},\"err\":{:?}}}",
+                            path_for_log, e.to_string(),
+                        );
+                        break;
+                    }
+                    // Flush so an interactive `tail -F` sees output
+                    // promptly — important when the operator is
+                    // debugging a stuck guest.
+                    let _ = sink.flush();
+                }
+                // Best-effort close — read side stays open until
+                // here so we can drain the pipe to completion.
+                unsafe {
+                    libc::close(read_fd);
+                }
+            })
+            .map_err(|e| RuntimeError::InvalidConfig(format!(
+                "console pump thread spawn: {e}",
+            )))?;
+
+        Ok(pump)
+    }
+
     impl AvfRuntime {
         /// Build a runtime; allocates the serial dispatch queue but
         /// no AVF objects yet. The first AVF call happens in
@@ -316,10 +547,12 @@ mod macos {
             Self {
                 cfg,
                 queue,
-                config_obj: None,
-                vm:         None,
-                started:    false,
-                last_error: None,
+                config_obj:   None,
+                vm:           None,
+                started:      false,
+                last_error:   None,
+                console_pump: None,
+                vsock_conn:   None,
             }
         }
 
@@ -529,6 +762,70 @@ mod macos {
                 conf.setSocketDevices(&socket_array);
             }
 
+            // ---- Serial console (for guest stderr capture) -------
+            //
+            // When the kernel-side `VmSpec::guest_console_log` is
+            // populated the substrate attaches a single
+            // `VZVirtioConsoleDeviceSerialPortConfiguration` whose
+            // `fileHandleForWriting` is the **write end of an
+            // anonymous pipe**. A background thread on the host
+            // reads from the pipe's read end and appends bytes to
+            // the host-side console log. The Linux kernel cmdline
+            // (`console=hvc0`) routes guest printk + stdout +
+            // stderr there so panics (PID 1 dying → kernel reboot
+            // per `panic=10`) leave a forensic trail on the host
+            // instead of just a vsock RST.
+            //
+            // **Why a pipe and not a regular file.** Empirically AVF
+            // 15.x writes nothing to a regular-file `NSFileHandle`
+            // — even with `O_APPEND` and `closeOnDealloc:NO`,
+            // `validateWithError:` accepts the configuration but
+            // the kernel's hvc0 output never appears. A pipe
+            // (`PF_LOCAL` semantics) IS honoured. The cost is one
+            // extra background thread per VM, which is acceptable
+            // for the V2 GA fan-out (~hundreds of concurrent VMs
+            // tops on a single host per the deployment spec). The
+            // thread has constant memory footprint (4 KiB stack)
+            // and exits naturally when AVF closes the write end at
+            // VM teardown.
+            //
+            // **No reader fd attached** — the guest is write-only
+            // from the host's perspective. We accept the cost of
+            // not capturing host→guest console writes (the planner
+            // never reads stdin in V2 GA).
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"avf_console_log_decision\",\
+                  \"console_log_set\":{}}}",
+                self.cfg.console_log.is_some(),
+            );
+            if let Some(path) = self.cfg.console_log.as_ref() {
+                match wire_console_pipe(path, &conf) {
+                    Ok(handle) => {
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"avf_console_log_attached\",\
+                              \"path\":{:?}}}",
+                            path.display().to_string(),
+                        );
+                        // SAFETY of the cell mutation: we are inside
+                        // `build_configuration(&self)`, but the cell
+                        // holding `console_pump` is `Option` on the
+                        // runtime which is NOT borrowed here. We
+                        // re-enter through `start()` which holds
+                        // `&mut self`. Push the join handle onto a
+                        // thread-local instead and pick it up in
+                        // `start()`.
+                        CONSOLE_PUMP_TAKE.with(|cell| {
+                            *cell.borrow_mut() = Some(handle);
+                        });
+                    }
+                    Err(e) => eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"avf_console_log_open_failed\",\
+                          \"path\":{:?},\"err\":{:?}}}",
+                        path.display().to_string(), e.to_string(),
+                    ),
+                }
+            }
+
             // ---- Validate ----------------------------------------
             match unsafe { conf.validateWithError() } {
                 Ok(()) => Ok(conf),
@@ -550,6 +847,11 @@ mod macos {
                 return Ok(());
             }
             let conf = self.build_configuration()?;
+            // build_configuration may have stashed a console pump
+            // join handle in a thread-local; pick it up so it lives
+            // alongside the runtime (joined on drop / stop).
+            let pump = CONSOLE_PUMP_TAKE.with(|cell| cell.borrow_mut().take());
+            self.console_pump = pump;
             self.config_obj = Some(conf.clone());
 
             // SAFETY: VM init must happen on the substrate's queue.
@@ -598,14 +900,30 @@ mod macos {
             match rx.recv_timeout(grace) {
                 Ok(Ok(())) => {
                     self.started = true;
+                    eprintln!(
+                        "{{\"level\":\"info\",\"event\":\"avf_vm_started\",\
+                          \"vcpu\":{},\"mem_mib\":{}}}",
+                        self.cfg.vcpu_count,
+                        self.cfg.mem_mib,
+                    );
                     Ok(())
                 }
                 Ok(Err(e)) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"avf_vm_start_failed\",\
+                          \"err\":{:?}}}",
+                        e.to_string(),
+                    );
                     self.last_error = Some(e.to_string());
                     Err(e)
                 }
                 Err(_) => {
                     let err = RuntimeError::StartTimeout(grace);
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"avf_vm_start_timeout\",\
+                          \"grace_ms\":{}}}",
+                        grace.as_millis(),
+                    );
                     self.last_error = Some(err.to_string());
                     Err(err)
                 }
@@ -651,8 +969,15 @@ mod macos {
 
             self.started = false;
             self.config_obj = None;
+            // Drop the configuration object so the AVF retains on
+            // the serial-port attachment (and therefore on the
+            // pipe's NSFileHandle write side) get released; that
+            // lets the console-pump thread observe EOF on its read
+            // side and exit. Without this drop the pump would
+            // hang until process exit.
+            // (The actual drop happens above by `self.config_obj = None`.)
 
-            match rx.recv_timeout(grace) {
+            let result = match rx.recv_timeout(grace) {
                 Ok(Ok(())) => Ok(AvfExit {
                     final_state: VmStateSnapshot::Stopped,
                     graceful:    true,
@@ -671,17 +996,51 @@ mod macos {
                     graceful:    false,
                     reason:      Some(format!("stop timed out after {grace:?}")),
                 }),
+            };
+
+            // Best-effort join the console-pump thread. The thread
+            // exits naturally on pipe EOF (which arrives once AVF
+            // releases the write-side NSFileHandle on VM teardown).
+            // We don't propagate panics from the pump — its only
+            // job is forensic capture, never observable behaviour.
+            if let Some(pump) = self.console_pump.take() {
+                let _ = pump.join();
             }
+
+            result
         }
 
         /// Open a VSock connection to a guest port.
         ///
         /// Resolves the VM's `VZVirtioSocketDevice` from
         /// `socketDevices`, dispatches
-        /// `connectToPort:completionHandler:`, and returns the
-        /// resulting connection's file descriptor. The substrate's
-        /// caller (`AppleVzSession`) owns the fd and is responsible
-        /// for closing it on session teardown.
+        /// `connectToPort:completionHandler:`, and returns:
+        ///
+        /// * a **dup'd file descriptor** the substrate caller owns
+        ///   outright (closed when the substrate's downstream
+        ///   stream wrapper drops);
+        /// * the **retained `VZVirtioSocketConnection`**, which the
+        ///   runtime stores as `vsock_conn` so the AVF-owned
+        ///   original fd stays open for the lifetime of the
+        ///   session (the AVF connection deinit closes its own
+        ///   fd; without a strong reference the autorelease pool
+        ///   would drain it the moment the dispatch block returns
+        ///   and the dup we just produced would race against
+        ///   AVF closing the underlying socketpair half).
+        ///
+        /// **Why a dup at extraction time.** The AVF connection
+        /// object owns the fd via `closeOnDealloc`-equivalent
+        /// semantics. If we ever leak the same integer fd to two
+        /// owners (AVF's connection + a Rust `OwnedFd`), the next
+        /// `close(2)` after the first owner releases is on a
+        /// closed fd → the std I/O safety harness aborts the
+        /// process with
+        ///   `fatal runtime error: IO Safety violation: owned
+        ///    file descriptor already closed, aborting`.
+        /// Dup-ping inside the dispatch block (before AVF can
+        /// reap the connection's autorelease pool) gives us an
+        /// independent fd whose lifetime the Rust side controls
+        /// end-to-end.
         ///
         /// **Boot-race retry.** AVF's `connectToPort:` does not wait
         /// for the guest to bind a listener; it dispatches the SYN
@@ -699,7 +1058,7 @@ mod macos {
         /// VM that is missing its `VZVirtioSocketDevice`, returns
         /// immediately. Both are programming bugs in the
         /// substrate, not transient guest-boot races.
-        pub fn connect_vsock(&self, port: u32) -> Result<c_int, RuntimeError> {
+        pub fn connect_vsock(&mut self, port: u32) -> Result<c_int, RuntimeError> {
             let deadline = std::time::Instant::now() + VSOCK_CONNECT_DEADLINE;
             // Track the most-recent transient reason so the
             // deadline-exhausted error message names what the guest
@@ -713,7 +1072,22 @@ mod macos {
             let mut last_err: Option<String> = None;
             loop {
                 match self.connect_vsock_once(port) {
-                    Ok(fd) => return Ok(fd),
+                    Ok((fd, conn_handle)) => {
+                        // Pin the AVF connection inside the runtime
+                        // so its owned fd survives until session
+                        // teardown. `vsock_conn` Drop releases the
+                        // ObjC object, which closes the AVF-owned
+                        // fd; the dup we just produced is closed
+                        // independently by the substrate's stream
+                        // wrapper.
+                        self.vsock_conn = Some(conn_handle);
+                        eprintln!(
+                            "{{\"level\":\"info\",\"event\":\"avf_vsock_connected\",\
+                              \"port\":{},\"dup_fd\":{}}}",
+                            port, fd,
+                        );
+                        return Ok(fd);
+                    }
                     Err(RuntimeError::VsockConnect { reason, .. })
                         if is_terminal_vsock_reason(&reason) =>
                     {
@@ -743,15 +1117,35 @@ mod macos {
         /// [`Self::connect_vsock`] so the boot-race retry loop can
         /// re-issue the call without re-implementing the queue +
         /// completion-handler bridge.
-        fn connect_vsock_once(&self, port: u32) -> Result<c_int, RuntimeError> {
+        ///
+        /// Returns `(dup_fd, retained_conn)` on success; see
+        /// [`Self::connect_vsock`] for the lifetime contract.
+        fn connect_vsock_once(
+            &self,
+            port: u32,
+        ) -> Result<(c_int, VsockConnHandle), RuntimeError> {
             let vm = self.vm.as_ref().ok_or_else(|| RuntimeError::VsockConnect {
                 port,
                 reason: "VM not started — start() must succeed before connecting vsock".to_owned(),
             })?;
 
-            // VsockResult is `Send` because both variants are owned
-            // primitives / Strings.
-            let (tx, rx) = mpsc::sync_channel::<Result<c_int, RuntimeError>>(1);
+            // The completion block dups the fd inside the AVF
+            // dispatch context (where `conn` is guaranteed live),
+            // retains the connection, and ships both pieces back to
+            // the calling thread.
+            //
+            // The `Retained<VZVirtioSocketConnection>` is wrapped in
+            // `VsockConnHandle` (a `Send`-marked newtype) so the
+            // standard `mpsc::sync_channel` can carry it across
+            // threads — `Retained` itself is not `Send` because
+            // ObjC object pointers are thread-confined for method
+            // dispatch, but our usage is "hold a strong reference,
+            // never call methods" until Drop, which is the exact
+            // contract `unsafe impl Send for VsockConnHandle`
+            // certifies.
+            type ConnectOutcome =
+                Result<(c_int, VsockConnHandle), RuntimeError>;
+            let (tx, rx) = mpsc::sync_channel::<ConnectOutcome>(1);
             let vm_for_dispatch = vm.clone_handle();
             let tx_for_dispatch = tx.clone();
             self.queue.exec_async(move || {
@@ -779,7 +1173,7 @@ mod macos {
                 let tx_inner = tx_for_dispatch.clone();
                 let block = RcBlock::new(
                     move |conn: *mut VZVirtioSocketConnection, err: *mut NSError| {
-                        let result = if !err.is_null() {
+                        let result: ConnectOutcome = if !err.is_null() {
                             // SAFETY: see start path.
                             let msg = unsafe { ns_error_string_from_raw(err) };
                             Err(RuntimeError::VsockConnect { port, reason: msg })
@@ -792,21 +1186,70 @@ mod macos {
                                         .to_owned(),
                             })
                         } else {
-                            // SAFETY: AVF returns a retained
-                            // VZVirtioSocketConnection; the fd is
-                            // owned by the connection until the
-                            // connection is released. We retain it
-                            // for the duration of the runtime so the
-                            // fd stays valid; release happens on
-                            // session teardown.
+                            // 1. Read the fd while `conn` is still
+                            //    guaranteed live (we are inside the
+                            //    completion handler, before the
+                            //    connection's autorelease pool can
+                            //    drain).
+                            //
+                            // SAFETY: completion handler contract:
+                            // `conn` is non-null per the branch we
+                            // just took, and points at an
+                            // AVF-owned `VZVirtioSocketConnection`.
                             let fd = unsafe { (*conn).fileDescriptor() };
                             if fd < 0 {
                                 Err(RuntimeError::VsockConnect {
                                     port,
-                                    reason: "AVF connection returned negative fd".to_owned(),
+                                    reason:
+                                        "AVF connection returned negative fd".to_owned(),
                                 })
                             } else {
-                                Ok(fd)
+                                // 2. Dup the fd so the host side
+                                //    owns an independent SOCK_STREAM
+                                //    endpoint. AVF's connection
+                                //    object retains close rights on
+                                //    its original fd; we MUST NOT
+                                //    hand that integer to any Rust
+                                //    `OwnedFd` lest the std I/O
+                                //    safety harness abort the
+                                //    process when AVF reaps its own
+                                //    fd at deinit.
+                                //
+                                // SAFETY: dup(2) on a valid SOCK_STREAM
+                                // fd; on failure (EMFILE) we propagate
+                                // a typed error.
+                                let dup_fd = unsafe { libc::dup(fd) };
+                                if dup_fd < 0 {
+                                    let e = std::io::Error::last_os_error();
+                                    Err(RuntimeError::VsockConnect {
+                                        port,
+                                        reason: format!(
+                                            "dup(2) on AVF vsock fd failed: {e}"
+                                        ),
+                                    })
+                                } else {
+                                    // 3. Retain the connection so its
+                                    //    own fd stays open until the
+                                    //    runtime drops the handle. The
+                                    //    AVF deinit will then close
+                                    //    *its* fd; ours stays open
+                                    //    until the substrate caller's
+                                    //    stream wrapper drops.
+                                    //
+                                    // SAFETY: `conn` is non-null and
+                                    // points at an AVF-owned ObjC
+                                    // object; `Retained::retain`
+                                    // bumps the refcount once and
+                                    // returns the strong reference.
+                                    let conn_strong = unsafe {
+                                        Retained::retain(conn).expect(
+                                            "AVF returned non-null \
+                                             VZVirtioSocketConnection \
+                                             but Retained::retain saw nil",
+                                        )
+                                    };
+                                    Ok((dup_fd, VsockConnHandle(conn_strong)))
+                                }
                             }
                         };
                         let _ = tx_inner.send(result);
@@ -996,6 +1439,7 @@ mod tests {
             // E2E lifecycle test.
             linux_kernel_path: PathBuf::from("/var/raxis/test/vmlinux.bin"),
             env:               Default::default(),
+            guest_console_log: None,
         }
     }
 
@@ -1080,7 +1524,7 @@ mod tests {
     #[test]
     fn runtime_connect_vsock_refuses_without_a_started_vm() {
         let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
-        let r = AvfRuntime::new(cfg);
+        let mut r = AvfRuntime::new(cfg);
         match r.connect_vsock(1024) {
             Err(RuntimeError::VsockConnect { port, reason }) => {
                 assert_eq!(port, 1024);

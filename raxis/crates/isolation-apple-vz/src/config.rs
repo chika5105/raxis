@@ -68,6 +68,25 @@ pub enum ConfigError {
          `kernel/src/canonical_images_preflight::linux_kernel_path`)"
     )]
     KernelPathMissing,
+
+    /// One of the `entrypoint_argv` tokens contained whitespace.
+    /// Linux's cmdline tokeniser splits on whitespace and does not
+    /// honour POSIX shell quoting, so a whitespace-bearing token
+    /// would silently fragment into multiple init argv entries —
+    /// which would deliver an unintended argv to the planner. The
+    /// substrate fails closed and instructs the caller to route the
+    /// value through env (`spec.env`) instead, which goes via the
+    /// `raxis.envb64=` cmdline channel that survives whitespace
+    /// intact.
+    #[error(
+        "entrypoint_argv contains a whitespace-bearing token {arg:?}; \
+         AVF cmdline tokeniser cannot pass it intact — route the \
+         value through VmSpec.env instead"
+    )]
+    EntrypointArgvWhitespace {
+        /// The offending argv token.
+        arg: String,
+    },
 }
 
 /// AVF's documented minimum memory size for a Linux guest. Below this
@@ -174,6 +193,13 @@ pub struct AvfConfig {
     pub network:       Option<AvfNetworkDevice>,
     /// VSock configuration.
     pub vsock:         AvfVsock,
+    /// Optional host file path for guest serial console capture.
+    /// When `Some`, the runtime attaches a
+    /// `VZVirtioConsoleDeviceSerialPortConfiguration` whose
+    /// `fileHandleForWriting` opens the path `O_WRONLY | O_CREAT |
+    /// O_APPEND` (mode 0600). Forwarded verbatim from
+    /// [`raxis_isolation::VmSpec::guest_console_log`].
+    pub console_log:   Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -229,21 +255,39 @@ pub fn translate(
         return Err(ConfigError::UnsupportedImageKind { kind: image.kind });
     }
     // Base kernel cmdline. `hvc0` is the canonical Virtio console
-    // for Linux guests under AVF; `reboot=k panic=1` makes a guest
-    // panic surface as a clean exit. For initramfs boots we pin
-    // `rdinit=/init` so the kernel honours our cpio-archived /init
-    // regardless of `CONFIG_DEFAULT_INIT`. EROFS boots get the
-    // virtio-blk root pin instead. Operator-supplied
-    // [`VmSpec::boot_args`] **replace** these defaults wholesale —
-    // the kernel session-spawn path stamps an empty `boot_args`
-    // for the canonical roles and the substrate owns the cmdline
-    // shape.
+    // for Linux guests under AVF; we pair it with `earlycon` so the
+    // kernel's earliest printk lines (before virtio is enumerated)
+    // also reach the host-side console log instead of disappearing
+    // into the void. `reboot=k panic=10` gives any panic backtrace
+    // ten seconds to flush to the virtio-console FIFO before AVF
+    // resets the VM (we used to use `panic=1` but a one-second
+    // delay is faster than the printk buffer can drain in some
+    // cases, leaving the host with a zero-byte log and no idea
+    // why init died). `loglevel=8 ignore_loglevel` raises printk
+    // verbosity unconditionally so kernel-side mount / module
+    // failures show up in the forensic trail. For initramfs boots
+    // we pin `rdinit=/init` so the kernel honours our
+    // cpio-archived /init regardless of `CONFIG_DEFAULT_INIT`;
+    // EROFS boots get the virtio-blk root pin instead.
+    // Operator-supplied [`VmSpec::boot_args`] **replace** these
+    // defaults wholesale — the kernel session-spawn path stamps
+    // an empty `boot_args` for the canonical roles and the
+    // substrate owns the cmdline shape.
+    // Note on `earlycon`: AVF does NOT expose a PL011 / 16550-compatible
+    // UART, so the canonical `earlycon=pl011,…` recipe from the QEMU
+    // ARM virt machine does not apply. The kernel's printk before
+    // virtio-console is enumerated is therefore lost; that's an
+    // accepted limitation of the AVF substrate. Once `hvc0` is up
+    // (after `virtio_pci` enumerates devices) all printk lands in
+    // the host-side console log.
+    let base_cmdline =
+        "console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10";
     let mut cmdline = if spec.boot_args.is_empty() {
         match image.kind {
             ImageKind::RootfsInitramfsCpio =>
-                "console=hvc0 reboot=k panic=1 rdinit=/init".to_owned(),
+                format!("{base_cmdline} rdinit=/init"),
             _ =>
-                "console=hvc0 reboot=k panic=1 root=/dev/vda ro".to_owned(),
+                format!("{base_cmdline} root=/dev/vda ro"),
         }
     } else {
         spec.boot_args.join(" ")
@@ -317,8 +361,41 @@ pub fn translate(
             AVF_PLANNER_PORT.to_string(),
         );
         // (2) per-spawn `spec.env` — overrides defaults.
+        //
+        // We **strip** `RAXIS_KERNEL_PLANNER_SOCKET` here even when
+        // the kernel session-spawn path stamped it. Rationale:
+        //
+        //   * `KernelTransportConfig::from_env_fn` checks
+        //     `RAXIS_KERNEL_PLANNER_SOCKET` BEFORE
+        //     `RAXIS_KERNEL_VSOCK_LISTEN_PORT`. If the UDS env var
+        //     leaks into the AVF guest, the planner picks UDS mode,
+        //     calls `UnixStream::connect` on a host-only path that
+        //     does not exist inside the guest filesystem, and fails
+        //     with `ENOENT` — surfacing as a vsock CONNECT timeout
+        //     on the host side because the planner never bound its
+        //     vsock listener.
+        //
+        //   * The kernel stamps the UDS env unconditionally because
+        //     it does not know the substrate at env-build time
+        //     (substrate selection is below the kernel-side bridge).
+        //     Stripping here is the substrate's responsibility — the
+        //     contract is "AVF is the source of truth for which
+        //     transport to expose to the guest".
+        //
+        //   * `RAXIS_KERNEL_VSOCK_CID` / `RAXIS_KERNEL_VSOCK_PORT`
+        //     (dial-out vsock variant used by Firecracker) is also
+        //     stripped for the same reason — the AVF substrate is
+        //     a vsock-listen substrate, not a vsock-dial substrate.
+        const STRIPPED: &[&str] = &[
+            "RAXIS_KERNEL_PLANNER_SOCKET",
+            "RAXIS_KERNEL_VSOCK_CID",
+            "RAXIS_KERNEL_VSOCK_PORT",
+        ];
         for (k, v) in &spec.env {
             if k.is_empty() {
+                continue;
+            }
+            if STRIPPED.iter().any(|s| *s == k.as_str()) {
                 continue;
             }
             effective.insert(k.clone(), v.clone());
@@ -333,6 +410,48 @@ pub fn translate(
         let b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
         cmdline.push_str(" raxis.envb64=");
         cmdline.push_str(&b64);
+    }
+
+    // ---- 2.5. Init args (`spec.entrypoint_argv[1..]`) ------------------
+    //
+    // Linux's `parse_args()` collects unrecognised cmdline tokens into
+    // `argv_init[]` (bare tokens) and `envp_init[]` (KEY=VAL tokens),
+    // which are then passed to `kernel_execve(init, argv_init,
+    // envp_init)`. By appending `-- <argv tail>` after the kernel
+    // params we reach the planner binary with `argv = [/init, …]` —
+    // the same shape `SubprocessIsolation` produces via
+    // `Command::args(&spec.entrypoint_argv)`.
+    //
+    // We strip `entrypoint_argv[0]` because under initramfs the
+    // kernel set argv[0] from `rdinit=` (the in-guest path), not
+    // from the host-side path the kernel-side spawn helper recorded.
+    // The dropped element is informational only — it is the planner's
+    // host-side install path which is meaningless inside the guest.
+    //
+    // **Quoting.** Linux's cmdline tokeniser splits on whitespace and
+    // does not honour POSIX shell quoting. Tokens with spaces would
+    // be split into separate argv entries. The orchestrator /
+    // executor / reviewer flags (`--initiative-id <UUID>`,
+    // `--task-id <UUID>`) only carry hex+`-` characters and are safe;
+    // a future role that needs whitespace-bearing args MUST go via
+    // env (the `raxis.envb64=` channel above) rather than argv.
+    if spec.entrypoint_argv.len() > 1 {
+        cmdline.push_str(" --");
+        for arg in spec.entrypoint_argv.iter().skip(1) {
+            if arg.is_empty() {
+                continue;
+            }
+            // Reject tokens that would break the cmdline tokeniser.
+            // Caller bug — better to fail closed than to silently
+            // mutate the planner argv.
+            if arg.chars().any(|c| c.is_whitespace()) {
+                return Err(ConfigError::EntrypointArgvWhitespace {
+                    arg: arg.clone(),
+                });
+            }
+            cmdline.push(' ');
+            cmdline.push_str(arg);
+        }
     }
     let initrd_url = match image.kind {
         ImageKind::RootfsInitramfsCpio => Some(rootfs_path.clone()),
@@ -417,6 +536,7 @@ pub fn translate(
         fs_shares,
         network,
         vsock,
+        console_log: spec.guest_console_log.clone(),
     })
 }
 
@@ -457,6 +577,7 @@ mod tests {
             virtio_fs_mounts:  Vec::new(),
             linux_kernel_path: PathBuf::from("/var/raxis/test/vmlinux.bin"),
             env:               Default::default(),
+            guest_console_log: None,
         }
     }
 
@@ -488,9 +609,10 @@ mod tests {
         // `spec.env` is empty — see
         // `translate_always_appends_substrate_default_env_keys`.
         assert!(
-            cfg.boot_loader
-                .command_line
-                .starts_with("console=hvc0 reboot=k panic=1 root=/dev/vda ro raxis.envb64="),
+            cfg.boot_loader.command_line.starts_with(
+                "console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10 \
+                 root=/dev/vda ro raxis.envb64=",
+            ),
             "unexpected cmdline shape: {:?}",
             cfg.boot_loader.command_line,
         );
@@ -525,9 +647,10 @@ mod tests {
             "initramfs boots use the kernel's initrd channel, not virtio-blk",
         );
         assert!(
-            cfg.boot_loader
-                .command_line
-                .starts_with("console=hvc0 reboot=k panic=1 rdinit=/init raxis.envb64="),
+            cfg.boot_loader.command_line.starts_with(
+                "console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10 \
+                 rdinit=/init raxis.envb64=",
+            ),
             "unexpected initramfs cmdline shape: {:?}",
             cfg.boot_loader.command_line,
         );
@@ -589,8 +712,13 @@ mod tests {
         let line = &cfg.boot_loader.command_line;
 
         // Default base prefix preserved.
-        assert!(line.starts_with("console=hvc0 reboot=k panic=1 root=/dev/vda ro"),
-            "base cmdline must precede the envb64 token; got {line:?}");
+        assert!(
+            line.starts_with(
+                "console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10 \
+                 root=/dev/vda ro",
+            ),
+            "base cmdline must precede the envb64 token; got {line:?}",
+        );
 
         // Locate and decode the token.
         let token = line
@@ -692,6 +820,72 @@ mod tests {
                 "RAXIS_KERNEL_VSOCK_LISTEN_PORT={AVF_PLANNER_PORT}\n",
             )),
             "substrate default must not coexist with operator override; got {payload:?}",
+        );
+    }
+
+    /// `RAXIS_KERNEL_PLANNER_SOCKET` and `RAXIS_KERNEL_VSOCK_*`
+    /// (dial-out flavour) MUST NOT be propagated into the guest
+    /// envelope. The kernel-side session-spawn path stamps them
+    /// because it is substrate-agnostic; the AVF substrate is the
+    /// authority on which transport the planner sees, and AVF
+    /// guests must use the listen-vsock path keyed off the
+    /// substrate-default `RAXIS_KERNEL_VSOCK_LISTEN_PORT`. If the
+    /// UDS path leaks, the planner's
+    /// `KernelTransportConfig::from_env_fn` selects UDS first and
+    /// fails with `ENOENT` inside the guest, surfacing as a vsock
+    /// CONNECT timeout on the host because the planner never
+    /// binds its listener.
+    #[test]
+    fn translate_strips_uds_and_dial_vsock_env_keys() {
+        use base64::Engine as _;
+
+        let mut spec = fixture_spec();
+        spec.env.insert(
+            "RAXIS_KERNEL_PLANNER_SOCKET".to_owned(),
+            "/var/lib/raxis/data/planners/abc.sock".to_owned(),
+        );
+        spec.env
+            .insert("RAXIS_KERNEL_VSOCK_CID".to_owned(), "2".to_owned());
+        spec.env
+            .insert("RAXIS_KERNEL_VSOCK_PORT".to_owned(), "1234".to_owned());
+        spec.env.insert(
+            "RAXIS_PLANNER_TASK_PROMPT".to_owned(),
+            "ship the demo".to_owned(),
+        );
+
+        let cfg = translate(&fixture_image(), &[], &spec).unwrap();
+        let token = cfg
+            .boot_loader
+            .command_line
+            .split_whitespace()
+            .find(|tok| tok.starts_with("raxis.envb64="))
+            .expect("substrate must always stamp the envb64 token");
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(token.strip_prefix("raxis.envb64=").unwrap().as_bytes())
+            .unwrap();
+        let payload = std::str::from_utf8(&bytes).unwrap();
+
+        assert!(
+            !payload.contains("RAXIS_KERNEL_PLANNER_SOCKET="),
+            "AVF substrate must strip the host UDS path; got {payload:?}",
+        );
+        assert!(
+            !payload.contains("RAXIS_KERNEL_VSOCK_CID="),
+            "AVF substrate must strip dial-out vsock CID; got {payload:?}",
+        );
+        assert!(
+            !payload.contains("RAXIS_KERNEL_VSOCK_PORT="),
+            "AVF substrate must strip dial-out vsock PORT; got {payload:?}",
+        );
+        assert!(
+            payload.contains("RAXIS_PLANNER_TASK_PROMPT=ship the demo\n"),
+            "non-stripped operator env must round-trip; got {payload:?}",
+        );
+        assert!(
+            payload.contains(&format!(
+                "RAXIS_KERNEL_VSOCK_LISTEN_PORT={AVF_PLANNER_PORT}\n",
+            )),
+            "substrate-default listen port must remain after the strip; got {payload:?}",
         );
     }
 

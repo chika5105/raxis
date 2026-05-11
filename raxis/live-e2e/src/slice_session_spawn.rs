@@ -133,6 +133,7 @@ pub async fn run() -> Result<()> {
             // this slice.
             linux_kernel_path: std::path::PathBuf::new(),
             env:               BTreeMap::new(),
+            guest_console_log: None,
         },
         credentials,
         admission_service: Box::new(PolicyAdmissionService::new(allowlist)),

@@ -385,6 +385,7 @@ mod tests {
             virtio_fs_mounts:  Vec::new(),
             linux_kernel_path: std::path::PathBuf::new(),
             env:               Default::default(),
+            guest_console_log: None,
         }
     }
 

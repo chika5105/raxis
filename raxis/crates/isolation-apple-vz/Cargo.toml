@@ -52,6 +52,13 @@ thiserror       = { workspace = true }
 # manifest so the substrate's link surface stays under tight
 # control.
 base64          = { workspace = true }
+# `libc` for `pipe(2)` + `read(2)` + `close(2)` in the AVF console
+# pump path. Apple's `Virtualization.framework` only writes
+# guest-console output to file handles backed by a pipe (regular
+# files are silently dropped on macOS 15.x), so the substrate
+# allocates an anonymous pipe per VM and drains it on a host
+# thread.
+libc            = { workspace = true }
 
 # `objc2-virtualization` is the macOS-only binding to
 # Virtualization.framework. Linked only on macOS targets so the
@@ -99,6 +106,15 @@ objc2-virtualization     = { version = "0.3", features = [
     "VZSocketDevice",
     "VZVirtioSocketDevice",
     "VZVirtioSocketConnection",
+    # Serial console (guest stdout / stderr capture for the
+    # `VmSpec::guest_console_log` path — `VZFileHandleSerialPortAttachment`
+    # writes the guest's `console=hvc0` output into a host-side file
+    # handle so panics from PID 1 leave a forensic trail instead of
+    # surfacing as an opaque vsock RST).
+    "VZSerialPortConfiguration",
+    "VZSerialPortAttachment",
+    "VZVirtioConsoleDeviceSerialPortConfiguration",
+    "VZFileHandleSerialPortAttachment",
     # Async-start completion-handler bridging
     "block2",
     "dispatch2",

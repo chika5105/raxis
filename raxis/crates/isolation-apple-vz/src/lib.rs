@@ -396,6 +396,53 @@ impl Session for AppleVzSession {
     fn session_identity(&self) -> SessionTransportId {
         SessionTransportId::Vsock { cid: self.vsock_cid }
     }
+
+    /// Surrender the host-side virtio-vsock fd to the kernel's IPC
+    /// dispatch loop.
+    ///
+    /// The fd returned here is **already a `dup(2)` of the
+    /// AVF-owned vsock connection fd** — the dup happened inside
+    /// [`runtime::AvfRuntime::connect_vsock`]'s completion block
+    /// while the underlying `VZVirtioSocketConnection` was still
+    /// guaranteed live. The runtime retains that connection in its
+    /// `vsock_conn` slot for the lifetime of the session, so the
+    /// AVF-owned original fd stays open while the substrate is
+    /// alive and the dup we hand back is a fully independent
+    /// SOCK_STREAM endpoint that the kernel-side
+    /// `tokio::net::UnixStream` owns end-to-end.
+    ///
+    /// Once the kernel takes ownership, [`AppleVzSession::push`] /
+    /// [`AppleVzSession::recv_intent`] refuse further use because
+    /// `self.vsock_fd == -1`. That refusal is the contract:
+    /// the kernel's per-session dispatch task owns the framing from
+    /// this point on, and any later `push`/`recv_intent` on the
+    /// substrate handle would be a programming error in the kernel
+    /// (double-driving the same socket), so we surface it as a
+    /// typed transport fault rather than silently sharing the fd.
+    ///
+    /// **No double-close.** [`AppleVzSession::terminate`] /
+    /// [`AppleVzSession::shutdown`] stop the AVF runtime; the
+    /// runtime's `Drop` releases its `VZVirtioSocketConnection`
+    /// retain, which closes the AVF-owned fd. The kernel-side
+    /// `tokio::net::UnixStream` closes its independent dup at
+    /// drop time. Two fds, two owners, zero races.
+    ///
+    /// Returns `None` if no vsock channel was established (e.g. a
+    /// macOS host without the entitlement) or after the session has
+    /// already been terminated.
+    fn take_kernel_ipc_fd(&mut self) -> Option<std::os::unix::io::RawFd> {
+        if self.terminated || self.vsock_fd < 0 {
+            return None;
+        }
+        // The runtime already handed us a dup'd fd via
+        // `connect_vsock`'s completion block. Surrender it directly
+        // and zero the substrate's slot so `push`/`recv_intent`
+        // refuse further use (typed fail-closed; double-driving the
+        // socket from two owners is a programming error).
+        let fd = self.vsock_fd;
+        self.vsock_fd = -1;
+        Some(fd)
+    }
 }
 
 impl Drop for AppleVzSession {
@@ -581,6 +628,7 @@ mod tests {
             virtio_fs_mounts:  Vec::new(),
             linux_kernel_path: std::path::PathBuf::from("/var/raxis/test/vmlinux.bin"),
             env:               Default::default(),
+            guest_console_log: None,
         }
     }
 

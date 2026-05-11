@@ -370,9 +370,38 @@ async fn accept_planner_loop(listener: UnixListener, ctx: Arc<HandlerContext>) {
 ///   "there is no separate witness.sock — verifier subprocesses connect to
 ///   planner.sock and the dispatcher routes by message variant."
 async fn handle_planner_connection(
-    mut stream: tokio::net::UnixStream,
+    stream: tokio::net::UnixStream,
     ctx: Arc<HandlerContext>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    drive_planner_stream(stream, ctx).await
+}
+
+/// **The planner dispatch loop, transport-agnostic.**
+///
+/// Reads length-prefixed bincode `IpcMessage` frames from `stream`,
+/// dispatches each through the same handler chain
+/// `handle_planner_connection` uses, and writes the response back
+/// onto the same stream.
+///
+/// Used by:
+///   * `accept_planner_loop` (`tokio::net::UnixStream` accepted on
+///     `planner.sock` — subprocess substrate).
+///   * `crate::session_spawn_orchestrator::spawn_planner_dispatcher`
+///     (`tokio::net::UnixStream` constructed from the AVF /
+///     Firecracker substrate's per-session VSock fd via
+///     `Session::take_kernel_ipc_fd`).
+///
+/// Both paths converge here so a single change to the dispatch
+/// matrix (e.g. a new `IpcMessage` variant) lands in exactly one
+/// place. `drive_planner_stream` is `pub(crate)` because the
+/// session-spawn callsite lives in `kernel/src/session_spawn_*.rs`.
+pub(crate) async fn drive_planner_stream<S>(
+    mut stream: S,
+    ctx: Arc<HandlerContext>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin,
+{
     use raxis_ipc::{read_frame, write_frame, IpcMessage};
 
     loop {

@@ -23,12 +23,19 @@
 //! deadline path.
 
 use raxis_planner_core::{
-    hydrate_from_proc_cmdline, park_on_signal, render_boot_log, run_role_session, BootContext,
-    DriverError, DriverOutcome, HydrationOutcome, PlannerError, Role,
+    hydrate_from_proc_cmdline, init_pid1_filesystem, park_on_signal, render_boot_log,
+    run_role_session, BootContext, DriverError, DriverOutcome, HydrationOutcome, PlannerError,
+    Role,
 };
 
 fn main() -> std::process::ExitCode {
-    // Pre-runtime cmdline-env hydration. See
+    // Step 1: when running as PID 1 inside a Linux initramfs,
+    // mount /proc, /sys, /dev, /tmp before any other I/O. See
+    // `raxis-planner-core::guest_init` for the full rationale.
+    // No-op on the host (PID ≠ 1) and on macOS.
+    init_pid1_filesystem();
+
+    // Step 2: pre-runtime cmdline-env hydration. See
     // `raxis-planner-orchestrator/src/main.rs` for the full
     // rationale.
     let hydration = hydrate_from_proc_cmdline();

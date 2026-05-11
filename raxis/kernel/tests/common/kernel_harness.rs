@@ -115,6 +115,16 @@ fn write_operator_cert(dir: &Path) -> PathBuf {
 /// Bootstrap a fresh data dir by running `RAXIS_BOOTSTRAP=1 raxis-kernel`.
 /// Returns a `TempDir` owning the data dir. Panics on any error so the
 /// failure is loud and actionable.
+///
+/// `#[allow(dead_code)]`: Cargo runs dead-code analysis per integration
+/// test binary. Some binaries (e.g. `full_e2e_session_lifecycle`) drive
+/// the kernel through the live-e2e harness which provisions its own
+/// `RAXIS_INSTALL_DIR`-backed data directory and never calls into this
+/// helper. Other binaries (e.g. `worktree_staging_substrate`) DO use it
+/// transitively through `bootstrap_and_spawn`. The suppression keeps a
+/// shared harness function genuinely shared without forcing every
+/// binary to import it.
+#[allow(dead_code)]
 fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
     let tmp = tempfile::tempdir().expect("tempdir for kernel data dir");
     let data_dir = tmp.path();
@@ -182,6 +192,12 @@ impl KernelInstance {
     /// This is the single entry point for end-to-end tests: it captures the
     /// full bootstrap-then-run dance and the kernel binary's lifetime in
     /// one RAII handle.
+    ///
+    /// `#[allow(dead_code)]`: see `bootstrap_data_dir` — per-binary dead
+    /// code analysis flags this as unused for binaries that never invoke
+    /// the harness's bootstrap path (e.g. `full_e2e_session_lifecycle`,
+    /// which uses the live-e2e harness instead).
+    #[allow(dead_code)]
     pub fn bootstrap_and_spawn() -> Self {
         let _build_lock = acquire_test_lock();
         let kernel_bin = build_and_locate_kernel();
@@ -265,6 +281,9 @@ impl KernelInstance {
     }
 
     /// Convenience: full path to `<data_dir>/sockets/planner.sock`.
+    ///
+    /// `#[allow(dead_code)]`: see `bootstrap_data_dir`.
+    #[allow(dead_code)]
     pub fn planner_socket(&self) -> PathBuf {
         self.data_dir.join("sockets").join("planner.sock")
     }

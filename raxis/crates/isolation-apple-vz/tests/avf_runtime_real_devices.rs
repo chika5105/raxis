@@ -96,6 +96,7 @@ fn fixture_spec(
         virtio_fs_mounts:  Vec::new(),
         linux_kernel_path,
         env:               Default::default(),
+        guest_console_log: None,
     }
 }
 
@@ -209,7 +210,7 @@ fn avf_runtime_connect_vsock_without_started_vm_returns_typed_error() {
         &fixture_spec("vsock-pre-start", EgressTier::None, kernel_path),
     )
     .unwrap();
-    let runtime = AvfRuntime::new(cfg);
+    let mut runtime = AvfRuntime::new(cfg);
     match runtime.connect_vsock(1024) {
         Err(RuntimeError::VsockConnect { port, reason }) => {
             assert_eq!(port, 1024);

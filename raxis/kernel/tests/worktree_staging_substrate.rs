@@ -78,6 +78,7 @@ fn fixture_spec(token: &str, mounts: Vec<WorkspaceMount>) -> VmSpec {
         // substrate; the kernel path is ignored.
         linux_kernel_path: std::path::PathBuf::new(),
         env:               Default::default(),
+        guest_console_log: None,
     }
 }
 

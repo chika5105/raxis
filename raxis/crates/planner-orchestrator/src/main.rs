@@ -26,20 +26,31 @@
 //! See `raxis-planner-core/src/driver.rs` for the env contract.
 
 use raxis_planner_core::{
-    hydrate_from_proc_cmdline, park_on_signal, render_boot_log, run_role_session, BootContext,
-    DriverError, DriverOutcome, HydrationOutcome, PlannerError, Role,
+    hydrate_from_proc_cmdline, init_pid1_filesystem, park_on_signal, render_boot_log,
+    run_role_session, BootContext, DriverError, DriverOutcome, HydrationOutcome, PlannerError,
+    Role,
 };
 
 fn main() -> std::process::ExitCode {
     // === PRE-RUNTIME PHASE ===
     //
-    // Hydrate the process environment from `/proc/cmdline` BEFORE
-    // we start the tokio runtime — `cmdline_env::hydrate_*` calls
-    // `std::env::set_var`, which is documented unsafe under
-    // multi-threaded races. `tokio::main` would spin the runtime
-    // (and pin worker threads) before our function body runs, so
-    // we run the hydration in the synchronous `main` and only then
-    // hand off to the async runner.
+    // Step 1: when running as PID 1 inside a Linux initramfs
+    // (AVF / Firecracker substrates), mount /proc, /sys, /dev,
+    // /tmp before anything else. Without /proc the next step
+    // (cmdline_env hydration) silently no-ops and the planner
+    // boots without `RAXIS_KERNEL_VSOCK_LISTEN_PORT` etc., which
+    // surfaces from the host as an AVF vsock CONNECT timeout.
+    // No-op on the host (PID ≠ 1) and on macOS.
+    init_pid1_filesystem();
+
+    // Step 2: hydrate the process environment from
+    // `/proc/cmdline` BEFORE we start the tokio runtime —
+    // `cmdline_env::hydrate_*` calls `std::env::set_var`, which is
+    // documented unsafe under multi-threaded races. `tokio::main`
+    // would spin the runtime (and pin worker threads) before our
+    // function body runs, so we run the hydration in the
+    // synchronous `main` and only then hand off to the async
+    // runner.
     //
     // The Apple-VZ substrate folds `VmSpec::env` into
     // `raxis.envb64=<base64>` on the kernel cmdline because there
