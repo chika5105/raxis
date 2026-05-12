@@ -785,12 +785,16 @@ fn run_phase_a(
     //
     // V2 sub-task lifecycle kinds — `SubmitReview` is now routed to
     // its dedicated handler (v2-deep-spec.md §Step 22).
-    // `ActivateSubTask` is intercepted on the async path BEFORE
-    // Phase A and never reaches here (see `handle_activate_sub_task`
-    // dispatch in `handle_inner`). `RetrySubTask` is intercepted
-    // alongside it as a fail-closed shim until the
-    // `crash_retry_count` / `review_reject_count` ceiling enforcement
-    // lands (v2-deep-spec.md §Step 12).
+    // `ActivateSubTask` and `RetrySubTask` are both intercepted on
+    // the async path BEFORE Phase A and never reach here — see the
+    // early dispatch into `handle_activate_sub_task` /
+    // `handle_retry_sub_task` in `handle_inner`. The retry handler
+    // owns the §Step 12 dual-counter ceiling enforcement
+    // (`crash_retry_count` / `review_reject_count`) along with the
+    // revoke / re-insert / task-FSM-reset flow; the arm in this
+    // function is a belt-and-braces fail-closed shim that only
+    // fires if a regression ever lets a V2 sub-task kind slip past
+    // the early dispatch.
     //
     // Authorization for all V2 kinds was already enforced by
     // the static dispatch matrix in `handle_inner` BEFORE Phase A
@@ -1979,11 +1983,12 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 ///
 /// **Why scope to `terminated_at IS NULL`.** A given Executor task
 /// can have several historical activation rows (one per retry
-/// round once `RetrySubTask` lands V2 §Step 12 properly). The
-/// counter we want to bump is the *active* one — the row whose
-/// session is still bound — which by construction is the only row
-/// with a NULL `terminated_at`. Bumping a terminated row would
-/// double-count history and skew the ceiling check.
+/// round — `handle_retry_sub_task` inserts a NEW
+/// `PendingActivation` row per V2 §Step 12 rather than mutating the
+/// prior one). The counter we want to bump is the *active* one —
+/// the row whose session is still bound — which by construction is
+/// the only row with a NULL `terminated_at`. Bumping a terminated
+/// row would double-count history and skew the ceiling check.
 ///
 /// **Atomicity.** Single `UPDATE ... SET review_reject_count =
 /// review_reject_count + 1` in its own transaction. Concurrent
