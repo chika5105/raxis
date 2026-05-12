@@ -56,7 +56,7 @@ guides/recipes/
 |---|---:|---|
 | [setup](#setup-bootstrapping) | 10 | Fresh machine; first kernel; first plan |
 | [env](#env-environment-variables) | 12 | Tuning binary behaviour without touching policy |
-| [policy](#policy-the-operator-signed-config) | 15 | Authoring or auditing `policy.toml` |
+| [policy](#policy-the-operator-signed-config) | 16 | Authoring or auditing `policy.toml` |
 | [plan](#plan-the-toml-plan-bundle) | 12 | Authoring or debugging `plan.toml` |
 | [patterns](#patterns-common-plan-shapes) | 8 | Choosing the right multi-task topology |
 | [cli](#cli-every-raxis-subcommand) | 33 | "What does `raxis <X>` do? What's the JSON schema?" |
@@ -114,6 +114,7 @@ guides/recipes/
 | Require operator-signed plans | [`policy/13-plan-signing`](policy/13-plan-signing.md) |
 | Cap plan-bundle byte size and task count | [`policy/14-plan-bundle-limits`](policy/14-plan-bundle-limits.md) |
 | Wire kernel notifications to email/Slack/webhook | [`policy/15-notifications-section`](policy/15-notifications-section.md) |
+| Bound elastic VM scaling + transient-retry budget | [`policy/16-elastic-section`](policy/16-elastic-section.md) |
 
 ### Driving the kernel via CLI
 
@@ -227,6 +228,7 @@ guides/recipes/
 | 13 | [`plan-signing`](policy/13-plan-signing.md) | Plan signature requirements |
 | 14 | [`plan-bundle-limits`](policy/14-plan-bundle-limits.md) | Plan-bundle size / task / depth caps |
 | 15 | [`notifications-section`](policy/15-notifications-section.md) | `[[notifications]]` |
+| 16 | [`elastic-section`](policy/16-elastic-section.md) | `[elastic]` |
 
 ### plan — the TOML plan bundle
 
