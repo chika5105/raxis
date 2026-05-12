@@ -1108,28 +1108,91 @@ async fn forward_with_resultset_response(
 /// supports it) and reject the connection otherwise — the proxy
 /// would not know how to encode `HandshakeResponse41` against an
 /// upstream that is so old it predates the 4.1 protocol.
-const CLIENT_PROTOCOL_41: u32 = 1 << 9;
-const CLIENT_PLUGIN_AUTH: u32 = 1 << 19;
+const CLIENT_PROTOCOL_41:        u32 = 1 << 9;
+const CLIENT_PLUGIN_AUTH:        u32 = 1 << 19;
 
-/// Capability flags the proxy advertises to the upstream. Picked
-/// conservatively — just enough to enable the 4.1 protocol, plugin
-/// auth, default db (if any), and the long password / secure
-/// connection legacy bits the server also expects from a modern
-/// client. We deliberately do NOT advertise `CLIENT_DEPRECATE_EOF`
-/// (bit 24) so the upstream sends EOF packets the proxy can use as
-/// terminators.
+/// `CLIENT_SSL` (bit 11) — the proxy MUST NEVER advertise this. If
+/// it does, the upstream enters its TLS-negotiation state after the
+/// 32-byte SSL-truncated `HandshakeResponse41` and waits for a
+/// TLS Client Hello on the same TCP stream. The proxy never sends
+/// one, the server's `net_read_timeout` eventually fires, and the
+/// agent observes the proxy hanging on the `read_packet` loop. The
+/// historical V2.1 caps mask had this bit accidentally set (the
+/// comment said `CLIENT_IGNORE_SIGPIPE`, which is bit 12 — see
+/// `audit_handshake_caps_must_not_set_ssl` below). The bug surfaced
+/// against MySQL 8.0.36 in the live-e2e harness; older 5.7
+/// servers happened to tolerate the malformed handshake. The
+/// constant is carried here so a future change that mistakenly
+/// adds it back fails the bit-position assertion in the unit test.
+#[allow(dead_code)]
+const CLIENT_SSL_FORBIDDEN_BIT:  u32 = 1 << 11;
+/// `CLIENT_COMPRESS` (bit 5) — also FORBIDDEN. Advertising it
+/// commits the proxy to wrapping every subsequent packet in a
+/// 7-byte zlib-compressed packet header (`[MS-MYS] 4.4`), which the
+/// proxy does not implement. The historical V2.1 mask claimed this
+/// bit was `CLIENT_LOCAL_FILES`; bit 5 is in fact `CLIENT_COMPRESS`,
+/// bit 7 is `CLIENT_LOCAL_FILES`.
+#[allow(dead_code)]
+const CLIENT_COMPRESS_FORBIDDEN_BIT: u32 = 1 << 5;
+
+/// Compile-time pin: even if a future caller refactors the test,
+/// the build itself fails if these forbidden bits sneak into
+/// `CLIENT_CAPS`. (Trivially zero today; the assertions are kept
+/// to fail fast on regression.)
+const _: () = {
+    assert!(CLIENT_CAPS & CLIENT_SSL_FORBIDDEN_BIT == 0,
+        "CLIENT_SSL must NEVER be in upstream caps");
+    assert!(CLIENT_CAPS & CLIENT_COMPRESS_FORBIDDEN_BIT == 0,
+        "CLIENT_COMPRESS must NEVER be in upstream caps");
+};
+
+/// Capability flags the proxy advertises to the upstream.
+///
+/// Reference: <https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html>.
+///
+/// Bits (ALL fields are by **bit number**, not by their `1 << n`
+/// expansion — every comment below is double-checked against the
+/// spec to defend against a re-occurrence of the V2.1 mis-numbering
+/// bug that landed `CLIENT_SSL` in place of `CLIENT_IGNORE_SIGPIPE`):
+///
+/// * bit 0 — `CLIENT_LONG_PASSWORD`
+/// * bit 1 — `CLIENT_FOUND_ROWS`
+/// * bit 2 — `CLIENT_LONG_FLAG`
+/// * bit 3 — `CLIENT_CONNECT_WITH_DB`   (set conditionally below)
+/// * bit 9 — `CLIENT_PROTOCOL_41`        (REQUIRED for 4.1+)
+/// * bit 12 — `CLIENT_IGNORE_SIGPIPE`
+/// * bit 13 — `CLIENT_TRANSACTIONS`
+/// * bit 15 — `CLIENT_SECURE_CONNECTION`  (REQUIRED so the server
+///            accepts the 20-byte SHA-1 scramble layout)
+/// * bit 17 — `CLIENT_MULTI_RESULTS`
+/// * bit 18 — `CLIENT_PS_MULTI_RESULTS`
+/// * bit 19 — `CLIENT_PLUGIN_AUTH`        (REQUIRED for the plugin
+///            string in the response)
+///
+/// We deliberately do NOT advertise:
+///
+/// * bit 5 (`CLIENT_COMPRESS`) — would require a zlib framing layer.
+/// * bit 6 (`CLIENT_ODBC`) — has no effect; just noise.
+/// * bit 7 (`CLIENT_LOCAL_FILES`) — would let the upstream issue
+///   `LOCAL INFILE` requests; the proxy explicitly rejects those
+///   in `forward_query`.
+/// * bit 11 (`CLIENT_SSL`) — see `CLIENT_SSL_FORBIDDEN_BIT` above.
+/// * bit 24 (`CLIENT_DEPRECATE_EOF`) — the proxy uses EOF packets
+///   to delimit text-result-set frames; deprecating them would
+///   force the result-set parser to read OK packets to detect
+///   end-of-frame, which is more state machine than V2.1 wants to
+///   own.
 const CLIENT_CAPS: u32 = 0
     | (1 << 0)   // CLIENT_LONG_PASSWORD
     | (1 << 1)   // CLIENT_FOUND_ROWS
     | (1 << 2)   // CLIENT_LONG_FLAG
     | (1 << 3)   // CLIENT_CONNECT_WITH_DB
-    | (1 << 5)   // CLIENT_LOCAL_FILES
-    | (1 << 6)   // CLIENT_IGNORE_SPACE
     | CLIENT_PROTOCOL_41
-    | (1 << 11)  // CLIENT_IGNORE_SIGPIPE
+    | (1 << 12)  // CLIENT_IGNORE_SIGPIPE
     | (1 << 13)  // CLIENT_TRANSACTIONS
     | (1 << 15)  // CLIENT_SECURE_CONNECTION
-    | (1 << 17)  // CLIENT_PS_MULTI_RESULTS
+    | (1 << 17)  // CLIENT_MULTI_RESULTS
+    | (1 << 18)  // CLIENT_PS_MULTI_RESULTS
     | CLIENT_PLUGIN_AUTH;
 
 /// Parsed shape of the upstream's `HandshakeV10` greeting.
@@ -2337,6 +2400,39 @@ mod tests {
         p.extend_from_slice(&2u16.to_le_bytes()); // status flags
         p.extend_from_slice(&0u16.to_le_bytes()); // warnings
         p
+    }
+
+    /// Pin the regression: the proxy MUST NEVER advertise
+    /// `CLIENT_SSL` (bit 11) or `CLIENT_COMPRESS` (bit 5) in its
+    /// upstream `HandshakeResponse41`. Setting `CLIENT_SSL` makes
+    /// the server enter its TLS-negotiation state and wait for a
+    /// Client Hello, hanging the connection until `net_read_timeout`
+    /// fires. Setting `CLIENT_COMPRESS` commits the proxy to
+    /// zlib-framed packets, which it does not implement.
+    ///
+    /// Pinned against MySQL 8.0.36 reproducer; the V2.1 caps mask
+    /// had bit 11 set with a comment claiming `CLIENT_IGNORE_SIGPIPE`
+    /// (which is bit 12), and bit 5 set with a comment claiming
+    /// `CLIENT_LOCAL_FILES` (bit 7).
+    #[test]
+    fn client_caps_does_not_advertise_ssl_or_compress() {
+        assert_eq!(
+            CLIENT_CAPS & CLIENT_SSL_FORBIDDEN_BIT, 0,
+            "CLIENT_SSL must NEVER be set in upstream caps; \
+             see CLIENT_SSL_FORBIDDEN_BIT documentation",
+        );
+        assert_eq!(
+            CLIENT_CAPS & CLIENT_COMPRESS_FORBIDDEN_BIT, 0,
+            "CLIENT_COMPRESS must NEVER be set in upstream caps; \
+             see CLIENT_COMPRESS_FORBIDDEN_BIT documentation",
+        );
+        // Sanity: the bits we DO want must be present.
+        assert_ne!(CLIENT_CAPS & CLIENT_PROTOCOL_41, 0,
+            "CLIENT_PROTOCOL_41 must be set");
+        assert_ne!(CLIENT_CAPS & CLIENT_PLUGIN_AUTH, 0,
+            "CLIENT_PLUGIN_AUTH must be set");
+        assert_ne!(CLIENT_CAPS & (1 << 15), 0,
+            "CLIENT_SECURE_CONNECTION must be set");
     }
 
     #[test]

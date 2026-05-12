@@ -235,12 +235,74 @@ pub async fn run() -> Result<()> {
         }
         tracing::info!("slice mysql-proxy: hermetic SELECT got ERR_Packet (upstream unreachable, expected)");
     } else {
-        // Real upstream: any of OK_Packet (0x00), result-set header
-        // (column count > 0), or even ERR_Packet for permission
-        // issues is acceptable. We just want to confirm the proxy
-        // connected and forwarded the bytes — counter-side checks
-        // below validate that.
-        let _ = payload_sel.first();
+        // Real upstream: drain the rest of the result-set stream so
+        // the next `read_packet` after sending INSERT lines up with
+        // INSERT's own ERR_Packet rather than a leftover ColumnDef /
+        // EOF / Row / EOF.
+        //
+        // The wire shape for `SELECT 1` against a real MySQL
+        // upstream is one of:
+        //
+        //   * `OK_Packet` (header `0x00`) — terminal, no result set.
+        //     Real MySQL never replies this for `SELECT 1` but
+        //     defensive: handle it anyway.
+        //   * `ERR_Packet` (header `0xff`) — terminal, e.g. permission
+        //     denied at the upstream. Already-drained on read.
+        //   * `ResultSetHeader` (lenenc-int column count) followed by
+        //     N ColumnDef + EOF + N Row + EOF (no `CLIENT_DEPRECATE_EOF`
+        //     advertised by the proxy, so we get classic EOFs).
+        //
+        // We discriminate on the FIRST packet we already read and
+        // drain accordingly.
+        match payload_sel.first().copied() {
+            Some(0xff) | Some(0x00) => {
+                // Terminal: no further packets to read for this query.
+                tracing::info!(
+                    first_byte = format!("{:#04x}",
+                        payload_sel.first().copied().unwrap_or(0)),
+                    "slice mysql-proxy: real-upstream SELECT short-form reply",
+                );
+            }
+            Some(_) => {
+                // Result-set form. The reading loop must continue
+                // until we see two EOFs (column-defs terminator AND
+                // row terminator), or a mid-stream ERR_Packet.
+                let column_count = payload_sel
+                    .first()
+                    .copied()
+                    .unwrap_or(0) as u64;
+                let mut eof_seen = 0;
+                let mut frames_read = 1;
+                while eof_seen < 2 {
+                    let (_h, p) = read_packet(&mut sock).await
+                        .context("drain SELECT result-set frame")?
+                        .ok_or_else(|| anyhow!(
+                            "EOF mid-result-set after {frames_read} frames",
+                        ))?;
+                    frames_read += 1;
+                    if !p.is_empty() && p[0] == 0xfe && p.len() < 9 {
+                        eof_seen += 1;
+                    } else if !p.is_empty() && p[0] == 0xff {
+                        // Mid-stream upstream error — fine for our
+                        // purposes; the SELECT still drove an
+                        // upstream round trip.
+                        break;
+                    }
+                }
+                tracing::info!(
+                    first_byte = format!("{:#04x}",
+                        payload_sel.first().copied().unwrap_or(0)),
+                    column_count,
+                    frames_read,
+                    "slice mysql-proxy: real-upstream SELECT result-set drained",
+                );
+            }
+            None => {
+                return Err(anyhow!(
+                    "real-upstream mode: SELECT yielded an empty packet payload",
+                ));
+            }
+        }
     }
 
     // 6. COM_QUERY "INSERT INTO t VALUES (1)" — must yield

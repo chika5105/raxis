@@ -63,21 +63,50 @@ pub mod cmd {
 }
 
 /// Capability flags the proxy advertises in the `HandshakeV10`
-/// greeting. Picked to match what `mysql_native_password`-speaking
-/// clients (`mysqlclient`, `mysql-connector-python`, `mysql2` Node,
-/// `go-sql-driver/mysql`) all set on the response side.
+/// greeting it sends to the AGENT.
+///
+/// Reference: <https://dev.mysql.com/doc/dev/mysql-server/latest/group__group__cs__capabilities__flags.html>.
+///
+/// Pinned bit positions (every comment is double-checked against
+/// the spec — the V2.1 mask had bit 5/6/11 mis-numbered as
+/// `LOCAL_FILES`/`IGNORE_SPACE`/`IGNORE_SIGPIPE`, which are bits
+/// 7/8/12; bit 11 is `CLIENT_SSL` and bit 5 is `CLIENT_COMPRESS`):
+///
+/// * bit 0  — `CLIENT_LONG_PASSWORD`
+/// * bit 1  — `CLIENT_FOUND_ROWS`
+/// * bit 2  — `CLIENT_LONG_FLAG`
+/// * bit 3  — `CLIENT_CONNECT_WITH_DB`
+/// * bit 9  — `CLIENT_PROTOCOL_41` (REQUIRED)
+/// * bit 12 — `CLIENT_IGNORE_SIGPIPE`
+/// * bit 13 — `CLIENT_TRANSACTIONS`
+/// * bit 15 — `CLIENT_SECURE_CONNECTION` (REQUIRED so client
+///            sends the 20-byte SHA-1 scramble layout)
+/// * bit 17 — `CLIENT_MULTI_RESULTS`
+/// * bit 18 — `CLIENT_PS_MULTI_RESULTS`
+/// * bit 19 — `CLIENT_PLUGIN_AUTH` (REQUIRED for the plugin name
+///            field in the response)
+///
+/// We deliberately do NOT advertise:
+///
+/// * bit 5  (`CLIENT_COMPRESS`) — would tell the agent to zlib-frame
+///   every subsequent packet; the proxy does not understand zlib
+///   framing.
+/// * bit 11 (`CLIENT_SSL`) — would tell the agent to negotiate TLS
+///   over the same TCP stream; the proxy is plaintext-only.
+///
+/// Mirrors `upstream::CLIENT_CAPS`. See the upstream comment for
+/// the full V2.1 regression history.
 pub const CAPABILITIES: u32 = 0
     | (1 <<  0)  // CLIENT_LONG_PASSWORD
     | (1 <<  1)  // CLIENT_FOUND_ROWS
     | (1 <<  2)  // CLIENT_LONG_FLAG
     | (1 <<  3)  // CLIENT_CONNECT_WITH_DB
-    | (1 <<  5)  // CLIENT_LOCAL_FILES (advertised but unused)
-    | (1 <<  6)  // CLIENT_IGNORE_SPACE
     | (1 <<  9)  // CLIENT_PROTOCOL_41
-    | (1 << 11)  // CLIENT_IGNORE_SIGPIPE
+    | (1 << 12)  // CLIENT_IGNORE_SIGPIPE
     | (1 << 13)  // CLIENT_TRANSACTIONS
-    | (1 << 15)  // CLIENT_SECURE_CONNECTION (deprecated, but expected)
-    | (1 << 17)  // CLIENT_PS_MULTI_RESULTS
+    | (1 << 15)  // CLIENT_SECURE_CONNECTION
+    | (1 << 17)  // CLIENT_MULTI_RESULTS
+    | (1 << 18)  // CLIENT_PS_MULTI_RESULTS
     | (1 << 19); // CLIENT_PLUGIN_AUTH
 
 /// Server status flags returned by `OK_Packet`.
@@ -223,6 +252,23 @@ impl PacketHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pin the wire-side companion to `upstream.rs::client_caps_does_not_advertise_ssl_or_compress`
+    /// — the proxy's `HandshakeV10` greeting MUST NOT advertise
+    /// `CLIENT_SSL` (bit 11) or `CLIENT_COMPRESS` (bit 5) to the
+    /// agent. Doing so would commit the proxy to negotiating TLS or
+    /// zlib framing it does not implement.
+    #[test]
+    fn capabilities_does_not_advertise_ssl_or_compress() {
+        assert_eq!(
+            CAPABILITIES & (1 << 11), 0,
+            "CLIENT_SSL must NEVER be set in greeting caps",
+        );
+        assert_eq!(
+            CAPABILITIES & (1 << 5), 0,
+            "CLIENT_COMPRESS must NEVER be set in greeting caps",
+        );
+    }
 
     #[test]
     fn handshake_v10_advertises_protocol_41_and_secure_connection() {
