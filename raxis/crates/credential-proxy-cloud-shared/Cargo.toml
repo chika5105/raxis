@@ -1,0 +1,29 @@
+[package]
+name        = "raxis-credential-proxy-cloud-shared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Shared infrastructure for V3 cloud credential-proxy forwarding (AWS STS, GCP OAuth2, Azure AAD): construction-enforced closed-allowlist HTTPS client, in-memory token cache with async refresh, audit-emission helpers with redaction discipline, and provider-agnostic upstream error-envelope traits. Normative reference: specs/v3/cloud-proxy-forwarding.md."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+raxis-audit-tools = { workspace = true }
+
+tokio       = { workspace = true }
+reqwest     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+sha2        = { workspace = true }
+hex         = { workspace = true }
+hmac        = { workspace = true }
+thiserror   = { workspace = true }
+secrecy     = { version = "0.10", features = ["serde"] }
+zeroize     = "1"
+tracing     = "0.1"
+url         = "2"
+bytes       = "1"
+
+[dev-dependencies]
+tokio    = { workspace = true, features = ["test-util", "macros"] }

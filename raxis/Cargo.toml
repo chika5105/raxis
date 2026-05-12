@@ -23,6 +23,8 @@ members = [
     "crates/credential-proxy-aws",
     "crates/credential-proxy-gcp",
     "crates/credential-proxy-azure",
+    "crates/credential-proxy-cloud-shared",
+    "crates/credential-proxy-cloud-shared",
     "crates/credential-proxy-mysql",
     "crates/credential-proxy-mongodb",
     "crates/credential-proxy-mssql",
@@ -221,6 +223,7 @@ raxis-crypto = { path = "crates/crypto" }
 raxis-audit-tools       = { path = "crates/audit" }
 raxis-credentials       = { path = "crates/raxis-credentials" }
 raxis-credentials-file  = { path = "crates/raxis-credentials-file" }
+raxis-credential-proxy-cloud-shared = { path = "crates/credential-proxy-cloud-shared" }
 raxis-tproxy-protocol   = { path = "crates/tproxy-protocol" }
 raxis-egress-admission  = { path = "crates/egress-admission" }
 raxis-tproxy            = { path = "tproxy" }

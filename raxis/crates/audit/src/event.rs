@@ -2162,6 +2162,147 @@ pub enum AuditEventKind {
         blocked:         bool,
     },
 
+    /// V3 cloud-forwarding event. Emitted by the AWS / GCP /
+    /// Azure credential proxy each time it performs (or attempts)
+    /// a real upstream token-exchange call against the cloud
+    /// control plane. Carries the upstream FQDN, the exchange
+    /// kind (closed enum from `specs/v3/cloud-proxy-forwarding.md
+    /// §2`), the wall-clock latency, the upstream HTTP status,
+    /// the byte count of the redacted response, and a boolean
+    /// recording whether the request carried a signed payload
+    /// (SigV4 for AWS, JWT for GCP, none for Azure). Never the
+    /// request or response bytes themselves.
+    ///
+    /// Spec reference: `specs/v3/cloud-proxy-forwarding.md §5.1`.
+    /// Paired with the in-VM-facing
+    /// `AwsCredentialServed` / `GcpMetadataServed` /
+    /// `AzureTokenServed` event so an audit reader can compute
+    /// "one upstream exchange per N in-VM requests" cardinality.
+    CloudCredentialForwarded {
+        /// Session whose VM made the request.
+        session_id:        String,
+        /// Policy-declared credential name.
+        credential_name:   String,
+        /// `"aws" | "gcp" | "azure"` — closed enum.
+        provider:          String,
+        /// `"assume_role" | "jwt_bearer" | "client_credentials"` —
+        /// closed enum.
+        exchange_kind:     String,
+        /// Upstream FQDN the proxy called. Never a full URL,
+        /// never carries query parameters. Always one of the
+        /// hosts in the §3 allowlist.
+        upstream_endpoint: String,
+        /// `"success" | "failure"`.
+        outcome:           String,
+        /// Wall-clock duration of the upstream call in
+        /// milliseconds. `0` on transport failures that did not
+        /// produce a response.
+        latency_ms:        u32,
+        /// Upstream HTTP status code. `0` on transport failure.
+        status_code:       u16,
+        /// Byte count of the upstream response body. NEVER the
+        /// body itself; the count is for redaction-respecting
+        /// rate sizing.
+        redacted_response_size: u32,
+        /// Whether the request carried a cryptographic signature
+        /// (SigV4 / JWT). `false` for Azure client-credentials
+        /// (which authenticates with a shared secret only).
+        request_signature_present: bool,
+    },
+
+    /// V3 cloud-forwarding denial event. Emitted by the cloud
+    /// proxy when a forwarding attempt is refused or fails.
+    /// The `reason` is a closed enum from
+    /// `specs/v3/cloud-proxy-forwarding.md §5.2`:
+    /// `"egress_allowlist" | "missing_credential" |
+    /// "misconfigured" | "upstream_5xx" | "upstream_4xx" |
+    /// "upstream_malformed" | "timeout" | "network"`.
+    ///
+    /// A `CloudCredentialForwardingDenied` event is in addition
+    /// to (NOT a replacement for) the in-VM-facing
+    /// `*ServedCredential` event, which still fires with the
+    /// upstream-canonical error envelope per §6.
+    CloudCredentialForwardingDenied {
+        /// Session whose VM made the request.
+        session_id:        String,
+        /// Policy-declared credential name.
+        credential_name:   String,
+        /// `"aws" | "gcp" | "azure"`.
+        provider:          String,
+        /// Closed-enum exchange kind: `"assume_role" |
+        /// "jwt_bearer" | "client_credentials"`.
+        #[serde(default)]
+        exchange_kind:     String,
+        /// Canonical upstream FQDN the proxy attempted to dial
+        /// (or would have, on a construction-time refusal).
+        /// Empty for `egress_allowlist` denials that never had
+        /// a host.
+        #[serde(default)]
+        upstream_endpoint: String,
+        /// Closed-enum denial reason (see above).
+        reason:            String,
+        /// HTTP status observed (0 when no HTTP wire was
+        /// reached).
+        #[serde(default)]
+        status_code:       u16,
+        /// Wall-clock latency at the point of failure, in
+        /// milliseconds.
+        #[serde(default)]
+        latency_ms:        u32,
+    },
+
+    /// V3 cloud-forwarding cache-hit event. Emitted by the cloud
+    /// proxy each time it serves a request from its in-memory
+    /// short-lived-token cache without dispatching to the cloud
+    /// control plane. Carries the cached token's age in
+    /// milliseconds and the remaining TTL until expiry, so an
+    /// operator can correlate cache hit rates with the
+    /// `lease_seconds` / `cache_ttl_safety_window_ms` plan
+    /// settings.
+    CloudCredentialCacheHit {
+        /// Session whose VM made the request.
+        session_id:       String,
+        /// Policy-declared credential name.
+        credential_name:  String,
+        /// `"aws" | "gcp" | "azure"`.
+        provider:         String,
+        /// Closed-enum exchange kind: `"assume_role" |
+        /// "jwt_bearer" | "client_credentials"`.
+        #[serde(default)]
+        exchange_kind:    String,
+        /// Age of the cached token in milliseconds (now -
+        /// refreshed_at).
+        age_ms:           u32,
+        /// Time remaining until the cached token expires, in
+        /// milliseconds. May be less than the safety window
+        /// (in which case a background refresh has been or will
+        /// be scheduled by the same request path).
+        ttl_remaining_ms: u32,
+    },
+
+    /// V3 cloud-forwarding cache-refresh event. Emitted by the
+    /// cloud proxy when a background refresh successfully
+    /// installed a fresh short-lived token in the cache. Pairs
+    /// with the `CloudCredentialForwarded { outcome: "success" }`
+    /// event the same refresh triggered. Carries the prior age
+    /// and the new TTL so operators can detect cache thrash.
+    CloudCredentialCacheRefreshed {
+        /// Session whose VM made the request that triggered the
+        /// refresh.
+        session_id:      String,
+        /// Policy-declared credential name.
+        credential_name: String,
+        /// `"aws" | "gcp" | "azure"`.
+        provider:        String,
+        /// Closed-enum exchange kind.
+        #[serde(default)]
+        exchange_kind:   String,
+        /// Age in ms of the cached token BEFORE the refresh.
+        prior_age_ms:    u32,
+        /// TTL in ms of the freshly-installed token.
+        new_ttl_ms:      u32,
+    },
+
     /// Emitted by the MongoDB credential proxy on every classified
     /// (or blocked) command issued through the `OP_MSG` wire
     /// protocol. Mirrors the `RedisCommandExecuted` shape so
@@ -2506,6 +2647,10 @@ impl AuditEventKind {
             Self::AwsCredentialServed { .. } => "AwsCredentialServed",
             Self::GcpMetadataServed { .. } => "GcpMetadataServed",
             Self::AzureTokenServed { .. } => "AzureTokenServed",
+            Self::CloudCredentialForwarded { .. } => "CloudCredentialForwarded",
+            Self::CloudCredentialForwardingDenied { .. } => "CloudCredentialForwardingDenied",
+            Self::CloudCredentialCacheHit { .. } => "CloudCredentialCacheHit",
+            Self::CloudCredentialCacheRefreshed { .. } => "CloudCredentialCacheRefreshed",
             Self::MongoCommandExecuted { .. } => "MongoCommandExecuted",
             Self::SmtpMessageRelayed { .. } => "SmtpMessageRelayed",
             Self::SmtpMessageRejected { .. } => "SmtpMessageRejected",

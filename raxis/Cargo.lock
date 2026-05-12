@@ -3157,6 +3157,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-credential-proxy-cloud-shared"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "hex",
+ "hmac 0.12.1",
+ "raxis-audit-tools",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "raxis-credential-proxy-gcp"
 version = "0.1.0"
 dependencies = [
