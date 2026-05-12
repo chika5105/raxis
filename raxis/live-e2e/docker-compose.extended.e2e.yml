@@ -104,3 +104,48 @@ services:
       retries: 10
     tmpfs:
       - /data
+
+  smtp:
+    image: docker.io/mailserver/docker-mailserver:14.0
+    container_name: raxis-e2e-smtp
+    hostname: mail.live-e2e.test
+    ports:
+      - "127.0.0.1:25199:25"
+    environment:
+      OVERRIDE_HOSTNAME: mail.live-e2e.test
+      POSTMASTER_ADDRESS: postmaster@live-e2e.test
+      ENABLE_CLAMAV: "0"
+      ENABLE_AMAVIS: "0"
+      ENABLE_SPAMASSASSIN: "0"
+      ENABLE_FAIL2BAN: "0"
+      ENABLE_OPENDKIM: "0"
+      ENABLE_OPENDMARC: "0"
+      ENABLE_POSTGREY: "0"
+      ENABLE_RSPAMD: "0"
+      ENABLE_SRS: "0"
+      ENABLE_MTA_STS: "0"
+      ENABLE_UPDATE_CHECK: "0"
+      SMTP_ONLY: "0"
+      SSL_TYPE: ""
+      PERMIT_DOCKER: connected-networks
+      LOG_LEVEL: warn
+      ONE_DIR: "1"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./seed/smtp/postfix-accounts.cf:/tmp/docker-mailserver/postfix-accounts.cf:ro
+      - ./seed/smtp/postfix-virtual.cf:/tmp/docker-mailserver/postfix-virtual.cf:ro
+      - ./seed/smtp/postfix-main.cf:/tmp/docker-mailserver/postfix-main.cf:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "ss -ltn | grep -q ':25 ' && supervisorctl status postfix | grep -q RUNNING"
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    tmpfs:
+      - /var/mail
+      - /var/mail-state
+      - /var/log/mail
+      - /tmp

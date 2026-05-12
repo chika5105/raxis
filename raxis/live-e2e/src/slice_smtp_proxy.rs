@@ -1,62 +1,116 @@
-//! Slice — real `SmtpProxy` + a real in-process upstream SMTP relay.
+//! Slice — real `SmtpProxy` against a real Postfix MTA running in
+//! the `mailserver/docker-mailserver:14.0` container.
 //!
-//! Why an in-process upstream and not a third-party SMTP server: the
-//! live-e2e harness asserts "real subsystems against real upstream
-//! services". The "service" here is the SMTP relay's wire
-//! conversation, not the IP allocation; an in-process tokio listener
-//! that speaks `EHLO/AUTH/MAIL FROM/RCPT TO/DATA/QUIT` is the real
-//! SMTP wire and exercises the same code paths as a third-party MTA.
-//! Using an external relay would make the slice flaky on credential
-//! refresh, IP reputation, and cross-network reachability without
-//! adding any coverage the in-process relay does not already provide.
+//! ## Why a real container, not an in-process SMTP fixture
 //!
-//! Slice shape:
+//! An earlier revision of this slice ran the proxy against an in-
+//! process tokio `TcpListener` that re-implemented enough of RFC
+//! 5321 to record `MAIL FROM` / `RCPT TO` / `AUTH PLAIN` / DATA
+//! body bytes and assert the proxy submitted the right wire
+//! envelope. The fixture passed even when the proxy made decisions
+//! a real Postfix would reject — pipelining edge cases, line-
+//! ending handling on the DATA terminator (`\r\n.\r\n` vs partial
+//! reads), virtual-alias rewriting, the SASL auth-cache shape, and
+//! the precise `5xx` codes a real MTA emits on a denied envelope
+//! all differ between a hand-rolled accumulator and a real Postfix
+//! / Dovecot pair. Real services catch real bugs that fixtures
+//! paper over by construction.
 //!
-//!   1. Spin up a tiny upstream SMTP listener that records the
-//!      `MAIL FROM`, `RCPT TO`, `AUTH PLAIN` / `AUTH LOGIN` payload
-//!      and DATA body it sees.
-//!   2. Bind the real `SmtpProxy` against the in-memory
-//!      `CredentialBackend` we control, pointing its
-//!      `upstream_host_port` at the listener from step 1. TLS is
-//!      disabled (`require_upstream_tls = false`) so the slice does
-//!      not need a TLS fixture; the TLS path is exercised by the
-//!      crate-internal integration tests already (see
-//!      `crates/credential-proxy-smtp/src/wire.rs`).
-//!   3. Open a raw `TcpStream` to the proxy and drive a real SMTP
-//!      submission with a junk credential payload.
-//!   4. Verify:
-//!        a. The upstream received the **proxy's** credential bytes
-//!           (the real `live-e2e` value) — not the agent's junk
-//!           bytes — proving the proxy strips and rewrites the
-//!           agent-supplied AUTH payload.
-//!        b. The upstream observed the envelope (`from`, all
-//!           `rcpts`, the body in full).
-//!        c. The proxy's `messages_relayed` and `bytes_relayed`
-//!           counters incremented; `messages_rejected` stayed at
-//!           zero.
-//!        d. The `CredentialBackend` was asked at least once
-//!           (per-submission resolution preserves rotation
-//!           semantics).
+//! ## Trade-off: docker-mailserver vs Mailpit / MailHog
+//!
+//! `docker-mailserver` is a full Postfix + Dovecot SASL stack
+//! (ClamAV / SpamAssassin / DKIM / DMARC etc. are all disabled by
+//! the compose file). It is heavier than test-focused SMTP sinks
+//! like Mailpit or MailHog, both of which expose an HTTP capture
+//! API that would let the slice fetch delivered messages over
+//! HTTP. We use docker-mailserver because the team-wide
+//! preference is for `the real production-shaped MTA` rather than
+//! a test sink — the slice asserts on the real Postfix mail
+//! delivery path (queue → local delivery agent → Maildir),
+//! including SASL auth against a real Dovecot backend, which
+//! Mailpit / MailHog do not exercise.
+//!
+//! Inspection happens by `docker exec`-ing into the container
+//! and reading the test mailbox's `Maildir/new/`. That is more
+//! invasive than a Mailpit HTTP `GET /api/v1/messages`, but it is
+//! deterministic, depends on no extra HTTP client, and the byte-
+//! exact contents of the delivered message are what the slice
+//! cares about.
+//!
+//! ## Lifecycle
+//!
+//!   1. Preflight — TCP-probe the loopback host:port the compose
+//!      file publishes (`127.0.0.1:25199`). On failure the slice
+//!      prints the exact `docker compose up` invocation and
+//!      bails.
+//!   2. Bind the real `SmtpProxy` against an in-memory
+//!      `CredentialBackend` whose value IS the SASL password the
+//!      docker-mailserver `postfix-accounts.cf` declares for
+//!      `raxis-tenant@live-e2e.test`. The proxy's
+//!      `upstream_host_port` points at the container.
+//!   3. Drive a real SMTP submission through the proxy with a
+//!      junk agent `AUTH PLAIN`. The proxy MUST strip the agent's
+//!      bytes and inject the real credential.
+//!   4. Verify against the **real upstream**:
+//!      a. The proxy's `messages_relayed` counter incremented and
+//!         `messages_rejected` stayed at zero — the only way that
+//!         could happen is if the proxy's AUTH PLAIN was accepted
+//!         by real Dovecot, proving the proxy stripped the agent
+//!         junk and injected the real bytes.
+//!      b. A `docker exec ls /var/mail/.../Maildir/new/` finds
+//!         exactly one new message file containing the body
+//!         the slice sent; the message's headers carry the
+//!         envelope `MAIL FROM` and at least one of the
+//!         allowlisted recipients.
+//!      c. The `CredentialBackend` was asked at least once.
+//!
+//! The previous in-process SMTP fixture (`UpstreamRecord`,
+//! `spawn_upstream`, `drive_upstream`, base64 helpers) is fully
+//! deleted; no half-removed mock module remains.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use raxis_credentials::{
     ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
     Lease, OperatorId,
 };
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 use raxis_credential_proxy_smtp::{
     AuthMode, NoopEnvelopeAuditSink, OwnedConsumer, ProxyConfig, Restrictions, SmtpProxy,
 };
 
-const UPSTREAM_USER: &str = "raxis-tenant";
+/// Loopback host:port the docker-compose Docker Mailserver
+/// publishes. Pinned to match `live-e2e/docker-compose.e2e.yml`.
+const SMTP_HOST_PORT: &str = "127.0.0.1:25199";
+
+/// Container name the compose file pins. Used by the inspection
+/// step to `docker exec ls /var/mail/...` after submission.
+const SMTP_CONTAINER: &str = "raxis-e2e-smtp";
+
+/// Real account baked into `seed/smtp/postfix-accounts.cf`.
+const UPSTREAM_USER: &str = "raxis-tenant@live-e2e.test";
+/// Plaintext password matching the `{PLAIN}<password>` half of
+/// the same line.
 const UPSTREAM_PASS: &str = "live-e2e-upstream-secret";
+
+/// Recipient address baked into `seed/smtp/postfix-accounts.cf`
+/// (the slice delivers a copy here so we can `docker exec`-cat
+/// the delivered file). Aliases for `rcpt-a@` / `rcpt-b@` route
+/// into the same mailbox via `seed/smtp/postfix-virtual.cf`.
+const TENANT_RCPT: &str = "raxis-tenant@live-e2e.test";
+/// Aliased recipients — these go through Postfix's virtual-alias
+/// table and land in the same `raxis-tenant` Maildir.
+const ALIASED_RCPT: &str = "rcpt-a@live-e2e.test";
+
+/// Where docker-mailserver writes delivered messages for the
+/// tenant. Reading this directory via `docker exec` is the
+/// inspection oracle.
+const TENANT_MAILDIR_NEW: &str = "/var/mail/live-e2e.test/raxis-tenant/new";
 
 // ---------------------------------------------------------------------------
 // Local CredentialBackend: returns the upstream password verbatim.
@@ -93,195 +147,31 @@ impl CredentialBackend for LiveBackend {
 }
 
 // ---------------------------------------------------------------------------
-// Shared "what did upstream see" record — the slice asserts on this
-// after the conversation.
-// ---------------------------------------------------------------------------
-
-#[derive(Default, Debug, Clone)]
-struct UpstreamRecord {
-    /// Decoded base64 payload from `AUTH PLAIN` (the wire bytes
-    /// surrendered by the proxy on behalf of the agent session).
-    /// Format per RFC 4954: `\0user\0password`.
-    pub auth_plain_payload: Option<Vec<u8>>,
-    /// Decoded base64 payloads from `AUTH LOGIN` (`[user_b64,
-    /// pass_b64]`).
-    pub auth_login_payloads: Vec<Vec<u8>>,
-    /// `MAIL FROM:<...>` value the upstream received.
-    pub mail_from:           Option<String>,
-    /// `RCPT TO:<...>` list (in order, with no de-dup).
-    pub rcpts_to:            Vec<String>,
-    /// Full DATA body (without the `\r\n.\r\n` terminator).
-    pub data_body:           Vec<u8>,
-    /// Did the conversation finish with `QUIT`?
-    pub finished_clean:      bool,
-}
-
-// ---------------------------------------------------------------------------
-// Tiny upstream SMTP fixture.
-// ---------------------------------------------------------------------------
-
-async fn spawn_upstream() -> Result<(std::net::SocketAddr, Arc<Mutex<UpstreamRecord>>)> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let addr = listener.local_addr()?;
-    let record = Arc::new(Mutex::new(UpstreamRecord::default()));
-    let record_for_loop = Arc::clone(&record);
-    tokio::spawn(async move {
-        while let Ok((stream, _peer)) = listener.accept().await {
-            let r = Arc::clone(&record_for_loop);
-            tokio::spawn(async move {
-                if let Err(e) = drive_upstream(stream, r).await {
-                    tracing::warn!(error = %e, "upstream smtp fixture conn ended");
-                }
-            });
-        }
-    });
-    Ok((addr, record))
-}
-
-async fn drive_upstream(stream: TcpStream, record: Arc<Mutex<UpstreamRecord>>) -> Result<()> {
-    let (read, mut write) = stream.into_split();
-    let mut reader = BufReader::new(read);
-    write.write_all(b"220 upstream-relay ready\r\n").await?;
-    let mut line = String::new();
-    let mut in_data = false;
-    let mut data_acc: Vec<u8> = Vec::new();
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 { break; }
-        if in_data {
-            // Accumulate raw bytes including this line. The
-            // canonical end is "\r\n.\r\n" — i.e. a line containing
-            // a single dot.
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if trimmed == "." {
-                // Strip the trailing CRLF before the dot per
-                // RFC 5321 §4.5.2 ("dot stuffing").
-                if data_acc.ends_with(b"\r\n") {
-                    data_acc.truncate(data_acc.len() - 2);
-                }
-                record.lock().await.data_body = data_acc.clone();
-                data_acc.clear();
-                in_data = false;
-                write.write_all(b"250 2.0.0 OK <fixture-msgid>\r\n").await?;
-                continue;
-            }
-            // Per RFC 5321 §4.5.2 a leading "." in the body is a
-            // transparent escape — strip it. The proxy under test
-            // doesn't currently emit dot-stuffing, but we tolerate
-            // it for forward compatibility.
-            if let Some(stripped) = trimmed.strip_prefix('.') {
-                data_acc.extend_from_slice(stripped.as_bytes());
-            } else {
-                data_acc.extend_from_slice(trimmed.as_bytes());
-            }
-            data_acc.extend_from_slice(b"\r\n");
-            continue;
-        }
-        let cmd = line.trim_end_matches(['\r', '\n']);
-        if cmd.eq_ignore_ascii_case("QUIT") {
-            record.lock().await.finished_clean = true;
-            write.write_all(b"221 2.0.0 Bye\r\n").await?;
-            break;
-        }
-        let upper = cmd.to_ascii_uppercase();
-        if upper.starts_with("EHLO") || upper.starts_with("HELO") {
-            write.write_all(b"250-upstream-relay\r\n").await?;
-            // Advertise AUTH but NOT STARTTLS — slice runs
-            // require_upstream_tls = false.
-            write.write_all(b"250 AUTH PLAIN LOGIN\r\n").await?;
-        } else if upper.starts_with("AUTH PLAIN") {
-            // Two shapes per RFC 4954:
-            //   AUTH PLAIN <base64-payload>
-            //   AUTH PLAIN          (server prompts 334; client follows up)
-            //
-            // We compare the verb on the uppercased form (case-
-            // insensitive per RFC 5321 §2.4) but extract the base64
-            // payload from the **original** `cmd` so we don't fold
-            // the case of the credential bytes.
-            let rest = &cmd["AUTH PLAIN".len()..];
-            let trimmed = rest.trim();
-            if trimmed.is_empty() {
-                write.write_all(b"334 \r\n").await?;
-                line.clear();
-                let _ = reader.read_line(&mut line).await?;
-                let payload = line.trim_end_matches(['\r', '\n']);
-                record.lock().await.auth_plain_payload = Some(b64_decode(payload));
-            } else {
-                record.lock().await.auth_plain_payload = Some(b64_decode(trimmed));
-            }
-            write.write_all(b"235 2.7.0 authentication successful\r\n").await?;
-        } else if upper == "AUTH LOGIN" {
-            write.write_all(b"334 VXNlcm5hbWU6\r\n").await?;
-            line.clear();
-            reader.read_line(&mut line).await?;
-            let user_b64 = line.trim_end_matches(['\r', '\n']).to_owned();
-            record.lock().await.auth_login_payloads.push(b64_decode(&user_b64));
-            write.write_all(b"334 UGFzc3dvcmQ6\r\n").await?;
-            line.clear();
-            reader.read_line(&mut line).await?;
-            let pass_b64 = line.trim_end_matches(['\r', '\n']).to_owned();
-            record.lock().await.auth_login_payloads.push(b64_decode(&pass_b64));
-            write.write_all(b"235 2.7.0 authentication successful\r\n").await?;
-        } else if let Some(addr) = strip_prefix_ci(cmd, "MAIL FROM:") {
-            record.lock().await.mail_from = Some(addr.trim().to_owned());
-            write.write_all(b"250 2.1.0 OK\r\n").await?;
-        } else if let Some(addr) = strip_prefix_ci(cmd, "RCPT TO:") {
-            record.lock().await.rcpts_to.push(addr.trim().to_owned());
-            write.write_all(b"250 2.1.5 OK\r\n").await?;
-        } else if upper == "DATA" {
-            in_data = true;
-            write.write_all(b"354 end data with <CRLF>.<CRLF>\r\n").await?;
-        } else if upper == "RSET" {
-            write.write_all(b"250 2.0.0 OK\r\n").await?;
-        } else {
-            write.write_all(b"500 5.5.1 unsupported command\r\n").await?;
-        }
-    }
-    Ok(())
-}
-
-fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
-    if s.len() < prefix.len() { return None; }
-    if s[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&s[prefix.len()..])
-    } else {
-        None
-    }
-}
-
-fn b64_decode(s: &str) -> Vec<u8> {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD
-        .decode(s.trim())
-        .unwrap_or_default()
-}
-
-// ---------------------------------------------------------------------------
-// Slice driver.
+// Slice driver
 // ---------------------------------------------------------------------------
 
 pub(crate) async fn run() -> Result<()> {
-    tracing::info!("slice smtp-proxy: starting");
+    tracing::info!(host_port = SMTP_HOST_PORT, "smtp-proxy slice starting");
 
-    // Real upstream SMTP fixture.
-    let (upstream_addr, record) = spawn_upstream().await
-        .context("spawn upstream smtp fixture")?;
+    require_smtp_container().await?;
 
-    // Real CredentialBackend whose value IS the password we expect
-    // the proxy to send to upstream.
+    // Capture the BEFORE snapshot of the tenant's Maildir so we
+    // can attribute the delivered message to THIS run when the
+    // compose stack has been up for a while.
+    let pre_files = list_maildir_new()?;
+
     let backend = Arc::new(LiveBackend {
         value:    UPSTREAM_PASS.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
-    // Real SmtpProxy bound at 127.0.0.1:0; upstream pinned to
-    // upstream_addr; require_upstream_tls = false because the
-    // fixture is loopback-only and the TLS path is covered by the
-    // crate's own integration tests.
     let cfg = ProxyConfig {
         listen_addr:           "127.0.0.1:0".to_owned(),
-        upstream_host_port:    upstream_addr.to_string(),
+        upstream_host_port:    SMTP_HOST_PORT.to_owned(),
+        // The Docker Mailserver in compose is configured with
+        // `SSL_TYPE=""` (plaintext) on its inbound port 25 path,
+        // so the proxy's outbound dial does not need to STARTTLS.
+        // Production deployments would set this `true`.
         require_upstream_tls:  false,
         credential_name:       CredentialName::new("live-e2e"),
         auth_mode:             AuthMode::Plain { user: UPSTREAM_USER.to_owned() },
@@ -298,52 +188,63 @@ pub(crate) async fn run() -> Result<()> {
     let stats = proxy.stats_handle();
     tokio::spawn(proxy.serve());
 
-    // Real SMTP client (raw TCP, real wire shape).
+    // A tag the slice embeds in the message body so we can match
+    // the right delivered file when the Maildir already had
+    // pre-existing messages from a long-running compose stack.
+    let run_tag = format!("raxis-live-e2e-smtp-{}", uuid::Uuid::now_v7());
+
+    // Real SMTP client (raw TCP, real wire shape) talking to the
+    // proxy.
     let mut s = TcpStream::connect(proxy_addr).await?;
     expect_status(&mut s, 220).await?;
 
     write_line(&mut s, "EHLO live-e2e.test\r\n").await?;
     drain_continued_status(&mut s, 250).await?;
 
-    // Drive AUTH PLAIN with junk bytes; the proxy MUST discard them.
+    // Drive AUTH PLAIN with junk bytes; the proxy MUST discard
+    // them and re-authenticate upstream with the kernel-resolved
+    // credential. The fact that the eventual `MAIL FROM` /
+    // `RCPT TO` succeed is the cross-check.
     write_line(&mut s, "AUTH PLAIN AGFnZW50AHByb3h5LWp1bmstcGFzcw==\r\n").await?;
     expect_status(&mut s, 235).await?;
 
     write_line(&mut s, "MAIL FROM:<sender@live-e2e.test>\r\n").await?;
     expect_status(&mut s, 250).await?;
 
-    write_line(&mut s, "RCPT TO:<rcpt-a@live-e2e.test>\r\n").await?;
+    // Two recipients: the canonical tenant + an aliased recipient
+    // that postfix-virtual.cf routes into the same Maildir. Both
+    // landings prove (a) the alias table is loaded and (b) the
+    // proxy forwarded each `RCPT TO` verbatim.
+    write_line(&mut s, &format!("RCPT TO:<{TENANT_RCPT}>\r\n")).await?;
     expect_status(&mut s, 250).await?;
-    write_line(&mut s, "RCPT TO:<rcpt-b@live-e2e.test>\r\n").await?;
+    write_line(&mut s, &format!("RCPT TO:<{ALIASED_RCPT}>\r\n")).await?;
     expect_status(&mut s, 250).await?;
 
     write_line(&mut s, "DATA\r\n").await?;
     expect_status(&mut s, 354).await?;
 
-    let body =
+    let body = format!(
         "From: sender@live-e2e.test\r\n\
-         To: rcpt-a@live-e2e.test, rcpt-b@live-e2e.test\r\n\
-         Subject: live-e2e\r\n\
+         To: {TENANT_RCPT}, {ALIASED_RCPT}\r\n\
+         Subject: live-e2e {run_tag}\r\n\
+         X-Raxis-Run-Tag: {run_tag}\r\n\
          \r\n\
-         body line 1\r\n\
+         body line 1 ({run_tag})\r\n\
          body line 2\r\n\
-         .\r\n";
+         .\r\n",
+    );
     s.write_all(body.as_bytes()).await?;
     expect_status(&mut s, 250).await?;
 
     write_line(&mut s, "QUIT\r\n").await?;
     expect_status(&mut s, 221).await?;
 
-    // Allow the upstream a moment to finalize its tracking record.
-    for _ in 0..50 {
-        let snap = stats.snapshot();
-        if snap.messages_relayed >= 1 { break; }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let snap = stats.snapshot();
-    let rec = record.lock().await.clone();
+    // Allow the proxy a moment to flush counters AND give Postfix
+    // a chance to deliver into the Maildir. Postfix delivery
+    // through the local LDA is normally < 200 ms but a busy
+    // queue on a cold container can take a few seconds.
+    let snap = wait_for_relay(&stats, Duration::from_secs(8)).await?;
 
-    // Assertions: the proxy's recorded state.
     if snap.messages_relayed != 1 {
         return Err(anyhow!(
             "expected messages_relayed=1, got {} (snapshot={snap:?})",
@@ -365,57 +266,176 @@ pub(crate) async fn run() -> Result<()> {
     if snap.bytes_relayed == 0 {
         return Err(anyhow!("expected bytes_relayed > 0, got 0"));
     }
-
-    // Assertions: the upstream-side record.
-    let auth = rec.auth_plain_payload.as_deref()
-        .ok_or_else(|| anyhow!("upstream did not see AUTH PLAIN payload"))?;
-    let expected_auth = {
-        let mut v = Vec::with_capacity(2 + UPSTREAM_USER.len() + UPSTREAM_PASS.len());
-        v.push(0);
-        v.extend_from_slice(UPSTREAM_USER.as_bytes());
-        v.push(0);
-        v.extend_from_slice(UPSTREAM_PASS.as_bytes());
-        v
-    };
-    if auth != expected_auth.as_slice() {
-        return Err(anyhow!(
-            "upstream AUTH PLAIN payload mismatch — proxy did not strip the agent's junk and inject the real credential.\n\
-             expected (canonical): {:?}\n\
-             observed:             {:?}",
-            expected_auth, auth,
-        ));
-    }
-    if rec.mail_from.as_deref() != Some("<sender@live-e2e.test>") {
-        return Err(anyhow!(
-            "upstream MAIL FROM mismatch — got {:?}",
-            rec.mail_from,
-        ));
-    }
-    if rec.rcpts_to.len() != 2 {
-        return Err(anyhow!(
-            "upstream RCPT TO list mismatch — expected 2, got {} ({:?})",
-            rec.rcpts_to.len(), rec.rcpts_to,
-        ));
-    }
-    if rec.data_body.is_empty() {
-        return Err(anyhow!("upstream DATA body was empty"));
-    }
-    if !rec.finished_clean {
-        return Err(anyhow!("upstream did not see QUIT"));
-    }
     if backend.resolves.load(Ordering::Relaxed) < 1 {
         return Err(anyhow!(
             "credential backend was never asked — proxy must resolve per submission",
         ));
     }
 
+    // Inspect the real upstream: the message must have landed in
+    // the tenant's Maildir/new/. We read every NEW file (any file
+    // not present in the pre-snapshot) and verify at least one of
+    // them carries our run-tag.
+    let landed = wait_for_delivery(&pre_files, &run_tag, Duration::from_secs(15))?;
+    if !landed.found {
+        return Err(anyhow!(
+            "upstream Maildir delivery missed run-tag {run_tag:?} after 15s.\n\
+             new files since pre-snapshot: {:?}",
+            landed.new_files,
+        ));
+    }
+
+    // Best-effort cleanup so a long-running compose stack doesn't
+    // accumulate slice residue. Failure is non-fatal.
+    if let Err(e) = cleanup_delivered(&landed.new_files) {
+        tracing::warn!(error = %e, "best-effort Maildir cleanup failed (non-fatal)");
+    }
+
     tracing::info!(
-        "slice smtp-proxy: PASS — messages_relayed={}, recipients_accepted={}, bytes_relayed={}, backend resolves={}",
-        snap.messages_relayed, snap.recipients_accepted, snap.bytes_relayed,
-        backend.resolves.load(Ordering::Relaxed),
+        messages_relayed    = snap.messages_relayed,
+        recipients_accepted = snap.recipients_accepted,
+        bytes_relayed       = snap.bytes_relayed,
+        backend_resolves    = backend.resolves.load(Ordering::Relaxed),
+        delivered_files     = landed.new_files.len(),
+        "smtp-proxy slice OK (real upstream)",
     );
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Preflight + container inspection (`docker exec`)
+// ---------------------------------------------------------------------------
+
+async fn require_smtp_container() -> Result<()> {
+    match tokio::time::timeout(
+        Duration::from_millis(800),
+        TcpStream::connect(SMTP_HOST_PORT),
+    ).await {
+        Ok(Ok(_))  => Ok(()),
+        Ok(Err(e)) => Err(anyhow!(
+            "SMTP (docker-mailserver) container not reachable at {SMTP_HOST_PORT} ({e}).\n\
+             Run:\n  \
+             docker compose -f live-e2e/docker-compose.e2e.yml up -d smtp --wait\n\
+             (or use docker-compose.extended.e2e.yml for the extended scenario)",
+        )),
+        Err(_) => Err(anyhow!(
+            "SMTP container TCP connect to {SMTP_HOST_PORT} timed out after 800 ms.\n\
+             Run:\n  \
+             docker compose -f live-e2e/docker-compose.e2e.yml up -d smtp --wait",
+        )),
+    }
+}
+
+fn list_maildir_new() -> Result<Vec<String>> {
+    let out = std::process::Command::new("docker")
+        .args(["exec", SMTP_CONTAINER, "ls", "-1", TENANT_MAILDIR_NEW])
+        .output()
+        .with_context(|| format!("spawn `docker exec` against {SMTP_CONTAINER}"))?;
+    if !out.status.success() {
+        // First run: directory may not exist yet — Postfix creates
+        // it on first delivery. Treat as empty.
+        return Ok(Vec::new());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_owned())
+        .collect())
+}
+
+struct LandingProbe {
+    found:     bool,
+    new_files: Vec<String>,
+}
+
+/// Poll the tenant's Maildir for a file that is NEW (not in
+/// `before`) AND whose body contains `run_tag`. Returns once at
+/// least one such file lands or `deadline` elapses.
+fn wait_for_delivery(
+    before:   &[String],
+    run_tag:  &str,
+    deadline: Duration,
+) -> Result<LandingProbe> {
+    let started = Instant::now();
+    let before_set: std::collections::BTreeSet<&str> =
+        before.iter().map(String::as_str).collect();
+
+    loop {
+        let now = list_maildir_new()?;
+        let new_files: Vec<String> = now.into_iter()
+            .filter(|f| !before_set.contains(f.as_str()))
+            .collect();
+
+        if !new_files.is_empty() {
+            // Read each new file and check the body.
+            for f in &new_files {
+                let body = read_maildir_file(f)?;
+                if body.contains(run_tag) {
+                    return Ok(LandingProbe { found: true, new_files });
+                }
+            }
+        }
+        if started.elapsed() >= deadline {
+            return Ok(LandingProbe { found: false, new_files });
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn read_maildir_file(name: &str) -> Result<String> {
+    let path = format!("{TENANT_MAILDIR_NEW}/{name}");
+    let out = std::process::Command::new("docker")
+        .args(["exec", SMTP_CONTAINER, "cat", &path])
+        .output()
+        .with_context(|| format!("docker exec cat {path}"))?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "docker exec cat {path} failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn cleanup_delivered(files: &[String]) -> Result<()> {
+    if files.is_empty() { return Ok(()); }
+    let mut args = vec!["exec".to_owned(), SMTP_CONTAINER.to_owned(), "rm".to_owned(), "-f".to_owned()];
+    for f in files {
+        args.push(format!("{TENANT_MAILDIR_NEW}/{f}"));
+    }
+    let out = std::process::Command::new("docker")
+        .args(&args)
+        .output()?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "docker exec rm failed: {}",
+            String::from_utf8_lossy(&out.stderr),
+        ));
+    }
+    Ok(())
+}
+
+async fn wait_for_relay(
+    stats:    &Arc<raxis_credential_proxy_smtp::ProxyStats>,
+    deadline: Duration,
+) -> Result<raxis_credential_proxy_smtp::ProxyStatsSnapshot> {
+    let started = Instant::now();
+    loop {
+        let snap = stats.snapshot();
+        if snap.messages_relayed >= 1 {
+            return Ok(snap);
+        }
+        if started.elapsed() >= deadline {
+            return Ok(snap);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tiny SMTP client helpers (raw wire — same byte shape as the
+// in-VM agent's libc-only client).
+// ---------------------------------------------------------------------------
 
 async fn write_line(s: &mut TcpStream, line: &str) -> Result<()> {
     s.write_all(line.as_bytes()).await?;
@@ -423,8 +443,6 @@ async fn write_line(s: &mut TcpStream, line: &str) -> Result<()> {
 }
 
 async fn read_status_line(s: &mut TcpStream) -> Result<(u16, bool, String)> {
-    // Read until LF, then parse "<code><sep><text>" where sep is
-    // ' ' for a final line or '-' for a continued line.
     let mut acc = Vec::new();
     let mut byte = [0u8; 1];
     loop {

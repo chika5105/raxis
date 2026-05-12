@@ -1,0 +1,37 @@
+# Custom postfix main.cf overrides applied by docker-mailserver at
+# boot from `/tmp/docker-mailserver/postfix-main.cf`.
+#
+# The live-e2e SMTP slice points the proxy at the container on
+# port 25 (the only port `docker-compose.e2e.yml` publishes for the
+# `smtp` service) and the proxy issues `AUTH PLAIN` with the
+# kernel-resolved credential. By default docker-mailserver leaves
+# `smtpd_sasl_auth_enable = no` on the inbound port 25 path
+# because real-world MX servers should accept anonymous mail from
+# other MTAs and reserve AUTH for the submission ports. The live-
+# e2e harness flips that policy to YES so the slice can verify the
+# proxy's AUTH PLAIN handshake succeeds against a real Postfix
+# `smtpd_sasl_auth_enable` decision (rather than the in-process
+# fixture's hand-rolled "+OK" response).
+
+# Enable SASL AUTH on the inbound port 25 path so the SMTP proxy's
+# AUTH PLAIN handshake reaches a real Cyrus/Dovecot SASL
+# auth-cache on the upstream side.
+smtpd_sasl_auth_enable = yes
+
+# Permit plaintext AUTH on the inbound port. The proxy connects
+# over loopback to the Docker bridge with `require_upstream_tls =
+# false`, so the SASL exchange travels in cleartext on the test
+# host's network. Acceptable here because the harness is
+# explicitly an in-loopback dev tool — see the
+# `live-e2e/docker-compose.e2e.yml` header for the threat model
+# scope.
+smtpd_tls_auth_only = no
+
+# Recipient-restriction stack: permit clients that authenticated
+# via SASL (the proxy after `AUTH PLAIN`), permit traffic from
+# the docker-defined trusted network (the slice's loopback bridge
+# the `PERMIT_DOCKER` env var carved out), and reject relay
+# attempts otherwise. Mirrors the docker-mailserver default but
+# adds `permit_sasl_authenticated` first so the slice's authed
+# session is admitted independently of network-layer trust.
+smtpd_recipient_restrictions = permit_sasl_authenticated, permit_mynetworks, reject_unauth_destination

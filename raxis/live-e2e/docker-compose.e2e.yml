@@ -15,6 +15,13 @@
 #     semantics, real RESP3 NOPROTO downgrade against a real server,
 #     and real upstream AUTH success/failure rather than only the
 #     handshake bytes a fixture chooses to emit.
+#   * `smtp`    (25 → 25199)   — `smtp-proxy` slice; runs the real
+#     `docker-mailserver` image so the proxy speaks SMTP against a
+#     real Postfix MTA. Trade-off: docker-mailserver is heavier than
+#     test-focused alternatives like Mailpit/MailHog (which expose
+#     an HTTP capture API), but it is the team-wide preferred image
+#     and the harness inspects deliveries by `docker exec`-ing into
+#     the container's `Maildir/new`.
 #
 # Ports are deliberately offset from defaults to avoid colliding
 # with any operator-side databases the developer may already be
@@ -110,3 +117,73 @@ services:
       retries: 10
     tmpfs:
       - /data
+
+  smtp:
+    image: docker.io/mailserver/docker-mailserver:14.0
+    container_name: raxis-e2e-smtp
+    hostname: mail.live-e2e.test
+    ports:
+      - "127.0.0.1:25199:25"
+    environment:
+      # docker-mailserver is opinionated about its hostname matching
+      # the published TLS / banner; pin it to a deterministic test
+      # domain so every dev / CI box presents the same EHLO banner.
+      OVERRIDE_HOSTNAME: mail.live-e2e.test
+      POSTMASTER_ADDRESS: postmaster@live-e2e.test
+      # Strip every optional component — the live-e2e harness only
+      # needs Postfix + Dovecot SASL. ClamAV / SpamAssassin / DKIM
+      # / DMARC / Postgrey / Rspamd / SRS / MTA-STS would each
+      # blow up boot time and memory without adding any coverage
+      # the SMTP credential proxy slice needs.
+      ENABLE_CLAMAV: "0"
+      ENABLE_AMAVIS: "0"
+      ENABLE_SPAMASSASSIN: "0"
+      ENABLE_FAIL2BAN: "0"
+      ENABLE_OPENDKIM: "0"
+      ENABLE_OPENDMARC: "0"
+      ENABLE_POSTGREY: "0"
+      ENABLE_RSPAMD: "0"
+      ENABLE_SRS: "0"
+      ENABLE_MTA_STS: "0"
+      ENABLE_UPDATE_CHECK: "0"
+      # SMTP_ONLY would skip Dovecot, but the proxy's AUTH PLAIN
+      # handshake requires the Dovecot SASL backend behind Postfix.
+      # Keep Dovecot up; we still skip every other optional service.
+      SMTP_ONLY: "0"
+      SSL_TYPE: ""
+      PERMIT_DOCKER: connected-networks
+      LOG_LEVEL: warn
+      ONE_DIR: "1"
+    cap_add:
+      # docker-mailserver flips a sysctl during boot to size its
+      # postfix queue; without NET_ADMIN the entrypoint logs a noisy
+      # warning. Cap is otherwise unused.
+      - NET_ADMIN
+    volumes:
+      # Pre-bake the single account `raxis-tenant@live-e2e.test`
+      # whose plaintext password matches `UPSTREAM_PASS` in
+      # `slice_smtp_proxy.rs`. Aliases route `rcpt-a@` and `rcpt-b@`
+      # into the same mailbox so the slice can drive a multi-
+      # recipient envelope without provisioning extra users.
+      - ./seed/smtp/postfix-accounts.cf:/tmp/docker-mailserver/postfix-accounts.cf:ro
+      - ./seed/smtp/postfix-virtual.cf:/tmp/docker-mailserver/postfix-virtual.cf:ro
+      # Override the inbound port-25 SASL policy so the proxy's
+      # AUTH PLAIN handshake reaches a real Cyrus/Dovecot SASL
+      # decision — see the file's header for the rationale.
+      - ./seed/smtp/postfix-main.cf:/tmp/docker-mailserver/postfix-main.cf:ro
+    healthcheck:
+      # Postfix's master process is up AND listening on port 25.
+      # `start_period: 30s` matches the worst-case docker-mailserver
+      # boot time we see on a cold pull.
+      test:
+        - CMD-SHELL
+        - "ss -ltn | grep -q ':25 ' && supervisorctl status postfix | grep -q RUNNING"
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    tmpfs:
+      - /var/mail
+      - /var/mail-state
+      - /var/log/mail
+      - /tmp
