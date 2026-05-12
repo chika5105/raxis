@@ -21,7 +21,7 @@ export function ErrorBox({ error, onRetry }: ErrorBoxProps) {
           <p className="text-sm font-medium text-bad">{code}</p>
           <p className="mt-1 text-sm text-ink">{detail}</p>
           {onRetry && (
-            <button className="btn mt-3" onClick={onRetry}>
+            <button type="button" className="btn mt-3" onClick={onRetry}>
               Retry
             </button>
           )}

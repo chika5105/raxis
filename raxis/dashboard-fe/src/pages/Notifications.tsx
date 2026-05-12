@@ -62,6 +62,7 @@ export function NotificationsPage() {
             Unread only
           </label>
           <button
+            type="button"
             className="btn"
             disabled={markAll.isPending}
             onClick={() => markAll.mutate()}

@@ -201,6 +201,7 @@ export function PolicyPage() {
             />
             <div className="mt-3 flex items-center gap-3">
               <button
+                type="button"
                 className="btn-primary"
                 disabled={busy || !draft || sig.trim().length === 0}
                 onClick={onApply}
@@ -208,6 +209,7 @@ export function PolicyPage() {
                 {busy ? <><Spinner className="w-4 h-4" /> Applying…</> : "Apply policy"}
               </button>
               <button
+                type="button"
                 className="btn"
                 disabled={busy}
                 onClick={() => {

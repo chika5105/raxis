@@ -246,6 +246,7 @@ export function Shell({ children }: ShellProps) {
                 ))}
               </div>
               <button
+                type="button"
                 className="btn w-full mt-3 justify-center"
                 onClick={onLogout}
               >
@@ -254,6 +255,7 @@ export function Shell({ children }: ShellProps) {
             </div>
           ) : (
             <button
+              type="button"
               className="btn-primary w-full justify-center"
               onClick={() => navigate("/login")}
             >

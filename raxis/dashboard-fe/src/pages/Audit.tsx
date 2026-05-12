@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -16,6 +16,19 @@ export function AuditPage() {
   const [params, setParams] = useSearchParams();
   const initiativeId = params.get("initiative_id") ?? undefined;
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Controlled input mirroring the URL's initiative_id filter.
+  // The previous implementation used `defaultValue` which only
+  // seeds the field on first mount — clicking the "clear" link
+  // wiped the URL param but left whatever text the operator
+  // had typed, so the visible input lied about the active
+  // filter. Using a controlled state synced from the URL keeps
+  // the input and the filter in lockstep regardless of which
+  // surface (input, "clear", browser back/forward) drove the
+  // change.
+  const [filterDraft, setFilterDraft] = useState(initiativeId ?? "");
+  useEffect(() => {
+    setFilterDraft(initiativeId ?? "");
+  }, [initiativeId]);
 
   const q = useInfiniteQuery({
     queryKey: ["audit", { initiativeId }],
@@ -50,16 +63,18 @@ export function AuditPage() {
         <div className="flex gap-2">
           <input
             className="input w-72"
-            placeholder="Filter by initiative id…"
-            defaultValue={initiativeId ?? ""}
+            placeholder="Filter by initiative id (press Enter)…"
+            value={filterDraft}
+            onChange={(e) => setFilterDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                const v = (e.target as HTMLInputElement).value.trim();
-                if (v) {
-                  setParams({ initiative_id: v });
-                } else {
-                  setParams({});
-                }
+                e.preventDefault();
+                const v = filterDraft.trim();
+                if (v) setParams({ initiative_id: v });
+                else setParams({});
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setFilterDraft(initiativeId ?? "");
               }
             }}
           />
@@ -69,7 +84,11 @@ export function AuditPage() {
       {initiativeId && (
         <div className="text-xs text-ink-muted">
           Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
-          <button onClick={() => setParams({})} className="text-accent hover:underline ml-2">
+          <button
+            type="button"
+            onClick={() => setParams({})}
+            className="text-accent hover:underline ml-2"
+          >
             clear
           </button>
         </div>
@@ -161,6 +180,7 @@ export function AuditPage() {
           {q.hasNextPage && (
             <div className="p-3 border-t border-edge text-center">
               <button
+                type="button"
                 className="btn"
                 disabled={q.isFetchingNextPage}
                 onClick={() => q.fetchNextPage()}

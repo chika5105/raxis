@@ -93,7 +93,7 @@ export function WorktreeDetailPage() {
       </header>
 
       {/* Tabs */}
-      <div className="flex border-b border-edge text-sm">
+      <div role="tablist" className="flex border-b border-edge text-sm">
         <Tab active={tab === "log"} onClick={() => setTab("log")}>Log</Tab>
         <Tab active={tab === "diff"} onClick={() => setTab("diff")}>Diff vs base</Tab>
         <Tab active={tab === "range"} onClick={() => setTab("range")}>Range diff</Tab>
@@ -166,8 +166,11 @@ function Tab({
 }) {
   return (
     <button
+      type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
-      className={`px-4 py-2 -mb-px border-b-2 ${
+      className={`px-4 py-2 -mb-px border-b-2 focus:outline-none focus-visible:bg-panel-high ${
         active
           ? "text-ink border-accent"
           : "text-ink-muted border-transparent hover:text-ink"
