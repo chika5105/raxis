@@ -229,6 +229,12 @@ impl<T: Send + Sync + 'static> TokenCache<T> {
     pub async fn len(&self) -> usize {
         self.tokens.read().await.len()
     }
+
+    /// Test-only: whether the cache currently holds zero entries.
+    #[cfg(test)]
+    pub async fn is_empty(&self) -> bool {
+        self.tokens.read().await.is_empty()
+    }
 }
 
 /// RAII guard held while a refresh is in flight. Dropping the

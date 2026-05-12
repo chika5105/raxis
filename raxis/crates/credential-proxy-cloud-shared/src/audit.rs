@@ -174,6 +174,7 @@ pub fn emit_cloud_credential_forwarded(
 ///
 /// `status_code` is `0` when no HTTP response was received
 /// (e.g. timeout / network error / construction refusal).
+#[allow(clippy::too_many_arguments)] // Audit shape is normative — see spec §5.2.
 pub fn emit_cloud_credential_forwarding_denied(
     audit:           &Arc<dyn AuditSink>,
     session_id:      &str,
