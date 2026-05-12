@@ -394,16 +394,30 @@ impl BootContext {
 /// `"<redacted>"`); leaking it into stderr would let any host-side
 /// scrape break the kernel's authentication of the guest.
 pub fn render_boot_log(ctx: &BootContext) -> String {
+    // Both `initiative_id` and `task_id` are opaque non-validated
+    // strings at this layer (per the `BootArgs` doc above — the
+    // kernel mints UUIDv7 in production, but planner binaries do NOT
+    // regex-validate them and may be invoked through trampolines).
+    // The earlier implementation interpolated them directly into the
+    // JSON template, which would produce malformed JSON if either
+    // string contained a `"`, `\`, or control character. Routing
+    // each user-supplied string through `serde_json::Value` does the
+    // correct escaping (and `serde_json::to_string` never fails on
+    // a well-formed `Value::String`), so the boot-log JSON is now
+    // guaranteed well-formed regardless of what the caller passed
+    // on argv. The `role.shortname()` and the static template
+    // fragments are ASCII-only and need no escaping.
+    let init_repr = serde_json::Value::String(ctx.args.initiative_id.clone()).to_string();
     let task_repr = match ctx.args.task_id.as_deref() {
-        Some(t) => format!("\"{}\"", t),
-        None    => String::from("null"),
+        Some(t) => serde_json::Value::String(t.to_owned()).to_string(),
+        None => String::from("null"),
     };
     format!(
         "{{\"level\":\"info\",\"step\":\"planner-boot\",\
-         \"role\":\"{role}\",\"initiative_id\":\"{init}\",\
+         \"role\":\"{role}\",\"initiative_id\":{init},\
          \"task_id\":{task},\"session_token\":\"<redacted>\"}}",
         role = ctx.role.shortname(),
-        init = ctx.args.initiative_id,
+        init = init_repr,
         task = task_repr,
     )
 }

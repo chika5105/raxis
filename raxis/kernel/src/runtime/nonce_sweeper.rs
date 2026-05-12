@@ -132,7 +132,16 @@ pub async fn run_loop(
     // kernel restart; the live-window computation (which DOES
     // re-read on every tick) is what actually drives correctness.
     let initial_cadence_secs = policy.load().plan_signing().nonce_sweep_interval_secs;
-    let cadence = std::time::Duration::from_secs(initial_cadence_secs);
+    // Defence-in-depth: policy validation today enforces a 1-second
+    // lower bound (see `plan_signing_tests`), but
+    // `tokio::time::interval(Duration::ZERO)` panics with "interval
+    // period must not be zero". Clamp to >= 1ms here so a future
+    // policy-validator change (or a hand-edited test policy) can
+    // never crash the sweeper at boot. The 1ms floor is far below
+    // any realistic sweep cadence and below the policy lower bound,
+    // so it never affects production behaviour.
+    let cadence = std::time::Duration::from_secs(initial_cadence_secs)
+        .max(std::time::Duration::from_millis(1));
 
     let mut interval = tokio::time::interval(cadence);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

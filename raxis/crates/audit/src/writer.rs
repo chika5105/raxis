@@ -84,6 +84,58 @@ pub struct AuditWriter {
     /// SHA-256 of the last written line (hex, 64 chars).
     /// "000...000" before the first write.
     prev_sha256: String,
+    /// Durability knob — when true (the default), `append` issues a
+    /// `File::sync_data()` after the user-space buffer is flushed so
+    /// the JSONL append is fsync'd before the call returns. See
+    /// [`AuditWriterOptions::sync_on_append`].
+    sync_on_append: bool,
+}
+
+/// Construction options for [`AuditWriter`]. Today there is a single
+/// knob; the struct exists so the constructor surface can grow without
+/// breaking existing call sites.
+///
+/// # `sync_on_append` — audit-vs-SQLite crash consistency
+///
+/// The kernel's consistency unit (kernel-store.md §2.5.2) treats the
+/// audit chain pointer as part of the same atomic write boundary as
+/// the SQLite row that the audit record describes. SQLite is opened
+/// with `synchronous = FULL` (`crates/store/src/db.rs`), so every
+/// `tx.commit()` is fdatasynced before returning `Ok(())`. The audit
+/// append, however, only owned a `BufWriter::flush()` — which drains
+/// the user-space buffer to the OS page cache but does **not** issue
+/// a fsync. A host power-loss between SQLite's fsync and the kernel
+/// flushing dirty pages would leave a durable SQLite row whose
+/// corresponding JSONL line was lost, breaking the
+/// `audit JSONL = view-of-SQLite` invariant.
+///
+/// With `sync_on_append = true` (default), `AuditWriter::append`
+/// issues `File::sync_data()` after `flush()`. The audit chain is
+/// now crash-consistent with SQLite under the same fsync barrier.
+/// The perf cost is one extra fdatasync per emitted audit record —
+/// the same cost SQLite already pays per `tx.commit()`, so the
+/// realistic overhead is roughly one additional fsync per
+/// kernel-handled IPC frame.
+///
+/// `sync_on_append = false` is provided for operators who explicitly
+/// accept the data-loss risk in exchange for higher throughput on
+/// audit-heavy workloads (or for unit tests that exercise the
+/// writer on `tmpfs` where fsync is a no-op anyway). Setting this
+/// false weakens INV-AUDIT-PAIRED-01 across a host crash — use only
+/// with eyes open.
+#[derive(Debug, Clone, Copy)]
+pub struct AuditWriterOptions {
+    /// When true, `append` issues `File::sync_data()` after each
+    /// flush. Default true.
+    pub sync_on_append: bool,
+}
+
+impl Default for AuditWriterOptions {
+    fn default() -> Self {
+        Self {
+            sync_on_append: true,
+        }
+    }
 }
 
 impl AuditWriter {
@@ -102,20 +154,38 @@ impl AuditWriter {
     ///
     /// For fresh segments, pass `starting_seq = 0` and
     /// `starting_prev_sha256 = None` (uses genesis "000...000").
+    ///
+    /// Uses [`AuditWriterOptions::default()`] (`sync_on_append = true`).
+    /// Call [`Self::open_with_options`] to disable fsync-on-append.
     pub fn open(
         path: &Path,
         starting_seq: u64,
         starting_prev_sha256: Option<String>,
     ) -> Result<Self, AuditWriterError> {
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
+        Self::open_with_options(
+            path,
+            starting_seq,
+            starting_prev_sha256,
+            AuditWriterOptions::default(),
+        )
+    }
+
+    /// Like [`Self::open`] but allows tuning durability knobs.
+    /// See [`AuditWriterOptions`] for the invariants tied to
+    /// `sync_on_append`.
+    pub fn open_with_options(
+        path: &Path,
+        starting_seq: u64,
+        starting_prev_sha256: Option<String>,
+        options: AuditWriterOptions,
+    ) -> Result<Self, AuditWriterError> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
             writer: BufWriter::new(file),
             seq: starting_seq,
             prev_sha256: starting_prev_sha256
                 .unwrap_or_else(|| Self::GENESIS_PREV_SHA256.to_owned()),
+            sync_on_append: options.sync_on_append,
         })
     }
 
@@ -166,7 +236,25 @@ impl AuditWriter {
         self.writer.write_all(line.as_bytes())?;
         self.writer.flush()?;
 
-        // Advance chain state only after a successful flush.
+        // Durability barrier — closes the audit-vs-SQLite consistency
+        // gap. `BufWriter::flush()` only drains the user-space buffer
+        // into the OS page cache; under a host power-loss the dirty
+        // page can be lost while the SQLite row this record describes
+        // (committed with `synchronous = FULL`, fsync'd before commit
+        // returned) is durable. `File::sync_data()` issues an
+        // fdatasync so the JSONL append is on stable storage before
+        // we advance the in-memory chain pointer.
+        //
+        // Gated by `sync_on_append` so operators can trade durability
+        // for throughput on workloads where audit volume is high and
+        // the host-crash risk is mitigated by a battery-backed cache.
+        // See `AuditWriterOptions` for the invariant docs.
+        if self.sync_on_append {
+            self.writer.get_ref().sync_data()?;
+        }
+
+        // Advance chain state only after a successful flush (and
+        // fdatasync, if enabled).
         self.seq += 1;
         self.prev_sha256 = next_prev;
 

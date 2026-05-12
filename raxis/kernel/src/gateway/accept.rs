@@ -19,6 +19,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::gateway::client::GatewayClient;
 use crate::ipc::log::{body_from_fields, credential_fingerprint, finalize_line, level};
+use crate::ipc::{accept_backoff_step, ACCEPT_BACKOFF_INITIAL};
 
 /// How long we wait for the gateway to send its `GatewayReady` frame
 /// after accepting the connection. The gateway issues the frame
@@ -215,9 +216,14 @@ pub async fn accept_gateway_loop(
     client:   Arc<GatewayClient>,
     audit:    Arc<dyn AuditSink>,
 ) {
+    let mut backoff = ACCEPT_BACKOFF_INITIAL;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                // Reset the backoff after any successful accept so a
+                // transient blip doesn't keep the loop in cooldown
+                // once the underlying pressure clears.
+                backoff = ACCEPT_BACKOFF_INITIAL;
                 let client = Arc::clone(&client);
                 let audit  = Arc::clone(&audit);
                 tokio::spawn(async move {
@@ -226,9 +232,13 @@ pub async fn accept_gateway_loop(
             }
             Err(e) => {
                 gateway_dispatch_log::accept_error(&e.to_string());
-                // Same backoff as the v1 stub: short sleep so we don't
-                // spin if the listener is in a bad state.
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                // Exponential backoff (curve defined in `crate::ipc`).
+                // Pre-fix this slept a fixed 100 ms after every
+                // failure, producing 10 retries/sec under sustained
+                // FD exhaustion. See module docs in `kernel::ipc::mod`
+                // for the full rationale.
+                tokio::time::sleep(backoff).await;
+                backoff = accept_backoff_step(backoff);
             }
         }
     }

@@ -167,33 +167,36 @@ impl RetryingModelClient {
         let scaled = base_secs * (cfg.multiplier as f64).powi(attempt as i32);
         // Jitter draw: uniform in [1.0 - jitter, 1.0 + jitter]. We
         // use a tiny self-rolled LCG seeded from the wall-clock
-        // nanosecond field to avoid pulling `rand` for one call.
+        // sub-second nanosecond field to avoid pulling `rand` for one
+        // call.
         //
         // PRIOR BUG: the seed used to be
         //     `Instant::now().elapsed().as_nanos() as u64`
-        // which is the duration between two back-to-back `Instant::now`
-        // and `.elapsed()` calls — i.e. effectively the cost of
-        // `elapsed()` itself, on the order of tens of nanoseconds with
-        // very low entropy. That produced an almost-constant jitter
-        // factor across attempts, defeating the entire purpose of
-        // jitter (avoiding thundering-herd retry alignment when
-        // multiple sessions hit a 429 / 5xx in lockstep).
+        // which is the duration between two back-to-back instructions
+        // (`Instant::now()` and `.elapsed()` evaluated on the same
+        // statement) — on the order of tens of nanoseconds with very
+        // low entropy. That produced an almost-constant jitter factor
+        // across attempts, defeating the entire purpose of jitter
+        // (avoiding thundering-herd retry alignment when multiple
+        // sessions hit a 429 / 5xx in lockstep).
         //
-        // The replacement reads the wall-clock nanos-since-epoch. The
-        // value monotonically advances across calls and the low bits
-        // are noisy enough to break alignment. `SystemTime` can jump
-        // backwards on NTP correction but that does not weaken the
-        // jitter property — any nondeterministic seed suffices. The
-        // `unwrap_or(0)` matches the workspace's saturating wall-clock
-        // convention (see `crates/types/src/clock.rs`).
+        // Fix: seed from `SystemTime::now().duration_since(UNIX_EPOCH)
+        // .subsec_nanos()` XOR `attempt`. The wall-clock sub-second
+        // field varies on every call (and the `attempt` mix ensures
+        // two adjacent attempts in the same nanosecond seed
+        // distinctly). `SystemTime` can jump backwards on NTP
+        // correction but that does not weaken the jitter property —
+        // any nondeterministic seed suffices. `.unwrap_or(0)` matches
+        // the workspace's saturating wall-clock convention (see
+        // `crates/types/src/clock.rs`).
         let jitter_factor = if cfg.jitter > 0.0 {
             use std::time::{SystemTime, UNIX_EPOCH};
-            let nanos = SystemTime::now()
+            let wall_nanos = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.subsec_nanos() as u64)
-                .unwrap_or(0)
-                .wrapping_add(attempt as u64);
-            let lcg = nanos
+                .unwrap_or(0);
+            let seed = wall_nanos ^ (attempt as u64);
+            let lcg = seed
                 .wrapping_mul(6364136223846793005)
                 .wrapping_add(1442695040888963407);
             let unit = (lcg as u32) as f64 / (u32::MAX as f64); // [0, 1)

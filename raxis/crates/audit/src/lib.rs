@@ -56,4 +56,6 @@ pub use reader::{
     SEGMENT_PREFIX, SEGMENT_SUFFIX,
 };
 pub use sink::{AuditSink, FileAuditSink};
-pub use writer::{last_chain_state, AuditWriter, AuditWriterError, ChainResumeInfo};
+pub use writer::{
+    last_chain_state, AuditWriter, AuditWriterError, AuditWriterOptions, ChainResumeInfo,
+};
