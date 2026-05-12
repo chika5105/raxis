@@ -3400,6 +3400,7 @@ name = "raxis-dashboard-kernel"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "base64 0.22.1",
  "ed25519-dalek",
  "hex",
  "parking_lot",
@@ -3870,6 +3871,7 @@ dependencies = [
 name = "raxis-session-spawn"
 version = "0.1.0"
 dependencies = [
+ "parking_lot",
  "raxis-audit-tools",
  "raxis-credential-proxy-manager",
  "raxis-credentials",
@@ -4762,6 +4764,7 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -5606,6 +5609,7 @@ dependencies = [
  "anyhow",
  "ed25519-dalek",
  "hex",
+ "libc",
  "rand 0.8.6",
  "raxis-image-builder",
  "raxis-image-manifest",

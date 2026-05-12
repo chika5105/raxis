@@ -1058,7 +1058,10 @@ fn maybe_apply_scale_down(
             prev_memory_mb, new_memory_mb, reason, ..
         } => {
             // §5 rate-limit gate — INV-ELASTIC-04 soft deferral.
-            let now = unix_now_secs();
+            // `clock::unix_now_secs()` returns `i64` (audit-chain
+            // canon), the rate limiter takes `u64`. Unix seconds
+            // are always positive, so saturating cast is safe.
+            let now = unix_now_secs().max(0) as u64;
             match rate_limiter.try_admit(
                 now,
                 elastic.max_concurrent_scaling_events_per_minute,
@@ -2094,7 +2097,8 @@ pub async fn respawn_with_larger_resources(
     reason:            &str,
 ) -> RespawnWithLargerOutcome {
     // ── Step 0: §5 rate-limit gate. INV-ELASTIC-04 soft event. ──
-    let now = unix_now_secs();
+    // See sibling call-site comment: `i64`→`u64` saturating cast.
+    let now = unix_now_secs().max(0) as u64;
     match rate_limiter.try_admit(
         now,
         elastic.max_concurrent_scaling_events_per_minute,

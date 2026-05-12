@@ -6,6 +6,7 @@
 //! `Clone` (cheap `Arc` clone) so axum's per-request state
 //! cloning has zero allocation cost.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -290,20 +291,24 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route(
             "/api/auth/challenge",
             get(auth::challenge::<D>)
-                .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
-                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_DEFAULT)),
+                // `MethodRouter::layer<L, NewError>` needs `NewError` to be
+                // disambiguated since `http 1.4` added a new
+                // `From<Infallible> for http::Error` impl. Pin to
+                // `Infallible` so the router's error type is preserved.
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_DEFAULT)),
         )
         .route(
             "/api/auth/verify",
             post(auth::verify::<D>)
-                .layer(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
-                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
         )
         .route(
             "/api/auth/logout",
             post(auth::logout::<D>)
-                .layer(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
-                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
         )
         // Health (admin sees full, read sees sanitized).
         .route("/api/health",         get(health::health::<D>))
@@ -336,8 +341,8 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
             get(policy::raw_toml::<D>).put(
                 policy::update_toml::<D>
             )
-            .layer(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
-            .layer(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
+            .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
+            .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
         )
         // Git worktrees.
         .route("/api/git/worktrees",                       get(git::list::<D>))
