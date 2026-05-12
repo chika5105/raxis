@@ -117,7 +117,7 @@ lint forbids the legacy `std::env::set_var` approach).
 | Intent submission (executor → kernel) | ✅ | `planner-core/src/intent.rs` |
 | Witness/verdict submission (reviewer → kernel) | ✅ | `planner-core/src/intent.rs` |
 | Escalation submission (`SubmitEscalation`) | ✅ | `planner-core/src/intent.rs` |
-| KSB renderer (`[RAXIS:KERNEL_STATE … :KERNEL_STATE_END]`) | ✅ | `planner-core/src/ksb.rs` |
+| KSB renderer (`[RAXIS:KERNEL_STATE … :KERNEL_STATE_END]`) | ✅ | `crates/ksb/src/lib.rs` |
 | Custom-tool loader + subprocess executor | ✅ | `planner-core/src/custom_tools.rs` |
 
 **Invariant gap:** `planner-harness.md` defines 89 `INV-` invariants.

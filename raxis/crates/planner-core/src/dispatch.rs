@@ -297,7 +297,7 @@ impl DispatchLoop {
     /// Drive one dispatch session to a terminal outcome.
     ///
     /// `system_prompt` is the rendered KSB + role NNSP (see
-    /// [`crate::ksb`] and `kernel-mechanics-prompt.md`).
+    /// [`raxis_ksb`] and `kernel-mechanics-prompt.md`).
     ///
     /// `seed_user_text` is the role-specific seed message (e.g.
     /// "You are working on task task-42; the goal is …").

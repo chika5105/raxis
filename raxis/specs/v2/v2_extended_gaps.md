@@ -485,8 +485,9 @@ kernel-side assembly + driver-side fold).
    the `KSB_DELIMITER_OPEN` / `KSB_DELIMITER_CLOSE` /
    `PLANNER_KSB_ENV` / `KSB_SCHEMA_VERSION` constants, the
    `render_ksb` deterministic renderer, and `assemble_system_prompt`.
-   `crates/planner-core/src/ksb.rs` is now a thin re-export so older
-   import paths keep working.
+   The planner crate re-exports the canonical types directly from
+   `raxis-ksb` (`pub use raxis_ksb::{...}` in
+   `crates/planner-core/src/lib.rs`).
 2. `kernel/src/initiatives/ksb_assembly.rs` — projects live state
    (initiative + task rows, `PlanRegistry`, escalations) into a
    `KsbSnapshot`. Provides `fallback_snapshot` so transient SQLite

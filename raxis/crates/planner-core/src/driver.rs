@@ -900,7 +900,7 @@ fn build_role(
 
 /// Render the role-specific system prompt prefix. Per
 /// `kernel-mechanics-prompt.md`, the system prompt = NNSP +
-/// (eventually) the [`crate::ksb::render_ksb`] block. The V2.4
+/// (eventually) the [`crate::render_ksb`] block. The V2.4
 /// driver ships the NNSP-only first leg; the in-VM KSB renderer
 /// runs on the live KSB once the orchestrator-side push transport
 /// (V3, V2_GAPS §12.1) lands.

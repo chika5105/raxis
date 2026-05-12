@@ -2454,7 +2454,7 @@ Cross-cutting compile-time guard: `crates/raxis-planner-core/build.rs` emits a `
 - `crates/raxis-planner-core/src/loop_engine.rs` — the claw-code-style execution loop:
   - `pub async fn run<H: PlannerHarness>(harness: H, transport: Box<dyn IsolatedSession>) -> ExitCode`
   - Manages the `KernelPush → tool dispatch → IntentRequest` cycle, alert-class pre-emption, deterministic seed handling.
-- `crates/raxis-planner-core/src/ksb.rs` — KSB rendering envelope per `kernel-mechanics-prompt.md §4`:
+- `crates/ksb/src/lib.rs` — KSB rendering envelope per `kernel-mechanics-prompt.md §4`:
   - `pub struct KsbRenderer { template: KsbTemplate, sections: Vec<KsbSection> }`
   - `pub fn render(&self, frame: &KernelPush, history: &SessionHistory) -> String`
   - Renders sections in the canonical order (system prompt header → policy epoch banner → witness witnesses → alerts → conversation → cursor) defined in §9.
