@@ -372,19 +372,52 @@ impl SessionSpawnService {
         );
 
         // ── Step 4: boot the VM. ─────────────────────────────────────
+        //
+        // `Backend::spawn` is a synchronous trait method that does not
+        // return until the guest is reachable on its primary IPC
+        // transport (per the trait's "MUST NOT return until reachable"
+        // contract). For microVM substrates (Apple-VZ, Firecracker)
+        // that includes the entire kernel-boot + tokio-runtime spin-
+        // up + vsock CONNECT retry loop — typically ~250 ms. Calling
+        // it directly from the async runtime thread blocks the whole
+        // executor for that whole window, starving every other
+        // session's IPC handlers, the audit dispatcher, the
+        // credential-proxy event loops, and any other in-flight
+        // spawns. Wrap in `spawn_blocking` so the runtime thread is
+        // free to make progress on those tasks while AVF / Firecracker
+        // is wall-clock-blocked on `startWithCompletionHandler:` +
+        // `connectToPort:`.
+        //
         // Failure here MUST tear down the credential proxies AND the
         // admission listener bound above. Drop on the listener
         // releases the port immediately.
-        let mut session = match self.isolation.spawn(
-            &req.image,
-            &req.workspace_mounts,
-            &req.vm_spec,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
+        let isolation_for_spawn = Arc::clone(&self.isolation);
+        let image_for_spawn     = req.image.clone();
+        let mounts_for_spawn    = req.workspace_mounts.clone();
+        let vm_spec_for_spawn   = req.vm_spec.clone();
+        let spawn_join = tokio::task::spawn_blocking(move || {
+            isolation_for_spawn.spawn(
+                &image_for_spawn,
+                &mounts_for_spawn,
+                &vm_spec_for_spawn,
+            )
+        })
+        .await;
+        let mut session = match spawn_join {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
                 drop(admission_listener);
                 let _ = cred_handles.shutdown();
                 return Err(SpawnError::IsolationSpawn(e));
+            }
+            Err(join_err) => {
+                drop(admission_listener);
+                let _ = cred_handles.shutdown();
+                return Err(SpawnError::IsolationSpawn(
+                    raxis_isolation::IsolationError::BackendInternal(format!(
+                        "session-spawn: Backend::spawn blocking task join: {join_err}",
+                    )),
+                ));
             }
         };
 
