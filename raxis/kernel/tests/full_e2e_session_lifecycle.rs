@@ -146,6 +146,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use common::kernel_harness::{acquire_test_lock, build_and_locate_kernel, KernelInstance};
+use common::tier3_artifacts::Tier3Reporter;
 
 // ---------------------------------------------------------------------------
 // Constants — kept inline so the spec → code mapping is one file deep.
@@ -287,13 +288,24 @@ fn full_session_lifecycle() {
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[e2e] kernel daemon up, accepting operator IPC");
 
+    // Tier-3 reporter: built before the dashboard is opened so a
+    // mid-run panic still emits the artifact block on Drop. The
+    // dashboard URL is captured below when the autologin helper
+    // succeeds; we register it on the reporter so the post-run
+    // block surfaces the same URL.
+    let mut tier3 = Tier3Reporter::new(
+        "e2e", &install_dir, kernel.data_dir(),
+    );
+
     // ── (visual-debug) — open the operator dashboard with an
     //    autologin URL so the developer can watch the lifecycle in
     //    the browser. Best-effort: a missing FE bundle / port
     //    collision / missing `open(1)` is logged and skipped, never
     //    fatal — the test must still pass headless on CI / SSH.
     let dashboard_port = configured_dashboard_port();
-    open_dashboard_with_autologin(&signing_key, dashboard_port);
+    if let Some(url) = open_dashboard_with_autologin(&signing_key, dashboard_port) {
+        tier3.set_dashboard_url(url);
+    }
 
     // ── §7.4 — submit + approve the plan via the operator UDS. Both
     //    requests share one connection (one challenge-response
@@ -334,6 +346,17 @@ fn full_session_lifecycle() {
     let final_chain = walk_chain_or_panic(kernel.data_dir());
     assert_audit_invariants(&final_chain, &initiative_id);
     eprintln!("[e2e] audit chain integrity verified ({} events)", final_chain.len());
+
+    // Tier-3 artifact-block parity with the realistic-scenario
+    // driver. The merged worktree for `full_e2e_session_lifecycle`
+    // is `<data_dir>/repositories/main` (the operator-managed source
+    // the integration-merge pushes into).
+    let merged_repo = kernel.data_dir().join("repositories/main");
+    tier3.add_worktree("merged-source-of-truth", merged_repo);
+    tier3.mark_success();
+    // `tier3` Drop fires here (or unwinds on a panic above), emitting
+    // the artifact block exactly once and honoring the
+    // `RAXIS_E2E_KEEP` / `RAXIS_E2E_OPEN_REPO` policy env vars.
 }
 
 // ---------------------------------------------------------------------------
@@ -1862,13 +1885,13 @@ fn spawn_url_opener(_url: &str) -> Result<(), String> {
 /// End-to-end glue called from `full_session_lifecycle` after the
 /// kernel daemon is up. Wires steps 1–3 of the visual-debug
 /// flow described above. ALL failures are non-fatal.
-fn open_dashboard_with_autologin(signing_key: &SigningKey, port: u16) {
+fn open_dashboard_with_autologin(signing_key: &SigningKey, port: u16) -> Option<String> {
     if !wait_for_dashboard_port(port, Duration::from_secs(10)) {
         eprintln!(
             "[e2e] dashboard at {}:{} did not become reachable within 10s — skipping autologin",
             DASHBOARD_BIND_ADDRESS, port,
         );
-        return;
+        return None;
     }
     let session = match mint_dashboard_jwt(signing_key, port) {
         Some(s) => s,
@@ -1876,7 +1899,7 @@ fn open_dashboard_with_autologin(signing_key: &SigningKey, port: u16) {
             eprintln!(
                 "[e2e] dashboard JWT mint failed; skipping browser open (kernel logs may have details)",
             );
-            return;
+            return None;
         }
     };
     let url = build_autologin_url(port, &session);
@@ -1894,6 +1917,7 @@ fn open_dashboard_with_autologin(signing_key: &SigningKey, port: u16) {
             session.display_name, session.roles,
         );
     }
+    Some(url)
 }
 
 // ---------------------------------------------------------------------------

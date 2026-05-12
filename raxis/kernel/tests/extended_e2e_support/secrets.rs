@@ -117,7 +117,7 @@ pub const SECRETS_API_KEY_PATH:   &str = "secrets/api_key.txt";
 pub fn seed_secrets_fixtures(workdir: &Path) -> std::io::Result<()> {
     std::fs::write(
         workdir.join(ENV_EXAMPLE_PATH),
-        b"# .env.example — declare variables, never commit real values\n\
+        b"# .env.example -- declare variables, never commit real values\n\
           FIXTURE_SECRET_TOKEN=replace_me\n\
           API_BASE_URL=https://api.example.test\n\
           FEATURE_FLAG_X=false\n",

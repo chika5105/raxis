@@ -23,4 +23,5 @@ pub mod prompts;
 pub mod reviewer_substantive_disagreement;
 pub mod secrets;
 pub mod seeds;
+pub mod service_evidence;
 pub mod witnesses;

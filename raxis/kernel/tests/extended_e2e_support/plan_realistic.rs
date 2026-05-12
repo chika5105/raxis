@@ -66,6 +66,16 @@ pub const TASK_ALLOWLIST_POSITIVE: &str =
 pub const TASK_SECRETS_HANDLING: &str =
     super::secrets::TASK_SECRETS_HANDLING;
 
+/// Service-evidence round-trip executor task id -- exercises the
+/// per-protocol credential proxies against the real backing
+/// services (postgres / mongodb / redis / smtp; mysql / mssql
+/// opt-in via `RAXIS_LIVE_MYSQL_URL` / `RAXIS_LIVE_MSSQL_URL`)
+/// and commits the per-service canonical output files under
+/// `out/services/`. Witness lives in
+/// [`super::service_evidence`].
+pub const TASK_SERVICE_ROUND_TRIP: &str =
+    super::service_evidence::TASK_SERVICE_ROUND_TRIP;
+
 /// Lint-defect reviewer task ids (P3-7). Plain-prompted reviewers
 /// (no directive) whose substantive critique must name one of the
 /// lint-defect target files. Witness:
@@ -125,6 +135,15 @@ pub const SECRETS_HANDLING_PROMPT_MD: &str = include_str!(
     "../../../live-e2e/seed/prompts/secrets_handling.md"
 );
 
+/// Service-evidence round-trip prompt. Drives the executor
+/// through reading the per-service seed via each credential proxy
+/// and writing one canonical-form file per service into
+/// `out/services/`. See [`super::service_evidence`] for the
+/// canonical-bytes formulas the witness recomputes.
+pub const SERVICE_ROUND_TRIP_PROMPT_MD: &str = include_str!(
+    "../../../live-e2e/seed/prompts/service_round_trip.md"
+);
+
 // ---------------------------------------------------------------------------
 // Plan-TOML builder.
 // ---------------------------------------------------------------------------
@@ -134,11 +153,12 @@ pub const SECRETS_HANDLING_PROMPT_MD: &str = include_str!(
 /// includes `materialize-records` + `xfile-refactor`; subsequent
 /// commits on this branch extend it.
 pub fn realistic_plan_toml() -> String {
-    let materializer = MATERIALIZER_PROMPT_MD;
-    let xfile        = XFILE_REFACTOR_PROMPT_MD;
-    let lint         = LINT_DEFECT_PROMPT_MD;
-    let allowlist    = ALLOWLIST_POSITIVE_PROMPT_MD;
-    let secrets      = SECRETS_HANDLING_PROMPT_MD;
+    let materializer    = MATERIALIZER_PROMPT_MD;
+    let xfile           = XFILE_REFACTOR_PROMPT_MD;
+    let lint            = LINT_DEFECT_PROMPT_MD;
+    let allowlist       = ALLOWLIST_POSITIVE_PROMPT_MD;
+    let secrets         = SECRETS_HANDLING_PROMPT_MD;
+    let service_rt      = SERVICE_ROUND_TRIP_PROMPT_MD;
     let mut s = String::new();
     s.push_str(REALISTIC_PLAN_HEADER);
     s.push_str("\n\n");
@@ -164,6 +184,11 @@ pub fn realistic_plan_toml() -> String {
     s.push_str(REALISTIC_PLAN_SECRETS_HEAD);
     s.push_str(secrets);
     s.push_str("\n\"\"\"\n");
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_SERVICE_ROUND_TRIP_HEAD);
+    s.push_str(service_rt);
+    s.push_str("\n\"\"\"\n");
+    s.push_str(REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS);
     s
 }
 
@@ -287,6 +312,37 @@ path_allowlist     = ["out/secrets-report.txt"]
 description = """
 "#;
 
+const REALISTIC_PLAN_SERVICE_ROUND_TRIP_HEAD: &str = r#"# -- Service-evidence round-trip Executor (P3-9) ----------
+[[tasks]]
+task_id            = "service-round-trip"
+name               = "Round-trip every credential-proxy upstream + commit per-service canonical outputs"
+session_agent_type = "Executor"
+predecessors       = ["secrets-handling"]
+path_allowlist     = ["out/services/"]
+description = """
+"#;
+
+const REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS: &str = r#"
+  [[tasks.credentials]]
+  name       = "test-pg-dev"
+  proxy_type = "postgres"
+  mount_as   = "DATABASE_URL"
+
+  [[tasks.credentials]]
+  name       = "test-mongo-dev"
+  proxy_type = "mongodb"
+  mount_as   = "MONGO_URL"
+
+  [[tasks.credentials]]
+  name       = "test-redis-dev"
+  proxy_type = "redis"
+  mount_as   = "REDIS_URL"
+
+  [[tasks.credentials]]
+  name       = "test-smtp-dev"
+  proxy_type = "smtp"
+  mount_as   = "SMTP_URL""#;
+
 // ---------------------------------------------------------------------------
 // Tests — sanity-check the TOML decodes and pins the task list.
 // ---------------------------------------------------------------------------
@@ -316,6 +372,7 @@ mod tests {
             TASK_REVIEW_LINT_B,
             TASK_ALLOWLIST_POSITIVE,
             TASK_SECRETS_HANDLING,
+            TASK_SERVICE_ROUND_TRIP,
         ] {
             assert!(
                 ids.contains(&needle),
@@ -381,4 +438,70 @@ mod tests {
             "lint-defect must depend on xfile-refactor; got {names:?}",
         );
     }
+    #[test]
+    fn service_round_trip_task_carries_all_required_credentials() {
+        let toml_text = realistic_plan_toml();
+        let v: toml::Value = toml::from_str(&toml_text)
+            .expect("realistic plan must be valid TOML even with service-round-trip wired");
+        let tasks = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .expect("[[tasks]] array present");
+        let srt = tasks
+            .iter()
+            .find(|t| {
+                t.get("task_id").and_then(|i| i.as_str())
+                    == Some(TASK_SERVICE_ROUND_TRIP)
+            })
+            .expect("service-round-trip task present");
+        let allowlist = srt
+            .get("path_allowlist")
+            .and_then(|a| a.as_array())
+            .expect("service-round-trip path_allowlist present");
+        let paths: Vec<&str> = allowlist
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            paths,
+            vec!["out/services/"],
+            "service-round-trip must be scoped to out/services/ only",
+        );
+        let creds = srt
+            .get("credentials")
+            .and_then(|c| c.as_array())
+            .expect("service-round-trip credentials present");
+        let mounts: Vec<&str> = creds
+            .iter()
+            .filter_map(|c| c.get("mount_as").and_then(|m| m.as_str()))
+            .collect();
+        for needle in ["DATABASE_URL", "MONGO_URL", "REDIS_URL", "SMTP_URL"] {
+            assert!(
+                mounts.contains(&needle),
+                "service-round-trip must mount {needle}; got {mounts:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn service_round_trip_prompt_lists_every_in_scope_service() {
+        let prompt = SERVICE_ROUND_TRIP_PROMPT_MD;
+        for needle in [
+            "out/services/postgres.txt",
+            "out/services/mongodb.txt",
+            "out/services/redis.txt",
+            "out/services/smtp.txt",
+            "pg_seed_row_1",
+            "mongo_seed_doc_1",
+            "redis_seed_key_1",
+            "smtp_seed_subject_1",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "service-round-trip prompt must mention `{needle}` (len={})",
+                prompt.len(),
+            );
+        }
+    }
+
 }

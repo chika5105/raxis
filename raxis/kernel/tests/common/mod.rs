@@ -13,3 +13,4 @@
 //! follow-up work.
 
 pub mod kernel_harness;
+pub mod tier3_artifacts;

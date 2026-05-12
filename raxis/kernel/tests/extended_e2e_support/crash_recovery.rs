@@ -244,9 +244,15 @@ mod tests {
 
     #[test]
     fn respawn_recovery_satisfies() {
+        // Consecutive seqs: a real respawn lands on the next free
+        // `seq` after the pre-crash spawn; the witness's
+        // `unreconciled_gaps` walker is strict about monotonic
+        // contiguity unless a `ReconciliationGap` event accounts
+        // for the gap (`unreconciled_seq_gap_fails` pins that
+        // negative direction).
         let chain = vec![
             vm_spawn(10, "lint-defect"),
-            vm_spawn(20, "lint-defect"),
+            vm_spawn(11, "lint-defect"),
         ];
         let w = CrashRecoveryWitness::new("lint-defect");
         assert!(w.satisfied_by(&chain), "{}", w.diagnostic(&chain));

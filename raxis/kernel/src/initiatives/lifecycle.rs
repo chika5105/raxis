@@ -6817,6 +6817,7 @@ target_ref = "refs/heads/raxis/feature"
             = std::collections::HashMap::new();
         let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
         let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
+        let default_elastic = raxis_policy::ElasticConfig::default();
         approve_plan(
             &init_id,
             "op",
@@ -6829,6 +6830,7 @@ target_ref = "refs/heads/raxis/feature"
             &empty_creds,
             &empty_vm_images,
             None,
+            &default_elastic,
             &store,
             &audit,
             &registry,

@@ -100,15 +100,23 @@ use extended_e2e_support::{
     plan_realistic::{
         realistic_plan_toml, SEED_SCENARIO_ID, TASK_ALLOWLIST_POSITIVE,
         TASK_LINT_DEFECT, TASK_MATERIALIZE, TASK_SECRETS_HANDLING,
-        TASK_XFILE_REFACTOR,
+        TASK_SERVICE_ROUND_TRIP, TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
     secrets::{seed_secrets_fixtures, SecretsHandlingWitness},
     seeds::{MONGO_HOST_PORT, PG_HOST_PORT},
+    service_evidence::{
+        assert_mssql_round_trip, assert_mysql_round_trip,
+        collect_active_witness_failures, render_failures, seed_mongodb,
+        seed_mssql, seed_mysql, seed_postgres, seed_redis, seed_smtp,
+        WitnessScope,
+    },
     witnesses::{
         EnforcementWitness, NoSecurityViolationWitness,
     },
 };
+
+use common::tier3_artifacts::Tier3Reporter;
 
 const REALISTIC_GATE: &str = "RAXIS_LIVE_E2E_REALISTIC";
 
@@ -167,6 +175,43 @@ fn realistic_session_lifecycle() {
     let install_dir = PathBuf::from(
         std::env::var("RAXIS_INSTALL_DIR").expect("preflight verified RAXIS_INSTALL_DIR"),
     );
+
+    // Tier-3 reporter: created BEFORE the kernel spawn so an early
+    // failure still emits the artifact block on Drop. `mark_success()`
+    // at the bottom of the happy path enables the workdir-keep
+    // policy's success cleanup branch.
+    let mut tier3 = Tier3Reporter::new(
+        "realism-e2e", &install_dir, &data_dir,
+    );
+
+    // Seed every in-scope service BEFORE the executor wakes up. The
+    // round-trip task runs at the END of the plan dependency graph
+    // (predecessors include `secrets-handling`), so we have ample
+    // lead time, but we still seed eagerly so the harness fails
+    // closed on missing containers before burning LLM tokens.
+    let pg_seed = seed_postgres()
+        .unwrap_or_else(|e| panic!("postgres seed failed: {e}"));
+    let mongo_seed = seed_mongodb()
+        .unwrap_or_else(|e| panic!("mongodb seed failed: {e}"));
+    let redis_seed = seed_redis()
+        .unwrap_or_else(|e| panic!("redis seed failed: {e}"));
+    let smtp_seed = seed_smtp()
+        .unwrap_or_else(|e| panic!("smtp seed failed: {e}"));
+    // Opt-in seeds are bypassed by their own helpers when the env
+    // var is unset; calling them unconditionally keeps the surface
+    // wired so a future env flip becomes active with no code change.
+    let _mysql_seed = seed_mysql()
+        .unwrap_or_else(|e| panic!("mysql seed (opt-in) failed: {e}"));
+    let _mssql_seed = seed_mssql()
+        .unwrap_or_else(|e| panic!("mssql seed (opt-in) failed: {e}"));
+    eprintln!(
+        "[realism-e2e] service-evidence seeds installed:          postgres rows={}, mongo docs={}, redis keys={}, smtp subject={}",
+        pg_seed.rows.len(),
+        mongo_seed.docs.len(),
+        redis_seed.entries.len(),
+        smtp_seed.subject,
+    );
+
     let mut kernel = spawn_kernel_normal(&kernel_bin, data_dir.clone(), &install_dir);
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[realism-e2e] kernel daemon up, accepting operator IPC");
@@ -259,6 +304,54 @@ fn realistic_session_lifecycle() {
     );
     eprintln!("[realism-e2e] all chain-side + on-disk witnesses satisfied");
 
+    // ── Service-evidence per-protocol round-trip ─────────────
+    let service_workdir = locate_executor_worktree(
+        kernel.data_dir(), &initiative_primary, TASK_SERVICE_ROUND_TRIP,
+    );
+    let service_scope = WitnessScope::new(
+        initiative_primary.clone(),
+        TASK_SERVICE_ROUND_TRIP.to_owned(),
+    );
+    let active_failures = collect_active_witness_failures(
+        &chain,
+        &service_workdir,
+        &pg_seed,
+        &mongo_seed,
+        &redis_seed,
+        &smtp_seed,
+        &service_scope,
+    );
+    assert!(
+        active_failures.is_empty(),
+        "[realism-e2e] service-evidence witnesses failed:\n{}",
+        render_failures(&active_failures),
+    );
+    // Opt-in helpers: invoked unconditionally so the call surface
+    // is exercised. Their helpers short-circuit when the env var
+    // is unset (emitting one informational `eprintln!`). When the
+    // operator flips `RAXIS_LIVE_MYSQL_URL` / `RAXIS_LIVE_MSSQL_URL`
+    // the round-trip assertion becomes active with no code change.
+    if let Err(e) = assert_mysql_round_trip(
+        &chain, &service_workdir, &_mysql_seed, &service_scope,
+    ) { panic!("[realism-e2e] mysql round-trip failed: {e}"); }
+    if let Err(e) = assert_mssql_round_trip(
+        &chain, &service_workdir, &_mssql_seed, &service_scope,
+    ) { panic!("[realism-e2e] mssql round-trip failed: {e}"); }
+    eprintln!("[realism-e2e] service-evidence round-trip witnesses satisfied");
+
+    tier3.add_worktree(
+        format!("primary-xfile ({})", &initiative_primary),
+        &primary_workdir,
+    );
+    tier3.add_worktree(
+        format!("primary-services ({})", &initiative_primary),
+        &service_workdir,
+    );
+    // The realistic-scenario harness does not mount the dashboard
+    // (the kernel boot path here skips `open_dashboard_with_autologin`);
+    // we therefore omit the dashboard URL line cleanly rather than
+    // emit a broken placeholder.
+
     // ── Graceful shutdown ────────────────────────────────────
     let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
     assert!(
@@ -287,6 +380,10 @@ fn realistic_session_lifecycle() {
         final_chain.len(),
         primary_workdir.display(),
     );
+
+    tier3.mark_success();
+    // `tier3` Drop runs here (or unwinds via a panic above), emitting
+    // the post-run artifact block exactly once.
 }
 
 // ---------------------------------------------------------------------------
@@ -392,9 +489,15 @@ fn synthetic_multi_initiative_chain() -> Vec<AuditEvent> {
 }
 
 fn synthetic_crash_recovery_chain(task_id: &str) -> Vec<AuditEvent> {
+    // Consecutive seqs: the CrashRecoveryWitness fails closed on
+    // any unreconciled gap (`unreconciled_gaps`), so the synthetic
+    // chain pretends the kernel respawned in the immediately
+    // following audit slot. The real-driven test path inserts the
+    // genuine post-SIGTERM events in their natural order; only the
+    // smoke fixture needs the artificial contiguity.
     vec![
         synthetic_vm_spawn(10, task_id),
-        synthetic_vm_spawn(20, task_id),
+        synthetic_vm_spawn(11, task_id),
     ]
 }
 

@@ -152,7 +152,7 @@ impl EnforcementWitness for PathAllowlistPositiveWitness {
                 typed(ev),
                 Some(AuditEventKind::IntentAccepted {
                     task_id, head_sha: Some(_), ..
-                }) if task_id == &self.task_id
+                }) if task_id == self.task_id
             ))
             .count();
         let false_rejections: Vec<u64> = chain

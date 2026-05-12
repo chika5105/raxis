@@ -5267,7 +5267,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         seed_running_task(&store, "t1");
 
-        commit_task_completion("t1", &[], &store).unwrap();
+        commit_task_completion("t1", &[], None, &store).unwrap();
 
         assert_eq!(task_state_of(&store, "t1"), TaskState::Completed.as_sql_str());
         assert_eq!(count_export_snapshots(&store, "t1"), 0,
@@ -5284,7 +5284,7 @@ mod tests {
             "src/sub/c.rs".to_owned(),
         ];
 
-        commit_task_completion("t1", &exports, &store).unwrap();
+        commit_task_completion("t1", &exports, None, &store).unwrap();
 
         assert_eq!(task_state_of(&store, "t1"), TaskState::Completed.as_sql_str());
         assert_eq!(count_export_snapshots(&store, "t1"), 3);
@@ -5321,7 +5321,7 @@ mod tests {
             "src/a.rs".to_owned(),  // duplicate inside the call
         ];
 
-        commit_task_completion("t1", &exports, &store).unwrap();
+        commit_task_completion("t1", &exports, None, &store).unwrap();
         assert_eq!(count_export_snapshots(&store, "t1"), 1,
             "PK (task_id, path) collapses duplicates to one row");
     }
@@ -5335,7 +5335,7 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         seed_task(&store, "t1");  // seeds in `Admitted` state
 
-        let result = commit_task_completion("t1", &[], &store);
+        let result = commit_task_completion("t1", &[], None, &store);
         assert!(result.is_err(),
             "commit_task_completion must reject non-Running tasks");
         assert_eq!(task_state_of(&store, "t1"), TaskState::Admitted.as_sql_str(),
