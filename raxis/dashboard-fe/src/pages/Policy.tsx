@@ -9,6 +9,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner, Spinner } from "@/components/Spinner";
 import { fmtAbsolute, shortFingerprint, shortSha } from "@/lib/format";
 import { getStoredProfile } from "@/lib/auth-store";
+import { useTheme } from "@/lib/theme";
 import type { PolicyAdvancement } from "@/types/api";
 
 /// Policy page. Shows the parsed snapshot in a read-friendly
@@ -30,6 +31,13 @@ export function PolicyPage() {
   const profile = getStoredProfile();
   const canWrite =
     !!profile && (profile.roles.includes("write_policy") || profile.roles.includes("admin"));
+  // Mirror Monaco's chrome to the dashboard theme so an operator
+  // who switched to light mode doesn't get a dark TOML editor
+  // dropped in the middle of an otherwise light page. `vs` and
+  // `vs-dark` are Monaco's two built-in themes; we use the same
+  // `useTheme` hook the rest of the chrome reads from.
+  const { theme } = useTheme();
+  const monacoTheme = theme === "dark" ? "vs-dark" : "vs";
 
   const snap = useQuery({
     queryKey: ["policy"],
@@ -168,7 +176,7 @@ export function PolicyPage() {
               <Editor
                 height="100%"
                 defaultLanguage="toml"
-                theme="vs-dark"
+                theme={monacoTheme}
                 value={draft ?? ""}
                 onChange={(v) => setDraft(v ?? "")}
                 options={{

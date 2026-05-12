@@ -16,19 +16,12 @@ interface RepoFileTreeProps {
 /// leaves are files. Directories sort before files at every
 /// level so the layout reads top-down like `ls -F`.
 ///
-/// **Why a derived tree and not a real `git ls-tree` view.**
-/// The dashboard backend at `raxis/crates/dashboard/src/data.rs`
-/// surfaces only `list_worktrees`, `get_worktree`, `worktree_log`,
-/// `worktree_diff_default`, and `worktree_diff_range`. There is
-/// no `tree` / `blob` endpoint yet. The diff already names every
-/// file the executor touched relative to the base, so deriving a
-/// tree from that gives the operator a glanceable "what's
-/// changing" map without a backend round trip.
-///
-/// A full unchanged-files browser (including content view +
-/// syntax highlighting) requires new endpoints — see the
-/// backend ask in the worker report for the dashboard-backend
-/// sibling worker.
+/// **Scope: changed files only.** This component renders the
+/// "what did the executor touch" view, derived directly from a
+/// diff payload (no backend round trip). For a full
+/// browse-any-file experience over the worktree, use the
+/// `<RepoBrowser>` component, which is backed by the live
+/// `/api/git/worktrees/:name/tree` + `/file` endpoints.
 export function RepoFileTree({ diff, onSelect }: RepoFileTreeProps) {
   const root = useMemo(() => buildTree(diff.files), [diff.files]);
   return (

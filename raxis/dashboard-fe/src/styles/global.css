@@ -64,6 +64,13 @@
     --c-scroll-thumb: 212 212 212;
     --c-grid-line:      0   0   0;
     --grid-line-alpha: 0.04;
+
+    /* Card / panel elevation. Light mode: subtle, low-opacity
+     * neutral shadow so cards lift off the warm canvas without
+     * the harsh "tracking-shot" black tinting that the dark
+     * value would produce here. */
+    --shadow-soft: 0 1px 2px 0 rgb(15 23 42 / 0.06),
+                   0 1px 1px 0 rgb(15 23 42 / 0.04);
   }
 
   :root.dark {
@@ -99,6 +106,11 @@
     --c-scroll-thumb: 46 56 73;
     --c-grid-line:   255 255 255;
     --grid-line-alpha: 0.02;
+
+    /* Dark-mode shadow can stay heavier — the underlying canvas
+     * is near-black so a deeper shadow still reads as elevation
+     * rather than as a black bar around the card. */
+    --shadow-soft: 0 1px 2px 0 rgb(0 0 0 / 0.4);
   }
 
   html, body, #root {

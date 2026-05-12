@@ -141,13 +141,16 @@ export function SessionStream({
       }
     };
 
-    // Default `message` listener catches any frame the backend
-    // ships without an `event:` line.
-    es.onmessage = (e) => pushPayloadEvent("message", e);
-
     // Known payload-bearing kinds we recognize from the planner
-    // capture vocabulary. Unknown kinds still arrive via the
-    // generic `addEventListener` below.
+    // capture vocabulary. Each `addEventListener("<kind>", …)`
+    // dispatches on the SSE `event: <kind>` discriminator, so
+    // each frame fires exactly one of these listeners.
+    //
+    // We deliberately do NOT also assign `es.onmessage`: that
+    // would double-deliver default-named (`event: message`)
+    // frames — `onmessage` fires AND the matching
+    // `addEventListener("message", …)` fires, so the operator
+    // would see every default frame twice in the stream pane.
     const PAYLOAD_KINDS = [
       "token",
       "model_chunk",

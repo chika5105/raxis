@@ -33,8 +33,10 @@ import type {
   VerifyResponse,
   WorktreeDetail,
   WorktreeDiff,
+  WorktreeFile,
   WorktreeListEntry,
   WorktreeLogEntry,
+  WorktreeTree,
 } from "@/types/api";
 
 import { getStoredToken, clearStoredToken } from "@/lib/auth-store";
@@ -305,10 +307,46 @@ export const dashboardApi = {
     diffDefault: (name: string, signal?: AbortSignal): Promise<WorktreeDiff> =>
       apiFetch<WorktreeDiff>(`/api/git/worktrees/${encodeURIComponent(name)}/diff`, signal ? { signal } : {}),
     diffRange: (name: string, from: string, to: string, signal?: AbortSignal): Promise<WorktreeDiff> =>
+      // Each SHA is URL-encoded individually so a stray
+      // non-hex char (the backend already 400s these, but
+      // defence-in-depth on the client side keeps the URL
+      // well-formed and avoids accidentally splitting on a
+      // literal "/" if a caller ever sneaks a non-SHA in).
       apiFetch<WorktreeDiff>(
-        `/api/git/worktrees/${encodeURIComponent(name)}/diff/${from}..${to}`,
+        `/api/git/worktrees/${encodeURIComponent(name)}/diff/${encodeURIComponent(
+          from,
+        )}..${encodeURIComponent(to)}`,
         signal ? { signal } : {},
       ),
+    /// `GET /api/git/worktrees/:name/tree?path=<rel-path>` —
+    /// list one directory under the worktree. `subPath`
+    /// undefined / empty ⇒ worktree root.
+    tree: (
+      name: string,
+      subPath?: string,
+      signal?: AbortSignal,
+    ): Promise<WorktreeTree> => {
+      const qs = new URLSearchParams();
+      if (subPath && subPath.length > 0) qs.set("path", subPath);
+      const suffix = qs.toString() ? `?${qs}` : "";
+      return apiFetch<WorktreeTree>(
+        `/api/git/worktrees/${encodeURIComponent(name)}/tree${suffix}`,
+        signal ? { signal } : {},
+      );
+    },
+    /// `GET /api/git/worktrees/:name/file?path=<rel-path>` —
+    /// read one regular file under the worktree.
+    file: (
+      name: string,
+      path: string,
+      signal?: AbortSignal,
+    ): Promise<WorktreeFile> => {
+      const qs = new URLSearchParams({ path });
+      return apiFetch<WorktreeFile>(
+        `/api/git/worktrees/${encodeURIComponent(name)}/file?${qs}`,
+        signal ? { signal } : {},
+      );
+    },
   },
 };
 

@@ -206,10 +206,18 @@ export function OverviewPage() {
           )}
         </section>
 
-        {/* Active sessions */}
+        {/*
+         * Recent sessions — newest first, regardless of state.
+         * Previously labelled "Active sessions" which lied about
+         * the data: the underlying query is `sessions.list(8)`
+         * with no state filter, so a one-Completed + seven-Failed
+         * page would display under an "Active" banner. Mirroring
+         * the "Recent initiatives" sibling is also more useful
+         * at-a-glance than a state-filtered list.
+         */}
         <section className="card p-0 overflow-hidden">
           <header className="px-4 py-3 border-b border-edge flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-ink">Active sessions</h2>
+            <h2 className="text-sm font-semibold text-ink">Recent sessions</h2>
             <Link to="/sessions" className="text-xs text-accent hover:underline">
               View all →
             </Link>

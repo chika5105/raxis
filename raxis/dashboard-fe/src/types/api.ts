@@ -248,6 +248,41 @@ export interface WorktreeDiff {
   files: WorktreeDiffFile[];
 }
 
+// Per-entry shape returned by GET /api/git/worktrees/:name/tree.
+// Mirrors `WorktreeTreeEntry` in `crates/dashboard/src/data.rs`.
+export interface WorktreeTreeEntry {
+  /// Basename (no path separators).
+  name: string;
+  /// Forward-slash root-relative path.
+  path: string;
+  /// "file", "dir", "symlink", or "other".
+  kind: string;
+  /// Bytes (regular files only). `null` for directories /
+  /// symlinks / other.
+  size: number | null;
+}
+
+export interface WorktreeTree {
+  name: string;
+  /// Path relative to the worktree root that was listed
+  /// (`""` ⇒ root). Forward-slash separated.
+  path: string;
+  entries: WorktreeTreeEntry[];
+  /// `true` when the listing was capped by the per-request
+  /// entry budget; the caller should refine the path.
+  truncated: boolean;
+}
+
+export interface WorktreeFile {
+  name: string;
+  path: string;
+  size: number;
+  /// "utf8" or "base64".
+  encoding: string;
+  /// File content (UTF-8 string or base64 of raw bytes).
+  content: string;
+}
+
 // Server-Sent Event payload from /api/sessions/:id/stream.
 //
 // Wire shape (per raxis/crates/dashboard/src/routes/sessions.rs

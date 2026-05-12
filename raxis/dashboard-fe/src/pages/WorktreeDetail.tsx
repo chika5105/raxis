@@ -8,11 +8,12 @@ import { DiffView } from "@/components/DiffView";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
+import { RepoBrowser } from "@/components/RepoBrowser";
 import { RepoFileTree } from "@/components/RepoFileTree";
 import { PageSpinner } from "@/components/Spinner";
 import { fmtRelative, plural, shortSha } from "@/lib/format";
 
-type Tab = "files" | "log" | "diff" | "range";
+type Tab = "files" | "browse" | "log" | "diff" | "range";
 
 /// Operator-facing repo viewer for a single worktree.
 ///
@@ -26,16 +27,15 @@ type Tab = "files" | "log" | "diff" | "range";
 ///         derived from the same diff payload the Diff tab
 ///         renders. Clicking a file scrolls the corresponding
 ///         hunk into view.
+///       - **Browse**: full lazy-loaded file-tree browser backed
+///         by `GET /api/git/worktrees/:name/tree?path=…` and
+///         `GET /api/git/worktrees/:name/file?path=…`. Lets the
+///         operator inspect any file in the worktree, not just
+///         the ones the executor touched.
 ///       - **Log**: `git log -n 100` against the worktree.
 ///       - **Diff vs base**: the same diff the operator sees on
 ///         the Files tab, but expanded inline.
 ///       - **Range diff**: arbitrary sha1..sha2 comparison.
-///
-/// Backend gap (flagged for the dashboard-backend sibling
-/// worker): there is no `tree` / `blob` endpoint, so the
-/// "Files" view only surfaces *changed* files. Full
-/// browsing-of-unchanged-files + file content inline requires
-/// new endpoints — see the worker report.
 export function WorktreeDetailPage() {
   const { name = "" } = useParams<{ name: string }>();
   const [tab, setTab] = useState<Tab>("files");
@@ -170,6 +170,9 @@ export function WorktreeDetailPage() {
         <TabButton active={tab === "files"} onClick={() => setTab("files")}>
           Files
         </TabButton>
+        <TabButton active={tab === "browse"} onClick={() => setTab("browse")}>
+          Browse
+        </TabButton>
         <TabButton active={tab === "log"} onClick={() => setTab("log")}>
           Log
         </TabButton>
@@ -191,6 +194,8 @@ export function WorktreeDetailPage() {
           onSelectFile={setScrollTo}
         />
       )}
+
+      {tab === "browse" && <RepoBrowser worktreeName={w.name} />}
 
       {tab === "log" && (
         <>
@@ -315,7 +320,6 @@ function FilesTab({
 
   return (
     <div className="space-y-3">
-      <BackendGapCallout />
       {diff.files.length === 0 ? (
         <Empty
           title="No files changed against the base SHA."
@@ -331,12 +335,11 @@ function FilesTab({
           </aside>
           <div ref={inlineRef} className="space-y-3">
             <DiffView diff={diff} />
-            <div className="text-[11px] text-ink-subtle italic">
-              File contents in their pre-/post-change form are derived from the
-              unified diff above. Inline file content for <em>unchanged</em>{" "}
-              files is not available yet — see the backend gap callout above
-              this table.
-            </div>
+            <p className="text-[11px] text-ink-subtle italic">
+              Showing files the executor touched relative to the base SHA. Use
+              the <strong>Browse</strong> tab to inspect any file in the
+              worktree, including unchanged files.
+            </p>
           </div>
         </div>
       )}
@@ -377,29 +380,6 @@ function DiffErrorOrEmpty({
     );
   }
   return <ErrorBox error={error} />;
-}
-
-/// Operator-visible callout flagging the missing repo-browsing
-/// endpoints (`tree`, `blob`). Phrased so the operator
-/// understands what they CAN see ("diff of touched files") vs
-/// what they cannot ("any file in the tree"), and so the
-/// dashboard-backend sibling worker knows exactly what to add.
-function BackendGapCallout() {
-  return (
-    <div className="card p-3 border-l-4 border-l-warn bg-warn-muted/10 text-[12px]">
-      <header className="font-semibold text-warn mb-1">
-        Files view: diff-derived only
-      </header>
-      <p className="text-ink-muted">
-        The dashboard shows every file the executor touched relative to the base
-        SHA, plus the hunk diff. A full file-tree browser with file-content
-        viewing is pending backend support:{" "}
-        <Mono className="text-ink">GET /api/git/worktrees/:name/tree</Mono> and{" "}
-        <Mono className="text-ink">GET /api/git/worktrees/:name/blob</Mono> are
-        the asks tracked for the dashboard-backend worker.
-      </p>
-    </div>
-  );
 }
 
 /// CSS.escape polyfill for older runtimes. The querySelector

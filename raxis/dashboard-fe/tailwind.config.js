@@ -94,8 +94,13 @@ export default {
         xl: ["1.25rem", { lineHeight: "1.7rem" }],
       },
       boxShadow: {
-        soft: "0 1px 2px 0 rgba(0,0,0,0.4)",
-        ring: "0 0 0 1px rgba(58,134,255,0.45)",
+        // `soft` is theme-aware: the actual rgba value lives in
+        // the `--shadow-soft` CSS custom property defined in
+        // `src/styles/global.css` under both `:root` (light) and
+        // `:root.dark` (dark). Light mode gets a subtle low-opacity
+        // neutral; dark mode keeps the original deeper black.
+        soft: "var(--shadow-soft)",
+        ring: "0 0 0 1px rgb(var(--c-accent) / 0.45)",
       },
       animation: {
         pulseDot: "pulseDot 1.6s ease-in-out infinite",

@@ -42,7 +42,16 @@ const queryClient = new QueryClient({
 export function App() {
   return (
     <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
+      <BrowserRouter
+        future={{
+          // Opt-in to react-router v7 behaviour now so the v6 console
+          // warnings (logged as `console.error`) stop polluting every
+          // page load. These two flags are no-op upgrades — they only
+          // change internals, not our route definitions.
+          v7_startTransition: true,
+          v7_relativeSplatPath: true,
+        }}
+      >
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route

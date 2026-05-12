@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import dagre from "dagre";
 
-import { stateTone, toneClasses } from "@/lib/state-color";
+import { stateTone, toneClasses, type StateBadgeTone } from "@/lib/state-color";
 
 export interface DagGraphNode {
   task_id: string;
@@ -13,6 +13,29 @@ export interface DagGraphEdge {
   from: string;
   to: string;
 }
+
+// SVG attributes can't take Tailwind classes; we drive every
+// fill/stroke from the same CSS custom properties Tailwind reads
+// (`--c-ok-muted`, `--c-info`, …) so the graph re-themes on
+// light/dark toggle without a re-render. Going through
+// `rgb(var(--c-x))` mirrors the README's "always reach for a
+// semantic token" rule for SVG primitives that bypass Tailwind.
+const NODE_FILL_VAR: Record<StateBadgeTone, string> = {
+  ok:    "rgb(var(--c-ok-muted))",
+  info:  "rgb(var(--c-info-muted))",
+  warn:  "rgb(var(--c-warn-muted))",
+  bad:   "rgb(var(--c-bad-muted))",
+  block: "rgb(var(--c-block-muted))",
+  muted: "rgb(var(--c-edge))",
+};
+const NODE_STROKE_VAR: Record<StateBadgeTone, string> = {
+  ok:    "rgb(var(--c-ok))",
+  info:  "rgb(var(--c-info))",
+  warn:  "rgb(var(--c-warn))",
+  bad:   "rgb(var(--c-bad))",
+  block: "rgb(var(--c-block))",
+  muted: "rgb(var(--c-edge-strong))",
+};
 
 interface DagGraphProps {
   nodes: DagGraphNode[];
@@ -138,7 +161,7 @@ export function DagGraph({
             markerHeight="5"
             orient="auto-start-reverse"
           >
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#7d8892" />
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="rgb(var(--c-ink-subtle))" />
           </marker>
         </defs>
 
@@ -153,7 +176,7 @@ export function DagGraph({
               key={`${e.from}-${e.to}-${i}`}
               d={d}
               fill="none"
-              stroke="#7d8892"
+              stroke="rgb(var(--c-ink-subtle))"
               strokeWidth={1.4}
               markerEnd="url(#arrow)"
               opacity={
@@ -166,30 +189,8 @@ export function DagGraph({
         {/* Nodes */}
         {layout.nodes.map((n) => {
           const tone = stateTone(n.state);
-          const fill =
-            tone === "ok"
-              ? "#1c5b2c"
-              : tone === "info"
-                ? "#1f4d80"
-                : tone === "warn"
-                  ? "#6b4d10"
-                  : tone === "bad"
-                    ? "#7d1d1d"
-                    : tone === "block"
-                      ? "#3a2762"
-                      : "#222a36";
-          const stroke =
-            tone === "ok"
-              ? "#2ea043"
-              : tone === "info"
-                ? "#58a6ff"
-                : tone === "warn"
-                  ? "#d29922"
-                  : tone === "bad"
-                    ? "#f85149"
-                    : tone === "block"
-                      ? "#a371f7"
-                      : "#2e3849";
+          const fill = NODE_FILL_VAR[tone];
+          const stroke = NODE_STROKE_VAR[tone];
           const isSelected = selected === n.task_id;
           return (
             <g
@@ -222,7 +223,7 @@ export function DagGraph({
                 height={n.h}
                 rx={6}
                 fill={fill}
-                stroke={isSelected ? "#3a86ff" : stroke}
+                stroke={isSelected ? "rgb(var(--c-accent))" : stroke}
                 strokeWidth={isSelected ? 2 : 1}
                 opacity={hover && hover !== n.task_id ? 0.8 : 1}
               />
@@ -236,7 +237,7 @@ export function DagGraph({
               <text
                 x={10}
                 y={22}
-                fill="#e6e8eb"
+                fill="rgb(var(--c-ink))"
                 fontSize={12}
                 fontWeight={500}
                 fontFamily="Inter, system-ui, sans-serif"
@@ -246,7 +247,7 @@ export function DagGraph({
               <text
                 x={10}
                 y={40}
-                fill="#a8b1bc"
+                fill="rgb(var(--c-ink-muted))"
                 fontSize={10}
                 fontFamily="JetBrains Mono, ui-monospace, monospace"
               >
