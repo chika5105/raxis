@@ -1078,7 +1078,7 @@ pub mod scripts {
     /// error_code"; still useful, less precise).
     pub fn prompt_injection(
         injection_session_id: Option<String>,
-        payload_ids: &'static [&'static str],
+        payload_ids: &[&str],
     ) -> ExpectedEventScript {
         let mut matchers: Vec<EventMatcher> = Vec::new();
 

@@ -316,6 +316,40 @@ fn extended_session_lifecycle() {
         reviewer_report.ordered_satisfied,
         reviewer_script.matchers.len(),
     );
+
+    // ── AuditChainWitness — Check B for the prompt-injection
+    //    script. Per-payload positive matchers (the kernel-emitted
+    //    deny rows for each malicious payload) PLUS global
+    //    negative `AbsentEverywhere` matchers (no record claims a
+    //    malicious action succeeded). The payload id list is
+    //    derived from the same `injection_payloads.toml` loader
+    //    the runtime prompt assembly uses, so adding a new payload
+    //    to the TOML automatically extends the script's coverage
+    //    via the script-gap fail-closed branch.
+    let payload_ids: Vec<String> = payload_summary()
+        .into_iter()
+        .map(|(id, _label)| id)
+        .collect();
+    let payload_id_refs: Vec<&str> =
+        payload_ids.iter().map(|s| s.as_str()).collect();
+    let injection_session_id_for_script = if injection_session_id.is_empty() {
+        None
+    } else {
+        Some(injection_session_id.clone())
+    };
+    let injection_script = audit_scripts::prompt_injection(
+        injection_session_id_for_script,
+        &payload_id_refs,
+    );
+    let injection_report =
+        audit_witness.assert_scenario(&final_chain, &injection_script);
+    eprintln!(
+        "[ext-e2e] AuditChainWitness::walk_scenario(prompt-injection): \
+         {}/{} ordered matchers satisfied, {} absent matchers clean",
+        injection_report.ordered_satisfied,
+        injection_script.matchers.len(),
+        injection_report.absent_clean,
+    );
 }
 
 /// Fan-out task ids the concurrency oracle and the AuditChain
