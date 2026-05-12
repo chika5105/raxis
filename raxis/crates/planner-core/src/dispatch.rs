@@ -591,6 +591,28 @@ impl DispatchLoop {
             );
             cum_out = cum_out.saturating_add(u64::from(output_tokens));
 
+            // V2 `v2_extended_gaps.md §2.5` — enforce per-session token
+            // caps BEFORE inspecting the response for terminal tools /
+            // Idle. The earlier version of this streaming path placed
+            // the ceiling check at the BOTTOM of the loop iteration,
+            // after the `Idle` and `TerminalTool` early returns — that
+            // meant a streaming session whose final turn crossed the
+            // cap (and whose provider never emitted a mid-stream
+            // `Usage` event before `Complete`) would surface as `Idle`
+            // or `TerminalTool` with the cap silently bypassed. This
+            // matches the regression guard already in `run()` (see
+            // `input_ceiling_fires_even_on_idle_terminal_path` and
+            // `input_ceiling_fires_even_on_terminal_tool_short_circuit`
+            // in the buffered path's tests); promoting the check to
+            // the top of the post-turn block keeps the contract tight
+            // for the streaming path too: every cap that is hit
+            // reaches the role binary as a `TokensExceeded` outcome,
+            // regardless of whether the provider streamed an
+            // intermediate `Usage` event.
+            if let Some(exceeded) = self.check_ceilings(cum_in, cum_out) {
+                return Ok(exceeded);
+            }
+
             // ── From here, identical to `run()` ───────────────────
             messages.push(Message {
                 role:    "assistant".to_owned(),
@@ -660,10 +682,15 @@ impl DispatchLoop {
             });
             let _ = turn;
 
-            // ── Post-turn ceiling check (same as `run()`) ─────────
-            if let Some(exceeded) = self.check_ceilings(cum_in, cum_out) {
-                return Ok(exceeded);
-            }
+            // Post-turn ceiling check already fired above (right after
+            // the canonical usage fold), so the cap was checked
+            // BEFORE the Idle/TerminalTool early returns. Reaching
+            // this point is the explicit "cap not yet hit" branch.
+            // Tombstone kept so a future refactor that flips the
+            // order back to "tools first, then check" is forced to
+            // think about the Idle/TerminalTool regression that
+            // motivated promoting the check (mirrors the tombstone
+            // in `run()`).
         }
 
         Ok(DispatchOutcome::MaxTurnsExceeded {
