@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { ErrorBox } from "@/components/ErrorBox";
@@ -13,6 +13,7 @@ import { fmtRelative, fmtTokens, plural } from "@/lib/format";
 /// rows). Refreshes on a 5-second cadence per the spec
 /// principle "real-time indicators" (§4.4).
 export function OverviewPage() {
+  const navigate = useNavigate();
   const health = useQuery({
     queryKey: ["health"],
     queryFn: ({ signal }) => dashboardApi.health(signal),
@@ -151,10 +152,27 @@ export function OverviewPage() {
                 </tr>
               </thead>
               <tbody>
-                {initiatives.data.map((i) => (
-                  <tr key={i.initiative_id} className="border-b border-edge/50 last:border-b-0 hover:bg-panel-high">
+                {initiatives.data.map((i) => {
+                  const href = `/initiatives/${i.initiative_id}`;
+                  return (
+                  <tr
+                    key={i.initiative_id}
+                    tabIndex={0}
+                    onClick={() => navigate(href)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        navigate(href);
+                      }
+                    }}
+                    className="border-b border-edge/50 last:border-b-0 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                  >
                     <td className="px-4 py-2">
-                      <Link to={`/initiatives/${i.initiative_id}`} className="text-ink hover:text-accent">
+                      <Link
+                        to={href}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-ink hover:text-accent"
+                      >
                         {i.display_name}
                       </Link>
                       <div className="text-[11px] text-ink-subtle">
@@ -175,7 +193,8 @@ export function OverviewPage() {
                       {fmtRelative(i.updated_at)}
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}
@@ -208,10 +227,27 @@ export function OverviewPage() {
                 </tr>
               </thead>
               <tbody>
-                {sessions.data.map((s) => (
-                  <tr key={s.session_id} className="border-b border-edge/50 last:border-b-0 hover:bg-panel-high">
+                {sessions.data.map((s) => {
+                  const href = `/sessions/${s.session_id}`;
+                  return (
+                  <tr
+                    key={s.session_id}
+                    tabIndex={0}
+                    onClick={() => navigate(href)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        navigate(href);
+                      }
+                    }}
+                    className="border-b border-edge/50 last:border-b-0 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                  >
                     <td className="px-4 py-2">
-                      <Link to={`/sessions/${s.session_id}`} className="text-ink hover:text-accent">
+                      <Link
+                        to={href}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-ink hover:text-accent"
+                      >
                         <Mono>{s.session_id.slice(0, 12)}…</Mono>
                       </Link>
                       <div className="text-[11px] text-ink-subtle">
@@ -229,7 +265,8 @@ export function OverviewPage() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           )}

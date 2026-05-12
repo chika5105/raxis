@@ -124,13 +124,25 @@ export function InitiativeDetailPage() {
                 {init.tasks.map((t) => (
                   <tr
                     key={t.task_id}
-                    className={`border-b border-edge/40 last:border-b-0 hover:bg-panel-high cursor-pointer ${
+                    tabIndex={0}
+                    aria-selected={selectedTask === t.task_id}
+                    className={`border-b border-edge/40 last:border-b-0 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
                       selectedTask === t.task_id ? "bg-panel-high" : ""
                     }`}
                     onClick={() => setSelectedTask(t.task_id)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setSelectedTask(t.task_id);
+                      }
+                    }}
                   >
                     <td className="px-4 py-2">
-                      <Link to={`/tasks/${t.task_id}`} className="text-ink hover:text-accent">
+                      <Link
+                        to={`/tasks/${t.task_id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-ink hover:text-accent"
+                      >
                         {t.title}
                       </Link>
                       <div className="text-[11px] text-ink-subtle">
@@ -144,6 +156,7 @@ export function InitiativeDetailPage() {
                       {t.session_id ? (
                         <Link
                           to={`/sessions/${t.session_id}`}
+                          onClick={(e) => e.stopPropagation()}
                           className="text-accent hover:underline font-mono"
                         >
                           {t.session_id.slice(0, 12)}…

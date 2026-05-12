@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -21,6 +21,7 @@ const STATE_OPTIONS = [
 ];
 
 export function InitiativesPage() {
+  const navigate = useNavigate();
   const [stateFilter, setStateFilter] = useState<string>("All");
   const [search, setSearch] = useState("");
 
@@ -105,14 +106,25 @@ export function InitiativesPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((i) => (
+              {filtered.map((i) => {
+                const href = `/initiatives/${i.initiative_id}`;
+                return (
                 <tr
                   key={i.initiative_id}
-                  className="border-t border-edge/40 hover:bg-panel-high"
+                  tabIndex={0}
+                  onClick={() => navigate(href)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      navigate(href);
+                    }
+                  }}
+                  className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
                 >
                   <td className="px-4 py-2.5">
                     <Link
-                      to={`/initiatives/${i.initiative_id}`}
+                      to={href}
+                      onClick={(e) => e.stopPropagation()}
                       className="text-ink hover:text-accent font-medium"
                     >
                       {i.display_name}
@@ -142,7 +154,8 @@ export function InitiativesPage() {
                     {fmtRelative(i.updated_at)}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
