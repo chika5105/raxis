@@ -2707,6 +2707,13 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // V2 per-session VM lifecycle (extensibility-traits.md §3.5,
     // credential-proxy.md §2; paired-class — see audit-paired-writes.md §4.1).
     "SessionVmSpawned", "SessionVmExited",
+    // V2 elastic-vm-scaling.md §3.2, §4 — bounded retry on transient
+    // spawn failure + dynamic resource adjustment + per-minute rate
+    // limit deferral. `SessionVmFailedFinal` is mutually exclusive
+    // with `SessionVmSpawned` for the same lineage; see
+    // `audit-paired-writes.md §4` extension.
+    "SessionVmRespawnAttempted", "SessionVmFailedFinal",
+    "SessionVmScaleEvent", "SessionVmScaleDeferred",
     // initiative
     "InitiativeCreated", "PlanApproved", "PlanRejected",
     "PathScopeOverrideApplied", "InitiativeStateChanged", "InitiativeAborted",
@@ -7019,6 +7026,44 @@ channels   = []
                 signal_class:  "x".into(),
                 exit_code:     0,
                 backend_error: None,
+            }.as_str(),
+            // V2 elastic-vm-scaling.md §3.2, §4 — bounded retry +
+            // dynamic resource adjustment + rate-limit deferral.
+            AuditEventKind::SessionVmRespawnAttempted {
+                session_id:      "x".into(),
+                task_id:         None,
+                initiative_id:   "x".into(),
+                attempt:         1,
+                max_attempts:    3,
+                failure_class:   "Transient".into(),
+                previous_reason: "x".into(),
+                backoff_ms:      250,
+            }.as_str(),
+            AuditEventKind::SessionVmFailedFinal {
+                session_id:     "x".into(),
+                task_id:        None,
+                initiative_id:  "x".into(),
+                total_attempts: 1,
+                failure_class:  "Permanent".into(),
+                final_reason:   "x".into(),
+            }.as_str(),
+            AuditEventKind::SessionVmScaleEvent {
+                session_id:     "x".into(),
+                task_id:        None,
+                initiative_id:  "x".into(),
+                direction:      "Up".into(),
+                prev_vcpus:     2,
+                new_vcpus:      4,
+                prev_memory_mb: 4096,
+                new_memory_mb:  6144,
+                reason:         "MemoryPressure".into(),
+            }.as_str(),
+            AuditEventKind::SessionVmScaleDeferred {
+                session_id:    "x".into(),
+                task_id:       None,
+                initiative_id: "x".into(),
+                direction:     "Up".into(),
+                reason:        "RateLimit".into(),
             }.as_str(),
             // V2_GAPS §C7 — credential CLI ceremony events.
             AuditEventKind::CredentialRegistered {
