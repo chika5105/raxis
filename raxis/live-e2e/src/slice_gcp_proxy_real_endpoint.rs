@@ -64,12 +64,82 @@
 //! lands JWT-bearer-grant forwarding the slice should be flipped
 //! to drive the request through the proxy.
 
+//! ## V3 forwarding pivot (`RAXIS_V3_CLOUD_FORWARDING=1`)
+//!
+//! When BOTH `RAXIS_LIVE_CLOUD_NET=1` AND
+//! `RAXIS_V3_CLOUD_FORWARDING=1` are set, the slice replaces
+//! the unsigned-baseline witness with an end-to-end V3
+//! forwarding witness:
+//!
+//!   1. Generate a throwaway RSA-2048 key at startup and
+//!      assemble a service-account-JSON-shaped credential body
+//!      (`client_email`, `private_key`, `private_key_id`,
+//!      `token_uri`). The `client_email` deliberately points
+//!      at a non-existent service account so Google rejects
+//!      the JWT-bearer exchange.
+//!   2. Bind `GcpProxy::bind_v3` with `ForwardingConfig` pinned
+//!      to `oauth2.googleapis.com` and scope
+//!      `https://www.googleapis.com/auth/cloud-platform`.
+//!   3. Dial the proxy's loopback `/computeMetadata/v1/...token`
+//!      endpoint. The proxy mints + signs the JWT, POSTs to
+//!      real `oauth2.googleapis.com`, receives a 4xx RFC 6749
+//!      envelope, and mirrors it back verbatim.
+//!   4. Assert: status is 4xx, body parses as JSON with an
+//!      `error` field in the RFC 6749 §5.2 closed enum.
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
+use raxis_audit_tools::AuditSink;
+use raxis_credential_proxy_cloud_shared::{CloudHttpClient, CloudUpstreamHost, TokenCache};
+use raxis_credential_proxy_gcp::{
+    ForwardingConfig as GcpForwardingConfig, GcpCacheValue, GcpProxy, NoopAuditChannel,
+    OwnedConsumer, ProxyConfig, Restrictions,
+};
+use raxis_credentials::{
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
+};
+use raxis_test_support::audit_sink::FakeAuditSink;
+use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+use rsa::RsaPrivateKey;
 use serde_json::Value as JsonValue;
 
 const REAL_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
+
+/// Local `CredentialBackend` that serves a synthetic service-
+/// account JSON for the V3 forwarding witness. The PEM is a
+/// valid throwaway RSA-2048 key so the proxy's JWT signer
+/// succeeds; the `client_email` points at a non-existent
+/// service account so the upstream rejects the exchange.
+struct SyntheticSaBackend {
+    body:     Vec<u8>,
+    resolves: AtomicU32,
+}
+
+impl CredentialBackend for SyntheticSaBackend {
+    fn resolve(
+        &self,
+        _name:     &CredentialName,
+        _consumer: ConsumerIdentity<'_>,
+    ) -> std::result::Result<CredentialValue, CredentialError> {
+        self.resolves.fetch_add(1, Ordering::SeqCst);
+        Ok(CredentialValue::from_bytes(self.body.clone()))
+    }
+    fn rotate(
+        &self, name: &CredentialName, _v: CredentialValue, _a: OperatorId,
+    ) -> std::result::Result<(), CredentialError> {
+        Err(CredentialError::Malformed {
+            name:   name.clone(),
+            reason: "live-e2e V3 GCP witness does not rotate".to_owned(),
+        })
+    }
+    fn exists(&self, _name: &CredentialName) -> bool { true }
+    fn lease(&self, _: &CredentialName) -> Lease { Lease::Forever }
+    fn backend_kind(&self) -> &'static str { "live-e2e-v3-gcp-witness" }
+}
 
 /// RFC 6749 §5.2 closed enum of OAuth2 error codes. The slice
 /// asserts the response body's `error` field is in this set.
@@ -90,6 +160,9 @@ pub(crate) async fn run() -> Result<()> {
              {REAL_ENDPOINT}",
         );
         return Ok(());
+    }
+    if std::env::var("RAXIS_V3_CLOUD_FORWARDING").ok().as_deref() == Some("1") {
+        return run_v3_forwarding_witness().await;
     }
     tracing::info!(
         endpoint = REAL_ENDPOINT,
@@ -165,6 +238,147 @@ pub(crate) async fn run() -> Result<()> {
         error    = error_field,
         body_len = body.len(),
         "slice gcp-proxy-real-endpoint: PASS — V3 baseline witness pinned",
+    );
+    Ok(())
+}
+
+/// V3 forwarding witness. Generates a throwaway RSA-2048 key,
+/// builds a service-account-JSON-shaped credential body,
+/// binds a `GcpProxy::bind_v3` against it, and dials the
+/// proxy's metadata-server `/token` endpoint. The upstream
+/// rejects the JWT (the issuer email is synthetic); the
+/// proxy mirrors the 4xx OAuth2 envelope back.
+async fn run_v3_forwarding_witness() -> Result<()> {
+    tracing::info!(
+        endpoint = REAL_ENDPOINT,
+        "slice gcp-proxy-real-endpoint: V3-forwarding witness starting",
+    );
+
+    let mut rng = rand_core::OsRng;
+    let private_key = RsaPrivateKey::new(&mut rng, 2048)
+        .context("generate throwaway RSA-2048 key for V3 witness")?;
+    let pem = private_key
+        .to_pkcs8_pem(LineEnding::LF)
+        .context("encode RSA private key to PKCS#8 PEM")?
+        .to_string();
+
+    // Synthetic service-account email — does not correspond
+    // to any real Google service account, so the upstream
+    // rejects the JWT-bearer exchange with `invalid_grant`.
+    let synthetic_email = "raxis-v3-witness@nonexistent.iam.gserviceaccount.com";
+    let sa_json = serde_json::json!({
+        "type":             "service_account",
+        "client_email":     synthetic_email,
+        "private_key_id":   "raxis-v3-witness-kid",
+        "private_key":      pem,
+        "token_uri":        REAL_ENDPOINT,
+        "project_id":       "raxis-v3-witness-project",
+    });
+    let body = serde_json::to_vec(&sa_json).context("serialise synthetic SA JSON")?;
+
+    let backend: Arc<dyn CredentialBackend> = Arc::new(SyntheticSaBackend {
+        body,
+        resolves: AtomicU32::new(0),
+    });
+
+    let upstream = CloudUpstreamHost::gcp_oauth2();
+    let http_client = Arc::new(
+        CloudHttpClient::new(upstream.clone())
+            .context("construct CloudHttpClient for oauth2.googleapis.com")?,
+    );
+    let token_cache = Arc::new(TokenCache::<GcpCacheValue>::new(Duration::from_secs(300)));
+    let audit_sink: Arc<dyn AuditSink> = Arc::new(FakeAuditSink::new());
+
+    let fwd = GcpForwardingConfig {
+        upstream,
+        scopes:              vec!["https://www.googleapis.com/auth/cloud-platform".to_owned()],
+        jwt_lifetime:        Duration::from_secs(3600),
+        cache_safety_window: Duration::from_secs(300),
+    };
+
+    let cfg = ProxyConfig {
+        listen_addr:        "127.0.0.1:0".to_owned(),
+        credential_name:    CredentialName::new("live-e2e-v3-gcp"),
+        consumer:           OwnedConsumer::new("live-e2e-gcp-slice", "v3-witness"),
+        lease_seconds:      3600,
+        project_id:         "raxis-v3-witness-project".to_owned(),
+        numeric_project_id: Some(123_456_789),
+        forwarding:         Some(fwd),
+        restrictions:       Restrictions::default(),
+    };
+
+    let proxy = GcpProxy::bind_v3(
+        backend,
+        cfg,
+        Arc::new(NoopAuditChannel::default()),
+        Arc::clone(&audit_sink),
+        http_client,
+        token_cache,
+    )
+    .await
+    .context("bind GcpProxy V3")?;
+    let addr = proxy.local_addr().context("GcpProxy local_addr")?;
+    tokio::spawn(async move { proxy.serve().await; });
+
+    let url = format!(
+        "http://{addr}/computeMetadata/v1/instance/service-accounts/default/token",
+    );
+    let client = reqwest::Client::builder()
+        .user_agent("raxis-live-e2e/gcp-proxy-real-endpoint-v3")
+        .timeout(Duration::from_secs(20))
+        .no_proxy()
+        .build()
+        .context("build reqwest client")?;
+    let resp = client.get(&url)
+        .header("Metadata-Flavor", "Google")
+        .send().await
+        .with_context(|| format!("GET {url}"))?;
+    let status = resp.status();
+    let body   = resp.text().await.context("read response body")?;
+
+    if status.is_success() {
+        return Err(anyhow!(
+            "expected 4xx pass-through from oauth2.googleapis.com for synthetic SA \
+             email, got 200; body={body:.500}",
+        ));
+    }
+    if !(status.as_u16() >= 400 && status.as_u16() < 600) {
+        return Err(anyhow!(
+            "expected 4xx/5xx status from V3 forwarding witness, got {status}; \
+             body={body:.500}",
+        ));
+    }
+    let parsed: JsonValue = serde_json::from_str(&body)
+        .with_context(|| format!("parse V3 envelope JSON: {body:.500}"))?;
+    let error_field = parsed.get("error").and_then(|v| v.as_str()).ok_or_else(|| {
+        anyhow!(
+            "V3-forwarding response body has no `error` field; body={body:.500}",
+        )
+    })?;
+    if !RFC6749_ERROR_CODES.contains(&error_field) {
+        return Err(anyhow!(
+            "V3-forwarding response `error` = {error_field:?} not in RFC 6749 §5.2 \
+             closed enum {RFC6749_ERROR_CODES:?}",
+        ));
+    }
+    // Hygiene: the PEM and synthetic email are operator-side
+    // bytes; they MUST NOT leak through the proxy to the
+    // in-VM client. Assert their absence.
+    if body.contains("BEGIN PRIVATE KEY")
+        || body.contains("BEGIN RSA PRIVATE KEY")
+        || body.contains(synthetic_email)
+    {
+        return Err(anyhow!(
+            "V3-forwarding response body leaked credential-shaped substring; \
+             body={body:.500}",
+        ));
+    }
+
+    tracing::info!(
+        status   = %status,
+        error    = error_field,
+        body_len = body.len(),
+        "slice gcp-proxy-real-endpoint: PASS — V3 upstream-forwarding witness pinned",
     );
     Ok(())
 }

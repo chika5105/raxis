@@ -26,6 +26,7 @@ raxis-credential-proxy-mysql    = { path = "../crates/credential-proxy-mysql" }
 raxis-credential-proxy-mssql    = { path = "../crates/credential-proxy-mssql" }
 raxis-credential-proxy-mongodb  = { path = "../crates/credential-proxy-mongodb" }
 raxis-credential-proxy-manager  = { path = "../crates/credential-proxy-manager" }
+raxis-credential-proxy-cloud-shared = { path = "../crates/credential-proxy-cloud-shared" }
 raxis-egress-admission     = { path = "../crates/egress-admission" }
 raxis-isolation            = { path = "../crates/isolation" }
 raxis-plan-credentials     = { path = "../crates/plan-credentials" }
@@ -54,3 +55,9 @@ anyhow      = "1"
 tracing     = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 base64      = "0.22"
+# RSA key generation for the V3-forwarding GCP witness — the
+# witness ships a throwaway PKCS#8 PEM the proxy signs a JWT
+# with so the upstream `oauth2.googleapis.com` exchange path
+# is exercised end-to-end.
+rsa         = { workspace = true, features = ["sha2"] }
+rand_core   = "0.6"
