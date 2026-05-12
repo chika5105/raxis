@@ -188,6 +188,20 @@ pub struct OrchestratorSpawnContext {
     /// stamped (live-mode planner contract is not populated;
     /// matches the V2.3 scaffold path).
     pub data_dir:   Option<PathBuf>,
+    /// V2 `elastic-vm-scaling.md §4.4` — per-role rolling window
+    /// of recent utilisation samples. Consulted at spawn time so a
+    /// run of consistently under-used Orchestrator sessions biases
+    /// the next spawn smaller. Allowed regardless of the elastic
+    /// flag (`§6` — never raises capacity).
+    ///
+    /// **Default** is a fresh empty tracker — when the host kernel
+    /// boots without sharing one across the orchestrator and
+    /// executor contexts, both windows fill independently. The
+    /// `with_scale_down_history` builder lets `main.rs` /
+    /// `ipc/context.rs` thread a single shared tracker through
+    /// both spawn contexts so e.g. an Executor activation can
+    /// read its own history alongside the orchestrator's.
+    pub scale_down_history: Arc<crate::elastic::ScaleDownHistory>,
 }
 
 impl OrchestratorSpawnContext {
@@ -214,6 +228,7 @@ impl OrchestratorSpawnContext {
             // path).
             mem_mib:    1024,
             data_dir:   None,
+            scale_down_history: Arc::new(crate::elastic::ScaleDownHistory::new()),
         }
     }
 
@@ -223,6 +238,19 @@ impl OrchestratorSpawnContext {
     /// `kernel/src/main.rs::data_dir()`.
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
         self.data_dir = Some(data_dir);
+        self
+    }
+
+    /// Builder: share an externally-owned scale-down tracker so
+    /// the orchestrator and executor spawn contexts read /
+    /// write the SAME windows. `main.rs` constructs ONE
+    /// [`crate::elastic::ScaleDownHistory`] at boot and threads
+    /// the same `Arc` through both contexts.
+    pub fn with_scale_down_history(
+        mut self,
+        history: Arc<crate::elastic::ScaleDownHistory>,
+    ) -> Self {
+        self.scale_down_history = history;
         self
     }
 }
@@ -890,6 +918,20 @@ async fn spawn_orchestrator_for_initiative(
     let mut workspace_mounts = vec![orch_mount];
     workspace_mounts.extend(extra_workspace_mounts);
 
+    // ── Step 3.5: consult the per-role scale-down history. ────────
+    //
+    // V2 `elastic-vm-scaling.md §4.4` — when the recent rolling
+    // window of orchestrator sessions all reported low utilisation,
+    // bias this spawn smaller. Allowed even when `elastic = false`
+    // (`§6` — never raises capacity).
+    let (vm_spec, scale_down_decision) = maybe_apply_scale_down(
+        vm_spec,
+        crate::elastic::RoleKey::Orchestrator,
+        &spawn_ctx.scale_down_history,
+        policy.elastic(),
+        &crate::elastic::PlanElasticOverrides::default(),
+    );
+
     // ── Step 4: delegate via the bounded-retry helper. ────────────
     //
     // V2 `elastic-vm-scaling.md §3.2` — every kernel-side spawn is
@@ -909,7 +951,76 @@ async fn spawn_orchestrator_for_initiative(
         credentials,
         egress_allowlist,
     };
-    Ok(spawn_with_transient_retry(&service, policy.elastic(), proto).await?)
+    let handle = spawn_with_transient_retry(
+        &service,
+        policy.elastic(),
+        proto,
+    ).await?;
+
+    // ── Step 5: emit SessionVmScaleEvent on a successful down-bias.
+    //
+    // INV-ELASTIC-03 write-then-emit ordering: the new VM is
+    // bound (SessionVmSpawned was emitted inside spawn_session),
+    // and the scale event lands AFTER the spawn so audit replay
+    // attributes the smaller spec to the §4.4 bias. On audit-emit
+    // failure we log + clear the tracker (so a future spawn does
+    // not also wedge on the same condition) and return Ok — the
+    // VM is already running.
+    if let Some((prev_vcpus, prev_mb, new_vcpus, new_mb, reason)) = scale_down_decision {
+        if let Err(e) = crate::elastic::emit_scale_event_audit(
+            service.audit(),
+            session_id,
+            None,
+            initiative_id,
+            crate::elastic::ScaleDirection::Down,
+            prev_vcpus,
+            new_vcpus,
+            prev_mb,
+            new_mb,
+            &reason,
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"orchestrator_scale_down_audit_emit_failed\",\
+                 \"session_id\":\"{session_id}\",\"error\":\"{e}\"}}",
+            );
+        }
+        spawn_ctx.scale_down_history.clear(crate::elastic::RoleKey::Orchestrator);
+    }
+
+    Ok(handle)
+}
+
+/// Apply the §4.4 next-spawn down-bias to `vm_spec` when the
+/// rolling window for `role` says the recent N sessions were
+/// under-used.
+///
+/// Returns `(vm_spec_after_bias, Some((prev_vcpus, prev_mb,
+/// new_vcpus, new_mb, reason)))` when the bias was applied, or
+/// `(vm_spec_unchanged, None)` when the history did not justify
+/// a bias.
+///
+/// **Why a free function** (rather than inlined): the orchestrator
+/// and executor spawn paths share the exact same shape — consult,
+/// rebuild, return + capture for the post-spawn audit emit. The
+/// helper keeps both spawn paths aligned without duplicating the
+/// logic.
+fn maybe_apply_scale_down(
+    vm_spec:          VmSpec,
+    role:             crate::elastic::RoleKey,
+    history:          &Arc<crate::elastic::ScaleDownHistory>,
+    elastic:          &raxis_policy::ElasticConfig,
+    plan:             &crate::elastic::PlanElasticOverrides,
+) -> (VmSpec, Option<(u32, u32, u32, u32, String)>) {
+    match crate::elastic::decide_scale_down(&vm_spec, elastic, plan, history.as_ref(), role) {
+        crate::elastic::ScaleDecision::Apply {
+            new_spec, prev_vcpus, new_vcpus,
+            prev_memory_mb, new_memory_mb, reason, ..
+        } => (
+            new_spec,
+            Some((prev_vcpus, prev_memory_mb, new_vcpus, new_memory_mb, reason)),
+        ),
+        crate::elastic::ScaleDecision::Skip { .. } => (vm_spec, None),
+    }
 }
 
 /// **Drive the kernel ↔ guest IPC channel for a freshly-spawned
@@ -2070,6 +2181,12 @@ pub struct ExecutorSpawnContext {
     /// `raxis-planner-core::run_role_session` can connect back via
     /// `RAXIS_KERNEL_PLANNER_SOCKET`. `None` ⇒ env var not stamped.
     pub data_dir: Option<PathBuf>,
+    /// V2 `elastic-vm-scaling.md §4.4` — per-role rolling window
+    /// of recent utilisation samples. Mirror of
+    /// [`OrchestratorSpawnContext::scale_down_history`]; production
+    /// wires the same `Arc` through both contexts so executor and
+    /// reviewer activations consult the shared tracker.
+    pub scale_down_history: Arc<crate::elastic::ScaleDownHistory>,
 }
 
 impl ExecutorSpawnContext {
@@ -2105,6 +2222,7 @@ impl ExecutorSpawnContext {
             // reviewer's static-analysis working set.
             reviewer_mem_mib:    1024,
             data_dir:            None,
+            scale_down_history:  Arc::new(crate::elastic::ScaleDownHistory::new()),
         }
     }
 
@@ -2112,6 +2230,16 @@ impl ExecutorSpawnContext {
     /// stamping. See [`OrchestratorSpawnContext::with_data_dir`].
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
         self.data_dir = Some(data_dir);
+        self
+    }
+
+    /// Builder: share an externally-owned scale-down tracker. See
+    /// [`OrchestratorSpawnContext::with_scale_down_history`].
+    pub fn with_scale_down_history(
+        mut self,
+        history: Arc<crate::elastic::ScaleDownHistory>,
+    ) -> Self {
+        self.scale_down_history = history;
         self
     }
 }
@@ -2511,6 +2639,29 @@ pub async fn spawn_executor_for_task(
             .map(|d| d.join("guests").join(session_id).join("console.log")),
     };
 
+    // ── Step 3.5: consult the per-role scale-down history. ────────
+    //
+    // V2 `elastic-vm-scaling.md §4.4` — bias the next spawn smaller
+    // when the recent rolling window for this role is under-used.
+    // The bias is allowed even when `elastic = false` (`§6` —
+    // scale-down never raises capacity).
+    let role = match agent_kind {
+        ExecutorAgentKind::Executor => crate::elastic::RoleKey::Executor,
+        ExecutorAgentKind::Reviewer => crate::elastic::RoleKey::Reviewer,
+    };
+    let plan_overrides = plan_elastic_overrides_for_task(
+        plan_registry,
+        initiative_id,
+        task_id,
+    );
+    let (vm_spec, scale_down_decision) = maybe_apply_scale_down(
+        vm_spec,
+        role,
+        &spawn_ctx.scale_down_history,
+        policy.elastic(),
+        &plan_overrides,
+    );
+
     // ── Step 4: delegate via the bounded-retry helper. ────────────
     //
     // V2 `elastic-vm-scaling.md §3.2` — see the matching block on
@@ -2529,7 +2680,70 @@ pub async fn spawn_executor_for_task(
         credentials,
         egress_allowlist,
     };
-    Ok(spawn_with_transient_retry(&service, policy.elastic(), proto).await?)
+    let handle = spawn_with_transient_retry(
+        &service,
+        policy.elastic(),
+        proto,
+    ).await?;
+
+    // ── Step 5: emit SessionVmScaleEvent on a successful down-bias.
+    //
+    // INV-ELASTIC-03 write-then-emit ordering: the new VM is
+    // bound (SessionVmSpawned was emitted inside spawn_session);
+    // the scale event lands AFTER so audit replay attributes the
+    // smaller spec to the §4.4 bias. Audit-emit failure is logged
+    // and the tracker is cleared so a future spawn does not also
+    // wedge on the same condition.
+    if let Some((prev_vcpus, prev_mb, new_vcpus, new_mb, reason)) = scale_down_decision {
+        if let Err(e) = crate::elastic::emit_scale_event_audit(
+            service.audit(),
+            session_id,
+            Some(task_id),
+            initiative_id,
+            crate::elastic::ScaleDirection::Down,
+            prev_vcpus,
+            new_vcpus,
+            prev_mb,
+            new_mb,
+            &reason,
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"executor_scale_down_audit_emit_failed\",\
+                 \"session_id\":\"{session_id}\",\"task_id\":\"{task_id}\",\"error\":\"{e}\"}}",
+            );
+        }
+        spawn_ctx.scale_down_history.clear(role);
+    }
+
+    Ok(handle)
+}
+
+/// Project the `[[plan.tasks]]` elastic overrides for
+/// `(initiative_id, task_id)` into the
+/// [`crate::elastic::PlanElasticOverrides`] shape consumed by the
+/// §4.4 chokepoint.
+///
+/// Returns `Default` when the registry has no entry for the task
+/// (e.g. an orchestrator spawn that pre-dates the registry write,
+/// or a test fixture that hasn't populated the registry). The
+/// default produces no plan-level narrowing, so the policy
+/// ceiling alone governs the spawn.
+fn plan_elastic_overrides_for_task(
+    registry:      &Arc<crate::initiatives::PlanRegistry>,
+    initiative_id: &str,
+    task_id:       &str,
+) -> crate::elastic::PlanElasticOverrides {
+    let key = crate::initiatives::TaskKey::new(initiative_id, task_id);
+    match registry.get(&key) {
+        Some(fields) => crate::elastic::PlanElasticOverrides {
+            elastic:        fields.elastic,
+            min_vcpus:      fields.min_vcpus,
+            max_vcpus:      fields.max_vcpus,
+            min_memory_mb:  fields.min_memory_mb,
+            max_memory_mb:  fields.max_memory_mb,
+        },
+        None => crate::elastic::PlanElasticOverrides::default(),
+    }
 }
 
 #[cfg(test)]

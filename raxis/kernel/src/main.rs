@@ -968,6 +968,16 @@ async fn main() {
                     Arc::clone(&audit),
                 ),
             );
+            // V2 `elastic-vm-scaling.md §4.4` — single tracker
+            // shared across the orchestrator + executor / reviewer
+            // spawn contexts so per-role rolling windows live in
+            // one in-memory location. Operators see the bias
+            // through `SessionVmScaleEvent { direction: "Down" }`
+            // events; the tracker itself is per-process state and
+            // resets on kernel restart by design.
+            let scale_down_history = Arc::new(
+                crate::elastic::ScaleDownHistory::new(),
+            );
             Arc::new(
                 crate::session_spawn_orchestrator::LiveOrchestratorSpawn::new(
                     crate::session_spawn_orchestrator::OrchestratorSpawnContext::new(
@@ -979,7 +989,8 @@ async fn main() {
                     // the guest env (otherwise the planner binary
                     // has no transport to dial back to the kernel
                     // and falls through to scaffold/park mode).
-                    .with_data_dir(data_dir.clone()),
+                    .with_data_dir(data_dir.clone())
+                    .with_scale_down_history(Arc::clone(&scale_down_history)),
                     session_spawn_for_orch,
                     Arc::clone(&store),
                     Arc::clone(&plan_registry),
@@ -1009,7 +1020,20 @@ async fn main() {
             // executor / reviewer path so activations carry the
             // planner UDS env stamp without each IPC handler having
             // to thread the path itself.
-            .with_data_dir(data_dir.clone()),
+            .with_data_dir(data_dir.clone())
+            // V2 `elastic-vm-scaling.md §4.4` — own tracker for
+            // the executor / reviewer spawn context. The
+            // orchestrator-spawn block above owns its own
+            // tracker; both are keyed by `RoleKey` so they would
+            // not actually share state even if we threaded the
+            // same `Arc` through (the orchestrator window would
+            // ignore Executor / Reviewer samples and vice versa).
+            // Splitting the tracker per-context keeps the boot
+            // ordering simple — neither closure depends on the
+            // other.
+            .with_scale_down_history(Arc::new(
+                crate::elastic::ScaleDownHistory::new(),
+            )),
         ),
         Arc::clone(&domain),
     )

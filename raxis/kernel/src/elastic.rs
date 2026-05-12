@@ -34,8 +34,10 @@
 //!   audit emission, then delegates to the bounded-retry helper
 //!   for the new spawn.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_isolation::VmSpec;
 use raxis_policy::ElasticConfig;
@@ -472,6 +474,270 @@ pub fn decide_scale_up(
 }
 
 // ---------------------------------------------------------------------------
+// Scale-down history — `ScaleDownHistory` tracker
+// ---------------------------------------------------------------------------
+
+/// Stable identifier for the resource-budget role the tracker keys
+/// utilisation samples by. The mapping `(install role) → RoleKey`
+/// is intentionally narrow — the kernel has exactly three classes
+/// of long-running VMs that consume operator-tunable resource
+/// budgets per `host-capacity.md §4.1`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoleKey {
+    /// Canonical Orchestrator session
+    /// (`OrchestratorSpawnContext::vcpu_count` /
+    /// `mem_mib`).
+    Orchestrator,
+    /// Executor sessions
+    /// (`ExecutorSpawnContext::executor_vcpu_count` /
+    /// `executor_mem_mib`).
+    Executor,
+    /// Reviewer sessions
+    /// (`ExecutorSpawnContext::reviewer_vcpu_count` /
+    /// `reviewer_mem_mib`).
+    Reviewer,
+}
+
+impl RoleKey {
+    /// Stable string projection — used for structured-log output
+    /// only (the audit event projects role through the
+    /// session-agent-type field, not through the `RoleKey`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Orchestrator => "Orchestrator",
+            Self::Executor     => "Executor",
+            Self::Reviewer     => "Reviewer",
+        }
+    }
+}
+
+/// One session's peak resource utilisation as measured by the
+/// substrate's heartbeat / per-tick sampler. The kernel records a
+/// fresh `UtilisationSample` for every session that completes
+/// successfully (terminations on permanent failure are excluded —
+/// they don't carry meaningful utilisation history).
+///
+/// Percentages are rounded to whole percent (`u8`) so the tracker's
+/// rolling window stays compact even under heavy session churn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UtilisationSample {
+    /// Peak resident-set-size during the session, as a percent of
+    /// the allotted `mem_mib`. Sourced from the dispatch loop's
+    /// heartbeat (when present) or the VMM's RSS read on
+    /// `terminate_session`.
+    pub peak_memory_pct: u8,
+    /// Peak vCPU saturation during the session, as a percent.
+    pub peak_vcpu_pct:   u8,
+}
+
+/// Defaults for the §4.4 down-bias triggers. Constants live here
+/// (rather than in `policy.toml`) because the scale-down rule is
+/// a kernel-internal heuristic, not an operator-tuneable; bumping
+/// the threshold is a kernel change, not a policy bump.
+pub mod scale_down_thresholds {
+    /// Window size N — the tracker keeps the most recent N
+    /// utilisation samples per role and biases the next spawn
+    /// smaller only when ALL N are under the thresholds.
+    pub const WINDOW_SIZE: usize = 5;
+    /// Memory utilisation must be `≤ MEMORY_PCT` for every sample
+    /// in the window to bias smaller. Per
+    /// `elastic-vm-scaling.md §4.4`.
+    pub const MEMORY_PCT:  u8 = 30;
+    /// vCPU utilisation must be `≤ VCPU_PCT` for every sample.
+    pub const VCPU_PCT:    u8 = 50;
+}
+
+/// Per-role rolling window of recent utilisation samples.
+///
+/// Construct ONE instance at kernel boot, share it across every
+/// spawn path (`OrchestratorSpawnContext`, `ExecutorSpawnContext`)
+/// via `Arc::clone`. Recording (`record_sample`) is `&self` and
+/// thread-safe; the tracker holds a `parking_lot::Mutex` over the
+/// per-role queues internally so concurrent terminations in a
+/// busy initiative do not need external coordination.
+///
+/// **Correctness note.** The tracker is per-process; restart
+/// resets the windows. This is by design — the §4.4 heuristic is
+/// behavioural feedback, not a hard policy contract; throwing
+/// away the window across restarts is a benign loss of one tick
+/// of capacity tuning. Persisting the window into SQLite would
+/// invite stale-data drift across operator-driven kernel
+/// rolls and is explicitly out of scope.
+pub struct ScaleDownHistory {
+    inner: Mutex<HashMap<RoleKey, VecDeque<UtilisationSample>>>,
+    window_size: usize,
+}
+
+impl ScaleDownHistory {
+    /// Construct a fresh tracker with the §4.4 default window
+    /// size (`scale_down_thresholds::WINDOW_SIZE = 5`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_window_size(scale_down_thresholds::WINDOW_SIZE)
+    }
+
+    /// Construct a tracker with a custom window size. Used by
+    /// unit tests to drive shorter windows.
+    #[must_use]
+    pub fn with_window_size(window_size: usize) -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            window_size: window_size.max(1),
+        }
+    }
+
+    /// Append `sample` to the rolling window for `role`. The
+    /// oldest sample is evicted when the window is full
+    /// (FIFO). Idempotent at the per-call level — the caller is
+    /// expected to dedupe on session_id BEFORE calling so a
+    /// double-record on a flaky observer does not skew the
+    /// window.
+    pub fn record_sample(&self, role: RoleKey, sample: UtilisationSample) {
+        let mut guard = self.inner.lock();
+        let queue = guard.entry(role).or_insert_with(|| {
+            VecDeque::with_capacity(self.window_size)
+        });
+        if queue.len() >= self.window_size {
+            queue.pop_front();
+        }
+        queue.push_back(sample);
+    }
+
+    /// Snapshot the current samples for `role`. Returns an empty
+    /// `Vec` when no samples have landed yet. Used by tests + by
+    /// `decide_scale_down` to evaluate the §4.4 trigger.
+    #[must_use]
+    pub fn samples(&self, role: RoleKey) -> Vec<UtilisationSample> {
+        self.inner
+            .lock()
+            .get(&role)
+            .map(|q| q.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// `true` when the rolling window for `role` is full AND every
+    /// sample is below the §4.4 thresholds. Returns `false` when
+    /// the window is not yet full — the kernel will not bias
+    /// smaller until it has seen at least N consecutive
+    /// well-behaved sessions, so a freshly-restarted kernel
+    /// always spawns at the operator-configured baseline.
+    #[must_use]
+    pub fn should_downscale(&self, role: RoleKey) -> bool {
+        let guard = self.inner.lock();
+        let Some(queue) = guard.get(&role) else { return false; };
+        if queue.len() < self.window_size {
+            return false;
+        }
+        queue.iter().all(|s| {
+            s.peak_memory_pct <= scale_down_thresholds::MEMORY_PCT
+                && s.peak_vcpu_pct <= scale_down_thresholds::VCPU_PCT
+        })
+    }
+
+    /// Reset the window for `role`. Used by callers after a
+    /// successful down-bias has been applied so the next round of
+    /// samples starts from a clean slate (otherwise a single
+    /// down-biased session would never accrue enough history to
+    /// down-bias again, but the previous samples would persist
+    /// indefinitely).
+    pub fn clear(&self, role: RoleKey) {
+        self.inner.lock().remove(&role);
+    }
+}
+
+impl Default for ScaleDownHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// decide_scale_down — §4.4 next-spawn down-bias decision
+// ---------------------------------------------------------------------------
+
+/// Decide whether the kernel should bias the next spawn for
+/// `role` smaller than `baseline`.
+///
+/// **`elastic = false` is intentionally ignored.** Per
+/// `elastic-vm-scaling.md §6`, scale-down is allowed regardless of
+/// the elastic flag because it never raises capacity — the
+/// "never increase capacity beyond baseline" rule is preserved.
+/// The function therefore does NOT consult `elastic.enabled` or
+/// `plan.elastic`.
+///
+/// Returns `Apply { direction = Down, ... }` when:
+///
+///   * `history.should_downscale(role)` is `true` AND
+///   * The chokepoint produced a spec strictly smaller than
+///     `baseline` (otherwise the bias would be a no-op).
+///
+/// Otherwise returns `Skip { reason }` with one of:
+///
+///   * `"InsufficientHistory"` — fewer than N samples yet.
+///   * `"AboveThresholds"` — at least one recent sample blew
+///     past the memory or vCPU threshold.
+///   * `"AtFloor"` — already at the bounds floor; nothing to bias.
+#[must_use]
+pub fn decide_scale_down(
+    baseline: &VmSpec,
+    elastic:  &ElasticConfig,
+    plan:     &PlanElasticOverrides,
+    history:  &ScaleDownHistory,
+    role:     RoleKey,
+) -> ScaleDecision {
+    if !history.should_downscale(role) {
+        // Distinguish "not enough samples" from "samples blew
+        // through the thresholds" so structured logs are useful.
+        let samples = history.samples(role);
+        let reason = if samples.len() < scale_down_thresholds::WINDOW_SIZE {
+            "InsufficientHistory"
+        } else {
+            "AboveThresholds"
+        };
+        return ScaleDecision::Skip { reason: reason.to_owned() };
+    }
+
+    let bounds = ElasticBounds::resolve(elastic, plan);
+    if baseline.vcpu_count <= bounds.min_vcpus
+        && baseline.mem_mib <= bounds.min_memory_mb
+    {
+        return ScaleDecision::Skip { reason: "AtFloor".to_owned() };
+    }
+
+    let new_spec = build_scaled_vm_spec(
+        baseline,
+        ScaleDirection::Down,
+        ScaleMultiplier::NEXT_SPAWN_DOWN,
+        &bounds,
+        // `elastic` is irrelevant for Down (the chokepoint only
+        // gates Up); pass `true` so the function takes the
+        // arithmetic path, not the baseline-fallthrough.
+        true,
+    );
+
+    if new_spec.vcpu_count == baseline.vcpu_count
+        && new_spec.mem_mib == baseline.mem_mib
+    {
+        return ScaleDecision::Skip { reason: "AtFloor".to_owned() };
+    }
+
+    let prev_vcpus     = baseline.vcpu_count;
+    let prev_memory_mb = baseline.mem_mib;
+    let new_vcpus      = new_spec.vcpu_count;
+    let new_memory_mb  = new_spec.mem_mib;
+    ScaleDecision::Apply {
+        new_spec,
+        prev_vcpus,
+        new_vcpus,
+        prev_memory_mb,
+        new_memory_mb,
+        direction: ScaleDirection::Down,
+        reason:    "NextSpawnUnderUtilised".to_owned(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // emit_scale_event_audit — INV-ELASTIC-03 helper
 // ---------------------------------------------------------------------------
 
@@ -845,5 +1111,218 @@ mod tests {
         assert_eq!(ScaleSignal::IpcBackpressure.as_str(),   "IpcBackpressure");
         assert_eq!(ScaleSignal::MemoryPressure.as_str(),    "MemoryPressure");
         assert_eq!(ScaleSignal::ToolTimeoutBurst.as_str(),  "ToolTimeoutBurst");
+    }
+
+    // -----------------------------------------------------------------
+    // ScaleDownHistory + decide_scale_down — §4.4 down-bias pinning
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn history_empty_does_not_downscale() {
+        let h = ScaleDownHistory::new();
+        assert!(!h.should_downscale(RoleKey::Executor));
+    }
+
+    #[test]
+    fn history_partial_window_does_not_downscale() {
+        let h = ScaleDownHistory::new();
+        for _ in 0..(scale_down_thresholds::WINDOW_SIZE - 1) {
+            h.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 10, peak_vcpu_pct: 10 },
+            );
+        }
+        // Window not yet full → no downscale, even though all
+        // samples are well under threshold.
+        assert!(!h.should_downscale(RoleKey::Executor));
+    }
+
+    #[test]
+    fn history_full_window_under_threshold_downscales() {
+        let h = ScaleDownHistory::new();
+        for _ in 0..scale_down_thresholds::WINDOW_SIZE {
+            h.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+            );
+        }
+        assert!(h.should_downscale(RoleKey::Executor));
+    }
+
+    #[test]
+    fn history_one_blown_sample_blocks_downscale() {
+        let h = ScaleDownHistory::new();
+        for _ in 0..(scale_down_thresholds::WINDOW_SIZE - 1) {
+            h.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+            );
+        }
+        h.record_sample(
+            RoleKey::Executor,
+            // Memory at the threshold is fine; just over kicks us out.
+            UtilisationSample { peak_memory_pct: 50, peak_vcpu_pct: 30 },
+        );
+        assert!(!h.should_downscale(RoleKey::Executor));
+    }
+
+    #[test]
+    fn history_evicts_oldest_when_window_full() {
+        let h = ScaleDownHistory::with_window_size(3);
+        for pct in [80, 80, 80] {
+            h.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: pct, peak_vcpu_pct: 30 },
+            );
+        }
+        // Now push three under-threshold samples; the over-threshold
+        // history must evict.
+        for _ in 0..3 {
+            h.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+            );
+        }
+        assert!(h.should_downscale(RoleKey::Executor));
+    }
+
+    #[test]
+    fn history_keys_per_role_independently() {
+        let h = ScaleDownHistory::new();
+        for _ in 0..scale_down_thresholds::WINDOW_SIZE {
+            h.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+            );
+        }
+        // Reviewer has no history; must NOT downscale even though
+        // Executor would.
+        assert!(h.should_downscale(RoleKey::Executor));
+        assert!(!h.should_downscale(RoleKey::Reviewer));
+    }
+
+    #[test]
+    fn decide_scale_down_admits_when_history_says_yes() {
+        let history = ScaleDownHistory::new();
+        for _ in 0..scale_down_thresholds::WINDOW_SIZE {
+            history.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+            );
+        }
+        let base    = baseline_vmspec(2, 1024);
+        let elastic = elastic_default();
+        let plan    = PlanElasticOverrides::default();
+        match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
+            ScaleDecision::Apply {
+                new_vcpus, new_memory_mb, direction, reason, ..
+            } => {
+                assert_eq!(direction, ScaleDirection::Down);
+                assert_eq!(new_vcpus, 1);     // 2 - 1
+                assert_eq!(new_memory_mb, 768); // 1024 * 0.75
+                assert_eq!(reason, "NextSpawnUnderUtilised");
+            }
+            other => panic!("expected Apply, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_scale_down_skips_when_no_history() {
+        let history = ScaleDownHistory::new();
+        let base    = baseline_vmspec(2, 1024);
+        let elastic = elastic_default();
+        let plan    = PlanElasticOverrides::default();
+        match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
+            ScaleDecision::Skip { reason } => assert_eq!(reason, "InsufficientHistory"),
+            other => panic!("expected Skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_scale_down_skips_when_blown_recent_sample() {
+        let history = ScaleDownHistory::new();
+        for i in 0..scale_down_thresholds::WINDOW_SIZE {
+            // Last sample blows the threshold.
+            let mem = if i + 1 == scale_down_thresholds::WINDOW_SIZE { 90 } else { 20 };
+            history.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: mem, peak_vcpu_pct: 30 },
+            );
+        }
+        let base    = baseline_vmspec(2, 1024);
+        let elastic = elastic_default();
+        let plan    = PlanElasticOverrides::default();
+        match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
+            ScaleDecision::Skip { reason } => assert_eq!(reason, "AboveThresholds"),
+            other => panic!("expected Skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_scale_down_skips_at_floor() {
+        let history = ScaleDownHistory::new();
+        for _ in 0..scale_down_thresholds::WINDOW_SIZE {
+            history.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+            );
+        }
+        // Already at the floor (1 vcpu, 0 memory after applying
+        // bounds.min_memory_mb default 0 — we pin a custom plan
+        // override to say "min memory = 1024" so the floor is
+        // visible).
+        let base    = baseline_vmspec(1, 1024);
+        let elastic = elastic_default();
+        let plan    = PlanElasticOverrides {
+            min_memory_mb: Some(1024),
+            ..PlanElasticOverrides::default()
+        };
+        match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
+            ScaleDecision::Skip { reason } => assert_eq!(reason, "AtFloor"),
+            other => panic!("expected Skip, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decide_scale_down_admits_even_when_elastic_disabled() {
+        // INV-ELASTIC-05 is about UPWARD scaling. Down-bias is
+        // unaffected by the elastic flag because it never raises
+        // capacity (`elastic-vm-scaling.md §6`).
+        let history = ScaleDownHistory::new();
+        for _ in 0..scale_down_thresholds::WINDOW_SIZE {
+            history.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+            );
+        }
+        let base    = baseline_vmspec(2, 1024);
+        let mut elastic = elastic_default();
+        elastic.enabled = false;
+        let plan    = PlanElasticOverrides::default();
+        match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
+            ScaleDecision::Apply { direction: ScaleDirection::Down, .. } => {}
+            other => panic!("expected Apply Down, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn history_clear_resets_role() {
+        let h = ScaleDownHistory::new();
+        for _ in 0..scale_down_thresholds::WINDOW_SIZE {
+            h.record_sample(
+                RoleKey::Executor,
+                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+            );
+        }
+        assert!(h.should_downscale(RoleKey::Executor));
+        h.clear(RoleKey::Executor);
+        assert!(!h.should_downscale(RoleKey::Executor));
+    }
+
+    #[test]
+    fn role_key_as_str_round_trip() {
+        assert_eq!(RoleKey::Orchestrator.as_str(), "Orchestrator");
+        assert_eq!(RoleKey::Executor.as_str(),     "Executor");
+        assert_eq!(RoleKey::Reviewer.as_str(),     "Reviewer");
     }
 }
