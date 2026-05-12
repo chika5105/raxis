@@ -1,0 +1,25 @@
+{
+  "name": "@rich-multilang/ts-pkg",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TypeScript workspace member for the rich-multilang-001 e2e fixture.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "lint": "eslint --max-warnings 0 .",
+    "format-check": "prettier --check .",
+    "test": "node --test --import tsx ./src/greet.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.2.5",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  }
+}

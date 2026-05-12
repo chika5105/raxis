@@ -1,0 +1,20 @@
+target-version = "py310"
+line-length    = 100
+
+[lint]
+select = [
+  "E",    # pycodestyle errors
+  "F",    # pyflakes
+  "W",    # pycodestyle warnings
+  "I",    # isort
+  "B",    # flake8-bugbear
+  "UP",   # pyupgrade
+  "SIM",  # flake8-simplify
+]
+ignore = []
+
+[format]
+quote-style                  = "double"
+indent-style                 = "space"
+docstring-code-format        = true
+skip-magic-trailing-comma    = false

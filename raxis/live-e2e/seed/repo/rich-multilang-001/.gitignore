@@ -1,0 +1,20 @@
+target/
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.tsbuildinfo
+
+# Editor noise
+.idea/
+.vscode/
+*.swp
+
+# OS noise
+.DS_Store
+Thumbs.db
