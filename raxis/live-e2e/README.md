@@ -313,6 +313,48 @@ Without the env var the slices skip with an actionable hint
 require any cloud credentials — the assertion is on the
 canonical _unauthenticated_ error shape.
 
+### V3 forwarding witness (the V3 work has landed)
+
+When **both** `RAXIS_LIVE_CLOUD_NET=1` and
+`RAXIS_V3_CLOUD_FORWARDING=1` are set, each
+`*-proxy-real-endpoint` slice replaces the no-proxy baseline
+with an end-to-end V3 forwarding witness:
+
+* `aws-proxy-real-endpoint` — binds an in-process
+  `AwsProxy::bind_v3` with a deliberately invalid IAM key,
+  dials the loopback IMDS endpoint, and asserts the proxy
+  signed an `sts:AssumeRole` with the bad key, POSTed it to
+  `sts.amazonaws.com`, and mirrored the 4xx `<ErrorResponse>`
+  envelope back. Exercises the SigV4 sign-and-dispatch path.
+* `gcp-proxy-real-endpoint` — generates a throwaway RSA-2048
+  key at startup, builds a synthetic service-account JSON
+  body, binds an in-process `GcpProxy::bind_v3`, and dials
+  the metadata-server `/token` endpoint. Asserts the proxy
+  minted a JWT, POSTed the JWT-bearer-grant to
+  `oauth2.googleapis.com`, received an RFC 6749 §5.2 4xx
+  envelope, and mirrored it back. The PEM and synthetic
+  email are asserted absent from the in-VM response.
+* `azure-proxy-real-endpoint` — binds an in-process
+  `AzureProxy::bind_v3` with a synthetic service-principal
+  env body, dials the IMDS `/metadata/identity/oauth2/token`
+  endpoint, and asserts the proxy executed a
+  `client_credentials`-grant against `login.microsoftonline.com`
+  and mirrored the 4xx OAuth2 envelope back. The synthetic
+  client_secret is asserted absent from the in-VM response.
+
+```bash
+RAXIS_LIVE_CLOUD_NET=1 RAXIS_V3_CLOUD_FORWARDING=1 \
+    cargo run -p raxis-live-e2e -- aws-proxy-real-endpoint
+RAXIS_LIVE_CLOUD_NET=1 RAXIS_V3_CLOUD_FORWARDING=1 \
+    cargo run -p raxis-live-e2e -- gcp-proxy-real-endpoint
+RAXIS_LIVE_CLOUD_NET=1 RAXIS_V3_CLOUD_FORWARDING=1 \
+    cargo run -p raxis-live-e2e -- azure-proxy-real-endpoint
+```
+
+Operator recipe: see
+`specs/v3/cloud-proxy-forwarding-recipe.md` for the plan
+TOML / credential-backend / egress-allowlist contracts.
+
 ---
 
 ## Troubleshooting

@@ -55,14 +55,28 @@
 //!     consumer identity, role ARN, decision, and request-path
 //!     SHA-256.
 //!
+//! # V3 upstream forwarding (landed)
+//!
+//! When `ProxyConfig::forwarding = Some(...)` is wired
+//! through the plan TOML's `[tasks.credentials.forwarding]`
+//! block, the proxy drives a real `sts:AssumeRole` against
+//! the closed-allowlist STS endpoint and serves the
+//! upstream-issued short-lived credential to the in-VM
+//! SDK. The hand-rolled SigV4 signer lives in
+//! `raxis-credential-proxy-cloud-shared`; the AssumeRole XML
+//! response parser + cache + audit emission lives in
+//! `forwarding.rs`. See
+//! `specs/v3/cloud-proxy-forwarding.md §2.1, §5, §6.1`.
+//!
+//! When `forwarding` is `None` (the default), the V2 emulator
+//! path below runs unchanged.
+//!
 //! # What is deferred
 //!
-//!   * **Real `sts:AssumeRole` round-trip** so the proxy issues a
-//!     genuinely scoped, short-lived STS credential rather than
-//!     mirroring a long-lived IAM key. V3 lands this as
-//!     `IsLocallyMintedSts = false` mode using the `aws-sdk-sts`
-//!     crate; V2 mints synthetic responses from the long-lived
-//!     IAM key the operator stores in the credential backend.
+//!   * **Real `sts:AssumeRole` round-trip** — landed in V3 via
+//!     [`ForwardingConfig`] / [`AwsProxy::bind_v3`]. V2 mints
+//!     synthetic responses from the long-lived IAM key the
+//!     operator stores in the credential backend.
 //!     Defence-in-depth still works — the IAM key itself never
 //!     reaches the VM.
 //!   * **IMDSv2 token dance** (`PUT /latest/api/token` →

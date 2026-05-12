@@ -51,14 +51,29 @@
 //!     emits a `GcpMetadataServed` event with the consumer
 //!     identity, request path, decision, and request-path SHA-256.
 //!
+//! # V3 upstream forwarding (landed)
+//!
+//! When `ProxyConfig::forwarding = Some(...)` is wired
+//! through the plan TOML's `[tasks.credentials.forwarding]`
+//! block, the `/computeMetadata/v1/.../token` endpoint
+//! drives a real JWT-bearer-grant exchange against the
+//! closed-allowlist `oauth2.googleapis.com` endpoint and
+//! serves the upstream-issued short-lived access token to
+//! the in-VM SDK. The RS256 JWT signer + form encoder + cache
+//! + audit emission lives in `forwarding.rs`. See
+//! `specs/v3/cloud-proxy-forwarding.md §2.2, §5, §6.2`.
+//!
+//! The non-`/token` endpoints (`/email`, `/project-id`, etc.)
+//! keep their V2 behaviour even with forwarding enabled —
+//! V3 only changes the credential-mint path.
+//!
 //! # What is deferred
 //!
-//!   * **Real `oauth2.googleapis.com` exchange** so the proxy mints
-//!     a fresh OAuth2 access token from a service-account JSON key
-//!     using the JWT-bearer grant. V3 lands this; V2 mirrors a
-//!     long-lived token the operator stored in the credential
-//!     backend (or one minted out-of-band by `raxis credential
-//!     refresh gcp-staging`).
+//!   * **Real `oauth2.googleapis.com` exchange** — landed in
+//!     V3 via [`ForwardingConfig`] / [`GcpProxy::bind_v3`].
+//!     V2 mirrors a long-lived token the operator stored in
+//!     the credential backend (or one minted out-of-band by
+//!     `raxis credential refresh gcp-staging`).
 //!   * **`recursive=true` query param** that would return a JSON
 //!     tree of all instance metadata. The V2 surface is single
 //!     leaves only.

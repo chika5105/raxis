@@ -49,12 +49,28 @@
 //!     emits an `AzureTokenServed` event with the consumer
 //!     identity, requested resource, and decision.
 //!
+//! # V3 upstream forwarding (landed)
+//!
+//! When `ProxyConfig::forwarding = Some(...)` is wired
+//! through the plan TOML's `[tasks.credentials.forwarding]`
+//! block, the IMDS `/metadata/identity/oauth2/token` endpoint
+//! drives a real `client_credentials`-grant exchange against
+//! the closed-allowlist `login.microsoftonline.com` endpoint
+//! and serves the upstream-issued short-lived access token
+//! to the in-VM SDK. The form-encoder + AAD response parser
+//! + IMDS-shape adapter + cache + audit emission lives in
+//! `forwarding.rs`. See
+//! `specs/v3/cloud-proxy-forwarding.md §2.3, §5, §6.3`.
+//!
+//! The `tenant_id` / `client_id` / `client_secret` come from
+//! the service-principal credential body resolved through
+//! `CredentialBackend`. Plan TOML never carries the secret.
+//!
 //! # What is deferred
 //!
-//!   * **Real `oauth2/v2.0/token` exchange** so the proxy mints a
-//!     fresh OAuth2 access token from a service-principal client
-//!     secret using the `client_credentials` grant. V3 lands this;
-//!     V2 mirrors a token the operator stored in the credential
+//!   * **Real `oauth2/v2.0/token` exchange** — landed in V3 via
+//!     [`ForwardingConfig`] / [`AzureProxy::bind_v3`]. V2
+//!     mirrors a token the operator stored in the credential
 //!     backend.
 //!   * **Per-resource credential resolution.** V2 resolves the same
 //!     credential for every allowed resource — the assumption is

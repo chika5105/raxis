@@ -2374,6 +2374,115 @@ without raising a critical finding.
 
 ---
 
+## §11.7 — V3 cloud-proxy forwarding (INV-CLOUD-FWD-*)
+
+These invariants apply only when a credential's
+`[tasks.credentials.forwarding].enabled = true`. The V2
+emulator path is unaffected.
+
+### INV-CLOUD-FWD-01 — Construction-enforced egress allowlist
+
+The shared `CloudHttpClient` is constructed against a
+typed `CloudUpstreamHost` enum whose variants are
+hard-coded to `{sts.amazonaws.com,
+sts.{region}.amazonaws.com, oauth2.googleapis.com,
+login.microsoftonline.com}`. Any attempt to dispatch to a
+host not in this set fails at construction time
+(`UpstreamError::EgressAllowlist`) before any TLS handshake
+is initiated. The kernel surfaces the failure as
+`ManagerError::CloudForwardingConfig` at session start so
+malformed plans never spawn an unauthorized proxy.
+
+**Justification.** A V3 proxy that could be redirected to an
+attacker-controlled host by a misconfigured plan is strictly
+worse than the V2 emulator. The allowlist is structural, not
+configuration-driven.
+
+**Canonical home.** `v3/cloud-proxy-forwarding.md §3.1`.
+
+### INV-CLOUD-FWD-02 — Audit redaction discipline
+
+The four V3 audit events (`CloudCredentialForwarded`,
+`CloudCredentialForwardingDenied`, `CloudCredentialCacheHit`,
+`CloudCredentialCacheRefreshed`) emit only
+non-credential-bearing fields: provider, exchange-kind,
+upstream-host FQDN, elapsed-ms, HTTP status code, response
+size in bytes, denial-reason enum. The IAM access-key ID is
+NEVER emitted; the GCP `client_email` and `private_key` are
+NEVER emitted; the Azure `client_secret` is NEVER emitted.
+The Azure cache key folds `sha256(client_id)[:8]` instead
+of the raw client ID so the cache surface itself cannot leak
+identifying bytes.
+
+**Justification.** The V3 work increases the audit chain's
+visibility into credential operations. Without strict
+redaction the chain becomes a credential exfiltration vector.
+
+**Canonical home.** `v3/cloud-proxy-forwarding.md §5` and
+`raxis-credential-proxy-cloud-shared::audit`.
+
+### INV-CLOUD-FWD-03 — Failed refresh does not poison cache
+
+When the aging-window background refresh fails (network
+error, upstream 4xx, malformed body, timeout), the existing
+cache entry is NOT evicted. The proxy continues to serve
+the old (still-valid) credential to in-VM clients until its
+hard TTL expires, at which point the cache misses and a
+fresh cold-path exchange is attempted. The refresh path
+emits `CloudCredentialForwardingDenied` so operators see
+the failure even though the in-VM SDK is unaffected.
+
+**Justification.** A transient STS outage must not cascade
+into agent-side credential starvation while the refresh
+window is open. Operators need explicit signal of refresh
+failures so they can act before the hard TTL expires.
+
+**Canonical home.** `v3/cloud-proxy-forwarding.md §6.5`.
+
+### INV-CLOUD-FWD-04 — Upstream 4xx envelope pass-through
+
+When the upstream returns a 4xx (auth, permission,
+malformed-request) the proxy mirrors the body bytes verbatim
+to the in-VM SDK with the upstream status code unchanged,
+modulo a synthetic 503 substitution on 5xx /
+network-failure / timeout / malformed-success per spec
+§6.4. The pass-through preserves the canonical wire shape
+(`<ErrorResponse>` XML for AWS, RFC 6749 JSON for GCP /
+AAD) the SDK expects so existing client-side error handlers
+continue to work without V3-specific patches.
+
+**Justification.** SDKs (boto3, google-auth-library,
+azure-identity, terraform providers) hard-code wire-shape
+expectations. A proxy that "helpfully" translates the error
+into a non-canonical shape becomes a compatibility
+liability.
+
+**Canonical home.** `v3/cloud-proxy-forwarding.md §6.4`.
+
+### INV-CLOUD-FWD-05 — Operator credentials never enter the VM
+
+The long-lived issuance material (AWS IAM key bytes, GCP
+service-account JSON private key, Azure service-principal
+client secret) is resolved through `CredentialBackend` on
+the kernel host and lives only in the proxy process memory
+(zeroized on drop where the type wrapper supports it). The
+in-VM SDK sees only the short-lived upstream-issued token
+the proxy mints. INV-VM-CAP-04 already forbids
+`credentials/` mounts inside the VM; this invariant
+strengthens it for the V3 path by establishing that even the
+proxy-side surface keeps the issuance material out of the
+audit chain, the JSON response body, and the cache key.
+
+**Justification.** The V3 forwarding work moves the proxy
+from an emulator to a real cryptographic actor on behalf
+of the operator. The risk surface for credential leakage
+grows; this invariant pins the mitigations.
+
+**Canonical home.** `v3/cloud-proxy-forwarding.md §5, §6.1,
+§6.2, §6.3`.
+
+---
+
 ## §12 — How invariants combine (composition map)
 
 Most security properties at the system level are emergent from
@@ -2409,6 +2518,7 @@ Most security properties at the system level are emergent from
 | **Cross-environment data flows are auditable** | INV-ENV-01 (forces DAG split for cross-env work) + INV-04 (audit log integrity) + INV-VERIFIER-* (artifact mechanism mediates the kernel-store handoff) — every cross-environment byte transfer becomes two task IDs and a SHA-256 in the audit chain rather than a single VM with multiple credentials |
 | **Audit chain is verifiable without the kernel running** | INV-AUDIT-PAIRED-01 (every state change has a pending) + INV-AUDIT-PAIRED-02/03 (pairing integrity) + INV-AUDIT-PAIRED-04 (`last_committing_event_seq` disambiguates orphans) + INV-AUDIT-PAIRED-05 (offline verifier algorithm) + INV-AUDIT-PAIRED-06 (recovery is advisory) + INV-04 (chain hash linkage) — together these turn R-7 from a probabilistic "if recovery runs" guarantee into a structural "verifiable from frozen state alone" guarantee |
 | **Kernel cannot announce one mutation and commit another** | INV-AUDIT-PAIRED-02 (digest equality between pending's `intended_post_state_digest` and confirmed's `actual_post_state_digest`) + INV-04 (chain hash linkage prevents post-hoc edit) + INV-CERT-* (event signing prevents forgery) — a buggy or compromised kernel that diverges intent from effect is flagged as `Finding::DigestMismatch` by the offline verifier, with no kernel cooperation required |
+| **V3 cloud-credential exchange is structurally bounded** | INV-CLOUD-FWD-01 (construction-enforced egress allowlist) + INV-CLOUD-FWD-02 (audit redaction) + INV-CLOUD-FWD-05 (operator credentials never enter VM) + INV-VM-CAP-04 (no credential mounts in VM) — together these guarantee the V3 forwarding path can dial only the four known cloud control planes, cannot leak the operator's issuance material through audit / cache / response, and confines the long-lived secret to the kernel-host proxy process | |
 
 When auditing a code path, look for which combination of invariants
 governs it; a single invariant in isolation rarely tells the full
