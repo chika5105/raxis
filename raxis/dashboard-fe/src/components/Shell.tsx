@@ -1,9 +1,13 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 
 import { authApi, dashboardApi } from "@/api/client";
+import {
+  CommandPalette,
+  type PaletteCommand,
+} from "@/components/CommandPalette";
 import { clearStoredToken, getStoredProfile, getStoredToken } from "@/lib/auth-store";
 import { shortFingerprint } from "@/lib/format";
 
@@ -62,6 +66,7 @@ interface ShellProps {
 export function Shell({ children }: ShellProps) {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(() => getStoredProfile());
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Re-read the profile when storage changes (logout in
   // another tab — clear local state to match).
@@ -71,6 +76,25 @@ export function Shell({ children }: ShellProps) {
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // Cmd/Ctrl-K opens the quick-nav palette. The header pill
+  // already advertises this shortcut; this commit makes it real.
+  // We mount the listener globally (window) so it works from
+  // any keyboard focus inside the dashboard, and we explicitly
+  // skip when an `<input>` / `<textarea>` / contenteditable is
+  // focused so operators editing policy TOML / search filters
+  // can still type a literal "k" with Cmd held (rare but
+  // possible on layout switches).
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   // Lightweight badge counts for the nav. Refresh every 10s
@@ -108,6 +132,40 @@ export function Shell({ children }: ShellProps) {
     setProfile(null);
     navigate("/login");
   };
+
+  // Build the palette command list from the same NAV config
+  // the sidebar uses. Adds a couple of action-style commands
+  // (Logout, Refresh page) so the palette is genuinely faster
+  // than clicking through the chrome.
+  const paletteCommands: PaletteCommand[] = useMemo(() => {
+    const navCommands: PaletteCommand[] = NAV.flatMap((section) =>
+      section.items
+        .filter(
+          (i) =>
+            !i.rolesAny ||
+            i.rolesAny.some((r) => profile?.roles.includes(r)),
+        )
+        .map<PaletteCommand>((i) => ({
+          label: i.label,
+          glyph: i.glyph,
+          hint: i.to,
+          keywords: section.label,
+          to: i.to,
+        })),
+    );
+    const actions: PaletteCommand[] = [
+      {
+        label: "Logout",
+        keywords: "sign out exit",
+        hint: "action",
+        run: () => {
+          void onLogout();
+        },
+      },
+    ];
+    return [...navCommands, ...actions];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile]);
 
   return (
     <div className="min-h-screen flex bg-panel">
@@ -209,10 +267,16 @@ export function Shell({ children }: ShellProps) {
       <main className="flex-1 min-w-0 flex flex-col">
         <header className="h-12 border-b border-edge bg-panel-raised flex items-center px-5 shrink-0">
           <Breadcrumb />
-          <div className="ml-auto flex items-center gap-2 text-xs text-ink-subtle">
-            <span className="kbd">⌘K</span>
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Open quick navigation"
+            title="Quick navigation (⌘K)"
+            className="ml-auto flex items-center gap-2 text-xs text-ink-subtle hover:text-ink focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded px-1.5 py-1 transition-colors"
+          >
+            <span className="kbd" aria-hidden="true">⌘K</span>
             <span>quick nav</span>
-          </div>
+          </button>
         </header>
         <div className="flex-1 overflow-y-auto scroll-thin">
           <div className="px-5 py-5 max-w-[1600px] mx-auto w-full">
@@ -220,6 +284,11 @@ export function Shell({ children }: ShellProps) {
           </div>
         </div>
       </main>
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={paletteCommands}
+      />
     </div>
   );
 }
