@@ -100,7 +100,7 @@ before a regression bisect):
 docker compose -f raxis/live-e2e/docker-compose.e2e.yml down -v
 
 # Or surgically wipe just the observability volumes:
-docker volume rm live-e2e_prometheus_data live-e2e_grafana_data
+docker volume rm raxis-live-e2e-test_prometheus_data raxis-live-e2e-test_grafana_data
 ```
 
 Or use the env-var opt-in: set `RAXIS_E2E_OBS_FRESH=1` in your

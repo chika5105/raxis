@@ -60,6 +60,32 @@ Two compose files live in this directory:
   on the same loopback addresses so a slice configured for one
   works against the other unchanged.
 
+Both compose files pin the project namespace to
+`raxis-live-e2e-test` via the top-level `name:` field, which
+means the auto-generated network and named volumes carry the
+same prefix (`raxis-live-e2e-test_default`,
+`raxis-live-e2e-test_prometheus_data`,
+`raxis-live-e2e-test_grafana_data`) regardless of which directory
+you invoke `docker compose -f <path>` from. Per-service
+`container_name:` directives in the compose files keep the
+short brand prefix (`raxis-e2e-pg`, `raxis-e2e-mongo`, ...) for
+the actual containers.
+
+> **Migration note (one-time).** The compose project was
+> previously the implicit directory-derived `live-e2e` and is
+> now `raxis-live-e2e-test` for namespace clarity on shared
+> developer hosts. If you have leftover containers, networks,
+> or named volumes from a pre-rename run, do a one-time cleanup
+> against the OLD namespace before bringing the stack back up:
+>
+> ```bash
+> docker compose -f live-e2e/docker-compose.e2e.yml -p live-e2e down -v
+> ```
+>
+> Subsequent `up` / `down` invocations pick up the new
+> `raxis-live-e2e-test` namespace from the compose file's
+> `name:` field with no extra flags required.
+
 Published loopback ports (offset from defaults to avoid colliding
 with operator-side databases):
 
@@ -363,16 +389,16 @@ to edit a dashboard; viewing is anonymous.
 
 Two named docker volumes hold the time-series and Grafana state:
 
-| Volume                          | Mounted at              | Survives `docker compose down`? |
+| Volume                                    | Mounted at              | Survives `docker compose down`? |
 |---|---|---|
-| `live-e2e_prometheus_data`      | `prometheus:/prometheus`           | yes |
-| `live-e2e_grafana_data`         | `grafana:/var/lib/grafana`         | yes |
+| `raxis-live-e2e-test_prometheus_data`     | `prometheus:/prometheus`           | yes |
+| `raxis-live-e2e-test_grafana_data`        | `grafana:/var/lib/grafana`         | yes |
 
 To wipe them between runs:
 
 ```bash
 docker compose -f live-e2e/docker-compose.e2e.yml down -v
-docker volume rm live-e2e_prometheus_data live-e2e_grafana_data
+docker volume rm raxis-live-e2e-test_prometheus_data raxis-live-e2e-test_grafana_data
 ```
 
 ### Dev-loop env vars

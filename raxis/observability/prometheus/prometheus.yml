@@ -14,7 +14,7 @@ global:
   scrape_interval:     5s
   evaluation_interval: 15s
   external_labels:
-    cluster: raxis-live-e2e
+    cluster: raxis-live-e2e-test
 
 scrape_configs:
   # The OpenTelemetry collector exposes the entire raxis emit surface

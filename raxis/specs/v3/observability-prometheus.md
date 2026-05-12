@@ -59,13 +59,13 @@ Three observability services join the upstream service containers
 
 Two named docker volumes hold time-series and Grafana state:
 
-| Volume                          | Mounted as            | Survives `docker compose down`? |
+| Volume                                   | Mounted as            | Survives `docker compose down`? |
 |---|---|---|
-| `live-e2e_prometheus_data`      | `prometheus:/prometheus`           | yes |
-| `live-e2e_grafana_data`         | `grafana:/var/lib/grafana`         | yes |
+| `raxis-live-e2e-test_prometheus_data`    | `prometheus:/prometheus`           | yes |
+| `raxis-live-e2e-test_grafana_data`       | `grafana:/var/lib/grafana`         | yes |
 
 The volumes are wiped only by `docker compose down -v` or
-`docker volume rm live-e2e_prometheus_data live-e2e_grafana_data`.
+`docker volume rm raxis-live-e2e-test_prometheus_data raxis-live-e2e-test_grafana_data`.
 Operators wanting a clean baseline before a regression bisect set
 `RAXIS_E2E_OBS_FRESH=1` (see `live-e2e/README.md`).
 
@@ -262,4 +262,4 @@ Each subcommand emits both:
 
 Volumes survive `docker compose down` by default; they are wiped
 only by `docker compose down -v` or `docker volume rm
-live-e2e_prometheus_data live-e2e_grafana_data`.
+raxis-live-e2e-test_prometheus_data raxis-live-e2e-test_grafana_data`.

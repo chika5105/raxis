@@ -22,7 +22,8 @@ see the per-subcommand numbers without parsing this file.
   (`raxis/live-e2e/docker-compose.e2e.yml`):
   Prometheus `v2.55.1`, Grafana `11.3.0`, OTel collector
   `contrib:0.110.0`. 14-day retention. Named volumes
-  `live-e2e_prometheus_data` / `live-e2e_grafana_data`.
+  `raxis-live-e2e-test_prometheus_data` /
+  `raxis-live-e2e-test_grafana_data`.
 
 ## Section 1 — VM cold-boot (substrate=subprocess, n=500)
 
@@ -100,5 +101,5 @@ open 'http://127.0.0.1:3000/d/raxis-00-overview'
 # 4. Wipe the persisted data when you are done (volumes survive
 #    `docker compose down` by default):
 docker compose -f raxis/live-e2e/docker-compose.e2e.yml down
-docker volume rm live-e2e_prometheus_data live-e2e_grafana_data
+docker volume rm raxis-live-e2e-test_prometheus_data raxis-live-e2e-test_grafana_data
 ```

@@ -29,6 +29,17 @@
 #   RAXIS_LIVE_E2E=1 cargo test -p raxis-kernel \
 #       --test extended_e2e_concurrent_lifecycle -- --nocapture
 #   docker compose -f live-e2e/docker-compose.extended.e2e.yml down -v
+#
+# # Project name
+#
+# Same explicit `name:` namespace as `docker-compose.e2e.yml` so
+# both compose files share resource prefixes (network, volumes,
+# auto-generated container names) — the extended file is a
+# superset, so an operator switching between the two should not
+# see two parallel `live-e2e_*` / `raxis-live-e2e-test_*`
+# resource sets fight over the same host ports.
+
+name: raxis-live-e2e-test
 
 services:
   postgres:
