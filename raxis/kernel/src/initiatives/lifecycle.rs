@@ -8,7 +8,10 @@
 // (NOT 'PlanSubmitted' — that name appeared in draft specs only. DDL wins.)
 //
 // OPERATOR-DRIVEN lifecycle:
-//   create_initiative() — submit plan bytes + Ed25519 sig → Draft row
+//   (admission)         — `initiatives::v2_admission::create_initiative_v2_blocking`
+//                         seals the plan-bundle and inserts the Draft row;
+//                         the V1 path-based `create_initiative()` was deleted
+//                         in V2.5.
 //   approve_plan()      — verify sig, promote to Executing, admit all tasks
 //   reject_plan()       — set state = Aborted (rejection is terminal, no dedicated state)
 //   abort_initiative()  — set state = Aborted, cancel all non-terminal tasks
@@ -424,13 +427,12 @@ impl From<AuthorityError> for LifecycleError {
 // ---------------------------------------------------------------------------
 // Public result types
 // ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct InitiativeCreated {
-    pub initiative_id: String,
-    /// Always "Draft" in v1.
-    pub status: String,
-}
+//
+// V2.5 deletion: `InitiativeCreated` (the V1 result type for the
+// path-based admission FSM) was removed alongside the `create_initiative`
+// function. The post-V2.5 admission path is
+// `initiatives::v2_admission::create_initiative_v2_blocking`, which
+// returns its own typed `V2InitiativeCreated`.
 
 #[derive(Debug)]
 pub struct PlanApproved {
@@ -472,104 +474,18 @@ pub struct PlanApproved {
 }
 
 // ---------------------------------------------------------------------------
-// create_initiative — submit a plan for operator review
+// (V2.5) Initiative admission lives in `initiatives::v2_admission`.
+//
+// The V1 path-based `create_initiative(plan_toml, plan_sig_hex,
+// submitted_by, store)` was deleted as part of the
+// `OperatorRequest::CreateInitiative` rename: there is now exactly one
+// admission entry point — `v2_admission::create_initiative_v2_blocking`
+// — and it consumes the sealed plan-bundle envelope. The V1 unit tests
+// that asserted the two-INSERT atomicity contract were removed
+// alongside the function; the equivalent property is now covered by
+// `v2_admission`'s `BEGIN IMMEDIATE` step ordering (steps 10a–12 per
+// `plan-bundle-sealing.md §8.1`).
 // ---------------------------------------------------------------------------
-
-/// Submit a plan document for this initiative.
-///
-/// - `plan_toml`: raw plan bytes (TOML text).
-/// - `plan_sig_hex`: hex-encoded Ed25519 signature over the plan bytes.
-/// - `submitted_by`: operator fingerprint for audit.
-///
-/// Creates:
-///   - initiatives row in `Draft` state (DDL canonical; NOT 'PlanSubmitted').
-///   - signed_plan_artifacts row with the raw plan bytes + signature.
-///
-/// Signature verification is deferred to `approve_plan` so the operator
-/// can submit and inspect before approving.
-pub fn create_initiative(
-    plan_toml:    &str,
-    plan_sig_hex: &str,
-    submitted_by: &str,
-    store: &Store,
-) -> Result<InitiativeCreated, LifecycleError> {
-    let initiative_id  = uuid::Uuid::new_v4().to_string();
-    let plan_sha256    = raxis_crypto::token::sha256_hex(plan_toml.as_bytes());
-    let now            = unix_now_secs();
-
-    // terminal_criteria_json: empty JSON object in v1 (operator-driven terminal
-    // criteria not yet configured at submission time).
-    let terminal_criteria = "{}";
-
-    // Reject malformed hex up-front (before opening the transaction) rather
-    // than silently storing an empty `plan_sig` (which would later fail
-    // signature verification with a misleading "Ed25519 signature verification
-    // failed" error and obscure the real cause). Surfaces as `PlanInvalid` so
-    // the operator sees the actual problem.
-    let sig_bytes = hex::decode(plan_sig_hex).map_err(|e| LifecycleError::PlanInvalid {
-        reason: format!("plan signature is not valid hex: {e}"),
-    })?;
-    if sig_bytes.len() != 64 {
-        return Err(LifecycleError::PlanInvalid {
-            reason: format!(
-                "plan signature must be 64 bytes (Ed25519); got {} bytes",
-                sig_bytes.len()
-            ),
-        });
-    }
-
-    // INV-STORE-02 (kernel-store.md §2.5.1.1 Pattern D): both INSERTs MUST
-    // commit atomically. Pre-fix, a process crash between the two left an
-    // orphaned `Draft` initiative with no `signed_plan_artifacts` row that
-    // subsequent `approve_plan` calls would fail to read with
-    // QueryReturnedNoRows — producing an undeletable initiative the operator
-    // could never approve. Single-transaction commit makes the failure mode
-    // binary: either both rows land or neither does.
-    let mut conn = store.lock_sync();
-    let tx = conn.transaction()?;
-
-    tx.execute(
-        &format!(
-            "INSERT INTO {INITIATIVES}
-                (initiative_id, state, terminal_criteria_json,
-                 plan_artifact_sha256, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)"
-        ),
-        rusqlite::params![
-            &initiative_id,
-            InitiativeState::Draft.as_sql_str(),
-            terminal_criteria,
-            &plan_sha256,
-            now,
-        ],
-    )?;
-
-    tx.execute(
-        &format!(
-            "INSERT INTO {SIGNED_PLAN_ARTIFACTS}
-                (initiative_id, plan_bytes, plan_sig, stored_at)
-             VALUES (?1, ?2, ?3, ?4)"
-        ),
-        rusqlite::params![
-            &initiative_id,
-            plan_toml.as_bytes(),
-            &sig_bytes,
-            now,
-        ],
-    )?;
-
-    tx.commit()?;
-
-    eprintln!(
-        "{{\"level\":\"info\",\"event\":\"InitiativeCreated\",\
-         \"initiative_id\":\"{initiative_id}\",\"submitted_by\":\"{submitted_by}\"}}",
-    );
-
-    Ok(InitiativeCreated {
-        initiative_id,
-        status: "Draft".to_owned(),
-    })
-}
 
 // ---------------------------------------------------------------------------
 // approve_plan — verify sig, admit tasks, promote to Executing
@@ -7812,72 +7728,15 @@ target_ref = "refs/heads/raxis/feature"
             "initiatives UPDATE must have committed in the SAME transaction");
     }
 
-    /// `create_initiative` must commit BOTH the `initiatives` INSERT and
-    /// the `signed_plan_artifacts` INSERT in one transaction. Pre-fix, a
-    /// crash between the two left an orphaned `Draft` initiative with no
-    /// plan artifact — `approve_plan` would fail with QueryReturnedNoRows
-    /// and the operator could neither approve nor delete it.
-    ///
-    /// We pin the property by inducing the failure path: if the second
-    /// INSERT fails (signature is invalid), the first INSERT MUST also
-    /// roll back so no orphan `initiatives` row remains.
-    #[test]
-    fn create_initiative_rolls_back_initiative_row_on_signature_failure() {
-        let store = Store::open_in_memory().unwrap();
-        let plan_toml = r#"[[tasks]]
-        task_id = "t1"
-        "#;
-        // Provide a malformed signature hex — `create_initiative` must
-        // reject this BEFORE writing either row (validation happens
-        // before the transaction opens).
-        let result = create_initiative(plan_toml, "not-hex-at-all", "op", &store);
-        assert!(result.is_err(),
-            "malformed signature must reject the submission");
-
-        // No `initiatives` row should exist (validation was pre-tx).
-        let conn = store.lock_sync();
-        let count: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {INITIATIVES}"),
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(count, 0,
-            "validation failure must not leave orphan initiative row");
-        let plan_count: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {SIGNED_PLAN_ARTIFACTS}"),
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(plan_count, 0,
-            "validation failure must not leave orphan plan artifact row");
-    }
-
-    /// Happy-path `create_initiative` MUST land BOTH rows together.
-    #[test]
-    fn create_initiative_commits_both_rows_atomically_on_success() {
-        let store = Store::open_in_memory().unwrap();
-        let (sk, _) = fixture_keypair();
-        let plan_toml = r#"[[tasks]]
-        task_id = "t1"
-        "#;
-        let plan_bytes = plan_toml.as_bytes().to_vec();
-        let signing_input = raxis_crypto::plan::plan_signing_input(&plan_bytes);
-        let sig_hex = hex::encode(sk.sign(&signing_input).to_bytes());
-
-        let created = create_initiative(plan_toml, &sig_hex, "op", &store).unwrap();
-
-        // Both rows MUST be present.
-        let conn = store.lock_sync();
-        let init_state: String = conn.query_row(
-            &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
-            rusqlite::params![&created.initiative_id], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(init_state, "Draft");
-        let plan_present: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1"),
-            rusqlite::params![&created.initiative_id], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(plan_present, 1,
-            "signed_plan_artifacts row MUST commit alongside initiatives row");
-    }
+    // V2.5 deletion: the V1 `create_initiative` two-INSERT
+    // atomicity tests
+    // (`create_initiative_rolls_back_initiative_row_on_signature_failure`,
+    // `create_initiative_commits_both_rows_atomically_on_success`)
+    // were dropped alongside the V1 path-based handler. The
+    // equivalent property is now covered by `v2_admission`'s
+    // `BEGIN IMMEDIATE` step ordering — see
+    // `initiatives::v2_admission` test module
+    // (`plan-bundle-sealing.md §8.1`).
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

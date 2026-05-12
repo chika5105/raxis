@@ -785,12 +785,16 @@ fn run_phase_a(
     //
     // V2 sub-task lifecycle kinds — `SubmitReview` is now routed to
     // its dedicated handler (v2-deep-spec.md §Step 22).
-    // `ActivateSubTask` is intercepted on the async path BEFORE
-    // Phase A and never reaches here (see `handle_activate_sub_task`
-    // dispatch in `handle_inner`). `RetrySubTask` is intercepted
-    // alongside it as a fail-closed shim until the
-    // `crash_retry_count` / `review_reject_count` ceiling enforcement
-    // lands (v2-deep-spec.md §Step 12).
+    // `ActivateSubTask` and `RetrySubTask` are both intercepted on
+    // the async path BEFORE Phase A and never reach here — see the
+    // early dispatch into `handle_activate_sub_task` /
+    // `handle_retry_sub_task` in `handle_inner`. The retry handler
+    // owns the §Step 12 dual-counter ceiling enforcement
+    // (`crash_retry_count` / `review_reject_count`) along with the
+    // revoke / re-insert / task-FSM-reset flow; the arm in this
+    // function is a belt-and-braces fail-closed shim that only
+    // fires if a regression ever lets a V2 sub-task kind slip past
+    // the early dispatch.
     //
     // Authorization for all V2 kinds was already enforced by
     // the static dispatch matrix in `handle_inner` BEFORE Phase A
@@ -2223,11 +2227,12 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 ///
 /// **Why scope to `terminated_at IS NULL`.** A given Executor task
 /// can have several historical activation rows (one per retry
-/// round once `RetrySubTask` lands V2 §Step 12 properly). The
-/// counter we want to bump is the *active* one — the row whose
-/// session is still bound — which by construction is the only row
-/// with a NULL `terminated_at`. Bumping a terminated row would
-/// double-count history and skew the ceiling check.
+/// round — `handle_retry_sub_task` inserts a NEW
+/// `PendingActivation` row per V2 §Step 12 rather than mutating the
+/// prior one). The counter we want to bump is the *active* one —
+/// the row whose session is still bound — which by construction is
+/// the only row with a NULL `terminated_at`. Bumping a terminated
+/// row would double-count history and skew the ceiling check.
 ///
 /// **Atomicity.** Single `UPDATE ... SET review_reject_count =
 /// review_reject_count + 1` in its own transaction. Concurrent
@@ -2251,6 +2256,65 @@ fn increment_executor_review_reject_count(
         rusqlite::params![executor_task_id],
     )?;
     Ok(())
+}
+
+/// V2.3 §12.1 / Step 25 push wiring — resolve an `initiative_id` to
+/// the live Orchestrator session that should receive the push.
+///
+/// The mapping closes the V2_GAPS §12.1 gap: every kernel-side push
+/// carries a `SessionId` envelope, but the call sites that fire
+/// pushes (Step 25 review aggregation, Step 21 sub-task admit, etc.)
+/// only know the `initiative_id` of the executor / reviewer they
+/// just touched. The Orchestrator session itself is uniquely
+/// determined by `(initiative_id, session_agent_type='Orchestrator',
+/// revoked=0, expires_at>now)` per Migration 18 + the
+/// `auto_spawn_orchestrator_session_in_tx` invariant in
+/// `initiatives::lifecycle` — so this query is O(1) against the
+/// supporting index and never returns more than one row.
+///
+/// Returns `None` when:
+///   * the initiative is not currently in `Executing` (no live
+///     orchestrator to receive the push);
+///   * the orchestrator session was already revoked / expired (the
+///     re-spawn path in `session_spawn_orchestrator::respawn_
+///     orchestrator_for_initiative` will mint a new one when the
+///     next intent flows; the missed push is harmless because the
+///     audit chain is the canonical record per `push::mod` §V2.3
+///     scope);
+///   * the SQLite read fails — fail-soft, log + continue at the
+///     call site so a transient DB error cannot stall the
+///     post-commit audit emission.
+///
+/// The query mirrors the active-orchestrator preflight in
+/// `session_spawn_orchestrator::respawn_orchestrator_for_initiative`
+/// (same `(initiative_id, session_agent_type, revoked, expires_at)`
+/// predicate) so both code paths agree on what counts as "live"
+/// — diverging that contract would let a push fire to a session
+/// the spawn-side considered dead.
+fn active_orchestrator_session_id_for_initiative(
+    initiative_id: &str,
+    store:         &Store,
+) -> Option<String> {
+    let now = unix_now_secs();
+    let conn = store.lock_sync();
+    conn.query_row(
+        &format!(
+            "SELECT session_id FROM {sessions}
+              WHERE initiative_id     = ?1
+                AND session_agent_type = ?2
+                AND revoked            = 0
+                AND expires_at         > ?3
+              ORDER BY created_at DESC
+              LIMIT 1",
+            sessions = Table::Sessions.as_str(),
+        ),
+        rusqlite::params![
+            initiative_id,
+            raxis_types::SessionAgentType::Orchestrator.as_sql_str(),
+            now,
+        ],
+        |r| r.get::<_, String>(0),
+    ).ok()
 }
 
 fn handle_submit_review(
@@ -2499,26 +2563,38 @@ fn handle_submit_review(
     //                         sibling Reviewer; emitting now would
     //                         flood the audit chain with N-1
     //                         partial-state rows.
-    //   * `AllPassed`       → emit `ReviewAggregationCompleted`. The
-    //                         V2.3 push dispatcher (`push::mod`) is
-    //                         shipped; once the kernel persists an
-    //                         initiative→Orchestrator-session
-    //                         mapping (gap §12.1 — schema migration
-    //                         pending) the call site here will also
-    //                         fire `push_dispatcher.enqueue(orch,
-    //                         KernelPush::AllReviewersPassed{..})`.
-    //                         Until then the audit row is the
-    //                         canonical signal — the Orchestrator
-    //                         polls the audit chain via
-    //                         `OperatorRequest::ListInitiativeEvents`.
+    //   * `AllPassed`       → emit `ReviewAggregationCompleted` AND
+    //                         enqueue `KernelPush::AllReviewersPassed`
+    //                         on the live Orchestrator session
+    //                         resolved via
+    //                         `active_orchestrator_session_id_for_
+    //                         initiative` (V2_GAPS §12.1). When no
+    //                         live orchestrator is bound the audit
+    //                         row remains the canonical signal —
+    //                         the Orchestrator picks up the verdict
+    //                         on its next admission via
+    //                         `OperatorRequest::ListInitiativeEvents`
+    //                         or via the post-respawn replay path.
     //   * `AtLeastOneRejected` → emit `ReviewAggregationCompleted`
     //                         AND bump `subtask_activations.
     //                         review_reject_count` for the Executor
     //                         predecessor (Step 25 counter — see
-    //                         `increment_executor_review_reject_count`).
-    //                         Push enqueue (`KernelPush::ReviewRejected`)
-    //                         follows the same migration as
-    //                         `AllPassed` above.
+    //                         `increment_executor_review_reject_count`)
+    //                         AND, when the *current* submission is
+    //                         the rejecting verdict (`approved=
+    //                         false`), enqueue
+    //                         `KernelPush::ReviewRejected` carrying
+    //                         the freshly-formatted critique + this
+    //                         reviewer's session_id. Best-judgment
+    //                         scope (documented inline below): the
+    //                         rare race where this submission
+    //                         `approved=true` but a prior sibling
+    //                         already rejected does NOT fire the
+    //                         push — looking up the rejecting
+    //                         sibling's session_id requires a
+    //                         secondary join into
+    //                         `subtask_activations` and is deferred;
+    //                         the audit row covers it.
     //   * `NoSuccessors`    → emit `ReviewAggregationCompleted` for
     //                         defense in depth (a malformed plan
     //                         this kernel let in must surface in
@@ -2534,9 +2610,32 @@ fn handle_submit_review(
         .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Completed))?;
     let session_id_str    = session_id.as_str().to_owned();
     let initiative_id_str = task.initiative_id.clone();
+
+    // Resolve the live Orchestrator session for this initiative
+    // exactly once per SubmitReview admission. Predecessors share
+    // the initiative — the lookup result is identical for every
+    // iteration of the loop below, so a single read is correct.
+    // `None` is the common "no live orchestrator" path (initiative
+    // already terminated, mid-respawn window, etc.) — the audit
+    // emission below still fires; only the in-memory push fan-out
+    // is skipped per the V2.3 audit-canonical contract.
+    let orchestrator_session_id =
+        active_orchestrator_session_id_for_initiative(&initiative_id_str, store)
+            .and_then(|s| SessionId::parse(&s).ok());
+    let initiative_id_obj =
+        raxis_types::InitiativeId::parse(&initiative_id_str).ok();
+    let push_now_unix = unix_now_secs() as i64;
     for predecessor in &predecessors {
         let outcome = match crate::initiatives::review_aggregation
-            ::compute_aggregate_review_outcome(predecessor.as_str(), store)
+            ::compute_aggregate_review_outcome(
+                predecessor.as_str(),
+                store,
+                Some(crate::initiatives::review_aggregation::AgentTypeFilter {
+                    plan_registry:    ctx.plan_registry.as_ref(),
+                    initiative_id:    initiative_id_str.as_str(),
+                    reviewer_task_id: reviewer_task_id.as_str(),
+                }),
+            )
         {
             Ok(o) => o,
             Err(e) => {
@@ -2610,6 +2709,80 @@ fn handle_submit_review(
                  \"audit_emit_failed\":\"{e}\",\
                  \"executor_task_id\":\"{predecessor}\",\
                  \"reviewer_task_id\":\"{reviewer_task_id}\"}}",
+            );
+        }
+
+        // ── V2_GAPS §12.1 — Step 25 push fan-out ─────────────────────────────
+        //
+        // Audit row is durable; now best-effort enqueue the matching
+        // `KernelPush` on the live Orchestrator session. The push
+        // dispatcher mirrors every enqueue to the audit chain a
+        // second time (see `KernelPushDispatcher::enqueue_with_
+        // context`), but the verdict-canonical
+        // `ReviewAggregationCompleted` row is the source of truth
+        // for the Orchestrator's poll path — so a no-orchestrator
+        // / parse-failure / unsupported-verdict outcome here is a
+        // soft-skip with a log, never an error.
+        if let (Some(orch_sid), Some(executor_task_id_obj)) = (
+            orchestrator_session_id.clone(),
+            raxis_types::TaskId::parse(predecessor.as_str()).ok(),
+        ) {
+            let push_opt = match outcome.verdict {
+                crate::initiatives::review_aggregation::AggregateReviewVerdict::AllPassed => {
+                    Some(raxis_types::push::KernelPush::AllReviewersPassed {
+                        task_id: executor_task_id_obj,
+                    })
+                }
+                crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected
+                    if !approved =>
+                {
+                    // Best-judgment scope (per the loop preamble):
+                    // surface this submission's critique + session
+                    // when the current reviewer is the cause of the
+                    // terminal-rejected verdict. The rare "this
+                    // reviewer approved, a sibling rejected"
+                    // race-window case does not fire the push —
+                    // selecting the historical rejecting sibling
+                    // requires a secondary join into
+                    // `subtask_activations` that is the next
+                    // increment of work; the audit row covers
+                    // forensic recovery in the meantime.
+                    formatted_critique.as_ref().map(|c| {
+                        raxis_types::push::KernelPush::ReviewRejected {
+                            task_id:             executor_task_id_obj,
+                            critique:            c.clone(),
+                            reviewer_session_id: session_id.clone(),
+                        }
+                    })
+                }
+                _ => None,
+            };
+
+            if let Some(push) = push_opt {
+                let _frame = ctx.push_dispatcher.enqueue_with_context(
+                    orch_sid,
+                    push,
+                    push_now_unix,
+                    initiative_id_obj.clone(),
+                );
+            }
+        } else if matches!(
+            outcome.verdict,
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::AllPassed
+                | crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected,
+        ) {
+            // Push opportunistically dropped because the orchestrator
+            // session is not currently live (initiative already
+            // terminated, post-revoke window before the next re-spawn,
+            // etc.). The audit row is the canonical record per
+            // V2.3 push-dispatcher scope; structured log here makes
+            // the skip grep-friendly for forensic replay.
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"ReviewAggregationPushSkipped\",\
+                 \"executor_task_id\":\"{predecessor}\",\
+                 \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                 \"verdict\":\"{verdict_str}\",\
+                 \"reason\":\"no_live_orchestrator_session\"}}",
             );
         }
     }
@@ -5248,6 +5421,49 @@ mod tests {
         ).unwrap();
     }
 
+    /// V2.5+ §Step 25 test fixture — register the agent kind for
+    /// each `(initiative_id, task_id)` pair in the kernel's
+    /// `PlanRegistry` so the Step 25 aggregator's
+    /// [`crate::initiatives::review_aggregation::AgentTypeFilter`]
+    /// finds the entry instead of falling through the missing-
+    /// entry arm.
+    ///
+    /// **Why a separate helper rather than folding into
+    /// `seed_reviewer_with_executor_predecessor`.** The DB-row
+    /// seed is a pure-`Store` operation (used by ~30 tests across
+    /// `SubmitReview`, `StructuredOutput`, and a few read-path
+    /// tests). The plan-registry seed needs a `PlanRegistry`
+    /// reference, which only the SubmitReview-aggregator success
+    /// path actually consumes. Splitting them keeps the
+    /// `Store`-only tests (StructuredOutput, list-task-outputs)
+    /// from having to thread a registry handle they never touch.
+    ///
+    /// Production V2.5+ admission (`approve_plan` →
+    /// `parse_plan_tasks` → `PlanRegistry::insert`) populates the
+    /// registry atomically with the sealed plan bundle; these
+    /// integration tests skip the admission path and seed `tasks`
+    /// / `task_dag_edges` directly, so they MUST mirror the
+    /// registry seeding here. Forgetting the call would surface
+    /// as a `NoSuccessors` aggregator outcome under fail-closed
+    /// semantics (see commit "kernel/initiatives: fail closed on
+    /// missing plan-registry entry in AgentTypeFilter").
+    fn seed_plan_registry_for_tasks(
+        registry:      &crate::initiatives::PlanRegistry,
+        initiative_id: &str,
+        tasks:         &[(&str, raxis_types::SessionAgentType)],
+    ) {
+        use crate::initiatives::plan_registry::{TaskKey, TaskPlanFields};
+        for (task_id, agent_type) in tasks {
+            registry.insert(
+                TaskKey::new(initiative_id, *task_id),
+                TaskPlanFields {
+                    session_agent_type: *agent_type,
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
     fn read_last_critique(store: &Store, task_id: &str) -> Option<String> {
         let conn = store.lock_sync();
         conn.query_row(
@@ -5355,6 +5571,14 @@ mod tests {
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request("rev1", Some(true), None);
         let resp = handle_submit_review(
@@ -5380,6 +5604,14 @@ mod tests {
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request(
             "rev1",
@@ -5404,6 +5636,14 @@ mod tests {
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request(
             "rev1",
@@ -5468,6 +5708,15 @@ mod tests {
                 [],
             ).unwrap();
         }
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("revA", raxis_types::SessionAgentType::Reviewer),
+                ("revB", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         // First reviewer rejects.
         let req_a = make_submit_review_request(
@@ -5586,6 +5835,14 @@ mod tests {
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let at_cap = "y".repeat(raxis_types::MAX_CRITIQUE_BYTES);
         let req = make_submit_review_request("rev1", Some(false), Some(&at_cap));
@@ -5710,6 +5967,15 @@ mod tests {
                 [],
             ).unwrap();
         }
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("revA", raxis_types::SessionAgentType::Reviewer),
+                ("revB", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         // First reviewer approves — aggregator must still be Pending,
         // NO audit emission expected.
@@ -5764,6 +6030,14 @@ mod tests {
         let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev-only", "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1",     raxis_types::SessionAgentType::Executor),
+                ("rev-only", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request("rev-only", Some(true), None);
         handle_submit_review(
@@ -5827,6 +6101,15 @@ mod tests {
                 [],
             ).unwrap();
         }
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("revA", raxis_types::SessionAgentType::Reviewer),
+                ("revB", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         // revA approves → still Pending, no audit row.
         let req_a = make_submit_review_request("revA", Some(true), None);
@@ -5916,6 +6199,14 @@ mod tests {
 
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
         seed_executor_activation_row(&store, "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         assert_eq!(read_review_reject_count(&store, "exe1"), 0,
             "freshly-seeded activation row starts at zero");
@@ -5940,6 +6231,14 @@ mod tests {
 
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
         seed_executor_activation_row(&store, "exe1");
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("rev1", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         let req = make_submit_review_request("rev1", Some(true), None);
         handle_submit_review(
@@ -5990,6 +6289,15 @@ mod tests {
                 [],
             ).unwrap();
         }
+        seed_plan_registry_for_tasks(
+            &ctx.plan_registry,
+            "init-rev",
+            &[
+                ("exe1", raxis_types::SessionAgentType::Executor),
+                ("revA", raxis_types::SessionAgentType::Reviewer),
+                ("revB", raxis_types::SessionAgentType::Reviewer),
+            ],
+        );
 
         // revA rejects first → still Pending (revB hasn't voted) → no bump.
         let req_a = make_submit_review_request("revA", Some(false), Some("first"));

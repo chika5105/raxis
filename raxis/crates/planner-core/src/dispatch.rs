@@ -306,11 +306,30 @@ impl DispatchLoop {
         system_prompt:  String,
         seed_user_text: String,
     ) -> Result<DispatchOutcome, DispatchError> {
-        let mut messages: Vec<Message> = vec![Message {
-            role:    "user".to_owned(),
-            content: vec![ContentBlock::Text { text: seed_user_text }],
-        }];
-        let tool_specs = self.registry.to_specs();
+        // Build the request once and mutate `req.messages` in place
+        // between turns. The previous shape constructed a fresh
+        // `MessageRequest` per iteration and cloned `messages`,
+        // `tool_specs`, `system_prompt`, and `model` every time. The
+        // wire shape (`MessageRequest`) owns the conversation history
+        // directly, so making the request the canonical owner of
+        // `messages` removes those clones without changing the
+        // `&MessageRequest` shape `ModelClient::create_message`
+        // expects. The append-after-call semantics are preserved
+        // exactly: the assistant turn and any tool_result reply are
+        // pushed onto `req.messages` between calls, matching the
+        // pre-refactor `messages` Vec mutations.
+        let mut req = MessageRequest {
+            model:       self.config.model.clone(),
+            max_tokens:  self.config.max_tokens,
+            system:      Some(system_prompt),
+            messages:    vec![Message {
+                role:    "user".to_owned(),
+                content: vec![ContentBlock::Text { text: seed_user_text }],
+            }],
+            tools:       self.registry.to_specs(),
+            temperature: self.config.temperature,
+            stream:      false,
+        };
 
         // V2_GAPS §C1 — cumulative session token totals. Updated
         // post-turn from `MessageResponse::usage` and checked against
@@ -319,15 +338,6 @@ impl DispatchLoop {
         let mut cum_out: u64 = 0;
 
         for turn in 0..self.config.max_turns {
-            let req = MessageRequest {
-                model:       self.config.model.clone(),
-                max_tokens:  self.config.max_tokens,
-                system:      Some(system_prompt.clone()),
-                messages:    messages.clone(),
-                tools:       tool_specs.clone(),
-                temperature: self.config.temperature,
-                stream:      false,
-            };
             let resp = self.model.create_message(&req).await?;
             // V2_GAPS §C1 — fold this turn's `Usage` into the
             // running totals before any other side effect, so a
@@ -361,7 +371,7 @@ impl DispatchLoop {
 
             // Append the assistant turn to the history (verbatim so
             // tool_use blocks correlate with our tool_result reply).
-            messages.push(Message {
+            req.messages.push(Message {
                 role:    "assistant".to_owned(),
                 content: resp.content.clone(),
             });
@@ -436,7 +446,7 @@ impl DispatchLoop {
                     is_error:    output.is_error,
                 });
             }
-            messages.push(Message {
+            req.messages.push(Message {
                 role:    "user".to_owned(),
                 content: next_user_blocks,
             });
@@ -496,26 +506,33 @@ impl DispatchLoop {
     ) -> Result<DispatchOutcome, DispatchError> {
         use crate::streaming::StreamEvent;
 
-        let mut messages: Vec<Message> = vec![Message {
-            role:    "user".to_owned(),
-            content: vec![ContentBlock::Text { text: seed_user_text }],
-        }];
-        let tool_specs = self.registry.to_specs();
+        // Mirrors the hoist in `run()` (see commit
+        // "planner-core/dispatch: hoist MessageRequest out of run()
+        // loop to remove per-turn clones"). The streaming path
+        // carried the same per-turn allocation shape — `messages`,
+        // `tool_specs`, `system_prompt`, and `model` were cloned
+        // into a fresh `MessageRequest` every iteration. Building
+        // the request once and mutating `req.messages` between turns
+        // removes those clones; `req.stream = true` is set once at
+        // construction so the AnthropicClient SSE path receives the
+        // flag without per-turn re-derivation.
+        let mut req = MessageRequest {
+            model:       self.config.model.clone(),
+            max_tokens:  self.config.max_tokens,
+            system:      Some(system_prompt),
+            messages:    vec![Message {
+                role:    "user".to_owned(),
+                content: vec![ContentBlock::Text { text: seed_user_text }],
+            }],
+            tools:       self.registry.to_specs(),
+            temperature: self.config.temperature,
+            stream:      true,
+        };
 
         let mut cum_in:  u64 = 0;
         let mut cum_out: u64 = 0;
 
         for turn in 0..self.config.max_turns {
-            let req = MessageRequest {
-                model:       self.config.model.clone(),
-                max_tokens:  self.config.max_tokens,
-                system:      Some(system_prompt.clone()),
-                messages:    messages.clone(),
-                tools:       tool_specs.clone(),
-                temperature: self.config.temperature,
-                stream:      true,
-            };
-
             // ── Stream consumption with mid-stream budget check ──
             let mut rx = self.model.create_message_stream(&req).await?;
             let mut resp: Option<MessageResponse> = None;
@@ -614,7 +631,7 @@ impl DispatchLoop {
             }
 
             // ── From here, identical to `run()` ───────────────────
-            messages.push(Message {
+            req.messages.push(Message {
                 role:    "assistant".to_owned(),
                 content: resp.content.clone(),
             });
@@ -676,7 +693,7 @@ impl DispatchLoop {
                     is_error:    output.is_error,
                 });
             }
-            messages.push(Message {
+            req.messages.push(Message {
                 role:    "user".to_owned(),
                 content: next_user_blocks,
             });

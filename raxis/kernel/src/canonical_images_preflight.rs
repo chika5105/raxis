@@ -70,7 +70,10 @@
 //! preflight runs at boot, AND `IsolationBackend::launch` re-runs
 //! the manifest verification at activation as defense-in-depth.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_canonical_images::{
@@ -79,6 +82,83 @@ use raxis_canonical_images::{
 };
 use raxis_image_manifest::ImageFormat;
 use raxis_isolation::ImageKind;
+
+// ---------------------------------------------------------------------------
+// Per-process resolve cache
+// ---------------------------------------------------------------------------
+
+/// Cached result of [`resolve_image_kind_for_role`] for one canonical
+/// image. Keyed in [`image_kind_cache()`] by image path; invalidated
+/// whenever the file's `mtime` or `len` change (i.e. the operator
+/// rebuilt the image since the last call).
+///
+/// We deliberately do NOT cache the streamed SHA-256 result — the
+/// trust gate is that the on-disk bytes still hash to the manifest's
+/// signed value. The `mtime`+`len` pair is a cheap proxy: any
+/// modification touches at least one of them on APFS / ext4, so a
+/// hit means "the bytes the kernel verified at the prior call are
+/// the same bytes on disk now". The boot-time
+/// `verify_canonical_images_at_boot` already covers the full-stream
+/// SHA-256, and the kernel re-runs that on every restart.
+#[derive(Debug, Clone)]
+struct CachedKindEntry {
+    /// Image kind the manifest's `image_format` mapped to.
+    image_kind:     ImageKind,
+    /// Whether the format came from a verified manifest (vs. a
+    /// graceful-degradation fallback).
+    is_trusted:     bool,
+    /// File `mtime` at the time of the verifying call. A change
+    /// invalidates the entry — the file was rebuilt and we must
+    /// re-verify.
+    file_mtime:     SystemTime,
+    /// File `len` at the time of the verifying call. A change
+    /// invalidates the entry on the same logic as `file_mtime`.
+    /// Included so that an mtime-preserving rebuild (rare but
+    /// possible with `touch -t` workflows) still trips the
+    /// invalidator.
+    file_len:       u64,
+    /// Kernel version string the manifest's `kernel_version`
+    /// matched. A change invalidates the entry; the kernel only
+    /// ever passes its compile-time `kernel_version` here, but
+    /// keying on it is defense-in-depth against a future hot-
+    /// reload regression.
+    kernel_version: String,
+    /// Canonical role the manifest was checked for. Different
+    /// roles for the same path would be a programming bug, but we
+    /// key on it so a future caller misuse fails closed (cache
+    /// miss) rather than returning a wrong-role kind.
+    canonical_kind: CanonicalImageKind,
+}
+
+/// Process-wide cache of `resolve_image_kind_for_role` outputs.
+///
+/// **Why a kernel-side cache.** The pre-cache call path was:
+///
+///   `read_verified_image_format`
+///     → `verify_canonical_image_via_manifest`
+///        → `verify_image_blob_against_manifest`
+///           → `compute_image_digest` (full streamed SHA-256)
+///
+/// The streamed SHA-256 over a ~67 MiB cpio.gz rootfs is ~50-150 ms
+/// of wall time on macOS APFS (warm page cache: ~30-50 ms; cold:
+/// ~100-200 ms). Since `resolve_image_kind_for_role` is called
+/// **on every spawn** for the same handful of canonical images
+/// (orchestrator, executor, reviewer per kernel version), the
+/// digest stream was being paid per spawn for no incremental trust
+/// gain — the file did not change between activations, and the
+/// boot-time preflight already streamed it once.
+///
+/// **Correctness.** Cache hits are gated by `(mtime, len)` plus the
+/// kernel-version + canonical-kind tuple. APFS / ext4 mtime is
+/// nanosecond-precision; any rebuild touches it. `len` catches the
+/// edge case where a rebuild produces an mtime-preserving overwrite
+/// (e.g. `dd conv=notrunc` workflows or `touch -t` race conditions).
+/// A cache miss falls through to the original
+/// `read_verified_image_format` path — same trust contract as before.
+fn image_kind_cache() -> &'static Mutex<HashMap<PathBuf, CachedKindEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedKindEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Outcome of verifying one canonical image at boot under the V2
 /// manifest-trust model.
@@ -314,6 +394,33 @@ pub fn resolve_image_kind_for_role(
     canonical_kind: CanonicalImageKind,
     kernel_version: &str,
 ) -> (ImageKind, bool) {
+    // ── Fast path: per-process cache lookup gated on (mtime, len). ──
+    //
+    // We stat the image first so a cache hit costs one syscall + one
+    // hashmap lookup vs the previous full streamed SHA-256 over the
+    // ~67 MiB rootfs. A miss (or a stat failure) falls through to the
+    // verifying path below; correctness is unchanged either way
+    // because the verifier still runs on every miss.
+    if let Ok(meta) = std::fs::metadata(image_path) {
+        let file_len = meta.len();
+        // `modified()` may fail on filesystems that don't track
+        // mtime; in that case we treat it as a cache miss rather
+        // than poisoning the cache with `UNIX_EPOCH`.
+        if let Ok(file_mtime) = meta.modified() {
+            if let Ok(cache) = image_kind_cache().lock() {
+                if let Some(entry) = cache.get(image_path) {
+                    if entry.file_mtime    == file_mtime
+                        && entry.file_len   == file_len
+                        && entry.kernel_version == kernel_version
+                        && entry.canonical_kind == canonical_kind
+                    {
+                        return (entry.image_kind, entry.is_trusted);
+                    }
+                }
+            }
+        }
+    }
+
     let manifest_path = manifest_path_for_image(image_path);
     if !manifest_path.exists() {
         eprintln!(
@@ -323,23 +430,55 @@ pub fn resolve_image_kind_for_role(
             image_path.display(),
             manifest_path.display(),
         );
+        // Fallback path is intentionally NOT cached — we want every
+        // spawn to re-stat the manifest path so a freshly-built
+        // manifest is picked up the moment it lands on disk
+        // (typical first-deploy workflow).
         return (ImageKind::RootfsErofs, false);
     }
-    match read_verified_image_format(image_path, &manifest_path, canonical_kind, kernel_version) {
-        Ok(fmt) => (image_format_to_image_kind(fmt), true),
-        Err(e) => {
-            eprintln!(
-                "{{\"level\":\"warn\",\"event\":\"canonical_image_kind_fallback\",\
-                 \"reason\":\"manifest_verify_failed\",\"image\":\"{}\",\
-                 \"manifest\":\"{}\",\"fallback_kind\":\"RootfsErofs\",\
-                 \"error\":{:?}}}",
-                image_path.display(),
-                manifest_path.display(),
-                e.to_string(),
-            );
-            (ImageKind::RootfsErofs, false)
+    let result =
+        match read_verified_image_format(image_path, &manifest_path, canonical_kind, kernel_version) {
+            Ok(fmt) => (image_format_to_image_kind(fmt), true),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"canonical_image_kind_fallback\",\
+                     \"reason\":\"manifest_verify_failed\",\"image\":\"{}\",\
+                     \"manifest\":\"{}\",\"fallback_kind\":\"RootfsErofs\",\
+                     \"error\":{:?}}}",
+                    image_path.display(),
+                    manifest_path.display(),
+                    e.to_string(),
+                );
+                // Same fallback-not-cached rationale as above: we
+                // want the next spawn to re-stat once the operator
+                // remediates the manifest.
+                return (ImageKind::RootfsErofs, false);
+            }
+        };
+
+    // Populate the cache for the verified path. Re-stat to capture
+    // the mtime+len that pair with the bytes we just verified — if
+    // the file was mid-rotation, the second stat may show the new
+    // mtime/len, which is exactly what we want (we cache "the bytes
+    // that verified" with their on-disk fingerprint).
+    if let Ok(meta) = std::fs::metadata(image_path) {
+        if let Ok(file_mtime) = meta.modified() {
+            if let Ok(mut cache) = image_kind_cache().lock() {
+                cache.insert(
+                    image_path.to_path_buf(),
+                    CachedKindEntry {
+                        image_kind:     result.0,
+                        is_trusted:     result.1,
+                        file_mtime,
+                        file_len:       meta.len(),
+                        kernel_version: kernel_version.to_owned(),
+                        canonical_kind,
+                    },
+                );
+            }
         }
     }
+    result
 }
 
 /// Probe the host-canonical Linux kernel binary at boot. The

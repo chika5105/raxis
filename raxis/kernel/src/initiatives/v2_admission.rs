@@ -82,9 +82,12 @@ use thiserror::Error;
 // here per `INV-STORE-03`.
 const INITIATIVES: &str = Table::Initiatives.as_str();
 
-/// Successful admission outcome — mirrors V1 `InitiativeCreated` so
-/// the operator IPC dispatcher can project V1 and V2 onto a single
-/// `OperatorResponse::InitiativeCreated`.
+/// Successful admission outcome — projected onto
+/// `OperatorResponse::InitiativeCreated` by the IPC dispatcher.
+/// Pre-V2.5 the kernel also exposed a V1-only `InitiativeCreated`
+/// type via the deleted `lifecycle::create_initiative` path; the
+/// sealed-bundle pipeline (this module) is the sole admission path
+/// today.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2InitiativeCreated {
     pub initiative_id: String,

@@ -97,8 +97,8 @@ use raxis_isolation::{
 };
 use raxis_plan_credentials::TaskCredentialDecl;
 use thiserror::Error;
+use parking_lot::Mutex;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 // ---------------------------------------------------------------------------
@@ -255,16 +255,23 @@ pub enum SpawnError {
 ///
 /// One instance per kernel boot. Threaded into `HandlerContext` and
 /// shared across every IPC handler that needs to spawn or terminate
-/// a session. The internal session table is behind a `tokio::Mutex`
-/// — `spawn_session` and `terminate_session` are async and
-/// short-lived, so the mutex is uncontended in practice.
+/// a session. The internal session table is behind a
+/// `parking_lot::Mutex` — every callsite acquires the lock, mutates
+/// the map (`insert` / `remove` / `contains_key` / `len`), and
+/// drops the guard within a single synchronous block. None of the
+/// callsites await while holding the lock, so the async runtime
+/// would gain nothing from `tokio::sync::Mutex` and pay the
+/// async-state-machine overhead for every short critical section.
 pub struct SessionSpawnService {
     isolation: Arc<dyn IsolationBackend>,
     proxies:   Arc<CredentialProxyManager>,
     audit:     Arc<dyn AuditSink>,
     /// Per-session live state. Populated by `spawn_session`,
-    /// drained by `terminate_session`. Behind a `tokio::Mutex`
-    /// because every method is async; the inner value is small.
+    /// drained by `terminate_session`. Synchronously serialised
+    /// because every critical section is map-mutation only — the
+    /// VM-shutdown / audit-emit / loop-abort work in
+    /// `terminate_session` runs AFTER the guard has been dropped
+    /// (`drop(table)` immediately after `remove`).
     sessions:  Mutex<HashMap<String, ActiveSession>>,
 }
 
@@ -372,19 +379,52 @@ impl SessionSpawnService {
         );
 
         // ── Step 4: boot the VM. ─────────────────────────────────────
+        //
+        // `Backend::spawn` is a synchronous trait method that does not
+        // return until the guest is reachable on its primary IPC
+        // transport (per the trait's "MUST NOT return until reachable"
+        // contract). For microVM substrates (Apple-VZ, Firecracker)
+        // that includes the entire kernel-boot + tokio-runtime spin-
+        // up + vsock CONNECT retry loop — typically ~250 ms. Calling
+        // it directly from the async runtime thread blocks the whole
+        // executor for that whole window, starving every other
+        // session's IPC handlers, the audit dispatcher, the
+        // credential-proxy event loops, and any other in-flight
+        // spawns. Wrap in `spawn_blocking` so the runtime thread is
+        // free to make progress on those tasks while AVF / Firecracker
+        // is wall-clock-blocked on `startWithCompletionHandler:` +
+        // `connectToPort:`.
+        //
         // Failure here MUST tear down the credential proxies AND the
         // admission listener bound above. Drop on the listener
         // releases the port immediately.
-        let mut session = match self.isolation.spawn(
-            &req.image,
-            &req.workspace_mounts,
-            &req.vm_spec,
-        ) {
-            Ok(s) => s,
-            Err(e) => {
+        let isolation_for_spawn = Arc::clone(&self.isolation);
+        let image_for_spawn     = req.image.clone();
+        let mounts_for_spawn    = req.workspace_mounts.clone();
+        let vm_spec_for_spawn   = req.vm_spec.clone();
+        let spawn_join = tokio::task::spawn_blocking(move || {
+            isolation_for_spawn.spawn(
+                &image_for_spawn,
+                &mounts_for_spawn,
+                &vm_spec_for_spawn,
+            )
+        })
+        .await;
+        let mut session = match spawn_join {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
                 drop(admission_listener);
                 let _ = cred_handles.shutdown();
                 return Err(SpawnError::IsolationSpawn(e));
+            }
+            Err(join_err) => {
+                drop(admission_listener);
+                let _ = cred_handles.shutdown();
+                return Err(SpawnError::IsolationSpawn(
+                    raxis_isolation::IsolationError::BackendInternal(format!(
+                        "session-spawn: Backend::spawn blocking task join: {join_err}",
+                    )),
+                ));
             }
         };
 
@@ -505,7 +545,7 @@ impl SessionSpawnService {
         }
 
         // ── Step 7: register the active session. ────────────────────
-        let mut table = self.sessions.lock().await;
+        let mut table = self.sessions.lock();
         table.insert(
             session_id.clone(),
             ActiveSession {
@@ -538,7 +578,7 @@ impl SessionSpawnService {
         session_id: &str,
         grace:      Duration,
     ) -> Result<TerminationReport, SpawnError> {
-        let mut table = self.sessions.lock().await;
+        let mut table = self.sessions.lock();
         let mut entry = table
             .remove(session_id)
             .ok_or_else(|| SpawnError::SessionNotActive {
@@ -615,15 +655,18 @@ impl SessionSpawnService {
     /// Whether a session id has an active VM right now.
     ///
     /// Cheap; takes the table lock for the duration of the lookup.
+    /// Method stays `async` for API stability — callers `.await` it
+    /// today and the body trivially completes synchronously.
     pub async fn is_active(&self, session_id: &str) -> bool {
-        self.sessions.lock().await.contains_key(session_id)
+        self.sessions.lock().contains_key(session_id)
     }
 
     /// Number of currently-active sessions. Useful for kernel boot
     /// admission tier checks (`MaxConcurrentVms`) and for the
-    /// `raxis status` operator command.
+    /// `raxis status` operator command. See [`Self::is_active`] for
+    /// the async-signature note.
     pub async fn active_count(&self) -> usize {
-        self.sessions.lock().await.len()
+        self.sessions.lock().len()
     }
 }
 

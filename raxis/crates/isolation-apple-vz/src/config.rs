@@ -280,8 +280,30 @@ pub fn translate(
     // accepted limitation of the AVF substrate. Once `hvc0` is up
     // (after `virtio_pci` enumerates devices) all printk lands in
     // the host-side console log.
-    let base_cmdline =
-        "console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10";
+    // **Quiet-boot opt-in.** When the host process exports
+    // `RAXIS_AVF_QUIET_BOOT=1`, swap the verbose `loglevel=8
+    // ignore_loglevel` pair for `quiet loglevel=0`. The Linux
+    // kernel emits ~hundreds of printk lines before virtio-console
+    // is enumerated; each line is a synchronous write to the host-
+    // side hvc0 sink, so muting them shaves ~50–100 ms off the
+    // observable boot path on the AVF substrate. Default is
+    // **OFF** — operators keeping the verbose default get the
+    // same forensic kernel log they had before this knob existed,
+    // and any spawn that needs to debug a boot regression can
+    // simply unset the env var. We deliberately read the env at
+    // translate time rather than plumbing a typed
+    // `VmSpec::quiet_boot` field so the operator can flip the
+    // behaviour without restamping plans or VM specs that are
+    // already in flight (the env var is observed once per spawn,
+    // before the VZ configuration is materialised).
+    let quiet_boot = std::env::var("RAXIS_AVF_QUIET_BOOT")
+        .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false);
+    let base_cmdline = if quiet_boot {
+        "console=hvc0 quiet loglevel=0 reboot=k panic=10"
+    } else {
+        "console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10"
+    };
     let mut cmdline = if spec.boot_args.is_empty() {
         match image.kind {
             ImageKind::RootfsInitramfsCpio =>

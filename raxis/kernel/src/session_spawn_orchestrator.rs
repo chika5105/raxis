@@ -538,13 +538,22 @@ async fn spawn_orchestrator_for_initiative(
         ),
     };
 
-    // ── Step 2: rehydrate credential decls AND the session token. ──
-    //
-    // Two reads off the same `spawn_blocking` so the SQLite mutex
-    // is acquired exactly once. Both come from the canonical
-    // orchestrator session row that `lifecycle::approve_plan`
-    // inserted inside the same transaction that admitted the
-    // plan tasks.
+    // ── Step 2: rehydrate credential decls + session token AND assemble
+    //    the KSB snapshot **concurrently**. Both are independent
+    //    reads against the live store + plan registry; nothing in the
+    //    KSB pipeline depends on the credentials or session token, and
+    //    the token read does not depend on the KSB. We launch both as
+    //    `spawn_blocking` futures and `tokio::join!` them so the second
+    //    read does not pay for the first read's `spawn_blocking` task-
+    //    launch round-trip on every spawn. The two tasks do contend for
+    //    the SQLite mutex internally, but interleaving the two
+    //    pipelines saves the per-spawn task-launch + scheduler-wakeup
+    //    overhead (~1-3 ms) that used to be paid serially. The KSB
+    //    assembly itself is the slower of the two (multiple queries +
+    //    plan-registry reads), so co-scheduling it with the token read
+    //    means the env-build phase sees the KSB ready as soon as the
+    //    token comes back rather than starting its blocking round-trip
+    //    only after token + env build complete.
     //
     // The session token is the CSPRNG-generated 64-char hex value
     // emitted by `raxis_crypto::token::generate_session_token` and
@@ -564,9 +573,9 @@ async fn spawn_orchestrator_for_initiative(
     // orchestrator session (no `[[tasks]]` row), but we still go
     // through the uniform path for forward compat with sessions
     // that gain credentials in V3.
-    let store_for_read = Arc::clone(store);
-    let session_id_for_read = session_id.to_owned();
-    let (credentials, session_token_db) =
+    let token_read_fut = {
+        let store_for_read      = Arc::clone(store);
+        let session_id_for_read = session_id.to_owned();
         tokio::task::spawn_blocking(move || -> Result<_, String> {
             let conn = store_for_read.lock_sync();
             let creds = kernel_lifecycle::read_task_credential_proxies_in_tx(
@@ -587,7 +596,34 @@ async fn spawn_orchestrator_for_initiative(
                 })?;
             Ok((creds, token))
         })
-        .await
+    };
+    // KSB assembly co-scheduled with the token read. Failure here
+    // is non-fatal — the spawn proceeds with a fallback snapshot so
+    // a transient SQLite lock contention does not block initiative
+    // activation; the absence of the live KSB is logged in the
+    // env-stamp branch below so an operator can correlate.
+    let ksb_fut = {
+        let store_for_ksb     = Arc::clone(store);
+        let registry_for_ksb  = Arc::clone(plan_registry);
+        let initiative_owned  = initiative_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store_for_ksb.lock_sync();
+            crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
+                &*conn,
+                &registry_for_ksb,
+                &crate::initiatives::ksb_assembly::KsbInputs {
+                    initiative_id: &initiative_owned,
+                    task_id:       None,
+                    role:          crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
+                    token_budget_remaining:        0,
+                    wallclock_budget_remaining_s:  0,
+                    credential_ports:              Vec::new(),
+                },
+            )
+        })
+    };
+    let (token_join, ksb_join) = tokio::join!(token_read_fut, ksb_fut);
+    let (credentials, session_token_db) = token_join
         .map_err(|e| OrchestratorSpawnError::StoreRead(e.to_string()))?
         .map_err(OrchestratorSpawnError::StoreRead)?;
 
@@ -743,36 +779,17 @@ async fn spawn_orchestrator_for_initiative(
     populate_token_cap_env(&mut env, policy.token_caps());
     populate_sleep_cap_env(&mut env, policy.sleep_caps());
 
-    // V2 `v2_extended_gaps.md §2.4` — assemble the KSB snapshot
-    // from the live kernel state and stamp it into
+    // V2 `v2_extended_gaps.md §2.4` — stamp the KSB snapshot we
+    // co-scheduled at the top of this function into
     // `RAXIS_PLANNER_KSB`. The driver reads the env var and renders
     // it via `raxis_ksb::assemble_system_prompt(NNSP, snap)` so the
     // model sees authoritative kernel context inside the
     // `[RAXIS:KERNEL_STATE … :KERNEL_STATE_END]` delimiters every
-    // turn. Failure here is non-fatal — the spawn proceeds with a
-    // fallback snapshot so a transient SQLite lock contention does
-    // not block initiative activation; the absence of the live KSB
-    // is logged so an operator can correlate.
-    let ksb_snapshot = {
-        let store_for_ksb     = Arc::clone(store);
-        let registry_for_ksb  = Arc::clone(plan_registry);
-        let initiative_owned  = initiative_id.to_owned();
-        tokio::task::spawn_blocking(move || {
-            let conn = store_for_ksb.lock_sync();
-            crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
-                &*conn,
-                &registry_for_ksb,
-                &crate::initiatives::ksb_assembly::KsbInputs {
-                    initiative_id: &initiative_owned,
-                    task_id:       None,
-                    role:          crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
-                    token_budget_remaining:        0,
-                    wallclock_budget_remaining_s:  0,
-                    credential_ports:              Vec::new(),
-                },
-            )
-        })
-        .await
+    // turn. Failure of the assembly task is non-fatal — the spawn
+    // proceeds with a fallback snapshot so a transient SQLite lock
+    // contention does not block initiative activation; the absence
+    // of the live KSB is logged here so an operator can correlate.
+    let ksb_snapshot = ksb_join
         .ok()
         .and_then(|r| r.ok())
         .unwrap_or_else(|| {
@@ -785,8 +802,7 @@ async fn spawn_orchestrator_for_initiative(
                 None,
                 crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
             )
-        })
-    };
+        });
     let ksb_json = serde_json::to_string(&ksb_snapshot)
         .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
     // Prefer the virtiofs sidecar channel (small `RAXIS_PLANNER_KSB_PATH`
