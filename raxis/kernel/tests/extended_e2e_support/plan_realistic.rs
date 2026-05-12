@@ -49,6 +49,15 @@ pub const TASK_XFILE_REFACTOR: &str = "xfile-refactor";
 /// is the executor's) that the reviewer must catch.
 pub const TASK_LINT_DEFECT: &str = "lint-defect";
 
+/// Positive path-allowlist executor task id (P3-4) — the
+/// executor legitimately writes to `target/codegen/` under an
+/// allowlist that admits exactly that path. Witness asserts both
+/// (a) the chain admitted the commit AND (b) the file landed on
+/// disk AND (c) the path-allowlist did not falsely reject the
+/// task. See [`super::path_allowlist::PathAllowlistPositiveWitness`].
+pub const TASK_ALLOWLIST_POSITIVE: &str =
+    super::path_allowlist::TASK_ALLOWLIST_POSITIVE;
+
 /// Lane id for the realistic scenario. Distinct from
 /// `super::plan::LANE_ID` so the realistic-scenario test and the
 /// existing extended-scenario test can co-exist in a single kernel
@@ -84,6 +93,13 @@ pub const LINT_DEFECT_PROMPT_MD: &str = include_str!(
     "../../../live-e2e/seed/prompts/lint_defect.md"
 );
 
+/// Positive path-allowlist prompt. Drives the executor through
+/// writing `target/codegen/build_meta.txt` under an allowlist
+/// that admits only `target/codegen/`.
+pub const ALLOWLIST_POSITIVE_PROMPT_MD: &str = include_str!(
+    "../../../live-e2e/seed/prompts/allowlist_positive.md"
+);
+
 // ---------------------------------------------------------------------------
 // Plan-TOML builder.
 // ---------------------------------------------------------------------------
@@ -96,6 +112,7 @@ pub fn realistic_plan_toml() -> String {
     let materializer = MATERIALIZER_PROMPT_MD;
     let xfile        = XFILE_REFACTOR_PROMPT_MD;
     let lint         = LINT_DEFECT_PROMPT_MD;
+    let allowlist    = ALLOWLIST_POSITIVE_PROMPT_MD;
     let mut s = String::new();
     s.push_str(REALISTIC_PLAN_HEADER);
     s.push_str("\n\n");
@@ -110,6 +127,10 @@ pub fn realistic_plan_toml() -> String {
     s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_LINT_DEFECT_HEAD);
     s.push_str(lint);
+    s.push_str("\n\"\"\"\n");
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD);
+    s.push_str(allowlist);
     s.push_str("\n\"\"\"\n");
     s
 }
@@ -173,6 +194,15 @@ path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 "#;
 
+const REALISTIC_PLAN_ALLOWLIST_POSITIVE_HEAD: &str = r#"# ── Positive path-allowlist Executor (P3-4) ─────────────
+[[tasks]]
+task_id            = "allowlist-positive-codegen"
+name               = "Generate a build-meta file into target/codegen/"
+session_agent_type = "Executor"
+path_allowlist     = ["target/codegen/"]
+description = """
+"#;
+
 // ---------------------------------------------------------------------------
 // Tests — sanity-check the TOML decodes and pins the task list.
 // ---------------------------------------------------------------------------
@@ -194,7 +224,12 @@ mod tests {
             .iter()
             .filter_map(|t| t.get("task_id").and_then(|i| i.as_str()))
             .collect();
-        for needle in [TASK_MATERIALIZE, TASK_XFILE_REFACTOR, TASK_LINT_DEFECT] {
+        for needle in [
+            TASK_MATERIALIZE,
+            TASK_XFILE_REFACTOR,
+            TASK_LINT_DEFECT,
+            TASK_ALLOWLIST_POSITIVE,
+        ] {
             assert!(
                 ids.contains(&needle),
                 "expected task_id `{needle}` in realistic plan; got {ids:?}",
