@@ -50,6 +50,32 @@ The workspace's `cargo xtask dev-prereqs --install` does this for you.
 
 ---
 
+## 1b · "Allow `raxis-kernel` to accept incoming network connections?" popup on every macOS build
+
+**When.** Every `cargo build && ./target/debug/raxis-kernel` (and
+every `cargo run -p raxis-kernel`) on macOS pops a modal asking you to
+allow incoming connections.
+
+**Why.** The macOS Application Firewall keys per-binary
+allowlist decisions on the binary's code-signing identity. Every
+`cargo build` re-emits a binary with a fresh ad-hoc CDHash, so the
+firewall treats each rebuild as a brand-new app and re-prompts.
+
+**Fix.** One-time per workspace:
+
+```bash
+cargo xtask macos-firewall-prereq         # idempotent; prompts for sudo once
+cargo xtask macos-firewall-status         # verify every raxis host binary shows "Allow"
+```
+
+`cargo xtask dev-prereqs` runs the same step automatically on macOS,
+so a fresh `--install` covers this. Pass `--skip-firewall` on managed
+devices where `sudo` is disallowed.
+
+Reference: [`recipes/setup/11-macos-firewall-popup.md`](../recipes/setup/11-macos-firewall-popup.md).
+
+---
+
 ## 2 · `genesis: refusing to overwrite existing data dir`
 
 **When.** Re-running `raxis genesis` against a `RAXIS_DATA_DIR` that

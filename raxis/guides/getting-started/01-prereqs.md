@@ -78,6 +78,18 @@ What `dev-prereqs --install` does (in order):
 5. **`codesign` probe** — required for ad-hoc-signing the kernel
    binary against the AVF entitlements (`release/raxis.entitlements`).
 6. **Cargo probe** — verifies the toolchain.
+7. **macOS Application Firewall allowlist** — allowlists the raxis
+   host binaries (`raxis-kernel`, `raxis-otel-pusher`,
+   `raxis-live-e2e`) via `sudo socketfilterfw --add` so the recurring
+   "allow `raxis-kernel` to accept incoming network connections"
+   popup does not re-appear on every fresh `cargo build`. Prompts
+   for `sudo` exactly once; auto-skipped when the firewall is
+   disabled. Pass `--skip-firewall` on managed devices that disallow
+   `sudo`. See
+   [`recipes/setup/11-macos-firewall-popup.md`](../recipes/setup/11-macos-firewall-popup.md)
+   for the full recipe and
+   [`xtask/src/macos_firewall.rs`](../../xtask/src/macos_firewall.rs)
+   for the inventory of managed binaries.
 
 Each step emits one JSON line so you can grep for the first failure.
 

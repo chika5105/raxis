@@ -43,6 +43,14 @@
 //!      binary is on `$PATH`. Required by `cargo xtask dev-codesign`.
 //!   6. **Cargo probe** — verifies `cargo --version` reports a
 //!      stable toolchain.
+//!   7. **macOS Application Firewall allowlist** (macOS only) —
+//!      runs `cargo xtask macos-firewall-prereq` so the recurring
+//!      "allow `raxis-kernel` to accept incoming network
+//!      connections" popup does not derail every fresh
+//!      `cargo build`. See [`crate::macos_firewall`] for the
+//!      Strategy-A trade-off (per-binary path allowlist via
+//!      `socketfilterfw`). Skipped with `--skip-firewall` for
+//!      CI / managed devices that disallow `sudo`.
 //!
 //! Each step prints a one-line `{"level":"info"|"warn"|"error",
 //! "event":"dev_prereqs_<step>", ...}` JSON record so operators
@@ -140,6 +148,11 @@ struct Args {
     /// already curate `~/.cargo/config.toml` by hand and want the
     /// subcommand to act as a pure verifier.
     skip_cargo_config: bool,
+    /// Skip the macOS Application Firewall allowlist step (Step 7).
+    /// CI / managed devices that disallow `sudo` should pass this.
+    /// On non-macOS hosts the step is auto-skipped without needing
+    /// the flag.
+    skip_firewall: bool,
 }
 
 /// Host architecture the prerequisites are configured against.
@@ -196,6 +209,7 @@ impl Args {
         let mut scope = CargoConfigScope::User;
         let mut arch = None;
         let mut skip_cargo_config = false;
+        let mut skip_firewall = false;
 
         let mut i = 0;
         while i < argv.len() {
@@ -213,6 +227,7 @@ impl Args {
                     )?);
                 }
                 "--skip-cargo-config" => skip_cargo_config = true,
+                "--skip-firewall" => skip_firewall = true,
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -227,6 +242,7 @@ impl Args {
             scope,
             arch,
             skip_cargo_config,
+            skip_firewall,
         })
     }
 }
@@ -235,7 +251,7 @@ fn print_help() {
     eprintln!(
         "usage: cargo xtask dev-prereqs \n           \
            [--install] [--scope user|workspace] [--arch aarch64|x86_64]\n           \
-           [--skip-cargo-config]\n\
+           [--skip-cargo-config] [--skip-firewall]\n\
          \n\
          Verifies the AVF demo prerequisites from \n         \
            raxis/demo-e2e-sample/AVF_DEMO.md §0\n\
@@ -245,13 +261,19 @@ fn print_help() {
            3. rustup target: <arch>-unknown-linux-musl\n  \
            4. ~/.cargo/config.toml [target.<arch>-unknown-linux-musl] linker patch\n  \
            5. codesign on $PATH (macOS only)\n  \
-           6. cargo --version probe\n\
+           6. cargo --version probe\n  \
+           7. macOS Application Firewall allowlist for raxis host binaries\n     \
+              (macOS only; one-time `sudo socketfilterfw --add` per binary;\n     \
+              suppresses the recurring `accept incoming network connections`\n     \
+              popup on every fresh `cargo build`. See `xtask/src/macos_firewall.rs`\n     \
+              for the inventory of managed binaries.)\n\
          \n\
          Defaults:\n  \
            --install            off (verify-only; non-zero exit on miss)\n  \
            --scope              user (~/.cargo/config.toml)\n  \
            --arch               host arch\n  \
-           --skip-cargo-config  off\n"
+           --skip-cargo-config  off\n  \
+           --skip-firewall      off (skip Step 7; required on managed devices\n                                that disallow `sudo`)\n"
     );
 }
 
@@ -325,6 +347,39 @@ fn run_with_args(args: &Args, host_arch: HostArch) -> Result<()> {
     match probe_cargo() {
         Ok(()) => {}
         Err(e) => hard_failures.push(format!("cargo: {e}")),
+    }
+
+    // Step 7 — macOS Application Firewall allowlist (no-op on
+    // non-macOS, no-op when --skip-firewall is set, no-op when the
+    // firewall is disabled globally). Surfacing this as a soft step:
+    // the firewall step CAN fail on managed devices that disallow
+    // `sudo`, and we don't want a managed-device failure here to
+    // mask the genuine outcome of steps 1–6 (which are the demo
+    // hard-prereqs). Operators who need the firewall step to be
+    // hard-required can run `cargo xtask macos-firewall-prereq`
+    // directly and let its non-zero exit propagate.
+    if is_macos {
+        if args.skip_firewall {
+            eprintln!("{{\"level\":\"info\",\"event\":\"dev_prereqs_skip_firewall\"}}");
+        } else {
+            match crate::macos_firewall::run_prereq_as_dev_prereqs_step() {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"dev_prereqs_firewall_failed\",\
+                         \"reason\":{:?},\"hint\":\"re-run `cargo xtask macos-firewall-prereq` \
+                         manually, or pass --skip-firewall to dev-prereqs on managed devices \
+                         that disallow sudo\"}}",
+                        e,
+                    );
+                }
+            }
+        }
+    } else {
+        eprintln!(
+            "{{\"level\":\"info\",\"event\":\"dev_prereqs_skip_firewall\",\
+             \"reason\":\"non-macOS host; firewall popup is a macOS-only artefact\"}}"
+        );
     }
 
     if hard_failures.is_empty() {
@@ -716,6 +771,7 @@ mod tests {
         assert!(!args.install);
         assert_eq!(args.scope, CargoConfigScope::User);
         assert!(!args.skip_cargo_config);
+        assert!(!args.skip_firewall);
         assert!(args.arch.is_none());
     }
 
@@ -728,12 +784,14 @@ mod tests {
             "--arch".to_owned(),
             "x86_64".to_owned(),
             "--skip-cargo-config".to_owned(),
+            "--skip-firewall".to_owned(),
         ];
         let args = Args::parse(&argv).unwrap();
         assert!(args.install);
         assert_eq!(args.scope, CargoConfigScope::Workspace);
         assert_eq!(args.arch, Some(HostArch::X86_64));
         assert!(args.skip_cargo_config);
+        assert!(args.skip_firewall);
     }
 
     #[test]

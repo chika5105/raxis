@@ -13,6 +13,7 @@ mod images;
 mod license_check;
 mod linux_microvm;
 mod linux_prereqs;
+mod macos_firewall;
 mod perf;
 mod spec_graph;
 
@@ -86,10 +87,30 @@ fn main() -> anyhow::Result<()> {
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             linux_prereqs::run(&tail).context("linux-prereqs")
         }
+        Some("macos-firewall-prereq") => {
+            // `cargo xtask macos-firewall-prereq [--dry-run]` —
+            // one-time setup that allowlists the raxis host binaries
+            // in the macOS Application Firewall so the
+            // "allow `raxis-kernel` to accept incoming network
+            // connections" popup never appears on a fresh
+            // `cargo build`. No-op on non-macOS hosts. See
+            // `xtask/src/macos_firewall.rs` for the inventory of
+            // managed binaries and the Strategy A vs B trade-off.
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            macos_firewall::run_prereq(&tail).context("macos-firewall-prereq")
+        }
+        Some("macos-firewall-status") => {
+            // `cargo xtask macos-firewall-status` — read-only
+            // companion to `macos-firewall-prereq`. Prints the
+            // current allowlist state for every raxis host binary.
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            macos_firewall::run_status(&tail).context("macos-firewall-status")
+        }
         Some(other) => anyhow::bail!(
             "unknown xtask target: {other:?}\n\
              available: spec-graph [--strict], license-check [--strict], \
-             dev-keys, dev-codesign, dev-prereqs, images, linux-microvm, linux-prereqs"
+             dev-keys, dev-codesign, dev-prereqs, images, linux-microvm, \
+             linux-prereqs, macos-firewall-prereq, macos-firewall-status"
         ),
         None => anyhow::bail!(
             "usage: cargo xtask <target> [flags]\n\
@@ -103,7 +124,9 @@ fn main() -> anyhow::Result<()> {
              images dev-stage --role <ROLE>             — cross-compile raxis-planner-<role>\n                 [--target <TRIPLE>]                       and stage it into images/<role>/rootfs/init\n                                                 (planner-harness.md §14.4)\n  \
              images build-all                           — pack staged rootfs into signed cpio.gz\n                 [--role <ROLE>] [--install-dir <P>]       initramfs and lay out under\n                 [--signing-key <PATH>]                    <install_dir>/images/raxis-<role>-<kver>.{{img,manifest.toml}}\n                                                 (planner-harness.md §14.4 + e2e-live-test-gap.md)\n  \
              linux-microvm bundle                       — one-shot Firecracker bundle:\n                 [--install-dir <PATH>] [--arch <ARCH>]      stage reference vmlinux + every\n                 [--kernel-from-file <PATH>]                 canonical role's signed initramfs\n                 [--kernel-url <URL>] [--kernel-sha256 <HEX>]   under <install_dir>/\n                 [--target <TRIPLE>] [--signing-key <PATH>]    (isolation-linux-microvm.md §9)\n                 [--role <ROLE>] [--skip-kernel] [--skip-stage] [--force]\n  \
-             linux-prereqs                              — Linux substrate host preflight:\n                 [--json]                                  /dev/kvm, vhost_vsock, kvm group,\n                                                           kernel ≥ 5.10, cgroup v2, firecracker(1),\n                                                           virtiofsd(1) (V3 prereq, Warn-only)\n                                                           (isolation-linux-microvm.md §9)"
+             linux-prereqs                              — Linux substrate host preflight:\n                 [--json]                                  /dev/kvm, vhost_vsock, kvm group,\n                                                           kernel ≥ 5.10, cgroup v2, firecracker(1),\n                                                           virtiofsd(1) (V3 prereq, Warn-only)\n                                                           (isolation-linux-microvm.md §9)\n  \
+             macos-firewall-prereq                      — one-time `socketfilterfw --add` /\n                 [--dry-run]                                `--unblockapp` of every raxis host\n                 [--release-only | --debug-only]            binary so the macOS firewall popup\n                                                           does not re-appear on every\n                                                           `cargo build`. Auto-runs as part of\n                                                           `dev-prereqs` on macOS.\n  \
+             macos-firewall-status                      — read-only listing of the firewall\n                                                           allowlist state for every raxis host\n                                                           binary."
         ),
     }
 }
