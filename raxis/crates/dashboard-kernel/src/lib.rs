@@ -55,7 +55,7 @@ use raxis_dashboard::data::{
     InitiativeListEntry, InitiativeView, NotificationView, OperatorAuthResolution,
     PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView,
     SessionView, StructuredOutputView, TaskView, WorktreeDetail, WorktreeDiff,
-    WorktreeListEntry, WorktreeLogEntry,
+    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -895,6 +895,163 @@ impl DashboardData for KernelDashboardData {
         })
     }
 
+    fn worktree_tree(
+        &self,
+        name: &str,
+        sub_path: Option<&str>,
+    ) -> Result<WorktreeTree, ApiError> {
+        let resolved = self.resolve_worktree(name)?;
+        let root = std::path::PathBuf::from(&resolved.summary.path);
+        if !root.exists() {
+            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+        }
+        let target = resolve_within_root(&root, sub_path.unwrap_or(""))?;
+        let meta = std::fs::metadata(&target).map_err(|_| ApiError::NotFound {
+            kind: "tree-entry".into(),
+        })?;
+        if !meta.is_dir() {
+            return Err(ApiError::BadRequest {
+                detail: "path is not a directory".into(),
+            });
+        }
+        let read_dir = std::fs::read_dir(&target).map_err(|e| ApiError::Internal {
+            log_only: format!("read_dir: {e}"),
+        })?;
+        let mut entries: Vec<WorktreeTreeEntry> = Vec::new();
+        let mut truncated = false;
+        let prefix = sub_path.unwrap_or("").trim_matches('/');
+        for ent in read_dir {
+            // Cap directory listings so a worktree with a
+            // pathologically-large directory (e.g. a
+            // node_modules with 50K direntries) cannot pin
+            // the request thread for an unbounded time.
+            if entries.len() >= MAX_TREE_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let Ok(ent) = ent else { continue };
+            let file_name = ent.file_name();
+            let Some(name_str) = file_name.to_str() else {
+                continue; // refuse non-UTF-8 entry names
+            };
+            // Hide repo internals.
+            if name_str == ".git" {
+                continue;
+            }
+            let rel_path = if prefix.is_empty() {
+                name_str.to_owned()
+            } else {
+                format!("{prefix}/{name_str}")
+            };
+            // ent.metadata() does NOT follow symlinks on
+            // Unix, so a symlink in the directory listing
+            // surfaces as kind="symlink" with the target
+            // never dereferenced.
+            let kind_meta = match ent.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let ft = kind_meta.file_type();
+            let (kind, size) = if ft.is_symlink() {
+                ("symlink".to_owned(), None)
+            } else if ft.is_dir() {
+                ("dir".to_owned(), None)
+            } else if ft.is_file() {
+                ("file".to_owned(), Some(kind_meta.len()))
+            } else {
+                ("other".to_owned(), None)
+            };
+            entries.push(WorktreeTreeEntry {
+                name: name_str.to_owned(),
+                path: rel_path,
+                kind,
+                size,
+            });
+        }
+        // Directories first, then alpha within each bucket.
+        entries.sort_by(|a, b| {
+            let dir_a = a.kind == "dir";
+            let dir_b = b.kind == "dir";
+            dir_b
+                .cmp(&dir_a)
+                .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+        });
+        Ok(WorktreeTree {
+            name: resolved.summary.name,
+            path: prefix.to_owned(),
+            entries,
+            truncated,
+        })
+    }
+
+    fn worktree_file(
+        &self,
+        name: &str,
+        file_path: &str,
+    ) -> Result<WorktreeFile, ApiError> {
+        let resolved = self.resolve_worktree(name)?;
+        let root = std::path::PathBuf::from(&resolved.summary.path);
+        if !root.exists() {
+            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+        }
+        let target = resolve_within_root(&root, file_path)?;
+        // Refuse symlinks outright (do not follow). Defends
+        // against a tree where the operator inadvertently
+        // committed a symlink to /etc/shadow. resolve_within_root
+        // already rejected symlinks at every depth; this is
+        // a belt-and-braces re-check on the leaf.
+        let lmeta = std::fs::symlink_metadata(&target).map_err(|_| ApiError::NotFound {
+            kind: "file".into(),
+        })?;
+        if lmeta.file_type().is_symlink() {
+            return Err(ApiError::BadRequest {
+                detail: "symlinks are not browsable".into(),
+            });
+        }
+        if !lmeta.is_file() {
+            return Err(ApiError::BadRequest {
+                detail: "path is not a regular file".into(),
+            });
+        }
+        let size = lmeta.len();
+        if size > MAX_FILE_INLINE_BYTES as u64 {
+            return Err(ApiError::BadRequest {
+                detail: format!(
+                    "file size {size} bytes exceeds inline cap of {} bytes",
+                    MAX_FILE_INLINE_BYTES
+                ),
+            });
+        }
+        let bytes = std::fs::read(&target).map_err(|e| ApiError::Internal {
+            log_only: format!("read file: {e}"),
+        })?;
+        let (encoding, content) = match std::str::from_utf8(&bytes) {
+            Ok(_) => (
+                "utf8".to_owned(),
+                // SAFETY: we just verified `bytes` is valid UTF-8.
+                String::from_utf8(bytes).unwrap_or_default(),
+            ),
+            Err(_) => {
+                use base64::Engine as _;
+                (
+                    "base64".to_owned(),
+                    base64::engine::general_purpose::STANDARD.encode(&bytes),
+                )
+            }
+        };
+        let trimmed = file_path.trim_matches('/').to_owned();
+        Ok(WorktreeFile {
+            name: std::path::Path::new(&trimmed)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path: trimmed,
+            size,
+            encoding,
+            content,
+        })
+    }
+
     fn stream_tail(
         &self,
         session_id: &str,
@@ -1157,6 +1314,110 @@ impl KernelDashboardData {
         }
         Ok(resolved)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Repo-browsing sandbox helpers (worktree_tree / worktree_file)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of dirent rows surfaced for one
+/// `GET /api/git/worktrees/:name/tree` call. Generous for any
+/// real source tree; tight enough that a worktree containing a
+/// pathologically-large directory (e.g. `node_modules` with
+/// 50K entries) cannot pin a request thread for unbounded time.
+/// When tripped the response carries `truncated = true`.
+const MAX_TREE_ENTRIES: usize = 5_000;
+
+/// Maximum file size the inline `worktree_file` endpoint will
+/// serve. Anything larger gets a `BadRequest` and the operator
+/// is expected to use a future streaming-download endpoint.
+/// 2 MiB is enough for source files (a 100 KLOC Rust file is
+/// ~3 MiB compressed), small images, JSON manifests, etc., but
+/// blocks accidental dumps of database files and binaries.
+const MAX_FILE_INLINE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Resolve a forward-slash separated, root-relative `sub_path`
+/// against `root` and verify that:
+///   * no component of the joined path is a symlink, AND
+///   * the canonical (symlink-followed) form of the joined
+///     path is still under the canonical form of `root`.
+///
+/// The first check is the load-bearing one — refusing
+/// symlinks at every depth means `worktree_file` can hand
+/// the resolved path back to `std::fs::read` without ever
+/// dereferencing a link. The second check is a redundant
+/// defence: even if a future change relaxes the symlink
+/// rule, a path that escapes the canonical root is still
+/// rejected.
+///
+/// Returns `Err(BadRequest)` when the path escapes or
+/// crosses a symlink; `Err(NotFound)` when the path does
+/// not exist.
+fn resolve_within_root(
+    root: &std::path::Path,
+    sub_path: &str,
+) -> Result<std::path::PathBuf, ApiError> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|_| ApiError::NotFound {
+        kind: "worktree-path".into(),
+    })?;
+    let trimmed = sub_path.trim_matches('/');
+    let mut joined = canonical_root.clone();
+    if !trimmed.is_empty() {
+        for component in trimmed.split('/') {
+            // Belt-and-braces — the route-layer validator
+            // already rejects these; refusing them here
+            // closes the door if a future caller bypasses
+            // the route layer (e.g. an internal helper).
+            if component.is_empty()
+                || component == "."
+                || component == ".."
+                || component == ".git"
+            {
+                return Err(ApiError::BadRequest {
+                    detail: "path contains forbidden component".into(),
+                });
+            }
+            joined.push(component);
+            // Refuse symlinks at every depth. We cannot defer
+            // this to the canonicalize check below because
+            // canonicalize FOLLOWS symlinks and the caller
+            // wants to apply `symlink_metadata` to the
+            // returned path; if we returned the canonical
+            // (followed) form, a downstream `is_symlink()`
+            // check would always say "no".
+            match std::fs::symlink_metadata(&joined) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err(ApiError::BadRequest {
+                        detail: "path crosses a symlink".into(),
+                    });
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    // Final-component miss is NotFound; an
+                    // earlier-component miss is unusual but we
+                    // surface NotFound either way (no need to
+                    // distinguish for the operator UI).
+                    return Err(ApiError::NotFound {
+                        kind: "tree-entry".into(),
+                    });
+                }
+            }
+        }
+    }
+    // Defence-in-depth: even with no symlinks on the path,
+    // verify the canonical form is under the canonical root.
+    let canonical = std::fs::canonicalize(&joined).map_err(|_| ApiError::NotFound {
+        kind: "tree-entry".into(),
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(ApiError::BadRequest {
+            detail: "path escapes worktree root".into(),
+        });
+    }
+    // Return the JOINED (non-canonicalized-from-symlinks)
+    // path; the caller will run `symlink_metadata` on it and
+    // must see the actual entry, not a followed link.
+    Ok(joined)
 }
 
 /// Common task-row → TaskView projection. Pulls structured

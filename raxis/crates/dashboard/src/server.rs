@@ -345,6 +345,12 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/git/worktrees/:name/log",             get(git::log::<D>))
         .route("/api/git/worktrees/:name/diff",            get(git::diff_default::<D>))
         .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>))
+        // Repo browsing — directory tree + file content under
+        // the worktree root, both subject to the
+        // path-allowlist + symlink-escape sandbox in
+        // `KernelDashboardData::worktree_{tree,file}`.
+        .route("/api/git/worktrees/:name/tree",            get(git::tree::<D>))
+        .route("/api/git/worktrees/:name/file",            get(git::file::<D>))
         // Per-handler wall-clock timeout. Applies to the
         // sub-router only so the SSE long-poll handler is
         // exempt (see the sibling sub-router below).

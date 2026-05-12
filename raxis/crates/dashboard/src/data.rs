@@ -358,6 +358,66 @@ pub struct WorktreeDiff {
     pub files: Vec<WorktreeDiffFile>,
 }
 
+/// One entry in a worktree directory listing returned by
+/// `GET /api/git/worktrees/:name/tree`.
+///
+/// Symlinks are reported as `kind = "symlink"` and never
+/// followed for sizing/listing — the kernel-side
+/// implementation refuses to surface symlink targets that
+/// resolve outside the worktree root.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeTreeEntry {
+    /// Basename of the entry (no path separators).
+    pub name: String,
+    /// Path relative to the worktree root (forward-slash
+    /// separated, no leading slash).
+    pub path: String,
+    /// `"file"`, `"dir"`, `"symlink"`, or `"other"`.
+    pub kind: String,
+    /// Size in bytes (regular files only). `None` for
+    /// directories / symlinks / other.
+    pub size: Option<u64>,
+}
+
+/// Directory listing returned by
+/// `GET /api/git/worktrees/:name/tree`.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeTree {
+    /// Worktree slug.
+    pub name: String,
+    /// Path relative to the worktree root that was listed
+    /// (`""` ⇒ root). Forward-slash separated.
+    pub path: String,
+    /// Entries in the directory, sorted directories-first then
+    /// alphabetical.
+    pub entries: Vec<WorktreeTreeEntry>,
+    /// `true` when the listing was capped by the per-request
+    /// entry budget; the caller should refine the path.
+    pub truncated: bool,
+}
+
+/// File content returned by
+/// `GET /api/git/worktrees/:name/file`.
+///
+/// `encoding = "utf8"` ⇒ `content` is the literal file body.
+/// `encoding = "base64"` ⇒ `content` is standard-base64
+/// (no padding stripped) of the raw bytes; the frontend
+/// can decide whether to render as a hex dump, image
+/// preview, or "binary file" placeholder.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeFile {
+    /// Worktree slug.
+    pub name: String,
+    /// Path relative to the worktree root.
+    pub path: String,
+    /// Size in bytes of the underlying file.
+    pub size: u64,
+    /// `"utf8"` or `"base64"`.
+    pub encoding: String,
+    /// File content (UTF-8 string or base64 of raw bytes).
+    pub content: String,
+}
+
 /// Health snapshot returned by `GET /api/health`.
 #[derive(Debug, Clone, Serialize)]
 pub struct HealthSnapshot {
@@ -534,6 +594,48 @@ pub trait DashboardData: Send + Sync + 'static {
         from_sha: &str,
         to_sha: &str,
     ) -> Result<WorktreeDiff, ApiError>;
+
+    /// Directory listing under the worktree.
+    ///
+    /// `sub_path` is a forward-slash separated path relative to
+    /// the worktree root. `None` / `Some("")` ⇒ the worktree
+    /// root itself.
+    ///
+    /// The implementation MUST refuse path-traversal (`..`),
+    /// absolute paths, NUL bytes, and symlink targets that
+    /// resolve outside the worktree root. A `.git` directory
+    /// at any depth MUST be skipped — never surface repo
+    /// internals to the operator UI.
+    ///
+    /// Returns `Err(NotFound)` for unknown worktree slugs OR
+    /// when the resolved path does not exist; `Err(BadRequest)`
+    /// for malformed input. When the entry count is capped, the
+    /// result's `truncated` flag is `true` and the caller is
+    /// expected to refine the path.
+    fn worktree_tree(
+        &self,
+        name: &str,
+        sub_path: Option<&str>,
+    ) -> Result<WorktreeTree, ApiError>;
+
+    /// File content from the worktree.
+    ///
+    /// `file_path` is required (no listing-by-default), forward-
+    /// slash separated, relative to the worktree root. The
+    /// implementation MUST apply the same sandbox as
+    /// [`Self::worktree_tree`] AND refuse symlinks (do not
+    /// follow), refuse non-regular files, and cap the inline
+    /// payload at the implementation-defined maximum (the
+    /// kernel impl uses 2 MiB and surfaces oversize requests
+    /// as `BadRequest`).
+    ///
+    /// `encoding` is `"utf8"` if the bytes parse as UTF-8 and
+    /// `"base64"` otherwise.
+    fn worktree_file(
+        &self,
+        name: &str,
+        file_path: &str,
+    ) -> Result<WorktreeFile, ApiError>;
 
     /// Replay the last `n` events captured for the session's
     /// stream from the on-disk file ring. Used by the SSE
@@ -1015,6 +1117,41 @@ impl DashboardData for InMemoryDashboardData {
             .get(&(from_sha.to_owned(), to_sha.to_owned()))
             .cloned()
             .ok_or(ApiError::NotFound { kind: "diff-range".into() })
+    }
+
+    fn worktree_tree(
+        &self,
+        name: &str,
+        _sub_path: Option<&str>,
+    ) -> Result<WorktreeTree, ApiError> {
+        // The in-memory fixture has no real on-disk worktree; we
+        // only validate that the slug exists. Tests that need
+        // tree contents go through the kernel impl.
+        let g = self.inner.read();
+        if !g.worktrees.iter().any(|w| w.detail.summary.name == name) {
+            return Err(ApiError::NotFound { kind: "worktree".into() });
+        }
+        Ok(WorktreeTree {
+            name: name.to_owned(),
+            path: String::new(),
+            entries: Vec::new(),
+            truncated: false,
+        })
+    }
+
+    fn worktree_file(
+        &self,
+        name: &str,
+        _file_path: &str,
+    ) -> Result<WorktreeFile, ApiError> {
+        let g = self.inner.read();
+        if !g.worktrees.iter().any(|w| w.detail.summary.name == name) {
+            return Err(ApiError::NotFound { kind: "worktree".into() });
+        }
+        // Fixture has no real bytes — return NotFound so route
+        // tests can still assert the 404 path without seeding
+        // file contents into the in-memory store.
+        Err(ApiError::NotFound { kind: "worktree-file".into() })
     }
 
     fn stream_tail(
