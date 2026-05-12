@@ -40,7 +40,8 @@
 > `INV-CAPACITY-01..06`, `INV-PROVIDER-01..10`,
 > `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`, `INV-DELEGATE-01`,
 > `INV-DISPATCH`, `INV-RUNTIME-CLASSIFICATION` (§12 of this file per
-> the V1 numbering, slated to become INV-09).
+> the V1 numbering, slated to become INV-09),
+> `INV-ELASTIC-01..07` (canonical home: `v2/elastic-vm-scaling.md`).
 >
 > **DEPRECATED in V2 (do NOT mirror; will be removed entirely in V3):**
 > `INV-EGRESS-01` (kernel-mediated egress allowlist; superseded by
