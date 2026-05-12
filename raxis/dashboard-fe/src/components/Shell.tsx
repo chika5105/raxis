@@ -6,6 +6,7 @@ import clsx from "clsx";
 import { authApi, dashboardApi } from "@/api/client";
 import { clearStoredToken, getStoredProfile, getStoredToken } from "@/lib/auth-store";
 import { shortFingerprint } from "@/lib/format";
+import { ThemeToggle } from "@/components/ThemeToggle";
 
 interface NavSection {
   label: string;
@@ -208,9 +209,12 @@ export function Shell({ children }: ShellProps) {
       <main className="flex-1 min-w-0 flex flex-col">
         <header className="h-12 border-b border-edge bg-panel-raised flex items-center px-5 shrink-0">
           <Breadcrumb />
-          <div className="ml-auto flex items-center gap-2 text-xs text-ink-subtle">
-            <span className="kbd">⌘K</span>
-            <span>quick nav</span>
+          <div className="ml-auto flex items-center gap-3 text-xs text-ink-subtle">
+            <div className="flex items-center gap-2">
+              <span className="kbd">⌘K</span>
+              <span>quick nav</span>
+            </div>
+            <ThemeToggle />
           </div>
         </header>
         <div className="flex-1 overflow-y-auto scroll-thin">
