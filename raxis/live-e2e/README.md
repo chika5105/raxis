@@ -113,6 +113,82 @@ proxy understands.)
 
 ---
 
+## Transparent-proxy validation tier
+
+Beyond the per-protocol slices in `raxis-live-e2e`, the realism
+e2e harness layers a second validation tier that proves the
+credential proxy is **transparent to the agent** — a stock
+Python program that knows nothing about RAXIS connects via the
+proxy, pulls the seeded data, and writes byte-canonical outputs.
+The contract, witness module, and assertion order are pinned in
+[`raxis/specs/v2/transparent-proxy-validation.md`](../specs/v2/transparent-proxy-validation.md).
+
+### Pieces
+
+* Stock-Python scripts: `live-e2e/seed/scripts/transparent_proxy/`
+  (`check_postgres.py`, `check_mongodb.py`, `check_redis.py`,
+  `check_smtp.py`, `check_mysql.py`, `check_mssql.py`,
+  `run_all_services.sh`, `requirements.txt`).
+* Operator-realistic prompt:
+  `live-e2e/seed/prompts/transparent_proxy_real_scripts.md`.
+* Plan task: `transparent-proxy-realscripts` (a successor of
+  `service-round-trip` in the realistic-scenario plan;
+  `path_allowlist = ["out/services/", "scripts/last_run_summary.txt"]`).
+* Witness module:
+  `kernel/tests/extended_e2e_support/transparent_proxy_evidence.rs`.
+
+### Run the scripts standalone (no kernel needed)
+
+The scripts read `*_URL` env vars and have no RAXIS imports, so
+an operator can run them directly against the un-mock compose
+stack to confirm behaviour outside a kernel-driven flow:
+
+```bash
+docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait
+
+cd live-e2e/seed/scripts/transparent_proxy
+pip install -r requirements.txt   # or use a venv
+
+DATABASE_URL='postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e_pg' \
+PG_DATABASE=raxis_e2e_pg \
+python3 check_postgres.py --output /tmp/postgres-direct.txt
+
+MONGO_URL='mongodb://127.0.0.1:27399/' \
+MONGO_DATABASE=raxis_e2e_mongo \
+python3 check_mongodb.py --output /tmp/mongodb-direct.txt
+
+REDIS_URL='redis://:raxis_test_pass@127.0.0.1:63799/0' \
+python3 check_redis.py --output /tmp/redis-direct.txt
+
+SMTP_URL='smtp://127.0.0.1:25199/' \
+python3 check_smtp.py --output /tmp/smtp-direct.txt
+
+bash run_all_services.sh /tmp/run-all
+```
+
+Outputs are byte-canonical (pipe-delimited rows, sorted JSON
+lines, etc.). The kernel-driven realism e2e uses the same scripts
+through the credential proxies and asserts the resulting bytes
+match seed-derived canonicals.
+
+### Witness gating + smoke test
+
+The realistic-scenario test (`cargo test -p raxis-kernel
+--test extended_e2e_realistic_scenario`) exercises the
+transparent-proxy witness in **two** modes:
+
+1. **Wiring smoke test (default; both gates off).** Builds a
+   tempdir fixture, writes the canonical output bytes from the
+   `service_evidence` seed shapes, and asserts the witness
+   accepts the fixture against a synthetic audit chain. Fast,
+   no containers required.
+2. **Live-driven (`RAXIS_LIVE_E2E=1 RAXIS_LIVE_E2E_REALISTIC=1`).**
+   Stages the scripts into the executor's worktree, lets the
+   real LLM-driven Executor task run them through the credential
+   proxies, then asserts the chain + worktree against the witness.
+
+---
+
 ## Troubleshooting
 
 ### `<service> container not reachable at 127.0.0.1:<port>`

@@ -76,6 +76,28 @@ pub const TASK_SECRETS_HANDLING: &str =
 pub const TASK_SERVICE_ROUND_TRIP: &str =
     super::service_evidence::TASK_SERVICE_ROUND_TRIP;
 
+/// Transparent-proxy real-scripts executor task id (P3-10).
+///
+/// Companion to `service-round-trip`: the executor is handed a
+/// normal "run these Python scripts and commit their outputs"
+/// task. The scripts (`check_postgres.py`, `check_mongodb.py`,
+/// `check_redis.py`, `check_smtp.py`, `check_mysql.py`,
+/// `check_mssql.py` + a `run_all_services.sh` wrapper) use stock
+/// client libraries (`psycopg2`, `pymongo`, `redis-py`, `pymysql`,
+/// `pymssql`, stdlib `smtplib`) against stock environment
+/// variables (`DATABASE_URL`, `MONGO_URL`, `REDIS_URL`,
+/// `SMTP_URL`, `MYSQL_URL`, `MSSQL_URL`) and have no raxis-aware
+/// branching. The credential proxies must be the only reachable
+/// path to the upstreams.
+///
+/// Witness lives in [`super::transparent_proxy_evidence`]; it
+/// asserts both that the proxy was started for the executor's
+/// session AND that no direct-upstream egress (the kernel's
+/// `TransparentProxyDenied{reason: "proxy_target_bypass"}`
+/// signature) ever fired.
+pub const TASK_TRANSPARENT_PROXY_REALSCRIPTS: &str =
+    super::transparent_proxy_evidence::TASK_TRANSPARENT_PROXY_REALSCRIPTS;
+
 /// Lint-defect reviewer task ids (P3-7). Plain-prompted reviewers
 /// (no directive) whose substantive critique must name one of the
 /// lint-defect target files. Witness:
@@ -144,6 +166,14 @@ pub const SERVICE_ROUND_TRIP_PROMPT_MD: &str = include_str!(
     "../../../live-e2e/seed/prompts/service_round_trip.md"
 );
 
+/// Transparent-proxy real-scripts prompt. Operator-realistic
+/// phrasing — does NOT mention raxis or "credential proxy". The
+/// witness in [`super::transparent_proxy_evidence`] asserts the
+/// prompt does not leak.
+pub const TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD: &str = include_str!(
+    "../../../live-e2e/seed/prompts/transparent_proxy_real_scripts.md"
+);
+
 // ---------------------------------------------------------------------------
 // Plan-TOML builder.
 // ---------------------------------------------------------------------------
@@ -159,6 +189,7 @@ pub fn realistic_plan_toml() -> String {
     let allowlist       = ALLOWLIST_POSITIVE_PROMPT_MD;
     let secrets         = SECRETS_HANDLING_PROMPT_MD;
     let service_rt      = SERVICE_ROUND_TRIP_PROMPT_MD;
+    let transparent_rt  = TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD;
     let mut s = String::new();
     s.push_str(REALISTIC_PLAN_HEADER);
     s.push_str("\n\n");
@@ -189,6 +220,11 @@ pub fn realistic_plan_toml() -> String {
     s.push_str(service_rt);
     s.push_str("\n\"\"\"\n");
     s.push_str(REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS);
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_TRANSPARENT_PROXY_HEAD);
+    s.push_str(transparent_rt);
+    s.push_str("\n\"\"\"\n");
+    s.push_str(REALISTIC_PLAN_TRANSPARENT_PROXY_CREDS);
     s
 }
 
@@ -343,6 +379,37 @@ const REALISTIC_PLAN_SERVICE_ROUND_TRIP_CREDS: &str = r#"
   proxy_type = "smtp"
   mount_as   = "SMTP_URL""#;
 
+const REALISTIC_PLAN_TRANSPARENT_PROXY_HEAD: &str = r#"# -- Transparent-proxy real-scripts Executor (P3-10) ------
+[[tasks]]
+task_id            = "transparent-proxy-realscripts"
+name               = "Run stock-Python service-integrity scripts; commit per-service outputs"
+session_agent_type = "Executor"
+predecessors       = ["service-round-trip"]
+path_allowlist     = ["out/services/", "scripts/last_run_summary.txt"]
+description = """
+"#;
+
+const REALISTIC_PLAN_TRANSPARENT_PROXY_CREDS: &str = r#"
+  [[tasks.credentials]]
+  name       = "test-pg-dev"
+  proxy_type = "postgres"
+  mount_as   = "DATABASE_URL"
+
+  [[tasks.credentials]]
+  name       = "test-mongo-dev"
+  proxy_type = "mongodb"
+  mount_as   = "MONGO_URL"
+
+  [[tasks.credentials]]
+  name       = "test-redis-dev"
+  proxy_type = "redis"
+  mount_as   = "REDIS_URL"
+
+  [[tasks.credentials]]
+  name       = "test-smtp-dev"
+  proxy_type = "smtp"
+  mount_as   = "SMTP_URL""#;
+
 // ---------------------------------------------------------------------------
 // Tests — sanity-check the TOML decodes and pins the task list.
 // ---------------------------------------------------------------------------
@@ -373,6 +440,7 @@ mod tests {
             TASK_ALLOWLIST_POSITIVE,
             TASK_SECRETS_HANDLING,
             TASK_SERVICE_ROUND_TRIP,
+            TASK_TRANSPARENT_PROXY_REALSCRIPTS,
         ] {
             assert!(
                 ids.contains(&needle),
@@ -504,4 +572,102 @@ mod tests {
         }
     }
 
+    #[test]
+    fn transparent_proxy_task_runs_after_service_round_trip() {
+        let toml_text = realistic_plan_toml();
+        let v: toml::Value = toml::from_str(&toml_text)
+            .expect("realistic plan must be valid TOML with transparent-proxy task wired");
+        let tasks = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .expect("[[tasks]] array present");
+        let tp = tasks
+            .iter()
+            .find(|t| {
+                t.get("task_id").and_then(|i| i.as_str())
+                    == Some(TASK_TRANSPARENT_PROXY_REALSCRIPTS)
+            })
+            .expect("transparent-proxy-realscripts task present");
+
+        let predecessors = tp
+            .get("predecessors")
+            .and_then(|p| p.as_array())
+            .expect("transparent-proxy-realscripts.predecessors array");
+        let preds: Vec<&str> = predecessors
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            preds.contains(&TASK_SERVICE_ROUND_TRIP),
+            "transparent-proxy task must run AFTER service-round-trip; \
+             got predecessors {preds:?}",
+        );
+
+        let allowlist = tp
+            .get("path_allowlist")
+            .and_then(|a| a.as_array())
+            .expect("transparent-proxy-realscripts path_allowlist present");
+        let paths: Vec<&str> = allowlist
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            paths.contains(&"out/services/"),
+            "transparent-proxy task must allow writes to out/services/; \
+             got {paths:?}",
+        );
+        assert!(
+            paths.contains(&"scripts/last_run_summary.txt"),
+            "transparent-proxy task must allow writing scripts/last_run_summary.txt; \
+             got {paths:?}",
+        );
+
+        let creds = tp
+            .get("credentials")
+            .and_then(|c| c.as_array())
+            .expect("transparent-proxy-realscripts credentials present");
+        let mounts: Vec<&str> = creds
+            .iter()
+            .filter_map(|c| c.get("mount_as").and_then(|m| m.as_str()))
+            .collect();
+        for needle in ["DATABASE_URL", "MONGO_URL", "REDIS_URL", "SMTP_URL"] {
+            assert!(
+                mounts.contains(&needle),
+                "transparent-proxy task must mount {needle} via the proxy; \
+                 got {mounts:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn transparent_proxy_prompt_is_operator_realistic() {
+        // The whole point of this validation tier is "operator
+        // writes a normal Python script with no awareness of
+        // raxis." The prompt for this task must therefore not
+        // leak raxis-internal vocabulary; the witness in
+        // `transparent_proxy_evidence` keys on this property.
+        let prompt = TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD;
+        let forbidden = ["raxis", "credential proxy", "loopback", "tproxy"];
+        for word in forbidden {
+            assert!(
+                !prompt.to_lowercase().contains(word),
+                "transparent-proxy prompt MUST NOT mention `{word}` \
+                 (operator-realistic phrasing); leak found in prompt",
+            );
+        }
+        // Positive checks — the prompt should clearly point at the
+        // scripts directory and the per-service output convention.
+        for needle in [
+            "scripts/",
+            "out/services/",
+            "last_run_summary.txt",
+            "check_postgres.py",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "transparent-proxy prompt must mention `{needle}` (len={})",
+                prompt.len(),
+            );
+        }
+    }
 }

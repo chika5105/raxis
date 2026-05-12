@@ -1,0 +1,15 @@
+# Pinned client library versions for the transparent-proxy realism
+# scripts. Pins are exact so a transitive update cannot silently change
+# behaviour under the realism witness.
+#
+# Update protocol: when bumping any pin, re-run
+#   docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait
+#   PYTHONPATH=. python3 scripts/check_<service>.py --output /tmp/<svc>.txt
+# against the un-mock stack to confirm the canonical-bytes shape did
+# not regress.
+
+psycopg2-binary==2.9.10
+pymongo==4.10.1
+redis==5.2.1
+PyMySQL==1.1.1
+pymssql==2.3.2

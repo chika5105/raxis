@@ -223,6 +223,86 @@ Reference: [`recipes/ops/12-debug-egress-denial.md`](../recipes/ops/12-debug-egr
 
 ---
 
+## 8b · The executor's Python script cannot connect to `<service>`
+
+**When.** An Executor task that runs a stock Python script
+(`psycopg2.connect(...)`, `pymongo.MongoClient(...)`,
+`redis.from_url(...)`, `smtplib.SMTP(...)`, `pymysql.connect(...)`,
+`pymssql.connect(...)`) raises a connection / authentication
+error inside the VM. Symptoms in the task log:
+
+* `psycopg2.OperationalError: could not translate host name "..."` —
+  the script tried to connect to a raw upstream host, not the
+  proxy.
+* `pymongo.errors.InvalidURI: ... Scheme must be one of mongodb` —
+  the script received a malformed connection string.
+* `redis.exceptions.ConnectionError: Error 111 connecting to ...` —
+  egress to the upstream's real address was admission-denied; the
+  proxy URL was not consumed.
+* `smtplib.SMTPServerDisconnected: ... server refused connection` —
+  same as above, for SMTP.
+
+**Why.** The credential-proxy manager injects a per-service URL
+env var (`DATABASE_URL`, `MONGO_URL`, `REDIS_URL`, `SMTP_URL`,
+`MYSQL_URL`, `MSSQL_URL`) into the task VM. The script MUST read
+the URL from the env var verbatim; hard-coding the upstream host
+is rejected by Tier-1 egress with a `TransparentProxyDenied`
+audit event. Common root causes:
+
+1. The script is reading a non-standard env var (e.g.
+   `MONGODB_URI`, `POSTGRES_URL`) the proxy did not mount.
+2. The script is hard-coding the upstream `host:port` from a
+   pre-RAXIS config file.
+3. The plan task is missing a `[[tasks.credentials]]` entry for
+   the service the script needs — the proxy was never started so
+   no env var was injected.
+4. The executor image is missing the pinned client library so
+   the import fails before the connect call. Symptoms then
+   include `ModuleNotFoundError: No module named '<library>'`.
+
+**Fix.**
+
+1. Confirm the script reads from the canonical env var:
+
+   ```bash
+   raxis log --task <task-id> --kind CredentialProxyStarted
+   ```
+
+   This lists the proxies that were started for the task and the
+   `mount_as` env var each was bound to. Match those against the
+   `os.environ[...]` reads in the script.
+
+2. Confirm the plan declares the credential mount. In the plan
+   TOML the task must carry a credentials entry:
+
+   ```toml
+   [[tasks.credentials]]
+   name       = "test-mongo-dev"
+   proxy_type = "mongodb"
+   mount_as   = "MONGO_URL"
+   ```
+
+3. If the executor image is custom (not the starter), confirm it
+   ships the client library at the same pinned version the script
+   imports. The starter image installs
+   `psycopg2-binary==2.9.10`, `pymongo==4.10.1`, `redis==5.2.1`,
+   `PyMySQL==1.1.1`, `pymssql==2.3.2`; pin to these versions if
+   you are inheriting from a custom base.
+
+4. If you see a `TransparentProxyDenied{reason: "proxy_target_bypass"}`
+   event in the chain, the script tried to dial the upstream
+   directly. That's the *correct* kernel behaviour — the proxy
+   is the only legal egress — and the fix is to remove the
+   hard-coded host from the script, NOT to widen the egress
+   allowlist.
+
+Reference: [`specs/v2/transparent-proxy-validation.md`](../../specs/v2/transparent-proxy-validation.md),
+[`specs/v2/credential-proxy.md`](../../specs/v2/credential-proxy.md),
+[`live-e2e/seed/scripts/transparent_proxy/`](../../live-e2e/seed/scripts/transparent_proxy/)
+for canonical script shapes.
+
+---
+
 ## 9 · Audit chain reports a gap or hash mismatch
 
 **When.** `raxis verify-chain` exits non-zero with a "gap at seq=N" or

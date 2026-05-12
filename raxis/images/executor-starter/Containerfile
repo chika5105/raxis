@@ -64,6 +64,32 @@ RUN apt-get update && apt-get install --no-install-recommends -y \
     python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
+# Pinned Python client libraries used by the operator's stock
+# service-integrity scripts (see
+# `raxis/live-e2e/seed/scripts/transparent_proxy/requirements.txt`).
+# Versions MUST stay in lock-step with that requirements file so the
+# realistic-scenario transparent-proxy task does not silently drift
+# under a transitive library bump.
+#
+#   * psycopg2-binary - Postgres (DBAPI 2.0; `DATABASE_URL`)
+#   * pymongo        - MongoDB  (`MONGO_URL`)
+#   * redis          - Redis    (`REDIS_URL`)
+#   * PyMySQL        - MySQL    (`MYSQL_URL`; opt-in)
+#   * pymssql        - MSSQL    (`MSSQL_URL`; opt-in)
+#
+# `--break-system-packages` is required because Debian bookworm
+# treats the system Python as a PEP-668 "externally managed
+# environment". The starter image is a single-tenant VM rootfs;
+# there is no system package manager racing against pip, so the
+# concern PEP-668 guards against does not apply here. We use
+# `--no-cache-dir` so the layer stays minimal.
+RUN pip3 install --no-cache-dir --break-system-packages \
+        "psycopg2-binary==2.9.10" \
+        "pymongo==4.10.1" \
+        "redis==5.2.1" \
+        "PyMySQL==1.1.1" \
+        "pymssql==2.3.2"
+
 # Rust stable via rustup.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ENV PATH=/root/.cargo/bin:$PATH

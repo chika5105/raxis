@@ -100,7 +100,8 @@ use extended_e2e_support::{
     plan_realistic::{
         realistic_plan_toml, SEED_SCENARIO_ID, TASK_ALLOWLIST_POSITIVE,
         TASK_LINT_DEFECT, TASK_MATERIALIZE, TASK_SECRETS_HANDLING,
-        TASK_SERVICE_ROUND_TRIP, TASK_XFILE_REFACTOR,
+        TASK_SERVICE_ROUND_TRIP, TASK_TRANSPARENT_PROXY_REALSCRIPTS,
+        TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
     secrets::{seed_secrets_fixtures, SecretsHandlingWitness},
@@ -110,6 +111,10 @@ use extended_e2e_support::{
         collect_active_witness_failures, render_failures, seed_mongodb,
         seed_mssql, seed_mysql, seed_postgres, seed_redis, seed_smtp,
         WitnessScope,
+    },
+    transparent_proxy_evidence::{
+        self as tp_evidence,
+        TransparentProxyExpectations, WRAPPER_SUMMARY_PATH,
     },
     witnesses::{
         EnforcementWitness, NoSecurityViolationWitness,
@@ -248,6 +253,21 @@ fn realistic_session_lifecycle() {
         TASK_XFILE_REFACTOR,
     );
 
+    // ── Stage the stock-Python scripts into the
+    //    transparent-proxy executor's worktree. The kernel will
+    //    eventually materialise that worktree once the upstream
+    //    `service-round-trip` task completes; we poll for the
+    //    directory to appear (gated by the same long deadline as
+    //    `materialise_realistic_seed`) and then copy the seed
+    //    scripts in. The scripts have no raxis-specific symbols;
+    //    they simply consume the env vars (`DATABASE_URL`,
+    //    `MONGO_URL`, …) the credential-proxy manager injects.
+    stage_transparent_proxy_scripts(
+        kernel.data_dir(),
+        &initiative_primary,
+        TASK_TRANSPARENT_PROXY_REALSCRIPTS,
+    );
+
     // ── Wait for both initiatives to merge ───────────────────
     let chain = poll_for_dual_lifecycle_completion(
         kernel.data_dir(),
@@ -339,6 +359,43 @@ fn realistic_session_lifecycle() {
     ) { panic!("[realism-e2e] mssql round-trip failed: {e}"); }
     eprintln!("[realism-e2e] service-evidence round-trip witnesses satisfied");
 
+    // ── Transparent-proxy round-trip ─────────────────────────
+    // Companion witness to `service_evidence`: asserts the
+    // executor used stock client libraries against stock env vars
+    // (no raxis shims) AND that the kernel refused any direct-
+    // upstream egress (proxy is the only path). Together with the
+    // service-evidence pass above this proves the transparency
+    // contract end-to-end.
+    let tp_workdir = locate_executor_worktree(
+        kernel.data_dir(),
+        &initiative_primary,
+        TASK_TRANSPARENT_PROXY_REALSCRIPTS,
+    );
+    let tp_scope = WitnessScope::new(
+        initiative_primary.clone(),
+        TASK_TRANSPARENT_PROXY_REALSCRIPTS.to_owned(),
+    );
+    let tp_expectations = TransparentProxyExpectations {
+        postgres: pg_seed.clone(),
+        mongodb:  mongo_seed.clone(),
+        redis:    redis_seed.clone(),
+        smtp:     smtp_seed.clone(),
+        mysql:    _mysql_seed.clone(),
+        mssql:    _mssql_seed.clone(),
+    };
+    let tp_failures = tp_evidence::collect_active_witness_failures(
+        &chain,
+        &tp_workdir,
+        &tp_expectations,
+        &tp_scope,
+    );
+    assert!(
+        tp_failures.is_empty(),
+        "[realism-e2e] transparent-proxy witnesses failed:\n{}",
+        tp_evidence::render_failures(&tp_failures),
+    );
+    eprintln!("[realism-e2e] transparent-proxy round-trip witnesses satisfied");
+
     tier3.add_worktree(
         format!("primary-xfile ({})", &initiative_primary),
         &primary_workdir,
@@ -346,6 +403,20 @@ fn realistic_session_lifecycle() {
     tier3.add_worktree(
         format!("primary-services ({})", &initiative_primary),
         &service_workdir,
+    );
+    // Surface the transparent-proxy worktree so an operator
+    // inspecting a Tier-3 failure can `cat
+    // <workdir>/out/services/*.txt` and
+    // `<workdir>/scripts/last_run_summary.txt` directly. We use a
+    // label suffix that names the two notable paths so the
+    // copy-pasteable line tells the operator exactly what to look
+    // for without needing a separate note entry.
+    tier3.add_worktree(
+        format!(
+            "primary-transparent-proxy ({}; out/services/ + {WRAPPER_SUMMARY_PATH})",
+            &initiative_primary,
+        ),
+        &tp_workdir,
     );
     // The realistic-scenario harness does not mount the dashboard
     // (the kernel boot path here skips `open_dashboard_with_autologin`);
@@ -472,6 +543,36 @@ fn wiring_smoke_test() {
     let _ = crash_recovery::CrashRecoveryWitness::new("placeholder");
     let _ = multi_initiative::sibling_plan_toml();
     let _ = realistic_plan_toml();
+
+    // TransparentProxyEvidence: hand-built worktree fixture +
+    // synthetic chain. Validates the witness wires end-to-end and
+    // catches a proxy-bypass denial on the negative path. We use
+    // a SECOND tempdir so the secrets fixture writes earlier in
+    // this function do not collide with the canonical out/services
+    // tree this helper lays down.
+    let tp_tmp = tempfile::tempdir().unwrap();
+    let tp_expectations = tp_evidence::default_expectations();
+    tp_evidence::write_canonical_outputs_for_smoke(
+        tp_tmp.path(), &tp_expectations,
+    ).expect("smoke: write_canonical_outputs_for_smoke");
+    let tp_scope = WitnessScope::new(
+        "init-primary".to_owned(),
+        TASK_TRANSPARENT_PROXY_REALSCRIPTS.to_owned(),
+    );
+    let tp_chain = tp_evidence::synthetic_transparent_chain(
+        "init-primary",
+        TASK_TRANSPARENT_PROXY_REALSCRIPTS,
+        "sess-tp-smoke",
+    );
+    let tp_failures = tp_evidence::collect_active_witness_failures(
+        &tp_chain, tp_tmp.path(), &tp_expectations, &tp_scope,
+    );
+    assert!(
+        tp_failures.is_empty(),
+        "smoke: transparent-proxy witness on synthetic chain:\n{}",
+        tp_evidence::render_failures(&tp_failures),
+    );
+    eprintln!("[realism-e2e] smoke: transparent-proxy witness satisfied");
 
     eprintln!("[realism-e2e] wiring smoke test passed");
 }
@@ -700,4 +801,72 @@ fn materialise_realistic_seed(
         .expect("seed_secrets_fixtures into the materialized worktree");
     eprintln!("[realism-e2e] seed + secrets fixtures materialised into {}",
         workdir.display());
+}
+
+// ---------------------------------------------------------------------------
+// Transparent-proxy script overlay.
+//
+// The `transparent-proxy-realscripts` executor task expects the
+// stock-Python service-integrity scripts to be present at
+// `<worktree>/scripts/` BEFORE it wakes up. The scripts live
+// under `live-e2e/seed/scripts/transparent_proxy/` in the
+// repository; this helper polls for the executor's worktree to
+// materialise, then asks the witness module to copy every pinned
+// script into it.
+//
+// We delegate to `tp_evidence::stage_scripts_into_worktree` so the
+// list of staged files lives in exactly ONE place (the witness's
+// `STAGED_SCRIPT_NAMES` constant) — the staging path and the
+// witness-side test both consult the same source-of-truth list.
+// ---------------------------------------------------------------------------
+
+fn stage_transparent_proxy_scripts(
+    data_dir: &Path,
+    initiative_id: &str,
+    task_id: &str,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let workdir: PathBuf = loop {
+        if std::time::Instant::now() > deadline {
+            panic!(
+                "timed out waiting for transparent-proxy worktree at \
+                 <data_dir>/worktrees/{initiative_id}/{task_id}/ — \
+                 the kernel never materialised the executor's tree; \
+                 staging the stock-Python scripts is impossible",
+            );
+        }
+        let candidate = data_dir.join("worktrees")
+            .join(initiative_id)
+            .join(task_id);
+        if candidate.exists() {
+            break candidate;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    eprintln!(
+        "[realism-e2e] transparent-proxy worktree appeared at {}; \
+         staging stock-Python check_*.py + run_all_services.sh + requirements.txt",
+        workdir.display(),
+    );
+
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .expect("workspace parent dir present")
+        .to_path_buf();
+
+    let staged = tp_evidence::stage_scripts_into_worktree(
+        &workdir,
+        &workspace_root,
+    ).unwrap_or_else(|e| {
+        panic!(
+            "failed to stage transparent-proxy scripts into {}: {e}",
+            workdir.display(),
+        )
+    });
+    eprintln!(
+        "[realism-e2e] staged {} stock-Python file(s) into {}/scripts/",
+        staged.len(),
+        workdir.display(),
+    );
 }
