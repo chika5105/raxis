@@ -19,8 +19,8 @@ pub mod loader;
 pub mod observability;
 
 pub use bundle::{
-    DefaultExecutorImageConfig, EnvironmentConfig, GateEntry, GatewaySection, HostCapacityConfig,
-    IntegrationMergeVerifierAppliesTo, IntegrationMergeVerifierEntry,
+    DefaultExecutorImageConfig, ElasticConfig, EnvironmentConfig, GateEntry, GatewaySection,
+    HostCapacityConfig, IntegrationMergeVerifierAppliesTo, IntegrationMergeVerifierEntry,
     IntegrationMergeVerifierOnFailure, IsolationConfig, LaneEntry,
     NotificationChannel, NotificationChannelKind, NotificationRoute, OperatorEntry,
     PermittedCredentialConfig, PlanBundleLimitsSection, PlanSigningSection, PolicyBundle,

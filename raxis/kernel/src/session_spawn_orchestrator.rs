@@ -188,6 +188,32 @@ pub struct OrchestratorSpawnContext {
     /// stamped (live-mode planner contract is not populated;
     /// matches the V2.3 scaffold path).
     pub data_dir:   Option<PathBuf>,
+    /// V2 `elastic-vm-scaling.md §4.4` — per-role rolling window
+    /// of recent utilisation samples. Consulted at spawn time so a
+    /// run of consistently under-used Orchestrator sessions biases
+    /// the next spawn smaller. Allowed regardless of the elastic
+    /// flag (`§6` — never raises capacity).
+    ///
+    /// **Default** is a fresh empty tracker — when the host kernel
+    /// boots without sharing one across the orchestrator and
+    /// executor contexts, both windows fill independently. The
+    /// `with_scale_down_history` builder lets `main.rs` /
+    /// `ipc/context.rs` thread a single shared tracker through
+    /// both spawn contexts so e.g. an Executor activation can
+    /// read its own history alongside the orchestrator's.
+    pub scale_down_history: Arc<crate::elastic::ScaleDownHistory>,
+    /// V2 `elastic-vm-scaling.md §5` — sliding 60-second window
+    /// of admitted scaling events. Consulted before a scale-down
+    /// bias or a scale-up respawn lands; on overflow the
+    /// decision is deferred via
+    /// `SessionVmScaleDeferred { reason: "RateLimit" }`
+    /// (INV-ELASTIC-04 — soft event).
+    ///
+    /// Default is a fresh empty limiter; production wires a
+    /// shared `Arc` across both spawn contexts via
+    /// `with_rate_limiter` so up- and down-events on the same
+    /// host share the same budget.
+    pub rate_limiter: Arc<crate::elastic::ScalingRateLimiter>,
 }
 
 impl OrchestratorSpawnContext {
@@ -214,6 +240,8 @@ impl OrchestratorSpawnContext {
             // path).
             mem_mib:    1024,
             data_dir:   None,
+            scale_down_history: Arc::new(crate::elastic::ScaleDownHistory::new()),
+            rate_limiter:       Arc::new(crate::elastic::ScalingRateLimiter::new()),
         }
     }
 
@@ -223,6 +251,29 @@ impl OrchestratorSpawnContext {
     /// `kernel/src/main.rs::data_dir()`.
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
         self.data_dir = Some(data_dir);
+        self
+    }
+
+    /// Builder: share an externally-owned scale-down tracker so
+    /// the orchestrator and executor spawn contexts read /
+    /// write the SAME windows. `main.rs` constructs ONE
+    /// [`crate::elastic::ScaleDownHistory`] at boot and threads
+    /// the same `Arc` through both contexts.
+    pub fn with_scale_down_history(
+        mut self,
+        history: Arc<crate::elastic::ScaleDownHistory>,
+    ) -> Self {
+        self.scale_down_history = history;
+        self
+    }
+
+    /// Builder: share an externally-owned rate limiter. See
+    /// [`with_scale_down_history`](Self::with_scale_down_history).
+    pub fn with_rate_limiter(
+        mut self,
+        rl: Arc<crate::elastic::ScalingRateLimiter>,
+    ) -> Self {
+        self.rate_limiter = rl;
         self
     }
 }
@@ -890,19 +941,155 @@ async fn spawn_orchestrator_for_initiative(
     let mut workspace_mounts = vec![orch_mount];
     workspace_mounts.extend(extra_workspace_mounts);
 
-    let req = SpawnRequest {
-        session_id:        session_id.to_owned(),
-        task_id:           None, // orchestrator: no `[[tasks]]` row
-        initiative_id:     initiative_id.to_owned(),
-        image:             verified_image,
+    // ── Step 3.5: consult the per-role scale-down history. ────────
+    //
+    // V2 `elastic-vm-scaling.md §4.4` — when the recent rolling
+    // window of orchestrator sessions all reported low utilisation,
+    // bias this spawn smaller. Allowed even when `elastic = false`
+    // (`§6` — never raises capacity). The §5 rate limiter is
+    // consulted INSIDE `maybe_apply_scale_down`; on overflow the
+    // bias is silently skipped and `SessionVmScaleDeferred`
+    // lands instead (INV-ELASTIC-04 — soft event).
+    let (vm_spec, scale_down_decision) = maybe_apply_scale_down(
+        vm_spec,
+        crate::elastic::RoleKey::Orchestrator,
+        &spawn_ctx.scale_down_history,
+        &spawn_ctx.rate_limiter,
+        policy.elastic(),
+        service.audit(),
+        session_id,
+        None,
+        initiative_id,
+        &crate::elastic::PlanElasticOverrides::default(),
+    );
+
+    // ── Step 4: delegate via the bounded-retry helper. ────────────
+    //
+    // V2 `elastic-vm-scaling.md §3.2` — every kernel-side spawn is
+    // wrapped in `spawn_with_transient_retry`. Transient failures
+    // (per `IsolationError::classify`) are retried with exponential
+    // backoff up to `policy.[elastic].transient_retry_max_attempts`;
+    // permanent failures short-circuit to `SessionVmFailedFinal`.
+    // Successful spawns still emit `SessionVmSpawned` from inside
+    // `SessionSpawnService::spawn_session` (unchanged).
+    let proto = SpawnRequestProto {
+        session_id:       session_id.to_owned(),
+        task_id:          None, // orchestrator: no `[[tasks]]` row
+        initiative_id:    initiative_id.to_owned(),
+        image:            verified_image,
         workspace_mounts,
         vm_spec,
         credentials,
-        admission_service: Box::new(PolicyAdmissionService::new(egress_allowlist)),
+        egress_allowlist,
     };
+    let handle = spawn_with_transient_retry(
+        &service,
+        policy.elastic(),
+        proto,
+    ).await?;
 
-    // ── Step 4: delegate. ─────────────────────────────────────────
-    Ok(service.spawn_session(req).await?)
+    // ── Step 5: emit SessionVmScaleEvent on a successful down-bias.
+    //
+    // INV-ELASTIC-03 write-then-emit ordering: the new VM is
+    // bound (SessionVmSpawned was emitted inside spawn_session),
+    // and the scale event lands AFTER the spawn so audit replay
+    // attributes the smaller spec to the §4.4 bias. On audit-emit
+    // failure we log + clear the tracker (so a future spawn does
+    // not also wedge on the same condition) and return Ok — the
+    // VM is already running.
+    if let Some((prev_vcpus, prev_mb, new_vcpus, new_mb, reason)) = scale_down_decision {
+        if let Err(e) = crate::elastic::emit_scale_event_audit(
+            service.audit(),
+            session_id,
+            None,
+            initiative_id,
+            crate::elastic::ScaleDirection::Down,
+            prev_vcpus,
+            new_vcpus,
+            prev_mb,
+            new_mb,
+            &reason,
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"orchestrator_scale_down_audit_emit_failed\",\
+                 \"session_id\":\"{session_id}\",\"error\":\"{e}\"}}",
+            );
+        }
+        spawn_ctx.scale_down_history.clear(crate::elastic::RoleKey::Orchestrator);
+    }
+
+    Ok(handle)
+}
+
+/// Apply the §4.4 next-spawn down-bias to `vm_spec` when the
+/// rolling window for `role` says the recent N sessions were
+/// under-used AND the §5 rate limiter admits the new event.
+///
+/// Returns `(vm_spec_after_bias, Some((prev_vcpus, prev_mb,
+/// new_vcpus, new_mb, reason)))` when the bias was applied, or
+/// `(vm_spec_unchanged, None)` when the history did not justify
+/// a bias OR the rate limiter deferred. In the rate-limit-defer
+/// case the helper itself emits `SessionVmScaleDeferred { reason:
+/// "RateLimit" }` so callers do not have to track the deferral
+/// path separately (INV-ELASTIC-04 — soft event, no hard
+/// failure).
+///
+/// **Why a free function** (rather than inlined): the orchestrator
+/// and executor spawn paths share the exact same shape — consult,
+/// rebuild, return + capture for the post-spawn audit emit. The
+/// helper keeps both spawn paths aligned without duplicating the
+/// logic.
+#[allow(clippy::too_many_arguments)]
+fn maybe_apply_scale_down(
+    vm_spec:          VmSpec,
+    role:             crate::elastic::RoleKey,
+    history:          &Arc<crate::elastic::ScaleDownHistory>,
+    rate_limiter:     &Arc<crate::elastic::ScalingRateLimiter>,
+    elastic:          &raxis_policy::ElasticConfig,
+    audit:            &Arc<dyn raxis_audit_tools::AuditSink>,
+    session_id:       &str,
+    task_id:          Option<&str>,
+    initiative_id:    &str,
+    plan:             &crate::elastic::PlanElasticOverrides,
+) -> (VmSpec, Option<(u32, u32, u32, u32, String)>) {
+    match crate::elastic::decide_scale_down(&vm_spec, elastic, plan, history.as_ref(), role) {
+        crate::elastic::ScaleDecision::Apply {
+            new_spec, prev_vcpus, new_vcpus,
+            prev_memory_mb, new_memory_mb, reason, ..
+        } => {
+            // §5 rate-limit gate — INV-ELASTIC-04 soft deferral.
+            let now = unix_now_secs();
+            match rate_limiter.try_admit(
+                now,
+                elastic.max_concurrent_scaling_events_per_minute,
+            ) {
+                crate::elastic::RateLimitDecision::Admit => (
+                    new_spec,
+                    Some((prev_vcpus, prev_memory_mb, new_vcpus, new_memory_mb, reason)),
+                ),
+                crate::elastic::RateLimitDecision::Defer => {
+                    if let Err(e) = crate::elastic::emit_scale_deferred_audit(
+                        audit,
+                        session_id,
+                        task_id,
+                        initiative_id,
+                        crate::elastic::ScaleDirection::Down,
+                        "RateLimit",
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"scale_deferred_audit_emit_failed\",\
+                             \"session_id\":\"{session_id}\",\"direction\":\"Down\",\
+                             \"error\":\"{e}\"}}",
+                        );
+                    }
+                    // Skip the bias for this spawn; the next tick
+                    // re-evaluates the trigger.
+                    (vm_spec, None)
+                }
+            }
+        }
+        crate::elastic::ScaleDecision::Skip { .. } => (vm_spec, None),
+    }
 }
 
 /// **Drive the kernel ↔ guest IPC channel for a freshly-spawned
@@ -1510,6 +1697,568 @@ fn populate_sleep_cap_env_or_insert(
 }
 
 // ---------------------------------------------------------------------------
+// Bounded retry on transient VM spawn failure — `spawn_with_transient_retry`.
+// ---------------------------------------------------------------------------
+//
+// V2 `elastic-vm-scaling.md §3.1 / §3.2 / §3.3` — the kernel-side
+// bridge wraps every VM-spawn call in a bounded retry loop driven by
+// `policy.[elastic].transient_retry_*`. The loop:
+//
+//   * Re-builds a fresh [`SpawnRequest`] per attempt (the request is
+//     consumed by `SessionSpawnService::spawn_session`; cloning the
+//     prototype + freshly boxing a per-attempt admission service is
+//     cheaper than threading the whole 2 KiB request through the
+//     loop by `Clone`).
+//   * Classifies each [`SpawnError`] via [`classify_spawn_error`].
+//     `IsolationFailureClass::Permanent` short-circuits to
+//     `SessionVmFailedFinal` per **INV-ELASTIC-02** (no silent
+//     retry on permanent failures).
+//   * Bounds retries at `transient_retry_max_attempts` per
+//     **INV-ELASTIC-06**; exhaustion emits `SessionVmFailedFinal`.
+//   * Emits `SessionVmRespawnAttempted` for each retry with the
+//     previous attempt's `failure_class` projection (always
+//     `"Transient"` for emitted respawn events, by construction).
+//
+// The success path is unchanged: on `Ok(handle)` the loop returns
+// immediately and `SessionVmSpawned` lands inside
+// `SessionSpawnService::spawn_session` exactly as before.
+
+/// Bundle of cloneable inputs needed to construct a fresh
+/// [`SpawnRequest`] per retry attempt.
+///
+/// The fields are split out from the inline struct literal at each
+/// call site so the retry helper can re-clone and re-box the per-
+/// attempt admission service without consuming any of the upstream
+/// preparation work (image resolution, credential rehydration, KSB
+/// assembly, env stamping). All fields except `egress_allowlist` are
+/// `Clone`-derived in their owning crates; `egress_allowlist` is
+/// declared `#[derive(Clone)]` in `raxis-egress-admission`.
+///
+/// **Public** so the dynamic-resource-adjustment respawn helper
+/// (`respawn_with_larger_resources`) can be called from a future
+/// signal-observer / scaling decision engine module without
+/// duplicating the spawn-request construction shape.
+pub struct SpawnRequestProto {
+    /// Stable per-session identifier minted by the kernel.
+    pub session_id:        String,
+    /// Owning task id (`None` for the canonical Orchestrator
+    /// session, which has no `[[tasks]]` row).
+    pub task_id:           Option<String>,
+    /// Owning initiative id.
+    pub initiative_id:     String,
+    /// Verified image bytes the substrate boots.
+    pub image:             VerifiedImage,
+    /// Mounts the substrate exposes to the guest.
+    pub workspace_mounts:  Vec<raxis_isolation::WorkspaceMount>,
+    /// Resource envelope + boot args. The dynamic-resource-
+    /// adjustment path mutates `vcpu_count` / `mem_mib` via the
+    /// `crate::elastic::build_scaled_vm_spec` chokepoint.
+    pub vm_spec:           VmSpec,
+    /// Credential decls the spawn service rehydrates per attempt.
+    pub credentials:       Vec<raxis_plan_credentials::TaskCredentialDecl>,
+    /// Egress allowlist — cloned per attempt to construct a fresh
+    /// per-spawn `PolicyAdmissionService`.
+    pub egress_allowlist:  EgressAllowlist,
+}
+
+impl SpawnRequestProto {
+    /// Clone the prototype into a fresh [`SpawnRequest`]. Boxes a
+    /// new per-attempt [`PolicyAdmissionService`] — admission
+    /// services hold per-session listener state and are not reusable
+    /// across attempts.
+    pub fn build_request(&self) -> SpawnRequest {
+        SpawnRequest {
+            session_id:        self.session_id.clone(),
+            task_id:           self.task_id.clone(),
+            initiative_id:     self.initiative_id.clone(),
+            image:             self.image.clone(),
+            workspace_mounts:  self.workspace_mounts.clone(),
+            vm_spec:           self.vm_spec.clone(),
+            credentials:       self.credentials.clone(),
+            admission_service: Box::new(PolicyAdmissionService::new(
+                self.egress_allowlist.clone(),
+            )),
+        }
+    }
+}
+
+/// Project a [`SpawnError`] onto an
+/// [`raxis_isolation::IsolationFailureClass`].
+///
+/// **Mapping rationale.** Only `SpawnError::IsolationSpawn(err)`
+/// carries an [`raxis_isolation::IsolationError`] whose classification
+/// is documented in `elastic-vm-scaling.md §3.1`. Every other
+/// `SpawnError` variant is structurally pre-substrate (credential
+/// proxy bind, admission listener bind, audit-emit) or
+/// post-substrate teardown, and is treated as **Permanent** —
+/// retrying a port-bind race or an audit-fsync error would just
+/// hammer the same fault, and INV-ELASTIC-07 forbids implicit
+/// fall-through to "retry on any error".
+fn classify_spawn_error(err: &SpawnError) -> raxis_isolation::IsolationFailureClass {
+    match err {
+        SpawnError::IsolationSpawn(iso) => iso.classify(),
+        // INV-ELASTIC-07: every non-IsolationSpawn variant is
+        // explicitly Permanent. Adding a new SpawnError variant
+        // requires updating this match (the compiler enforces it).
+        SpawnError::CredentialProxy(_)
+        | SpawnError::AdmissionBind(_)
+        | SpawnError::IsolationShutdown(_)
+        | SpawnError::SessionNotActive { .. }
+        | SpawnError::Audit(_) => raxis_isolation::IsolationFailureClass::Permanent,
+    }
+}
+
+/// Compute the backoff for retry attempt `attempt` (1-indexed:
+/// `attempt = 1` is the first respawn after the original failed
+/// spawn). Exponential schedule clamped to
+/// `transient_retry_max_backoff_ms`:
+///
+/// ```text
+/// backoff = min(initial * 2^(attempt-1), max)
+/// ```
+///
+/// All arithmetic is `u64` internally to avoid overflow when an
+/// operator misconfigures the initial backoff close to `u32::MAX`;
+/// the final clamp is the policy ceiling, which the validator
+/// already constrained to `≤ ELASTIC_MAX_RETRY_BACKOFF_CEILING_MS`.
+fn compute_backoff_ms(initial_ms: u32, max_ms: u32, attempt: u32) -> u32 {
+    debug_assert!(attempt >= 1, "attempt is 1-indexed; caller invariant");
+    let shift = attempt.saturating_sub(1).min(31);
+    let scaled: u64 = (initial_ms as u64).saturating_mul(1u64 << shift);
+    let capped = scaled.min(max_ms as u64);
+    u32::try_from(capped).unwrap_or(max_ms)
+}
+
+/// Wrap [`SessionSpawnService::spawn_session`] in a bounded retry
+/// loop driven by `policy.[elastic].transient_retry_*`.
+///
+/// **Audit emission contract.**
+///
+/// * `Ok(handle)` ⇒ `SessionVmSpawned` was emitted by
+///   `spawn_session` itself (unchanged from before this commit).
+///   This helper emits nothing on the happy path.
+/// * Transient failure with `attempt < max_attempts` ⇒
+///   `SessionVmRespawnAttempted` with `attempt = N` (1-indexed,
+///   i.e. the FIRST retry is `attempt = 1`) and the previous
+///   attempt's `failure_class = "Transient"` projection.
+/// * Transient failure with `attempt >= max_attempts` ⇒
+///   `SessionVmFailedFinal` with `total_attempts = max_attempts + 1`
+///   and `failure_class = "Transient"`.
+/// * Permanent failure (any attempt) ⇒ `SessionVmFailedFinal` with
+///   `total_attempts = N` and `failure_class = "Permanent"`,
+///   short-circuiting the retry loop (INV-ELASTIC-02).
+///
+/// Audit-emit failures are logged but do **not** mask the
+/// underlying spawn error — the original `SpawnError` is propagated
+/// to the caller verbatim so operator dashboards see the substrate
+/// reason rather than an audit-disk-full surrogate.
+async fn spawn_with_transient_retry(
+    service:       &SessionSpawnService,
+    elastic:       &raxis_policy::ElasticConfig,
+    proto:         SpawnRequestProto,
+) -> Result<SpawnHandle, SpawnError> {
+    use raxis_audit_tools::AuditEventKind;
+
+    let max_attempts            = elastic.transient_retry_max_attempts;
+    let initial_backoff_ms      = elastic.transient_retry_initial_backoff_ms;
+    let max_backoff_ms          = elastic.transient_retry_max_backoff_ms;
+
+    // 1-indexed attempt counter for the audit projection. Attempt 0
+    // is the original spawn (the one that just failed when we land
+    // in the `Err` arm); attempt 1 is the FIRST retry.
+    let mut retry_attempt: u32 = 0;
+
+    loop {
+        let req = proto.build_request();
+        match service.spawn_session(req).await {
+            Ok(handle) => return Ok(handle),
+            Err(err) => {
+                let class      = classify_spawn_error(&err);
+                let prev_reason = err.to_string();
+
+                // Permanent ⇒ short-circuit. INV-ELASTIC-02.
+                if matches!(class, raxis_isolation::IsolationFailureClass::Permanent) {
+                    let total_attempts = retry_attempt.saturating_add(1);
+                    if let Err(e) = service.audit().emit(
+                        AuditEventKind::SessionVmFailedFinal {
+                            session_id:    proto.session_id.clone(),
+                            task_id:       proto.task_id.clone(),
+                            initiative_id: proto.initiative_id.clone(),
+                            total_attempts,
+                            failure_class: class.as_str().to_owned(),
+                            final_reason:  prev_reason.clone(),
+                        },
+                        Some(&proto.session_id),
+                        proto.task_id.as_deref(),
+                        Some(&proto.initiative_id),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"session_vm_failed_final_audit_emit_failed\",\
+                             \"session_id\":\"{sid}\",\"phase\":\"permanent\",\"error\":\"{err}\"}}",
+                            sid = proto.session_id,
+                            err = e,
+                        );
+                    }
+                    return Err(err);
+                }
+
+                // Transient: are we at the retry ceiling?
+                // INV-ELASTIC-06: `transient_retry_max_attempts` is
+                // a hard ceiling. `retry_attempt` already counts
+                // completed retries; we admit the next one only when
+                // `retry_attempt < max_attempts`.
+                if retry_attempt >= max_attempts {
+                    // total_attempts = original (1) + completed retries.
+                    let total_attempts = retry_attempt.saturating_add(1);
+                    if let Err(e) = service.audit().emit(
+                        AuditEventKind::SessionVmFailedFinal {
+                            session_id:    proto.session_id.clone(),
+                            task_id:       proto.task_id.clone(),
+                            initiative_id: proto.initiative_id.clone(),
+                            total_attempts,
+                            failure_class: class.as_str().to_owned(),
+                            final_reason:  prev_reason.clone(),
+                        },
+                        Some(&proto.session_id),
+                        proto.task_id.as_deref(),
+                        Some(&proto.initiative_id),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"session_vm_failed_final_audit_emit_failed\",\
+                             \"session_id\":\"{sid}\",\"phase\":\"exhausted\",\"error\":\"{err}\"}}",
+                            sid = proto.session_id,
+                            err = e,
+                        );
+                    }
+                    return Err(err);
+                }
+
+                // Schedule the next retry. attempt counter for the
+                // audit event is 1-indexed (the first retry is
+                // attempt = 1).
+                let next_attempt = retry_attempt.saturating_add(1);
+                let backoff_ms   = compute_backoff_ms(
+                    initial_backoff_ms,
+                    max_backoff_ms,
+                    next_attempt,
+                );
+
+                if let Err(e) = service.audit().emit(
+                    AuditEventKind::SessionVmRespawnAttempted {
+                        session_id:      proto.session_id.clone(),
+                        task_id:         proto.task_id.clone(),
+                        initiative_id:   proto.initiative_id.clone(),
+                        attempt:         next_attempt,
+                        max_attempts,
+                        failure_class:   class.as_str().to_owned(),
+                        previous_reason: prev_reason.clone(),
+                        backoff_ms,
+                    },
+                    Some(&proto.session_id),
+                    proto.task_id.as_deref(),
+                    Some(&proto.initiative_id),
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"session_vm_respawn_attempted_audit_emit_failed\",\
+                         \"session_id\":\"{sid}\",\"attempt\":{attempt},\"error\":\"{err}\"}}",
+                        sid = proto.session_id,
+                        attempt = next_attempt,
+                        err = e,
+                    );
+                }
+
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"session_vm_transient_retry\",\
+                     \"session_id\":\"{sid}\",\"attempt\":{attempt},\
+                     \"max_attempts\":{max_attempts},\"backoff_ms\":{backoff_ms},\
+                     \"failure_class\":\"{class}\",\"previous_reason\":\"{reason}\"}}",
+                    sid = proto.session_id,
+                    attempt = next_attempt,
+                    class = class.as_str(),
+                    reason = prev_reason.replace('"', "\\\""),
+                );
+
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    backoff_ms as u64,
+                ))
+                .await;
+
+                retry_attempt = next_attempt;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic resource adjustment — `respawn_with_larger_resources`.
+// ---------------------------------------------------------------------------
+//
+// V2 `elastic-vm-scaling.md §4.2` — the scale-up event flow. The
+// signal observer (future wiring; see `crate::elastic::ScaleSignal`)
+// produces a `ScaleDecision::Apply` from
+// `crate::elastic::decide_scale_up`; this helper consumes that
+// decision and orchestrates the audit-and-respawn dance:
+//
+//   terminate_session(prev)               (emits SessionVmExited)
+//     → emit SessionVmScaleEvent          (INV-ELASTIC-03 write-then-emit
+//                                           ordering: between Exit and Spawn)
+//     → spawn_with_transient_retry(new)   (emits SessionVmSpawned)
+//
+// The new `VmSpec` is already produced by `build_scaled_vm_spec`,
+// which is the **single mechanical chokepoint** that honours
+// INV-ELASTIC-05 (no upward scaling when `elastic = false`).
+// Callers MUST NOT post-process the spec returned by the chokepoint
+// — doing so would route around the INV-ELASTIC-05 guarantee.
+
+/// Outcome of a [`respawn_with_larger_resources`] call.
+///
+/// Pre-existing `OrchestratorSpawnError` does not cleanly express
+/// the "old session terminated but new spawn failed" case; this
+/// dedicated enum surfaces it as `Respawn { drain_ok: true,
+/// spawn_err }` so the caller can decide whether to retry the
+/// scaling decision next tick or surface the failure verbatim.
+#[derive(Debug)]
+pub enum RespawnWithLargerOutcome {
+    /// Successful respawn. The new session is bound; the audit
+    /// chain shows `SessionVmExited` → `SessionVmScaleEvent` →
+    /// `SessionVmSpawned`.
+    Ok(SpawnHandle),
+
+    /// Failed to terminate the previous session before the
+    /// respawn. The new session was NOT bound; the previous
+    /// session is in an unknown state (the substrate may still
+    /// have a live VM). The caller should surface the error to
+    /// the operator and avoid re-entering the scaling loop until
+    /// the old session is reconciled.
+    DrainFailed(SpawnError),
+
+    /// Terminated the previous session but the new spawn failed
+    /// (after the §3.2 retry loop exhausted). The kernel is now
+    /// without a live session for this `(initiative_id, task_id)`
+    /// pair; the caller is responsible for the operator-visible
+    /// recovery (typically: surface a structured log + let the
+    /// next signal-observer tick request a fresh scale decision
+    /// against the baseline spec).
+    SpawnFailed(SpawnError),
+}
+
+/// Drain the previous session, emit `SessionVmScaleEvent`, and
+/// spawn the new session with the scaled-up `VmSpec`.
+///
+/// **Audit ordering** (`elastic-vm-scaling.md §4.2`,
+/// INV-ELASTIC-03):
+///
+///   1. `service.terminate_session(prev_session_id)` ⇒
+///      `SessionVmExited` lands.
+///   2. `emit_scale_event_audit(direction = Up, ...)` ⇒
+///      `SessionVmScaleEvent` lands BEFORE the new spawn so
+///      audit-replay attributes the new VM to the scaling
+///      decision (write-then-emit).
+///   3. `spawn_with_transient_retry(new_proto)` ⇒
+///      `SessionVmSpawned` lands.
+///
+/// **`elastic = false` semantics.** The chokepoint
+/// (`crate::elastic::build_scaled_vm_spec`) clamps the new spec
+/// to the baseline when `elastic = false`, so this function
+/// *cannot* admit an upward scale even if a buggy caller
+/// constructs a `proto` with a bumped `vm_spec`. This is the
+/// "mechanically enforced" leg of INV-ELASTIC-05.
+///
+/// The helper is intentionally **public** so the future signal
+/// observer (`ScalingDecisionEngine::tick`) can call it without
+/// re-implementing the audit-emit ordering.
+///
+/// **§5 rate-limit gate.** The function consults `rate_limiter`
+/// FIRST. On `Defer`, it emits
+/// `SessionVmScaleDeferred { reason: "RateLimit" }` and returns
+/// `RespawnWithLargerOutcome::DrainFailed` with a synthetic
+/// `SpawnError::Audit("rate-limited")` so the caller surfaces
+/// the deferral to its observer loop the same way it surfaces
+/// any other deferred decision. The previous session is **NOT**
+/// drained (the kernel never starts the respawn ceremony when
+/// the budget is full); the next signal-observer tick
+/// re-evaluates the trigger.
+#[allow(clippy::too_many_arguments)]
+pub async fn respawn_with_larger_resources(
+    service:           Arc<SessionSpawnService>,
+    elastic:           &raxis_policy::ElasticConfig,
+    rate_limiter:      &Arc<crate::elastic::ScalingRateLimiter>,
+    prev_session_id:   &str,
+    drain_grace:       std::time::Duration,
+    new_proto:         SpawnRequestProto,
+    direction:         crate::elastic::ScaleDirection,
+    prev_vcpus:        u32,
+    new_vcpus:         u32,
+    prev_memory_mb:    u32,
+    new_memory_mb:     u32,
+    reason:            &str,
+) -> RespawnWithLargerOutcome {
+    // ── Step 0: §5 rate-limit gate. INV-ELASTIC-04 soft event. ──
+    let now = unix_now_secs();
+    match rate_limiter.try_admit(
+        now,
+        elastic.max_concurrent_scaling_events_per_minute,
+    ) {
+        crate::elastic::RateLimitDecision::Admit => {}
+        crate::elastic::RateLimitDecision::Defer => {
+            if let Err(e) = crate::elastic::emit_scale_deferred_audit(
+                service.audit(),
+                &new_proto.session_id,
+                new_proto.task_id.as_deref(),
+                &new_proto.initiative_id,
+                direction,
+                "RateLimit",
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"respawn_with_larger_deferred_audit_failed\",\
+                     \"session_id\":\"{sid}\",\"error\":\"{err}\"}}",
+                    sid = new_proto.session_id,
+                    err = e,
+                );
+            }
+            // The caller distinguishes deferral from a real
+            // drain-failure via a synthetic `SpawnError::Audit`.
+            return RespawnWithLargerOutcome::DrainFailed(SpawnError::Audit(format!(
+                "scale event deferred: rate limit ({max}/min) exceeded",
+                max = elastic.max_concurrent_scaling_events_per_minute,
+            )));
+        }
+    }
+
+    // ── Step 1: drain + terminate the previous session. ──────────
+    //
+    // `terminate_session` emits `SessionVmExited` internally; the
+    // helper here just propagates the outcome so a drain-failure
+    // can be surfaced distinctly from a spawn-failure.
+    if let Err(err) = service
+        .terminate_session(prev_session_id, drain_grace)
+        .await
+    {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"respawn_with_larger_drain_failed\",\
+             \"prev_session_id\":\"{sid}\",\"error\":\"{err}\"}}",
+            sid = prev_session_id,
+            err = err,
+        );
+        return RespawnWithLargerOutcome::DrainFailed(err);
+    }
+
+    // ── Step 2: emit `SessionVmScaleEvent`. ───────────────────────
+    //
+    // INV-ELASTIC-03: the scale event is emitted AFTER the
+    // `SessionVmExited` (terminate) and BEFORE the new
+    // `SessionVmSpawned` (the spawn helper below). Audit-emit
+    // failure is logged but never aborts the scaling flow — the
+    // VM lifecycle continues against the new VmSpec.
+    if let Err(e) = crate::elastic::emit_scale_event_audit(
+        service.audit(),
+        &new_proto.session_id,
+        new_proto.task_id.as_deref(),
+        &new_proto.initiative_id,
+        direction,
+        prev_vcpus,
+        new_vcpus,
+        prev_memory_mb,
+        new_memory_mb,
+        reason,
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"session_vm_scale_event_audit_emit_failed\",\
+             \"session_id\":\"{sid}\",\"direction\":\"{dir}\",\"error\":\"{err}\"}}",
+            sid = new_proto.session_id,
+            dir = direction.as_str(),
+            err = e,
+        );
+    }
+
+    // ── Step 3: spawn the new session with the scaled-up spec.
+    //    Wraps in the §3.2 bounded-retry loop so transient
+    //    substrate noise on the new spawn does not abandon the
+    //    scaling decision.
+    match spawn_with_transient_retry(&service, elastic, new_proto).await {
+        Ok(handle) => RespawnWithLargerOutcome::Ok(handle),
+        Err(err)   => RespawnWithLargerOutcome::SpawnFailed(err),
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    //! Unit tests for [`compute_backoff_ms`] and
+    //! [`classify_spawn_error`]. The end-to-end retry semantics are
+    //! exercised by the `tests` module below against a real
+    //! `SessionSpawnService` + `FakeAuditSink`.
+
+    use super::{classify_spawn_error, compute_backoff_ms};
+    use raxis_isolation::{IsolationError, IsolationFailureClass};
+    use raxis_session_spawn::SpawnError;
+
+    #[test]
+    fn compute_backoff_grows_exponentially() {
+        // initial = 100ms, max = 4000ms.
+        assert_eq!(compute_backoff_ms(100, 4_000, 1),  100);
+        assert_eq!(compute_backoff_ms(100, 4_000, 2),  200);
+        assert_eq!(compute_backoff_ms(100, 4_000, 3),  400);
+        assert_eq!(compute_backoff_ms(100, 4_000, 4),  800);
+        assert_eq!(compute_backoff_ms(100, 4_000, 5),  1_600);
+        assert_eq!(compute_backoff_ms(100, 4_000, 6),  3_200);
+        // Clamped:
+        assert_eq!(compute_backoff_ms(100, 4_000, 7),  4_000);
+        assert_eq!(compute_backoff_ms(100, 4_000, 30), 4_000);
+    }
+
+    #[test]
+    fn compute_backoff_handles_zero_initial() {
+        // 0 initial ⇒ 0 backoff at every attempt (operator opted
+        // for tight retry; the policy validator allows this).
+        assert_eq!(compute_backoff_ms(0, 4_000, 1), 0);
+        assert_eq!(compute_backoff_ms(0, 4_000, 5), 0);
+    }
+
+    #[test]
+    fn compute_backoff_clamps_at_u32_overflow() {
+        // u32::MAX initial + a long retry chain MUST NOT panic; the
+        // clamp keeps the result inside the policy ceiling.
+        let initial = u32::MAX;
+        let max     = 5_000;
+        assert_eq!(compute_backoff_ms(initial, max, 31), max);
+        assert_eq!(compute_backoff_ms(initial, max, 64), max);
+    }
+
+    #[test]
+    fn classify_spawn_isolation_spawn_uses_isolation_classify() {
+        let transient = SpawnError::IsolationSpawn(
+            IsolationError::SpawnFailed("noisy neighbour".into()),
+        );
+        assert_eq!(
+            classify_spawn_error(&transient),
+            IsolationFailureClass::Transient,
+        );
+
+        let permanent = SpawnError::IsolationSpawn(IsolationError::SignatureMismatch);
+        assert_eq!(
+            classify_spawn_error(&permanent),
+            IsolationFailureClass::Permanent,
+        );
+    }
+
+    #[test]
+    fn classify_spawn_audit_is_permanent() {
+        // Audit failures are fail-closed; never retried.
+        let err = SpawnError::Audit("disk full".into());
+        assert_eq!(classify_spawn_error(&err), IsolationFailureClass::Permanent);
+    }
+
+    #[test]
+    fn classify_spawn_admission_bind_is_permanent() {
+        let err = SpawnError::AdmissionBind(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "EADDRINUSE",
+        ));
+        assert_eq!(classify_spawn_error(&err), IsolationFailureClass::Permanent);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Executor / Reviewer spawn — `spawn_executor_for_task` (free fn).
 // ---------------------------------------------------------------------------
 
@@ -1546,6 +2295,16 @@ pub struct ExecutorSpawnContext {
     /// `raxis-planner-core::run_role_session` can connect back via
     /// `RAXIS_KERNEL_PLANNER_SOCKET`. `None` ⇒ env var not stamped.
     pub data_dir: Option<PathBuf>,
+    /// V2 `elastic-vm-scaling.md §4.4` — per-role rolling window
+    /// of recent utilisation samples. Mirror of
+    /// [`OrchestratorSpawnContext::scale_down_history`]; production
+    /// wires the same `Arc` through both contexts so executor and
+    /// reviewer activations consult the shared tracker.
+    pub scale_down_history: Arc<crate::elastic::ScaleDownHistory>,
+    /// V2 `elastic-vm-scaling.md §5` — sliding 60-second rate
+    /// limiter for admitted scaling events. See
+    /// [`OrchestratorSpawnContext::rate_limiter`].
+    pub rate_limiter: Arc<crate::elastic::ScalingRateLimiter>,
 }
 
 impl ExecutorSpawnContext {
@@ -1581,6 +2340,8 @@ impl ExecutorSpawnContext {
             // reviewer's static-analysis working set.
             reviewer_mem_mib:    1024,
             data_dir:            None,
+            scale_down_history:  Arc::new(crate::elastic::ScaleDownHistory::new()),
+            rate_limiter:        Arc::new(crate::elastic::ScalingRateLimiter::new()),
         }
     }
 
@@ -1588,6 +2349,26 @@ impl ExecutorSpawnContext {
     /// stamping. See [`OrchestratorSpawnContext::with_data_dir`].
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {
         self.data_dir = Some(data_dir);
+        self
+    }
+
+    /// Builder: share an externally-owned scale-down tracker. See
+    /// [`OrchestratorSpawnContext::with_scale_down_history`].
+    pub fn with_scale_down_history(
+        mut self,
+        history: Arc<crate::elastic::ScaleDownHistory>,
+    ) -> Self {
+        self.scale_down_history = history;
+        self
+    }
+
+    /// Builder: share an externally-owned rate limiter. See
+    /// [`OrchestratorSpawnContext::with_rate_limiter`].
+    pub fn with_rate_limiter(
+        mut self,
+        rl: Arc<crate::elastic::ScalingRateLimiter>,
+    ) -> Self {
+        self.rate_limiter = rl;
         self
     }
 }
@@ -1987,19 +2768,116 @@ pub async fn spawn_executor_for_task(
             .map(|d| d.join("guests").join(session_id).join("console.log")),
     };
 
-    let req = SpawnRequest {
-        session_id:        session_id.to_owned(),
-        task_id:           Some(task_id.to_owned()),
-        initiative_id:     initiative_id.to_owned(),
-        image:             verified_image,
+    // ── Step 3.5: consult the per-role scale-down history. ────────
+    //
+    // V2 `elastic-vm-scaling.md §4.4` — bias the next spawn smaller
+    // when the recent rolling window for this role is under-used.
+    // The bias is allowed even when `elastic = false` (`§6` —
+    // scale-down never raises capacity).
+    let role = match agent_kind {
+        ExecutorAgentKind::Executor => crate::elastic::RoleKey::Executor,
+        ExecutorAgentKind::Reviewer => crate::elastic::RoleKey::Reviewer,
+    };
+    let plan_overrides = plan_elastic_overrides_for_task(
+        plan_registry,
+        initiative_id,
+        task_id,
+    );
+    let (vm_spec, scale_down_decision) = maybe_apply_scale_down(
+        vm_spec,
+        role,
+        &spawn_ctx.scale_down_history,
+        &spawn_ctx.rate_limiter,
+        policy.elastic(),
+        service.audit(),
+        session_id,
+        Some(task_id),
+        initiative_id,
+        &plan_overrides,
+    );
+
+    // ── Step 4: delegate via the bounded-retry helper. ────────────
+    //
+    // V2 `elastic-vm-scaling.md §3.2` — see the matching block on
+    // the orchestrator-spawn path. Same retry semantics apply to
+    // Executor / Reviewer activations: transient
+    // `IsolationError`s are retried with exponential backoff
+    // bounded by `policy.[elastic].transient_retry_max_attempts`,
+    // permanent failures short-circuit to `SessionVmFailedFinal`.
+    let proto = SpawnRequestProto {
+        session_id:       session_id.to_owned(),
+        task_id:          Some(task_id.to_owned()),
+        initiative_id:    initiative_id.to_owned(),
+        image:            verified_image,
         workspace_mounts,
         vm_spec,
         credentials,
-        admission_service: Box::new(PolicyAdmissionService::new(egress_allowlist)),
+        egress_allowlist,
     };
+    let handle = spawn_with_transient_retry(
+        &service,
+        policy.elastic(),
+        proto,
+    ).await?;
 
-    // ── Step 4: delegate to `ctx.session_spawn`. ─────────────────
-    Ok(service.spawn_session(req).await?)
+    // ── Step 5: emit SessionVmScaleEvent on a successful down-bias.
+    //
+    // INV-ELASTIC-03 write-then-emit ordering: the new VM is
+    // bound (SessionVmSpawned was emitted inside spawn_session);
+    // the scale event lands AFTER so audit replay attributes the
+    // smaller spec to the §4.4 bias. Audit-emit failure is logged
+    // and the tracker is cleared so a future spawn does not also
+    // wedge on the same condition.
+    if let Some((prev_vcpus, prev_mb, new_vcpus, new_mb, reason)) = scale_down_decision {
+        if let Err(e) = crate::elastic::emit_scale_event_audit(
+            service.audit(),
+            session_id,
+            Some(task_id),
+            initiative_id,
+            crate::elastic::ScaleDirection::Down,
+            prev_vcpus,
+            new_vcpus,
+            prev_mb,
+            new_mb,
+            &reason,
+        ) {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"executor_scale_down_audit_emit_failed\",\
+                 \"session_id\":\"{session_id}\",\"task_id\":\"{task_id}\",\"error\":\"{e}\"}}",
+            );
+        }
+        spawn_ctx.scale_down_history.clear(role);
+    }
+
+    Ok(handle)
+}
+
+/// Project the `[[plan.tasks]]` elastic overrides for
+/// `(initiative_id, task_id)` into the
+/// [`crate::elastic::PlanElasticOverrides`] shape consumed by the
+/// §4.4 chokepoint.
+///
+/// Returns `Default` when the registry has no entry for the task
+/// (e.g. an orchestrator spawn that pre-dates the registry write,
+/// or a test fixture that hasn't populated the registry). The
+/// default produces no plan-level narrowing, so the policy
+/// ceiling alone governs the spawn.
+fn plan_elastic_overrides_for_task(
+    registry:      &Arc<crate::initiatives::PlanRegistry>,
+    initiative_id: &str,
+    task_id:       &str,
+) -> crate::elastic::PlanElasticOverrides {
+    let key = crate::initiatives::TaskKey::new(initiative_id, task_id);
+    match registry.get(&key) {
+        Some(fields) => crate::elastic::PlanElasticOverrides {
+            elastic:        fields.elastic,
+            min_vcpus:      fields.min_vcpus,
+            max_vcpus:      fields.max_vcpus,
+            min_memory_mb:  fields.min_memory_mb,
+            max_memory_mb:  fields.max_memory_mb,
+        },
+        None => crate::elastic::PlanElasticOverrides::default(),
+    }
 }
 
 #[cfg(test)]

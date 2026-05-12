@@ -26,6 +26,9 @@ reference. Other recipes drill deeper into individual fields.
 | `[[tasks.credentials]]` | sub-block | optional | Per-task credential declarations; see *task credentials* recipe. |
 | `[[tasks.verifiers]]` | sub-block | optional | Per-task verifiers; see *task verifiers* recipe. |
 | `cumulative_max_seconds` | `u32` | optional | Wall-clock cap. Beyond this, the kernel emits `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`. |
+| `elastic` | `bool` | optional | Per-task override of `policy.[elastic].enabled`. **Plan can only NARROW** — `elastic = false` always wins (`INV-ELASTIC-01`); `elastic = true` is rejected if the policy disables elastic. Default: inherit `policy.[elastic].enabled` (V2 GA default = `true`). See *elastic VM scaling* recipe. |
+| `min_vcpus` / `max_vcpus` | `u32` | optional | Per-task vCPU floor / ceiling for `[elastic]` scaling. The ceiling MUST be `≤ policy.[elastic].max_vcpus_per_session`; over-broad values are rejected with `FAIL_ELASTIC_PLAN_EXCEEDS_POLICY`. Reviewer tasks MUST NOT declare these (`FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`). |
+| `min_memory_mb` / `max_memory_mb` | `u32` | optional | Per-task memory floor / ceiling for `[elastic]` scaling. Same `≤ policy.[elastic].max_memory_mb_per_session` rule. Reviewer tasks MUST NOT declare these. |
 
 > **Reserved (V2.6) — silently ignored today.** `max_crash_retries`,
 > `max_review_rejections`, and `max_revision_rounds` parse without
@@ -91,6 +94,7 @@ A `session_agent_type = "Reviewer"` task has additional invariants:
 | `allowed_egress` | MUST be empty; Reviewer VMs have no network device (`INV-NETISO-01`). |
 | `predecessors` | MUST be non-empty — a Reviewer with no predecessor Executor has nothing to review. |
 | `[[tasks.credentials]]` | Should be empty; Reviewers can't reach the credential proxy without egress. |
+| `min_vcpus` / `max_vcpus` / `min_memory_mb` / `max_memory_mb` | MUST be unset; Reviewer resource ceilings are kernel-canonical (`FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`). |
 
 ---
 

@@ -56,9 +56,9 @@ guides/recipes/
 |---|---:|---|
 | [setup](#setup-bootstrapping) | 10 | Fresh machine; first kernel; first plan |
 | [env](#env-environment-variables) | 12 | Tuning binary behaviour without touching policy |
-| [policy](#policy-the-operator-signed-config) | 15 | Authoring or auditing `policy.toml` |
+| [policy](#policy-the-operator-signed-config) | 16 | Authoring or auditing `policy.toml` |
 | [plan](#plan-the-toml-plan-bundle) | 12 | Authoring or debugging `plan.toml` |
-| [patterns](#patterns-common-plan-shapes) | 8 | Choosing the right multi-task topology |
+| [patterns](#patterns-common-plan-shapes) | 9 | Choosing the right multi-task topology |
 | [cli](#cli-every-raxis-subcommand) | 33 | "What does `raxis <X>` do? What's the JSON schema?" |
 | [ops](#ops-day-2-operations) | 15 | Running RAXIS in anger: outages, rotations, debugging |
 
@@ -94,6 +94,7 @@ guides/recipes/
 | A refactor where every Executor edits a shared lockfile | [`patterns/06-cross-cutting-refactor`](patterns/06-cross-cutting-refactor.md) |
 | A risky change I want to canary first | [`patterns/07-canary-then-broad-change`](patterns/07-canary-then-broad-change.md) |
 | A bulk job I need to throttle by host capacity | [`patterns/08-budget-bounded-cohort`](patterns/08-budget-bounded-cohort.md) |
+| Sessions that need bursty memory / vCPU + transient-retry | [`patterns/09-elastic-vm-scaling`](patterns/09-elastic-vm-scaling.md) |
 
 ### Authoring policy
 
@@ -114,6 +115,7 @@ guides/recipes/
 | Require operator-signed plans | [`policy/13-plan-signing`](policy/13-plan-signing.md) |
 | Cap plan-bundle byte size and task count | [`policy/14-plan-bundle-limits`](policy/14-plan-bundle-limits.md) |
 | Wire kernel notifications to email/Slack/webhook | [`policy/15-notifications-section`](policy/15-notifications-section.md) |
+| Bound elastic VM scaling + transient-retry budget | [`policy/16-elastic-section`](policy/16-elastic-section.md) |
 
 ### Driving the kernel via CLI
 
@@ -227,6 +229,7 @@ guides/recipes/
 | 13 | [`plan-signing`](policy/13-plan-signing.md) | Plan signature requirements |
 | 14 | [`plan-bundle-limits`](policy/14-plan-bundle-limits.md) | Plan-bundle size / task / depth caps |
 | 15 | [`notifications-section`](policy/15-notifications-section.md) | `[[notifications]]` |
+| 16 | [`elastic-section`](policy/16-elastic-section.md) | `[elastic]` |
 
 ### plan — the TOML plan bundle
 
@@ -257,6 +260,7 @@ guides/recipes/
 | 06 | [`cross-cutting-refactor`](patterns/06-cross-cutting-refactor.md) | `cross_cutting_artifacts` for shared lockfiles / generated files |
 | 07 | [`canary-then-broad-change`](patterns/07-canary-then-broad-change.md) | Verified canary commit gating broader rollout |
 | 08 | [`budget-bounded-cohort`](patterns/08-budget-bounded-cohort.md) | Lane concurrency + budget cap throttling many tasks |
+| 09 | [`elastic-vm-scaling`](patterns/09-elastic-vm-scaling.md) | Bounded transient-retry + scale-up/down for VM substrate |
 
 ### cli — every `raxis` subcommand
 

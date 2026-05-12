@@ -30,6 +30,7 @@ mod authority;
 mod canonical_images_preflight;
 mod capacity;
 mod dashboard_glue;
+mod elastic;
 mod ipc;
 mod recovery;
 mod initiatives;
@@ -930,6 +931,31 @@ async fn main() {
         }
     }
 
+    // V2 `elastic-vm-scaling.md §5` — INV-ELASTIC-04 requires a
+    // SINGLE global budget for substrate-visible scaling events
+    // (`max_concurrent_scaling_events_per_minute`). The rate
+    // limiter is **role-independent** and **direction-independent**;
+    // splitting it into one instance per spawn context (orchestrator
+    // vs executor / reviewer) would silently double the operator-
+    // signed budget, which is exactly the "weakened invariant
+    // disguised as a default" anti-pattern. One shared
+    // `Arc<ScalingRateLimiter>` flows through both
+    // `OrchestratorSpawnContext` and `ExecutorSpawnContext` below
+    // so every admitted scale event — orchestrator scale-down,
+    // executor scale-up, reviewer scale-down — consumes the same
+    // sliding-60-second budget the policy bundle declares.
+    //
+    // The §4.4 `ScaleDownHistory` does NOT need to be shared:
+    // its windows are keyed by `RoleKey` and each spawn context
+    // only spawns within its own role family (Orchestrator vs
+    // Executor / Reviewer), so the two trackers fill disjoint
+    // partitions of the per-role table. Keeping them separate
+    // avoids any cross-context lock contention on the spawn hot
+    // path; sharing would only matter if a future signal
+    // observer reaches across role families.
+    let elastic_rate_limiter = Arc::new(
+        crate::elastic::ScalingRateLimiter::new(),
+    );
     let ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -967,6 +993,21 @@ async fn main() {
                     Arc::clone(&audit),
                 ),
             );
+            // V2 `elastic-vm-scaling.md §4.4` — fresh scale-down
+            // tracker for the orchestrator-spawn context. The
+            // Executor / Reviewer spawn context owns its own
+            // tracker (see below); each tracker's windows key by
+            // `RoleKey` and the spawn contexts spawn disjoint
+            // roles, so two instances are semantically equivalent
+            // to one shared instance for the orchestrator's role.
+            //
+            // The §5 rate limiter, in contrast, is the SAME
+            // `Arc` for both contexts (hoisted to
+            // `elastic_rate_limiter` above) so the budget remains
+            // a single global cap per INV-ELASTIC-04.
+            let scale_down_history = Arc::new(
+                crate::elastic::ScaleDownHistory::new(),
+            );
             Arc::new(
                 crate::session_spawn_orchestrator::LiveOrchestratorSpawn::new(
                     crate::session_spawn_orchestrator::OrchestratorSpawnContext::new(
@@ -978,7 +1019,9 @@ async fn main() {
                     // the guest env (otherwise the planner binary
                     // has no transport to dial back to the kernel
                     // and falls through to scaffold/park mode).
-                    .with_data_dir(data_dir.clone()),
+                    .with_data_dir(data_dir.clone())
+                    .with_scale_down_history(Arc::clone(&scale_down_history))
+                    .with_rate_limiter(Arc::clone(&elastic_rate_limiter)),
                     session_spawn_for_orch,
                     Arc::clone(&store),
                     Arc::clone(&plan_registry),
@@ -1008,7 +1051,23 @@ async fn main() {
             // executor / reviewer path so activations carry the
             // planner UDS env stamp without each IPC handler having
             // to thread the path itself.
-            .with_data_dir(data_dir.clone()),
+            .with_data_dir(data_dir.clone())
+            // V2 `elastic-vm-scaling.md §4.4` — own scale-down
+            // tracker for the executor / reviewer spawn context;
+            // disjoint `RoleKey` partitions from the orchestrator
+            // tracker above.
+            //
+            // V2 `elastic-vm-scaling.md §5` — share the SAME
+            // `elastic_rate_limiter` Arc as the orchestrator
+            // context so admitted scale events from BOTH spawn
+            // paths consume the single global budget the
+            // operator declared in
+            // `policy.[elastic].max_concurrent_scaling_events_per_minute`
+            // (INV-ELASTIC-04).
+            .with_scale_down_history(Arc::new(
+                crate::elastic::ScaleDownHistory::new(),
+            ))
+            .with_rate_limiter(Arc::clone(&elastic_rate_limiter)),
         ),
         Arc::clone(&domain),
     )

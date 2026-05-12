@@ -301,6 +301,179 @@ pub enum AuditEventKind {
         backend_error: Option<String>,
     },
 
+    /// V2 `elastic-vm-scaling.md §3.2` — per-attempt record of a
+    /// transient-failure respawn against the same `VmSpec`. Emitted
+    /// once per retry by the kernel's bounded-retry loop in
+    /// `session_spawn_orchestrator`, BEFORE the next
+    /// `SessionVmSpawned` (or before the terminating
+    /// `SessionVmFailedFinal`).
+    ///
+    /// Pairs N:1 with the eventual `SessionVmSpawned` (success) or
+    /// the terminating `SessionVmFailedFinal` (exhausted attempts).
+    /// The kernel writes the attempt counter starting at `1` for
+    /// the first respawn (i.e. the original spawn that failed is
+    /// attempt 0; the first retry is attempt 1).
+    ///
+    /// **Honours INV-ELASTIC-02 / INV-ELASTIC-07.** A
+    /// `SessionVmRespawnAttempted` is NEVER emitted for an
+    /// `IsolationFailureClass::Permanent` failure — those go
+    /// straight to `SessionVmFailedFinal`. The `failure_class`
+    /// field carries the projected class verbatim
+    /// (`"Transient"` only, by construction; the field exists on
+    /// the wire so audit-replay readers can sanity-check the
+    /// invariant).
+    SessionVmRespawnAttempted {
+        /// Session id the respawn targets. References
+        /// `sessions.session_id`.
+        session_id:        String,
+        /// Owning task id (`None` for the canonical Orchestrator
+        /// session, which has no `[[tasks]]` row).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id:           Option<String>,
+        /// Owning initiative id; pins the respawn into the
+        /// initiative's lineage.
+        initiative_id:     String,
+        /// 1-indexed attempt counter. The first retry is
+        /// `attempt = 1`; the original spawn is implicitly
+        /// `attempt = 0` and is reflected by the previous
+        /// `SessionVmSpawned` / failure-emitting code path.
+        attempt:           u32,
+        /// Operator-policy ceiling (`policy.[elastic].
+        /// transient_retry_max_attempts`) at the time of this
+        /// respawn. Recorded so dashboards can surface
+        /// "attempt 2 of 3"-style progress without re-reading
+        /// the policy snapshot.
+        max_attempts:      u32,
+        /// Failure-class projection of the previous attempt's
+        /// `IsolationError` per `IsolationError::classify` —
+        /// always `"Transient"` by construction.
+        failure_class:     String,
+        /// Substrate-facing reason string from the previous
+        /// attempt. Unstructured (the substrate's diagnostic
+        /// message) — operator-facing diagnostics only; the
+        /// kernel does not key behaviour off the value.
+        previous_reason:   String,
+        /// Backoff applied before this respawn, in milliseconds.
+        /// Computed as `min(initial * 2^(attempt-1), max)` per
+        /// `elastic-vm-scaling.md §3.2`. Recorded so audit-replay
+        /// can confirm the backoff schedule honoured the policy
+        /// caps.
+        backoff_ms:        u32,
+    },
+
+    /// V2 `elastic-vm-scaling.md §3.2 / §3.3` — terminal failure of
+    /// the kernel-side spawn lifecycle. Emitted exactly once per
+    /// failed spawn lineage when one of:
+    ///
+    /// * The spawn surfaced an `IsolationFailureClass::Permanent`
+    ///   (no retries; INV-ELASTIC-02).
+    /// * The bounded retry loop exhausted
+    ///   `transient_retry_max_attempts` (INV-ELASTIC-06).
+    ///
+    /// **Pairing.** `SessionVmFailedFinal` is mutually exclusive
+    /// with `SessionVmSpawned` for the same `(session_id,
+    /// attempt-lineage)`: a session that lands a `SessionVmSpawned`
+    /// never emits `SessionVmFailedFinal` for the same lineage,
+    /// and vice versa. The audit-paired-writes invariant
+    /// (`audit-paired-writes.md §4`) is extended in this commit
+    /// to cover this either/or rule.
+    SessionVmFailedFinal {
+        /// Session id whose spawn lineage failed.
+        session_id:        String,
+        /// Owning task id (`None` for the canonical Orchestrator
+        /// session).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id:           Option<String>,
+        /// Owning initiative id; pins the failure into the
+        /// initiative's lineage.
+        initiative_id:     String,
+        /// Total attempts taken before giving up (1-indexed; e.g.
+        /// `1` when a `Permanent` first-attempt failure surfaces,
+        /// `transient_retry_max_attempts + 1` when retries
+        /// exhaust).
+        total_attempts:    u32,
+        /// Failure-class projection of the LAST attempt per
+        /// `IsolationError::classify` (one of `"Transient"` or
+        /// `"Permanent"`). When `"Transient"`, the lineage hit
+        /// the retry-exhaustion path; when `"Permanent"`, the
+        /// lineage short-circuited at the first failure.
+        failure_class:     String,
+        /// Final substrate-facing reason string. Audit-replay
+        /// dashboards surface this as the operator diagnostic.
+        final_reason:      String,
+    },
+
+    /// V2 `elastic-vm-scaling.md §4` — admitted scaling decision.
+    /// Emitted by the dynamic-scaling engine after a scale-up
+    /// (`direction = "Up"`, requires `policy.[elastic].enabled =
+    /// true`) or a next-spawn scale-down (`direction = "Down"`,
+    /// allowed even when `enabled = false`).
+    ///
+    /// **Pairing.** A scale-up emits this event in the SAME audit
+    /// transaction as the new `SessionVmSpawned` — INV-ELASTIC-03
+    /// (write-then-emit). A scale-down is recorded once per
+    /// next-spawn the bias applies to.
+    SessionVmScaleEvent {
+        /// Session id the scaling decision applies to. For
+        /// scale-up via respawn-with-larger this is the NEW
+        /// session id; the previous session's
+        /// `SessionVmExited` is emitted independently as part of
+        /// the drain.
+        session_id:        String,
+        /// Owning task id (`None` for the orchestrator session).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id:           Option<String>,
+        /// Owning initiative id.
+        initiative_id:     String,
+        /// `"Up"` or `"Down"`. Stable PascalCase string;
+        /// dashboards key on this. INV-ELASTIC-05 requires that
+        /// `direction = "Up"` is mechanically forbidden when
+        /// the resolved `elastic` flag is `false` for this
+        /// session — emitting that combination is a kernel bug.
+        direction:         String,
+        /// Pre-decision vCPU count.
+        prev_vcpus:        u32,
+        /// Post-decision vCPU count (`prev_vcpus * 2` clamped to
+        /// the policy ceiling for scale-up; ≤ `prev_vcpus` for
+        /// scale-down).
+        new_vcpus:         u32,
+        /// Pre-decision memory in MiB.
+        prev_memory_mb:    u32,
+        /// Post-decision memory in MiB (`prev_memory_mb * 3 / 2`
+        /// clamped to the policy ceiling for scale-up; ≤
+        /// `prev_memory_mb` for scale-down).
+        new_memory_mb:     u32,
+        /// Substrate-agnostic reason for the decision. Free-form
+        /// audit-string; the kernel does not key behaviour off the
+        /// value. Examples: `"InferenceTokenBurnRate"`,
+        /// `"MemoryPressure"`, `"NextSpawnUnderUtilizedBias"`.
+        reason:            String,
+    },
+
+    /// V2 `elastic-vm-scaling.md §4.3` — scaling decision deferred
+    /// because the per-minute rate limit
+    /// (`policy.[elastic].max_concurrent_scaling_events_per_minute`)
+    /// would be exceeded. INV-ELASTIC-04: a soft event, never a
+    /// hard failure — the spawn lifecycle continues against the
+    /// pre-scale-up `VmSpec`.
+    SessionVmScaleDeferred {
+        /// Session id the deferred decision applied to.
+        session_id:        String,
+        /// Owning task id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id:           Option<String>,
+        /// Owning initiative id.
+        initiative_id:     String,
+        /// What the engine was about to do (`"Up"` or `"Down"`)
+        /// before the rate-limit check denied admission.
+        direction:         String,
+        /// Stable PascalCase reason tag. Closed set:
+        ///   * `"RateLimit"` — the per-minute window was full.
+        /// New reasons land here AND in the kernel-side decision
+        /// engine in lockstep.
+        reason:             String,
+    },
+
     /// A security boundary the kernel enforces was violated AT the
     /// moment a fail-closed guard surfaced the violation. Distinct
     /// from "policy admission rejected an operator's request"
@@ -2246,6 +2419,10 @@ impl AuditEventKind {
             Self::IsolationSubstrateRefused { .. } => "IsolationSubstrateRefused",
             Self::SessionVmSpawned { .. } => "SessionVmSpawned",
             Self::SessionVmExited { .. } => "SessionVmExited",
+            Self::SessionVmRespawnAttempted { .. } => "SessionVmRespawnAttempted",
+            Self::SessionVmFailedFinal { .. }      => "SessionVmFailedFinal",
+            Self::SessionVmScaleEvent { .. }       => "SessionVmScaleEvent",
+            Self::SessionVmScaleDeferred { .. }    => "SessionVmScaleDeferred",
             Self::SecurityViolationDetected { .. } => "SecurityViolationDetected",
             Self::InitiativeCreated { .. } => "InitiativeCreated",
             Self::PlanApproved { .. } => "PlanApproved",

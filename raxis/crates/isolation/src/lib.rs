@@ -568,6 +568,128 @@ pub enum IsolationError {
 }
 
 // ---------------------------------------------------------------------------
+// V2 elastic-vm-scaling.md §3.1 — IsolationError → failure-class mapping
+// ---------------------------------------------------------------------------
+
+/// Coarse failure-class projection of [`IsolationError`].
+///
+/// `elastic-vm-scaling.md §3.1` (the spawn-outcome state machine) splits
+/// every spawn failure into exactly one of two classes so the kernel
+/// retry loop can decide whether to attempt another spawn:
+///
+/// * [`IsolationFailureClass::Transient`] — a respawn against the same
+///   spec is reasonable. The kernel runs a bounded retry loop with
+///   exponential backoff (`policy.[elastic].transient_retry_*`) and
+///   emits one `SessionVmRespawnAttempted` per attempt.
+/// * [`IsolationFailureClass::Permanent`] — respawn is forbidden by
+///   INV-ELASTIC-02. The kernel emits a single `SessionVmFailedFinal`
+///   audit event and surfaces the failure to the operator without ever
+///   retrying.
+///
+/// **No third class.** INV-ELASTIC-07 forbids implicit "retry on any
+/// error" fallthroughs: every variant of [`IsolationError`] MUST map
+/// explicitly to exactly one class. Adding a new variant without
+/// updating [`IsolationError::classify`] is a compile-time error
+/// because the match is exhaustive.
+///
+/// **Substrate sharing.** The classification lives on the trait crate
+/// (not on a per-substrate impl) so the AVF backend
+/// (`raxis-isolation-apple-vz`) and the Firecracker backend
+/// (`raxis-isolation-firecracker`, currently scaffolded) project the
+/// same string identifiers into the audit chain. When a substrate
+/// surfaces a backend-specific reason, it MUST wrap it in the
+/// closest-matching [`IsolationError`] variant; the classification
+/// then drops out for free.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IsolationFailureClass {
+    /// Retryable — the kernel may respawn against the same `VmSpec`.
+    /// Backoff and attempt-count are policy-driven.
+    Transient,
+    /// Not retryable. The kernel records the failure and surfaces it
+    /// to the operator without further spawn attempts.
+    Permanent,
+}
+
+impl IsolationFailureClass {
+    /// Stable string identifier for audit / structured-log
+    /// projection. The kernel emits this verbatim into the
+    /// `SessionVmRespawnAttempted` / `SessionVmFailedFinal` event
+    /// payloads.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transient => "Transient",
+            Self::Permanent => "Permanent",
+        }
+    }
+}
+
+impl IsolationError {
+    /// Project an [`IsolationError`] onto its
+    /// [`IsolationFailureClass`] per `elastic-vm-scaling.md §3.1`.
+    ///
+    /// **Mapping rationale (one comment per variant):**
+    ///
+    /// * [`IsolationError::SpawnFailed`] — Transient. Spawn-time
+    ///   failures are dominated by hypervisor noisy-neighbour
+    ///   contention and ephemeral host conditions (vCPU exhaustion,
+    ///   transient cgroup pressure, AVF VMM startup race). The
+    ///   kernel retries with exponential backoff; if the failure is
+    ///   actually permanent (e.g. an image not on disk), the
+    ///   bounded `transient_retry_max_attempts` ceiling
+    ///   (INV-ELASTIC-06) terminates the loop and the operator
+    ///   sees `SessionVmFailedFinal`.
+    /// * [`IsolationError::PeerClosed`] — Transient. The guest may
+    ///   have exited because of a transient OOM or a
+    ///   noisy-neighbour eviction; respawn against a fresh address
+    ///   space is reasonable. Permanent guest failures still
+    ///   bottom out at the retry ceiling.
+    /// * [`IsolationError::TransportFault`] — Transient. VSock
+    ///   socket faults and ring-buffer hiccups are typically
+    ///   driver-side noise; the substrate tears the session down
+    ///   on each fault, so a retry gets a clean transport.
+    /// * [`IsolationError::SignatureMismatch`] — **Permanent**.
+    ///   Image bytes failed re-verification at spawn time. Either
+    ///   the signed manifest no longer matches the cached bytes
+    ///   (cache corruption — the operator must re-prime the
+    ///   image-cache) or a credential rotation invalidated the
+    ///   signature in flight. Retrying against the same
+    ///   `VerifiedImage` would just re-hit the same mismatch.
+    ///   INV-ELASTIC-02 forbids the silent retry.
+    /// * [`IsolationError::ResourceLimit`] — Transient. Resource
+    ///   pressure (cgroup quota, FD cap, vCPU exhaustion) is
+    ///   inherently temporary on a healthy host; the retry-with-
+    ///   backoff window typically clears the contending session.
+    ///   Operator-pathological misconfig (e.g. ceiling below the
+    ///   per-VM minimum) bottoms out at INV-ELASTIC-06 instead.
+    /// * [`IsolationError::BackendInternal`] — **Permanent**. By
+    ///   construction this variant marks "the substrate hit a bug
+    ///   it does not know how to recover from" (VMM crashed,
+    ///   kernel module unloaded). Retrying just papers over the
+    ///   real fault. The operator must investigate; the kernel
+    ///   emits `SessionVmFailedFinal` so the failure is loud.
+    #[must_use]
+    pub fn classify(&self) -> IsolationFailureClass {
+        match self {
+            Self::SpawnFailed(_)     => IsolationFailureClass::Transient,
+            Self::PeerClosed         => IsolationFailureClass::Transient,
+            Self::TransportFault(_)  => IsolationFailureClass::Transient,
+            Self::SignatureMismatch  => IsolationFailureClass::Permanent,
+            Self::ResourceLimit(_)   => IsolationFailureClass::Transient,
+            Self::BackendInternal(_) => IsolationFailureClass::Permanent,
+        }
+    }
+
+    /// Convenience: `true` when the kernel may attempt another
+    /// spawn against the same `VmSpec`. Equivalent to
+    /// `self.classify() == IsolationFailureClass::Transient`.
+    #[must_use]
+    pub fn is_transient(&self) -> bool {
+        matches!(self.classify(), IsolationFailureClass::Transient)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Push / Receive payload types
 // ---------------------------------------------------------------------------
 //
@@ -901,5 +1023,58 @@ mod tests {
             let parsed: ExitStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, case);
         }
+    }
+
+    // ── V2 elastic-vm-scaling.md §3.1 — failure-class mapping ─────
+    //
+    // Pin the IsolationError → IsolationFailureClass projection.
+    // INV-ELASTIC-07 forbids implicit "retry on any error"; the
+    // mapping in `IsolationError::classify` is the contract, and
+    // these tests are its specification surface. A new variant on
+    // `IsolationError` must extend `classify` and add a row here.
+
+    #[test]
+    fn classify_spawn_failed_is_transient() {
+        let e = IsolationError::SpawnFailed("VMM start race".to_owned());
+        assert_eq!(e.classify(), IsolationFailureClass::Transient);
+        assert!(e.is_transient());
+    }
+
+    #[test]
+    fn classify_peer_closed_is_transient() {
+        let e = IsolationError::PeerClosed;
+        assert_eq!(e.classify(), IsolationFailureClass::Transient);
+    }
+
+    #[test]
+    fn classify_transport_fault_is_transient() {
+        let e = IsolationError::TransportFault("vsock reset".to_owned());
+        assert_eq!(e.classify(), IsolationFailureClass::Transient);
+    }
+
+    #[test]
+    fn classify_signature_mismatch_is_permanent() {
+        let e = IsolationError::SignatureMismatch;
+        assert_eq!(e.classify(), IsolationFailureClass::Permanent);
+        assert!(!e.is_transient());
+    }
+
+    #[test]
+    fn classify_resource_limit_is_transient() {
+        let e = IsolationError::ResourceLimit("cgroup_cpu".to_owned());
+        assert_eq!(e.classify(), IsolationFailureClass::Transient);
+    }
+
+    #[test]
+    fn classify_backend_internal_is_permanent() {
+        let e = IsolationError::BackendInternal("kernel module unloaded".to_owned());
+        assert_eq!(e.classify(), IsolationFailureClass::Permanent);
+        assert!(!e.is_transient());
+    }
+
+    #[test]
+    fn isolation_failure_class_as_str_matches_audit_projection() {
+        assert_eq!(IsolationFailureClass::Transient.as_str(), "Transient");
+        assert_eq!(IsolationFailureClass::Permanent.as_str(), "Permanent");
     }
 }

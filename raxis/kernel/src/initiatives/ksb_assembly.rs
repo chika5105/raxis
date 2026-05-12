@@ -429,6 +429,7 @@ mod tests {
             cross_cutting_artifacts: vec![],
             description:             "Drive the typed-enum refactor across the executor lane.".to_owned(),
             target_ref:              "refs/heads/feature/typed-enum".to_owned(),
+            elastic:                 None,
         });
     }
 
