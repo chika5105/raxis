@@ -23,7 +23,10 @@ The slices' docstrings carry the per-slice contract.
 | `smtp-proxy`                                 | `mailserver/docker-mailserver`  | 🟢 active   | Postfix + Dovecot SASL. The slice verifies delivery by `docker exec`-ing into the container's Maildir.           |
 | `mysql-proxy`                                | `mysql:8.0.36`                  | 🟢 active   | Real upstream by default against the compose container; `RAXIS_LIVE_MYSQL_URL` overrides for non-CI debugging.   |
 | `mssql-proxy`                                | SQL Server 2022                 | 🟢 active   | Real upstream by default against the compose container; `RAXIS_LIVE_MSSQL_URL` overrides for non-CI debugging.   |
-| `aws-proxy`, `gcp-proxy`, `azure-proxy`      | n/a                             | 🟢 active   | These proxies SYNTHESISE IMDS responses or proxy to public internet endpoints — there is no mock to replace.     |
+| `aws-proxy`, `gcp-proxy`, `azure-proxy`      | n/a (V2 IMDS emulator)          | 🟢 active   | V2 proxies SYNTHESISE IMDS responses from the credential backend; they do NOT forward to AWS / GCP / Azure. The slices exercise the synthesizer wire shape on a localhost TCP socket.                                              |
+| `aws-proxy-real-endpoint`                    | `https://sts.amazonaws.com/`    | 🟡 V3 witness | Skip-by-default; opt in with `RAXIS_LIVE_CLOUD_NET=1`. Pins the AWS STS canonical `MissingAuthenticationToken` / `InvalidClientTokenId` envelope for the V3 forwarding work. NOT a V2 coverage path — see Phase B notes below.  |
+| `gcp-proxy-real-endpoint`                    | `https://oauth2.googleapis.com/`| 🟡 V3 witness | Skip-by-default; opt in with `RAXIS_LIVE_CLOUD_NET=1`. Pins the Google OAuth2 RFC 6749 §5.2 `error` envelope for the V3 forwarding work. NOT a V2 coverage path — see Phase B notes below.                                       |
+| `azure-proxy-real-endpoint`                  | `https://login.microsoftonline.com/` | 🟡 V3 witness | Skip-by-default; opt in with `RAXIS_LIVE_CLOUD_NET=1`. Pins the AAD OAuth2 RFC 6749 §5.2 `error` + AAD-specific `error_codes` envelope for the V3 forwarding work. NOT a V2 coverage path — see Phase B notes below.        |
 | `http-proxy*`, `gateway-anthropic`           | real HTTPS endpoints            | 🟢 active   | Drive real `https://` upstreams; nothing to un-mock.                                                             |
 | `egress-enforcement`, `session-spawn`        | n/a (kernel-internal)           | 🟢 active   | Exercise the kernel's own state machines, not external services.                                                 |
 
@@ -226,6 +229,63 @@ transparent-proxy witness in **two** modes:
    Stages the scripts into the executor's worktree, lets the
    real LLM-driven Executor task run them through the credential
    proxies, then asserts the chain + worktree against the witness.
+
+---
+
+## Cloud-proxy real-endpoint witnesses (Phase B)
+
+The `*-proxy-real-endpoint` slices were authored as **V3
+readiness witnesses**, not as V2 coverage. The V2 cloud proxies
+(`AwsProxy`, `GcpProxy`, `AzureProxy`) are IMDS / metadata-server
+emulators: they synthesise the wire shape AWS / GCP / Azure SDKs
+expect, populated from a `CredentialBackend`-resolved long-lived
+key. They do NOT call the real cloud control plane:
+
+  * `AwsProxy` — does not call `sts.amazonaws.com`, does not
+    perform SigV4 signing, does not mint scoped STS credentials.
+    The deferral to V3 is documented at
+    `crates/credential-proxy-aws/src/lib.rs` "What is deferred"
+    (`Real sts:AssumeRole round-trip`).
+  * `GcpProxy` — does not call `oauth2.googleapis.com`, does not
+    perform JWT-bearer assertion exchange. Documented at
+    `crates/credential-proxy-gcp/src/lib.rs` "What is deferred"
+    (`Real oauth2.googleapis.com exchange`).
+  * `AzureProxy` — does not call `login.microsoftonline.com`,
+    does not perform OAuth2 client-credentials grant. Documented
+    at `crates/credential-proxy-azure/src/lib.rs` "What is
+    deferred" (`Real oauth2/v2.0/token exchange`).
+
+The V3 work to land genuine forwarding requires SigV4 / JWT-
+bearer / client-credentials grant code that the V2 spec
+explicitly defers. Until V3 ships, the `*-real-endpoint` slices
+exist to:
+
+  1. Confirm the canonical authentication-failure response
+     shapes from the real cloud control planes are stable —
+     RFC 6749 §5.2 plus AAD-specific `error_codes` for Azure,
+     `MissingAuthenticationToken` / `InvalidClientTokenId` for
+     AWS STS.
+  2. Provide a green-or-red signal an operator can use to
+     answer "is this network egress path reachable?" without
+     standing up a full agent VM.
+  3. Serve as the wire-shape contract V3 implementers
+     pattern-match against when the proxies start forwarding.
+
+Run the witnesses opt-in:
+
+```bash
+RAXIS_LIVE_CLOUD_NET=1 cargo run -p raxis-live-e2e -- \
+    aws-proxy-real-endpoint
+RAXIS_LIVE_CLOUD_NET=1 cargo run -p raxis-live-e2e -- \
+    gcp-proxy-real-endpoint
+RAXIS_LIVE_CLOUD_NET=1 cargo run -p raxis-live-e2e -- \
+    azure-proxy-real-endpoint
+```
+
+Without the env var the slices skip with an actionable hint
+(matching the MySQL/MSSQL preflight pattern). They do NOT
+require any cloud credentials — the assertion is on the
+canonical _unauthenticated_ error shape.
 
 ---
 

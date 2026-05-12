@@ -141,10 +141,13 @@ use clap::{Parser, Subcommand};
 
 mod env_file;
 mod slice_aws_proxy;
+mod slice_aws_proxy_real_endpoint;
 mod slice_azure_proxy;
+mod slice_azure_proxy_real_endpoint;
 mod slice_egress_enforcement;
 mod slice_gateway_anthropic;
 mod slice_gcp_proxy;
+mod slice_gcp_proxy_real_endpoint;
 mod slice_http_proxy_bearer;
 mod slice_http_proxy_restrictions;
 mod slice_mongodb_proxy;
@@ -251,6 +254,30 @@ enum Slice {
     /// fields, and that requests missing `Metadata: true` or naming
     /// a disallowed resource get `400`.
     AzureProxy,
+    /// V3-readiness baseline witness: real
+    /// `https://sts.amazonaws.com/` AWS STS endpoint. Pins the
+    /// canonical `MissingAuthenticationToken` / `InvalidClientTokenId`
+    /// error envelope an unsigned `GetCallerIdentity` call returns.
+    /// Skip-by-default; opt in with `RAXIS_LIVE_CLOUD_NET=1`. The
+    /// V2 `AwsProxy` is a synthesizer (no upstream forwarding); the
+    /// slice exists so V3's `aws-sdk-sts`-based forwarding has a
+    /// stable wire-shape contract.
+    AwsProxyRealEndpoint,
+    /// V3-readiness baseline witness: real
+    /// `https://oauth2.googleapis.com/token` endpoint. Pins the
+    /// canonical RFC 6749 §5.2 OAuth2 error envelope an empty-body
+    /// POST returns. Skip-by-default; opt in with
+    /// `RAXIS_LIVE_CLOUD_NET=1`. V2 `GcpProxy` does not forward;
+    /// see slice doc.
+    GcpProxyRealEndpoint,
+    /// V3-readiness baseline witness: real
+    /// `https://login.microsoftonline.com/common/oauth2/v2.0/token`
+    /// endpoint. Pins the canonical RFC 6749 §5.2 OAuth2 error
+    /// envelope plus the AAD-specific `error_codes` array an
+    /// empty-body POST returns. Skip-by-default; opt in with
+    /// `RAXIS_LIVE_CLOUD_NET=1`. V2 `AzureProxy` does not forward;
+    /// see slice doc.
+    AzureProxyRealEndpoint,
     /// Real `MysqlProxy` + a raw MySQL client. Asserts the
     /// handshake-tier MVP reaches `OK_Packet`, that `SELECT` is
     /// allowed and `INSERT` is blocked under `allow_only_select`
@@ -347,6 +374,9 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
         Slice::AwsProxy                   => slice_aws_proxy::run().await,
         Slice::GcpProxy                   => slice_gcp_proxy::run().await,
         Slice::AzureProxy                 => slice_azure_proxy::run().await,
+        Slice::AwsProxyRealEndpoint       => slice_aws_proxy_real_endpoint::run().await,
+        Slice::GcpProxyRealEndpoint       => slice_gcp_proxy_real_endpoint::run().await,
+        Slice::AzureProxyRealEndpoint     => slice_azure_proxy_real_endpoint::run().await,
         Slice::MysqlProxy                 => slice_mysql_proxy::run().await,
         Slice::MssqlProxy                 => slice_mssql_proxy::run().await,
         Slice::MongodbProxy               => slice_mongodb_proxy::run().await,
@@ -381,6 +411,12 @@ async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
                 .context("slice gcp-proxy")?;
             slice_azure_proxy::run().await
                 .context("slice azure-proxy")?;
+            slice_aws_proxy_real_endpoint::run().await
+                .context("slice aws-proxy-real-endpoint")?;
+            slice_gcp_proxy_real_endpoint::run().await
+                .context("slice gcp-proxy-real-endpoint")?;
+            slice_azure_proxy_real_endpoint::run().await
+                .context("slice azure-proxy-real-endpoint")?;
             slice_mysql_proxy::run().await
                 .context("slice mysql-proxy")?;
             slice_mssql_proxy::run().await

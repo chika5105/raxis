@@ -37,6 +37,12 @@ raxis-audit-tools          = { path = "../crates/audit" }
 raxis-types                = { path = "../crates/types" }
 
 tokio       = { workspace = true }
+# Outbound HTTPS client for the V3-readiness real-endpoint cloud
+# slices (`slice_{aws,gcp,azure}_proxy_real_endpoint.rs`). The
+# rustls-tls feature avoids a dynamic libssl dependency on Linux
+# CI workers; gzip is needed because GCP / Azure error responses
+# are sometimes content-encoded.
+reqwest     = { workspace = true }
 serde_json  = { workspace = true }
 hex         = { workspace = true }
 uuid        = { workspace = true }

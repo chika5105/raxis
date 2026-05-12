@@ -3733,6 +3733,7 @@ dependencies = [
  "raxis-test-support",
  "raxis-tproxy-protocol",
  "raxis-types",
+ "reqwest",
  "serde_json",
  "tempfile",
  "tokio",
