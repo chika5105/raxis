@@ -27,6 +27,7 @@ use crate::handlers;
 use crate::ipc::context::HandlerContext;
 use crate::ipc::auth;
 use crate::ipc::operator;
+use crate::ipc::{accept_backoff_step, ACCEPT_BACKOFF_INITIAL};
 
 // ---------------------------------------------------------------------------
 // ShutdownReason — why the dispatch loop exited.
@@ -262,9 +263,15 @@ async fn accept_operator_loop(
     listener: UnixListener,
     ctx: Arc<HandlerContext>,
 ) {
+    let mut backoff = ACCEPT_BACKOFF_INITIAL;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                // Reset the backoff after any successful accept so a
+                // transient FD exhaustion (or similar) doesn't keep
+                // the loop in a long-cooldown state once the underlying
+                // pressure clears.
+                backoff = ACCEPT_BACKOFF_INITIAL;
                 let ctx = Arc::clone(&ctx);
                 tokio::spawn(async move {
                     if let Err(e) = handle_operator_connection(stream, ctx).await {
@@ -274,8 +281,17 @@ async fn accept_operator_loop(
             }
             Err(e) => {
                 server_log::operator_accept_error(&e.to_string());
-                // Brief pause before retrying to prevent busy-spin.
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // Exponential backoff with a hard cap. The prior
+                // implementation slept a fixed 100 ms after every
+                // failure; under sustained EMFILE/ENFILE pressure this
+                // produced 10 retries/second of structured-stderr
+                // noise without giving the host any chance to recover.
+                // Doubling each failure (with a 5 s ceiling) keeps the
+                // first retry snappy on transient blips while bounding
+                // log noise during a real outage. See `accept_backoff_step`
+                // for the curve.
+                tokio::time::sleep(backoff).await;
+                backoff = accept_backoff_step(backoff);
             }
         }
     }
@@ -341,9 +357,11 @@ async fn handle_operator_connection(
 // ---------------------------------------------------------------------------
 
 async fn accept_planner_loop(listener: UnixListener, ctx: Arc<HandlerContext>) {
+    let mut backoff = ACCEPT_BACKOFF_INITIAL;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
+                backoff = ACCEPT_BACKOFF_INITIAL;
                 let ctx = Arc::clone(&ctx);
                 tokio::spawn(async move {
                     if let Err(e) = handle_planner_connection(stream, ctx).await {
@@ -353,7 +371,9 @@ async fn accept_planner_loop(listener: UnixListener, ctx: Arc<HandlerContext>) {
             }
             Err(e) => {
                 planner_dispatch_log::planner_accept_error(&e.to_string());
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                // See `accept_operator_loop` for rationale; same curve.
+                tokio::time::sleep(backoff).await;
+                backoff = accept_backoff_step(backoff);
             }
         }
     }
