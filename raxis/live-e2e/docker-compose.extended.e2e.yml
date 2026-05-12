@@ -1,0 +1,80 @@
+# live-e2e/docker-compose.extended.e2e.yml
+#
+# Extended infrastructure for the extended E2E scenario test
+# (`raxis/kernel/tests/extended_e2e_concurrent_lifecycle.rs`,
+#  spec'd in `raxis/specs/v2/e2e-extended-scenario.md`).
+#
+# This file is a SUPERSET of `docker-compose.e2e.yml`: same service
+# names, ports, credentials, tmpfs mounts, and healthcheck shape so
+# the existing `full_e2e_session_lifecycle.rs` keeps passing against
+# either compose file. The extended scenario additionally:
+#
+#   * Creates a logical sub-database `raxis_e2e_pg` on the postgres
+#     side (via the seed script's `\connect`-then-`CREATE TABLE`
+#     pattern).
+#   * Creates a `raxis_e2e_mongo` database on the mongo side with a
+#     `seeded_docs` collection (via the seed script).
+#   * Mounts `live-e2e/seed/postgres/` into the postgres container's
+#     `/docker-entrypoint-initdb.d/` so the seed runs at first boot.
+#   * Mounts `live-e2e/seed/mongo/` into the mongo container's
+#     `/docker-entrypoint-initdb.d/` for the same reason.
+#
+# Storage: tmpfs only — every `up` is a clean slate. The seeds are
+# idempotent, so re-applying them via `psql` / `mongosh` from the
+# harness's preflight is safe and the test never depends on
+# persistence.
+#
+# Run:
+#   docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait
+#   RAXIS_LIVE_E2E=1 cargo test -p raxis-kernel \
+#       --test extended_e2e_concurrent_lifecycle -- --nocapture
+#   docker compose -f live-e2e/docker-compose.extended.e2e.yml down -v
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: raxis-e2e-pg
+    ports:
+      - "127.0.0.1:54399:5432"
+    environment:
+      POSTGRES_USER: raxis_test
+      POSTGRES_PASSWORD: raxis_test_pass
+      # `raxis_e2e` is the legacy DB the single-task test connects
+      # to. The extended scenario's seed script creates `raxis_e2e_pg`
+      # on top.
+      POSTGRES_DB: raxis_e2e
+    volumes:
+      # Read-only bind: docker-entrypoint runs every *.sql here in
+      # alphabetical order at first boot.
+      - ./seed/postgres:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raxis_test -d raxis_e2e"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  mongodb:
+    image: mongo:7
+    container_name: raxis-e2e-mongo
+    command: ["--auth", "--bind_ip", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:27399:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: raxis_test
+      MONGO_INITDB_ROOT_PASSWORD: raxis_test_pass
+    volumes:
+      # Read-only bind: docker-entrypoint runs every *.js here via
+      # mongosh after the auth-bootstrap step at first boot.
+      - ./seed/mongo:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: >
+        mongosh --quiet
+        -u raxis_test -p raxis_test_pass --authenticationDatabase admin
+        --eval "db.adminCommand({ ping: 1 }).ok"
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /data/db
