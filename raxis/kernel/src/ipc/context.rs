@@ -69,10 +69,12 @@ pub struct HandlerContext {
     pub data_dir: PathBuf,
     /// Absolute path to the witness blob store (`<data_dir>/witness/`).
     ///
-    /// Spec §2.3 witness.rs: all witness blob writes go through
-    /// `witness_index::write(record, blob, &ctx.witness_dir, store)`.
-    /// The directory is created at bootstrap time and always exists by
-    /// the time the IPC server starts (startup step 5, store open).
+    /// Spec §2.3 witness.rs: all witness blob writes go through the
+    /// `witness_index::write_blob_to_disk` + `insert_witness_index_in_tx`
+    /// pair (both inside the verifier-token consume transaction per
+    /// Pattern C, kernel-store.md §2.5.1.1). The directory is created
+    /// at bootstrap time and always exists by the time the IPC server
+    /// starts (startup step 5, store open).
     pub witness_dir: PathBuf,
     /// In-memory per-task plan-fields registry.
     ///

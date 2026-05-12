@@ -134,7 +134,9 @@ pub enum HandlerError {
 ///
 /// **Async safety:** every helper this function calls that touches
 /// `Store::lock_sync()` (verifier_token::validate / consume_verifier_token,
-/// load_task_row, witness_index::write) is wrapped in
+/// load_task_row, the Pattern C witness commit transaction that
+/// composes `witness_index::insert_witness_index_in_tx` with
+/// `consume_verifier_token_in_tx`) is wrapped in
 /// `tokio::task::spawn_blocking`. Calling them directly from this `async`
 /// frame would panic with "Cannot block the current thread from within a
 /// runtime" because `Store::lock_sync` ultimately invokes

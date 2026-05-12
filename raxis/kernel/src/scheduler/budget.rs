@@ -27,8 +27,11 @@ pub type LaneBudgetSnapshot = crate::scheduler::lane::LaneStatus;
 
 /// Check whether a lane has budget for `estimated_cost` more units.
 ///
-/// Pure read. Called from `handlers/intent.rs` after gate evaluation,
-/// before `consume_budget`.
+/// Pure read. The canonical write path
+/// ([`reserve_budget_in_tx`]) folds an equivalent check and the
+/// `lane_budget_reservations` INSERT into a single transaction;
+/// this standalone variant is preserved as a diagnostic helper for
+/// dashboards / ad-hoc operator queries.
 ///
 /// Returns `SchedulerError::BudgetExceeded { kind }` if over-limit.
 pub fn check_budget(
@@ -61,34 +64,13 @@ pub fn check_budget(
     Ok(())
 }
 
-/// Insert a `lane_budget_reservations` row for this task.
-///
-/// **Standalone wrapper** that opens its own mutex acquisition and
-/// auto-commits the INSERT. Pre-fix this was the only entry point and was
-/// paired with a separate `check_budget` call — that pairing is the
-/// canonical Pattern A TOCTOU bug documented in `kernel-store.md`
-/// §2.5.1.1. **New write paths MUST use `reserve_budget_in_tx` instead**
-/// so the check and the insert run inside the same transaction.
-///
-/// PK (lane_id, task_id) means re-insertion on continuation is prevented
-/// by `INSERT OR IGNORE`.
-///
-/// Kept for the (rare) case where a caller has already validated the
-/// budget under the same transaction by other means and just needs to
-/// drop the reservation row in. New callers should prefer
-/// `reserve_budget_in_tx`.
-pub fn consume_budget(
-    lane_id: &str,
-    task_id: &str,
-    cost: u64,
-    store: &Store,
-) -> Result<(), SchedulerError> {
-    let conn = store.lock_sync();
-    consume_budget_in_tx(&conn, lane_id, task_id, cost)
-}
-
 /// Insert a `lane_budget_reservations` row for this task — transaction
-/// variant for callers composing this write into a larger atomic operation.
+/// variant for callers composing this write into a larger atomic
+/// operation. The canonical write path is
+/// [`reserve_budget_in_tx`], which folds the lane-status SELECT and
+/// this INSERT into a single transaction (closes Pattern A TOCTOU
+/// per `kernel-store.md` §2.5.1.1). PK `(lane_id, task_id)` means
+/// re-insertion on continuation is prevented by `INSERT OR IGNORE`.
 pub fn consume_budget_in_tx(
     conn:    &rusqlite::Connection,
     lane_id: &str,
