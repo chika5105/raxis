@@ -563,7 +563,6 @@ fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
         now_unix_secs,
         permitted_ops: vec![
             "CreateInitiative".to_owned(),
-            "CreateInitiativeV2".to_owned(),
             "ApprovePlan".to_owned(),
             "AbortInitiative".to_owned(),
         ],
@@ -775,7 +774,7 @@ impl OperatorIpc {
         let fingerprint = fingerprint_8(&pubkey);
 
         let req = serde_json::json!({
-            "op": "CreateInitiativeV2",
+            "op": "CreateInitiative",
             "payload": {
                 "initiative_id":     initiative_id,
                 "plan_bundle_hex":   hex::encode(&canonical),
@@ -784,11 +783,11 @@ impl OperatorIpc {
                 "signed_by_hex":     hex::encode(fingerprint.as_bytes()),
             },
         });
-        write_json_frame(&mut self.stream, &req).expect("write CreateInitiativeV2");
+        write_json_frame(&mut self.stream, &req).expect("write CreateInitiative");
         let resp = read_json_blocking(&mut self.stream);
         assert_eq!(
             resp["status"].as_str(), Some("InitiativeCreated"),
-            "CreateInitiativeV2 must succeed; got: {resp:#}",
+            "CreateInitiative must succeed; got: {resp:#}",
         );
         let returned_id = resp["payload"]["initiative_id"]
             .as_str()
