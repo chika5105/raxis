@@ -1223,60 +1223,76 @@ async fn main() {
             // gateway bridge by allocating it here so both
             // surfaces (file ring + broadcast channel) point
             // at the same `<data_dir>/streams/` directory.
-            let stream_capture = raxis_dashboard_kernel::SessionStreamCapture::new(
+            //
+            // Hardening: the previous version `expect`-ed on the
+            // streams-directory init, taking the kernel down on
+            // a read-only data dir / EROFS / ENOSPC. Surface the
+            // failure as a structured warning and skip the
+            // dashboard instead — the kernel's other surfaces
+            // (operator UDS, audit chain) keep working.
+            match raxis_dashboard_kernel::SessionStreamCapture::new(
                 &data_dir,
                 raxis_dashboard_kernel::CaptureConfig::default(),
-            )
-            .expect("create streams dir");
-            match raxis_dashboard_kernel::start_dashboard_with_advancer(
-                cfg.clone(),
-                Arc::clone(&store),
-                Arc::clone(&policy),
-                data_dir.clone(),
-                policy_path.clone(),
-                started_at,
-                stream_capture,
-                advancer,
-            )
-            .await
-            {
-                Ok(h) => {
-                    let addr   = h.local_addr();
-                    let scheme = if !cfg.tls_cert_path.is_empty()
-                        && !cfg.tls_key_path.is_empty()
-                    { "https" } else { "http" };
-                    // Human-readable line: most modern terminals
-                    // (Cursor, VS Code, iTerm2, Terminal.app,
-                    // Ghostty, Kitty, Alacritty, tmux) auto-detect
-                    // `scheme://host:port` URLs and make them
-                    // cmd/ctrl-clickable. When the listener is
-                    // bound to `0.0.0.0` / `::` the printed URL is
-                    // not directly clickable; print a `localhost`
-                    // hint alongside so the operator can still
-                    // click through.
-                    let ip = addr.ip();
-                    let primary = format!("{scheme}://{addr}");
-                    if ip.is_unspecified() {
-                        eprintln!(
-                            "RAXIS dashboard: {primary}  (click: {scheme}://localhost:{})",
-                            addr.port(),
-                        );
-                    } else {
-                        eprintln!("RAXIS dashboard: {primary}");
+            ) {
+                Ok(stream_capture) => {
+                    match raxis_dashboard_kernel::start_dashboard_with_advancer(
+                        cfg.clone(),
+                        Arc::clone(&store),
+                        Arc::clone(&policy),
+                        data_dir.clone(),
+                        policy_path.clone(),
+                        started_at,
+                        stream_capture,
+                        advancer,
+                    )
+                    .await
+                    {
+                        Ok(h) => {
+                            let addr   = h.local_addr();
+                            let scheme = if !cfg.tls_cert_path.is_empty()
+                                && !cfg.tls_key_path.is_empty()
+                            { "https" } else { "http" };
+                            // Human-readable line: most modern terminals
+                            // (Cursor, VS Code, iTerm2, Terminal.app,
+                            // Ghostty, Kitty, Alacritty, tmux) auto-detect
+                            // `scheme://host:port` URLs and make them
+                            // cmd/ctrl-clickable. When the listener is
+                            // bound to `0.0.0.0` / `::` the printed URL is
+                            // not directly clickable; print a `localhost`
+                            // hint alongside so the operator can still
+                            // click through.
+                            let ip = addr.ip();
+                            let primary = format!("{scheme}://{addr}");
+                            if ip.is_unspecified() {
+                                eprintln!(
+                                    "RAXIS dashboard: {primary}  (click: {scheme}://localhost:{})",
+                                    addr.port(),
+                                );
+                            } else {
+                                eprintln!("RAXIS dashboard: {primary}");
+                            }
+                            // Keep the structured log line for tooling that
+                            // captures stderr (CI, log shippers, the
+                            // `raxis status` parser).
+                            eprintln!(
+                                "{{\"level\":\"info\",\"event\":\"dashboard_started\",\
+                                 \"scheme\":\"{scheme}\",\"local_addr\":\"{addr}\",\
+                                 \"url\":\"{primary}\"}}",
+                            );
+                            Some(h)
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "{{\"level\":\"warn\",\"event\":\"dashboard_start_failed\",\
+                                 \"reason\":\"{e}\"}}"
+                            );
+                            None
+                        }
                     }
-                    // Keep the structured log line for tooling that
-                    // captures stderr (CI, log shippers, the
-                    // `raxis status` parser).
-                    eprintln!(
-                        "{{\"level\":\"info\",\"event\":\"dashboard_started\",\
-                         \"scheme\":\"{scheme}\",\"local_addr\":\"{addr}\",\
-                         \"url\":\"{primary}\"}}",
-                    );
-                    Some(h)
                 }
                 Err(e) => {
                     eprintln!(
-                        "{{\"level\":\"warn\",\"event\":\"dashboard_start_failed\",\
+                        "{{\"level\":\"warn\",\"event\":\"dashboard_streams_init_failed\",\
                          \"reason\":\"{e}\"}}"
                     );
                     None

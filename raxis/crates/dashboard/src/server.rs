@@ -8,23 +8,74 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::async_trait;
-use axum::extract::FromRequestParts;
+use axum::extract::{DefaultBodyLimit, FromRequestParts};
 use axum::http::request::Parts;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
 use tokio::net::TcpListener;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+
+// ---------------------------------------------------------------------------
+// Phase 1 hardening — per-process bounds (see
+// `crates/dashboard/src/server.rs::build_router`)
+// ---------------------------------------------------------------------------
+
+/// Per-handler wall-clock timeout for every JSON API endpoint.
+/// The dashboard is meant to be operator-clicky, not long-poll —
+/// any handler that does not finish in this window is buggy
+/// (slow-loris client, runaway DB query, deadlocked git
+/// subprocess, …) and we surface a 408 instead of holding
+/// the connection forever. SSE handlers are exempt — see
+/// [`build_router`].
+const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum number of in-flight handler invocations (across all
+/// routes, including SSE). Operator dashboards see at most a
+/// handful of concurrent tabs per operator and ~5 outstanding
+/// SSE streams; 256 leaves substantial headroom while keeping
+/// the worst-case memory footprint bounded under e2e churn.
+const MAX_INFLIGHT_REQUESTS: usize = 256;
+
+/// Body size cap for tiny JSON requests (auth verify / logout —
+/// payloads are <1 KiB in practice). Above this we 413 before
+/// the handler runs to make the auth path immune to body-bomb
+/// abuse.
+const BODY_LIMIT_AUTH: usize = 4 * 1024;
+
+/// Body size cap for the policy editor PUT
+/// (`PUT /api/policy/toml`). 1 MiB is well above the largest
+/// `policy.toml` we expect operators to author and well below
+/// the kernel's working-set budget.
+const BODY_LIMIT_POLICY: usize = 1024 * 1024;
+
+/// Body size cap for everything else (GET endpoints in
+/// practice, but defence-in-depth in case a future endpoint
+/// adds a body without thinking about the limit).
+const BODY_LIMIT_DEFAULT: usize = 16 * 1024;
 
 use crate::auth::{build_auth_state, AuthState, DashboardRole, OperatorClaims};
 use crate::config::DashboardConfig;
 use crate::data::DashboardData;
 use crate::error::ApiError;
+
+#[cfg(test)]
+pub(crate) const fn body_limit_auth_for_tests() -> usize { BODY_LIMIT_AUTH }
+#[cfg(test)]
+pub(crate) const fn body_limit_policy_for_tests() -> usize { BODY_LIMIT_POLICY }
+#[cfg(test)]
+pub(crate) const fn handler_timeout_for_tests() -> Duration { HANDLER_TIMEOUT }
+#[cfg(test)]
+pub(crate) const fn max_inflight_for_tests() -> usize { MAX_INFLIGHT_REQUESTS }
 
 /// Shared application state. Cheap `Arc` clone per request.
 pub type AppState<D> = Arc<AppStateInner<D>>;
@@ -41,6 +92,73 @@ pub struct AppStateInner<D: DashboardData> {
     /// `data.lookup_operator_roles` rather than touching the
     /// policy bundle directly.
     pub config: DashboardConfig,
+    /// Process-wide shutdown signal. Fires exactly once when the
+    /// server's `serve_with_shutdown` future is signalled (or the
+    /// server task is otherwise winding down). Long-poll handlers
+    /// (SSE) `select!` on `shutdown.notified()` so they emit a
+    /// final `kernel-shutdown` event and complete cleanly instead
+    /// of leaving the browser hung waiting for a response.
+    ///
+    /// `Notify::notify_waiters` is fan-out-safe: every active
+    /// SSE handler wakes exactly once. New subscribers that
+    /// arrive AFTER the notify see the "closed" path through
+    /// `is_shutdown_triggered`.
+    pub shutdown: Arc<ShutdownSignal>,
+}
+
+/// One-shot, fan-out-safe shutdown signal handed to long-poll
+/// handlers via `AppStateInner::shutdown`.
+///
+/// Wraps a `tokio::sync::Notify` plus a sticky `AtomicBool`:
+/// `notify_waiters()` only wakes currently-waiting tasks, so a
+/// handler that subscribes after shutdown was triggered would
+/// otherwise miss the signal entirely. The sticky bit lets
+/// `is_triggered` see the post-signal state without racing.
+pub struct ShutdownSignal {
+    notify: tokio::sync::Notify,
+    triggered: std::sync::atomic::AtomicBool,
+}
+
+impl ShutdownSignal {
+    /// Build a fresh, unsignalled shutdown.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            notify: tokio::sync::Notify::new(),
+            triggered: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Trigger the shutdown. Idempotent — additional triggers
+    /// are no-ops. Wakes every currently-waiting handler.
+    pub fn trigger(&self) {
+        self.triggered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Wait for the shutdown to fire. Returns immediately when
+    /// it has already fired (sticky bit).
+    pub async fn notified(&self) {
+        if self.triggered.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.notify.notified().await;
+    }
+
+    /// Synchronous probe used by handlers that need to know
+    /// whether to emit a `kernel-shutdown` frame on attach.
+    pub fn is_triggered(&self) -> bool {
+        self.triggered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Default for ShutdownSignal {
+    fn default() -> Self {
+        Self {
+            notify: tokio::sync::Notify::new(),
+            triggered: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 /// Dashboard server.
@@ -49,6 +167,7 @@ pub struct DashboardServer<D: DashboardData> {
     listener: TcpListener,
     addr: SocketAddr,
     _state: AppState<D>,
+    shutdown: Arc<ShutdownSignal>,
 }
 
 impl<D: DashboardData> DashboardServer<D> {
@@ -60,10 +179,12 @@ impl<D: DashboardData> DashboardServer<D> {
     ) -> Result<Self, BindError> {
         let auth = build_auth_state(&config)
             .map_err(|e| BindError::Auth(e.to_string()))?;
+        let shutdown = ShutdownSignal::new();
         let state: AppState<D> = Arc::new(AppStateInner {
             data: Arc::clone(&data),
             auth,
             config: config.clone(),
+            shutdown: Arc::clone(&shutdown),
         });
         let router = build_router(Arc::clone(&state));
         let addr_str = format!("{}:{}", config.bind_address, config.bind_port);
@@ -77,21 +198,37 @@ impl<D: DashboardData> DashboardServer<D> {
                 addr: addr_str,
                 source: e,
             })?;
-        Ok(Self { router, listener, addr, _state: state })
+        Ok(Self { router, listener, addr, _state: state, shutdown })
     }
 
     /// Address the listener is bound to (useful for tests).
     pub fn local_addr(&self) -> SocketAddr { self.addr }
 
+    /// Shutdown signal handle (cloneable). Triggering this
+    /// directly is equivalent to triggering the future passed to
+    /// [`Self::serve_with_shutdown`]; long-poll handlers wake on
+    /// either path.
+    pub fn shutdown_signal(&self) -> Arc<ShutdownSignal> {
+        Arc::clone(&self.shutdown)
+    }
+
     /// Run the server until the supplied shutdown future
     /// completes. On graceful shutdown, in-flight requests are
-    /// allowed to complete.
+    /// allowed to complete; long-poll SSE handlers receive a
+    /// `kernel-shutdown` sentinel event and close cleanly
+    /// instead of being held open against a hyper drain that
+    /// will never finish.
     pub async fn serve_with_shutdown(
         self,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), std::io::Error> {
+        let signal = Arc::clone(&self.shutdown);
+        let combined_shutdown = async move {
+            shutdown.await;
+            signal.trigger();
+        };
         axum::serve(self.listener, self.router)
-            .with_graceful_shutdown(shutdown)
+            .with_graceful_shutdown(combined_shutdown)
             .await
     }
 
@@ -106,17 +243,68 @@ impl<D: DashboardData> DashboardServer<D> {
 /// as the fallback service so SPA client-side routes (e.g.
 /// `/initiatives/init-abc`) load `index.html` and resolve in
 /// the browser.
+///
+/// # Hardening (Phase 1)
+///
+/// Every JSON API endpoint is bounded by:
+///
+/// 1. A per-route **body size limit** ([`BODY_LIMIT_AUTH`],
+///    [`BODY_LIMIT_POLICY`], [`BODY_LIMIT_DEFAULT`]). Oversize
+///    requests get a 413 before the handler runs.
+/// 2. A **request timeout** ([`HANDLER_TIMEOUT`]) applied via
+///    `tower_http::timeout::TimeoutLayer`. A handler that runs
+///    longer surfaces an HTTP 408 to the operator instead of
+///    pinning a tokio task. **SSE endpoints are intentionally
+///    exempt** — they are long-poll by design and rely on
+///    `axum::response::sse::KeepAlive` for liveness.
+/// 3. A **process-wide concurrency cap**
+///    ([`MAX_INFLIGHT_REQUESTS`]) applied via
+///    `tower::limit::ConcurrencyLimitLayer`. Once the cap is hit
+///    new requests queue (or get 503 with the right inner
+///    layer); we accept queueing to keep the kernel below its
+///    file-descriptor / memory budget under e2e churn.
+///
+/// The SSE route is mounted in a sibling sub-router that
+/// inherits the concurrency cap but skips the timeout layer.
+/// SPA fallback (when `static_dir` is set) is added last so
+/// `/api/*` routes never fall through to `ServeDir`.
 fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
     use axum::routing::{get, patch, post};
     use crate::routes::*;
 
     let static_dir = state.config.static_dir.clone();
 
-    let mut router = Router::new()
+    // ── Auth + write surface: tighter body limits ────────────────────────
+    //
+    // `auth/verify` and `auth/logout` carry tiny JSON payloads
+    // (≤ ~1 KiB in practice — challenge hex + Ed25519 sig hex +
+    // pubkey hex). Capping at `BODY_LIMIT_AUTH` makes the
+    // unauthenticated surface immune to body-bomb abuse without
+    // ever entering the JWT verifier.
+    //
+    // `policy/toml` PUT carries the full policy.toml; cap at
+    // `BODY_LIMIT_POLICY` (1 MiB) — far above any realistic
+    // operator policy and far below the kernel's working set.
+    let api_router: Router<AppState<D>> = Router::new()
         // Auth (no JWT required).
-        .route("/api/auth/challenge", get(auth::challenge::<D>))
-        .route("/api/auth/verify",    post(auth::verify::<D>))
-        .route("/api/auth/logout",    post(auth::logout::<D>))
+        .route(
+            "/api/auth/challenge",
+            get(auth::challenge::<D>)
+                .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
+                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_DEFAULT)),
+        )
+        .route(
+            "/api/auth/verify",
+            post(auth::verify::<D>)
+                .layer(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
+                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
+        )
+        .route(
+            "/api/auth/logout",
+            post(auth::logout::<D>)
+                .layer(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
+                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
+        )
         // Health (admin sees full, read sees sanitized).
         .route("/api/health",         get(health::health::<D>))
         // Initiatives.
@@ -130,7 +318,6 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Sessions.
         .route("/api/sessions",                    get(sessions::list::<D>))
         .route("/api/sessions/:id",                get(sessions::detail::<D>))
-        .route("/api/sessions/:id/stream",         get(sessions::stream::<D>))
         // Escalations.
         .route("/api/escalations",                 get(escalations::list::<D>))
         .route("/api/escalations/:id",             get(escalations::detail::<D>))
@@ -144,14 +331,43 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/notifications/:id/read",      patch(notifications::mark_read::<D>))
         // Policy.
         .route("/api/policy",                      get(policy::snapshot::<D>))
-        .route("/api/policy/toml",
-            get(policy::raw_toml::<D>).put(policy::update_toml::<D>))
+        .route(
+            "/api/policy/toml",
+            get(policy::raw_toml::<D>).put(
+                policy::update_toml::<D>
+            )
+            .layer(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
+            .layer(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
+        )
         // Git worktrees.
         .route("/api/git/worktrees",                       get(git::list::<D>))
         .route("/api/git/worktrees/:name",                 get(git::detail::<D>))
         .route("/api/git/worktrees/:name/log",             get(git::log::<D>))
         .route("/api/git/worktrees/:name/diff",            get(git::diff_default::<D>))
-        .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>));
+        .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>))
+        // Repo browsing — directory tree + file content under
+        // the worktree root, both subject to the
+        // path-allowlist + symlink-escape sandbox in
+        // `KernelDashboardData::worktree_{tree,file}`.
+        .route("/api/git/worktrees/:name/tree",            get(git::tree::<D>))
+        .route("/api/git/worktrees/:name/file",            get(git::file::<D>))
+        // Per-handler wall-clock timeout. Applies to the
+        // sub-router only so the SSE long-poll handler is
+        // exempt (see the sibling sub-router below).
+        .layer(TimeoutLayer::new(HANDLER_TIMEOUT));
+
+    // ── SSE sub-router (no timeout layer — see HANDLER_TIMEOUT) ──────────
+    //
+    // Long-poll endpoints rely on
+    // `axum::response::sse::KeepAlive` for liveness; wrapping
+    // them in TimeoutLayer would force-close every SSE
+    // connection after `HANDLER_TIMEOUT` seconds, which is
+    // exactly the wrong behaviour for a stream the browser is
+    // meant to hold open across the lifetime of a session.
+    let sse_router: Router<AppState<D>> = Router::new()
+        .route("/api/sessions/:id/stream",         get(sessions::stream::<D>));
+
+    let mut router = api_router.merge(sse_router);
 
     // SPA fallback: any non-API route serves index.html so
     // React Router can resolve client-side routes. ServeDir's
@@ -174,6 +390,11 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // the SSE handler in routes::sessions::stream is not
         // buffered for gzip — a buffered SSE stream looks like a
         // hung connection from the browser's point of view.
+        //
+        // The concurrency cap is the outermost meaningful layer
+        // (TraceLayer wraps it for free) so it backpressures
+        // BEFORE we allocate per-request handler state.
+        .layer(ConcurrencyLimitLayer::new(MAX_INFLIGHT_REQUESTS))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .layer(

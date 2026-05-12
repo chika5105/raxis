@@ -55,7 +55,7 @@ use raxis_dashboard::data::{
     InitiativeListEntry, InitiativeView, NotificationView, OperatorAuthResolution,
     PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView,
     SessionView, StructuredOutputView, TaskView, WorktreeDetail, WorktreeDiff,
-    WorktreeListEntry, WorktreeLogEntry,
+    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -233,20 +233,27 @@ pub struct KernelDashboardData {
 
 impl KernelDashboardData {
     /// Build a new kernel-wired data layer.
+    ///
+    /// Returns an error when the streams directory cannot be
+    /// created (e.g. read-only `data_dir`, a non-directory file
+    /// already at `<data_dir>/streams`, ENOSPC). The previous
+    /// implementation panicked here via `expect`, which would
+    /// take the kernel down at dashboard-bind time on any of
+    /// these cases — the caller now decides whether to disable
+    /// the dashboard or surface the IO error.
     pub fn new(
         store: Arc<Store>,
         policy: Arc<ArcSwap<PolicyBundle>>,
         data_dir: PathBuf,
         policy_path: PathBuf,
         booted_at: u64,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let audit_dir = data_dir.join("audit");
         let stream_capture = SessionStreamCapture::new(
             &data_dir,
             CaptureConfig::default(),
-        )
-        .expect("create streams dir");
-        Self {
+        )?;
+        Ok(Self {
             policy,
             data_dir,
             policy_path,
@@ -255,7 +262,7 @@ impl KernelDashboardData {
             store,
             stream_capture,
             policy_advancer: None,
-        }
+        })
     }
 
     /// Same as [`Self::new`] but with a caller-supplied capture
@@ -615,19 +622,52 @@ impl DashboardData for KernelDashboardData {
         limit: u32,
         initiative_id: Option<&str>,
     ) -> Result<Vec<AuditEntryView>, ApiError> {
-        // Walk the chain newest-first by collecting ALL records
-        // matching the filter then paginating. The chain reader
-        // walks oldest→newest, so we collect into a Vec and reverse.
-        // For V2.5 chains (single segment, ≤ 100K events for a
-        // typical operator) this is acceptable. A larger
-        // workspace will need a server-side index — tracked under
-        // §3 of the dashboard spec under "future indexing".
+        // Walk the audit chain in segment order (oldest → newest)
+        // and keep only the most recent `cap` records that match
+        // the caller's filter, in a bounded ring buffer. Memory
+        // is O(cap) ≤ 500 entries regardless of how long the
+        // chain is, and the iteration is wall-bounded by
+        // `MAX_AUDIT_WALK_RECORDS` so a degenerate chain (e.g.
+        // millions of rows after sustained e2e churn) cannot
+        // pin a request thread for unbounded time.
+        //
+        // Why a ring buffer instead of "collect everything, sort,
+        // paginate": the previous implementation accumulated
+        // every matched record into a Vec, sorted by seq desc,
+        // then sliced. That is O(N) memory + O(N log N) CPU per
+        // request — fine for a 100-event chain, fatal during the
+        // live e2e where the chain grows monotonically and many
+        // operators may hit `/api/audit` concurrently.
+        const MAX_AUDIT_WALK_RECORDS: usize = 200_000;
+
         let reader = ChainReader::open(&self.audit_dir).map_err(|e| ApiError::Internal {
             log_only: format!("ChainReader::open: {e}"),
         })?;
         let cap = limit.min(500) as usize;
-        let mut matched: Vec<AuditEntryView> = Vec::new();
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Bounded sliding window of "newest matched records seen
+        // so far that are strictly older than the cursor".
+        let mut tail: std::collections::VecDeque<AuditEntryView> =
+            std::collections::VecDeque::with_capacity(cap);
+        let mut walked: usize = 0;
         for rec in reader.records() {
+            walked += 1;
+            if walked > MAX_AUDIT_WALK_RECORDS {
+                // Hard cap: stop walking. The caller still gets
+                // the newest matching records seen so far. The
+                // structured warn line lets ops know the chain
+                // grew past the per-request budget so they can
+                // rotate / archive.
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                      \"event\":\"dashboard_audit_walk_capped\",\
+                      \"limit_records\":{MAX_AUDIT_WALK_RECORDS}}}"
+                );
+                break;
+            }
             let rec = match rec {
                 Ok(r) => r,
                 Err(_) => continue, // tolerate one malformed line per spec
@@ -637,12 +677,18 @@ impl DashboardData for KernelDashboardData {
                     continue;
                 }
             }
+            // Cursor filter: caller already saw everything ≥ cursor.
+            if let Some(c) = cursor_seq {
+                if rec.seq >= c {
+                    continue;
+                }
+            }
             let payload = rec
                 .parsed_value
                 .as_ref()
                 .and_then(|v| v.get("payload").cloned())
                 .unwrap_or(serde_json::Value::Null);
-            matched.push(AuditEntryView {
+            let entry = AuditEntryView {
                 seq: rec.seq,
                 event_id: rec
                     .parsed_value
@@ -657,19 +703,18 @@ impl DashboardData for KernelDashboardData {
                 session_id: rec.session_id,
                 at: rec.emitted_at.unwrap_or(0).max(0) as u64,
                 payload,
-            });
+            };
+            if tail.len() == cap {
+                // Drop the oldest matched record we've buffered;
+                // it falls outside the page-of-newest we'll return.
+                tail.pop_front();
+            }
+            tail.push_back(entry);
         }
         // Newest first.
-        matched.sort_by(|a, b| b.seq.cmp(&a.seq));
-        let from = match cursor_seq {
-            Some(c) => matched
-                .iter()
-                .position(|e| e.seq < c)
-                .unwrap_or(matched.len()),
-            None => 0,
-        };
-        let end = (from + cap).min(matched.len());
-        Ok(matched[from..end].to_vec())
+        let mut matched: Vec<AuditEntryView> = tail.into_iter().collect();
+        matched.reverse();
+        Ok(matched)
     }
 
     fn list_inbox(&self) -> Result<Vec<AuditEntryView>, ApiError> {
@@ -847,6 +892,163 @@ impl DashboardData for KernelDashboardData {
             from_sha: from_sha.to_owned(),
             to_sha: to_sha.to_owned(),
             files,
+        })
+    }
+
+    fn worktree_tree(
+        &self,
+        name: &str,
+        sub_path: Option<&str>,
+    ) -> Result<WorktreeTree, ApiError> {
+        let resolved = self.resolve_worktree(name)?;
+        let root = std::path::PathBuf::from(&resolved.summary.path);
+        if !root.exists() {
+            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+        }
+        let target = resolve_within_root(&root, sub_path.unwrap_or(""))?;
+        let meta = std::fs::metadata(&target).map_err(|_| ApiError::NotFound {
+            kind: "tree-entry".into(),
+        })?;
+        if !meta.is_dir() {
+            return Err(ApiError::BadRequest {
+                detail: "path is not a directory".into(),
+            });
+        }
+        let read_dir = std::fs::read_dir(&target).map_err(|e| ApiError::Internal {
+            log_only: format!("read_dir: {e}"),
+        })?;
+        let mut entries: Vec<WorktreeTreeEntry> = Vec::new();
+        let mut truncated = false;
+        let prefix = sub_path.unwrap_or("").trim_matches('/');
+        for ent in read_dir {
+            // Cap directory listings so a worktree with a
+            // pathologically-large directory (e.g. a
+            // node_modules with 50K direntries) cannot pin
+            // the request thread for an unbounded time.
+            if entries.len() >= MAX_TREE_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let Ok(ent) = ent else { continue };
+            let file_name = ent.file_name();
+            let Some(name_str) = file_name.to_str() else {
+                continue; // refuse non-UTF-8 entry names
+            };
+            // Hide repo internals.
+            if name_str == ".git" {
+                continue;
+            }
+            let rel_path = if prefix.is_empty() {
+                name_str.to_owned()
+            } else {
+                format!("{prefix}/{name_str}")
+            };
+            // ent.metadata() does NOT follow symlinks on
+            // Unix, so a symlink in the directory listing
+            // surfaces as kind="symlink" with the target
+            // never dereferenced.
+            let kind_meta = match ent.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let ft = kind_meta.file_type();
+            let (kind, size) = if ft.is_symlink() {
+                ("symlink".to_owned(), None)
+            } else if ft.is_dir() {
+                ("dir".to_owned(), None)
+            } else if ft.is_file() {
+                ("file".to_owned(), Some(kind_meta.len()))
+            } else {
+                ("other".to_owned(), None)
+            };
+            entries.push(WorktreeTreeEntry {
+                name: name_str.to_owned(),
+                path: rel_path,
+                kind,
+                size,
+            });
+        }
+        // Directories first, then alpha within each bucket.
+        entries.sort_by(|a, b| {
+            let dir_a = a.kind == "dir";
+            let dir_b = b.kind == "dir";
+            dir_b
+                .cmp(&dir_a)
+                .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+        });
+        Ok(WorktreeTree {
+            name: resolved.summary.name,
+            path: prefix.to_owned(),
+            entries,
+            truncated,
+        })
+    }
+
+    fn worktree_file(
+        &self,
+        name: &str,
+        file_path: &str,
+    ) -> Result<WorktreeFile, ApiError> {
+        let resolved = self.resolve_worktree(name)?;
+        let root = std::path::PathBuf::from(&resolved.summary.path);
+        if !root.exists() {
+            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+        }
+        let target = resolve_within_root(&root, file_path)?;
+        // Refuse symlinks outright (do not follow). Defends
+        // against a tree where the operator inadvertently
+        // committed a symlink to /etc/shadow. resolve_within_root
+        // already rejected symlinks at every depth; this is
+        // a belt-and-braces re-check on the leaf.
+        let lmeta = std::fs::symlink_metadata(&target).map_err(|_| ApiError::NotFound {
+            kind: "file".into(),
+        })?;
+        if lmeta.file_type().is_symlink() {
+            return Err(ApiError::BadRequest {
+                detail: "symlinks are not browsable".into(),
+            });
+        }
+        if !lmeta.is_file() {
+            return Err(ApiError::BadRequest {
+                detail: "path is not a regular file".into(),
+            });
+        }
+        let size = lmeta.len();
+        if size > MAX_FILE_INLINE_BYTES as u64 {
+            return Err(ApiError::BadRequest {
+                detail: format!(
+                    "file size {size} bytes exceeds inline cap of {} bytes",
+                    MAX_FILE_INLINE_BYTES
+                ),
+            });
+        }
+        let bytes = std::fs::read(&target).map_err(|e| ApiError::Internal {
+            log_only: format!("read file: {e}"),
+        })?;
+        let (encoding, content) = match std::str::from_utf8(&bytes) {
+            Ok(_) => (
+                "utf8".to_owned(),
+                // SAFETY: we just verified `bytes` is valid UTF-8.
+                String::from_utf8(bytes).unwrap_or_default(),
+            ),
+            Err(_) => {
+                use base64::Engine as _;
+                (
+                    "base64".to_owned(),
+                    base64::engine::general_purpose::STANDARD.encode(&bytes),
+                )
+            }
+        };
+        let trimmed = file_path.trim_matches('/').to_owned();
+        Ok(WorktreeFile {
+            name: std::path::Path::new(&trimmed)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            path: trimmed,
+            size,
+            encoding,
+            content,
         })
     }
 
@@ -1114,6 +1316,110 @@ impl KernelDashboardData {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Repo-browsing sandbox helpers (worktree_tree / worktree_file)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of dirent rows surfaced for one
+/// `GET /api/git/worktrees/:name/tree` call. Generous for any
+/// real source tree; tight enough that a worktree containing a
+/// pathologically-large directory (e.g. `node_modules` with
+/// 50K entries) cannot pin a request thread for unbounded time.
+/// When tripped the response carries `truncated = true`.
+const MAX_TREE_ENTRIES: usize = 5_000;
+
+/// Maximum file size the inline `worktree_file` endpoint will
+/// serve. Anything larger gets a `BadRequest` and the operator
+/// is expected to use a future streaming-download endpoint.
+/// 2 MiB is enough for source files (a 100 KLOC Rust file is
+/// ~3 MiB compressed), small images, JSON manifests, etc., but
+/// blocks accidental dumps of database files and binaries.
+const MAX_FILE_INLINE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Resolve a forward-slash separated, root-relative `sub_path`
+/// against `root` and verify that:
+///   * no component of the joined path is a symlink, AND
+///   * the canonical (symlink-followed) form of the joined
+///     path is still under the canonical form of `root`.
+///
+/// The first check is the load-bearing one — refusing
+/// symlinks at every depth means `worktree_file` can hand
+/// the resolved path back to `std::fs::read` without ever
+/// dereferencing a link. The second check is a redundant
+/// defence: even if a future change relaxes the symlink
+/// rule, a path that escapes the canonical root is still
+/// rejected.
+///
+/// Returns `Err(BadRequest)` when the path escapes or
+/// crosses a symlink; `Err(NotFound)` when the path does
+/// not exist.
+fn resolve_within_root(
+    root: &std::path::Path,
+    sub_path: &str,
+) -> Result<std::path::PathBuf, ApiError> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|_| ApiError::NotFound {
+        kind: "worktree-path".into(),
+    })?;
+    let trimmed = sub_path.trim_matches('/');
+    let mut joined = canonical_root.clone();
+    if !trimmed.is_empty() {
+        for component in trimmed.split('/') {
+            // Belt-and-braces — the route-layer validator
+            // already rejects these; refusing them here
+            // closes the door if a future caller bypasses
+            // the route layer (e.g. an internal helper).
+            if component.is_empty()
+                || component == "."
+                || component == ".."
+                || component == ".git"
+            {
+                return Err(ApiError::BadRequest {
+                    detail: "path contains forbidden component".into(),
+                });
+            }
+            joined.push(component);
+            // Refuse symlinks at every depth. We cannot defer
+            // this to the canonicalize check below because
+            // canonicalize FOLLOWS symlinks and the caller
+            // wants to apply `symlink_metadata` to the
+            // returned path; if we returned the canonical
+            // (followed) form, a downstream `is_symlink()`
+            // check would always say "no".
+            match std::fs::symlink_metadata(&joined) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    return Err(ApiError::BadRequest {
+                        detail: "path crosses a symlink".into(),
+                    });
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    // Final-component miss is NotFound; an
+                    // earlier-component miss is unusual but we
+                    // surface NotFound either way (no need to
+                    // distinguish for the operator UI).
+                    return Err(ApiError::NotFound {
+                        kind: "tree-entry".into(),
+                    });
+                }
+            }
+        }
+    }
+    // Defence-in-depth: even with no symlinks on the path,
+    // verify the canonical form is under the canonical root.
+    let canonical = std::fs::canonicalize(&joined).map_err(|_| ApiError::NotFound {
+        kind: "tree-entry".into(),
+    })?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(ApiError::BadRequest {
+            detail: "path escapes worktree root".into(),
+        });
+    }
+    // Return the JOINED (non-canonicalized-from-symlinks)
+    // path; the caller will run `symlink_metadata` on it and
+    // must see the actual entry, not a followed link.
+    Ok(joined)
+}
+
 /// Common task-row → TaskView projection. Pulls structured
 /// outputs from the V2 §3.2 table; reviewer verdicts are not
 /// surfaced yet (the store does not own that read view today).
@@ -1201,6 +1507,13 @@ pub fn load_dashboard_config(policy_path: &Path) -> Result<Option<DashboardConfi
 ///
 /// Caller is responsible for awaiting `handle.shutdown()`
 /// during the orderly exit path.
+///
+/// Returns an `Err(String)` for both the streams-directory
+/// IO failure surfaced by `KernelDashboardData::new` AND any
+/// downstream `DashboardServer::bind` failure — the caller
+/// chooses whether to disable the dashboard or take the
+/// kernel down. The previous version panicked on the streams-
+/// dir failure and only surfaced bind errors.
 pub async fn start_dashboard(
     cfg: DashboardConfig,
     store: Arc<Store>,
@@ -1209,13 +1522,16 @@ pub async fn start_dashboard(
     policy_path: PathBuf,
     booted_at: u64,
 ) -> Result<ServerHandle, String> {
-    let data = Arc::new(KernelDashboardData::new(
-        store,
-        policy,
-        data_dir,
-        policy_path,
-        booted_at,
-    ));
+    let data = Arc::new(
+        KernelDashboardData::new(
+            store,
+            policy,
+            data_dir,
+            policy_path,
+            booted_at,
+        )
+        .map_err(|e| format!("dashboard streams dir init failed: {e}"))?,
+    );
     let server = DashboardServer::bind(cfg, data)
         .await
         .map_err(|e| format!("dashboard bind failed: {e}"))?;

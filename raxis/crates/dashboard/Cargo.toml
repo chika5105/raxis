@@ -18,10 +18,14 @@ raxis-audit-tools   = { workspace = true }
 
 # HTTP stack. Pinned to the workspace's existing axum 0.7 family
 # (the aegis-server uses the same major). tower-http provides
-# CORS / compression / static serving for the React bundle.
+# CORS / compression / static serving / per-handler timeout for
+# the React bundle. tower's `limit` feature gives us the
+# in-flight concurrency cap (Phase 1 hardening — see
+# `crates/dashboard/src/server.rs::build_router` for the
+# rationale + numbers).
 axum         = { version = "0.7", features = ["macros", "tokio"] }
-tower-http   = { version = "0.5", features = ["cors", "compression-gzip", "fs", "trace"] }
-tower        = "0.5"
+tower-http   = { version = "0.5", features = ["cors", "compression-gzip", "fs", "trace", "limit", "timeout"] }
+tower        = { version = "0.5", features = ["limit"] }
 
 # Async + concurrency primitives.
 tokio        = { workspace = true, features = ["sync", "rt-multi-thread", "macros", "time", "fs"] }
