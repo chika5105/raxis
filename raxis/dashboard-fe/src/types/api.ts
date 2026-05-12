@@ -249,14 +249,40 @@ export interface WorktreeDiff {
 }
 
 // Server-Sent Event payload from /api/sessions/:id/stream.
+//
+// Wire shape (per raxis/crates/dashboard/src/routes/sessions.rs
+// and raxis-dashboard's `StreamEvent`):
+//
+//   event: <kind>      ← SSE event name, also stamped into `kind`
+//   id:    <at_ms>     ← unix milliseconds (lastEventId on the
+//                        browser side)
+//   data:  <payload>   ← the `payload` field's JSON ONLY, NOT
+//                        the full envelope
+//
+// Control frames (no `payload`, emitted by the backend SSE
+// handler in `routes::sessions::stream::build_sse_stream`):
+//
+//   * `event: tail-complete` — backend has finished replaying
+//     the file-ring tail; live frames begin next.
+//   * `event: lagged`        — slow subscriber dropped `data`
+//     events (the data line carries the lag count).
+//   * `event: closed`        — publisher dropped the broadcast
+//     (session terminated or no live source attached).
+//   * `event: keep-alive`    — axum's SSE keep-alive heartbeat
+//     emitted every 15 s; ignored by the renderer.
+//
+// The renderer constructs an in-browser `StreamEventEnvelope`
+// from those three SSE fields (kind / at_ms / payload). It does
+// NOT expect the backend to pack the whole envelope into `data:`.
 export interface StreamEventEnvelope {
-  /// Monotonic per-stream sequence number (file ring offset).
-  seq: number;
-  /// Unix-seconds timestamp recorded by the kernel side.
-  at: number;
+  /// Unix milliseconds timestamp from the SSE `id:` field.
+  at_ms: number;
   /// Event kind (`token` / `tool_call` / `tool_result` /
-  /// `terminal` / `heartbeat` / etc.).
+  /// `terminal` / `model_chunk` / `error` / `lagged` / `closed`
+  /// / `tail-complete` / ...). The wire is open — new kinds may
+  /// appear without a frontend release.
   kind: string;
-  /// Free-form structured payload. Shape depends on `kind`.
+  /// Free-form structured payload parsed from the SSE `data:`
+  /// line. Shape depends on `kind`.
   payload: unknown;
 }

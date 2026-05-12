@@ -17,69 +17,115 @@ export interface DagGraphEdge {
 interface DagGraphProps {
   nodes: DagGraphNode[];
   edges: DagGraphEdge[];
-  /// Called when the operator clicks a node.
+  /// Called when the operator clicks a node. The page is free
+  /// to decide whether that means "focus this node in a side
+  /// panel" or "navigate to the task detail page".
   onSelect?: (taskId: string) => void;
+  /// Called when the operator double-clicks a node — typically
+  /// "open the task page" when single-click already focuses.
+  onActivate?: (taskId: string) => void;
   /// Currently-highlighted task id.
   selected?: string | null;
-  /// Display height in pixels (the SVG fills the parent
-  /// width). Defaults to 360.
+  /// Minimum SVG display height in pixels. The graph grows
+  /// beyond this if the laid-out content is taller. Defaults to
+  /// 360.
   height?: number;
+  /// Layout direction. `LR` (default) is best for "executor
+  /// pipeline" plans where stages flow left-to-right; `TB` is
+  /// preferred for tall fan-out plans. Mirrors the dagre option
+  /// vocabulary.
+  rankdir?: "LR" | "TB";
 }
 
-/// Static SVG DAG renderer using `dagre` for left-to-right
-/// layered layout. Operator-tooling-grade — no zoom/pan,
-/// just a clean readable view that scales with the canvas.
-export function DagGraph({ nodes, edges, onSelect, selected, height = 360 }: DagGraphProps) {
+const NODE_W = 200;
+const NODE_H = 56;
+
+/// Static SVG DAG renderer using `dagre` for layered layout.
+/// Operator-tooling-grade — no zoom/pan, just a clean readable
+/// view that scales with the canvas. ≤ 50 nodes is the target
+/// (`v2_extended_gaps.md §4.4` ergonomic budget).
+export function DagGraph({
+  nodes,
+  edges,
+  onSelect,
+  onActivate,
+  selected,
+  height = 360,
+  rankdir = "LR",
+}: DagGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<string | null>(null);
 
   const layout = useMemo(() => {
     const g = new dagre.graphlib.Graph({ multigraph: false, compound: false });
-    g.setGraph({ rankdir: "LR", nodesep: 20, ranksep: 50, marginx: 12, marginy: 12 });
+    g.setGraph({ rankdir, nodesep: 24, ranksep: 60, marginx: 16, marginy: 16 });
     g.setDefaultEdgeLabel(() => ({}));
 
-    const NODE_W = 180;
-    const NODE_H = 50;
+    // Only edges whose endpoints exist in `nodes` get rendered —
+    // a stale edge from a deleted task would otherwise blow up
+    // `dagre.layout`.
+    const nodeIds = new Set(nodes.map((n) => n.task_id));
     nodes.forEach((n) => {
       g.setNode(n.task_id, { width: NODE_W, height: NODE_H, label: n.title });
     });
-    edges.forEach((e) => {
+    const safeEdges = edges.filter(
+      (e) => nodeIds.has(e.from) && nodeIds.has(e.to),
+    );
+    safeEdges.forEach((e) => {
       g.setEdge(e.from, e.to);
     });
     dagre.layout(g);
 
     const placedNodes = nodes.map((n) => {
       const meta = g.node(n.task_id);
+      const cx = meta?.x ?? 0;
+      const cy = meta?.y ?? 0;
       return {
         ...n,
-        x: meta.x - NODE_W / 2,
-        y: meta.y - NODE_H / 2,
+        x: cx - NODE_W / 2,
+        y: cy - NODE_H / 2,
         w: NODE_W,
         h: NODE_H,
       };
     });
 
-    const placedEdges = edges.map((e) => {
+    const placedEdges = safeEdges.map((e) => {
       const edgeData = g.edge({ v: e.from, w: e.to });
-      const points = (edgeData?.points ?? []) as Array<{ x: number; y: number }>;
+      const points = (edgeData?.points ?? []) as Array<{
+        x: number;
+        y: number;
+      }>;
       return { ...e, points };
     });
 
     const graphInfo = g.graph();
+    // Pad the natural extent so the rightmost / bottommost node
+    // stroke isn't clipped by the viewBox edge.
+    const naturalW = (graphInfo.width ?? 800) + 8;
+    const naturalH = (graphInfo.height ?? height) + 8;
     return {
       nodes: placedNodes,
       edges: placedEdges,
-      width: graphInfo.width ?? 800,
-      height: graphInfo.height ?? height,
+      width: naturalW,
+      height: naturalH,
     };
-  }, [nodes, edges, height]);
+  }, [nodes, edges, height, rankdir]);
+
+  // The viewBox MUST match the laid-out extent so dagre's
+  // coordinates render at scale; the SVG height is the larger
+  // of the natural extent and the caller's minimum. Width is
+  // 100% of the container — the container scrolls horizontally
+  // if the natural width exceeds it.
+  const svgHeight = Math.max(layout.height, height);
 
   return (
     <div ref={containerRef} className="w-full overflow-auto scroll-thin">
       <svg
-        viewBox={`0 0 ${Math.max(layout.width, 600)} ${Math.max(layout.height, height)}`}
-        width="100%"
-        height={Math.max(layout.height, height)}
+        viewBox={`0 0 ${layout.width} ${layout.height}`}
+        width={layout.width}
+        height={svgHeight}
+        preserveAspectRatio="xMinYMin meet"
+        style={{ minWidth: "100%" }}
         className="bg-panel rounded grid-overlay border border-edge"
       >
         <defs>
@@ -110,7 +156,9 @@ export function DagGraph({ nodes, edges, onSelect, selected, height = 360 }: Dag
               stroke="#7d8892"
               strokeWidth={1.4}
               markerEnd="url(#arrow)"
-              opacity={hover && hover !== e.from && hover !== e.to ? 0.25 : 0.85}
+              opacity={
+                hover && hover !== e.from && hover !== e.to ? 0.25 : 0.85
+              }
             />
           );
         })}
@@ -122,35 +170,52 @@ export function DagGraph({ nodes, edges, onSelect, selected, height = 360 }: Dag
             tone === "ok"
               ? "#1c5b2c"
               : tone === "info"
-              ? "#1f4d80"
-              : tone === "warn"
-              ? "#6b4d10"
-              : tone === "bad"
-              ? "#7d1d1d"
-              : tone === "block"
-              ? "#3a2762"
-              : "#222a36";
+                ? "#1f4d80"
+                : tone === "warn"
+                  ? "#6b4d10"
+                  : tone === "bad"
+                    ? "#7d1d1d"
+                    : tone === "block"
+                      ? "#3a2762"
+                      : "#222a36";
           const stroke =
             tone === "ok"
               ? "#2ea043"
               : tone === "info"
-              ? "#58a6ff"
-              : tone === "warn"
-              ? "#d29922"
-              : tone === "bad"
-              ? "#f85149"
-              : tone === "block"
-              ? "#a371f7"
-              : "#2e3849";
+                ? "#58a6ff"
+                : tone === "warn"
+                  ? "#d29922"
+                  : tone === "bad"
+                    ? "#f85149"
+                    : tone === "block"
+                      ? "#a371f7"
+                      : "#2e3849";
           const isSelected = selected === n.task_id;
           return (
             <g
               key={n.task_id}
               transform={`translate(${n.x}, ${n.y})`}
               onClick={() => onSelect?.(n.task_id)}
+              onDoubleClick={() => onActivate?.(n.task_id)}
               onMouseEnter={() => setHover(n.task_id)}
               onMouseLeave={() => setHover(null)}
               style={{ cursor: "pointer" }}
+              role="button"
+              tabIndex={0}
+              aria-label={`Task ${n.title} (state ${n.state}). Click to focus, double-click to open task page.`}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter" || ev.key === " ") {
+                  ev.preventDefault();
+                  // Enter = activate (open task page) when wired,
+                  // else fall back to onSelect so the operator can
+                  // still focus the node with the keyboard.
+                  if (onActivate) {
+                    onActivate(n.task_id);
+                  } else if (onSelect) {
+                    onSelect(n.task_id);
+                  }
+                }
+              }}
             >
               <rect
                 width={n.w}
@@ -161,32 +226,41 @@ export function DagGraph({ nodes, edges, onSelect, selected, height = 360 }: Dag
                 strokeWidth={isSelected ? 2 : 1}
                 opacity={hover && hover !== n.task_id ? 0.8 : 1}
               />
+              <title>
+                {n.title}
+                {"\n"}
+                {n.task_id}
+                {"\n"}
+                state: {n.state}
+              </title>
               <text
                 x={10}
-                y={20}
+                y={22}
                 fill="#e6e8eb"
                 fontSize={12}
                 fontWeight={500}
                 fontFamily="Inter, system-ui, sans-serif"
               >
-                {truncate(n.title, 24)}
+                {truncate(n.title, 26)}
               </text>
               <text
                 x={10}
-                y={36}
+                y={40}
                 fill="#a8b1bc"
                 fontSize={10}
                 fontFamily="JetBrains Mono, ui-monospace, monospace"
               >
-                {n.task_id.length > 18 ? `${n.task_id.slice(0, 18)}…` : n.task_id}
+                {n.task_id.length > 20
+                  ? `${n.task_id.slice(0, 20)}…`
+                  : n.task_id}
               </text>
               <text
                 x={n.w - 8}
-                y={20}
+                y={22}
                 textAnchor="end"
                 fill={stroke}
                 fontSize={9}
-                fontWeight={600}
+                fontWeight={700}
                 fontFamily="Inter, system-ui, sans-serif"
               >
                 {n.state.toUpperCase()}
@@ -198,7 +272,14 @@ export function DagGraph({ nodes, edges, onSelect, selected, height = 360 }: Dag
 
       {/* Legend */}
       <div className="flex flex-wrap gap-1.5 mt-2 text-[11px]">
-        {["Pending", "Running", "Completed", "Failed", "Blocked", "Reviewing"].map((s) => (
+        {[
+          "Pending",
+          "Running",
+          "Completed",
+          "Failed",
+          "Blocked",
+          "Reviewing",
+        ].map((s) => (
           <span key={s} className={`badge ${toneClasses(stateTone(s))}`}>
             {s}
           </span>

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
@@ -20,6 +20,7 @@ import {
 
 export function InitiativeDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
+  const navigate = useNavigate();
   const [selectedTask, setSelectedTask] = useState<string | null>(null);
 
   const q = useQuery({
@@ -40,7 +41,9 @@ export function InitiativeDetailPage() {
       <header className="flex items-start gap-4 flex-wrap">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 text-sm text-ink-subtle">
-            <Link to="/initiatives" className="hover:text-accent">Initiatives</Link>
+            <Link to="/initiatives" className="hover:text-accent">
+              Initiatives
+            </Link>
             <span>/</span>
             <Mono className="text-ink-muted">{init.initiative_id}</Mono>
             <CopyButton value={init.initiative_id} />
@@ -51,8 +54,7 @@ export function InitiativeDetailPage() {
           <div className="mt-2 flex flex-wrap gap-2 items-center">
             <StateBadge state={init.state} pulse={init.state === "Active"} />
             <span className="text-xs text-ink-muted">
-              {plural(init.task_count, "task")}{" "}
-              · {init.completed_tasks} done
+              {plural(init.task_count, "task")} · {init.completed_tasks} done
               {init.failed_tasks > 0 && (
                 <span className="text-bad"> · {init.failed_tasks} failed</span>
               )}
@@ -76,11 +78,17 @@ export function InitiativeDetailPage() {
 
       {/* DAG */}
       <section className="card p-4">
-        <header className="flex items-center justify-between mb-2">
+        <header className="flex items-center justify-between mb-2 gap-2 flex-wrap">
           <h2 className="text-sm font-semibold text-ink">Task DAG</h2>
-          <span className="text-[11px] text-ink-subtle">
-            Click a node to focus
-          </span>
+          <div className="flex items-center gap-3 text-[11px] text-ink-subtle">
+            <span>Click to focus · double-click to open task</span>
+            <Link
+              to={`/initiatives/${init.initiative_id}/dag`}
+              className="text-accent hover:underline"
+            >
+              Full DAG view →
+            </Link>
+          </div>
         </header>
         {init.tasks.length === 0 ? (
           <Empty title="This initiative has no tasks." />
@@ -93,6 +101,7 @@ export function InitiativeDetailPage() {
             }))}
             edges={init.edges}
             onSelect={setSelectedTask}
+            onActivate={(taskId) => navigate(`/tasks/${taskId}`)}
             selected={selectedTask}
             height={Math.min(640, 80 + init.tasks.length * 40)}
           />
@@ -130,7 +139,10 @@ export function InitiativeDetailPage() {
                     onClick={() => setSelectedTask(t.task_id)}
                   >
                     <td className="px-4 py-2">
-                      <Link to={`/tasks/${t.task_id}`} className="text-ink hover:text-accent">
+                      <Link
+                        to={`/tasks/${t.task_id}`}
+                        className="text-ink hover:text-accent"
+                      >
                         {t.title}
                       </Link>
                       <div className="text-[11px] text-ink-subtle">
@@ -138,7 +150,10 @@ export function InitiativeDetailPage() {
                       </div>
                     </td>
                     <td className="px-4 py-2">
-                      <StateBadge state={t.state} pulse={t.state === "Running"} />
+                      <StateBadge
+                        state={t.state}
+                        pulse={t.state === "Running"}
+                      />
                     </td>
                     <td className="px-4 py-2 text-xs">
                       {t.session_id ? (
@@ -180,32 +195,64 @@ export function InitiativeDetailPage() {
                 <CopyButton value={focusedTask.task_id} />
               </div>
               <div className="mt-3 flex items-center gap-2">
-                <StateBadge state={focusedTask.state} pulse={focusedTask.state === "Running"} />
+                <StateBadge
+                  state={focusedTask.state}
+                  pulse={focusedTask.state === "Running"}
+                />
               </div>
               <dl className="mt-3 space-y-2 text-xs">
-                <Row label="Session" value={
-                  focusedTask.session_id ? (
-                    <Link to={`/sessions/${focusedTask.session_id}`} className="text-accent hover:underline">
-                      <Mono>{focusedTask.session_id}</Mono>
-                    </Link>
-                  ) : "—"
-                } />
-                <Row label="Reviewer verdicts" value={String(focusedTask.reviewer_verdicts.length)} />
-                <Row label="Outputs" value={String(focusedTask.structured_outputs.length)} />
-                <Row label="Path scope" value={
-                  <div className="font-mono text-[11px] mt-1 max-h-32 overflow-y-auto scroll-thin">
-                    {focusedTask.path_allowlist.length === 0
-                      ? <span className="text-ink-subtle">—</span>
-                      : focusedTask.path_allowlist.map((p) => (
-                        <div key={p} className="text-ink-muted truncate">{p}</div>
-                      ))
-                    }
-                  </div>
-                } />
-                <Row label="Created" value={fmtAbsolute(focusedTask.created_at)} />
-                <Row label="Updated" value={fmtAbsolute(focusedTask.updated_at)} />
+                <Row
+                  label="Session"
+                  value={
+                    focusedTask.session_id ? (
+                      <Link
+                        to={`/sessions/${focusedTask.session_id}`}
+                        className="text-accent hover:underline"
+                      >
+                        <Mono>{focusedTask.session_id}</Mono>
+                      </Link>
+                    ) : (
+                      "—"
+                    )
+                  }
+                />
+                <Row
+                  label="Reviewer verdicts"
+                  value={String(focusedTask.reviewer_verdicts.length)}
+                />
+                <Row
+                  label="Outputs"
+                  value={String(focusedTask.structured_outputs.length)}
+                />
+                <Row
+                  label="Path scope"
+                  value={
+                    <div className="font-mono text-[11px] mt-1 max-h-32 overflow-y-auto scroll-thin">
+                      {focusedTask.path_allowlist.length === 0 ? (
+                        <span className="text-ink-subtle">—</span>
+                      ) : (
+                        focusedTask.path_allowlist.map((p) => (
+                          <div key={p} className="text-ink-muted truncate">
+                            {p}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  }
+                />
+                <Row
+                  label="Created"
+                  value={fmtAbsolute(focusedTask.created_at)}
+                />
+                <Row
+                  label="Updated"
+                  value={fmtAbsolute(focusedTask.updated_at)}
+                />
               </dl>
-              <Link to={`/tasks/${focusedTask.task_id}`} className="btn w-full justify-center mt-4">
+              <Link
+                to={`/tasks/${focusedTask.task_id}`}
+                className="btn w-full justify-center mt-4"
+              >
                 Open task page →
               </Link>
             </>
@@ -232,10 +279,14 @@ function Row({ label, value, mono }: RowProps) {
       <span className="w-24 text-ink-subtle uppercase tracking-wider text-[10px] mt-0.5 shrink-0">
         {label}
       </span>
-      <span className={`flex-1 min-w-0 ${mono ? "font-mono text-ink-muted" : "text-ink"}`}>
+      <span
+        className={`flex-1 min-w-0 ${mono ? "font-mono text-ink-muted" : "text-ink"}`}
+      >
         {typeof value === "string" && mono && value.length > 18 ? (
           <span title={value}>{shortFingerprint(value)}</span>
-        ) : value}
+        ) : (
+          value
+        )}
       </span>
     </div>
   );
