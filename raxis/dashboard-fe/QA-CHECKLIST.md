@@ -286,3 +286,70 @@ open devtools, screenshot the console.
 - DAG: nodes with very long titles overflowing the rect.
 - WorktreeDetail / Browse: large files (> 256 KiB) being inlined
   with bad scroll perf.
+
+---
+
+## Live-e2e run results (rolling)
+
+### Run 1 — full_session_lifecycle (kernel @ port 19820, JWT
+exp 13:10:20 PDT 2026-05-12)
+
+Tour driver: `browser-use` subagent against the kernel + Vite
+proxy (Vite served the FE bundle, proxied `/api` →
+`http://127.0.0.1:19820`).
+
+Snapshot of kernel state at tour time (via REST):
+- 1 active `Executing` initiative
+  (`019e1d98-e641-7ea0-b5fe-267983c55a57`)
+- 2 active sessions (Planner + a sibling)
+- 3+ worktrees registered (1 main, 1+ session clones)
+
+Per-view results (BOTH dark + light modes verified, theme
+persistence after F5 verified):
+
+- Overview / `/`           PASS (real KPI counts, recent
+  initiatives, recent sessions, recent activity)
+- Initiatives / `/initiatives`             PASS (1 row, search
+  + filter rendered)
+- Initiative Detail / `/initiatives/:id`   PASS (header showed
+  initiative_id since this plan has no `[plan.initiative].title`
+  — that is the documented fallback, not a bug)
+- DAG / `/initiatives/:id/dag`             PASS (3 task nodes
+  rendered, LR/TB toggle worked)
+- Sessions / `/sessions`                   PASS (kernel reported
+  the orchestrator had already exited by the time we drilled in;
+  empty state correct)
+- Audit / `/audit`                         PASS (~19 events,
+  expand worked, badges legible)
+- Health / `/health`                       PASS
+- Inbox / `/inbox`                         PASS (10+ events with
+  links to initiatives + tasks)
+- Notifications / `/notifications`         PASS (16 unread,
+  "Mark all read" present, links rendered)
+- Escalations / `/escalations`             PASS (empty state)
+- Policy / `/policy`                       PASS (read-only
+  snapshot since this operator has `roles=["read"]`; no editor
+  shown — expected)
+- Git list / `/git`                        not visited in run 1
+- Git Worktree Detail / `/git/:name`       not visited in run 1
+
+Console messages: clean throughout. Only standard Vite HMR
+chatter + the React-DevTools install hint. No 401s.
+
+Theme tour: dark ↔ light worked in every view; persisted
+through reload.
+
+Known false alarm to ignore on future runs: the subagent in
+this run also reported a "404 on /git/worktrees". That URL
+is NOT a valid app route — `/git` is the list, `/git/:slug`
+is the detail (`:slug` ∈ `main-0`, `session-<short>`, …).
+Clicking the row labelled "worktrees" routes to `/git/main-0`,
+which works. The 404 was the subagent typing the URL by
+hand; do not re-flag in subsequent runs.
+
+### Run 2 — pending
+
+Waiting for the next full-lifecycle test cycle to drive a Git
++ Worktree Detail tour with real files in the seeded repo.
+Will also drive at least one SessionStream into `live` and
+watch ≥5 frames flow live.
