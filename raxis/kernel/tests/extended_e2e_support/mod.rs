@@ -14,6 +14,7 @@ pub mod audit_chain;
 pub mod concurrency;
 pub mod injection;
 pub mod plan;
+pub mod plan_realistic;
 pub mod prompts;
 pub mod seeds;
 pub mod witnesses;
