@@ -142,14 +142,43 @@ fn lookup_plan_bytes(
     initiative_id: &str,
     task_id:       &str,
 ) -> Result<Vec<u8>, PlanFieldsError> {
-    let sql = format!(
+    // V1 (legacy `signed_plan_artifacts`): every pre-V2 plan
+    // wrote here. Try this first because it's a single-row
+    // primary-key lookup.
+    let sql_v1 = format!(
         "SELECT plan_bytes FROM {} WHERE initiative_id = ?1",
         Table::SignedPlanArtifacts.as_str(),
     );
-    let row: Option<Vec<u8>> = conn
-        .query_row(&sql, rusqlite::params![initiative_id], |r| r.get::<_, Vec<u8>>(0))
+    let v1: Option<Vec<u8>> = conn
+        .query_row(&sql_v1, rusqlite::params![initiative_id], |r| r.get::<_, Vec<u8>>(0))
         .optional()?;
-    row.ok_or_else(|| PlanFieldsError::PlanArtifactMissing {
+    if let Some(bytes) = v1 {
+        return Ok(bytes);
+    }
+
+    // V2.1 sealed-bundle path (`plan-bundle-sealing.md §8.2`):
+    // initiatives.plan_bundle_sha256 → plan_bundle_artifacts row
+    // whose `artifact_name = 'plan.toml'`. The §8.3 contract is
+    // that the plan TOML lives at artifact_seq=0, but we look up
+    // by name so a future bundle layout that relocates plan.toml
+    // continues to work without changing this view.
+    let sql_v2 = format!(
+        "SELECT pba.artifact_bytes \
+         FROM {init} AS i \
+         JOIN {pba} AS pba ON pba.bundle_sha256 = i.plan_bundle_sha256 \
+         WHERE i.initiative_id = ?1 AND pba.artifact_name = 'plan.toml' \
+         LIMIT 1",
+        init = Table::Initiatives.as_str(),
+        pba  = Table::PlanBundleArtifacts.as_str(),
+    );
+    let v2: Option<Vec<u8>> = conn
+        .query_row(&sql_v2, rusqlite::params![initiative_id], |r| r.get::<_, Vec<u8>>(0))
+        .optional()?;
+    if let Some(bytes) = v2 {
+        return Ok(bytes);
+    }
+
+    Err(PlanFieldsError::PlanArtifactMissing {
         task_id:       task_id.to_owned(),
         initiative_id: initiative_id.to_owned(),
     })

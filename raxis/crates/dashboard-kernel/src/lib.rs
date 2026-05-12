@@ -1423,6 +1423,19 @@ fn resolve_within_root(
 /// Common task-row → TaskView projection. Pulls structured
 /// outputs from the V2 §3.2 table; reviewer verdicts are not
 /// surfaced yet (the store does not own that read view today).
+///
+/// The `path_allowlist` projection delegates to
+/// `raxis_store::views::plan_fields::reveal_for_task`, which parses
+/// the immutable `signed_plan_artifacts.plan_bytes` blob owned by
+/// the task's initiative. The reveal is fail-soft for the dashboard:
+/// any failure (missing artifact, malformed plan, task absent from
+/// plan TOML) collapses to an empty allowlist so the operator UI
+/// keeps rendering — `cli/src/reveal.rs` is the gated path that
+/// surfaces the typed forensic error variants.
+///
+/// `title` falls back to the `task_id` because the `tasks` table
+/// does not store a human title; rendering an empty `<h1>` was a
+/// blank-view paper-cut on every drill-in.
 fn task_row_to_view(
     conn: &raxis_store::ro::RoConn,
     t: &raxis_store::views::tasks::TaskRow,
@@ -1436,15 +1449,18 @@ fn task_row_to_view(
             at: o.emitted_at.max(0) as u64,
         })
         .collect();
+    let path_allowlist = raxis_store::views::plan_fields::reveal_for_task(conn, &t.task_id)
+        .map(|f| f.path_allowlist)
+        .unwrap_or_default();
     TaskView {
         task_id: t.task_id.clone(),
         initiative_id: t.initiative_id.clone(),
-        title: String::new(), // tasks table doesn't store a display title
+        title: t.task_id.clone(),
         state: t.state.clone(),
         session_id: t.session_id.clone(),
         reviewer_verdicts: Vec::<ReviewerVerdictView>::new(),
         structured_outputs: outputs,
-        path_allowlist: Vec::new(),
+        path_allowlist,
         created_at: t.admitted_at,
         updated_at: t.transitioned_at,
     }

@@ -1524,8 +1524,21 @@ pub fn repopulate_plan_registry(
 
     let mut inserted = 0usize;
 
+    const PLAN_BUNDLE_ARTIFACTS: &str = "plan_bundle_artifacts";
     for init_id in initiative_ids {
         // Load the immutable plan blob for this initiative.
+        //
+        // V1 path (`signed_plan_artifacts`) handles every plan
+        // approved before V2 sealed-bundle admission landed. V2.1
+        // sealed-bundle admission writes to `plan_bundles` /
+        // `plan_bundle_artifacts` and leaves `signed_plan_artifacts`
+        // empty for that initiative, so the V1 row does not exist
+        // for these — fall through to the bundle-artifact lookup
+        // (parity with the V1/V2 dispatch in `approve_plan` above).
+        // Without this fallback every V2 initiative emits
+        // `plan_registry_repopulate: missing_artifact` on kernel
+        // restart and `path_scope::effective_allow` returns
+        // `NoPlanEntry` on the first intent.
         let plan_bytes: Vec<u8> = match conn.query_row(
             &format!(
                 "SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1",
@@ -1534,6 +1547,32 @@ pub fn repopulate_plan_registry(
             |r| r.get::<_, Vec<u8>>(0),
         ) {
             Ok(b) => b,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                // V2.1 fallback: chase the bundle through the
+                // initiatives row, then read artifact_seq=0
+                // (= plan.toml per `plan-bundle-sealing.md §8.2`).
+                match conn.query_row(
+                    &format!(
+                        "SELECT pba.artifact_bytes \
+                         FROM {INITIATIVES} AS i \
+                         JOIN {PLAN_BUNDLE_ARTIFACTS} AS pba \
+                              ON pba.bundle_sha256 = i.plan_bundle_sha256 \
+                         WHERE i.initiative_id = ?1 AND pba.artifact_name = 'plan.toml' \
+                         LIMIT 1"
+                    ),
+                    rusqlite::params![&init_id],
+                    |r| r.get::<_, Vec<u8>>(0),
+                ) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\
+                             \"initiative_id\":\"{init_id}\",\"reason\":\"missing_artifact_v2: {e}\"}}",
+                        );
+                        continue;
+                    }
+                }
+            }
             Err(e) => {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"plan_registry_repopulate\",\

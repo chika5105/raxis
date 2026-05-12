@@ -50,6 +50,10 @@ tracing      = "0.1"
 [dev-dependencies]
 tokio        = { workspace = true, features = ["test-util", "macros"] }
 tempfile     = "3"
-reqwest      = { workspace = true }
+# Tests in `tests/hardening_smoke.rs` use `Response::json()`, which
+# is gated behind reqwest's `json` cargo feature. The workspace
+# default is feature-pruned for runtime compactness, so we
+# layer the feature on here in dev-dependencies only.
+reqwest      = { workspace = true, features = ["json"] }
 toml         = { workspace = true }
 ed25519-dalek = { workspace = true }
