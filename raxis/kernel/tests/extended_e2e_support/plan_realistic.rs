@@ -44,6 +44,11 @@ pub const TASK_MATERIALIZE: &str = "materialize-records";
 /// Cross-file refactor executor task id (P3-2).
 pub const TASK_XFILE_REFACTOR: &str = "xfile-refactor";
 
+/// Lint-defect executor task id (P3-3) — the executor deliberately
+/// introduces ONE real lint defect (Rust / TS / Python — choice
+/// is the executor's) that the reviewer must catch.
+pub const TASK_LINT_DEFECT: &str = "lint-defect";
+
 /// Lane id for the realistic scenario. Distinct from
 /// `super::plan::LANE_ID` so the realistic-scenario test and the
 /// existing extended-scenario test can co-exist in a single kernel
@@ -72,6 +77,13 @@ pub const XFILE_REFACTOR_PROMPT_MD: &str = include_str!(
     "../../../live-e2e/seed/prompts/cross_file_refactor.md"
 );
 
+/// Lint-defect prompt. Drives the executor through introducing
+/// exactly one real lint defect that the reviewer must catch on
+/// round 1.
+pub const LINT_DEFECT_PROMPT_MD: &str = include_str!(
+    "../../../live-e2e/seed/prompts/lint_defect.md"
+);
+
 // ---------------------------------------------------------------------------
 // Plan-TOML builder.
 // ---------------------------------------------------------------------------
@@ -83,6 +95,7 @@ pub const XFILE_REFACTOR_PROMPT_MD: &str = include_str!(
 pub fn realistic_plan_toml() -> String {
     let materializer = MATERIALIZER_PROMPT_MD;
     let xfile        = XFILE_REFACTOR_PROMPT_MD;
+    let lint         = LINT_DEFECT_PROMPT_MD;
     let mut s = String::new();
     s.push_str(REALISTIC_PLAN_HEADER);
     s.push_str("\n\n");
@@ -93,6 +106,10 @@ pub fn realistic_plan_toml() -> String {
     s.push_str("\n\n");
     s.push_str(REALISTIC_PLAN_XFILE_HEAD);
     s.push_str(xfile);
+    s.push_str("\n\"\"\"\n");
+    s.push_str("\n\n");
+    s.push_str(REALISTIC_PLAN_LINT_DEFECT_HEAD);
+    s.push_str(lint);
     s.push_str("\n\"\"\"\n");
     s
 }
@@ -146,6 +163,16 @@ path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
 description = """
 "#;
 
+const REALISTIC_PLAN_LINT_DEFECT_HEAD: &str = r#"# ── Lint-defect Executor (P3-3) ─────────────────────────
+[[tasks]]
+task_id            = "lint-defect"
+name               = "Introduce exactly one real lint defect"
+session_agent_type = "Executor"
+predecessors       = ["xfile-refactor"]
+path_allowlist     = ["rust-crate/", "ts-pkg/", "py-pkg/"]
+description = """
+"#;
+
 // ---------------------------------------------------------------------------
 // Tests — sanity-check the TOML decodes and pins the task list.
 // ---------------------------------------------------------------------------
@@ -155,7 +182,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn realistic_toml_decodes_and_carries_both_executors() {
+    fn realistic_toml_decodes_and_carries_executors() {
         let toml_text = realistic_plan_toml();
         let v: toml::Value =
             toml::from_str(&toml_text).expect("realistic plan must be valid TOML");
@@ -167,14 +194,12 @@ mod tests {
             .iter()
             .filter_map(|t| t.get("task_id").and_then(|i| i.as_str()))
             .collect();
-        assert!(
-            ids.contains(&TASK_MATERIALIZE),
-            "materialize-records task missing; got {ids:?}",
-        );
-        assert!(
-            ids.contains(&TASK_XFILE_REFACTOR),
-            "xfile-refactor task missing; got {ids:?}",
-        );
+        for needle in [TASK_MATERIALIZE, TASK_XFILE_REFACTOR, TASK_LINT_DEFECT] {
+            assert!(
+                ids.contains(&needle),
+                "expected task_id `{needle}` in realistic plan; got {ids:?}",
+            );
+        }
 
         let lane = v
             .get("workspace")
@@ -193,5 +218,45 @@ mod tests {
                 prompt.len(),
             );
         }
+    }
+
+    #[test]
+    fn lint_defect_prompt_lists_one_per_language() {
+        let prompt = LINT_DEFECT_PROMPT_MD;
+        for needle in ["clippy", "eslint", "ruff"] {
+            assert!(
+                prompt.contains(needle),
+                "lint-defect prompt must reference {needle} (got len={})",
+                prompt.len(),
+            );
+        }
+    }
+
+    #[test]
+    fn lint_defect_task_depends_on_xfile_refactor() {
+        let toml_text = realistic_plan_toml();
+        let v: toml::Value = toml::from_str(&toml_text).unwrap();
+        let tasks = v
+            .get("tasks")
+            .and_then(|t| t.as_array())
+            .expect("[[tasks]] array present");
+        let lint = tasks
+            .iter()
+            .find(|t| {
+                t.get("task_id").and_then(|i| i.as_str()) == Some(TASK_LINT_DEFECT)
+            })
+            .expect("lint-defect task present");
+        let predecessors = lint
+            .get("predecessors")
+            .and_then(|p| p.as_array())
+            .expect("lint-defect.predecessors array");
+        let names: Vec<&str> = predecessors
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(
+            names.contains(&TASK_XFILE_REFACTOR),
+            "lint-defect must depend on xfile-refactor; got {names:?}",
+        );
     }
 }
