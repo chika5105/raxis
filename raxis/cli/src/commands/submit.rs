@@ -18,7 +18,7 @@
 //   7. canonical_encode — produce canonical_input bytes per §3.2
 //   8. hash         — bundle_sha256 = SHA-256(canonical_input)
 //   9. sign         — Ed25519 over signing_input per §3.2
-//  10. submit       — IPC `OperatorRequest::CreateInitiativeV2` (or
+//  10. submit       — IPC `OperatorRequest::CreateInitiative` (or
 //                     skip with --dry-run)
 //  11. report       — print initiative_id and Status: Draft on success
 //
@@ -316,7 +316,7 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // `FAIL_PLAN_BUNDLE_*` codes from `plan-bundle-sealing.md §8.1`,
     // which the CLI surfaces transparently via
     // `plan::handle_response`.
-    let request = OperatorRequest::CreateInitiativeV2 {
+    let request = OperatorRequest::CreateInitiative {
         initiative_id:     initiative_id.clone(),
         plan_bundle_hex:   hex::encode(&canonical_input),
         bundle_sha256_hex: hex::encode(bundle_sha.as_bytes()),

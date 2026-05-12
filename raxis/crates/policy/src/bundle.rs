@@ -4039,7 +4039,7 @@ impl PolicyBundle {
     ///     `[u8; 8]` = first 8 bytes of the same digest, hex-encoded).
     ///     This is what plan-bundle V2.1 envelopes carry as
     ///     `signed_by` (per `specs/v2/plan-bundle-sealing.md §3.4`)
-    ///     and what `OperatorRequest::CreateInitiativeV2` lookups
+    ///     and what `OperatorRequest::CreateInitiative` lookups
     ///     pass in via `req.signed_by.to_hex()`.
     ///
     /// The 16-char form is *always* a prefix of the 32-char form for

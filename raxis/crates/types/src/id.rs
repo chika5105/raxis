@@ -303,13 +303,22 @@ pub enum GateTypeError {
 pub struct UnixSeconds(pub i64);
 
 impl UnixSeconds {
+    /// Wall-clock "now" as a `UnixSeconds`. A host whose clock is set
+    /// to before 1970-01-01 (no-RTC / pre-NTP boot) yields `Err` from
+    /// `duration_since(UNIX_EPOCH)`; this method saturates to 0 rather
+    /// than panic, matching the documented contract of
+    /// `crate::clock::unix_now_secs` (the workspace's canonical wall
+    /// clock helper). The relative-time invariants RAXIS depends on
+    /// (TTLs, deadlines, cooldown windows) compare two reads from the
+    /// same `Clock` instance, so both reads being `0` together still
+    /// preserves the ordering contract.
     pub fn now() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         Self(
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .expect("system clock is before Unix epoch")
-                .as_secs() as i64,
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
         )
     }
 

@@ -166,14 +166,41 @@ impl RetryingModelClient {
         let base_secs = cfg.base_delay.as_secs_f64();
         let scaled = base_secs * (cfg.multiplier as f64).powi(attempt as i32);
         // Jitter draw: uniform in [1.0 - jitter, 1.0 + jitter]. We
-        // use a tiny self-rolled LCG seeded from the nanosecond clock
-        // to avoid pulling `rand` for one call.
+        // use a tiny self-rolled LCG seeded from the wall-clock
+        // nanosecond field to avoid pulling `rand` for one call.
+        //
+        // PRIOR BUG: the seed used to be
+        //     `Instant::now().elapsed().as_nanos() as u64`
+        // which is the duration between two back-to-back `Instant::now`
+        // and `.elapsed()` calls — i.e. effectively the cost of
+        // `elapsed()` itself, on the order of tens of nanoseconds with
+        // very low entropy. That produced an almost-constant jitter
+        // factor across attempts, defeating the entire purpose of
+        // jitter (avoiding thundering-herd retry alignment when
+        // multiple sessions hit a 429 / 5xx in lockstep).
+        //
+        // The replacement reads the wall-clock nanos-since-epoch. The
+        // value monotonically advances across calls and the low bits
+        // are noisy enough to break alignment. `SystemTime` can jump
+        // backwards on NTP correction but that does not weaken the
+        // jitter property — any nondeterministic seed suffices. The
+        // `unwrap_or(0)` matches the workspace's saturating wall-clock
+        // convention (see `crates/types/src/clock.rs`).
         let jitter_factor = if cfg.jitter > 0.0 {
-            let nanos = Instant::now().elapsed().as_nanos() as u64;
-            let lcg   = nanos.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let unit  = (lcg as u32) as f64 / (u32::MAX as f64); // [0, 1)
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.subsec_nanos() as u64)
+                .unwrap_or(0)
+                .wrapping_add(attempt as u64);
+            let lcg = nanos
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let unit = (lcg as u32) as f64 / (u32::MAX as f64); // [0, 1)
             1.0 + (unit * 2.0 - 1.0) * cfg.jitter as f64
-        } else { 1.0 };
+        } else {
+            1.0
+        };
         let secs = (scaled * jitter_factor).max(0.0);
         Duration::from_secs_f64(secs)
     }

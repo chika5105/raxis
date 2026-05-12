@@ -19,11 +19,11 @@
 
 use raxis_planner_core::{
     hydrate_from_proc_cmdline, init_pid1_filesystem, park_on_signal, render_boot_log,
-    run_role_session, BootContext, DriverError, DriverOutcome, HydrationOutcome, PlannerError,
-    Role,
+    run_role_session, shutdown_or_exit, BootContext, DriverError, DriverOutcome,
+    HydrationOutcome, PlannerError, Role,
 };
 
-fn main() -> std::process::ExitCode {
+fn main() -> ! {
     // Step 1: when running as PID 1 inside a Linux initramfs,
     // mount /proc, /sys, /dev, /tmp before any other I/O. See
     // `raxis-planner-core::guest_init` for the full rationale.
@@ -43,19 +43,25 @@ fn main() -> std::process::ExitCode {
         .enable_all()
         .build()
         .expect("tokio runtime construction must not fail at executor boot");
-    runtime.block_on(async_main())
+    let exit_code = runtime.block_on(async_main());
+    // See `raxis-planner-orchestrator/src/main.rs` for the full
+    // rationale: PID 1 must `reboot(POWER_OFF)` instead of plain
+    // `process::exit` so the substrate observes a clean
+    // `SessionVmExited` event. `shutdown_or_exit` no-ops to
+    // `process::exit(code)` when not PID 1.
+    shutdown_or_exit(exit_code)
 }
 
-async fn async_main() -> std::process::ExitCode {
+async fn async_main() -> u8 {
     match run().await {
-        Ok(())  => std::process::ExitCode::SUCCESS,
+        Ok(())  => 0,
         Err(e)  => {
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"planner-boot-error\",\
                   \"role\":\"executor\",\"message\":{:?}}}",
                 e.to_string(),
             );
-            std::process::ExitCode::from(e.exit_code() as u8)
+            e.exit_code() as u8
         }
     }
 }

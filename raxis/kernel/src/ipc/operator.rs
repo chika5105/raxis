@@ -13,7 +13,7 @@
 //   CreateSession      — fully wired (authority::session::create_session)
 //   RevokeSession      — fully wired (authority::session::revoke_session)
 //   GrantDelegation    — fully wired (authority::delegation::grant_delegation)
-//   CreateInitiative   — fully wired (initiatives::lifecycle::create_initiative)
+//   CreateInitiative   — fully wired (initiatives::v2_admission::create_initiative_v2_blocking)
 //   ApprovePlan        — fully wired (initiatives::lifecycle::approve_plan)
 //   RejectPlan         — fully wired (initiatives::lifecycle::reject_plan)
 //   AbortInitiative    — fully wired (initiatives::lifecycle::abort_initiative)
@@ -277,20 +277,15 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
             ("delegation_id", delegation_id.clone()),
             ("capability_class", capability_class.clone()),
         ],
-        OperatorRequest::CreateInitiative { submitted_by, .. } => {
-            // No initiative_id field — the kernel mints one in
-            // `lifecycle::create_initiative`. The minted id appears in
-            // the response log line via `response_summary_fields`.
-            vec![("submitted_by", submitted_by.clone())]
-        }
-        OperatorRequest::CreateInitiativeV2 {
+        OperatorRequest::CreateInitiative {
             initiative_id,
             bundle_sha256_hex,
             signed_by_hex,
             ..
         } => vec![
-            // V2.1 envelope carries operator-chosen initiative_id +
-            // the bundle's content-address + the operator fingerprint
+            // The plan-bundle-sealed envelope carries the
+            // operator-chosen initiative_id + the bundle's
+            // content-address + the operator fingerprint
             // (plan-bundle-sealing.md §3.4). Logging the sha256 +
             // fingerprint makes admission failures correlatable
             // with the operator's local bundle without dumping
@@ -697,24 +692,25 @@ async fn handle_request(
                 ttl_secs, max_uses, signature_hex, operator, ctx,
             ).await
         }
-        // Initiative lifecycle:
-        OperatorRequest::CreateInitiative { plan_toml, plan_sig_hex, submitted_by } => {
-            handle_create_initiative(plan_toml, plan_sig_hex, submitted_by, ctx).await
-        }
-        // V2.1 plan-bundle-sealed admission. Spec:
-        // `plan-bundle-sealing.md §3.4 + §8.1`. The hex envelope is
-        // decoded here into the `V2AdmissionRequest` typed shape, then
-        // handed to `create_initiative_v2_blocking` which runs the §8.1
-        // step ordering (steps 2–9 pre-tx, 10a–12 inside `BEGIN
-        // IMMEDIATE`). Replay-protection invariants (`INV-PLAN-BUNDLE-
-        // FRESH`) are enforced inside the transaction.
-        OperatorRequest::CreateInitiativeV2 {
+        // Initiative lifecycle — plan-bundle-sealed admission.
+        // Spec: `plan-bundle-sealing.md §3.4 + §8.1`. The hex
+        // envelope is decoded here into the `V2AdmissionRequest`
+        // typed shape, then handed to `create_initiative_blocking`
+        // which runs the §8.1 step ordering (steps 2–9 pre-tx, 10a–12
+        // inside `BEGIN IMMEDIATE`). Replay-protection invariants
+        // (`INV-PLAN-BUNDLE-FRESH`) are enforced inside the
+        // transaction.
+        //
+        // V2.5 dropped the V1 path-based `CreateInitiative` arm —
+        // there is now a single `CreateInitiative` discriminant on
+        // the wire and it carries the sealed-bundle payload below.
+        OperatorRequest::CreateInitiative {
             initiative_id,
             plan_bundle_hex,
             bundle_sha256_hex,
             signature_hex,
             signed_by_hex,
-        } => handle_create_initiative_v2(
+        } => handle_create_initiative(
             initiative_id, plan_bundle_hex, bundle_sha256_hex,
             signature_hex, signed_by_hex, ctx,
         ).await,
@@ -1096,44 +1092,19 @@ async fn handle_grant_delegation(
 // Initiative lifecycle handlers
 // ---------------------------------------------------------------------------
 
-/// CreateInitiative — submit a plan TOML + Ed25519 sig → PlanSubmitted row.
-/// Spec: kernel-core.md §2.3 operator handlers; initiative_id returned to operator.
+/// CreateInitiative — plan-bundle admission handler.
+///
+/// Spec: `plan-bundle-sealing.md §8.1`. Decodes the hex IPC envelope,
+/// runs the §8.1 step ordering via `initiatives::v2_admission`,
+/// projects the result onto an `OperatorResponse`. The decode +
+/// admission both happen on a blocking pool because
+/// `canonical_decode` + Ed25519 verify + SQLite commit are CPU/IO
+/// heavy.
+///
+/// V2.5 collapsed the previous V1 `handle_create_initiative` (path-
+/// based plan TOML + signature) into this one, leaving the sealed-
+/// bundle pipeline as the sole admission path on the wire.
 async fn handle_create_initiative(
-    plan_toml:    String,
-    plan_sig_hex: String,
-    submitted_by: String,
-    ctx: &HandlerContext,
-) -> OperatorResponse {
-    let store_for_blocking = Arc::clone(&ctx.store);
-    let join_result = tokio::task::spawn_blocking(move || {
-        lifecycle::create_initiative(&plan_toml, &plan_sig_hex, &submitted_by, &store_for_blocking)
-    }).await;
-    let outcome = match join_result {
-        Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_CREATE_INITIATIVE".to_owned(),
-            detail: format!("create_initiative spawn_blocking join failed: {e}"),
-        },
-    };
-    match outcome {
-        Ok(result) => OperatorResponse::InitiativeCreated {
-            initiative_id: result.initiative_id,
-            status:        result.status,
-        },
-        Err(e) => OperatorResponse::Error {
-            code:   "FAIL_CREATE_INITIATIVE".to_owned(),
-            detail: e.to_string(),
-        },
-    }
-}
-
-/// V2.1 plan-bundle admission handler. Spec: `plan-bundle-sealing.md
-/// §8.1`. Decodes the hex IPC envelope, runs the §8.1 step ordering
-/// via `initiatives::v2_admission`, projects the result onto an
-/// `OperatorResponse`. The decode + admission both happen on a
-/// blocking pool because `canonical_decode` + Ed25519 verify + SQLite
-/// commit are CPU/IO heavy.
-async fn handle_create_initiative_v2(
     initiative_id:     String,
     plan_bundle_hex:   String,
     bundle_sha256_hex: String,
@@ -2361,8 +2332,7 @@ fn op_name(req: &OperatorRequest) -> &'static str {
         OperatorRequest::CreateSession { .. }  => "CreateSession",
         OperatorRequest::RevokeSession { .. }  => "RevokeSession",
         OperatorRequest::GrantDelegation { .. }=> "GrantDelegation",
-        OperatorRequest::CreateInitiative { .. }=> "CreateInitiative",
-        OperatorRequest::CreateInitiativeV2 { .. } => "CreateInitiativeV2",
+        OperatorRequest::CreateInitiative { .. } => "CreateInitiative",
         OperatorRequest::ApprovePlan { .. }     => "ApprovePlan",
         OperatorRequest::RejectPlan { .. }      => "RejectPlan",
         OperatorRequest::RetryTask { .. }       => "RetryTask",
@@ -2752,6 +2722,11 @@ mod escalation_dispatch_tests {
     // surface: just a session_id. Hitting the not-found path forces the
     // FSM down to `lock_sync` even on the error side, so "no panic" is
     // the discriminator.
+    //
+    // V2.5 collapsed the V1 path-based `CreateInitiative` handler into
+    // the sealed-bundle pipeline — the V1-shape spawn_blocking
+    // regression test was removed alongside the handler, so the
+    // `RevokeSession` test below carries the property on its own.
 
     #[tokio::test]
     async fn revoke_session_runs_under_tokio_without_panic() {
@@ -2769,27 +2744,6 @@ mod escalation_dispatch_tests {
         // session row doesn't exist.
         match resp {
             OperatorResponse::Error { .. } | OperatorResponse::SessionRevoked { .. } => {},
-            other => panic!("unexpected variant: {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn create_initiative_runs_under_tokio_without_panic() {
-        let store = Arc::new(Store::open_in_memory().unwrap());
-        let sink  = Arc::new(FakeAuditSink::new());
-        let ctx   = build_ctx(store, sink, &fixture_keypair());
-
-        // Empty plan TOML is rejected by the FSM, but the FSM still
-        // takes the store mutex on the way to that error — same
-        // spawn_blocking gate as the happy path.
-        let resp = handle_create_initiative(
-            "[meta]\nplan_id = \"\"\n".into(),
-            "deadbeef".into(),
-            "op-prime".into(),
-            &ctx,
-        ).await;
-        match resp {
-            OperatorResponse::Error { .. } | OperatorResponse::InitiativeCreated { .. } => {},
             other => panic!("unexpected variant: {other:?}"),
         }
     }
@@ -3614,12 +3568,12 @@ mod dispatch_logging_tests {
     }
 
     #[test]
-    fn op_response_initiative_created_includes_minted_id_for_correlation() {
-        // The kernel mints a fresh UUID inside `lifecycle::create_initiative`
-        // and the request side has no `initiative_id` field — without
-        // this special case the operator can't correlate "the request I
-        // just sent" with "the initiative now in Draft". Pin that the
-        // response log surfaces the minted id so a single grep on
+    fn op_response_initiative_created_includes_id_for_correlation() {
+        // V2 plan-bundle admission echoes back the operator-chosen
+        // `initiative_id` from the request, but operators frequently
+        // grep for the response line to confirm "the kernel committed
+        // the row I asked for". Pin that the response log surfaces
+        // `initiative_id` so a single grep on
         // `"event":"op_response","initiative_id":"<uuid>"` finds the
         // exact creation moment.
         let response = OperatorResponse::InitiativeCreated {
@@ -3631,7 +3585,10 @@ mod dispatch_logging_tests {
             "abcd1234abcd1234abcd1234abcd1234",
             Some("Chika"),
             &response,
-            &[("submitted_by", "abcd1234abcd1234abcd1234abcd1234".to_owned())],
+            &[(
+                "initiative_id",
+                "5c5a6cd4-95cd-47d1-a4cc-8b0ef46da235".to_owned(),
+            )],
             5,
             1_700_000_003,
         );
@@ -3643,7 +3600,7 @@ mod dispatch_logging_tests {
         assert_eq!(
             v.get("initiative_id").and_then(Value::as_str),
             Some("5c5a6cd4-95cd-47d1-a4cc-8b0ef46da235"),
-            "the freshly-minted initiative_id MUST appear on the response line",
+            "the operator-chosen initiative_id MUST appear on the response line",
         );
     }
 
@@ -3801,10 +3758,12 @@ mod dispatch_logging_tests {
                 signature_hex:     "00".repeat(64),
             }, "delegation_id"),
             (OperatorRequest::CreateInitiative {
-                plan_toml:    String::new(),
-                plan_sig_hex: String::new(),
-                submitted_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            }, "submitted_by"),
+                initiative_id:     "0192a8f0-1234-7abc-9000-000000000001".to_owned(),
+                plan_bundle_hex:   String::new(),
+                bundle_sha256_hex: String::new(),
+                signature_hex:     String::new(),
+                signed_by_hex:     String::new(),
+            }, "initiative_id"),
             (OperatorRequest::ApprovePlan {
                 initiative_id:      "i1".to_owned(),
                 approving_operator: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
