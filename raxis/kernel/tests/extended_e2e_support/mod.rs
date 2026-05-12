@@ -14,6 +14,7 @@ pub mod audit_chain;
 pub mod concurrency;
 pub mod crash_recovery;
 pub mod injection;
+pub mod kernel_driver;
 pub mod multi_initiative;
 pub mod path_allowlist;
 pub mod plan;
