@@ -232,6 +232,27 @@ async fn wait_for_shutdown(
     };
 
     tokio::select! {
+        // `biased`: poll signal branches first, then the accept-task
+        // join handles. Without `biased`, tokio uses a pseudo-random
+        // tie-breaker, which means a SIGTERM that arrives in the same
+        // scheduler tick as one of the accept tasks completing could
+        // surface as `AcceptLoopExited` instead of `SigTerm`. The
+        // distinction matters for two reasons:
+        //   1. `main.rs` audits the `KernelStopped { reason }` event
+        //      using the variant returned here. Operators reading the
+        //      audit chain need "SIGTERM" to mean "operator requested
+        //      shutdown", not "happened to coincide with a degraded
+        //      accept loop exiting".
+        //   2. `AcceptLoopExited` returns a non-zero exit code from
+        //      the kernel binary; `SigTerm`/`SigInt` return zero. A
+        //      coincidence MUST NOT promote a clean operator shutdown
+        //      into a degraded exit.
+        // Bias is intentionally signals-first, then op → pl → gw;
+        // within the accept-loop branches the order is irrelevant
+        // (only one of them can complete in a non-shutdown path
+        // because each is its own task).
+        biased;
+
         _ = sigterm_fut => {
             server_log::signal_received("SIGTERM");
             ShutdownReason::SigTerm
