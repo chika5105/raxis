@@ -36,5 +36,11 @@ raxis-image-builder      = { workspace = true }
 raxis-image-manifest     = { workspace = true }
 raxis-initramfs-builder  = { workspace = true }
 
+# Used by `cargo xtask linux-prereqs` to call `getgroups(2)` directly
+# rather than dragging in `nix` / `users` for a single syscall. The
+# call site is gated on `target_os = "linux"`; on macOS the dep is
+# unused but link-clean.
+libc          = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"

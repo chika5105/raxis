@@ -75,13 +75,68 @@ pub const BACKEND_ID: &str = "firecracker-1.x";
 pub const DEFAULT_PLANNER_PORT: u32 = 1024;
 
 /// Default boot grace period: how long we wait for the API socket to
-/// appear after spawning `firecracker`. Firecracker boots in single-
-/// digit milliseconds on a healthy host; 2 s catches stalled VMMs
-/// without making boot-failure tests slow.
-pub const DEFAULT_BOOT_GRACE: Duration = Duration::from_millis(2000);
+/// appear after spawning `firecracker`.
+///
+/// **Why 500 ms.** Firecracker creates the API socket as part of its
+/// own startup sequence — measured single-digit-ms on a healthy host
+/// (`isolation-linux-microvm.md §3.1`). 500 ms is ~50× the expected
+/// runtime cost, so a healthy spawn never hits the deadline, while
+/// a stalled VMM (missing `/dev/kvm`, KVM module unloaded mid-boot,
+/// out-of-fd) is reported as `ApiSockTimeout` in well under a
+/// second. The previous 2 s value was a holdover from a noisier
+/// CI environment and added latency to the `raxis doctor` boot
+/// probe path; tightening it lets the substrate's host-probe
+/// surface regressions ~4× sooner.
+pub const DEFAULT_BOOT_GRACE: Duration = Duration::from_millis(500);
 
 /// Default per-API-call timeout when driving the boot REST sequence.
 pub const DEFAULT_API_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Fast-boot kernel cmdline base — every token earns its place per the
+/// per-token rationale in `isolation-linux-microvm.md §3.2`.
+///
+/// **Token roles:**
+///
+/// * `console=ttyS0` — guest printk → Firecracker's serial pipe →
+///   per-session `console.log` for post-mortem debugging.
+/// * `reboot=k panic=1` — reboot-on-panic via the keyboard-trap path
+///   (no ACPI tree); the VMM observes the reboot as a clean exit so
+///   the audit chain records `GracefulExit { code }` rather than an
+///   opaque `BackendError`.
+/// * `pci=off` — Firecracker exposes no PCI devices; skipping bus
+///   enumeration shaves ~5 ms.
+/// * `i8042.noaux` / `i8042.nokbd` — Firecracker has neither port and
+///   the i8042 probe blocks for ~30 ms on fail.
+/// * `quiet loglevel=0` — suppress the kernel boot banner and every
+///   non-emergency printk; saves ~5–8 ms of serial-port writes.
+/// * `tsc=reliable clocksource=tsc` — trust the TSC as a stable
+///   clocksource without the calibration sweep / HPET probe.
+/// * `8250.nr_uarts=0` — the 8250 driver skips the slow extra-UART
+///   probe (`console=ttyS0` keeps the one we do have).
+/// * `random.trust_cpu=on` — seed the kernel RNG from `RDRAND`
+///   instead of waiting for entropy. Safe on KVM where the host has
+///   its own entropy and the guest's "secrets" are session-scoped
+///   tokens the kernel mints.
+///
+/// The substrate appends `rdinit=/init` for `RootfsInitramfsCpio`
+/// boots and `root=/dev/vda ro` for `RootfsErofs` boots. Operator-
+/// supplied [`raxis_isolation::VmSpec::boot_args`] REPLACE this
+/// default wholesale (the kernel's `session_spawn_orchestrator`
+/// stamps an empty `boot_args` for canonical roles so the substrate
+/// owns the cmdline shape).
+pub const FAST_BOOT_CMDLINE_BASE: &str = "console=ttyS0 reboot=k panic=1 \
+     pci=off i8042.noaux i8042.nokbd \
+     quiet loglevel=0 tsc=reliable clocksource=tsc \
+     8250.nr_uarts=0 random.trust_cpu=on";
+
+/// Reported through `Backend::capability(BootLatencyMs)`. Median
+/// wall-clock from `vm.start()` to "guest agent reachable on vsock"
+/// observed on a 5.15-kernel x86_64 host with the
+/// [`FAST_BOOT_CMDLINE_BASE`] tokens applied. Surfaced through
+/// `raxis doctor` so operators can spot regressions; the kernel
+/// does NOT gate session admission on this number (it's a hint, not
+/// a guarantee — see `isolation-linux-microvm.md §3.1`).
+pub const BOOT_LATENCY_MS_MEDIAN: u64 = 50;
 
 // ---------------------------------------------------------------------------
 // Host probing
@@ -346,17 +401,18 @@ fn drive_boot(
     }
     let is_initramfs = matches!(image.kind, raxis_isolation::ImageKind::RootfsInitramfsCpio);
     let boot_args = if spec.boot_args.is_empty() {
-        // Canonical RAXIS pin per `extensibility-traits.md §3.5`:
-        // serial console for early-boot diagnostics; reboot on panic
-        // so a guest crash leads to a clean exit code via the
-        // VMM-controlled lifecycle. For initramfs boots add
-        // `rdinit=/init` so the cpio-archived /init becomes PID 1
-        // regardless of the kernel's CONFIG_DEFAULT_INIT.
-        let base = "console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nokbd";
+        // Canonical RAXIS fast-boot pin — see [`FAST_BOOT_CMDLINE_BASE`]
+        // for the per-token rationale. Initramfs boots append
+        // `rdinit=/init` so the cpio-archived `/init` becomes PID 1
+        // regardless of `CONFIG_DEFAULT_INIT`; EROFS boots append
+        // `root=/dev/vda ro` to point the kernel at the virtio-blk
+        // rootfs read-only. Operator-supplied
+        // [`raxis_isolation::VmSpec::boot_args`] REPLACE these
+        // defaults wholesale (per `isolation-linux-microvm.md §3.2`).
         Some(if is_initramfs {
-            format!("{base} rdinit=/init")
+            format!("{FAST_BOOT_CMDLINE_BASE} rdinit=/init")
         } else {
-            format!("{base} root=/dev/vda ro")
+            format!("{FAST_BOOT_CMDLINE_BASE} root=/dev/vda ro")
         })
     } else {
         Some(spec.boot_args.join(" "))
@@ -474,7 +530,7 @@ impl Backend for FirecrackerBackend {
                 CapabilityValue::Bool(matches!(probe_host(), HostSupport::Supported))
             }
             CapabilityKind::AttestationSupported => CapabilityValue::Bool(false),
-            CapabilityKind::BootLatencyMs        => CapabilityValue::Int(125),
+            CapabilityKind::BootLatencyMs        => CapabilityValue::Int(BOOT_LATENCY_MS_MEDIAN),
             CapabilityKind::MaxConcurrentVms     => CapabilityValue::Int(256),
             CapabilityKind::MemoryEncryption     => CapabilityValue::Bool(false),
         }
@@ -730,6 +786,55 @@ mod tests {
         assert_eq!(b.backend_id(), BACKEND_ID);
     }
 
+    // -- Fast-boot defaults pin --------------------------------------------
+
+    #[test]
+    fn fast_boot_cmdline_base_pins_every_documented_token() {
+        // The per-token rationale lives in `isolation-linux-microvm.md
+        // §3.2`. A reviewer dropping any of these tokens silently would
+        // regress the boot-latency budget without surfacing a build
+        // failure; the pin keeps the cmdline shape under test review.
+        for token in [
+            "console=ttyS0",
+            "reboot=k",
+            "panic=1",
+            "pci=off",
+            "i8042.noaux",
+            "i8042.nokbd",
+            "quiet",
+            "loglevel=0",
+            "tsc=reliable",
+            "clocksource=tsc",
+            "8250.nr_uarts=0",
+            "random.trust_cpu=on",
+        ] {
+            assert!(
+                FAST_BOOT_CMDLINE_BASE.contains(token),
+                "fast-boot cmdline base lost token {token:?}; \
+                 base now reads {FAST_BOOT_CMDLINE_BASE:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn default_boot_grace_is_tight_enough_to_surface_stalled_vmms_quickly() {
+        // 500 ms is ~50× the expected `wait_for_api_sock` runtime on a
+        // healthy host (single-digit-ms per the latency budget); a
+        // healthy spawn never hits this deadline. We pin the upper
+        // bound so a future reviewer doesn't quietly bump it back to
+        // the pre-fast-boot 2 s value.
+        assert!(
+            DEFAULT_BOOT_GRACE <= Duration::from_millis(500),
+            "DEFAULT_BOOT_GRACE relaxed past 500 ms ({DEFAULT_BOOT_GRACE:?}); \
+             see `isolation-linux-microvm.md §3.1` for the budget"
+        );
+        assert!(
+            DEFAULT_BOOT_GRACE >= Duration::from_millis(100),
+            "DEFAULT_BOOT_GRACE tightened below 100 ms ({DEFAULT_BOOT_GRACE:?}); \
+             healthy spawns may flap with this little headroom"
+        );
+    }
+
     #[test]
     fn capability_table_pins_diagnostic_consumers() {
         let b = FirecrackerBackend::new("/tmp/raxis-fc-runtime");
@@ -741,7 +846,7 @@ mod tests {
         );
         assert_eq!(
             b.capability(CapabilityKind::BootLatencyMs),
-            CapabilityValue::Int(125),
+            CapabilityValue::Int(BOOT_LATENCY_MS_MEDIAN),
         );
         assert_eq!(
             b.capability(CapabilityKind::MaxConcurrentVms),
