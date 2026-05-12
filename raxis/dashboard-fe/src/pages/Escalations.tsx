@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -9,6 +9,7 @@ import { PageSpinner } from "@/components/Spinner";
 import { fmtRelative } from "@/lib/format";
 
 export function EscalationsPage() {
+  const navigate = useNavigate();
   const q = useQuery({
     queryKey: ["escalations"],
     queryFn: ({ signal }) => dashboardApi.escalations.list(signal),
@@ -30,8 +31,21 @@ export function EscalationsPage() {
         <Empty title="No pending escalations." hint="Operator inbox is clear." />
       ) : (
         <ul className="space-y-3">
-          {items.map((e) => (
-            <li key={e.escalation_id} className="card p-4">
+          {items.map((e) => {
+            const href = `/initiatives/${e.initiative_id}`;
+            return (
+            <li
+              key={e.escalation_id}
+              tabIndex={0}
+              onClick={() => navigate(href)}
+              onKeyDown={(ev) => {
+                if (ev.key === "Enter") {
+                  ev.preventDefault();
+                  navigate(href);
+                }
+              }}
+              className="card p-4 cursor-pointer hover:border-accent/60 hover:bg-panel-high/40 transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+            >
               <div className="flex items-start justify-between gap-3">
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
@@ -47,7 +61,8 @@ export function EscalationsPage() {
                       {e.severity}
                     </span>
                     <Link
-                      to={`/initiatives/${e.initiative_id}`}
+                      to={href}
+                      onClick={(ev) => ev.stopPropagation()}
                       className="text-sm text-accent hover:underline font-mono"
                     >
                       {e.initiative_id}
@@ -55,6 +70,7 @@ export function EscalationsPage() {
                     {e.task_id && (
                       <Link
                         to={`/tasks/${e.task_id}`}
+                        onClick={(ev) => ev.stopPropagation()}
                         className="text-xs text-ink-muted hover:text-accent font-mono"
                       >
                         / {e.task_id}
@@ -73,7 +89,8 @@ export function EscalationsPage() {
                 </div>
               </div>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </div>

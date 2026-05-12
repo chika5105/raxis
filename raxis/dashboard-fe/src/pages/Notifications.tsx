@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -10,6 +10,7 @@ import { PageSpinner } from "@/components/Spinner";
 import { fmtRelative } from "@/lib/format";
 
 export function NotificationsPage() {
+  const navigate = useNavigate();
   const qc = useQueryClient();
   const [unreadOnly, setUnreadOnly] = useState(false);
 
@@ -74,10 +75,37 @@ export function NotificationsPage() {
         <Empty title="No notifications." />
       ) : (
         <ul className="card p-0 overflow-hidden divide-y divide-edge/40">
-          {items.map((n) => (
+          {items.map((n) => {
+            // Default activation drills into the linked entity
+            // (initiative > task) and marks the notification
+            // read, mirroring the Slack/Gmail "click row to
+            // open" pattern operators expect. Notifications
+            // with neither id are non-navigable but still
+            // clickable to mark read.
+            const href = n.initiative_id
+              ? `/initiatives/${n.initiative_id}`
+              : n.task_id
+              ? `/tasks/${n.task_id}`
+              : null;
+            const activate = () => {
+              if (!n.read) markRead.mutate(n.notification_id);
+              if (href) navigate(href);
+            };
+            return (
             <li
               key={n.notification_id}
-              className={`px-4 py-3 hover:bg-panel-high ${n.read ? "opacity-70" : ""}`}
+              tabIndex={0}
+              role={href ? "link" : "button"}
+              onClick={activate}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  activate();
+                }
+              }}
+              className={`px-4 py-3 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
+                n.read ? "opacity-70" : ""
+              }`}
             >
               <div className="flex items-center gap-2 flex-wrap">
                 {!n.read && <span className="w-1.5 h-1.5 rounded-full bg-accent" aria-hidden="true" />}
@@ -87,6 +115,7 @@ export function NotificationsPage() {
                 {n.initiative_id && (
                   <Link
                     to={`/initiatives/${n.initiative_id}`}
+                    onClick={(e) => e.stopPropagation()}
                     className="text-sm text-accent hover:underline font-mono"
                   >
                     {n.initiative_id}
@@ -95,6 +124,7 @@ export function NotificationsPage() {
                 {n.task_id && (
                   <Link
                     to={`/tasks/${n.task_id}`}
+                    onClick={(e) => e.stopPropagation()}
                     className="text-xs text-ink-muted hover:text-accent font-mono"
                   >
                     · {n.task_id}
@@ -104,8 +134,12 @@ export function NotificationsPage() {
                   <span>{fmtRelative(n.created_at)}</span>
                   {!n.read && (
                     <button
-                      className="text-accent hover:underline"
-                      onClick={() => markRead.mutate(n.notification_id)}
+                      type="button"
+                      className="text-accent hover:underline focus:outline-none focus-visible:underline"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        markRead.mutate(n.notification_id);
+                      }}
                     >
                       Mark read
                     </button>
@@ -117,7 +151,8 @@ export function NotificationsPage() {
                 source event {n.source_event_id}
               </Mono>
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </div>
