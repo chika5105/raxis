@@ -3129,7 +3129,10 @@ dependencies = [
  "bytes",
  "hex",
  "httparse",
+ "raxis-audit-tools",
+ "raxis-credential-proxy-cloud-shared",
  "raxis-credentials",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3137,6 +3140,7 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

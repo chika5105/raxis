@@ -93,13 +93,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use raxis_audit_tools::AuditSink;
+use raxis_credential_proxy_cloud_shared::{CloudHttpClient, TokenCache};
 use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+
+use crate::forwarding::StsCacheValue;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+pub mod forwarding;
 pub mod restriction;
 
+pub use forwarding::{AWS_XML_CONTENT_TYPE, ForwardOutcome, ForwardingConfig};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------
@@ -151,6 +157,11 @@ pub struct ProxyConfig {
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
     pub restrictions:    Restrictions,
+    /// V3 forwarding configuration. When `Some`, the proxy
+    /// drives a real `sts:AssumeRole` exchange against the
+    /// closed-allowlist STS endpoint instead of mirroring the
+    /// long-lived IAM key. See `specs/v3/cloud-proxy-forwarding.md`.
+    pub forwarding:      Option<ForwardingConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -359,15 +370,23 @@ fn pick_str<'a>(
 
 /// AWS-IMDS-compatible credential proxy.
 pub struct AwsProxy {
-    listener: TcpListener,
-    backend:  Arc<dyn CredentialBackend>,
-    config:   ProxyConfig,
-    stats:    Arc<ProxyStats>,
-    audit:    Arc<dyn AuditChannel>,
+    listener:    TcpListener,
+    backend:     Arc<dyn CredentialBackend>,
+    config:      ProxyConfig,
+    stats:       Arc<ProxyStats>,
+    audit:       Arc<dyn AuditChannel>,
+    /// V3 forwarding glue — only used when
+    /// [`ProxyConfig::forwarding`] is `Some`.
+    audit_sink:  Option<Arc<dyn AuditSink>>,
+    http_client: Option<Arc<CloudHttpClient>>,
+    token_cache: Option<Arc<TokenCache<StsCacheValue>>>,
 }
 
 impl AwsProxy {
-    /// Bind a listener and return an owned proxy.
+    /// Bind a listener and return an owned proxy. V2-only
+    /// constructor — see [`Self::bind_v3`] for the
+    /// V3-cloud-forwarding-aware constructor that wires the
+    /// HTTP client, token cache, and audit sink.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
         config:  ProxyConfig,
@@ -384,6 +403,39 @@ impl AwsProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
+            audit_sink:  None,
+            http_client: None,
+            token_cache: None,
+        })
+    }
+
+    /// Bind a listener with V3 forwarding plumbing. When
+    /// [`ProxyConfig::forwarding`] is `Some`, the per-request
+    /// path drives a real `sts:AssumeRole` exchange and emits
+    /// the four V3 audit events through `audit_sink` (in
+    /// addition to the existing V2 `AwsCredentialServed`).
+    pub async fn bind_v3(
+        backend:     Arc<dyn CredentialBackend>,
+        config:      ProxyConfig,
+        audit:       Arc<dyn AuditChannel>,
+        audit_sink:  Arc<dyn AuditSink>,
+        http_client: Arc<CloudHttpClient>,
+        token_cache: Arc<TokenCache<StsCacheValue>>,
+    ) -> Result<Self, ProxyError> {
+        let listener = TcpListener::bind(&config.listen_addr).await
+            .map_err(|source| ProxyError::Bind {
+                addr:   config.listen_addr.clone(),
+                source,
+            })?;
+        Ok(Self {
+            listener,
+            backend,
+            config,
+            stats: Arc::new(ProxyStats::default()),
+            audit,
+            audit_sink:  Some(audit_sink),
+            http_client: Some(http_client),
+            token_cache: Some(token_cache),
         })
     }
 
@@ -408,12 +460,18 @@ impl AwsProxy {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
                     self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
-                    let backend = Arc::clone(&self.backend);
-                    let config  = self.config.clone();
-                    let stats   = Arc::clone(&self.stats);
-                    let audit   = Arc::clone(&self.audit);
+                    let backend     = Arc::clone(&self.backend);
+                    let config      = self.config.clone();
+                    let stats       = Arc::clone(&self.stats);
+                    let audit       = Arc::clone(&self.audit);
+                    let audit_sink  = self.audit_sink.clone();
+                    let http_client = self.http_client.clone();
+                    let token_cache = self.token_cache.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = serve_one(stream, backend, config, stats, audit).await {
+                        if let Err(e) = serve_one(
+                            stream, backend, config, stats, audit,
+                            audit_sink, http_client, token_cache,
+                        ).await {
                             tracing::warn!(error = %e, "aws proxy connection ended with error");
                         }
                     });
@@ -432,12 +490,16 @@ impl AwsProxy {
 // we never pipeline.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_one(
-    mut stream: TcpStream,
-    backend:    Arc<dyn CredentialBackend>,
-    config:     ProxyConfig,
-    stats:      Arc<ProxyStats>,
-    audit:      Arc<dyn AuditChannel>,
+    mut stream:  TcpStream,
+    backend:     Arc<dyn CredentialBackend>,
+    config:      ProxyConfig,
+    stats:       Arc<ProxyStats>,
+    audit:       Arc<dyn AuditChannel>,
+    audit_sink:  Option<Arc<dyn AuditSink>>,
+    http_client: Option<Arc<CloudHttpClient>>,
+    token_cache: Option<Arc<TokenCache<StsCacheValue>>>,
 ) -> std::io::Result<()> {
     // Read request line + headers.
     let mut buf = Vec::with_capacity(2048);
@@ -506,7 +568,60 @@ async fn serve_one(
         }
     };
 
-    // Build response.
+    // V3 branch — when forwarding is wired, drive a real
+    // sts:AssumeRole exchange through the closed-allowlist
+    // HTTPS client and serve the upstream-issued short-lived
+    // credentials (or pass through the canonical AWS XML error
+    // envelope on failure). Cache-hit / aging-window
+    // semantics live inside the helper.
+    if let (Some(fwd), Some(sink), Some(http), Some(cache)) = (
+        config.forwarding.as_ref(),
+        audit_sink.as_ref(),
+        http_client.as_ref(),
+        token_cache.as_ref(),
+    ) {
+        let session_id = format!("{}:{}", config.consumer.kind, config.consumer.id);
+        let outcome = forwarding::forward_or_serve_from_cache(
+            fwd, http, cache, sink,
+            &session_id,
+            config.credential_name.as_str(),
+            &key.access_key_id,
+            &key.secret_access_key,
+        ).await;
+        match outcome {
+            ForwardOutcome::Ok(body) => {
+                write_full_response(
+                    &mut stream,
+                    200, "OK",
+                    "application/json",
+                    &body,
+                ).await?;
+                stats.credentials_served.fetch_add(1, Ordering::Relaxed);
+                stats.bytes_served.fetch_add(body.len() as u64, Ordering::Relaxed);
+                audit.emit(audit_event(&config, &method, &path, false));
+            }
+            ForwardOutcome::UpstreamEnvelope { status, body } => {
+                let reason = upstream_status_reason_phrase(status);
+                write_full_response(
+                    &mut stream,
+                    status, reason,
+                    AWS_XML_CONTENT_TYPE,
+                    &body,
+                ).await?;
+                stats.bytes_served.fetch_add(body.len() as u64, Ordering::Relaxed);
+                // V3 envelope passthrough is NOT a V2 "blocked"
+                // — the V2 audit event is omitted on the
+                // forwarding-error path so the V2 wire shape is
+                // not muddied with statuses that V2 never
+                // produced. The V3 events from
+                // `forward_or_serve_from_cache` provide the
+                // structured audit record.
+            }
+        }
+        return Ok(());
+    }
+
+    // V2 emulator path (forwarding disabled).
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let expiration = format_iso8601_z(now + config.lease_seconds);
     let resp_body = ContainerCredentialResponse {
@@ -537,6 +652,54 @@ async fn serve_one(
     stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
     audit.emit(audit_event(&config, &method, &path, false));
     Ok(())
+}
+
+/// Map an HTTP status code to its conventional reason phrase
+/// for the lines the V3 path emits. The status-and-phrase pair
+/// matches what AWS' real STS endpoint emits so SDKs parse the
+/// envelope as-is.
+fn upstream_status_reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        504 => "Gateway Timeout",
+        _ if (200..300).contains(&status) => "OK",
+        _ if (400..500).contains(&status) => "Client Error",
+        _ if (500..600).contains(&status) => "Server Error",
+        _ => "Status",
+    }
+}
+
+/// Common helper for writing a full HTTP/1.1 response (line +
+/// headers + body) in one shot. Used by both the V2 and V3
+/// success / error paths.
+async fn write_full_response(
+    stream:       &mut TcpStream,
+    status:       u16,
+    reason:       &str,
+    content_type: &str,
+    body:         &[u8],
+) -> std::io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: {content_type}\r\n\
+         Content-Length: {len}\r\n\
+         Cache-Control: no-store\r\n\
+         Connection: close\r\n\
+         \r\n",
+        len = body.len(),
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(body).await?;
+    stream.flush().await
 }
 
 async fn write_status(
