@@ -1174,7 +1174,15 @@ pub fn approve_plan(
     // sessions table CHECK clause). `vsock_cid` is also NULL until
     // the hypervisor returns the assigned CID.
     let orchestrator_auto_spawn =
-        auto_spawn_orchestrator_session_in_tx(&tx, initiative_id)?;
+        auto_spawn_orchestrator_session_in_tx(
+            &tx,
+            initiative_id,
+            // The coordinator task carries the workspace-root lane
+            // verbatim so its budget reservations land in the same
+            // bucket as the sub-task admissions admitted just above.
+            &workspace_lane,
+            policy_epoch,
+        )?;
 
     tx.commit()?;
     drop(conn); // release the store mutex before doing audit I/O.
@@ -1364,6 +1372,51 @@ pub struct OrchestratorAutoSpawn {
 fn auto_spawn_orchestrator_session_in_tx(
     tx:            &rusqlite::Transaction<'_>,
     initiative_id: &str,
+    // ── V2.5 IntegrationMerge plumbing — admit a synthetic
+    //    "coordinator task" row whose `task_id == initiative_id`,
+    //    in lockstep with the Orchestrator session row. ─────────
+    //
+    // Background: the planner-core orchestrator driver populates
+    // `IntentSubmitter.task_id` with `args.task_id.unwrap_or(args.initiative_id)`
+    // (see `crates/planner-core/src/driver.rs`); for an Orchestrator
+    // `args.task_id` is always None, so the wire `IntentRequest.task_id`
+    // for an `IntegrationMerge` is the initiative_id. The kernel's
+    // `handlers::intent::run_phase_a::load_task` rejects with
+    // `FailUnknownTask` when no `tasks(task_id)` row matches; without a
+    // coordinator row, every `IntegrationMerge` is dead on arrival.
+    //
+    // Why a synthetic task row vs. an early-dispatch carve-out
+    // (the StructuredOutput pattern):
+    //
+    //   * The IntegrationMerge admission pipeline reads
+    //     `task.initiative_id` in three places (`run_phase_a` Steps
+    //     3a/3c/7A and `run_phase_c` Step 12B/post-commit); reusing
+    //     a real `tasks` row keeps each of those reads pointed at a
+    //     single source of truth.
+    //   * `lane_budget_reservations.task_id` has an FK to
+    //     `tasks(task_id)`. A synthetic in-memory `TaskRow` would
+    //     fail the FK at `reserve_budget_in_tx`. A real coordinator
+    //     row makes the budget reservation valid AND correctly
+    //     accounts for merge cost against the workspace lane.
+    //   * `task_intent_ranges` likewise FKs to `tasks(task_id)`.
+    //
+    // FSM lifecycle of the coordinator row:
+    //
+    //   created ────────► Admitted ──────────► Running
+    //   (here)            (kernel)             (after first IntegrationMerge,
+    //                                           via `transition_task_in_tx`
+    //                                           in `run_phase_c` Step 11)
+    //
+    // The row stays in `Running` for the lifetime of the initiative.
+    // No spec-defined terminal state; it is never the target of
+    // ActivateSubTask / RetrySubTask, never appears in any
+    // `merged_task_ids`, and never participates in
+    // `evaluate_terminal_criteria` (which scans the *plan*'s task
+    // set, not the entire `tasks` table — the plan is loaded from
+    // the signed plan artifact, see
+    // `evaluate_terminal_criteria_for_initiative`).
+    workspace_lane: &str,
+    policy_epoch:   u64,
 ) -> Result<OrchestratorAutoSpawn, LifecycleError> {
     use raxis_types::SessionId;
 
@@ -1422,6 +1475,40 @@ fn auto_spawn_orchestrator_session_in_tx(
             initiative_id,
         ],
     )?;
+
+    // ── Coordinator task row (V2.5 IntegrationMerge plumbing) ────────────
+    //
+    // Reuses `scheduler::admit_in_tx` so the row carries every
+    // column the standard task-admit path produces (lane_id, state,
+    // actor, policy_epoch, admitted_at, transitioned_at,
+    // actual_cost). `dependencies` is empty — the coordinator has
+    // no DAG predecessors; `dag::detect_cycle_in` and
+    // `dag::insert_edges_in` are both no-ops on an empty edge set.
+    //
+    // `task_id == initiative_id` by construction. UUIDs (initiative
+    // ids) and operator-authored sub-task names live in disjoint
+    // string spaces in practice; no collision check is needed
+    // here — the validator that admits sub-tasks runs *after*
+    // this insert and would reject any sub-task whose `task_id`
+    // collides with an existing row via `INSERT OR IGNORE` returning
+    // 0 rows (caller already aborts on `task_count` mismatch).
+    let coordinator_task = scheduler::PlanTask {
+        task_id:       initiative_id.to_owned(),
+        initiative_id: initiative_id.to_owned(),
+        lane_id:       workspace_lane.to_owned(),
+        name:          format!("orchestrator-coordinator-{initiative_id}"),
+        dependencies:  Vec::new(),
+    };
+    scheduler::admit_in_tx(tx, coordinator_task, policy_epoch).map_err(|e| {
+        // Wrap the scheduler error in `LifecycleError::Sql` so the
+        // outer `approve_plan` rolls back atomically — same failure
+        // shape as a sub-task admit error.
+        LifecycleError::PlanInvalid {
+            reason: format!(
+                "auto-admit coordinator task for initiative {initiative_id} failed: {e}"
+            ),
+        }
+    })?;
 
     Ok(OrchestratorAutoSpawn {
         session_id: session_id_s,

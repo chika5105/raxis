@@ -265,11 +265,22 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
         );
     }
 
-    // Stage into images/<role>/rootfs/init. Linux unpacks the
-    // initramfs and execs `/init` as PID 1 — placing the planner
-    // there sidesteps the need to ship busybox + a wrapper script in
-    // the dev pipeline. Production EROFS images keep the
-    // /usr/local/bin/raxis-* layout per planner-harness.md §14.4.
+    // Stage into images/<role>/rootfs/. The Containerfile-built rootfs
+    // already contains a `/init` symlink pointing at
+    // `/usr/local/bin/raxis-planner-<role>` (planner-harness.md §14.4
+    // canonical layout). When `init` is a symlink, naïve `fs::copy`
+    // follows it and writes to whatever absolute path the symlink
+    // resolves to ON THE HOST — i.e. /usr/local/bin/ — instead of
+    // updating the in-rootfs binary that the cpio writer will
+    // actually pack. We therefore:
+    //   1. Always write the freshly cross-compiled binary into the
+    //      canonical /usr/local/bin path INSIDE the rootfs.
+    //   2. Ensure /init exists as a symlink pointing at that path.
+    // This keeps the dev pipeline's on-disk layout byte-identical to
+    // the production EROFS layout and guarantees the new binary
+    // actually ships in the cpio.gz.
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
     let staging_root = args
         .workspace_root
         .join(STAGING_PARENT)
@@ -277,18 +288,50 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
         .join("rootfs");
     fs::create_dir_all(&staging_root)
         .with_context(|| format!("create {}", staging_root.display()))?;
-    let dest = staging_root.join("init");
-    fs::copy(&built, &dest)
-        .with_context(|| format!("copy {} -> {}", built.display(), dest.display()))?;
 
-    // chmod 755 — cpio writer reads mode bits from the host file.
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = fs::metadata(&dest)
-        .with_context(|| format!("stat {}", dest.display()))?
+    let canonical_rel = format!("usr/local/bin/{}", args.role.binary_name());
+    let canonical_abs = staging_root.join(&canonical_rel);
+    if let Some(parent) = canonical_abs.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("create {}", parent.display()))?;
+    }
+    // Replace the existing binary atomically: remove the stale file
+    // (or symlink) first so `fs::copy` writes a fresh inode rather
+    // than following a host-absolute symlink.
+    if canonical_abs.exists() || canonical_abs.symlink_metadata().is_ok() {
+        fs::remove_file(&canonical_abs).with_context(|| {
+            format!("remove stale {}", canonical_abs.display())
+        })?;
+    }
+    fs::copy(&built, &canonical_abs).with_context(|| {
+        format!("copy {} -> {}", built.display(), canonical_abs.display())
+    })?;
+    let mut perms = fs::metadata(&canonical_abs)
+        .with_context(|| format!("stat {}", canonical_abs.display()))?
         .permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&dest, perms)
-        .with_context(|| format!("chmod {}", dest.display()))?;
+    fs::set_permissions(&canonical_abs, perms)
+        .with_context(|| format!("chmod {}", canonical_abs.display()))?;
+
+    // Ensure `/init` exists as a symlink to /usr/local/bin/<binary>.
+    // We always recreate it so a stale regular-file `/init` (left by
+    // an earlier pre-fix dev-stage run) cannot end up packed instead
+    // of the canonical-layout binary.
+    let init_link = staging_root.join("init");
+    if init_link.exists() || init_link.symlink_metadata().is_ok() {
+        fs::remove_file(&init_link).with_context(|| {
+            format!("remove stale {}", init_link.display())
+        })?;
+    }
+    let init_target = format!("/{canonical_rel}");
+    symlink(&init_target, &init_link).with_context(|| {
+        format!(
+            "symlink {} -> {}",
+            init_link.display(),
+            init_target,
+        )
+    })?;
+    let dest = canonical_abs;
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"dev_stage_ok\",\

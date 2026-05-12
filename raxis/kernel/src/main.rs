@@ -50,6 +50,11 @@ mod push;
 mod runtime;
 mod session_spawn_orchestrator;
 mod worktree_gc;
+// V2 §Step 24 / §Step 24b — host-side worktree provisioning seam.
+// Composes `raxis-worktree-provision` + `raxis-domain-git` into the
+// three role-specific operations the spawn / activation /
+// completion handlers invoke. See module doc-comment.
+mod worktree_provisioning;
 
 use std::sync::Arc;
 

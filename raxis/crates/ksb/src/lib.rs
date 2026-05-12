@@ -76,6 +76,45 @@ pub const KSB_DELIMITER_CLOSE: &str = ":KERNEL_STATE_END]";
 /// production every kernel-spawned session has the env stamped).
 pub const PLANNER_KSB_ENV: &str = "RAXIS_PLANNER_KSB";
 
+/// Env var the kernel stamps when it delivers the KSB snapshot via a
+/// virtiofs sidecar file rather than inlining it in
+/// [`PLANNER_KSB_ENV`]. The value is the **guest-visible absolute
+/// path** of a JSON file containing the same byte-shape as the env
+/// var would carry.
+///
+/// Why a sidecar exists. The Apple-VZ substrate has no
+/// `Command::env` analogue and folds [`raxis_isolation::VmSpec::env`]
+/// into the Linux `/proc/cmdline` as a single base64-encoded token
+/// (`raxis.envb64=<base64>`). Linux's `COMMAND_LINE_SIZE` ceiling on
+/// aarch64 (default 2048 bytes) means a KSB JSON of more than ~1 KiB
+/// can push the cmdline past the boot loader's truncation point —
+/// which silently drops the trailing `-- --task-id <ID>
+/// --initiative-id <ID>` argv tail. The reviewer's KSB is the first
+/// projection that consistently exceeds the budget (it carries the
+/// per-initiative DAG that the executor's KSB intentionally omits).
+///
+/// The sidecar shifts the KSB out of the cmdline and into a
+/// dedicated read-only virtiofs share the substrate provisions
+/// alongside `/workspace`. The driver reads from the path when
+/// present and falls back to [`PLANNER_KSB_ENV`] when only the env
+/// var is set, so legacy callers (subprocess-isolation tests, older
+/// kernel revisions) keep working.
+pub const PLANNER_KSB_PATH_ENV: &str = "RAXIS_PLANNER_KSB_PATH";
+
+/// Conventional guest-side mount point for the KSB sidecar file.
+/// Pinned by the kernel-side spawn path
+/// (`session_spawn_orchestrator.rs`) and the substrate's
+/// `WorkspaceMount` translation. Surfaced as a constant so the
+/// guest-init / driver / test fixtures all reference the same
+/// string.
+pub const PLANNER_KSB_GUEST_MOUNT: &str = "/raxis-meta";
+
+/// Conventional file name of the KSB JSON inside the sidecar mount.
+/// The kernel writes
+/// `<host meta dir>/<PLANNER_KSB_FILE_NAME>` and stamps
+/// `RAXIS_PLANNER_KSB_PATH=<PLANNER_KSB_GUEST_MOUNT>/<PLANNER_KSB_FILE_NAME>`.
+pub const PLANNER_KSB_FILE_NAME: &str = "ksb.json";
+
 /// Current schema version. Incremented when a field is *removed* or
 /// *renamed*. Adding a field is non-breaking.
 pub const KSB_SCHEMA_VERSION: u32 = 1;
@@ -157,6 +196,22 @@ pub struct KsbSnapshot {
     #[serde(default)]
     pub target_ref: String,
 
+    /// Initiative-wide base SHA — the 40-char hex SHA the
+    /// orchestrator's worktree (and every per-task executor /
+    /// reviewer worktree cloned from it) is anchored at. The
+    /// orchestrator's `integration_merge { base_sha, head_sha }`
+    /// tool call cites this verbatim as `base_sha`; the kernel
+    /// admission gate enforces `is_ancestor(base_sha, head_sha)`
+    /// against the orchestrator's worktree, which holds because
+    /// the executor's commit is parented on this exact SHA.
+    ///
+    /// Empty when the kernel cannot resolve the anchor (boot
+    /// race / corrupted session row); the renderer emits the
+    /// literal `<unset>` so the agent fails-loud rather than
+    /// guessing.
+    #[serde(default)]
+    pub base_sha: String,
+
     /// Reviewer verdicts on prior attempts of this task, oldest
     /// first. Empty if no review has been recorded yet.
     #[serde(default)]
@@ -195,6 +250,23 @@ pub struct DagRow {
     /// Number of reviewers attached to this task.
     #[serde(default)]
     pub reviewers:  u32,
+    /// 40-char hex SHA the predecessor (Executor) stamped into
+    /// `tasks.evaluation_sha` at `CompleteTask`. Empty until the
+    /// task completes; populated for every Executor row in the
+    /// initiative DAG so the Orchestrator's `integration_merge`
+    /// tool call can cite the right `head_sha`. Reviewer rows
+    /// inherit their predecessor's `evaluation_sha` here too —
+    /// the kernel does not stamp Reviewer tasks with SHAs (they
+    /// are read-only); a Reviewer row whose predecessor
+    /// completed shows the same SHA the Executor produced so
+    /// downstream agents can correlate the verdict with the
+    /// commit being reviewed.
+    ///
+    /// `serde(default)` for forward/backward wire compat with
+    /// any pre-V2.5 dashboard / replay tool that decodes a KSB
+    /// snapshot from disk.
+    #[serde(default)]
+    pub evaluation_sha: String,
 }
 
 /// One reviewer verdict against a prior executor attempt.
@@ -336,6 +408,7 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
         ("evaluation_sha",   snapshot.evaluation_sha.as_str()),
         ("task_description", snapshot.task_description.as_str()),
         ("target_ref",       snapshot.target_ref.as_str()),
+        ("base_sha",         snapshot.base_sha.as_str()),
     ] {
         if value.contains(KSB_DELIMITER_CLOSE) {
             return Err(KsbError::DelimiterInjection { field: field_name });
@@ -386,6 +459,21 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
     push_kv(&mut buf, "role",          &snapshot.role);
     push_kv(&mut buf, "evaluation_sha", &snapshot.evaluation_sha);
     push_kv(&mut buf, "target_ref",     &snapshot.target_ref);
+    // V2.5 — `base_sha` is the orchestrator's
+    // `integration_merge { base_sha, head_sha }` source. We emit
+    // the literal `<unset>` (rather than an empty value) when
+    // the anchor is missing so the agent does not silently
+    // submit an empty-string SHA and round-trip it as
+    // `INVALID_REQUEST` from the kernel.
+    push_kv(
+        &mut buf,
+        "base_sha",
+        if snapshot.base_sha.is_empty() {
+            "<unset>"
+        } else {
+            snapshot.base_sha.as_str()
+        },
+    );
 
     buf.push_str("path_allowlist=\n");
     if snapshot.path_allowlist.is_empty() {
@@ -472,6 +560,17 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
             buf.push_str(&row.state);
             buf.push_str(" reviewers=");
             buf.push_str(&row.reviewers.to_string());
+            buf.push_str(" sha=");
+            // Empty string when the task has not yet stamped an
+            // evaluation_sha — the orchestrator's prompt teaches
+            // it that an empty `sha=` field means the task has
+            // not produced a commit (still pending / in-progress
+            // / failed-before-commit).
+            buf.push_str(if row.evaluation_sha.is_empty() {
+                "<none>"
+            } else {
+                row.evaluation_sha.as_str()
+            });
             buf.push_str(" \"");
             buf.push_str(&row.title);
             buf.push_str("\"\n");
@@ -545,20 +644,23 @@ mod tests {
             wallclock_budget_remaining_s:  600,
             dag_rows:                      vec![
                 DagRow {
-                    task_id:   "task-42".to_owned(),
-                    state:     "in_progress".to_owned(),
-                    title:     "First sub-task".to_owned(),
-                    reviewers: 2,
+                    task_id:        "task-42".to_owned(),
+                    state:          "in_progress".to_owned(),
+                    title:          "First sub-task".to_owned(),
+                    reviewers:      2,
+                    evaluation_sha: String::new(),
                 },
                 DagRow {
-                    task_id:   "task-43".to_owned(),
-                    state:     "pending".to_owned(),
-                    title:     String::new(),
-                    reviewers: 1,
+                    task_id:        "task-43".to_owned(),
+                    state:          "pending".to_owned(),
+                    title:          String::new(),
+                    reviewers:      1,
+                    evaluation_sha: String::new(),
                 },
             ],
             task_description:              "Make the executor land a commit.".to_owned(),
             target_ref:                    "refs/heads/main".to_owned(),
+            base_sha:                      "f3d21a09f3d21a09f3d21a09f3d21a09f3d21a09".to_owned(),
             reviewer_verdicts:             vec![],
             pending_escalations:           vec![],
             credential_ports:              vec![],
@@ -597,8 +699,8 @@ mod tests {
         assert!(s.contains("token_budget_remaining=12345"));
         assert!(s.contains("wallclock_budget_remaining_s=600"));
         assert!(s.contains("Make the executor land a commit."));
-        assert!(s.contains("- task-42 in_progress reviewers=2 \"First sub-task\""));
-        assert!(s.contains("- task-43 pending reviewers=1 \"\""));
+        assert!(s.contains("- task-42 in_progress reviewers=2 sha=<none> \"First sub-task\""));
+        assert!(s.contains("- task-43 pending reviewers=1 sha=<none> \"\""));
     }
 
     #[test]

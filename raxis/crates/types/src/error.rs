@@ -174,6 +174,23 @@ pub enum PlannerErrorCode {
     /// kernel restart. INV-MERGE-CONSISTENCY (§11.8).
     #[serde(rename = "FAIL_GIT_APPLY_PENDING")]
     FailGitApplyPending,
+
+    /// **V2 §Step 24 / §Step 24b** — host-side worktree provisioning
+    /// for an Executor or Reviewer activation failed (the `gix`
+    /// clone could not open the source repository, the destination
+    /// path could not be initialised, the requested SHA is missing
+    /// from the orchestrator ODB, or the post-clone checkout
+    /// failed). Surfaced from `handle_activate_subtask` when the
+    /// `worktree_provisioning::provision_executor_worktree` /
+    /// `provision_reviewer_worktree` composition errors out before
+    /// the substrate spawn.
+    ///
+    /// Terminal — re-attempting the activation without operator
+    /// intervention will hit the same gix failure on every retry.
+    /// The audit chain carries a structured `ActivateSubTask*`
+    /// diagnostic with the underlying cause.
+    #[serde(rename = "FAIL_WORKTREE_PROVISION")]
+    FailWorktreeProvision,
 }
 
 impl PlannerErrorCode {
@@ -184,7 +201,8 @@ impl PlannerErrorCode {
             self,
             Self::FailUnknownTask
                 | Self::Unauthorized
-                | Self::FailInitiativeQuarantined,
+                | Self::FailInitiativeQuarantined
+                | Self::FailWorktreeProvision,
         )
     }
 }
@@ -214,6 +232,7 @@ impl fmt::Display for PlannerErrorCode {
             Self::FailStructuredOutputInvalid => "FAIL_STRUCTURED_OUTPUT_INVALID",
             Self::FailStructuredOutputRateLimited => "FAIL_STRUCTURED_OUTPUT_RATE_LIMITED",
             Self::FailGitApplyPending => "FAIL_GIT_APPLY_PENDING",
+            Self::FailWorktreeProvision => "FAIL_WORKTREE_PROVISION",
         };
         f.write_str(s)
     }

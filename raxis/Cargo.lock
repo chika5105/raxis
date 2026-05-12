@@ -3636,6 +3636,7 @@ dependencies = [
  "ed25519-dalek",
  "futures-util",
  "getrandom 0.2.17",
+ "gix",
  "glob",
  "hex",
  "libc",
@@ -3668,6 +3669,7 @@ dependencies = [
  "raxis-store",
  "raxis-test-support",
  "raxis-types",
+ "raxis-worktree-provision",
  "raxis-worktree-staging",
  "reqwest",
  "rusqlite",
@@ -4052,6 +4054,7 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64 0.22.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",

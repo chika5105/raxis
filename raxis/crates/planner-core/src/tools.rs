@@ -686,10 +686,31 @@ impl Tool for GitCommitTool {
                 reason: "missing or non-string `message`".to_owned(),
             }
         })?;
-        // git add -A
+        // The cloned worktree has no `user.email` / `user.name` in
+        // its `.git/config` (the gix `file://` clone copies refs +
+        // HEAD but not user identity), and the AVF guest has no
+        // `~/.gitconfig` to inherit from. Without an identity,
+        // `git commit` exits 128 with "Author identity unknown",
+        // which would surface to the model as a tool failure and
+        // burn LLM tokens on retries. We inject a deterministic
+        // raxis identity via the standard `GIT_AUTHOR_*` /
+        // `GIT_COMMITTER_*` env vars (they take precedence over
+        // both `.git/config` and `~/.gitconfig` per `git-commit(1)
+        // ENVIRONMENT`) so the commit is fully self-contained and
+        // reproducible across guest reboots. The author email is
+        // a `.invalid` TLD per RFC 2606 so the address can never
+        // be confused with a real maintainer's mailbox.
+        let git_env: &[(&str, &str)] = &[
+            ("GIT_AUTHOR_NAME",     "raxis-executor"),
+            ("GIT_AUTHOR_EMAIL",    "executor@raxis.invalid"),
+            ("GIT_COMMITTER_NAME",  "raxis-executor"),
+            ("GIT_COMMITTER_EMAIL", "executor@raxis.invalid"),
+        ];
+
         let add = match tokio::process::Command::new("git")
             .args(["add", "-A"])
             .current_dir(&ctx.workspace_root)
+            .envs(git_env.iter().copied())
             .output()
             .await
         {
@@ -705,10 +726,10 @@ impl Tool for GitCommitTool {
                 String::from_utf8_lossy(&add.stderr)
             )));
         }
-        // git commit -m <message>
         let commit = match tokio::process::Command::new("git")
             .args(["commit", "-m", message])
             .current_dir(&ctx.workspace_root)
+            .envs(git_env.iter().copied())
             .output()
             .await
         {
@@ -725,11 +746,15 @@ impl Tool for GitCommitTool {
                 String::from_utf8_lossy(&commit.stderr)
             )));
         }
-        // Return new HEAD short sha for the model to use in
-        // intent submission.
+        // Return the FULL HEAD SHA (40 hex chars) so the model can
+        // pass it verbatim to `task_complete.head_sha`. The kernel's
+        // `CommitSha::new` validator rejects short SHAs as
+        // `INVALID_REQUEST` — `--short` here would silently
+        // burn the activation on the first tool round-trip.
         let sha = match tokio::process::Command::new("git")
-            .args(["rev-parse", "--short", "HEAD"])
+            .args(["rev-parse", "HEAD"])
             .current_dir(&ctx.workspace_root)
+            .envs(git_env.iter().copied())
             .output()
             .await
         {

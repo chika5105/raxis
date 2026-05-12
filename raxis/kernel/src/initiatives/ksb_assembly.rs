@@ -188,6 +188,24 @@ pub fn assemble_ksb_snapshot(
     // ── Pending escalations scoped to this initiative ────────────
     let pending_escalations = read_pending_escalations(conn, inputs.initiative_id)?;
 
+    // ── Initiative anchor `base_sha` ─────────────────────────────
+    //
+    // V2.5: every per-initiative session (orchestrator, executor,
+    // reviewer) is anchored at the same base SHA — the SHA the
+    // orchestrator's worktree was provisioned at by
+    // `worktree_provisioning::provision_orchestrator_worktree`.
+    // The orchestrator's `integration_merge` tool call cites this
+    // verbatim as `base_sha`. We source it from the live
+    // orchestrator session row so a respawn re-attached to the
+    // existing anchor surfaces the same SHA without reading the
+    // on-disk worktree (which would race the spawn).
+    //
+    // A miss surfaces as an empty string; the renderer emits the
+    // literal `<unset>` and the agent fails-loud per
+    // `kernel-mechanics-prompt.md` ("never invent a SHA").
+    let base_sha = read_initiative_anchor_base_sha(conn, inputs.initiative_id)?
+        .unwrap_or_default();
+
     Ok(KsbSnapshot {
         version:                       KSB_SCHEMA_VERSION,
         initiative_id:                 inputs.initiative_id.to_owned(),
@@ -200,6 +218,7 @@ pub fn assemble_ksb_snapshot(
         dag_rows,
         task_description,
         target_ref,
+        base_sha,
         // V3 placeholder. Wiring up the reviewer-verdict feed
         // requires plumbing the witness-aggregation crate
         // (`review_aggregation`) into this projection; left for the
@@ -207,6 +226,40 @@ pub fn assemble_ksb_snapshot(
         reviewer_verdicts:             Vec::new(),
         pending_escalations,
         credential_ports:              inputs.credential_ports.clone(),
+    })
+}
+
+/// Read the per-initiative anchor `base_sha` from the live
+/// orchestrator session row. The orchestrator session is the
+/// canonical source — every executor / reviewer session for the
+/// initiative was cloned from that anchor.
+///
+/// Returns `Ok(None)` when no orchestrator row exists yet (boot
+/// race) or the row's `base_sha` is `NULL` (the spawn path's
+/// post-provisioning UPDATE has not landed yet). The caller falls
+/// back to the literal `<unset>` rendering.
+fn read_initiative_anchor_base_sha(
+    conn:          &Connection,
+    initiative_id: &str,
+) -> Result<Option<String>, rusqlite::Error> {
+    use raxis_types::SessionAgentType;
+    let sql = format!(
+        "SELECT base_sha FROM {sessions} \
+          WHERE initiative_id      = ?1 \
+            AND session_agent_type = ?2 \
+            AND base_sha IS NOT NULL \
+          ORDER BY created_at DESC \
+          LIMIT 1",
+        sessions = Table::Sessions.as_str(),
+    );
+    conn.query_row(
+        &sql,
+        rusqlite::params![initiative_id, SessionAgentType::Orchestrator.as_sql_str()],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(None),
+        other => Err(other),
     })
 }
 
@@ -241,8 +294,17 @@ fn read_dag_rows_for_initiative(
     initiative_id: &str,
     registry:      &PlanRegistry,
 ) -> Result<Vec<DagRow>, rusqlite::Error> {
+    // V2.5 §11.4-adjacent — the DAG-row projection now includes
+    // `evaluation_sha` so the Orchestrator's KSB-rendered `dag=`
+    // block carries the per-task commit SHA the
+    // `integration_merge` tool needs to cite as `head_sha`.
+    // Without this projection the Orchestrator agent has no
+    // wire-visible source for the SHA — it would have to invent
+    // one or call `read_file` against `.git/refs/heads/...`,
+    // both of which would round-trip incorrect (or empty)
+    // values into the kernel.
     let sql = format!(
-        "SELECT task_id, state FROM {tasks} \
+        "SELECT task_id, state, evaluation_sha FROM {tasks} \
          WHERE initiative_id = ?1 \
          ORDER BY admitted_at ASC, task_id ASC",
         tasks = Table::Tasks.as_str(),
@@ -250,19 +312,17 @@ fn read_dag_rows_for_initiative(
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
         .query_map(rusqlite::params![initiative_id], |r| {
-            let task_id: String = r.get(0)?;
-            let state:   String = r.get(1)?;
-            Ok((task_id, state))
+            let task_id:        String         = r.get(0)?;
+            let state:          String         = r.get(1)?;
+            let evaluation_sha: Option<String> = r.get(2)?;
+            Ok((task_id, state, evaluation_sha))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(rows.into_iter().map(|(task_id, state)| {
+    Ok(rows.into_iter().map(|(task_id, state, evaluation_sha)| {
         let title = registry
             .get(&TaskKey::new(initiative_id.to_owned(), task_id.clone()))
             .map(|t| {
-                // The DAG row's `title` is a one-line summary; reuse
-                // the first line of the task description so the
-                // model has a human-readable label per row.
                 t.description.lines().next().unwrap_or("").to_owned()
             })
             .unwrap_or_default();
@@ -275,6 +335,7 @@ fn read_dag_rows_for_initiative(
             // sessions. Reported as `0` for now; the renderer
             // tolerates this verbatim.
             reviewers: 0,
+            evaluation_sha: evaluation_sha.unwrap_or_default(),
         }
     }).collect())
 }
@@ -329,6 +390,7 @@ pub fn fallback_snapshot(
         dag_rows:                      Vec::new(),
         task_description:              String::new(),
         target_ref:                    crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned(),
+        base_sha:                      String::new(),
         reviewer_verdicts:             Vec::new(),
         pending_escalations:           Vec::new(),
         credential_ports:              Vec::new(),

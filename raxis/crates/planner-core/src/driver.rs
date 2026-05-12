@@ -413,22 +413,30 @@ where
     let max_tokens_total        = parse_u64_env(&f, PLANNER_MAX_TOKENS_TOTAL_ENV);
 
     // V2 `v2_extended_gaps.md §2.4` — read the kernel-stamped KSB
-    // env var. Absent / unparseable → `None`, which the
+    // snapshot.
+    //
+    // Two delivery channels are supported. The kernel chooses one
+    // per spawn; the driver tries them in this order:
+    //
+    //   1. **Sidecar file.** When `RAXIS_PLANNER_KSB_PATH` is set
+    //      the driver reads the JSON bytes from that guest-visible
+    //      path (the kernel mounts a per-session virtiofs share at
+    //      [`raxis_ksb::PLANNER_KSB_GUEST_MOUNT`] containing
+    //      [`raxis_ksb::PLANNER_KSB_FILE_NAME`]). This is the only
+    //      channel that survives the Apple-VZ substrate's
+    //      `COMMAND_LINE_SIZE` ceiling once the KSB grows past
+    //      ~1 KiB (e.g. the reviewer's per-initiative DAG snapshot).
+    //
+    //   2. **Inline env var.** When `RAXIS_PLANNER_KSB` is set the
+    //      driver parses the value verbatim. Used by
+    //      subprocess-isolation tests and the legacy
+    //      pre-sidecar kernel path.
+    //
+    // Absent / unparseable on both channels → `None`, which the
     // dispatch-loop seam uses to fall back to the NNSP-only system
-    // prompt (test-only fallback path; in production every
+    // prompt (test-only fallback; in production every
     // kernel-spawned session has a parseable snapshot stamped).
-    let ksb_snapshot = var(raxis_ksb::PLANNER_KSB_ENV).and_then(|raw| {
-        match serde_json::from_str::<raxis_ksb::KsbSnapshot>(&raw) {
-            Ok(snap) => Some(snap),
-            Err(e) => {
-                eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"planner_ksb_parse_failed\",\
-                     \"err\":\"{e}\"}}",
-                );
-                None
-            }
-        }
-    });
+    let ksb_snapshot = read_ksb_snapshot(&f);
 
     // ── Connect kernel transport BEFORE building the model so the
     //    model's HttpFetch can share the connection (required for
@@ -585,6 +593,69 @@ where
                 &secret_hex,
                 Arc::clone(http_fetch),
             )?)
+        }
+    })
+}
+
+/// Helper for `run_role_session_with_env_fn` — read the
+/// kernel-stamped KSB snapshot using whichever delivery channel the
+/// kernel chose for this spawn.
+///
+/// Channel priority:
+///
+///   1. **`RAXIS_PLANNER_KSB_PATH` (sidecar file).** When set, read
+///      the JSON bytes from the path and deserialise. A non-empty
+///      value but a missing / unreadable / unparseable file
+///      surfaces a structured-log warn and returns `None` — the
+///      driver falls back to the NNSP-only prompt rather than
+///      booting against an inconsistent KSB.
+///
+///   2. **`RAXIS_PLANNER_KSB` (inline env).** Legacy in-process
+///      delivery, used by subprocess-isolation tests and pre-V2.6
+///      kernel revisions. Empty / unparseable → `None` with a
+///      structured-log warn.
+///
+///   3. Neither set → `None` (driver falls back to NNSP-only
+///      system prompt).
+fn read_ksb_snapshot<F: Fn(&str) -> Option<String>>(f: &F) -> Option<raxis_ksb::KsbSnapshot> {
+    let var = |k: &str| f(k).filter(|v| !v.is_empty());
+
+    if let Some(path) = var(raxis_ksb::PLANNER_KSB_PATH_ENV) {
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"planner_ksb_sidecar_read_failed\",\
+                     \"path\":{:?},\"err\":\"{e}\"}}",
+                    path,
+                );
+                return None;
+            }
+        };
+        match serde_json::from_slice::<raxis_ksb::KsbSnapshot>(&bytes) {
+            Ok(snap) => return Some(snap),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"planner_ksb_sidecar_parse_failed\",\
+                     \"path\":{:?},\"bytes\":{},\"err\":\"{e}\"}}",
+                    path,
+                    bytes.len(),
+                );
+                return None;
+            }
+        }
+    }
+
+    var(raxis_ksb::PLANNER_KSB_ENV).and_then(|raw| {
+        match serde_json::from_str::<raxis_ksb::KsbSnapshot>(&raw) {
+            Ok(snap) => Some(snap),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"planner_ksb_parse_failed\",\
+                     \"err\":\"{e}\"}}",
+                );
+                None
+            }
         }
     })
 }
@@ -879,7 +950,11 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                               1. Look at the `dag=` block inside \
                                  `[RAXIS:KERNEL_STATE …]` (below). Each row \
                                  has the shape `<task_id> <state> reviewers=N \
-                                 \"<title>\"`.\n\
+                                 sha=<40-hex|<none>> \"<title>\"`. The \
+                                 `sha=` field is the executor's commit SHA \
+                                 once the task completes; it is `<none>` \
+                                 while the task is pending / in-progress / \
+                                 failed-before-commit.\n\
                               2. Find the first task whose `state` is `pending` \
                                  AND whose plan-declared predecessors are all \
                                  `complete`. Call `activate_subtask { \
@@ -891,7 +966,30 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                               4. When EVERY executor row is `complete` AND \
                                  every reviewer row is `complete`, call \
                                  `integration_merge { base_sha, head_sha }` \
-                                 to fast-forward the initiative's `target_ref`.\n\
+                                 to fast-forward the initiative's \
+                                 `target_ref`. Source the SHAs as follows:\n\
+                                  - `base_sha`: copy the value from the \
+                                    `base_sha=<40-hex>` line at the top \
+                                    of `[RAXIS:KERNEL_STATE …]` verbatim. \
+                                    The literal `<unset>` means the \
+                                    kernel could not resolve the anchor — \
+                                    do NOT submit; instead `sleep 5` and \
+                                    re-check on the next turn.\n\
+                                  - `head_sha`: copy the `sha=<40-hex>` \
+                                    field of the single executor task \
+                                    whose changes you want to fast-forward \
+                                    from the `dag=` block. With one \
+                                    executor in the DAG this is \
+                                    unambiguous; with multiple executor \
+                                    tasks pick the SHA of the latest \
+                                    committed executor whose associated \
+                                    reviewer is `complete`. The literal \
+                                    `<none>` means the executor has not \
+                                    stamped a SHA yet — do NOT submit.\n\
+                                  - Always pass FULL 40-char lowercase hex \
+                                    SHAs verbatim. Submitting a short SHA \
+                                    or the literal `<none>` / `<unset>` \
+                                    is rejected as `INVALID_REQUEST`.\n\
                               \n\
                               You MUST call exactly ONE of `activate_subtask`, \
                               `retry_subtask`, or `integration_merge` per \
@@ -1388,6 +1486,7 @@ mod tests {
             dag_rows:                      vec![],
             task_description:              "fold-test description".to_owned(),
             target_ref:                    "refs/heads/feature/fold".to_owned(),
+            base_sha:                      String::new(),
             reviewer_verdicts:             vec![],
             pending_escalations:           vec![],
             credential_ports:              vec![],

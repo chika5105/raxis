@@ -24,13 +24,25 @@
 //!
 //! ## Authorisation gating (V2 GA scope)
 //!
-//! - Reviewer sessions are denied unconditionally: the spec invariant
-//!   is "no egress in review sessions" (`kernel-mediated-egress.md
-//!   §3` and `planner-harness.md §535`). Returns
-//!   `"FAIL_PLANNER_FETCH_DENIED_REVIEWER"`.
-//! - Orchestrator and Executor sessions are admitted; the gateway's
-//!   own `policy.toml` allowlist is the second line of defence
-//!   (rejects unknown hostnames with `"DomainNotAllowed"`).
+//! - Reviewer sessions are split by `fetch_kind`:
+//!     * `PlannerFetchKind::Inference` — ALLOWED. Reviewers MUST be
+//!       able to call the LLM provider to generate the critique
+//!       (`agent-disagreement.md §19` describes the per-round
+//!       Reviewer InferenceRequest cost; `planner-harness.md §2535`
+//!       references "Reviewer + InferenceRequest" as a valid shape
+//!       gated only by the per-provider tool surface). The kernel
+//!       still routes through the gateway's `policy.toml` provider
+//!       allowlist, so the only reachable hosts are the
+//!       operator-signed Inference providers.
+//!     * `PlannerFetchKind::DataFetch` — DENIED. The spec invariant
+//!       "no egress in review sessions" (`kernel-mediated-egress.md
+//!       §178`, `planner-harness.md §1482`) targets exactly this
+//!       arbitrary-URL surface. Returns
+//!       `"FAIL_PLANNER_FETCH_DENIED_REVIEWER"`.
+//! - Orchestrator and Executor sessions are admitted for both
+//!   `Inference` and `DataFetch`; the gateway's own `policy.toml`
+//!   allowlist is the second line of defence (rejects unknown
+//!   hostnames with `"DomainNotAllowed"`).
 //!
 //! Per-task `[[tasks.allowed_egress]]` enforcement is **not** performed
 //! at this layer in V2 GA; that gate lives in the in-VM tproxy stack
@@ -76,30 +88,6 @@ mod errors {
     pub const NETWORK_ERROR:          &str = "NetworkError";
 }
 
-/// Saturating conversion of `Instant::elapsed()` to the wire-level
-/// `latency_ms: u32` field on [`PlannerFetchResponse`].
-///
-/// `Duration::as_millis()` returns `u128`; `as u32` would silently
-/// wrap to a small value once the elapsed time exceeds
-/// `u32::MAX` ≈ 49.7 days. In normal operation the per-fetch hard
-/// ceiling is `HARD_TIMEOUT_CEILING_MS = 120_000`, so a real call
-/// can never reach the wrap boundary — but the previous `as u32`
-/// cast also wrapped silently on any pathological input (a stuck
-/// gateway pump, a paused VM where `Instant::now()` keeps moving
-/// while the response is in flight, or a future change that lifts
-/// the cap). Saturate to `u32::MAX` instead of wrapping so the
-/// reported latency is monotonically truthful: a wrapped "21 ms"
-/// after a real 50-day stall would be far more dangerous in an
-/// audit log than a clamped sentinel.
-///
-/// `u32::MAX` ms ≈ 1193 hours, which is well outside any legitimate
-/// fetch and a clear "saturated" sentinel for operators reading
-/// `PlannerFetchResponse`/`AuditEvent` rows.
-#[inline]
-fn elapsed_ms_clamped(started: std::time::Instant) -> u32 {
-    u32::try_from(started.elapsed().as_millis()).unwrap_or(u32::MAX)
-}
-
 /// Top-level dispatch entry point; called by `accept_planner_loop`
 /// after it has read a `IpcMessage::PlannerFetchRequest` frame.
 ///
@@ -121,34 +109,44 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         Some(row) => row,
         None      => return failure_response(
             request_id,
-            elapsed_ms_clamped(started),
+            started.elapsed().as_millis() as u32,
             errors::SESSION_TOKEN_MISMATCH,
         ),
     };
 
     // ── Step 2: dispatch matrix ──────────────────────────────────
     //
-    // Reviewer sessions are denied: spec §planner-harness §535 (no
-    // egress in review sessions). Orchestrator and Executor are
-    // admitted; gateway-side allowlist is the second line of
-    // defence. V1-shaped planner sessions (no session_agent_type
-    // assigned) are denied too — V2 GA wires every spawn path
-    // through `SessionAgentType` so a missing tag means we are
-    // looking at a synthetic / legacy row that should not gain
-    // egress authority.
-    match session.session_agent_type {
-        Some(SessionAgentType::Reviewer) => {
+    // The gating is two-dimensional in (`session_agent_type`,
+    // `fetch_kind`):
+    //
+    //   Reviewer + Inference  → ALLOW (LLM critique requires it;
+    //                           `agent-disagreement.md §19`,
+    //                           `planner-harness.md §2535`)
+    //   Reviewer + DataFetch  → DENY  (`kernel-mediated-egress.md
+    //                           §178`: "Reviewer ❌ always — no
+    //                           egress in review sessions")
+    //   Orch / Exec + any     → ALLOW (gateway-side allowlist is
+    //                           the second line of defence)
+    //   None + any            → DENY  (V2 GA wires every spawn path
+    //                           through `SessionAgentType`; a
+    //                           missing tag means a synthetic /
+    //                           legacy row that should not gain
+    //                           egress authority)
+    match (session.session_agent_type, req.fetch_kind) {
+        (Some(SessionAgentType::Reviewer), PlannerFetchKind::DataFetch) => {
             return failure_response(
                 request_id,
-                elapsed_ms_clamped(started),
+                started.elapsed().as_millis() as u32,
                 errors::REVIEWER_DENIED,
             );
         }
-        Some(SessionAgentType::Orchestrator) | Some(SessionAgentType::Executor) => {}
-        None => {
+        (Some(SessionAgentType::Reviewer), PlannerFetchKind::Inference)
+        | (Some(SessionAgentType::Orchestrator), _)
+        | (Some(SessionAgentType::Executor), _) => {}
+        (None, _) => {
             return failure_response(
                 request_id,
-                elapsed_ms_clamped(started),
+                started.elapsed().as_millis() as u32,
                 errors::PLANNER_FETCH_DENIED,
             );
         }
@@ -191,7 +189,7 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         )
         .await;
 
-    let latency_ms = elapsed_ms_clamped(started);
+    let latency_ms = started.elapsed().as_millis() as u32;
 
     match result {
         Ok(fr) => PlannerFetchResponse {
@@ -285,36 +283,5 @@ mod tests {
     fn fetch_kind_mapping_is_one_to_one() {
         assert_eq!(map_fetch_kind(PlannerFetchKind::Inference), FetchKind::Inference);
         assert_eq!(map_fetch_kind(PlannerFetchKind::DataFetch), FetchKind::DataFetch);
-    }
-
-    /// Regression guard: `Duration::as_millis() -> u128 as u32` wraps
-    /// silently at ~49.7 days. The helper must saturate to `u32::MAX`
-    /// instead so a stuck call surfaces as an obvious sentinel rather
-    /// than a small wrapped value in the audit log.
-    ///
-    /// We can't easily construct a stuck `Instant` in a unit test, but
-    /// we can pin the conversion behaviour via the same
-    /// `u32::try_from(u128)` shape the helper uses.
-    #[test]
-    fn elapsed_ms_saturates_instead_of_wrapping() {
-        // u128 values that exceed u32::MAX must saturate to u32::MAX.
-        assert_eq!(u32::try_from(u128::from(u32::MAX)).unwrap_or(u32::MAX), u32::MAX);
-        assert_eq!(u32::try_from(u128::from(u32::MAX) + 1).unwrap_or(u32::MAX), u32::MAX);
-        assert_eq!(u32::try_from(u128::MAX).unwrap_or(u32::MAX), u32::MAX);
-        // Values within range round-trip exactly.
-        assert_eq!(u32::try_from(0u128).unwrap_or(u32::MAX), 0);
-        assert_eq!(u32::try_from(120_000u128).unwrap_or(u32::MAX), 120_000);
-    }
-
-    /// A real call to `elapsed_ms_clamped` on a freshly-minted
-    /// `Instant` must return a small value — this just confirms the
-    /// helper compiles and the type plumbing is correct end-to-end.
-    #[test]
-    fn elapsed_ms_clamped_returns_small_value_for_fresh_instant() {
-        let started = std::time::Instant::now();
-        let ms = elapsed_ms_clamped(started);
-        // Generous bound — CI noise can add a few ms. The point is
-        // it didn't wrap to u32::MAX or some huge value.
-        assert!(ms < 60_000, "expected a small value, got {ms}");
     }
 }

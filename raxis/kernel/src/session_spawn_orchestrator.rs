@@ -64,7 +64,7 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -202,7 +202,17 @@ impl OrchestratorSpawnContext {
             install_dir,
             kernel_version,
             vcpu_count: 1,
-            mem_mib:    256,
+            // The dev-host orchestrator-core initramfs image expands to
+            // ~217 MiB in tmpfs (full Debian rootfs + planner binary);
+            // the production EROFS image is much smaller but mem_mib
+            // here MUST cover the worst-case dev image so the live-e2e
+            // path doesn't OOM the guest kernel. 1 GiB leaves headroom
+            // for the planner's tokio runtime, gateway streaming, and
+            // the guest kernel's page cache. Operators override at
+            // boot via the `[isolation] orchestrator_mem_mib` policy
+            // key (when those keys land — for now this is the only
+            // path).
+            mem_mib:    1024,
             data_dir:   None,
         }
     }
@@ -581,6 +591,101 @@ async fn spawn_orchestrator_for_initiative(
         .map_err(|e| OrchestratorSpawnError::StoreRead(e.to_string()))?
         .map_err(OrchestratorSpawnError::StoreRead)?;
 
+    // ── Step 2b: V2 §Step 24b — host-side orchestrator worktree
+    //    provisioning. Idempotent on respawn (re-attach to the
+    //    existing per-initiative worktree). The path is keyed by
+    //    `initiative_id` so a respawned orchestrator session
+    //    inherits the previous session's tree (including any
+    //    Executor commits already merged into it). The
+    //    orchestrator-VM does NOT need /workspace mounted to do
+    //    its job (its task is pure planning + IPC), but the
+    //    orchestrator's worktree MUST exist on the host so:
+    //
+    //      * Executor / Reviewer activations can clone from it.
+    //      * The IntegrationMerge handler can call
+    //        `domain_git::commit_merge_to_target_ref` against it
+    //        (passing it as `orch_worktree_root`).
+    //
+    //    The worktree_root + base_sha + base_tracking_ref are
+    //    persisted into the orchestrator session row below so
+    //    `pre_state.worktree_path` (set by
+    //    `handlers::intent::run_phase_a` from
+    //    `session.worktree_root`) resolves correctly at
+    //    IntegrationMerge admission.
+    let data_dir = spawn_ctx
+        .data_dir
+        .as_ref()
+        .ok_or_else(|| OrchestratorSpawnError::StoreRead(
+            "OrchestratorSpawnContext is missing data_dir; \
+             worktree provisioning requires <data_dir>/repositories/main \
+             to exist (boot wires data_dir via `with_data_dir`)".to_owned(),
+        ))?
+        .clone();
+    let target_ref = plan_registry
+        .orchestrator(initiative_id)
+        .map(|o| o.target_ref)
+        .unwrap_or_else(|| {
+            crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned()
+        });
+    let initiative_owned = initiative_id.to_owned();
+    let target_ref_owned = target_ref.clone();
+    let data_dir_for_provision = data_dir.clone();
+    let anchor = tokio::task::spawn_blocking(move || {
+        crate::worktree_provisioning::provision_orchestrator_worktree(
+            &data_dir_for_provision,
+            &initiative_owned,
+            &target_ref_owned,
+        )
+    })
+    .await
+    .map_err(|e| OrchestratorSpawnError::StoreRead(format!(
+        "orchestrator worktree provisioning task join failed: {e}",
+    )))?
+    .map_err(|e| OrchestratorSpawnError::StoreRead(format!(
+        "orchestrator worktree provisioning failed: {e}",
+    )))?;
+
+    // Persist the anchor onto the orchestrator session row so
+    // the kernel-side IntegrationMerge handler reads
+    // `session.worktree_root` consistently with where this
+    // function provisioned. Best-effort within the spawn path —
+    // a failure here would surface downstream as
+    // `pre_state.worktree_path = ""` and IntegrationMerge would
+    // reject with `FailPolicyViolation`; we surface it
+    // structurally as `StoreRead` so the operator sees the
+    // diagnostic immediately.
+    {
+        let store_for_update = Arc::clone(store);
+        let session_id_for_update = session_id.to_owned();
+        let worktree_root_str = anchor.worktree_root.display().to_string();
+        let base_sha_str      = anchor.base_sha.clone();
+        let tracking_ref_str  = anchor.base_tracking_ref.clone();
+        tokio::task::spawn_blocking(move || -> Result<(), rusqlite::Error> {
+            let conn = store_for_update.lock_sync();
+            conn.execute(
+                "UPDATE sessions
+                    SET worktree_root      = ?1,
+                        base_sha           = ?2,
+                        base_tracking_ref  = ?3
+                  WHERE session_id = ?4",
+                rusqlite::params![
+                    worktree_root_str,
+                    base_sha_str,
+                    tracking_ref_str,
+                    session_id_for_update,
+                ],
+            )?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| OrchestratorSpawnError::StoreRead(format!(
+            "orchestrator session row update task join failed: {e}",
+        )))?
+        .map_err(|e| OrchestratorSpawnError::StoreRead(format!(
+            "UPDATE sessions worktree_root failed: {e}",
+        )))?;
+    }
+
     // ── Step 3: build the spawn spec. ────────────────────────────
     // Egress tier is `EgressTier::None` for the Orchestrator. Per
     // the user-clarified invariant ("the Orchestrator has no
@@ -684,7 +789,29 @@ async fn spawn_orchestrator_for_initiative(
     };
     let ksb_json = serde_json::to_string(&ksb_snapshot)
         .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
-    env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
+    // Prefer the virtiofs sidecar channel (small `RAXIS_PLANNER_KSB_PATH`
+    // env, KSB JSON in a per-session file) so the AVF cmdline budget
+    // is not consumed by the snapshot bytes; fall back to the legacy
+    // inline `RAXIS_PLANNER_KSB` env when there is no on-disk meta
+    // dir to write into (in-process tests with `data_dir = None`).
+    let ksb_sidecar = provision_ksb_sidecar(
+        spawn_ctx.data_dir.as_deref(),
+        session_id,
+        &ksb_json,
+    );
+    let extra_workspace_mounts: Vec<raxis_isolation::WorkspaceMount> = match &ksb_sidecar {
+        Some((mount, guest_path)) => {
+            env.insert(
+                raxis_ksb::PLANNER_KSB_PATH_ENV.to_owned(),
+                guest_path.clone(),
+            );
+            vec![mount.clone()]
+        }
+        None => {
+            env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
+            Vec::new()
+        }
+    };
     let vm_spec = VmSpec {
         vcpu_count:        spawn_ctx.vcpu_count,
         mem_mib:           spawn_ctx.mem_mib,
@@ -729,12 +856,30 @@ async fn spawn_orchestrator_for_initiative(
             .map(|d| d.join("guests").join(session_id).join("console.log")),
     };
 
+    // V2 §Step 24b — the Orchestrator gets `/workspace` mounted RW
+    // off the per-initiative anchor we provisioned in Step 2b. The
+    // orchestrator agent itself is a pure-coordination role — it
+    // does not need to write files in the worktree to do its job
+    // (it dispatches sub-tasks through the planner-IPC) — but the
+    // mount lets the orchestrator plan the IntegrationMerge by
+    // observing the same bytes the host kernel will fetch into
+    // main at merge time, which keeps the agent / kernel views
+    // coherent under prompt-injection-class anomalies.
+    let orch_mount = raxis_isolation::WorkspaceMount {
+        host_path:    anchor.worktree_root.clone(),
+        guest_path:   raxis_worktree_staging::GUEST_WORKSPACE_PATH.to_owned(),
+        mode:         raxis_isolation::MountMode::ReadWrite,
+        content_hash: None,
+    };
+    let mut workspace_mounts = vec![orch_mount];
+    workspace_mounts.extend(extra_workspace_mounts);
+
     let req = SpawnRequest {
         session_id:        session_id.to_owned(),
         task_id:           None, // orchestrator: no `[[tasks]]` row
         initiative_id:     initiative_id.to_owned(),
         image:             verified_image,
-        workspace_mounts:  Vec::new(),
+        workspace_mounts,
         vm_spec,
         credentials,
         admission_service: Box::new(PolicyAdmissionService::new(egress_allowlist)),
@@ -1164,6 +1309,91 @@ pub async fn respawn_orchestrator_for_initiative(
 }
 
 // ---------------------------------------------------------------------------
+// KSB virtiofs sidecar — writes `ksb.json` to a per-session
+// host directory and returns the matching `WorkspaceMount` +
+// guest-side path env value the caller stamps into `spec.env` /
+// `workspace_mounts`. Pinned by `raxis_ksb::PLANNER_KSB_PATH_ENV`.
+// ---------------------------------------------------------------------------
+
+/// Provision the per-session KSB sidecar.
+///
+/// The Apple-VZ substrate lacks a `Command::env` analogue and folds
+/// every `VmSpec::env` entry into the Linux `/proc/cmdline` as a
+/// single base64-encoded `raxis.envb64=<base64>` token. Linux's
+/// `COMMAND_LINE_SIZE` ceiling on aarch64 (default 2048 bytes)
+/// silently truncates anything past that boundary, including the
+/// `-- --task-id <ID> --initiative-id <ID>` argv tail the planner
+/// binary needs to boot. Once the KSB JSON crosses ~1 KiB (the
+/// reviewer's per-initiative DAG snapshot is the first projection
+/// that consistently does so) the cmdline overflow drops the argv
+/// entirely and the planner aborts at boot with
+/// `MissingValue("--initiative-id")`.
+///
+/// Routing the KSB through a dedicated virtiofs file removes it from
+/// the cmdline budget entirely — only a tiny
+/// `RAXIS_PLANNER_KSB_PATH=/raxis-meta/ksb.json` env stays in the
+/// payload (~40 bytes). The driver reads from the path when
+/// `RAXIS_PLANNER_KSB_PATH` is set and falls back to the legacy
+/// inline `RAXIS_PLANNER_KSB` env when only that channel is
+/// populated (subprocess-isolation tests, older kernel revisions).
+///
+/// Returns `Some((mount, path_env_value))` when:
+///
+///   * `data_dir` is `Some` (every production spawn — the boot path
+///     populates `OrchestratorSpawnContext::data_dir` /
+///     `ExecutorSpawnContext::data_dir` from
+///     `KernelInstance::data_dir`).
+///   * The host meta dir + file write both succeeded.
+///
+/// Returns `None` for the in-process tests that construct a spawn
+/// context with `data_dir = None`, in which case the caller
+/// stamps the legacy inline env unchanged.
+///
+/// **Idempotency.** Repeated calls for the same session reuse the
+/// existing meta dir; the file write is a fresh truncate so a
+/// retried spawn always observes the latest snapshot.
+fn provision_ksb_sidecar(
+    data_dir:   Option<&Path>,
+    session_id: &str,
+    ksb_json:   &str,
+) -> Option<(raxis_isolation::WorkspaceMount, String)> {
+    let data_dir = data_dir?;
+    let meta_dir = data_dir
+        .join("guests")
+        .join(session_id)
+        .join("meta");
+    if let Err(e) = std::fs::create_dir_all(&meta_dir) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"planner_ksb_sidecar_mkdir_failed\",\
+             \"session_id\":\"{session_id}\",\"path\":\"{path}\",\"err\":\"{e}\"}}",
+            path = meta_dir.display(),
+        );
+        return None;
+    }
+    let file_path = meta_dir.join(raxis_ksb::PLANNER_KSB_FILE_NAME);
+    if let Err(e) = std::fs::write(&file_path, ksb_json.as_bytes()) {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"planner_ksb_sidecar_write_failed\",\
+             \"session_id\":\"{session_id}\",\"path\":\"{path}\",\"err\":\"{e}\"}}",
+            path = file_path.display(),
+        );
+        return None;
+    }
+    let mount = raxis_isolation::WorkspaceMount {
+        host_path:    meta_dir,
+        guest_path:   raxis_ksb::PLANNER_KSB_GUEST_MOUNT.to_owned(),
+        mode:         raxis_isolation::MountMode::ReadOnly,
+        content_hash: None,
+    };
+    let guest_path = format!(
+        "{mount}/{file}",
+        mount = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+        file  = raxis_ksb::PLANNER_KSB_FILE_NAME,
+    );
+    Some((mount, guest_path))
+}
+
+// ---------------------------------------------------------------------------
 // V2 `v2_extended_gaps.md §2.5` — token-cap env stamping.
 // ---------------------------------------------------------------------------
 
@@ -1309,10 +1539,31 @@ impl ExecutorSpawnContext {
         Self {
             install_dir,
             kernel_version,
+            // `host-capacity.md §4.1` reference Executor budget:
+            // 2 vCPU. Executor agents routinely run cargo / npm /
+            // pytest builds whose make-style parallelism saturates
+            // a single vCPU, so a 1-vCPU pin would directly bottleneck
+            // tool latency. The AVF SMP timer issue we previously
+            // observed (`rcu_sched detected stalls on CPUs/tasks` on
+            // early boot) is mitigated below in [`ExecutorSpawnContext`]'s
+            // kernel-cmdline path through the `[isolation]`-tuneable
+            // boot args declared in `kernel/src/main.rs`. The next
+            // iteration moves this constant under operator control
+            // via `[isolation]` policy keys validated in
+            // `raxis-policy::IsolationConfig`; until then this
+            // hardcoded default matches the spec reference.
             executor_vcpu_count: 2,
-            executor_mem_mib:    1024,
+            // The dev-host executor-starter initramfs image expands to
+            // ~448 MiB in tmpfs (full Debian + Node + Python + Rust +
+            // Go + Git CLI). 2 GiB covers the worst-case dev image
+            // with headroom for the agent's working set; production
+            // EROFS images run comfortably in 1 GiB.
+            executor_mem_mib:    2048,
             reviewer_vcpu_count: 1,
-            reviewer_mem_mib:    512,
+            // The dev-host reviewer-core initramfs image expands to
+            // ~127 MiB in tmpfs. 1 GiB covers the image plus the
+            // reviewer's static-analysis working set.
+            reviewer_mem_mib:    1024,
             data_dir:            None,
         }
     }
@@ -1400,7 +1651,7 @@ pub async fn spawn_executor_for_task(
     task_id:          &str,
     initiative_id:    &str,
     egress_allowlist: EgressAllowlist,
-    workspace_mounts: Vec<raxis_isolation::WorkspaceMount>,
+    mut workspace_mounts: Vec<raxis_isolation::WorkspaceMount>,
     extra_env:        BTreeMap<String, String>,
     service:          Arc<SessionSpawnService>,
     plan_registry:    &Arc<crate::initiatives::PlanRegistry>,
@@ -1499,24 +1750,54 @@ pub async fn spawn_executor_for_task(
         }
     };
 
-    // ── Step 2: rehydrate credential decls. ──────────────────────
-    // `read_task_credential_proxies_in_tx` is keyed by `task_id`,
-    // not `session_id`, because the `[[tasks.credentials]]` block
-    // is plan-side configuration. Reviewer activations always
-    // return an empty Vec (Pure-Static Reviewer cannot consume
-    // credentials, `INV-PLANNER-HARNESS-02`); we still call through
-    // the uniform path so a future regression in plan validation
-    // does not silently slip past.
+    // ── Step 2: rehydrate credential decls AND the session token. ──
+    //
+    // Two reads off the same `spawn_blocking` so the SQLite mutex is
+    // acquired exactly once. The token is read by `session_id` from
+    // the canonical `sessions.session_token` column inserted by the
+    // activation handler (`handle_activate_subtask` in
+    // `kernel/src/handlers/intent.rs`); using a synthesized fake
+    // here would put the planner and the kernel out of sync — every
+    // egress fetch would fail closed with
+    // `FAIL_SESSION_TOKEN_MISMATCH` because `resolve_session` looks
+    // the token up in `sessions.session_token` and would find no
+    // matching row. The same audit-chain wedge that the orchestrator
+    // path's Step 2 comment block describes applies here verbatim.
+    //
+    // `read_task_credential_proxies_in_tx` is keyed by `task_id`
+    // because the `[[tasks.credentials]]` block is plan-side
+    // configuration. Reviewer activations always return an empty
+    // Vec (Pure-Static Reviewer cannot consume credentials per
+    // `INV-PLANNER-HARNESS-02`); we still call through the uniform
+    // path so a future regression in plan validation does not
+    // silently slip past.
     let store_for_read = Arc::clone(store);
     let task_id_for_read = task_id.to_owned();
-    let credentials = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let conn = store_for_read.lock_sync();
-        kernel_lifecycle::read_task_credential_proxies_in_tx(&conn, &task_id_for_read)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| OrchestratorSpawnError::StoreRead(e.to_string()))?
-    .map_err(OrchestratorSpawnError::StoreRead)?;
+    let session_id_for_read = session_id.to_owned();
+    let (credentials, session_token_db) =
+        tokio::task::spawn_blocking(move || -> Result<_, String> {
+            let conn = store_for_read.lock_sync();
+            let creds = kernel_lifecycle::read_task_credential_proxies_in_tx(
+                &conn,
+                &task_id_for_read,
+            )
+            .map_err(|e| e.to_string())?;
+            let token: String = conn
+                .query_row(
+                    "SELECT session_token FROM sessions WHERE session_id = ?1",
+                    rusqlite::params![&session_id_for_read],
+                    |row| row.get(0),
+                )
+                .map_err(|e| {
+                    format!(
+                        "session row missing for session_id {session_id_for_read}: {e}",
+                    )
+                })?;
+            Ok((creds, token))
+        })
+        .await
+        .map_err(|e| OrchestratorSpawnError::StoreRead(e.to_string()))?
+        .map_err(OrchestratorSpawnError::StoreRead)?;
 
     // Defense-in-depth: refuse any `[[tasks.credentials]]` decl
     // attached to a Reviewer task. The plan-side validator
@@ -1638,7 +1919,29 @@ pub async fn spawn_executor_for_task(
     };
     let ksb_json = serde_json::to_string(&ksb_snapshot)
         .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
-    env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
+    // Same channel selection as the orchestrator path: prefer the
+    // virtiofs sidecar so the AVF cmdline budget stays under
+    // `COMMAND_LINE_SIZE` for reviewers (whose KSB carries the
+    // per-initiative DAG and reliably exceeds the inline budget).
+    // Fall back to the legacy inline env when no `data_dir` is
+    // available (in-process subprocess-isolation tests).
+    let ksb_sidecar = provision_ksb_sidecar(
+        spawn_ctx.data_dir.as_deref(),
+        session_id,
+        &ksb_json,
+    );
+    match &ksb_sidecar {
+        Some((mount, guest_path)) => {
+            env.insert(
+                raxis_ksb::PLANNER_KSB_PATH_ENV.to_owned(),
+                guest_path.clone(),
+            );
+            workspace_mounts.push(mount.clone());
+        }
+        None => {
+            env.insert(raxis_ksb::PLANNER_KSB_ENV.to_owned(), ksb_json);
+        }
+    }
     let vm_spec = VmSpec {
         vcpu_count,
         mem_mib,
@@ -1647,17 +1950,12 @@ pub async fn spawn_executor_for_task(
         boot_args:         Vec::new(),
         entrypoint_argv,
         // Per-session token; the substrate stamps it into the
-        // guest env under `RAXIS_SESSION_TOKEN`. Production wires
-        // this from `sessions.session_token`; the trait round-trip
-        // accepts a deterministic-but-opaque shape here.
-        session_token:     SessionToken(format!(
-            "{kind}-{session}",
-            kind    = match agent_kind {
-                ExecutorAgentKind::Executor => "exec",
-                ExecutorAgentKind::Reviewer => "rev",
-            },
-            session = session_id,
-        )),
+        // guest env under `RAXIS_SESSION_TOKEN`. Sourced from the
+        // canonical `sessions.session_token` column inserted by the
+        // activation handler — same 64-char hex value the kernel-
+        // mediated egress handler revalidates on every
+        // `IpcMessage::PlannerFetchRequest`. INV-IPC-AUTH-01.
+        session_token:     SessionToken(session_token_db.clone()),
         vsock_cid:         None,
         virtio_fs_mounts:  Vec::new(),
         // Same host-canonical kernel binary as the orchestrator path.
@@ -2113,9 +2411,12 @@ mod tests {
         let dd = std::path::PathBuf::from("/var/lib/raxis-test");
         let ctx = ctx.with_data_dir(dd.clone());
         assert_eq!(ctx.data_dir.as_ref(), Some(&dd));
-        // Defaults survive the builder.
+        // Defaults survive the builder. The orchestrator runs a
+        // single-stream model loop so 1 vCPU is sufficient; mem
+        // is sized for the dev-host initramfs (~217 MiB unpacked)
+        // plus headroom for the planner runtime.
         assert_eq!(ctx.vcpu_count, 1);
-        assert_eq!(ctx.mem_mib, 256);
+        assert_eq!(ctx.mem_mib, 1024);
     }
 
     #[test]
@@ -2128,10 +2429,13 @@ mod tests {
         let dd = std::path::PathBuf::from("/var/lib/raxis-test");
         let ctx = ctx.with_data_dir(dd.clone());
         assert_eq!(ctx.data_dir.as_ref(), Some(&dd));
-        // Defaults survive the builder.
+        // Defaults survive the builder. Values pinned to
+        // `host-capacity.md §4.1` reference + `dev-host` initramfs
+        // image-size budget (executor 2 vCPU / 2 GiB; reviewer
+        // 1 vCPU / 1 GiB).
         assert_eq!(ctx.executor_vcpu_count, 2);
-        assert_eq!(ctx.executor_mem_mib, 1024);
+        assert_eq!(ctx.executor_mem_mib, 2048);
         assert_eq!(ctx.reviewer_vcpu_count, 1);
-        assert_eq!(ctx.reviewer_mem_mib, 512);
+        assert_eq!(ctx.reviewer_mem_mib, 1024);
     }
 }

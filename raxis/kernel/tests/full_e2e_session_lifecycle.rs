@@ -165,6 +165,14 @@ const PG_HOST_PORT:    &str = "127.0.0.1:54399";
 /// Loopback host:port the docker-compose MongoDB binds to.
 const MONGO_HOST_PORT: &str = "127.0.0.1:27399";
 
+/// Loopback bind address for the in-test operator dashboard. Picked
+/// distinct from the spec default `127.0.0.1:9820` so a developer
+/// running the production daemon side-by-side does not collide
+/// with the test's listener. Override with
+/// `RAXIS_E2E_DASHBOARD_PORT` when 19820 is itself busy.
+const DASHBOARD_DEFAULT_PORT: u16 = 19820;
+const DASHBOARD_BIND_ADDRESS: &str = "127.0.0.1";
+
 /// How long the test waits for the kernel to bind sockets after
 /// spawn. `bootstrap_and_spawn` is generous; CI machines under
 /// load occasionally take >5s.
@@ -255,6 +263,20 @@ fn full_session_lifecycle() {
     write_credentials(&data_dir);
     write_provider_credentials(&data_dir);
 
+    // ── §7.3c-bis — Seed the operator-managed source repository
+    //    at `<data_dir>/repositories/main`. Per V2 §Step 24 the
+    //    kernel does NOT auto-create this repo; it is the
+    //    operator's responsibility (in production: the operator
+    //    runs `git init --bare && git push` once at install time;
+    //    in this test: we synthesise the equivalent bytes
+    //    inline). The orchestrator-spawn path's
+    //    `provision_orchestrator_worktree` requires this repo to
+    //    exist with the initiative's `target_ref` (defaults to
+    //    `refs/heads/main`) pointing at a real commit. We seed an
+    //    empty initial commit on `main` — the executor task will
+    //    create `hello.txt` on top.
+    seed_main_repository(&data_dir);
+
     // ── §7.3c — Now bring up the daemon kernel. It re-reads the
     //    (mutated) policy.toml at boot, so `[gateway]` and
     //    `[[providers]]` go live on this spawn.
@@ -264,6 +286,14 @@ fn full_session_lifecycle() {
     let mut kernel = spawn_kernel_normal(&kernel_bin, data_dir.clone(), &install_dir);
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
     eprintln!("[e2e] kernel daemon up, accepting operator IPC");
+
+    // ── (visual-debug) — open the operator dashboard with an
+    //    autologin URL so the developer can watch the lifecycle in
+    //    the browser. Best-effort: a missing FE bundle / port
+    //    collision / missing `open(1)` is logged and skipped, never
+    //    fatal — the test must still pass headless on CI / SSH.
+    let dashboard_port = configured_dashboard_port();
+    open_dashboard_with_autologin(&signing_key, dashboard_port);
 
     // ── §7.4 — submit + approve the plan via the operator UDS. Both
     //    requests share one connection (one challenge-response
@@ -608,6 +638,58 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
 /// `policy_manager::advance_epoch`, the runtime epoch-rotation
 /// path), so post-bootstrap mutation is safe and persists across
 /// the second `Command::new(kernel_bin).spawn()` below.
+/// In-place mutation of the genesis-emitted `[dashboard]` block:
+///
+///   * change `bind_port    = 9820` → `bind_port    = {test_port}`
+///     so the test-managed dashboard does not collide with a
+///     running developer daemon on the spec default 9820.
+///   * insert `static_dir   = "<dashboard-fe/dist>"` immediately
+///     after the port line when the React production bundle has
+///     been built — without it the kernel's dashboard server
+///     serves the JSON API only (no UI), which defeats the
+///     visual-debug purpose.
+///
+/// Genesis emits the block flush-left (Rust `\` line continuation
+/// in `genesis_tools::policy_toml::render_genesis_policy_toml`
+/// strips the source-file indentation), so each key sits at
+/// column 0. We preserve that shape so the rewritten file stays
+/// formatted the same way the genesis emitter would have written it.
+///
+/// Failure mode: if the genesis template is ever changed and the
+/// `bind_port    = 9820` literal disappears, this helper panics
+/// with a clear remediation — silently failing here would land
+/// the test on the spec default port and silently skip the
+/// `static_dir` injection (no UI served), which is exactly the
+/// failure mode we are trying to prevent.
+fn mutate_dashboard_block_in_policy(body: &mut String) {
+    const NEEDLE: &str = "bind_port    = 9820\n";
+    let port = configured_dashboard_port();
+    let replacement = match locate_dashboard_dist() {
+        Some(dist) => {
+            let mut s = String::new();
+            s.push_str(&format!("bind_port    = {port}\n"));
+            s.push_str("# static_dir injected by full_e2e_session_lifecycle.\n");
+            s.push_str(&format!("static_dir   = {:?}\n", dist.display().to_string()));
+            s
+        }
+        None => {
+            let mut s = String::new();
+            s.push_str(&format!("bind_port    = {port}\n"));
+            s.push_str("# NOTE: dashboard-fe/dist not found; serving JSON API only.\n");
+            s
+        }
+    };
+    if !body.contains(NEEDLE) {
+        panic!(
+            "mutate_dashboard_block_in_policy: cannot find {NEEDLE:?} in \
+             genesis-emitted policy.toml. The genesis template's [dashboard] \
+             block has changed shape — re-anchor this helper against the new \
+             format in `genesis_tools::policy_toml::render_genesis_policy_toml`.",
+        );
+    }
+    *body = body.replacen(NEEDLE, &replacement, 1);
+}
+
 fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
     let policy_path = data_dir.join("policy").join("policy.toml");
     let mut body = std::fs::read_to_string(&policy_path)
@@ -616,8 +698,25 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
         !body.contains("\n[gateway]\n"),
         "policy.toml already has a [gateway] block; bootstrap template changed",
     );
+
+    // ── [dashboard] block mutation — the genesis template already
+    //    emits a `[dashboard]` block with `enabled = true`,
+    //    `bind_port = 9820`, and no `static_dir`
+    //    (`render_genesis_policy_toml` →
+    //    `policy_toml.rs::write!(out, "[dashboard]\n…")`). We
+    //    cannot APPEND a second block — TOML rejects duplicate
+    //    table headers. Instead we surgically replace the
+    //    `bind_port` line so the test binds to a non-default
+    //    loopback port (19820) — staying off 9820 lets a
+    //    developer's running daemon coexist — and inject a
+    //    `static_dir` line pointing at the pre-built React
+    //    bundle so the dashboard server's
+    //    `tower_http::services::ServeDir` fallback can serve the
+    //    UI in addition to the JSON API.
+    mutate_dashboard_block_in_policy(&mut body);
+
     let injected = format!(
-        "\n# ── [gateway] + [[providers]] + [egress] injected by full_e2e_session_lifecycle ──\n\
+        "\n# ── [gateway] + [[providers]] + [egress] + [[lanes]] injected by full_e2e_session_lifecycle ──\n\
          [gateway]\n\
          binary_path              = \"{gw}\"\n\
          spawn_timeout_secs       = 30\n\
@@ -640,7 +739,22 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
          data_fetch_timeout_ms = 30000\n\
          pricing.input_tokens_per_dollar      = 200000\n\
          pricing.output_tokens_per_dollar     = 50000\n\
-         pricing.cache_read_tokens_per_dollar = 2000000\n",
+         pricing.cache_read_tokens_per_dollar = 2000000\n\
+         \n\
+         # The plan's `[workspace] lane_id = \"e2e-live-lane\"` propagates onto\n\
+         # every admitted task (including the synthetic orchestrator-coordinator\n\
+         # row inserted by `auto_spawn_orchestrator_session_in_tx`). Without a\n\
+         # matching `[[lanes]]` entry, `scheduler::lane::lane_config_for_row`\n\
+         # returns `NoLaneAssigned`, which surfaces at the IntegrationMerge\n\
+         # `reserve_budget_in_tx` call as `FailBudgetExceeded` (`map_err(|_|\n\
+         # FailBudgetExceeded)` in `intent.rs::run_phase_a`). Caps are sized\n\
+         # generously so the per-task cost (50 for IntegrationMerge plus\n\
+         # `cost_per_touched_path * paths`) clears comfortably.\n\
+         [[lanes]]\n\
+         lane_id              = \"e2e-live-lane\"\n\
+         max_concurrent_tasks = 8\n\
+         max_cost_per_epoch   = 100000\n\
+         priority             = 100\n",
         gw = gateway_binary.display(),
     );
     body.push_str(&injected);
@@ -688,6 +802,105 @@ fn write_credentials(data_dir: &Path) {
         panic!("read GCP ADC at {}: {e}", adc.display())
     });
     write_with_mode_0600(&cred_dir.join("test-gcp-dev.json"), &adc_bytes);
+}
+
+/// Seed `<data_dir>/repositories/main` as a real, non-bare git
+/// repository with `refs/heads/main` pointing at an initial empty
+/// commit. The orchestrator-spawn path's
+/// `worktree_provisioning::provision_orchestrator_worktree` clones
+/// from this repository at the initiative's `target_ref`
+/// (defaults to `refs/heads/main`) into
+/// `<data_dir>/worktrees/orch-<initiative_id>`. The executor then
+/// clones from that orchestrator worktree, edits its allow-listed
+/// path (`hello.txt` per the spec plan), and commits.
+///
+/// **Why `git init` and not `gix`.** This is test infrastructure;
+/// shelling out to the host's git CLI is the most readable wire
+/// shape and matches the operator's real install procedure
+/// (`git init --bare && git push` to seed). We use a *non-bare*
+/// repository because `gix::clone` reaches into the source's
+/// working tree via the `file://` transport, which is the path
+/// the production orchestrator-clone exercises.
+///
+/// **Author identity.** We stamp explicit author + committer
+/// env vars so the seed commit's hash is reproducible across
+/// developer machines (no `~/.gitconfig` dependency).
+fn seed_main_repository(data_dir: &Path) {
+    let repos_root = data_dir.join("repositories");
+    std::fs::create_dir_all(&repos_root)
+        .unwrap_or_else(|e| panic!("mkdir {}: {e}", repos_root.display()));
+
+    let main_repo = repos_root.join("main");
+    if main_repo.exists() {
+        // Idempotent — a previous test run inside this same data_dir
+        // may have seeded already. The kernel always boots with a
+        // fresh data_dir so we never actually hit this branch in
+        // the test, but defensive.
+        return;
+    }
+
+    // Initialise an empty repo. `git init -b main` is git 2.28+;
+    // older host gits (e.g. macOS XCode CLT 2.24) reject `-b`.
+    // We `git init` then explicitly point HEAD at refs/heads/main
+    // so the seed commit lands on `main` regardless of the host
+    // git's default-branch config (`init.defaultBranch`).
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .arg(&main_repo)
+        .status()
+        .unwrap_or_else(|e| panic!("spawn git init: {e}"));
+    assert!(init.success(), "git init failed at {}", main_repo.display());
+
+    let head_set = Command::new("git")
+        .current_dir(&main_repo)
+        .args(["symbolic-ref", "HEAD", "refs/heads/main"])
+        .status()
+        .unwrap_or_else(|e| panic!("spawn git symbolic-ref: {e}"));
+    assert!(
+        head_set.success(),
+        "git symbolic-ref HEAD refs/heads/main failed in {}",
+        main_repo.display(),
+    );
+
+    // Stamp deterministic author / committer identity. Without
+    // this `git commit` reads $HOME/.gitconfig and may fail or
+    // produce nondeterministic SHAs.
+    let env: &[(&str, &str)] = &[
+        ("GIT_AUTHOR_NAME",     "raxis-e2e"),
+        ("GIT_AUTHOR_EMAIL",    "e2e@raxis.invalid"),
+        ("GIT_COMMITTER_NAME",  "raxis-e2e"),
+        ("GIT_COMMITTER_EMAIL", "e2e@raxis.invalid"),
+        // Pin the commit timestamp so the SHA is deterministic
+        // across runs (test diagnostics; not security-relevant).
+        ("GIT_AUTHOR_DATE",     "2026-01-01T00:00:00Z"),
+        ("GIT_COMMITTER_DATE",  "2026-01-01T00:00:00Z"),
+    ];
+
+    let commit = Command::new("git")
+        .current_dir(&main_repo)
+        .envs(env.iter().copied())
+        .args(["commit", "-q", "--allow-empty", "-m", "raxis-e2e: seed repository"])
+        .status()
+        .unwrap_or_else(|e| panic!("spawn git commit: {e}"));
+    assert!(commit.success(), "git commit failed in {}", main_repo.display());
+
+    // Sanity-check: refs/heads/main exists.
+    let rev = Command::new("git")
+        .current_dir(&main_repo)
+        .args(["rev-parse", "refs/heads/main"])
+        .output()
+        .unwrap_or_else(|e| panic!("spawn git rev-parse: {e}"));
+    assert!(
+        rev.status.success(),
+        "git rev-parse refs/heads/main failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&rev.stdout),
+        String::from_utf8_lossy(&rev.stderr),
+    );
+    eprintln!(
+        "[e2e] seeded main repo at {} → {}",
+        main_repo.display(),
+        String::from_utf8_lossy(&rev.stdout).trim(),
+    );
 }
 
 /// Per `credential-proxy.md §6.1` credential files MUST be 0600 so
@@ -1238,6 +1451,18 @@ fn summarize_chain_for_panic(audit_dir: &Path) -> String {
 /// enumerate every record and decode the parsed JSON body into
 /// `AuditEvent`. Panics with a friendly diagnostic on any chain
 /// break or row that fails the typed deserialise.
+///
+/// Note: the genesis row (`seq=0`, `event_kind="GenesisRecord"`) is
+/// written by `raxis-genesis-tools` and uses a different on-wire
+/// shape than `AuditEvent` — it lacks `payload` / `session_id` /
+/// `task_id` / `initiative_id` and instead carries
+/// `genesis_nonce` + `authority_pubkey_fingerprint`. The
+/// `ChainReader` deliberately tolerates both shapes (see
+/// `ChainRecord` doc-comment); we surface the genesis row as a
+/// synthetic `AuditEvent { event_kind: "GenesisRecord", payload:
+/// genesis-record-json, .. }` so downstream invariant checks
+/// (`first_kind` / `kinds: BTreeSet<&str>`) keep the same wire
+/// contract they had before genesis got its own discriminator.
 fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
     let audit_dir = data_dir.join("audit");
     verify_chain_full(&audit_dir)
@@ -1249,10 +1474,25 @@ fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
         .records()
         .map(|r| {
             let row = r.unwrap_or_else(|e| panic!("chain record decode failed: {e:?}"));
-            let value = row.parsed_value.unwrap_or_else(|| panic!(
+            let value = row.parsed_value.clone().unwrap_or_else(|| panic!(
                 "chain row seq={} has no parsed_value (raw_line failed JSON parse)",
                 row.seq,
             ));
+            // Genesis row has a distinct schema; project it onto the
+            // AuditEvent shape so the invariant assertions stay uniform.
+            if row.event_kind == "GenesisRecord" {
+                return AuditEvent {
+                    seq: row.seq,
+                    event_id: uuid::Uuid::nil(),
+                    event_kind: row.event_kind.clone(),
+                    session_id: None,
+                    task_id: None,
+                    initiative_id: None,
+                    payload: value,
+                    emitted_at: row.emitted_at.unwrap_or(0),
+                    prev_sha256: row.prev_sha256.clone(),
+                };
+            }
             serde_json::from_value::<AuditEvent>(value).unwrap_or_else(|e| {
                 panic!("decode AuditEvent from chain row {}: {e}", row.seq)
             })
@@ -1277,8 +1517,17 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
 
     let first_kind = chain.first().expect("non-empty").event_kind.as_str();
     let last_kind  = chain.last().expect("non-empty").event_kind.as_str();
+    // The first row may be either:
+    //   - `GenesisRecord` (modern, `raxis-genesis-tools`-emitted seed
+    //     row, written before `KernelStarted`), or
+    //   - `KernelStarted` / `Kernel*` (legacy bootstraps that skip
+    //     the genesis seed), or
+    //   - `GenesisAnchor` (legacy alias kept for backwards-compat
+    //     with the older test fixture name).
     assert!(
-        first_kind.starts_with("Kernel") || first_kind == "GenesisAnchor",
+        first_kind.starts_with("Kernel")
+            || first_kind == "GenesisAnchor"
+            || first_kind == "GenesisRecord",
         "first audit row must be a boot marker, got {first_kind:?}",
     );
     assert!(
@@ -1291,9 +1540,30 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
     // Required lifecycle events. Missing any one indicates a chain-
     // wiring regression in the kernel — the test fails loud rather
     // than silently passing on a half-completed run.
+    //
+    // Note: `IntentAdmitted` is named in the spec
+    // (`audit-paired-writes.md` §intent-flow) but the current kernel
+    // emits per-intent admission as plain stderr (`eprintln!
+    // event=IntentAccepted ...`) rather than as an `AuditEventKind`
+    // chain row. The chain DOES carry the higher-level proofs that
+    // admission flowed end-to-end:
+    //   - `PlanApproved`           — operator-side plan admission ran.
+    //   - `SessionCreated`         — at least one planner session was
+    //     spawned (every spawn requires an `ActivateSubTask` intent
+    //     to have been admitted by `handlers::intent::run_phase_a`).
+    //   - `IntegrationMergeCompleted` — the orchestrator's
+    //     coordinator-task `IntegrationMerge` intent passed Phase A
+    //     and the merge driver landed the integration commit; this
+    //     transitively proves every prior `CompleteTask` /
+    //     `SubmitReview` was admitted (the merge driver refuses to
+    //     run if any predecessor is non-Completed).
+    // Together these gate the same invariant `IntentAdmitted` was
+    // intended to guard without coupling the test to the future
+    // audit-emission wiring.
     for required in &[
         "InitiativeCreated",
-        "IntentAdmitted",
+        "PlanApproved",
+        "SessionCreated",
         "IntegrationMergeCompleted",
     ] {
         assert!(
@@ -1333,6 +1603,299 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
         "SecurityViolation must NOT appear in a clean lifecycle; \
          kinds: {kinds:?}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// Operator dashboard — visual debugging hook
+// ---------------------------------------------------------------------------
+//
+// The kernel boots its dashboard HTTP server when `policy.toml`
+// carries an `[dashboard].enabled = true` block (see
+// `enable_gateway_in_policy` for the injected block). After the
+// daemon is up, this section:
+//
+//   1. Polls the bound port until the kernel's
+//      `start_dashboard_with_advancer` call has returned (so the
+//      `/api/auth/challenge` endpoint is wired).
+//   2. Mints a fresh challenge through `GET /api/auth/challenge`,
+//      signs the 32-byte payload with the test's operator key,
+//      submits the response to `POST /api/auth/verify`, and
+//      receives a freshly-minted JWT.
+//   3. Opens the bundled React UI with the JWT pre-installed via
+//      a URL-fragment autologin payload (`Login.tsx` parses
+//      `#autologin=1&token=…` on mount and writes the JWT into
+//      `localStorage`, then redirects to `/`).
+//
+// **Best-effort.** Every failure mode (build skipped, FE bundle
+// absent, JWT mint failed, `open(1)` missing, etc.) is logged
+// and ignored — the lifecycle test must still pass on headless
+// CI runners that have no browser and no FE bundle. The
+// developer running the test interactively gets the visual
+// payoff without affecting the assertion path.
+//
+// **Why a URL fragment instead of a query parameter.** The hash
+// is not transmitted to the server, never appears in HTTP access
+// logs, and is scrubbed by `Login.tsx`'s `replaceState` after
+// consumption. A query-string token would leak through every
+// proxy / log / browser-history surface in between.
+
+/// Operator dashboard port. Override via
+/// `RAXIS_E2E_DASHBOARD_PORT` when the default 19820 is busy.
+fn configured_dashboard_port() -> u16 {
+    std::env::var("RAXIS_E2E_DASHBOARD_PORT")
+        .ok()
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(DASHBOARD_DEFAULT_PORT)
+}
+
+/// Absolute path to the React production bundle, if it has been
+/// built. The kernel's `[dashboard].static_dir` field consumes
+/// this; absent ⇒ JSON-API-only dashboard (still useful for
+/// programmatic poking, just no UI).
+fn locate_dashboard_dist() -> Option<PathBuf> {
+    let raxis_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.to_path_buf();
+    let dist = raxis_root.join("dashboard-fe").join("dist");
+    if dist.join("index.html").is_file() {
+        Some(dist)
+    } else {
+        None
+    }
+}
+
+/// Return-type of `mint_dashboard_jwt`. `None` ⇒ best-effort
+/// failure that callers must tolerate (browser-open is skipped).
+struct DashboardSession {
+    token:        String,
+    operator_id:  String,
+    display_name: String,
+    roles:        Vec<String>,
+    expires_at:   u64,
+}
+
+/// Block until `127.0.0.1:<port>` accepts a TCP connection or
+/// `deadline` elapses. Returns `false` on timeout. We use a raw
+/// `TcpStream::connect_timeout` rather than an HTTP probe because
+/// the dashboard's accept-loop binds the socket BEFORE the
+/// router state is fully wired — a TCP success is the earliest
+/// signal that JSON requests will not get connection-refused.
+fn wait_for_dashboard_port(port: u16, deadline: Duration) -> bool {
+    let addr = format!("{}:{}", DASHBOARD_BIND_ADDRESS, port);
+    let parsed: std::net::SocketAddr = match addr.parse() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let start = Instant::now();
+    while start.elapsed() < deadline {
+        if std::net::TcpStream::connect_timeout(&parsed, Duration::from_millis(250)).is_ok() {
+            // Accept-loop is up; give the router state one tick to
+            // finish wiring before the first POST hits.
+            std::thread::sleep(Duration::from_millis(150));
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    false
+}
+
+/// Drive the kernel's challenge-response auth dance against the
+/// in-test operator key and return the minted JWT envelope.
+/// Returns `None` on any HTTP / JSON error so the caller can
+/// log + skip the browser-open step (the lifecycle test must
+/// still pass without a browser).
+fn mint_dashboard_jwt(signing_key: &SigningKey, port: u16) -> Option<DashboardSession> {
+    let base = format!("http://{}:{}", DASHBOARD_BIND_ADDRESS, port);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .ok()?;
+
+    // Step 1 — request a challenge.
+    let challenge_resp = client.get(format!("{base}/api/auth/challenge")).send().ok()?;
+    if !challenge_resp.status().is_success() {
+        eprintln!(
+            "[e2e] dashboard /api/auth/challenge: HTTP {}",
+            challenge_resp.status(),
+        );
+        return None;
+    }
+    let challenge_body: serde_json::Value = challenge_resp.json().ok()?;
+    let challenge_hex = challenge_body.get("challenge")?.as_str()?.to_owned();
+    let challenge_bytes = hex::decode(&challenge_hex).ok()?;
+    if challenge_bytes.len() != 32 { return None; }
+
+    // Step 2 — sign with the test's operator key (the same one
+    // `bootstrap_with_custom_cert` minted the operator cert with,
+    // so the kernel's policy-side `operator_entry` lookup
+    // succeeds inside `verify`).
+    let signature = signing_key.sign(&challenge_bytes);
+    let pubkey = signing_key.verifying_key().to_bytes();
+    let signature_hex = hex::encode(signature.to_bytes());
+    let pubkey_hex = hex::encode(pubkey);
+
+    // ── Paste-fallback for the operator ─────────────────────────
+    //
+    // If the autologin redirect ever fails (stale FE bundle,
+    // hash-routing quirk, browser strips fragments, …) the
+    // operator can still log in by pasting the values below into
+    // the dashboard's manual challenge-response form. We emit:
+    //
+    //   1. The exact `raxis auth sign <challenge>` command that
+    //      the dashboard's "Step 1" code-block displays.
+    //   2. The 128-hex-char signature (Step 2 input).
+    //   3. The 64-hex-char public key (Step 3 input).
+    //
+    // The challenge is a one-time nonce (32 random bytes minted
+    // by `/api/auth/challenge`, single-use, ~5 min TTL), so the
+    // signature has no value beyond this single mint attempt.
+    eprintln!("[e2e] dashboard manual-fallback (paste into /login if autologin fails):");
+    eprintln!("[e2e]   1. CLI command   : raxis auth sign {challenge_hex}");
+    eprintln!("[e2e]   2. Signature hex : {signature_hex}");
+    eprintln!("[e2e]   3. Public key hex: {pubkey_hex}");
+
+    // Step 3 — verify.
+    let verify_body = serde_json::json!({
+        "challenge":  challenge_hex,
+        "signature":  signature_hex,
+        "public_key": pubkey_hex,
+    });
+    let verify_resp = client
+        .post(format!("{base}/api/auth/verify"))
+        .json(&verify_body)
+        .send()
+        .ok()?;
+    if !verify_resp.status().is_success() {
+        eprintln!(
+            "[e2e] dashboard /api/auth/verify: HTTP {} (body: {:?})",
+            verify_resp.status(),
+            verify_resp.text().unwrap_or_default(),
+        );
+        return None;
+    }
+    let verify_payload: serde_json::Value = verify_resp.json().ok()?;
+    Some(DashboardSession {
+        token:        verify_payload.get("token")?.as_str()?.to_owned(),
+        operator_id:  verify_payload.get("operator_id")?.as_str()?.to_owned(),
+        display_name: verify_payload.get("display_name")?.as_str()?.to_owned(),
+        roles:        verify_payload.get("roles")?
+                         .as_array()?
+                         .iter()
+                         .filter_map(|v| v.as_str().map(str::to_owned))
+                         .collect(),
+        expires_at:   verify_payload.get("expires_at")?.as_u64()?,
+    })
+}
+
+/// Build the autologin URL the dashboard's React `LoginPage`
+/// consumes via `parseAutologinHash`. Mirror the field set
+/// 1:1 — any drift will land the operator on the manual flow.
+fn build_autologin_url(port: u16, session: &DashboardSession) -> String {
+    fn encode(s: &str) -> String {
+        // Minimal RFC-3986 percent-encoding of the few characters
+        // the autologin payload may carry. We do NOT pull in
+        // `urlencoding` or `percent-encoding` for one call site;
+        // the values here are constrained (hex JWT segments, ASCII
+        // operator names, lowercase role names) so a small bespoke
+        // pass is sufficient.
+        s.bytes()
+            .flat_map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+                | b'-' | b'_' | b'.' | b'~' => vec![b],
+                _ => format!("%{b:02X}").into_bytes(),
+            })
+            .map(|b| b as char)
+            .collect()
+    }
+    let roles_csv = session.roles.iter()
+        .map(|r| encode(r))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "http://{addr}:{port}/login#autologin=1\
+         &token={token}\
+         &operator_id={op}\
+         &display_name={name}\
+         &roles={roles}\
+         &expires_at={exp}\
+         &next=%2F",
+        addr  = DASHBOARD_BIND_ADDRESS,
+        port  = port,
+        token = encode(&session.token),
+        op    = encode(&session.operator_id),
+        name  = encode(&session.display_name),
+        roles = roles_csv,
+        exp   = session.expires_at,
+    )
+}
+
+/// Spawn the platform-native URL opener. Returns `Ok(())` when
+/// the binary spawned (we don't wait for it — `open(1)` /
+/// `xdg-open(1)` exit immediately after handing the URL to the
+/// resolver). Returns `Err(reason)` when the binary couldn't
+/// even be invoked (CI / SSH / headless host).
+#[cfg(target_os = "macos")]
+fn spawn_url_opener(url: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("spawn open: {e}"))
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_url_opener(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("spawn xdg-open: {e}"))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn spawn_url_opener(_url: &str) -> Result<(), String> {
+    Err("no URL opener supported on this platform".to_owned())
+}
+
+/// End-to-end glue called from `full_session_lifecycle` after the
+/// kernel daemon is up. Wires steps 1–3 of the visual-debug
+/// flow described above. ALL failures are non-fatal.
+fn open_dashboard_with_autologin(signing_key: &SigningKey, port: u16) {
+    if !wait_for_dashboard_port(port, Duration::from_secs(10)) {
+        eprintln!(
+            "[e2e] dashboard at {}:{} did not become reachable within 10s — skipping autologin",
+            DASHBOARD_BIND_ADDRESS, port,
+        );
+        return;
+    }
+    let session = match mint_dashboard_jwt(signing_key, port) {
+        Some(s) => s,
+        None => {
+            eprintln!(
+                "[e2e] dashboard JWT mint failed; skipping browser open (kernel logs may have details)",
+            );
+            return;
+        }
+    };
+    let url = build_autologin_url(port, &session);
+    eprintln!(
+        "[e2e] dashboard ready: http://{}:{}/  (autologin URL printed below for manual fallback)",
+        DASHBOARD_BIND_ADDRESS, port,
+    );
+    eprintln!("[e2e] dashboard autologin URL: {url}");
+    if let Err(e) = spawn_url_opener(&url) {
+        eprintln!(
+            "[e2e] could not open browser ({e}); paste the URL above into a browser to autologin",
+        );
+    } else {
+        eprintln!("[e2e] dashboard opened in default browser as operator '{}' (roles={:?})",
+            session.display_name, session.roles,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

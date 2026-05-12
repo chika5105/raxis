@@ -23,9 +23,9 @@
 //! deadline path.
 
 use raxis_planner_core::{
-    hydrate_from_proc_cmdline, init_pid1_filesystem, park_on_signal, render_boot_log,
-    run_role_session, shutdown_or_exit, BootContext, DriverError, DriverOutcome,
-    HydrationOutcome, PlannerError, Role,
+    hydrate_from_proc_cmdline, init_pid1_filesystem, mount_workspace_shares, park_on_signal,
+    render_boot_log, run_role_session, shutdown_or_exit, BootContext, DriverError, DriverOutcome,
+    HydrationOutcome, MountStatus, PlannerError, Role, WorkspaceMountOutcome,
 };
 
 fn main() -> ! {
@@ -40,6 +40,15 @@ fn main() -> ! {
     // rationale.
     let hydration = hydrate_from_proc_cmdline();
     log_hydration_outcome(&hydration);
+
+    // Step 3: mount any VirtioFS workspace shares the substrate
+    // declared via `RAXIS_VIRTIOFS_MOUNTS`. The reviewer role
+    // mounts `/workspace` (its task-scoped read-only worktree) so
+    // ripgrep / read_file see exactly the bytes the executor
+    // committed. See `raxis-planner-orchestrator/src/main.rs::main`
+    // for the full rationale.
+    let mount_outcome = mount_workspace_shares();
+    log_workspace_mount_outcome(&mount_outcome);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -148,4 +157,51 @@ async fn run() -> Result<(), PlannerError> {
 
 fn driver_to_planner_error(e: DriverError) -> PlannerError {
     PlannerError::DriverFailure(e.to_string())
+}
+
+fn log_workspace_mount_outcome(outcome: &WorkspaceMountOutcome) {
+    match outcome {
+        WorkspaceMountOutcome::NoEnvVar => eprintln!(
+            "{{\"level\":\"info\",\"step\":\"planner-virtiofs-mount\",\
+              \"role\":\"reviewer\",\"outcome\":\"no-env-var\"}}"
+        ),
+        WorkspaceMountOutcome::BadEnvVar { reason, attempts } => eprintln!(
+            "{{\"level\":\"warn\",\"step\":\"planner-virtiofs-mount\",\
+              \"role\":\"reviewer\",\"outcome\":\"bad-env-var\",\
+              \"reason\":{:?},\"attempts\":{}}}",
+            reason,
+            attempts.len(),
+        ),
+        WorkspaceMountOutcome::Mounted { attempts } => {
+            for attempt in attempts {
+                let (status_str, reason): (&str, Option<&str>) = match &attempt.status {
+                    MountStatus::Ok      => ("ok", None),
+                    MountStatus::Already => ("already", None),
+                    MountStatus::Failed { reason } => ("failed", Some(reason.as_str())),
+                };
+                match reason {
+                    Some(r) => eprintln!(
+                        "{{\"level\":\"warn\",\"step\":\"planner-virtiofs-mount\",\
+                          \"role\":\"reviewer\",\"outcome\":{:?},\
+                          \"tag\":{:?},\"guest_path\":{:?},\"read_only\":{},\
+                          \"reason\":{:?}}}",
+                        status_str,
+                        attempt.spec.tag,
+                        attempt.spec.guest_path,
+                        attempt.spec.read_only,
+                        r,
+                    ),
+                    None => eprintln!(
+                        "{{\"level\":\"info\",\"step\":\"planner-virtiofs-mount\",\
+                          \"role\":\"reviewer\",\"outcome\":{:?},\
+                          \"tag\":{:?},\"guest_path\":{:?},\"read_only\":{}}}",
+                        status_str,
+                        attempt.spec.tag,
+                        attempt.spec.guest_path,
+                        attempt.spec.read_only,
+                    ),
+                }
+            }
+        }
+    }
 }

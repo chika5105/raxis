@@ -146,6 +146,15 @@ pub(crate) struct RawPolicy {
     #[serde(default)]
     pub(crate) host_capacity: Option<HostCapacitySection>,
 
+    /// `[isolation]` — V2 operator-tunable per-role microVM
+    /// resource budgets per `host-capacity.md §4.1`. **Optional**:
+    /// omitted section means "kernel uses the spec defaults"
+    /// from [`IsolationConfig::default`]. Read at every per-VM
+    /// spawn so an operator's epoch rotation is observed on the
+    /// next spawn cycle.
+    #[serde(default)]
+    pub(crate) isolation: Option<IsolationSection>,
+
     /// `[environments.<label>]` — V2_GAPS §E1 environment-binding
     /// declarations per `environment-access-control.md §5b.1`.
     /// **Optional**: omitting the entire `[environments]` table
@@ -700,6 +709,216 @@ impl Default for HostCapacityConfig {
             disk_root:             None,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// `[isolation]` — operator-tunable per-role microVM resource budgets
+// ---------------------------------------------------------------------------
+
+/// `[isolation]` — operator-tunable per-role microVM resource
+/// budgets per `host-capacity.md §4.1`.
+///
+/// ```toml
+/// [isolation]
+/// orchestrator_vcpu_count = 1
+/// orchestrator_mem_mib    = 1024
+/// executor_vcpu_count     = 2
+/// executor_mem_mib        = 4096
+/// reviewer_vcpu_count     = 1
+/// reviewer_mem_mib        = 1024
+/// ```
+///
+/// Every field is optional; absent ⇒ kernel defaults from
+/// [`IsolationConfig::default`] apply (chosen to match
+/// `host-capacity.md §4.1` reference values: orchestrator
+/// 1 vCPU / 1 GiB, executor 2 vCPU / 4 GiB, reviewer 1 vCPU /
+/// 1 GiB). Every value is validated at policy load:
+///
+/// * `*_vcpu_count` MUST be ≥ 1 and ≤ 64. Zero would cause the
+///   AVF / Firecracker substrate to refuse the spawn at translate
+///   time; >64 is the substrate's own ceiling.
+/// * `*_mem_mib` MUST be ≥ 64 (the AVF substrate floor;
+///   smaller values are rejected at `translate` time with
+///   `MemoryBelowFloor`) and ≤ 65536 (64 GiB — sized for the
+///   largest realistic per-VM working set on Apple Silicon hosts).
+///
+/// V2 invariants this section honours:
+///
+/// * Per-role budgets stay symmetric across the three canonical
+///   roles (`Orchestrator`, `Executor`, `Reviewer`). The kernel
+///   does not expose a per-task override here — task-level
+///   overrides are routed through the `[[vm_images]]` registry's
+///   per-image declarations (V2.5).
+/// * Reading the section is hot-reload safe: every spawn-path
+///   call site goes through the live `Arc<PolicyBundle>` snapshot
+///   so a rotation (`policy_manager::advance_epoch`) is observed
+///   on the next spawn.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct IsolationSection {
+    /// vCPU count for orchestrator-role VMs. Default 1.
+    #[serde(default)]
+    pub(crate) orchestrator_vcpu_count: Option<u32>,
+    /// Memory ceiling (MiB) for orchestrator-role VMs. Default
+    /// 1024 (1 GiB).
+    #[serde(default)]
+    pub(crate) orchestrator_mem_mib:    Option<u32>,
+
+    /// vCPU count for executor-role VMs. Default 2.
+    #[serde(default)]
+    pub(crate) executor_vcpu_count: Option<u32>,
+    /// Memory ceiling (MiB) for executor-role VMs. Default 4096
+    /// (4 GiB).
+    #[serde(default)]
+    pub(crate) executor_mem_mib:    Option<u32>,
+
+    /// vCPU count for reviewer-role VMs. Default 1.
+    #[serde(default)]
+    pub(crate) reviewer_vcpu_count: Option<u32>,
+    /// Memory ceiling (MiB) for reviewer-role VMs. Default 1024
+    /// (1 GiB).
+    #[serde(default)]
+    pub(crate) reviewer_mem_mib:    Option<u32>,
+}
+
+/// V2 effective `[isolation]` config — every field resolved to a
+/// concrete value with defaults applied and structural caps
+/// validated. Read at every per-VM spawn so an operator's epoch
+/// rotation is observed on the next spawn cycle.
+#[derive(Debug, Clone)]
+pub struct IsolationConfig {
+    /// vCPU count for orchestrator-role VMs.
+    pub orchestrator_vcpu_count: u32,
+    /// Memory ceiling (MiB) for orchestrator-role VMs.
+    pub orchestrator_mem_mib:    u32,
+
+    /// vCPU count for executor-role VMs.
+    pub executor_vcpu_count: u32,
+    /// Memory ceiling (MiB) for executor-role VMs.
+    pub executor_mem_mib:    u32,
+
+    /// vCPU count for reviewer-role VMs.
+    pub reviewer_vcpu_count: u32,
+    /// Memory ceiling (MiB) for reviewer-role VMs.
+    pub reviewer_mem_mib:    u32,
+}
+
+impl Default for IsolationConfig {
+    /// Kernel defaults per `host-capacity.md §4.1`. The dev-host
+    /// initramfs images are sized to fit comfortably in these
+    /// budgets:
+    ///
+    /// * Orchestrator initramfs ≈ 217 MiB unpacked → 1 GiB total
+    ///   leaves ~800 MiB for the planner runtime and the guest
+    ///   kernel page cache.
+    /// * Executor-starter initramfs ≈ 448 MiB unpacked → 4 GiB
+    ///   total covers the agent's tool subprocesses (rust/go/node
+    ///   builds, cargo/git working trees) without page-faulting
+    ///   into swap.
+    /// * Reviewer initramfs ≈ 127 MiB unpacked → 1 GiB total covers
+    ///   the static-analysis working set (ripgrep / read_file) and
+    ///   the streaming planner.
+    ///
+    /// vCPU defaults are tuned for Apple Silicon AVF: the
+    /// executor uses 2 vCPUs to keep build/test commands
+    /// responsive; the orchestrator and reviewer use 1 vCPU
+    /// because their workloads are inherently single-threaded
+    /// (one model in flight, one terminal-tool dispatch). Each
+    /// substrate's per-role timer / SMP behaviour is exercised
+    /// in `kernel/tests/full_e2e_session_lifecycle.rs` so a
+    /// regression in a substrate rev surfaces here.
+    fn default() -> Self {
+        Self {
+            orchestrator_vcpu_count: 1,
+            orchestrator_mem_mib:    1024,
+            executor_vcpu_count:     2,
+            executor_mem_mib:        4096,
+            reviewer_vcpu_count:     1,
+            reviewer_mem_mib:        1024,
+        }
+    }
+}
+
+/// Hard ceiling on per-role vCPU count. AVF on Apple Silicon caps
+/// at 64 logical cores; we forbid anything beyond that at the
+/// policy layer so a typo cannot strand a spawn at substrate
+/// translate time.
+const ISOLATION_MAX_VCPU_COUNT: u32 = 64;
+
+/// Hard floor on per-role memory in MiB. Matches the AVF
+/// substrate's `AVF_MIN_MEMORY_MIB` (64) so a smaller value would
+/// be rejected at translate anyway; we surface it here so the
+/// operator gets a single failure surface.
+const ISOLATION_MIN_MEM_MIB: u32 = 64;
+
+/// Hard ceiling on per-role memory in MiB. 64 GiB matches the
+/// largest realistic per-VM working set on the M-series hosts
+/// the AVF substrate targets.
+const ISOLATION_MAX_MEM_MIB: u32 = 64 * 1024;
+
+/// Validate a parsed `[isolation]` section, applying defaults for
+/// absent fields. All structural-cap failures land as
+/// `FAIL_ISOLATION_INVALID` so the operator sees a single error
+/// class for this section.
+fn validate_isolation_section(
+    raw: &Option<IsolationSection>,
+) -> Result<IsolationConfig, PolicyError> {
+    let mut cfg = IsolationConfig::default();
+    let Some(s) = raw else { return Ok(cfg); };
+
+    let check_vcpu = |label: &'static str, v: u32| -> Result<u32, PolicyError> {
+        if v < 1 {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_ISOLATION_INVALID: \
+                 [isolation] {label} must be ≥ 1 (got {v})"
+            )));
+        }
+        if v > ISOLATION_MAX_VCPU_COUNT {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_ISOLATION_INVALID: \
+                 [isolation] {label} = {v} exceeds the hard ceiling of \
+                 {ISOLATION_MAX_VCPU_COUNT} (host-capacity.md §4.1)"
+            )));
+        }
+        Ok(v)
+    };
+    let check_mem = |label: &'static str, v: u32| -> Result<u32, PolicyError> {
+        if v < ISOLATION_MIN_MEM_MIB {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_ISOLATION_INVALID: \
+                 [isolation] {label} = {v} MiB is below the hard floor of \
+                 {ISOLATION_MIN_MEM_MIB} MiB (matches AVF AVF_MIN_MEMORY_MIB)"
+            )));
+        }
+        if v > ISOLATION_MAX_MEM_MIB {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_ISOLATION_INVALID: \
+                 [isolation] {label} = {v} MiB exceeds the hard ceiling of \
+                 {ISOLATION_MAX_MEM_MIB} MiB"
+            )));
+        }
+        Ok(v)
+    };
+
+    if let Some(v) = s.orchestrator_vcpu_count {
+        cfg.orchestrator_vcpu_count = check_vcpu("orchestrator_vcpu_count", v)?;
+    }
+    if let Some(v) = s.orchestrator_mem_mib {
+        cfg.orchestrator_mem_mib = check_mem("orchestrator_mem_mib", v)?;
+    }
+    if let Some(v) = s.executor_vcpu_count {
+        cfg.executor_vcpu_count = check_vcpu("executor_vcpu_count", v)?;
+    }
+    if let Some(v) = s.executor_mem_mib {
+        cfg.executor_mem_mib = check_mem("executor_mem_mib", v)?;
+    }
+    if let Some(v) = s.reviewer_vcpu_count {
+        cfg.reviewer_vcpu_count = check_vcpu("reviewer_vcpu_count", v)?;
+    }
+    if let Some(v) = s.reviewer_mem_mib {
+        cfg.reviewer_mem_mib = check_mem("reviewer_mem_mib", v)?;
+    }
+
+    Ok(cfg)
 }
 
 /// `[git]` — operator default + lock for the per-initiative
@@ -3190,6 +3409,14 @@ pub struct PolicyBundle {
     /// omits `[host_capacity]` from `policy.toml`.
     host_capacity: HostCapacityConfig,
 
+    /// V2 — operator-tunable per-role microVM resource budgets.
+    /// Always populated; spec defaults from
+    /// [`IsolationConfig::default`] apply when the operator omits
+    /// `[isolation]`. The kernel's `OrchestratorSpawnContext` and
+    /// `ExecutorSpawnContext` constructors read this to project
+    /// `vcpu_count` / `mem_mib` into every spawn's `SpawnRequest`.
+    isolation: IsolationConfig,
+
     /// V2_GAPS §E1 — declared environment labels and their
     /// per-env knobs (`environment-access-control.md §5b`). The
     /// map is empty when the operator declares no
@@ -3795,6 +4022,7 @@ impl PolicyBundle {
                 .map(|g| g.target_ref_locked)
                 .unwrap_or(false),
             host_capacity: validate_host_capacity_section(&raw.host_capacity)?,
+            isolation:     validate_isolation_section(&raw.isolation)?,
             environments: validate_environments(&raw.environments)?,
             permitted_credentials: validate_permitted_credentials(
                 &raw.permitted_credentials,
@@ -3893,6 +4121,20 @@ impl PolicyBundle {
     /// omits `[host_capacity]`.
     pub fn host_capacity(&self) -> &HostCapacityConfig {
         &self.host_capacity
+    }
+
+    /// V2 — operator-tunable per-role microVM resource budgets
+    /// (`[isolation]`). Always populated; spec defaults from
+    /// [`IsolationConfig::default`] apply when the operator
+    /// omits the section.
+    ///
+    /// Read by the kernel's `OrchestratorSpawnContext` and
+    /// `ExecutorSpawnContext` constructors to project the
+    /// per-role `vcpu_count` / `mem_mib` into every spawn's
+    /// `SpawnRequest`. Hot-reload safe — every spawn-path call
+    /// site goes through the live `Arc<PolicyBundle>` snapshot.
+    pub fn isolation(&self) -> &IsolationConfig {
+        &self.isolation
     }
 
     /// V2_GAPS §E1 — declared `[environments.<label>]` entries.
@@ -4188,6 +4430,7 @@ impl PolicyBundle {
             git_auto_push:          false,
             git_push_remote:        String::new(),
             host_capacity:          HostCapacityConfig::default(),
+            isolation:              IsolationConfig::default(),
             environments:           HashMap::new(),
             permitted_credentials:  Vec::new(),
             vm_images:              Vec::new(),
@@ -4775,6 +5018,7 @@ mod tests {
             git_auto_push:          false,
             git_push_remote:        String::new(),
             host_capacity:          HostCapacityConfig::default(),
+            isolation:              IsolationConfig::default(),
             environments:           HashMap::new(),
             permitted_credentials:  Vec::new(),
             vm_images:              Vec::new(),

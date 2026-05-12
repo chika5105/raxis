@@ -53,6 +53,21 @@ raxis-image-cache   = { workspace = true }
 # `WorkspaceMount` the substrate consumes. Lives in its own crate
 # so kernel integration tests can drive the same staging path.
 raxis-worktree-staging = { workspace = true }
+# V2 §Step 24 / §Step 24b host-side `gix`-mediated worktree
+# provisioning — orchestrator clones from `<data_dir>/repositories/main`
+# at admission, executors clone from the orchestrator's worktree at
+# activation, reviewers clone the orchestrator's tree at the
+# Executor's `evaluation_sha`. The kernel's `worktree_provisioning`
+# module composes this crate with `worktree-staging` and
+# `domain-git::fetch_into_main` to thread the per-role worktree
+# through the spawn path.
+raxis-worktree-provision = { workspace = true }
+# `gix::ObjectId` + `gix::open` direct calls in the kernel's
+# `worktree_provisioning` and `main_repo_preflight` modules; we
+# pin the workspace `gix` so the SHA lookup uses the same gix
+# version as the provisioning + domain-git crates and we don't
+# accidentally drag two `gix_object` versions into the kernel.
+gix                     = { workspace = true }
 # `CredentialBackend` trait + `FileCredentialBackend` reference impl.
 # The kernel boot constructs the backend from `policy.toml
 # [credential_backend]` (default `File`), wraps it in
@@ -182,8 +197,15 @@ raxis-test-support = { path = "../crates/test-support" }
 # binary (no kernel boot ceremony in unit-test scope).
 ed25519-dalek = { workspace = true }
 sha2          = { workspace = true }
-reqwest       = { workspace = true, features = ["stream"] }
+reqwest       = { workspace = true, features = ["stream", "blocking", "json"] }
 hex           = { workspace = true }
 tokio-util    = { version = "0.7", features = ["io"] }
 futures-util  = "0.3"
 parking_lot   = "0.12"
+# Dev-only — used by `tests/full_e2e_session_lifecycle.rs` to mint a
+# zero-UUID for the synthetic `AuditEvent` projection of the genesis
+# chain row. The genesis row has no `event_id` (it's a different
+# wire shape than `AuditEvent`); we synthesise a nil UUID so the
+# downstream invariant assertions can keep the same `Vec<AuditEvent>`
+# contract.
+uuid          = { workspace = true }

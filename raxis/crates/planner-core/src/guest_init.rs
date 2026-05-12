@@ -267,6 +267,44 @@ mod linux {
             Err(io::Error::last_os_error())
         }
     }
+
+    /// Mount one VirtioFS share inside the guest. Equivalent to
+    /// `mount -t virtiofs <tag> <guest_path>` (read/write) or
+    /// `mount -t virtiofs -o ro <tag> <guest_path>` (read-only).
+    pub(super) fn try_mount_virtiofs(
+        tag:        &str,
+        guest_path: &str,
+        read_only:  bool,
+    ) -> io::Result<()> {
+        let source_c = CString::new(tag)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let target_c = CString::new(guest_path)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let fs_c = CString::new("virtiofs")
+            .expect("static fs_type has no NUL bytes");
+        // VirtioFS does not need a `data` parameter for the basic
+        // case; mount options like `cache=…` would be supplied
+        // here. The kernel's virtiofs driver pulls cache mode
+        // from the device descriptor by default.
+        let mut flags: libc::c_ulong = libc::MS_NOSUID | libc::MS_NODEV;
+        if read_only {
+            flags |= libc::MS_RDONLY;
+        }
+        let rc = unsafe {
+            libc::mount(
+                source_c.as_ptr(),
+                target_c.as_ptr(),
+                fs_c.as_ptr(),
+                flags,
+                std::ptr::null(),
+            )
+        };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
 }
 
 /// Mount `/proc`, `/sys`, `/dev`, `/tmp` if and only if this
@@ -283,6 +321,248 @@ pub fn init_pid1_filesystem() {
         }
     }
     // Non-Linux + non-PID-1 path: deliberate no-op.
+}
+
+// ---------------------------------------------------------------------------
+// VirtioFS workspace-share mounts
+// ---------------------------------------------------------------------------
+
+/// Environment variable the AVF / Firecracker substrates use to
+/// hand the guest the list of `WorkspaceMount`s the host has wired
+/// in via VirtioFS. Comma-separated entries of the form
+/// `<tag>:<guest_path>:<rw|ro>`. Empty / unset ⇒ no shares to
+/// mount (the substrate did not declare any workspace mounts).
+///
+/// Wire shape (single entry):
+///
+/// ```text
+/// <tag>:<guest_path>:<mode>
+///   tag        — VirtioFS tag, must match the substrate's
+///                `AvfVirtioFsShare.tag` byte-for-byte.
+///                Convention: `<guest_path>` with the leading
+///                `/` stripped and any internal `/` rewritten to
+///                `_` (e.g. `/workspace` ⇒ `workspace`,
+///                `/raxis/foo` ⇒ `raxis_foo`).
+///   guest_path — absolute path inside the guest where the share
+///                is mounted (must start with `/`).
+///   mode       — `ro` (`MountMode::ReadOnly`) or `rw`
+///                (`MountMode::ReadWrite`).
+/// ```
+///
+/// We deliberately do NOT route this through `raxis.envb64=` (the
+/// catch-all base64 channel) because the substrate already needs
+/// the per-mount tag/path/mode to surface the AVF
+/// `VZVirtioFileSystemDeviceConfiguration` in
+/// `crates/isolation-apple-vz/src/config.rs::translate`; the guest
+/// must observe the exact same triple to issue the correct
+/// `mount(2)` syscall. Pinning the env-var name here keeps the
+/// host/guest contract single-channel.
+pub const VIRTIOFS_MOUNTS_ENV: &str = "RAXIS_VIRTIOFS_MOUNTS";
+
+/// One parsed VirtioFS share spec extracted from
+/// [`VIRTIOFS_MOUNTS_ENV`]. The host-side substrate (AVF /
+/// Firecracker) already validated `host_path` and the
+/// `MountMode`; the guest only sees the post-validation triple.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VirtioFsMountSpec {
+    /// VirtioFS tag — must match the host-side
+    /// `AvfVirtioFsShare.tag`. Used as the `source` argument to
+    /// `mount(2)`.
+    pub tag: String,
+    /// Absolute guest path the share is mounted at (the `/init`
+    /// process performs `mkdir -p` before mounting).
+    pub guest_path: String,
+    /// `true` ⇒ mount the share read-only (`MS_RDONLY`).
+    pub read_only: bool,
+}
+
+/// Outcome of parsing [`VIRTIOFS_MOUNTS_ENV`] and attempting each
+/// mount. Aggregated and logged by the planner main entry-points
+/// so the kernel-side scraper can correlate a guest-side mount
+/// failure to the host-side substrate event.
+#[derive(Clone, Debug)]
+pub enum WorkspaceMountOutcome {
+    /// `RAXIS_VIRTIOFS_MOUNTS` was unset or empty — the substrate
+    /// did not wire any workspace shares, the guest has nothing to
+    /// mount.
+    NoEnvVar,
+    /// The env var existed but at least one entry was malformed.
+    /// The guest still attempts to mount the well-formed entries
+    /// (defence-in-depth: a typo in one entry must not strand a
+    /// healthy share).
+    BadEnvVar {
+        /// Operator-facing diagnostic for why a token was rejected.
+        reason: String,
+        /// The well-formed entries we still attempted to mount.
+        attempts: Vec<MountAttempt>,
+    },
+    /// All entries parsed cleanly; per-attempt status is in
+    /// `attempts`.
+    Mounted {
+        /// One [`MountAttempt`] per parsed [`VirtioFsMountSpec`].
+        attempts: Vec<MountAttempt>,
+    },
+}
+
+/// Per-share mount attempt + outcome.
+#[derive(Clone, Debug)]
+pub struct MountAttempt {
+    /// The parsed share specification we tried to mount.
+    pub spec: VirtioFsMountSpec,
+    /// Whether the `mount(2)` syscall succeeded, treated EBUSY as
+    /// success (already-mounted), or failed.
+    pub status: MountStatus,
+}
+
+/// Discriminant for a single per-share mount outcome.
+#[derive(Clone, Debug)]
+pub enum MountStatus {
+    /// `mount(2)` returned 0 — the share is now visible at
+    /// `spec.guest_path`.
+    Ok,
+    /// `mount(2)` returned `EBUSY` (`spec.guest_path` was already
+    /// mounted by an earlier substrate hook). Treated as success
+    /// for idempotency.
+    Already,
+    /// `mount(2)` failed (or `mkdir -p` of the target failed
+    /// upstream). The reason is the operator-facing `io::Error`
+    /// message; the guest continues to try the remaining shares.
+    Failed {
+        /// Operator-facing diagnostic for why this mount failed.
+        reason: String,
+    },
+}
+
+/// Parse one comma-separated `RAXIS_VIRTIOFS_MOUNTS` payload into
+/// [`VirtioFsMountSpec`]s + the index of the first malformed
+/// token (if any).
+pub fn parse_virtiofs_mounts(
+    raw: &str,
+) -> (Vec<VirtioFsMountSpec>, Option<String>) {
+    let mut out: Vec<VirtioFsMountSpec> = Vec::new();
+    let mut bad: Option<String> = None;
+    for (idx, raw_entry) in raw.split(',').enumerate() {
+        let entry = raw_entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let mut parts = entry.split(':');
+        let tag = match parts.next() {
+            Some(t) if !t.is_empty() => t.to_owned(),
+            _ => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: missing or empty <tag> field"
+                    ));
+                }
+                continue;
+            }
+        };
+        let guest_path = match parts.next() {
+            Some(p) if p.starts_with('/') => p.to_owned(),
+            Some(p) => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: <guest_path> must be absolute (got {p:?})"
+                    ));
+                }
+                continue;
+            }
+            None => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: missing <guest_path> field"
+                    ));
+                }
+                continue;
+            }
+        };
+        let mode = match parts.next() {
+            Some("ro") => true,
+            Some("rw") => false,
+            Some(other) => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: <mode> must be 'ro' or 'rw' (got {other:?})"
+                    ));
+                }
+                continue;
+            }
+            None => {
+                if bad.is_none() {
+                    bad = Some(format!(
+                        "entry {idx}: missing <mode> field"
+                    ));
+                }
+                continue;
+            }
+        };
+        if parts.next().is_some() && bad.is_none() {
+            bad = Some(format!(
+                "entry {idx}: too many ':' separated fields"
+            ));
+            // Still accept the spec — extra fields are tolerated
+            // for forward-compatibility, but flagged.
+        }
+        out.push(VirtioFsMountSpec {
+            tag,
+            guest_path,
+            read_only: mode,
+        });
+    }
+    (out, bad)
+}
+
+/// Read [`VIRTIOFS_MOUNTS_ENV`] and mount every declared VirtioFS
+/// share. No-op on non-Linux. Each mount is best-effort: a single
+/// failed share does not abort the others.
+///
+/// MUST be invoked AFTER [`init_pid1_filesystem`] (which mounts
+/// `/proc`/`/sys`/`/dev`/`/tmp`) AND AFTER
+/// [`crate::cmdline_env::hydrate_from_proc_cmdline`] (which copies
+/// the env from `/proc/cmdline` into the process env). Otherwise
+/// the env var is invisible.
+pub fn mount_workspace_shares() -> WorkspaceMountOutcome {
+    let raw = match std::env::var(VIRTIOFS_MOUNTS_ENV) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return WorkspaceMountOutcome::NoEnvVar,
+    };
+    let (specs, bad) = parse_virtiofs_mounts(&raw);
+    let mut attempts: Vec<MountAttempt> = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let status = mount_one(&spec);
+        attempts.push(MountAttempt { spec, status });
+    }
+    match bad {
+        Some(reason) => WorkspaceMountOutcome::BadEnvVar { reason, attempts },
+        None => WorkspaceMountOutcome::Mounted { attempts },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mount_one(spec: &VirtioFsMountSpec) -> MountStatus {
+    if let Err(e) = std::fs::create_dir_all(&spec.guest_path) {
+        return MountStatus::Failed {
+            reason: format!(
+                "mkdir -p {target}: {e}",
+                target = spec.guest_path,
+            ),
+        };
+    }
+    match linux::try_mount_virtiofs(&spec.tag, &spec.guest_path, spec.read_only) {
+        Ok(()) => MountStatus::Ok,
+        Err(e) if e.raw_os_error() == Some(libc::EBUSY) => MountStatus::Already,
+        Err(e) => MountStatus::Failed { reason: e.to_string() },
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mount_one(_spec: &VirtioFsMountSpec) -> MountStatus {
+    // Non-Linux dev hosts have no `mount(2)` for virtiofs; the
+    // planner does not run as PID 1 there anyway.
+    MountStatus::Failed {
+        reason: "mount_workspace_shares is a no-op on non-Linux".to_owned(),
+    }
 }
 
 /// **Cleanly power off the microVM after the planner main exits.**

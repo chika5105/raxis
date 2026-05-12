@@ -32,13 +32,78 @@
 // exit.
 // ─────────────────────────────────────────────────────────────────
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 
 import { ApiError, authApi } from "@/api/client";
 import { setStoredProfile, setStoredToken } from "@/lib/auth-store";
 import { CopyButton } from "@/components/CopyButton";
 import { Spinner } from "@/components/Spinner";
+
+// ─────────────────────────────────────────────────────────────────
+// Autologin via URL hash (E2E / dev convenience)
+// ─────────────────────────────────────────────────────────────────
+//
+// The CLI / E2E harness can mint a JWT out-of-band (it already
+// holds the operator private key) and hand it to a freshly opened
+// browser via a URL of the shape:
+//
+//   /login#autologin=1&token=<jwt>&operator_id=<fp>\
+//        &display_name=<n>&roles=<r1>,<r2>&expires_at=<unix>\
+//        &next=<encoded path>
+//
+// On mount the page parses the fragment, mirrors the values into
+// `localStorage` exactly the way the manual flow does, scrubs the
+// fragment from the URL, and navigates to `next` (defaults to `/`).
+//
+// SECURITY NOTES:
+//   * The fragment is NEVER sent to the server (HTTP layer never
+//     transmits the part after `#`), so the JWT never crosses the
+//     wire on this hop.
+//   * Anyone who can construct the URL already holds the JWT —
+//     storing it in `localStorage` is no additional exposure.
+//   * The fragment is scrubbed via `history.replaceState` so the
+//     JWT does not linger in browser history / clipboard surfaces.
+//   * Gated on `autologin=1` so a stray `#token=...` cannot
+//     accidentally land an operator on a stale credential.
+
+interface AutologinPayload {
+  token: string;
+  operator_id: string;
+  display_name: string;
+  roles: string[];
+  expires_at: number;
+  next: string;
+}
+
+function parseAutologinHash(): AutologinPayload | null {
+  if (typeof window === "undefined") return null;
+  const raw = window.location.hash;
+  if (!raw.startsWith("#")) return null;
+  const params = new URLSearchParams(raw.slice(1));
+  if (params.get("autologin") !== "1") return null;
+  const token = params.get("token");
+  const operator_id = params.get("operator_id");
+  const display_name = params.get("display_name");
+  const rolesRaw = params.get("roles");
+  const expRaw = params.get("expires_at");
+  if (!token || !operator_id || !display_name || !rolesRaw || !expRaw) {
+    return null;
+  }
+  const expires_at = Number.parseInt(expRaw, 10);
+  if (!Number.isFinite(expires_at) || expires_at <= 0) return null;
+  const roles = rolesRaw
+    .split(",")
+    .map((r) => r.trim())
+    .filter((r) => r.length > 0);
+  if (roles.length === 0) return null;
+  const nextParam = params.get("next");
+  const next =
+    nextParam && nextParam.startsWith("/") && !nextParam.startsWith("//")
+      ? decodeURIComponent(nextParam)
+      : "/";
+  return { token, operator_id, display_name, roles, expires_at, next };
+}
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -84,6 +149,54 @@ export function LoginPage() {
   // UI state.
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // ── URL-hash autologin (E2E / dev convenience) ─────────────
+  //
+  // Runs once on mount. If the URL fragment carries a complete
+  // `#autologin=1&token=…&operator_id=…&…&expires_at=…` payload,
+  // we mirror it into `localStorage` (so `RequireAuth` sees a
+  // live profile on the next render), scrub the fragment from
+  // the visible URL, and replace-navigate to `next`. The manual
+  // form below stays mounted just long enough for React to flush
+  // the navigation; the operator never sees it on the autologin
+  // path.
+  useEffect(() => {
+    const payload = parseAutologinHash();
+    if (!payload) return;
+    setStoredToken(payload.token);
+    setStoredProfile({
+      operator_id: payload.operator_id,
+      display_name: payload.display_name,
+      roles: payload.roles,
+      expires_at: payload.expires_at,
+    });
+    // We deliberately full-page-load the destination instead of
+    // calling `navigate(payload.next)`:
+    //
+    //   * `RequireAuth`, the React-Query auth subscriber, and the
+    //     top-level layout all snapshot `localStorage` once at
+    //     mount. A SPA `navigate()` keeps the same React tree
+    //     mounted, so freshly-written tokens are NOT picked up
+    //     until the operator manually refreshes — exactly the
+    //     "stuck on /login" behaviour the test surfaced.
+    //
+    //   * `window.location.assign(target)` enqueues a real
+    //     navigation so the new page boots from a clean React
+    //     root and reads `localStorage` on first render. Per
+    //     WHATWG `Location#assign`, the URL fragment is dropped
+    //     unless we include it explicitly — which we don't,
+    //     because we already scrubbed the JWT-bearing fragment
+    //     into oblivion.
+    //
+    //   * We assemble `target` as `pathname [+ search]` only —
+    //     never copying `payload.next` if it isn't a plain in-app
+    //     path. `parseAutologinHash` already enforces
+    //     `next.startsWith("/") && !next.startsWith("//")` so the
+    //     relative path cannot escape the origin.
+    if (typeof window !== "undefined") {
+      window.location.assign(payload.next);
+    }
+  }, [navigate]);
 
   // ── Step 1: Request a challenge ────────────────────────────
 

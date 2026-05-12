@@ -1675,7 +1675,33 @@ fn handle_complete_task(
     policy:     &raxis_policy::PolicyBundle,
     ctx:        &HandlerContext,
 ) -> HandlerResult {
-    if task_state != TaskState::Running {
+    // V2.5 — accept both `Admitted` and `Running` states.
+    //
+    // **Why `Admitted` is admissible.** The Executor's terminal
+    // intent contract (`render_system_prompt_for_role`) is a
+    // single `task_complete { head_sha }` per session — the
+    // planner makes one (or more) commits in /workspace then
+    // calls `task_complete` exactly once to flip the task to
+    // `Completed`. There is NO separate "admit the diff" intent
+    // in the normative path. If the Executor never submitted a
+    // witness intent (no inline `single_commit`), the task is
+    // still in `Admitted` when `task_complete` arrives — the
+    // common path for first-and-only commits.
+    //
+    // We fold Phase A (ancestry / topology / diff / path-allowlist
+    // / range insert / Admitted → Running transition) into the
+    // CompleteTask handler when the task is `Admitted`, then fall
+    // through to the existing `Running` completion logic (which
+    // unions the freshly-inserted range, runs the second
+    // path-allowlist sweep over the union, and flips
+    // Running → Completed). The `Running` arm preserves V2's
+    // multi-witness path verbatim.
+    //
+    // Per `kernel-mechanics-states.md`: any state that is not
+    // `Admitted` or `Running` (`Completed`, `Failed`,
+    // `BlockedRecoveryPending`, …) still rejects with
+    // `FailTaskNotRunning`.
+    if !matches!(task_state, TaskState::Admitted | TaskState::Running) {
         return Err((PlannerErrorCode::FailTaskNotRunning, task_state));
     }
 
@@ -1706,6 +1732,154 @@ fn handle_complete_task(
         Some(CommitSha::new(req_head_str)
             .map_err(|_| (PlannerErrorCode::InvalidRequest, task_state))?)
     };
+
+    // ── 1b. V2.5 — `Admitted`-state inline Phase A admission ──────────────
+    //
+    // Performed BEFORE Step 2's `read_completion_inputs`, so the
+    // freshly-inserted `task_intent_ranges` row is observed by
+    // the union loop below. The whole sequence is gated on a
+    // non-empty `req.head_sha` — a vacuous CompleteTask
+    // (head_sha=="") with no prior witness intents and no diff
+    // is the documented "task ran to completion with no commit"
+    // path; we let it through unchanged so the existing
+    // Running-state logic applies.
+    //
+    // **Why `session.base_sha` is the admission base.** The
+    // session row's `base_sha` was stamped by
+    // `handlers::intent::handle_activate_subtask` to the orch
+    // anchor SHA at provisioning time
+    // (`provision_executor_worktree`). The Executor's commit is
+    // parented on this exact SHA — the worktree was checked out
+    // there before the planner started. So `(session.base_sha,
+    // req.head_sha)` is the canonical admission range, identical
+    // to what an explicit `single_commit { base_sha, head_sha }`
+    // would carry.
+    //
+    // **What this admission enforces.**
+    //   * Ancestry (`is_ancestor(base, head)`).
+    //   * Topology (`parent(head) == base`) — no merge commits in
+    //     the executor's range.
+    //   * Diff → touched_paths.
+    //   * Path-allowlist coverage (the same `check_paths` call the
+    //     normal Phase A handler does at Step 7A).
+    //   * `task_intent_ranges` row insert.
+    //   * Admitted → Running FSM transition.
+    //
+    // **Failure semantics.** Any of these violations short-circuit
+    // CompleteTask with the corresponding planner error code,
+    // leaving the task in `Admitted`. The Executor sees the same
+    // error wire shape it would have seen had it called
+    // `single_commit` first; the Orchestrator's next respawn
+    // observes the still-`Admitted` row and either retries or
+    // surfaces a `Failed` transition through the standard plan
+    // flow.
+    let mut admitted_inline = false;
+    if matches!(task_state, TaskState::Admitted) {
+        if let Some(head_str) = req.head_sha.as_ref().map(|s| s.as_str().to_owned()) {
+            let base_str = session.base_sha.clone().unwrap_or_default();
+            if base_str.is_empty() {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"CompleteTaskAdmitNoBaseSha\",\
+                     \"task_id\":\"{}\",\"diagnostic\":\"session.base_sha is NULL — \
+                     handle_activate_subtask did not stamp it; cannot run inline Phase A\"}}",
+                    req.task_id.as_str(),
+                );
+                return Err((PlannerErrorCode::FailPolicyViolation, task_state));
+            }
+            let _b = CommitSha::new(&base_str)
+                .map_err(|_| (PlannerErrorCode::InvalidRequest, task_state))?;
+
+            let rt_handle = tokio::runtime::Handle::current();
+
+            // Ancestry.
+            let is_anc = rt_handle.block_on(
+                ctx.domain.is_ancestor(&base_str, &head_str, &worktree_path)
+            ).map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+            if !is_anc {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"CompleteTaskAdmitAncestryViolation\",\
+                     \"task_id\":\"{}\",\"base\":\"{}\",\"head\":\"{}\"}}",
+                    req.task_id.as_str(), base_str, head_str,
+                );
+                return Err((PlannerErrorCode::FailInvalidDiff, task_state));
+            }
+
+            // Topology — parent(head) == base; no merge commits.
+            rt_handle.block_on(
+                ctx.domain.topology_check(&base_str, &head_str, &worktree_path)
+            ).map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
+
+            // Diff → touched_paths, project to workspace-relative
+            // paths the path-scope check expects.
+            let resources = rt_handle.block_on(
+                ctx.domain.compute_touched_paths(&base_str, &head_str, &worktree_path)
+            ).map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+            let touched_admit: Vec<PathBuf> = resources.resources
+                .iter()
+                .map(|r| {
+                    let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
+                    PathBuf::from(stripped)
+                })
+                .collect();
+
+            // Path-allowlist (effective_allow at the moment of admission).
+            match crate::path_scope::check_paths(
+                &touched_admit,
+                &task.initiative_id,
+                req.task_id.as_str(),
+                &ctx.plan_registry,
+                store,
+            ) {
+                Ok(Ok(())) => {}
+                Ok(Err(violation)) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"CompleteTaskAdmitPathViolation\",\
+                         \"task_id\":\"{}\",\"violation_count\":{}}}",
+                        req.task_id.as_str(),
+                        violation.paths.len(),
+                    );
+                    return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"CompleteTaskAdmitPathScopeError\",\
+                         \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
+                        req.task_id.as_str(),
+                    );
+                    return Err((PlannerErrorCode::FailPathPolicyViolation, task_state));
+                }
+            }
+
+            // Insert range + transition Admitted → Running atomically.
+            // Same SQLite tx pattern as Phase A's Step 11 + Step 12A.
+            {
+                let mut conn = store.lock_sync();
+                let tx = conn.transaction()
+                    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                insert_task_intent_range_in_tx(
+                    &tx, req.task_id.as_str(), &base_str, &head_str,
+                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                transition_task_in_tx(
+                    &tx,
+                    req.task_id.as_str(),
+                    TaskState::Running,
+                    None,
+                    TransitionActor::Kernel,
+                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                tx.commit()
+                    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+            }
+            admitted_inline = true;
+        }
+    }
+
+    // From this point on the task is structurally `Running` (either
+    // because it was already so, or because we just transitioned it
+    // above). The `task_state` local stays at its original value
+    // for error-return purposes — `commit_task_completion`'s
+    // SQLite filter still uses `state = 'Running'`, which the
+    // post-admission row satisfies.
+    let _ = admitted_inline;
 
     // ── 2. Read H_bind + accepted intent ranges from the store ───────────
     //
@@ -1816,8 +1990,78 @@ fn handle_complete_task(
         .unwrap_or_default();
 
     // ── 7. Atomic commit — Running → Completed + snapshot inserts ───────
-    commit_task_completion(req.task_id.as_str(), &export_paths, store)
-        .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+    //
+    // V2 §Step 24-adjacent — also stamp `tasks.evaluation_sha` with
+    // the head SHA the planner submitted. This is the value the
+    // KSB assembler exposes to the Orchestrator as
+    // `evaluation_sha`, the value Reviewer activations clone from
+    // (`provision_reviewer_worktree`'s `evaluation_sha` parameter
+    // is sourced from this column via the predecessor join), and
+    // the value the Orchestrator submits in `IntegrationMerge`'s
+    // `commit_sha`. Stamping inside the same SQLite transaction
+    // as the Running → Completed flip preserves
+    // INV-STORE-02 atomicity: a crash between the status flip
+    // and the SHA stamp is impossible.
+    let head_sha_for_eval = req.head_sha.as_ref().map(|s| s.as_str().to_owned());
+    commit_task_completion(
+        req.task_id.as_str(),
+        &export_paths,
+        head_sha_for_eval.as_deref(),
+        store,
+    )
+    .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+
+    // ── 7b. V2 §Step 24 — copy executor commit closure into the
+    //         per-initiative orchestrator ODB so:
+    //           * downstream Reviewer activations can clone at
+    //             `evaluation_sha` (the SHA we just stamped).
+    //           * the IntegrationMerge handler's
+    //             `domain_git::commit_merge_to_target_ref` can
+    //             fetch from the orch worktree to the main repo.
+    //
+    //         Best-effort *post-commit* (the Completed flip is
+    //         already durable). A failure here is logged
+    //         structurally; the Reviewer-side clone surfaces it
+    //         again as `ShaMissingPostClone`, which translates
+    //         to `FailWorktreeProvision`. We do NOT
+    //         roll back the Completed flip — the task's diff
+    //         was already approved by Phase A, the SHA is
+    //         immutable in the executor's ODB, and the operator
+    //         can re-trigger the copy via a future kernel
+    //         recovery sweep without re-running the executor.
+    if let Some(head_sha) = head_sha_for_eval.as_deref() {
+        let exec_worktree = worktree_path.clone();
+        let initiative_for_orch = task.initiative_id.clone();
+        let data_dir = ctx.data_dir.clone();
+        let orch_worktree = crate::worktree_provisioning::orchestrator_worktree_path(
+            &data_dir,
+            &initiative_for_orch,
+        );
+        if let Err(e) = crate::worktree_provisioning::copy_executor_commit_to_orchestrator_odb(
+            &orch_worktree,
+            &exec_worktree,
+            req.task_id.as_str(),
+            head_sha,
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"CompleteTaskCopyClosureFailed\",\
+                 \"task_id\":\"{}\",\"head_sha\":\"{}\",\"orch_worktree\":\"{}\",\
+                 \"exec_worktree\":\"{}\",\"error\":\"{}\"}}",
+                req.task_id.as_str(),
+                head_sha,
+                orch_worktree.display(),
+                exec_worktree.display(),
+                e,
+            );
+        } else {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"CompleteTaskCopiedClosure\",\
+                 \"task_id\":\"{}\",\"head_sha\":\"{}\"}}",
+                req.task_id.as_str(),
+                head_sha,
+            );
+        }
+    }
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"TaskCompleted\",\"task_id\":\"{}\",\
@@ -2019,9 +2263,69 @@ fn handle_submit_review(
     ctx: &HandlerContext,
 ) -> HandlerResult {
     // ── 1. Task-state gate ────────────────────────────────────────────────
-    if task_state != TaskState::Running {
+    //
+    // V2.5 — accept both `Admitted` and `Running`. Reviewer
+    // sessions never submit witness intents (they are read-only
+    // — `INV-PLANNER-HARNESS-01`), which means there is NO
+    // `single_commit` shaped seam for the kernel to drive the
+    // `Admitted → Running` transition before the terminal
+    // `submit_review` arrives. We mirror the
+    // `handle_complete_task` Admitted-folding pattern here:
+    //
+    //   * On `Admitted`: kernel performs the standalone FSM
+    //     transition `Admitted → Running` (no diff, no
+    //     `task_intent_ranges` insert — Reviewer has none) under
+    //     `TransitionActor::Kernel`, then continues into the
+    //     normal `Running → Completed` pipeline below.
+    //   * On `Running`: identical to the V2 path.
+    //
+    // Why this is safe (vs. the alternative of auto-transitioning
+    // at VM spawn): `run_phase_c::reserve_budget_in_tx` is gated
+    // on `task_state == Admitted` for witness intents
+    // (Step 10, `intent.rs:1172`). Reviewer tasks issue no
+    // witnesses and therefore never reach Phase C; the lane-budget
+    // bookkeeping for a Reviewer is a no-op either way. The
+    // standalone transition here cannot drop a reservation that
+    // never existed.
+    //
+    // Per `kernel-mechanics-states.md`: any state that is not
+    // `Admitted` or `Running` (`Completed`, `Failed`,
+    // `BlockedRecoveryPending`, …) still rejects with
+    // `FailTaskNotRunning`.
+    if !matches!(task_state, TaskState::Admitted | TaskState::Running) {
         return Err((PlannerErrorCode::FailTaskNotRunning, task_state));
     }
+    let task_state = if matches!(task_state, TaskState::Admitted) {
+        // INV-INIT-04 — every task FSM transition routes through
+        // `task_transitions::transition_task` (alias `fsm_transition`).
+        // Standalone (not in-tx) is correct here: the SQLite tx that
+        // does the critique-append + Running → Completed below is a
+        // separate, downstream commit; we deliberately DO NOT bundle
+        // them together, because the auto-transition's success is the
+        // signal that gates the rest of the handler's work. A failure
+        // here leaves the task in `Admitted` for retry — same shape
+        // as a witness-intent rejection at Phase A.
+        if let Err(_) = fsm_transition(
+            req.task_id.as_str(),
+            TaskState::Running,
+            None,
+            TransitionActor::Kernel,
+            store,
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"SubmitReviewAdmitTransitionFailed\",\
+                 \"task_id\":\"{}\",\"reviewer_session\":\"{}\"}}",
+                req.task_id.as_str(),
+                session_id.as_str(),
+            );
+            return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+        }
+        // The downstream SQL update flips `Running → Completed`
+        // (filter `state = 'Running'`); the row now matches.
+        TaskState::Running
+    } else {
+        task_state
+    };
 
     // ── 2. Wire payload validation ────────────────────────────────────────
     let approved = match req.approved {
@@ -3224,14 +3528,216 @@ async fn handle_activate_sub_task(
         lookup.task_prompt.clone(),
     );
 
-    let spawn_handle = match crate::session_spawn_orchestrator::spawn_executor_for_task(
+    // V2 §Step 24 / §Step 24b — host-side worktree provisioning for
+    // the new Executor / Reviewer session. Composes:
+    //
+    //   1. Resolve the Orchestrator's anchor (the per-initiative
+    //      worktree the orchestrator-spawn path provisioned in
+    //      `spawn_orchestrator_for_initiative` Step 2b). Read from
+    //      `<data_dir>/worktrees/orch-<initiative_id>/` via the
+    //      idempotent re-attach path of
+    //      `provision_orchestrator_worktree`. We do NOT consult
+    //      the orch session row's `worktree_root` here: a
+    //      respawned orchestrator could be momentarily mid-spawn
+    //      and have a stale `NULL`, but the on-disk anchor is
+    //      authoritative.
+    //
+    //   2. For Executor: clone orch worktree → `<data_dir>/worktrees/<exec_session>/`.
+    //      Mount /workspace RW.
+    //
+    //   3. For Reviewer: read predecessor Executor's
+    //      `evaluation_sha` (stamped in `commit_task_completion`
+    //      below); clone orch worktree at that SHA →
+    //      `<data_dir>/worktrees/<rev_session>/`. Mount /workspace
+    //      RO per `v2-deep-spec.md §Step 24` — the Reviewer must
+    //      observe the exact bytes the Executor committed.
+    //
+    //   4. Persist `(worktree_root, base_sha, base_tracking_ref)`
+    //      onto the new session row so:
+    //        * `handle_complete_task` can read
+    //          `session.worktree_root` to find the executor
+    //          worktree (`fetch_into_main` source).
+    //        * `pre_state.worktree_path` resolves correctly for
+    //          domain-git diff/topology-check calls.
+    let workspace_mounts: Vec<raxis_isolation::WorkspaceMount> = {
+        let data_dir = ctx
+            .executor_spawn
+            .data_dir
+            .as_ref()
+            .ok_or_else(|| {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"ActivateSubTaskNoDataDir\",\
+                     \"task_id\":\"{}\",\"diagnostic\":\"ExecutorSpawnContext is missing data_dir; \
+                     worktree provisioning requires <data_dir>/worktrees/ — check kernel boot wiring\"}}",
+                    task_id_owned,
+                );
+                (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted)
+            })?
+            .clone();
+
+        // Resolve the live orchestrator target_ref from the plan
+        // registry (or fall back to the kernel default). The
+        // ref is needed by `provision_orchestrator_worktree`'s
+        // first-spawn path; the re-attach path ignores it.
+        let policy_for_target = ctx.policy.load_full();
+        let target_ref = ctx.plan_registry
+            .orchestrator(&lookup.initiative_id)
+            .map(|o| o.target_ref)
+            .unwrap_or_else(|| policy_for_target.git_default_target_ref().to_owned());
+
+        // For Reviewer: read predecessor Executor's evaluation_sha
+        // BEFORE provisioning, so we can short-circuit with a
+        // typed error if it's missing instead of half-staging
+        // a worktree.
+        let (evaluation_sha_for_reviewer, dispatch_kind) = match lookup.agent_kind {
+            crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer => {
+                let store_for_eval = Arc::clone(&ctx.store);
+                let task_id_for_eval = task_id_owned.clone();
+                let row: Result<Option<String>, _> = tokio::task::spawn_blocking(move || {
+                    let conn = store_for_eval.lock_sync();
+                    // The Reviewer's `predecessors` list points
+                    // at the Executor task; the Executor's
+                    // `tasks.evaluation_sha` was stamped at its
+                    // CompleteTask. We grab any predecessor with
+                    // a non-NULL evaluation_sha — the plan
+                    // validator guarantees Reviewers have
+                    // exactly one predecessor.
+                    let dag = raxis_store::Table::TaskDagEdges.as_str();
+                    conn.query_row(
+                        &format!(
+                            "SELECT t.evaluation_sha
+                               FROM {tasks} AS t
+                               JOIN {dag} AS d ON d.predecessor_task_id = t.task_id
+                              WHERE d.successor_task_id = ?1
+                                AND t.evaluation_sha IS NOT NULL
+                              LIMIT 1",
+                            tasks = TASKS,
+                            dag = dag,
+                        ),
+                        rusqlite::params![&task_id_for_eval],
+                        |r| r.get::<_, Option<String>>(0),
+                    )
+                }).await.map_err(|_| (
+                    PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted,
+                ))?;
+                let sha = match row {
+                    Ok(Some(s)) => s,
+                    _ => {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"ActivateSubTaskReviewerNoEvalSha\",\
+                             \"task_id\":\"{}\",\"diagnostic\":\"reviewer activation but no \
+                             predecessor task carries evaluation_sha — Executor's \
+                             commit_task_completion must run first\"}}",
+                            task_id_owned,
+                        );
+                        return Err((
+                            PlannerErrorCode::FailWorktreeProvision,
+                            TaskState::Admitted,
+                        ));
+                    }
+                };
+                (Some(sha), "reviewer")
+            }
+            crate::session_spawn_orchestrator::ExecutorAgentKind::Executor => (None, "executor"),
+        };
+
+        let initiative_for_provision = lookup.initiative_id.clone();
+        let session_for_provision    = lookup.new_session_id.clone();
+        let target_ref_for_provision = target_ref.clone();
+        let data_dir_for_provision   = data_dir.clone();
+        let provisioned: Result<(raxis_isolation::WorkspaceMount, String, String), String> =
+            tokio::task::spawn_blocking(move || {
+                let anchor = crate::worktree_provisioning::provision_orchestrator_worktree(
+                    &data_dir_for_provision,
+                    &initiative_for_provision,
+                    &target_ref_for_provision,
+                ).map_err(|e| format!("orchestrator anchor: {e}"))?;
+                let mount = match evaluation_sha_for_reviewer.as_deref() {
+                    Some(eval_sha) => crate::worktree_provisioning::provision_reviewer_worktree(
+                        &data_dir_for_provision,
+                        &session_for_provision,
+                        &anchor,
+                        eval_sha,
+                    ).map_err(|e| format!("reviewer provisioning: {e}"))?,
+                    None => crate::worktree_provisioning::provision_executor_worktree(
+                        &data_dir_for_provision,
+                        &session_for_provision,
+                        &anchor,
+                    ).map_err(|e| format!("executor provisioning: {e}"))?,
+                };
+                Ok((mount, anchor.base_sha, anchor.base_tracking_ref))
+            }).await.map_err(|e| {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"ActivateSubTaskProvisionJoinFailed\",\
+                     \"task_id\":\"{}\",\"kind\":\"{}\",\"error\":\"{}\"}}",
+                    task_id_owned, dispatch_kind, e,
+                );
+                (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted)
+            })?;
+        let (mount, base_sha, base_tracking_ref) = provisioned.map_err(|e| {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"ActivateSubTaskProvisionFailed\",\
+                 \"task_id\":\"{}\",\"kind\":\"{}\",\"error\":\"{}\"}}",
+                task_id_owned, dispatch_kind, e,
+            );
+            (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted)
+        })?;
+
+        // Update the new session row with worktree provenance so
+        // intent admission (Phase A) and CompleteTask both
+        // observe a consistent (worktree_root, base_sha) pair.
+        // Best-effort: a failure here surfaces downstream as a
+        // FailPolicyViolation on the first intent, which we
+        // surface eagerly here as a typed provisioning failure.
+        let store_for_update      = Arc::clone(&ctx.store);
+        let session_id_for_update = lookup.new_session_id.clone();
+        let worktree_root_str     = mount.host_path.display().to_string();
+        let base_sha_str          = base_sha.clone();
+        let tracking_ref_str      = base_tracking_ref.clone();
+        let updated: Result<(), rusqlite::Error> = tokio::task::spawn_blocking(move || {
+            let conn = store_for_update.lock_sync();
+            conn.execute(
+                &format!(
+                    "UPDATE {SESSIONS}
+                        SET worktree_root      = ?1,
+                            base_sha           = ?2,
+                            base_tracking_ref  = ?3
+                      WHERE session_id = ?4",
+                ),
+                rusqlite::params![
+                    worktree_root_str,
+                    base_sha_str,
+                    tracking_ref_str,
+                    session_id_for_update,
+                ],
+            )?;
+            Ok(())
+        }).await.map_err(|_| (
+            PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted,
+        ))?;
+        if let Err(e) = updated {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"ActivateSubTaskWorktreeRowUpdateFailed\",\
+                 \"task_id\":\"{}\",\"session_id\":\"{}\",\"error\":\"{}\"}}",
+                task_id_owned, lookup.new_session_id, e,
+            );
+            return Err((
+                PlannerErrorCode::FailWorktreeProvision,
+                TaskState::Admitted,
+            ));
+        }
+
+        vec![mount]
+    };
+
+    let mut spawn_handle = match crate::session_spawn_orchestrator::spawn_executor_for_task(
         &ctx.executor_spawn,
         lookup.agent_kind,
         &lookup.new_session_id,
         &task_id_owned,
         &lookup.initiative_id,
         allowlist,
-        Vec::new(),
+        workspace_mounts,
         extra_env,
         Arc::clone(&ctx.session_spawn),
         &ctx.plan_registry,
@@ -3331,6 +3837,29 @@ async fn handle_activate_sub_task(
             }
         }
     }
+
+    // ── Step 4b: bridge the substrate-surrendered IPC stream into
+    //    the planner dispatcher. The microVM substrates (AVF,
+    //    Firecracker) return a host-side `kernel_ipc_stream` on the
+    //    `SpawnHandle`; without a tokio task running
+    //    `drive_planner_stream` on it, the executor's vsock listener
+    //    never observes any kernel-side traffic and its first
+    //    kernel-mediated `FetchRequest` blocks indefinitely (which
+    //    surfaces as the executor VM sitting idle past the lifecycle
+    //    deadline with no `IntentRequest` rows). The subprocess
+    //    substrate leaves `kernel_ipc_stream = None` and dials
+    //    `planner.sock` directly, so this call is a no-op there
+    //    (`spawn_planner_dispatcher` early-returns).
+    //
+    // This mirrors the bridge call the orchestrator-spawn path makes
+    // in `OperatorRequest::ApprovePlan` and
+    // `respawn_orchestrator_after_*`. The wiring contract is
+    // symmetric across roles — every per-VM session that surrenders
+    // a kernel IPC fd needs a dispatcher driving it.
+    crate::session_spawn_orchestrator::spawn_planner_dispatcher(
+        &mut spawn_handle,
+        Arc::clone(&ctx),
+    );
 
     // ── Step 5: audit-after-commit — `SessionCreated`. ─────────────────
     //
@@ -3905,9 +4434,10 @@ async fn handle_retry_sub_task(
 /// case (`PRIMARY KEY (task_id, path)` — same path inserted twice is a
 /// no-op, matching the spec's "ignore" rule).
 fn commit_task_completion(
-    task_id:      &str,
-    export_paths: &[String],
-    store:        &Store,
+    task_id:        &str,
+    export_paths:   &[String],
+    evaluation_sha: Option<&str>,
+    store:          &Store,
 ) -> Result<(), ()> {
     let mut conn = store.lock_sync();
     let tx = conn.transaction().map_err(|_| ())?;
@@ -3917,15 +4447,32 @@ fn commit_task_completion(
     //    transition rejected). The `tasks` DDL has no `completed_at`
     //    column (kernel-store.md §2.5.1 Table 5); `transitioned_at` is
     //    the canonical timestamp for the Running → Completed edge.
+    //
+    //    V2 §Step 24-adjacent — when the planner submitted a
+    //    `head_sha`, stamp it onto `tasks.evaluation_sha` in the
+    //    same row update so the KSB / Reviewer-clone / IM-fetch
+    //    paths can read it immediately. `COALESCE(?, evaluation_sha)`
+    //    preserves the column on a vacuous CompleteTask
+    //    (head_sha=None per §2.5.8 edge-case): the kernel never
+    //    overwrites a previously-stamped SHA with NULL.
     let now = unix_now_secs();
     let completed_state = TaskState::Completed.as_sql_str();
     let running_state   = TaskState::Running.as_sql_str();
     let rows = tx.execute(
         &format!(
-            "UPDATE {TASKS} SET state = ?1, transitioned_at = ?2
-             WHERE task_id = ?3 AND state = ?4",
+            "UPDATE {TASKS}
+                SET state           = ?1,
+                    transitioned_at = ?2,
+                    evaluation_sha  = COALESCE(?5, evaluation_sha)
+              WHERE task_id = ?3 AND state = ?4",
         ),
-        rusqlite::params![completed_state, now, task_id, running_state],
+        rusqlite::params![
+            completed_state,
+            now,
+            task_id,
+            running_state,
+            evaluation_sha,
+        ],
     ).map_err(|_| ())?;
     if rows == 0 {
         return Err(());

@@ -400,6 +400,52 @@ pub fn translate(
             }
             effective.insert(k.clone(), v.clone());
         }
+
+        // (3) substrate-injected RAXIS_VIRTIOFS_MOUNTS — the
+        // canonical wire shape the in-guest /init parses via
+        // `raxis-planner-core::guest_init::parse_virtiofs_mounts`.
+        // Composed from `mounts` (the same list we just turned into
+        // `AvfVirtioFsShare`s above), so the host AVF descriptor and
+        // the guest mount(2) syscall observe the same triple
+        // (tag, guest_path, mode).
+        //
+        // Format: comma-separated `<tag>:<guest_path>:<rw|ro>`.
+        // Tag derivation MUST match the
+        // `let tag = mount.guest_path.trim_start_matches('/').replace('/', "_")`
+        // recipe used in the `AvfVirtioFsShare` translation block
+        // below — otherwise the guest's `mount(2)` would refer to
+        // a tag the AVF substrate never advertised.
+        let valid_mounts: Vec<&WorkspaceMount> = mounts
+            .iter()
+            .filter(|m| !m.guest_path.is_empty())
+            .collect();
+        if !valid_mounts.is_empty() {
+            let mut mounts_env = String::new();
+            for (i, mount) in valid_mounts.iter().enumerate() {
+                if i > 0 {
+                    mounts_env.push(',');
+                }
+                let tag = mount
+                    .guest_path
+                    .trim_start_matches('/')
+                    .replace('/', "_");
+                mounts_env.push_str(&tag);
+                mounts_env.push(':');
+                mounts_env.push_str(&mount.guest_path);
+                mounts_env.push(':');
+                let read_only = matches!(mount.mode, MountMode::ReadOnly);
+                mounts_env.push_str(if read_only { "ro" } else { "rw" });
+            }
+            // The substrate-injected key always wins over a
+            // potential operator override on `spec.env` — the
+            // operator never has authority to lie to the guest about
+            // which shares the substrate actually wired up.
+            effective.insert(
+                "RAXIS_VIRTIOFS_MOUNTS".to_owned(),
+                mounts_env,
+            );
+        }
+
         let mut payload = String::new();
         for (k, v) in &effective {
             payload.push_str(k);

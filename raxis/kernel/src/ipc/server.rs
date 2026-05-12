@@ -27,7 +27,6 @@ use crate::handlers;
 use crate::ipc::context::HandlerContext;
 use crate::ipc::auth;
 use crate::ipc::operator;
-use crate::ipc::{accept_backoff_step, ACCEPT_BACKOFF_INITIAL};
 
 // ---------------------------------------------------------------------------
 // ShutdownReason — why the dispatch loop exited.
@@ -232,27 +231,6 @@ async fn wait_for_shutdown(
     };
 
     tokio::select! {
-        // `biased`: poll signal branches first, then the accept-task
-        // join handles. Without `biased`, tokio uses a pseudo-random
-        // tie-breaker, which means a SIGTERM that arrives in the same
-        // scheduler tick as one of the accept tasks completing could
-        // surface as `AcceptLoopExited` instead of `SigTerm`. The
-        // distinction matters for two reasons:
-        //   1. `main.rs` audits the `KernelStopped { reason }` event
-        //      using the variant returned here. Operators reading the
-        //      audit chain need "SIGTERM" to mean "operator requested
-        //      shutdown", not "happened to coincide with a degraded
-        //      accept loop exiting".
-        //   2. `AcceptLoopExited` returns a non-zero exit code from
-        //      the kernel binary; `SigTerm`/`SigInt` return zero. A
-        //      coincidence MUST NOT promote a clean operator shutdown
-        //      into a degraded exit.
-        // Bias is intentionally signals-first, then op → pl → gw;
-        // within the accept-loop branches the order is irrelevant
-        // (only one of them can complete in a non-shutdown path
-        // because each is its own task).
-        biased;
-
         _ = sigterm_fut => {
             server_log::signal_received("SIGTERM");
             ShutdownReason::SigTerm
@@ -284,15 +262,9 @@ async fn accept_operator_loop(
     listener: UnixListener,
     ctx: Arc<HandlerContext>,
 ) {
-    let mut backoff = ACCEPT_BACKOFF_INITIAL;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                // Reset the backoff after any successful accept so a
-                // transient FD exhaustion (or similar) doesn't keep
-                // the loop in a long-cooldown state once the underlying
-                // pressure clears.
-                backoff = ACCEPT_BACKOFF_INITIAL;
                 let ctx = Arc::clone(&ctx);
                 tokio::spawn(async move {
                     if let Err(e) = handle_operator_connection(stream, ctx).await {
@@ -302,17 +274,8 @@ async fn accept_operator_loop(
             }
             Err(e) => {
                 server_log::operator_accept_error(&e.to_string());
-                // Exponential backoff with a hard cap. The prior
-                // implementation slept a fixed 100 ms after every
-                // failure; under sustained EMFILE/ENFILE pressure this
-                // produced 10 retries/second of structured-stderr
-                // noise without giving the host any chance to recover.
-                // Doubling each failure (with a 5 s ceiling) keeps the
-                // first retry snappy on transient blips while bounding
-                // log noise during a real outage. See `accept_backoff_step`
-                // for the curve.
-                tokio::time::sleep(backoff).await;
-                backoff = accept_backoff_step(backoff);
+                // Brief pause before retrying to prevent busy-spin.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }
@@ -378,11 +341,9 @@ async fn handle_operator_connection(
 // ---------------------------------------------------------------------------
 
 async fn accept_planner_loop(listener: UnixListener, ctx: Arc<HandlerContext>) {
-    let mut backoff = ACCEPT_BACKOFF_INITIAL;
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
-                backoff = ACCEPT_BACKOFF_INITIAL;
                 let ctx = Arc::clone(&ctx);
                 tokio::spawn(async move {
                     if let Err(e) = handle_planner_connection(stream, ctx).await {
@@ -392,9 +353,7 @@ async fn accept_planner_loop(listener: UnixListener, ctx: Arc<HandlerContext>) {
             }
             Err(e) => {
                 planner_dispatch_log::planner_accept_error(&e.to_string());
-                // See `accept_operator_loop` for rationale; same curve.
-                tokio::time::sleep(backoff).await;
-                backoff = accept_backoff_step(backoff);
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }
