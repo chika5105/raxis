@@ -1,39 +1,42 @@
 //! Slice — real `MssqlProxy` driving the V2.1 real-upstream-forwarding
-//! contract.
+//! contract against a real SQL Server 2022 container.
 //!
-//! ## Two modes
+//! ## Active by default — no env-var gate
 //!
-//! 1. **Hermetic (default)** — the proxy is configured with an
-//!    unreachable upstream URL (`mssql://demo:demo@127.0.0.1:1/demo`)
-//!    so the V2.1 upstream forwarding path can be exercised
-//!    without an external service:
-//!      * The agent's PRELOGIN ↔ LOGIN7 ↔ LOGINACK+DONE succeeds
-//!        (the proxy answers locally — these are NOT forwarded).
-//!      * `SQLBatch "SELECT 1"` triggers an upstream connect to
-//!        127.0.0.1:1, which fails — the agent receives an
-//!        ERROR + DONE_ERROR token sequence. We assert on the
-//!        ERROR token's presence AND
-//!        `upstream_connects_failed ≥ 1`.
-//!      * `SQLBatch "INSERT INTO t VALUES (1)"` short-circuits at
-//!        the restriction layer (BEFORE upstream) with an
-//!        ERROR + DONE_ERROR.
+//! As of the credproxy-gap-closer worker (post the
+//! `rewrite_sql_batch_for_upstream` ALL_HEADERS rebuild in
+//! `crates/credential-proxy-mssql/src/upstream.rs`), the slice
+//! exercises the **real upstream forwarding path** by default
+//! against the compose stack's `127.0.0.1:14399` SQL Server 2022
+//! container. Bring the stack up first:
 //!
-//! 2. **Real upstream (`RAXIS_LIVE_MSSQL_URL=mssql://...`)** — when
-//!    the env var is set, the SELECT round-trips real result-set
-//!    tokens (COLMETADATA / ROW / DONE) from a live SQL Server.
-//!    Plaintext TDS only — `?encrypt=true` is rejected at
-//!    `connect()`.  The docker-compose SQL Server service
-//!    published in `live-e2e/docker-compose.e2e.yml` is the
-//!    recommended target for the fast-path; set:
+//! ```sh
+//! docker compose -f live-e2e/docker-compose.e2e.yml up -d mssql --wait
+//! cargo run -p raxis-live-e2e -- mssql-proxy
+//! ```
 //!
-//!    ```sh
-//!    docker compose -f live-e2e/docker-compose.e2e.yml up -d mssql --wait
-//!    export RAXIS_LIVE_MSSQL_URL='mssql://sa:raxis_Test_Pass1!@127.0.0.1:14399/master'
-//!    cargo run -p raxis-live-e2e -- mssql-proxy
-//!    ```
+//! Plaintext TDS only — `?encrypt=true` is rejected at the proxy's
+//! `connect()`. The slice TCP-preflights the container and refuses
+//! to start with an actionable error message if it isn't reachable.
 //!
-//! Either mode validates the proxy's local handshake, restriction
-//! enforcement, audit emission, and credential resolution.
+//! Operators that need a different upstream (e.g. an Azure SQL
+//! endpoint for non-CI debugging) can set
+//! `RAXIS_LIVE_MSSQL_URL=mssql://user:pass@host:port/db?encrypt=false`
+//! to override the default compose URL. The slice does NOT support
+//! a hermetic / no-container mode anymore; the upstream-failure
+//! audit path is covered by the unit tests in
+//! `crates/credential-proxy-mssql/src/upstream.rs::tests`.
+//!
+//! ## What the slice asserts
+//!
+//! 1. PRELOGIN ↔ LOGIN7 ↔ LOGINACK + DONE succeeds (proxy-local).
+//! 2. `SQLBatch "SELECT 1"` round-trips real `COLMETADATA + ROW
+//!    + DONE` tokens — assertion: `upstream_connects_succeeded ≥ 1`,
+//!    no ERROR token in the reply.
+//! 3. `SQLBatch "INSERT INTO t VALUES (1)"` is rejected at the
+//!    restriction layer BEFORE upstream — assertion: ERROR + DONE.
+//! 4. Counters: `connections_served ≥ 1`, `queries_audited == 2`,
+//!    `queries_blocked == 1`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -52,7 +55,15 @@ use raxis_credential_proxy_mssql::{
     wire::{frame_packet, PacketHeader, pkt as tds_pkt, HEADER_LEN},
 };
 
-const HERMETIC_UPSTREAM_URL: &str = "mssql://demo:demo@127.0.0.1:1/demo";
+/// Default upstream URL — the loopback published by
+/// `live-e2e/docker-compose.e2e.yml` for the SQL Server 2022
+/// container. Operators can override via `RAXIS_LIVE_MSSQL_URL`.
+const DEFAULT_UPSTREAM_URL: &str =
+    "mssql://sa:raxis_Test_Pass1!@127.0.0.1:14399/master?encrypt=false";
+
+/// Loopback host:port the docker-compose SQL Server publishes;
+/// used for the slice's TCP preflight.
+const MSSQL_HOST_PORT: &str = "127.0.0.1:14399";
 
 struct LiveBackend {
     value:    Vec<u8>,
@@ -85,16 +96,21 @@ impl CredentialBackend for LiveBackend {
 }
 
 pub async fn run() -> Result<()> {
-    let real_upstream = std::env::var("RAXIS_LIVE_MSSQL_URL").ok();
-    let upstream_url = match real_upstream.as_deref() {
-        Some(u) if !u.is_empty() => u.to_owned(),
-        _ => HERMETIC_UPSTREAM_URL.to_owned(),
+    let env_override = std::env::var("RAXIS_LIVE_MSSQL_URL").ok();
+    let (upstream_url, source) = match env_override.as_deref() {
+        Some(u) if !u.is_empty() => (u.to_owned(), "RAXIS_LIVE_MSSQL_URL override"),
+        _ => (DEFAULT_UPSTREAM_URL.to_owned(), "compose-stack default"),
     };
-    let hermetic = real_upstream.as_deref().is_none_or(str::is_empty);
     tracing::info!(
-        mode = if hermetic { "hermetic" } else { "real-upstream" },
-        "slice mssql-proxy: starting",
+        host_port = MSSQL_HOST_PORT,
+        url_source = source,
+        "slice mssql-proxy: starting (real-upstream, active by default)",
     );
+
+    require_mssql_container().await?;
+    // Hermetic flag retained as a `false` constant so the rest of
+    // the slice's audit-counter assertions do not need to branch.
+    let hermetic = false;
 
     let backend = Arc::new(LiveBackend {
         value:    upstream_url.as_bytes().to_vec(),
@@ -189,29 +205,16 @@ pub async fn run() -> Result<()> {
         .ok_or_else(|| anyhow!("EOF after SELECT"))?;
     let has_error = sel_reply.1.iter().any(|&b| b == 0xAA);
     let has_done  = sel_reply.1.iter().any(|&b| b == 0xFD);
-    if hermetic {
-        if !has_error {
-            return Err(anyhow!(
-                "hermetic mode: SELECT reply missing ERROR token (0xAA) for unreachable upstream"
-            ));
-        }
-        if !has_done {
-            return Err(anyhow!(
-                "hermetic mode: SELECT reply missing DONE token (0xFD) after ERROR"
-            ));
-        }
-        tracing::info!("slice mssql-proxy: hermetic SELECT got ERROR+DONE (upstream unreachable, expected)");
-    } else {
-        if has_error {
-            return Err(anyhow!(
-                "real-upstream mode: SELECT reply contained ERROR token — upstream may have rejected the query"
-            ));
-        }
-        if !has_done {
-            return Err(anyhow!(
-                "real-upstream mode: SELECT reply missing DONE token (0xFD)"
-            ));
-        }
+    let _ = hermetic;
+    if has_error {
+        return Err(anyhow!(
+            "SELECT reply contained ERROR token (0xAA) — upstream may have rejected the query"
+        ));
+    }
+    if !has_done {
+        return Err(anyhow!(
+            "SELECT reply missing DONE token (0xFD)"
+        ));
     }
 
     // 4. SQLBatch "INSERT INTO t VALUES (1)" — must yield ERROR + DONE.
@@ -256,16 +259,9 @@ pub async fn run() -> Result<()> {
             "expected ≥1 CredentialBackend::resolve call, got 0",
         ));
     }
-    if hermetic {
-        if snap.upstream_connects_failed < 1 {
-            return Err(anyhow!(
-                "hermetic mode: expected upstream_connects_failed≥1, got {}",
-                snap.upstream_connects_failed,
-            ));
-        }
-    } else if snap.upstream_connects_succeeded < 1 {
+    if snap.upstream_connects_succeeded < 1 {
         return Err(anyhow!(
-            "real-upstream mode: expected upstream_connects_succeeded≥1, got {}",
+            "expected upstream_connects_succeeded≥1, got {}",
             snap.upstream_connects_succeeded,
         ));
     }
@@ -340,6 +336,24 @@ fn build_sql_batch_body(sql: &str) -> Vec<u8> {
         body.extend_from_slice(&u.to_le_bytes());
     }
     body
+}
+
+/// TCP-preflight the SQL Server container.
+async fn require_mssql_container() -> Result<()> {
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        TcpStream::connect(MSSQL_HOST_PORT),
+    ).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(anyhow!(
+            "mssql container not reachable at {MSSQL_HOST_PORT}: {e}\n\
+             hint: docker compose -f live-e2e/docker-compose.e2e.yml up -d mssql --wait",
+        )),
+        Err(_) => Err(anyhow!(
+            "mssql container not reachable at {MSSQL_HOST_PORT}: timed out after 2s\n\
+             hint: docker compose -f live-e2e/docker-compose.e2e.yml up -d mssql --wait",
+        )),
+    }
 }
 
 async fn read_packet(sock: &mut TcpStream) -> Result<Option<(PacketHeader, Vec<u8>)>> {

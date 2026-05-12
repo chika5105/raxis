@@ -1,43 +1,47 @@
 //! Slice — real `MysqlProxy` driving the V2.1 real-upstream-forwarding
-//! contract.
+//! contract against a real MySQL 8.0.36 container.
 //!
-//! ## Two modes
+//! ## Active by default — no env-var gate
 //!
-//! 1. **Hermetic (default)** — the proxy is configured with an
-//!    unreachable upstream URL (`mysql://demo:demo@127.0.0.1:1/demo`)
-//!    so the V2.1 upstream-forwarding path can be exercised
-//!    without an external service:
-//!      * The agent's `HandshakeV10` ↔ `HandshakeResponse41` ↔
-//!        `OK_Packet` succeeds (the proxy answers locally).
-//!      * `COM_PING` succeeds (still local).
-//!      * `SELECT 1` triggers the proxy to attempt an upstream
-//!        connection — which fails — and the agent receives an
-//!        `ERR_Packet`. We assert the failure path emitted
-//!        `CredentialProxyUpstreamFailed` and the
-//!        `upstream_connects_failed` counter incremented.
-//!      * `INSERT INTO t VALUES (1)` short-circuits at the
-//!        restriction layer (BEFORE upstream) with
-//!        `ERR_Packet { sqlstate = "42501" }`.
-//!      * `COM_QUIT` closes cleanly.
+//! As of the credproxy-gap-closer worker (post the
+//! `CLIENT_SSL` cap-bit fix in
+//! `crates/credential-proxy-mysql/src/upstream.rs`), the slice
+//! exercises the **real upstream forwarding path** by default
+//! against the compose stack's `127.0.0.1:33099` MySQL 8.0.36
+//! container. Bring the stack up first:
 //!
-//! 2. **Real upstream (`RAXIS_LIVE_MYSQL_URL=mysql://...`)** — when
-//!    the env var is set, the SELECT round-trips a real result set
-//!    from a live MySQL server through `mysql_native_password`.
-//!    The docker-compose MySQL service published in
-//!    `live-e2e/docker-compose.e2e.yml` is the recommended
-//!    target for the fast-path; set:
+//! ```sh
+//! docker compose -f live-e2e/docker-compose.e2e.yml up -d mysql --wait
+//! cargo run -p raxis-live-e2e -- mysql-proxy
+//! ```
 //!
-//!    ```sh
-//!    docker compose -f live-e2e/docker-compose.e2e.yml up -d mysql --wait
-//!    export RAXIS_LIVE_MYSQL_URL=mysql://raxis_test:raxis_test_pass@127.0.0.1:33099
-//!    cargo run -p raxis-live-e2e -- mysql-proxy
-//!    ```
+//! The slice TCP-preflights the container and refuses to start
+//! with an actionable error message if it isn't reachable —
+//! mirroring the redis-proxy / mongodb-proxy-collection-allowlists
+//! convention.
 //!
-//! Either mode validates the proxy's local handshake, restriction
-//! enforcement, audit emission, and credential-resolution
-//! invariants. The client side speaks the wire protocol directly
-//! (no third-party MySQL crate) so the slice has zero external
-//! dependencies beyond the proxy crate itself.
+//! Operators that need to point at a different upstream (e.g. an
+//! Aurora / PlanetScale endpoint for non-CI debugging) can set
+//! `RAXIS_LIVE_MYSQL_URL=mysql://user:pass@host:port/db` to
+//! override the default compose URL. The slice does NOT support a
+//! hermetic / no-container mode anymore; the upstream-failure
+//! audit path is covered by the fake-MySQL fixtures in
+//! `crates/credential-proxy-mysql/tests`.
+//!
+//! ## What the slice asserts
+//!
+//! 1. `HandshakeV10` ↔ `HandshakeResponse41` ↔ `OK_Packet` succeeds.
+//! 2. `COM_PING` succeeds.
+//! 3. `COM_QUERY "SELECT 1"` round-trips a real result set
+//!    (TEXT_RESULTSET) — assertion: `upstream_connects_succeeded ≥ 1`.
+//! 4. `COM_QUERY "INSERT INTO t VALUES (1)"` is rejected at the
+//!    restriction layer BEFORE upstream — assertion:
+//!    `ERR_Packet { sqlstate = "42501" }` and `queries_blocked == 1`.
+//! 5. `COM_QUIT` closes cleanly.
+//!
+//! The client speaks the wire protocol directly (no third-party
+//! MySQL crate) so the slice has zero external runtime dependencies
+//! beyond the proxy crate itself.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -56,7 +60,15 @@ use raxis_credential_proxy_mysql::{
     wire::{frame_packet, PacketHeader, cmd as mysql_cmd},
 };
 
-const HERMETIC_UPSTREAM_URL: &str = "mysql://demo:demo@127.0.0.1:1/demo";
+/// Default upstream URL — the loopback published by
+/// `live-e2e/docker-compose.e2e.yml` for the MySQL 8.0.36 container.
+/// Operators can override via `RAXIS_LIVE_MYSQL_URL`.
+const DEFAULT_UPSTREAM_URL: &str =
+    "mysql://raxis_test:raxis_test_pass@127.0.0.1:33099/raxis_e2e";
+
+/// Loopback host:port the docker-compose MySQL publishes; used for
+/// the slice's TCP preflight.
+const MYSQL_HOST_PORT: &str = "127.0.0.1:33099";
 
 struct LiveBackend {
     value:    Vec<u8>,
@@ -89,17 +101,25 @@ impl CredentialBackend for LiveBackend {
 }
 
 pub async fn run() -> Result<()> {
-    let real_upstream = std::env::var("RAXIS_LIVE_MYSQL_URL").ok();
-    let upstream_url = match real_upstream.as_deref() {
-        Some(u) if !u.is_empty() => u.to_owned(),
-        _ => HERMETIC_UPSTREAM_URL.to_owned(),
+    let env_override = std::env::var("RAXIS_LIVE_MYSQL_URL").ok();
+    let (upstream_url, source) = match env_override.as_deref() {
+        Some(u) if !u.is_empty() => (u.to_owned(), "RAXIS_LIVE_MYSQL_URL override"),
+        _ => (DEFAULT_UPSTREAM_URL.to_owned(), "compose-stack default"),
     };
-    let hermetic = real_upstream.as_deref().is_none_or(str::is_empty);
     tracing::info!(
-        mode = if hermetic { "hermetic" } else { "real-upstream" },
-        upstream_kind = if hermetic { "unreachable (127.0.0.1:1)" } else { "configured via RAXIS_LIVE_MYSQL_URL" },
-        "slice mysql-proxy: starting",
+        host_port = MYSQL_HOST_PORT,
+        url_source = source,
+        "slice mysql-proxy: starting (real-upstream, active by default)",
     );
+
+    // Preflight: the container must be reachable.  The slice does
+    // not run in any "hermetic / unreachable upstream" fallback —
+    // the proxy crate's fake-MySQL fixture tests cover the
+    // upstream-failure audit path.
+    require_mysql_container().await?;
+    // Hermetic flag retained as a `false` constant so the rest of
+    // the slice's audit-counter assertions do not need to branch.
+    let hermetic = false;
 
     let backend = Arc::new(LiveBackend {
         value:    upstream_url.as_bytes().to_vec(),
@@ -208,12 +228,22 @@ pub async fn run() -> Result<()> {
         return Err(anyhow!("PING did not yield OK_Packet"));
     }
 
-    // 5. COM_QUERY "SELECT 1" — exercises upstream-forwarding path.
-    //    In hermetic mode this triggers an upstream connect to
-    //    127.0.0.1:1 which fails, and the proxy surfaces an
-    //    ERR_Packet (first byte 0xFF). In real-upstream mode this
-    //    round-trips real result-set frames (TEXT_RESULTSET) which
-    //    end with EOF or OK_Packet.
+    // 5. COM_QUERY "SELECT 1" — drives a real result-set round
+    //    trip through the proxy.  Wire shape for `SELECT 1` against
+    //    a live MySQL upstream is one of:
+    //
+    //      * `OK_Packet` (header `0x00`) — terminal, no result set
+    //        (real MySQL never replies this for `SELECT 1` but the
+    //        slice handles it defensively).
+    //      * `ERR_Packet` (header `0xff`) — terminal, e.g. permission
+    //        denied. Already-drained on read.
+    //      * `ResultSetHeader` (lenenc-int column count) followed by
+    //        N ColumnDef + EOF + N Row + EOF (no `CLIENT_DEPRECATE_EOF`
+    //        advertised by the proxy, so we get classic EOFs).
+    //
+    //    The slice MUST drain the full result-set stream so the
+    //    next `read_packet` after sending INSERT lines up with
+    //    INSERT's own ERR_Packet rather than a leftover ColumnDef.
     let mut select_payload = vec![mysql_cmd::QUERY];
     select_payload.extend_from_slice(b"SELECT 1");
     sock.write_all(&frame_packet(&select_payload, 0)).await
@@ -222,86 +252,44 @@ pub async fn run() -> Result<()> {
     let (_h_sel, payload_sel) = read_packet(&mut sock).await
         .context("read SELECT response")?
         .ok_or_else(|| anyhow!("EOF after SELECT"))?;
-    if hermetic {
-        // ERR_Packet (0xFF) is expected for the unreachable upstream.
-        // OK_Packet (0x00) would also be acceptable IF some local
-        // listener answered on port 1, but on a normal dev machine
-        // that's never the case.
-        if payload_sel.first().copied() != Some(0xff) {
-            return Err(anyhow!(
-                "hermetic mode: SELECT did not yield ERR_Packet (0xFF) for unreachable upstream, first byte {:#04x}",
-                payload_sel.first().copied().unwrap_or(0),
-            ));
+    match payload_sel.first().copied() {
+        Some(0xff) | Some(0x00) => {
+            tracing::info!(
+                first_byte = format!("{:#04x}",
+                    payload_sel.first().copied().unwrap_or(0)),
+                "slice mysql-proxy: SELECT short-form reply",
+            );
         }
-        tracing::info!("slice mysql-proxy: hermetic SELECT got ERR_Packet (upstream unreachable, expected)");
-    } else {
-        // Real upstream: drain the rest of the result-set stream so
-        // the next `read_packet` after sending INSERT lines up with
-        // INSERT's own ERR_Packet rather than a leftover ColumnDef /
-        // EOF / Row / EOF.
-        //
-        // The wire shape for `SELECT 1` against a real MySQL
-        // upstream is one of:
-        //
-        //   * `OK_Packet` (header `0x00`) — terminal, no result set.
-        //     Real MySQL never replies this for `SELECT 1` but
-        //     defensive: handle it anyway.
-        //   * `ERR_Packet` (header `0xff`) — terminal, e.g. permission
-        //     denied at the upstream. Already-drained on read.
-        //   * `ResultSetHeader` (lenenc-int column count) followed by
-        //     N ColumnDef + EOF + N Row + EOF (no `CLIENT_DEPRECATE_EOF`
-        //     advertised by the proxy, so we get classic EOFs).
-        //
-        // We discriminate on the FIRST packet we already read and
-        // drain accordingly.
-        match payload_sel.first().copied() {
-            Some(0xff) | Some(0x00) => {
-                // Terminal: no further packets to read for this query.
-                tracing::info!(
-                    first_byte = format!("{:#04x}",
-                        payload_sel.first().copied().unwrap_or(0)),
-                    "slice mysql-proxy: real-upstream SELECT short-form reply",
-                );
-            }
-            Some(_) => {
-                // Result-set form. The reading loop must continue
-                // until we see two EOFs (column-defs terminator AND
-                // row terminator), or a mid-stream ERR_Packet.
-                let column_count = payload_sel
-                    .first()
-                    .copied()
-                    .unwrap_or(0) as u64;
-                let mut eof_seen = 0;
-                let mut frames_read = 1;
-                while eof_seen < 2 {
-                    let (_h, p) = read_packet(&mut sock).await
-                        .context("drain SELECT result-set frame")?
-                        .ok_or_else(|| anyhow!(
-                            "EOF mid-result-set after {frames_read} frames",
-                        ))?;
-                    frames_read += 1;
-                    if !p.is_empty() && p[0] == 0xfe && p.len() < 9 {
-                        eof_seen += 1;
-                    } else if !p.is_empty() && p[0] == 0xff {
-                        // Mid-stream upstream error — fine for our
-                        // purposes; the SELECT still drove an
-                        // upstream round trip.
-                        break;
-                    }
+        Some(_) => {
+            let column_count = payload_sel
+                .first()
+                .copied()
+                .unwrap_or(0) as u64;
+            let mut eof_seen = 0;
+            let mut frames_read = 1;
+            while eof_seen < 2 {
+                let (_h, p) = read_packet(&mut sock).await
+                    .context("drain SELECT result-set frame")?
+                    .ok_or_else(|| anyhow!(
+                        "EOF mid-result-set after {frames_read} frames",
+                    ))?;
+                frames_read += 1;
+                if !p.is_empty() && p[0] == 0xfe && p.len() < 9 {
+                    eof_seen += 1;
+                } else if !p.is_empty() && p[0] == 0xff {
+                    break;
                 }
-                tracing::info!(
-                    first_byte = format!("{:#04x}",
-                        payload_sel.first().copied().unwrap_or(0)),
-                    column_count,
-                    frames_read,
-                    "slice mysql-proxy: real-upstream SELECT result-set drained",
-                );
             }
-            None => {
-                return Err(anyhow!(
-                    "real-upstream mode: SELECT yielded an empty packet payload",
-                ));
-            }
+            tracing::info!(
+                first_byte = format!("{:#04x}",
+                    payload_sel.first().copied().unwrap_or(0)),
+                column_count,
+                frames_read,
+                "slice mysql-proxy: SELECT result-set drained",
+            );
+        }
+        None => {
+            return Err(anyhow!("SELECT yielded an empty packet payload"));
         }
     }
 
@@ -366,24 +354,13 @@ pub async fn run() -> Result<()> {
             "expected ≥1 CredentialBackend::resolve call, got 0",
         ));
     }
-    if hermetic {
-        // The unreachable-upstream connect MUST have been
-        // attempted and MUST have failed — otherwise the proxy
-        // skipped the upstream-forwarding code path entirely
-        // (regression).
-        if snap.upstream_connects_failed < 1 {
-            return Err(anyhow!(
-                "hermetic mode: expected upstream_connects_failed≥1, got {}",
-                snap.upstream_connects_failed,
-            ));
-        }
-    } else if snap.upstream_connects_succeeded < 1 {
-        // Real-upstream mode: the SELECT must have driven a
-        // successful upstream connect. A regression that bypassed
-        // upstream and answered the SELECT locally would surface
-        // here.
+    // The SELECT must have driven a successful upstream connect.
+    // A regression that bypassed upstream and answered the SELECT
+    // locally would surface here.
+    let _ = hermetic;
+    if snap.upstream_connects_succeeded < 1 {
         return Err(anyhow!(
-            "real-upstream mode: expected upstream_connects_succeeded≥1, got {}",
+            "expected upstream_connects_succeeded≥1, got {}",
             snap.upstream_connects_succeeded,
         ));
     }
@@ -401,6 +378,26 @@ pub async fn run() -> Result<()> {
         "mysql-proxy slice OK",
     );
     Ok(())
+}
+
+/// TCP-preflight the MySQL container. Returns an actionable error
+/// when the container isn't running so the operator immediately
+/// knows to bring up the compose stack.
+async fn require_mysql_container() -> Result<()> {
+    match tokio::time::timeout(
+        Duration::from_secs(2),
+        TcpStream::connect(MYSQL_HOST_PORT),
+    ).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(anyhow!(
+            "mysql container not reachable at {MYSQL_HOST_PORT}: {e}\n\
+             hint: docker compose -f live-e2e/docker-compose.e2e.yml up -d mysql --wait",
+        )),
+        Err(_) => Err(anyhow!(
+            "mysql container not reachable at {MYSQL_HOST_PORT}: timed out after 2s\n\
+             hint: docker compose -f live-e2e/docker-compose.e2e.yml up -d mysql --wait",
+        )),
+    }
 }
 
 async fn read_packet(sock: &mut TcpStream) -> Result<Option<(PacketHeader, Vec<u8>)>> {

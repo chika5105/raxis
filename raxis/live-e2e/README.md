@@ -14,18 +14,18 @@ The slices' docstrings carry the per-slice contract.
 
 ## What is and is NOT in scope
 
-| Slice                                        | Real upstream                   | Notes                                                                                                            |
-| -------------------------------------------- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `postgres-proxy*`                            | `postgres:16-alpine`            | Original real-service slice — the pattern every other slice mirrors.                                             |
-| `mongodb-proxy`                              | `mongo:7`                       | `--noauth` mode by default; `RAXIS_LIVE_MONGODB_URL` overrides.                                                  |
-| `mongodb-proxy-collection-allowlists`        | `mongo:7`                       | Auth (SCRAM-SHA-256) against `admin`. Seeds `live_e2e_cap.users` via `docker exec mongosh` and drops on cleanup. |
-| `redis-proxy`                                | `redis:7-alpine`                | `--requirepass`-protected; the slice drives a real RESP `AUTH` + round-trip.                                     |
-| `smtp-proxy`                                 | `mailserver/docker-mailserver`  | Postfix + Dovecot SASL. The slice verifies delivery by `docker exec`-ing into the container's Maildir.           |
-| `mysql-proxy`                                | `mysql:8.0.36` (opt-in)         | Hermetic by default; set `RAXIS_LIVE_MYSQL_URL` to drive the compose container.                                  |
-| `mssql-proxy`                                | SQL Server 2022 (opt-in)        | Hermetic by default; set `RAXIS_LIVE_MSSQL_URL` to drive the compose container.                                  |
-| `aws-proxy`, `gcp-proxy`, `azure-proxy`      | n/a                             | These proxies SYNTHESISE IMDS responses or proxy to public internet endpoints — there is no mock to replace.     |
-| `http-proxy*`, `gateway-anthropic`           | real HTTPS endpoints            | Drive real `https://` upstreams; nothing to un-mock.                                                             |
-| `egress-enforcement`, `session-spawn`        | n/a (kernel-internal)           | Exercise the kernel's own state machines, not external services.                                                 |
+| Slice                                        | Real upstream                   | Status      | Notes                                                                                                            |
+| -------------------------------------------- | ------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------- |
+| `postgres-proxy*`                            | `postgres:16-alpine`            | 🟢 active   | Original real-service slice — the pattern every other slice mirrors.                                             |
+| `mongodb-proxy`                              | `mongo:7`                       | 🟢 active   | `--noauth` mode by default; `RAXIS_LIVE_MONGODB_URL` overrides.                                                  |
+| `mongodb-proxy-collection-allowlists`        | `mongo:7`                       | 🟢 active   | Auth (SCRAM-SHA-256) against `admin`. Seeds `live_e2e_cap.users` via `docker exec mongosh` and drops on cleanup. |
+| `redis-proxy`                                | `redis:7-alpine`                | 🟢 active   | `--requirepass`-protected; the slice drives a real RESP `AUTH` + round-trip.                                     |
+| `smtp-proxy`                                 | `mailserver/docker-mailserver`  | 🟢 active   | Postfix + Dovecot SASL. The slice verifies delivery by `docker exec`-ing into the container's Maildir.           |
+| `mysql-proxy`                                | `mysql:8.0.36`                  | 🟢 active   | Real upstream by default against the compose container; `RAXIS_LIVE_MYSQL_URL` overrides for non-CI debugging.   |
+| `mssql-proxy`                                | SQL Server 2022                 | 🟢 active   | Real upstream by default against the compose container; `RAXIS_LIVE_MSSQL_URL` overrides for non-CI debugging.   |
+| `aws-proxy`, `gcp-proxy`, `azure-proxy`      | n/a                             | 🟢 active   | These proxies SYNTHESISE IMDS responses or proxy to public internet endpoints — there is no mock to replace.     |
+| `http-proxy*`, `gateway-anthropic`           | real HTTPS endpoints            | 🟢 active   | Drive real `https://` upstreams; nothing to un-mock.                                                             |
+| `egress-enforcement`, `session-spawn`        | n/a (kernel-internal)           | 🟢 active   | Exercise the kernel's own state machines, not external services.                                                 |
 
 ---
 
@@ -66,8 +66,8 @@ with operator-side databases):
 | `mongodb`          | 27017          | `127.0.0.1:27399`   |
 | `redis`            | 6379           | `127.0.0.1:63799`   |
 | `smtp`             | 25             | `127.0.0.1:25199`   |
-| `mysql` (opt-in)   | 3306           | `127.0.0.1:33099`   |
-| `mssql` (opt-in)   | 1433           | `127.0.0.1:14399`   |
+| `mysql`            | 3306           | `127.0.0.1:33099`   |
+| `mssql`            | 1433           | `127.0.0.1:14399`   |
 
 ---
 
@@ -91,25 +91,45 @@ Each slice prints `OK — all selected slices passed` on success
 and exits non-zero with an actionable error (which compose
 service to start, which env var to set) on failure.
 
-### Opt-in real-upstream mode for mysql / mssql
+### MySQL + MSSQL — active by default
 
-Both slices default to a hermetic mode that asserts the
-`upstream_connects_failed ≥ 1` invariant against an unreachable
-upstream. To exercise the real-upstream round-trip against the
-compose containers:
+Both slices now exercise the real upstream forwarding path by
+default against the compose stack containers. Bring the stack up
+first and the slices Just Work; no env-var dance required:
 
 ```bash
 docker compose -f live-e2e/docker-compose.e2e.yml \
     up -d mysql mssql --wait
 
-RAXIS_LIVE_MYSQL_URL='mysql://raxis_test:raxis_test_pass@127.0.0.1:33099/raxis_e2e' \
-RAXIS_LIVE_MSSQL_URL='mssql://sa:Raxis_e2e_pass!@127.0.0.1:14399/master?encrypt=false' \
-RAXIS_LIVE_E2E=1 \
-    cargo run -p raxis-live-e2e -- mysql-proxy mssql-proxy
+RAXIS_LIVE_E2E=1 cargo run -p raxis-live-e2e -- mysql-proxy
+RAXIS_LIVE_E2E=1 cargo run -p raxis-live-e2e -- mssql-proxy
 ```
 
-(See the slices' module docstrings for the exact URL shape each
-proxy understands.)
+The slices TCP-preflight their respective host ports
+(`127.0.0.1:33099` for MySQL, `127.0.0.1:14399` for MSSQL) and
+fail fast with an actionable error message if the container
+isn't reachable.
+
+If you need to point at a non-compose upstream (e.g. an
+Aurora / Azure SQL endpoint for non-CI debugging):
+
+```bash
+RAXIS_LIVE_MYSQL_URL='mysql://user:pass@host:3306/db' \
+    cargo run -p raxis-live-e2e -- mysql-proxy
+RAXIS_LIVE_MSSQL_URL='mssql://user:pass@host:1433/db?encrypt=false' \
+    cargo run -p raxis-live-e2e -- mssql-proxy
+```
+
+Note: the proxy is plaintext-only on the upstream side (V2.1
+MVP); `?encrypt=true` on the MSSQL URL fails fast at
+`UpstreamSession::connect`. TLS upstream lands in V3 alongside
+Windows / Entra ID auth.
+
+The slices no longer support a hermetic / no-container mode —
+the upstream-failure audit path is covered by the unit tests in
+`crates/credential-proxy-{mysql,mssql}/src/upstream.rs::tests`
+(MySQL fake-server fixtures + MSSQL `forward_sql_batch` rewrite
+fuzzers).
 
 ---
 
