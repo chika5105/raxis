@@ -13,6 +13,7 @@
 pub mod audit_chain;
 pub mod concurrency;
 pub mod injection;
+pub mod multi_initiative;
 pub mod path_allowlist;
 pub mod plan;
 pub mod plan_realistic;
