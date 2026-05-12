@@ -506,26 +506,33 @@ impl DispatchLoop {
     ) -> Result<DispatchOutcome, DispatchError> {
         use crate::streaming::StreamEvent;
 
-        let mut messages: Vec<Message> = vec![Message {
-            role:    "user".to_owned(),
-            content: vec![ContentBlock::Text { text: seed_user_text }],
-        }];
-        let tool_specs = self.registry.to_specs();
+        // Mirrors the hoist in `run()` (see commit
+        // "planner-core/dispatch: hoist MessageRequest out of run()
+        // loop to remove per-turn clones"). The streaming path
+        // carried the same per-turn allocation shape — `messages`,
+        // `tool_specs`, `system_prompt`, and `model` were cloned
+        // into a fresh `MessageRequest` every iteration. Building
+        // the request once and mutating `req.messages` between turns
+        // removes those clones; `req.stream = true` is set once at
+        // construction so the AnthropicClient SSE path receives the
+        // flag without per-turn re-derivation.
+        let mut req = MessageRequest {
+            model:       self.config.model.clone(),
+            max_tokens:  self.config.max_tokens,
+            system:      Some(system_prompt),
+            messages:    vec![Message {
+                role:    "user".to_owned(),
+                content: vec![ContentBlock::Text { text: seed_user_text }],
+            }],
+            tools:       self.registry.to_specs(),
+            temperature: self.config.temperature,
+            stream:      true,
+        };
 
         let mut cum_in:  u64 = 0;
         let mut cum_out: u64 = 0;
 
         for turn in 0..self.config.max_turns {
-            let req = MessageRequest {
-                model:       self.config.model.clone(),
-                max_tokens:  self.config.max_tokens,
-                system:      Some(system_prompt.clone()),
-                messages:    messages.clone(),
-                tools:       tool_specs.clone(),
-                temperature: self.config.temperature,
-                stream:      true,
-            };
-
             // ── Stream consumption with mid-stream budget check ──
             let mut rx = self.model.create_message_stream(&req).await?;
             let mut resp: Option<MessageResponse> = None;
@@ -624,7 +631,7 @@ impl DispatchLoop {
             }
 
             // ── From here, identical to `run()` ───────────────────
-            messages.push(Message {
+            req.messages.push(Message {
                 role:    "assistant".to_owned(),
                 content: resp.content.clone(),
             });
@@ -686,7 +693,7 @@ impl DispatchLoop {
                     is_error:    output.is_error,
                 });
             }
-            messages.push(Message {
+            req.messages.push(Message {
                 role:    "user".to_owned(),
                 content: next_user_blocks,
             });
