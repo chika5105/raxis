@@ -78,3 +78,29 @@ services:
       retries: 10
     tmpfs:
       - /data/db
+
+  redis:
+    image: redis:7-alpine
+    container_name: raxis-e2e-redis
+    # `--requirepass` matches `REDIS_REQUIREPASS` in
+    # `slice_redis_proxy.rs`. `--save ""` and `--appendonly no`
+    # disable both persistence backends so the container is a
+    # pure-RAM instance — every `down -v` is a clean slate (matching
+    # the postgres/mongo tmpfs convention).
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "raxis_test_pass"
+      - "--appendonly"
+      - "no"
+      - "--save"
+      - ""
+    ports:
+      - "127.0.0.1:63799:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "raxis_test_pass", "PING"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /data

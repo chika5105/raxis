@@ -1,27 +1,51 @@
 # live-e2e/docker-compose.e2e.yml
 # Dedicated infrastructure for the full E2E lifecycle test
-# (`raxis/kernel/tests/full_e2e_session_lifecycle.rs`).
+# (`raxis/kernel/tests/full_e2e_session_lifecycle.rs`) AND for every
+# `raxis-live-e2e` slice that needs a real upstream service.
 #
 # Per `specs/v2/e2e-live-test-gap.md` §2.1.
 #
-# Ports are deliberately offset from defaults to avoid colliding with
-# any operator-side databases the developer may already be running on
-# 5432 / 27017. The kernel + its credential proxies bind to
-# `127.0.0.1:0` (loopback only) and never reach these containers
-# except via the proxies, so all traffic stays on localhost.
+# # Services
 #
-# Storage: tmpfs only — every `up` is a clean slate. The test asserts
-# on its own ephemeral schema; we do not persist between runs.
+#   * `postgres` (5432 → 54399) — kernel-side credential proxies and
+#     the `postgres-proxy` slice's real-upstream mode.
+#   * `mongodb` (27017 → 27399) — same role for the mongo proxy.
+#   * `redis`   (6379 → 63799) — `redis-proxy` slice; replaces the
+#     historical in-process RESP fixture so we exercise real TTL
+#     semantics, real RESP3 NOPROTO downgrade against a real server,
+#     and real upstream AUTH success/failure rather than only the
+#     handshake bytes a fixture chooses to emit.
 #
-# Health checks must report "healthy" before the kernel test fires. The
-# `--wait` flag on `docker compose up` blocks until every healthcheck
-# transitions to healthy or times out.
+# Ports are deliberately offset from defaults to avoid colliding
+# with any operator-side databases the developer may already be
+# running on the canonical ports. The kernel + its credential
+# proxies bind to `127.0.0.1:0` (loopback only) and never reach
+# these containers except via the proxies, so all traffic stays on
+# localhost.
+#
+# Storage: tmpfs only — every `up` is a clean slate. The test
+# asserts on its own ephemeral schema; we do not persist between
+# runs.
+#
+# Health checks must report "healthy" before the kernel test fires.
+# The `--wait` flag on `docker compose up` blocks until every
+# healthcheck transitions to healthy or times out.
 #
 # Run:
 #   docker compose -f live-e2e/docker-compose.e2e.yml up -d --wait
 #   RAXIS_LIVE_E2E=1 cargo test -p raxis-kernel \
 #       --test full_e2e_session_lifecycle -- --nocapture
 #   docker compose -f live-e2e/docker-compose.e2e.yml down -v
+#
+# # Image-version policy
+#
+# Every image is pinned to a SPECIFIC minor tag (no `:latest`). A
+# silent base-image bump under the test suite would re-introduce
+# the same "mocked external service papered over a regression"
+# problem this compose file exists to solve — a Redis 8.x semantic
+# change (e.g. RESP3 default) would shift behaviour without any
+# code change in this repo. Bumping a tag here is a deliberate,
+# reviewable action.
 
 services:
   postgres:
@@ -60,3 +84,29 @@ services:
       retries: 10
     tmpfs:
       - /data/db
+
+  redis:
+    image: redis:7-alpine
+    container_name: raxis-e2e-redis
+    # `--requirepass` matches `REDIS_REQUIREPASS` in
+    # `slice_redis_proxy.rs`. `--save ""` and `--appendonly no`
+    # disable both persistence backends so the container is a
+    # pure-RAM instance — every `down -v` is a clean slate (matching
+    # the postgres/mongo tmpfs convention).
+    command:
+      - "redis-server"
+      - "--requirepass"
+      - "raxis_test_pass"
+      - "--appendonly"
+      - "no"
+      - "--save"
+      - ""
+    ports:
+      - "127.0.0.1:63799:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "raxis_test_pass", "PING"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    tmpfs:
+      - /data
