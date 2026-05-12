@@ -331,11 +331,21 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn unix_now() -> i64 {
+    // Mirrors `raxis_types::clock::unix_now_secs`: a wall clock set
+    // to before 1970-01-01 (e.g. a host that boots without an RTC
+    // battery and has not yet completed NTP sync) yields `Err` from
+    // `duration_since(UNIX_EPOCH)`. Saturate to 0 rather than panic
+    // — the audit append is on the hot path of every kernel handler
+    // and panicking here would crash the kernel mid-write, leaving
+    // the chain pointer ahead of the file. The `emitted_at` field
+    // is best-effort wall time and is NOT used for any ordering
+    // invariant (`seq` is the canonical monotonic key — see
+    // `crates/types/src/clock.rs`).
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before Unix epoch")
-        .as_secs() as i64
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
