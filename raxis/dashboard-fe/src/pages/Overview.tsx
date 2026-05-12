@@ -58,31 +58,37 @@ export function OverviewPage() {
         </div>
       </header>
 
-      {/* KPI tiles */}
+      {/* KPI tiles. Each tile is a navigation target — the
+          number is the operator's most common drill-in question
+          ("which active initiatives?", "what's escalated?"). */}
       <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <Tile
           title="Kernel"
           value={h.status}
           tone={h.status === "ok" ? "ok" : h.status === "degraded" ? "warn" : "bad"}
           sub={`Booted ${fmtRelative(h.kernel_booted_at)}`}
+          to="/health"
         />
         <Tile
           title="Policy epoch"
           value={`#${h.policy_epoch}`}
           tone="info"
           sub="Active bundle"
+          to="/policy"
         />
         <Tile
           title="Active initiatives"
           value={String(h.active_initiatives)}
           tone="info"
           sub="In flight"
+          to="/initiatives?state=Active"
         />
         <Tile
           title="Pending escalations"
           value={String(h.pending_escalations)}
           tone={h.pending_escalations > 0 ? "warn" : "muted"}
           sub="Awaiting operator"
+          to="/escalations"
         />
       </section>
 
@@ -332,9 +338,13 @@ interface TileProps {
   value: string;
   tone: "ok" | "warn" | "bad" | "info" | "muted";
   sub: string;
+  /// Optional drill-in target. When set, the tile is a real
+  /// link (full-tile click + keyboard focus) — the entire card
+  /// looks clickable and now actually is.
+  to?: string;
 }
 
-function Tile({ title, value, tone, sub }: TileProps) {
+function Tile({ title, value, tone, sub, to }: TileProps) {
   const toneClass =
     tone === "ok"
       ? "text-ok"
@@ -346,13 +356,25 @@ function Tile({ title, value, tone, sub }: TileProps) {
       ? "text-info"
       : "text-ink-muted";
 
-  return (
-    <div className="card p-3">
+  const inner = (
+    <>
       <div className="text-xs uppercase tracking-wider text-ink-subtle">{title}</div>
       <div className={`mt-1 text-2xl font-semibold ${toneClass} tabular`}>{value}</div>
       <div className="text-[11px] text-ink-subtle mt-1">{sub}</div>
-    </div>
+    </>
   );
+
+  if (to) {
+    return (
+      <Link
+        to={to}
+        className="card p-3 block hover:border-accent/60 hover:bg-panel-high transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+      >
+        {inner}
+      </Link>
+    );
+  }
+  return <div className="card p-3">{inner}</div>;
 }
 
 interface ProgressProps {

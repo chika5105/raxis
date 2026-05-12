@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -22,7 +22,19 @@ const STATE_OPTIONS = [
 
 export function InitiativesPage() {
   const navigate = useNavigate();
-  const [stateFilter, setStateFilter] = useState<string>("All");
+  // The Overview KPI tile links here with `?state=Active`,
+  // and operators expect to share / bookmark filtered URLs.
+  // Mirror the filter into the URL so back/forward, copy-link,
+  // and refresh all preserve the chosen state.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlState = searchParams.get("state") ?? "All";
+  const stateFilter = STATE_OPTIONS.includes(urlState) ? urlState : "All";
+  const setStateFilter = (next: string) => {
+    const sp = new URLSearchParams(searchParams);
+    if (next === "All") sp.delete("state");
+    else sp.set("state", next);
+    setSearchParams(sp, { replace: true });
+  };
   const [search, setSearch] = useState("");
 
   const q = useQuery({
