@@ -81,13 +81,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use raxis_audit_tools::AuditSink;
+use raxis_credential_proxy_cloud_shared::{CloudHttpClient, TokenCache};
 use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
+pub mod forwarding;
 pub mod restriction;
 
+use crate::forwarding::GcpCacheValue;
+
+pub use forwarding::{ForwardOutcome, ForwardingConfig, GCP_JSON_CONTENT_TYPE};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------
@@ -144,6 +150,14 @@ pub struct ProxyConfig {
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
     pub restrictions:       Restrictions,
+    /// V3 forwarding configuration. When `Some`, the
+    /// `/computeMetadata/v1/.../token` endpoint drives a real
+    /// JWT-bearer-grant exchange against the closed-allowlist
+    /// `oauth2.googleapis.com` endpoint. The non-`/token`
+    /// endpoints (`/email`, `/project-id`) keep their V2
+    /// behaviour but read identity fields from the service-
+    /// account JSON. See `specs/v3/cloud-proxy-forwarding.md`.
+    pub forwarding:         Option<ForwardingConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -338,15 +352,20 @@ fn pick_str<'a>(
 
 /// GCP metadata-server-compatible credential proxy.
 pub struct GcpProxy {
-    listener: TcpListener,
-    backend:  Arc<dyn CredentialBackend>,
-    config:   ProxyConfig,
-    stats:    Arc<ProxyStats>,
-    audit:    Arc<dyn AuditChannel>,
+    listener:    TcpListener,
+    backend:     Arc<dyn CredentialBackend>,
+    config:      ProxyConfig,
+    stats:       Arc<ProxyStats>,
+    audit:       Arc<dyn AuditChannel>,
+    audit_sink:  Option<Arc<dyn AuditSink>>,
+    http_client: Option<Arc<CloudHttpClient>>,
+    token_cache: Option<Arc<TokenCache<GcpCacheValue>>>,
 }
 
 impl GcpProxy {
-    /// Bind a listener and return an owned proxy.
+    /// Bind a listener and return an owned proxy. V2-only
+    /// constructor — see [`Self::bind_v3`] for the
+    /// V3-cloud-forwarding-aware constructor.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
         config:  ProxyConfig,
@@ -363,6 +382,37 @@ impl GcpProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
+            audit_sink:  None,
+            http_client: None,
+            token_cache: None,
+        })
+    }
+
+    /// Bind a listener with V3 forwarding plumbing. When
+    /// [`ProxyConfig::forwarding`] is `Some`, the `/token`
+    /// path drives a real JWT-bearer-grant OAuth2 exchange.
+    pub async fn bind_v3(
+        backend:     Arc<dyn CredentialBackend>,
+        config:      ProxyConfig,
+        audit:       Arc<dyn AuditChannel>,
+        audit_sink:  Arc<dyn AuditSink>,
+        http_client: Arc<CloudHttpClient>,
+        token_cache: Arc<TokenCache<GcpCacheValue>>,
+    ) -> Result<Self, ProxyError> {
+        let listener = TcpListener::bind(&config.listen_addr).await
+            .map_err(|source| ProxyError::Bind {
+                addr:   config.listen_addr.clone(),
+                source,
+            })?;
+        Ok(Self {
+            listener,
+            backend,
+            config,
+            stats: Arc::new(ProxyStats::default()),
+            audit,
+            audit_sink:  Some(audit_sink),
+            http_client: Some(http_client),
+            token_cache: Some(token_cache),
         })
     }
 
@@ -383,12 +433,18 @@ impl GcpProxy {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
                     self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
-                    let backend = Arc::clone(&self.backend);
-                    let config  = self.config.clone();
-                    let stats   = Arc::clone(&self.stats);
-                    let audit   = Arc::clone(&self.audit);
+                    let backend     = Arc::clone(&self.backend);
+                    let config      = self.config.clone();
+                    let stats       = Arc::clone(&self.stats);
+                    let audit       = Arc::clone(&self.audit);
+                    let audit_sink  = self.audit_sink.clone();
+                    let http_client = self.http_client.clone();
+                    let token_cache = self.token_cache.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = serve_one(stream, backend, config, stats, audit).await {
+                        if let Err(e) = serve_one(
+                            stream, backend, config, stats, audit,
+                            audit_sink, http_client, token_cache,
+                        ).await {
                             tracing::warn!(error = %e, "gcp proxy connection ended with error");
                         }
                     });
@@ -407,12 +463,16 @@ impl GcpProxy {
 // we never pipeline.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn serve_one(
-    mut stream: TcpStream,
-    backend:    Arc<dyn CredentialBackend>,
-    config:     ProxyConfig,
-    stats:      Arc<ProxyStats>,
-    audit:      Arc<dyn AuditChannel>,
+    mut stream:  TcpStream,
+    backend:     Arc<dyn CredentialBackend>,
+    config:      ProxyConfig,
+    stats:       Arc<ProxyStats>,
+    audit:       Arc<dyn AuditChannel>,
+    audit_sink:  Option<Arc<dyn AuditSink>>,
+    http_client: Option<Arc<CloudHttpClient>>,
+    token_cache: Option<Arc<TokenCache<GcpCacheValue>>>,
 ) -> std::io::Result<()> {
     let mut buf = Vec::with_capacity(2048);
     let mut chunk = [0u8; 1024];
@@ -467,6 +527,96 @@ async fn serve_one(
     let bare_path = path.split('?').next().unwrap_or(&path);
     let (body, content_type) = match bare_path {
         "/computeMetadata/v1/instance/service-accounts/default/token" => {
+            // V3 branch — drive real JWT-bearer-grant exchange.
+            if let (Some(fwd), Some(sink), Some(http), Some(cache)) = (
+                config.forwarding.as_ref(),
+                audit_sink.as_ref(),
+                http_client.as_ref(),
+                token_cache.as_ref(),
+            ) {
+                let resolved_bytes = match backend.resolve(
+                    &config.credential_name, config.consumer.as_ref(),
+                ) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "gcp proxy credential resolve failed");
+                        write_oauth2_error(&mut stream, 502,
+                            "invalid_client", "credential resolve failed").await?;
+                        return Ok(());
+                    }
+                };
+                let body_str = match resolved_bytes.as_utf8() {
+                    Some(s) => s.to_owned(),
+                    None    => {
+                        tracing::warn!("gcp proxy credential body is not UTF-8");
+                        write_oauth2_error(&mut stream, 502,
+                            "invalid_client", "credential body not UTF-8").await?;
+                        return Ok(());
+                    }
+                };
+                let sa = match forwarding::parse_service_account_key(&body_str) {
+                    Ok(s) => s,
+                    Err(_) => {
+                        write_oauth2_error(&mut stream, 502,
+                            "invalid_client",
+                            "service-account JSON parse failed").await?;
+                        return Ok(());
+                    }
+                };
+                let session_id = format!(
+                    "{}:{}", config.consumer.kind, config.consumer.id,
+                );
+                let outcome = forwarding::forward_or_serve_from_cache(
+                    fwd, http, cache, sink,
+                    &session_id,
+                    config.credential_name.as_str(),
+                    &sa,
+                ).await;
+                match outcome {
+                    ForwardOutcome::Ok(body) => {
+                        let body_len = body.len();
+                        let header = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: {ct}\r\n\
+                             Content-Length: {len}\r\n\
+                             Metadata-Flavor: Google\r\n\
+                             Cache-Control: no-store\r\n\
+                             Connection: close\r\n\
+                             \r\n",
+                            ct  = GCP_JSON_CONTENT_TYPE,
+                            len = body_len,
+                        );
+                        stream.write_all(header.as_bytes()).await?;
+                        stream.write_all(&body).await?;
+                        stream.flush().await?;
+                        stats.credentials_served.fetch_add(1, Ordering::Relaxed);
+                        stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+                        audit.emit(audit_event(&config, &method, &path, false));
+                    }
+                    ForwardOutcome::UpstreamEnvelope { status, body } => {
+                        let body_len = body.len();
+                        let header = format!(
+                            "HTTP/1.1 {status} {reason}\r\n\
+                             Content-Type: {ct}\r\n\
+                             Content-Length: {len}\r\n\
+                             Metadata-Flavor: Google\r\n\
+                             Cache-Control: no-store\r\n\
+                             Connection: close\r\n\
+                             \r\n",
+                            reason = oauth2_reason_phrase(status),
+                            ct     = GCP_JSON_CONTENT_TYPE,
+                            len    = body_len,
+                        );
+                        stream.write_all(header.as_bytes()).await?;
+                        stream.write_all(&body).await?;
+                        stream.flush().await?;
+                        stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+                    }
+                }
+                return Ok(());
+            }
+
+            // V2 emulator path (forwarding disabled).
             let resolved = match resolve_key(&backend, &config) {
                 Ok(k) => k,
                 Err(()) => {
@@ -562,6 +712,49 @@ async fn write_status(
         "HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     );
     stream.write_all(line.as_bytes()).await?;
+    stream.flush().await
+}
+
+/// Map an OAuth2 / GCP-flavored HTTP status to its reason
+/// phrase. Used by the V3 envelope passthrough path.
+fn oauth2_reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        _ if (200..300).contains(&status) => "OK",
+        _ if (400..500).contains(&status) => "Client Error",
+        _ if (500..600).contains(&status) => "Server Error",
+        _ => "Status",
+    }
+}
+
+/// Write a canonical OAuth2 RFC 6749 JSON error envelope.
+async fn write_oauth2_error(
+    stream:      &mut TcpStream,
+    status:      u16,
+    error:       &str,
+    description: &str,
+) -> std::io::Result<()> {
+    let body = forwarding::synthesise_oauth2_error_envelope(error, description);
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\n\
+         Content-Type: {ct}\r\n\
+         Content-Length: {len}\r\n\
+         Metadata-Flavor: Google\r\n\
+         Connection: close\r\n\
+         \r\n",
+        reason = oauth2_reason_phrase(status),
+        ct     = GCP_JSON_CONTENT_TYPE,
+        len    = body.len(),
+    );
+    stream.write_all(header.as_bytes()).await?;
+    stream.write_all(&body).await?;
     stream.flush().await
 }
 

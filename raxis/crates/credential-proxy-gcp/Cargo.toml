@@ -9,7 +9,9 @@ description = "GCP metadata-server-compatible credential proxy. Emits /computeMe
 path = "src/lib.rs"
 
 [dependencies]
-raxis-credentials = { workspace = true }
+raxis-credentials                     = { workspace = true }
+raxis-credential-proxy-cloud-shared   = { workspace = true }
+raxis-audit-tools                     = { workspace = true }
 
 tokio     = { workspace = true }
 httparse  = "1"
@@ -20,6 +22,8 @@ sha2      = { workspace = true }
 hex       = { workspace = true }
 thiserror = { workspace = true }
 tracing   = "0.1"
+rsa       = { workspace = true, features = ["sha2"] }
+base64    = { workspace = true }
 
 [dev-dependencies]
 tokio    = { workspace = true, features = ["test-util", "macros"] }

@@ -3184,10 +3184,14 @@ dependencies = [
 name = "raxis-credential-proxy-gcp"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytes",
  "hex",
  "httparse",
+ "raxis-audit-tools",
+ "raxis-credential-proxy-cloud-shared",
  "raxis-credentials",
+ "rsa",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4144,6 +4148,7 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha2 0.10.9",
  "signature",
  "spki",
  "subtle",
