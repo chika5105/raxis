@@ -94,11 +94,11 @@ copy_tree() {
 }
 
 # ── Commit 0: initial scaffolding (README, .gitignore). Establishes
-#   the baseline that subsequent commits build on. (No LICENSE /
-#   CONTRIBUTING / governance files are committed into the seeded
-#   repo: the parent raxis repository's policy forbids generating
-#   those even in test fixtures, and a "Recent changes" section in
-#   the seeded README plays the role CONTRIBUTING played previously.)
+#   the baseline that subsequent commits build on. The seeded repo
+#   deliberately omits governance / policy files (per the parent
+#   raxis repository's policy, which applies to fixture trees too);
+#   a "Recent changes" section in the seeded README documents
+#   project conventions instead.
 _set_date_for_tick 0
 cp "$fixture_root/README.template.md" README.md
 cp "$fixture_root/.gitignore" .
