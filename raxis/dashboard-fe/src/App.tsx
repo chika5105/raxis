@@ -9,6 +9,7 @@ import { EscalationsPage } from "@/pages/Escalations";
 import { GitPage } from "@/pages/Git";
 import { HealthPage } from "@/pages/Health";
 import { InboxPage } from "@/pages/Inbox";
+import { InitiativeDagPage } from "@/pages/InitiativeDag";
 import { InitiativeDetailPage } from "@/pages/InitiativeDetail";
 import { InitiativesPage } from "@/pages/Initiatives";
 import { LoginPage } from "@/pages/Login";
@@ -56,6 +57,7 @@ export function App() {
                     <Route path="/notifications" element={<NotificationsPage />} />
                     <Route path="/initiatives" element={<InitiativesPage />} />
                     <Route path="/initiatives/:id" element={<InitiativeDetailPage />} />
+                    <Route path="/initiatives/:id/dag" element={<InitiativeDagPage />} />
                     <Route path="/tasks/:id" element={<TaskDetailPage />} />
                     <Route path="/sessions" element={<SessionsPage />} />
                     <Route path="/sessions/:id" element={<SessionDetailPage />} />
