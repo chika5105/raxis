@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 
@@ -20,6 +21,22 @@ export function SessionDetailPage() {
     enabled: id.length > 0,
   });
 
+  // Cross-correlate worktrees to surface a "View worktree" deep
+  // link when the kernel has registered a session-owned clone.
+  // Refresh on the same cadence as the worktree list page so a
+  // late-attached clone shows up without a manual reload.
+  const worktrees = useQuery({
+    queryKey: ["worktrees", { for: id }],
+    queryFn: ({ signal }) => dashboardApi.git.list(signal),
+    refetchInterval: 15_000,
+    enabled: id.length > 0,
+  });
+
+  const ownedWorktree = useMemo(() => {
+    if (!worktrees.data) return null;
+    return worktrees.data.find((w) => w.session_id === id) ?? null;
+  }, [worktrees.data, id]);
+
   if (q.isPending) return <PageSpinner />;
   if (q.error) return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
   const s = q.data;
@@ -29,7 +46,9 @@ export function SessionDetailPage() {
       <header className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm text-ink-subtle">
-            <Link to="/sessions" className="hover:text-accent">Sessions</Link>
+            <Link to="/sessions" className="hover:text-accent">
+              Sessions
+            </Link>
             <span>/</span>
             <Mono className="text-ink-muted">{s.session_id}</Mono>
             <CopyButton value={s.session_id} />
@@ -38,7 +57,13 @@ export function SessionDetailPage() {
             {s.role}
             {s.task_id && (
               <span className="text-ink-muted text-base ml-2">
-                · task <Link to={`/tasks/${s.task_id}`} className="hover:text-accent font-mono">{s.task_id}</Link>
+                · task{" "}
+                <Link
+                  to={`/tasks/${s.task_id}`}
+                  className="hover:text-accent font-mono"
+                >
+                  {s.task_id}
+                </Link>
               </span>
             )}
           </h1>
@@ -51,15 +76,38 @@ export function SessionDetailPage() {
         <div className="card p-3 text-xs space-y-1.5 min-w-[260px]">
           <Row label="Provider" value={s.provider ?? "—"} mono />
           <Row label="Model" value={s.model ?? "—"} mono />
-          <Row label="Initiative" value={
-            s.initiative_id ? (
-              <Link to={`/initiatives/${s.initiative_id}`} className="text-accent hover:underline font-mono">
-                {s.initiative_id}
-              </Link>
-            ) : "—"
-          } />
+          <Row
+            label="Initiative"
+            value={
+              s.initiative_id ? (
+                <Link
+                  to={`/initiatives/${s.initiative_id}`}
+                  className="text-accent hover:underline font-mono"
+                >
+                  {s.initiative_id}
+                </Link>
+              ) : (
+                "—"
+              )
+            }
+          />
           <Row label="Input tokens" value={fmtTokens(s.input_tokens)} mono />
           <Row label="Output tokens" value={fmtTokens(s.output_tokens)} mono />
+          <Row
+            label="Worktree"
+            value={
+              ownedWorktree ? (
+                <Link
+                  to={`/git/${encodeURIComponent(ownedWorktree.name)}`}
+                  className="text-accent hover:underline"
+                >
+                  {ownedWorktree.label} ↗
+                </Link>
+              ) : (
+                <span className="text-ink-subtle">—</span>
+              )
+            }
+          />
         </div>
       </header>
 
@@ -68,13 +116,23 @@ export function SessionDetailPage() {
   );
 }
 
-function Row({ label, value, mono }: { label: string; value: React.ReactNode; mono?: boolean }) {
+function Row({
+  label,
+  value,
+  mono,
+}: {
+  label: string;
+  value: React.ReactNode;
+  mono?: boolean;
+}) {
   return (
     <div className="flex items-start gap-3 text-xs">
       <span className="w-24 text-ink-subtle uppercase tracking-wider text-[10px] mt-0.5 shrink-0">
         {label}
       </span>
-      <span className={`flex-1 min-w-0 ${mono ? "font-mono text-ink-muted" : "text-ink"}`}>
+      <span
+        className={`flex-1 min-w-0 ${mono ? "font-mono text-ink-muted" : "text-ink"}`}
+      >
         {value}
       </span>
     </div>
