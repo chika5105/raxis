@@ -233,20 +233,27 @@ pub struct KernelDashboardData {
 
 impl KernelDashboardData {
     /// Build a new kernel-wired data layer.
+    ///
+    /// Returns an error when the streams directory cannot be
+    /// created (e.g. read-only `data_dir`, a non-directory file
+    /// already at `<data_dir>/streams`, ENOSPC). The previous
+    /// implementation panicked here via `expect`, which would
+    /// take the kernel down at dashboard-bind time on any of
+    /// these cases — the caller now decides whether to disable
+    /// the dashboard or surface the IO error.
     pub fn new(
         store: Arc<Store>,
         policy: Arc<ArcSwap<PolicyBundle>>,
         data_dir: PathBuf,
         policy_path: PathBuf,
         booted_at: u64,
-    ) -> Self {
+    ) -> std::io::Result<Self> {
         let audit_dir = data_dir.join("audit");
         let stream_capture = SessionStreamCapture::new(
             &data_dir,
             CaptureConfig::default(),
-        )
-        .expect("create streams dir");
-        Self {
+        )?;
+        Ok(Self {
             policy,
             data_dir,
             policy_path,
@@ -255,7 +262,7 @@ impl KernelDashboardData {
             store,
             stream_capture,
             policy_advancer: None,
-        }
+        })
     }
 
     /// Same as [`Self::new`] but with a caller-supplied capture
@@ -1201,6 +1208,13 @@ pub fn load_dashboard_config(policy_path: &Path) -> Result<Option<DashboardConfi
 ///
 /// Caller is responsible for awaiting `handle.shutdown()`
 /// during the orderly exit path.
+///
+/// Returns an `Err(String)` for both the streams-directory
+/// IO failure surfaced by `KernelDashboardData::new` AND any
+/// downstream `DashboardServer::bind` failure — the caller
+/// chooses whether to disable the dashboard or take the
+/// kernel down. The previous version panicked on the streams-
+/// dir failure and only surfaced bind errors.
 pub async fn start_dashboard(
     cfg: DashboardConfig,
     store: Arc<Store>,
@@ -1209,13 +1223,16 @@ pub async fn start_dashboard(
     policy_path: PathBuf,
     booted_at: u64,
 ) -> Result<ServerHandle, String> {
-    let data = Arc::new(KernelDashboardData::new(
-        store,
-        policy,
-        data_dir,
-        policy_path,
-        booted_at,
-    ));
+    let data = Arc::new(
+        KernelDashboardData::new(
+            store,
+            policy,
+            data_dir,
+            policy_path,
+            booted_at,
+        )
+        .map_err(|e| format!("dashboard streams dir init failed: {e}"))?,
+    );
     let server = DashboardServer::bind(cfg, data)
         .await
         .map_err(|e| format!("dashboard bind failed: {e}"))?;

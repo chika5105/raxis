@@ -115,7 +115,8 @@ async fn list_initiatives_returns_seeded_rows_with_real_store() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
-    );
+    )
+    .expect("KernelDashboardData::new");
 
     let entries = data.list_initiatives(50, None).expect("list");
     let ids: Vec<&str> = entries.iter().map(|e| e.initiative_id.as_str()).collect();
@@ -157,7 +158,8 @@ async fn get_initiative_includes_tasks_and_dag_edges() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
-    );
+    )
+    .expect("KernelDashboardData::new");
 
     let view = data.get_initiative("init-A").expect("get_initiative");
     assert_eq!(view.summary.initiative_id, "init-A");
@@ -184,7 +186,8 @@ async fn health_snapshot_reports_ok_when_chain_and_store_are_clean() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
-    );
+    )
+    .expect("KernelDashboardData::new");
     let h = data.health();
     assert_eq!(h.status, "ok", "checks should all pass against a fresh dir; got {:#?}", h);
     assert_eq!(h.policy_epoch, 0); // for_tests_with_operators starts at epoch 0
@@ -203,7 +206,8 @@ async fn lookup_operator_roles_maps_permitted_ops_to_dashboard_roles() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
-    );
+    )
+    .expect("KernelDashboardData::new");
 
     let fingerprint = {
         use sha2::Digest;
@@ -229,7 +233,8 @@ async fn audit_list_returns_genesis_record_from_real_chain() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
-    );
+    )
+    .expect("KernelDashboardData::new");
 
     let page = data.list_audit(None, 100, None).expect("list_audit");
     assert!(!page.is_empty(), "genesis record should appear");
@@ -402,7 +407,8 @@ async fn worktree_endpoints_surface_real_git_state() {
         tmp.path().to_path_buf(),
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
-    );
+    )
+    .expect("KernelDashboardData::new");
 
     // 1) Listing surfaces our root.
     let listed = data.list_worktrees().expect("list_worktrees");
