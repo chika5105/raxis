@@ -112,7 +112,7 @@ access and no IPC message type that routes to a provider inference
 endpoint; the only inference path is `InferenceRequest → kernel →
 gateway`. Admission cost (`estimated_cost`) is kernel-computed from
 `budget::compute_admission_cost` using VCS-derived inputs and policy —
-no planner-supplied field reaches `consume_budget`.
+no planner-supplied field reaches `reserve_budget_in_tx`.
 
 **Justification.** Two failure modes are blocked by one invariant:
 (a) a planner with provider credentials could call the model directly

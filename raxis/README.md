@@ -540,7 +540,7 @@ Full invariant specifications (rationale, adversarial assertions, test cross-ref
 | ID | Invariant |
 |---|---|
 | INV-01 | Planner cannot perform any authorized action without a valid kernel-issued session token |
-| INV-02A | Planner has no provider credential access; all inference goes `InferenceRequest → kernel → gateway`; admission cost is kernel-computed, no planner-supplied field reaches `consume_budget` |
+| INV-02A | Planner has no provider credential access; all inference goes `InferenceRequest → kernel → gateway`; admission cost is kernel-computed, no planner-supplied field reaches `reserve_budget_in_tx` |
 | INV-02B | Planner has no direct network egress; all fetches go `FetchRequest → kernel → gateway`; kernel logs every fetch before content is returned |
 | INV-03 | A witness bound to commit SHA `A` cannot satisfy a gate check for commit SHA `B` |
 | INV-04 | Any modification to the audit log is detectable by hash chain verification |
