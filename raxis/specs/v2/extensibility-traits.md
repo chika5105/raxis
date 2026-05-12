@@ -1510,7 +1510,7 @@ This is correct for the SE reference deployment. It is wrong for:
 
 What is unchanged across these scenarios:
 
-- The kernel computes admission cost (`crates/policy::compute_admission_cost`) and consumes budget (`kernel/src/scheduler/budget.rs::consume_budget`) **before** the request leaves the kernel.
+- The kernel computes admission cost (`crates/policy::compute_admission_cost`) and reserves budget (`kernel/src/scheduler/budget.rs::reserve_budget_in_tx`) **before** the request leaves the kernel.
 - The planner has no provider credentials and no DNS exit (`INV-02A`, `INV-02B`).
 - The audit chain records `InferenceRequested` and `InferenceCompleted` with the resolved provider, model, and observed token usage.
 

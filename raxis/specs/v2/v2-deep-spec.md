@@ -2041,8 +2041,11 @@ and sets it on every task row inserted. At `ActivateSubTask → create_session`,
 reads `task.lane_id` from the task row and sets `sessions.lane_id` for the new session.
 
 **Shared enforcement:** Every `InferenceRequest` and intent from every session in the
-initiative calls `consume_budget(lane_id, estimated_cost)`. The existing `check_budget`
-query is:
+initiative goes through `scheduler::budget::reserve_budget_in_tx(tx, lane_id, task_id,
+estimated_cost, policy)`, the single transactional helper that folds the budget check
+and the `lane_budget_reservations` insert into one `BEGIN`/`COMMIT` (see `kernel-store.md`
+§2.5.1.1 Pattern A — the historical standalone `check_budget`/`consume_budget` wrappers
+have been removed). The aggregate query inside that helper is:
 ```sql
 SELECT COALESCE(SUM(reserved_cost), 0) FROM lane_budget_reservations WHERE lane_id = ?
 ```
