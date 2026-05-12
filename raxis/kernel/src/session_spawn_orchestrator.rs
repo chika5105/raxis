@@ -890,19 +890,26 @@ async fn spawn_orchestrator_for_initiative(
     let mut workspace_mounts = vec![orch_mount];
     workspace_mounts.extend(extra_workspace_mounts);
 
-    let req = SpawnRequest {
-        session_id:        session_id.to_owned(),
-        task_id:           None, // orchestrator: no `[[tasks]]` row
-        initiative_id:     initiative_id.to_owned(),
-        image:             verified_image,
+    // ── Step 4: delegate via the bounded-retry helper. ────────────
+    //
+    // V2 `elastic-vm-scaling.md §3.2` — every kernel-side spawn is
+    // wrapped in `spawn_with_transient_retry`. Transient failures
+    // (per `IsolationError::classify`) are retried with exponential
+    // backoff up to `policy.[elastic].transient_retry_max_attempts`;
+    // permanent failures short-circuit to `SessionVmFailedFinal`.
+    // Successful spawns still emit `SessionVmSpawned` from inside
+    // `SessionSpawnService::spawn_session` (unchanged).
+    let proto = SpawnRequestProto {
+        session_id:       session_id.to_owned(),
+        task_id:          None, // orchestrator: no `[[tasks]]` row
+        initiative_id:    initiative_id.to_owned(),
+        image:            verified_image,
         workspace_mounts,
         vm_spec,
         credentials,
-        admission_service: Box::new(PolicyAdmissionService::new(egress_allowlist)),
+        egress_allowlist,
     };
-
-    // ── Step 4: delegate. ─────────────────────────────────────────
-    Ok(service.spawn_session(req).await?)
+    Ok(spawn_with_transient_retry(&service, policy.elastic(), proto).await?)
 }
 
 /// **Drive the kernel ↔ guest IPC channel for a freshly-spawned
@@ -1510,6 +1517,359 @@ fn populate_sleep_cap_env_or_insert(
 }
 
 // ---------------------------------------------------------------------------
+// Bounded retry on transient VM spawn failure — `spawn_with_transient_retry`.
+// ---------------------------------------------------------------------------
+//
+// V2 `elastic-vm-scaling.md §3.1 / §3.2 / §3.3` — the kernel-side
+// bridge wraps every VM-spawn call in a bounded retry loop driven by
+// `policy.[elastic].transient_retry_*`. The loop:
+//
+//   * Re-builds a fresh [`SpawnRequest`] per attempt (the request is
+//     consumed by `SessionSpawnService::spawn_session`; cloning the
+//     prototype + freshly boxing a per-attempt admission service is
+//     cheaper than threading the whole 2 KiB request through the
+//     loop by `Clone`).
+//   * Classifies each [`SpawnError`] via [`classify_spawn_error`].
+//     `IsolationFailureClass::Permanent` short-circuits to
+//     `SessionVmFailedFinal` per **INV-ELASTIC-02** (no silent
+//     retry on permanent failures).
+//   * Bounds retries at `transient_retry_max_attempts` per
+//     **INV-ELASTIC-06**; exhaustion emits `SessionVmFailedFinal`.
+//   * Emits `SessionVmRespawnAttempted` for each retry with the
+//     previous attempt's `failure_class` projection (always
+//     `"Transient"` for emitted respawn events, by construction).
+//
+// The success path is unchanged: on `Ok(handle)` the loop returns
+// immediately and `SessionVmSpawned` lands inside
+// `SessionSpawnService::spawn_session` exactly as before.
+
+/// Bundle of cloneable inputs needed to construct a fresh
+/// [`SpawnRequest`] per retry attempt.
+///
+/// The fields are split out from the inline struct literal at each
+/// call site so the retry helper can re-clone and re-box the per-
+/// attempt admission service without consuming any of the upstream
+/// preparation work (image resolution, credential rehydration, KSB
+/// assembly, env stamping). All fields except `egress_allowlist` are
+/// `Clone`-derived in their owning crates; `egress_allowlist` is
+/// declared `#[derive(Clone)]` in `raxis-egress-admission`.
+struct SpawnRequestProto {
+    session_id:        String,
+    task_id:           Option<String>,
+    initiative_id:     String,
+    image:             VerifiedImage,
+    workspace_mounts:  Vec<raxis_isolation::WorkspaceMount>,
+    vm_spec:           VmSpec,
+    credentials:       Vec<raxis_plan_credentials::TaskCredentialDecl>,
+    egress_allowlist:  EgressAllowlist,
+}
+
+impl SpawnRequestProto {
+    /// Clone the prototype into a fresh [`SpawnRequest`]. Boxes a
+    /// new per-attempt [`PolicyAdmissionService`] — admission
+    /// services hold per-session listener state and are not reusable
+    /// across attempts.
+    fn build_request(&self) -> SpawnRequest {
+        SpawnRequest {
+            session_id:        self.session_id.clone(),
+            task_id:           self.task_id.clone(),
+            initiative_id:     self.initiative_id.clone(),
+            image:             self.image.clone(),
+            workspace_mounts:  self.workspace_mounts.clone(),
+            vm_spec:           self.vm_spec.clone(),
+            credentials:       self.credentials.clone(),
+            admission_service: Box::new(PolicyAdmissionService::new(
+                self.egress_allowlist.clone(),
+            )),
+        }
+    }
+}
+
+/// Project a [`SpawnError`] onto an
+/// [`raxis_isolation::IsolationFailureClass`].
+///
+/// **Mapping rationale.** Only `SpawnError::IsolationSpawn(err)`
+/// carries an [`raxis_isolation::IsolationError`] whose classification
+/// is documented in `elastic-vm-scaling.md §3.1`. Every other
+/// `SpawnError` variant is structurally pre-substrate (credential
+/// proxy bind, admission listener bind, audit-emit) or
+/// post-substrate teardown, and is treated as **Permanent** —
+/// retrying a port-bind race or an audit-fsync error would just
+/// hammer the same fault, and INV-ELASTIC-07 forbids implicit
+/// fall-through to "retry on any error".
+fn classify_spawn_error(err: &SpawnError) -> raxis_isolation::IsolationFailureClass {
+    match err {
+        SpawnError::IsolationSpawn(iso) => iso.classify(),
+        // INV-ELASTIC-07: every non-IsolationSpawn variant is
+        // explicitly Permanent. Adding a new SpawnError variant
+        // requires updating this match (the compiler enforces it).
+        SpawnError::CredentialProxy(_)
+        | SpawnError::AdmissionBind(_)
+        | SpawnError::IsolationShutdown(_)
+        | SpawnError::SessionNotActive { .. }
+        | SpawnError::Audit(_) => raxis_isolation::IsolationFailureClass::Permanent,
+    }
+}
+
+/// Compute the backoff for retry attempt `attempt` (1-indexed:
+/// `attempt = 1` is the first respawn after the original failed
+/// spawn). Exponential schedule clamped to
+/// `transient_retry_max_backoff_ms`:
+///
+/// ```text
+/// backoff = min(initial * 2^(attempt-1), max)
+/// ```
+///
+/// All arithmetic is `u64` internally to avoid overflow when an
+/// operator misconfigures the initial backoff close to `u32::MAX`;
+/// the final clamp is the policy ceiling, which the validator
+/// already constrained to `≤ ELASTIC_MAX_RETRY_BACKOFF_CEILING_MS`.
+fn compute_backoff_ms(initial_ms: u32, max_ms: u32, attempt: u32) -> u32 {
+    debug_assert!(attempt >= 1, "attempt is 1-indexed; caller invariant");
+    let shift = attempt.saturating_sub(1).min(31);
+    let scaled: u64 = (initial_ms as u64).saturating_mul(1u64 << shift);
+    let capped = scaled.min(max_ms as u64);
+    u32::try_from(capped).unwrap_or(max_ms)
+}
+
+/// Wrap [`SessionSpawnService::spawn_session`] in a bounded retry
+/// loop driven by `policy.[elastic].transient_retry_*`.
+///
+/// **Audit emission contract.**
+///
+/// * `Ok(handle)` ⇒ `SessionVmSpawned` was emitted by
+///   `spawn_session` itself (unchanged from before this commit).
+///   This helper emits nothing on the happy path.
+/// * Transient failure with `attempt < max_attempts` ⇒
+///   `SessionVmRespawnAttempted` with `attempt = N` (1-indexed,
+///   i.e. the FIRST retry is `attempt = 1`) and the previous
+///   attempt's `failure_class = "Transient"` projection.
+/// * Transient failure with `attempt >= max_attempts` ⇒
+///   `SessionVmFailedFinal` with `total_attempts = max_attempts + 1`
+///   and `failure_class = "Transient"`.
+/// * Permanent failure (any attempt) ⇒ `SessionVmFailedFinal` with
+///   `total_attempts = N` and `failure_class = "Permanent"`,
+///   short-circuiting the retry loop (INV-ELASTIC-02).
+///
+/// Audit-emit failures are logged but do **not** mask the
+/// underlying spawn error — the original `SpawnError` is propagated
+/// to the caller verbatim so operator dashboards see the substrate
+/// reason rather than an audit-disk-full surrogate.
+async fn spawn_with_transient_retry(
+    service:       &SessionSpawnService,
+    elastic:       &raxis_policy::ElasticConfig,
+    proto:         SpawnRequestProto,
+) -> Result<SpawnHandle, SpawnError> {
+    use raxis_audit_tools::AuditEventKind;
+
+    let max_attempts            = elastic.transient_retry_max_attempts;
+    let initial_backoff_ms      = elastic.transient_retry_initial_backoff_ms;
+    let max_backoff_ms          = elastic.transient_retry_max_backoff_ms;
+
+    // 1-indexed attempt counter for the audit projection. Attempt 0
+    // is the original spawn (the one that just failed when we land
+    // in the `Err` arm); attempt 1 is the FIRST retry.
+    let mut retry_attempt: u32 = 0;
+
+    loop {
+        let req = proto.build_request();
+        match service.spawn_session(req).await {
+            Ok(handle) => return Ok(handle),
+            Err(err) => {
+                let class      = classify_spawn_error(&err);
+                let prev_reason = err.to_string();
+
+                // Permanent ⇒ short-circuit. INV-ELASTIC-02.
+                if matches!(class, raxis_isolation::IsolationFailureClass::Permanent) {
+                    let total_attempts = retry_attempt.saturating_add(1);
+                    if let Err(e) = service.audit().emit(
+                        AuditEventKind::SessionVmFailedFinal {
+                            session_id:    proto.session_id.clone(),
+                            task_id:       proto.task_id.clone(),
+                            initiative_id: proto.initiative_id.clone(),
+                            total_attempts,
+                            failure_class: class.as_str().to_owned(),
+                            final_reason:  prev_reason.clone(),
+                        },
+                        Some(&proto.session_id),
+                        proto.task_id.as_deref(),
+                        Some(&proto.initiative_id),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"session_vm_failed_final_audit_emit_failed\",\
+                             \"session_id\":\"{sid}\",\"phase\":\"permanent\",\"error\":\"{err}\"}}",
+                            sid = proto.session_id,
+                            err = e,
+                        );
+                    }
+                    return Err(err);
+                }
+
+                // Transient: are we at the retry ceiling?
+                // INV-ELASTIC-06: `transient_retry_max_attempts` is
+                // a hard ceiling. `retry_attempt` already counts
+                // completed retries; we admit the next one only when
+                // `retry_attempt < max_attempts`.
+                if retry_attempt >= max_attempts {
+                    // total_attempts = original (1) + completed retries.
+                    let total_attempts = retry_attempt.saturating_add(1);
+                    if let Err(e) = service.audit().emit(
+                        AuditEventKind::SessionVmFailedFinal {
+                            session_id:    proto.session_id.clone(),
+                            task_id:       proto.task_id.clone(),
+                            initiative_id: proto.initiative_id.clone(),
+                            total_attempts,
+                            failure_class: class.as_str().to_owned(),
+                            final_reason:  prev_reason.clone(),
+                        },
+                        Some(&proto.session_id),
+                        proto.task_id.as_deref(),
+                        Some(&proto.initiative_id),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\"event\":\"session_vm_failed_final_audit_emit_failed\",\
+                             \"session_id\":\"{sid}\",\"phase\":\"exhausted\",\"error\":\"{err}\"}}",
+                            sid = proto.session_id,
+                            err = e,
+                        );
+                    }
+                    return Err(err);
+                }
+
+                // Schedule the next retry. attempt counter for the
+                // audit event is 1-indexed (the first retry is
+                // attempt = 1).
+                let next_attempt = retry_attempt.saturating_add(1);
+                let backoff_ms   = compute_backoff_ms(
+                    initial_backoff_ms,
+                    max_backoff_ms,
+                    next_attempt,
+                );
+
+                if let Err(e) = service.audit().emit(
+                    AuditEventKind::SessionVmRespawnAttempted {
+                        session_id:      proto.session_id.clone(),
+                        task_id:         proto.task_id.clone(),
+                        initiative_id:   proto.initiative_id.clone(),
+                        attempt:         next_attempt,
+                        max_attempts,
+                        failure_class:   class.as_str().to_owned(),
+                        previous_reason: prev_reason.clone(),
+                        backoff_ms,
+                    },
+                    Some(&proto.session_id),
+                    proto.task_id.as_deref(),
+                    Some(&proto.initiative_id),
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\"event\":\"session_vm_respawn_attempted_audit_emit_failed\",\
+                         \"session_id\":\"{sid}\",\"attempt\":{attempt},\"error\":\"{err}\"}}",
+                        sid = proto.session_id,
+                        attempt = next_attempt,
+                        err = e,
+                    );
+                }
+
+                eprintln!(
+                    "{{\"level\":\"info\",\"event\":\"session_vm_transient_retry\",\
+                     \"session_id\":\"{sid}\",\"attempt\":{attempt},\
+                     \"max_attempts\":{max_attempts},\"backoff_ms\":{backoff_ms},\
+                     \"failure_class\":\"{class}\",\"previous_reason\":\"{reason}\"}}",
+                    sid = proto.session_id,
+                    attempt = next_attempt,
+                    class = class.as_str(),
+                    reason = prev_reason.replace('"', "\\\""),
+                );
+
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    backoff_ms as u64,
+                ))
+                .await;
+
+                retry_attempt = next_attempt;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    //! Unit tests for [`compute_backoff_ms`] and
+    //! [`classify_spawn_error`]. The end-to-end retry semantics are
+    //! exercised by the `tests` module below against a real
+    //! `SessionSpawnService` + `FakeAuditSink`.
+
+    use super::{classify_spawn_error, compute_backoff_ms};
+    use raxis_isolation::{IsolationError, IsolationFailureClass};
+    use raxis_session_spawn::SpawnError;
+
+    #[test]
+    fn compute_backoff_grows_exponentially() {
+        // initial = 100ms, max = 4000ms.
+        assert_eq!(compute_backoff_ms(100, 4_000, 1),  100);
+        assert_eq!(compute_backoff_ms(100, 4_000, 2),  200);
+        assert_eq!(compute_backoff_ms(100, 4_000, 3),  400);
+        assert_eq!(compute_backoff_ms(100, 4_000, 4),  800);
+        assert_eq!(compute_backoff_ms(100, 4_000, 5),  1_600);
+        assert_eq!(compute_backoff_ms(100, 4_000, 6),  3_200);
+        // Clamped:
+        assert_eq!(compute_backoff_ms(100, 4_000, 7),  4_000);
+        assert_eq!(compute_backoff_ms(100, 4_000, 30), 4_000);
+    }
+
+    #[test]
+    fn compute_backoff_handles_zero_initial() {
+        // 0 initial ⇒ 0 backoff at every attempt (operator opted
+        // for tight retry; the policy validator allows this).
+        assert_eq!(compute_backoff_ms(0, 4_000, 1), 0);
+        assert_eq!(compute_backoff_ms(0, 4_000, 5), 0);
+    }
+
+    #[test]
+    fn compute_backoff_clamps_at_u32_overflow() {
+        // u32::MAX initial + a long retry chain MUST NOT panic; the
+        // clamp keeps the result inside the policy ceiling.
+        let initial = u32::MAX;
+        let max     = 5_000;
+        assert_eq!(compute_backoff_ms(initial, max, 31), max);
+        assert_eq!(compute_backoff_ms(initial, max, 64), max);
+    }
+
+    #[test]
+    fn classify_spawn_isolation_spawn_uses_isolation_classify() {
+        let transient = SpawnError::IsolationSpawn(
+            IsolationError::SpawnFailed("noisy neighbour".into()),
+        );
+        assert_eq!(
+            classify_spawn_error(&transient),
+            IsolationFailureClass::Transient,
+        );
+
+        let permanent = SpawnError::IsolationSpawn(IsolationError::SignatureMismatch);
+        assert_eq!(
+            classify_spawn_error(&permanent),
+            IsolationFailureClass::Permanent,
+        );
+    }
+
+    #[test]
+    fn classify_spawn_audit_is_permanent() {
+        // Audit failures are fail-closed; never retried.
+        let err = SpawnError::Audit("disk full".into());
+        assert_eq!(classify_spawn_error(&err), IsolationFailureClass::Permanent);
+    }
+
+    #[test]
+    fn classify_spawn_admission_bind_is_permanent() {
+        let err = SpawnError::AdmissionBind(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "EADDRINUSE",
+        ));
+        assert_eq!(classify_spawn_error(&err), IsolationFailureClass::Permanent);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Executor / Reviewer spawn — `spawn_executor_for_task` (free fn).
 // ---------------------------------------------------------------------------
 
@@ -1987,19 +2347,25 @@ pub async fn spawn_executor_for_task(
             .map(|d| d.join("guests").join(session_id).join("console.log")),
     };
 
-    let req = SpawnRequest {
-        session_id:        session_id.to_owned(),
-        task_id:           Some(task_id.to_owned()),
-        initiative_id:     initiative_id.to_owned(),
-        image:             verified_image,
+    // ── Step 4: delegate via the bounded-retry helper. ────────────
+    //
+    // V2 `elastic-vm-scaling.md §3.2` — see the matching block on
+    // the orchestrator-spawn path. Same retry semantics apply to
+    // Executor / Reviewer activations: transient
+    // `IsolationError`s are retried with exponential backoff
+    // bounded by `policy.[elastic].transient_retry_max_attempts`,
+    // permanent failures short-circuit to `SessionVmFailedFinal`.
+    let proto = SpawnRequestProto {
+        session_id:       session_id.to_owned(),
+        task_id:          Some(task_id.to_owned()),
+        initiative_id:    initiative_id.to_owned(),
+        image:            verified_image,
         workspace_mounts,
         vm_spec,
         credentials,
-        admission_service: Box::new(PolicyAdmissionService::new(egress_allowlist)),
+        egress_allowlist,
     };
-
-    // ── Step 4: delegate to `ctx.session_spawn`. ─────────────────
-    Ok(service.spawn_session(req).await?)
+    Ok(spawn_with_transient_retry(&service, policy.elastic(), proto).await?)
 }
 
 #[cfg(test)]

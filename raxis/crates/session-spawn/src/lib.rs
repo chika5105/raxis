@@ -303,6 +303,20 @@ impl SessionSpawnService {
         }
     }
 
+    /// Borrow the audit sink the service was constructed with.
+    ///
+    /// Exposed so kernel-side bridges (e.g.
+    /// `kernel::session_spawn_orchestrator::spawn_with_transient_retry`)
+    /// can emit elastic-scaling audit events
+    /// (`SessionVmRespawnAttempted`, `SessionVmFailedFinal`,
+    /// `SessionVmScaleEvent`, `SessionVmScaleDeferred`) against the
+    /// SAME sink that the service uses for `SessionVmSpawned` /
+    /// `SessionVmExited` — keeping the kernel-wide audit chain a
+    /// single ordered stream per `audit-paired-writes.md §1`.
+    pub fn audit(&self) -> &Arc<dyn AuditSink> {
+        &self.audit
+    }
+
     /// Spawn a VM and bind every per-session listener for the given
     /// request. On error, every already-bound listener is torn down
     /// before the error returns.
