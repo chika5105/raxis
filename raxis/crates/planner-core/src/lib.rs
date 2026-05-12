@@ -82,7 +82,6 @@ pub mod gemini_client;
 pub mod guest_init;
 pub mod http_fetch;
 pub mod intent;
-pub mod ksb;
 pub mod model;
 pub mod openai_client;
 pub mod provider_model;
@@ -98,8 +97,7 @@ pub use custom_tools::{
 pub use dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
 pub use driver::{
     park_on_signal, run_role_session, run_role_session_with_model, DriverError, DriverOutcome,
-    DEFAULT_PLANNER_BASE_URL, DEFAULT_PLANNER_MAX_TOKENS, DEFAULT_PLANNER_MAX_TURNS,
-    DEFAULT_WORKSPACE_PATH,
+    DEFAULT_PLANNER_MAX_TOKENS, DEFAULT_PLANNER_MAX_TURNS, DEFAULT_WORKSPACE_PATH,
 };
 pub use error::PlannerError;
 pub use intent::{
@@ -107,7 +105,7 @@ pub use intent::{
     reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError, SubmitReviewInput,
     TaskCompleteInput,
 };
-pub use ksb::{
+pub use raxis_ksb::{
     assemble_system_prompt, render_ksb, DagRow, KsbError, KsbSnapshot, KSB_DELIMITER_CLOSE,
     KSB_DELIMITER_OPEN,
 };

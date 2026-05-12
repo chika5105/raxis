@@ -17,7 +17,6 @@ use std::path::Path;
 
 use raxis_crypto::token::sha256_hex;
 use raxis_store::{Store, Table};
-use raxis_types::unix_now_secs;
 use rusqlite::OptionalExtension;
 use thiserror::Error;
 
@@ -100,36 +99,6 @@ pub struct WitnessStartupReport {
 // ---------------------------------------------------------------------------
 // write
 // ---------------------------------------------------------------------------
-
-/// Write a witness record.
-///
-/// - Verifies that `sha256(blob) == record.blob_sha256`.
-/// - Writes blob to `<witness_dir>/<blob_sha256>` (idempotent if file exists).
-/// - Inserts SQL index row into `witness_records`.
-///
-/// Returns `Ok(verifier_run_id)` on success.
-///
-/// **Standalone wrapper** that opens its own mutex acquisition for the SQL
-/// INSERT. New code paths that need to atomically commit the witness +
-/// consume the verifier token MUST use `write_blob_to_disk` followed by
-/// `insert_witness_index_in_tx` inside the same `conn.transaction()` —
-/// see `kernel-store.md` §2.5.1.1 Pattern C and INV-INIT-08 for why.
-/// Kept for callers (mostly tests) that don't need to compose with a
-/// token-consume in the same transaction.
-pub fn write(
-    record: &WitnessRecord,
-    blob: &[u8],
-    witness_dir: &Path,
-    store: &Store,
-) -> Result<String, WitnessError> {
-    write_blob_to_disk(record, blob, witness_dir)?;
-
-    let recorded_at = unix_now_secs();
-    let conn = store.lock_sync();
-    insert_witness_index_in_tx(&conn, record, recorded_at)?;
-
-    Ok(record.verifier_run_id.clone())
-}
 
 /// Write the witness blob to the content-addressed FS store.
 ///
@@ -352,10 +321,8 @@ mod tests {
     }
 
     #[test]
-    fn write_rejects_hash_mismatch() {
+    fn write_blob_to_disk_rejects_hash_mismatch() {
         let base = temp_dir();
-        let db_path = base.join("kernel.db");
-        let store = Store::open(&db_path).unwrap();
         let blob_dir = base.join("blobs");
         std::fs::create_dir_all(&blob_dir).unwrap();
 
@@ -373,7 +340,7 @@ mod tests {
             recorded_at:     0,
         };
 
-        let result = write(&rec, blob, &blob_dir, &store);
+        let result = write_blob_to_disk(&rec, blob, &blob_dir);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), WitnessError::BlobHashMismatch { .. }));
 

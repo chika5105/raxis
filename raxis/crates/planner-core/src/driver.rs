@@ -117,15 +117,6 @@ use crate::tools::{
 use crate::transport::{KernelTransport, KernelTransportConfig, TransportError};
 use crate::{BootArgs, BootEnv, Role};
 
-/// Default base URL when `RAXIS_PLANNER_BASE_URL` is unset AND no
-/// per-provider default applies.
-///
-/// Kept for backwards compatibility — production planners now derive
-/// the default from [`ProviderId::default_base_url`] based on the
-/// resolved `RAXIS_MODEL_ID`, so this constant is only used by tests
-/// that don't go through `provider_model::resolve_model_from_env_fn`.
-pub const DEFAULT_PLANNER_BASE_URL: &str = "https://api.anthropic.com";
-
 /// V2_GAPS §C5 sidecar env vars (kernel-stamped per
 /// `extensibility-traits.md §9A.5`).
 ///
@@ -909,7 +900,7 @@ fn build_role(
 
 /// Render the role-specific system prompt prefix. Per
 /// `kernel-mechanics-prompt.md`, the system prompt = NNSP +
-/// (eventually) the [`crate::ksb::render_ksb`] block. The V2.4
+/// (eventually) the [`crate::render_ksb`] block. The V2.4
 /// driver ships the NNSP-only first leg; the in-VM KSB renderer
 /// runs on the live KSB once the orchestrator-side push transport
 /// (V3, V2_GAPS §12.1) lands.

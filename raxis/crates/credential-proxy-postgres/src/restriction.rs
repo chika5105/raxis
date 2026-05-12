@@ -82,8 +82,12 @@ impl Restrictions {
     }
 
     /// Returns `true` if the verb-class restriction blocks the
-    /// operation. Kept for back-compat with V2.1 callers; new
-    /// callers should use [`Self::check`] for the full surface.
+    /// operation (i.e. `allow_only_select` is set and `op` is not a
+    /// `Select`). Internal helper used by [`Self::check`] as the
+    /// first guard before the table-allowlist walker runs; tests in
+    /// this crate exercise it directly to pin the
+    /// `allow_only_select` semantics in isolation from the SQL
+    /// walker.
     pub fn is_blocked(&self, op: &OperationKind) -> bool {
         self.allow_only_select && !matches!(op, OperationKind::Select)
     }

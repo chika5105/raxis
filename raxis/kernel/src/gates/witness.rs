@@ -2,10 +2,14 @@
 //
 // Normative reference: kernel-core.md §2.3 `src/gates/witness.rs`.
 //
-// Does not write witness records. Writes go through ipc/handlers/witness.rs
-// → witness_index::write. This module is intentionally kept dumb: it returns
-// the record as stored and never makes a pass/fail judgment. The sole
-// interpreter of result_class is gates/mod.rs step 4.
+// Does not write witness records. Writes go through
+// `ipc/handlers/witness.rs` →
+// `witness_index::{write_blob_to_disk, insert_witness_index_in_tx}`
+// (Pattern C: blob FS write + SQL index INSERT + verifier-token
+// consume composed inside one transaction). This module is
+// intentionally kept dumb: it returns the record as stored and
+// never makes a pass/fail judgment. The sole interpreter of
+// result_class is gates/mod.rs step 4.
 
 use raxis_store::Store;
 

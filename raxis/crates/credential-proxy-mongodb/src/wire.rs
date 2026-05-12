@@ -33,11 +33,12 @@
 //!     doc.
 //!   * Pull the **first BSON field name** out of that doc — that's
 //!     the command name (e.g. `"find"`, `"insert"`, `"hello"`).
-//!     This module continues to expose that helper for back-compat;
-//!     the V2 walker in `restriction::walk_command` does the deeper
-//!     parsing for `allowed_collections` / `forbidden_collections`
-//!     / `max_documents` per `specs/v2/proxy-table-allowlists.md
-//!     §6`.
+//!     The shipped helper (`first_command_name`) is still consumed
+//!     by `lib.rs` as a fallback for the
+//!     `CommandTarget::Ambiguous` audit envelope; the V2 walker in
+//!     `restriction::walk_command` does the deeper parsing for
+//!     `allowed_collections` / `forbidden_collections` /
+//!     `max_documents` per `specs/v2/proxy-table-allowlists.md §6`.
 //!
 //! BSON document layout
 //! ====================

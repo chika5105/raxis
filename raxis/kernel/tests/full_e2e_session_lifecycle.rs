@@ -533,8 +533,8 @@ fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
             // V2.5 IPC: the test wraps the plan in a signed
             // PlanBundle and goes through the sole
             // `CreateInitiative` discriminant on the wire (the V1
-            // path-based variant + the V2-named `CreateInitiativeV2`
-            // alias were collapsed in V2.5).
+            // path-based variant was deleted in V2.5; there is no
+            // longer a separate V2-named alias either).
             "CreateInitiative".to_owned(),
             "ApprovePlan".to_owned(),
             "AbortInitiative".to_owned(),

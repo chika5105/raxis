@@ -77,7 +77,10 @@ impl Restrictions {
         Self { allow_read_only: true, ..Self::default() }
     }
 
-    /// Verb-class block check; back-compat with V2.1 callers.
+    /// Verb-class block check used by [`Self::check`] as the first
+    /// guard before the BSON walker runs. Tests in this crate
+    /// exercise it directly to pin the `allow_read_only` semantics
+    /// in isolation from the walker.
     pub fn is_blocked(&self, command_name: &str) -> bool {
         self.allow_read_only && !is_read_command(command_name)
     }
@@ -974,7 +977,7 @@ mod tests {
     }
 
     #[test]
-    fn is_blocked_kept_back_compat() {
+    fn is_blocked_pins_allow_read_only_semantics() {
         let r = Restrictions::read_only();
         assert!(!r.is_blocked("find"));
         assert!( r.is_blocked("insert"));
