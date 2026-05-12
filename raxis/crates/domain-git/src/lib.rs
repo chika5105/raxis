@@ -34,9 +34,7 @@
 //!    plan.toml — see `V2_GAPS.md §12.8`) to point at the
 //!    requested commit SHA via `gix-ref::file::Transaction::commit`,
 //!    mirroring the host-side
-//!    `git update-ref <target_ref> <commit_sha>`. The legacy
-//!    [`update_main_ref`] entry point is preserved as a
-//!    `target_ref = "refs/heads/main"` shim.
+//!    `git update-ref <target_ref> <commit_sha>`.
 //!
 //! These two calls together implement the main-advancement work
 //! the spec calls "Phase 2 (idempotent domain commit)". They are
@@ -536,18 +534,6 @@ pub fn update_target_ref(
         MainMergeError::RefUpdateFailed(format!("edit_reference: {e}"))
     })?;
     Ok(())
-}
-
-/// Backwards-compatible wrapper around [`update_target_ref`]
-/// pinned to `refs/heads/main`. New code paths SHOULD use
-/// [`update_target_ref`] directly so the operator-configurable
-/// target-ref work from `V2_GAPS.md §12.8` lights up.
-pub fn update_main_ref(
-    repo:              &gix::Repository,
-    oid:               &gix::ObjectId,
-    expected_previous: Option<&gix::ObjectId>,
-) -> Result<(), MainMergeError> {
-    update_target_ref(repo, oid, expected_previous, "refs/heads/main")
 }
 
 /// Read the current SHA `target_ref` points at in the repository
