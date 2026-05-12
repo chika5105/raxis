@@ -67,6 +67,7 @@ use sha2::{Digest, Sha256};
 
 use common::kernel_harness::{acquire_test_lock, build_and_locate_kernel, KernelInstance};
 use extended_e2e_support::{
+    audit_chain::{scripts as audit_scripts, AuditChainWitness},
     concurrency::assert_overlap_or_panic,
     injection::{
         assemble_prompt as assemble_injection_prompt, payload_summary,
@@ -195,10 +196,7 @@ fn extended_session_lifecycle() {
 
     // ── Concurrency oracle — at least one overlapping pair across
     //    the three fan-out tasks.
-    assert_overlap_or_panic(
-        &chain,
-        &[TASK_FANOUT_README, TASK_FANOUT_FMT, TASK_FANOUT_MANIFEST],
-    );
+    assert_overlap_or_panic(&chain, FANOUT_GROUP);
     eprintln!("[ext-e2e] ConcurrencyOracle: fan-out group overlap confirmed");
 
     // ── Locate the injection task's session id by scanning the
@@ -257,7 +255,56 @@ fn extended_session_lifecycle() {
     let final_chain = walk_chain_or_panic(kernel.data_dir());
     assert_audit_invariants(&final_chain, &initiative_id);
     eprintln!("[ext-e2e] audit chain integrity verified ({} events)", final_chain.len());
+
+    // ── AuditChainWitness — Check A (structural integrity walk
+    //    re-derived independently of `verify_chain_full`) and
+    //    Check B (concurrent-lifecycle scenario script). The
+    //    structural walk is the load-bearing assertion: if it
+    //    fails the chain itself cannot be trusted, so no
+    //    scenario-walk verdict means anything. The concurrent-
+    //    lifecycle script asserts the chain captured the events
+    //    THIS scenario actually drove (materializer spawn, fanout
+    //    spawn ×3, fanout exit ×3, ReviewAggregationCompleted
+    //    AllPassed, IntegrationMergeCompleted).
+    //    Reviewer-disagreement and prompt-injection scripts are
+    //    wired in subsequent commits as additional sweeps over
+    //    the same chain.
+    let audit_witness = AuditChainWitness::for_data_dir(kernel.data_dir());
+    let structural_report = audit_witness.assert_structural();
+    eprintln!(
+        "[ext-e2e] AuditChainWitness::walk_structural: {} records walked, \
+         last_seq={}, {} segment(s), {} distinct event_kind(s)",
+        structural_report.records_walked,
+        structural_report.last_seq,
+        structural_report.segments.len(),
+        structural_report.kinds_seen.len(),
+    );
+    let lifecycle_script = audit_scripts::concurrent_lifecycle(
+        TASK_MATERIALIZE,
+        FANOUT_GROUP,
+        initiative_id.clone(),
+    );
+    let lifecycle_report =
+        audit_witness.assert_scenario(&final_chain, &lifecycle_script);
+    eprintln!(
+        "[ext-e2e] AuditChainWitness::walk_scenario(concurrent-lifecycle): \
+         {}/{} ordered matchers satisfied, {} absent matchers clean",
+        lifecycle_report.ordered_satisfied,
+        lifecycle_script.matchers.len(),
+        lifecycle_report.absent_clean,
+    );
 }
+
+/// Fan-out task ids the concurrency oracle and the AuditChain
+/// scenario script both reference. Pinned as a `'static` slice
+/// because `audit_chain::scripts::concurrent_lifecycle` needs
+/// `&'static [&'static str]` so the matcher closures can capture
+/// the task-id set without per-call allocation.
+const FANOUT_GROUP: &[&str] = &[
+    TASK_FANOUT_README,
+    TASK_FANOUT_FMT,
+    TASK_FANOUT_MANIFEST,
+];
 
 // ---------------------------------------------------------------------------
 // Preflight
