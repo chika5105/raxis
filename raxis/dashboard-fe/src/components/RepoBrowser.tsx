@@ -196,6 +196,23 @@ function DirectoryListing({
     );
   }
   if (data.entries.length === 0) {
+    // `depth === 0` is the synthetic root listing (rendered inline
+    // by the `isRoot` branch in `DirectoryNode`). An empty root
+    // means the worktree has no files at all — much more
+    // operator-relevant than "(empty)" tucked into a sub-folder
+    // expansion, so spell it out so the operator does not assume
+    // the tree failed to load.
+    if (depth === 0) {
+      return (
+        <div className="text-xs text-ink-muted py-2 px-1 leading-snug">
+          <p className="font-medium text-ink-subtle">No tracked files yet.</p>
+          <p className="mt-1">
+            This worktree has not produced any files. Files appear here once a
+            session writes inside it.
+          </p>
+        </div>
+      );
+    }
     return (
       <div
         className="text-[11px] text-ink-subtle italic py-1"
@@ -291,8 +308,7 @@ const LARGE_TEXT_BYTES = 256 * 1024;
 function FileView({ worktreeName, path }: FileViewProps) {
   const file = useQuery({
     queryKey: ["worktree-file", worktreeName, path],
-    queryFn: ({ signal }) =>
-      dashboardApi.git.file(worktreeName, path, signal),
+    queryFn: ({ signal }) => dashboardApi.git.file(worktreeName, path, signal),
     retry: false,
   });
 
@@ -318,9 +334,7 @@ function FileView({ worktreeName, path }: FileViewProps) {
   return (
     <div className="card p-0 overflow-hidden">
       <header className="px-3 py-2 border-b border-edge bg-panel-high flex items-center gap-2 text-xs flex-wrap">
-        <Mono className="text-ink truncate flex-1 min-w-[160px]">
-          {f.path}
-        </Mono>
+        <Mono className="text-ink truncate flex-1 min-w-[160px]">{f.path}</Mono>
         <CopyButton value={f.path} label="Copy path" />
         <span className="text-ink-subtle tabular">{fmtBytes(f.size)}</span>
         <span className="badge bg-edge/40 border-edge-strong text-ink-muted text-[10px]">
@@ -332,8 +346,8 @@ function FileView({ worktreeName, path }: FileViewProps) {
           <>
             {f.size > LARGE_TEXT_BYTES && (
               <p className="mb-2 text-[11px] text-warn">
-                Large file ({fmtBytes(f.size)}) — rendering inline; expect
-                some scroll lag.
+                Large file ({fmtBytes(f.size)}) — rendering inline; expect some
+                scroll lag.
               </p>
             )}
             <pre className="font-mono text-[12px] leading-relaxed overflow-auto scroll-thin max-h-[70vh] text-ink whitespace-pre">
@@ -358,7 +372,8 @@ function FileView({ worktreeName, path }: FileViewProps) {
 /// the dashboard.
 function BinaryView({ raw }: { raw: string }) {
   const HEX_PREVIEW_BYTES = 4096;
-  const slice = raw.length > HEX_PREVIEW_BYTES ? raw.slice(0, HEX_PREVIEW_BYTES) : raw;
+  const slice =
+    raw.length > HEX_PREVIEW_BYTES ? raw.slice(0, HEX_PREVIEW_BYTES) : raw;
   const lines = useMemo(() => {
     const out: string[] = [];
     for (let i = 0; i < slice.length; i += 16) {
