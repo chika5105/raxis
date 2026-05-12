@@ -113,6 +113,25 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     ("direction",         AttrSchema { ty: AttrTy::Str,  max_bytes: 8   }),
     ("state",             AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
     ("drop_reason",       AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    // ---- V3 perf-telemetry expansion (specs/v3/observability-prometheus.md) ----
+    ("backend",           AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    ("image_kind",        AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    ("failure_class",     AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    ("agent_type",        AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
+    ("tool_name",         AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
+    ("service",           AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    ("operation",         AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    ("blocked",           AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
+    ("route",             AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
+    ("http_method",       AttrSchema { ty: AttrTy::Str,  max_bytes: 8   }),
+    ("http_status",       AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
+    ("revision_round",    AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
+    ("author_role",       AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
+    ("attempt",           AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
+    ("final_outcome",     AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
+    ("streaming",         AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
+    ("initiative_class",  AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    ("phase",             AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
 ];
 
 /// Explicit denylist. Defense-in-depth: even if a key accidentally

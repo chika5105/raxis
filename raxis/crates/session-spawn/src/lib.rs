@@ -86,6 +86,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod perf_telemetry;
+
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credential_proxy_manager::{
     CredentialProxyManager, ManagerError, SessionProxyHandles, ShutdownReport,
@@ -100,6 +102,25 @@ use thiserror::Error;
 use parking_lot::Mutex;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+
+// ---------------------------------------------------------------------------
+// V3 perf-telemetry helpers
+// ---------------------------------------------------------------------------
+
+/// Stable string mapping for the `failure_class` attribute the perf
+/// histograms / counters carry on every spawn-error path. Mirrors
+/// `IsolationError::classify()` but stays in this crate so the
+/// observability surface owns its own attribute strings.
+fn failure_class_for(err: &IsolationError) -> &'static str {
+    match err {
+        IsolationError::SpawnFailed(_)     => "spawn_failed",
+        IsolationError::PeerClosed         => "peer_closed",
+        IsolationError::TransportFault(_)  => "transport_fault",
+        IsolationError::SignatureMismatch  => "signature_mismatch",
+        IsolationError::ResourceLimit(_)   => "resource_limit",
+        IsolationError::BackendInternal(_) => "backend_internal",
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -266,6 +287,13 @@ pub struct SessionSpawnService {
     isolation: Arc<dyn IsolationBackend>,
     proxies:   Arc<CredentialProxyManager>,
     audit:     Arc<dyn AuditSink>,
+    /// V3 perf-telemetry. Optional so existing tests that build the
+    /// service without an observability surface keep working; the
+    /// kernel boot wires this via `with_observability` before the
+    /// orchestrator-spawn service is constructed (see
+    /// `kernel/src/observability_boot.rs` and
+    /// `kernel/src/main.rs`).
+    observability: Option<Arc<raxis_observability::ObservabilityHub>>,
     /// Per-session live state. Populated by `spawn_session`,
     /// drained by `terminate_session`. Synchronously serialised
     /// because every critical section is map-mutation only — the
@@ -299,8 +327,38 @@ impl SessionSpawnService {
             isolation,
             proxies,
             audit,
+            observability: None,
             sessions: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// V3 perf-telemetry. Inject the kernel-wide `ObservabilityHub`
+    /// so the four-tier VM cold-boot histograms get stamped from the
+    /// very first spawn. Builder-shaped to keep the existing 3-arg
+    /// `new` constructor source-compatible with the V1/V2 call sites.
+    pub fn with_observability(
+        mut self,
+        hub: Arc<raxis_observability::ObservabilityHub>,
+    ) -> Self {
+        self.observability = Some(hub);
+        self
+    }
+
+    /// Borrow the (optional) observability hub. Crate-private so the
+    /// internal `perf_telemetry` module can short-circuit when
+    /// observability is disabled.
+    pub(crate) fn observability_hub(
+        &self,
+    ) -> Option<&Arc<raxis_observability::ObservabilityHub>> {
+        self.observability.as_ref()
+    }
+
+    /// Backend identifier the perf-telemetry helpers stamp into the
+    /// `backend` attribute. Crate-private; goes through the trait
+    /// rather than being read from a stored copy so the value cannot
+    /// drift from what the substrate advertises.
+    pub(crate) fn backend_id(&self) -> &'static str {
+        self.isolation.backend_id()
     }
 
     /// Borrow the audit sink the service was constructed with.
@@ -335,6 +393,22 @@ impl SessionSpawnService {
         &self,
         mut req: SpawnRequest,
     ) -> Result<SpawnHandle, SpawnError> {
+        // V3 perf-telemetry: start the cold-boot wall clock the moment
+        // we enter `spawn_session`. The four-tier histogram defined in
+        // `specs/v3/observability-prometheus.md §3.1` measures the
+        // entire path from "kernel asks for a VM" to "VM is reachable
+        // on its IPC channel" — exactly the wall span between this
+        // line and the `record_successful_spawn` / `record_failed_spawn`
+        // call below. The `image_kind` attribute is carried alongside
+        // for histogram pivoting (initramfs vs disk, dev vs prod, ...).
+        let perf_t0 = std::time::Instant::now();
+        let perf_image_kind = match req.image.kind {
+            raxis_isolation::ImageKind::RootfsErofs         => "rootfs_erofs",
+            raxis_isolation::ImageKind::RootfsInitramfsCpio => "rootfs_initramfs_cpio",
+            raxis_isolation::ImageKind::EnclaveSigStruct    => "enclave_sigstruct",
+            raxis_isolation::ImageKind::WasmModule          => "wasm_module",
+        };
+
         let session_id = req.session_id.clone();
         let task_id    = req.task_id.clone().unwrap_or_else(|| "<orchestrator>".to_owned());
         tracing::info!(
@@ -416,6 +490,16 @@ impl SessionSpawnService {
         let image_for_spawn     = req.image.clone();
         let mounts_for_spawn    = req.workspace_mounts.clone();
         let vm_spec_for_spawn   = req.vm_spec.clone();
+        // V3 perf-telemetry: bracket the blocking spawn so we can
+        // attribute the wall time to "host_init" (everything between
+        // the start of `spawn_session` and the substrate handing back
+        // a live `IsolationSession`) vs. "guest_init" (everything
+        // between session-handed-back and IPC-stream-wrapped). The
+        // four-tier histogram set lets operators tell whether a
+        // regression is in the host-side launcher (Apple-VZ
+        // configuration / Firecracker JSON), the guest's first
+        // userspace process, or the vsock handshake.
+        let perf_host_t0 = std::time::Instant::now();
         let spawn_join = tokio::task::spawn_blocking(move || {
             isolation_for_spawn.spawn(
                 &image_for_spawn,
@@ -424,14 +508,33 @@ impl SessionSpawnService {
             )
         })
         .await;
+        let perf_host_init_ms = perf_host_t0.elapsed().as_millis() as i64;
         let mut session = match spawn_join {
             Ok(Ok(s)) => s,
             Ok(Err(e)) => {
+                perf_telemetry::record_failed_spawn(
+                    self,
+                    perf_image_kind,
+                    perf_t0.elapsed().as_millis() as i64,
+                    Some(perf_host_init_ms),
+                    None,
+                    None,
+                    failure_class_for(&e),
+                );
                 drop(admission_listener);
                 let _ = cred_handles.shutdown();
                 return Err(SpawnError::IsolationSpawn(e));
             }
             Err(join_err) => {
+                perf_telemetry::record_failed_spawn(
+                    self,
+                    perf_image_kind,
+                    perf_t0.elapsed().as_millis() as i64,
+                    Some(perf_host_init_ms),
+                    None,
+                    None,
+                    "host_join",
+                );
                 drop(admission_listener);
                 let _ = cred_handles.shutdown();
                 return Err(SpawnError::IsolationSpawn(
@@ -441,6 +544,7 @@ impl SessionSpawnService {
                 ));
             }
         };
+        let perf_guest_t0 = std::time::Instant::now();
 
         // ── Step 4.5: surrender the kernel-side IPC stream. ─────────
         //
@@ -476,6 +580,21 @@ impl SessionSpawnService {
                 },
                 None => None,
             };
+        let perf_guest_init_ms = perf_guest_t0.elapsed().as_millis() as i64;
+        // V3 perf-telemetry: stamp the four-tier cold-boot histograms
+        // and bump the success counter. The vsock handshake measurement
+        // is fused into `guest_init_ms` for substrates that combine
+        // them; substrates that expose a separate handshake duration
+        // (Apple-VZ via the IPC fd takedown) will surface it directly
+        // once `take_kernel_ipc_fd` is itself instrumented.
+        perf_telemetry::record_successful_spawn(
+            self,
+            perf_image_kind,
+            perf_t0.elapsed().as_millis() as i64,
+            Some(perf_host_init_ms),
+            Some(perf_guest_init_ms),
+            None,
+        );
         tracing::info!(
             session_id = %session_id,
             backend    = self.isolation.backend_id(),

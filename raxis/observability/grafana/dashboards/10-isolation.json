@@ -1,0 +1,129 @@
+{
+  "title": "raxis | 10 Isolation / VM cold-boot",
+  "uid": "raxis-10-isolation",
+  "tags": ["raxis", "isolation", "vm"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-30m", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "backend",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": "label_values(raxis_isolation_spawn_total, backend)",
+        "current": { "text": "All", "value": "$__all" },
+        "includeAll": true,
+        "multi": true,
+        "refresh": 2
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Cold-boot p50 (5m)",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (le) (rate(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket{backend=~\"$backend\"}[5m])))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Cold-boot p95 (5m)",
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket{backend=~\"$backend\"}[5m])))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Cold-boot p99 (5m)",
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        { "expr": "histogram_quantile(0.99, sum by (le) (rate(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket{backend=~\"$backend\"}[5m])))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Spawn success rate (5m)",
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 4 },
+      "targets": [
+        { "expr": "sum(rate(raxis_isolation_spawn_total{outcome=\"success\",backend=~\"$backend\"}[5m])) / sum(rate(raxis_isolation_spawn_total{backend=~\"$backend\"}[5m]))", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit", "decimals": 4, "color": { "mode": "thresholds" }, "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "yellow", "value": 0.95 }, { "color": "green", "value": 0.99 } ] } }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Cold-boot quantiles (ms) by backend",
+      "gridPos": { "x": 0, "y": 4, "w": 24, "h": 9 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (backend, le) (rate(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket{backend=~\"$backend\"}[5m])))", "legendFormat": "{{backend}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (backend, le) (rate(raxis_isolation_spawn_cold_boot_duration_milliseconds_bucket{backend=~\"$backend\"}[5m])))", "legendFormat": "{{backend}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "Cold-boot partition - host_init / guest_init / vsock_handshake (p95, ms)",
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 9 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_isolation_spawn_host_init_duration_milliseconds_bucket{backend=~\"$backend\"}[5m])))", "legendFormat": "host_init p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_isolation_spawn_guest_init_duration_milliseconds_bucket{backend=~\"$backend\"}[5m])))", "legendFormat": "guest_init p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (le) (rate(raxis_isolation_spawn_vsock_handshake_duration_milliseconds_bucket{backend=~\"$backend\"}[5m])))", "legendFormat": "vsock_handshake p95", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Spawn rate by outcome",
+      "gridPos": { "x": 0, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (outcome) (rate(raxis_isolation_spawn_total{backend=~\"$backend\"}[1m]))", "legendFormat": "{{outcome}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Failure rate by failure_class",
+      "gridPos": { "x": 12, "y": 22, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (failure_class) (rate(raxis_isolation_spawn_total{outcome=\"failure\",backend=~\"$backend\"}[5m]))", "legendFormat": "{{failure_class}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "Respawn attempts (transient retries)",
+      "gridPos": { "x": 0, "y": 30, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (backend) (rate(raxis_isolation_respawn_attempted_total[5m]))", "legendFormat": "{{backend}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Permanent terminal failures (per backend)",
+      "gridPos": { "x": 12, "y": 30, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (backend, failure_class) (rate(raxis_isolation_failed_final_total[5m]))", "legendFormat": "{{backend}} {{failure_class}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    }
+  ]
+}

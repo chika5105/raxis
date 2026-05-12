@@ -1,0 +1,26 @@
+# raxis/observability/grafana/provisioning/datasources/prometheus.yaml
+#
+# Auto-provisions the Prometheus datasource so the Grafana container
+# starts up with raxis dashboards already wired in - no operator
+# clicks required.
+#
+# `uid: prometheus` is referenced by every dashboard JSON file under
+# raxis/observability/grafana/dashboards/. Renaming the uid is a
+# coordinated change with every dashboard JSON.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s
+      httpMethod: POST
+      manageAlerts: false
+      prometheusType: Prometheus
+      prometheusVersion: 2.55.0

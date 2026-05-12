@@ -29,6 +29,11 @@ raxis-plan-credentials  = { path = "../plan-credentials" }
 raxis-audit-tools       = { workspace = true }
 raxis-credentials       = { workspace = true }
 
+# V3 perf telemetry — optional Hub-Arc setter the kernel calls. The
+# crate compiles without an `Arc<ObservabilityHub>` (legacy callers,
+# integration tests) and is a no-op when no hub is wired in.
+raxis-observability     = { path = "../observability" }
+
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 tokio       = { workspace = true }

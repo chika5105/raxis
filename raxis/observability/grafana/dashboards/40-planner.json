@@ -1,0 +1,53 @@
+{
+  "title": "raxis | 40 Planner / Inference",
+  "uid": "raxis-40-planner",
+  "tags": ["raxis", "planner", "llm"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Inference latency p50/p95 (ms) by model",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum by (model, le) (rate(raxis_planner_inference_duration_milliseconds_bucket[5m])))", "legendFormat": "{{model}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (model, le) (rate(raxis_planner_inference_duration_milliseconds_bucket[5m])))", "legendFormat": "{{model}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Tokens / sec by direction",
+      "gridPos": { "x": 0, "y": 9, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "sum by (direction) (rate(raxis_planner_inference_tokens_total[1m]))", "legendFormat": "{{direction}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "tokens/s" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Tool-call latency p95 (ms) by tool_name",
+      "gridPos": { "x": 12, "y": 9, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.95, sum by (tool_name, le) (rate(raxis_planner_tool_call_duration_milliseconds_bucket[5m])))", "legendFormat": "{{tool_name}} p95", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Retries by attempt",
+      "gridPos": { "x": 0, "y": 17, "w": 24, "h": 8 },
+      "targets": [
+        { "expr": "sum by (attempt, final_outcome) (rate(raxis_planner_retry_total[5m]))", "legendFormat": "attempt {{attempt}} {{final_outcome}}", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    }
+  ]
+}

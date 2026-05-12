@@ -3879,6 +3879,7 @@ dependencies = [
  "raxis-credentials-file",
  "raxis-egress-admission",
  "raxis-isolation",
+ "raxis-observability",
  "raxis-plan-credentials",
  "raxis-test-support",
  "raxis-tproxy-protocol",
@@ -5608,6 +5609,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "ed25519-dalek",
  "hex",
  "libc",
@@ -5615,9 +5617,14 @@ dependencies = [
  "raxis-image-builder",
  "raxis-image-manifest",
  "raxis-initramfs-builder",
+ "raxis-isolation",
+ "raxis-observability",
+ "raxis-test-support",
  "regex",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "tokio",
  "toml",
  "walkdir",
 ]

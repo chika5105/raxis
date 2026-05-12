@@ -43,6 +43,7 @@ mod handlers;
 mod isolation_select;
 mod notifications;
 mod observability;
+mod observability_boot;
 mod breakglass;
 mod path_scope;
 mod policy_manager;
@@ -956,6 +957,16 @@ async fn main() {
     let elastic_rate_limiter = Arc::new(
         crate::elastic::ScalingRateLimiter::new(),
     );
+
+    // V3 `specs/v3/observability-prometheus.md` — hoisted hub
+    // construction. The observability hub is built BEFORE the
+    // orchestrator-spawn service so the SessionSpawnService can
+    // stamp the four-tier VM cold-boot histograms from the very
+    // first spawn. The same Arc is reused below when wiring the
+    // HandlerContext (no second hub is built).
+    let observability_hub: Arc<raxis_observability::ObservabilityHub> =
+        observability_boot::build_obs_hub(&policy, &data_dir, kernel_version);
+
     let ctx_inner = ipc::context::HandlerContext::new(
         Arc::clone(&policy),
         Arc::clone(&registry),
@@ -991,7 +1002,10 @@ async fn main() {
                     Arc::clone(&isolation_backend),
                     proxy_manager_for_orch,
                     Arc::clone(&audit),
-                ),
+                )
+                // V3 perf-telemetry: stamp the four-tier VM cold-boot
+                // histograms from the very first spawn.
+                .with_observability(Arc::clone(&observability_hub)),
             );
             // V2 `elastic-vm-scaling.md §4.4` — fresh scale-down
             // tracker for the orchestrator-spawn context. The
@@ -1087,54 +1101,11 @@ async fn main() {
     // counter set surfaced to `raxis status`.
     .with_sidecar_registry(Arc::clone(&sidecar_registry));
 
-    // V3 §3 — construct the `ObservabilityHub` per the policy
-    // bundle's validated `[observability]` section. When
-    // `enabled = false` the hub uses `NoopExporter` and every
-    // emit site short-circuits before sanitisation. When enabled,
-    // the kernel writes JSONL frames into `<data_dir>/observability/`
-    // (or operator-supplied `[observability.ring].dir`) and the
-    // out-of-process `raxis-otel-pusher` reads + ships via OTLP
-    // (`INV-OTEL-03`).
-    let observability_hub: Arc<raxis_observability::ObservabilityHub> = {
-        let snap = policy.load();
-        let oc = snap.observability();
-        if oc.enabled {
-            let ring_root = if oc.ring.dir.is_empty() {
-                data_dir.clone()
-            } else {
-                std::path::PathBuf::from(&oc.ring.dir)
-            };
-            let ring_cfg = raxis_observability::ring::RingConfig {
-                segment_max_bytes: oc.ring.segment_max_bytes,
-                max_total_bytes:   oc.ring.max_total_bytes,
-            };
-            let hub_cfg = raxis_observability::HubConfig {
-                enabled:             true,
-                max_queue_depth:     oc.ring.max_queue_depth,
-                sample_rate:         oc.traces.sample_rate,
-                max_attrs_per_span:  oc.traces.max_attrs_per_span,
-                max_events_per_span: oc.traces.max_events_per_span,
-                histogram_buckets:   oc.metrics.histogram_buckets.clone(),
-            };
-            match raxis_observability::ObservabilityHub::with_ring_at(
-                hub_cfg,
-                &ring_root,
-                ring_cfg,
-                kernel_version.to_owned(),
-            ) {
-                Ok((hub, _exp)) => Arc::new(hub),
-                Err(e) => {
-                    eprintln!(
-                        "{{\"level\":\"warn\",\"event\":\"ObservabilityHubInitFailed\",\
-                         \"reason\":\"{e}\"}}",
-                    );
-                    Arc::new(raxis_observability::ObservabilityHub::disabled())
-                }
-            }
-        } else {
-            Arc::new(raxis_observability::ObservabilityHub::disabled())
-        }
-    };
+    // V3 `specs/v3/observability-prometheus.md` — the hub itself
+    // was constructed earlier (just before the orchestrator-spawn
+    // service) so the four-tier VM cold-boot histograms can stamp
+    // from the very first spawn. Here we just install it onto the
+    // HandlerContext so every handler sees the same Arc.
     let ctx_inner = ctx_inner.with_observability(Arc::clone(&observability_hub));
 
     // Step 8.6: Boot-time break-glass state (v1 Tier 4,

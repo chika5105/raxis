@@ -289,6 +289,115 @@ pub enum MetricName {
     BudgetExceededTotal,
     /// `raxis.observability.dropped.total` — Counter (per drop reason).
     ObservabilityDroppedTotal,
+
+    // ---------- V3 perf-telemetry expansion ----------
+    // (specs/v3/observability-prometheus.md §3)
+
+    // ── Isolation / VM lifecycle ────────────────────────────────────
+    /// `raxis.isolation.spawn.cold_boot.duration` — Histogram (ms).
+    IsolationSpawnColdBootDuration,
+    /// `raxis.isolation.spawn.host_init.duration` — Histogram (ms).
+    IsolationSpawnHostInitDuration,
+    /// `raxis.isolation.spawn.guest_init.duration` — Histogram (ms).
+    IsolationSpawnGuestInitDuration,
+    /// `raxis.isolation.spawn.vsock_handshake.duration` — Histogram (ms).
+    IsolationSpawnVsockHandshakeDuration,
+    /// `raxis.isolation.spawn.total` — Counter.
+    IsolationSpawnTotal,
+    /// `raxis.isolation.respawn_attempted.total` — Counter.
+    IsolationRespawnAttemptedTotal,
+    /// `raxis.isolation.failed_final.total` — Counter.
+    IsolationFailedFinalTotal,
+    /// `raxis.isolation.scale.event.total` — Counter.
+    IsolationScaleEventTotal,
+    /// `raxis.isolation.scale.deferred.total` — Counter.
+    IsolationScaleDeferredTotal,
+
+    // ── Session / initiative lifecycle ──────────────────────────────
+    /// `raxis.session.lifecycle.transition.total` — Counter.
+    SessionLifecycleTransitionTotal,
+    /// `raxis.session.duration` — Histogram (ms).
+    SessionDuration,
+    /// `raxis.initiative.duration` — Histogram (ms).
+    InitiativeDuration,
+    /// `raxis.initiative.task.in_flight` — Gauge.
+    InitiativeTaskInFlight,
+
+    // ── Audit chain ─────────────────────────────────────────────────
+    /// `raxis.audit.event.append.duration` — Histogram (ms).
+    AuditEventAppendDuration,
+    /// `raxis.audit.event.confirmed.duration` — Histogram (ms).
+    AuditEventConfirmedDuration,
+    /// `raxis.audit.event.append.total` — Counter.
+    AuditEventAppendTotal,
+    /// `raxis.audit.fsync.failure.total` — Counter.
+    AuditFsyncFailureTotal,
+    /// `raxis.audit.chain.lag` — Gauge (events behind tip).
+    AuditChainLag,
+
+    // ── Planner / inference ─────────────────────────────────────────
+    /// `raxis.planner.inference.duration` — Histogram (ms).
+    PlannerInferenceDuration,
+    /// `raxis.planner.inference.tokens.total` — Counter.
+    PlannerInferenceTokensTotal,
+    /// `raxis.planner.dispatch.turn.total` — Counter.
+    PlannerDispatchTurnTotal,
+    /// `raxis.planner.tool_call.duration` — Histogram (ms).
+    PlannerToolCallDuration,
+    /// `raxis.planner.retry.total` — Counter.
+    PlannerRetryTotal,
+
+    // ── Credential proxies ──────────────────────────────────────────
+    /// `raxis.credential_proxy.connection.duration` — Histogram (ms).
+    CredentialProxyConnectionDuration,
+    /// `raxis.credential_proxy.connection.total` — Counter.
+    CredentialProxyConnectionTotal,
+    /// `raxis.credential_proxy.statement.duration` — Histogram (ms).
+    CredentialProxyStatementDuration,
+    /// `raxis.credential_proxy.bytes.total` — Counter.
+    CredentialProxyBytesTotal,
+    /// `raxis.credential_proxy.policy_block.total` — Counter.
+    CredentialProxyPolicyBlockTotal,
+
+    // ── Egress / gateway ────────────────────────────────────────────
+    /// `raxis.egress.allowlist.check.duration` — Histogram (ms).
+    EgressAllowlistCheckDuration,
+    /// `raxis.egress.allowlist.block.total` — Counter.
+    EgressAllowlistBlockTotal,
+    /// `raxis.gateway.upstream.duration` — Histogram (ms).
+    GatewayUpstreamDuration,
+
+    // ── Operator dashboard ──────────────────────────────────────────
+    /// `raxis.dashboard.http.request.duration` — Histogram (ms).
+    DashboardHttpRequestDuration,
+    /// `raxis.dashboard.sse.connection.active` — Gauge.
+    DashboardSseConnectionActive,
+    /// `raxis.dashboard.sse.event.total` — Counter.
+    DashboardSseEventTotal,
+    /// `raxis.dashboard.sse.lag.duration` — Histogram (ms).
+    DashboardSseLagDuration,
+
+    // ── Reviewer / disagreement ─────────────────────────────────────
+    /// `raxis.reviewer.review.duration` — Histogram (ms).
+    ReviewerReviewDuration,
+    /// `raxis.reviewer.outcome.total` — Counter.
+    ReviewerOutcomeTotal,
+    /// `raxis.reviewer.disagreement.total` — Counter.
+    ReviewerDisagreementTotal,
+    /// `raxis.review.revision_round` — Histogram (rounds).
+    ReviewRevisionRound,
+
+    // ── Git / worktree ──────────────────────────────────────────────
+    /// `raxis.git.worktree.provision.duration` — Histogram (ms).
+    GitWorktreeProvisionDuration,
+    /// `raxis.git.merge.duration` — Histogram (ms).
+    GitMergeDuration,
+    /// `raxis.git.commit.total` — Counter.
+    GitCommitTotal,
+
+    // ── Process / host ──────────────────────────────────────────────
+    /// `raxis.kernel.uptime.seconds` — Gauge.
+    KernelUptimeSeconds,
 }
 
 impl MetricName {
@@ -313,6 +422,60 @@ impl MetricName {
             Self::BudgetReserved                  => "raxis.budget.reserved",
             Self::BudgetExceededTotal             => "raxis.budget.exceeded.total",
             Self::ObservabilityDroppedTotal       => "raxis.observability.dropped.total",
+
+            // V3 perf-telemetry expansion.
+            Self::IsolationSpawnColdBootDuration       => "raxis.isolation.spawn.cold_boot.duration",
+            Self::IsolationSpawnHostInitDuration       => "raxis.isolation.spawn.host_init.duration",
+            Self::IsolationSpawnGuestInitDuration      => "raxis.isolation.spawn.guest_init.duration",
+            Self::IsolationSpawnVsockHandshakeDuration => "raxis.isolation.spawn.vsock_handshake.duration",
+            Self::IsolationSpawnTotal                  => "raxis.isolation.spawn.total",
+            Self::IsolationRespawnAttemptedTotal       => "raxis.isolation.respawn_attempted.total",
+            Self::IsolationFailedFinalTotal            => "raxis.isolation.failed_final.total",
+            Self::IsolationScaleEventTotal             => "raxis.isolation.scale.event.total",
+            Self::IsolationScaleDeferredTotal          => "raxis.isolation.scale.deferred.total",
+
+            Self::SessionLifecycleTransitionTotal      => "raxis.session.lifecycle.transition.total",
+            Self::SessionDuration                      => "raxis.session.duration",
+            Self::InitiativeDuration                   => "raxis.initiative.duration",
+            Self::InitiativeTaskInFlight               => "raxis.initiative.task.in_flight",
+
+            Self::AuditEventAppendDuration             => "raxis.audit.event.append.duration",
+            Self::AuditEventConfirmedDuration          => "raxis.audit.event.confirmed.duration",
+            Self::AuditEventAppendTotal                => "raxis.audit.event.append.total",
+            Self::AuditFsyncFailureTotal               => "raxis.audit.fsync.failure.total",
+            Self::AuditChainLag                        => "raxis.audit.chain.lag",
+
+            Self::PlannerInferenceDuration             => "raxis.planner.inference.duration",
+            Self::PlannerInferenceTokensTotal          => "raxis.planner.inference.tokens.total",
+            Self::PlannerDispatchTurnTotal             => "raxis.planner.dispatch.turn.total",
+            Self::PlannerToolCallDuration              => "raxis.planner.tool_call.duration",
+            Self::PlannerRetryTotal                    => "raxis.planner.retry.total",
+
+            Self::CredentialProxyConnectionDuration    => "raxis.credential_proxy.connection.duration",
+            Self::CredentialProxyConnectionTotal       => "raxis.credential_proxy.connection.total",
+            Self::CredentialProxyStatementDuration     => "raxis.credential_proxy.statement.duration",
+            Self::CredentialProxyBytesTotal            => "raxis.credential_proxy.bytes.total",
+            Self::CredentialProxyPolicyBlockTotal      => "raxis.credential_proxy.policy_block.total",
+
+            Self::EgressAllowlistCheckDuration         => "raxis.egress.allowlist.check.duration",
+            Self::EgressAllowlistBlockTotal            => "raxis.egress.allowlist.block.total",
+            Self::GatewayUpstreamDuration              => "raxis.gateway.upstream.duration",
+
+            Self::DashboardHttpRequestDuration         => "raxis.dashboard.http.request.duration",
+            Self::DashboardSseConnectionActive         => "raxis.dashboard.sse.connection.active",
+            Self::DashboardSseEventTotal               => "raxis.dashboard.sse.event.total",
+            Self::DashboardSseLagDuration              => "raxis.dashboard.sse.lag.duration",
+
+            Self::ReviewerReviewDuration               => "raxis.reviewer.review.duration",
+            Self::ReviewerOutcomeTotal                 => "raxis.reviewer.outcome.total",
+            Self::ReviewerDisagreementTotal            => "raxis.reviewer.disagreement.total",
+            Self::ReviewRevisionRound                  => "raxis.review.revision_round",
+
+            Self::GitWorktreeProvisionDuration         => "raxis.git.worktree.provision.duration",
+            Self::GitMergeDuration                     => "raxis.git.merge.duration",
+            Self::GitCommitTotal                       => "raxis.git.commit.total",
+
+            Self::KernelUptimeSeconds                  => "raxis.kernel.uptime.seconds",
         }
     }
 
@@ -323,13 +486,37 @@ impl MetricName {
             | Self::GatewayFetchDuration
             | Self::VerifierExecutionDuration
             | Self::CredentialProxyRequestDuration
-            | Self::NotificationDeliveryDuration => MetricType::Histogram,
+            | Self::NotificationDeliveryDuration
+            | Self::IsolationSpawnColdBootDuration
+            | Self::IsolationSpawnHostInitDuration
+            | Self::IsolationSpawnGuestInitDuration
+            | Self::IsolationSpawnVsockHandshakeDuration
+            | Self::SessionDuration
+            | Self::InitiativeDuration
+            | Self::AuditEventAppendDuration
+            | Self::AuditEventConfirmedDuration
+            | Self::PlannerInferenceDuration
+            | Self::PlannerToolCallDuration
+            | Self::CredentialProxyConnectionDuration
+            | Self::CredentialProxyStatementDuration
+            | Self::EgressAllowlistCheckDuration
+            | Self::GatewayUpstreamDuration
+            | Self::DashboardHttpRequestDuration
+            | Self::DashboardSseLagDuration
+            | Self::ReviewerReviewDuration
+            | Self::ReviewRevisionRound
+            | Self::GitWorktreeProvisionDuration
+            | Self::GitMergeDuration => MetricType::Histogram,
 
             Self::CircuitBreakerState
             | Self::SessionsActive
             | Self::AuditChainLength
             | Self::EscalationsOpen
-            | Self::BudgetReserved => MetricType::Gauge,
+            | Self::BudgetReserved
+            | Self::InitiativeTaskInFlight
+            | Self::AuditChainLag
+            | Self::DashboardSseConnectionActive
+            | Self::KernelUptimeSeconds => MetricType::Gauge,
 
             Self::IntentAdmissionTotal
             | Self::GatewayFetchTotal
@@ -338,7 +525,26 @@ impl MetricName {
             | Self::NotificationDeliveryTotal
             | Self::EscalationsClosedTotal
             | Self::BudgetExceededTotal
-            | Self::ObservabilityDroppedTotal => MetricType::Counter,
+            | Self::ObservabilityDroppedTotal
+            | Self::IsolationSpawnTotal
+            | Self::IsolationRespawnAttemptedTotal
+            | Self::IsolationFailedFinalTotal
+            | Self::IsolationScaleEventTotal
+            | Self::IsolationScaleDeferredTotal
+            | Self::SessionLifecycleTransitionTotal
+            | Self::AuditEventAppendTotal
+            | Self::AuditFsyncFailureTotal
+            | Self::PlannerInferenceTokensTotal
+            | Self::PlannerDispatchTurnTotal
+            | Self::PlannerRetryTotal
+            | Self::CredentialProxyConnectionTotal
+            | Self::CredentialProxyBytesTotal
+            | Self::CredentialProxyPolicyBlockTotal
+            | Self::EgressAllowlistBlockTotal
+            | Self::DashboardSseEventTotal
+            | Self::ReviewerOutcomeTotal
+            | Self::ReviewerDisagreementTotal
+            | Self::GitCommitTotal => MetricType::Counter,
         }
     }
 
@@ -349,10 +555,33 @@ impl MetricName {
             | Self::GatewayFetchDuration
             | Self::VerifierExecutionDuration
             | Self::CredentialProxyRequestDuration
-            | Self::NotificationDeliveryDuration => Unit::Milliseconds,
+            | Self::NotificationDeliveryDuration
+            | Self::IsolationSpawnColdBootDuration
+            | Self::IsolationSpawnHostInitDuration
+            | Self::IsolationSpawnGuestInitDuration
+            | Self::IsolationSpawnVsockHandshakeDuration
+            | Self::SessionDuration
+            | Self::InitiativeDuration
+            | Self::AuditEventAppendDuration
+            | Self::AuditEventConfirmedDuration
+            | Self::PlannerInferenceDuration
+            | Self::PlannerToolCallDuration
+            | Self::CredentialProxyConnectionDuration
+            | Self::CredentialProxyStatementDuration
+            | Self::EgressAllowlistCheckDuration
+            | Self::GatewayUpstreamDuration
+            | Self::DashboardHttpRequestDuration
+            | Self::DashboardSseLagDuration
+            | Self::ReviewerReviewDuration
+            | Self::GitWorktreeProvisionDuration
+            | Self::GitMergeDuration => Unit::Milliseconds,
 
-            Self::TokensConsumed => Unit::Tokens,
-            Self::SessionsActive => Unit::Connections,
+            Self::TokensConsumed
+            | Self::PlannerInferenceTokensTotal => Unit::Tokens,
+
+            Self::SessionsActive
+            | Self::DashboardSseConnectionActive => Unit::Connections,
+
             _ => Unit::None,
         }
     }

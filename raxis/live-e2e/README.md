@@ -331,3 +331,73 @@ docker exec raxis-e2e-mongo mongosh --quiet \
 
 A successful ping with `{ ok: 1 }` confirms the auth path is
 healthy.
+
+---
+
+## Observability stack
+
+Per `specs/v3/observability-prometheus.md`, every live-e2e run
+brings up the full Prometheus + Grafana + OpenTelemetry-collector
+stack alongside the upstream-service containers. One
+`docker compose up -d --wait` produces the entire developer /
+operator surface.
+
+| Service          | Image                                                 | Host port | Purpose |
+|---|---|---|---|
+| `otel-collector` | `otel/opentelemetry-collector-contrib:0.110.0`       | 4318, 8889, 8888, 13133 | OTLP receiver + Prometheus exposition |
+| `prometheus`     | `prom/prometheus:v2.55.1`                             | 9090      | 14-day retention, scrapes the collector + itself every 5 s |
+| `grafana`        | `grafana/grafana:11.3.0`                              | 3000      | Anonymous Viewer access, 10 raxis dashboards auto-provisioned |
+
+### Open the dashboards
+
+```bash
+open http://127.0.0.1:3000/d/raxis-00-overview
+open http://127.0.0.1:9090/
+open http://127.0.0.1:13133/
+```
+
+The Grafana admin login (`admin` / `raxis-e2e`) is needed only
+to edit a dashboard; viewing is anonymous.
+
+### Persistence
+
+Two named docker volumes hold the time-series and Grafana state:
+
+| Volume                          | Mounted at              | Survives `docker compose down`? |
+|---|---|---|
+| `live-e2e_prometheus_data`      | `prometheus:/prometheus`           | yes |
+| `live-e2e_grafana_data`         | `grafana:/var/lib/grafana`         | yes |
+
+To wipe them between runs:
+
+```bash
+docker compose -f live-e2e/docker-compose.e2e.yml down -v
+docker volume rm live-e2e_prometheus_data live-e2e_grafana_data
+```
+
+### Dev-loop env vars
+
+| Variable                       | Default | Effect |
+|---|---|---|
+| `RAXIS_E2E_OPEN_OBSERVABILITY` | OFF     | Print + open Grafana / Prometheus / OTel URLs at end of run. |
+| `RAXIS_E2E_OBS_FRESH`          | OFF     | Wipe volumes BEFORE the live-e2e run for a clean baseline. |
+| `RAXIS_E2E_OBS_KEEP_UP`        | ON      | Leave the compose stack running after the test exits. |
+
+### Verifying data flow
+
+After a kernel run, confirm the OTLP path:
+
+```bash
+curl -s 'http://127.0.0.1:9090/api/v1/query?query=raxis_intent_admission_total' \
+    | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d["data"]["result"]), "series")'
+```
+
+A non-zero series count proves the kernel `[observability]` block
+is wired to the collector at `http://127.0.0.1:4318` and the
+collector is pushing into Prometheus.
+
+### Perf harness
+
+`cargo xtask perf` reuses this stack automatically when present
+(it never spins up a competing instance). See
+`raxis/guides/recipes/ops/16-measure-perf.md` for the recipe.

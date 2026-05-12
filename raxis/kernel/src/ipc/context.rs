@@ -577,7 +577,19 @@ impl HandlerContext {
     /// `InMemoryExporter`-backed hub via this same setter; tests
     /// that don't keep the default disabled hub.
     pub fn with_observability(mut self, hub: Arc<ObservabilityHub>) -> Self {
+        // V3 perf-telemetry: rebuild SessionSpawnService with the
+        // hub so the four-tier VM cold-boot histograms are stamped
+        // from the very first spawn. The hub is shared (Arc-cloned)
+        // between the HandlerContext and the inner SessionSpawnService.
+        let hub_for_spawn = hub.clone();
         self.observability = hub;
+        let new_spawn = SessionSpawnService::new(
+            self.isolation.clone(),
+            self.proxy_manager.clone(),
+            self.audit.clone(),
+        )
+        .with_observability(hub_for_spawn);
+        self.session_spawn = Arc::new(new_spawn);
         self
     }
 

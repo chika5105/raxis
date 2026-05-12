@@ -1,0 +1,122 @@
+# raxis/observability/otel-collector/otel-collector-config.yaml
+#
+# OpenTelemetry Collector configuration for the live-e2e + perf
+# harness Prometheus pipeline.
+#
+# Pipeline:
+#   raxis-otel-pusher (host process, OTLP/HTTP) ->
+#       OTLP receiver (this collector) ->
+#           Prometheus exporter exposition (/metrics) ->
+#               Prometheus (scrape every 5s)
+#
+# Spec: specs/v3/observability-prometheus.md.
+#
+# Why a collector at all (Option A in the spec audit) instead of
+# the kernel exposing Prometheus directly (Option B):
+#
+#   1. The kernel is already an OTLP producer per `INV-OTEL-03` -
+#      the only OTLP-importing process in the source tree is
+#      raxis-otel-pusher. Adding a Prometheus exposition crate
+#      to raxis-kernel would cut against that invariant.
+#   2. The collector lets us swap the downstream sink (Prometheus
+#      today, Datadog / Honeycomb / managed Tempo / Loki tomorrow)
+#      without touching the kernel binary.
+#   3. The collector handles cumulative-temporality conversion:
+#      OTLP carries delta histograms, Prometheus wants cumulative.
+#      The Prometheus exporter normalises this transparently.
+#
+# Pinned image: otel/opentelemetry-collector-contrib:0.110.0.
+
+receivers:
+  otlp:
+    protocols:
+      # HTTP receiver only - matches the raxis-otel-pusher transport
+      # choice (HTTP/protobuf, see specs/v3/otel-observability.md).
+      # gRPC is intentionally NOT enabled to keep the host attack
+      # surface minimal in the dev/CI loopback wiring.
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost:*"
+            - "http://127.0.0.1:*"
+
+processors:
+  # Cap memory at 256 MiB so a runaway pusher cannot OOM the
+  # collector container on a developer laptop. The collector drops
+  # incoming data when the limit trips, which surfaces in
+  # `otelcol_processor_dropped_metric_points` (auto-scraped below).
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  # Standard batching - 1 second flush to keep the operator-facing
+  # latency to under 5 seconds end-to-end (1s batch + max 5s scrape
+  # interval).
+  batch:
+    send_batch_size: 1024
+    timeout: 1s
+  # Stamp a stable `service.namespace` so all raxis-emitted series
+  # share a single Prometheus label. Operators can pivot the entire
+  # raxis surface with `{service_namespace="raxis"}`.
+  resource:
+    attributes:
+      - key: service.namespace
+        value: raxis
+        action: upsert
+
+exporters:
+  # Prometheus pulls from this exposition endpoint every 5 seconds.
+  # The collector binds 0.0.0.0:8889 inside its container; the
+  # compose file maps 127.0.0.1:8889 on the host so a developer
+  # can `curl localhost:8889/metrics` directly to debug a missing
+  # series.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    namespace: ""
+    const_labels:
+      collector: raxis-otel
+    # OTel histograms are delta-temporality by default; the
+    # Prometheus exporter would otherwise reject them. `enable_open_metrics`
+    # enables the OpenMetrics format which Prometheus 2.5+ understands
+    # and which preserves the histogram shape across the conversion.
+    enable_open_metrics: true
+    # Drop the synthetic `target_info` series the contrib exporter
+    # produces - it is high-cardinality (per resource attribute set)
+    # and the operator dashboards do not pivot on it.
+    resource_to_telemetry_conversion:
+      enabled: false
+
+  # Mirror to stdout when collector log level is debug. Off by
+  # default to keep the live-e2e stack quiet in CI.
+  debug:
+    verbosity: basic
+
+extensions:
+  # /metrics on :13133 surfaces the collector's own internal counters
+  # so the perf harness can confirm the collector is up before
+  # asking Prometheus for a query.
+  health_check:
+    endpoint: 0.0.0.0:13133
+    path: "/"
+
+service:
+  extensions: [health_check]
+  pipelines:
+    metrics:
+      receivers:  [otlp]
+      processors: [memory_limiter, batch, resource]
+      exporters:  [prometheus]
+    traces:
+      receivers:  [otlp]
+      processors: [memory_limiter, batch, resource]
+      # Traces are accepted but discarded for now - V3.1 will wire
+      # Tempo / Jaeger here. The receiver still has to be wired so
+      # raxis-otel-pusher does not get HTTP 415 on the trace endpoint.
+      exporters:  [debug]
+  telemetry:
+    logs:
+      level: warn
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888

@@ -13,6 +13,7 @@ mod images;
 mod license_check;
 mod linux_microvm;
 mod linux_prereqs;
+mod perf;
 mod spec_graph;
 
 use anyhow::Context;
@@ -73,6 +74,10 @@ fn main() -> anyhow::Result<()> {
             // `specs/v2/isolation-linux-microvm.md §9`.
             let tail: Vec<String> = args.into_iter().skip(1).collect();
             linux_microvm::run(&tail).context("linux-microvm")
+        }
+        Some("perf") => {
+            let tail: Vec<String> = args.into_iter().skip(1).collect();
+            perf::run(&tail).context("perf")
         }
         Some("linux-prereqs") => {
             // `cargo xtask linux-prereqs [--json]` — Linux Firecracker

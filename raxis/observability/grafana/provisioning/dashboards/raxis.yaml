@@ -1,0 +1,25 @@
+# raxis/observability/grafana/provisioning/dashboards/raxis.yaml
+#
+# Tells Grafana to scan a directory for dashboard JSON files at
+# startup. The dashboards land at /etc/grafana/provisioning/
+# dashboards/ inside the container (mounted from
+# raxis/observability/grafana/dashboards/ on the host).
+#
+# `allowUiUpdates: false` keeps the dashboards in lock-step with
+# the JSON files in this repo - operators editing the dashboards
+# from the Grafana UI cannot drift from the canonical source.
+
+apiVersion: 1
+
+providers:
+  - name: raxis
+    orgId: 1
+    folder: 'raxis'
+    folderUid: raxis
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
