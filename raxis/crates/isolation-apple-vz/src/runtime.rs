@@ -89,12 +89,65 @@ use crate::config::AvfConfig;
 /// for `start()` itself.
 pub const VSOCK_CONNECT_DEADLINE: Duration = Duration::from_secs(30);
 
-/// Inter-attempt sleep for the [`AvfRuntime::connect_vsock`] retry
-/// loop. 100 ms is short enough to surface a successful connect
-/// within one or two extra ticks, long enough to avoid spamming
-/// AVF's dispatch queue with no-op completion handlers while the
-/// guest is still booting.
-pub const VSOCK_CONNECT_BACKOFF:  Duration = Duration::from_millis(100);
+/// Inter-attempt sleep used by the [`AvfRuntime::connect_vsock`]
+/// retry loop once the VM has been booting long enough that the
+/// guest planner is overdue. See [`vsock_connect_next_backoff`] for
+/// the full progressive policy — `VSOCK_CONNECT_BACKOFF_STEADY` is
+/// the upper-bound applied past `VSOCK_CONNECT_BACKOFF_RAMP_END`,
+/// where additional polling cost no longer matters because the
+/// guest is clearly not on the happy path.
+pub const VSOCK_CONNECT_BACKOFF_STEADY: Duration = Duration::from_millis(100);
+
+/// Inter-attempt sleep used during the initial "fast poll" window of
+/// [`AvfRuntime::connect_vsock`]. The canonical orchestrator boot
+/// (per `extensibility-traits.md §3.5`) lands a vsock listener
+/// within ~200 ms; the previous 100 ms steady-state cadence cost up
+/// to 90 ms of avoidable wall time on every spawn (we'd miss the
+/// listener bind by one cycle). Polling at 5 ms during the boot
+/// window costs only a handful of dispatch hops on AVF's serial
+/// queue and recovers ~50–90 ms per spawn in the typical case.
+pub const VSOCK_CONNECT_BACKOFF_FAST:   Duration = Duration::from_millis(5);
+
+/// Mid-window backoff: once the guest is past the median boot
+/// budget but not yet "stuck", we relax to 25 ms so polling cost
+/// stays bounded if a slower-than-usual boot drags out into the
+/// hundreds of ms.
+pub const VSOCK_CONNECT_BACKOFF_MID:    Duration = Duration::from_millis(25);
+
+/// Elapsed-time threshold separating the fast (5 ms) and mid (25 ms)
+/// polling regimes. Sized to comfortably cover the median orchestrator
+/// boot plus the tokio-runtime spin-up the planner does before
+/// binding AF_VSOCK.
+pub const VSOCK_CONNECT_BACKOFF_FAST_END: Duration = Duration::from_millis(300);
+
+/// Elapsed-time threshold separating the mid (25 ms) and steady
+/// (100 ms) polling regimes. Past this point the boot is clearly
+/// abnormal; we stop hammering the dispatch queue and give the
+/// guest time to recover (or the deadline to expire).
+pub const VSOCK_CONNECT_BACKOFF_RAMP_END: Duration = Duration::from_secs(2);
+
+/// Pick the next inter-attempt sleep for the
+/// [`AvfRuntime::connect_vsock`] retry loop based on how long we've
+/// already been polling. Three regimes:
+///
+///   * `< VSOCK_CONNECT_BACKOFF_FAST_END` (300 ms) — `5 ms`. Covers
+///     the median orchestrator boot; recovers ~50–90 ms per spawn
+///     vs the previous 100 ms steady cadence.
+///   * `< VSOCK_CONNECT_BACKOFF_RAMP_END` (2 s) — `25 ms`. The
+///     guest is past the happy path but might still come up; bounded
+///     polling cost.
+///   * otherwise — `100 ms`. Same as the legacy steady cadence;
+///     the boot is abnormal and additional polling cost is moot.
+#[inline]
+pub fn vsock_connect_next_backoff(elapsed: Duration) -> Duration {
+    if elapsed < VSOCK_CONNECT_BACKOFF_FAST_END {
+        VSOCK_CONNECT_BACKOFF_FAST
+    } else if elapsed < VSOCK_CONNECT_BACKOFF_RAMP_END {
+        VSOCK_CONNECT_BACKOFF_MID
+    } else {
+        VSOCK_CONNECT_BACKOFF_STEADY
+    }
+}
 
 /// Errors the runtime can surface.
 #[derive(Debug, thiserror::Error)]
@@ -1048,10 +1101,11 @@ mod macos {
         /// peer" if no listener exists yet. The kernel calls
         /// `connect_vsock` immediately after `start()` returns, but
         /// the in-guest planner needs ~hundreds of ms to spin up
-        /// its tokio runtime and bind AF_VSOCK. We retry with
-        /// 100 ms backoff for up to [`VSOCK_CONNECT_DEADLINE`]
-        /// (currently 30 s — the canonical orchestrator boot
-        /// budget per `extensibility-traits.md §3.5`).
+        /// its tokio runtime and bind AF_VSOCK. We retry under a
+        /// progressive backoff ([`vsock_connect_next_backoff`]) — 5 ms
+        /// during the boot window, 25 ms past the median budget,
+        /// 100 ms past 2 s — for up to [`VSOCK_CONNECT_DEADLINE`]
+        /// (currently 30 s, the canonical Apple-VZ start budget).
         ///
         /// **Terminal errors are not retried** — calling
         /// `connect_vsock` before `start()` succeeded, or against a
@@ -1059,7 +1113,8 @@ mod macos {
         /// immediately. Both are programming bugs in the
         /// substrate, not transient guest-boot races.
         pub fn connect_vsock(&mut self, port: u32) -> Result<c_int, RuntimeError> {
-            let deadline = std::time::Instant::now() + VSOCK_CONNECT_DEADLINE;
+            let started_at = std::time::Instant::now();
+            let deadline   = started_at + VSOCK_CONNECT_DEADLINE;
             // Track the most-recent transient reason so the
             // deadline-exhausted error message names what the guest
             // was actually surfacing rather than a generic timeout.
@@ -1109,7 +1164,7 @@ mod macos {
                         ),
                     });
                 }
-                std::thread::sleep(VSOCK_CONNECT_BACKOFF);
+                std::thread::sleep(vsock_connect_next_backoff(started_at.elapsed()));
             }
         }
 
