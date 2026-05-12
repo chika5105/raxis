@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -21,7 +21,20 @@ const STATE_OPTIONS = [
 ];
 
 export function InitiativesPage() {
-  const [stateFilter, setStateFilter] = useState<string>("All");
+  const navigate = useNavigate();
+  // The Overview KPI tile links here with `?state=Active`,
+  // and operators expect to share / bookmark filtered URLs.
+  // Mirror the filter into the URL so back/forward, copy-link,
+  // and refresh all preserve the chosen state.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlState = searchParams.get("state") ?? "All";
+  const stateFilter = STATE_OPTIONS.includes(urlState) ? urlState : "All";
+  const setStateFilter = (next: string) => {
+    const sp = new URLSearchParams(searchParams);
+    if (next === "All") sp.delete("state");
+    else sp.set("state", next);
+    setSearchParams(sp, { replace: true });
+  };
   const [search, setSearch] = useState("");
 
   const q = useQuery({
@@ -105,14 +118,25 @@ export function InitiativesPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((i) => (
+              {filtered.map((i) => {
+                const href = `/initiatives/${i.initiative_id}`;
+                return (
                 <tr
                   key={i.initiative_id}
-                  className="border-t border-edge/40 hover:bg-panel-high"
+                  tabIndex={0}
+                  onClick={() => navigate(href)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      navigate(href);
+                    }
+                  }}
+                  className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
                 >
                   <td className="px-4 py-2.5">
                     <Link
-                      to={`/initiatives/${i.initiative_id}`}
+                      to={href}
+                      onClick={(e) => e.stopPropagation()}
                       className="text-ink hover:text-accent font-medium"
                     >
                       {i.display_name}
@@ -142,7 +166,8 @@ export function InitiativesPage() {
                     {fmtRelative(i.updated_at)}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

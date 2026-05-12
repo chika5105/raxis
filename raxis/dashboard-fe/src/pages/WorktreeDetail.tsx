@@ -166,7 +166,7 @@ export function WorktreeDetailPage() {
       </header>
 
       {/* Tabs */}
-      <div className="flex border-b border-edge text-sm">
+      <div role="tablist" className="flex border-b border-edge text-sm">
         <TabButton active={tab === "files"} onClick={() => setTab("files")}>
           Files
         </TabButton>
@@ -420,8 +420,11 @@ interface TabButtonProps {
 function TabButton({ active, onClick, children }: TabButtonProps) {
   return (
     <button
+      type="button"
+      role="tab"
+      aria-selected={active}
       onClick={onClick}
-      className={`px-4 py-2 -mb-px border-b-2 ${
+      className={`px-4 py-2 -mb-px border-b-2 focus:outline-none focus-visible:bg-panel-high ${
         active
           ? "text-ink border-accent"
           : "text-ink-muted border-transparent hover:text-ink"

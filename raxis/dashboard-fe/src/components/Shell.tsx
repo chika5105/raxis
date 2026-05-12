@@ -1,9 +1,13 @@
-import { useEffect, useState, type ReactNode } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link, NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import clsx from "clsx";
 
 import { authApi, dashboardApi } from "@/api/client";
+import {
+  CommandPalette,
+  type PaletteCommand,
+} from "@/components/CommandPalette";
 import { clearStoredToken, getStoredProfile, getStoredToken } from "@/lib/auth-store";
 import { shortFingerprint } from "@/lib/format";
 import { ThemeToggle } from "@/components/ThemeToggle";
@@ -63,6 +67,7 @@ interface ShellProps {
 export function Shell({ children }: ShellProps) {
   const navigate = useNavigate();
   const [profile, setProfile] = useState(() => getStoredProfile());
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   // Re-read the profile when storage changes (logout in
   // another tab — clear local state to match).
@@ -72,6 +77,25 @@ export function Shell({ children }: ShellProps) {
     }
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  // Cmd/Ctrl-K opens the quick-nav palette. The header pill
+  // already advertises this shortcut; this commit makes it real.
+  // We mount the listener globally (window) so it works from
+  // any keyboard focus inside the dashboard, and we explicitly
+  // skip when an `<input>` / `<textarea>` / contenteditable is
+  // focused so operators editing policy TOML / search filters
+  // can still type a literal "k" with Cmd held (rare but
+  // possible on layout switches).
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
   // Lightweight badge counts for the nav. Refresh every 10s
@@ -110,6 +134,40 @@ export function Shell({ children }: ShellProps) {
     navigate("/login");
   };
 
+  // Build the palette command list from the same NAV config
+  // the sidebar uses. Adds a couple of action-style commands
+  // (Logout, Refresh page) so the palette is genuinely faster
+  // than clicking through the chrome.
+  const paletteCommands: PaletteCommand[] = useMemo(() => {
+    const navCommands: PaletteCommand[] = NAV.flatMap((section) =>
+      section.items
+        .filter(
+          (i) =>
+            !i.rolesAny ||
+            i.rolesAny.some((r) => profile?.roles.includes(r)),
+        )
+        .map<PaletteCommand>((i) => ({
+          label: i.label,
+          glyph: i.glyph,
+          hint: i.to,
+          keywords: section.label,
+          to: i.to,
+        })),
+    );
+    const actions: PaletteCommand[] = [
+      {
+        label: "Logout",
+        keywords: "sign out exit",
+        hint: "action",
+        run: () => {
+          void onLogout();
+        },
+      },
+    ];
+    return [...navCommands, ...actions];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile]);
+
   return (
     <div className="min-h-screen flex bg-panel">
       {/* Sidebar */}
@@ -147,6 +205,7 @@ export function Shell({ children }: ShellProps) {
                       className={({ isActive }) =>
                         clsx(
                           "flex items-center gap-2.5 px-4 py-1.5 text-sm border-l-2 transition-colors",
+                          "focus:outline-none focus-visible:bg-panel-high focus-visible:text-ink",
                           isActive
                             ? "border-accent text-ink bg-panel-high"
                             : "border-transparent text-ink-muted hover:text-ink hover:bg-panel-high/50",
@@ -188,6 +247,7 @@ export function Shell({ children }: ShellProps) {
                 ))}
               </div>
               <button
+                type="button"
                 className="btn w-full mt-3 justify-center"
                 onClick={onLogout}
               >
@@ -196,6 +256,7 @@ export function Shell({ children }: ShellProps) {
             </div>
           ) : (
             <button
+              type="button"
               className="btn-primary w-full justify-center"
               onClick={() => navigate("/login")}
             >
@@ -209,11 +270,17 @@ export function Shell({ children }: ShellProps) {
       <main className="flex-1 min-w-0 flex flex-col">
         <header className="h-12 border-b border-edge bg-panel-raised flex items-center px-5 shrink-0">
           <Breadcrumb />
-          <div className="ml-auto flex items-center gap-3 text-xs text-ink-subtle">
-            <div className="flex items-center gap-2">
-              <span className="kbd">⌘K</span>
+          <div className="ml-auto flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setPaletteOpen(true)}
+              aria-label="Open quick navigation"
+              title="Quick navigation (⌘K)"
+              className="flex items-center gap-2 text-xs text-ink-subtle hover:text-ink focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded px-1.5 py-1 transition-colors"
+            >
+              <span className="kbd" aria-hidden="true">⌘K</span>
               <span>quick nav</span>
-            </div>
+            </button>
             <ThemeToggle />
           </div>
         </header>
@@ -223,32 +290,102 @@ export function Shell({ children }: ShellProps) {
           </div>
         </div>
       </main>
+      <CommandPalette
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        commands={paletteCommands}
+      />
     </div>
   );
 }
 
+// Friendly labels for top-level route segments. Anything not
+// in this map is rendered as-is (e.g. raw IDs / hashes).
+const SEGMENT_LABELS: Record<string, string> = {
+  health: "Health",
+  inbox: "Inbox",
+  notifications: "Notifications",
+  initiatives: "Initiatives",
+  tasks: "Tasks",
+  sessions: "Sessions",
+  escalations: "Escalations",
+  audit: "Audit",
+  git: "Git Worktrees",
+  policy: "Policy",
+};
+
 function Breadcrumb() {
-  const segments =
-    typeof window !== "undefined"
-      ? window.location.pathname.split("/").filter(Boolean)
-      : [];
+  // useLocation makes the breadcrumb update on every SPA
+  // navigation. The previous implementation read
+  // `window.location.pathname` directly, which is correct on
+  // the first render but only re-runs because Shell happens
+  // to re-render on route change — fragile, and broke entirely
+  // when the parent didn't re-render (e.g. nav inside a tab).
+  const location = useLocation();
+  const segments = location.pathname.split("/").filter(Boolean);
+
   if (segments.length === 0) {
     return (
-      <span className="text-sm text-ink-muted">
+      <nav aria-label="Breadcrumb" className="text-sm text-ink-muted">
         <span className="text-ink">Home</span>
-      </span>
+      </nav>
     );
   }
+
   return (
-    <span className="text-sm text-ink-muted">
-      {segments.map((s, i) => (
-        <span key={i}>
-          {i > 0 && <span className="mx-1.5 text-ink-subtle">/</span>}
-          <span className={i === segments.length - 1 ? "text-ink" : ""}>
-            {s}
+    <nav aria-label="Breadcrumb" className="text-sm text-ink-muted">
+      <Link to="/" className="hover:text-accent">
+        Home
+      </Link>
+      {segments.map((seg, i) => {
+        // Truncate long IDs / hashes so the chrome doesn't
+        // overflow when the operator drills into something
+        // like `/sessions/01HXYZ…64hex`. Keep `Mono`-ish
+        // styling for raw IDs (no friendly label match).
+        const isLast = i === segments.length - 1;
+        const friendly = SEGMENT_LABELS[seg];
+        const decoded = (() => {
+          try {
+            return decodeURIComponent(seg);
+          } catch {
+            return seg;
+          }
+        })();
+        const display = friendly
+          ? friendly
+          : decoded.length > 18
+          ? `${decoded.slice(0, 8)}…${decoded.slice(-4)}`
+          : decoded;
+        const path = "/" + segments.slice(0, i + 1).join("/");
+        return (
+          <span key={`${seg}-${i}`}>
+            <span className="mx-1.5 text-ink-subtle">/</span>
+            {isLast ? (
+              <span
+                className={
+                  friendly
+                    ? "text-ink"
+                    : "text-ink font-mono text-[0.78rem]"
+                }
+                title={decoded}
+              >
+                {display}
+              </span>
+            ) : (
+              <Link
+                to={path}
+                className={clsx(
+                  "hover:text-accent",
+                  !friendly && "font-mono text-[0.78rem]",
+                )}
+                title={decoded}
+              >
+                {display}
+              </Link>
+            )}
           </span>
-        </span>
-      ))}
-    </span>
+        );
+      })}
+    </nav>
   );
 }

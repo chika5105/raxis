@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -13,6 +13,7 @@ import { fmtRelative, fmtTokens } from "@/lib/format";
 const ROLES = ["All", "Orchestrator", "Executor", "Reviewer"];
 
 export function SessionsPage() {
+  const navigate = useNavigate();
   const [role, setRole] = useState<string>("All");
   const [search, setSearch] = useState("");
 
@@ -78,10 +79,27 @@ export function SessionsPage() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map((s) => (
-                <tr key={s.session_id} className="border-t border-edge/40 hover:bg-panel-high">
+              {filtered.map((s) => {
+                const href = `/sessions/${s.session_id}`;
+                return (
+                <tr
+                  key={s.session_id}
+                  tabIndex={0}
+                  onClick={() => navigate(href)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      navigate(href);
+                    }
+                  }}
+                  className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                >
                   <td className="px-4 py-2">
-                    <Link to={`/sessions/${s.session_id}`} className="text-ink hover:text-accent">
+                    <Link
+                      to={href}
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-ink hover:text-accent"
+                    >
                       <Mono>{s.session_id.slice(0, 16)}…</Mono>
                     </Link>
                   </td>
@@ -91,13 +109,21 @@ export function SessionsPage() {
                   </td>
                   <td className="px-4 py-2 text-xs">
                     {s.initiative_id && (
-                      <Link to={`/initiatives/${s.initiative_id}`} className="text-accent hover:underline font-mono">
+                      <Link
+                        to={`/initiatives/${s.initiative_id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-accent hover:underline font-mono"
+                      >
                         {s.initiative_id}
                       </Link>
                     )}
                     {s.task_id && (
                       <div>
-                        <Link to={`/tasks/${s.task_id}`} className="text-ink-muted hover:text-accent font-mono text-[11px]">
+                        <Link
+                          to={`/tasks/${s.task_id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-ink-muted hover:text-accent font-mono text-[11px]"
+                        >
                           {s.task_id}
                         </Link>
                       </div>
@@ -117,7 +143,8 @@ export function SessionsPage() {
                     {fmtRelative(s.updated_at)}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>

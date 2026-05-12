@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -9,6 +9,7 @@ import { PageSpinner } from "@/components/Spinner";
 import { fmtRelative } from "@/lib/format";
 
 export function InboxPage() {
+  const navigate = useNavigate();
   const q = useQuery({
     queryKey: ["inbox"],
     queryFn: ({ signal }) => dashboardApi.inbox(signal),
@@ -34,8 +35,42 @@ export function InboxPage() {
       ) : (
         <div className="card p-0 overflow-hidden">
           <ul className="divide-y divide-edge/50">
-            {items.map((a) => (
-              <li key={a.event_id} className="px-4 py-3 hover:bg-panel-high">
+            {items.map((a) => {
+              // Drill-in target: prefer initiative, fall back
+              // to task. Some inbox events (e.g.
+              // PolicyEpochAdvanced) carry neither — render
+              // those as plain non-interactive rows so the
+              // hover affordance doesn't lie about
+              // clickability.
+              const href = a.initiative_id
+                ? `/initiatives/${a.initiative_id}`
+                : a.task_id
+                ? `/tasks/${a.task_id}`
+                : null;
+              const interactive = href !== null;
+              const interactiveProps = interactive
+                ? {
+                    tabIndex: 0,
+                    role: "link",
+                    onClick: () => navigate(href!),
+                    onKeyDown: (e: React.KeyboardEvent<HTMLLIElement>) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        navigate(href!);
+                      }
+                    },
+                  }
+                : {};
+              return (
+              <li
+                key={a.event_id}
+                {...interactiveProps}
+                className={`px-4 py-3 ${
+                  interactive
+                    ? "hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                    : ""
+                }`}
+              >
                 <div className="flex items-center gap-3 flex-wrap">
                   <span className="badge bg-warn-muted/30 border-warn text-warn">
                     {a.event_kind}
@@ -43,6 +78,7 @@ export function InboxPage() {
                   {a.initiative_id && (
                     <Link
                       to={`/initiatives/${a.initiative_id}`}
+                      onClick={(e) => e.stopPropagation()}
                       className="text-sm text-accent hover:underline font-mono"
                     >
                       {a.initiative_id}
@@ -51,6 +87,7 @@ export function InboxPage() {
                   {a.task_id && (
                     <Link
                       to={`/tasks/${a.task_id}`}
+                      onClick={(e) => e.stopPropagation()}
                       className="text-xs text-ink-muted hover:text-accent font-mono"
                     >
                       · {a.task_id}
@@ -64,7 +101,8 @@ export function InboxPage() {
                   {JSON.stringify(a.payload, null, 2)}
                 </pre>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       )}

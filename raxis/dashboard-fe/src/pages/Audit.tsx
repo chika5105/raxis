@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useInfiniteQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -16,6 +16,19 @@ export function AuditPage() {
   const [params, setParams] = useSearchParams();
   const initiativeId = params.get("initiative_id") ?? undefined;
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Controlled input mirroring the URL's initiative_id filter.
+  // The previous implementation used `defaultValue` which only
+  // seeds the field on first mount — clicking the "clear" link
+  // wiped the URL param but left whatever text the operator
+  // had typed, so the visible input lied about the active
+  // filter. Using a controlled state synced from the URL keeps
+  // the input and the filter in lockstep regardless of which
+  // surface (input, "clear", browser back/forward) drove the
+  // change.
+  const [filterDraft, setFilterDraft] = useState(initiativeId ?? "");
+  useEffect(() => {
+    setFilterDraft(initiativeId ?? "");
+  }, [initiativeId]);
 
   const q = useInfiniteQuery({
     queryKey: ["audit", { initiativeId }],
@@ -50,16 +63,18 @@ export function AuditPage() {
         <div className="flex gap-2">
           <input
             className="input w-72"
-            placeholder="Filter by initiative id…"
-            defaultValue={initiativeId ?? ""}
+            placeholder="Filter by initiative id (press Enter)…"
+            value={filterDraft}
+            onChange={(e) => setFilterDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                const v = (e.target as HTMLInputElement).value.trim();
-                if (v) {
-                  setParams({ initiative_id: v });
-                } else {
-                  setParams({});
-                }
+                e.preventDefault();
+                const v = filterDraft.trim();
+                if (v) setParams({ initiative_id: v });
+                else setParams({});
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setFilterDraft(initiativeId ?? "");
               }
             }}
           />
@@ -69,7 +84,11 @@ export function AuditPage() {
       {initiativeId && (
         <div className="text-xs text-ink-muted">
           Filtered to initiative <Mono pill>{initiativeId}</Mono>{" "}
-          <button onClick={() => setParams({})} className="text-accent hover:underline ml-2">
+          <button
+            type="button"
+            onClick={() => setParams({})}
+            className="text-accent hover:underline ml-2"
+          >
             clear
           </button>
         </div>
@@ -80,56 +99,88 @@ export function AuditPage() {
       ) : (
         <div className="card p-0 overflow-hidden">
           <ul className="divide-y divide-edge/50">
-            {all.map((a) => (
-              <li key={a.event_id}>
-                <button
-                  onClick={() => setExpanded(expanded === a.event_id ? null : a.event_id)}
-                  className="w-full text-left px-4 py-2.5 flex items-center gap-3 hover:bg-panel-high"
-                >
-                  <span className="text-[11px] text-ink-subtle font-mono w-14 text-right">
-                    #{a.seq}
-                  </span>
-                  <span className="badge bg-panel-high text-ink-muted border-edge-strong">
-                    {a.event_kind}
-                  </span>
-                  {a.initiative_id && (
-                    <Link
-                      to={`/initiatives/${a.initiative_id}`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="text-xs text-accent hover:underline font-mono"
+            {all.map((a) => {
+              const isOpen = expanded === a.event_id;
+              const toggle = () =>
+                setExpanded(isOpen ? null : a.event_id);
+              // Outer row is a real interactive surface but
+              // contains nested <a> links to the initiative /
+              // task. Plain <button> would be invalid HTML
+              // (interactive descendants), so we use
+              // role="button" + keyboard handlers on a <div>.
+              return (
+                <li key={a.event_id}>
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={isOpen}
+                    aria-controls={`audit-payload-${a.event_id}`}
+                    onClick={toggle}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        toggle();
+                      }
+                    }}
+                    className="w-full text-left px-4 py-2.5 flex items-center gap-3 cursor-pointer hover:bg-panel-high focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                  >
+                    <span className="text-[11px] text-ink-subtle font-mono w-14 text-right">
+                      #{a.seq}
+                    </span>
+                    <span className="badge bg-panel-high text-ink-muted border-edge-strong">
+                      {a.event_kind}
+                    </span>
+                    {a.initiative_id && (
+                      <Link
+                        to={`/initiatives/${a.initiative_id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-xs text-accent hover:underline font-mono"
+                      >
+                        {a.initiative_id}
+                      </Link>
+                    )}
+                    {a.task_id && (
+                      <Link
+                        to={`/tasks/${a.task_id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-[11px] text-ink-muted hover:text-accent font-mono"
+                      >
+                        · {a.task_id}
+                      </Link>
+                    )}
+                    <span className="ml-auto text-xs text-ink-subtle">
+                      {fmtRelative(a.at)}
+                    </span>
+                    <span
+                      aria-hidden="true"
+                      className={`text-ink-subtle text-xs transition-transform ${
+                        isOpen ? "rotate-90" : ""
+                      }`}
                     >
-                      {a.initiative_id}
-                    </Link>
-                  )}
-                  {a.task_id && (
-                    <Link
-                      to={`/tasks/${a.task_id}`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="text-[11px] text-ink-muted hover:text-accent font-mono"
-                    >
-                      · {a.task_id}
-                    </Link>
-                  )}
-                  <span className="ml-auto text-xs text-ink-subtle">
-                    {fmtRelative(a.at)}
-                  </span>
-                </button>
-                {expanded === a.event_id && (
-                  <div className="px-4 pb-3 pt-1 bg-panel">
-                    <div className="text-[11px] text-ink-subtle">
-                      <Mono>{a.event_id}</Mono> · {fmtAbsolute(a.at)}
-                    </div>
-                    <pre className="mt-2 text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96">
-                      {JSON.stringify(a.payload, null, 2)}
-                    </pre>
+                      ›
+                    </span>
                   </div>
-                )}
-              </li>
-            ))}
+                  {isOpen && (
+                    <div
+                      id={`audit-payload-${a.event_id}`}
+                      className="px-4 pb-3 pt-1 bg-panel"
+                    >
+                      <div className="text-[11px] text-ink-subtle">
+                        <Mono>{a.event_id}</Mono> · {fmtAbsolute(a.at)}
+                      </div>
+                      <pre className="mt-2 text-[11px] font-mono text-ink-muted overflow-x-auto scroll-thin max-h-96">
+                        {JSON.stringify(a.payload, null, 2)}
+                      </pre>
+                    </div>
+                  )}
+                </li>
+              );
+            })}
           </ul>
           {q.hasNextPage && (
             <div className="p-3 border-t border-edge text-center">
               <button
+                type="button"
                 className="btn"
                 disabled={q.isFetchingNextPage}
                 onClick={() => q.fetchNextPage()}

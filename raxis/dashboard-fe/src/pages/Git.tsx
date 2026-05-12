@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { Empty } from "@/components/Empty";
@@ -9,6 +9,7 @@ import { PageSpinner } from "@/components/Spinner";
 import { shortSha } from "@/lib/format";
 
 export function GitPage() {
+  const navigate = useNavigate();
   const q = useQuery({
     queryKey: ["worktrees"],
     queryFn: ({ signal }) => dashboardApi.git.list(signal),
@@ -43,10 +44,27 @@ export function GitPage() {
               </tr>
             </thead>
             <tbody>
-              {items.map((w) => (
-                <tr key={w.name} className="border-t border-edge/40 hover:bg-panel-high">
+              {items.map((w) => {
+                const href = `/git/${encodeURIComponent(w.name)}`;
+                return (
+                <tr
+                  key={w.name}
+                  tabIndex={0}
+                  onClick={() => navigate(href)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      navigate(href);
+                    }
+                  }}
+                  className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                >
                   <td className="px-4 py-2.5">
-                    <Link to={`/git/${encodeURIComponent(w.name)}`} className="text-ink hover:text-accent">
+                    <Link
+                      to={href}
+                      onClick={(e) => e.stopPropagation()}
+                      className="text-ink hover:text-accent"
+                    >
                       {w.label}
                     </Link>
                     <div className="text-[11px] text-ink-subtle">
@@ -69,7 +87,11 @@ export function GitPage() {
                   </td>
                   <td className="px-4 py-2.5 text-xs">
                     {w.session_id ? (
-                      <Link to={`/sessions/${w.session_id}`} className="text-accent hover:underline font-mono">
+                      <Link
+                        to={`/sessions/${w.session_id}`}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-accent hover:underline font-mono"
+                      >
                         {w.session_id.slice(0, 12)}…
                       </Link>
                     ) : (
@@ -77,7 +99,11 @@ export function GitPage() {
                     )}
                     {w.task_id && (
                       <div>
-                        <Link to={`/tasks/${w.task_id}`} className="text-ink-muted hover:text-accent font-mono text-[11px]">
+                        <Link
+                          to={`/tasks/${w.task_id}`}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-ink-muted hover:text-accent font-mono text-[11px]"
+                        >
                           {w.task_id}
                         </Link>
                       </div>
@@ -87,7 +113,8 @@ export function GitPage() {
                     {shortSha(w.base_sha)}
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
