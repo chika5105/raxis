@@ -155,6 +155,20 @@ pub(crate) struct RawPolicy {
     #[serde(default)]
     pub(crate) isolation: Option<IsolationSection>,
 
+    /// `[elastic]` — V2 elastic VM-scaling configuration per
+    /// `specs/v2/elastic-vm-scaling.md §2.1`. **Optional**:
+    /// omitted section means "kernel uses the spec defaults" from
+    /// [`ElasticConfig::default`] (elastic enabled, ceilings sized
+    /// well above the `[isolation]` baselines, three transient
+    /// retries with exponential backoff). Read at every per-VM
+    /// spawn (transient retries) and by the dynamic-scaling
+    /// engine (scale-up bounds + rate-limit). The `enabled` flag
+    /// is the master switch — `false` disables UPWARD scaling
+    /// only; transient retries and downscale-on-next-spawn remain
+    /// active per INV-ELASTIC-05 / INV-ELASTIC-07.
+    #[serde(default)]
+    pub(crate) elastic: Option<ElasticSection>,
+
     /// `[environments.<label>]` — V2_GAPS §E1 environment-binding
     /// declarations per `environment-access-control.md §5b.1`.
     /// **Optional**: omitting the entire `[environments]` table
@@ -854,6 +868,306 @@ const ISOLATION_MIN_MEM_MIB: u32 = 64;
 /// largest realistic per-VM working set on the M-series hosts
 /// the AVF substrate targets.
 const ISOLATION_MAX_MEM_MIB: u32 = 64 * 1024;
+
+// ---------------------------------------------------------------------------
+// `[elastic]` — operator-tunable elastic VM-scaling per
+// `specs/v2/elastic-vm-scaling.md §2.1`
+// ---------------------------------------------------------------------------
+
+/// `[elastic]` — V2 elastic VM-scaling configuration per
+/// `specs/v2/elastic-vm-scaling.md §2.1`.
+///
+/// ```toml
+/// [elastic]
+/// enabled                                = true
+/// max_vcpus_per_session                  = 8
+/// max_memory_mb_per_session              = 16384
+/// max_concurrent_scaling_events_per_minute = 6
+/// transient_retry_max_attempts           = 3
+/// transient_retry_initial_backoff_ms     = 250
+/// transient_retry_max_backoff_ms         = 4000
+/// ```
+///
+/// Every field is optional; absent ⇒ kernel defaults from
+/// [`ElasticConfig::default`] apply. The `enabled` field is the
+/// master switch:
+///
+/// * `enabled = true` (default) — the kernel may scale capacity
+///   upward at runtime when in-VM signals warrant it (subject to
+///   the per-session / plan / policy ceilings).
+/// * `enabled = false` — the kernel NEVER raises capacity beyond
+///   the configured baseline. INV-ELASTIC-05 is enforced
+///   mechanically by the spawn helper that builds the new
+///   `VmSpec`; the kernel still retries transient spawn failures
+///   and still biases future spawns smaller for under-utilised
+///   roles (those mechanisms never increase capacity).
+#[derive(Debug, Clone, Deserialize, Default)]
+pub(crate) struct ElasticSection {
+    /// Master switch. Default `true`. When `false`, no
+    /// `SessionVmScaleEvent { direction: Up }` may ever be
+    /// emitted (INV-ELASTIC-05). Transient retries and
+    /// downscale-on-next-spawn remain active.
+    #[serde(default)]
+    pub(crate) enabled: Option<bool>,
+
+    /// Operator-signed ceiling on vCPU count for any single
+    /// per-session VM (scale-up cannot raise vcpus above this).
+    /// Default 8.
+    #[serde(default)]
+    pub(crate) max_vcpus_per_session: Option<u32>,
+
+    /// Operator-signed ceiling on memory MiB for any single
+    /// per-session VM. Default 16384 (16 GiB).
+    #[serde(default)]
+    pub(crate) max_memory_mb_per_session: Option<u32>,
+
+    /// Sliding-window rate limit on substrate-visible scaling
+    /// events (scale-up + scale-down combined). Default 6.
+    /// INV-ELASTIC-04.
+    #[serde(default)]
+    pub(crate) max_concurrent_scaling_events_per_minute: Option<u32>,
+
+    /// Hard ceiling on transient spawn retry attempts.
+    /// INV-ELASTIC-06. Default 3.
+    #[serde(default)]
+    pub(crate) transient_retry_max_attempts: Option<u32>,
+
+    /// Initial exponential-backoff delay after the first
+    /// transient spawn failure. Default 250 ms.
+    #[serde(default)]
+    pub(crate) transient_retry_initial_backoff_ms: Option<u32>,
+
+    /// Cap on the exponential-backoff delay between transient
+    /// retries. Default 4000 ms.
+    #[serde(default)]
+    pub(crate) transient_retry_max_backoff_ms: Option<u32>,
+}
+
+/// V2 effective `[elastic]` config — every field resolved to a
+/// concrete value with defaults applied and structural caps
+/// validated.
+///
+/// Read at every per-VM spawn (transient retry parameters) and by
+/// the dynamic-scaling engine (per-session ceilings + rate
+/// limit). All fields are non-Optional after validation; the
+/// section's optionality is captured on the raw side
+/// ([`ElasticSection`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElasticConfig {
+    /// Master switch. `true` ⇒ upward scaling is permitted (still
+    /// subject to ceilings + rate limit); `false` ⇒ NEVER raise
+    /// capacity beyond baseline (INV-ELASTIC-05).
+    pub enabled: bool,
+
+    /// Operator-signed ceiling on vCPU count for any single
+    /// per-session VM after a scale-up event. Plans MAY declare
+    /// `max_vcpus` ≤ this value; plans declaring more are
+    /// rejected at admission with
+    /// `FAIL_ELASTIC_PLAN_EXCEEDS_POLICY` (INV-ELASTIC-01).
+    pub max_vcpus_per_session: u32,
+
+    /// Operator-signed ceiling on memory MiB. Same plan-narrows
+    /// rule.
+    pub max_memory_mb_per_session: u32,
+
+    /// Sliding-window rate limit on scaling events (per minute,
+    /// per kernel). Excess events are deferred and audited via
+    /// `SessionVmScaleDeferred { reason: RateLimit }`
+    /// (INV-ELASTIC-04 — never a hard failure).
+    pub max_concurrent_scaling_events_per_minute: u32,
+
+    /// Maximum transient-retry attempts before the kernel emits
+    /// `SessionVmFailedFinal`. INV-ELASTIC-06: hard ceiling.
+    pub transient_retry_max_attempts: u32,
+
+    /// Initial backoff between transient retries.
+    pub transient_retry_initial_backoff_ms: u32,
+
+    /// Cap on the exponential backoff (the actual delay is
+    /// `min(initial * 2^(n-1), max)` per `elastic-vm-scaling.md
+    /// §3.2`).
+    pub transient_retry_max_backoff_ms: u32,
+}
+
+impl Default for ElasticConfig {
+    /// Spec defaults from `elastic-vm-scaling.md §2.1`. Sized so
+    /// that a kernel that boots with no `[elastic]` section
+    /// behaves identically to today modulo the new
+    /// transient-retry loop (which can only IMPROVE liveness
+    /// against noisy-neighbour boot races) and the new
+    /// scale-up engine (which is gated by the `enabled` flag).
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            // Sized at 8 vCPU / 16 GiB per session — comfortably
+            // above the V2 reference Executor budget (2 vCPU /
+            // 4 GiB) so a 4× scale-up is admissible without an
+            // operator policy bump.
+            max_vcpus_per_session:                    8,
+            max_memory_mb_per_session:                16 * 1024,
+            // Six events / minute is one event every ten seconds
+            // — enough headroom for a host-wide noisy-neighbour
+            // event to flush its scaling decisions without
+            // overwhelming the audit dashboard.
+            max_concurrent_scaling_events_per_minute: 6,
+            transient_retry_max_attempts:             3,
+            transient_retry_initial_backoff_ms:       250,
+            transient_retry_max_backoff_ms:           4_000,
+        }
+    }
+}
+
+/// Hard ceiling on `transient_retry_max_attempts` per
+/// INV-ELASTIC-06. Beyond this, retry loops are operator-
+/// pathological and surface as `FAIL_ELASTIC_INVALID`.
+const ELASTIC_MAX_RETRY_ATTEMPTS_CEILING: u32 = 10;
+
+/// Hard ceiling on `max_concurrent_scaling_events_per_minute`. One
+/// event/sec is the limit at which operator dashboards stay
+/// legible; beyond this we reject with `FAIL_ELASTIC_INVALID`.
+const ELASTIC_MAX_EVENTS_PER_MINUTE_CEILING: u32 = 60;
+
+/// Validate a parsed `[elastic]` section, applying defaults for
+/// absent fields. All structural-cap failures land as
+/// `FAIL_ELASTIC_INVALID` so the operator gets a single error
+/// class for this section.
+///
+/// **Cross-section consistency.** The validator additionally
+/// enforces that the elastic ceilings are ≥ the `[isolation]`
+/// baselines (`elastic-vm-scaling.md §2.1`); a ceiling smaller
+/// than the baseline is structurally inconsistent and would
+/// cause every spawn to fail closed at `build_scaled_vm_spec`
+/// time. The cross-check runs after both sections have been
+/// individually validated so the diagnostic mentions the
+/// resolved values rather than the raw TOML.
+fn validate_elastic_section(
+    raw:       &Option<ElasticSection>,
+    isolation: &IsolationConfig,
+) -> Result<ElasticConfig, PolicyError> {
+    let mut cfg = ElasticConfig::default();
+    if let Some(s) = raw {
+        if let Some(v) = s.enabled {
+            cfg.enabled = v;
+        }
+        if let Some(v) = s.max_vcpus_per_session {
+            if v < 1 {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_ELASTIC_INVALID: \
+                     [elastic] max_vcpus_per_session must be ≥ 1 (got {v})",
+                )));
+            }
+            if v > ISOLATION_MAX_VCPU_COUNT {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_ELASTIC_INVALID: \
+                     [elastic] max_vcpus_per_session = {v} exceeds the \
+                     hard ceiling of {ISOLATION_MAX_VCPU_COUNT} \
+                     (matches the [isolation] per-role hard ceiling)",
+                )));
+            }
+            cfg.max_vcpus_per_session = v;
+        }
+        if let Some(v) = s.max_memory_mb_per_session {
+            if v < ISOLATION_MIN_MEM_MIB {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_ELASTIC_INVALID: \
+                     [elastic] max_memory_mb_per_session = {v} MiB is below \
+                     the hard floor of {ISOLATION_MIN_MEM_MIB} MiB",
+                )));
+            }
+            if v > ISOLATION_MAX_MEM_MIB {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_ELASTIC_INVALID: \
+                     [elastic] max_memory_mb_per_session = {v} MiB exceeds the \
+                     hard ceiling of {ISOLATION_MAX_MEM_MIB} MiB",
+                )));
+            }
+            cfg.max_memory_mb_per_session = v;
+        }
+        if let Some(v) = s.max_concurrent_scaling_events_per_minute {
+            if v == 0 {
+                return Err(PolicyError::MalformedArtifact(
+                    "FAIL_ELASTIC_INVALID: \
+                     [elastic] max_concurrent_scaling_events_per_minute must \
+                     be ≥ 1 (use enabled = false to disable scaling \
+                     entirely)".to_owned(),
+                ));
+            }
+            if v > ELASTIC_MAX_EVENTS_PER_MINUTE_CEILING {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_ELASTIC_INVALID: \
+                     [elastic] max_concurrent_scaling_events_per_minute = \
+                     {v} exceeds the hard ceiling of \
+                     {ELASTIC_MAX_EVENTS_PER_MINUTE_CEILING} (operator \
+                     dashboards stop being legible above one event per second)",
+                )));
+            }
+            cfg.max_concurrent_scaling_events_per_minute = v;
+        }
+        if let Some(v) = s.transient_retry_max_attempts {
+            if v > ELASTIC_MAX_RETRY_ATTEMPTS_CEILING {
+                return Err(PolicyError::MalformedArtifact(format!(
+                    "FAIL_ELASTIC_INVALID: \
+                     [elastic] transient_retry_max_attempts = {v} exceeds the \
+                     hard ceiling of {ELASTIC_MAX_RETRY_ATTEMPTS_CEILING} \
+                     (INV-ELASTIC-06)",
+                )));
+            }
+            cfg.transient_retry_max_attempts = v;
+        }
+        if let Some(v) = s.transient_retry_initial_backoff_ms {
+            cfg.transient_retry_initial_backoff_ms = v;
+        }
+        if let Some(v) = s.transient_retry_max_backoff_ms {
+            cfg.transient_retry_max_backoff_ms = v;
+        }
+        if cfg.transient_retry_initial_backoff_ms
+            > cfg.transient_retry_max_backoff_ms
+        {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_ELASTIC_INVALID: \
+                 [elastic] transient_retry_initial_backoff_ms = {init} > \
+                 transient_retry_max_backoff_ms = {max}; the exponential \
+                 backoff schedule must start at or below its ceiling",
+                init = cfg.transient_retry_initial_backoff_ms,
+                max  = cfg.transient_retry_max_backoff_ms,
+            )));
+        }
+    }
+
+    // Cross-section: ceilings MUST be ≥ the largest [isolation]
+    // baseline. A ceiling below the baseline would cause every
+    // spawn to fail closed at the scaling clamp.
+    let max_baseline_vcpu = isolation
+        .orchestrator_vcpu_count
+        .max(isolation.executor_vcpu_count)
+        .max(isolation.reviewer_vcpu_count);
+    if cfg.max_vcpus_per_session < max_baseline_vcpu {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_ELASTIC_CEILING_BELOW_BASELINE: \
+             [elastic] max_vcpus_per_session = {cap} < the largest \
+             [isolation] role baseline ({base}). Raise the ceiling \
+             or lower the baseline so scale-up has admissible room.",
+            cap  = cfg.max_vcpus_per_session,
+            base = max_baseline_vcpu,
+        )));
+    }
+    let max_baseline_mem = isolation
+        .orchestrator_mem_mib
+        .max(isolation.executor_mem_mib)
+        .max(isolation.reviewer_mem_mib);
+    if cfg.max_memory_mb_per_session < max_baseline_mem {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_ELASTIC_CEILING_BELOW_BASELINE: \
+             [elastic] max_memory_mb_per_session = {cap} MiB < the largest \
+             [isolation] role baseline ({base} MiB). Raise the ceiling \
+             or lower the baseline so scale-up has admissible room.",
+            cap  = cfg.max_memory_mb_per_session,
+            base = max_baseline_mem,
+        )));
+    }
+
+    Ok(cfg)
+}
 
 /// Validate a parsed `[isolation]` section, applying defaults for
 /// absent fields. All structural-cap failures land as
@@ -3417,6 +3731,16 @@ pub struct PolicyBundle {
     /// `vcpu_count` / `mem_mib` into every spawn's `SpawnRequest`.
     isolation: IsolationConfig,
 
+    /// V2 — operator-tunable elastic VM-scaling configuration per
+    /// `specs/v2/elastic-vm-scaling.md §2.1`. Always populated;
+    /// spec defaults from [`ElasticConfig::default`] apply when
+    /// the operator omits `[elastic]`. Read at every per-VM
+    /// spawn (transient retry parameters) and by the
+    /// dynamic-scaling engine (per-session ceilings + rate
+    /// limit). The `enabled` flag mechanically gates UPWARD
+    /// scaling only — INV-ELASTIC-05 / INV-ELASTIC-07.
+    elastic: ElasticConfig,
+
     /// V2_GAPS §E1 — declared environment labels and their
     /// per-env knobs (`environment-access-control.md §5b`). The
     /// map is empty when the operator declares no
@@ -4023,6 +4347,18 @@ impl PolicyBundle {
                 .unwrap_or(false),
             host_capacity: validate_host_capacity_section(&raw.host_capacity)?,
             isolation:     validate_isolation_section(&raw.isolation)?,
+            // V2 elastic-vm-scaling.md §2.1 — built after
+            // `[isolation]` so the cross-section consistency check
+            // (ceilings ≥ baselines) can read the resolved
+            // `IsolationConfig`. Re-validate `[isolation]` here
+            // so the diagnostic mentions the resolved values
+            // rather than the raw TOML — the field-init order is
+            // not guaranteed by Rust struct expressions, so we
+            // compute the resolved isolation once and reuse.
+            elastic: {
+                let iso = validate_isolation_section(&raw.isolation)?;
+                validate_elastic_section(&raw.elastic, &iso)?
+            },
             environments: validate_environments(&raw.environments)?,
             permitted_credentials: validate_permitted_credentials(
                 &raw.permitted_credentials,
@@ -4133,6 +4469,27 @@ impl PolicyBundle {
     /// per-role `vcpu_count` / `mem_mib` into every spawn's
     /// `SpawnRequest`. Hot-reload safe — every spawn-path call
     /// site goes through the live `Arc<PolicyBundle>` snapshot.
+    /// V2 elastic VM-scaling configuration per
+    /// `specs/v2/elastic-vm-scaling.md §2.1`. Always present
+    /// (defaults to [`ElasticConfig::default`] when the operator
+    /// omits the section). Read at:
+    ///
+    /// * Per-VM spawn — `transient_retry_max_attempts` /
+    ///   `transient_retry_*_backoff_ms` shape the retry loop.
+    /// * Dynamic scaling — `enabled` /
+    ///   `max_vcpus_per_session` / `max_memory_mb_per_session` /
+    ///   `max_concurrent_scaling_events_per_minute` bound the
+    ///   `ScalingDecisionEngine`.
+    ///
+    /// Honour INV-ELASTIC-05 / INV-ELASTIC-07: when `enabled =
+    /// false`, the spawn helper that builds the new `VmSpec`
+    /// MUST clamp to baseline regardless of any signal-driven
+    /// scale-up trigger. The flag here is the single mechanical
+    /// gate.
+    pub fn elastic(&self) -> &ElasticConfig {
+        &self.elastic
+    }
+
     pub fn isolation(&self) -> &IsolationConfig {
         &self.isolation
     }
@@ -4431,6 +4788,7 @@ impl PolicyBundle {
             git_push_remote:        String::new(),
             host_capacity:          HostCapacityConfig::default(),
             isolation:              IsolationConfig::default(),
+            elastic:                ElasticConfig::default(),
             environments:           HashMap::new(),
             permitted_credentials:  Vec::new(),
             vm_images:              Vec::new(),
@@ -5019,6 +5377,7 @@ mod tests {
             git_push_remote:        String::new(),
             host_capacity:          HostCapacityConfig::default(),
             isolation:              IsolationConfig::default(),
+            elastic:                ElasticConfig::default(),
             environments:           HashMap::new(),
             permitted_credentials:  Vec::new(),
             vm_images:              Vec::new(),

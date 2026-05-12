@@ -551,6 +551,12 @@ pub fn approve_plan_for_test(
     let empty_envs: HashMap<String, raxis_policy::EnvironmentConfig> = HashMap::new();
     let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
     let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
+    // V2 `elastic-vm-scaling.md §2.1` — test fixtures default to
+    // the spec defaults so existing tests keep working without
+    // having to declare an explicit `[elastic]` section. Plans
+    // that need to exercise INV-ELASTIC-01 set up their own
+    // `ElasticConfig` and call `approve_plan` directly.
+    let default_elastic = raxis_policy::ElasticConfig::default();
     approve_plan(
         initiative_id,
         approving_operator,
@@ -563,6 +569,7 @@ pub fn approve_plan_for_test(
         &empty_creds,
         &empty_vm_images,
         None,
+        &default_elastic,
         store,
         audit,
         plan_registry,
@@ -606,6 +613,15 @@ pub fn approve_plan(
     // equivalent to "no kernel-side defaulting" (matches V1
     // behavior).
     policy_default_executor_image:       Option<&raxis_policy::DefaultExecutorImageConfig>,
+    // V2 `elastic-vm-scaling.md §2.1` — operator-side
+    // `[elastic]` configuration. Drives the
+    // plan-narrows-policy validator (INV-ELASTIC-01) so any
+    // plan declaring `elastic = true` / `max_vcpus` /
+    // `max_memory_mb` beyond the policy ceiling is rejected
+    // BEFORE BEGIN TRANSACTION. Always present (defaults to
+    // [`raxis_policy::ElasticConfig::default`] when the
+    // operator omits the section).
+    policy_elastic:                      &raxis_policy::ElasticConfig,
     store:                               &Store,
     audit:                               &dyn AuditSink,
     plan_registry:                       &PlanRegistry,
@@ -836,6 +852,16 @@ pub fn approve_plan(
     // names a proxy this kernel build does not implement cannot
     // allocate a task row.
     validate_task_credentials(&plan_tasks)?;
+    // V2 `elastic-vm-scaling.md §2.1, §2.2` — plan-narrows-policy
+    // (INV-ELASTIC-01). Runs before BEGIN TRANSACTION so an
+    // over-claiming plan never allocates a row. Reviewer-task
+    // checks here are a defence-in-depth re-check of what the
+    // parser already enforces.
+    validate_elastic_against_policy(
+        &plan_tasks,
+        &orchestrator_fields,
+        policy_elastic,
+    )?;
     // V2_GAPS §13 (V2.5 BLOCKER) — INV-VM-CAP-03 +
     // INV-PLANNER-HARNESS-03. Reject Reviewer tasks that try to
     // override the kernel-canonical Reviewer image and Executor
@@ -1006,6 +1032,20 @@ pub fn approve_plan(
             //  `DEFAULT_MAX_REVIEW_REJECTIONS`).
             max_crash_retries:         pt.max_crash_retries,
             max_review_rejections:     pt.max_review_rejections,
+            // V2 `elastic-vm-scaling.md §2.2` — propagate the
+            // operator-declared elastic knobs into the in-memory
+            // PlanRegistry so the spawn helper can consult them
+            // without re-parsing the plan TOML on every spawn /
+            // re-spawn. `None` carries through unchanged so the
+            // resolver in `effective_elastic_bounds` (called by
+            // `build_scaled_vm_spec`) can apply the policy
+            // default with full visibility into "operator
+            // omitted vs declared".
+            elastic:                   pt.elastic,
+            min_vcpus:                 pt.min_vcpus,
+            max_vcpus:                 pt.max_vcpus,
+            min_memory_mb:             pt.min_memory_mb,
+            max_memory_mb:             pt.max_memory_mb,
         };
         path_scope_snapshots.push((
             pt.task_id.clone(),
@@ -1548,6 +1588,16 @@ pub fn repopulate_plan_registry(
                     // numeric value where the plan had silence.
                     max_crash_retries:         pt.max_crash_retries,
                     max_review_rejections:     pt.max_review_rejections,
+                    // V2 `elastic-vm-scaling.md §2.2` — re-hydrate
+                    // the operator-declared elastic knobs from the
+                    // immutable signed plan bytes. Same `None`
+                    // discipline as the retry ceilings above: a
+                    // missing field stays missing across restart.
+                    elastic:                   pt.elastic,
+                    min_vcpus:                 pt.min_vcpus,
+                    max_vcpus:                 pt.max_vcpus,
+                    min_memory_mb:             pt.min_memory_mb,
+                    max_memory_mb:             pt.max_memory_mb,
                 },
             );
             inserted += 1;
@@ -1909,6 +1959,26 @@ struct PlanTask {
     /// bound the env-var footprint passed to the substrate
     /// (`execve(2)` `ARG_MAX` ~128 KiB on Linux).
     description:               String,
+
+    // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
+    /// **V2 `elastic-vm-scaling.md §2.2`** — operator opt-out from
+    /// upward VM-resource scaling for this task. `None` ⇒ inherit
+    /// from `[plan.initiative] elastic`, then policy
+    /// `[elastic].enabled`. The validator rejects
+    /// `Some(true)` paired with policy `enabled = false`
+    /// (`FAIL_ELASTIC_PLAN_EXCEEDS_POLICY`). Reviewer tasks must
+    /// leave this `None` (`FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`).
+    elastic:                   Option<bool>,
+    /// Per-task floor on vCPU count (used as the lower bound by
+    /// scale-down; default = role baseline).
+    min_vcpus:                 Option<u32>,
+    /// Per-task ceiling on vCPU count (used as the upper bound by
+    /// scale-up; default = `policy.[elastic].max_vcpus_per_session`).
+    max_vcpus:                 Option<u32>,
+    /// Per-task floor on memory MiB. Same shape as `min_vcpus`.
+    min_memory_mb:             Option<u32>,
+    /// Per-task ceiling on memory MiB. Same shape as `max_vcpus`.
+    max_memory_mb:             Option<u32>,
 }
 
 /// Parse `[[tasks]]` array from plan TOML.
@@ -2132,6 +2202,71 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             entry, "max_review_rejections", &task_id,
         )?;
 
+        // V2 `elastic-vm-scaling.md §2.2` — per-task elastic knobs.
+        // All five fields are OPTIONAL; absence carries through as
+        // `None` so admission-time validation can apply the
+        // policy-default inheritance + plan-narrows-policy rule
+        // (INV-ELASTIC-01) once it has access to the active
+        // `PolicyBundle::elastic()`. The parser does ONLY the
+        // structural shape check; cross-section semantics live in
+        // `validate_elastic_against_policy`.
+        let elastic = match entry.get("elastic") {
+            None => None,
+            Some(toml::Value::Boolean(v)) => Some(*v),
+            Some(other) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) `elastic` must be a                          TOML boolean (got {ty}); see                          `specs/v2/elastic-vm-scaling.md §2.2`",
+                        ty = other.type_str(),
+                    ),
+                });
+            }
+        };
+        let min_vcpus     = parse_optional_u32_field(entry, "min_vcpus",     &task_id)?;
+        let max_vcpus     = parse_optional_u32_field(entry, "max_vcpus",     &task_id)?;
+        let min_memory_mb = parse_optional_u32_field(entry, "min_memory_mb", &task_id)?;
+        let max_memory_mb = parse_optional_u32_field(entry, "max_memory_mb", &task_id)?;
+        // Internal-consistency check: floor ≤ ceiling. This rule
+        // applies regardless of policy, so it lives in the parser.
+        if let (Some(lo), Some(hi)) = (min_vcpus, max_vcpus) {
+            if lo > hi {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) min_vcpus = {lo} >                          max_vcpus = {hi}; the floor cannot exceed the                          ceiling (specs/v2/elastic-vm-scaling.md §2.2)"
+                    ),
+                });
+            }
+        }
+        if let (Some(lo), Some(hi)) = (min_memory_mb, max_memory_mb) {
+            if lo > hi {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task_id}`) min_memory_mb = {lo} >                          max_memory_mb = {hi}; the floor cannot exceed the                          ceiling (specs/v2/elastic-vm-scaling.md §2.2)"
+                    ),
+                });
+            }
+        }
+        // INV-PLANNER-HARNESS-02 / `elastic-vm-scaling.md §2.2` —
+        // Reviewer tasks may not declare any of the elastic fields.
+        // Reviewers run on the kernel-canonical small image; allowing
+        // a plan-author to scale a Reviewer would let a compromised
+        // plan starve the operator's review surface. We reject any
+        // declaration here so the failure surface is the parser
+        // (matching the rest of the structural checks).
+        if matches!(session_agent_type, SessionAgentType::Reviewer)
+            && (elastic.is_some()
+                || min_vcpus.is_some()
+                || max_vcpus.is_some()
+                || min_memory_mb.is_some()
+                || max_memory_mb.is_some())
+        {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task_id}`) `session_agent_type =                      \"Reviewer\"` cannot declare elastic / min_*/max_*                      fields (FAIL_REVIEWER_ELASTIC_NOT_ALLOWED,                      INV-PLANNER-HARNESS-02; see                      specs/v2/elastic-vm-scaling.md §2.2)"
+                ),
+            });
+        }
+
         tasks.push(PlanTask {
             task_id,
             name,
@@ -2148,6 +2283,11 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             description: description_raw,
             max_crash_retries,
             max_review_rejections,
+            elastic,
+            min_vcpus,
+            max_vcpus,
+            min_memory_mb,
+            max_memory_mb,
         });
     }
 
@@ -2241,6 +2381,24 @@ fn parse_plan_orchestrator(plan_toml: &str)
         });
     }
 
+    // V2 `elastic-vm-scaling.md §2.2` — initiative-level elastic
+    // toggle. Optional. Plan-narrows-policy semantics
+    // (INV-ELASTIC-01) are enforced in
+    // `validate_elastic_against_policy` once we have the policy
+    // bundle; the parser does only the structural shape check.
+    let elastic = match initiative_table.and_then(|t| t.get("elastic")) {
+        None => None,
+        Some(toml::Value::Boolean(v)) => Some(*v),
+        Some(other) => {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[plan.initiative] `elastic` must be a TOML boolean                      (got {ty}); see                      `specs/v2/elastic-vm-scaling.md §2.2`",
+                    ty = other.type_str(),
+                ),
+            });
+        }
+    };
+
     Ok(crate::initiatives::OrchestratorPlanFields {
         cross_cutting_artifacts,
         description,
@@ -2251,7 +2409,92 @@ fn parse_plan_orchestrator(plan_toml: &str)
         // `parse_plan_orchestrator` directly (without a policy) still
         // produce a well-formed struct.
         target_ref: crate::initiatives::OrchestratorPlanFields::DEFAULT_TARGET_REF.to_owned(),
+        elastic,
     })
+}
+
+/// V2 `elastic-vm-scaling.md §2.1, §2.2` — admission-time
+/// plan-narrows-policy enforcement (INV-ELASTIC-01).
+///
+/// Runs after `parse_plan_tasks` and `parse_plan_orchestrator`,
+/// before `BEGIN TRANSACTION`. Rejects any plan that:
+///
+/// * Declares `elastic = true` (initiative-level or per-task) when
+///   policy `[elastic].enabled = false`
+///   (`FAIL_ELASTIC_PLAN_EXCEEDS_POLICY`).
+/// * Declares per-task `max_vcpus` / `max_memory_mb` exceeding the
+///   policy ceilings (`FAIL_ELASTIC_PLAN_EXCEEDS_POLICY`).
+/// * Re-checks Reviewer-task elastic fields as defence-in-depth
+///   against a future parser regression
+///   (`FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`).
+///
+/// Pure function — no I/O, no store reads, no audit. Honours the
+/// "plan can NARROW" rule: `Some(false)` is always admissible,
+/// smaller `max_*` is fine; only `Some(true)` against
+/// disabled policy or larger `max_*` against the policy ceiling
+/// surfaces a `LifecycleError::PlanInvalid`.
+pub(crate) fn validate_elastic_against_policy(
+    tasks:        &[PlanTask],
+    initiative:   &crate::initiatives::OrchestratorPlanFields,
+    elastic_cfg:  &raxis_policy::ElasticConfig,
+) -> Result<(), LifecycleError> {
+    if matches!(initiative.elastic, Some(true)) && !elastic_cfg.enabled {
+        return Err(LifecycleError::PlanInvalid {
+            reason:
+                "[plan.initiative] `elastic = true` but policy                  `[elastic].enabled = false`                  (FAIL_ELASTIC_PLAN_EXCEEDS_POLICY; INV-ELASTIC-01;                  plan can only narrow policy, never widen)".to_owned(),
+        });
+    }
+
+    for t in tasks {
+        if matches!(t.session_agent_type, SessionAgentType::Reviewer)
+            && (t.elastic.is_some()
+                || t.min_vcpus.is_some()
+                || t.max_vcpus.is_some()
+                || t.min_memory_mb.is_some()
+                || t.max_memory_mb.is_some())
+        {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task}`) Reviewer cannot declare                      elastic / min_*/max_* fields                      (FAIL_REVIEWER_ELASTIC_NOT_ALLOWED;                      INV-PLANNER-HARNESS-02)",
+                    task = t.task_id,
+                ),
+            });
+        }
+
+        if matches!(t.elastic, Some(true)) && !elastic_cfg.enabled {
+            return Err(LifecycleError::PlanInvalid {
+                reason: format!(
+                    "[[tasks]] (task `{task}`) `elastic = true` but policy                      `[elastic].enabled = false`                      (FAIL_ELASTIC_PLAN_EXCEEDS_POLICY; INV-ELASTIC-01)",
+                    task = t.task_id,
+                ),
+            });
+        }
+
+        if let Some(v) = t.max_vcpus {
+            if v > elastic_cfg.max_vcpus_per_session {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task}`) max_vcpus = {v} exceeds                          policy `[elastic].max_vcpus_per_session = {cap}`                          (FAIL_ELASTIC_PLAN_EXCEEDS_POLICY; INV-ELASTIC-01;                          plan can only narrow policy)",
+                        task = t.task_id,
+                        cap  = elastic_cfg.max_vcpus_per_session,
+                    ),
+                });
+            }
+        }
+        if let Some(v) = t.max_memory_mb {
+            if v > elastic_cfg.max_memory_mb_per_session {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[tasks]] (task `{task}`) max_memory_mb = {v} exceeds                          policy `[elastic].max_memory_mb_per_session = {cap}`                          (FAIL_ELASTIC_PLAN_EXCEEDS_POLICY; INV-ELASTIC-01)",
+                        task = t.task_id,
+                        cap  = elastic_cfg.max_memory_mb_per_session,
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4110,6 +4353,11 @@ description = "do thing"
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            elastic:                   None,
+            min_vcpus:                 None,
+            max_vcpus:                 None,
+            min_memory_mb:             None,
+            max_memory_mb:             None,
         }
     }
 
@@ -4284,6 +4532,11 @@ description = "do thing"
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            elastic:                   None,
+            min_vcpus:                 None,
+            max_vcpus:                 None,
+            min_memory_mb:             None,
+            max_memory_mb:             None,
         }
     }
 
@@ -4478,6 +4731,11 @@ description = "do thing"
             description: String::new(),
             max_crash_retries: None,
             max_review_rejections: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 
@@ -4803,6 +5061,11 @@ session_agent_type = "Coordinator"
             description: String::new(),
             max_crash_retries: None,
             max_review_rejections: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 
@@ -5482,6 +5745,11 @@ description = "do thing"
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            elastic:                   None,
+            min_vcpus:                 None,
+            max_vcpus:                 None,
+            min_memory_mb:             None,
+            max_memory_mb:             None,
         }
     }
 
@@ -7775,6 +8043,11 @@ mod env_consistency_tests {
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            elastic:                   None,
+            min_vcpus:                 None,
+            max_vcpus:                 None,
+            min_memory_mb:             None,
+            max_memory_mb:             None,
         }
     }
 
@@ -7920,6 +8193,11 @@ mod vm_image_admission_tests {
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            elastic:                   None,
+            min_vcpus:                 None,
+            max_vcpus:                 None,
+            min_memory_mb:             None,
+            max_memory_mb:             None,
         }
     }
 

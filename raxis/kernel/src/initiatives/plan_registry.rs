@@ -188,6 +188,46 @@ pub struct TaskPlanFields {
     /// transitions to `AtLeastOneRejected`). The retry handler
     /// reads the latest active activation row's value.
     pub max_review_rejections:     Option<u32>,
+
+    // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
+    /// Operator-declared toggle for upward VM-resource scaling on
+    /// this task. `None` ⇒ inherit from
+    /// `OrchestratorPlanFields::elastic` (initiative-level), which
+    /// in turn falls back to `policy.[elastic].enabled`. Reviewer
+    /// tasks MUST leave this `None` (the validator rejects any
+    /// declaration with `FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`).
+    ///
+    /// Resolution precedence (`elastic-vm-scaling.md §2.2`):
+    /// task-level explicit value > initiative-level explicit value
+    /// > policy `enabled` flag. Plan-narrows-policy
+    /// (INV-ELASTIC-01): `Some(true)` is rejected at admission
+    /// when policy `enabled = false`; `Some(false)` is always
+    /// admissible (a plan can always be MORE restrictive than
+    /// policy).
+    pub elastic:                   Option<bool>,
+
+    /// Operator-declared floor on vCPU count for any spawn /
+    /// scale-down event for this task. `None` ⇒ kernel uses the
+    /// role baseline from `policy.[isolation]`. Validated against
+    /// the policy ceiling `policy.[elastic].max_vcpus_per_session`
+    /// at admission time.
+    pub min_vcpus:                 Option<u32>,
+
+    /// Operator-declared ceiling on vCPU count for any scale-up
+    /// event for this task. `None` ⇒ kernel uses the policy
+    /// ceiling. Plans MAY narrow below the policy ceiling but
+    /// MAY NOT exceed it (INV-ELASTIC-01).
+    pub max_vcpus:                 Option<u32>,
+
+    /// Operator-declared floor on memory MiB for any spawn /
+    /// scale-down event. Same resolution + INV-ELASTIC-01 rule
+    /// as `min_vcpus`.
+    pub min_memory_mb:             Option<u32>,
+
+    /// Operator-declared ceiling on memory MiB for any scale-up
+    /// event. Same resolution + INV-ELASTIC-01 rule as
+    /// `max_vcpus`.
+    pub max_memory_mb:             Option<u32>,
 }
 
 /// V2 `v2-deep-spec.md §Step 12` — kernel default `max_crash_retries`
@@ -222,6 +262,11 @@ impl Default for TaskPlanFields {
             description:               String::new(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            elastic:                   None,
+            min_vcpus:                 None,
+            max_vcpus:                 None,
+            min_memory_mb:             None,
+            max_memory_mb:             None,
         }
     }
 }
@@ -312,6 +357,21 @@ pub struct OrchestratorPlanFields {
     /// non-empty default exists so any caller that *does* find an
     /// entry can advance to a real ref without a panic.
     pub target_ref: String,
+
+    /// V2 `elastic-vm-scaling.md §2.2` — initiative-level toggle
+    /// for upward VM-resource scaling. Sourced from
+    /// `[plan.initiative] elastic`. `None` ⇒ field omitted ⇒
+    /// inherit from `policy.[elastic].enabled`. Resolution
+    /// precedence: task-level explicit > initiative-level
+    /// explicit > policy `enabled` flag.
+    ///
+    /// Plan-narrows-policy (INV-ELASTIC-01): `Some(true)` is
+    /// rejected at admission when policy `enabled = false`;
+    /// `Some(false)` is always admissible. Reviewer tasks may
+    /// not opt back into elastic at the task level even when
+    /// the initiative declares `true` — Reviewer scaling is
+    /// structurally forbidden by `INV-PLANNER-HARNESS-02`.
+    pub elastic: Option<bool>,
 }
 
 impl OrchestratorPlanFields {
@@ -328,6 +388,7 @@ impl Default for OrchestratorPlanFields {
             cross_cutting_artifacts: Vec::new(),
             description:             String::new(),
             target_ref:              Self::DEFAULT_TARGET_REF.to_owned(),
+            elastic:                 None,
         }
     }
 }
@@ -721,6 +782,11 @@ mod tests {
             description:               "Refactor parser to handle UTF-16".to_owned(),
             max_crash_retries:         None,
             max_review_rejections:     None,
+            elastic:                   None,
+            min_vcpus:                 None,
+            max_vcpus:                 None,
+            min_memory_mb:             None,
+            max_memory_mb:             None,
         };
         r.insert(TaskKey::new("init-A", "t1"), f.clone());
         let snapshot = r.tasks_in_initiative("init-A");

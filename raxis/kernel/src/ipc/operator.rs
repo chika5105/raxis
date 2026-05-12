@@ -1305,6 +1305,13 @@ async fn handle_approve_plan(
     let policy_default_executor_image_snapshot:
         Option<raxis_policy::DefaultExecutorImageConfig> =
         policy_snapshot.default_executor_image().cloned();
+    // V2 `elastic-vm-scaling.md §2.1` — snapshot the operator
+    // `[elastic]` block at the same epoch the plan was submitted
+    // under so plan-narrows-policy (INV-ELASTIC-01) is evaluated
+    // against a stable view. Cloned so the spawn_blocking hop
+    // owns 'static data without cross-thread borrows.
+    let policy_elastic_snapshot: raxis_policy::ElasticConfig =
+        policy_snapshot.elastic().clone();
     // Snapshot the operator's display name from the same bundle we
     // resolved the pubkey from, so the audit event records the name
     // that was authoritative at approval time. See
@@ -1329,6 +1336,7 @@ async fn handle_approve_plan(
             &policy_permitted_credentials_snapshot,
             &policy_vm_images_snapshot,
             policy_default_executor_image_snapshot.as_ref(),
+            &policy_elastic_snapshot,
             &store_for_blocking,
             &*audit_for_blocking,
             &plan_registry_for_blocking,
