@@ -86,7 +86,9 @@ export function InitiativeDagPage() {
             <span className="text-ink">DAG</span>
           </div>
           <h1 className="mt-1 text-xl font-semibold text-ink">
-            {summary.data?.display_name ?? "Task DAG"}
+            {summary.data?.display_name ||
+              summary.data?.initiative_id ||
+              "Task DAG"}
           </h1>
           <p className="text-sm text-ink-muted mt-0.5">
             {nodes.length} task{nodes.length === 1 ? "" : "s"} · {edges.length}{" "}

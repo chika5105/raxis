@@ -444,9 +444,26 @@ impl DashboardData for KernelDashboardData {
             let completed_tasks = tasks.iter().filter(|t| t.state == "Completed").count() as u32;
             let failed_tasks = tasks.iter().filter(|t| t.state == "Failed").count() as u32;
             let updated_at = tasks.iter().map(|t| t.transitioned_at).max().unwrap_or(r.created_at);
+            // `initiatives` table has no `display_name` column —
+            // the operator-visible title lives in
+            // `[plan.initiative].title` inside the plan TOML
+            // (`02-first-initiative.md §"Define the plan"`). Fall
+            // back to `initiative_id` so the list view never
+            // renders an invisible <Link> row.
+            let title = raxis_store::views::plan_fields::reveal_initiative_meta(
+                &conn,
+                &r.initiative_id,
+            )
+            .map(|m| m.title)
+            .unwrap_or_default();
+            let display_name = if title.is_empty() {
+                r.initiative_id.clone()
+            } else {
+                title
+            };
             out.push(InitiativeListEntry {
                 initiative_id: r.initiative_id,
-                display_name: String::new(), // initiative-table has no display name today
+                display_name,
                 state: r.state,
                 task_count,
                 completed_tasks,
@@ -488,10 +505,21 @@ impl DashboardData for KernelDashboardData {
             }
             tasks.push(task_row_to_view(&conn, t));
         }
+        let title = raxis_store::views::plan_fields::reveal_initiative_meta(
+            &conn,
+            &row.initiative_id,
+        )
+        .map(|m| m.title)
+        .unwrap_or_default();
+        let display_name = if title.is_empty() {
+            row.initiative_id.clone()
+        } else {
+            title
+        };
         Ok(InitiativeView {
             summary: InitiativeListEntry {
                 initiative_id: row.initiative_id.clone(),
-                display_name: String::new(),
+                display_name,
                 state: row.state,
                 task_count,
                 completed_tasks,

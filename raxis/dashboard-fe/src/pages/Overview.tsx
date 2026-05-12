@@ -22,7 +22,8 @@ export function OverviewPage() {
 
   const initiatives = useQuery({
     queryKey: ["initiatives", { limit: 5 }],
-    queryFn: ({ signal }) => dashboardApi.initiatives.list({ limit: 5 }, signal),
+    queryFn: ({ signal }) =>
+      dashboardApi.initiatives.list({ limit: 5 }, signal),
     refetchInterval: 5_000,
   });
 
@@ -39,7 +40,8 @@ export function OverviewPage() {
   });
 
   if (health.isPending) return <PageSpinner />;
-  if (health.error) return <ErrorBox error={health.error} onRetry={() => health.refetch()} />;
+  if (health.error)
+    return <ErrorBox error={health.error} onRetry={() => health.refetch()} />;
 
   const h = health.data;
   return (
@@ -48,8 +50,8 @@ export function OverviewPage() {
         <div>
           <h1 className="text-xl font-semibold text-ink">Overview</h1>
           <p className="text-sm text-ink-muted">
-            Kernel health · {plural(h.active_initiatives, "active initiative")} ·{" "}
-            {plural(h.active_sessions, "active session")} ·{" "}
+            Kernel health · {plural(h.active_initiatives, "active initiative")}{" "}
+            · {plural(h.active_sessions, "active session")} ·{" "}
             {plural(h.pending_escalations, "pending escalation")}
           </p>
         </div>
@@ -65,7 +67,9 @@ export function OverviewPage() {
         <Tile
           title="Kernel"
           value={h.status}
-          tone={h.status === "ok" ? "ok" : h.status === "degraded" ? "warn" : "bad"}
+          tone={
+            h.status === "ok" ? "ok" : h.status === "degraded" ? "warn" : "bad"
+          }
           sub={`Booted ${fmtRelative(h.kernel_booted_at)}`}
           to="/health"
         />
@@ -116,8 +120,8 @@ export function OverviewPage() {
                   c.status === "ok"
                     ? "w-2 h-2 rounded-full bg-ok"
                     : c.status === "degraded"
-                    ? "w-2 h-2 rounded-full bg-warn"
-                    : "w-2 h-2 rounded-full bg-bad"
+                      ? "w-2 h-2 rounded-full bg-warn"
+                      : "w-2 h-2 rounded-full bg-bad"
                 }
                 aria-hidden="true"
               />
@@ -134,24 +138,35 @@ export function OverviewPage() {
         {/* Recent initiatives */}
         <section className="card p-0 overflow-hidden">
           <header className="px-4 py-3 border-b border-edge flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-ink">Recent initiatives</h2>
-            <Link to="/initiatives" className="text-xs text-accent hover:underline">
+            <h2 className="text-sm font-semibold text-ink">
+              Recent initiatives
+            </h2>
+            <Link
+              to="/initiatives"
+              className="text-xs text-accent hover:underline"
+            >
               View all →
             </Link>
           </header>
           {initiatives.isPending ? (
-            <div className="py-12 text-center text-ink-subtle text-sm">Loading…</div>
+            <div className="py-12 text-center text-ink-subtle text-sm">
+              Loading…
+            </div>
           ) : initiatives.error ? (
             <div className="p-4">
               <ErrorBox error={initiatives.error} />
             </div>
           ) : initiatives.data.length === 0 ? (
-            <div className="py-12 text-center text-ink-subtle text-sm">No initiatives yet.</div>
+            <div className="py-12 text-center text-ink-subtle text-sm">
+              No initiatives yet.
+            </div>
           ) : (
             <table className="w-full text-sm">
               <thead className="text-xs text-ink-subtle">
                 <tr className="border-b border-edge">
-                  <th className="text-left px-4 py-2 font-medium">Initiative</th>
+                  <th className="text-left px-4 py-2 font-medium">
+                    Initiative
+                  </th>
                   <th className="text-left px-4 py-2 font-medium">State</th>
                   <th className="text-right px-4 py-2 font-medium">Progress</th>
                   <th className="text-right px-4 py-2 font-medium">Updated</th>
@@ -161,44 +176,47 @@ export function OverviewPage() {
                 {initiatives.data.map((i) => {
                   const href = `/initiatives/${i.initiative_id}`;
                   return (
-                  <tr
-                    key={i.initiative_id}
-                    tabIndex={0}
-                    onClick={() => navigate(href)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        navigate(href);
-                      }
-                    }}
-                    className="border-b border-edge/50 last:border-b-0 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
-                  >
-                    <td className="px-4 py-2">
-                      <Link
-                        to={href}
-                        onClick={(e) => e.stopPropagation()}
-                        className="text-ink hover:text-accent"
-                      >
-                        {i.display_name}
-                      </Link>
-                      <div className="text-[11px] text-ink-subtle">
-                        <Mono>{i.initiative_id}</Mono>
-                      </div>
-                    </td>
-                    <td className="px-4 py-2">
-                      <StateBadge state={i.state} pulse={i.state === "Active"} />
-                    </td>
-                    <td className="px-4 py-2 text-right">
-                      <Progress
-                        completed={i.completed_tasks}
-                        failed={i.failed_tasks}
-                        total={i.task_count}
-                      />
-                    </td>
-                    <td className="px-4 py-2 text-right text-ink-muted text-xs">
-                      {fmtRelative(i.updated_at)}
-                    </td>
-                  </tr>
+                    <tr
+                      key={i.initiative_id}
+                      tabIndex={0}
+                      onClick={() => navigate(href)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          navigate(href);
+                        }
+                      }}
+                      className="border-b border-edge/50 last:border-b-0 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                    >
+                      <td className="px-4 py-2">
+                        <Link
+                          to={href}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-ink hover:text-accent"
+                        >
+                          {i.display_name || i.initiative_id}
+                        </Link>
+                        <div className="text-[11px] text-ink-subtle">
+                          <Mono>{i.initiative_id}</Mono>
+                        </div>
+                      </td>
+                      <td className="px-4 py-2">
+                        <StateBadge
+                          state={i.state}
+                          pulse={i.state === "Active"}
+                        />
+                      </td>
+                      <td className="px-4 py-2 text-right">
+                        <Progress
+                          completed={i.completed_tasks}
+                          failed={i.failed_tasks}
+                          total={i.task_count}
+                        />
+                      </td>
+                      <td className="px-4 py-2 text-right text-ink-muted text-xs">
+                        {fmtRelative(i.updated_at)}
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>
@@ -218,18 +236,25 @@ export function OverviewPage() {
         <section className="card p-0 overflow-hidden">
           <header className="px-4 py-3 border-b border-edge flex items-center justify-between">
             <h2 className="text-sm font-semibold text-ink">Recent sessions</h2>
-            <Link to="/sessions" className="text-xs text-accent hover:underline">
+            <Link
+              to="/sessions"
+              className="text-xs text-accent hover:underline"
+            >
               View all →
             </Link>
           </header>
           {sessions.isPending ? (
-            <div className="py-12 text-center text-ink-subtle text-sm">Loading…</div>
+            <div className="py-12 text-center text-ink-subtle text-sm">
+              Loading…
+            </div>
           ) : sessions.error ? (
             <div className="p-4">
               <ErrorBox error={sessions.error} />
             </div>
           ) : sessions.data.length === 0 ? (
-            <div className="py-12 text-center text-ink-subtle text-sm">No sessions running.</div>
+            <div className="py-12 text-center text-ink-subtle text-sm">
+              No sessions running.
+            </div>
           ) : (
             <table className="w-full text-sm">
               <thead className="text-xs text-ink-subtle">
@@ -244,41 +269,47 @@ export function OverviewPage() {
                 {sessions.data.map((s) => {
                   const href = `/sessions/${s.session_id}`;
                   return (
-                  <tr
-                    key={s.session_id}
-                    tabIndex={0}
-                    onClick={() => navigate(href)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        navigate(href);
-                      }
-                    }}
-                    className="border-b border-edge/50 last:border-b-0 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
-                  >
-                    <td className="px-4 py-2">
-                      <Link
-                        to={href}
-                        onClick={(e) => e.stopPropagation()}
-                        className="text-ink hover:text-accent"
-                      >
-                        <Mono>{s.session_id.slice(0, 12)}…</Mono>
-                      </Link>
-                      <div className="text-[11px] text-ink-subtle">
-                        {s.provider ?? "—"} · {s.model ?? "—"}
-                      </div>
-                    </td>
-                    <td className="px-4 py-2 text-ink-muted">{s.role}</td>
-                    <td className="px-4 py-2">
-                      <StateBadge state={s.state} pulse={s.state === "Running"} />
-                    </td>
-                    <td className="px-4 py-2 text-right text-ink-muted text-xs tabular">
-                      <span className="text-ink">{fmtTokens(s.input_tokens + s.output_tokens)}</span>
-                      <div className="text-[10px]">
-                        in {fmtTokens(s.input_tokens)} · out {fmtTokens(s.output_tokens)}
-                      </div>
-                    </td>
-                  </tr>
+                    <tr
+                      key={s.session_id}
+                      tabIndex={0}
+                      onClick={() => navigate(href)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          navigate(href);
+                        }
+                      }}
+                      className="border-b border-edge/50 last:border-b-0 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                    >
+                      <td className="px-4 py-2">
+                        <Link
+                          to={href}
+                          onClick={(e) => e.stopPropagation()}
+                          className="text-ink hover:text-accent"
+                        >
+                          <Mono>{s.session_id.slice(0, 12)}…</Mono>
+                        </Link>
+                        <div className="text-[11px] text-ink-subtle">
+                          {s.provider ?? "—"} · {s.model ?? "—"}
+                        </div>
+                      </td>
+                      <td className="px-4 py-2 text-ink-muted">{s.role}</td>
+                      <td className="px-4 py-2">
+                        <StateBadge
+                          state={s.state}
+                          pulse={s.state === "Running"}
+                        />
+                      </td>
+                      <td className="px-4 py-2 text-right text-ink-muted text-xs tabular">
+                        <span className="text-ink">
+                          {fmtTokens(s.input_tokens + s.output_tokens)}
+                        </span>
+                        <div className="text-[10px]">
+                          in {fmtTokens(s.input_tokens)} · out{" "}
+                          {fmtTokens(s.output_tokens)}
+                        </div>
+                      </td>
+                    </tr>
                   );
                 })}
               </tbody>
@@ -296,17 +327,24 @@ export function OverviewPage() {
           </Link>
         </header>
         {audit.isPending ? (
-          <div className="py-12 text-center text-ink-subtle text-sm">Loading…</div>
+          <div className="py-12 text-center text-ink-subtle text-sm">
+            Loading…
+          </div>
         ) : audit.error ? (
           <div className="p-4">
             <ErrorBox error={audit.error} />
           </div>
         ) : audit.data.length === 0 ? (
-          <div className="py-12 text-center text-ink-subtle text-sm">No audit events.</div>
+          <div className="py-12 text-center text-ink-subtle text-sm">
+            No audit events.
+          </div>
         ) : (
           <ul className="divide-y divide-edge/50">
             {audit.data.map((a) => (
-              <li key={a.event_id} className="px-4 py-2.5 flex items-center gap-3 text-sm">
+              <li
+                key={a.event_id}
+                className="px-4 py-2.5 flex items-center gap-3 text-sm"
+              >
                 <span className="text-[11px] text-ink-subtle font-mono w-12 text-right">
                   #{a.seq}
                 </span>
@@ -357,17 +395,21 @@ function Tile({ title, value, tone, sub, to }: TileProps) {
     tone === "ok"
       ? "text-ok"
       : tone === "warn"
-      ? "text-warn"
-      : tone === "bad"
-      ? "text-bad"
-      : tone === "info"
-      ? "text-info"
-      : "text-ink-muted";
+        ? "text-warn"
+        : tone === "bad"
+          ? "text-bad"
+          : tone === "info"
+            ? "text-info"
+            : "text-ink-muted";
 
   const inner = (
     <>
-      <div className="text-xs uppercase tracking-wider text-ink-subtle">{title}</div>
-      <div className={`mt-1 text-2xl font-semibold ${toneClass} tabular`}>{value}</div>
+      <div className="text-xs uppercase tracking-wider text-ink-subtle">
+        {title}
+      </div>
+      <div className={`mt-1 text-2xl font-semibold ${toneClass} tabular`}>
+        {value}
+      </div>
       <div className="text-[11px] text-ink-subtle mt-1">{sub}</div>
     </>
   );
@@ -392,7 +434,8 @@ interface ProgressProps {
 }
 
 function Progress({ completed, failed, total }: ProgressProps) {
-  const pct = total === 0 ? 0 : Math.round(((completed + failed) / total) * 100);
+  const pct =
+    total === 0 ? 0 : Math.round(((completed + failed) / total) * 100);
   const okPct = total === 0 ? 0 : (completed / total) * 100;
   const failPct = total === 0 ? 0 : (failed / total) * 100;
   return (

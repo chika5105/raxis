@@ -56,7 +56,7 @@ export function InitiativesPage() {
     const needle = search.trim().toLowerCase();
     return q.data.filter(
       (i) =>
-        i.display_name.toLowerCase().includes(needle) ||
+        (i.display_name ?? "").toLowerCase().includes(needle) ||
         i.initiative_id.toLowerCase().includes(needle),
     );
   }, [q.data, search]);
@@ -97,7 +97,11 @@ export function InitiativesPage() {
         <ErrorBox error={q.error} onRetry={() => q.refetch()} />
       ) : filtered.length === 0 ? (
         <Empty
-          title={search ? "No initiatives match your search." : "No initiatives in this state."}
+          title={
+            search
+              ? "No initiatives match your search."
+              : "No initiatives in this state."
+          }
           hint={
             <>
               Try a different filter, or admit a plan with{" "}
@@ -110,7 +114,9 @@ export function InitiativesPage() {
           <table className="w-full text-sm">
             <thead className="text-xs text-ink-subtle bg-panel-high">
               <tr>
-                <th className="text-left px-4 py-2.5 font-medium">Initiative</th>
+                <th className="text-left px-4 py-2.5 font-medium">
+                  Initiative
+                </th>
                 <th className="text-left px-4 py-2.5 font-medium">State</th>
                 <th className="text-left px-4 py-2.5 font-medium">Tasks</th>
                 <th className="text-right px-4 py-2.5 font-medium">Created</th>
@@ -121,51 +127,58 @@ export function InitiativesPage() {
               {filtered.map((i) => {
                 const href = `/initiatives/${i.initiative_id}`;
                 return (
-                <tr
-                  key={i.initiative_id}
-                  tabIndex={0}
-                  onClick={() => navigate(href)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      navigate(href);
-                    }
-                  }}
-                  className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
-                >
-                  <td className="px-4 py-2.5">
-                    <Link
-                      to={href}
-                      onClick={(e) => e.stopPropagation()}
-                      className="text-ink hover:text-accent font-medium"
-                    >
-                      {i.display_name}
-                    </Link>
-                    <div className="text-[11px] text-ink-subtle">
-                      <Mono>{i.initiative_id}</Mono>
-                    </div>
-                  </td>
-                  <td className="px-4 py-2.5">
-                    <StateBadge state={i.state} pulse={i.state === "Active"} />
-                  </td>
-                  <td className="px-4 py-2.5 text-xs text-ink-muted">
-                    {plural(i.task_count, "task")}
-                    <div className="text-[11px]">
-                      {i.completed_tasks > 0 && (
-                        <span className="text-ok">{i.completed_tasks} done</span>
-                      )}
-                      {i.failed_tasks > 0 && (
-                        <span className="text-bad ml-2">{i.failed_tasks} failed</span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-2.5 text-right text-xs text-ink-muted tabular">
-                    {fmtRelative(i.created_at)}
-                  </td>
-                  <td className="px-4 py-2.5 text-right text-xs text-ink-muted tabular">
-                    {fmtRelative(i.updated_at)}
-                  </td>
-                </tr>
+                  <tr
+                    key={i.initiative_id}
+                    tabIndex={0}
+                    onClick={() => navigate(href)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        navigate(href);
+                      }
+                    }}
+                    className="border-t border-edge/40 hover:bg-panel-high cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent focus-visible:bg-panel-high"
+                  >
+                    <td className="px-4 py-2.5">
+                      <Link
+                        to={href}
+                        onClick={(e) => e.stopPropagation()}
+                        className="text-ink hover:text-accent font-medium"
+                      >
+                        {i.display_name || i.initiative_id}
+                      </Link>
+                      <div className="text-[11px] text-ink-subtle">
+                        <Mono>{i.initiative_id}</Mono>
+                      </div>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      <StateBadge
+                        state={i.state}
+                        pulse={i.state === "Active"}
+                      />
+                    </td>
+                    <td className="px-4 py-2.5 text-xs text-ink-muted">
+                      {plural(i.task_count, "task")}
+                      <div className="text-[11px]">
+                        {i.completed_tasks > 0 && (
+                          <span className="text-ok">
+                            {i.completed_tasks} done
+                          </span>
+                        )}
+                        {i.failed_tasks > 0 && (
+                          <span className="text-bad ml-2">
+                            {i.failed_tasks} failed
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="px-4 py-2.5 text-right text-xs text-ink-muted tabular">
+                      {fmtRelative(i.created_at)}
+                    </td>
+                    <td className="px-4 py-2.5 text-right text-xs text-ink-muted tabular">
+                      {fmtRelative(i.updated_at)}
+                    </td>
+                  </tr>
                 );
               })}
             </tbody>

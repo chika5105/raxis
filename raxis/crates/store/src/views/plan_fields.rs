@@ -54,6 +54,18 @@ pub struct PlanPathFields {
     pub path_scope_override:       bool,
 }
 
+/// `[plan.initiative]` metadata pulled out of the same plan TOML
+/// blob. The dashboard list/detail views render `title` so the
+/// operator does not have to read raw initiative_ids; if the plan
+/// omits the field (V1 plans pre-`[plan.initiative]`, malformed
+/// plans, etc.) we fall back to an empty string and let the caller
+/// substitute initiative_id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InitiativeMeta {
+    pub title:       String,
+    pub description: String,
+}
+
 /// Failure modes specific to the plan-fields reveal view.
 #[derive(Debug, Error)]
 pub enum PlanFieldsError {
@@ -114,6 +126,27 @@ pub fn reveal_for_task(
 
     let plan_toml = String::from_utf8_lossy(&plan_bytes);
     parse_plan_path_fields(&plan_toml, &initiative_id, task_id)
+}
+
+/// Read the `[plan.initiative]` block (`title`, `description`) out
+/// of the plan TOML for `initiative_id`. Same V1 → V2.1 fallback
+/// chain as [`reveal_for_task`], same fail-soft default — a plan
+/// that omits the block, or pre-`[plan.initiative]` V1 plans, both
+/// return `Ok(InitiativeMeta::default())` (empty strings) so the
+/// dashboard can substitute `initiative_id` instead of 500-ing.
+///
+/// Returns `Err(_)` only on hard failures (sqlite, malformed TOML,
+/// missing plan blob entirely) — those are operator-visible
+/// diagnostics, not blank-view paper-cuts.
+pub fn reveal_initiative_meta(
+    conn:          &RoConn,
+    initiative_id: &str,
+) -> Result<InitiativeMeta, PlanFieldsError> {
+    // `task_id` is only used in the error variants below — pass the
+    // initiative_id as a stand-in so the diagnostic is still useful.
+    let plan_bytes = lookup_plan_bytes(conn, initiative_id, initiative_id)?;
+    let plan_toml  = String::from_utf8_lossy(&plan_bytes);
+    parse_initiative_meta(&plan_toml, initiative_id)
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -233,6 +266,42 @@ fn parse_plan_path_fields(
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
     })
+}
+
+/// Pull `[plan.initiative]` `title` + `description` out of the
+/// plan TOML. Both fields default to `""` so a V1 plan (which has
+/// no `[plan.initiative]` block) renders as an empty meta and the
+/// caller substitutes `initiative_id` for display. We deliberately
+/// do NOT 500 on a missing block: the only invariant we enforce is
+/// "the TOML parses".
+fn parse_initiative_meta(
+    plan_toml:     &str,
+    initiative_id: &str,
+) -> Result<InitiativeMeta, PlanFieldsError> {
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
+        PlanFieldsError::PlanInvalid {
+            initiative_id: initiative_id.to_owned(),
+            reason:        format!("TOML parse error: {e}"),
+        }
+    })?;
+
+    let block = doc
+        .get("plan")
+        .and_then(|p| p.get("initiative"))
+        .and_then(|i| i.as_table());
+
+    let title = block
+        .and_then(|t| t.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let description = block
+        .and_then(|t| t.get("description"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    Ok(InitiativeMeta { title, description })
 }
 
 /// Read an optional TOML field as a `Vec<String>`. Missing field,
