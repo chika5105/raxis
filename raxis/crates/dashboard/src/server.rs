@@ -8,23 +8,74 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::async_trait;
-use axum::extract::FromRequestParts;
+use axum::extract::{DefaultBodyLimit, FromRequestParts};
 use axum::http::request::Parts;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Router;
 use tokio::net::TcpListener;
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
+
+// ---------------------------------------------------------------------------
+// Phase 1 hardening — per-process bounds (see
+// `crates/dashboard/src/server.rs::build_router`)
+// ---------------------------------------------------------------------------
+
+/// Per-handler wall-clock timeout for every JSON API endpoint.
+/// The dashboard is meant to be operator-clicky, not long-poll —
+/// any handler that does not finish in this window is buggy
+/// (slow-loris client, runaway DB query, deadlocked git
+/// subprocess, …) and we surface a 408 instead of holding
+/// the connection forever. SSE handlers are exempt — see
+/// [`build_router`].
+const HANDLER_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum number of in-flight handler invocations (across all
+/// routes, including SSE). Operator dashboards see at most a
+/// handful of concurrent tabs per operator and ~5 outstanding
+/// SSE streams; 256 leaves substantial headroom while keeping
+/// the worst-case memory footprint bounded under e2e churn.
+const MAX_INFLIGHT_REQUESTS: usize = 256;
+
+/// Body size cap for tiny JSON requests (auth verify / logout —
+/// payloads are <1 KiB in practice). Above this we 413 before
+/// the handler runs to make the auth path immune to body-bomb
+/// abuse.
+const BODY_LIMIT_AUTH: usize = 4 * 1024;
+
+/// Body size cap for the policy editor PUT
+/// (`PUT /api/policy/toml`). 1 MiB is well above the largest
+/// `policy.toml` we expect operators to author and well below
+/// the kernel's working-set budget.
+const BODY_LIMIT_POLICY: usize = 1024 * 1024;
+
+/// Body size cap for everything else (GET endpoints in
+/// practice, but defence-in-depth in case a future endpoint
+/// adds a body without thinking about the limit).
+const BODY_LIMIT_DEFAULT: usize = 16 * 1024;
 
 use crate::auth::{build_auth_state, AuthState, DashboardRole, OperatorClaims};
 use crate::config::DashboardConfig;
 use crate::data::DashboardData;
 use crate::error::ApiError;
+
+#[cfg(test)]
+pub(crate) const fn body_limit_auth_for_tests() -> usize { BODY_LIMIT_AUTH }
+#[cfg(test)]
+pub(crate) const fn body_limit_policy_for_tests() -> usize { BODY_LIMIT_POLICY }
+#[cfg(test)]
+pub(crate) const fn handler_timeout_for_tests() -> Duration { HANDLER_TIMEOUT }
+#[cfg(test)]
+pub(crate) const fn max_inflight_for_tests() -> usize { MAX_INFLIGHT_REQUESTS }
 
 /// Shared application state. Cheap `Arc` clone per request.
 pub type AppState<D> = Arc<AppStateInner<D>>;
@@ -106,17 +157,68 @@ impl<D: DashboardData> DashboardServer<D> {
 /// as the fallback service so SPA client-side routes (e.g.
 /// `/initiatives/init-abc`) load `index.html` and resolve in
 /// the browser.
+///
+/// # Hardening (Phase 1)
+///
+/// Every JSON API endpoint is bounded by:
+///
+/// 1. A per-route **body size limit** ([`BODY_LIMIT_AUTH`],
+///    [`BODY_LIMIT_POLICY`], [`BODY_LIMIT_DEFAULT`]). Oversize
+///    requests get a 413 before the handler runs.
+/// 2. A **request timeout** ([`HANDLER_TIMEOUT`]) applied via
+///    `tower_http::timeout::TimeoutLayer`. A handler that runs
+///    longer surfaces an HTTP 408 to the operator instead of
+///    pinning a tokio task. **SSE endpoints are intentionally
+///    exempt** — they are long-poll by design and rely on
+///    `axum::response::sse::KeepAlive` for liveness.
+/// 3. A **process-wide concurrency cap**
+///    ([`MAX_INFLIGHT_REQUESTS`]) applied via
+///    `tower::limit::ConcurrencyLimitLayer`. Once the cap is hit
+///    new requests queue (or get 503 with the right inner
+///    layer); we accept queueing to keep the kernel below its
+///    file-descriptor / memory budget under e2e churn.
+///
+/// The SSE route is mounted in a sibling sub-router that
+/// inherits the concurrency cap but skips the timeout layer.
+/// SPA fallback (when `static_dir` is set) is added last so
+/// `/api/*` routes never fall through to `ServeDir`.
 fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
     use axum::routing::{get, patch, post};
     use crate::routes::*;
 
     let static_dir = state.config.static_dir.clone();
 
-    let mut router = Router::new()
+    // ── Auth + write surface: tighter body limits ────────────────────────
+    //
+    // `auth/verify` and `auth/logout` carry tiny JSON payloads
+    // (≤ ~1 KiB in practice — challenge hex + Ed25519 sig hex +
+    // pubkey hex). Capping at `BODY_LIMIT_AUTH` makes the
+    // unauthenticated surface immune to body-bomb abuse without
+    // ever entering the JWT verifier.
+    //
+    // `policy/toml` PUT carries the full policy.toml; cap at
+    // `BODY_LIMIT_POLICY` (1 MiB) — far above any realistic
+    // operator policy and far below the kernel's working set.
+    let api_router: Router<AppState<D>> = Router::new()
         // Auth (no JWT required).
-        .route("/api/auth/challenge", get(auth::challenge::<D>))
-        .route("/api/auth/verify",    post(auth::verify::<D>))
-        .route("/api/auth/logout",    post(auth::logout::<D>))
+        .route(
+            "/api/auth/challenge",
+            get(auth::challenge::<D>)
+                .layer(DefaultBodyLimit::max(BODY_LIMIT_DEFAULT))
+                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_DEFAULT)),
+        )
+        .route(
+            "/api/auth/verify",
+            post(auth::verify::<D>)
+                .layer(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
+                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
+        )
+        .route(
+            "/api/auth/logout",
+            post(auth::logout::<D>)
+                .layer(DefaultBodyLimit::max(BODY_LIMIT_AUTH))
+                .layer(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
+        )
         // Health (admin sees full, read sees sanitized).
         .route("/api/health",         get(health::health::<D>))
         // Initiatives.
@@ -130,7 +232,6 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Sessions.
         .route("/api/sessions",                    get(sessions::list::<D>))
         .route("/api/sessions/:id",                get(sessions::detail::<D>))
-        .route("/api/sessions/:id/stream",         get(sessions::stream::<D>))
         // Escalations.
         .route("/api/escalations",                 get(escalations::list::<D>))
         .route("/api/escalations/:id",             get(escalations::detail::<D>))
@@ -144,14 +245,37 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/notifications/:id/read",      patch(notifications::mark_read::<D>))
         // Policy.
         .route("/api/policy",                      get(policy::snapshot::<D>))
-        .route("/api/policy/toml",
-            get(policy::raw_toml::<D>).put(policy::update_toml::<D>))
+        .route(
+            "/api/policy/toml",
+            get(policy::raw_toml::<D>).put(
+                policy::update_toml::<D>
+            )
+            .layer(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
+            .layer(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
+        )
         // Git worktrees.
         .route("/api/git/worktrees",                       get(git::list::<D>))
         .route("/api/git/worktrees/:name",                 get(git::detail::<D>))
         .route("/api/git/worktrees/:name/log",             get(git::log::<D>))
         .route("/api/git/worktrees/:name/diff",            get(git::diff_default::<D>))
-        .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>));
+        .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>))
+        // Per-handler wall-clock timeout. Applies to the
+        // sub-router only so the SSE long-poll handler is
+        // exempt (see the sibling sub-router below).
+        .layer(TimeoutLayer::new(HANDLER_TIMEOUT));
+
+    // ── SSE sub-router (no timeout layer — see HANDLER_TIMEOUT) ──────────
+    //
+    // Long-poll endpoints rely on
+    // `axum::response::sse::KeepAlive` for liveness; wrapping
+    // them in TimeoutLayer would force-close every SSE
+    // connection after `HANDLER_TIMEOUT` seconds, which is
+    // exactly the wrong behaviour for a stream the browser is
+    // meant to hold open across the lifetime of a session.
+    let sse_router: Router<AppState<D>> = Router::new()
+        .route("/api/sessions/:id/stream",         get(sessions::stream::<D>));
+
+    let mut router = api_router.merge(sse_router);
 
     // SPA fallback: any non-API route serves index.html so
     // React Router can resolve client-side routes. ServeDir's
@@ -174,6 +298,11 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // the SSE handler in routes::sessions::stream is not
         // buffered for gzip — a buffered SSE stream looks like a
         // hung connection from the browser's point of view.
+        //
+        // The concurrency cap is the outermost meaningful layer
+        // (TraceLayer wraps it for free) so it backpressures
+        // BEFORE we allocate per-request handler state.
+        .layer(ConcurrencyLimitLayer::new(MAX_INFLIGHT_REQUESTS))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .layer(
