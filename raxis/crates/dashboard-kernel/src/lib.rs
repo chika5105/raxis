@@ -622,19 +622,52 @@ impl DashboardData for KernelDashboardData {
         limit: u32,
         initiative_id: Option<&str>,
     ) -> Result<Vec<AuditEntryView>, ApiError> {
-        // Walk the chain newest-first by collecting ALL records
-        // matching the filter then paginating. The chain reader
-        // walks oldest→newest, so we collect into a Vec and reverse.
-        // For V2.5 chains (single segment, ≤ 100K events for a
-        // typical operator) this is acceptable. A larger
-        // workspace will need a server-side index — tracked under
-        // §3 of the dashboard spec under "future indexing".
+        // Walk the audit chain in segment order (oldest → newest)
+        // and keep only the most recent `cap` records that match
+        // the caller's filter, in a bounded ring buffer. Memory
+        // is O(cap) ≤ 500 entries regardless of how long the
+        // chain is, and the iteration is wall-bounded by
+        // `MAX_AUDIT_WALK_RECORDS` so a degenerate chain (e.g.
+        // millions of rows after sustained e2e churn) cannot
+        // pin a request thread for unbounded time.
+        //
+        // Why a ring buffer instead of "collect everything, sort,
+        // paginate": the previous implementation accumulated
+        // every matched record into a Vec, sorted by seq desc,
+        // then sliced. That is O(N) memory + O(N log N) CPU per
+        // request — fine for a 100-event chain, fatal during the
+        // live e2e where the chain grows monotonically and many
+        // operators may hit `/api/audit` concurrently.
+        const MAX_AUDIT_WALK_RECORDS: usize = 200_000;
+
         let reader = ChainReader::open(&self.audit_dir).map_err(|e| ApiError::Internal {
             log_only: format!("ChainReader::open: {e}"),
         })?;
         let cap = limit.min(500) as usize;
-        let mut matched: Vec<AuditEntryView> = Vec::new();
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Bounded sliding window of "newest matched records seen
+        // so far that are strictly older than the cursor".
+        let mut tail: std::collections::VecDeque<AuditEntryView> =
+            std::collections::VecDeque::with_capacity(cap);
+        let mut walked: usize = 0;
         for rec in reader.records() {
+            walked += 1;
+            if walked > MAX_AUDIT_WALK_RECORDS {
+                // Hard cap: stop walking. The caller still gets
+                // the newest matching records seen so far. The
+                // structured warn line lets ops know the chain
+                // grew past the per-request budget so they can
+                // rotate / archive.
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                      \"event\":\"dashboard_audit_walk_capped\",\
+                      \"limit_records\":{MAX_AUDIT_WALK_RECORDS}}}"
+                );
+                break;
+            }
             let rec = match rec {
                 Ok(r) => r,
                 Err(_) => continue, // tolerate one malformed line per spec
@@ -644,12 +677,18 @@ impl DashboardData for KernelDashboardData {
                     continue;
                 }
             }
+            // Cursor filter: caller already saw everything ≥ cursor.
+            if let Some(c) = cursor_seq {
+                if rec.seq >= c {
+                    continue;
+                }
+            }
             let payload = rec
                 .parsed_value
                 .as_ref()
                 .and_then(|v| v.get("payload").cloned())
                 .unwrap_or(serde_json::Value::Null);
-            matched.push(AuditEntryView {
+            let entry = AuditEntryView {
                 seq: rec.seq,
                 event_id: rec
                     .parsed_value
@@ -664,19 +703,18 @@ impl DashboardData for KernelDashboardData {
                 session_id: rec.session_id,
                 at: rec.emitted_at.unwrap_or(0).max(0) as u64,
                 payload,
-            });
+            };
+            if tail.len() == cap {
+                // Drop the oldest matched record we've buffered;
+                // it falls outside the page-of-newest we'll return.
+                tail.pop_front();
+            }
+            tail.push_back(entry);
         }
         // Newest first.
-        matched.sort_by(|a, b| b.seq.cmp(&a.seq));
-        let from = match cursor_seq {
-            Some(c) => matched
-                .iter()
-                .position(|e| e.seq < c)
-                .unwrap_or(matched.len()),
-            None => 0,
-        };
-        let end = (from + cap).min(matched.len());
-        Ok(matched[from..end].to_vec())
+        let mut matched: Vec<AuditEntryView> = tail.into_iter().collect();
+        matched.reverse();
+        Ok(matched)
     }
 
     fn list_inbox(&self) -> Result<Vec<AuditEntryView>, ApiError> {
