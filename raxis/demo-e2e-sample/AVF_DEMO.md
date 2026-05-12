@@ -30,7 +30,21 @@ compose), see [`raxis/kernel/tests/full_e2e_session_lifecycle.rs`](../kernel/tes
 | **`codesign`** (Xcode CLT) | Ad-hoc-sign the kernel binary against AVF entitlements | `xcode-select --install` |
 | **A pre-built Linux kernel binary** | Boot the AVF guest | We point you at a downloadable `vmlinux-aarch64` in §6 |
 
-Verify:
+The fastest way to land all of the above is the dedicated xtask
+subcommand — it verifies (`--install`-flag escalates to install) the
+brew packages, the rustup musl target, the cargo linker pin in
+`~/.cargo/config.toml`, plus `codesign` / `cargo` on `$PATH`:
+
+```bash
+# verify-only (exits non-zero if anything is missing):
+cargo xtask dev-prereqs
+
+# verify + auto-install missing pieces (brew formulae and rustup target):
+cargo xtask dev-prereqs --install
+```
+
+Equivalent manual verification, if you prefer to step through the
+checks yourself:
 
 ```bash
 openssl version                       # MUST show OpenSSL 3.x, NOT LibreSSL
@@ -40,7 +54,9 @@ codesign --version
 cargo --version
 ```
 
-> One-time `~/.cargo/config.toml` snippet so Cargo finds the musl linker:
+> The `cargo xtask dev-prereqs` step also patches `~/.cargo/config.toml`
+> idempotently with the snippet below so Cargo finds the musl linker.
+> Pass `--skip-cargo-config` if you curate that file by hand.
 >
 > ```toml
 > [target.aarch64-unknown-linux-musl]
@@ -283,6 +299,7 @@ notarized.
 
 | Step | Crate / file | Spec reference |
 |---|---|---|
+| §0 dev-prereqs | `xtask/src/dev_prereqs.rs` | `demo-e2e-sample/AVF_DEMO.md §0` |
 | §1 dev-keys | `xtask/src/dev_keys.rs` | `release-and-distribution.md §8` |
 | §3 dev-stage | `xtask/src/images.rs` | `planner-harness.md §14.4` |
 | §4 build-all | `xtask/src/images.rs` + `crates/initramfs-builder/` + `crates/image-builder/` | `e2e-live-test-gap.md §3 (a)` |
@@ -313,7 +330,7 @@ rm -rf "$HOME/.config/raxis/keys"
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `error: linker 'aarch64-linux-musl-gcc' not found` | musl linker missing | `brew install filosottile/musl-cross/musl-cross` and add the `[target.aarch64-unknown-linux-musl]` snippet to `~/.cargo/config.toml` (see §0) |
+| `error: linker 'aarch64-linux-musl-gcc' not found` | musl linker missing | Run `cargo xtask dev-prereqs --install` (see §0); manual fallback: `brew install filosottile/musl-cross/musl-cross` plus the `[target.aarch64-unknown-linux-musl]` snippet in `~/.cargo/config.toml` |
 | `error: target 'aarch64-unknown-linux-musl' not installed` | rustup target not added | `rustup target add aarch64-unknown-linux-musl` |
 | `Failed to parse entitlements: AMFIUnserializeXML: syntax error` from `dev-codesign` | `release/raxis.entitlements` was edited and now contains XML comments inside `<dict>` (AMFI rejects them) | Keep all comments OUTSIDE the `<dict>` element (above the `<plist>` open tag). The repo file is structured this way intentionally. |
 | `errSecInternalError (-67050)` at AVF startup | Kernel binary not codesigned, or signed without entitlements | Re-run `cargo xtask dev-codesign`; verify with `codesign --display --entitlements -` |
