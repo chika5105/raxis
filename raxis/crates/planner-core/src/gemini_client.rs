@@ -276,11 +276,24 @@ fn map_finish_reason(s: &str) -> String {
 }
 
 fn synthetic_id() -> String {
+    // Wall-clock millis dominate the uniqueness budget here, but the
+    // 32-bit suffix exists to break ties between IDs minted in the
+    // same millisecond. The prior implementation seeded the suffix
+    // with `Instant::now().elapsed().as_nanos() as u32`, which is
+    // the duration between two adjacent instructions (~tens of ns)
+    // and produces near-constant values across calls — so two IDs
+    // minted in the same millisecond would collide on the suffix
+    // too. Switch to the wall-clock sub-second nanosecond field,
+    // which varies on every call. Matches the entropy-fix in
+    // `planner-core/src/retry.rs::backoff_for`.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let nanos = std::time::Instant::now().elapsed().as_nanos() as u32;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
     format!("gemini-resp-{now}-{:08x}", nanos)
 }
 
