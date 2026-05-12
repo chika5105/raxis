@@ -2323,7 +2323,15 @@ fn handle_submit_review(
     let push_now_unix = unix_now_secs() as i64;
     for predecessor in &predecessors {
         let outcome = match crate::initiatives::review_aggregation
-            ::compute_aggregate_review_outcome(predecessor.as_str(), store)
+            ::compute_aggregate_review_outcome(
+                predecessor.as_str(),
+                store,
+                Some(crate::initiatives::review_aggregation::AgentTypeFilter {
+                    plan_registry:    ctx.plan_registry.as_ref(),
+                    initiative_id:    initiative_id_str.as_str(),
+                    reviewer_task_id: reviewer_task_id.as_str(),
+                }),
+            )
         {
             Ok(o) => o,
             Err(e) => {

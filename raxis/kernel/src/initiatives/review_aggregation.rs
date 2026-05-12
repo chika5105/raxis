@@ -41,29 +41,41 @@
 //     declares a non-Reviewer agent type — the actively-wrong
 //     case the legacy "trust the join" workaround couldn't
 //     detect.
-//   * **Missing-entry rows fall open: treated as Reviewer for the
-//     fold.** This is a deliberate best-judgment scope (V2.5
-//     transition). Rationale:
+//   * **Missing-entry rows are SKIPPED (fail-closed) and a
+//     `agent_type_filter.missing_registry_entry` structured
+//     warning is logged with `task_id`, `initiative_id`, and
+//     `reviewer_task_id` so operators can alert on it.**
+//
+//     This is the user's correction of an earlier "fall open"
+//     attempt:
+//
 //       * V2.5+ admission populates the registry atomically with
-//         the sealed bundle, and `repopulate_plan_registry`
-//         re-seeds on every kernel restart — so a missing entry
-//         post-admission is a kernel bug rather than a benign
-//         data shape, and failing closed would silently degrade a
-//         registry-rebuild race into "all reviewers ignored".
-//       * The audit chain (`ReviewAggregationCompleted` row +
-//         `subtask_activations.review_reject_count` counter) is
-//         the operator's safety net: a registry-corruption bug
-//         that mis-folds reviewer counts would still surface in
-//         the audit row's `reviewer_count` cardinality (catching
-//         the off-by-N) and in the operator-visible `RetrySubTask`
-//         outcome — fail-closed-on-missing would erase BOTH
-//         signals.
-//       * Unit tests in `handlers::intent` seed
-//         `tasks` / `task_dag_edges` directly without populating
-//         the kernel's `PlanRegistry`; treating missing entries as
-//         Reviewer keeps those tests exercising the legacy
-//         fold-everything behaviour while the production path
-//         still rejects actively-wrong non-Reviewer rows.
+//         the sealed plan bundle (see
+//         `lifecycle::approve_plan` → `parse_plan_tasks` →
+//         `PlanRegistry::insert`), and
+//         `repopulate_plan_registry` re-seeds on every kernel
+//         restart. A missing entry post-admission is therefore a
+//         kernel bug or a registry-rebuild race that operators
+//         MUST see; silently folding the row as Reviewer would
+//         erase that signal — tests would keep passing while
+//         production silently mis-aggregates.
+//       * Fall-open additionally created a test-driven backdoor
+//         where the production registry-driven path was never
+//         actually exercised by the integration tests in
+//         `handlers::intent` (every test relied on the
+//         missing-entry arm). Fail-closed forces those tests to
+//         seed the registry via the shared
+//         `seed_plan_registry_for_tasks` helper, so the same
+//         code path that runs in production is the one under
+//         test.
+//       * The structured `tracing`-style warn line is the
+//         diagnostic surface: a missing-entry skip emits a
+//         single grep-friendly JSON record per row, on top of
+//         the still-emitted `ReviewAggregationCompleted` audit
+//         row whose `reviewer_count` will reflect the (smaller)
+//         post-skip cardinality. Operators alert on the
+//         `agent_type_filter.missing_registry_entry` event name.
+//
 //   * Unit tests in this module that pre-date the sealed-bundle
 //     filter pass `None` to disable the filter entirely; the
 //     dedicated `agent_type_filter_*` tests below cover the
@@ -90,40 +102,75 @@ const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
 
 /// V2.5 §Step 25 — sealed-plan-bundle agent-type filter.
 ///
-/// Wraps a `(plan_registry, initiative_id)` pair so the aggregator
-/// can ask "is this `successor_task_id` a Reviewer?" against the
-/// kernel's in-memory plan registry without callers having to
+/// Wraps a `(plan_registry, initiative_id, reviewer_task_id)`
+/// triple so the aggregator can ask "is this
+/// `successor_task_id` a Reviewer?" against the kernel's
+/// in-memory plan registry without callers having to
 /// re-implement the lookup. Constructed by
 /// `handle_submit_review` from `ctx.plan_registry` +
-/// `task.initiative_id`; tests pass `None` to opt out of the
-/// filter when exercising the bare verdict-fold logic.
+/// `task.initiative_id` + `req.task_id` (the freshly-submitting
+/// Reviewer); tests pass `None` to opt out of the filter when
+/// exercising the bare verdict-fold logic.
+///
+/// `reviewer_task_id` is the trigger context for the
+/// fail-closed missing-entry warn log: every dropped row's
+/// log line includes it so a forensic grep of
+/// `agent_type_filter.missing_registry_entry` immediately
+/// points at the SubmitReview that observed the missing peer.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentTypeFilter<'a> {
-    pub plan_registry: &'a PlanRegistry,
-    pub initiative_id: &'a str,
+    pub plan_registry:    &'a PlanRegistry,
+    pub initiative_id:    &'a str,
+    pub reviewer_task_id: &'a str,
 }
 
 impl AgentTypeFilter<'_> {
-    /// Return `true` iff the registry entry for
-    /// `(initiative_id, successor_task_id)` declares the task as
-    /// a Reviewer, OR no entry exists at all (missing-entry rows
-    /// fall open per the V2.5 transition contract documented at
-    /// the module top — only registry rows that *actively
-    /// declare* a non-Reviewer agent type are dropped).
+    /// Return `true` iff the registry **actively declares** the
+    /// `(initiative_id, successor_task_id)` task as a Reviewer.
+    ///
+    /// **Fail-closed on missing-entry.** Returns `false` for any
+    /// row the registry has no entry for, AND emits a
+    /// `agent_type_filter.missing_registry_entry` structured
+    /// warning so operators can alert on it. V2.5+ admission
+    /// populates the registry atomically with the sealed plan
+    /// bundle and `repopulate_plan_registry` re-seeds on
+    /// restart, so a missing entry post-admission indicates a
+    /// kernel bug or a registry-rebuild race that operators
+    /// MUST see; silently folding as Reviewer (the previous
+    /// fall-open attempt) would erase that signal.
     fn is_reviewer(&self, successor_task_id: &str) -> bool {
         let key = TaskKey::new(self.initiative_id, successor_task_id);
         match self.plan_registry.get(&key) {
             // Active declaration: trust it. Drop everything that
             // is not Reviewer.
             Some(f) => f.session_agent_type == SessionAgentType::Reviewer,
-            // Missing-entry: fall open. The legacy "trust the
-            // join" assumption was that every successor of an
-            // Executor is a Reviewer (because Step-17 plan-shape
-            // validators rejected the alternatives at admission);
-            // we keep that assumption ONLY when the registry has
-            // nothing to say. The audit chain is the operator's
-            // safety net for registry-corruption bugs.
-            None => true,
+            // Missing-entry: fail closed. Skip the row from the
+            // fold AND emit a structured warning so operators
+            // alerting on `agent_type_filter.missing_registry_
+            // entry` see the registry-corruption / registry-
+            // rebuild-race signal directly.
+            //
+            // The kernel uses `eprintln!` with a JSON envelope
+            // for structured logs (no `tracing`/`log` crates
+            // wired in; see `kernel/src/handlers/intent.rs` for
+            // the existing pattern). We mirror that shape here:
+            // `level=warn`, stable `event` name, identifying
+            // fields verbatim. The audit chain remains the
+            // canonical record (`ReviewAggregationCompleted`
+            // with the post-skip `reviewer_count`); this log is
+            // the alerting surface.
+            None => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"agent_type_filter.missing_registry_entry\",\
+                     \"task_id\":\"{successor_task_id}\",\
+                     \"initiative_id\":\"{initiative_id}\",\
+                     \"reviewer_task_id\":\"{reviewer_task_id}\"}}",
+                    initiative_id    = self.initiative_id,
+                    reviewer_task_id = self.reviewer_task_id,
+                );
+                false
+            }
         }
     }
 }
@@ -211,16 +258,21 @@ pub fn compute_aggregate_review_verdict(
 /// predicate.
 ///
 /// **`agent_type_filter` semantics.**
-/// * `Some(AgentTypeFilter { plan_registry, initiative_id })` —
-///   each successor's `(initiative_id, task_id)` is looked up in
-///   the kernel's `PlanRegistry`; rows whose
-///   `TaskPlanFields::session_agent_type` is **actively declared**
-///   as something other than `SessionAgentType::Reviewer` are
-///   skipped (do NOT count towards `count`, do NOT influence the
-///   verdict). Missing-entry rows fall open and are folded as
-///   Reviewer (V2.5 transition contract — see the module-top
-///   doc for the rationale; the audit chain remains the
-///   operator's safety net). Used by the production
+/// * `Some(AgentTypeFilter { plan_registry, initiative_id,
+///   reviewer_task_id })` — each successor's
+///   `(initiative_id, task_id)` is looked up in the kernel's
+///   `PlanRegistry`; rows whose
+///   `TaskPlanFields::session_agent_type` is **actively
+///   declared** as something other than
+///   `SessionAgentType::Reviewer` are skipped (do NOT count
+///   towards `count`, do NOT influence the verdict).
+///   Missing-entry rows are ALSO skipped (fail-closed) and emit
+///   a `agent_type_filter.missing_registry_entry` structured
+///   warn log carrying `task_id`, `initiative_id`, and
+///   `reviewer_task_id` — V2.5+ admission populates the
+///   registry atomically with the sealed bundle, so a missing
+///   entry post-admission is a kernel bug or registry-rebuild
+///   race that operators MUST see. Used by the production
 ///   `handle_submit_review` call site.
 /// * `None` — every successor in `task_dag_edges` is folded, with
 ///   no agent-type predicate. Used by tests that exercise the
@@ -277,11 +329,11 @@ pub fn compute_aggregate_review_outcome(
         // V2.5 §Step 25 — sealed-plan-bundle filter. When the call
         // site passes a registry, we drop rows that the plan
         // bundle *actively declares* as a non-Reviewer agent
-        // type. Missing-entry rows fall open (folded as Reviewer)
-        // per the V2.5 transition contract (see module-top doc):
-        // the audit chain is the safety net for registry bugs,
-        // and integration tests in `handlers::intent` that don't
-        // populate the registry rely on this behaviour.
+        // type AND rows for which the registry has no entry at
+        // all (fail-closed). The latter case emits a
+        // `agent_type_filter.missing_registry_entry` warn log
+        // inside `is_reviewer` so operators can alert on it; see
+        // the module-top doc for the V2.5 transition rationale.
         if let Some(filter) = agent_type_filter.as_ref() {
             if !filter.is_reviewer(&successor_task_id) {
                 continue;
@@ -666,8 +718,9 @@ mod tests {
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry: &reg,
-                initiative_id: "init-agg",
+                plan_registry:    &reg,
+                initiative_id:    "init-agg",
+                reviewer_task_id: "rev-2",
             }),
         )
         .unwrap();
@@ -701,8 +754,9 @@ mod tests {
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry: &reg,
-                initiative_id: "init-agg",
+                plan_registry:    &reg,
+                initiative_id:    "init-agg",
+                reviewer_task_id: "rev-1",
             }),
         )
         .unwrap();
@@ -715,75 +769,95 @@ mod tests {
     }
 
     /// Filter active + missing-entry successor → that successor is
-    /// **folded as Reviewer** (fall open per the V2.5 transition
-    /// contract; the audit chain is the safety net for registry
-    /// bugs). Pin this against an accidental flip to fail-closed
-    /// semantics, which would silently break the integration
-    /// tests in `handlers::intent` that don't populate the
-    /// registry.
+    /// **SKIPPED** (fail-closed) and the missing-entry diagnostic
+    /// fires. Pin this against an accidental flip back to the
+    /// earlier fall-open semantics: a missing registry entry is
+    /// the substrate of a kernel bug or registry-rebuild race
+    /// that operators MUST be alerted to.
+    ///
+    /// Behaviour pinned in this test:
+    ///   * Missing-entry successor `rev-1` is dropped from the
+    ///     fold (its NULL verdict does NOT keep the aggregator
+    ///     `Pending`).
+    ///   * Registered Reviewer `rev-0` is the only row counted
+    ///     (`count == 1`).
+    ///   * Verdict short-circuits to `AllPassed` because every
+    ///     row that passed the filter approved.
     #[test]
-    fn agent_type_filter_falls_open_on_missing_registry_entry() {
+    fn agent_type_filter_fails_closed_on_missing_registry_entry() {
         let store = Store::open_in_memory().unwrap();
         let exe = seed_executor_with_n_reviewers(&store, 2);
         set_verdict(&store, "rev-0", ReviewVerdict::Approved);
-        set_verdict(&store, "rev-1", ReviewVerdict::Approved);
+        // rev-1 verdict stays NULL — under the prior fall-open
+        // behaviour this would have been folded as Reviewer and
+        // flipped the verdict to `Pending`. Under fail-closed it
+        // is dropped (with a `agent_type_filter.missing_registry_
+        // entry` warn line on stderr) and the count reports 1.
 
         let reg = PlanRegistry::new();
         register_task(&reg, "rev-0", SessionAgentType::Reviewer);
-        // rev-1 intentionally NOT registered — fall-open MUST keep
-        // it in the fold.
+        // rev-1 intentionally NOT registered.
 
         let outcome = compute_aggregate_review_outcome(
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry: &reg,
-                initiative_id: "init-agg",
+                plan_registry:    &reg,
+                initiative_id:    "init-agg",
+                reviewer_task_id: "rev-0",
             }),
         )
         .unwrap();
         assert_eq!(outcome.verdict, AggregateReviewVerdict::AllPassed);
         assert_eq!(
-            outcome.count, 2,
-            "both rows must be folded — registered Reviewer + \
-             fall-open missing-entry"
+            outcome.count, 1,
+            "only the registered Reviewer is folded; missing-entry \
+             successors are fail-closed-skipped (and emit \
+             agent_type_filter.missing_registry_entry on stderr)"
         );
     }
 
-    /// Filter active + a registry entry that is BOTH missing-entry
-    /// AND has approved → still folded (fall open). Pairs with
-    /// `agent_type_filter_falls_open_on_missing_registry_entry`
-    /// to pin that the fall-open path does not require a
-    /// peer-registered Reviewer to anchor it.
+    /// Filter active + EVERY successor missing-entry → the
+    /// aggregator drops every row and surfaces `NoSuccessors`.
+    /// Pin the kernel-bug / registry-rebuild-race scenario the
+    /// fail-closed flip is designed to catch: silently
+    /// fold-as-Reviewer (the rejected fall-open path) would have
+    /// returned `AllPassed` here and quietly advanced the
+    /// Executor.
     #[test]
-    fn agent_type_filter_fall_open_alone_can_terminate_aggregator() {
+    fn agent_type_filter_all_missing_entries_returns_no_successors() {
         let store = Store::open_in_memory().unwrap();
         let exe = seed_executor_with_n_reviewers(&store, 1);
         set_verdict(&store, "rev-0", ReviewVerdict::Approved);
 
-        // Empty registry — every successor falls open.
+        // Empty registry — every successor is dropped fail-closed.
         let reg = PlanRegistry::new();
 
         let outcome = compute_aggregate_review_outcome(
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry: &reg,
-                initiative_id: "init-agg",
+                plan_registry:    &reg,
+                initiative_id:    "init-agg",
+                reviewer_task_id: "rev-0",
             }),
         )
         .unwrap();
-        assert_eq!(outcome.verdict, AggregateReviewVerdict::AllPassed);
-        assert_eq!(outcome.count, 1);
+        assert_eq!(
+            outcome.verdict,
+            AggregateReviewVerdict::NoSuccessors,
+            "every missing-entry successor must be dropped — \
+             aggregator surfaces NoSuccessors so the Executor \
+             does NOT silently advance",
+        );
+        assert_eq!(outcome.count, 0);
     }
 
     /// Filter active + every successor *actively declared* as a
     /// non-Reviewer → `NoSuccessors`. Pins the strict-drop
-    /// posture: a structurally malformed plan that explicitly
-    /// puts the wrong agent type on every successor does NOT
-    /// silently advance the Executor. (Distinct from the
-    /// fall-open `missing-entry` arm above — fall-open only
-    /// applies when the registry has nothing to say.)
+    /// posture for the actively-wrong case (distinct from the
+    /// missing-entry case above — both now drop, but for
+    /// independently asserted reasons).
     #[test]
     fn agent_type_filter_no_reviewer_successors_returns_no_successors() {
         let store = Store::open_in_memory().unwrap();
@@ -800,8 +874,9 @@ mod tests {
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry: &reg,
-                initiative_id: "init-agg",
+                plan_registry:    &reg,
+                initiative_id:    "init-agg",
+                reviewer_task_id: "rev-0",
             }),
         )
         .unwrap();
