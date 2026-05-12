@@ -476,12 +476,40 @@ impl UpstreamSession {
     /// Forward an `SQLBatch` packet (header + body, single packet)
     /// to the upstream and read the upstream's `TABULAR_RESULT`
     /// stream until EOM.
+    ///
+    /// The agent's body is **rewritten** before forwarding so that
+    /// the upstream sees a TDS 7.4-compliant `ALL_HEADERS` preamble
+    /// followed by the SQL text in UTF-16 LE. This is necessary
+    /// because:
+    ///
+    /// * The proxy advertises TDS 7.4 in its LOGIN7 (see
+    ///   `build_login7`), so the upstream parses every SQLBatch
+    ///   packet body using the TDS 7.4 rules — which require a
+    ///   well-formed `ALL_HEADERS` containing at least the
+    ///   `MARS Transaction Descriptor` header (`HeaderType = 0x0002`).
+    /// * Many simple agent clients (the live-e2e harness, hand-rolled
+    ///   benchmarks, older drivers) emit a degenerate
+    ///   `ALL_HEADERS` of `TotalLength = 4` (i.e. a 0-byte header
+    ///   list). SQL Server 2022 rejects these with the "TDS protocol
+    ///   stream is incorrect. The multiple active result sets (MARS)
+    ///   TDS header is missing" `ERROR` token (number `4002`).
+    /// * The agent's `ALL_HEADERS` cannot meaningfully cross the
+    ///   proxy boundary anyway: any transaction descriptor the agent
+    ///   chose refers to its OWN proxy-side connection state, not
+    ///   the proxy's upstream-side connection state. The proxy is
+    ///   the authoritative source for the upstream-side transaction
+    ///   descriptor (always `0` until the proxy implements transaction
+    ///   handling for V3).
+    ///
+    /// Pinned against MS SQL Server 2022 reproducer; older 2017/2019
+    /// servers happen to tolerate the malformed `ALL_HEADERS`.
     pub async fn forward_sql_batch(
         &mut self,
         agent_packet: &[u8],
     ) -> Result<ForwardOutcome, UpstreamError> {
         let started = Instant::now();
-        self.stream.write_all(agent_packet).await
+        let rewritten = rewrite_sql_batch_for_upstream(agent_packet)?;
+        self.stream.write_all(&rewritten).await
             .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
         self.stream.flush().await.ok();
         let frames = read_until_eom(&mut self.stream).await
@@ -495,6 +523,113 @@ impl UpstreamSession {
             bytes_returned,
             upstream_error,
         })
+    }
+}
+
+/// Rewrite the agent's SQLBatch packet so the body carries a fresh
+/// TDS 7.4-compliant `ALL_HEADERS` preamble followed by the
+/// SQL text in UTF-16 LE.
+///
+/// `agent_packet` is the full TDS packet the agent sent (8-byte
+/// header + body).  We parse out the SQL text, drop the agent's
+/// `ALL_HEADERS` entirely, then re-frame:
+///
+/// ```text
+///   8-byte TDS header (type=SQLBatch, status=EOM, packet_id=1,
+///                      length set after assembly)
+///   ALL_HEADERS:
+///     u32 LE TotalLength = 22
+///     u32 LE HeaderLength = 18
+///     u16 LE HeaderType = 0x0002 (Transaction Descriptor)
+///     u64 LE TransactionDescriptor = 0
+///     u32 LE OutstandingRequestCount = 1
+///   UTF-16 LE SQL text bytes
+/// ```
+///
+/// Returns the wire bytes ready to write to the upstream.
+fn rewrite_sql_batch_for_upstream(agent_packet: &[u8])
+    -> Result<Vec<u8>, UpstreamError>
+{
+    use crate::wire::{HEADER_LEN as TDS_HEADER, PacketHeader, status, pkt};
+    if agent_packet.len() < TDS_HEADER {
+        return Err(UpstreamError::RelayFailed(
+            "agent SQLBatch packet shorter than TDS header".into(),
+        ));
+    }
+    let mut hb = [0u8; 8];
+    hb.copy_from_slice(&agent_packet[..TDS_HEADER]);
+    let h = PacketHeader::parse(hb);
+    if h.packet_type != pkt::SQL_BATCH {
+        return Err(UpstreamError::RelayFailed(format!(
+            "expected SQLBatch (0x{:02x}) header from agent, got 0x{:02x}",
+            pkt::SQL_BATCH, h.packet_type,
+        )));
+    }
+    let body = &agent_packet[TDS_HEADER..];
+    let sql_text_bytes = extract_sql_text_bytes(body);
+    // Build the rewritten body. ALL_HEADERS preamble must include a
+    // Transaction Descriptor header for TDS 7.4 — see
+    // `[MS-TDS] 2.2.5.3.1 ALL_HEADERS` and 2.2.5.3.2
+    // `Transaction Descriptor`.
+    const ALL_HEADERS_LEN: u32 = 4 + 4 + 2 + 8 + 4;     // 22
+    const TXN_DESC_HEADER_LEN: u32 = ALL_HEADERS_LEN - 4; // 18
+    const TXN_DESC_HEADER_TYPE: u16 = 0x0002;
+    let mut new_body = Vec::with_capacity(
+        ALL_HEADERS_LEN as usize + sql_text_bytes.len(),
+    );
+    new_body.extend_from_slice(&ALL_HEADERS_LEN.to_le_bytes());
+    new_body.extend_from_slice(&TXN_DESC_HEADER_LEN.to_le_bytes());
+    new_body.extend_from_slice(&TXN_DESC_HEADER_TYPE.to_le_bytes());
+    new_body.extend_from_slice(&0u64.to_le_bytes());     // descriptor
+    new_body.extend_from_slice(&1u32.to_le_bytes());     // outstanding-req
+    new_body.extend_from_slice(sql_text_bytes);
+    // Re-frame the packet with the new body.  Total length must
+    // include the 8-byte header.
+    let total = TDS_HEADER + new_body.len();
+    if total > u16::MAX as usize {
+        // SQLBatch body too large to fit in a single TDS packet
+        // (TDS supports multi-packet messages but the agent did not
+        // send one and the proxy does not chunk in V2.1).
+        return Err(UpstreamError::RelayFailed(format!(
+            "rewritten SQLBatch packet length {total} exceeds u16::MAX",
+        )));
+    }
+    let header = PacketHeader {
+        packet_type: pkt::SQL_BATCH,
+        status:      h.status | status::EOM,
+        length:      total as u16,
+        spid:        0,
+        packet_id:   1,
+        window:      0,
+    };
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(&header.encode());
+    out.extend_from_slice(&new_body);
+    Ok(out)
+}
+
+/// Extract the SQL text bytes (UTF-16 LE, raw) from a SQLBatch body
+/// — i.e. strip whatever `ALL_HEADERS` the agent prepended (or did
+/// not). Mirrors the parsing rule in `wire::decode_sql_batch_body`
+/// but returns the bytes rather than the decoded string so we can
+/// pass them through to the upstream without re-encoding.
+fn extract_sql_text_bytes(body: &[u8]) -> &[u8] {
+    if body.len() < 4 {
+        return body;
+    }
+    let total_headers =
+        u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    // Defensive: a real client always emits `total_headers >= 4`,
+    // but the proxy is lenient about both extremes:
+    //
+    // * `total_headers > body.len()` — agent omitted ALL_HEADERS
+    //   entirely (TDS 7.0/7.1 shape). Treat the whole body as SQL.
+    // * `total_headers <= 3` — malformed; pretend ALL_HEADERS is
+    //   absent.
+    if total_headers <= 3 || total_headers > body.len() {
+        body
+    } else {
+        &body[total_headers..]
     }
 }
 
@@ -976,5 +1111,125 @@ mod tests {
         let (n, m) = scan_first_error_token(&body).expect("ERROR token");
         assert_eq!(n, -9);
         assert_eq!(m, "denied");
+    }
+
+    /// V2.1 regression pin: every SQLBatch the proxy forwards to the
+    /// upstream MUST begin with a TDS 7.4-compliant `ALL_HEADERS`
+    /// preamble (`TotalLength = 22`, one Transaction Descriptor
+    /// header with `HeaderType = 0x0002`).
+    ///
+    /// The agent in the live-e2e harness sends `TotalLength = 4` (no
+    /// inner headers); SQL Server 2022 rejects this with the
+    /// "MARS TDS header is missing" `ERROR` token. The proxy must
+    /// rewrite ALL_HEADERS unconditionally before forwarding.
+    #[test]
+    fn rewrite_sql_batch_injects_transaction_descriptor_header() {
+        use crate::wire::{frame_packet, pkt};
+        // Agent body: TotalLength = 4 (degenerate ALL_HEADERS),
+        // followed by "SELECT 1" UTF-16 LE.
+        let mut agent_body = Vec::new();
+        agent_body.extend_from_slice(&4u32.to_le_bytes());
+        for u in "SELECT 1".encode_utf16() {
+            agent_body.extend_from_slice(&u.to_le_bytes());
+        }
+        let agent_pkt = frame_packet(pkt::SQL_BATCH, &agent_body);
+        let rewritten = rewrite_sql_batch_for_upstream(&agent_pkt).unwrap();
+        // Rewritten body starts at offset 8 (TDS header). Must have
+        // TotalLength = 22.
+        let rewritten_body = &rewritten[8..];
+        let total = u32::from_le_bytes([
+            rewritten_body[0], rewritten_body[1],
+            rewritten_body[2], rewritten_body[3],
+        ]);
+        assert_eq!(total, 22, "ALL_HEADERS TotalLength must be 22");
+        // HeaderLength = 18.
+        let hlen = u32::from_le_bytes([
+            rewritten_body[4], rewritten_body[5],
+            rewritten_body[6], rewritten_body[7],
+        ]);
+        assert_eq!(hlen, 18, "Transaction Descriptor HeaderLength must be 18");
+        // HeaderType = 0x0002 (Transaction Descriptor).
+        let htype = u16::from_le_bytes([rewritten_body[8], rewritten_body[9]]);
+        assert_eq!(htype, 0x0002, "HeaderType must be 0x0002");
+        // TransactionDescriptor bytes 10..18 are zero.
+        assert_eq!(&rewritten_body[10..18], &[0u8; 8]);
+        // OutstandingRequestCount bytes 18..22 = 1.
+        let ors = u32::from_le_bytes([
+            rewritten_body[18], rewritten_body[19],
+            rewritten_body[20], rewritten_body[21],
+        ]);
+        assert_eq!(ors, 1, "OutstandingRequestCount must be 1");
+        // SQL text "SELECT 1" UTF-16 LE follows the ALL_HEADERS.
+        let sql_bytes = &rewritten_body[22..];
+        let units: Vec<u16> = sql_bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let s = String::from_utf16(&units).unwrap();
+        assert_eq!(s, "SELECT 1");
+    }
+
+    /// Defensive: an agent that omits ALL_HEADERS entirely (TDS
+    /// 7.0/7.1 shape, body is just the UTF-16 SQL text) must still
+    /// be rewritten to the proper TDS 7.4 form, with the entire
+    /// agent body treated as SQL text.
+    #[test]
+    fn rewrite_sql_batch_when_agent_omits_all_headers() {
+        use crate::wire::{frame_packet, pkt};
+        let mut agent_body = Vec::new();
+        for u in "SELECT 2".encode_utf16() {
+            agent_body.extend_from_slice(&u.to_le_bytes());
+        }
+        let agent_pkt = frame_packet(pkt::SQL_BATCH, &agent_body);
+        let rewritten = rewrite_sql_batch_for_upstream(&agent_pkt).unwrap();
+        let body = &rewritten[8..];
+        // Slice out the SQL bytes.
+        let sql_bytes = &body[22..];
+        let units: Vec<u16> = sql_bytes
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        // Note: the first 16-bit word from the agent's body becomes
+        // the synthetic TotalLength when we treat the body as
+        // ALL_HEADERS-prefixed in `extract_sql_text_bytes`. We
+        // explicitly designed the helper to fall through to "treat
+        // whole body as SQL" when `total_headers > body.len()` AND
+        // when `total_headers <= 3`.  For "SELECT 2" UTF-16, the
+        // first 4 bytes are `53 00 45 00` = 0x00450053 = 4521987,
+        // which is > body.len(), so the fallback fires correctly.
+        assert_eq!(String::from_utf16(&units).unwrap(), "SELECT 2");
+    }
+
+    /// A malformed packet (shorter than the TDS header) must be
+    /// rejected with `RelayFailed`; the proxy must not panic.
+    #[test]
+    fn rewrite_sql_batch_rejects_truncated_packet() {
+        let truncated = vec![0x01u8, 0x01, 0x00];
+        let res = rewrite_sql_batch_for_upstream(&truncated);
+        match res {
+            Err(UpstreamError::RelayFailed(msg)) => {
+                assert!(msg.contains("shorter than TDS header"),
+                    "unexpected error message: {msg}");
+            }
+            other => panic!("expected RelayFailed, got {other:?}"),
+        }
+    }
+
+    /// A packet whose header type is NOT SQLBatch must be rejected.
+    /// This protects against `forward_sql_batch` being mis-called
+    /// with a LOGIN7 / PRELOGIN packet, which would silently corrupt
+    /// the upstream session.
+    #[test]
+    fn rewrite_sql_batch_rejects_non_sqlbatch_header() {
+        use crate::wire::{frame_packet, pkt};
+        let pkt = frame_packet(pkt::PRELOGIN, &[0u8; 4]);
+        let res = rewrite_sql_batch_for_upstream(&pkt);
+        match res {
+            Err(UpstreamError::RelayFailed(msg)) => {
+                assert!(msg.contains("expected SQLBatch"),
+                    "unexpected error message: {msg}");
+            }
+            other => panic!("expected RelayFailed, got {other:?}"),
+        }
     }
 }
