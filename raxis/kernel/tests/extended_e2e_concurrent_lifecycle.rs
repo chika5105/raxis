@@ -293,6 +293,29 @@ fn extended_session_lifecycle() {
         lifecycle_script.matchers.len(),
         lifecycle_report.absent_clean,
     );
+
+    // ── AuditChainWitness — Check B for the reviewer-disagreement
+    //    script. Asserts the chain captured (reviewer-A SubmitReview
+    //    → executor re-spawn → reviewer-B SubmitReview →
+    //    ReviewAggregationCompleted AllPassed). The
+    //    `ReviewerDisagreementWitness` already covers the same
+    //    semantics with a hand-rolled state machine; this script-
+    //    based assertion is the same invariant expressed
+    //    declaratively, with per-matcher diagnostics surfacing
+    //    exactly which event the chain lacked when it fails.
+    let reviewer_script = audit_scripts::reviewer_disagreement(
+        TASK_MATERIALIZE,
+        TASK_REVIEW_A,
+        TASK_REVIEW_B,
+    );
+    let reviewer_report =
+        audit_witness.assert_scenario(&final_chain, &reviewer_script);
+    eprintln!(
+        "[ext-e2e] AuditChainWitness::walk_scenario(reviewer-disagreement): \
+         {}/{} ordered matchers satisfied",
+        reviewer_report.ordered_satisfied,
+        reviewer_script.matchers.len(),
+    );
 }
 
 /// Fan-out task ids the concurrency oracle and the AuditChain
