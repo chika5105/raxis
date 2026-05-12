@@ -71,12 +71,15 @@ use extended_e2e_support::{
     injection::assemble_prompt as assemble_injection_prompt,
     plan::{
         extended_plan_toml, TASK_FANOUT_FMT, TASK_FANOUT_MANIFEST,
-        TASK_FANOUT_README, TASK_MATERIALIZE,
+        TASK_FANOUT_README, TASK_MATERIALIZE, TASK_REVIEW_A, TASK_REVIEW_B,
     },
     seeds::{
         preflight_or_panic as preflight_dbs_or_panic, MONGO_HOST_PORT, PG_HOST_PORT,
     },
-    witnesses::{MaterializationWitness, NoSecurityViolationWitness, EnforcementWitness},
+    witnesses::{
+        EnforcementWitness, MaterializationWitness, NoSecurityViolationWitness,
+        ReviewerDisagreementWitness,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -193,11 +196,16 @@ fn extended_session_lifecycle() {
     );
     eprintln!("[ext-e2e] ConcurrencyOracle: fan-out group overlap confirmed");
 
-    // ── Global enforcement-layer witnesses (the three additive
-    //    commits that follow this one extend this list with the
-    //    reviewer-disagreement and injection-payload witnesses).
+    // ── Global enforcement-layer witnesses. The injection-payload
+    //    witnesses are added in the next commit; the reviewer-
+    //    disagreement witness is wired here.
     let global_witnesses: Vec<Box<dyn EnforcementWitness>> = vec![
         Box::new(NoSecurityViolationWitness),
+        Box::new(ReviewerDisagreementWitness {
+            executor_task_id:   TASK_MATERIALIZE.to_owned(),
+            reviewer_a_task_id: TASK_REVIEW_A.to_owned(),
+            reviewer_b_task_id: TASK_REVIEW_B.to_owned(),
+        }),
     ];
     extended_e2e_support::witnesses::assert_all_satisfied(&global_witnesses, &chain);
 
