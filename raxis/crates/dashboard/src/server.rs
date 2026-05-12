@@ -92,6 +92,73 @@ pub struct AppStateInner<D: DashboardData> {
     /// `data.lookup_operator_roles` rather than touching the
     /// policy bundle directly.
     pub config: DashboardConfig,
+    /// Process-wide shutdown signal. Fires exactly once when the
+    /// server's `serve_with_shutdown` future is signalled (or the
+    /// server task is otherwise winding down). Long-poll handlers
+    /// (SSE) `select!` on `shutdown.notified()` so they emit a
+    /// final `kernel-shutdown` event and complete cleanly instead
+    /// of leaving the browser hung waiting for a response.
+    ///
+    /// `Notify::notify_waiters` is fan-out-safe: every active
+    /// SSE handler wakes exactly once. New subscribers that
+    /// arrive AFTER the notify see the "closed" path through
+    /// `is_shutdown_triggered`.
+    pub shutdown: Arc<ShutdownSignal>,
+}
+
+/// One-shot, fan-out-safe shutdown signal handed to long-poll
+/// handlers via `AppStateInner::shutdown`.
+///
+/// Wraps a `tokio::sync::Notify` plus a sticky `AtomicBool`:
+/// `notify_waiters()` only wakes currently-waiting tasks, so a
+/// handler that subscribes after shutdown was triggered would
+/// otherwise miss the signal entirely. The sticky bit lets
+/// `is_triggered` see the post-signal state without racing.
+pub struct ShutdownSignal {
+    notify: tokio::sync::Notify,
+    triggered: std::sync::atomic::AtomicBool,
+}
+
+impl ShutdownSignal {
+    /// Build a fresh, unsignalled shutdown.
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            notify: tokio::sync::Notify::new(),
+            triggered: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    /// Trigger the shutdown. Idempotent — additional triggers
+    /// are no-ops. Wakes every currently-waiting handler.
+    pub fn trigger(&self) {
+        self.triggered
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Wait for the shutdown to fire. Returns immediately when
+    /// it has already fired (sticky bit).
+    pub async fn notified(&self) {
+        if self.triggered.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.notify.notified().await;
+    }
+
+    /// Synchronous probe used by handlers that need to know
+    /// whether to emit a `kernel-shutdown` frame on attach.
+    pub fn is_triggered(&self) -> bool {
+        self.triggered.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Default for ShutdownSignal {
+    fn default() -> Self {
+        Self {
+            notify: tokio::sync::Notify::new(),
+            triggered: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
 }
 
 /// Dashboard server.
@@ -100,6 +167,7 @@ pub struct DashboardServer<D: DashboardData> {
     listener: TcpListener,
     addr: SocketAddr,
     _state: AppState<D>,
+    shutdown: Arc<ShutdownSignal>,
 }
 
 impl<D: DashboardData> DashboardServer<D> {
@@ -111,10 +179,12 @@ impl<D: DashboardData> DashboardServer<D> {
     ) -> Result<Self, BindError> {
         let auth = build_auth_state(&config)
             .map_err(|e| BindError::Auth(e.to_string()))?;
+        let shutdown = ShutdownSignal::new();
         let state: AppState<D> = Arc::new(AppStateInner {
             data: Arc::clone(&data),
             auth,
             config: config.clone(),
+            shutdown: Arc::clone(&shutdown),
         });
         let router = build_router(Arc::clone(&state));
         let addr_str = format!("{}:{}", config.bind_address, config.bind_port);
@@ -128,21 +198,37 @@ impl<D: DashboardData> DashboardServer<D> {
                 addr: addr_str,
                 source: e,
             })?;
-        Ok(Self { router, listener, addr, _state: state })
+        Ok(Self { router, listener, addr, _state: state, shutdown })
     }
 
     /// Address the listener is bound to (useful for tests).
     pub fn local_addr(&self) -> SocketAddr { self.addr }
 
+    /// Shutdown signal handle (cloneable). Triggering this
+    /// directly is equivalent to triggering the future passed to
+    /// [`Self::serve_with_shutdown`]; long-poll handlers wake on
+    /// either path.
+    pub fn shutdown_signal(&self) -> Arc<ShutdownSignal> {
+        Arc::clone(&self.shutdown)
+    }
+
     /// Run the server until the supplied shutdown future
     /// completes. On graceful shutdown, in-flight requests are
-    /// allowed to complete.
+    /// allowed to complete; long-poll SSE handlers receive a
+    /// `kernel-shutdown` sentinel event and close cleanly
+    /// instead of being held open against a hyper drain that
+    /// will never finish.
     pub async fn serve_with_shutdown(
         self,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> Result<(), std::io::Error> {
+        let signal = Arc::clone(&self.shutdown);
+        let combined_shutdown = async move {
+            shutdown.await;
+            signal.trigger();
+        };
         axum::serve(self.listener, self.router)
-            .with_graceful_shutdown(shutdown)
+            .with_graceful_shutdown(combined_shutdown)
             .await
     }
 

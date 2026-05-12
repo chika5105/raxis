@@ -71,4 +71,4 @@ pub use data::{
     SessionView, TaskView,
 };
 pub use error::{ApiError, ApiResult};
-pub use server::{DashboardServer, ServerHandle};
+pub use server::{DashboardServer, ServerHandle, ShutdownSignal};
