@@ -17,5 +17,6 @@ pub mod path_allowlist;
 pub mod plan;
 pub mod plan_realistic;
 pub mod prompts;
+pub mod secrets;
 pub mod seeds;
 pub mod witnesses;
